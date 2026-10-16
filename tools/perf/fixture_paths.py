@@ -142,7 +142,10 @@ def open_regular(root: Path, path: Path):
     target = checked.resolve(strict=True)
     if not target.is_relative_to(root):
         raise ValueError(f"fixture reference resolves outside root: {path}")
-    expected = target.stat()
+    # Inspect the supplied name before opening its canonical target. A selected
+    # root may have an alias (including a short Windows or linked POSIX name);
+    # canonicalization must not bypass metadata checks on that input.
+    expected = path.stat()
     refusal = f"fixture reference is not a regular file: {path}"
     if not stat.S_ISREG(expected.st_mode):
         raise ValueError(refusal)

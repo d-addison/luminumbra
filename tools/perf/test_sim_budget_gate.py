@@ -20,7 +20,9 @@ import check_sim_budgets
 import propose_sim_budgets
 import sim_budget_compare
 import sim_budget_io
-from test_fixture_hash import ROOTED_REFERENCES, ESCAPING_REFERENCES, symlink_or_skip
+from test_fixture_hash import (
+    ROOTED_REFERENCES, ESCAPING_REFERENCES, directory_link, remove_directory_link, symlink_or_skip,
+)
 
 
 PRESETS = capture.PRESETS
@@ -192,6 +194,27 @@ class SimBudgetGateTests(unittest.TestCase):
                         mock.patch.object(Path, "read_text", read), \
                         self.assertRaisesRegex(ValueError, "not a regular file"):
                     sim_budget_io.load_capture(directory)
+
+    def test_selected_capture_directory_alias_keeps_metadata_checks(self):
+        actual = self.capture_dir("actual")
+        directory = self.root / "alias"
+        directory_link(directory, actual.resolve())
+        original_stat = Path.stat
+        try:
+            sim_budget_io.load_capture(directory)
+            for name in ("capture.json", "default.json"):
+                for mode in (stat.S_IFIFO, stat.S_IFSOCK, stat.S_IFCHR, stat.S_IFBLK, stat.S_IFDIR):
+                    def status(path, *args, **kwargs):
+                        if path == directory / name:
+                            return os.stat_result((mode,) + (0,) * 9)
+                        return original_stat(path, *args, **kwargs)
+
+                    with self.subTest(name=name, mode=mode), \
+                            mock.patch.object(Path, "stat", status), \
+                            self.assertRaisesRegex(ValueError, "not a regular file"):
+                        sim_budget_io.load_capture(directory)
+        finally:
+            remove_directory_link(directory)
 
     @unittest.skipUnless(hasattr(os, "mkfifo"), "OS has no mkfifo")
     def test_fifo_manifest_and_run_are_refused_without_reading(self):

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import capture_sim_budget
-from fixture_paths import read_text, resolve_reference
+from fixture_paths import read_text, reference_parts
 
 
 CAPTURE_SCHEMA = "luminumbra.sim_budget_capture.v1"
@@ -84,7 +84,7 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
 
 
 def load_capture(directory: Path) -> dict[str, Any]:
-    manifest = read_json(resolve_reference(directory, "capture.json"), root=directory.resolve())
+    manifest = read_json(directory / "capture.json", root=directory)
     if not isinstance(manifest, dict) or manifest.get("schema") != CAPTURE_SCHEMA:
         raise ValueError("capture.json has a missing or unsupported schema")
     absent = [key for key in MANIFEST_KEYS if key not in manifest]
@@ -104,7 +104,9 @@ def load_capture(directory: Path) -> dict[str, Any]:
         preset, artifact = run["preset"], run["artifact"]
         if preset in presets:
             raise ValueError(f"duplicate preset in capture.json: {preset}")
-        data = read_json(resolve_reference(directory, artifact), root=directory.resolve())
+        # Validate the authored spelling once, keeping the selected directory's
+        # native path for the shared reader's metadata and containment checks.
+        data = read_json(directory.joinpath(*reference_parts(artifact)), root=directory)
         if not isinstance(data, dict):
             raise ValueError(f"{artifact} is not a JSON object")
         try:

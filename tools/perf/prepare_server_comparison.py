@@ -14,7 +14,7 @@ from pathlib import Path
 import shutil
 
 from fixture_hash import fixture_hash
-from fixture_paths import open_regular, read_text, resolve_reference
+from fixture_paths import contain_path, open_regular, read_text, resolve_reference
 
 GATES = ("ActiveRegions", "WaterHighRes", "WeatherRain", "WeatherEvents", "AetherState")
 TUNINGS = ("Ecology", "WildlifeFoliage", "Thirst", "Scavenging", "Foraging", "Reproduction")
@@ -35,12 +35,12 @@ def prepare(base: Path, head: Path, receipt: Path) -> None:
     # including finite hydrology, which systems.json alone cannot configure.
     common = resolve_reference(base, "data/common")
     presets = resolve_reference(base, "worlds/atlas/presets")
+    data = resolve_reference(base, "data")
     # Refuse unsafe source trees before copytree follows links or adapters edit
     # either checkout. Retain dependencies outside common in the copied fixture.
     fixture_hash(common, scope="headless-server")
     dependencies: dict[str, Path] = {}
-    fixture_hash(presets, reference_root=resolve_reference(base, "data"),
-                 dependencies=dependencies)
+    fixture_hash(presets, reference_root=data, dependencies=dependencies)
     systems = json.loads(read_text(common, common / "systems.json", encoding="utf-8-sig"))
     schema = json.loads((head / "src/luminumbra_common/core/ConfigSchema.json").read_text(encoding="utf-8-sig"))
     # Registry fields are authored in the schema; do not omit an absent base key.
@@ -60,11 +60,16 @@ def prepare(base: Path, head: Path, receipt: Path) -> None:
 
         shutil.copytree(common, root / "data/common", copy_function=copy_fixture)
         shutil.copytree(presets, root / "worlds/atlas/presets", copy_function=copy_fixture)
-        for name, path in sorted(dependencies.items()):
-            destination = resolve_reference(root / "data", name)
+        for _, path in sorted(dependencies.items()):
+            # Dependencies already carry validated native paths. Reinterpreting
+            # their normalized names would treat literal POSIX backslashes as
+            # authored separators a second time.
+            destination_root = root / "data"
+            destination = contain_path(destination_root, destination_root /
+                                       path.relative_to(data))
             if not destination.exists() and path.exists():
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                with open_regular(resolve_reference(base, "data"), path) as stream, destination.open("wb") as output:
+                with open_regular(data, path) as stream, destination.open("wb") as output:
                     shutil.copyfileobj(stream, output)
         (root / "data/common/systems.json").write_text(json.dumps(systems, indent=2) + "\n")
         (root / MARKER).write_text(json.dumps(dict(schema="luminumbra.controlled_server.v1",

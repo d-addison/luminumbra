@@ -8,7 +8,7 @@ import types
 import unittest
 from unittest import mock
 
-from test_fixture_hash import symlink_or_skip
+from test_fixture_hash import directory_link, remove_directory_link, symlink_or_skip
 
 
 class TerrainAovPathTests(unittest.TestCase):
@@ -45,26 +45,40 @@ class TerrainAovPathTests(unittest.TestCase):
 
     def test_every_manifest_and_attachment_requires_regular_files_before_read(self):
         aovs = self.load_inspector()
+        with tempfile.TemporaryDirectory() as temporary:
+            self.check_non_regular_metadata(aovs, Path(temporary))
+
+    def test_directory_alias_preserves_regular_file_checks(self):
+        aovs = self.load_inspector()
+        with tempfile.TemporaryDirectory() as temporary:
+            actual = Path(temporary) / 'actual'
+            actual.mkdir()
+            alias = Path(temporary) / 'alias'
+            directory_link(alias, actual.resolve())
+            try:
+                self.check_non_regular_metadata(aovs, alias)
+            finally:
+                remove_directory_link(alias)
+
+    def check_non_regular_metadata(self, aovs, root):
         names = ('manifest.json', 'color.ppm', 'depth.pfm', 'position.pfm',
                  'normal.pfm', 'albedo.pfm', 'material.pgm')
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            for name in names:
-                (root / name).write_text('{}')
-            original_stat = Path.stat
-            for name in names:
-                for mode in (stat.S_IFIFO, stat.S_IFSOCK, stat.S_IFCHR, stat.S_IFBLK, stat.S_IFDIR):
-                    def status(path, *args, **kwargs):
-                        if path == root / name:
-                            return os.stat_result((mode,) + (0,) * 9)
-                        return original_stat(path, *args, **kwargs)
+        for name in names:
+            (root / name).write_text('{}')
+        original_stat = Path.stat
+        for name in names:
+            for mode in (stat.S_IFIFO, stat.S_IFSOCK, stat.S_IFCHR, stat.S_IFBLK, stat.S_IFDIR):
+                def status(path, *args, **kwargs):
+                    if path == root / name:
+                        return os.stat_result((mode,) + (0,) * 9)
+                    return original_stat(path, *args, **kwargs)
 
-                    with self.subTest(name=name, mode=mode), \
-                            mock.patch.object(Path, 'stat', status), \
-                            mock.patch.object(Path, 'read_text', side_effect=AssertionError('unchecked read')), \
-                            mock.patch.object(aovs, 'plane', side_effect=AssertionError('numeric processing')), \
-                            self.assertRaisesRegex(ValueError, 'not a regular file'):
-                        aovs.inspect(root)
+                with self.subTest(name=name, mode=mode), \
+                        mock.patch.object(Path, 'stat', status), \
+                        mock.patch.object(Path, 'read_text', side_effect=AssertionError('unchecked read')), \
+                        mock.patch.object(aovs, 'plane', side_effect=AssertionError('numeric processing')), \
+                        self.assertRaisesRegex(ValueError, 'not a regular file'):
+                    aovs.inspect(root)
 
     @unittest.skipUnless(hasattr(os, 'mkfifo'), 'OS has no mkfifo')
     def test_fifo_manifest_and_attachments_are_refused_without_reading(self):

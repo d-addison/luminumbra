@@ -95,6 +95,7 @@ class FixtureReferenceTests(unittest.TestCase):
             "extra\\biomes.json", "extra\\sub\\..\\biomes.json",
             "extra/./sub/../biomes.json", "extra\\sub/../biomes.json",
             "extra/sub/..\\biomes.json", "extra//biomes.json",
+            r"a\b/../..\biomes.json",
         )
         for grammar, normalize in ((PurePosixPath, posixpath.normpath),
                                    (PureWindowsPath, ntpath.normpath)):
@@ -163,7 +164,7 @@ def write(root: Path, relative: str, text: str) -> None:
 class FixtureHashTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self._tmp.name)
+        self.root = Path(self._tmp.name).resolve()
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -355,9 +356,31 @@ class FixtureHashTests(unittest.TestCase):
         with mock.patch.object(fixture_paths, "os", windows_os, create=True), \
                 mock.patch.object(fixture_paths, "_windows_final_path", create=True,
                                   return_value=self.root.parent / "outside.json"), \
-                mock.patch.object(os, "fdopen", side_effect=AssertionError("unchecked read")), \
+                mock.patch.object(windows_os, "fdopen", side_effect=AssertionError("unchecked read")), \
                 self.assertRaisesRegex(ValueError, "changed target"):
             module.canonical_file_digest(table)
+
+    def test_selected_root_alias_does_not_bypass_non_regular_metadata(self):
+        actual = self.root / "actual"
+        actual.mkdir()
+        (actual / "table.json").write_bytes(b"{}")
+        alias = self.root / "alias"
+        directory_link(alias, actual)
+        path = alias / "table.json"
+        original_stat = Path.stat
+        try:
+            for mode in (stat.S_IFIFO, stat.S_IFSOCK, stat.S_IFCHR, stat.S_IFBLK, stat.S_IFDIR):
+                def status(name, *args, **kwargs):
+                    if name == path:
+                        return os.stat_result((mode,) + (0,) * 9)
+                    return original_stat(name, *args, **kwargs)
+
+                with self.subTest(mode=mode), mock.patch.object(Path, "stat", status), \
+                        mock.patch.object(os, "open", side_effect=AssertionError("opened non-regular input")), \
+                        self.assertRaisesRegex(ValueError, "not a regular file"):
+                    fixture_paths.read_bytes(alias, path)
+        finally:
+            remove_directory_link(alias)
 
     @unittest.skipUnless(hasattr(os, "mkfifo"), "OS has no mkfifo")
     def test_fifo_tree_entry_is_refused(self):
@@ -750,7 +773,9 @@ class FixtureEvidenceReaderTests(unittest.TestCase):
         self.refusals = (OSError, ValueError, check_residency.InvalidInput)
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.parent = Path(self.temporary.name)
+        # Hook the actual canonical open path, including Windows long names and
+        # POSIX temporary directories reached through a linked ancestor.
+        self.parent = Path(self.temporary.name).resolve()
         self.root = self.parent / "inputs"
         self.root.mkdir()
         build = self.parent / "build.json"
@@ -838,6 +863,7 @@ class FixtureEvidenceReaderTests(unittest.TestCase):
                 swap()
             with mock.patch.object(os, "open", side_effect=open_descriptor), \
                     mock.patch.object(io, "open", side_effect=open_stream), \
+                    mock.patch.object(os, "fdopen", side_effect=AssertionError("unchecked descriptor read")), \
                     self.assertRaises(self.refusals):
                 reader(path)
             self.assertTrue(swapped)
@@ -848,6 +874,36 @@ class FixtureEvidenceReaderTests(unittest.TestCase):
         for name, reader, payload in self.readers:
             with self.subTest(reader=name):
                 self.check_replacement(reader, payload, "symlink")
+
+    def test_all_evidence_readers_verify_windows_handle_paths_before_reading(self):
+        path = self.root / "input.json"
+        windows_os = types.SimpleNamespace(**(vars(os) | {"name": "nt"}))
+        for name, reader, payload in self.readers:
+            path.write_bytes(payload)
+            with self.subTest(reader=name, canonical=True), \
+                    mock.patch.object(fixture_paths, "os", windows_os), \
+                    mock.patch.object(fixture_paths, "_windows_final_path", return_value=path.resolve()):
+                reader(path)
+            for failure in (self.parent / "outside.json", self.root / "replacement.json",
+                            OSError("handle path unavailable"),
+                            ValueError("opened fixture path exceeds platform bound")):
+                def final_path(descriptor):
+                    self.assertTrue(stat.S_ISREG(os.fstat(descriptor).st_mode))
+                    if isinstance(failure, Exception):
+                        raise failure
+                    return failure
+
+                with self.subTest(reader=name, failure=str(failure)), \
+                        mock.patch.object(fixture_paths, "os", windows_os), \
+                        mock.patch.object(fixture_paths, "_windows_final_path", side_effect=final_path), \
+                        mock.patch.object(windows_os, "fdopen", side_effect=AssertionError("unchecked read")), \
+                        mock.patch.object(windows_os, "close", wraps=os.close) as closed, \
+                        self.assertRaises(self.refusals):
+                    reader(path)
+                closed.assert_called_once()
+                with self.assertRaises(OSError) as invalid:
+                    os.fstat(closed.call_args.args[0])
+                self.assertEqual(invalid.exception.errno, errno.EBADF)
 
     @unittest.skipUnless(hasattr(os, "mkfifo"), "OS has no mkfifo")
     def test_all_evidence_readers_refuse_fifo_before_and_during_open(self):

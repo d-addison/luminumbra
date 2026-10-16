@@ -15,7 +15,7 @@ from pathlib import Path
 
 import numpy as np
 
-from fixture_paths import decode_text, open_regular, read_text, resolve_reference
+from fixture_paths import contain_path, decode_text, open_regular, read_text
 
 LEGACY_DEPTH_DESCRIPTION = 'float32 OpenGL window depth [0,1], clear=1; bottom-up'
 DEPTH_DESCRIPTION = ('float32 reversed-Z OpenGL window depth [0,1], '
@@ -112,11 +112,15 @@ def stream_digest(stream):
 
 
 def inspect(directory, legacy_forward=False):
-    manifest_path = resolve_reference(directory, 'manifest.json')
-    attachments = {name: resolve_reference(directory, name) for name in
+    # These fixed native names are checked by open_regular. Preserve the chosen
+    # directory spelling through its metadata check, including selected aliases.
+    manifest_path = directory / 'manifest.json'
+    attachments = {name: directory / name for name in
                    ('color.ppm', 'depth.pfm', 'position.pfm', 'normal.pfm', 'albedo.pfm', 'material.pgm')}
+    for path in (manifest_path, *attachments.values()):
+        contain_path(directory, path)
     with ExitStack() as stack:
-        streams = {name: stack.enter_context(open_regular(directory.resolve(), path))
+        streams = {name: stack.enter_context(open_regular(directory, path))
                    for name, path in {'manifest.json': manifest_path, **attachments}.items()}
         # The manifest is bounded to 16 MiB, including concurrent file growth.
         require(os.fstat(streams['manifest.json'].fileno()).st_size <= 16 * 1024 * 1024,

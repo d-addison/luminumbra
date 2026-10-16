@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Controlled-workload identity and isolation contracts; stdlib only."""
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -58,11 +59,49 @@ class ComparisonFixtureTest(unittest.TestCase):
             (base / "data/common").mkdir(parents=True)
             presets = base / "worlds/atlas/presets"
             presets.mkdir(parents=True)
-            (presets / "default.json").write_text(json.dumps({
-                "generation_params": {"biomes": {"table": "../outside.json"}}}))
-            with self.assertRaisesRegex(ValueError, "escapes root"):
-                comparison.prepare(base, head, Path(temp) / "receipt.json")
-            self.assertFalse((base / "perf-common").exists())
+            for reference in ("../outside.json", r"a\b/../../..\biomes.json"):
+                (presets / "default.json").write_text(json.dumps({
+                    "generation_params": {"biomes": {"table": reference}}}))
+                with self.subTest(reference=reference), self.assertRaisesRegex(ValueError, "escapes root"):
+                    comparison.prepare(base, head, Path(temp) / "receipt.json")
+                self.assertFalse((base / "perf-common").exists())
+                self.assertFalse((head / "perf-common").exists())
+                self.assertFalse((Path(temp) / "receipt.json").exists())
+
+    def test_preparation_carries_validated_native_dependency_paths(self):
+        reference = r"a\b/../..\biomes.json"
+        native_name = "biomes.json" if os.name == "nt" else r"..\biomes.json"
+        for present in (False, True):
+            with self.subTest(present=present), tempfile.TemporaryDirectory() as temp:
+                base, head = Path(temp) / "base", Path(temp) / "head"
+                for checkout in (base, head):
+                    source = checkout / "src/luminumbra_server/ServerWorldRunner.cpp"
+                    source.parent.mkdir(parents=True)
+                    source.write_text('    bool world_ready = false;\n'
+                        '    world_system->debug_set_streaming_radius_cap(m_config.test_streaming_radius_cap);\n')
+                common = base / "data/common"
+                common.mkdir(parents=True)
+                (common / "systems.json").write_text('{}')
+                presets = base / "worlds/atlas/presets"
+                presets.mkdir(parents=True)
+                (presets / "default.json").write_text(json.dumps({
+                    "generation_params": {"biomes": {"table": reference}}}))
+                dependency = base / "data" / native_name
+                if present:
+                    dependency.write_bytes(b'{"biomes":[]}')
+                schema = head / "src/luminumbra_common/core/ConfigSchema.json"
+                schema.parent.mkdir(parents=True)
+                schema.write_text('{"keys":[]}')
+                receipt = Path(temp) / "receipt.json"
+                comparison.prepare(base, head, receipt)
+                self.assertTrue(receipt.is_file())
+                for checkout in (base, head):
+                    copied = checkout / "perf-common/data" / native_name
+                    self.assertEqual(copied.exists(), present)
+                    if present:
+                        self.assertEqual(copied.read_bytes(), dependency.read_bytes())
+                self.assertEqual(comparison.identity(base / "perf-common"),
+                                 comparison.identity(head / "perf-common"))
 
     def test_inputs_match_and_saves_do_not_change_identity(self):
         with tempfile.TemporaryDirectory() as temp:
