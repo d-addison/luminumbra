@@ -276,6 +276,129 @@ Committed and generated evidence has these compatibility rules:
   missing, corrupt or incompatible receipt supplies no acceptance evidence and
   must not be treated as proof of completion.
 
+## Qualification execution record
+
+`tools/perf/run_qualification.py --client <native-client> --out-dir <output>
+--build-manifest <performance-build.json>` writes
+`qualification.json` with schema `luminumbra.render_qualification.v1`.
+The output directory is held exclusively with `.qualification.lock`, created with
+`O_CREAT | O_EXCL`, after the output directory is validated/created and before any
+run files or settings change, through aggregate publication. Directory creation
+and lock creation failures without an existing lock report `cannot write` and
+exit 2. A held lock refuses the run and names the lock file; it is never
+automatically reclaimed. Normal returns and exceptions release the lock. After
+an abrupt termination, the operator must establish that the owner has stopped
+before removing its lock. Aggregate publication uses a sibling temporary file
+and atomic replacement. Prior aggregates and selected cells' captures, verdicts,
+retained captures and receipts are set aside as `.prev-<n>`, including for cells
+that have become unready. An unevaluated cell reports no capture or adapter.
+
+Cell `artifact` paths, and retained `capture_path` values in process receipts, are
+relative to the output directory, such as `cells/surface-flight.quality.3840x1600.json`.
+The private process receipt still records absolute command, cwd and client paths.
+Its `binary_sha256` identifies the launched executable. The qualification runner
+adds `client_path` and a `client` object with the actual client code's `sha256`,
+`kind`, `sha256_verified`, `native_build`, manifest hashes and refusal `reason`.
+For `.py` clients, the executable hash identifies Python and the client hash
+identifies the script. Both script and native client hashes are checked before
+and after execution; a changed or unverifiable client makes the cell fail.
+Existing client paths, including bare `.py` filenames, resolve from the caller's
+directory before the child enters its per-cell working directory.
+
+Every launched cell receives `--systems-config` with the absolute path to the
+selected runtime's `data/common/systems.json`. The client parses this option in
+`src/luminumbra_client/core/RuntimeScenarioConfig.cpp` and strictly loads the
+override in `src/luminumbra_client/main_client.cpp`. Each process receipt records
+`systems_config.path`, `systems_config.sha256` and `systems_config.sha256_verified`.
+A missing/unreadable configuration prevents launch; changed or unreadable bytes
+after execution fail the cell before the checker runs.
+The runner writes a per-cell `render-overrides.json` declaring the exact
+`cli:--systems-config` argument. Runtime and save roots select file locations and
+are excluded from render overrides.
+
+Every launched cell receives an absolute `--runtime-root`. The runner resolves
+the selected client executable before launch and searches only its directory and
+ancestors for `res/shaders/g_buffer.vert`, `data/audio/music.bank.json` and
+`worlds/atlas/presets/default.json`. For other layouts, supply the runner's
+`--runtime-root <absolute-directory>` argument. An incomplete explicit root fails
+without falling back to discovery. The output directory and per-cell working
+directory never select runtime assets, including when output is inside a checkout.
+
+Each cell also receives its own absolute `--save-root` at
+`<out-dir>/work/<cell-id>/storage`, with world saves and the world catalog beneath
+`worlds/saves` there. Its working directory remains `<out-dir>/work/<cell-id>`.
+Process receipts record `runtime_root` and `save_root` alongside the exact command.
+The client refuses relative, empty, missing-value or repeated root options,
+runtime roots missing required files, and save roots that cannot be created.
+`GameSession` uses the save-root override for world creation, loading, saving and
+catalog inspection; runtime assets still come from the runtime root. Ordinary
+client launches without either option retain discovery and runtime-root storage.
+Embedded presets resolve biome and structure dependencies from the runtime's
+`data/` directory. Legacy saves without an embedded preset use the runtime's
+frozen or named atlas preset, even when storage is separate.
+
+Traversal qualification binds both the script path and its expected SHA-256.
+Every traversal entry in `tools/perf/qualification/matrix.json` requires
+`script_sha256`: 64 lowercase hexadecimal digits for the exact script bytes,
+or null for a blocked traversal whose `script` is null. A missing or malformed
+digest is a matrix input error (exit 2). Before launching a traversal, the runner
+compares the fixture bytes with that expected digest; a mismatch records an
+invalid cell and exits 1 without launching the client or checker.
+The runner snapshots each manifest into `work/<cell-id>/workload.traversal`
+(at most 64 KiB) and passes that same file to the client and checker. It verifies
+the snapshot after each process and records its digest and verification status
+in the cell's `traversal` object. Editing the source fixture changes its digest
+and prevents qualification; edits after snapshot creation cannot change that run.
+
+The supplied manifest uses the existing `luminumbra.performance_build.v1` schema:
+compiler (`id`, `version`, `target`), configuration (the existing build options
+and `effective_flags_sha256`), and system (`name`, `processor`). For qualification
+it must additionally contain `"client": {"sha256": "<64 lowercase hex digits>"}`,
+recorded for the final native client binary after the build. The CMake-generated
+manifest currently has no client hash, so it must be extended with that evidence
+before use here. Missing/invalid fields in a supplied manifest are input errors.
+Omitting the manifest or supplying a different executable hash permits diagnostic
+captures but prevents qualification (`build_manifest_missing` or
+`client_build_hash_mismatch`). Executable format checks reject interpreter
+scripts, even if renamed or accompanied by a matching manifest, with
+`client_not_native_build`. Batch and command files are rejected by suffix even
+when they begin with an executable signature. PE images must have a valid DOS,
+PE, optional and section header layout with an executable entry point.
+The manifest is operator-supplied build evidence;
+synthetic controls do not establish a native GPU measurement.
+
+The checker `--verdict-out` contract is the complete
+`luminumbra.render_verdict.v1` envelope returned by `render_budget.evaluate`, with
+workload kind, profile, adapter, frames, `floor`, and `target`. The checker calls
+this envelope `floor` internally; it does not write only its nested floor block.
+The runner reconciles the envelope with the capture and selected cell. A real
+checker success with a passing floor produces a passing cell, even when aggregate
+qualification prerequisites remain unmet.
+
+The child writes to a private per-invocation capture directory. The runner
+publishes and checks that capture only after the process receipt records a
+successful return, successful retention, the exact spawned capture path and a
+SHA-256 matching both the private capture and retained bytes. The published
+artifact must match those bytes. An existing public artifact without this
+ownership evidence fails the cell before the checker runs.
+
+The aggregate records `matrix.sha256`, `matrix.canonical_sha256` and
+`matrix.canonical`. These are SHA-256 hashes of UTF-8 JSON with sorted object keys
+and compact separators, covering every matrix field, including poses and their
+provenance. The canonical hash is computed from the committed repository matrix.
+A different `--matrix` path makes every cell's `matrix_canonical` false, including
+a byte-identical copy; changed content is also noncanonical. Such runs include
+`non_canonical_matrix` in `render_floor_qualified_reasons` and cannot qualify.
+
+`render_floor_qualified` additionally requires all 36 canonical cells, the
+canonical checker, matching RTX 5070 Ti adapter identities, passing capture/floor
+checks, declared display refresh and manifest-bound native clients.
+`expanded_qualified` remains false until the far-world evidence is available.
+Unqualified records retain `qualification_status: "NEEDS-NATIVE-RUN"` and explicit
+`render_floor_qualified_reasons`. The committed matrix still has unrecorded fixed
+poses and blocked traversal workloads; completing diagnostic tests cannot
+qualify it. Missing acceptance evidence is never inferred from passing tests.
+
 ## Process failure and shutdown evidence
 
 Each `test_render_runner.py` child keeps its original 180-second process deadline,

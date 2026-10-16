@@ -594,6 +594,37 @@ zero constant rain/evaporation rates. Explicit false water resolution selects
 Medium; lower-level session setters can retain disabled compatibility workloads.
 Diagnostic rosters and telemetry remain opt-in.
 
+TCP Hello admission, the lockstep handshake and replay playback compare the same
+`GameSession::PresetContentHash()` alongside the effective configuration identity.
+The content hash binds the resolved preset and its biome/structure dependencies,
+plus every immediate regular `data/common/creatures/species/*.json` file, including
+inline `brain` and `genome_ranges` overrides (issue #338). Species apply even with
+biomes and structures disabled. All dependencies use one manifest: sorted generic
+UTF-8 logical paths with `/` separators and exact-byte FNV-1a-64 file hashes, folded
+with the canonical preset JSON. Absolute runtime roots and clocks are excluded.
+The loader captures the species registry from those same bytes and GameSession
+adopts it on create/load; it never rereads species after computing the hash.
+Malformed JSON warns and skips the entry while its bytes remain bound; present
+unreadable files/directories refuse resolution without replacing a running world.
+Directory-open, entry-status and iteration failures are reported by the registry
+without escaping to client metadata callers; a failed scan adds no species. Logical
+dependency names must be well-formed UTF-8, and an invalid species filename refuses
+the scan before any reads. Resolver exceptions, including JSON serialization
+failures, return diagnostics without publishing an identity or dependency snapshot;
+failed create/load leaves the live world unchanged.
+
+Protocol-v3 Hello and LREC1-v3 headers retain their layouts. A species mismatch
+refuses TCP admission, lockstep handshake and replay verification before simulation
+advances. Existing content-mismatch diagnostics apply; lockstep and replay name
+`preset/species` content. Older v0.3.0-era preset-only replay hashes mismatch when
+species records are present, in either engine direction, following the existing
+preset dependency compatibility rule. With no species directory, no new records
+are added. Current-format saves store no session content identity and adopt the
+loading installation's species content; the optional historical `presetIdentity`
+check still checks frozen preset JSON only. Older world-format refusals and save
+container versions are unchanged. See the full
+[identity contract](development/system-config-identity.md).
+
 Playback, vsync, TAAU, tier-1 froxel volumetrics, cave AO, scent decals and aether
 material gain 1 are on. `--no-audio`, `--volumetric-quality 0`, `LUMIN_CAVE_AO=0`,
 `LUMIN_SCENT_DECAL=0`, explicit config values and renderer setters remain available.
