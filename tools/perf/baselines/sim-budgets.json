@@ -4,303 +4,393 @@
     "num": 3
   },
   "identity": {
-    "collision_radius": null,
+    "collision_radius": 1,
     "fixture_hash": null,
     "revision": null,
     "seed": 1337,
-    "surface_radius": null,
+    "surface_radius": 1,
     "ticks": 600
   },
   "presets": {
     "archipelago": {
       "stages": {
         "aether": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 6144
         },
         "alarm": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 9
         },
         "animation": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 0
         },
         "circadian": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 0
         },
         "creatures": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 17
         },
         "crops": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 9
         },
         "decay": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 9
         },
         "disease": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 0
         },
         "energy": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 0
         },
         "events": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 0
         },
         "fire": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 0
         },
         "grazing": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 9
         },
         "instinct": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 0
         },
         "irrigation": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 0
         },
         "lifespan": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 12
         },
         "locomotion": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 0
         },
         "migration": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 9
         },
         "packs": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 3
         },
         "perception": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 0
         },
         "plants": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 9
         },
         "pollination": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 9
         },
         "scent": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 98304
         },
         "server_physics": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 2
         },
         "server_streaming": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 0
         },
         "server_water": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 6144
         },
         "soil": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 98304
         },
         "territory": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 9
         },
         "weather": {
-          "max_work_per_tick": null
+          "expect_inactive": true,
+          "max_work_per_tick": 0
         },
         "wind": {
-          "max_work_per_tick": null
+          "expect_inactive": true,
+          "max_work_per_tick": 0
         },
         "wind_weather": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 12288
         }
       },
       "total": {
-        "max_work_per_tick": null
+        "max_work_per_tick": 221289
       }
     },
     "default": {
       "stages": {
         "aether": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 6144
         },
         "alarm": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 9
         },
         "animation": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 0
         },
         "circadian": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 0
         },
         "creatures": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 17
         },
         "crops": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 9
         },
         "decay": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 9
         },
         "disease": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 0
         },
         "energy": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 0
         },
         "events": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 0
         },
         "fire": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 0
         },
         "grazing": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 9
         },
         "instinct": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 0
         },
         "irrigation": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 0
         },
         "lifespan": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 12
         },
         "locomotion": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 0
         },
         "migration": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 9
         },
         "packs": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 3
         },
         "perception": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 0
         },
         "plants": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 9
         },
         "pollination": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 9
         },
         "scent": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 98304
         },
         "server_physics": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 2
         },
         "server_streaming": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 0
         },
         "server_water": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 6144
         },
         "soil": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 98304
         },
         "territory": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 9
         },
         "weather": {
-          "max_work_per_tick": null
+          "expect_inactive": true,
+          "max_work_per_tick": 0
         },
         "wind": {
-          "max_work_per_tick": null
+          "expect_inactive": true,
+          "max_work_per_tick": 0
         },
         "wind_weather": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 12288
         }
       },
       "total": {
-        "max_work_per_tick": null
+        "max_work_per_tick": 221289
       }
     },
     "mountains": {
       "stages": {
         "aether": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 6144
         },
         "alarm": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 9
         },
         "animation": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 0
         },
         "circadian": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 0
         },
         "creatures": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 17
         },
         "crops": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 9
         },
         "decay": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 9
         },
         "disease": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 0
         },
         "energy": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 0
         },
         "events": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 0
         },
         "fire": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 0
         },
         "grazing": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 9
         },
         "instinct": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 0
         },
         "irrigation": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 0
         },
         "lifespan": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 12
         },
         "locomotion": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 0
         },
         "migration": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 9
         },
         "packs": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 3
         },
         "perception": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 0
         },
         "plants": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 9
         },
         "pollination": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 9
         },
         "scent": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 98304
         },
         "server_physics": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 2
         },
         "server_streaming": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 0
         },
         "server_water": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 6144
         },
         "soil": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 98304
         },
         "territory": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 9
         },
         "weather": {
-          "max_work_per_tick": null
+          "expect_inactive": true,
+          "max_work_per_tick": 0
         },
         "wind": {
-          "max_work_per_tick": null
+          "expect_inactive": true,
+          "max_work_per_tick": 0
         },
         "wind_weather": {
-          "max_work_per_tick": null
+          "expect_inactive": false,
+          "max_work_per_tick": 12288
         }
       },
       "total": {
-        "max_work_per_tick": null
+        "max_work_per_tick": 221289
       }
     }
   },

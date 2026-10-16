@@ -36,6 +36,7 @@ PYTHON_TESTS = (
     "tools/release/test_sbom.py",
     "tools/release/test_sbom_schema.py",
     "tools/release/test_verify_release.py",
+    "tools/release/test_validate_release_gates.py",
     "tools/assets/test_acquire.py",
     "tools/audio/test_bank_validate.py",
     "tools/persistence/test_save_receipt.py",
@@ -52,7 +53,8 @@ PYTHON_MODULES = {
     "tools/perf/inspect_terrain_aovs.py", "tools/perf/validate_foliage_evidence.py",
     "tools/perf/validate_render_capture.py",
     "tools/release/generate_sbom.py", "tools/release/validate_sbom.py",
-    "tools/release/verify_release.py", "tools/assets/acquire.py",
+    "tools/release/verify_release.py", "tools/release/validate_release_gates.py",
+    "tools/assets/acquire.py",
     "tools/audio/bank_validate.py", "tools/persistence/save_receipt.py",
     "tools/rendering/acceptance/scene_matrix.py",
 }
@@ -120,7 +122,7 @@ CI_ENTRYPOINTS = (
         "tools/perf/check_sim_budgets.py", "tools/perf/fixture_hash.py",
         "tools/perf/perf.py", "tools/perf/propose_sim_budgets.py",
         "tools/release/generate_sbom.py", "tools/release/validate_package.py",
-        "tools/release/validate_sbom.py",
+        "tools/release/validate_sbom.py", "tools/release/validate_release_gates.py",
     }
     | {path for path in AUTHORING_PYTHON_FILES
        if "/tests/" in path or "/extension_tests/" in path or "/test_" in path}

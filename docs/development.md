@@ -114,6 +114,10 @@ missing history, an empty diff, unknown paths, or missing classifier outputs kee
 the build lanes enabled. Pushes, schedules, and manual dispatches always enable
 every path-gated lane, regardless of changed files.
 
+Compiler and analysis caches can be restored on eligible PR and manual runs.
+The MSYS2 package cache is an exception: its setup action enables both restore
+and save together, so package caching is disabled outside main/devel pushes.
+
 Blocking clang-tidy analysis runs in three path-hash shards on standard Ubuntu
 runners, each with a 60-minute timeout. Together they analyse every configured
 first-party translation unit and its headers on every executed merged-tip run;

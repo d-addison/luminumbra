@@ -106,11 +106,15 @@ int RunLockstepLoopback(const ServerCliOptions& options) {
         c.tick_rate_hz = 30;
         c.local_client_id = 0;
         c.peer_client_id = 1;
+        c.system_config_identity = host_runner->Session()->SystemConfigIdentity();
+        c.preset_content_hash = host_runner->Session()->PresetContentHash();
         return c;
     }();
     auto peer_cfg = host_cfg;
     peer_cfg.local_client_id = 1;
     peer_cfg.peer_client_id = 0;
+    peer_cfg.system_config_identity = peer_runner->Session()->SystemConfigIdentity();
+    peer_cfg.preset_content_hash = peer_runner->Session()->PresetContentHash();
 
     Luminumbra::Net::LockstepHooks host_hooks = hooks_template;
     host_hooks.user = &host_ctx;
@@ -138,13 +142,23 @@ int RunLockstepLoopback(const ServerCliOptions& options) {
         ph.preset = options.preset;
         ph.tick_rate_hz = 30;
         ph.client_id = 1;
-        peer_transport->SendFrame(Luminumbra::Net::EncodeHello(ph));
+        ph.system_config_identity = peer_cfg.system_config_identity;
+        ph.preset_content_hash = peer_cfg.preset_content_hash;
+        if (!peer_transport->SendFrame(Luminumbra::Net::EncodeHello(ph))) {
+            LUMINUMBRA_CORE_ERROR("lockstep: handshake send failed");
+            return 1;
+        }
         Luminumbra::Net::HelloMsg hh;
         hh.seed = seed_num;
         hh.preset = options.preset;
         hh.tick_rate_hz = 30;
         hh.client_id = 0;
-        host_transport->SendFrame(Luminumbra::Net::EncodeHello(hh));
+        hh.system_config_identity = host_cfg.system_config_identity;
+        hh.preset_content_hash = host_cfg.preset_content_hash;
+        if (!host_transport->SendFrame(Luminumbra::Net::EncodeHello(hh))) {
+            LUMINUMBRA_CORE_ERROR("lockstep: handshake send failed");
+            return 1;
+        }
     }
     if (!host.Handshake() || !peer.Handshake()) {
         LUMINUMBRA_CORE_ERROR("lockstep: handshake failed");

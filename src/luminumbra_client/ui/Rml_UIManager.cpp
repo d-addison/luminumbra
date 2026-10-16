@@ -1234,8 +1234,8 @@ void Rml_UIManager::PopulateSettingsForm(Rml::ElementDocument* document) {
     // A real null backend explicitly disables playback and the volume controls.
     const bool audio_disabled = m_audioManager && !m_audioManager->IsPlaybackEnabled();
     if (auto* status = document->GetElementById("setting_audio_status")) {
-        status->SetInnerRML(audio_disabled   ? "Audio is disabled for this release."
-                            : m_audioManager ? "Experimental audio enabled."
+        status->SetInnerRML(audio_disabled   ? "Audio playback disabled or unavailable."
+                            : m_audioManager ? "Audio playback enabled."
                                              : "Saved audio levels.");
     }
     for (const char* id : {"setting_audio_master", "setting_audio_sfx", "setting_audio_music"}) {

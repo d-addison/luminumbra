@@ -214,6 +214,7 @@ StaticSoakResult RunStaticSoak(bool delta_on, std::uint64_t ticks) {
 // run -- the core soak assertion.
 TEST(ReplicationScale, SustainsThirtyTwoClientsWithinBudget) {
     ReplicationServer server;
+    server.SetDeltaCompression(false); // Full-snapshot soak; delta has a separate workload.
     server.SetAoiChunkRadius(/*chunk_radius=*/3, kChunkSizeMm);
 
     std::vector<SimClient> clients;
@@ -277,6 +278,7 @@ TEST(ReplicationScale, SustainsThirtyTwoClientsWithinBudget) {
 // resumes mirroring.
 TEST(ReplicationScale, DisconnectReconnectUnderLoad) {
     ReplicationServer server;
+    server.SetDeltaCompression(false); // Preserve reconnect coverage with full snapshots.
     server.SetAoiChunkRadius(/*chunk_radius=*/3, kChunkSizeMm);
 
     std::vector<SimClient> clients;

@@ -226,3 +226,7 @@ artifact. Require the watchdog arm log, complete shutdown with drained jobs and
 all ten headless-profile milestones, and no crash/hang reports before treating
 an automated capture run as complete. None of these checks grants visual
 approval or proves that every streaming, cave, edit or water view is correct.
+
+`--render-benchmark-aovs` explicitly selects the unjittered, TAAU-disabled
+measurement workload. Its existing manifest records the effective temporal setting
+and jitter. Ordinary rendering continues to use TAAU by default.

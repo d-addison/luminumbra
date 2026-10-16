@@ -50,6 +50,7 @@
 #include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_common/systems/WindFieldSystem.h"
 #include "luminumbra_common/world/GameSession.h"
+#include "luminumbra_common/world/TerrainPresetLoader.h"
 #include <cmath>
 #include <entt/entt.hpp>
 
@@ -145,6 +146,16 @@ ServerCliOptions ParseOptions(int argc, char* argv[]) {
         } else if (std::strcmp(arg, "--lockstep-dump") == 0) {
             if (const char* v = next_value(i))
                 options.lockstep_dump_path = v;
+        } else if (std::strcmp(arg, "--systems-config") == 0) {
+            if (const char* v = next_value(i)) {
+                options.systems_config_path = v;
+                options.parse_error = options.parse_error || options.systems_config_path.empty();
+            }
+        } else if (std::strcmp(arg, "--preset-json") == 0) {
+            if (const char* v = next_value(i)) {
+                options.preset_json_path = v;
+                options.parse_error = options.parse_error || options.preset_json_path.empty();
+            }
         } else if (std::strcmp(arg, "--root") == 0) {
             if (const char* v = next_value(i))
                 options.root = v;
@@ -318,7 +329,7 @@ int main(int argc, char* argv[]) {
             "[--record <path>] [--replay <path>] [--mutate-replay-fixture <path>] "
             "[--lockstep-loopback [--lockstep-delay-input <n>] [--lockstep-corrupt-tick <t>] "
             "[--lockstep-dump <path>]] "
-            "[--root <path>] [--preset <name>] "
+            "[--root <path>] [--preset <name>] [--systems-config <path>] [--preset-json <path>] "
             "[--seed <seed>] [--world-id <id>] [--ticks <n>] [--radius <chunks>] "
             "[--collision-radius <chunks>] [--autosave-ticks <n>] [--clients <n>] "
             "[--player-id <id>] [--server-mode] [--crash-dir <path>] [--artifact <path>]");
@@ -347,6 +358,30 @@ int main(int argc, char* argv[]) {
         options.root = RootString(fs::path(options.root));
     }
     LUMINUMBRA_CORE_INFO("Server runtime root: {}", options.root);
+
+    // Resolve explicit overrides once, before dispatch, so every run and peer uses the
+    // same snapshot. Relative override paths are relative to the working directory.
+    std::string override_error;
+    if (!options.systems_config_path.empty()) {
+        luminumbra::core::SystemConfig config;
+        if (!luminumbra::core::SystemConfig::TryLoadFromFile(
+                options.systems_config_path, config, override_error)) {
+            LUMINUMBRA_CORE_ERROR("--systems-config: {}", override_error);
+            return 2;
+        }
+        options.systems_config_override = std::move(config);
+    }
+    if (!options.preset_json_path.empty()) {
+        std::string json_text;
+        if (!Luminumbra::world::LoadTerrainPresetOverride(options.preset_json_path,
+                                                          fs::path(options.root) / "data",
+                                                          json_text,
+                                                          override_error)) {
+            LUMINUMBRA_CORE_ERROR("--preset-json: {}", override_error);
+            return 2;
+        }
+        options.preset_json_override = std::move(json_text);
+    }
 
     if (!options.mutate_replay_fixture.empty()) {
         return RunMutateReplayFixture(options);
