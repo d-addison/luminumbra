@@ -7,6 +7,7 @@ import json
 import math
 import ntpath
 import os
+import posixpath
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import subprocess
 import shutil
@@ -189,7 +190,7 @@ class CommandGoldenTests(MatrixTestBase):
             '--profile', 'quality', '--width=3840', '--height=1600',
             '--warmup-frames=400', '--workload-kind', 'fixed_view',
             '--position', '100.5', '-2.25', '30.0', '--yaw=45.0', '--pitch=-10.5',
-            '--tod=0.04', '--frames=240'])
+            '--tod=0.04', '--frames=240', '--require-geometry', '--require-settled'])
         traversal = qm.checker_command(
             find_cell(cells, 'surface-flight.quality.3840x1600'), artifact='/out/a.json',
             qualified_renderer=RENDERER, root=ROOT, python='/usr/bin/python3')
@@ -209,6 +210,21 @@ class CommandGoldenTests(MatrixTestBase):
                                              qualified_renderer=RENDERER,
                                              root=ROOT, python=sys.executable)
                 self.assertEqual(command.count('--enforce-floor'), 1)
+
+    def test_every_fixed_view_requires_settled_geometry(self):
+        matrix = committed()
+        for workload in matrix['workloads']:
+            if workload['kind'] == 'fixed_view':
+                workload['pose'] = dict(POSE)
+        for cell in qm.cells(matrix):
+            if cell['kind'] != 'fixed_view':
+                continue
+            with self.subTest(cell=cell['id']):
+                command = qm.checker_command(cell, artifact='capture.json',
+                                             qualified_renderer=RENDERER,
+                                             root=ROOT, python=sys.executable)
+                self.assertEqual(command.count('--require-geometry'), 1)
+                self.assertEqual(command.count('--require-settled'), 1)
 
 
 class CheckerArgparseTests(MatrixTestBase):
@@ -264,6 +280,56 @@ class CheckerArgparseTests(MatrixTestBase):
 
 
 class CheckerEvidenceTests(MatrixTestBase):
+    def fixed_capture(self):
+        """Synthetic report-frame geometry with a small, valid measured window."""
+        data = synthetic_artifact()
+        position = [0.0, 0.0, 0.0]
+        data['camera'] = dict(position=position, yaw=0.0, pitch=0.0, fov=90.0)
+        data['capture_context'] = dict(time_of_day_at_report=0.04,
+                                       last_world_streaming_position=position)
+        right, up, forward = capture.camera_basis(0, 0)
+        view = [right[0], up[0], -forward[0], 0, right[1], up[1], -forward[1], 0,
+                right[2], up[2], -forward[2], 0, 0, 0, 0, 1]
+        projection = [0.0] * 16
+        projection[0], projection[5] = 720 / 1280, 1.0
+        data['render_uniforms'] = dict(matrix_layout='column_major',
+                                       observation='report_time_shader_state')
+        for name in ('geometry', 'instanced_static_mesh'):
+            data['render_uniforms'][name] = dict(available=True, view=view,
+                                                projection=projection)
+        phase = 0.04 * 2 * math.pi
+        data['render_uniforms']['lighting'] = {
+            'available': True, 'u_viewPos': position,
+            'u_inverseView': right + [0] + up + [0] + [-v for v in forward] + [0] + position + [1],
+            'u_sun.direction': [math.sin(phase), -math.cos(phase), 0]}
+        data['streaming'] = dict(terrain_draws=1, generation_pending=0,
+                                 meshing_pending=0, terrain_uploads_pending=0)
+        return data
+
+    def test_fixed_checker_requires_settled_geometry(self):
+        cell = find_cell(qm.cells(with_pose(committed())), 'forest-settled.quality.3840x1600')
+        cell.update(pose=dict.fromkeys(POSE, 0.0), width=1280, height=720,
+                    warmup_frames=2, measured_frames=4)
+        argv = qm.checker_command(cell, artifact=self.tmp / 'fixed.json',
+                                  qualified_renderer=RENDERER, root=ROOT,
+                                  python=sys.executable)
+        data = self.fixed_capture()
+        code, verdict = self.run_checker(data, argv=argv)
+        self.assertEqual(code, 0)
+        self.assertEqual(verdict['verdict'], 'PASS')
+        for field, value, reason in (
+                ('terrain_draws', 0, 'no terrain draw'),
+                ('generation_pending', 1, 'not settled: generation_pending=1'),
+                ('meshing_pending', 1, 'not settled: meshing_pending=1'),
+                ('terrain_uploads_pending', 1, 'not settled: terrain_uploads_pending=1')):
+            with self.subTest(field=field):
+                invalid = copy.deepcopy(data)
+                invalid['streaming'][field] = value
+                code, verdict = self.run_checker(invalid, argv=argv)
+                self.assertEqual(code, 1)
+                self.assertEqual(verdict['verdict'], 'FAIL')
+                self.assertIn(reason, verdict['reason'])
+
     def traversal_capture(self, *, profile='performance', width=3440, height=1440,
                           warmup=400):
         """Synthetic full-length traversal with internally consistent cell metadata."""
@@ -302,11 +368,12 @@ class CheckerEvidenceTests(MatrixTestBase):
         self.assertEqual(contract.validate(data, RENDERER, traversal=script)['verdict'], 'PASS')
         return data
 
-    def run_checker(self, data):
-        cell_id = 'surface-flight.performance.3440x1440'
-        plan = planner.build_plan(committed(), client='client', out_dir=self.tmp, root=ROOT,
-                                  python=sys.executable, only=[cell_id])
-        argv = plan['cells'][0]['checker_command']
+    def run_checker(self, data, *, argv=None):
+        if argv is None:
+            cell_id = 'surface-flight.performance.3440x1440'
+            plan = planner.build_plan(committed(), client='client', out_dir=self.tmp, root=ROOT,
+                                      python=sys.executable, only=[cell_id])
+            argv = plan['cells'][0]['checker_command']
         artifact = Path(argv[2])
         artifact.parent.mkdir(parents=True, exist_ok=True)
         artifact.write_text(json.dumps(data), encoding='utf-8')
@@ -613,7 +680,7 @@ class PathResolutionTests(unittest.TestCase):
                 return False
 
         windows = types.SimpleNamespace(**vars(os))
-        windows.name = 'nt'
+        windows.name, windows.path = 'nt', ntpath
         for ordinary, extended in (
                 (r'C:\RUNNER~1\evidence', r'\\?\C:\RUNNER~1\evidence'),
                 (r'\\server\share\evidence', r'\\?\UNC\server\share\evidence'),
@@ -627,7 +694,7 @@ class PathResolutionTests(unittest.TestCase):
                 self.assertEqual(runner.resolve_path(extended), expected)
                 self.assertEqual(runner.resolve_path(ordinary), expected)
                 identity = runner._output_identity(WindowsPath(extended) / 'Capture.json')
-                self.assertEqual(str(identity), str(expected / 'capture.json'))
+                self.assertEqual(str(identity), str(expected / 'Capture.json'))
                 self.assertEqual(identity, runner._output_identity(
                     WindowsPath(ordinary) / 'Capture.json'))
                 with self.assertRaisesRegex(OSError, 'output overlaps a lock sidecar'):
@@ -659,12 +726,17 @@ class PathResolutionTests(unittest.TestCase):
                 extended = WindowsPath(r'\\?\UNC\nas\aux\qualification\capture.json')
                 self.assertEqual(runner._output_identity(ordinary),
                                  runner._output_identity(extended))
-                for owner, contender in ((ordinary, extended), (extended, ordinary)):
+                aliases = (ordinary, extended,
+                           WindowsPath(r'\\NAS\AUX\QUALIFICATION\CAPTURE.JSON'))
+                for owner, contender in ((a, b) for a in aliases for b in aliases
+                                         if str(a) != str(b)):
                     with self.subTest(owner=owner), runner._output_locks((owner,)):
                         with self.assertRaises(FileExistsError):
                             with runner._output_locks((contender,)):
                                 self.fail('a competing invocation acquired the held output lock')
                         self.assertEqual(opened.call_args_list[-2], opened.call_args_list[-1])
+                        self.assertEqual(str(opened.call_args.args[0]),
+                                         str(ordinary) + '.lock')
 
     def test_extended_unc_root_checks_only_server_and_share_emptiness(self):
         with self.windows_paths():
@@ -1638,7 +1710,10 @@ class ProcessRunnerTests(MatrixTestBase):
                 with self.subTest(source=source, destination=destination):
                     inner = list(outputs)
                     inner[destination] = outputs[source].with_name(outputs[source].name.upper())
-                    self.assert_output_names_refused(inner, 'output paths must be distinct')
+                    locks = runner._output_locks
+                    with mock.patch.object(runner, '_output_locks',
+                                           side_effect=lambda paths: locks(paths, normcase=str.lower)):
+                        self.assert_output_names_refused(inner, 'output paths must be distinct')
 
     def test_windows_short_leaf_outputs_refuse_before_alias_mapping_can_disappear(self):
         command = self.script('')
@@ -1693,16 +1768,64 @@ class ProcessRunnerTests(MatrixTestBase):
                 sidecar.write_bytes(b'reusable sidecar')
                 before = (sidecar.read_bytes(), sidecar.stat().st_ino)
                 alias = output.with_name(output.name.upper())
-                # Either spelling must use the same sidecar, including when the
-                # uppercase invocation is the first owner on a sensitive filesystem.
+                # Simulate an insensitive filesystem on every host. Either spelling
+                # must use the same sidecar regardless of which owner arrives first.
                 for owner, contender in ((output, alias), (alias, output)):
-                    with runner._output_locks((owner,)):
+                    with runner._output_locks((owner,), normcase=str.lower):
                         with self.assertRaises(FileExistsError):
-                            with runner._output_locks((contender,)):
+                            with runner._output_locks((contender,), normcase=str.lower):
                                 self.fail('a competing invocation acquired the held output lock')
                     self.assertEqual((sidecar.read_bytes(), sidecar.stat().st_ino), before)
                 self.assertEqual([p for p in self.tmp.iterdir()
                                   if p.name.casefold() == sidecar.name], [sidecar])
+
+    def test_sensitive_output_names_have_distinct_keys_and_locks(self):
+        # Model path identity independently of the host filesystem's case rules.
+        lower = PurePosixPath('/evidence/capture.json')
+        upper = PurePosixPath('/evidence/Capture.json')
+        handles = []
+        locks = []
+
+        def open_sidecar(path):
+            handle = mock.Mock()
+            handles.append(handle)
+            return handle
+
+        def lock_handle(handle, path):
+            if path in locks:
+                raise FileExistsError('output is locked by another run')
+            locks.append(path)
+
+        with mock.patch.object(runner, 'Path', PurePosixPath), \
+                mock.patch.object(runner, 'resolve_path', side_effect=lambda path: path), \
+                mock.patch.object(runner, 'os', types.SimpleNamespace(
+                    name='posix', fstat=lambda descriptor: object())), \
+                mock.patch.object(runner, '_check_output'), \
+                mock.patch.object(runner, '_sidecar_stat', return_value=object()), \
+                mock.patch.object(runner, '_same_file', return_value=True), \
+                mock.patch.object(runner, '_open_sidecar', side_effect=open_sidecar), \
+                mock.patch.object(runner, '_lock_handle', side_effect=lock_handle):
+            self.assertEqual(str(runner._output_identity(upper)), str(upper))
+            with runner._output_locks((lower, upper), normcase=posixpath.normcase):
+                self.assertEqual(set(map(str, locks)),
+                                 {'/evidence/Capture.json.lock', '/evidence/capture.json.lock'})
+            self.assertTrue(all(handle.close.called for handle in handles))
+
+    def test_native_output_case_policy(self):
+        upper = self.artifact.with_name('Capture.json')
+        if os.path.normcase(str(upper)) == os.path.normcase(str(self.artifact)):
+            with self.assertRaisesRegex(OSError, 'output paths must be distinct'):
+                with runner._output_locks((upper, self.artifact)):
+                    self.fail('case aliases acquired distinct output locks')
+        else:
+            with runner._output_locks((upper, self.artifact)):
+                for path in (upper, self.artifact):
+                    with self.assertRaises(FileExistsError):
+                        with runner._output_locks((path,)):
+                            self.fail('a contender acquired a held output lock')
+        # Both platform branches leave the locks available for a later owner.
+        with runner._output_locks((upper,)):
+            pass
 
     def test_windows_locks_are_unlocked_before_close(self):
         for failure in (None, 'body', 'contention', 'acquisition'):

@@ -294,7 +294,7 @@ def resolve_executable(program, cwd, environment=None):
 
 
 def _output_identity(path):
-    """Return the shared destination identity after portable name validation."""
+    """Return the resolved destination spelling after portable name validation."""
     def validate_components(candidate):
         for component in candidate.parts:
             if component in (candidate.anchor, '.', '..'):
@@ -321,7 +321,6 @@ def _output_identity(path):
         if path.is_symlink():
             raise OSError(errno.ELOOP, 'output must not be a symlink', str(path))
         canonical = resolve_path(parent / path.name)
-        canonical = Path(os.path.normcase(canonical))
         validate_components(canonical)
         # Deleting an 8.3 leaf alias removes its mapping to the long name.
         # Recreating that spelling could then publish under a different lock.
@@ -329,10 +328,8 @@ def _output_identity(path):
         if canonical.name.casefold() != path.name.casefold():
             raise OSError(errno.EINVAL, 'output leaf alias must use its long name', str(path))
         parent, path = canonical.parent, canonical
-    # Preserve the directory's actual spelling on case-sensitive filesystems;
-    # fold the destination name for every use of its identity, including locks.
-    identity = parent / path.name.casefold()
-    if identity.name.endswith(OUTPUT_LOCK_SUFFIX):
+    identity = parent / path.name
+    if identity.name.casefold().endswith(OUTPUT_LOCK_SUFFIX):
         raise OSError(errno.EINVAL, 'output overlaps a lock sidecar', str(path))
     return identity
 
@@ -416,23 +413,27 @@ def _check_output(path):
 
 
 @contextmanager
-def _output_locks(paths):
+def _output_locks(paths, *, normcase=None):
+    """Lock comparison keys using the platform's injectable case normalization."""
     # Refuse destination symlinks and short-name leaf aliases: replacing an
     # output must not change its lock identity. Validate before write-capable opens.
-    paths = [(Path(path), _output_identity(Path(path))) for path in paths]
-    identities = [identity for path, identity in paths]
-    if len(set(identities)) != len(identities):
+    # Keep resolved spelling separate from comparison and sidecar keys. Windows
+    # normcase folds aliases; POSIX normcase preserves distinct case-sensitive names.
+    normcase = os.path.normcase if normcase is None else normcase
+    paths = [(Path(path), normcase(str(_output_identity(Path(path))))) for path in paths]
+    keys = [key for path, key in paths]
+    if len(set(keys)) != len(keys):
         raise OSError(errno.EINVAL, 'output paths must be distinct')
     paths.sort(key=lambda item: item[1])
-    for path, identity in paths:
-        _sidecar_stat(Path(str(identity) + OUTPUT_LOCK_SUFFIX))
-    for path, identity in paths:
+    for path, key in paths:
+        _sidecar_stat(Path(key + OUTPUT_LOCK_SUFFIX))
+    for path, key in paths:
         _check_output(path)
     locks = []
     completed = False
     try:
-        for path, identity in paths:
-            lock = Path(str(identity) + OUTPUT_LOCK_SUFFIX)
+        for path, key in paths:
+            lock = Path(key + OUTPUT_LOCK_SUFFIX)
             handle = _open_sidecar(lock)
             locks.append((handle, False))
             _lock_handle(handle, lock)
@@ -440,7 +441,7 @@ def _output_locks(paths):
             current = _sidecar_stat(lock)
             if current is None or not _same_file(os.fstat(handle.fileno()), current):
                 raise OSError(errno.EINVAL, 'lock sidecar changed during acquisition', str(lock))
-        for path, identity in paths:
+        for path, key in paths:
             _check_output(path)
         yield
         completed = True
