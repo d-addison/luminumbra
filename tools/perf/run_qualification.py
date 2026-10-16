@@ -50,7 +50,8 @@ SETTINGS_KEYS = ('HOME', 'USERPROFILE', 'APPDATA', 'XDG_CONFIG_HOME', 'XDG_DATA_
 RUNTIME_SENTINELS = ('res/shaders/g_buffer.vert', 'data/audio/music.bank.json',
                      'worlds/atlas/presets/default.json')
 EXPECTED_FOV = 45.0  # The client default from SystemConfig.
-FIXED_VIEW_CHECK_FLAGS = ('--require-settled', '--require-geometry', '--require-camera-chunk')
+# Geometry and settling checks are supplied by the matrix checker command.
+FIXED_VIEW_CHECK_FLAGS = ('--require-camera-chunk',)
 MAX_HOST_JSON_DEPTH = 64  # Object/array levels, checked before recursive JSON decoding.
 
 # The canonical qualification universe. A run qualifies only against exactly these.

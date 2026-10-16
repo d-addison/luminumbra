@@ -92,14 +92,38 @@ def file_sha256(path):
     return digest.hexdigest()
 
 
+def _executable_metadata(metadata):
+    """Comparable snapshot for repeated calls of the *same* stat kind.
+
+    Windows CPython 3.12's path stat copies birth time into st_ctime for
+    compatibility, whereas handle fstat can expose ChangeTime. Do not use
+    Windows ctime as a portable modification clock. Keep POSIX ctime, and
+    keep device, inode, size and mtime on both platforms, comparing path
+    snapshots separately from handle snapshots (their precision can differ).
+    The digest independently detects edits that restore size and mtime.
+    """
+    fields = (metadata.st_dev, metadata.st_ino, metadata.st_size,
+              metadata.st_mtime_ns)
+    return fields if os.name == 'nt' else fields + (metadata.st_ctime_ns,)
+
+
+def _open_binary(path):
+    # A replacement FIFO must not block before the regular-file/identity check.
+    flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NONBLOCK', 0)
+    descriptor = os.open(path, flags)
+    try:
+        return os.fdopen(descriptor, 'rb')
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
 def _binary_identity(path):
     """Hash one open file and verify that its path still names that identity."""
-    def identity(metadata):
-        return (metadata.st_dev, metadata.st_ino, metadata.st_size,
-                metadata.st_mtime_ns, metadata.st_ctime_ns)
+    named_before = _executable_metadata(os.stat(path))
 
     digest = hashlib.sha256()
-    with Path(path).open('rb') as source:
+    with _open_binary(path) as source:
         before = os.fstat(source.fileno())
         if not stat.S_ISREG(before.st_mode):
             raise OSError(errno.EINVAL, 'executable must be a regular file', str(path))
@@ -107,14 +131,18 @@ def _binary_identity(path):
         for block in iter(lambda: source.read(1024 * 1024), b''):
             digest.update(block)
         after = os.fstat(source.fileno())
-        # Windows path stat and descriptor stat can give ctime different
-        # meanings (change time versus creation time). Compare open handles on
-        # both platforms, including a fresh open of the current path.
-        with Path(path).open('rb') as named_source:
-            named = os.fstat(named_source.fileno())
-    if identity(before) != identity(after) or identity(after) != identity(named):
+        # Bind the current name to the hashed handle with another handle stat,
+        # never by comparing the platform-dependent path/handle stat fields.
+        with _open_binary(path) as current:
+            reopened = os.fstat(current.fileno())
+        named_after = _executable_metadata(os.stat(path))
+    opened = _executable_metadata(after)
+    if (not stat.S_ISREG(reopened.st_mode)
+            or _executable_metadata(before) != opened
+            or opened != _executable_metadata(reopened)
+            or named_before != named_after):
         raise OSError(errno.EIO, 'executable changed while hashing', str(path))
-    return identity(after), digest.hexdigest()
+    return (opened, named_after), digest.hexdigest()
 
 
 @contextmanager
@@ -266,7 +294,7 @@ def resolve_executable(program, cwd, environment=None):
 
 
 def _output_identity(path):
-    """Return the shared destination identity after portable name validation."""
+    """Return the resolved destination spelling after portable name validation."""
     def validate_components(candidate):
         for component in candidate.parts:
             if component in (candidate.anchor, '.', '..'):
@@ -293,13 +321,15 @@ def _output_identity(path):
         if path.is_symlink():
             raise OSError(errno.ELOOP, 'output must not be a symlink', str(path))
         canonical = resolve_path(parent / path.name)
-        canonical = Path(os.path.normcase(canonical))
         validate_components(canonical)
+        # Deleting an 8.3 leaf alias removes its mapping to the long name.
+        # Recreating that spelling could then publish under a different lock.
+        # Refuse before mutation rather than rewrite executable-specific argv.
+        if canonical.name.casefold() != path.name.casefold():
+            raise OSError(errno.EINVAL, 'output leaf alias must use its long name', str(path))
         parent, path = canonical.parent, canonical
-    # Preserve the directory's actual spelling on case-sensitive filesystems;
-    # fold the destination name for every use of its identity, including locks.
-    identity = parent / path.name.casefold()
-    if identity.name.endswith(OUTPUT_LOCK_SUFFIX):
+    identity = parent / path.name
+    if identity.name.casefold().endswith(OUTPUT_LOCK_SUFFIX):
         raise OSError(errno.EINVAL, 'output overlaps a lock sidecar', str(path))
     return identity
 
@@ -325,7 +355,15 @@ def _open_sidecar(lock):
     if before is None:
         # Exclusive creation also refuses a symlink installed after lstat.
         flags |= os.O_CREAT | os.O_EXCL
-    descriptor = os.open(lock, flags, 0o600)
+    try:
+        descriptor = os.open(lock, flags, 0o600)
+    except FileExistsError:
+        # Another spelling or process may have created this same sidecar since
+        # lstat. Open and validate that inode, then let the OS lock arbitrate.
+        before = _sidecar_stat(lock)
+        if before is None:
+            raise OSError(errno.EINVAL, 'lock sidecar changed during acquisition', str(lock))
+        descriptor = os.open(lock, flags & ~(os.O_CREAT | os.O_EXCL), 0o600)
     try:
         opened = os.fstat(descriptor)
         after = _sidecar_stat(lock)
@@ -384,30 +422,46 @@ def _check_output(path):
 
 @contextmanager
 def _output_locks(paths):
-    # Never follow the destination itself: replacing an output must not change
-    # its lock identity. Validate every path before any write-capable open.
-    paths = [(Path(path), _output_identity(Path(path))) for path in paths]
-    identities = [identity for path, identity in paths]
-    if len(set(identities)) != len(identities):
+    """Lock destination sidecar inodes using the filesystem's alias rules."""
+    # Refuse destination symlinks and short-name leaf aliases: replacing an
+    # output must not change its lock identity. Validate before write-capable opens.
+    # Preserve spelling: case rules can vary by volume or directory on both
+    # Windows and POSIX. Aliases open the same sidecar inode even before the
+    # output exists, and keep doing so when that output is replaced.
+    paths = [(Path(path), str(_output_identity(Path(path)))) for path in paths]
+    keys = [key for path, key in paths]
+    if len(set(keys)) != len(keys):
         raise OSError(errno.EINVAL, 'output paths must be distinct')
     paths.sort(key=lambda item: item[1])
-    for path, identity in paths:
-        _sidecar_stat(Path(str(identity) + OUTPUT_LOCK_SUFFIX))
-    for path, identity in paths:
+    sidecars = set()
+    for path, key in paths:
+        metadata = _sidecar_stat(Path(key + OUTPUT_LOCK_SUFFIX))
+        if metadata is not None:
+            identity = (metadata.st_dev, metadata.st_ino)
+            if identity in sidecars:
+                raise OSError(errno.EINVAL, 'output paths must be distinct')
+            sidecars.add(identity)
+    for path, key in paths:
         _check_output(path)
     locks = []
+    sidecars = set()
     completed = False
     try:
-        for path, identity in paths:
-            lock = Path(str(identity) + OUTPUT_LOCK_SUFFIX)
+        for path, key in paths:
+            lock = Path(key + OUTPUT_LOCK_SUFFIX)
             handle = _open_sidecar(lock)
             locks.append((handle, False))
+            metadata = os.fstat(handle.fileno())
+            identity = (metadata.st_dev, metadata.st_ino)
+            if identity in sidecars:
+                raise OSError(errno.EINVAL, 'output paths must be distinct')
+            sidecars.add(identity)
             _lock_handle(handle, lock)
             locks[-1] = (handle, True)
             current = _sidecar_stat(lock)
             if current is None or not _same_file(os.fstat(handle.fileno()), current):
                 raise OSError(errno.EINVAL, 'lock sidecar changed during acquisition', str(lock))
-        for path, identity in paths:
+        for path, key in paths:
             _check_output(path)
         yield
         completed = True
@@ -438,10 +492,11 @@ def run_process(command, *, cwd, environment, log, artifact, retained, receipt_p
     before and after execution. Resolution and lock refusals leave outputs unchanged.
     Spawn and timeout failures attempt receipt publication before re-raising the
     original exception. An active OS lock refuses the invocation; leftover lock
-    files are reusable after a crash. Symlink and overlapping outputs are refused;
-    the lock-sidecar suffix is reserved globally. Locks cover all outputs through
-    receipt publication. Optional receipt finalization runs under the same locks,
-    including after process failure, before any competing invocation can publish.
+    files are reusable after a crash. Symlink, short-name leaf alias and overlapping
+    outputs are refused; the lock-sidecar suffix is reserved globally. Locks cover
+    all outputs through receipt publication. Optional receipt finalization runs
+    under the same locks, including after process failure, before any competing
+    invocation can publish.
     """
     artifact, retained, receipt_path, log = (Path(artifact), Path(retained),
                                              Path(receipt_path), Path(log))

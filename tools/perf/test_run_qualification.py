@@ -750,7 +750,7 @@ class CheckCommandTests(unittest.TestCase):
     def test_fixed_view_gets_settled_geometry_camera_and_fov_flags(self):
         command = self.command(FOREST_CELL)
         for flag in ('--require-settled', '--require-geometry', '--require-camera-chunk'):
-            self.assertIn(flag, command)
+            self.assertEqual(command.count(flag), 1)
         self.assertEqual(command[command.index('--fov') + 1], '45.0')
         self.assertEqual(command[1], str(Path('/chk/validate.py')))
         self.assert_cell_expectations(command, self.cells[FOREST_CELL])

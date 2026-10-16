@@ -53,6 +53,38 @@ def with_pose(matrix):
     return result
 
 
+@contextlib.contextmanager
+def windows_binary_stats():
+    """Model different path/handle metadata without changing native I/O or locks."""
+    windows = types.SimpleNamespace(**vars(os))
+    windows.name = 'nt'
+    handle_calls = 0
+
+    def snapshot(metadata):
+        return types.SimpleNamespace(**{field: getattr(metadata, field) for field in (
+            'st_mode', 'st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns')})
+
+    def fstat(descriptor):
+        nonlocal handle_calls
+        handle_calls += 1
+        result = snapshot(os.fstat(descriptor))
+        # Handle ChangeTime need not be a portable modification clock.
+        result.st_ctime_ns += handle_calls
+        return result
+
+    def named_stat(path):
+        result = snapshot(os.stat(path))
+        result.st_dev += 1
+        result.st_ino += 1
+        result.st_mtime_ns -= result.st_mtime_ns % 1000000000
+        result.st_ctime_ns = 1  # Path stat's compatibility birth time.
+        return result
+
+    windows.fstat, windows.stat = fstat, named_stat
+    with mock.patch.object(runner, 'os', windows):
+        yield
+
+
 class MatrixTestBase(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -159,7 +191,8 @@ class CommandGoldenTests(MatrixTestBase):
             '--profile', 'quality', '--width=3840', '--height=1600',
             '--warmup-frames=400', '--workload-kind', 'fixed_view',
             '--position', '100.5', '-2.25', '30.0', '--yaw=45.0', '--pitch=-10.5',
-            '--tod=0.04', '--frames=240', '--enforce-floor', '--verdict-out', '/out/v.json'])
+            '--tod=0.04', '--frames=240', '--require-geometry', '--require-settled',
+            '--enforce-floor', '--verdict-out', '/out/v.json'])
         traversal = qm.checker_command(
             find_cell(cells, 'surface-flight.quality.3840x1600'),
             artifact='/out/a.json', verdict='/out/v.json',
@@ -182,6 +215,21 @@ class CommandGoldenTests(MatrixTestBase):
                                              qualified_renderer=RENDERER,
                                              root=ROOT, python=sys.executable)
                 self.assertEqual(command.count('--enforce-floor'), 1)
+
+    def test_every_fixed_view_requires_settled_geometry(self):
+        matrix = committed()
+        for workload in matrix['workloads']:
+            if workload['kind'] == 'fixed_view':
+                workload['pose'] = dict(POSE)
+        for cell in qm.cells(matrix):
+            if cell['kind'] != 'fixed_view':
+                continue
+            with self.subTest(cell=cell['id']):
+                command = qm.checker_command(cell, artifact='capture.json',
+                                             verdict='verdict.json', qualified_renderer=RENDERER,
+                                             root=ROOT, python=sys.executable)
+                self.assertEqual(command.count('--require-geometry'), 1)
+                self.assertEqual(command.count('--require-settled'), 1)
 
 
 class CheckerArgparseTests(MatrixTestBase):
@@ -241,6 +289,56 @@ class CheckerArgparseTests(MatrixTestBase):
 
 
 class CheckerEvidenceTests(MatrixTestBase):
+    def fixed_capture(self):
+        """Synthetic report-frame geometry with a small, valid measured window."""
+        data = synthetic_artifact()
+        position = [0.0, 0.0, 0.0]
+        data['camera'] = dict(position=position, yaw=0.0, pitch=0.0, fov=90.0)
+        data['capture_context'] = dict(time_of_day_at_report=0.04,
+                                       last_world_streaming_position=position)
+        right, up, forward = capture.camera_basis(0, 0)
+        view = [right[0], up[0], -forward[0], 0, right[1], up[1], -forward[1], 0,
+                right[2], up[2], -forward[2], 0, 0, 0, 0, 1]
+        projection = [0.0] * 16
+        projection[0], projection[5] = 720 / 1280, 1.0
+        data['render_uniforms'] = dict(matrix_layout='column_major',
+                                       observation='report_time_shader_state')
+        for name in ('geometry', 'instanced_static_mesh'):
+            data['render_uniforms'][name] = dict(available=True, view=view,
+                                                projection=projection)
+        phase = 0.04 * 2 * math.pi
+        data['render_uniforms']['lighting'] = {
+            'available': True, 'u_viewPos': position,
+            'u_inverseView': right + [0] + up + [0] + [-v for v in forward] + [0] + position + [1],
+            'u_sun.direction': [math.sin(phase), -math.cos(phase), 0]}
+        data['streaming'] = dict(terrain_draws=1, generation_pending=0,
+                                 meshing_pending=0, terrain_uploads_pending=0)
+        return data
+
+    def test_fixed_checker_requires_settled_geometry(self):
+        cell = find_cell(qm.cells(with_pose(committed())), 'forest-settled.quality.3840x1600')
+        cell.update(pose=dict.fromkeys(POSE, 0.0), width=1280, height=720,
+                    warmup_frames=2, measured_frames=4)
+        argv = qm.checker_command(cell, artifact=self.tmp / 'fixed.json',
+                                  verdict=self.tmp / 'verdict.json', qualified_renderer=RENDERER, root=ROOT,
+                                  python=sys.executable)
+        data = self.fixed_capture()
+        code, verdict = self.run_checker(data, argv=argv)
+        self.assertEqual(code, 0)
+        self.assertEqual(verdict['verdict'], 'PASS')
+        for field, value, reason in (
+                ('terrain_draws', 0, 'no terrain draw'),
+                ('generation_pending', 1, 'not settled: generation_pending=1'),
+                ('meshing_pending', 1, 'not settled: meshing_pending=1'),
+                ('terrain_uploads_pending', 1, 'not settled: terrain_uploads_pending=1')):
+            with self.subTest(field=field):
+                invalid = copy.deepcopy(data)
+                invalid['streaming'][field] = value
+                code, verdict = self.run_checker(invalid, argv=argv)
+                self.assertEqual(code, 1)
+                self.assertEqual(verdict['verdict'], 'FAIL')
+                self.assertIn(reason, verdict['reason'])
+
     def traversal_capture(self, *, profile='performance', width=3440, height=1440,
                           warmup=400):
         """Synthetic full-length traversal with internally consistent cell metadata."""
@@ -279,11 +377,12 @@ class CheckerEvidenceTests(MatrixTestBase):
         self.assertEqual(contract.validate(data, RENDERER, traversal=script)['verdict'], 'PASS')
         return data
 
-    def run_checker(self, data):
-        cell_id = 'surface-flight.performance.3440x1440'
-        plan = planner.build_plan(committed(), client='client', out_dir=self.tmp, root=ROOT,
-                                  python=sys.executable, only=[cell_id])
-        argv = plan['cells'][0]['checker_command']
+    def run_checker(self, data, *, argv=None):
+        if argv is None:
+            cell_id = 'surface-flight.performance.3440x1440'
+            plan = planner.build_plan(committed(), client='client', out_dir=self.tmp, root=ROOT,
+                                      python=sys.executable, only=[cell_id])
+            argv = plan['cells'][0]['checker_command']
         artifact = Path(argv[2])
         artifact.parent.mkdir(parents=True, exist_ok=True)
         artifact.write_text(json.dumps(data), encoding='utf-8')
@@ -425,11 +524,13 @@ class PathResolutionTests(unittest.TestCase):
         with mock.patch.object(runner, 'os', windows), \
                 mock.patch.object(runner, 'Path', WindowsPath):
             expected = WindowsPath(r'C:\Runner Account\Capture Record.json')
-            aliases = (expected, WindowsPath(r'C:\RUNNER~1\CAPTUR~1.JSO'),
+            aliases = (expected, WindowsPath(r'C:\RUNNER~1\Capture Record.json'),
                        WindowsPath(r'C:\RUNNER ACCOUNT\nested\..\CAPTURE RECORD.JSON'))
             identities = [runner._output_identity(path) for path in aliases]
             self.assertEqual([str(path) + '.lock' for path in identities],
                              [str(expected).lower() + '.lock'] * len(aliases))
+            with self.assertRaisesRegex(OSError, 'output leaf alias must use its long name'):
+                runner._output_identity(WindowsPath(r'C:\RUNNER~1\CAPTUR~1.JSO'))
 
     @contextlib.contextmanager
     def windows_paths(self):
@@ -588,8 +689,7 @@ class PathResolutionTests(unittest.TestCase):
                 return False
 
         windows = types.SimpleNamespace(**vars(os))
-        windows.name = 'nt'
-        windows.path = ntpath
+        windows.name, windows.path = 'nt', ntpath
         for ordinary, extended in (
                 (r'C:\RUNNER~1\evidence', r'\\?\C:\RUNNER~1\evidence'),
                 (r'\\server\share\evidence', r'\\?\UNC\server\share\evidence'),
@@ -603,7 +703,7 @@ class PathResolutionTests(unittest.TestCase):
                 self.assertEqual(runner.resolve_path(extended), expected)
                 self.assertEqual(runner.resolve_path(ordinary), expected)
                 identity = runner._output_identity(WindowsPath(extended) / 'Capture.json')
-                self.assertEqual(str(identity), ntpath.normcase(str(expected / 'capture.json')))
+                self.assertEqual(str(identity), str(expected / 'Capture.json'))
                 self.assertEqual(identity, runner._output_identity(
                     WindowsPath(ordinary) / 'Capture.json'))
                 with self.assertRaisesRegex(OSError, 'output overlaps a lock sidecar'):
@@ -616,7 +716,7 @@ class PathResolutionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             # Map the Windows path model to real local sidecars and native locks.
             def local_sidecar(path):
-                return Path(directory) / path.name
+                return Path(directory) / path.name.lower()
 
             def lock_native(handle, path):
                 with mock.patch.object(runner, 'os', os):
@@ -635,12 +735,18 @@ class PathResolutionTests(unittest.TestCase):
                 extended = WindowsPath(r'\\?\UNC\nas\aux\qualification\capture.json')
                 self.assertEqual(runner._output_identity(ordinary),
                                  runner._output_identity(extended))
-                for owner, contender in ((ordinary, extended), (extended, ordinary)):
+                aliases = (ordinary, extended,
+                           WindowsPath(r'\\NAS\AUX\QUALIFICATION\CAPTURE.JSON'))
+                for owner, contender in ((a, b) for a in aliases for b in aliases
+                                         if str(a) != str(b)):
                     with self.subTest(owner=owner), runner._output_locks((owner,)):
                         with self.assertRaises(FileExistsError):
                             with runner._output_locks((contender,)):
                                 self.fail('a competing invocation acquired the held output lock')
-                        self.assertEqual(opened.call_args_list[-2], opened.call_args_list[-1])
+                        self.assertEqual(local_sidecar(opened.call_args_list[-2].args[0]),
+                                         local_sidecar(opened.call_args_list[-1].args[0]))
+                        self.assertEqual(str(opened.call_args.args[0]).lower(),
+                                         str(ordinary) + '.lock')
 
     def test_extended_unc_root_checks_only_server_and_share_emptiness(self):
         with self.windows_paths():
@@ -791,6 +897,101 @@ class PlannerCliTests(MatrixTestBase):
         self.assertNotIn('Traceback', result.stderr)
 
 
+class BinaryIdentityTests(MatrixTestBase):
+    def setUp(self):
+        super().setUp()
+        self.binary = self.tmp / 'executable'
+        self.binary.write_bytes(b'executable bytes')
+
+    def test_windows_path_and_handle_snapshots_can_differ(self):
+        receipt = dict(binary_path=str(self.binary), evidence_errors=[])
+        with windows_binary_stats():
+            with runner.verified_binary(receipt):
+                self.assertEqual(receipt['binary_identity_status'], 'pending')
+        self.assertEqual(receipt['binary_identity_status'], 'verified')
+        self.assertEqual(receipt['binary_sha256'], runner.file_sha256(self.binary))
+        self.assertEqual(receipt['evidence_errors'], [])
+
+    def test_same_kind_metadata_changes_during_hashing_are_refused(self):
+        original = self.binary.stat()
+        fields = ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns')
+        for platform in ('posix', 'nt'):
+            for kind in ('handle', 'name', 'reopened'):
+                for field in fields if platform == 'posix' else fields[:-1]:
+                    with self.subTest(platform=platform, kind=kind, field=field):
+                        changed = types.SimpleNamespace(st_mode=original.st_mode,
+                            **{key: getattr(original, key) + (key == field) for key in fields})
+                        system = types.SimpleNamespace(**vars(os))
+                        system.name = platform
+                        system.stat = mock.Mock(side_effect=[original, changed]
+                                                if kind == 'name' else [original, original])
+                        system.fstat = mock.Mock(side_effect={
+                            'handle': [original, changed, changed],
+                            'name': [original, original, original],
+                            'reopened': [original, original, changed]}[kind])
+                        with mock.patch.object(runner, 'os', system), \
+                                self.assertRaisesRegex(OSError, 'executable changed while hashing'):
+                            runner._binary_identity(self.binary)
+
+    def test_binary_opens_are_nonblocking_and_close_on_nonregular_replacement(self):
+        for nonregular_call in (1, 3):
+            with self.subTest(nonregular_call=nonregular_call):
+                system = types.SimpleNamespace(**vars(os))
+                # Inject the flag even where the native platform has no FIFOs.
+                system.O_NONBLOCK = 1 << 29
+                descriptors = []
+                calls = 0
+
+                def open_binary(path, flags):
+                    self.assertTrue(flags & system.O_NONBLOCK)
+                    descriptor = os.open(path, flags & ~system.O_NONBLOCK)
+                    descriptors.append(descriptor)
+                    return descriptor
+
+                def fstat(descriptor):
+                    nonlocal calls
+                    calls += 1
+                    metadata = os.fstat(descriptor)
+                    if calls == nonregular_call:
+                        return types.SimpleNamespace(st_mode=stat.S_IFIFO,
+                            **{field: getattr(metadata, field) for field in (
+                                'st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns')})
+                    return metadata
+
+                system.open, system.fstat = open_binary, fstat
+                with mock.patch.object(runner, 'os', system), self.assertRaises(OSError):
+                    runner._binary_identity(self.binary)
+                self.assertEqual(len(descriptors), 1 if nonregular_call == 1 else 2)
+                for descriptor in descriptors:
+                    with self.assertRaises(OSError):
+                        os.fstat(descriptor)
+
+    def test_windows_real_changes_across_execution_invalidate_identity(self):
+        for change in ('bytes', 'timestamp', 'replacement', 'missing'):
+            with self.subTest(change=change):
+                self.binary.write_bytes(b'executable bytes')
+                receipt = dict(binary_path=str(self.binary), evidence_errors=[])
+                with windows_binary_stats(), contextlib.redirect_stderr(io.StringIO()), \
+                        self.assertRaises(OSError):
+                    with runner.verified_binary(receipt):
+                        before = self.binary.stat()
+                        if change == 'bytes':
+                            self.binary.write_bytes(b'changed contents')
+                            os.utime(self.binary, ns=(before.st_atime_ns, before.st_mtime_ns))
+                        elif change == 'timestamp':
+                            os.utime(self.binary, ns=(before.st_atime_ns,
+                                                     before.st_mtime_ns + 2000000000))
+                        elif change == 'replacement':
+                            replacement = self.tmp / 'replacement'
+                            shutil.copy2(self.binary, replacement)
+                            replacement.replace(self.binary)
+                        else:
+                            self.binary.unlink()
+                self.assertEqual(receipt['binary_identity_status'], 'changed')
+                self.assertIsNone(receipt['binary_sha256'])
+                self.assertTrue(receipt['evidence_errors'])
+
+
 class ProcessRunnerTests(MatrixTestBase):
     def setUp(self):
         super().setUp()
@@ -820,8 +1021,8 @@ class ProcessRunnerTests(MatrixTestBase):
         def path_stat(path, *args, **kwargs):
             metadata = original_stat(path, *args, **kwargs)
             if Path(path) == executable:
-                # Windows path stat reports change time while descriptor stat
-                # can report creation time for the same unchanged executable.
+                # Path and descriptor stat can report different ctime values
+                # for the same unchanged executable on Windows.
                 values = {name: getattr(metadata, name) for name in (
                     'st_dev', 'st_ino', 'st_mode', 'st_size', 'st_mtime_ns', 'st_ctime_ns')}
                 values['st_ctime_ns'] += 2000000000
@@ -832,8 +1033,8 @@ class ProcessRunnerTests(MatrixTestBase):
             identity, digest = runner._binary_identity(executable)
         with executable.open('rb') as source:
             metadata = os.fstat(source.fileno())
-        self.assertEqual(identity, (metadata.st_dev, metadata.st_ino, metadata.st_size,
-                                    metadata.st_mtime_ns, metadata.st_ctime_ns))
+        self.assertEqual(identity, (runner._executable_metadata(metadata),
+                                    runner._executable_metadata(path_stat(executable))))
         self.assertEqual(digest, runner.file_sha256(executable))
 
     def test_executable_changes_fail_closed_and_clear_unverified_hash(self):
@@ -1586,6 +1787,7 @@ class ProcessRunnerTests(MatrixTestBase):
 
     def test_casefolded_duplicate_outputs_are_refused_before_mutation(self):
         outputs = (self.artifact, self.retained, self.receipt, self.log)
+        sidecar_stat = runner._sidecar_stat
         for source in range(len(outputs)):
             for destination in range(len(outputs)):
                 if source == destination:
@@ -1593,25 +1795,202 @@ class ProcessRunnerTests(MatrixTestBase):
                 with self.subTest(source=source, destination=destination):
                     inner = list(outputs)
                     inner[destination] = outputs[source].with_name(outputs[source].name.upper())
-                    self.assert_output_names_refused(inner, 'output paths must be distinct')
+                    with mock.patch.object(runner, '_sidecar_stat', side_effect=lambda path:
+                                           sidecar_stat(path.with_name(path.name.lower()))):
+                        self.assert_output_names_refused(inner, 'output paths must be distinct')
+
+    def test_windows_short_leaf_outputs_refuse_before_alias_mapping_can_disappear(self):
+        command = self.script('')
+        outputs = (self.artifact, self.retained, self.receipt, self.log)
+        resolve = runner.resolve_path
+        lock_handle = runner._lock_handle
+        windows = types.SimpleNamespace(**vars(os))
+        windows.name = 'nt'
+
+        def lock_native(handle, path):
+            with mock.patch.object(runner, 'os', os):
+                lock_handle(handle, path)
+
+        for index, destination in enumerate(outputs):
+            with self.subTest(destination=destination.name):
+                self.seed_old_evidence()
+                alias = self.tmp / 'EVIDEN~1.JSO'
+                alias.write_bytes(b'alias of old evidence')
+                inner = list(outputs)
+                inner[index] = alias
+                before = {p: p.read_bytes() for p in self.tmp.iterdir() if p.is_file()}
+
+                def resolve_alias(path, **kwargs):
+                    # A short-name mapping exists only while its leaf exists;
+                    # unlink/recreate would turn it into a different destination.
+                    if Path(path) == alias and alias.exists():
+                        return destination
+                    return resolve(path, **kwargs)
+
+                with mock.patch.object(runner, 'os', windows), \
+                        mock.patch.object(runner, 'resolve_path', side_effect=resolve_alias), \
+                        mock.patch.object(runner, '_lock_handle', side_effect=lock_native), \
+                        mock.patch.object(runner, 'msvcrt', mock.Mock(), create=True), \
+                        mock.patch.object(runner, '_open_sidecar', wraps=runner._open_sidecar) as opened, \
+                        mock.patch.object(runner.subprocess, 'run', return_value=
+                                          subprocess.CompletedProcess(command, 0)) as launch, \
+                        self.assertRaisesRegex(OSError, 'output leaf alias must use its long name'):
+                    runner.run_process(command, cwd=self.tmp, environment=os.environ.copy(),
+                                       artifact=inner[0], retained=inner[1],
+                                       receipt_path=inner[2], log=inner[3])
+                opened.assert_not_called()
+                launch.assert_not_called()
+                self.assertEqual(before, {p: p.read_bytes() for p in self.tmp.iterdir()
+                                          if p.is_file()})
+                self.assertFalse(list(self.tmp.glob('*.lock')))
+                alias.unlink()
 
     def test_casefolded_output_names_contend_on_reusable_sidecars(self):
+        sidecar_stat = runner._sidecar_stat
+        open_sidecar = runner._open_sidecar
+
+        def local_sidecar(path):
+            return path.with_name(path.name.lower())
+
         for output in (self.artifact, self.retained, self.receipt, self.log):
             with self.subTest(output=output.name):
                 sidecar = Path(str(output) + '.lock')
                 sidecar.write_bytes(b'reusable sidecar')
                 before = (sidecar.read_bytes(), sidecar.stat().st_ino)
                 alias = output.with_name(output.name.upper())
-                # Either spelling must use the same sidecar, including when the
-                # uppercase invocation is the first owner on a sensitive filesystem.
-                for owner, contender in ((output, alias), (alias, output)):
-                    with runner._output_locks((owner,)):
-                        with self.assertRaises(FileExistsError):
-                            with runner._output_locks((contender,)):
-                                self.fail('a competing invocation acquired the held output lock')
-                    self.assertEqual((sidecar.read_bytes(), sidecar.stat().st_ino), before)
+                # Simulate an insensitive filesystem on every host. Either spelling
+                # must use the same sidecar regardless of which owner arrives first.
+                with mock.patch.object(runner, '_sidecar_stat',
+                                       side_effect=lambda p: sidecar_stat(local_sidecar(p))), \
+                        mock.patch.object(runner, '_open_sidecar',
+                                          side_effect=lambda p: open_sidecar(local_sidecar(p))):
+                    for owner, contender in ((output, alias), (alias, output)):
+                        with runner._output_locks((owner,)):
+                            with self.assertRaisesRegex(FileExistsError,
+                                                        'output is locked by another run'):
+                                with runner._output_locks((contender,)):
+                                    self.fail('a competing invocation acquired the held output lock')
+                        self.assertEqual((sidecar.read_bytes(), sidecar.stat().st_ino), before)
                 self.assertEqual([p for p in self.tmp.iterdir()
                                   if p.name.casefold() == sidecar.name], [sidecar])
+
+    def assert_output_case_policy(self, aliases, sidecar_path=Path):
+        upper = self.artifact.with_name('Capture.json')
+        for owner, contender in ((upper, self.artifact), (self.artifact, upper)):
+            with runner._output_locks((owner,)):
+                if aliases:
+                    with self.assertRaisesRegex(FileExistsError, 'output is locked by another run'):
+                        with runner._output_locks((contender,)):
+                            self.fail('a contender acquired an aliased output lock')
+                else:
+                    with runner._output_locks((contender,)):
+                        for path in (owner, contender):
+                            with self.assertRaisesRegex(FileExistsError,
+                                                        'output is locked by another run'):
+                                with runner._output_locks((path,)):
+                                    self.fail('a contender acquired a held output lock')
+        # Check overlapping destinations both with reusable and absent sidecars.
+        for existing in (True, False):
+            if not existing:
+                for path in (upper, self.artifact):
+                    sidecar_path(Path(str(path) + '.lock')).unlink(missing_ok=True)
+            if aliases:
+                with self.assertRaisesRegex(OSError, 'output paths must be distinct'):
+                    with runner._output_locks((upper, self.artifact)):
+                        self.fail('case aliases acquired distinct output locks')
+            else:
+                with runner._output_locks((upper, self.artifact)):
+                    pass
+            # Refusal and success must both release every acquired handle.
+            for path in (upper, self.artifact):
+                with runner._output_locks((path,)):
+                    pass
+
+    def assert_filesystem_output_case_policy(self, aliases):
+        # Map each policy onto real, numerically named sidecars so both branches
+        # exercise native OS locks regardless of the host filesystem's rules.
+        sidecar_stat = runner._sidecar_stat
+        open_sidecar = runner._open_sidecar
+        with tempfile.TemporaryDirectory(dir=self.tmp) as folder:
+            targets = {}
+
+            def local_sidecar(path):
+                if path.parent == Path(folder):
+                    return path
+                key = str(path).casefold() if aliases else str(path)
+                if key not in targets:
+                    targets[key] = Path(folder) / f'{len(targets)}.lock'
+                return targets[key]
+
+            with mock.patch.object(runner, '_sidecar_stat',
+                                   side_effect=lambda p: sidecar_stat(local_sidecar(p))), \
+                    mock.patch.object(runner, '_open_sidecar',
+                                      side_effect=lambda p: open_sidecar(local_sidecar(p))):
+                self.assert_output_case_policy(aliases, local_sidecar)
+            expected = {str(path) + '.lock' for path in
+                        (self.artifact, self.artifact.with_name('Capture.json'))}
+            if aliases:
+                expected = {path.casefold() for path in expected}
+            self.assertEqual(set(targets), expected)
+            self.assertEqual(len(list(Path(folder).iterdir())), 1 if aliases else 2)
+
+    def test_sensitive_output_names_have_distinct_keys_and_locks(self):
+        self.assert_filesystem_output_case_policy(False)
+
+    def test_insensitive_output_names_share_keys_and_locks(self):
+        self.assert_filesystem_output_case_policy(True)
+
+    def test_native_output_case_policy(self):
+        probe = self.tmp / 'CaseProbe'
+        probe.write_bytes(b'case sensitivity probe')
+        aliases = probe.with_name(probe.name.swapcase()).exists()
+        probe.unlink()
+        for existing in (False, True):
+            with self.subTest(existing=existing):
+                if existing:
+                    self.artifact.write_bytes(b'old capture')
+                self.assert_output_case_policy(aliases)
+                if existing:
+                    self.assertEqual(self.artifact.read_bytes(), b'old capture')
+                else:
+                    self.assertFalse(self.artifact.exists())
+                    self.assertFalse(self.artifact.with_name('Capture.json').exists())
+
+    def test_sidecar_created_by_contender_during_acquisition(self):
+        sidecar = Path(str(self.artifact) + '.lock')
+        native_open = os.open
+        for held in (False, True):
+            with self.subTest(held=held), contextlib.ExitStack() as cleanup:
+                sidecar.unlink(missing_ok=True)
+                owners = []
+
+                def open_after_contender(path, flags, mode=0o777):
+                    if Path(path) == sidecar and flags & os.O_EXCL:
+                        owner = cleanup.enter_context(os.fdopen(native_open(path, flags, mode),
+                                                                 'r+b'))
+                        owners.append(owner)
+                        if held:
+                            runner._lock_handle(owner, sidecar)
+                            if os.name == 'nt':
+                                cleanup.callback(runner.msvcrt.locking, owner.fileno(),
+                                                 runner.msvcrt.LK_UNLCK, 1)
+                        raise FileExistsError(runner.errno.EEXIST, 'sidecar already created',
+                                              str(path))
+                    return native_open(path, flags, mode)
+
+                with mock.patch.object(runner.os, 'open', side_effect=open_after_contender):
+                    if held:
+                        with self.assertRaisesRegex(FileExistsError,
+                                                    'output is locked by another run'):
+                            with runner._output_locks((self.artifact,)):
+                                self.fail('a contender acquired a held output lock')
+                    else:
+                        with runner._output_locks((self.artifact,)):
+                            pass
+                self.assertEqual(len(owners), 1)
+                self.assertTrue(runner._same_file(os.fstat(owners[0].fileno()), sidecar.lstat()))
+            with runner._output_locks((self.artifact,)):
+                pass
 
     def test_windows_locks_are_unlocked_before_close(self):
         for failure in (None, 'body', 'contention', 'acquisition'):
@@ -1867,21 +2246,32 @@ class ProcessRunnerTests(MatrixTestBase):
 
     def test_evidence_allocation_failure_preserves_process_exception(self):
         command = self.script('')
-        for error in (OSError('fixture spawn refused'),
-                      subprocess.TimeoutExpired(command, 60)):
-            with self.subTest(error=type(error).__name__):
-                self.seed_old_evidence()
-                with mock.patch.object(runner.subprocess, 'run', side_effect=error), \
-                        mock.patch.object(runner.tempfile, 'NamedTemporaryFile',
-                                          side_effect=OSError('fixture allocation refused')), \
-                        contextlib.redirect_stderr(io.StringIO()), \
-                        self.assertRaises(type(error)) as caught:
-                    self.run_case(command)
-                self.assertIs(caught.exception, error)
-                self.assertFalse(self.receipt.exists())
-                self.assertFalse(self.retained.exists())
-                self.assertFalse(list(self.tmp.glob('*.tmp')))
-                self.assert_output_locks_released()
+        identity = runner._binary_identity
+
+        def verify_windows(path):
+            with windows_binary_stats():
+                return identity(path)
+
+        for verify in (identity, verify_windows):
+            for error in (OSError('fixture spawn refused'),
+                          subprocess.TimeoutExpired(command, 60)):
+                with self.subTest(verify=verify.__name__, error=type(error).__name__):
+                    self.seed_old_evidence()
+                    with mock.patch.object(runner, '_binary_identity', side_effect=verify), \
+                            mock.patch.object(runner.subprocess, 'run', side_effect=error) as launch, \
+                            mock.patch.object(runner.subprocess, 'Popen') as spawn, \
+                            mock.patch.object(runner.tempfile, 'NamedTemporaryFile',
+                                              side_effect=OSError('fixture allocation refused')), \
+                            contextlib.redirect_stderr(io.StringIO()), \
+                            self.assertRaises(type(error)) as caught:
+                        self.run_case(command)
+                    launch.assert_called_once()
+                    spawn.assert_not_called()
+                    self.assertIs(caught.exception, error)
+                    self.assertFalse(self.receipt.exists())
+                    self.assertFalse(self.retained.exists())
+                    self.assertFalse(list(self.tmp.glob('*.tmp')))
+                    self.assert_output_locks_released()
 
     def open_with_lock_close_error(self, attempted, error):
         open_file = runner._open_sidecar

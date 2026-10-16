@@ -58,6 +58,35 @@ class CTestSkipAuditTests(unittest.TestCase):
         )
         self.assertFalse(MODULE.skip_is_allowed(case))
 
+    def test_required_target_passes_when_registered(self):
+        self.check_required_test("DeveloperConsoleUi.ScopedContextRestoresPreviousContext", 0)
+
+    def test_missing_target_fails_even_when_inventory_floor_is_met(self):
+        self.check_required_test("UiFixture.MissingTarget", 1)
+
+    def check_required_test(self, required: str, expected: int):
+        root = ET.Element("testsuite")
+        ET.SubElement(
+            root, "testcase", name="DeveloperConsoleUi.ScopedContextRestoresPreviousContext"
+        )
+        ET.SubElement(root, "testcase", name="Unrelated.ExtraCoverage")
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "ctest.junit.xml"
+            ET.ElementTree(root).write(report, encoding="utf-8")
+            output = io.StringIO()
+            errors = io.StringIO()
+            args = [
+                str(MODULE_PATH), str(report), "--minimum-tests", "2", "--require-test", required
+            ]
+            with mock.patch.object(sys, "argv", args):
+                with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+                    self.assertEqual(MODULE.main(), expected)
+            if expected:
+                self.assertIn("Required CTest cases are missing:", errors.getvalue())
+                self.assertIn(required, errors.getvalue())
+            else:
+                self.assertIn("2 tests; 0 approved skips", output.getvalue())
+
     def test_allow_list_is_empty(self):
         # Every previously allow-listed test now genuinely runs. Guard against a
         # skip quietly being re-admitted here without justification.
