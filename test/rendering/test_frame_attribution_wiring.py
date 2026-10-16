@@ -66,6 +66,15 @@ class FrameAttributionWiring(unittest.TestCase):
                          r"if \(collect_attribution\) \{ // Diagnostic[^\n]*? "
                          r"Attribution::ScatterSignature components\{\};")
 
+    def test_menu_input_ownership_and_exclusive_attribution_share_the_call(self):
+        main = compact(self.main)
+        self.assertRegex(main, r"RenderMenuScreens\([^;]*menuPreviewState, uiInputRouter\); "
+                         r"menu_timer.stop\(\); rb_menu_ms = Attribution::exclusive_parent_ms\("
+                         r" rb_menu_ms, menu_foliage_before, foliage_scope.snapshot\(\).rebuild_ms\);")
+        menu = compact(block(read(CLIENT / "app/MenuScreens.cpp"), "void RenderMenuScreens("))
+        self.assertTrue(menu.startswith(
+            "const bool previewMouseAllowed = previewState.UpdateInputOwnership(inputRouter);"))
+
     def test_disabled_timers_do_not_read_clocks(self):
         constructor = compact(block(self.header, "explicit StageTimer("))
         self.assertEqual(constructor, "if (m_running) m_start = std::chrono::steady_clock::now();")
@@ -138,7 +147,10 @@ class FrameAttributionWiring(unittest.TestCase):
                       "m_foliage_pass->last_draw_calls() > 0", pipeline)
         self.assertIn("m_last_render_pass_stats.foliage_instance_count_known = "
                       "m_foliage_pass->frame_instance_count_known();", pipeline)
-        overlay = compact(read(CLIENT / "app/DebugOverlays.cpp"))
+        overlay = compact(block(read(CLIENT / "app/DebugOverlays.cpp"),
+                                "void DrawGpuProfilerContents("))
+        self.assertNotIn("ImGui::Begin(", overlay)
+        self.assertNotIn("ImGui::End(", overlay)
         self.assertIn('if (gp.foliage_instance_count_known) ImGui::Text(', overlay)
         self.assertIn('capacity (count unavailable)', overlay)
         main = compact(self.main)
