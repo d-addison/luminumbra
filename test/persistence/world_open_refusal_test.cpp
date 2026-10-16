@@ -2,15 +2,19 @@
 #include <gtest/gtest.h>
 
 #include "luminumbra_common/core/JobSystem.h"
+#include "luminumbra_common/net/LockstepSession.h"
 #include "luminumbra_common/persistence/SavedWorldCatalog.h"
 #include "luminumbra_common/persistence/SyntheticSaveFixture.h"
+#include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
+#include "luminumbra_common/replay/ReplayStream.h"
 #include "luminumbra_common/systems/AetherFieldSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_common/systems/WindFieldSystem.h"
 #include "luminumbra_common/world/FarLodStore.h"
 #include "luminumbra_common/world/GameSession.h"
+#include "luminumbra_common/world/TerrainPresetLoader.h"
 #include "luminumbra_server/ServerWorldRunner.h"
 
 #include <algorithm>
@@ -102,6 +106,9 @@ protected:
         fs::create_directories(root / "worlds/atlas/presets");
         fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets/default.json",
                       root / "worlds/atlas/presets/default.json");
+        fs::copy(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets-rev6",
+                 root / "worlds/atlas/presets-rev6",
+                 fs::copy_options::recursive);
         save = root / "worlds/saves/fixture";
         Write(
             save / "world_info.json",
@@ -369,14 +376,16 @@ TEST_F(WorldOpenRefusal, MissingMetadataRefusesCatalogClientAndServerWithoutChan
 }
 
 TEST_F(WorldOpenRefusal, MissingEmbeddedPresetAndAtlasFallbackRefuseBeforeGeneration) {
-    const auto atlas = root / "worlds/atlas/presets/default.json";
+    const auto atlas = root / "worlds/atlas/presets-rev6/default.json";
     const auto embedded = save / "preset.json";
     ASSERT_TRUE(fs::copy_file(atlas, embedded));
     ASSERT_TRUE(Persistence::InspectSavedWorld(root, "fixture").error.empty());
     ASSERT_TRUE(fs::remove(embedded));
-    // An embedded-preset deletion alone is loadable through the atlas fallback.
+    // An embedded-preset deletion alone is loadable through the frozen revision-6 atlas fallback.
     ASSERT_TRUE(Persistence::InspectSavedWorld(root, "fixture").error.empty());
+    EXPECT_EQ(Persistence::InspectSavedWorld(root, "fixture").preset_path, atlas);
     ASSERT_TRUE(fs::remove(atlas));
+    ASSERT_TRUE(fs::remove(root / "worlds/atlas/presets/default.json"));
     const auto before = DiskBytes(root);
     ExpectMissingPresetReason(Persistence::InspectSavedWorld(root, "fixture").error, atlas);
     const auto catalog = Persistence::EnumerateSavedWorlds(root);
@@ -389,6 +398,7 @@ TEST_F(WorldOpenRefusal, MissingEmbeddedPresetAndAtlasFallbackRefuseBeforeGenera
         client.SetRootPath(RootString());
         EXPECT_FALSE(client.LoadWorld("fixture"));
         ExpectMissingPresetReason(client.GetWorldOpenError(), atlas);
+        EXPECT_EQ(client.GetWorldSystem(), nullptr);
         EXPECT_EQ(client.GetLastLoadedChunkCount(), 0u);
         EXPECT_FALSE(client.SaveWorld());
     }
@@ -408,6 +418,8 @@ TEST_F(WorldOpenRefusal, MissingEmbeddedPresetAndAtlasFallbackRefuseBeforeGenera
 }
 
 TEST_F(WorldOpenRefusal, ActiveClockSaveRefusesWithFeatureOffThroughEveryOpenPath) {
+    // This case exercises the legacy clock path, independently of shipping defaults.
+    Write(root / "data/common/systems.json", R"({"sim":{"active_regions":{"enabled":false}}})");
     GameSession writer;
     writer.SetRootPath(RootString());
     writer.SetJobSystem(&jobs);
@@ -421,6 +433,7 @@ TEST_F(WorldOpenRefusal, ActiveClockSaveRefusesWithFeatureOffThroughEveryOpenPat
     EXPECT_TRUE(inspected.requires_active_regions);
     EXPECT_EQ(inspected.clock.tick(), 1u);
     GameSession reader;
+    reader.SetActiveRegionsEnabled(false); // Required for the feature-off refusal.
     reader.SetRootPath(RootString());
     reader.SetJobSystem(&jobs);
     ASSERT_TRUE(reader.CreateTransientWorld("Reader", "1337", "default"));
@@ -488,6 +501,10 @@ TEST_F(WorldOpenRefusal, CurrentClientLoadPreservesAuthoritativeChunkAndFreshMis
     EXPECT_EQ(session.GetLastLoadedChunkCount(), 0u);
 }
 TEST_F(WorldOpenRefusal, CurrentServerBootKeepsLoadedAuthorityAndSkipsWaterSettle) {
+    // Keep the legacy clock and the fixture's 8x8 water grids: this test checks
+    // loaded authority/no-settle, independently of clock and resolution migrations.
+    Write(root / "data/common/systems.json",
+          R"({"sim":{"active_regions":{"enabled":false},"water_high_res":{"enabled":false}}})");
     Server::ServerWorldRunnerConfig config;
     config.root_path = RootString();
     config.world_id = "fixture";
@@ -586,13 +603,197 @@ TEST_F(WorldOpenRefusal, InvalidMetadataAndMissingWorldRefuseWithoutExceptionsOr
 
 TEST_F(WorldOpenRefusal, EmbeddedPresetLoadsWithoutTheOriginalNamedPreset) {
     fs::rename(root / "worlds/atlas/presets/default.json", save / "preset.json");
+    ASSERT_TRUE(fs::remove(root / "worlds/atlas/presets-rev6/default.json"));
     const auto before = DiskBytes(root);
     GameSession session;
     session.SetRootPath(RootString());
     session.SetJobSystem(&jobs);
     ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
+    const auto preset = world::LoadTerrainPreset(save / "preset.json");
+    ASSERT_TRUE(preset.ok);
+    EXPECT_FALSE(session.PresetContentHash().empty());
+    EXPECT_EQ(session.PresetContentHash(), preset.preset_content_hash);
     EXPECT_EQ(session.GetLastLoadedChunkCount(), 1u);
     EXPECT_EQ(DiskBytes(root), before);
+}
+
+TEST_F(WorldOpenRefusal, NonEmbeddedAdditionalNamedPresetUsesOriginalFile) {
+    const auto preset_path = root / "worlds/atlas/presets/my_hills.json";
+    auto preset = nlohmann::json::parse(Read(root / "worlds/atlas/presets-rev6/default.json"));
+    preset["generation_params"]["terrain"]["height_offset"] = 17.0f;
+    Write(preset_path, preset.dump());
+    auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+    metadata["worldType"] = "my_hills";
+    ASSERT_FALSE(metadata.contains("presetIdentity"));
+    ASSERT_FALSE(fs::exists(save / "preset.json"));
+    ASSERT_FALSE(fs::exists(root / "worlds/atlas/presets-rev6/my_hills.json"));
+
+    for (const auto& identity_metadata : {nlohmann::json::object(),
+                                          nlohmann::json{{"presetIdentity", "wrong"}},
+                                          nlohmann::json{{"presetIdentity", 123}}}) {
+        SCOPED_TRACE(identity_metadata.dump());
+        auto saved_metadata = metadata;
+        saved_metadata.update(identity_metadata);
+        Write(save / "world_info.json", saved_metadata.dump());
+        const auto before = DiskBytes(root);
+
+        const auto inspected = Persistence::InspectSavedWorld(root, "fixture");
+        ASSERT_TRUE(inspected.error.empty()) << inspected.error;
+        EXPECT_EQ(inspected.preset_path, preset_path);
+        GameSession session;
+        session.SetRootPath(RootString());
+        session.SetJobSystem(&jobs);
+        ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
+        EXPECT_FLOAT_EQ(session.GetWorldSystem()->get_params().height_offset, 17.0f);
+        EXPECT_FALSE(session.GetWorldSystem()->get_params().island_mask_enabled);
+        EXPECT_EQ(session.GetLastLoadedChunkCount(), 1u);
+        EXPECT_EQ(DiskBytes(root), before);
+    }
+}
+
+TEST_F(WorldOpenRefusal, EveryFrozenPresetResolvesHistoricalBytesAndChecksIdentity) {
+    const fs::path source = LUMINUMBRA_SOURCE_ROOT;
+    const auto original_metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+    ASSERT_FALSE(fs::exists(save / "preset.json"));
+    for (const char* name : {"amplified",
+                             "archipelago",
+                             "cave_dense",
+                             "caverns",
+                             "default",
+                             "flat_lands",
+                             "mountains",
+                             "temperate_forest"}) {
+        SCOPED_TRACE(name);
+        const auto filename = std::string(name) + ".json";
+        const auto historical = root / "worlds/atlas/presets-rev6" / filename;
+        fs::copy_file(source / "worlds/atlas/presets" / filename,
+                      root / "worlds/atlas/presets" / filename,
+                      fs::copy_options::overwrite_existing);
+        const auto identity =
+            Persistence::StableChecksum(nlohmann::json::parse(Read(historical)).dump());
+        if (std::string(name) == "cave_dense")
+            EXPECT_EQ(identity, "e70158a4777ee36b");
+        auto metadata = original_metadata;
+        metadata["worldType"] = name;
+        for (const auto& identity_metadata : {nlohmann::json::object(),
+                                              nlohmann::json{{"presetIdentity", identity}},
+                                              nlohmann::json{{"presetIdentity", "wrong"}}}) {
+            SCOPED_TRACE(identity_metadata.dump());
+            auto saved_metadata = metadata;
+            saved_metadata.update(identity_metadata);
+            Write(save / "world_info.json", saved_metadata.dump());
+            const auto before = DiskBytes(root);
+            const auto inspected = Persistence::InspectSavedWorld(root, "fixture");
+            EXPECT_EQ(inspected.preset_path, historical);
+            if (saved_metadata.value("presetIdentity", identity) == identity)
+                EXPECT_TRUE(inspected.error.empty()) << inspected.error;
+            else
+                EXPECT_NE(inspected.error.find("identity"), std::string::npos);
+            EXPECT_EQ(DiskBytes(root), before);
+        }
+        // Even metadata without an identity must refuse if its frozen file is absent.
+        Write(save / "world_info.json", metadata.dump());
+        ASSERT_TRUE(fs::remove(historical));
+        const auto before = DiskBytes(root);
+        const auto inspected = Persistence::InspectSavedWorld(root, "fixture");
+        ExpectMissingPresetReason(inspected.error, historical);
+        EXPECT_EQ(DiskBytes(root), before);
+    }
+}
+
+TEST_F(WorldOpenRefusal, NonEmbeddedRevisionSixHillsPreservesTerrainIdentity) {
+    const fs::path source = LUMINUMBRA_SOURCE_ROOT;
+    Write(save / "world_info.json",
+          Read(source / "test/fixtures/saves/revision6-hills/world_info.json"));
+    fs::create_directories(root / "data");
+    fs::copy(source / "data/common", root / "data/common", fs::copy_options::recursive);
+    ASSERT_FALSE(fs::exists(save / "preset.json"));
+    const auto before = DiskBytes(root);
+    const auto historical =
+        world::LoadTerrainPreset(root / "worlds/atlas/presets-rev6/default.json");
+    const auto shipping = world::LoadTerrainPreset(root / "worlds/atlas/presets/default.json");
+    ASSERT_TRUE(historical.ok);
+    ASSERT_TRUE(shipping.ok);
+    EXPECT_FALSE(historical.params.island_mask_enabled);
+    EXPECT_TRUE(shipping.params.island_mask_enabled);
+    EXPECT_EQ(
+        Persistence::StableChecksum(
+            nlohmann::json::parse(Read(root / "worlds/atlas/presets-rev6/default.json")).dump()),
+        "026f24207a8ffc7e");
+
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
+    const auto& params = session.GetWorldSystem()->get_params();
+    EXPECT_FALSE(params.island_mask_enabled);
+    EXPECT_FLOAT_EQ(params.base_frequency, 0.01f);
+    EXPECT_FLOAT_EQ(params.base_amplitude, 34.0f);
+    EXPECT_FLOAT_EQ(params.height_offset, 5.0f);
+    EXPECT_TRUE(params.hydro_enabled);
+    EXPECT_TRUE(params.biomes_enabled);
+    EXPECT_TRUE(params.biome_relief_enabled);
+    EXPECT_TRUE(params.rivers_enabled);
+    EXPECT_TRUE(params.lakes_enabled);
+    EXPECT_TRUE(params.cliffs_enabled);
+    EXPECT_TRUE(params.structures_enabled);
+    EXPECT_TRUE(params.surface_breaks_enabled);
+    EXPECT_EQ(World::ComputeTerrainParamsHash(params, session.GetWorldSystem()->get_seed()),
+              16636010052247870746ull);
+    EXPECT_EQ(session.GetLastLoadedChunkCount(), 1u);
+    EXPECT_EQ(DiskBytes(root), before);
+}
+
+TEST_F(WorldOpenRefusal, NonEmbeddedSaveWithoutIdentityNeverUsesShippingPreset) {
+    // The fixture's old metadata has no identity. Removing shipping content
+    // must not affect inspection or opening of an existing world.
+    fs::remove(root / "worlds/atlas/presets/default.json");
+    const auto before = DiskBytes(root);
+    const auto inspected = Persistence::InspectSavedWorld(root, "fixture");
+    ASSERT_TRUE(inspected.error.empty()) << inspected.error;
+    EXPECT_EQ(inspected.preset_path, root / "worlds/atlas/presets-rev6/default.json");
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
+    EXPECT_FALSE(session.GetWorldSystem()->get_params().island_mask_enabled);
+    EXPECT_EQ(DiskBytes(root), before);
+}
+
+TEST_F(WorldOpenRefusal, MissingHistoricalPresetRefusesRatherThanUsingShipping) {
+    const auto historical = root / "worlds/atlas/presets-rev6/default.json";
+    ASSERT_TRUE(fs::remove(historical));
+    const auto before = DiskBytes(root);
+    const auto inspected = Persistence::InspectSavedWorld(root, "fixture");
+    ExpectMissingPresetReason(inspected.error, historical);
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    EXPECT_FALSE(session.LoadWorld("fixture"));
+    ExpectMissingPresetReason(session.GetWorldOpenError(), historical);
+    EXPECT_EQ(session.GetWorldSystem(), nullptr);
+    EXPECT_EQ(DiskBytes(root), before);
+}
+
+TEST_F(WorldOpenRefusal, RecordedPresetIdentityMismatchRefusesBeforeGeneration) {
+    for (const bool embedded : {false, true}) {
+        if (embedded)
+            fs::copy_file(root / "worlds/atlas/presets/default.json", save / "preset.json");
+        for (const auto& identity : {nlohmann::json("wrong"), nlohmann::json(123)}) {
+            auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+            metadata["presetIdentity"] = identity;
+            Write(save / "world_info.json", metadata.dump());
+            const auto before = DiskBytes(root);
+            const auto inspected = Persistence::InspectSavedWorld(root, "fixture");
+            EXPECT_NE(inspected.error.find("identity"), std::string::npos);
+            GameSession session;
+            session.SetRootPath(RootString());
+            session.SetJobSystem(&jobs);
+            EXPECT_FALSE(session.LoadWorld("fixture"));
+            EXPECT_EQ(session.GetWorldSystem(), nullptr);
+            EXPECT_EQ(DiskBytes(root), before);
+        }
+    }
 }
 
 TEST_F(WorldOpenRefusal, CreateEditSaveRestartAndSwitchPreserveAuthority) {
@@ -700,6 +901,230 @@ TEST_F(WorldOpenRefusal, MenuWorldCreatesNoSaveAndClearsPreviousWorldState) {
     EXPECT_EQ(DiskBytes(root), before);
 }
 
+TEST_F(WorldOpenRefusal, AbsentLedgerPreservesSchedulerAndRestoresClockWithoutRegionState) {
+    const world::RegionSchedulerConfig scheduler{10, 3, 2};
+    world::ActiveRegionLedger ledger(scheduler);
+    ledger.set_local_anchor(Vec3(8, 18, 8));
+    ledger.pin({0, 0}, true, world::WorldClock{});
+    const world::WorldClock restored(45);
+    std::vector<std::string> errors;
+    ASSERT_FALSE(fs::exists(WorldSaveService::active_regions_path(save)));
+    ASSERT_TRUE(WorldSaveService::load_active_regions(ledger, save, &errors, restored));
+    EXPECT_TRUE(errors.empty());
+    EXPECT_EQ(ledger.config(), scheduler);
+    EXPECT_EQ(ledger.tick(), restored.tick());
+    EXPECT_EQ(ledger.header_tick(), restored.tick());
+    EXPECT_TRUE(ledger.records().empty());
+    EXPECT_FALSE(ledger.local_anchor().has_value());
+}
+
+TEST_F(WorldOpenRefusal, FreshRunnerBootAndAbsentLedgerReloadPreserveSchedulerIdentity) {
+    const world::RegionSchedulerConfig scheduler{10, 3, 2};
+    Server::ServerWorldRunnerConfig config;
+    config.root_path = RootString();
+    config.systems_config_override = luminumbra::core::SystemConfig::Defaults();
+    config.region_scheduler = scheduler;
+    config.surface_radius = 0;
+    config.collision_radius = 0;
+    config.test_streaming_radius_cap = 1;
+    config.autosave_interval_ticks = 0;
+    GameSession expected;
+    expected.ApplySystemConfig(*config.systems_config_override);
+    expected.SetRegionSchedulerConfig(scheduler);
+    Server::ServerWorldRunner runner(config);
+    ASSERT_TRUE(runner.Boot()) << runner.GetBootError();
+    ASSERT_NE(runner.Session(), nullptr);
+    ASSERT_TRUE(runner.Session()->ActiveRegionsEnabled());
+    EXPECT_EQ(runner.Session()->GetActiveRegionLedger().config(), scheduler);
+    EXPECT_EQ(runner.Session()->SystemConfigIdentity(), expected.SystemConfigIdentity());
+    EXPECT_NE(runner.Session()->SystemConfigIdentity(), GameSession{}.SystemConfigIdentity());
+    const auto ledger_path =
+        WorldSaveService::active_regions_path(runner.Session()->GetWorldSaveDir());
+    ASSERT_TRUE(fs::exists(ledger_path));
+    // Publish absence in the index; a raw unlink would be snapshot corruption.
+    ASSERT_TRUE(WorldSaveService::remove_member(runner.Session()->GetWorldSaveDir(),
+                                                "chunks/region/active-regions.arl"));
+    ASSERT_TRUE(runner.Session()->LoadWorldState()) << runner.Session()->GetWorldOpenError();
+    EXPECT_EQ(runner.Session()->GetActiveRegionLedger().config(), scheduler);
+    EXPECT_EQ(runner.Session()->SystemConfigIdentity(), expected.SystemConfigIdentity());
+    EXPECT_EQ(runner.TickCount(), 0u);
+    config.world_id = runner.Session()->GetMetadata().worldId;
+    runner.Shutdown();
+    // A subsequent runner with no override must identify the saved effective scheduler.
+    config.region_scheduler.reset();
+    const auto before = DiskBytes(root);
+    Server::ServerWorldRunner loaded(config);
+    ASSERT_TRUE(loaded.Boot()) << loaded.GetBootError();
+    EXPECT_EQ(loaded.Session()->GetActiveRegionLedger().config(), scheduler);
+    EXPECT_EQ(loaded.Session()->SystemConfigIdentity(), expected.SystemConfigIdentity());
+    EXPECT_EQ(DiskBytes(root), before);
+    loaded.Shutdown();
+}
+
+TEST_F(WorldOpenRefusal, PersistedSchedulerIdentityRefusesDifferentAdmissionAndReplayRules) {
+    // Each field changes independently while both sessions start with default member storage.
+    // Identity must observe the decoded ledger rather than that original storage.
+    world::RegionSchedulerConfig work_limit, hold_ticks, reduced_shift;
+    --work_limit.work_limit;
+    ++hold_ticks.hold_ticks;
+    ++reduced_shift.reduced_shift;
+    GameSession baseline;
+    baseline.SetRootPath(RootString());
+    baseline.SetJobSystem(&jobs);
+    ASSERT_TRUE(baseline.LoadWorld("fixture")) << baseline.GetWorldOpenError();
+    const auto baseline_identity = baseline.SystemConfigIdentity();
+    for (const auto scheduler : {work_limit, hold_ticks, reduced_shift}) {
+        SCOPED_TRACE(scheduler.work_limit);
+        SCOPED_TRACE(scheduler.hold_ticks);
+        SCOPED_TRACE(static_cast<unsigned>(scheduler.reduced_shift));
+        world::ActiveRegionLedger persisted(scheduler);
+        persisted.set_local_anchor(Vec3(8, 18, 8));
+        ASSERT_TRUE(WorldSaveService::save_active_regions(persisted, world::WorldClock{}, save));
+        const auto before = DiskBytes(root);
+        GameSession loaded, expected;
+        loaded.SetRootPath(RootString());
+        loaded.SetJobSystem(&jobs);
+        ASSERT_TRUE(loaded.LoadWorld("fixture")) << loaded.GetWorldOpenError();
+        expected.SetRegionSchedulerConfig(scheduler);
+        EXPECT_EQ(loaded.GetActiveRegionLedger().config(), scheduler);
+        EXPECT_EQ(loaded.SystemConfigIdentity(), expected.SystemConfigIdentity());
+        ASSERT_NE(loaded.SystemConfigIdentity(), baseline_identity);
+        EXPECT_EQ(DiskBytes(root), before);
+
+        Net::LockstepConfig local;
+        local.local_client_id = 0;
+        local.peer_client_id = 1;
+        local.system_config_identity = baseline_identity;
+        local.preset_content_hash = loaded.PresetContentHash();
+        Net::HelloMsg hello;
+        hello.seed = local.seed;
+        hello.preset = local.preset;
+        hello.tick_rate_hz = local.tick_rate_hz;
+        hello.client_id = 1;
+        hello.system_config_identity = loaded.SystemConfigIdentity();
+        hello.preset_content_hash = loaded.PresetContentHash();
+        auto expected_hello = hello;
+        expected_hello.system_config_identity = baseline_identity;
+        expected_hello.preset_content_hash = loaded.PresetContentHash();
+        EXPECT_FALSE(Net::HelloMatches(expected_hello, hello)); // TCP admission
+        auto [host_transport, peer_transport] = Net::MakeLoopbackPair();
+        Net::LockstepSession host(local, host_transport.get(), {});
+        ASSERT_TRUE(peer_transport->SendFrame(Net::EncodeHello(hello)));
+        EXPECT_FALSE(host.Handshake());
+        EXPECT_FALSE(host.Status().handshaken);
+
+        Replay::ReplayHeader header;
+        header.system_config_identity = baseline_identity;
+        header.preset_content_hash = loaded.PresetContentHash();
+        const auto replay_path = root / "scheduler.lrec1";
+        Replay::ReplayWriter writer;
+        ASSERT_TRUE(writer.Open(replay_path.string(), header));
+        ASSERT_TRUE(writer.Finalize(0));
+        const auto replay = Replay::ReadReplay(replay_path.string());
+        ASSERT_TRUE(replay.has_value());
+        if (!replay.has_value())
+            return;
+        EXPECT_TRUE(Replay::ConfigurationMatches(
+            replay->header, baseline_identity, header.preset_content_hash));
+        EXPECT_FALSE(Replay::ConfigurationMatches(
+            replay->header, loaded.SystemConfigIdentity(), header.preset_content_hash));
+        auto matching_header = replay->header;
+        matching_header.system_config_identity = loaded.SystemConfigIdentity();
+        matching_header.preset_content_hash = loaded.PresetContentHash();
+        EXPECT_TRUE(Replay::ConfigurationMatches(
+            matching_header, expected.SystemConfigIdentity(), header.preset_content_hash));
+        EXPECT_EQ(baseline.GetSimulationTickCount(), 0u);
+        EXPECT_EQ(loaded.GetSimulationTickCount(), 0u);
+        ASSERT_TRUE(fs::remove(replay_path));
+    }
+}
+
+TEST_F(WorldOpenRefusal, LoadedSchedulerSurvivesTransientCreateAndAbsentLedgerReplacement) {
+    const world::RegionSchedulerConfig scheduler{10, 3, 2};
+    world::ActiveRegionLedger persisted(scheduler);
+    persisted.set_local_anchor(Vec3(8, 18, 8));
+    ASSERT_TRUE(WorldSaveService::save_active_regions(persisted, world::WorldClock{}, save));
+    GameSession session, expected;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    expected.SetRegionSchedulerConfig(scheduler);
+    ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
+    const auto expect_scheduler = [&]() {
+        EXPECT_EQ(session.GetActiveRegionLedger().config(), scheduler);
+        EXPECT_EQ(session.SystemConfigIdentity(), expected.SystemConfigIdentity());
+    };
+    expect_scheduler();
+    ASSERT_TRUE(session.CreateTransientWorld("Scheduler menu", "1337", "default"));
+    expect_scheduler();
+    ASSERT_TRUE(session.LoadWorldState());
+    expect_scheduler();
+    // Exercise direct state load into an existing transient world, followed by an absent file.
+    ASSERT_TRUE(session.LoadWorldStateFrom(save)) << session.GetWorldOpenError();
+    expect_scheduler();
+    ASSERT_TRUE(fs::exists(WorldSaveService::active_regions_path(save)));
+    ASSERT_TRUE(WorldSaveService::remove_member(save, "chunks/region/active-regions.arl"));
+    ASSERT_TRUE(session.LoadWorldStateFrom(save)) << session.GetWorldOpenError();
+    expect_scheduler();
+    ASSERT_TRUE(session.CreateWorld("Scheduler reset", "1337", "default"));
+    expect_scheduler();
+    ASSERT_TRUE(session.LoadWorldState());
+    expect_scheduler();
+}
+
+TEST_F(WorldOpenRefusal, ExplicitSchedulerConflictRefusesLoadAndRunnerBootWithoutWriting) {
+    const world::RegionSchedulerConfig scheduler{10, 3, 2};
+    world::ActiveRegionLedger persisted(scheduler);
+    persisted.set_local_anchor(Vec3(8, 18, 8));
+    ASSERT_TRUE(WorldSaveService::save_active_regions(persisted, world::WorldClock{}, save));
+    const auto before = DiskBytes(root);
+    // A matching explicit override is accepted and preserves all decoded scheduler state.
+    GameSession matching;
+    matching.SetRootPath(RootString());
+    matching.SetJobSystem(&jobs);
+    matching.SetRegionSchedulerConfig(scheduler);
+    const auto matching_identity = matching.SystemConfigIdentity();
+    ASSERT_TRUE(matching.LoadWorld("fixture")) << matching.GetWorldOpenError();
+    EXPECT_EQ(matching.SystemConfigIdentity(), matching_identity);
+    EXPECT_EQ(matching.GetActiveRegionLedger().canonical_bytes(), persisted.canonical_bytes());
+    const std::string conflict =
+        "Incompatible configuration: persisted region scheduler differs from explicit override.";
+    auto work_limit = scheduler, hold_ticks = scheduler, reduced_shift = scheduler;
+    ++work_limit.work_limit;
+    ++hold_ticks.hold_ticks;
+    ++reduced_shift.reduced_shift;
+    for (const auto override_config :
+         {work_limit, hold_ticks, reduced_shift, world::RegionSchedulerConfig{}}) {
+        GameSession refused;
+        refused.SetRootPath(RootString());
+        refused.SetJobSystem(&jobs);
+        refused.SetRegionSchedulerConfig(override_config);
+        const auto requested_identity = refused.SystemConfigIdentity();
+        EXPECT_FALSE(refused.LoadWorld("fixture"));
+        EXPECT_EQ(refused.GetWorldOpenError(), conflict);
+        EXPECT_EQ(refused.GetActiveRegionLedger().config(), override_config);
+        EXPECT_EQ(refused.SystemConfigIdentity(), requested_identity);
+        EXPECT_FALSE(refused.SaveWorld());
+        EXPECT_EQ(DiskBytes(root), before);
+        // The direct state-load entry point enforces the same conflict policy.
+        ASSERT_TRUE(refused.CreateTransientWorld("Scheduler conflict", "1337", "default"));
+        EXPECT_FALSE(refused.LoadWorldStateFrom(save));
+        EXPECT_EQ(refused.GetWorldOpenError(), conflict);
+        EXPECT_EQ(refused.GetActiveRegionLedger().config(), override_config);
+        EXPECT_EQ(refused.SystemConfigIdentity(), requested_identity);
+        EXPECT_EQ(DiskBytes(root), before);
+    }
+    Server::ServerWorldRunnerConfig config;
+    config.root_path = RootString();
+    config.world_id = "fixture";
+    config.systems_config_override = luminumbra::core::SystemConfig::Defaults();
+    config.region_scheduler = world::RegionSchedulerConfig{};
+    Server::ServerWorldRunner runner(config);
+    EXPECT_FALSE(runner.Boot());
+    EXPECT_EQ(runner.GetBootError(), conflict);
+    EXPECT_EQ(runner.Session(), nullptr);
+    EXPECT_EQ(DiskBytes(root), before);
+}
+
 TEST_F(WorldOpenRefusal, ServerAutosaveAndFullSnapshotCarryTheAbsoluteClock) {
     Write(root / "data/common/systems.json", R"({"sim":{"active_regions":{"enabled":true}}})");
     Server::ServerWorldRunnerConfig config;
@@ -761,6 +1186,8 @@ TEST_F(WorldOpenRefusal, ServerAutosaveAndFullSnapshotCarryTheAbsoluteClock) {
 }
 
 TEST_F(WorldOpenRefusal, LegacyFullSnapshotCallbackAndMetadataFailureKeepChunkCount) {
+    // This case exercises the legacy clock path, independently of shipping defaults.
+    Write(root / "data/common/systems.json", R"({"sim":{"active_regions":{"enabled":false}}})");
     Server::ServerWorldRunnerConfig config;
     config.root_path = RootString();
     config.world_id = "fixture";
@@ -797,6 +1224,7 @@ TEST_F(WorldOpenRefusal, LegacyExplicitSessionSnapshotsKeepLargeKeylessMetadata)
     GameSession session;
     session.SetRootPath(RootString());
     session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(false); // Legacy keyless snapshots have no clock metadata.
     ASSERT_TRUE(session.CreateTransientWorld("Legacy direct load", "1337", "default"));
     ASSERT_TRUE(session.LoadWorldStateFrom(save)) << session.GetWorldOpenError();
     EXPECT_TRUE(session.SaveWorldStateTo(save));

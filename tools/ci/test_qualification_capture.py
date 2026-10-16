@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Refusal regressions for manual CI evidence; no native processes are launched."""
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import tempfile
 import types
 import unittest
@@ -148,8 +148,8 @@ class CaptureContract(unittest.TestCase):
     def test_corrupt_junit_is_rejected_before_github_proof(self):
         document = self.document()
         path = self.root / "qualification-capture.json"
-        path.write_text(json.dumps(document))
-        self.root.joinpath("ctest.junit.xml").write_text("changed")
+        path.write_text(json.dumps(document), encoding="utf-8")
+        self.root.joinpath("ctest.junit.xml").write_text("changed", encoding="utf-8")
         with patch.object(capture, "command", side_effect=[HEAD, ""]), patch.object(capture, "module", return_value=types.SimpleNamespace(fixture_hash=lambda *_args, **_kwargs: HASH)), patch.object(capture, "verify_producer") as proof, self.assertRaisesRegex(ValueError, "digest"):
             capture.validate_chain(HEAD, [path])
         proof.assert_not_called()
@@ -168,7 +168,8 @@ class CaptureContract(unittest.TestCase):
         for preset in capture.PRESETS:
             argv = [str(source / capture.SERVER_BINARY), "--root", str(source), "--smoke",
                     "--no-audio", "--sim-budget", "--ecology-roster", "--planted-roster",
-                    "--preset", preset, "--seed", "1337", "--ticks", "600", "--radius", "1",
+                    "--preset", preset, "--seed", "1337", "--ticks", "600",
+                    "--autosave-ticks", "30", "--radius", "1",
                     "--collision-radius", "1", "--artifact",
                     str(source / f"build/qualification/sim-budget-capture/{preset}.json")]
             commands[preset] = argv
@@ -193,9 +194,26 @@ class CaptureContract(unittest.TestCase):
 
     def test_duplicate_json_keys_are_not_ambiguous(self):
         path = self.root / "duplicate.json"
-        path.write_text('{"run_attempt":1,"run_attempt":2}')
+        path.write_text('{"run_attempt":1,"run_attempt":2}', encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "duplicate JSON key"):
             capture.read_json(path)
+
+    def test_server_capture_producer_path_syntax_is_independent_of_verifier_host(self):
+        for source in (PurePosixPath("/producer/source"), PureWindowsPath("C:/producer/source")):
+            manifest = {"revision": HEAD, "source_dirty": False, "fixture_hash": HASH,
+                        "binary_sha256": HASH, **capture.PARAMETERS, "runs": []}
+            for preset in capture.PRESETS:
+                artifact = f"{preset}.json"
+                argv = capture.module("capture_sim_budget").command(
+                    source / capture.SERVER_BINARY, source,
+                    source / "build/qualification/sim-budget-capture" / artifact,
+                    preset, "1337", 600, 1, 1)
+                manifest["runs"].append({"preset": preset, "artifact": artifact, "command": argv})
+            loader = types.SimpleNamespace(load_capture=lambda _: {"manifest": manifest})
+            command_module = capture.module("capture_sim_budget")
+            modules = {"sim_budget_io": loader, "capture_sim_budget": command_module}
+            with self.subTest(source=str(source)), patch.object(capture, "module", side_effect=modules.__getitem__):
+                capture.capture_contract(self.root, HEAD, HASH, HASH, str(source))
 
 
 if __name__ == "__main__":

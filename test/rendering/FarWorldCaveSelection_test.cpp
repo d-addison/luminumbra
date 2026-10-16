@@ -192,7 +192,9 @@ TEST(FarWorldCaveSelection, DefaultAndExactCodesReuseCanonicalEnum) {
     EXPECT_EQ(ResolveFarWorldCaveField(0), FarCaveMode::BandLimited);
     EXPECT_EQ(ResolveFarWorldCaveField(-0.0), FarCaveMode::BandLimited);
     EXPECT_EQ(ResolveFarWorldCaveField(1), FarCaveMode::BoxFiltered);
+    // The default renderer requests Ladder; without authority it has no effective cave policy.
     const FarWorldRenderer renderer;
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).requested, FarWorldMode::Ladder);
     const auto policy = renderer.CavePolicy(FarWorldPurpose::World);
     EXPECT_EQ(policy.requested, FarCaveMode::BandLimited);
     EXPECT_FALSE(policy.bound);
@@ -230,7 +232,7 @@ TEST(FarWorldCaveSelection, LegacyPreviewAndShaderRefusalHaveNoEffectiveCavePoli
     for (const auto requested : {std::optional(FarCaveMode::BandLimited),
                                  std::optional(FarCaveMode::BoxFiltered),
                                  std::optional<FarCaveMode>{}}) {
-        FarWorldRenderer legacy;
+        FarWorldRenderer legacy(FarWorldMode::Legacy);
         legacy.SetRequestedCavePolicy(requested);
         const auto selected = legacy.Selection(FarWorldPurpose::World);
         EXPECT_EQ(selected.effective, FarWorldMode::Legacy);
@@ -379,6 +381,14 @@ TEST(FarWorldCaveSelection, ProductionFacadeAdjacentTilesShareBordersHalosAndVer
 
 TEST(FarWorldCaveSelection, AnalyticOpeningSilhouettesRemainUnfilteredThroughOuterRadius) {
     auto params = CaveParams();
+    // Keep the analytic oracle on a flat surface: hydrology/terracing can otherwise
+    // lower adjacent box-filter taps enough to expose the noise router.
+    params.island_mask_enabled = false;
+    params.hydro_enabled = false;
+    params.rivers_enabled = false;
+    params.lakes_enabled = false;
+    params.cliffs_enabled = false;
+    params.biome_relief_enabled = false;
     // Prevent the noise router lifting the surface cap. At this shallow slice
     // all eight taps (including 64 m spacing) remain above the 18 m cap, leaving
     // the signed analytic mouth as an independent silhouette oracle.

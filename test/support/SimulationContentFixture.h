@@ -8,8 +8,16 @@
 
 namespace Luminumbra::TestSupport {
 
-// Small required inventories for enabled headless fixtures, without presentation assets.
+// Small required inventories and readable optional-policy parent for enabled headless fixtures.
 inline void WriteSimulationContentFixture(const std::filesystem::path& root) {
+    std::filesystem::create_directories(root / "data/common/sim");
+    std::ofstream biomes(root / "data/common/biomes.json", std::ios::binary | std::ios::trunc);
+    biomes
+        << R"({"schema":"luminumbra.biome_table.v1","biomes":[{"id":0,"name":"fixture_biome","surface":{"top":"Grass","filler":"Soil","depth":"Stone","underwater":"Sand"}}]})"
+        << '\n';
+    biomes.close();
+    if (!biomes.good())
+        throw std::runtime_error("Could not write simulation biome fixture.");
     for (const auto* domain : {"creatures", "foliage"}) {
         const auto directory = root / "data/common" / domain / "species";
         std::filesystem::create_directories(directory);
