@@ -306,22 +306,30 @@ Existing client paths, including bare `.py` filenames, resolve from the caller's
 directory before the child enters its per-cell working directory.
 
 Every launched cell receives `--systems-config` with the absolute path to the
-runner repository's `data/common/systems.json`. The client parses this option in
+selected runtime's `data/common/systems.json`. The client parses this option in
 `src/luminumbra_client/core/RuntimeScenarioConfig.cpp` and strictly loads the
 override in `src/luminumbra_client/main_client.cpp`. Each process receipt records
 `systems_config.path`, `systems_config.sha256` and `systems_config.sha256_verified`.
 A missing/unreadable configuration prevents launch; changed or unreadable bytes
 after execution fail the cell before the checker runs.
 
-World storage isolation is unavailable through a client CLI/environment override.
-`src/luminumbra_client/app/RuntimeRoot.cpp` discovers the root from working-directory
-ancestors followed by executable-directory ancestors, using shader, audio and
-default-preset sentinels. `main_client.cpp` passes that root to `GameSession`, whose
-`src/luminumbra_common/world/GameSession.cpp` creates and saves worlds beneath
-`<runtime-root>/worlds/saves`. An empty per-cell working directory therefore does
-not isolate world storage: it can still select the source or installed asset root.
-Redirecting user-settings locations does not redirect those saves. The runner does
-not currently provide world storage isolation.
+Every launched cell receives an absolute `--runtime-root`. The runner resolves
+the selected client executable before launch and searches only its directory and
+ancestors for `res/shaders/g_buffer.vert`, `data/audio/music.bank.json` and
+`worlds/atlas/presets/default.json`. For other layouts, supply the runner's
+`--runtime-root <absolute-directory>` argument. An incomplete explicit root fails
+without falling back to discovery. The output directory and per-cell working
+directory never select runtime assets, including when output is inside a checkout.
+
+Each cell also receives its own absolute `--save-root` at
+`<out-dir>/work/<cell-id>/storage`, with world saves and the world catalog beneath
+`worlds/saves` there. Its working directory remains `<out-dir>/work/<cell-id>`.
+Process receipts record `runtime_root` and `save_root` alongside the exact command.
+The client refuses relative, empty, missing-value or repeated root options,
+runtime roots missing required files, and save roots that cannot be created.
+`GameSession` uses the save-root override for world creation, loading, saving and
+catalog inspection; runtime assets still come from the runtime root. Ordinary
+client launches without either option retain discovery and runtime-root storage.
 
 The supplied manifest uses the existing `luminumbra.performance_build.v1` schema:
 compiler (`id`, `version`, `target`), configuration (the existing build options

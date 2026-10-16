@@ -214,10 +214,20 @@ class RunnerTestBase(unittest.TestCase):
         self.tmp = Path(self.directory.name)
         self.fake_client = self.tmp / 'fake_client.py'
         self.fake_client.write_text(FAKE_CLIENT, encoding='utf-8')
+        self.make_runtime(self.tmp)
         self.fake_checker = self.tmp / 'fake_checker.py'
         self.fake_checker.write_text(FAKE_CHECKER, encoding='utf-8')
         self.out = self.tmp / 'out'
         self.matrix_path = self.write_matrix(with_poses=True)
+
+    def make_runtime(self, root):
+        for name in rq.RUNTIME_SENTINELS:
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('fixture', encoding='utf-8')
+        config = root / 'data/common/systems.json'
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_bytes((planner.ROOT / 'data/common/systems.json').read_bytes())
 
     def write_matrix(self, with_poses):
         matrix = json.loads(MATRIX_PATH.read_text(encoding='utf-8'))
@@ -276,6 +286,12 @@ class DryRunTests(RunnerTestBase):
         self.assertEqual(plan['schema'], planner.PLAN_SCHEMA)
         self.assertEqual(plan['cell_count'], 36)
         self.assertEqual(plan['summary'], {'ready': 28, 'unevaluated': 8})
+        for cell in plan['cells']:
+            if cell['command'] is not None:
+                for option in ('--runtime-root', '--save-root'):
+                    self.assertEqual(cell['command'].count(option), 1)
+                    self.assertTrue(Path(cell['command'][cell['command'].index(option) + 1])
+                                    .is_absolute())
         self.assertIn('qualification plan: 36 cells', out)
 
     def test_dry_run_does_not_touch_existing_aggregate(self):
@@ -307,13 +323,24 @@ class FullMatrixTests(RunnerTestBase):
         self.assertEqual(sources, {'3840x1600': 'matrix', '3440x1440': 'undeclared'})
         self.assertIn('pass 28', out)
         self.assertTrue((self.out / 'cells' / f'{SURFACE_CELL}.verdict.json').is_file())
-        systems_config = rq.runner.resolve_path(planner.ROOT / 'data/common/systems.json')
+        systems_config = rq.runner.resolve_path(self.tmp / 'data/common/systems.json')
         receipts = list((self.out / 'cells').glob('*.process.json'))
         self.assertEqual(len(receipts), 28)
         for path in receipts:
             with self.subTest(receipt=path.name):
                 receipt = rq.read_json_object(path)
                 command = receipt['command']
+                for option in ('--runtime-root', '--save-root'):
+                    self.assertEqual(command.count(option), 1)
+                    value = command[command.index(option) + 1]
+                    self.assertTrue(Path(value).is_absolute())
+                    self.assertEqual(receipt[option[2:].replace('-', '_')], value)
+                self.assertEqual(Path(receipt['runtime_root']), self.tmp.resolve())
+                save_root = Path(receipt['save_root'])
+                self.assertEqual(save_root, self.out.resolve() / 'work' /
+                                 path.name.removesuffix('.process.json') / 'storage')
+                self.assertTrue(save_root.is_relative_to(self.out.resolve()))
+                self.assertEqual(Path(receipt['cwd']), save_root.parent)
                 self.assertEqual(command.count('--systems-config'), 1)
                 config_arg = command[command.index('--systems-config') + 1]
                 self.assertTrue(Path(config_arg).is_absolute())
@@ -810,7 +837,88 @@ class DirectoryLockTests(RunnerTestBase):
         self.assertEqual(self.run_main(self.argv('--only', SURFACE_CELL))[0], 0)
 
 
+class RuntimeRootTests(RunnerTestBase):
+    def test_package_root_is_independent_of_output_and_working_directory(self):
+        package = self.tmp / 'package'
+        self.make_runtime(package)
+        client = package / 'bin/client.py'
+        client.parent.mkdir()
+        client.write_text(FAKE_CLIENT, encoding='utf-8')
+        checkout = self.tmp / 'checkout'
+        self.make_runtime(checkout)
+        previous = Path.cwd()
+        try:
+            os.chdir(checkout)
+            for out in (self.tmp / 'external-output', checkout / 'build/qualification-native'):
+                with self.subTest(out=out):
+                    args = self.argv('--only', SURFACE_CELL, out=out)
+                    args[1] = str(client)
+                    code, _, _ = self.run_main(args)
+                    self.assertEqual(code, 0)
+                    receipt = rq.read_json_object(out / 'cells' / f'{SURFACE_CELL}.process.json')
+                    self.assertEqual(Path(receipt['runtime_root']), package.resolve())
+                    self.assertEqual(Path(receipt['systems_config']['path']),
+                                     package.resolve() / 'data/common/systems.json')
+                    self.assertEqual(Path(receipt['save_root']),
+                                     out.resolve() / 'work' / SURFACE_CELL / 'storage')
+                    self.assertEqual(Path(receipt['cwd']),
+                                     out.resolve() / 'work' / SURFACE_CELL)
+        finally:
+            os.chdir(previous)
+
+    def test_explicit_runtime_root_is_used_without_ancestor_fallback(self):
+        runtime = self.tmp / 'explicit-runtime'
+        self.make_runtime(runtime)
+        code, _, _ = self.run_main(self.argv('--only', SURFACE_CELL,
+                                              '--runtime-root', str(runtime)))
+        self.assertEqual(code, 0)
+        receipt = rq.read_json_object(self.out / 'cells' / f'{SURFACE_CELL}.process.json')
+        self.assertEqual(receipt['runtime_root'], str(runtime.resolve()))
+        self.assertEqual(receipt['systems_config']['path'],
+                         str(runtime.resolve() / 'data/common/systems.json'))
+        for root in (Path('relative'), self.tmp / 'missing-runtime', self.tmp / 'incomplete'):
+            with self.subTest(root=root), \
+                    mock.patch.object(rq.runner, 'run_process') as launch:
+                code, _, _ = self.run_main(self.argv('--only', SURFACE_CELL,
+                                                      '--runtime-root', str(root)))
+                self.assertEqual(code, 1)
+                self.assertFalse(self.load_qualification()['render_floor_qualified'])
+                self.assertIn('runtime', self.load_qualification()['error'])
+                launch.assert_not_called()
+
+    def test_missing_runtime_files_refuse_without_ancestor_fallback(self):
+        for name in rq.RUNTIME_SENTINELS:
+            path = self.tmp / name
+            original = path.read_bytes()
+            path.unlink()
+            try:
+                with self.subTest(name=name), \
+                        mock.patch.object(rq.runner, 'run_process') as launch:
+                    code, _, _ = self.run_main(self.argv('--only', SURFACE_CELL,
+                                                          '--runtime-root', str(self.tmp)))
+                    self.assertEqual(code, 1)
+                    self.assertIn('runtime root missing', self.load_qualification()['error'])
+                    self.assertFalse(self.load_qualification()['render_floor_qualified'])
+                    launch.assert_not_called()
+            finally:
+                path.write_bytes(original)
+
+    def test_discovery_does_not_fall_back_to_working_directory(self):
+        with mock.patch.object(rq.runner, 'run_process') as launch:
+            args = self.argv('--only', SURFACE_CELL)
+            args[1] = sys.executable
+            code, _, _ = self.run_main(args)
+        self.assertEqual(code, 1)
+        self.assertIn('runtime root missing', self.load_qualification()['error'])
+        self.assertFalse(self.load_qualification()['render_floor_qualified'])
+        launch.assert_not_called()
+
+
 class SystemsConfigTests(RunnerTestBase):
+    def setUp(self):
+        super().setUp()
+        (self.tmp / 'data/common/systems.json').unlink()
+
     def run_fixed_view(self):
         return rq.run_cells(matrix_lib.load_matrix(self.matrix_path), client=self.fake_client,
                             out_dir=self.out, root=self.tmp, only=[FOREST_CELL],
@@ -828,7 +936,7 @@ class SystemsConfigTests(RunnerTestBase):
 
     def test_changed_or_removed_config_is_refused(self):
         systems_config = self.tmp / 'data/common/systems.json'
-        systems_config.parent.mkdir(parents=True)
+        systems_config.parent.mkdir(parents=True, exist_ok=True)
         original = rq.runner.run_process
         for change in ('replace', 'remove'):
             with self.subTest(change=change):

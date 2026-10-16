@@ -45,6 +45,8 @@ EXPANDED_REASON = 'requires far_coverage evidence from the far-world runtime wor
 REFRESH_TEXT = re.compile(r'[0-9]{1,4}')
 SETTINGS_NAME = 'settings'
 SETTINGS_KEYS = ('HOME', 'USERPROFILE', 'APPDATA', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME')
+RUNTIME_SENTINELS = ('res/shaders/g_buffer.vert', 'data/audio/music.bank.json',
+                     'worlds/atlas/presets/default.json')
 EXPECTED_FOV = 45.0  # The client default from SystemConfig.
 FIXED_VIEW_CHECK_FLAGS = ('--require-settled', '--require-geometry', '--require-camera-chunk')
 
@@ -398,7 +400,8 @@ def native_executable(path):
         return macho(0, size)
 
 
-def run_client_process(command, *, client, build_manifest, systems_config, **kwargs):
+def run_client_process(command, *, client, build_manifest, systems_config,
+                       runtime_root, save_root, **kwargs):
     """Bind client-code and systems configuration identities to the process receipt."""
     script = str(client).endswith('.py')
     path = (runner.resolve_path(client) if script else
@@ -442,6 +445,7 @@ def run_client_process(command, *, client, build_manifest, systems_config, **kwa
             if not config_verified:
                 errors.append('systems configuration SHA-256 changed during execution')
             receipt.update(client_path=str(path), client=identity,
+                           runtime_root=str(runtime_root), save_root=str(save_root),
                            systems_config={'path': str(systems_config), 'sha256': config_sha256,
                                            'sha256_verified': config_verified})
             try:
@@ -500,7 +504,7 @@ def capture_ownership(receipt, retained, capture, out_dir):
 
 
 def run_cell(cell, matrix, *, client, out_dir, root, python, checker, timeout_seconds,
-             environment, checker_canonical, matrix_canonical, build_manifest):
+             environment, checker_canonical, matrix_canonical, build_manifest, runtime_root):
     state, reason = matrix_lib.readiness(cell, root)
     cells_dir = out_dir / 'cells'
     cell_id = cell['id']
@@ -520,6 +524,8 @@ def run_cell(cell, matrix, *, client, out_dir, root, python, checker, timeout_se
         return record('unevaluated', reason, artifact)
     work = out_dir / 'work' / cell_id
     work.mkdir(parents=True, exist_ok=True)
+    save_root = work / 'storage'
+    save_root.mkdir(parents=True, exist_ok=True)
     cells_dir.mkdir(parents=True, exist_ok=True)
     retained = cells_dir / f'{cell_id}.artifact.json'
     receipt_path = cells_dir / f'{cell_id}.process.json'
@@ -527,13 +533,15 @@ def run_cell(cell, matrix, *, client, out_dir, root, python, checker, timeout_se
         with tempfile.TemporaryDirectory(prefix='.capture-', dir=work) as staging:
             capture = Path(staging) / 'capture.json'
             command = matrix_lib.build_command(cell, client=client, artifact=capture, root=root)
-            systems_config = runner.resolve_path(Path(root) / 'data/common/systems.json')
-            command += ['--systems-config', str(systems_config)]
+            systems_config = runner.resolve_path(runtime_root / 'data/common/systems.json')
+            command += ['--systems-config', str(systems_config),
+                        '--runtime-root', str(runtime_root), '--save-root', str(save_root)]
             if str(client).endswith('.py'):
                 command = [sys.executable, str(client)] + command[1:]
             completed, evidence, client_evidence = run_client_process(
                 command, client=client, build_manifest=build_manifest,
-                systems_config=systems_config, cwd=work,
+                systems_config=systems_config, runtime_root=runtime_root,
+                save_root=save_root, cwd=work,
                 environment=environment, log=cells_dir / f'{cell_id}.log',
                 artifact=capture, retained=retained, receipt_path=receipt_path,
                 timeout_seconds=timeout_seconds)
@@ -600,10 +608,13 @@ def run_cell(cell, matrix, *, client, out_dir, root, python, checker, timeout_se
 
 def run_cells(matrix, *, client, out_dir, root=planner.ROOT, python=sys.executable,
               only=None, timeout_seconds=DEFAULT_TIMEOUT_SECONDS, checker=None,
-              environment=None, matrix_canonical=None, build_manifest=None):
+              environment=None, matrix_canonical=None, build_manifest=None, runtime_root=None):
     """Run every selected cell in matrix order; return one result dict per cell."""
     out_dir = runner.resolve_path(out_dir)
     client = resolve_client(str(client))
+    if not Path(client).is_absolute():
+        client = str(runner.resolve_executable(client, Path.cwd(), environment))
+    runtime_root = resolve_runtime_root(client, runtime_root)
     if matrix_canonical is None:
         matrix_canonical = matrix_identity(matrix)['canonical']
     if checker is None:
@@ -616,7 +627,8 @@ def run_cells(matrix, *, client, out_dir, root=planner.ROOT, python=sys.executab
     return [run_cell(cell, matrix, client=client, out_dir=out_dir, root=root, python=python,
                      checker=checker, timeout_seconds=timeout_seconds,
                      environment=environment, checker_canonical=checker_canonical,
-                     matrix_canonical=matrix_canonical, build_manifest=build_manifest)
+                     matrix_canonical=matrix_canonical, build_manifest=build_manifest,
+                     runtime_root=runtime_root)
             for cell in planner.select(matrix_lib.cells(matrix), only)]
 
 
@@ -726,14 +738,40 @@ def resolve_client(text):
     return text
 
 
+def resolve_runtime_root(client, explicit=None):
+    """Use only the explicit layout or ancestors of the resolved client executable."""
+    if explicit is not None:
+        explicit = Path(explicit)
+        if not explicit.is_absolute():
+            raise UsageError('--runtime-root requires an absolute directory')
+        candidates = (runner.resolve_path(explicit),)
+    else:
+        executable = runner.resolve_path(client)
+        candidates = executable.parents
+    for candidate in candidates:
+        if all((candidate / name).is_file() for name in RUNTIME_SENTINELS):
+            return candidate
+    raise UsageError('runtime root missing shader, audio or default-preset files; '
+                     'supply --runtime-root with an absolute runtime directory')
+
+
 def resolve_checker(text):
     """Absolute path when the checker script exists from the caller's cwd."""
     return str(runner.resolve_path(text)) if Path(text).exists() else text
 
 
 def run_dry(matrix, args, out_dir):
-    plan = planner.build_plan(matrix, client=args.client, out_dir=out_dir, root=planner.ROOT,
+    client = resolve_client(str(args.client))
+    if not Path(client).is_absolute():
+        client = str(runner.resolve_executable(client, Path.cwd()))
+    runtime_root = resolve_runtime_root(client, args.runtime_root)
+    plan = planner.build_plan(matrix, client=client, out_dir=out_dir, root=planner.ROOT,
                               python=sys.executable, only=args.only)
+    for cell in plan['cells']:
+        if cell['command'] is not None:
+            save_root = out_dir / 'work' / cell['id'] / 'storage'
+            cell['command'] += ['--runtime-root', str(runtime_root), '--save-root', str(save_root),
+                                '--systems-config', str(runtime_root / 'data/common/systems.json')]
     path = out_dir / planner.PLAN_NAME
     path.write_text(json.dumps(plan, indent=2) + '\n', encoding='utf-8')
     print(f"qualification plan: {plan['cell_count']} cells, "
@@ -765,6 +803,9 @@ def build_parser():
                              'run with the current interpreter (used by tests)')
     parser.add_argument('--out-dir', required=True, type=Path,
                         help='Directory receiving cells/, work/ and qualification.json')
+    parser.add_argument('--runtime-root', type=Path,
+                        help='Absolute runtime asset directory; otherwise search only '
+                             'the selected client executable ancestors')
     parser.add_argument('--matrix', type=Path, default=planner.DEFAULT_MATRIX,
                         help='Qualification matrix JSON (default: committed matrix)')
     parser.add_argument('--build-manifest', type=Path,
@@ -820,7 +861,11 @@ def main(argv=None):
     try:
         os.close(descriptor)
         if args.dry_run:
-            return run_dry(matrix, args, out_dir)
+            try:
+                return run_dry(matrix, args, out_dir)
+            except (OSError, UsageError) as error:
+                print(f'run_qualification: {error}', file=sys.stderr)
+                return 2
         return run_locked(matrix, args, out_dir, client, checker, declared,
                           provenance, build_manifest)
     finally:
@@ -835,7 +880,7 @@ def run_locked(matrix, args, out_dir, client, checker, declared, provenance, bui
         results = run_cells(matrix, client=client, out_dir=out_dir,
                             only=args.only, timeout_seconds=args.timeout_seconds,
                             checker=checker, matrix_canonical=provenance['canonical'],
-                            build_manifest=build_manifest)
+                            build_manifest=build_manifest, runtime_root=args.runtime_root)
         payload = aggregate(matrix, results, partial=args.only is not None,
                             declared_refresh=declared, matrix_provenance=provenance)
     except Exception as error:  # noqa: BLE001 - Any failure must leave an unqualified record.
