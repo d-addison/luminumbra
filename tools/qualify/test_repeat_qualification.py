@@ -165,11 +165,17 @@ def pid_alive(pid: int, timeout: float = 30) -> bool:
     except OSError:
         return False
     stat = Path(f"/proc/{pid}/stat")
-    if stat.is_file():
+    if not Path("/proc/self/stat").is_file():
+        # Without procfs, kill(pid, 0) succeeding is the best available answer.
+        return True
+    try:
         # A zombie still answers kill(pid, 0) but is already dead.
         fields = stat.read_text().rsplit(")", 1)[-1].split()
-        if fields and fields[0] == "Z":
-            return False
+    except (FileNotFoundError, ProcessLookupError):
+        # The process was reaped between kill(pid, 0) and reading its status.
+        return False
+    if fields and fields[0] == "Z":
+        return False
     return True
 
 
@@ -640,7 +646,10 @@ class InterruptCleanupTest(HarnessTestCase):
                     subprocess.run(["taskkill", "/T", "/F", "/PID", str(grandchild_pid)],
                                    capture_output=True, check=False, timeout=rq.CLEANUP_TIMEOUT_SECONDS)
                 else:
-                    os.kill(grandchild_pid, signal.SIGKILL)
+                    try:
+                        os.kill(grandchild_pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass  # Exited after the liveness check.
 
     def test_cleanup_failure_preserves_interrupt_and_reports_diagnostics(self) -> None:
         for failure in (["fixture cleanup refused"], OSError("fixture cleanup raised")):
@@ -738,6 +747,27 @@ if os.name == "posix":
             self.assertEqual(receipt["status"], "PREFLIGHT_FAILED")
             self.assertIn("outside the child working directory", receipt["failure_reason"])
             self.assertFalse((self.root / "missing-outside").exists())
+
+        def test_inaccessible_core_directory_with_override_runs_without_collection(self) -> None:
+            args = self.in_process_args(1, "--allow-no-dumps")
+            blocker = self.work / "blocker"
+            blocker.write_bytes(b"not a directory")
+            with mock.patch.object(rq, "shared_dump_directory_locks",
+                                   wraps=rq.shared_dump_directory_locks) as locks, \
+                    mock.patch.object(rq, "copy_changed_files", wraps=rq.copy_changed_files) as copies:
+                code = rq.run_qualification(
+                    args, ["--fake=pass"], core_limits=lambda: (4096, 4096),
+                    read_pattern=lambda: str(blocker / "core.%p"),
+                )
+            self.assertEqual(code, 0)
+            receipt = self.load_receipt()
+            self.assertEqual(receipt["status"], "passed")
+            self.assertTrue(receipt["environment"]["core_problems"])
+            self.assertIsNotNone(receipt["environment"]["core_directory_preflight"]["problem"])
+            self.assertEqual(len(receipt["iterations"]), 1)
+            self.assertEqual(receipt["iterations"][0]["collection_errors"], [])
+            locks.assert_called_once_with(None, None)
+            self.assertTrue(all(call.args[0] is None for call in copies.call_args_list))
 
         def test_core_file_copy_failure_keeps_the_classified_iteration(self) -> None:
             args = self.in_process_args(1)

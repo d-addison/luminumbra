@@ -2,7 +2,10 @@
 // Acceptance Criteria ..005.
 // These reference luminumbra::core::SystemConfig, which does not exist yet:
 // the test keeps the generated schema and runtime registry aligned.
+#include "../support/SystemConfigVariants.h"
+#include "../support/UniqueTempPath.h"
 #include <gtest/gtest.h>
+#include <nlohmann/json.hpp>
 
 #include <filesystem>
 #include <fstream>
@@ -23,27 +26,193 @@ using luminumbra::core::SystemConfig;
 
 namespace {
 
+constexpr const char* kSimulationGateNames[]{
+#define SIM_GATE_Sim(NAME) NAME,
+#define SIM_GATE_Render(NAME)
+#define SIM_GATE_NAME(ENUM, SECTION, JSON_SECTION, NAME, RESIDENCY) SIM_GATE_##SECTION(NAME)
+    LUMIN_CONFIG_KEY_TABLE(SIM_GATE_NAME)
+#undef SIM_GATE_NAME
+#undef SIM_GATE_Render
+#undef SIM_GATE_Sim
+};
+
+TEST(SystemConfig, SimulationArtifactReportsEveryRegistryGate) {
+    const auto gates = SystemConfig::Defaults().SimulationGates();
+    std::size_t count = 0;
+    for (const char* name : kSimulationGateNames) {
+        SCOPED_TRACE(name);
+        ++count;
+        ASSERT_TRUE(gates.contains(name));
+        EXPECT_TRUE(gates.at(name));
+    }
+    EXPECT_EQ(gates.size(), count);
+}
+
+TEST(SystemConfig, SimulationArtifactReportsEveryExplicitOptOut) {
+    const auto gates = SystemConfig::Defaults().SimulationGates();
+    for (const char* name : kSimulationGateNames) {
+        SCOPED_TRACE(name);
+        nlohmann::json document;
+        document["sim"][name]["enabled"] = false;
+        Luminumbra::world::GameSession session;
+        session.ApplySystemConfig(SystemConfig::FromJsonString(document.dump()));
+        const auto effective = session.EffectiveSimulationGates();
+        EXPECT_EQ(effective.size(), gates.size());
+        EXPECT_FALSE(effective.at(name));
+    }
+}
+
+std::string ConfigIdentity(const SystemConfig& config) {
+    Luminumbra::world::GameSession session;
+    session.ApplySystemConfig(config);
+    return session.SystemConfigIdentity();
+}
+
+TEST(SystemConfig, SimulationIdentityPinsShippingDefaults) {
+    // Exact little-endian scalar serialization, independently computed with stdlib Python.
+    // See docs/development/system-config-identity.md for the complete computation.
+    EXPECT_EQ(ConfigIdentity(SystemConfig::Defaults()), "60ab3c242d54ce89");
+    const auto path = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() /
+                      "data/common/systems.json";
+    ASSERT_TRUE(std::filesystem::exists(path));
+    EXPECT_EQ(ConfigIdentity(SystemConfig::LoadFromFile(path.string())), "60ab3c242d54ce89");
+    EXPECT_EQ(luminumbra::core::SimulationIdentityValues{}.ComputeIdentity(),
+              ConfigIdentity(SystemConfig::Defaults()));
+}
+
+TEST(SystemConfig, SimulationIdentityCoversEveryAppliedInput) {
+    const auto baseline = ConfigIdentity(SystemConfig::Defaults());
+    for (const auto& [name, identity] : Luminumbra::TestSupport::EffectiveIdentityMismatches()) {
+        SCOPED_TRACE(name);
+        EXPECT_NE(identity, baseline);
+    }
+}
+
+TEST(SystemConfig, SimulationIdentityUsesResolvedValuesAndIgnoresPresentation) {
+    const auto baseline = ConfigIdentity(SystemConfig::Defaults());
+    const auto explicit_defaults = SystemConfig::FromJsonString(R"({
+        "user":{"video":{"fov":90}},
+        "render":{"moonlight":{"enabled":false,"params":{"strength":0.75}}},
+        "sim":{"ecology":{"params":{"herd_weight":0.8,"energy_drain_per_second":0.006}},
+               "plant_growth":{"params":{"mutation_rate":0.05}}}})");
+    EXPECT_EQ(ConfigIdentity(explicit_defaults), baseline);
+    const auto first = SystemConfig::FromJsonString(R"({"sim":{
+        "ecology":{"params":{"herd_weight":0.9,"catch_radius":2.5}},
+        "plant_growth":{"params":{"mutation_rate":0.2}}}})");
+    const auto reordered = SystemConfig::FromJsonString(R"({"sim":{
+        "plant_growth":{"params":{"mutation_rate":0.2}},
+        "ecology":{"params":{"catch_radius":2.5,"herd_weight":0.9}}}})");
+    EXPECT_EQ(ConfigIdentity(first), ConfigIdentity(reordered));
+    const auto disabled = SystemConfig::FromJsonString(R"({"sim":{"ecology":{"enabled":false}}})");
+    const auto ignored = SystemConfig::FromJsonString(
+        R"({"sim":{"ecology":{"enabled":false,"params":{"herd_weight":0.9}}}})");
+    EXPECT_EQ(ConfigIdentity(disabled), ConfigIdentity(ignored));
+    const auto positive_zero = SystemConfig::FromJsonString(
+        R"({"sim":{"plant_growth":{"params":{"mutation_rate":0.0}}}})");
+    const auto negative_zero = SystemConfig::FromJsonString(
+        R"({"sim":{"plant_growth":{"params":{"mutation_rate":-0.0}}}})");
+    EXPECT_NE(ConfigIdentity(positive_zero), ConfigIdentity(negative_zero));
+}
+
 // missing/empty config yields all-defaults, no crash.
-TEST(SystemConfig, DefaultsAllOff) {
+TEST(SystemConfig, ShippingDefaultsAllOn) {
     const SystemConfig cfg = SystemConfig::Defaults();
-    EXPECT_FALSE(cfg.enabled(SysKey::SimPlantGrowth));
-    EXPECT_FALSE(cfg.enabled(SysKey::SimErosion));
-    EXPECT_FALSE(cfg.enabled(SysKey::RenderMoonlight));
-    EXPECT_FALSE(cfg.enabled(SysKey::RenderTreeWind));
+    for (unsigned key = 0; key < static_cast<unsigned>(SysKey::Count); ++key) {
+        const auto id = static_cast<SysKey>(key);
+        EXPECT_TRUE(cfg.enabled(id)) << key;
+    }
+    EXPECT_TRUE(cfg.enabled(SysKey::SimPlantGrowth));
+    EXPECT_TRUE(cfg.enabled(SysKey::SimErosion));
+    EXPECT_TRUE(cfg.enabled(SysKey::RenderMoonlight));
+    EXPECT_TRUE(cfg.enabled(SysKey::RenderTreeWind));
+    EXPECT_FLOAT_EQ(cfg.param(SysParam::PlantMutationRate, 0.123f), 0.123f);
+    EXPECT_FLOAT_EQ(cfg.param(SysParam::MoonlightStrength, 0.5f), 0.5f);
+}
+
+TEST(SystemConfig, DefaultsRequestFarWorldLadder) {
+    const SystemConfig cfg = SystemConfig::Defaults();
+    EXPECT_TRUE(cfg.enabled(SysKey::SimPlantGrowth));
+    EXPECT_TRUE(cfg.enabled(SysKey::SimErosion));
+    EXPECT_TRUE(cfg.enabled(SysKey::RenderMoonlight));
+    EXPECT_TRUE(cfg.enabled(SysKey::RenderTreeWind));
+    EXPECT_TRUE(cfg.enabled(SysKey::RenderFarWorldLadder));
     EXPECT_FLOAT_EQ(cfg.param(SysParam::PlantMutationRate, 0.123f), 0.123f);
     EXPECT_FLOAT_EQ(cfg.param(SysParam::MoonlightStrength, 0.5f), 0.5f);
 }
 
 TEST(SystemConfig, MissingFileIsDefaults) {
     const SystemConfig cfg = SystemConfig::LoadFromFile("this/path/does/not/exist.json");
-    EXPECT_FALSE(cfg.enabled(SysKey::RenderMoonlight));
+    for (unsigned key = 0; key < static_cast<unsigned>(SysKey::Count); ++key)
+        EXPECT_TRUE(cfg.enabled(static_cast<SysKey>(key))) << key;
+    EXPECT_TRUE(cfg.enabled(SysKey::RenderMoonlight));
+    EXPECT_TRUE(cfg.enabled(SysKey::RenderFarWorldLadder));
     EXPECT_FLOAT_EQ(cfg.param(SysParam::MoonlightStrength, 0.7f), 0.7f);
 }
 
+TEST(SystemConfig, ExplicitOverrideLoadsHistoricalConfiguration) {
+    const auto path = std::filesystem::path(__FILE__).parent_path().parent_path() /
+                      "fixtures/historical-defaults-off.json";
+    SystemConfig config;
+    std::string error = "previous error";
+    ASSERT_TRUE(SystemConfig::TryLoadFromFile(path.string(), config, error)) << error;
+    EXPECT_TRUE(error.empty());
+#define EXPECT_HISTORICAL_KEY(ENUM, SECTION, JSON_SECTION, JSON_NAME, RESIDENCY)                   \
+    if (std::string(JSON_SECTION) == "sim")                                                        \
+        EXPECT_FALSE(config.enabled(SysKey::ENUM)) << JSON_NAME;
+    LUMIN_CONFIG_KEY_TABLE(EXPECT_HISTORICAL_KEY)
+#undef EXPECT_HISTORICAL_KEY
+    EXPECT_TRUE(config.ComputeConfigSubHash().empty());
+    EXPECT_TRUE(config.enabled(SysKey::RenderFarWorldLadder));
+    EXPECT_FALSE(config.enabled(SysKey::RenderCircadian));
+    EXPECT_NE(ConfigIdentity(config), ConfigIdentity(SystemConfig::Defaults()));
+    EXPECT_EQ(ConfigIdentity(config), ConfigIdentity(SystemConfig::LoadFromFile(path.string())));
+}
+
+TEST(SystemConfig, ExplicitOverrideRefusesInvalidFilesWithoutChangingSnapshot) {
+    const auto directory =
+        Luminumbra::TestSupport::CreateUniqueTempDirectory("lumin-systemconfig-override-");
+    const auto path = directory / "override.json";
+    std::error_code remove_error;
+    SystemConfig config =
+        SystemConfig::FromJsonString(R"({"sim":{"water_high_res":{"enabled":false}}})");
+    const auto identity = ConfigIdentity(config);
+    std::string error;
+    EXPECT_FALSE(SystemConfig::TryLoadFromFile(path.string(), config, error));
+    EXPECT_FALSE(error.empty());
+    EXPECT_EQ(ConfigIdentity(config), identity);
+    for (const char* text : {"",
+                             "{",
+                             "[]",
+                             "null",
+                             "{} trailing",
+                             R"({"render":{"moonlight":{"params":{"color":[1,"bad",3]}}}})"}) {
+        SCOPED_TRACE(text);
+        {
+            std::ofstream file(path);
+            ASSERT_TRUE(file.good());
+            file << text;
+        }
+        EXPECT_FALSE(SystemConfig::TryLoadFromFile(path.string(), config, error));
+        EXPECT_FALSE(error.empty());
+        EXPECT_EQ(ConfigIdentity(config), identity);
+    }
+    std::filesystem::remove_all(directory, remove_error);
+}
+
 TEST(SystemConfig, EmptyAndBlankJsonAreDefaults) {
-    for (const char* text : {"", "{}", "   ", "not json at all"}) {
+    for (const char* text : {"",
+                             "{}",
+                             "   ",
+                             "not json at all",
+                             R"({"render":{"far_world_ladder":{}}})",
+                             R"({"render":{"far_world_ladder":{"enabled":null}}})",
+                             R"({"render":{"far_world_ladder":{"enabled":"false"}}})"}) {
         const SystemConfig cfg = SystemConfig::FromJsonString(text);
-        EXPECT_FALSE(cfg.enabled(SysKey::SimPlantGrowth)) << "input: " << text;
+        for (unsigned key = 0; key < static_cast<unsigned>(SysKey::Count); ++key)
+            EXPECT_TRUE(cfg.enabled(static_cast<SysKey>(key)))
+                << "input: " << text << " key: " << key;
+        EXPECT_TRUE(cfg.enabled(SysKey::SimPlantGrowth)) << "input: " << text;
+        EXPECT_TRUE(cfg.enabled(SysKey::RenderFarWorldLadder)) << "input: " << text;
     }
 }
 
@@ -81,25 +250,42 @@ TEST(SystemConfig, UnknownKeysIgnoredNoThrow) {
     EXPECT_TRUE(cfg.enabled(SysKey::RenderMoonlight));
 }
 
-// config sub-hash is empty at all-defaults (sub-hash set byte-identical).
-TEST(SystemConfig, ConfigSubHashEmptyAtDefaults) {
-    EXPECT_EQ(SystemConfig::Defaults().ComputeConfigSubHash(), std::string{});
+// Shipping simulation defaults contribute to the config sub-hash.
+TEST(SystemConfig, ConfigSubHashPresentAtDefaults) {
+    EXPECT_FALSE(SystemConfig::Defaults().ComputeConfigSubHash().empty());
 }
 
 // sim non-default flag/param moves the sub-hash; render flags never do.
 TEST(SystemConfig, RenderFlagDoesNotMoveConfigSubHash) {
-    const std::string json = R"({
-      "render": { "moonlight": { "enabled": true, "params": { "strength": 9.9 } },
-                  "tree_wind": { "enabled": true } }
-    })";
-    const SystemConfig cfg = SystemConfig::FromJsonString(json);
-    EXPECT_EQ(cfg.ComputeConfigSubHash(), std::string{});
+    nlohmann::json on, off;
+    // Exercise every render gate with opposite values and identical sim settings.
+    // Keep render parameters different too, to cover both exclusion contracts.
+#define CHECK_RENDER_Sim(ENUM, NAME)
+#define CHECK_RENDER_Render(ENUM, NAME)                                                            \
+    on["render"][NAME]["enabled"] = true;                                                          \
+    off["render"][NAME]["enabled"] = false;
+#define CHECK_RENDER_KEY(ENUM, SECTION, JSON_SECTION, NAME, RESIDENCY)                             \
+    CHECK_RENDER_##SECTION(ENUM, NAME)
+    LUMIN_CONFIG_KEY_TABLE(CHECK_RENDER_KEY)
+#undef CHECK_RENDER_KEY
+#undef CHECK_RENDER_Render
+#undef CHECK_RENDER_Sim
+    on["render"]["moonlight"]["params"]["strength"] = 9.9;
+    off["render"]["moonlight"]["params"]["strength"] = 0.1;
+    const auto enabled = SystemConfig::FromJsonString(on.dump());
+    const auto disabled = SystemConfig::FromJsonString(off.dump());
+    EXPECT_TRUE(enabled.enabled(SysKey::RenderMoonlight));
+    EXPECT_FALSE(disabled.enabled(SysKey::RenderMoonlight));
+    EXPECT_TRUE(enabled.enabled(SysKey::RenderTreeWind));
+    EXPECT_FALSE(disabled.enabled(SysKey::RenderTreeWind));
+    EXPECT_FALSE(enabled.ComputeConfigSubHash().empty());
+    EXPECT_EQ(enabled.ComputeConfigSubHash(), disabled.ComputeConfigSubHash());
 }
 
 TEST(SystemConfig, SimFlagMovesConfigSubHash) {
-    const std::string json = R"({ "sim": { "plant_growth": { "enabled": true } } })";
+    const std::string json = R"({ "sim": { "plant_growth": { "enabled": false } } })";
     const SystemConfig cfg = SystemConfig::FromJsonString(json);
-    EXPECT_NE(cfg.ComputeConfigSubHash(), std::string{});
+    EXPECT_NE(cfg.ComputeConfigSubHash(), SystemConfig::Defaults().ComputeConfigSubHash());
 }
 
 TEST(SystemConfig, SimParamMovesConfigSubHash) {
@@ -142,19 +328,35 @@ std::string ExpectedSubHash(const std::string& canonical_body) {
     return Luminumbra::Persistence::StableChecksum(bytes.str());
 }
 
+// Pin the serialization contract independently of shipping activation defaults.
+SystemConfig WithAllOtherSimFlagsOff(const std::string& text) {
+    nlohmann::json json;
+#define DISABLE_KEY(ENUM, SECTION, JSON_SECTION, JSON_NAME, RESIDENCY)                             \
+    if (std::string(JSON_SECTION) == "sim")                                                        \
+        json[JSON_SECTION][JSON_NAME]["enabled"] = false;
+    LUMIN_CONFIG_KEY_TABLE(DISABLE_KEY)
+#undef DISABLE_KEY
+    json.merge_patch(nlohmann::json::parse(text));
+    return SystemConfig::FromJsonString(json.dump());
+}
+
+TEST(SystemConfig, ConfigSubHashEmptyWithAllSimFlagsDisabled) {
+    EXPECT_EQ(WithAllOtherSimFlagsOff("{}").ComputeConfigSubHash(), std::string{});
+}
+
 TEST(SystemConfig, ConfigSubHashByteIdenticalSnapshot) {
     // Single sim key with one scalar param at its compiled default.
     {
         std::ostringstream body;
         body << std::setprecision(17) << "plant_growth:en=1;mutation_rate=" << 0.05f << ';';
         const auto cfg =
-            SystemConfig::FromJsonString(R"({ "sim": { "plant_growth": { "enabled": true } } })");
+            WithAllOtherSimFlagsOff(R"({ "sim": { "plant_growth": { "enabled": true } } })");
         EXPECT_EQ(cfg.ComputeConfigSubHash(), ExpectedSubHash(body.str()));
     }
     // Sim key with NO owned params still emits the enabled marker and nothing after it.
     {
         const auto cfg =
-            SystemConfig::FromJsonString(R"({ "sim": { "erosion": { "enabled": true } } })");
+            WithAllOtherSimFlagsOff(R"({ "sim": { "erosion": { "enabled": true } } })");
         EXPECT_EQ(cfg.ComputeConfigSubHash(), ExpectedSubHash("erosion:en=1;"));
     }
     // Sim key owning multiple scalar params: every owned default is emitted in kParams order.
@@ -163,7 +365,7 @@ TEST(SystemConfig, ConfigSubHashByteIdenticalSnapshot) {
         body << std::setprecision(17) << "foraging:en=1;deposit=" << 1.0f
              << ";trail_weight=" << 8.0f << ";goal_weight=" << 1.0f << ';';
         const auto cfg =
-            SystemConfig::FromJsonString(R"({ "sim": { "foraging": { "enabled": true } } })");
+            WithAllOtherSimFlagsOff(R"({ "sim": { "foraging": { "enabled": true } } })");
         EXPECT_EQ(cfg.ComputeConfigSubHash(), ExpectedSubHash(body.str()));
     }
     // Multiple enabled sim keys serialize in kKeys (schema) order: plant_growth precedes erosion.
@@ -171,7 +373,7 @@ TEST(SystemConfig, ConfigSubHashByteIdenticalSnapshot) {
         std::ostringstream body;
         body << std::setprecision(17) << "plant_growth:en=1;mutation_rate=" << 0.05f
              << ";erosion:en=1;";
-        const auto cfg = SystemConfig::FromJsonString(
+        const auto cfg = WithAllOtherSimFlagsOff(
             R"({ "sim": { "erosion": { "enabled": true },
                           "plant_growth": { "enabled": true } } })");
         EXPECT_EQ(cfg.ComputeConfigSubHash(), ExpectedSubHash(body.str()));
@@ -180,12 +382,12 @@ TEST(SystemConfig, ConfigSubHashByteIdenticalSnapshot) {
     {
         std::ostringstream body;
         body << std::setprecision(17) << "plant_growth:en=1;mutation_rate=" << 0.2f << ';';
-        const auto cfg = SystemConfig::FromJsonString(
+        const auto cfg = WithAllOtherSimFlagsOff(
             R"({ "sim": { "plant_growth": { "enabled": true, "params": { "mutation_rate": 0.2 } } } })");
         EXPECT_EQ(cfg.ComputeConfigSubHash(), ExpectedSubHash(body.str()));
     }
-    // All-default (no sim enabled) is the empty baseline — byte-identical to today.
-    EXPECT_EQ(SystemConfig::Defaults().ComputeConfigSubHash(), std::string{});
+    // Explicitly disabling all sim flags retains the empty compatibility baseline.
+    EXPECT_EQ(WithAllOtherSimFlagsOff("{}").ComputeConfigSubHash(), std::string{});
 }
 
 // enabled is a cheap, deterministic hot-path query (structural O(1);
@@ -226,12 +428,13 @@ TEST(SystemConfig, UserVideoAudioRoundTrip) {
     EXPECT_FLOAT_EQ(u.audio_sfx, 1.0f); // unnamed -> default
 }
 
-// Owner request 2026-06-18: default look sensitivity is 25% of the prior 0.1, and VSync
-// defaults OFF (preserve uncapped 300fps until the player opts in).
+// Default look sensitivity is 25% of the prior 0.1 (2026-06-18).
+// Shipping VSync defaults ON; saved user settings remain authoritative.
 TEST(SystemConfig, UserVideoDefaults) {
-    const auto& u = SystemConfig::Defaults().user();
+    const auto config = SystemConfig::Defaults();
+    const auto& u = config.user();
     EXPECT_FLOAT_EQ(u.mouse_sensitivity, 0.025f);
-    EXPECT_FALSE(u.vsync);
+    EXPECT_TRUE(u.vsync);
 }
 
 // -105 — keybind map resolves action->key; missing action -> fallback.
@@ -252,7 +455,7 @@ TEST(SystemConfig, UserSettingsDoNotHash) {
                 "controls": { "Jump": 32 } }
     })";
     const SystemConfig cfg = SystemConfig::FromJsonString(json);
-    EXPECT_EQ(cfg.ComputeConfigSubHash(), std::string{});
+    EXPECT_EQ(cfg.ComputeConfigSubHash(), SystemConfig::Defaults().ComputeConfigSubHash());
 }
 
 // -103 — SaveUserOverlay round-trips and writes ONLY user.* (no sim/render leakage).
@@ -287,7 +490,7 @@ TEST(SystemConfig, UserOverlaySaveReload) {
     EXPECT_FLOAT_EQ(reloaded.user().fov, 95.0f);
     EXPECT_EQ(reloaded.user().window_mode, "windowed");
     EXPECT_EQ(reloaded.keybind("Sprint", -1), 340);
-    EXPECT_FALSE(reloaded.enabled(SysKey::SimErosion)); // overlay carries no sim flags
+    EXPECT_TRUE(reloaded.enabled(SysKey::SimErosion)); // overlay carries no sim flags
 
     std::filesystem::remove_all(dir, rm_ec); // non-throwing teardown
 }
@@ -317,11 +520,55 @@ TEST(SystemConfig, MalformedOverlayKeepsSettings) {
     EXPECT_FLOAT_EQ(cfg.user().fov, 60.0f); // unchanged
 }
 
+TEST(SystemConfig, EnabledMissingTrueFalseAndMalformed) {
+    for (const auto& entry : {"{}",
+                              "{\"enabled\":true}",
+                              "{\"enabled\":false}",
+                              "{\"enabled\":0}",
+                              "{\"enabled\":null}",
+                              "false"}) {
+        auto json = nlohmann::json::parse(entry);
+        nlohmann::json document = {{"sim", {{"erosion", json}}}};
+        const auto cfg = SystemConfig::FromJsonString(document.dump());
+        const bool expected = !(json.is_object() && json.contains("enabled") &&
+                                json["enabled"].is_boolean() && !json["enabled"].get<bool>());
+        EXPECT_EQ(cfg.enabled(SysKey::SimErosion), expected) << entry;
+    }
+}
+
+TEST(SystemConfig, PackagedFlagsAgreeWithCompiledDefaults) {
+    const auto path = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() /
+                      "data/common/systems.json";
+    ASSERT_TRUE(std::filesystem::exists(path));
+    std::ifstream file(path);
+    const auto document = nlohmann::json::parse(file);
+#define CHECK_PACKAGED_FLAG(name, section, json_section, json_name, residency)                     \
+    EXPECT_EQ(document.at(json_section).at(json_name).at("enabled").get<bool>(),                   \
+              SystemConfig::Defaults().enabled(SysKey::name))                                      \
+        << json_name;
+    LUMIN_CONFIG_KEY_TABLE(CHECK_PACKAGED_FLAG)
+#undef CHECK_PACKAGED_FLAG
+    const auto packaged = SystemConfig::LoadFromFile(path.string());
+    for (unsigned key = 0; key < static_cast<unsigned>(SysKey::Count); ++key)
+        EXPECT_EQ(packaged.enabled(static_cast<SysKey>(key)),
+                  SystemConfig::Defaults().enabled(static_cast<SysKey>(key)))
+            << key;
+}
+
+TEST(SystemConfig, SavedFalseVsyncRemainsAuthoritative) {
+    auto cfg = SystemConfig::Defaults();
+    cfg.OverlayUserFromJsonString(R"({"user":{"video":{"vsync":false}},
+        "sim":{"erosion":{"enabled":false}},"render":{"taau":{"enabled":false}}})");
+    EXPECT_FALSE(cfg.user().vsync);
+    EXPECT_TRUE(cfg.enabled(SysKey::SimErosion));
+    EXPECT_TRUE(cfg.enabled(SysKey::RenderTaau));
+}
+
 TEST(SystemConfig, FarWorldCaveFieldDefaultsAndExactNumericCodes) {
     using namespace Luminumbra::Rendering;
     using Luminumbra::World::FarCaveMode;
     const auto defaults = SystemConfig::Defaults();
-    EXPECT_FALSE(defaults.enabled(SysKey::RenderFarWorldLadder));
+    EXPECT_TRUE(defaults.enabled(SysKey::RenderFarWorldLadder));
     EXPECT_EQ(ResolveFarWorldCaveField(
                   defaults.param(SysParam::FarWorldCaveField, kDefaultFarWorldCaveFieldCode)),
               FarCaveMode::BandLimited);

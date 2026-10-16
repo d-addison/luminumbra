@@ -114,10 +114,7 @@ public:
         for (auto& field : m_ch) {
             if (advect) {
                 // Snapshot the channel, then rewrite each cell from its upwind source.
-                std::vector<double> src(W * H);
-                for (std::size_t y = 0; y < H; ++y)
-                    for (std::size_t x = 0; x < W; ++x)
-                        src[y * W + x] = field.at(x, y);
+                const auto src = field.values();
                 for (std::size_t y = 0; y < H; ++y) {
                     for (std::size_t x = 0; x < W; ++x) {
                         if (participants && !participants(static_cast<int>(x), static_cast<int>(y)))
@@ -137,7 +134,7 @@ public:
                 }
             }
             if (did_diffuse) {
-                (void)field.diffuse(
+                field.advance(
                     diffusion_iters,
                     diffusion_rate,
                     exchange
@@ -158,10 +155,7 @@ public:
                 // gaps so the scent gradient is usable from any cell. Evaporation is
                 // folded into the same write. Only runs when diffusing, so a pure
                 // evaporation step (iters 0) stays an exact per-cell decay.
-                std::vector<double> tmp(W * H);
-                for (std::size_t y = 0; y < H; ++y)
-                    for (std::size_t x = 0; x < W; ++x)
-                        tmp[y * W + x] = field.at(x, y);
+                const auto tmp = field.values();
                 for (std::size_t y = 0; y < H; ++y) {
                     for (std::size_t x = 0; x < W; ++x) {
                         if (participants && !participants(static_cast<int>(x), static_cast<int>(y)))

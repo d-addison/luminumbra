@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <vector>
 
 #include "entt/entt.hpp"
@@ -89,6 +90,105 @@ GatherFieldEmitterDeposits(entt::registry& registry, luminumbra::fields::EnergyF
         }
         if (queued)
             ++stats.emitters;
+    }
+    return stats;
+}
+
+struct RegionalEmitterGatherStats {
+    FieldEmitterGatherStats queued;
+    std::uint64_t invalid_emitters = 0;
+    bool accepted = true;
+};
+
+// Enabled policy: skip invalid emitters in entity-id order and report their count.
+// Radius is restricted to the 32 nonzero uint32 falloff rings (0..31).
+// Check world bounds BEFORE floor/cast, and the whole footprint before gathering.
+inline bool RegionalEmitterCell(const Components::TransformComponent& transform,
+                                const Components::FieldEmitterComponent& emitter,
+                                int channels,
+                                int& cx,
+                                int& cz) {
+    using luminumbra::fields::EnergyFieldState;
+    using world::ActiveRegionLedger;
+    if (!ActiveRegionLedger::valid_anchor(transform.position) || emitter.radius_cells < 0 ||
+        emitter.radius_cells > 31 || emitter.channel < 0 || emitter.channel >= channels)
+        return false;
+    cx = static_cast<int>(std::floor(transform.position.x / kAetherCellSizeM));
+    cz = static_cast<int>(std::floor(transform.position.z / kAetherCellSizeM));
+    for (const int offset : {-emitter.radius_cells, emitter.radius_cells}) {
+        const auto owner = EnergyFieldState::OwnerOfCell(cx + offset, cz + offset);
+        if (owner.x < -32768 || owner.x >= 32768 || owner.z < -32768 || owner.z >= 32768)
+            return false;
+    }
+    return true;
+}
+
+inline bool
+AppendRegionalEmitter(std::vector<luminumbra::fields::EnergyFieldState::RegionalDeposit>& deposits,
+                      entt::entity entity,
+                      const Components::FieldEmitterComponent& emitter,
+                      int cx,
+                      int cz) {
+    using luminumbra::fields::EnergyFieldState;
+    const int radius = emitter.radius_cells;
+    for (int dz = -radius; dz <= radius; ++dz) {
+        for (int dx = -radius; dx <= radius; ++dx) {
+            const int distance = std::max(std::abs(dx), std::abs(dz));
+            const auto amount = emitter.rate_raw_per_tick >> static_cast<unsigned>(distance);
+            if (amount == 0)
+                continue;
+            if (deposits.size() == EnergyFieldState::kMaxRegionalDeposits)
+                return false;
+            deposits.push_back({static_cast<std::uint64_t>(entt::to_integral(entity)),
+                                cx + dx,
+                                cz + dz,
+                                emitter.channel,
+                                amount});
+        }
+    }
+    return true;
+}
+
+// A capacity refusal drops the ENTIRE new batch, preserving previous input and
+// field bytes. The caller still ticks that input, so a bad/oversized roster
+// cannot poison future ticks. Legacy gather above remains byte-for-byte unchanged.
+inline RegionalEmitterGatherStats
+GatherRegionalFieldEmitterDeposits(entt::registry& registry,
+                                   luminumbra::fields::EnergyFieldState& field) {
+    RegionalEmitterGatherStats stats;
+    std::vector<entt::entity> emitters;
+    for (auto entity :
+         registry
+             .view<const Components::TransformComponent, const Components::FieldEmitterComponent>())
+        emitters.push_back(entity);
+    std::sort(emitters.begin(), emitters.end(), [](entt::entity a, entt::entity b) {
+        return entt::to_integral(a) < entt::to_integral(b);
+    });
+    std::vector<luminumbra::fields::EnergyFieldState::RegionalDeposit> deposits;
+    FieldEmitterGatherStats queued;
+    for (auto entity : emitters) {
+        const auto& emitter = registry.get<const Components::FieldEmitterComponent>(entity);
+        if (emitter.rate_raw_per_tick == 0)
+            continue;
+        int cx = 0, cz = 0;
+        if (!RegionalEmitterCell(registry.get<const Components::TransformComponent>(entity),
+                                 emitter,
+                                 field.channels(),
+                                 cx,
+                                 cz)) {
+            ++stats.invalid_emitters;
+            continue;
+        }
+        if (!AppendRegionalEmitter(deposits, entity, emitter, cx, cz)) {
+            stats.accepted = false;
+            return stats;
+        }
+        ++queued.emitters;
+    }
+    stats.accepted = field.QueueRegionalDeposits(deposits);
+    if (stats.accepted) {
+        queued.deposits = static_cast<std::uint64_t>(deposits.size());
+        stats.queued = queued;
     }
     return stats;
 }
