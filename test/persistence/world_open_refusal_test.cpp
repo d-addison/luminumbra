@@ -16,6 +16,7 @@
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
 #include "luminumbra_server/ServerWorldRunner.h"
+#include "luminumbra_server/modes/ModeHelpers.h"
 
 #include <algorithm>
 #include <atomic>
@@ -987,6 +988,42 @@ TEST_F(WorldOpenRefusal, AbsentLedgerPreservesSchedulerAndRestoresClockWithoutRe
     EXPECT_EQ(ledger.header_tick(), restored.tick());
     EXPECT_TRUE(ledger.records().empty());
     EXPECT_FALSE(ledger.local_anchor().has_value());
+}
+
+TEST_F(WorldOpenRefusal, RuntimeHelloMatchesNewWorldCalendarWithActiveRegionsOnAndOff) {
+    for (const bool active_regions : {false, true}) {
+        SCOPED_TRACE(active_regions);
+        const nlohmann::json systems = {
+            {"sim", {{"active_regions", {{"enabled", active_regions}}}}}};
+        Write(root / "data/common/systems.json", systems.dump());
+        for (const bool use_override : {false, true}) {
+            SCOPED_TRACE(use_override);
+            ServerCliOptions options;
+            options.root = RootString();
+            options.seed = "1337";
+            options.preset = "default";
+            if (use_override)
+                options.systems_config_override =
+                    luminumbra::core::SystemConfig::FromJsonString(systems.dump());
+            const auto hello = RuntimeHelloFrom(options);
+            GameSession host;
+            host.SetRootPath(RootString());
+            host.SetJobSystem(&jobs);
+            host.ApplySystemConfig(luminumbra::core::SystemConfig::FromJsonString(systems.dump()));
+            host.SetFiniteHydrologyEnabled(RunnerConfigFrom(options).finite_hydrology);
+            ASSERT_TRUE(host.CreateWorld("Network calendar", options.seed, options.preset));
+            ASSERT_TRUE(host.LoadWorldState());
+            EXPECT_EQ(host.ActiveRegionsEnabled(), active_regions);
+            EXPECT_EQ(host.GetRenderCalendar(), world::WorldCalendar{});
+            EXPECT_EQ(hello.system_config_identity, host.SystemConfigIdentity());
+            auto expected = hello;
+            expected.system_config_identity = host.SystemConfigIdentity();
+            expected.preset_content_hash = host.PresetContentHash();
+            Net::HelloMsg decoded;
+            ASSERT_TRUE(Net::DecodeHello(Net::EncodeHello(hello), decoded));
+            EXPECT_TRUE(Net::HelloMatches(expected, decoded));
+        }
+    }
 }
 
 TEST_F(WorldOpenRefusal, FreshRunnerBootAndAbsentLedgerReloadPreserveSchedulerIdentity) {

@@ -15,6 +15,7 @@
 #include <limits>
 #include <nlohmann/json.hpp>
 #include <numeric>
+#include <optional>
 
 namespace {
 using Luminumbra::world::WorldCalendar;
@@ -416,7 +417,7 @@ TEST(WorldClockTest, StrictV2AndMarkerRefusalMatrixLeavesOutputUnchanged) {
     std::optional<WorldCalendar> marker;
     ASSERT_TRUE(WorldClock::read_render_calendar(metadata, marker, error));
     ASSERT_TRUE(marker.has_value());
-    EXPECT_EQ(*marker, WorldCalendar{});
+    EXPECT_EQ(marker, std::optional<WorldCalendar>{WorldCalendar{}});
 }
 
 TEST(WorldClockTest, ConstructorChecksRationalAndLunarBounds) {

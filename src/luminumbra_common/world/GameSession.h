@@ -251,6 +251,8 @@ public:
     void ApplySystemConfig(const luminumbra::core::SystemConfig& config);
     // Computed on demand from effective simulation gates, tuning and resolved calendar.
     [[nodiscard]] std::string SystemConfigIdentity() const;
+    // Pre-world admission can supply the calendar selected for the intended world.
+    [[nodiscard]] std::string SystemConfigIdentity(const WorldCalendar& calendar) const;
     [[nodiscard]] const std::string& PresetContentHash() const {
         return m_presetContentHash;
     }

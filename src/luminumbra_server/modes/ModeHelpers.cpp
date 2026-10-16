@@ -27,7 +27,8 @@ Luminumbra::Net::HelloMsg RuntimeHelloFrom(const ServerCliOptions& options) {
     session.SetFiniteHydrologyEnabled(runner_config.finite_hydrology);
     if (runner_config.region_scheduler)
         session.SetRegionSchedulerConfig(*runner_config.region_scheduler);
-    hello.system_config_identity = session.SystemConfigIdentity();
+    // Network hosts create a new world with this calendar, even when active regions are off.
+    hello.system_config_identity = session.SystemConfigIdentity(Luminumbra::world::WorldCalendar{});
     const auto preset =
         options.preset_json_override
             ? Luminumbra::world::LoadTerrainPresetFromJson(

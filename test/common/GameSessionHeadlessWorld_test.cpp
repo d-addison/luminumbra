@@ -16,6 +16,7 @@
 #include <fstream>
 #include <limits>
 #include <map>
+#include <optional>
 #include <span>
 #include <sstream>
 #include <string>
@@ -1227,7 +1228,8 @@ TEST(GameSessionHeadlessWorldTest, RenderCalendarMarkerLifecycleAndSnapshotRepla
     ASSERT_TRUE(inspected.error.empty()) << inspected.error;
     EXPECT_FALSE(inspected.requires_active_regions);
     ASSERT_TRUE(inspected.render_calendar.has_value());
-    EXPECT_EQ(*inspected.render_calendar, Luminumbra::world::WorldCalendar{});
+    EXPECT_EQ(inspected.render_calendar,
+              std::optional<Luminumbra::world::WorldCalendar>{Luminumbra::world::WorldCalendar{}});
     ASSERT_TRUE(loaded.LoadWorld(id));
     EXPECT_EQ(loaded.GetRenderCalendar(), session.GetRenderCalendar());
     EXPECT_EQ(ReadClockTestFile(save / "world_info.json"), before);
@@ -1309,7 +1311,7 @@ TEST(GameSessionHeadlessWorldTest, UnmarkedSnapshotOverwriteRemovesRenderCalenda
                     ASSERT_TRUE(legacy.GetWorldSystem()->adopt_streamed_chunk(chunk));
                 }
                 if (save_path == 2) {
-                    Luminumbra::world::WorldStreamingState state;
+                    Luminumbra::WorldStreamingState state;
                     state.insert_chunk(chunk);
                     ASSERT_TRUE(P::WorldSaveService{}.save_world(state, snapshot));
                 }

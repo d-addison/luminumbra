@@ -260,6 +260,10 @@ std::map<std::string, bool> GameSession::EffectiveSimulationGates() const {
 }
 
 std::string GameSession::SystemConfigIdentity() const {
+    return SystemConfigIdentity(GetRenderCalendar());
+}
+
+std::string GameSession::SystemConfigIdentity(const WorldCalendar& calendar) const {
     using luminumbra::core::SysKey;
     using luminumbra::core::SysParam;
     luminumbra::core::SimulationIdentityValues values;
@@ -269,7 +273,6 @@ std::string GameSession::SystemConfigIdentity() const {
     values.region_work_limit = scheduler.work_limit;
     values.region_hold_ticks = scheduler.hold_ticks;
     values.region_reduced_shift = scheduler.reduced_shift;
-    const auto calendar = GetRenderCalendar();
     values.day_length_ticks = calendar.dayLengthTicks;
     values.days_per_year = calendar.daysPerYear;
     values.daylight_numerator = calendar.daylightNumerator;
