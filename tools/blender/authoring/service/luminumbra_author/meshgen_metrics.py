@@ -282,7 +282,8 @@ def validate_png(data, limits):
             require(chunks == 1 and size == 13, 'worker.protocol', 'Invalid PNG IHDR.')
             width, height, depth, colour, compression, filtering, interlace = struct.unpack('>IIBBBBB', body)
             channels = {0: 1, 2: 3, 4: 2, 6: 4}.get(colour)
-            require(width > 0 and height > 0 and width*height <= limits['image_pixels'] and depth == 8 and channels
+            require(0 < width <= limits['image_dimension'] and 0 < height <= limits['image_dimension']
+                    and width*height <= limits['image_pixels'] and depth == 8 and channels
                     and compression == filtering == interlace == 0, 'worker.protocol', 'Unsupported PNG preview.')
             expected = height*(1+width*channels)
         elif kind == b'IDAT':

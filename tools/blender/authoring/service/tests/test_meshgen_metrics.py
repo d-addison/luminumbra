@@ -1,6 +1,8 @@
 """Bounded exported geometry, exact UV overlap, shared-frame guard and retries."""
 import struct
 import unittest
+from unittest.mock import patch
+import zlib
 from copy import deepcopy
 from meshgen_e4_fixture import arguments, glb, png
 from luminumbra_author.contracts import Refusal
@@ -84,6 +86,27 @@ class PortableMetrics(unittest.TestCase):
         self.assertEqual(validate_png(png(), self.effective['limits']), (1, 1))
         self.refusal('worker.protocol', lambda: validate_png(png()[:-1], self.effective['limits']))
         self.refusal('worker.protocol', lambda: validate_png(png()+b'extra', self.effective['limits']))
+
+    def test_preview_dimension_cap_checked_before_inflate_and_inclusive(self):
+        def image(width, height):
+            def chunk(kind, body):
+                return struct.pack('>I', len(body))+kind+body+struct.pack('>I', zlib.crc32(kind+body)&0xffffffff)
+            header = struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0)
+            scanlines = (b'\0'+b'\x80'*(width*3))*height
+            return (b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR', header)
+                    +chunk(b'IDAT', zlib.compress(scanlines))+chunk(b'IEND', b''))
+
+        for cap in (self.effective['limits']['image_dimension'], 32):
+            limits = {**self.effective['limits'], 'image_dimension': cap}
+            for width, height in ((cap*2, 1), (1, cap*2)):
+                with self.subTest(cap=cap, width=width, height=height):
+                    data = image(width, height)
+                    self.assertLessEqual(width*height, limits['image_pixels'])
+                    with patch.object(zlib, 'decompressobj', side_effect=AssertionError('Unexpected decompression')):
+                        self.refusal('worker.protocol', lambda: validate_png(data, limits))
+            for width, height in ((cap, 1), (1, cap)):
+                with self.subTest(cap=cap, width=width, height=height):
+                    self.assertEqual(validate_png(image(width, height), limits), (width, height))
 
     def test_area_weighted_sampling_deterministic_in_common_frame_and_whole_chain_retry(self):
         points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]

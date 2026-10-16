@@ -205,6 +205,37 @@ class CandidateStorage(unittest.TestCase):
                         self.assertEqual(store.attestations(JOB)[0]['observation'], {'score': 1})
                     retained.unlink()
 
+    def test_attestation_peak_quota_refuses_before_pointer_and_allows_smaller_append(self):
+        cap = 64*1024**2
+        payload = {'detail': 'x'*(600*1024)}
+        for copies in (3.5, 4.5):
+            with self.subTest(copies=copies):
+                store = CandidateStore(self.project, 'peak_'+str(int(copies*10)))
+                project = project_fixture(); project['budgets'] = {'target_height_m': 1}
+                project['retention'] = {'max_total_mib': 64}
+                args = arguments(); args['resolved'] = resolve(project, 'rock')
+                store.publish(JOB, build_evidence(**args))
+                remaining = int(copies*len(canonical(payload)))
+                # Sparse filler charges real file sizes without large allocation.
+                retained = store.root/'retained.bin'
+                used = sum(p.stat().st_size for p in store.root.parent.rglob('*') if p.is_file())
+                with retained.open('wb') as stream: stream.truncate(cap-used-remaining)
+                def snapshot():
+                    return {p.relative_to(store.root): p.read_bytes() if p.is_file() else None
+                            for p in store.root.rglob('*') if p != retained}
+                before = snapshot()
+                try:
+                    self.refusal('candidate.limit', lambda: store.append_attestation(
+                        JOB, 'metrics', '20261013T123456000001Z', payload))
+                    self.assertEqual(snapshot(), before)
+                    fresh = CandidateStore(self.project, store.root.name)
+                    self.assertEqual(fresh.recover_attestation(JOB), [])
+                    result = fresh.append_attestation(JOB, 'metrics', '20261013T123456000002Z', {'score': 1})
+                    self.assertEqual([entry['observation'] for entry in result], [{'score': 1}])
+                    self.assertLessEqual(sum(p.stat().st_size for p in store.root.parent.rglob('*') if p.is_file()), cap)
+                finally:
+                    retained.unlink()
+
     def test_attested_policy_publishes_retains_replay_notes_and_refuses_tampering(self):
         note_bytes = b'Human reviewed revenue evidence.\n'
         note = self.project/'authoring/meshgen/notes/revenue.md'

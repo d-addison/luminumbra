@@ -705,6 +705,8 @@ class ScriptPins(unittest.TestCase):
         features = dispatch(Service(), "capabilities", {})["features"]
         self.assertTrue(features["meshgen_script_pins"])
         self.assertTrue(features["meshgen_configuration"])
+        for feature in ("meshgen_candidate_storage", "meshgen_provenance_v2", "meshgen_worker_simulation"):
+            self.assertIs(features[feature], False)
         self.assertNotIn("max_tris_setting", features)
         self.assertNotIn("meshgen_execution", features)
 

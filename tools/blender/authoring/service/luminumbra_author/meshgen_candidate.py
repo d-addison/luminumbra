@@ -148,7 +148,7 @@ def validate_evidence(members):
     from .meshgen_provenance import validate_observations
     require(isinstance(stats, dict) and set(stats) == {'protocol', 'artifact', 'guard', 'gates', 'observations', 'guard_observation', 'acceptance', 'simulated'}
             and stats['protocol'] == 'luminumbra.meshgen.stats.v1'
-            and type(stats['simulated']) is bool and stats['simulated'] == (p['finish']['blender_version'] == 'simulated'),
+            and stats['simulated'] is True,
             'provenance.inconsistent', 'Malformed statistics envelope.')
     validate_observations({'finish': stats['observations'], 'guard': stats['guard_observation']}, effective)
     require(stats['artifact'] == actual and stats['observations'] == p['finish'], 'provenance.inconsistent', 'Stored statistics differ.')
@@ -679,12 +679,24 @@ class CandidateStore:
             # one bounded payload. Check every reader's byte/depth/item caps
             # before the first durable transaction pointer is installed.
             prepared_bytes = _record_bytes(state)
-            for record in (payload, entry, committed, head, advanced_head, {**advanced_head, 'pending': None}):
-                _record_bytes(record)
+            _record_bytes(payload)
+            history_bytes = _record_bytes(entry)
+            committed_bytes = _record_bytes(committed)
+            head_bytes = _record_bytes(head)
+            advanced_head_bytes = _record_bytes(advanced_head)
+            final_head_bytes = _record_bytes({**advanced_head, 'pending': None})
             config = bundle['provenance']['config']
             effective = verify_effective_config(bundle['members']['effective_config.json'],
                 config['effective_config_sha256'], config['config_digest'])
-            self._quota(len(prepared_bytes)+2*len(data)+1024, effective['retention']['max_total_mib']*1024**2)
+            # Four records coexist before finalization: pending head, anchor,
+            # candidate payload and numbered history, plus the 65-byte hash.
+            # Replacement keeps its old record while staging one more copy.
+            # Each JSON record is bounded by MAX_JSON above. Existing records
+            # remain charged by _quota, making this a conservative peak bound.
+            head_size = max(len(head_bytes), len(advanced_head_bytes), len(final_head_bytes))
+            anchor_size = max(len(prepared_bytes), len(committed_bytes))
+            incoming = head_size+anchor_size+len(data)+len(history_bytes)+65+max(head_size, anchor_size)
+            self._quota(incoming, effective['retention']['max_total_mib']*1024**2)
             self._write_head(job, head)
             self._write(area/'attestations.json', prepared_bytes, state)
             return self._recover_attestation(job)

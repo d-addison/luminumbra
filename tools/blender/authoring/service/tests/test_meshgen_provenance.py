@@ -37,6 +37,28 @@ class ParentProvenance(unittest.TestCase):
                 else: args['observations'][field] = True
                 with self.subTest(field=field, nested=nested): self.refusal('worker.policy', args)
 
+    def test_mock_lane_refuses_native_looking_worker_observations(self):
+        args = arguments()
+        args['observations']['finish']['blender_version'] = '5.1.0'
+        self.refusal('worker.protocol', args)
+
+    def test_mock_replay_refuses_native_looking_observations_even_when_rehashed(self):
+        for simulated in (False, True):
+            with self.subTest(simulated=simulated):
+                bundle = members()
+                provenance = bounded_json(bundle['provenance.json'])
+                stats = bounded_json(bundle['stats.json'])
+                for finish in (provenance['finish'], provenance['finishing'], stats['observations']):
+                    finish['blender_version'] = '5.1.0'
+                provenance['environment']['blender_version'] = '5.1.0'
+                stats['simulated'] = simulated
+                bundle['stats.json'] = canonical(stats)+b'\n'
+                provenance['metrics']['stats_sha256'] = digest(bundle['stats.json'])
+                bundle['provenance.json'] = canonical(provenance)+b'\n'
+                with self.assertRaises(Refusal) as caught: validate_evidence(bundle)
+                self.assertEqual(caught.exception.finding['rule_id'],
+                                 'worker.protocol' if simulated else 'provenance.inconsistent')
+
     def test_config_image_raw_result_exporter_and_capability_identity_mismatch(self):
         for mutation, rule in (('image', 'request.invalid'), ('result', 'backend.protocol'), ('exporter', 'worker.protocol'), ('capability', 'backend.pin_mismatch')):
             args = arguments()

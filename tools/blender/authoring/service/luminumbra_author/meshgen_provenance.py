@@ -45,6 +45,10 @@ def validate_observations(value, effective):
         elif isinstance(item, list): pending.extend(item)
     keys(value, ('finish', 'guard'), ('log',))
     validate_schema(value['finish'], FINISH)
+    # Every currently available execution path is simulated; native finishing
+    # remains unavailable, including when replaying retained observations.
+    require(value['finish']['blender_version'] == 'simulated',
+            'worker.protocol', 'Available finishing requires simulated observations.')
     require([s['id'] for s in value['finish']['steps']] == effective['finish']['steps'],
             'worker.protocol', 'Worker must report each configured step in order.')
     require(isinstance(value['guard'], dict) and isinstance(value.get('log', ''), str)
@@ -105,7 +109,7 @@ def build_evidence(*, request, resolved, card, result, image, raw_glb, artifact,
     stats = {'protocol': 'luminumbra.meshgen.stats.v1', 'artifact': artifact_stats, 'guard': guard,
              'gates': gates,
              'observations': deepcopy(observations['finish']), 'guard_observation': deepcopy(observations['guard']),
-             'acceptance': deepcopy(request.get('accept_flagged')), 'simulated': observations['finish']['blender_version'] == 'simulated'}
+             'acceptance': deepcopy(request.get('accept_flagged')), 'simulated': True}
     stats_bytes = canonical(stats)+b'\n'
     licence_bytes = canonical(licence)+b'\n'
     finish = deepcopy(observations['finish'])
