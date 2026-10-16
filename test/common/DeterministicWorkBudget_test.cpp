@@ -82,7 +82,7 @@ TEST(DeterministicWorkBudget, MissingOrExtraMeasurementsRefuse) {
 
 TEST(DeterministicWorkBudget, LiveSubsystemMovementEditAndDrainStayBounded) {
     const auto limits = WorkLimits("simulation");
-    auto params = Test::SyntheticTerrainParams();
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
     params.base_amplitude = 0;
     params.peaks_amplitude = 0;
     params.height_offset = 32.5f;
