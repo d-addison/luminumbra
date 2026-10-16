@@ -6742,6 +6742,7 @@ TEST(RenderSmokeTest, WorldSwapRetainsLegacyDiagnosticInventoryUntilShutdown) {
     HiddenGlContext context;
     ASSERT_TRUE(context.ready()) << context.error();
     RenderPipeline pipeline;
+    pipeline.set_far_world_mode(FarWorldMode::Legacy);
     const auto baseline_runtime = pipeline.get_runtime_render_stats();
     const auto baseline_resources = pipeline.get_resource_registry_stats();
     constexpr std::size_t resident_bytes = 4096, resident_vertex_arrays = 3;

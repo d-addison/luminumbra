@@ -99,6 +99,18 @@ struct RegionSchedule {
     bool operator==(const RegionSchedule&) const = default;
 };
 
+// Caller-owned derived storage. Never part of a ledger copy or canonical bytes.
+struct RegionScheduleScratch {
+    struct Row {
+        RegionKey key;
+        ActiveRegionRecord* record = nullptr;
+    };
+    std::vector<RegionWork> combined, accepted;
+    std::vector<Vec3> anchors;
+    std::vector<Row> rows;
+    std::string trace;
+};
+
 // Future systems explicitly opt in to this interface; no consumer is registered
 // here. Elapsed ticks are bounded by both the requested cap and one calendar day.
 struct RegionResumeWindow {
@@ -248,7 +260,8 @@ public:
                             std::optional<std::span<const Vec3>> replicated_anchors = std::nullopt,
                             std::span<const RegionWork> work = {},
                             const DurableDigest& durable_digest = {},
-                            const OwnershipProbe& owned = {});
+                            const OwnershipProbe& owned = {},
+                            RegionScheduleScratch* scratch = nullptr);
     [[nodiscard]] std::string canonical_bytes() const;
     [[nodiscard]] std::string encode() const;
     // Transactional decode: refuses without modifying out. No IO or migration.
@@ -259,7 +272,8 @@ private:
                                      std::optional<std::span<const Vec3>> replicated_anchors,
                                      std::span<const RegionWork> work,
                                      const DurableDigest& durable_digest,
-                                     const OwnershipProbe& owned);
+                                     const OwnershipProbe& owned,
+                                     RegionScheduleScratch& scratch);
     // Drops idle, unowned, non-pinned, unedited, unpopulated records with no water cursor,
     // water debt, completed work or energy age, including records due in the current schedule.
     void evict_idle(const WorldClock& clock, const OwnershipProbe& owned);

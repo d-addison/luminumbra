@@ -1,3 +1,4 @@
+#include "../fixtures/TerrainFixtureParams.h"
 // Physics surface queries for audio raycasts.
 //
 // PhysicsSystem::audio_raycast used to hardcode an upward surface normal and a
@@ -70,7 +71,7 @@ std::shared_ptr<Chunk> MakeRampChunk(const IVec3& coords) {
 // Default-params world system (biomes/rivers off): the KnobLayer_test idiom --
 // no job system, no water system, pure analytic worldgen queries only.
 std::unique_ptr<SHIELD_WorldSystem> MakeWorldSystem() {
-    TerrainGenParams params;
+    TerrainGenParams params = Luminumbra::Test::SyntheticTerrainParams();
     return std::make_unique<SHIELD_WorldSystem>(nullptr, nullptr, params, 4242);
 }
 

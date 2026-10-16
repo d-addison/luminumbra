@@ -35,6 +35,7 @@ set(LUMINUMBRA_RUNTIME_DATA_MANIFEST
     "common/particles/precip_splash.json"
     "common/particles/waterfall_spray.json"
     "common/scenario/skinned_showcase_model.json"
+    "common/sim/README.md"
     "common/structures/cairn/cairn.json"
     "common/structures/cairn/placement.json"
     "common/structures/ruin/a_base.json"

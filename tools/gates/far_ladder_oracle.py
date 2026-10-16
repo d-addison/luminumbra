@@ -284,7 +284,7 @@ def validate_station_heights(poses):
             "wrong elevated height: expected eye height + 78.2 m")
 
 
-def validate_artifact(a, renderer="legacy", required_stations=None, oracle=wanted_tiles):
+def validate_artifact(a, renderer="ladder", required_stations=None, oracle=wanted_tiles):
     obj(a, ("schema", "mode", "ladder_checked", "world_preset", "expected_stations", "stations", "complete", "ladder_water"), "artifact")
     require(a["schema"] == SCHEMA, "wrong schema")
     require(renderer in ("legacy", "ladder") and a["mode"] == renderer, "wrong-mode artifact")
@@ -361,7 +361,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("command", choices=("wanted", "legacy", "validate"))
     p.add_argument("values", nargs="*")
-    p.add_argument("--renderer", choices=("legacy", "ladder"), default="legacy")
+    p.add_argument("--renderer", choices=("legacy", "ladder"), default="ladder")
     p.add_argument("--station", action="append")
     args = p.parse_args()
     try:
