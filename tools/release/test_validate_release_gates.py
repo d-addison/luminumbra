@@ -996,15 +996,18 @@ class GitCommandTests(unittest.TestCase):
                      "GIT_CONFIG_SYSTEM": "broken-system", "GIT_CONFIG_COUNT": "1",
                      "GIT_CONFIG_KEY_0": "core.bare", "GIT_CONFIG_VALUE_0": "true",
                      "GIT_DIR": "other", "GIT_WORK_TREE": "other",
-                     "GIT_OBJECT_DIRECTORY": "other", "GIT_REPLACE_REF_BASE": "refs/other/"}
+                     "GIT_OBJECT_DIRECTORY": "other", "GIT_REPLACE_REF_BASE": "refs/other/",
+                     "Git_Dir": "mixed-dir", "git_work_tree": "mixed-work-tree",
+                     "GIT_config_global": "mixed-global"}
         result = subprocess.CompletedProcess([], 0, stdout=b"result\n", stderr=b"warning")
-        with mock.patch.dict(os.environ, overrides):
+        # A plain mapping preserves mixed-case keys even on Windows.
+        with mock.patch.object(gate.os, "environ", dict(os.environ, **overrides)):
             before = dict(os.environ)
             with mock.patch.object(gate.subprocess, "run", return_value=result) as command:
                 self.assertEqual(gate.git(ROOT, "rev-parse", "--verify", "HEAD^0"), b"result\n")
             self.assertEqual(dict(os.environ), before)
         child = command.call_args.kwargs["env"]
-        self.assertEqual({key: value for key, value in child.items() if key.startswith("GIT_")},
+        self.assertEqual({key: value for key, value in child.items() if key.upper().startswith("GIT_")},
                          {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull})
         self.assertEqual(command.call_args.args[0],
                          ["git", "--no-replace-objects", "-C", str(ROOT),
