@@ -23,6 +23,29 @@ public:
 private:
     ImGuiContext* m_previous;
 };
+
+// Owns the test context and closes any frame before restoring the caller's context.
+class ScopedImGuiContext {
+public:
+    ScopedImGuiContext()
+        : m_previous(ImGui::GetCurrentContext())
+        , m_context(ImGui::CreateContext()) {
+        ImGui::SetCurrentContext(m_context);
+    }
+    ~ScopedImGuiContext() {
+        ImGui::SetCurrentContext(m_context);
+        if (m_context->WithinFrameScope)
+            ImGui::EndFrame();
+        ImGui::DestroyContext(m_context);
+        ImGui::SetCurrentContext(m_previous);
+    }
+    ScopedImGuiContext(const ScopedImGuiContext&) = delete;
+    ScopedImGuiContext& operator=(const ScopedImGuiContext&) = delete;
+
+private:
+    ImGuiContext* m_previous;
+    ImGuiContext* m_context;
+};
 } // namespace
 
 TEST(LoadingOverlay, NoContextDrawsNothing) {
@@ -32,9 +55,7 @@ TEST(LoadingOverlay, NoContextDrawsNothing) {
 }
 
 TEST(LoadingOverlay, WithContextBuildsOneWindow) {
-    ImGuiContext* previous = ImGui::GetCurrentContext();
-    ImGuiContext* context = ImGui::CreateContext();
-    ImGui::SetCurrentContext(context);
+    ScopedImGuiContext context;
     ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize = ImVec2(1280, 720);
     io.DeltaTime = 1.0f / 60.0f;
@@ -47,7 +68,4 @@ TEST(LoadingOverlay, WithContextBuildsOneWindow) {
     ImGuiWindow* window = ImGui::FindWindowByName("Loading");
     ASSERT_NE(window, nullptr);
     EXPECT_TRUE(window->Active);
-    ImGui::EndFrame();
-    ImGui::DestroyContext(context);
-    ImGui::SetCurrentContext(previous);
 }
