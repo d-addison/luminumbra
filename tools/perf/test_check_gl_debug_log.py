@@ -59,6 +59,19 @@ class GlDebugLogTest(unittest.TestCase):
         self.assertEqual(document['notification_count'], 1)
         self.assertEqual(document['errors'], [])
 
+    def test_verified_sources_are_never_reopened_or_closed_by_readers(self):
+        path = self.root / 'handle-only'
+        for reader, payload, expected in (
+                (checker.bounded_bytes, b'{"value":1}', b'{"value":1}'),
+                (lambda path, **kwargs: list(checker.read_log(path, **kwargs)),
+                 b'first\r\nsecond\n', ['first', 'second'])):
+            with self.subTest(reader=reader):
+                source = io.BytesIO(payload)
+                with mock.patch.object(checker, 'open_input',
+                                       side_effect=AssertionError('source reopened')):
+                    self.assertEqual(reader(path, source=source), expected)
+                self.assertFalse(source.closed)
+
     def test_fail_by_error_type(self):
         code, document = self.verdict(MARKER + INFO + BAD_TYPE)
         self.assertEqual(code, 1)

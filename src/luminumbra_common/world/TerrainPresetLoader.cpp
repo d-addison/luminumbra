@@ -118,8 +118,7 @@ bool ResolveDependencyManifest(TerrainPresetLoadResult& preset,
                 return false;
             const auto path = data_root / Filesystem::LexicallyNormalPath(relative);
             if (!dependency_exists(path)) {
-                errors.push_back("missing worldgen biome table: " + logical);
-                return false;
+                state(logical, "biome-table-absent:legacy-classification");
             } else {
                 snapshot->biome_table = World::BiomeTable::Load(path, read_file);
                 const auto& table = snapshot->biome_table;

@@ -4,10 +4,12 @@ import contextlib
 import copy
 import io
 import json
+import os
 from pathlib import Path
 import stat
 import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -130,14 +132,14 @@ class ProcessReceiptSummaryTest(unittest.TestCase):
 
     def test_unreadable_log_exits_2_naming_the_log(self):
         self.write_timeout('run4', 'Shutdown stage: query_cleanup_started\n')
-        original = Path.open
+        original = summary._open_descriptor
 
-        def open_path(path, *args, **kwargs):
+        def open_path(path, root):
             if path.suffix == '.log':
                 raise PermissionError('denied')
-            return original(path, *args, **kwargs)
+            return original(path, root)
 
-        with mock.patch.object(Path, 'open', open_path):
+        with mock.patch.object(summary, '_open_descriptor', open_path):
             code, _out, err = self.run_cli([str(self.root)])
         self.assertEqual(code, 2)
         self.assertIn('run4.log', err)
@@ -345,6 +347,133 @@ class ProcessReceiptSummaryTest(unittest.TestCase):
         entry = self.document([str(path)])['receipts'][0]
         self.assertEqual(len(entry['exception_type']), summary.MAX_EXCERPT_CHARS)
         self.assertEqual(len(entry['binary_path']), summary.MAX_EXCERPT_CHARS)
+
+    def test_receipt_and_log_replacement_before_open_refuse_without_reading(self):
+        evidence = self.root / 'evidence'
+        evidence.mkdir()
+        receipt = self.write_receipt('race.process.json', directory=evidence,
+                                     outcome='timed_out', return_code=None,
+                                     capture_status='missing', exception_type='TimeoutExpired')
+        log = evidence / 'race.log'
+        log.write_text('Shutdown stage: world_save_started\n', encoding='utf-8')
+        outside = self.write_receipt('outside.process.json')
+        original = summary._open_descriptor
+        descriptors = []
+        for target in (receipt, log):
+            with self.subTest(target=target.name):
+                def replace_at_open(path, root):
+                    if path == target:
+                        # Model a symlink/ancestor swap returning an outside handle;
+                        # no symlink privileges or renaming open Windows files needed.
+                        descriptor = os.open(outside, os.O_RDONLY | getattr(os, 'O_BINARY', 0))
+                        descriptors.append(descriptor)
+                        return descriptor
+                    return original(path, root)
+
+                with mock.patch.object(summary, '_open_descriptor', replace_at_open), \
+                        mock.patch.object(summary, 'bounded_bytes', wraps=summary.bounded_bytes) as read_receipt, \
+                        mock.patch.object(summary, 'read_log', wraps=summary.read_log) as read_log:
+                    self.assert_refused([str(receipt)], 'changed during open')
+                self.assertEqual(read_receipt.call_count, int(target == log))
+                read_log.assert_not_called()
+                with self.assertRaises(OSError):
+                    os.fstat(descriptors[-1])
+
+    def test_receipt_and_log_are_read_through_the_verified_handle_only(self):
+        receipt = self.write_timeout('handle', 'Shutdown stage: world_save_started\r\n')
+        descriptors = []
+        original = summary._open_descriptor
+
+        def record_open(path, root):
+            descriptor = original(path, root)
+            descriptors.append((path, descriptor))
+            return descriptor
+
+        # A path reopen would fail even if validation used the correct handle.
+        with mock.patch.object(summary, '_open_descriptor', record_open), \
+                mock.patch.object(Path, 'open', side_effect=AssertionError('path reopened')):
+            entry = self.document([str(receipt)])['receipts'][0]
+        self.assertEqual(entry['placement'], 'in_world_save_started')
+        self.assertEqual([path for path, _descriptor in descriptors],
+                         [receipt, receipt.with_name('handle.log')])
+        for _path, descriptor in descriptors:
+            with self.assertRaises(OSError):
+                os.fstat(descriptor)
+
+    def test_no_follow_flags_cover_ancestor_and_leaf_opens(self):
+        if os.name == 'nt':
+            # Native reparse-point checks are exercised by every Windows read.
+            receipt = self.write_receipt('native.process.json')
+            self.document([str(receipt)])
+            return
+        receipt = self.write_receipt('nofollow.process.json')
+        original = os.open
+        flags_seen = []
+
+        def record_open(path, flags, *args, **kwargs):
+            flags_seen.append(flags)
+            return original(path, flags, *args, **kwargs)
+
+        with mock.patch.object(summary.os, 'open', record_open):
+            self.document([str(receipt)])
+        self.assertGreater(len(flags_seen), 1)
+        for flags in flags_seen:
+            self.assertEqual(flags & os.O_NOFOLLOW, os.O_NOFOLLOW)
+
+    def test_windows_reparse_and_outside_handles_refuse_before_reading(self):
+        import ctypes
+        from ctypes import wintypes
+
+        path = self.write_receipt('windows.process.json')
+        outside = self.root.parent / 'outside.process.json'
+        for reparse in (True, False):
+            with self.subTest(reparse=reparse):
+                kernel = mock.Mock()
+                kernel.CreateFileW.return_value = 123
+                crt = types.SimpleNamespace(open_osfhandle=mock.Mock())
+
+                def attributes(_handle, _kind, buffer, _size):
+                    flags = ctypes.cast(buffer, ctypes.POINTER(wintypes.DWORD))
+                    flags[0] = stat.FILE_ATTRIBUTE_REPARSE_POINT if reparse else 0
+                    return 1
+
+                def final_path(_handle, buffer, _size, _flags):
+                    if buffer is not None:
+                        buffer.value = str(outside)
+                    return len(str(outside)) + int(buffer is None)
+
+                kernel.GetFileInformationByHandleEx.side_effect = attributes
+                kernel.GetFinalPathNameByHandleW.side_effect = final_path
+                with mock.patch.object(ctypes, 'WinDLL', return_value=kernel, create=True), \
+                        mock.patch.dict(sys.modules, {'msvcrt': crt}):
+                    with self.assertRaisesRegex(checker.InputError,
+                                                'reparse point' if reparse else 'escapes'):
+                        summary._open_windows_descriptor(path, self.root)
+                self.assertTrue(kernel.CreateFileW.call_args.args[5] & 0x00200000)
+                kernel.CloseHandle.assert_called_once_with(123)
+                crt.open_osfhandle.assert_not_called()
+
+    def test_platform_no_follow_refuses_replacement_at_the_actual_open(self):
+        if os.name == 'nt':
+            # Exercise Windows refusal without requiring symlink privileges.
+            self.test_windows_reparse_and_outside_handles_refuse_before_reading()
+            return
+        outside = self.write_receipt('outside.process.json')
+        evidence = self.root / 'evidence'
+        evidence.mkdir()
+        receipt = self.write_receipt('swapped.process.json', directory=evidence)
+        original = os.open
+
+        def replace_at_open(path, flags, *args, **kwargs):
+            if path == receipt.name:
+                receipt.unlink()
+                receipt.symlink_to(outside)
+            return original(path, flags, *args, **kwargs)
+
+        with mock.patch.object(summary.os, 'open', replace_at_open), \
+                mock.patch.object(summary, 'bounded_bytes') as read_receipt:
+            self.assert_refused([str(receipt)])
+        read_receipt.assert_not_called()
 
 
 

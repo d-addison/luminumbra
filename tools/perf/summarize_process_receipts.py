@@ -17,6 +17,7 @@ strictly decoded as UTF-8 or BOM-marked UTF-16. Receipts/logs must be regular fi
 within the supplied evidence directory (or an explicit receipt's parent).
 """
 import argparse
+from contextlib import contextmanager
 import json
 import math
 import os
@@ -26,7 +27,7 @@ import sys
 from pathlib import Path
 
 import render_runner_process as runner
-from check_gl_debug_log import InputError, bounded_bytes, read_log, MAX_RECORDS
+from check_gl_debug_log import InputError, bounded_bytes, read_log, MAX_FILE_BYTES, MAX_RECORDS
 
 SCHEMA = 'luminumbra.process_receipt_summary.v1'
 RECEIPT_SUFFIX = '.process.json'
@@ -55,16 +56,123 @@ def regular_file(path, root):
     """lstat first: never resolve a receipt/log link and read its target."""
     validate_path(path)
     info = path.lstat()
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+    if (stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode)
+            or getattr(info, 'st_file_attributes', 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
         raise InputError(f'{path}: receipt/log must be a regular file, not a symlink')
     resolved = path.resolve(strict=True)
     if not resolved.is_relative_to(root):
         raise InputError(f'{path}: evidence escapes supplied directory')
-    return resolved
+    return resolved, info
 
 
-def load_receipt(path):
-    payload = bounded_bytes(path)
+def _open_windows_descriptor(path, root):
+    """Open the reparse point itself, then check attributes and the handle's path."""
+    import ctypes
+    from ctypes import wintypes
+    import msvcrt
+
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    create = kernel.CreateFileW
+    create.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                       wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
+    create.restype = wintypes.HANDLE
+    close = kernel.CloseHandle
+    close.argtypes = (wintypes.HANDLE,)
+    close.restype = wintypes.BOOL
+    attributes = kernel.GetFileInformationByHandleEx
+    attributes.argtypes = (wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD)
+    attributes.restype = wintypes.BOOL
+    final_path = kernel.GetFinalPathNameByHandleW
+    final_path.argtypes = (wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD)
+    final_path.restype = wintypes.DWORD
+
+    class AttributeTag(ctypes.Structure):
+        _fields_ = [('attributes', wintypes.DWORD), ('tag', wintypes.DWORD)]
+
+    # GENERIC_READ, shared reads/writes, OPEN_EXISTING, OPEN_REPARSE_POINT.
+    handle = create(str(path), 0x80000000, 0x3, None, 3, 0x00200000, None)
+    if handle == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        info = AttributeTag()
+        if not attributes(handle, 9, ctypes.byref(info), ctypes.sizeof(info)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if info.attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+            raise InputError(f'{path}: receipt/log must not be a reparse point')
+        # Windows extended paths are bounded to 32,768 wide characters.
+        size = final_path(handle, None, 0, 0)
+        if not size:
+            raise ctypes.WinError(ctypes.get_last_error())
+        if size >= 32768:
+            raise InputError(f'{path}: opened path exceeds Windows path cap')
+        buffer = ctypes.create_unicode_buffer(size + 1)
+        length = final_path(handle, buffer, len(buffer), 0)
+        if not length or length >= len(buffer):
+            raise InputError(f'{path}: cannot verify opened path')
+        name = buffer.value
+        if name.startswith('\\\\?\\UNC\\'):
+            name = '\\\\' + name[8:]
+        elif name.startswith('\\\\?\\'):
+            name = name[4:]
+        # Both names use normalized long paths, including when argv used 8.3 names.
+        if not Path(name).is_relative_to(root):
+            raise InputError(f'{path}: opened evidence escapes supplied directory')
+        descriptor = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+    except BaseException:
+        close(handle)
+        raise
+    return descriptor
+
+
+def _open_descriptor(path, root):
+    if os.name == 'nt':
+        return _open_windows_descriptor(path, root)
+    # Anchor each component to its already-open parent. O_NOFOLLOW on the leaf
+    # alone would still follow a replaced ancestor outside the evidence root.
+    relative = path.relative_to(root)
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, 'O_NOFOLLOW', 0)
+    directory = os.open(root.anchor, directory_flags)
+    try:
+        for part in (*root.parts[1:], *relative.parts[:-1]):
+            child = os.open(part, directory_flags, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        return os.open(relative.name, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
+                       | getattr(os, 'O_NONBLOCK', 0), dir_fd=directory)
+    finally:
+        os.close(directory)
+
+
+@contextmanager
+def open_regular_file(path, root):
+    """Validate identity and containment, then consume only this owning handle."""
+    _resolved, before = regular_file(path, root)
+    try:
+        descriptor = _open_descriptor(path, root)
+    except OSError as error:
+        # Win32 API errors and descriptor-relative opens may omit the full path.
+        error.filename = str(path)
+        raise
+    try:
+        opened = os.fstat(descriptor)
+        _resolved, after = regular_file(path, root)
+        identity = (opened.st_dev, opened.st_ino)
+        if (not stat.S_ISREG(opened.st_mode)
+                or identity != (before.st_dev, before.st_ino)
+                or identity != (after.st_dev, after.st_ino)):
+            raise InputError(f'{path}: evidence changed during open')
+        if opened.st_size > MAX_FILE_BYTES:
+            raise InputError(f'{path}: input exceeds {MAX_FILE_BYTES} byte cap')
+        source = os.fdopen(descriptor, 'rb')
+    except BaseException:
+        os.close(descriptor)
+        raise
+    with source:
+        yield source
+
+
+def load_receipt(path, source):
+    payload = bounded_bytes(path, source=source)
     try:
         data = json.loads(payload)
     except (ValueError, UnicodeError, RecursionError) as error:
@@ -122,14 +230,14 @@ def collect_receipts(inputs):
     scanned = 0
 
     def add(candidate, root):
-        resolved = regular_file(candidate, root)
-        found[str(resolved)] = resolved
+        resolved, _info = regular_file(candidate, root)
+        found[str(resolved)] = (candidate, root)
         if len(found) > MAX_RECEIPTS:
             raise InputError(f'input exceeds {MAX_RECEIPTS} receipt cap')
 
     for item in inputs:
         validate_path(item)
-        path = Path(item)
+        path = Path(os.path.abspath(item))
         info = path.lstat()
         if stat.S_ISLNK(info.st_mode):
             raise InputError(f'{path}: symlinked input is not allowed')
@@ -154,15 +262,16 @@ def collect_receipts(inputs):
         elif stat.S_ISREG(info.st_mode):
             if not path.name.endswith(RECEIPT_SUFFIX):
                 raise InputError(f'{item}: not a {RECEIPT_SUFFIX} receipt')
-            add(path, path.parent.resolve(strict=True))
+            root = path.parent.resolve(strict=True)
+            add(root / path.name, root)
         else:
             raise InputError(f'{item}: not a regular file or directory')
     return [found[key] for key in sorted(found)]
 
 
-def last_shutdown_stage(log_path):
+def last_shutdown_stage(log_path, source):
     stage = None
-    for line_number, line in enumerate(read_log(log_path), 1):
+    for line_number, line in enumerate(read_log(log_path, source=source), 1):
         if line_number > MAX_RECORDS:
             raise InputError(f'log exceeds {MAX_RECORDS} line cap')
         match = STAGE_LINE.search(line)
@@ -171,21 +280,21 @@ def last_shutdown_stage(log_path):
     return stage
 
 
-def timed_out_fields(receipt_path, log_suffix):
+def timed_out_fields(receipt_path, log_suffix, root):
     validate_log_suffix(log_suffix)
     log_path = receipt_path.with_name(receipt_path.name[:-len(RECEIPT_SUFFIX)] + log_suffix)
     try:
-        regular_file(log_path, receipt_path.parent)
+        with open_regular_file(log_path, root) as source:
+            stage = last_shutdown_stage(log_path, source)
     except FileNotFoundError:
         return dict(log_path=str(log_path), log_missing=True, last_shutdown_stage=None,
                     placement=None)
-    stage = last_shutdown_stage(log_path)
     placement = NO_BREADCRUMBS if stage is None else 'in_' + stage
     return dict(log_path=str(log_path), log_missing=False, last_shutdown_stage=stage,
                 placement=placement)
 
 
-def summarize(receipt_path, receipt, log_suffix):
+def summarize(receipt_path, receipt, log_suffix, root):
     entry = dict(path=str(receipt_path), classification=receipt['outcome'],
                  binary_path=receipt['binary_path'][:MAX_EXCERPT_CHARS],
                  timeout_seconds=receipt['timeout_seconds'],
@@ -196,7 +305,7 @@ def summarize(receipt_path, receipt, log_suffix):
     elif receipt['outcome'] == 'spawn_error':
         entry.update(exception_type=receipt['exception_type'][:MAX_EXCERPT_CHARS])
     else:
-        entry.update(timed_out_fields(receipt_path, log_suffix))
+        entry.update(timed_out_fields(receipt_path, log_suffix, root))
     return entry
 
 
@@ -217,9 +326,10 @@ def main(argv=None):
         validate_log_suffix(args.log_suffix)
         entries = []
         counts = {outcome: 0 for outcome in OUTCOMES}
-        for receipt_path in collect_receipts(args.inputs):
-            receipt = load_receipt(receipt_path)
-            entries.append(summarize(receipt_path, receipt, args.log_suffix))
+        for receipt_path, root in collect_receipts(args.inputs):
+            with open_regular_file(receipt_path, root) as source:
+                receipt = load_receipt(receipt_path, source)
+            entries.append(summarize(receipt_path, receipt, args.log_suffix, root))
             counts[receipt['outcome']] += 1
     except (InputError, OSError, ValueError, RuntimeError) as error:
         print(f'summarize_process_receipts: {str(error)[:MAX_EXCERPT_CHARS]}', file=sys.stderr)

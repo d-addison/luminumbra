@@ -123,7 +123,8 @@ std::string TerrainPresetContentHash(const nlohmann::json& preset);
 // must be objects, the six terrain noise fields must be numeric and
 // caves_enabled/cave_frequency must be present and typed. On any error the
 // result carries ok=false and human-readable messages; params/extras are only
-// meaningful when ok=true. Enabled biome tables and structure pools must exist.
+// meaningful when ok=true. Absent biome tables use legacy classification; present
+// tables must be readable and valid. Enabled structure pools must exist.
 // Runtime callers supply data_root independently of the preset's storage location.
 TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path,
                                           const std::filesystem::path& data_root);
@@ -138,8 +139,9 @@ bool LoadTerrainPresetOverride(const std::filesystem::path& preset_path,
                                std::string& error);
 
 // Parses an already-parsed preset with the runtime data directory supplied
-// explicitly. The disk loader delegates here. Enabled dependencies must be
-// readable and valid; disabled features require no files. `provenance` only
+// explicitly. The disk loader delegates here. Present biome tables and enabled
+// structure pools must be readable and valid; absent tables use legacy classification.
+// Disabled features require no files. `provenance` only
 // labels diagnostics. Identity binds the selected
 // biome table and enabled structure placement/piece files through portable paths.
 // The status reader queries links themselves and permits deterministic I/O failure coverage.

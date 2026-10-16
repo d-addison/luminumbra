@@ -17,6 +17,7 @@ luminumbra.render_benchmark.v3; it is validated only and does not change the ver
 """
 import argparse
 import codecs
+from contextlib import nullcontext
 import io
 import json
 import os
@@ -66,10 +67,10 @@ def open_input(path):
         raise InputError(f'input unreadable: {path}: {str(error)[:MAX_ERROR_CHARS]}') from error
 
 
-def bounded_bytes(path):
-    """JSON must fit the byte cap, including a file that grows after opening."""
+def bounded_bytes(path, *, source=None):
+    """Bound JSON bytes; an optional verified source stays owned by the caller."""
     try:
-        with open_input(path) as source:
+        with open_input(path) if source is None else nullcontext(source) as source:
             payload = source.read(MAX_FILE_BYTES + 1)
     except OSError as error:
         raise InputError(f'input unreadable: {path}: {str(error)[:MAX_ERROR_CHARS]}') from error
@@ -78,10 +79,10 @@ def bounded_bytes(path):
     return payload
 
 
-def read_log(path):
-    """Stream strictly decoded UTF-8 or BOM-marked UTF-16, with bounded lines."""
+def read_log(path, *, source=None):
+    """Stream bounded UTF-8/UTF-16 lines, optionally from a caller-owned source."""
     try:
-        with open_input(path) as source:
+        with open_input(path) if source is None else nullcontext(source) as source:
             prefix = source.read(2)
             encoding = ('utf-16' if prefix in (codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)
                         else 'utf-8')

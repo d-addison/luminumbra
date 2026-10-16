@@ -75,6 +75,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+# Native nonzero statuses are runner results, not PowerShell terminating errors.
+$PSNativeCommandUseErrorActionPreference = $false
 $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)   # tools/gates -> repo root
 Set-Location $repo
 
@@ -155,13 +157,16 @@ try {
         $qualification = Join-Path $outPath "qualification.json"
         Write-Host "[render-qualification] qualification.json: $qualification"
     }
+} catch {
+    Write-Host "[render-qualification] $($_.Exception.Message)"
 } finally {
     try {
         if (Test-Path -LiteralPath $hostTemporary) {
             Remove-Item -LiteralPath $hostTemporary -Force
         }
-    } finally {
-        # Preserve the runner's status even if reporting or cleanup fails.
-        exit $code
+    } catch {
+        Write-Host "[render-qualification] host evidence cleanup failed: $($_.Exception.Message)"
     }
 }
+# Exit outside finally: PowerShell must publish even a zero status to its caller.
+exit $code

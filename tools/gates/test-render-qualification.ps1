@@ -77,7 +77,7 @@ function Invoke-Wrapper {
     if ($UseDefaultExe) { $wrapperParameters.Remove("Exe") }
     if (Test-Path -LiteralPath $recordPath) { Remove-Item -LiteralPath $recordPath -Force }
     $script:runnerExitCode = $RunnerExitCode
-    $global:LASTEXITCODE = $null
+    $global:LASTEXITCODE = 91
     # Relative paths must be resolved against the repository, even from another cwd.
     Push-Location -LiteralPath $fixtureRoot
     try {
@@ -162,7 +162,8 @@ function Remove-Item {
     $global:LASTEXITCODE = $null
     if ($script:failCleanup) { throw "fixture cleanup failure" }
 }
-$global:LASTEXITCODE = $null
+$global:LASTEXITCODE = 91
+$PSNativeCommandUseErrorActionPreference = $true
 & $config.Wrapper @parameters
 if ($null -eq $global:LASTEXITCODE) { throw "wrapper returned without exiting" }
 exit $global:LASTEXITCODE
@@ -231,6 +232,9 @@ exit $global:LASTEXITCODE
         Assert-RunnerArguments $run (Join-Path $repo $clientRelative) -Tail $tail -TimeoutSeconds 37
     }
     foreach ($exitCode in @(0, 7)) {
+        $run = Invoke-Wrapper -RunnerExitCode $exitCode
+        Assert-Test ($run.Code -eq $exitCode) "in-process runner exit $exitCode replaces stale native status"
+        Assert-RunnerArguments $run (Join-Path $repo $clientRelative)
         $run = Invoke-Wrapper -RunnerExitCode $exitCode -AsProcess -FailCleanup
         Assert-Test ($run.Code -eq $exitCode) "cleanup failure preserves runner exit $exitCode`: $($run.Message)"
         Assert-RunnerArguments $run (Join-Path $repo $clientRelative)
