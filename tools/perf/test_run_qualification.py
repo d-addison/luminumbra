@@ -368,6 +368,58 @@ class FullMatrixTests(RunnerTestBase):
 
 
 class SelectionTests(RunnerTestBase):
+    def test_missing_expected_traversal_digest_exits_2_without_launch(self):
+        matrix = matrix_lib.load_matrix(self.matrix_path)
+        entry = next(entry for entry in matrix['workloads'] if entry['id'] == 'surface-flight')
+        del entry['script_sha256']
+        self.matrix_path.write_text(json.dumps(matrix), encoding='utf-8')
+        with mock.patch.object(rq.runner, 'run_process') as launch, \
+                mock.patch.object(rq.subprocess, 'run') as checker:
+            code, _, error = self.run_main(self.argv('--only', SURFACE_CELL))
+        self.assertEqual(code, 2)
+        self.assertIn('script_sha256', error)
+        self.assertFalse(self.out.exists())
+        launch.assert_not_called()
+        checker.assert_not_called()
+
+    def test_tampered_traversal_fixture_exits_1_without_launch(self):
+        source = self.tmp / 'tampered.traversal'
+        source.write_bytes((planner.ROOT / rq.CANONICAL_SURFACE_SCRIPT).read_bytes() + b'\n')
+        matrix = matrix_lib.load_matrix(self.matrix_path)
+        entry = next(entry for entry in matrix['workloads'] if entry['id'] == 'surface-flight')
+        entry['script'] = str(source)
+        self.matrix_path.write_text(json.dumps(matrix), encoding='utf-8')
+        with mock.patch.object(rq.runner, 'run_process') as launch, \
+                mock.patch.object(rq.subprocess, 'run') as checker:
+            code, _, _ = self.run_main(self.argv('--only', SURFACE_CELL))
+        self.assertEqual(code, 1)
+        document = self.load_qualification()
+        cell = self.cell_of(document, SURFACE_CELL)
+        self.assertEqual((cell['state'], cell['reason']),
+                         ('invalid', 'traversal SHA-256 mismatch'))
+        self.assertFalse(cell['traversal']['verified'])
+        self.assertIsNone(cell['artifact'])
+        self.assertFalse(document['render_floor_qualified'])
+        self.assertFalse((self.out / 'work' / SURFACE_CELL / 'workload.traversal').exists())
+        launch.assert_not_called()
+        checker.assert_not_called()
+
+    def test_diagnostic_traversal_uses_its_matrix_digest(self):
+        source = self.tmp / 'diagnostic.traversal'
+        source.write_bytes((planner.ROOT / rq.CANONICAL_SURFACE_SCRIPT).read_bytes() + b'\n')
+        matrix = matrix_lib.load_matrix(self.matrix_path)
+        entry = next(entry for entry in matrix['workloads'] if entry['id'] == 'surface-flight')
+        entry['script'] = str(source)
+        entry['script_sha256'] = rq.runner.file_sha256(source)
+        self.matrix_path.write_text(json.dumps(matrix), encoding='utf-8')
+        code, _, _ = self.run_main(self.argv('--only', SURFACE_CELL))
+        self.assertEqual(code, 0)
+        document = self.load_qualification()
+        cell = self.cell_of(document, SURFACE_CELL)
+        self.assertEqual(cell['state'], 'pass')
+        self.assertEqual(cell['traversal'], {'sha256': entry['script_sha256'], 'verified': True})
+        self.assertFalse(document['render_floor_qualified'])
+
     def test_traversal_snapshot_binds_content_and_survives_source_edits(self):
         source = self.tmp / rq.CANONICAL_SURFACE_SCRIPT
         source.parent.mkdir(parents=True, exist_ok=True)
@@ -409,7 +461,8 @@ class SelectionTests(RunnerTestBase):
                                client=self.fake_client, out_dir=self.out, root=self.tmp,
                                only=[SURFACE_CELL], checker=self.fake_checker,
                                matrix_canonical=True)[0]
-        self.assertEqual(changed['state'], 'pass')
+        self.assertEqual((changed['state'], changed['reason']),
+                         ('invalid', 'traversal SHA-256 mismatch'))
         self.assertFalse(rq.canonical_record(changed))
 
     def test_changed_traversal_snapshot_is_refused(self):

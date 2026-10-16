@@ -2,6 +2,7 @@
 """Tests for the qualification matrix, planner CLI and parametrised process runner."""
 import contextlib
 import copy
+import hashlib
 import io
 import json
 import math
@@ -73,6 +74,21 @@ class MatrixTestBase(unittest.TestCase):
 
 
 class CommittedMatrixTests(MatrixTestBase):
+    def test_committed_traversal_digests_match_fixture_bytes(self):
+        matrix = committed()
+        qm.validate_matrix(matrix)
+        traversals = [workload for workload in matrix['workloads']
+                      if workload['kind'] == 'traversal']
+        self.assertTrue(any(workload['script'] is not None for workload in traversals))
+        for workload in traversals:
+            with self.subTest(workload=workload['id']):
+                expected = (None if workload['script'] is None else hashlib.sha256(
+                    (ROOT / workload['script']).read_bytes()).hexdigest())
+                self.assertEqual(workload['script_sha256'], expected)
+                for cell in qm.cells(matrix):
+                    if cell['workload'] == workload['id']:
+                        self.assertEqual(cell['script_sha256'], expected)
+
     def test_committed_matrix_has_36_unique_cells_in_order(self):
         cells = qm.cells(committed())
         ids = [cell['id'] for cell in cells]
@@ -332,6 +348,32 @@ class CheckerEvidenceTests(MatrixTestBase):
 
 
 class MatrixValidationTests(MatrixTestBase):
+    def test_missing_traversal_digest_refused(self):
+        for workload in committed()['workloads']:
+            if workload['kind'] != 'traversal':
+                continue
+            with self.subTest(workload=workload['id']):
+                matrix = copy.deepcopy(committed())
+                entry = next(entry for entry in matrix['workloads']
+                             if entry['id'] == workload['id'])
+                del entry['script_sha256']
+                self.assert_refused(json.dumps(matrix), 'script_sha256')
+
+    def test_invalid_traversal_digest_refused(self):
+        for digest in (None, '', 'a' * 63, 'a' * 65, 'A' * 64, 'g' * 64, 0, True):
+            with self.subTest(digest=digest):
+                matrix = copy.deepcopy(committed())
+                entry = next(entry for entry in matrix['workloads']
+                             if entry['id'] == 'surface-flight')
+                entry['script_sha256'] = digest
+                self.assert_refused(json.dumps(matrix), 'script_sha256')
+
+    def test_blocked_traversal_digest_must_be_null(self):
+        matrix = copy.deepcopy(committed())
+        entry = next(entry for entry in matrix['workloads'] if entry['id'] == 'cave-walk')
+        entry['script_sha256'] = 'a' * 64
+        self.assert_refused(json.dumps(matrix), 'script_sha256 must be null')
+
     def test_null_renderer_refused(self):
         matrix = copy.deepcopy(committed())
         matrix['qualified_renderer'] = None

@@ -338,6 +338,12 @@ Embedded presets resolve biome and structure dependencies from the runtime's
 frozen or named atlas preset, even when storage is separate.
 
 Traversal qualification binds both the script path and its expected SHA-256.
+Every traversal entry in `tools/perf/qualification/matrix.json` requires
+`script_sha256`: 64 lowercase hexadecimal digits for the exact script bytes,
+or null for a blocked traversal whose `script` is null. A missing or malformed
+digest is a matrix input error (exit 2). Before launching a traversal, the runner
+compares the fixture bytes with that expected digest; a mismatch records an
+invalid cell and exits 1 without launching the client or checker.
 The runner snapshots each manifest into `work/<cell-id>/workload.traversal`
 (at most 64 KiB) and passes that same file to the client and checker. It verifies
 the snapshot after each process and records its digest and verification status

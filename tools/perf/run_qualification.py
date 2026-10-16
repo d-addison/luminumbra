@@ -562,10 +562,12 @@ def run_cell(cell, matrix, *, client, out_dir, root, python, checker, timeout_se
                     payload = source.read(TRAVERSAL_MAX_BYTES + 1)
                 if len(payload) > TRAVERSAL_MAX_BYTES:
                     return record('invalid', 'traversal exceeds 64 KiB', artifact)
-                traversal_path = work / 'workload.traversal'
-                runner.atomic_write(traversal_path, payload)
                 traversal_evidence = {'sha256': hashlib.sha256(payload).hexdigest(),
                                       'verified': False}
+                if traversal_evidence['sha256'] != cell['script_sha256']:
+                    return record('invalid', 'traversal SHA-256 mismatch', artifact)
+                traversal_path = work / 'workload.traversal'
+                runner.atomic_write(traversal_path, payload)
                 command[command.index('--traversal') + 1] = str(traversal_path)
             if str(client).endswith('.py'):
                 command = [sys.executable, str(client)] + command[1:]
