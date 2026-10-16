@@ -18,6 +18,9 @@ namespace Luminumbra::Persistence {
 
 struct WorldSaveAdmission;
 
+// Presence of presetFormat opts into mandatory embedded content and identity.
+inline constexpr int kSavedPresetFormat = 1;
+
 struct SavedWorld {
     world::WorldMetadata metadata;
     std::filesystem::path preset_path;
