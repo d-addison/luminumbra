@@ -58,6 +58,53 @@ class CTestSkipAuditTests(unittest.TestCase):
         )
         self.assertFalse(MODULE.skip_is_allowed(case))
 
+    def audit_required_tests(self, names, required, expected, skipped=False):
+        root = ET.Element("testsuite")
+        for name in names:
+            case = ET.SubElement(root, "testcase")
+            if name is not None:
+                case.set("name", name)
+            if skipped:
+                ET.SubElement(case, "skipped")
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "ctest.junit.xml"
+            ET.ElementTree(root).write(report, encoding="utf-8")
+            arguments = [str(MODULE_PATH), str(report), "--minimum-tests", str(len(names))]
+            for name in required:
+                arguments.extend(("--require-test", name))
+            output, errors = io.StringIO(), io.StringIO()
+            with mock.patch.object(sys, "argv", arguments):
+                with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+                    self.assertEqual(MODULE.main(), expected)
+            return output.getvalue(), errors.getvalue()
+
+    def test_repeated_required_names_pass_with_additional_coverage(self):
+        output, errors = self.audit_required_tests(
+            ["Developer.First", "Developer.Second", "Unrelated.Extra"],
+            ["Developer.First", "Developer.Second"], 0)
+        self.assertIn("3 tests; 0 approved skips", output)
+        self.assertEqual(errors, "")
+
+    def test_missing_required_names_fail_even_when_the_count_floor_passes(self):
+        required = ["Developer.First", "Developer.Second"]
+        for names in (["Developer.First", "Unrelated.Extra"],
+                      ["Developer.Second", "Unrelated.Extra"],
+                      ["Unrelated.First", "Unrelated.Second"],
+                      ["Developer.FirstSuffix", "PrefixDeveloper.Second"],
+                      [None, None], []):
+            with self.subTest(names=names):
+                output, errors = self.audit_required_tests(names, required, 1)
+                self.assertEqual(output, "")
+                missing = sorted(set(required) - set(names))
+                self.assertEqual(errors, "Required CTest cases are missing:\n" +
+                                 "".join(f"  - {name}\n" for name in missing))
+
+    def test_required_name_does_not_allow_a_skipped_case(self):
+        output, errors = self.audit_required_tests(
+            ["Developer.First"], ["Developer.First"], 1, skipped=True)
+        self.assertEqual(output, "")
+        self.assertIn("Unexpected unevaluated tests:\n  - Developer.First\n", errors)
+
     def test_allow_list_is_empty(self):
         # Every previously allow-listed test now genuinely runs. Guard against a
         # skip quietly being re-admitted here without justification.
