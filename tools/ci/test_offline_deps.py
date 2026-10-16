@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Isolated stdlib contracts for offline dependency provisioning."""
 
+import errno
 import importlib.util
 import json
 import os
@@ -413,6 +414,95 @@ class OfflineDependenciesTests(unittest.TestCase):
         self.assertFalse(dest.exists())
         self.stage()
         self.assertTrue((self.root / "scratch/initial cache.cmake").is_file())
+
+    def test_readonly_symlink_failure_cleanup_preserves_targets_and_retry_succeeds(self):
+        directory, content = self.readonly_source()
+        mode = directory.stat().st_mode
+        directory.chmod(mode | stat.S_IWUSR)
+        try:
+            for name, target in (("file link", content), ("directory link", directory)):
+                try:
+                    (directory / name).symlink_to(target.name if target == content else ".",
+                                                  target_is_directory=target == directory)
+                except OSError as error:
+                    if (error.errno not in (errno.EPERM, errno.EACCES, errno.ENOSYS,
+                                           errno.EOPNOTSUPP)
+                            and getattr(error, "winerror", None) not in (1, 50, 1314)):
+                        raise
+                    self.skipTest(f"Symlink creation is unavailable: {error}")
+        finally:
+            directory.chmod(mode)
+        self.write_lock()
+        modes = [path.stat().st_mode for path in (directory, content)]
+        real_copy = deps.shutil.copytree
+        real_chmod, real_unlink, real_rmdir = os.chmod, os.unlink, os.rmdir
+
+        for phase in ("publication", "copy"):
+            with self.subTest(phase=phase):
+                dest = self.root / "scratch" / phase
+                init = self.root / "scratch" / (phase + ".cmake")
+                original = OSError("injected " + phase + " failure")
+                cleaning = False
+                retried_links = set()
+
+                def fail():
+                    nonlocal cleaning
+                    copied = dest / "sample/readonly directory"
+                    self.assertEqual((copied / "file link").read_text(), "readonly content\n")
+                    # Model links pointing outside the partial stage. Cleanup
+                    # must neither traverse them nor chmod their cache targets.
+                    real_chmod(copied, mode | stat.S_IWUSR)
+                    for name, target in (("file link", content), ("directory link", directory)):
+                        link = copied / name
+                        link.unlink()
+                        link.symlink_to(target, target_is_directory=target == directory)
+                    real_chmod(copied, mode)
+                    cleaning = True
+                    raise original
+
+                def copy(source, target, *args, **kwargs):
+                    result = real_copy(source, target, *args, **kwargs)
+                    if phase == "copy" and Path(target) == dest / "sample":
+                        fail()
+                    return result
+
+                def publish(source, target):
+                    self.assertEqual(Path(target), init)
+                    fail()
+
+                def chmod(path, *args, **kwargs):
+                    if cleaning:
+                        self.assertFalse(stat.S_ISLNK(os.lstat(path).st_mode))
+                        self.assertFalse(Path(path).resolve().is_relative_to(self.cache))
+                    return real_chmod(path, *args, **kwargs)
+
+                def remove(function, path, *args, **kwargs):
+                    name = Path(path).name
+                    if cleaning and name in {"file link", "directory link"} and name not in retried_links:
+                        retried_links.add(name)
+                        raise PermissionError("injected read-only link deletion")
+                    return function(path, *args, **kwargs)
+
+                with patch.object(deps.shutil, "copytree", side_effect=copy), \
+                        patch.object(deps.os, "replace", side_effect=publish), \
+                        patch.object(deps.os, "chmod", side_effect=chmod), \
+                        patch.object(deps.os, "unlink", side_effect=lambda *a, **kw: remove(real_unlink, *a, **kw)), \
+                        patch.object(deps.os, "rmdir", side_effect=lambda *a, **kw: remove(real_rmdir, *a, **kw)):
+                    with self.assertRaises(OSError) as caught:
+                        self.stage(dest, init)
+                self.assertIs(caught.exception, original)
+                self.assertFalse(dest.exists())
+                self.assertFalse(init.exists())
+                self.assertEqual(list(init.parent.glob(init.name + ".*.tmp")), [])
+                self.assertEqual(retried_links, {"file link", "directory link"})
+                self.assertEqual([path.stat().st_mode for path in (directory, content)], modes)
+                self.stage(dest, init)
+                copied = dest / "sample/readonly directory"
+                self.assertTrue((copied / "file link").is_symlink())
+                self.assertTrue((copied / "directory link").is_symlink())
+                self.assertEqual((copied / "file link").read_text(), "readonly content\n")
+                self.assertEqual([path.stat().st_mode for path in (directory, content)], modes)
+                self.assertIn("FETCHCONTENT_SOURCE_DIR_SAMPLE", init.read_text())
 
     def test_stage_cleanup_failures_preserve_original_exception(self):
         original = OSError("injected cache publication failure")

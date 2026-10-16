@@ -13,6 +13,7 @@ import fnmatch
 import hashlib
 import importlib.util
 import json
+import ntpath
 import os
 from pathlib import Path
 import re
@@ -232,6 +233,16 @@ def replay_arguments(entry: dict) -> list[str]:
     return arguments
 
 
+def executable_name(executable: str) -> str:
+    """Identify native and Windows drivers without rewriting their launch path."""
+    name = ntpath.basename(executable)
+    # Also recognize Windows command spellings when inspecting a database on
+    # POSIX. Keep case-sensitive POSIX driver names otherwise.
+    if os.name == "nt" or name.lower().endswith(".exe"):
+        name = name.casefold()
+    return name.removesuffix(".exe")
+
+
 def parse_arguments(arguments: list[str]) -> tuple[list[str], list[str]]:
     """Allow only supported input/configuration flags; discard rewritten outputs.
 
@@ -241,9 +252,9 @@ def parse_arguments(arguments: list[str]) -> tuple[list[str], list[str]]:
     if not arguments or not all(isinstance(a, str) for a in arguments):
         raise SelectionError("malformed compiler arguments")
     args = list(arguments)
-    if Path(args[0]).name in {"ccache", "sccache"}:
+    if executable_name(args[0]) in {"ccache", "sccache"}:
         args.pop(0)
-    if not args or not re.fullmatch(r"(?:[\w.+-]*-)?(?:gcc|g\+\+|cc|c\+\+|clang|clang\+\+)(?:-[0-9.]+)?", Path(args[0]).name):
+    if not args or not re.fullmatch(r"(?:[\w.+-]*-)?(?:gcc|g\+\+|cc|c\+\+|clang|clang\+\+)(?:-[0-9.]+)?", executable_name(args[0])):
         raise SelectionError("unsupported compiler or command wrapper")
     result, operands = [args[0]], []
     rewritten_values = {option for option, policy in VALUE_OPTIONS.items() if policy == "drop"}
@@ -539,7 +550,7 @@ def warning_family(option: str) -> str | None:
 
 
 def profile_compiler(entry: dict) -> str:
-    name = Path(clean_arguments(entry["arguments"])[0]).name
+    name = executable_name(clean_arguments(entry["arguments"])[0])
     if "clang" in name:
         return "clang"
     if "gcc" in name or "g++" in name:
@@ -571,7 +582,7 @@ def profile_flags(entry: dict, profile: str) -> list[str]:
     # where GCC and Clang disagree about group specificity and option order.
     configured = {warning_family(arg) for arg in command if arg.startswith("-W")}
     compiler = profile_compiler(entry)
-    cxx = entry["file"].suffix.lower() != ".c" or "++" in Path(command[0]).name
+    cxx = entry["file"].suffix.lower() != ".c" or "++" in executable_name(command[0])
     index = 1
     while index < len(command):
         arg = command[index]

@@ -487,6 +487,64 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
                 self.entries()
         self.assertEqual(self.commands, [])
 
+    def test_windows_and_versioned_compilers_preserve_executable_paths(self):
+        for compiler in ("gcc.exe", "clang.exe", "g++.exe", "clang++.exe", "g++-14", "clang++-18",
+                         "G++-14.EXE", "CLANG++-18.EXE",
+                         "x86_64-w64-mingw32-g++-14.exe",
+                         r"C:\msys64\ucrt64\bin\g++.exe",
+                         r"C:\Program Files\LLVM\bin\clang++.exe"):
+            for command_string in (False, True):
+                with self.subTest(compiler=compiler, command_string=command_string):
+                    self.raw = [self.raw_entry(self.a)]
+                    self.raw[0]["arguments"][0] = compiler
+                    if command_string:
+                        arguments = self.raw[0].pop("arguments")
+                        # Windows databases quote paths containing backslashes
+                        # or spaces. Preserve the executable token for replay.
+                        self.raw[0]["command"] = ('"' + compiler + '" '
+                                                  + shlex.join(arguments[1:]))
+                    self.save_db()
+                    entry = self.entries()[0]
+                    command = tus.check_arguments(entry, "msvc-approx")
+                    self.assertEqual(command[0], compiler)
+                    self.assertIn("-Wshadow-all" if "clang" in compiler.lower()
+                                  else "-Wshadow", command)
+                    self.assertIn("-Wnarrowing", command)
+        self.assertEqual(self.commands, [])
+
+    def test_windows_warning_profiles_ignore_compiler_directory_names(self):
+        for compiler, shadow, cxx in ((r"C:\clang++\gcc.exe", "-Wshadow", False),
+                                      (r"C:\gcc\clang.exe", "-Wshadow-all", False),
+                                      (r"C:\msys64\G++.EXE", "-Wshadow", True),
+                                      (r"C:\LLVM\CLANG++-18.EXE", "-Wshadow-all", True)):
+            with self.subTest(compiler=compiler):
+                entry = {"file": self.src / "plain.c", "directory": self.build,
+                         "arguments": [compiler, str(self.src / "plain.c")]}
+                flags = tus.profile_flags(entry, "msvc-approx")
+                self.assertEqual(flags[0], shadow)
+                self.assertEqual("-Wnarrowing" in flags, cxx)
+        self.assertEqual(self.commands, [])
+
+    def test_windows_wrappers_and_driver_names_use_shared_normalization(self):
+        for wrapper in ("ccache.exe", "sccache.exe", r"C:\Tools\CCACHE.EXE"):
+            with self.subTest(wrapper=wrapper):
+                self.assertEqual(tus.clean_arguments([wrapper, "G++.EXE", str(self.a)]),
+                                 ["G++.EXE", str(self.a)])
+        with patch.object(tus.os, "name", "nt"):
+            self.assertEqual(tus.executable_name(r"C:\Tools\CLANG++-18"), "clang++-18")
+            self.assertEqual(tus.executable_name("SCCACHE"), "sccache")
+
+    def test_non_compiler_and_unsupported_windows_drivers_are_rejected(self):
+        for compiler in ("not-a-compiler.exe", r"C:\msys64\ucrt64\bin\cmd.exe",
+                         "g++.exe.exe", "clang-cl.exe", "CL.EXE"):
+            with self.subTest(compiler=compiler):
+                self.raw = [self.raw_entry(self.a)]
+                self.raw[0]["arguments"][0] = compiler
+                self.save_db()
+                with self.assertRaisesRegex(tus.SelectionError, "unsupported compiler"):
+                    self.entries()
+        self.assertEqual(self.commands, [])
+
     def test_configured_codegen_options_preserve_exact_source_operand(self):
         flags = shlex.split(
             "-fPIC -fexceptions -ffast-math -ffp-contract=off -ffp-model=precise "
