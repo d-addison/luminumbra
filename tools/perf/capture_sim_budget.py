@@ -183,6 +183,14 @@ def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def shipping_simulation_gates() -> tuple[str, ...]:
+    """Use the shipping systems document, ignoring its explanatory comment entries."""
+    path = Path(__file__).resolve().parents[2] / "data/common/systems.json"
+    systems = json.loads(path.read_text(encoding="utf-8-sig"))
+    return tuple(sorted(name for name, gate in systems["sim"].items()
+                        if isinstance(gate, dict) and "enabled" in gate))
+
+
 def validate_artifact(data: dict[str, Any], preset: str, seed: str, ticks: int, require_regions: bool = False) -> None:
     """Ignore unknown object keys; refuse incomplete, corrupt or future evidence."""
     for field in ("world_hash", "world_hash_replay"):
@@ -195,6 +203,10 @@ def validate_artifact(data: dict[str, Any], preset: str, seed: str, ticks: int, 
             or data.get("passed") is not True
             or data.get("world_hash") != data.get("world_hash_replay")):
         raise ValueError("smoke identity, tick count or replay verdict mismatch")
+    effective = data.get("effective_simulation")
+    required = shipping_simulation_gates() + ("finite_hydrology", "weather_rain")
+    if not isinstance(effective, dict) or any(effective.get(key) is not True for key in required):
+        raise ValueError("capture did not activate the shipping simulation defaults")
     budget = data.get("sim_budget")
     if not isinstance(budget, dict) or budget.get("schema") != "luminumbra.sim_budget.v2":
         raise ValueError("missing or unsupported sim_budget schema")
@@ -250,7 +262,8 @@ def command(binary: Path, root: Path, artifact: Path, preset: str,
             seed: str, ticks: int, radius: int, collision_radius: int) -> list[str]:
     return [str(binary), "--root", str(root), "--smoke", "--no-audio", "--sim-budget",
             "--ecology-roster", "--planted-roster", "--preset", preset, "--seed", seed,
-            "--ticks", str(ticks), "--radius", str(radius), "--collision-radius",
+            "--ticks", str(ticks), "--autosave-ticks", "30", "--radius", str(radius),
+            "--collision-radius",
             str(collision_radius), "--artifact", str(artifact)]
 
 

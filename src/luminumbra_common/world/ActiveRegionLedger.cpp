@@ -311,70 +311,12 @@ void ActiveRegionLedger::visit(const Vec3& anchor,
             record.last_proximity = clock.tick();
         }
 }
-void ActiveRegionLedger::evict_idle(const WorldClock& clock,
-                                    const OwnershipProbe& owned,
-                                    const RecordObserver& observe) {
-    if (!owned) {
-        if (observe)
-            for (const auto& [key, record] : m_records) {
-                (void)key;
-                observe(record);
-            }
-        return;
-    }
-    const auto evict_records = [this, &clock, &owned](auto observe_record) {
-        std::set<RegionKey> pending_owners;
-        for (const auto& [delivery, activation] : m_pendingActivations) {
-            (void)delivery;
-            pending_owners.insert(activation.key);
-        }
-        for (auto it = m_records.begin(); it != m_records.end();) {
-            const auto& record = it->second;
-            const bool idle = clock.tick() >= record.last_proximity &&
-                              clock.tick() - record.last_proximity >= kIdleEvictionTicks;
-            if (!record.pinned && !record.edited && !record.populated && record.water_cursor == 0 &&
-                idle && !m_completedWork.contains(it->first) && !m_energyAges.contains(it->first) &&
-                !m_waterDebts.contains(it->first) && !m_activationIntents.contains(it->first) &&
-                !pending_owners.contains(it->first) && !owned(it->first)) {
-                m_legacyFrozenDigests.erase(it->first);
-                it = m_records.erase(it);
-            } else {
-                observe_record(record);
-                ++it;
-            }
-        }
-    };
-    if (observe)
-        evict_records([&observe](const ActiveRegionRecord& record) { observe(record); });
-    else
-        evict_records([](const ActiveRegionRecord&) {});
-}
-RegionSchedule ActiveRegionLedger::schedule(const WorldClock& clock,
-                                            std::optional<std::span<const Vec3>> replicated_anchors,
-                                            std::span<const RegionWork> work,
-                                            const DurableDigest& durable_digest,
-                                            const OwnershipProbe& owned,
-                                            const RecordObserver& observe) {
-    auto next = *this;
-    std::vector<RegionWork> combined(work.begin(), work.end());
-    // Restored clock gaps expire stale work only after this schedule commits successfully.
-    if (m_tick + 1 == clock.tick())
-        for (const auto& [key, total] : m_completedWork)
-            combined.push_back(RegionWork{key, total, 0, 0, 0});
-    auto result =
-        next.schedule_in_place(clock, replicated_anchors, combined, durable_digest, owned, observe);
-    next.m_completedWork.clear();
-    next.validate_envelope();
-    *this = std::move(next);
-    return result;
-}
 RegionSchedule
 ActiveRegionLedger::schedule_in_place(const WorldClock& clock,
                                       std::optional<std::span<const Vec3>> replicated_anchors,
                                       std::span<const RegionWork> work,
                                       const DurableDigest& durable_digest,
-                                      const OwnershipProbe& owned,
-                                      const RecordObserver& observe) {
+                                      RegionScheduleScratch& scratch) {
     // The ceiling, not the canonical tick, is the latest world time this ledger
     // knows about. After reconciling an interrupted save the canonical tick is
     // older, and scheduling at an already elapsed tick would re-run it.
@@ -383,7 +325,8 @@ ActiveRegionLedger::schedule_in_place(const WorldClock& clock,
     RegionSchedule result;
     result.tick = clock.tick();
     const auto all_anchors = replicated_anchors.value_or(std::span<const Vec3>{});
-    std::vector<Vec3> anchors;
+    auto& anchors = scratch.anchors;
+    anchors.clear();
     anchors.reserve(all_anchors.size());
     for (const auto& anchor : all_anchors) {
         if (valid_anchor(anchor))
@@ -391,7 +334,8 @@ ActiveRegionLedger::schedule_in_place(const WorldClock& clock,
         else
             ++result.rejected.anchors;
     }
-    std::vector<RegionWork> accepted_work;
+    auto& accepted_work = scratch.accepted;
+    accepted_work.clear();
     accepted_work.reserve(work.size());
     for (const auto& units : work) {
         if (m_records.contains(units.key))
@@ -405,11 +349,9 @@ ActiveRegionLedger::schedule_in_place(const WorldClock& clock,
         visit(anchor, clock, result.rejected);
 
     // std::map nodes are pointer stable and nothing is inserted after this point.
-    struct Row {
-        RegionKey key;
-        ActiveRegionRecord* record;
-    };
-    std::vector<Row> rows;
+    using Row = RegionScheduleScratch::Row;
+    auto& rows = scratch.rows;
+    rows.clear();
     rows.reserve(m_records.size());
     for (auto& [key, record] : m_records) {
         record.pressure = 0;
@@ -507,7 +449,9 @@ ActiveRegionLedger::schedule_in_place(const WorldClock& clock,
     }
     m_tick = clock.tick();
     m_headerTick = std::max(m_headerTick, clock.tick());
-    std::string trace = "region_schedule:v1:";
+    auto& trace = scratch.trace;
+    trace = "region_schedule:v1:";
+    trace.reserve(trace.size() + 24 + 10 * (rows.size() + result.transitions.size()) + 12);
     Append(trace, result.tick, 8);
     Append(trace, result.work, 8);
     Append(trace, rows.size(), 4);
@@ -532,11 +476,6 @@ ActiveRegionLedger::schedule_in_place(const WorldClock& clock,
         Append(trace, result.rejected.capacity, 4);
     }
     result.digest = Persistence::StableChecksum(trace);
-    // Retention runs after the digest so the digest and trace describe the pre-eviction state.
-    evict_idle(clock, owned, observe);
-    // Consumers may create authority and publish work only for surviving records.
-    std::erase_if(result.due, [this](RegionKey key) { return !m_records.contains(key); });
-    result.ledger_records = m_records.size();
     return result;
 }
 

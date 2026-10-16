@@ -183,12 +183,13 @@ inline float ComputeMoonIllumination(std::uint64_t seasonTick,
 // TIME AUTHORITY — time-of-day as a PURE FUNCTION of the
 // authoritative sim tick, retiring the wall-clock day-advance for live play. Integer
 // modulo first (exact), then one divide — the same pure-function-of-the-tick shape as
-// ComputeSeason. The default day length reproduces the legacy pacing EXACTLY:
-// m_dayDurationSeconds (60 s) at the canonical 30 Hz tick rate = 1800 ticks/day, so
-// the switch from wall-clock to tick authority is visually pacing-identical.
+// ComputeSeason. The default day length matches the world calendar's day
+// (216000 ticks = 2 h at the canonical 30 Hz tick rate) and m_dayDurationSeconds,
+// so the legacy clock, the wall-clock fallback and the calendar share one pacing.
 // Render-only: the tick flows sim -> render one way; TOD never feeds world_hash
 //.
-inline constexpr std::uint64_t kDefaultDayLengthTicks = 1800; // 60 s/day @ 30 Hz
+inline constexpr std::uint64_t kDefaultDayLengthTicks = world::WorldCalendar{}.dayLengthTicks;
+static_assert(kDefaultDayLengthTicks == 216000, "2 h/day @ 30 Hz");
 
 inline float TimeOfDayFromTick(std::uint64_t simTick, std::uint64_t dayLengthTicks) {
     if (dayLengthTicks == 0) {

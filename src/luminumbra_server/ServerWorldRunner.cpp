@@ -276,7 +276,7 @@ bool ServerWorldRunner::Boot() {
     // client derives from data/common/systems.json — sim.water_high_res is baked into
     // the hashed mm grids, so a mismatched host could never agree with its peers.
     // Resolved against the runner root with a CWD-relative fallback (the client's
-    // load path); a missing file is all-defaults = Medium = byte-identical.
+    // load path); a missing file uses the same shipping simulation defaults.
     {
         namespace fsys = std::filesystem;
         const fsys::path root =
@@ -286,13 +286,14 @@ bool ServerWorldRunner::Boot() {
         if (!fsys::exists(systems_json, systems_ec)) {
             systems_json = fsys::path("data") / "common" / "systems.json";
         }
-        const auto sys_cfg = luminumbra::core::SystemConfig::LoadFromFile(systems_json.string());
-        m_session->SetActiveRegionsEnabled(
-            sys_cfg.enabled(luminumbra::core::SysKey::SimActiveRegions));
+        const auto sys_cfg =
+            m_config.systems_config_override
+                ? *m_config.systems_config_override
+                : luminumbra::core::SystemConfig::LoadFromFile(systems_json.string());
+        m_session->ApplySystemConfig(sys_cfg);
         m_session->SetParkedBytesLimit(static_cast<std::size_t>(m_config.parked_bytes_limit));
-        m_session->SetWaterHighResEnabled(
-            sys_cfg.enabled(luminumbra::core::SysKey::SimWaterHighRes));
     }
+    m_session->SetFiniteHydrologyEnabled(m_config.finite_hydrology);
     // A headless host has no client asset manifest; simulation assets alone are
     // validated and every voxel field uses the authoritative CPU generator.
 
@@ -307,7 +308,11 @@ bool ServerWorldRunner::Boot() {
     if (!m_config.world_id.empty()) {
         world_ready = m_session->LoadWorld(m_config.world_id);
     } else {
-        world_ready = m_session->CreateWorld(m_config.world_name, m_config.seed, m_config.preset);
+        world_ready = m_session->CreateWorld(
+            m_config.world_name,
+            m_config.seed,
+            m_config.preset,
+            m_config.preset_json_override ? &*m_config.preset_json_override : nullptr);
     }
     if (!world_ready) {
         m_bootError = m_session->GetWorldOpenError();
@@ -841,7 +846,8 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
             (simulation_tick % autosave_interval) == 0) {
             // Synchronous host-thread save. Snapshot/shutdown run between RunFixedTicks calls.
             world::WorldStateSaveReport save_report;
-            if (m_session->SaveWorldState(&save_report)) {
+            if (m_session->SaveWorldState(&save_report,
+                                          world::WorldStateSaveScope::DurableChanges)) {
                 report.autosave_passes += 1;
                 if (save_report.saved && save_report.chunks_dirty > 0) {
                     report.autosave_writes += 1;
@@ -852,7 +858,8 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         // Byte-limit pressure: a dirty authoritative chunk could not be parked, so persist now.
         if (m_session->PersistenceSaveRequested()) {
             world::WorldStateSaveReport pressure_report;
-            if (m_session->SaveWorldState(&pressure_report)) {
+            if (m_session->SaveWorldState(&pressure_report,
+                                          world::WorldStateSaveScope::DurableChanges)) {
                 report.autosave_passes += 1;
                 if (pressure_report.saved && pressure_report.chunks_dirty > 0) {
                     report.autosave_writes += 1;
@@ -1248,18 +1255,21 @@ std::size_t ServerWorldRunner::CreatureCount() const {
         .size();
 }
 
-void ServerWorldRunner::Shutdown(world::WorldStateSaveReport* shutdown_save_report) {
+void ServerWorldRunner::Shutdown(world::WorldStateSaveReport* shutdown_save_report,
+                                 ShutdownDiagnostics* diagnostics) {
     if (m_shutdown) {
         return;
     }
     m_shutdown = true;
 
+    using Clock = std::chrono::steady_clock;
+    const auto save_start = diagnostics ? Clock::now() : Clock::time_point{};
     if (m_booted && m_session) {
         // The host tick loop has returned, so this cannot overlap autosave/snapshot.
         // Save on shutdown via WorldSaveService (incremental contract: a
         // never-edited world writes nothing and stays on the fresh path).
         world::WorldStateSaveReport save_report;
-        m_session->SaveWorldState(&save_report);
+        m_session->SaveWorldState(&save_report, world::WorldStateSaveScope::DurableChanges);
         if (shutdown_save_report) {
             *shutdown_save_report = save_report;
         }
@@ -1270,11 +1280,21 @@ void ServerWorldRunner::Shutdown(world::WorldStateSaveReport* shutdown_save_repo
             save_report.saved);
     }
 
+    const auto teardown_start = diagnostics ? Clock::now() : Clock::time_point{};
+    if (diagnostics) {
+        diagnostics->save_seconds =
+            std::chrono::duration<double>(teardown_start - save_start).count();
+        if (m_session)
+            diagnostics->cache = m_session->GetChunkValidationCacheStats();
+    }
     m_session.reset();
     if (m_booted) {
         m_jobSystem.shutdown();
     }
     m_booted = false;
+    if (diagnostics)
+        diagnostics->teardown_seconds =
+            std::chrono::duration<double>(Clock::now() - teardown_start).count();
 }
 
 } // namespace Luminumbra::Server

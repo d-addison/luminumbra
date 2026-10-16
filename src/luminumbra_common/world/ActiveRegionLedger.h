@@ -4,7 +4,9 @@
 #include "WorldClock.h"
 #include "luminumbra/core/Types.h"
 
+#include <algorithm>
 #include <compare>
+#include <concepts>
 #include <cstdint>
 #include <functional>
 #include <limits>
@@ -14,6 +16,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace Luminumbra::world {
@@ -99,6 +102,18 @@ struct RegionSchedule {
     bool operator==(const RegionSchedule&) const = default;
 };
 
+// Caller-owned derived storage. Never part of a ledger copy or canonical bytes.
+struct RegionScheduleScratch {
+    struct Row {
+        RegionKey key;
+        ActiveRegionRecord* record = nullptr;
+    };
+    std::vector<RegionWork> combined, accepted;
+    std::vector<Vec3> anchors;
+    std::vector<Row> rows;
+    std::string trace;
+};
+
 // Future systems explicitly opt in to this interface; no consumer is registered
 // here. Elapsed ticks are bounded by both the requested cap and one calendar day.
 struct RegionResumeWindow {
@@ -128,8 +143,6 @@ public:
     static constexpr const char* kContentVersionMessage =
         "Incompatible simulation content version: active-region identity is missing.";
     static constexpr const char* kContentMismatchMessage = "Simulation content identity mismatch.";
-    // Candidate retained rows are const; publish observations only after schedule returns.
-    using RecordObserver = std::function<void(const ActiveRegionRecord&)>;
     using DurableDigest = std::function<std::uint64_t(RegionKey)>;
     // Reports whether a region is still owned by a consumer, so it must not be evicted.
     using OwnershipProbe = std::function<bool(RegionKey)>;
@@ -258,7 +271,41 @@ public:
                             std::span<const RegionWork> work = {},
                             const DurableDigest& durable_digest = {},
                             const OwnershipProbe& owned = {},
-                            const RecordObserver& observe = {});
+                            RegionScheduleScratch* scratch = nullptr) {
+        return schedule(
+            clock, replicated_anchors, work, durable_digest, owned, NoRecordObserver{}, scratch);
+    }
+    // Candidate retained rows are const; publish observations only after schedule returns.
+    // Keep the observer concrete so retention has no per-record type-erased dispatch.
+    template<typename Observer>
+        requires std::invocable<Observer&, const ActiveRegionRecord&>
+    RegionSchedule schedule(const WorldClock& clock,
+                            std::optional<std::span<const Vec3>> replicated_anchors,
+                            std::span<const RegionWork> work,
+                            const DurableDigest& durable_digest,
+                            const OwnershipProbe& owned,
+                            Observer&& observe,
+                            RegionScheduleScratch* scratch = nullptr) {
+        RegionScheduleScratch local;
+        auto& storage = scratch ? *scratch : local;
+        auto next = *this;
+        auto& combined = storage.combined;
+        combined.assign(work.begin(), work.end());
+        // Restored clock gaps expire stale work only after this schedule commits successfully.
+        if (m_tick + 1 == clock.tick())
+            for (const auto& [key, total] : m_completedWork)
+                combined.push_back(RegionWork{key, total, 0, 0, 0});
+        auto result =
+            next.schedule_in_place(clock, replicated_anchors, combined, durable_digest, storage);
+        // Retention follows the digest so trace bytes still describe the pre-eviction state.
+        next.evict_idle(clock, owned, observe);
+        std::erase_if(result.due, [&next](RegionKey key) { return !next.m_records.contains(key); });
+        result.ledger_records = next.m_records.size();
+        next.m_completedWork.clear();
+        next.validate_envelope();
+        *this = std::move(next);
+        return result;
+    }
     [[nodiscard]] std::string canonical_bytes() const;
     [[nodiscard]] std::string encode() const;
     // Transactional decode: refuses without modifying out. No IO or migration.
@@ -269,13 +316,42 @@ private:
                                      std::optional<std::span<const Vec3>> replicated_anchors,
                                      std::span<const RegionWork> work,
                                      const DurableDigest& durable_digest,
-                                     const OwnershipProbe& owned,
-                                     const RecordObserver& observe);
-    // Drops idle, unowned, non-pinned, unedited, unpopulated records with no water cursor,
-    // water debt, completed work or energy age, including records due in the current schedule.
-    void evict_idle(const WorldClock& clock,
-                    const OwnershipProbe& owned,
-                    const RecordObserver& observe = {});
+                                     RegionScheduleScratch& scratch);
+    struct NoRecordObserver {
+        void operator()(const ActiveRegionRecord&) const {}
+    };
+    // Drops idle, unowned records only when no authority or pending work retains them.
+    template<typename Observer>
+    void evict_idle(const WorldClock& clock, const OwnershipProbe& owned, Observer& observe) {
+        if (!owned) {
+            if constexpr (!std::same_as<Observer, NoRecordObserver>)
+                for (const auto& [key, record] : m_records) {
+                    (void)key;
+                    observe(record);
+                }
+            return;
+        }
+        std::set<RegionKey> pending_owners;
+        for (const auto& [delivery, activation] : m_pendingActivations) {
+            (void)delivery;
+            pending_owners.insert(activation.key);
+        }
+        for (auto it = m_records.begin(); it != m_records.end();) {
+            const auto& record = it->second;
+            const bool idle = clock.tick() >= record.last_proximity &&
+                              clock.tick() - record.last_proximity >= kIdleEvictionTicks;
+            if (!record.pinned && !record.edited && !record.populated && record.water_cursor == 0 &&
+                idle && !m_completedWork.contains(it->first) && !m_energyAges.contains(it->first) &&
+                !m_waterDebts.contains(it->first) && !m_activationIntents.contains(it->first) &&
+                !pending_owners.contains(it->first) && !owned(it->first)) {
+                m_legacyFrozenDigests.erase(it->first);
+                it = m_records.erase(it);
+            } else {
+                observe(record);
+                ++it;
+            }
+        }
+    }
     ActiveRegionRecord& activate(RegionKey key, const WorldClock& clock);
     void visit(const Vec3& anchor, const WorldClock& clock, RegionRejections& rejected);
     void capture_activation(RegionKey key, bool creation, ActivationCause cause);
