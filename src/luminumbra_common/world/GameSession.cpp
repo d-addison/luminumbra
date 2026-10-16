@@ -43,6 +43,7 @@
 #include "../core/JobSystem.h"
 #include "../core/Log.h"
 #include "../fields/EnergyFieldState.h"
+#include "../persistence/CreatedWorldArtifacts.h"
 #include "../persistence/PlantPersistence.h"
 #include "../persistence/SavedWorldCatalog.h"
 #include "../persistence/WorldPersistenceRoundtrip.h" // Persistence::StableChecksum (ComputeScentSubHash)
@@ -1151,20 +1152,29 @@ bool GameSession::CreateWorld(const std::string& name,
                               const std::string& seed,
                               const std::string& worldType,
                               const std::string* customPresetJson) {
-    return CreateWorldInternal(name, seed, worldType, customPresetJson, false);
+    return CreateWorldInternal(name, seed, worldType, customPresetJson, false, nullptr);
+}
+
+bool GameSession::CreateWorld(const std::string& name,
+                              const std::string& seed,
+                              const std::string& worldType,
+                              const std::string* customPresetJson,
+                              Persistence::CreatedWorldArtifacts& artifacts) {
+    return CreateWorldInternal(name, seed, worldType, customPresetJson, false, &artifacts);
 }
 
 bool GameSession::CreateTransientWorld(const std::string& name,
                                        const std::string& seed,
                                        const std::string& worldType) {
-    return CreateWorldInternal(name, seed, worldType, nullptr, true);
+    return CreateWorldInternal(name, seed, worldType, nullptr, true, nullptr);
 }
 
 bool GameSession::CreateWorldInternal(const std::string& name,
                                       const std::string& seed,
                                       const std::string& worldType,
                                       const std::string* customPresetJson,
-                                      bool transient) {
+                                      bool transient,
+                                      Persistence::CreatedWorldArtifacts* artifacts) {
     m_worldOpenError.clear();
     if (!m_jobSystem) {
         LUMINUMBRA_CORE_ERROR("JobSystem not set before creating world");
@@ -1190,7 +1200,11 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     const auto worldPath = RuntimeRoot(m_rootPath) / "worlds/saves" / metadata.worldId;
     if (!transient) {
         try {
-            fs::create_directories(worldPath);
+            fs::create_directories(worldPath.parent_path());
+            if (artifacts)
+                artifacts->create_root(worldPath);
+            else if (!fs::create_directory(worldPath))
+                throw std::runtime_error("Refusing to reuse an existing world save directory.");
         } catch (const std::exception& e) {
             m_worldOpenError = "Could not create world save directory: " + std::string(e.what());
             LUMINUMBRA_CORE_ERROR("{}", m_worldOpenError);
@@ -1223,12 +1237,22 @@ bool GameSession::CreateWorldInternal(const std::string& name,
         // Materialize historical choices before upgrading the revision.
         resolved["schema_rev"] = kTerrainPresetSchemaRevision;
         const fs::path world_preset = worldPath / "preset.json";
-        std::ofstream pf(world_preset, std::ios::binary);
-        pf << resolved.dump(2) << '\n';
-        pf.close();
-        if (!pf.good()) {
-            m_worldOpenError = "Could not save this world's resolved preset.";
-            return false;
+        if (artifacts) {
+            try {
+                artifacts->write_file(world_preset, resolved.dump(2) + "\n");
+            } catch (const std::exception& error) {
+                m_worldOpenError =
+                    "Could not save this world's resolved preset: " + std::string(error.what());
+                return false;
+            }
+        } else {
+            std::ofstream pf(world_preset, std::ios::binary);
+            pf << resolved.dump(2) << '\n';
+            pf.close();
+            if (!pf.good()) {
+                m_worldOpenError = "Could not save this world's resolved preset.";
+                return false;
+            }
         }
         preset_to_load = world_preset;
     }
@@ -1333,7 +1357,7 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     // Save world metadata
     if (m_activeRegionsEnabled)
         RestoreWorldClock(m_worldClock);
-    if (!transient && !SaveWorld()) {
+    if (!transient && !SaveWorldMetadataTo(GetWorldSaveDir(), artifacts)) {
         m_worldOpenError = "Could not save the new world's metadata.";
         LUMINUMBRA_CORE_ERROR("{}", m_worldOpenError);
         return false;
@@ -1612,7 +1636,8 @@ bool GameSession::SaveWorld() {
     return SaveWorldMetadataTo(GetWorldSaveDir());
 }
 
-bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
+bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir,
+                                      Persistence::CreatedWorldArtifacts* artifacts) {
     if (!IsSimulationTickBoundary() || save_dir.empty() ||
         !ClockConfigurationCompatible(save_dir) || m_transientWorld || m_metadata.worldId.empty() ||
         !m_worldOpenError.empty())
@@ -1655,11 +1680,11 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
         // world creation/quit/shutdown and server autosave/snapshot/shutdown.
         // Do not dispatch this pair to workers; the writer asserts non-overlap.
         if (!Persistence::WorldSaveService::save_metadata_and_active_regions(
-                metadata_json.dump(4) + "\n", m_activeRegionLedger, save_dir))
+                metadata_json.dump(4) + "\n", m_activeRegionLedger, save_dir, nullptr, artifacts))
             return false;
         m_regionDurableDirectory = save_dir;
-    } else if (!Persistence::WorldSaveService::save_metadata(metadata_json.dump(4) + "\n",
-                                                             save_dir)) {
+    } else if (!Persistence::WorldSaveService::save_metadata(
+                   metadata_json.dump(4) + "\n", save_dir, nullptr, artifacts)) {
         return false;
     }
     return true;

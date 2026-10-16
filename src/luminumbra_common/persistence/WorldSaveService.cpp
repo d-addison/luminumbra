@@ -1,4 +1,5 @@
 #include "WorldSaveService.h"
+#include "CreatedWorldArtifacts.h"
 
 #include "../ecs/EntitySnapshot.h" //  plant entity snapshot persistence
 #include "WorldPersistenceRoundtrip.h"
@@ -237,7 +238,11 @@ std::filesystem::path NextRegionTempPath(const std::filesystem::path& destinatio
     return temp;
 }
 
-void RemoveTemporaryFile(const std::filesystem::path& path) {
+void RemoveTemporaryFile(const std::filesystem::path& path,
+                         CreatedWorldArtifacts* artifacts = nullptr) {
+    // Creation rollback owns these files and checks identity after writers drain.
+    if (artifacts)
+        return;
     std::error_code remove_error;
     std::filesystem::remove(path, remove_error);
 }
@@ -278,10 +283,13 @@ std::string WindowsErrorMessage(DWORD error) {
 bool WriteDurableRegionTemp(const std::filesystem::path& destination,
                             const std::string& bytes,
                             std::filesystem::path& out_temp,
-                            std::vector<std::string>* errors) {
+                            std::vector<std::string>* errors,
+                            CreatedWorldArtifacts* artifacts = nullptr) {
     HANDLE file = INVALID_HANDLE_VALUE;
     for (int attempt = 0; attempt < 128; ++attempt) {
         out_temp = NextRegionTempPath(destination);
+        if (artifacts)
+            artifacts->reserve_file(out_temp);
         file = ::CreateFileW(out_temp.c_str(),
                              GENERIC_WRITE,
                              0,
@@ -290,9 +298,18 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
                              FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH,
                              nullptr);
         if (file != INVALID_HANDLE_VALUE) {
+            try {
+                if (artifacts)
+                    artifacts->file_created(out_temp, file);
+            } catch (...) {
+                ::CloseHandle(file);
+                throw;
+            }
             break;
         }
         const DWORD error = ::GetLastError();
+        if (artifacts)
+            artifacts->abandon_file_reservation();
         if (error != ERROR_FILE_EXISTS && error != ERROR_ALREADY_EXISTS) {
             AddError(errors,
                      "failed to create temporary region file: " + out_temp.string() + ": " +
@@ -319,7 +336,7 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
                 error = ERROR_WRITE_FAULT;
             }
             ::CloseHandle(file);
-            RemoveTemporaryFile(out_temp);
+            RemoveTemporaryFile(out_temp, artifacts);
             AddError(errors,
                      "failed to write temporary region file: " + out_temp.string() + ": " +
                          WindowsErrorMessage(error));
@@ -331,7 +348,7 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
     if (!::FlushFileBuffers(file)) {
         const DWORD error = ::GetLastError();
         ::CloseHandle(file);
-        RemoveTemporaryFile(out_temp);
+        RemoveTemporaryFile(out_temp, artifacts);
         AddError(errors,
                  "failed to durably flush temporary region file: " + out_temp.string() + ": " +
                      WindowsErrorMessage(error));
@@ -339,7 +356,7 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
     }
     if (!::CloseHandle(file)) {
         const DWORD error = ::GetLastError();
-        RemoveTemporaryFile(out_temp);
+        RemoveTemporaryFile(out_temp, artifacts);
         AddError(errors,
                  "failed to close temporary region file: " + out_temp.string() + ": " +
                      WindowsErrorMessage(error));
@@ -394,16 +411,28 @@ std::string PosixErrorMessage(int error) {
 bool WriteDurableRegionTemp(const std::filesystem::path& destination,
                             const std::string& bytes,
                             std::filesystem::path& out_temp,
-                            std::vector<std::string>* errors) {
+                            std::vector<std::string>* errors,
+                            CreatedWorldArtifacts* artifacts = nullptr) {
     int file = -1;
     for (int attempt = 0; attempt < 128; ++attempt) {
         out_temp = NextRegionTempPath(destination);
+        if (artifacts)
+            artifacts->reserve_file(out_temp);
         file = ::open(out_temp.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0666);
         if (file >= 0) {
+            try {
+                if (artifacts)
+                    artifacts->file_created(out_temp, file);
+            } catch (...) {
+                ::close(file);
+                throw;
+            }
             break;
         }
-        if (errno != EEXIST) {
-            const int error = errno;
+        const int error = errno;
+        if (artifacts)
+            artifacts->abandon_file_reservation();
+        if (error != EEXIST) {
             AddError(errors,
                      "failed to create temporary region file: " + out_temp.string() + ": " +
                          PosixErrorMessage(error));
@@ -428,7 +457,7 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
         if (written <= 0) {
             const int error = written < 0 ? errno : EIO;
             ::close(file);
-            RemoveTemporaryFile(out_temp);
+            RemoveTemporaryFile(out_temp, artifacts);
             AddError(errors,
                      "failed to write temporary region file: " + out_temp.string() + ": " +
                          PosixErrorMessage(error));
@@ -443,7 +472,7 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
         }
         const int error = errno;
         ::close(file);
-        RemoveTemporaryFile(out_temp);
+        RemoveTemporaryFile(out_temp, artifacts);
         AddError(errors,
                  "failed to durably flush temporary region file: " + out_temp.string() + ": " +
                      PosixErrorMessage(error));
@@ -451,7 +480,7 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
     }
     if (::close(file) != 0) {
         const int error = errno;
-        RemoveTemporaryFile(out_temp);
+        RemoveTemporaryFile(out_temp, artifacts);
         AddError(errors,
                  "failed to close temporary region file: " + out_temp.string() + ": " +
                      PosixErrorMessage(error));
@@ -847,7 +876,8 @@ bool WriteWorldManifest(const std::filesystem::path& manifest_path,
 
 bool WorldSaveService::save_metadata(const std::string& bytes,
                                      const std::filesystem::path& save_dir,
-                                     std::vector<std::string>* errors) {
+                                     std::vector<std::string>* errors,
+                                     CreatedWorldArtifacts* artifacts) {
     if (!validate_save(save_dir, errors))
         return false;
     world::WorldClock clock;
@@ -871,16 +901,20 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
         return false;
     }
     const auto destination = save_dir / "world_info.json";
+    if (artifacts)
+        artifacts->reserve_file(destination);
     std::filesystem::path temp;
-    if (!WriteDurableRegionTemp(destination, bytes, temp, errors))
+    if (!WriteDurableRegionTemp(destination, bytes, temp, errors, artifacts))
         return false;
     if (InterruptBeforeRegionReplaceForTesting().exchange(false)) {
-        RemoveTemporaryFile(temp);
+        RemoveTemporaryFile(temp, artifacts);
         AddError(errors, "interrupted before metadata replacement");
         return false;
     }
+    if (artifacts)
+        artifacts->publishing_file(temp, destination);
     if (!ReplaceRegionFileAtomically(temp, destination, errors)) {
-        RemoveTemporaryFile(temp);
+        RemoveTemporaryFile(temp, artifacts);
         return false;
     }
     return true;
@@ -889,7 +923,8 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
 bool WorldSaveService::save_metadata_and_active_regions(const std::string& bytes,
                                                         world::ActiveRegionLedger& ledger,
                                                         const std::filesystem::path& save_dir,
-                                                        std::vector<std::string>* errors) {
+                                                        std::vector<std::string>* errors,
+                                                        CreatedWorldArtifacts* artifacts) {
 #ifndef NDEBUG
     const PairedSaveGuard guard;
 #endif
@@ -917,10 +952,10 @@ bool WorldSaveService::save_metadata_and_active_regions(const std::string& bytes
     // Each writer validates the installed pair. On rewind, replace the ledger
     // first so it cannot be newer than the clock, even if metadata writing fails.
     if (clock.tick() < previous_clock.tick())
-        return save_active_regions(ledger, clock, save_dir, errors) &&
-               save_metadata(bytes, save_dir, errors);
-    return save_metadata(bytes, save_dir, errors) &&
-           save_active_regions(ledger, clock, save_dir, errors);
+        return save_active_regions(ledger, clock, save_dir, errors, artifacts) &&
+               save_metadata(bytes, save_dir, errors, artifacts);
+    return save_metadata(bytes, save_dir, errors, artifacts) &&
+           save_active_regions(ledger, clock, save_dir, errors, artifacts);
 }
 
 bool WorldSaveService::read_clock_metadata(const std::filesystem::path& save_dir,
@@ -1068,7 +1103,8 @@ bool WorldSaveService::load_active_regions(world::ActiveRegionLedger& ledger,
 bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
                                            const world::WorldClock& clock,
                                            const std::filesystem::path& save_dir,
-                                           std::vector<std::string>* errors) {
+                                           std::vector<std::string>* errors,
+                                           CreatedWorldArtifacts* artifacts) {
     if (!validate_save(save_dir, errors))
         return false;
     // Keep an anchor-only ledger: it restores last walking feet before activation.
@@ -1087,22 +1123,31 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
     }
     try {
         const auto path = active_regions_path(save_dir);
-        std::filesystem::create_directories(path.parent_path());
+        if (artifacts) {
+            artifacts->create_directory(path.parent_path().parent_path());
+            artifacts->create_directory(path.parent_path());
+            artifacts->reserve_file(path);
+        } else {
+            std::filesystem::create_directories(path.parent_path());
+        }
         std::filesystem::path temp;
         // Keep abandoned staging files outside the strict region integrity scan.
         // The save root is on the save filesystem; replacement refuses EXDEV
         // if a separately mounted chunks/region/ directory violates that layout.
         const auto staging = save_dir / path.filename();
-        ReclaimAbandonedStaging(staging);
-        if (!WriteDurableRegionTemp(staging, bytes, temp, errors))
+        if (!artifacts)
+            ReclaimAbandonedStaging(staging);
+        if (!WriteDurableRegionTemp(staging, bytes, temp, errors, artifacts))
             return false;
         if (const auto hook = BeforeActiveRegionsReplaceForTesting(); hook && !hook()) {
-            RemoveTemporaryFile(temp);
+            RemoveTemporaryFile(temp, artifacts);
             AddError(errors, "interrupted before active-region ledger replacement");
             return false;
         }
+        if (artifacts)
+            artifacts->publishing_file(temp, path);
         if (!ReplaceRegionFileAtomically(temp, path, errors)) {
-            RemoveTemporaryFile(temp);
+            RemoveTemporaryFile(temp, artifacts);
             return false;
         }
         ledger = std::move(saved);

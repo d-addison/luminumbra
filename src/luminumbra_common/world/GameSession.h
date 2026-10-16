@@ -25,6 +25,10 @@
 #include <string>
 #include <vector>
 
+namespace Luminumbra::Persistence {
+class CreatedWorldArtifacts;
+}
+
 namespace luminumbra::fields {
 class EnergyFieldState; //  (): the stateful energy layer
 }
@@ -92,6 +96,12 @@ public:
                      const std::string& seed,
                      const std::string& worldType,
                      const std::string* customPresetJson);
+    // Staged entry retains the journal until activation or drained rollback.
+    bool CreateWorld(const std::string& name,
+                     const std::string& seed,
+                     const std::string& worldType,
+                     const std::string* customPresetJson,
+                     Persistence::CreatedWorldArtifacts& artifacts);
     // 3-arg overload (named-preset path). Kept as a distinct overload — not a default arg — so
     // translation units compiled against the prior header still resolve a real symbol.
     bool
@@ -471,7 +481,8 @@ private:
     bool m_transientWorld = false;
     void ResetWorldSystems();
     void RestoreWorldClock(const WorldClock& clock);
-    bool SaveWorldMetadataTo(const std::filesystem::path& save_dir);
+    bool SaveWorldMetadataTo(const std::filesystem::path& save_dir,
+                             Persistence::CreatedWorldArtifacts* artifacts = nullptr);
     bool ClockConfigurationCompatible(const std::filesystem::path& save_dir) const;
     WorldClock m_worldClock;
     void AttachRegionEditObserver();
@@ -498,7 +509,8 @@ private:
                              const std::string& seed,
                              const std::string& worldType,
                              const std::string* customPresetJson,
-                             bool transient);
+                             bool transient,
+                             Persistence::CreatedWorldArtifacts* artifacts);
     // Cap catch-up to 2 ticks/frame (default is 4) so a
     // single slow frame replays at most 2 sim ticks instead of 4 — halving the worst-case
     // TickSimulation spike. Scoped HERE (not the shared SimulationClock.h constant, which
