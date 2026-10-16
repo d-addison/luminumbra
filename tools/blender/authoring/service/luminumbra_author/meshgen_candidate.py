@@ -396,9 +396,10 @@ class CandidateStore:
             self._quota(sum(len(v) for v in members.values())+16384, effective['retention']['max_total_mib']*1024**2)
             if (area/'running.json').exists():
                 owner = _json(read_member(area, 'running.json', MAX_JSON))
-                context = owner.get('backend_context') or {}
-                require(not context or context['config_digest'] == provenance['config']['config_digest']
-                        and context['backend_id'] == provenance['backend']['id'], 'receipt.changed', 'Candidate backend/config identity differs from owner.')
+                if 'config_digest' in owner or 'backend_id' in owner:
+                    require(owner.get('config_digest') == provenance['config']['config_digest']
+                            and owner.get('backend_id') == provenance['backend']['id'],
+                            'receipt.changed', 'Candidate backend/config identity differs from owner.')
                 require(owner['request_id'] == provenance['request_id'] and owner['plan_digest'] == provenance['plan_sha256']
                         and owner['state'] == 'finishing' and (not owner.get('backend_job_id') or
                         owner.get('task_drained') is True and owner.get('backend_stopped') is True),

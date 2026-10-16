@@ -1,6 +1,7 @@
 """Deterministic Linux ownership races and cleanup budgets; no PID reuse needed."""
 import os
-from contextlib import ExitStack
+from contextlib import contextmanager, ExitStack
+import io
 from pathlib import Path
 import signal
 import subprocess
@@ -12,6 +13,81 @@ from unittest.mock import Mock, patch
 
 from luminumbra_author import process as owner
 from luminumbra_author.contracts import Refusal
+
+
+class WorkerCompletion(unittest.TestCase):
+    @contextmanager
+    def complete_during_poll(self, stdout, *, stderr=b'', ready_callback=None, require_ready=True, cancel=None):
+        process = Mock(returncode=0)
+        process.stdin, process.stdout, process.stderr = io.BytesIO(), io.BytesIO(stdout), io.BytesIO(stderr)
+        threads = []
+
+        class Thread:
+            def __init__(self, target, args=(), **kwargs):
+                self.target, self.args = target, args
+                self.join = Mock()
+
+            def start(self): threads.append(self)
+
+        def poll():
+            # Deliver all bytes at the process completion observation. Checking
+            # readiness and overflow before that observation loses these bytes.
+            for thread in threads: thread.target(*thread.args)
+            return 0
+
+        process.poll.side_effect = poll
+        tree = Mock()
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(owner, '_require_pidfds'))
+            stack.enter_context(patch.object(owner, '_owned_command', return_value=(['unused'], None, None)))
+            stack.enter_context(patch.object(owner.subprocess, 'Popen', return_value=process))
+            stack.enter_context(patch.object(owner, 'ProcessTree', return_value=tree))
+            stack.enter_context(patch.object(owner.threading, 'Thread', Thread))
+            try:
+                yield lambda: owner.run_owned(['unused'], b'{}\n', timeout=2, clock=lambda: 10,
+                    require_ready=require_ready, ready_callback=ready_callback, cancel=cancel)
+            finally:
+                self.assertTrue(all(stream.closed for stream in (process.stdin, process.stdout, process.stderr)))
+                tree.stop.assert_called_once()
+                tree.reap.assert_called_once()
+                tree.close.assert_called_once()
+                self.assertEqual(len(threads), 3)
+                for thread in threads: thread.join.assert_called_once_with(timeout=2)
+
+    def test_completion_rejects_stdout_overflow_after_last_loop_check(self):
+        for require_ready in (False, True):
+            with self.subTest(require_ready=require_ready):
+                response = b'READY\n'+b'x'*(1024**2+1-6)
+                with self.complete_during_poll(response, require_ready=require_ready) as run:
+                    with self.assertRaises(Refusal) as caught: run()
+                    self.assertEqual(caught.exception.finding['rule_id'], 'worker.limit')
+
+    def test_completion_delivers_pending_readiness_once_and_retains_bounded_output(self):
+        for marker in (b'READY\n', b'READY\r\n'):
+            with self.subTest(marker=marker):
+                callback = Mock()
+                payload = b'x'*(1024**2-len(marker))
+                log = b'y'*(owner.LOG_LIMIT+1)
+                with self.complete_during_poll(marker+payload, stderr=log, ready_callback=callback) as run:
+                    result = run()
+                    callback.assert_called_once_with()
+                    self.assertEqual(result['stdout'], payload)
+                    self.assertEqual(result['log'], log[:owner.LOG_LIMIT])
+                    self.assertEqual(result['log_bytes'], len(log))
+                    self.assertTrue(result['log_truncated'])
+                    self.assertEqual(result['returncode'], 0)
+
+    def test_completion_readiness_callback_cancellation_and_error_still_abort(self):
+        cancel = owner.threading.Event()
+        callback = Mock(side_effect=cancel.set)
+        with self.complete_during_poll(b'READY\nresult', ready_callback=callback, cancel=cancel) as run:
+            with self.assertRaises(Refusal) as caught: run()
+            self.assertEqual(caught.exception.finding['rule_id'], 'cancelled')
+            callback.assert_called_once_with()
+        callback = Mock(side_effect=RuntimeError('callback failure'))
+        with self.complete_during_poll(b'READY\nresult', ready_callback=callback) as run:
+            with self.assertRaisesRegex(RuntimeError, 'callback failure'): run()
+            callback.assert_called_once_with()
 
 
 class LinuxSupervisorStartup(unittest.TestCase):

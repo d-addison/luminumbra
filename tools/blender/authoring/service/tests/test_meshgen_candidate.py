@@ -350,6 +350,36 @@ class CandidateStorage(unittest.TestCase):
             publish.assert_not_called()
         self.assertFalse(self.store.paths(job)[0].exists())
 
+    def test_publication_binds_backend_and_config_to_ledger_owner(self):
+        from luminumbra_author.meshgen_candidate import CandidateLedger
+        provenance = bounded_json(self.members['provenance.json'])
+        effective = bounded_json(self.members['effective_config.json'])
+        backend = provenance['backend']['id']
+        for changed in (None, 'config_digest', 'backend_id'):
+            with self.subTest(changed=changed):
+                document = changed or 'matching'
+                ledger = CandidateLedger(self.project, document=document)
+                store = CandidateStore(self.project, document)
+                context = {'profile': provenance['config']['profile'], 'backend_id': backend,
+                    'backend_endpoint': effective['backends'][backend]['endpoint'],
+                    'config_digest': provenance['config']['config_digest'], 'overrides': None}
+                if changed == 'config_digest': context[changed] = digest(b'other config')
+                elif changed == 'backend_id': context[changed] = 'other_backend'
+                record = ledger.begin(provenance['request_id'], provenance['plan_sha256'], backend_context=context)
+                job = record['job_id']
+                ledger.update(job, state='finishing', task_drained=True, backend_stopped=True)
+                if changed is None:
+                    terminal = ledger.commit_success(job, lambda: store.publish(job, self.members))
+                    self.assertEqual(terminal['state'], 'succeeded')
+                    self.assertEqual(terminal['result'], store.receipt(job))
+                else:
+                    self.refusal('receipt.changed', lambda: ledger.commit_success(job, lambda: store.publish(job, self.members)))
+                    candidate, area = store.paths(job)
+                    self.assertFalse(candidate.exists())
+                    self.assertFalse((area/'receipt.prepared.json').exists())
+                    self.assertEqual(ledger.status(job)['state'], 'finishing')
+                    ledger.cancel(job)
+
     def test_committed_seal_wins_cancel_and_recovers_original_e3_terminal_replay(self):
         from luminumbra_author.meshgen_candidate import CandidateLedger
         ledger = CandidateLedger(self.project, owner_start=lambda pid: 'fixture-owner')
