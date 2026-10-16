@@ -63,6 +63,25 @@ class PortableMetrics(unittest.TestCase):
         effective = deepcopy(self.effective); effective['limits']['glb_accessor_elements'] = 50
         self.refusal('glb.limit', lambda: inspect_artifact(self.args['artifact'], effective))
 
+    def test_attribute_availability_uses_only_selected_scene_primitives_including_children(self):
+        baseline = inspect_artifact(self.args['artifact'], self.effective)
+        for missing in (('NORMAL',), ('TEXCOORD_0',), ('NORMAL', 'TEXCOORD_0')):
+            with self.subTest(missing=missing):
+                def change(doc, blob):
+                    unused = deepcopy(doc['meshes'][0])
+                    for name in missing: unused['primitives'][0]['attributes'].pop(name)
+                    doc['meshes'].append(unused)
+                    doc['nodes'] = [{'children': [1]}, {'mesh': 0}, {'children': [3]}, {'mesh': 1}]
+                    doc['scenes'] = [{'nodes': [0]}, {'nodes': [2]}]
+                data = self.mutate(change)
+                self.assertEqual(inspect_artifact(data, self.effective), baseline)
+                def select_missing(doc, blob):
+                    change(doc, blob); doc['scene'] = 1
+                observed = inspect_artifact(self.mutate(select_missing), self.effective)
+                self.assertEqual(observed['has_normals'], 'NORMAL' not in missing)
+                self.assertEqual(observed['has_uv'], 'TEXCOORD_0' not in missing)
+                self.assertEqual(observed['uv_overlap_zero'], None if 'TEXCOORD_0' in missing else True)
+
     def test_exact_uv_positive_area_overlap_shared_edges_and_bounded_adversarial_pairs(self):
         a = ((0, 0), (1, 0), (0, 1)); b = ((1, 0), (1, 1), (0, 1))
         self.assertTrue(uv_overlap([a, b]))

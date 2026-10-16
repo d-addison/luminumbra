@@ -94,6 +94,53 @@ class CandidateStorage(unittest.TestCase):
                 if mutation == 'manifest': (candidate/'manifest.json').write_bytes(b'{}')
                 self.refusal(rule, lambda: self.store.read(job))
 
+    def test_refused_over_budget_evidence_cannot_be_published_or_replayed(self):
+        project = project_fixture(); project['budgets'] = {'target_height_m': 1}
+        project['profiles']['rock']['budgets']['max_tris_final'] = 64
+        project['policy']['validation_profile'] = 'internal'
+        project['evaluation'] = {'waivable': ['final_tris_within_budget', 'uv_overlap_zero']}
+        project['finish'] = {'decimate': {'on_over_budget': 'accept_flagged'}}
+        args = arguments(); args['resolved'] = resolve(project, 'rock')
+        args['request']['accept_flagged'] = {'human_initiated': True, 'accepted_by': 'reviewer',
+            'accepted_at': '2026-10-13T12:00:00Z', 'gates': project['evaluation']['waivable']}
+        data = args['artifact']; size = struct.unpack_from('<I', data, 12)[0]
+        doc = bounded_json(data[20:20+size])
+        doc['nodes'] = [{'mesh': 0} for _ in range(7)]
+        doc['scenes'][0]['nodes'] = list(range(7))
+        args['artifact'] = glb(doc, data[28+size:])
+        evidence = build_evidence(**args)
+        self.store.publish(JOB, evidence)
+        self.assertEqual(self.store.read(JOB)['stats']['artifact']['triangles'], 84)
+
+        project['finish']['decimate']['on_over_budget'] = 'refuse'
+        args['resolved'] = resolved = resolve(project, 'rock')
+        self.refusal('finish.budget_exceeded', lambda: build_evidence(**args))
+        # Rebind all identities to an otherwise valid retained refusal policy.
+        evidence['effective_config.json'] = resolved.stored_bytes
+        provenance = bounded_json(evidence['provenance.json'])
+        provenance['config'].update(config_digest=resolved.config_digest,
+            effective_config_sha256=resolved.stored_sha256, sources=resolved.sources)
+        evidence['provenance.json'] = canonical(provenance)+b'\n'
+        with self.subTest(stage='publication'):
+            self.refusal('finish.budget_exceeded', lambda: self.store.publish(SECOND, evidence))
+            candidate, area = self.store.paths(SECOND)
+            self.assertFalse(candidate.exists())
+            self.assertFalse((area/'receipt.prepared.json').exists())
+
+        candidate, _ = self.store.paths(JOB)
+        for name, data in evidence.items(): (candidate/name).write_bytes(data)
+        manifest = bounded_json((candidate/'manifest.json').read_bytes())
+        manifest['members'] = {name: digest(data) for name, data in evidence.items()}
+        manifest_bytes = canonical(manifest)+b'\n'
+        (candidate/'manifest.json').write_bytes(manifest_bytes)
+        seal = digest(manifest_bytes)
+        (candidate/'candidate.sha256').write_bytes((seal+'\n').encode())
+        head_path = self.store._head_path(JOB)
+        head = bounded_json(head_path.read_bytes()); head['seal'] = seal
+        head_path.write_bytes(canonical(head)+b'\n')
+        with self.subTest(stage='replay'):
+            self.refusal('finish.budget_exceeded', lambda: CandidateStore(self.project).read(JOB))
+
     def test_escapes_symlinks_and_hardlinks_refused(self):
         for job in ('../escape', '/absolute', 'a:b', 'a/b'):
             self.refusal('candidate.path', lambda: self.store.read(job))
@@ -327,6 +374,48 @@ class CandidateStorage(unittest.TestCase):
                     self.assertLessEqual(sum(p.stat().st_size for p in store.root.parent.rglob('*') if p.is_file()), cap)
                 finally:
                     retained.unlink()
+
+    def test_attestation_recovery_rechecks_quota_after_another_document_consumes_space(self):
+        cap = 64*1024**2
+        project = project_fixture(); project['budgets'] = {'target_height_m': 1}
+        project['retention'] = {'max_total_mib': 64}
+        args = arguments(); args['resolved'] = resolve(project, 'rock')
+        evidence = build_evidence(**args)
+        other = CandidateStore(self.project, 'other_document')
+        other.publish(JOB, evidence)
+        retained = other.root/'retained.bin'
+        for stop_at in range(1, 8):
+            with self.subTest(stop_at=stop_at):
+                store = CandidateStore(self.project, 'recovery_'+str(stop_at))
+                store.publish(JOB, evidence)
+                write, write_head, count = store._write, store._write_head, 0
+                def interrupted(action, *values):
+                    nonlocal count
+                    action(*values); count += 1
+                    if count == stop_at: raise OSError('interrupted append')
+                with patch.object(store, '_write', side_effect=lambda *v: interrupted(write, *v)), \
+                        patch.object(store, '_write_head', side_effect=lambda *v: interrupted(write_head, *v)):
+                    with self.assertRaisesRegex(OSError, 'interrupted append'):
+                        store.append_attestation(JOB, 'metrics', '20261013T123456000001Z', {'detail': 'x'*65536})
+                # Charge the shared quota in a different document. One free
+                # byte cannot stage even a final head whose replacement shrinks.
+                used = sum(p.stat().st_size for p in store.root.parent.rglob('*') if p.is_file())
+                with retained.open('wb') as stream: stream.truncate(cap-used-1)
+                def snapshot():
+                    return {p.relative_to(store.root): p.read_bytes() if p.is_file() else None
+                            for p in store.root.rglob('*')}
+                before = snapshot()
+                fresh = CandidateStore(self.project, store.root.name)
+                try:
+                    self.refusal('candidate.limit', lambda: fresh.recover_attestation(JOB))
+                    self.assertEqual(snapshot(), before)
+                    self.assertLessEqual(sum(p.stat().st_size for p in store.root.parent.rglob('*') if p.is_file()), cap)
+                finally:
+                    retained.unlink()
+                recovered = fresh.recover_attestation(JOB)
+                self.assertEqual([entry['observation'] for entry in recovered], [{'detail': 'x'*65536}])
+                self.assertEqual(fresh.recover_attestation(JOB), recovered)
+                self.assertEqual(CandidateStore(self.project, store.root.name).attestations(JOB), recovered)
 
     def test_attested_policy_publishes_retains_replay_notes_and_refuses_tampering(self):
         note_bytes = b'Human reviewed revenue evidence.\n'

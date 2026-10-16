@@ -97,13 +97,6 @@ def build_evidence(*, request, resolved, card, result, image, raw_glb, artifact,
     guard = guard_decision(observations['guard'], effective['finish']['decimate'])
     gates = quality_gates(artifact_stats, guard, effective)
     failed = [k for k, passed in gates.items() if passed == 'fail']
-    if 'final_tris_within_budget' in failed:
-        acceptance = request.get('accept_flagged') or {}
-        require(effective['finish']['decimate']['on_over_budget'] == 'accept_flagged'
-                and effective['policy']['validation_profile'] == 'internal'
-                and 'final_tris_within_budget' in effective['evaluation']['waivable']
-                and 'final_tris_within_budget' in acceptance.get('gates', []),
-                'finish.budget_exceeded', 'Export exceeds the authoritative final triangle cap.')
     waived = accepted_waivers(failed, effective, request.get('accept_flagged'))
     eligibility = candidate_eligibility(licence, backend['kind'], backend_id, waived=waived)
     stats = {'protocol': 'luminumbra.meshgen.stats.v1', 'artifact': artifact_stats, 'guard': guard,

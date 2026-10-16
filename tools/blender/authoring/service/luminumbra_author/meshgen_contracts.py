@@ -180,6 +180,13 @@ def validate_acceptance(value):
 def accepted_waivers(failed_gates, effective, acceptance=None):
     """Closed waiver contract; on_over_budget alone grants no acceptance."""
     failed = set(failed_gates)
+    if 'final_tris_within_budget' in failed:
+        require(effective['finish']['decimate']['on_over_budget'] == 'accept_flagged'
+                and effective['policy']['validation_profile'] == 'internal'
+                and 'final_tris_within_budget' in effective['evaluation']['waivable']
+                and isinstance(acceptance, dict) and isinstance(acceptance.get('gates'), list)
+                and 'final_tris_within_budget' in acceptance['gates'],
+                'finish.budget_exceeded', 'Export exceeds the authoritative final triangle cap.')
     require(failed <= set(WAIVABLE_GATES), "finish.gate_failed", "An unconditional gate cannot be waived.")
     if not failed:
         return []

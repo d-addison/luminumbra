@@ -141,6 +141,53 @@ class WorkerCompletion(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'callback failure'): run()
             callback.assert_called_once_with()
 
+    def test_root_success_stops_descendants_holding_either_pipe_before_draining(self):
+        for platform in ('nt', 'posix'):
+            for held in ('stdout', 'stderr', 'both'):
+                with self.subTest(platform=platform, held=held), ExitStack() as stack:
+                    released = owner.threading.Event()
+                    waiting = []
+                    class Pipe(io.BytesIO):
+                        def __init__(self, data, inherited):
+                            super().__init__(data)
+                            self.inherited = inherited
+                            self.waiting = owner.threading.Event()
+                            if inherited: waiting.append(self.waiting)
+
+                        def read(self, size):
+                            data = super().read(size)
+                            if not data and self.inherited:
+                                self.waiting.set()
+                                if not released.wait(2): raise OSError('Descendant still holds pipe')
+                            return data
+
+                    process = Mock(returncode=0)
+                    process.stdin = io.BytesIO()
+                    process.stdout = Pipe(b'READY\r\nresponse\x00\xff', held in ('stdout', 'both'))
+                    process.stderr = Pipe(b'diagnostic\r\n', held in ('stderr', 'both'))
+                    def poll():
+                        for event in waiting: self.assertTrue(event.wait(1), 'Reader did not reach inherited pipe')
+                        return 0
+                    process.poll.side_effect = poll
+                    tree = Mock()
+                    tree.stop.side_effect = lambda **kwargs: released.set()
+                    stack.enter_context(patch.object(owner.os, 'name', platform))
+                    stack.enter_context(patch.object(owner.sys, 'platform', 'linux' if platform == 'posix' else 'win32'))
+                    stack.enter_context(patch.object(owner, '_require_pidfds'))
+                    stack.enter_context(patch.object(owner, '_owned_command', return_value=(['unused'], None, None)))
+                    stack.enter_context(patch.object(owner.subprocess, 'Popen', return_value=process))
+                    stack.enter_context(patch.object(owner, 'ProcessTree', return_value=tree))
+                    result = owner.run_owned(['unused'], b'{}\n', timeout=2)
+                    self.assertEqual(result['stdout'], b'response\x00\xff')
+                    self.assertEqual(result['log'], b'diagnostic\r\n')
+                    self.assertEqual(result['log_bytes'], len(b'diagnostic\r\n'))
+                    self.assertEqual(result['returncode'], 0)
+                    self.assertEqual(tree.stop.call_count, 2)
+                    self.assertEqual(tree.stop.call_args_list[0], tree.stop.call_args_list[1])
+                    tree.reap.assert_called_once_with(**tree.stop.call_args.kwargs)
+                    tree.close.assert_called_once_with()
+                    self.assertTrue(all(stream.closed for stream in (process.stdin, process.stdout, process.stderr)))
+
 
 class LinuxSupervisorStartup(unittest.TestCase):
     def setup_failure(self, stack, phase, failure):

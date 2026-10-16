@@ -99,11 +99,9 @@ def inspect_artifact(data, effective):
                     'glb.bounds', 'Attribute counts differ.')
             if normals is not None:
                 require(all(sum(v*v for v in normal) > 0 for normal in normals), 'finish.gate_failed', 'Zero-length exported normal.')
-            has_uv &= uv is not None
-            has_normals &= normals is not None
             indices = [v[0] for v in read(primitive['indices'], 1, True)] if 'indices' in primitive else list(range(len(points)))
             require(len(indices) % 3 == 0 and all(v < len(points) for v in indices), 'glb.bounds', 'Invalid triangle indices.')
-            parts.append((points, uv, indices))
+            parts.append((points, uv, normals is not None, indices))
         mesh_data.append(parts)
     nodes, scenes = collection('nodes'), collection('scenes')
     roots = select_glb_scene(doc, scenes).get('nodes', [])
@@ -123,7 +121,9 @@ def inspect_artifact(data, effective):
         if 'mesh' in node:
             mi = node['mesh']
             require(type(mi) is int and 0 <= mi < len(mesh_data), 'glb.bounds', 'Invalid mesh index.')
-            for points, uv, indices in mesh_data[mi]:
+            for points, uv, normal_available, indices in mesh_data[mi]:
+                has_uv &= uv is not None
+                has_normals &= normal_available
                 base = len(positions)
                 require(base+len(points) <= min(limits['glb_accessor_elements'], METRIC_ELEMENT_LIMIT) and len(faces)+len(indices)//3 <= effective['budgets']['max_tris_prefinish'],
                         'glb.limit', 'Instanced expansion cap exceeded.')

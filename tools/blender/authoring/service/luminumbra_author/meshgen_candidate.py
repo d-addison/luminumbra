@@ -705,8 +705,25 @@ class CandidateStore:
             self._write(area/'attestations.json', prepared_bytes, state)
             return self._recover_attestation(job)
 
+    def _attestation_recovery_quota(self, bundle, records):
+        # At most six records, each bounded by MAX_JSON. A replacement stages
+        # its full new bytes before releasing the previous file's storage.
+        sizes, growth, peak = {}, 0, 0
+        for path, data in records:
+            old_size = sizes.get(path)
+            if old_size is None:
+                self._safe(path)
+                old_size = os.lstat(path).st_size if path.exists() else 0
+            peak = max(peak, growth+len(data))
+            growth += len(data)-old_size
+            sizes[path] = len(data)
+        config = bundle['provenance']['config']
+        effective = verify_effective_config(bundle['members']['effective_config.json'],
+            config['effective_config_sha256'], config['config_digest'])
+        self._quota(peak, effective['retention']['max_total_mib']*1024**2)
+
     def _recover_attestation(self, job):
-        self.attestations(job)
+        bundle = self.read(job)
         state = self._attestation_state(job)
         candidate, area = self.paths(job)
         seal = read_member(candidate, 'candidate.sha256', 65).decode().strip()
@@ -714,21 +731,31 @@ class CandidateStore:
         if not state['pending']:
             if head['pending'] is None: return self.attestations(job)
             if state['entries'] and state['entries'][-1] == head['pending']:
-                head['pending'] = None; self._write_head(job, head)
+                head['pending'] = None
+                self._attestation_recovery_quota(bundle, [(self._head_path(job), _record_bytes(head))])
+                self._write_head(job, head)
                 return self.attestations(job)
             state['pending'] = head['pending']
         entry = state['pending']
-        for name, data in ((entry['name'], canonical(entry['payload'])+b'\n'), (entry['name']+'.sha256', (entry['sha256']+'\n').encode())):
-            if not (candidate/'attestations'/name).exists(): self._write(candidate/'attestations'/name, data, entry['payload'])
+        records = [(candidate/'attestations'/name, data) for name, data in
+                   ((entry['name'], _record_bytes(entry['payload'])),
+                    (entry['name']+'.sha256', (entry['sha256']+'\n').encode()))
+                   if not (candidate/'attestations'/name).exists()]
         history_name = f"attestation-history/{len(state['entries']):04d}.json"
-        history_data = canonical(entry)+b'\n'
+        history_data = _record_bytes(entry)
         if (area/history_name).exists():
             require(read_member(area, history_name, MAX_JSON) == history_data, 'attestation.changed', 'Committed history changed.')
-        else: self._write(area/history_name, history_data, entry)
+        else: records.append((area/history_name, history_data))
         head.update(count=len(state['entries'])+1, head=entry['sha256'])
+        committed = {'schema': state['schema'], 'entries': state['entries']+[entry], 'pending': None}
+        committed_bytes = _record_bytes(committed)
+        self._attestation_recovery_quota(bundle, records+[
+            (self._head_path(job), _record_bytes(head)),
+            (area/'attestations.json', committed_bytes),
+            (self._head_path(job), _record_bytes({**head, 'pending': None}))])
+        for path, data in records: self._write(path, data, entry)
         self._write_head(job, head)
-        state['entries'].append(entry); state['pending'] = None
-        self._write(area/'attestations.json', canonical(state)+b'\n', state)
+        self._write(area/'attestations.json', committed_bytes, committed)
         head['pending'] = None
         self._write_head(job, head)
         return self.attestations(job)

@@ -513,11 +513,12 @@ def run_owned(command, payload, *, timeout, readiness_timeout=5, cancel=None,
         for function, args in ((drain, (process.stdout, output, 0)), (drain, (process.stderr, log, 1)), (send, ())):
             thread = threading.Thread(target=function, args=args, daemon=True)
             thread.start(); threads.append(thread)
-        announced = False
+        announced = descendants_stopped = False
         while True:
             # Observe completion before checking reader state: once all I/O
             # is done, the final readiness and overflow flags are stable.
-            completed = process.poll() is not None and eof.is_set() and stderr_done.is_set() and writer_done.is_set()
+            exited = process.poll() is not None
+            completed = exited and eof.is_set() and stderr_done.is_set() and writer_done.is_set()
             if ready.is_set() and not announced:
                 announced = True
                 if ready_callback is not None: ready_callback()
@@ -528,7 +529,13 @@ def run_owned(command, payload, *, timeout, readiness_timeout=5, cancel=None,
                 raise Refusal('worker.readiness', 'Worker did not become ready before the deadline.')
             if overflow.is_set(): raise Refusal('worker.limit', 'Worker response exceeds its cap.')
             if completed: break
-            eof.wait(0.01) if process.poll() is not None else cancel.wait(0.01)
+            if exited and not descendants_stopped and tree is not None:
+                # Descendants may hold either pipe open after root success.
+                # Stop the Job/group before waiting for EOF, then drain all
+                # received bytes under the unchanged work deadline.
+                tree.stop(deadline=deadline, clock=clock)
+                descendants_stopped = True
+            cancel.wait(0.01)
         require(not require_ready or ready.is_set(), 'worker.readiness', 'Worker exited before readiness.')
         require(process.returncode == 0 and not failures, 'worker.failed', 'Worker exited unsuccessfully or closed stdin.')
         return {'stdout': bytes(output)[ready_size:] if require_ready else bytes(output), 'log': bytes(log),
