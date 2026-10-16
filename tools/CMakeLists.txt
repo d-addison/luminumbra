@@ -127,6 +127,46 @@ if(BUILD_TESTING)
         PROPERTIES LABELS "tools;persistence" TIMEOUT 300
                    ENVIRONMENT "LUMINUMBRA_RQ_CONTRACT_DIAGNOSTIC_DIR=${CMAKE_BINARY_DIR}/Testing/Temporary/rq-contract-failures")
     add_test(
+        NAME AcceptanceMatrixContract
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                AcceptanceMatrixTests ProductionAcceptanceMatrixTests
+                AcceptanceMatrixPublishabilityTests PublicTreeScanTests)
+    set_tests_properties(AcceptanceMatrixContract
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixPublicTreeContract1
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                AcceptanceMatrixPublicTreeTests.test_partition_0)
+    add_test(
+        NAME AcceptanceMatrixPublicTreeContract2
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                AcceptanceMatrixPublicTreeTests.test_partition_1)
+    add_test(
+        NAME AcceptanceMatrixPublicTreeContract3
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                AcceptanceMatrixPublicTreeTests.test_partition_2)
+    add_test(
+        NAME AcceptanceMatrixPublicTreeContract4
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                AcceptanceMatrixPublicTreeTests.test_partition_3)
+    set_tests_properties(
+        AcceptanceMatrixPublicTreeContract1 AcceptanceMatrixPublicTreeContract2
+        AcceptanceMatrixPublicTreeContract3 AcceptanceMatrixPublicTreeContract4
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixTree
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/ci/check_acceptance_matrix.py"
+                --root "${CMAKE_SOURCE_DIR}"
+                --check-doc "${CMAKE_SOURCE_DIR}/docs/acceptance-matrix.md")
+    set_tests_properties(AcceptanceMatrixTree
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
         NAME PublicAssetInventory
         COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/ci/validate_assets.py"
