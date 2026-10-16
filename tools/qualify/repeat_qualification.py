@@ -227,6 +227,10 @@ class FileStamp(NamedTuple):
     read_complete: bool = True
 
 
+class DumpWriterBusyError(OSError):
+    """An incompatible open handle requires another settle attempt."""
+
+
 def check_settle_deadline(deadline: float | None, clock: Callable[[], float]) -> None:
     if deadline is not None and clock() >= deadline:
         raise TimeoutError("dump settle deadline expired")
@@ -241,6 +245,7 @@ def snapshot_files(
     baseline: dict[str, FileStamp] | None = None,
     deadline: float | None = None,
     clock: Callable[[], float] | None = None,
+    writer_probe: Callable[[Path], bool] | None = None,
 ) -> dict[str, FileStamp]:
     """Record metadata and bounded range hashes; never omit an oversized file.
 
@@ -248,6 +253,8 @@ def snapshot_files(
     when they have no samples. Read those ranges first; their total already fits
     SNAPSHOT_TOTAL_READ_BYTES. Allocate the remainder in sorted path order.
     Deadline expiry always propagates, even when inspection errors are collected.
+    When given, writer_probe must succeed for the inventory before any reads;
+    busy handles are retryable, while probe errors and failed reads are fatal.
     """
     clock = clock or time.monotonic
     check_settle_deadline(deadline, clock)
@@ -305,6 +312,19 @@ def snapshot_files(
         if errors is None:
             raise
         traversal_error(exc)
+
+    if writer_probe is not None:
+        for source in result:
+            check_settle_deadline(deadline, clock)
+            try:
+                closed = writer_probe(Path(source))
+            except Exception as exc:
+                # Platform imports and ctypes calls can also fail without an
+                # OSError. Unknown completion must never become settled evidence.
+                raise OSError(f"{source} writer probe: {type(exc).__name__}: {exc}") from exc
+            check_settle_deadline(deadline, clock)
+            if not closed:
+                raise DumpWriterBusyError(f"{source}: dump writer still open")
 
     def pinned(path: str) -> bool:
         previous = baseline.get(path) if baseline is not None else None
@@ -1138,7 +1158,13 @@ def run_locked_iteration(
 
 
 def windows_dump_writer_closed(path: Path) -> bool:
-    """A no-sharing read open fails while any incompatible WER handle is open."""
+    """Allow compatible readers, but reject handles with write/delete access.
+
+    CreateFileW checks sharing in both directions: FILE_SHARE_READ permits an
+    existing reader that shares our GENERIC_READ access, while omitting
+    FILE_SHARE_WRITE rejects existing writers even if they permit read sharing.
+    Readers that deny read sharing remain incompatible and must also be deferred.
+    """
     import ctypes
     from ctypes import wintypes
 
@@ -1152,7 +1178,7 @@ def windows_dump_writer_closed(path: Path) -> bool:
     close_handle = kernel32.CloseHandle
     close_handle.argtypes = (wintypes.HANDLE,)
     close_handle.restype = wintypes.BOOL
-    handle = create_file(str(path), 0x80000000, 0, None, 3, 0x80, None)
+    handle = create_file(str(path), 0x80000000, 0x1, None, 3, 0x80, None)
     if handle == ctypes.c_void_p(-1).value:
         error = ctypes.get_last_error()
         if error in (32, 33):  # ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION
@@ -1166,7 +1192,8 @@ def windows_dump_writer_closed(path: Path) -> bool:
 def dump_writer_closed(path: Path) -> bool:
     """Probe WER handles on Windows, cooperative advisory writers on POSIX.
 
-    POSIX has no mandatory share-mode equivalent for arbitrary writers. WER
+    A shared advisory probe allows cooperative readers and rejects exclusive
+    writers. POSIX has no mandatory share-mode equivalent for arbitrary writers. WER
     collection uses Windows; the advisory fallback and injectable probe allow
     deterministic portable tests without claiming native WER qualification.
     """
@@ -1176,7 +1203,7 @@ def dump_writer_closed(path: Path) -> bool:
 
     with path.open("rb", buffering=0) as handle:
         try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(handle.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
         except OSError as exc:
             if exc.errno in (errno.EACCES, errno.EAGAIN):
                 return False
@@ -1212,26 +1239,20 @@ def wait_for_dump_settle(
         raise OSError("incomplete baseline dump fingerprint coverage")
     while True:
         check_settle_deadline(deadline, clock)
-        snapshot = snapshot_files(folder, False, skip, errors, baseline=before,
-                                  deadline=deadline, clock=clock)
-        if any(not stamp.read_complete for stamp in snapshot.values()):
-            raise OSError("incomplete dump fingerprint coverage")
+        try:
+            # Probe even baseline files before reading: Windows may defer their
+            # timestamps until close. Compatible readers do not block the probe.
+            snapshot = snapshot_files(folder, False, skip, errors, baseline=before,
+                                      deadline=deadline, clock=clock, writer_probe=probe)
+        except DumpWriterBusyError:
+            snapshot = {}
+            closed = False
+        else:
+            if any(not stamp.read_complete for stamp in snapshot.values()):
+                raise OSError("incomplete dump fingerprint coverage")
+            closed = True
         current = {path: snapshot[path] for path in changed_files(before, snapshot)}
-        closed = bool(current)
-        # Probe all observed dumps: an old file may still be open with its file
-        # times deferred, even when its sampled bytes match the baseline.
-        for path in snapshot:
-            check_settle_deadline(deadline, clock)
-            try:
-                if not probe(Path(path)):
-                    closed = False
-            except Exception as exc:
-                # Optional platform imports and ctypes API calls can fail with
-                # exceptions other than OSError. Completion is unknown after
-                # any probe failure; abort collection rather than retrying into
-                # apparent stability. The iteration records this OSError while
-                # preserving the child's classification and other artifacts.
-                raise OSError(f"{path} writer probe: {type(exc).__name__}: {exc}") from exc
+        closed = closed and bool(current)
         check_settle_deadline(deadline, clock)
         now = clock()
         if not closed:

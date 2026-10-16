@@ -1040,6 +1040,112 @@ class DumpSettleTest(unittest.TestCase):
             return rq.wait_for_dump_settle(self.folder, before or {}, timeout, errors)
 
     @contextmanager
+    def windows_handles(self, held):
+        """Inject Win32 bidirectional read/write sharing checks on any host."""
+        import ctypes
+
+        real_open = Path.open
+        reads = []
+
+        def conflict(path, access, sharing):
+            held_access, held_sharing = held.get(path, (0, 3))
+            # Map GENERIC_READ/GENERIC_WRITE to FILE_SHARE_READ/FILE_SHARE_WRITE.
+            requested = (access >> 31) | ((access >> 29) & 2)
+            existing = (held_access >> 31) | ((held_access >> 29) & 2)
+            return bool((requested & ~held_sharing) or (existing & ~sharing))
+
+        def create_file(path, access, sharing, *unused):
+            return ctypes.c_void_p(-1).value if conflict(Path(path), access, sharing) else 123
+
+        def read_open(path, mode="r", *args, **kwargs):
+            if mode == "rb":
+                reads.append((path, self.now))
+                if conflict(path, 0x80000000, 3):
+                    raise PermissionError(32, "sharing violation")
+            return real_open(path, mode, *args, **kwargs)
+
+        kernel = mock.Mock()
+        kernel.CreateFileW.side_effect = create_file
+        kernel.CloseHandle.return_value = True
+        with mock.patch.object(ctypes, "WinDLL", create=True, return_value=kernel), \
+                mock.patch.object(ctypes, "get_last_error", create=True, return_value=32), \
+                mock.patch.object(Path, "open", read_open):
+            yield kernel, reads
+
+    def test_writer_busy_then_closes_before_fingerprinting(self) -> None:
+        path = self.dump("writer.dmp", size=128)
+        # Writers may either deny reads or share them; both must prevent settling.
+        for sharing in (0, 1):
+            with self.subTest(sharing=sharing):
+                self.now = 0.0
+                held = {path: (0x40000000, sharing)}
+                errors = []
+
+                def close_writer(seconds):
+                    self.pause(seconds)
+                    if self.now >= 2.0:
+                        held.clear()
+
+                with self.windows_handles(held) as (kernel, reads):
+                    settled = self.settle(probe=rq.windows_dump_writer_closed,
+                                          pause=close_writer, errors=errors)
+                self.assertEqual(self.now, 3.0)
+                self.assertEqual(reads, [(path, 2.0), (path, 3.0)])
+                self.assertEqual(kernel.CreateFileW.call_count, 4)
+                self.assertEqual(kernel.CloseHandle.call_count, 2)
+                self.assertEqual(errors, [])
+                self.assertEqual(rq.changed_files({}, settled), [str(path)])
+                self.assertTrue(settled[str(path)].read_complete)
+
+    def test_writer_never_closes_without_attempting_fingerprint_reads(self) -> None:
+        path = self.dump("writer.dmp", size=128)
+        errors = []
+        with self.windows_handles({path: (0x40000000, 0)}) as (kernel, reads):
+            with self.assertRaisesRegex(TimeoutError, "settle deadline"):
+                self.settle(probe=rq.windows_dump_writer_closed, timeout=1.5, errors=errors)
+        self.assertEqual(self.now, 1.5)
+        self.assertEqual(reads, [])
+        self.assertEqual(errors, [])
+        self.assertEqual(kernel.CreateFileW.call_count, 2)
+        kernel.CloseHandle.assert_not_called()
+
+    def test_reader_holding_baseline_dump_allows_successful_probes(self) -> None:
+        old = self.dump("old.dmp", size=128)
+        before = rq.snapshot_files(self.folder, False)
+        with self.windows_handles({old: (0x80000000, 1)}) as (kernel, reads):
+            with self.assertRaisesRegex(TimeoutError, "settle deadline"):
+                self.settle(before=before, probe=rq.windows_dump_writer_closed, timeout=2.0)
+        # A baseline alone supplies no new evidence, but its reader never makes
+        # a probe busy or prevents its fingerprint from being checked.
+        self.assertEqual(reads, [(old, 0.0), (old, 1.0)])
+        self.assertEqual(kernel.CreateFileW.call_count, 2)
+        self.assertEqual(kernel.CloseHandle.call_count, 2)
+
+    def test_new_dump_appears_while_reader_holds_baseline_dump(self) -> None:
+        old = self.dump("old.dmp", size=128)
+        before = rq.snapshot_files(self.folder, False)
+        new = self.folder / "new.dmp"
+        errors = []
+
+        def appear(seconds):
+            self.pause(seconds)
+            if self.now == 1.0:
+                self.dump(new.name, size=128)
+
+        with self.windows_handles({old: (0x80000000, 1)}) as (kernel, reads):
+            settled = self.settle(before=before, probe=rq.windows_dump_writer_closed,
+                                  pause=appear, errors=errors)
+            copies = rq.copy_changed_files(self.folder, before, self.root / "collected", after=settled)
+        self.assertEqual(self.now, 2.0)
+        self.assertEqual(rq.changed_files(before, settled), [str(new)])
+        self.assertEqual(copies, [str(self.root / "collected" / new.name)])
+        self.assertEqual(Path(copies[0]).read_bytes(), new.read_bytes())
+        self.assertEqual(errors, [])
+        self.assertEqual([when for path, when in reads if path == old], [0.0, 1.0, 2.0])
+        self.assertEqual(kernel.CreateFileW.call_count, 5)
+        self.assertEqual(kernel.CloseHandle.call_count, 5)
+
+    @contextmanager
     def track_reads(self, on_read=None):
         real_open = Path.open
         reads: list[tuple[Path, int, int]] = []
@@ -1473,7 +1579,7 @@ class DumpSettleTest(unittest.TestCase):
         self.assertFalse(after[str(path)].read_complete)
         self.assertFalse(after[str(path)].fingerprints)
         self.assertEqual(rq.changed_files({}, after), [])
-        probe.assert_not_called()
+        probe.assert_called_once_with(path)
         self.assertEqual(self.now, 0.0)
 
     def test_failed_read_cannot_recover_into_settled_evidence(self) -> None:
@@ -1500,14 +1606,15 @@ class DumpSettleTest(unittest.TestCase):
         self.assertIn("read denied", errors[0])
         self.assertEqual(attempts, 1)
         self.assertEqual(self.now, 0.0)
-        probe.assert_not_called()
+        self.assertCountEqual(probe.call_args_list, [mock.call(old), mock.call(self.folder / "new.dmp")])
+        probe.reset_mock()
         failed_baseline = {str(old): before[str(old)]._replace(read_complete=False, fingerprints=())}
         with self.assertRaisesRegex(OSError, "incomplete baseline dump fingerprint coverage"):
             self.settle(before=failed_baseline, probe=probe)
         probe.assert_not_called()
 
     def test_deadline_expiry_during_fingerprint_read_stops_collection(self) -> None:
-        self.dump("slow.dmp")
+        path = self.dump("slow.dmp")
 
         def expire():
             self.now = 10.0
@@ -1518,7 +1625,7 @@ class DumpSettleTest(unittest.TestCase):
             with self.assertRaisesRegex(TimeoutError, "settle deadline"):
                 self.settle(probe=probe, timeout=10.0, errors=errors)
         self.assertEqual(len(reads), 1)
-        probe.assert_not_called()
+        probe.assert_called_once_with(path)
 
     def test_deadline_expiry_during_listing_stops_collection(self) -> None:
         path = self.dump("slow.dmp")
@@ -1608,6 +1715,9 @@ class DumpSettleTest(unittest.TestCase):
         )
         for label, module, error in cases:
             with self.subTest(label=label), mock.patch.dict(sys.modules, {"ctypes": module}):
+                # An earlier probe may have cached this submodule. Remove it so
+                # the missing import is independent of test execution order.
+                sys.modules.pop("ctypes.wintypes", None)
                 self.check_iteration_probe_failure(label, rq.windows_dump_writer_closed, error)
 
     def test_windows_api_failures_keep_completed_iteration(self) -> None:
@@ -1659,7 +1769,7 @@ class DumpSettleTest(unittest.TestCase):
 
         self.check_iteration_probe_failure("transient-error", probe, "OSError: probe unavailable")
 
-    def test_windows_probe_uses_exclusive_open_and_closes_handle(self) -> None:
+    def test_windows_probe_shares_reads_and_closes_handle(self) -> None:
         import ctypes
 
         kernel = mock.Mock()
@@ -1668,7 +1778,7 @@ class DumpSettleTest(unittest.TestCase):
         with mock.patch.object(ctypes, "WinDLL", create=True, return_value=kernel) as dll:
             self.assertTrue(rq.windows_dump_writer_closed(Path("dump.dmp")))
         dll.assert_called_once_with("kernel32", use_last_error=True)
-        kernel.CreateFileW.assert_called_once_with("dump.dmp", 0x80000000, 0, None, 3, 0x80, None)
+        kernel.CreateFileW.assert_called_once_with("dump.dmp", 0x80000000, 1, None, 3, 0x80, None)
         kernel.CloseHandle.assert_called_once_with(123)
         self.assertEqual(kernel.CreateFileW.restype, ctypes.c_void_p)
 
@@ -1683,6 +1793,29 @@ class DumpSettleTest(unittest.TestCase):
                         mock.patch.object(ctypes, "get_last_error", create=True, return_value=error):
                     self.assertFalse(rq.windows_dump_writer_closed(Path("dump.dmp")))
                 kernel.CloseHandle.assert_not_called()
+
+    def test_posix_probe_allows_shared_readers_and_rejects_exclusive_writers(self) -> None:
+        path = self.dump("advisory.dmp", size=128)
+        posix = ModuleType("os")
+        posix.name = "posix"
+        fcntl = ModuleType("fcntl")
+        fcntl.LOCK_SH, fcntl.LOCK_EX, fcntl.LOCK_NB, fcntl.LOCK_UN = 1, 2, 4, 8
+        fcntl.flock = mock.Mock()
+        with mock.patch.object(rq, "os", posix), mock.patch.dict(sys.modules, {"fcntl": fcntl}):
+            self.assertTrue(rq.dump_writer_closed(path))
+            descriptor = fcntl.flock.call_args_list[0].args[0]
+            self.assertEqual(fcntl.flock.call_args_list,
+                             [mock.call(descriptor, 5), mock.call(descriptor, 8)])
+            for error in (errno.EACCES, errno.EAGAIN, errno.EIO):
+                with self.subTest(error=error):
+                    fcntl.flock.reset_mock()
+                    fcntl.flock.side_effect = OSError(error, "lock unavailable")
+                    if error == errno.EIO:
+                        with self.assertRaisesRegex(OSError, "lock unavailable"):
+                            rq.dump_writer_closed(path)
+                    else:
+                        self.assertFalse(rq.dump_writer_closed(path))
+                    fcntl.flock.assert_called_once_with(mock.ANY, 5)
 
 
 class WindowsDumpLockTest(unittest.TestCase):
