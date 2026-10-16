@@ -65,14 +65,19 @@ ctest --preset release -L manual \
 
 ## Continuous integration
 
-The Linux/GCC, Diligent RHI, ASan, preview-frame and paired performance lanes use
-bounded ccache (250M each); UCRT64 and MSVC use 500M each. Qualification captures
-bypass the cache. Immutable save keys include the commit SHA; restores prefer the
-matching CMake configuration prefix where available, then the lane prefix. Caches
-are trimmed with `ccache --cleanup` before saving, and cache-save failures cannot
-fail a job. Main/devel native and performance caches together retain about 4.5 GB
-across both branches. These lanes use standard runners and the existing cache
-actions, with no paid cache service.
+The Linux/GCC and ASan lanes use bounded ccache at 400M and 600M respectively.
+Diligent RHI, preview-frame and paired performance use 250M each; UCRT64 and MSVC
+use 500M each. Qualification captures bypass the cache. Immutable save keys include
+the commit SHA; restores prefer the matching CMake configuration prefix where
+available, then the lane prefix. Caches are trimmed with `ccache --cleanup`
+before saving, and cache-save failures cannot
+fail a job. Starting from the measured 1.55 GB devel generation, the two cap
+increases add 0.15 + 0.35 GB and the newly seeded UCRT64 cache adds up to 0.5 GB:
+about 2.55 GB per branch, or 5.1 GB across main/devel, leaving about 0.9 GB of the
+6 GB budget for other caches. At all seven lanes' configured caps, one generation
+per branch totals 2.75 GB, or 5.5 GB across both branches, leaving 0.5 GB for
+package and analysis caches. These lanes use standard runners and the existing
+cache actions, with no paid cache service.
 
 All Actions caches, including performance, clang-tidy results, and MSYS2 packages,
 are saved only on `push` events to `refs/heads/main` or `refs/heads/devel`; PRs,
@@ -241,10 +246,14 @@ the devel ruleset sees the following conclusions on ready PRs:
 Python changes outside the covered allowlist use the C++ PR column. Failures still
 report failure; `success` here describes an executed check that passes. Devel push
 columns describe runs that reach execution, subject to batching below.
-Windows/UCRT64 retains its existing branch/manual and draft routing in addition
-to path gating. The paired server comparison retains its main-bound ready PR and
-eligible main/devel push routing, with the same path gate. Manual qualification
-captures retain full build/test coverage and cache bypass.
+Windows/UCRT64 runs on ready PRs into main/devel, pushes to main/devel, and manual
+qualification captures, with its existing draft and path gates. Ordinary manual
+dispatches retain their main-only route. Devel pushes seed
+the devel-scoped compiler cache restored by PRs into devel; the MSYS2 package cache
+also saves on these trusted pushes. It shares the workflow-wide devel push
+concurrency group described below. The paired server comparison retains its
+main-bound ready PR and eligible main/devel push routing, with the same path gate.
+Manual qualification captures retain full build/test coverage and cache bypass.
 
 Devel pushes share one concurrency group per workflow and ref with
 `cancel-in-progress: false`. A running run completes; GitHub's queue of one
@@ -267,7 +276,7 @@ The authoring workflow keeps its existing path triggers; UCRT attribution keeps
 its PR/manual-only triggers. Scheduled and release routing stays unchanged.
 
 All runners remain standard hosted runners; no paid actions, larger/GPU runners,
-repository visibility changes, or cache-cap increases are introduced.
+or repository visibility changes are introduced.
 
 CTest produces JUnit and runtime artifacts. CI verifies a minimum discovered-test
 count so an empty or severely truncated suite cannot report success. Once a

@@ -99,7 +99,7 @@ jobs:
     timeout-minutes: 60
     env:
       CCACHE_COMPILERCHECK: content
-      CCACHE_MAXSIZE: 250M
+      CCACHE_MAXSIZE: 400M
     outputs:
       route: ${{ steps.route.outputs.route }}
     steps:
@@ -672,12 +672,12 @@ jobs:
 
   windows-ucrt64:
     name: Windows / MSYS2 UCRT64
-    # Runs on ready pull requests (devel- and main-bound) and on pushes to main, so a
-    # MinGW/UCRT break shows on the PR that causes it instead of at promotion. It is
-    # not a required devel context, so it informs rather than blocks there; it stays
-    # required on main. Pushes to devel do not run it (the PR already did).
+    # Runs on ready pull requests (devel- and main-bound) and pushes to main/devel.
+    # Devel pushes seed the compiler cache restored by pull requests into devel.
+    # A MinGW/UCRT break shows on the PR that causes it instead of at promotion.
+    # It is not a required devel context; it stays required on main.
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'pull_request' || github.ref_name == 'main' || (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)) }}
+    if: ${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'pull_request' || github.ref_name == 'main' || (github.event_name == 'push' && github.ref == 'refs/heads/devel') || (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)) }}
     runs-on: windows-2025
     # Measured 40.6 min end to end on the first post-release promotion run
     # (previously two 135-minute cap kills, before the test streaming caps
