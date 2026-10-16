@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "core/Environment.h"
+#include "core/FilesystemPath.h"
 #include "core/JobSystem.h"
 #include "entt/entt.hpp"
 #include "nlohmann/json.hpp"
@@ -1724,7 +1725,8 @@ TEST(WorldGenLayerSnapshotTest, BatchedVertexMaterialsMatchPerVertexClassificati
     {
         TerrainGenParams biome_params = ShapingTestParams();
         biome_params.biomes_enabled = true;
-        biome_params.biome_table_path = (SourceRoot() / "data" / "common" / "biomes.json").string();
+        biome_params.biome_table_path = Luminumbra::Filesystem::GenericUtf8PathString(
+            SourceRoot() / "data" / "common" / "biomes.json");
         biome_params.temperature_frequency = 0.003f;
         biome_params.humidity_frequency = 0.004f;
         run(biome_params);
@@ -1782,7 +1784,7 @@ fs::path BiomeTablePath() {
 TerrainGenParams BiomeEnabledParams() {
     TerrainGenParams params = ShapingTestParams();
     params.biomes_enabled = true;
-    params.biome_table_path = BiomeTablePath().string();
+    params.biome_table_path = Luminumbra::Filesystem::GenericUtf8PathString(BiomeTablePath());
     params.temperature_frequency = 0.003f;
     params.humidity_frequency = 0.004f;
     return params;

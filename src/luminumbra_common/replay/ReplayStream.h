@@ -67,6 +67,8 @@ struct ReplayHeader {
     std::uint32_t collision_radius = 2;
     std::string engine_version; // luminumbra::core::GetEngineVersionString()
     std::string system_config_identity;
+    // Canonical resolved preset plus sorted data_root-relative dependency paths
+    // and exact-byte file hashes (TerrainPresetLoadResult::preset_content_hash).
     std::string preset_content_hash;
 };
 

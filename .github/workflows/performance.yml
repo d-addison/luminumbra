@@ -23,10 +23,21 @@ permissions:
   contents: read
 
 concurrency:
-  # Manual capture attempts have separate run groups. Every devel push has its
-  # own commit group, preserving complete verdicts for previously merged tips.
-  group: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture && format('{0}-qualification-{1}', github.workflow, github.run_id) || format('{0}-{1}{2}', github.workflow, github.ref, github.event_name == 'push' && github.ref == 'refs/heads/devel' && format('-{0}', github.sha) || '') }}
-  cancel-in-progress: ${{ !((github.event_name == 'workflow_dispatch' && inputs.qualification_capture) || (github.event_name == 'push' && github.ref == 'refs/heads/devel')) }}
+  # Devel pushes share one workflow/ref group: the running run finishes, while
+  # GitHub's queue of one replaces a pending run with the newest devel push.
+  # The push suffix separates this group from cancellable scheduled runs.
+  # The campaign freeze audit covers a devel push run that ended cancelled
+  # only with a newer devel push run of the same workflow path on a descendant
+  # SHA that is pending or successful, or whose first attempt failed but has
+  # an accepted automatic rerun request. Coverage is recomputed on every audit.
+  # If the covering run later fails, or itself ends cancelled without its own
+  # covering run, the freeze re-latches. Failed runs are never covered by
+  # descendants; only their own successful rerun or an explicit resolution
+  # can resolve them.
+  # Main pushes and manual runs (including qualification captures) have isolated
+  # groups and never cancel. PR ref grouping/cancellation stays unchanged.
+  group: ${{ github.event_name == 'workflow_dispatch' && format('{0}-manual-{1}', github.workflow, github.run_id) || github.event_name == 'push' && github.ref == 'refs/heads/main' && format('{0}-{1}-{2}-{3}', github.workflow, github.ref, github.sha, github.run_id) || github.event_name == 'push' && github.ref == 'refs/heads/devel' && format('{0}-{1}-push', github.workflow, github.ref) || format('{0}-{1}', github.workflow, github.ref) }}
+  cancel-in-progress: ${{ github.event_name != 'push' && github.event_name != 'workflow_dispatch' }}
 
 env:
   QUALIFICATION_WORKFLOW_SHA: ${{ github.workflow_sha }}
@@ -36,6 +47,49 @@ env:
   CCACHE_MAXSIZE: 250M
 
 jobs:
+  # Keep required job names and PR triggers unconditional. Heavy jobs need only
+  # this gate; their job-level if reports skipped, with no skipped-needs chain.
+  # !cancelled() and != false keep missing/failed classification on the build path.
+  changes:
+    name: Classify changed paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      needs_cpp: ${{ steps.paths.outputs.needs_cpp }}
+      needs_python: ${{ steps.paths.outputs.needs_python }}
+    steps:
+      - name: Check out repository and PR history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Classify merge-base diff (all lanes for non-PR events)
+        id: paths
+        env:
+          CI_EVENT: ${{ github.event_name }}
+          CI_REPOSITORY: ${{ github.repository }}
+          CI_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CI_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # Use already-fetched base history; never execute the PR's classifier.
+          # The explicit guard also handles bases predating the fail-open rules.
+          all_lanes() {
+            echo 'Classification uncertain or CI inputs changed; running all lanes'
+            printf 'needs_cpp=true\nneeds_python=true\n' >> "$GITHUB_OUTPUT"
+          }
+          if [ "$CI_EVENT" != pull_request ] || [ -z "$CI_BASE_SHA" ] ||
+             [ -z "$CI_HEAD_SHA" ] || [ "$CI_REPOSITORY" != "$CI_HEAD_REPOSITORY" ]; then
+            all_lanes
+          elif ! git diff --quiet "$CI_BASE_SHA" "$CI_HEAD_SHA" -- tools/ci/ .github/workflows/ scripts/; then
+            all_lanes
+          elif git show "$CI_BASE_SHA:tools/ci/ci_paths.py" > "$RUNNER_TEMP/trusted-ci-paths.py"; then
+            if ! python3 -I -B "$RUNNER_TEMP/trusted-ci-paths.py" classify --root "$GITHUB_WORKSPACE"; then
+              all_lanes
+            fi
+          else
+            all_lanes
+          fi
+
   runner-contract:
     name: Runner contract / ${{ matrix.os }}
     strategy:
@@ -53,6 +107,7 @@ jobs:
           python tools/perf/test_fixture_hash.py
           python tools/perf/test_prepare_server_comparison.py
           python tools/perf/test_render_contract.py
+          python tools/perf/test_capture_sim_budget.py
           python tools/perf/test_sim_budget_gate.py
           python tools/perf/test_check_residency.py
           python tools/perf/test_render_budget.py
@@ -63,7 +118,10 @@ jobs:
   # head; maintainers must wait for its required checks to pass before merging.
   preview-frame:
     name: Preview frame / software OpenGL
-    # Fail the existing check on drafts instead of producing a green job skip.
+    # Drafts, including missing metadata, must reach the guard even on docs-only
+    # changes. Ready PRs can still skip this lane through the path gate.
+    needs: changes
+    if: ${{ !cancelled() && ((github.event_name == 'pull_request' && toJSON(github.event.pull_request.draft) != 'false') || needs.changes.outputs.needs_cpp != 'false') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -149,7 +207,9 @@ jobs:
     # about 48 runner-minutes per push. The event.before guard stays because a
     # first push to a branch has no base to compare against; schedule and manual
     # events are excluded on purpose (they define no base/candidate SHA pair).
+    needs: changes
     if: >-
+      !cancelled() && needs.changes.outputs.needs_cpp != 'false' &&
       (github.event_name != 'pull_request' || github.event.pull_request.draft == false) &&
       ((github.event_name == 'pull_request' && github.base_ref == 'main') ||
       (github.event_name == 'push' &&
@@ -436,16 +496,18 @@ jobs:
             --output build/water-smoke-comparison.json
       - name: Capture simulation budget evidence
         timeout-minutes: 20
-        # limits are pinned by AC2p from the first devel push's sim-budget-evidence artifact; then this step switches to --require-complete
+        # Enforce complete pinned work limits for the head checkout's shipping defaults.
         run: |
           python3 head/tools/perf/capture_sim_budget.py \
             --binary build/head/bin/luminumbra_server_app \
-            --evidence-dir build/head/sim-budget-capture --ticks 600
+            --evidence-dir build/head/sim-budget-capture \
+            --ticks 600 --seed 1337 --radius 1 --collision-radius 1
           python3 head/tools/perf/propose_sim_budgets.py build/head/sim-budget-capture \
             --output build/head/sim-budget-proposal.json
           check_rc=0
           python3 head/tools/perf/check_sim_budgets.py build/head/sim-budget-capture \
-            head/tools/perf/baselines/sim-budgets.json --output build/head/sim-budget-check.json \
+            head/tools/perf/baselines/sim-budgets.json --require-complete \
+            --output build/head/sim-budget-check.json \
             || check_rc=$?
           python3 - <<'PY'
           import json
@@ -536,7 +598,8 @@ jobs:
     name: Simulation budget qualification / candidate
     # Independent candidate-only path: a missing/incompatible comparison base
     # never prevents AC2 source evidence. Routine paired routing stays above.
-    if: github.event_name == 'workflow_dispatch' && inputs.qualification_capture
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && github.event_name == 'workflow_dispatch' && inputs.qualification_capture }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:

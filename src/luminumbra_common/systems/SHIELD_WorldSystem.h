@@ -7,6 +7,7 @@
 #include "../world/FarLodStore.h"
 #include "../world/FarVolume.h"
 #include "../world/StructurePlacement.h"
+#include "../world/WorldgenDependencySnapshot.h"
 #include "FastNoise/FastNoise.h"
 #include "entt/entt.hpp"
 #include <array>
@@ -33,6 +34,9 @@ class PhysicsSystem;
 class WaterSystem;
 class WeatherSystem; // Weather-driven rain passthrough.
 struct TerrainGenParams {
+    // The preset load result carries its immutable inputs through parameter
+    // adoption (including GameSession create/open). Null retains direct loading.
+    std::shared_ptr<const World::WorldgenDependencySnapshot> worldgen_dependencies;
     float base_frequency = 0.01f;
     float base_amplitude = 50.0f;
     int octaves = 4;
@@ -111,6 +115,7 @@ struct TerrainGenParams {
     //  mixes the loaded table's content hash into ComputeTerrainParamsHash
     // so pristine far-LOD tiles self-invalidate on a table content change.
     bool biomes_enabled = true;
+    // UTF-8; decode explicitly before filesystem access.
     std::string biome_table_path = "data/common/biomes.json";
     float temperature_frequency = 0.005f;
     float humidity_frequency = 0.005f;
@@ -181,6 +186,7 @@ struct TerrainGenParams {
     // Absolute path to data/common/structures (resolved by the preset loader,
     // mirrors biome_table_path). The world system loads every <type>/ pool here
     // when structures_enabled.
+    // UTF-8; decode explicitly before filesystem access.
     std::string structures_data_dir = "data/common/structures";
 
     // hydraulic/thermal RELIEF. When enabled, a deterministic per-region
@@ -1280,13 +1286,13 @@ private:
     //  river noise (seed registry: +10). Only built when rivers enabled.
     FastNoise::SmartNode<FastNoise::Generator> m_river_generator;
 
-    //  biome table (game data). Loaded from m_params.biome_table_path on
-    // (re)init when biomes are enabled; empty/disabled otherwise.
+    // Biome table adopted from the preset snapshot on (re)init; direct callers
+    // without a snapshot load m_params.biome_table_path. Empty/disabled otherwise.
     World::BiomeTable m_biome_table;
     bool m_biomes_enabled = false;
 
-    //  structure template pools (game data). Loaded from
-    // m_params.structures_data_dir when structures are enabled; the combined
+    // Structure pools adopted from the snapshot, or loaded from
+    // m_params.structures_data_dir for direct callers; the combined
     // content hash is stamped into m_params.structures_content_hash so the far
     // cache key tracks template changes. Public accessors expose the deterministic
     // placement query so callers (and gates) can locate sites.

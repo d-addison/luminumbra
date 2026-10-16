@@ -29,6 +29,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <map>
 #include <vector>
 
@@ -77,7 +78,10 @@ public:
     // aligned with the grid the world actually streams on. Scales as
     // O(E + clients * (2r+1)^2) instead of the mm-radius path's O(clients * E), so a
     // 20+ player world with many entities stays cheap. Takes PRECEDENCE over the mm
-    // radius when enabled. The default is radius 3 chunks; chunk_radius < 0 disables chunk AOI.
+    // radius when enabled. Intentionally defaults to radius 3 chunks (previously disabled)
+    // to bound entity fanout and bandwidth. SetAoiChunkRadius(-1, CHUNK_SIZE_X * 1000)
+    // disables chunk AOI; any chunk_radius < 0 does so. With the default mm radius 0,
+    // this restores the full entity set; SetAoiRadiusMm(0) also clears a custom mm radius.
     void SetAoiChunkRadius(int chunk_radius, std::int64_t chunk_size_mm) {
         m_aoi_chunk_radius = chunk_radius;
         m_aoi_chunk_size_mm = chunk_size_mm;
@@ -87,8 +91,9 @@ public:
     }
 
     //  ack-driven DELTA-vs-acked snapshot compression (the bandwidth win
-    // that makes 20-32+ players affordable). Enabled by default. Explicit OFF selects full
-    // snapshots. When ON, each client is sent only what CHANGED since the snapshot it last ACKed
+    // that makes 20-32+ players affordable). Intentionally enabled by default (previously off)
+    // to reduce snapshot bandwidth. SetDeltaCompression(false) restores full snapshots.
+    // When ON, each client is sent only what CHANGED since the snapshot it last ACKed
     // (MakeSnapshotDelta), tagged with that baseline's seq (delta_from_seq); the client
     // reconstructs the full set (ApplySnapshotDelta). Loss-tolerant by construction: the server
     // keeps deltaing against the last-ACKED baseline until a newer ack arrives, so a dropped delta
@@ -128,6 +133,13 @@ public:
     // client's area of interest. (Delta-vs-acked compression is a later step.)
     void BroadcastSnapshot(std::uint64_t server_tick,
                            const std::vector<ReplEntityState>& entities,
+                           const std::vector<std::uint32_t>& removed_ids = {});
+
+    // Borrow a sized entity source for a synchronous broadcast. Each reader result
+    // must remain valid until the call returns, including during AOI gathering.
+    void BroadcastSnapshot(std::uint64_t server_tick,
+                           std::size_t entity_count,
+                           const std::function<const ReplEntityState&(std::size_t)>& read_entity,
                            const std::vector<std::uint32_t>& removed_ids = {});
 
     // Drains all currently-available inbound frames from every client: Usercmd
@@ -177,15 +189,20 @@ public:
     // policy is off or the client keeps up.
     [[nodiscard]] std::uint64_t ForcedKeyframes(std::uint32_t client_id) const;
 
-    // client ids the backpressure policy DISCONNECTED during the most recent
-    // BroadcastSnapshot (hopeless peers that never drained past the deadline). Consume this
+    // Client ids disconnected during the most recent
+    // BroadcastSnapshot (oversized frames, lost peers, or the backpressure deadline). Consume this
     // exactly like PruneDisconnectedClients' return -- despawn/free the player's server-side
-    // state. Empty when the policy is off or nobody was dropped.
+    // state. Empty when nobody was dropped.
     [[nodiscard]] const std::vector<std::uint32_t>& DisconnectedClientsLastBroadcast() const {
         return m_disconnected_this_broadcast;
     }
 
 private:
+    template<typename EntityRange>
+    void BroadcastSnapshotEntities(std::uint64_t server_tick,
+                                   const EntityRange& entities,
+                                   const std::vector<std::uint32_t>& removed_ids);
+
     struct ClientLink {
         ILockstepTransport* transport = nullptr;
         UsercmdReceiver inbound;
@@ -196,7 +213,7 @@ private:
         std::map<std::uint32_t, SnapshotMsg> sent_history;
         // per-client OUTBOUND send queue (backpressure substrate) + cumulative
         // telemetry. Each broadcast pushes the produced frame here, then flushes as far as the
-        // transport accepts; a would-block / gone peer leaves frames buffered, so outbound.size
+        // transport accepts; temporary backpressure leaves frames buffered, so outbound.size
         // is the live queue-depth metric. Bounded by kOutboundQueueCap: overflow drops the OLDEST
         // (snapshots are unreliable / most-recent-wins) and increments dropped_frames. A connected
         // loopback/TCP peer accepts immediately, so the queue drains fully and the wire bytes stay
@@ -215,8 +232,12 @@ private:
         bool backed_up = false;
         int over_hwm_streak = 0;
     };
+    static void DrainClientInbound(ClientLink& link);
+    static void CloseClientTransport(ClientLink& link);
     std::map<std::uint32_t, ClientLink> m_clients; // ordered -> deterministic broadcast order
-    bool m_delta = true;                // delta-vs-acked compression (off = full snapshots)
+    // Intentional bandwidth default: previously false; SetDeltaCompression(false)
+    // restores full snapshots.
+    bool m_delta = true;
     bool m_backpressure_policy = false; //  policy default-OFF (byte-identical fast path)
     static constexpr std::size_t kServerHistoryCap = 256; // bound per-client baseline retention
     static constexpr std::size_t kOutboundQueueCap =
@@ -233,8 +254,10 @@ private:
     static constexpr int kDisconnectDeadlineStreak =
         16; // backed-up broadcasts w/o draining -> disconnect
     std::vector<std::uint32_t> m_disconnected_this_broadcast; //  drops from the last broadcast
-    std::int64_t m_aoi_radius_mm = 0;                       // 0 = mm-radius AOI disabled (full set)
-    int m_aoi_chunk_radius = 3;                             // < 0 = chunk AOI disabled
+    std::int64_t m_aoi_radius_mm = 0; // 0 = mm-radius AOI disabled (full set)
+    // Intentional fanout default: previously -1 (disabled). Restore with
+    // SetAoiChunkRadius(-1, CHUNK_SIZE_X * 1000); SetAoiRadiusMm(0) clears any mm AOI.
+    int m_aoi_chunk_radius = 3;
     std::int64_t m_aoi_chunk_size_mm = CHUNK_SIZE_X * 1000; // chunk edge length (mm) for chunk AOI
     std::size_t m_last_broadcast_total_bytes = 0;
     std::size_t m_last_broadcast_max_client_bytes = 0;
@@ -254,6 +277,7 @@ public:
         , m_transport(transport) {}
 
     // Sends one tick of input upstream (records the latest tick for the ack).
+    // A terminal send failure applies available snapshots before closing the transport.
     void SendUsercmd(const UsercmdMsg& cmd);
 
     // Drains inbound snapshots (most-recent-wins) and sends an Ack for the newest.
@@ -270,8 +294,12 @@ public:
     }
 
 private:
+    bool DrainInbound();
+    void TransportDisconnected();
+
     std::uint32_t m_player_id = 0;
     ILockstepTransport* m_transport = nullptr;
+    bool m_disconnected = false;
     SnapshotReceiver m_receiver;
     std::uint64_t m_latest_usercmd_tick = 0;
     bool m_sent_any_usercmd = false;

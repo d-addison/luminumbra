@@ -4,12 +4,17 @@
 from __future__ import annotations
 
 import copy
+import contextlib
+import io
 import json
 from pathlib import Path
+import shlex
+import tempfile
 import unittest
 from unittest import mock
 
 import capture_sim_budget as capture
+from fixture_hash import fixture_hash
 
 
 def artifact() -> dict:
@@ -182,6 +187,54 @@ class SimBudgetCaptureTests(unittest.TestCase):
             self.assertEqual(argv[argv.index("--ticks") + 1], "3600")
             self.assertEqual(argv[argv.index("--autosave-ticks") + 1], "30")
             self.assertEqual(argv[argv.index("--seed") + 1], "1337")
+
+    def test_capture_uses_shipping_checkout_root_and_headless_fixture_hash(self) -> None:
+        root = Path(capture.__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as temporary:
+            binary = Path(temporary) / "server"
+            binary.write_bytes(b"synthetic server")
+            evidence = Path(temporary) / "evidence"
+            commands = []
+
+            def run(argv, **kwargs):
+                self.assertEqual(kwargs["cwd"], root)
+                self.assertTrue(kwargs["check"])
+                self.assertEqual(argv[argv.index("--root") + 1], str(root))
+                data = artifact()
+                data["preset"] = argv[argv.index("--preset") + 1]
+                Path(argv[argv.index("--artifact") + 1]).write_text(json.dumps(data), encoding="utf-8")
+                commands.append(argv)
+
+            with mock.patch("sys.argv", ["capture_sim_budget.py", "--binary", str(binary),
+                                         "--evidence-dir", str(evidence), "--ticks", "2"]), \
+                    mock.patch.object(capture.subprocess, "check_output", side_effect=["a" * 40, ""]), \
+                    mock.patch.object(capture.subprocess, "run", side_effect=run), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(capture.main(), 0)
+            manifest = json.loads((evidence / "capture.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["fixture_hash"], fixture_hash(root / "data/common",
+                                                                   scope="headless-server"))
+            self.assertEqual(manifest["seed"], "1337")
+            self.assertEqual(manifest["surface_radius"], 1)
+            self.assertEqual(manifest["collision_radius"], 1)
+            self.assertEqual([run["command"] for run in manifest["runs"]], commands)
+            self.assertEqual([run["preset"] for run in manifest["runs"]], list(capture.PRESETS))
+
+    def test_ci_shipping_capture_pins_workload_and_requires_complete_budgets(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        workflow = (root / ".github/workflows/performance.yml").read_text(encoding="utf-8")
+        step = workflow.split("- name: Capture simulation budget evidence\n", 1)[1].split(
+            "      - name:", 1)[0]
+        capture_command = shlex.split(step.split("run: |", 1)[1].split(
+            "python3 head/tools/perf/propose_sim_budgets.py", 1)[0].replace("\\\n", ""))
+        self.assertEqual(capture_command[:2], ["python3", "head/tools/perf/capture_sim_budget.py"])
+        for flag, value in (("--ticks", "600"), ("--seed", "1337"), ("--radius", "1"),
+                            ("--collision-radius", "1")):
+            self.assertEqual(capture_command[capture_command.index(flag) + 1], value)
+        check_command = shlex.split(step.split(
+            "python3 head/tools/perf/check_sim_budgets.py", 1)[1].split("||", 1)[0].replace("\\\n", ""))
+        self.assertIn("head/tools/perf/baselines/sim-budgets.json", check_command)
+        self.assertIn("--require-complete", check_command)
 
 
 if __name__ == "__main__":

@@ -200,6 +200,12 @@ mountains and archipelago, with the existing ecology and planted rosters and
 `--no-audio`. The script fails on missing binaries, existing output directories,
 server errors, invalid artifacts or vacuous plant/creature/scent/field work.
 It retains partial evidence on failure and does not publish a success manifest.
+The committed shipping-default work-budget baseline and CI capture use 600 ticks
+instead. To check or re-pin that baseline, pass `--ticks 600 --seed 1337 --radius 1
+--collision-radius 1` explicitly and follow the
+budget re-pin procedure in `tools/perf/sim-budgets.md`.
+Omitting `--ticks` keeps the general 3,600-tick capture default, which will not
+match the baseline's pinned tick identity.
 The smoke artifact's `effective_simulation` object reports every `sim.*` gate from
 the generated SystemConfig registry. Tuning-only gates report whether the config
 override is enabled; runtime gates report their applied session state, including

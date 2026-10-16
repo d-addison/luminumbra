@@ -71,6 +71,75 @@ rosters should not be confused with missing simulation wiring.
 
 ## Networking
 
+- **Networking backends are mutually exclusive.** Both options default to OFF.
+  Use `LUMINUMBRA_ENABLE_GNS=ON` with `LUMINUMBRA_ENABLE_STEAM=OFF` for local/LAN
+  play, and `LUMINUMBRA_ENABLE_STEAM=ON` with `LUMINUMBRA_ENABLE_GNS=OFF` for Steam
+  qualification. Enabling both is a configuration error; dual-backend support
+  is future work. Keep separate build directories for the two configurations.
+
+  GNS uses CONFIG packages for `Protobuf` and `absl`, preserving protobuf's
+  transitive dependencies and `PROTOBUF_USE_DLLS`. Linux distribution packages
+  without a protobuf CONFIG file use CMake's module fallback for the compile
+  probe. Both `USE_CRYPTO` and `USE_CRYPTO25519` default to `OpenSSL` as cache
+  values that can be overridden; the OpenSSL Crypto component is required.
+  The pinned GNS build requests a static library and disables shared libraries,
+  tests and examples through function-local options, preserving caller cache
+  settings. Its installed dependencies may still be shared libraries.
+
+  A single `luminumbra_network_runtime` prerequisite stages shared networking
+  DLLs beside the server, client and QA client executables, including when only
+  one application target is built. It runs once per requested build and
+  configuration, scans dependency DLLs with `file(GET_RUNTIME_DEPENDENCIES)` and
+  uses `copy_if_different`. Each application's post-build step scans its linked
+  executable and verifies the staged DLLs without copying shared files. These
+  scans require CMake 3.21 or newer for networked Windows builds; older versions
+  fail configuration. The union of all three targets' runtime DLL lists supplies
+  additional shared inputs; all inputs and resolved DLLs are deduplicated.
+  Visual Studio and Ninja
+  Multi-Config use separate input files, stamps and runtime directories per
+  configuration. Supplemental package DLLs and OpenSSL search roots select only
+  that configuration's imported files, respecting `MAP_IMPORTED_CONFIG_<CONFIG>`
+  (including configuration-independent mappings), then the exact configuration,
+  generic imported location and first available imported configuration when no
+  mapping is set. Linux Steam builds also stage their shared library once.
+  MSYS2 imported targets can omit DLL locations and transitive runtime imports,
+  so the GNS UCRT64 build also explicitly copies `libprotobuf.dll`,
+  `libutf8_validity.dll`, `zlib1.dll`, `libcrypto-3-x64.dll`, every
+  Abseil runtime DLL. Compiler runtime candidates follow the MinGW toolchain:
+  GCC seeds available `libgcc_s_seh-1.dll`, `libstdc++-6.dll` and
+  `libwinpthread-1.dll`; Clang seeds available `libc++.dll`, `libunwind.dll` and
+  `libwinpthread-1.dll`. Missing compiler runtimes fail the PE scan when imported,
+  rather than requiring GCC DLLs for Clang or an unused winpthreads DLL.
+  Package bin directories are derived from protobuf/absl
+  CONFIG locations and selected imported library locations, with the configured
+  compiler bin directory as fallback. Abseil discovery also searches package bin
+  directories for `libabsl_*.dll` without pinning a version, preferring imported DLL
+  locations when available. Missing Abseil DLLs or multiple distinct DLL
+  versions across that configuration's candidate directories fail configuration.
+  Search paths are derived from CONFIG and imported-target locations, including
+  OpenSSL targets without DLL metadata. Windows GNS builds without MinGW also seed OpenSSL
+  DLLs from those directories and package targets' imported DLL locations.
+  MSVC builds seed the compiler redistributables
+  (including available debug DLLs) without adding install rules.
+  Both backends search the configured compiler's bin directory, so Steam's
+  UCRT64 closure also includes `libstdc++-6.dll`,
+  `libgcc_s_seh-1.dll` and `libwinpthread-1.dll` when imported. Windows system
+  directories and `api-ms-*`/`ext-ms-*` imports are excluded. Unresolved non-system
+  imports fail staging or verification with their names and search directories.
+  DLLs with the same basename (case-insensitive on Windows) but different contents
+  fail with the configuration and conflicting paths before files are copied;
+  identical copies are accepted during staging and verification.
+  A resolved executable import missing from the shared staging inputs, or with
+  different staged contents, also fails verification and must be added to the
+  shared inputs before the build can succeed. Both MinGW backends explicitly
+  seed available compiler runtime DLLs, including when Steam itself does not
+  import them. Empty target DLL lists are valid; missing explicitly required
+  GNS DLLs fail configuration. Steam requires both
+  `steam_api64.lib` and `steam_api64.dll` in the SDK's `redistributable_bin/win64`
+  directory, which is also searched by the scan; its DLL is an additional input.
+  These staging steps cover build-tree previews; release packaging still needs
+  runtime deployment.
+
 - **The Steamworks transport is not compiled or exercised in CI.** The
   GameNetworkingSockets (GNS) CI lane builds `luminumbra_common`, including the
   shared `NetSocketsTransport`, against pinned redistributable upstream source.
@@ -89,7 +158,7 @@ rosters should not be confused with missing simulation wiring.
   path with the SDK root containing `public/steam/steam_api.h`):
 
   ```sh
-  cmake --preset debug -DLUMINUMBRA_ENABLE_STEAM=ON \
+  cmake --preset debug -DLUMINUMBRA_ENABLE_STEAM=ON -DLUMINUMBRA_ENABLE_GNS=OFF \
     -DLUMINUMBRA_STEAM_SDK_DIR=/absolute/path/to/steamworks/sdk
   cmake --build --preset debug
   ctest --preset debug --output-on-failure -LE manual

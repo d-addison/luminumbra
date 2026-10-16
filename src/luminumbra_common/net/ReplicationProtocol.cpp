@@ -1,5 +1,9 @@
 #include "ReplicationProtocol.h"
 
+#include <limits>
+
+#include "LockstepSession.h"
+
 namespace Luminumbra::Net {
 
 namespace {
@@ -34,13 +38,13 @@ public:
     explicit Cursor(const std::vector<std::uint8_t>& buf)
         : m_buf(buf) {}
     bool GetU8(std::uint8_t& v) {
-        if (m_pos + 1 > m_buf.size())
+        if (!Remaining(1))
             return false;
         v = m_buf[m_pos++];
         return true;
     }
     bool GetU16(std::uint16_t& v) {
-        if (m_pos + 2 > m_buf.size())
+        if (!Remaining(2))
             return false;
         v = static_cast<std::uint16_t>(m_buf[m_pos]) |
             (static_cast<std::uint16_t>(m_buf[m_pos + 1]) << 8);
@@ -48,7 +52,7 @@ public:
         return true;
     }
     bool GetU32(std::uint32_t& v) {
-        if (m_pos + 4 > m_buf.size())
+        if (!Remaining(4))
             return false;
         v = 0;
         for (int i = 0; i < 4; ++i)
@@ -57,7 +61,7 @@ public:
         return true;
     }
     bool GetU64(std::uint64_t& v) {
-        if (m_pos + 8 > m_buf.size())
+        if (!Remaining(8))
             return false;
         v = 0;
         for (int i = 0; i < 8; ++i)
@@ -79,8 +83,15 @@ public:
         v = static_cast<std::int32_t>(u);
         return true;
     }
+    std::size_t RemainingBytes() const {
+        return m_buf.size() - m_pos;
+    }
 
 private:
+    bool Remaining(std::size_t n) const {
+        return m_pos <= m_buf.size() && n <= m_buf.size() - m_pos;
+    }
+
     const std::vector<std::uint8_t>& m_buf;
     std::size_t m_pos = 0;
 };
@@ -103,7 +114,7 @@ bool OpenFrame(const std::vector<std::uint8_t>& frame, ReplMessageType expected,
         return false;
     if (static_cast<ReplMessageType>(type) != expected)
         return false;
-    return frame.size() == static_cast<std::size_t>(5) + len;
+    return frame.size() - 5 == static_cast<std::size_t>(len);
 }
 
 } // namespace
@@ -119,14 +130,39 @@ std::vector<std::uint8_t> EncodeUsercmd(const UsercmdMsg& m) {
     return Frame(ReplMessageType::Usercmd, p);
 }
 
-std::vector<std::uint8_t> EncodeSnapshot(const SnapshotMsg& m) {
+std::optional<std::size_t> SnapshotEncodedSize(std::size_t entity_count,
+                                               std::size_t removed_count) {
+    constexpr auto max = std::numeric_limits<std::size_t>::max();
+    std::size_t size = 37; // envelope, fixed header and both counts
+    if (entity_count > (max - size) / 23u)
+        return std::nullopt;
+    size += 23u * entity_count;
+    if (removed_count > (max - size) / 4u)
+        return std::nullopt;
+    return size + 4u * removed_count;
+}
+
+namespace {
+
+template<typename EntityReader>
+std::vector<std::uint8_t> EncodeSnapshotEntities(const SnapshotMsg& m,
+                                                 std::size_t entity_count,
+                                                 const EntityReader& read_entity) {
+    const auto frame_size = SnapshotEncodedSize(entity_count, m.removed_ids.size());
+    if (!frame_size || *frame_size > kMaxFramePayloadBytes)
+        return {};
+    // Reserve only after checking the complete size, before reading any entities.
     std::vector<std::uint8_t> p;
+    p.reserve(*frame_size);
+    PutU8(p, static_cast<std::uint8_t>(ReplMessageType::Snapshot));
+    PutU32(p, static_cast<std::uint32_t>(*frame_size - 5u));
     PutU64(p, m.server_tick);
     PutU32(p, m.snapshot_seq);
     PutU32(p, m.delta_from_seq);
     PutU64(p, m.acked_usercmd_tick);
-    PutU32(p, static_cast<std::uint32_t>(m.entities.size()));
-    for (const ReplEntityState& e : m.entities) {
+    PutU32(p, static_cast<std::uint32_t>(entity_count));
+    for (std::size_t i = 0; i < entity_count; ++i) {
+        const ReplEntityState& e = read_entity(i);
         PutU32(p, e.entity_id);
         PutI32(p, e.px_mm);
         PutI32(p, e.py_mm);
@@ -141,7 +177,28 @@ std::vector<std::uint8_t> EncodeSnapshot(const SnapshotMsg& m) {
     for (std::uint32_t id : m.removed_ids) {
         PutU32(p, id);
     }
-    return Frame(ReplMessageType::Snapshot, p);
+    return p;
+}
+
+} // namespace
+
+std::vector<std::uint8_t> EncodeSnapshot(const SnapshotMsg& m) {
+    return EncodeSnapshot(m, m.entities);
+}
+
+std::vector<std::uint8_t> EncodeSnapshot(const SnapshotMsg& m,
+                                         const std::vector<ReplEntityState>& entities) {
+    return EncodeSnapshotEntities(
+        m, entities.size(), [&](std::size_t index) -> const ReplEntityState& {
+            return entities[index];
+        });
+}
+
+std::vector<std::uint8_t>
+EncodeSnapshot(const SnapshotMsg& m,
+               std::size_t entity_count,
+               const std::function<ReplEntityState(std::size_t)>& read_entity) {
+    return EncodeSnapshotEntities(m, entity_count, read_entity);
 }
 
 std::vector<std::uint8_t> EncodeAck(const AckMsg& m) {
@@ -175,6 +232,11 @@ bool DecodeSnapshot(const std::vector<std::uint8_t>& frame, SnapshotMsg& out) {
         !c.GetU32(out.delta_from_seq) || !c.GetU64(out.acked_usercmd_tick) || !c.GetU32(count)) {
         return false;
     }
+    // An entity is 4 u32s, 2 u16s and 3 u8s on the wire (23 bytes),
+    // independent of struct padding. Check before reserve trusts the peer's count.
+    constexpr std::size_t kEncodedEntityBytes = 23;
+    if (count > c.RemainingBytes() / kEncodedEntityBytes)
+        return false;
     out.entities.clear();
     out.entities.reserve(count);
     for (std::uint32_t i = 0; i < count; ++i) {
@@ -188,6 +250,8 @@ bool DecodeSnapshot(const std::vector<std::uint8_t>& frame, SnapshotMsg& out) {
     }
     std::uint32_t removed_count = 0;
     if (!c.GetU32(removed_count))
+        return false;
+    if (removed_count > c.RemainingBytes() / sizeof(std::uint32_t))
         return false;
     out.removed_ids.clear();
     out.removed_ids.reserve(removed_count);

@@ -20,6 +20,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -111,7 +113,22 @@ struct AckMsg {
 
 // --- Encode: each returns a complete framed message [u8 type][u32 len][payload]. ---
 std::vector<std::uint8_t> EncodeUsercmd(const UsercmdMsg& m);
+// Exact complete-frame size, including the five-byte replication envelope.
+// Returns nullopt on arithmetic overflow; performs no allocation.
+std::optional<std::size_t> SnapshotEncodedSize(std::size_t entity_count, std::size_t removed_count);
+// Snapshot encoders return an empty vector if the complete frame would exceed
+// kMaxFramePayloadBytes or its size overflows. No frame storage is allocated.
 std::vector<std::uint8_t> EncodeSnapshot(const SnapshotMsg& m);
+// Uses the supplied entity set with m's header and removals, avoiding an owning
+// snapshot copy when a full broadcast can borrow the caller's entities.
+std::vector<std::uint8_t> EncodeSnapshot(const SnapshotMsg& m,
+                                         const std::vector<ReplEntityState>& entities);
+// Sized, generated entity sets can be encoded without an owning vector. The
+// reader is called only after the complete size has passed the transport limit.
+std::vector<std::uint8_t>
+EncodeSnapshot(const SnapshotMsg& m,
+               std::size_t entity_count,
+               const std::function<ReplEntityState(std::size_t)>& read_entity);
 std::vector<std::uint8_t> EncodeAck(const AckMsg& m);
 
 // --- Decode: false on a short/garbled frame (truncation-robust). ---
