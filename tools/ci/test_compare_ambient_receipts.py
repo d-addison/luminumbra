@@ -109,6 +109,51 @@ def add_probe(path, status="ran", level="256", carrier="output", outcome=None):
 
 
 class CompareAmbientReceiptsTests(unittest.TestCase):
+    def test_unevaluated_receipts_and_probes_are_rejected(self):
+        metadata = (("status", "disabled"), ("status", "notrun"),
+                    ("status", "skipped"), ("status", "unknown"), ("status", ""),
+                    ("result", "suppressed"), ("result", "skipped"),
+                    ("result", "unknown"), ("result", ""))
+        for field, value in metadata:
+            for source in ("attribute", "property", "output", "suite", "probe", "duplicate"):
+                with self.subTest(field=field, value=value, source=source), tempfile.TemporaryDirectory() as directory:
+                    line = receipt_line()
+                    lane = write_junit(directory, "a.xml", attribute_value=line)
+                    tree = ET.parse(lane)
+                    suite = tree.getroot().find("testsuite")
+                    case = suite.find("testcase")
+                    if source == "property":
+                        case.attrib.pop("ambient_receipt")
+                        ET.SubElement(case.find("properties"), "property", name="ambient_receipt", value=line)
+                    elif source in ("output", "suite"):
+                        case.attrib.pop("ambient_receipt")
+                        ET.SubElement(case if source == "output" else suite, "system-out").text = line
+                    elif source == "duplicate":
+                        # A good duplicate must never hide an unevaluated producer.
+                        case = ET.SubElement(suite, "testcase", name="Other", ambient_receipt=line)
+                    if source != "probe":
+                        case.set(field, value)
+                    tree.write(lane)
+                    if source == "probe":
+                        add_probe(lane)
+                        tree = ET.parse(lane)
+                        tree.getroot().find("testsuite")[-1].set(field, value)
+                        tree.write(lane)
+                    code, out, err = run_main([f"asan={lane}"] + (["--require-probe", "asan"] if source == "probe" else []))
+                    self.assertEqual(code, 2, out)
+                    self.assertIn("unevaluated", err)
+
+    def test_explicit_success_execution_metadata_is_accepted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            lane = write_junit(directory, "a.xml", attribute_value=receipt_line())
+            add_probe(lane)
+            tree = ET.parse(lane)
+            for case in tree.getroot().iter("testcase"):
+                case.attrib.update(status="run", result="completed")
+            tree.write(lane)
+            code, out, err = run_main([f"asan={lane}", "--require-probe", "asan"])
+            self.assertEqual(code, 0, err)
+
     def test_agree_when_lane_simd_levels_match(self):
         with tempfile.TemporaryDirectory() as directory:
             lane_a = write_junit(

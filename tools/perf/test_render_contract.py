@@ -272,24 +272,139 @@ class RenderContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'manifest does not match'):
             contract.validate(data, QUALIFIED)
 
-    def report_capture(self, position=None, yaw=0, pitch=0):
+    def report_capture(self, position=None, yaw=0, pitch=0, view=None, inverse=None):
         position = [0, 0, 0] if position is None else position
         data = {'schema': 'luminumbra.render_benchmark.v2', 'width': 1280, 'height': 720,
                 'camera': {'position': position, 'yaw': yaw, 'pitch': pitch, 'fov': 90},
                 'capture_context': {'time_of_day_at_report': 0, 'last_world_streaming_position': position},
                 'render_uniforms': {'matrix_layout': 'column_major', 'observation': 'report_time_shader_state'}}
-        right, up, forward = capture.camera_basis(yaw, pitch)
-        view = [right[0], up[0], -forward[0], 0, right[1], up[1], -forward[1], 0,
-                right[2], up[2], -forward[2], 0, -capture.dot(right, position),
-                -capture.dot(up, position), capture.dot(forward, position), 1]
+        if view is None:
+            view = capture.camera_view(position, yaw, pitch)
+        if inverse is None:
+            inverse = capture.inverse_view(view)
         projection = [0.0] * 16
         projection[0], projection[5] = 720 / 1280, 1.0
         for name in ('geometry', 'instanced_static_mesh'):
             data['render_uniforms'][name] = dict(available=True, view=view, projection=projection)
-        data['render_uniforms']['lighting'] = {'available': True, 'u_viewPos': position,
-            'u_inverseView': right + [0] + up + [0] + [-v for v in forward] + [0] + position + [1],
+        data['render_uniforms']['lighting'] = {'available': True, 'u_viewPos': list(position),
+            'u_inverseView': inverse,
             'u_sun.direction': [0, -1, 0]}
         return data
+
+    def test_float32_lookat_captures_across_world_envelope(self):
+        # Fixed column-major float32 lookAt/inverse oracles. In particular, the
+        # first view translation differs from the ideal double view by 0.329 m.
+        cases = (
+            ([4096, 0, 0], 30, 0,
+             [-0.4999197125, 0, -0.8660717607, 0, 0, 1.0000001192, 0, 0,
+              0.8660718799, 0, -0.4999196529, 0, 2047.671142578125, 0, 3547.429931640625, 1],
+             [-0.4999195933, 0, 0.8660717010, 0, 0, 0.9999998808, 0, 0,
+              -0.8660718203, 0, -0.4999196529, 0, 4096, 0, 0, 1]),
+            ([-4096, 0, 0], 30, 0,
+             [-0.5000253916, 0, -0.8660107851, 0, 0, 1, 0, 0,
+              0.8660107851, 0, -0.5000253916, 0, -2048.10400390625, 0, -3547.18017578125, 1],
+             [-0.5000253916, 0, 0.8660107851, 0, 0, 1, 0, 0,
+              -0.8660107851, 0, -0.5000253916, 0, -4096, 0, 0, 1]),
+            ([4096, -2048, 3072], 137, -27,
+             [-0.6820120215, -0.3320983350, 0.6515906453, 0,
+              -0.0000095367423, 0.8909573555, 0.4540871680, 0,
+              -0.7313410044, 0.3096866906, -0.6076467633, 0,
+              5040.181640625, 2233.59814453125, 127.74609375, 1],
+             [-0.6820119619, -0.0000095367413, -0.7313408852, 0,
+              -0.3320982456, 0.8909571171, 0.3096866310, 0,
+              0.6515904665, 0.4540870488, -0.6076466441, 0,
+              4096, -2048, 3072.000244140625, 1]),
+            ([-4096, 2048, -3072], -73, 36,
+             [0.9562970400, -0.1718684286, -0.2365527451, 0,
+              -0.0000191032868, 0.8089757562, -0.5878421068, 0,
+              0.2923969030, 0.5621562004, 0.7736178041, 0,
+              4815.27490234375, -633.8115234375, 2611.53466796875, 1],
+             [0.9562970400, -0.0000191032868, 0.2923969030, 0,
+              -0.1718684137, 0.8089756370, 0.5621561408, 0,
+              -0.2365527153, -0.5878420472, 0.7736177444, 0,
+              -4095.99951171875, 2048, -3072, 1]),
+            ([16384, -16384, 16384], -170, 63,
+             [0.1737524718, 0.8773065805, 0.4473737478, 0,
+              -0.00020758067, 0.4543163478, -0.8908402920, 0,
+              -0.9847894311, 0.1546928436, 0.0791206881, 0,
+              13284.62890625, -9464.759765625, -23221.611328125, 1],
+             [0.1737524271, -0.00020758805, -0.9847891331, 0,
+              0.8773064613, 0.4543162882, 0.1546928287, 0,
+              0.4473737776, -0.8908403516, 0.0791206956, 0,
+              16383.9970703125, -16383.99609375, 16383.998046875, 1]),
+            ([-16384, 16384, -16384], -153, -67,
+             [0.4541749656, -0.8203179836, 0.3475679159, 0,
+              0.00048756605, 0.3903545737, 0.9206644297, 0,
+              -0.8909124136, -0.4179732800, 0.1776892096, 0,
+              -7163.49462890625, -26683.734375, -6478.353515625, 1],
+             [0.4541749954, 0.00048755115, -0.8909124136, 0,
+              -0.8203181028, 0.3903546333, -0.4179733396, 0,
+              0.3475679755, 0.9206646085, 0.1776892543, 0,
+              -16384.00390625, 16384.001953125, -16384.001953125, 1]),
+            ([8, 80, 8], -90, 0,
+             [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -8, -80, -8, 1],
+             [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 8, 80, 8, 1]),
+            ([1.25, -2.5, 3.75], 23, -17,
+             [-0.3907312751, 0.2691296637, -0.8802831173, 0,
+              0.0000000447034836, 0.9563047886, 0.2923717499, 0,
+              0.9205048680, 0.1142387465, -0.3736581802, 0,
+              -2.9634790421, 1.6259546280, 3.2325015068, 1],
+             [-0.3907311857, 0.0000000596046306, 0.9205046892, 0,
+              0.2691296041, 0.9563045502, 0.1142387167, 0,
+              -0.8802829981, 0.2923717499, -0.3736580908, 0,
+              1.25, -2.4999997616, 3.7499995232, 1]),
+        )
+        for position, yaw, pitch, view, inverse in cases:
+            for schema in ('luminumbra.render_benchmark.v2', contract.SCHEMA):
+                with self.subTest(position=position, schema=schema):
+                    data = self.report_capture(position, yaw, pitch, list(view), list(inverse))
+                    if schema == contract.SCHEMA:
+                        data.update(artifact())
+                    for name in ('geometry', 'instanced_static_mesh'):
+                        data['render_uniforms'][name]['view'] = list(view)
+                    data['render_uniforms']['lighting']['u_inverseView'] = list(inverse)
+                    expected = args(position=position, yaw=yaw, pitch=pitch, tod=0,
+                                    qualified_renderer=QUALIFIED if schema == contract.SCHEMA else None)
+                    self.assertEqual(capture.validate(data, expected)['verdict'], 'PASS')
+                    for name, field, index in (('geometry', 'view', 12),
+                                               ('instanced_static_mesh', 'view', 0),
+                                               ('lighting', 'u_inverseView', 13),
+                                               ('lighting', 'u_viewPos', 0)):
+                        corrupted = copy.deepcopy(data)
+                        corrupted['render_uniforms'][name][field][index] += 0.003
+                        with self.subTest(program=name, field=field), self.assertRaises(ValueError):
+                            capture.validate(corrupted, expected)
+                    wrong = copy.deepcopy(data)
+                    wrong['camera']['yaw'] += 1
+                    with self.assertRaisesRegex(ValueError, 'reported/requested angles'):
+                        capture.validate(wrong, expected)
+                    # Even when the claimed and requested pose agree, old uniforms
+                    # must not qualify a capture from another camera.
+                    wrong['camera']['yaw'] = yaw + 1
+                    with self.assertRaises(ValueError):
+                        capture.validate(wrong, args(**dict(vars(expected), yaw=yaw + 1)))
+                    wrong = copy.deepcopy(data)
+                    shifted = [position[0] + 0.25, *position[1:]]
+                    wrong['camera']['position'] = shifted
+                    wrong['capture_context']['last_world_streaming_position'] = shifted
+                    wrong['render_uniforms']['lighting']['u_viewPos'] = shifted
+                    with self.assertRaises(ValueError):
+                        capture.validate(wrong, args(**dict(vars(expected), position=shifted)))
+
+    def test_ordinary_camera_poses_and_malformed_matrices(self):
+        for position, yaw, pitch in (([0, 0, 0], 0, 0), ([8, 80, 8], -90, 0),
+                                     ([1.25, -2.5, 3.75], 23, -17)):
+            data = self.report_capture(position, yaw, pitch)
+            expected = args(position=position, yaw=yaw, pitch=pitch, tod=0, qualified_renderer=None)
+            self.assertEqual(capture.validate(data, expected)['verdict'], 'PASS')
+            for name, field in (('geometry', 'view'), ('instanced_static_mesh', 'view'),
+                                ('lighting', 'u_inverseView')):
+                for malformed in (None, [], [0] * 15, [0] * 16, [True] * 16,
+                                  [float('nan')] * 16, [float('inf')] * 16):
+                    broken = copy.deepcopy(data)
+                    broken['render_uniforms'][name][field] = malformed
+                    with self.subTest(program=name, value=malformed), self.assertRaises(ValueError):
+                        capture.validate(broken, expected)
 
     def test_requested_pose_rounds_through_float32_without_relaxing_tolerance(self):
         position = [1000.1, -2000.2, 0.1]
@@ -310,6 +425,14 @@ class RenderContractTests(unittest.TestCase):
                         capture.validate(data, args(**dict(vars(expected), position=different)))
                 with self.assertRaisesRegex(ValueError, 'reported/requested angles'):
                     capture.validate(data, args(**dict(vars(expected), yaw=angles[0] + 0.01)))
+
+    def test_unresolvable_float32_camera_direction_is_rejected(self):
+        data = self.report_capture()
+        position = [contract.float32(1e20)] * 3
+        data['camera'].update(position=position, yaw=30, pitch=20)
+        data['capture_context']['last_world_streaming_position'] = position
+        with self.assertRaisesRegex(ValueError, 'zero direction'):
+            capture.validate(data, args(position=position, yaw=30, pitch=20, tod=0, qualified_renderer=None))
 
     def test_requested_pose_outside_float32_range_fails_closed(self):
         with self.assertRaisesRegex(ValueError, 'outside float32 range'):

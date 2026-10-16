@@ -75,6 +75,27 @@ class CaptureContract(unittest.TestCase):
             with self.subTest(arguments=arguments), patch.object(capture, "module", return_value=self.comparator()), self.assertRaises(ValueError):
                 capture.ambient_receipt(self.junit(**arguments))
 
+    def test_unevaluated_receipt_testcases_refuse(self):
+        for field, value in (("status", "disabled"), ("status", "notrun"),
+                             ("status", "skipped"), ("status", "unknown"), ("status", ""),
+                             ("result", "suppressed"), ("result", "skipped"),
+                             ("result", "unknown"), ("result", "")):
+            with self.subTest(field=field, value=value):
+                path = self.junit(property_too=True)
+                tree = ET.parse(path)
+                tree.getroot().find("testcase").set(field, value)
+                tree.write(path)
+                with patch.object(capture, "module", return_value=self.comparator()), self.assertRaisesRegex(ValueError, "unevaluated"):
+                    capture.ambient_receipt(path)
+
+    def test_explicit_success_status_and_result_are_accepted(self):
+        path = self.junit()
+        tree = ET.parse(path)
+        tree.getroot().find("testcase").attrib.update(status="run", result="completed")
+        tree.write(path)
+        with patch.object(capture, "module", return_value=self.comparator()):
+            self.assertEqual(capture.ambient_receipt(path), RECEIPT)
+
     def test_receipt_parser_error_and_changed_ceiling_refuse(self):
         parser = types.SimpleNamespace(_parse_receipt=lambda *_: {**RECEIPT, "ceiling": "1024"}, InputError=ValueError)
         with patch.object(capture, "module", return_value=parser), self.assertRaises(ValueError):

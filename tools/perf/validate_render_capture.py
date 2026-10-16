@@ -32,15 +32,28 @@ def close(actual, expected, tolerance, label):
     return error
 
 
+def f32(value):
+    return struct.unpack('<f', struct.pack('<f', value))[0]
+
+
 def unit(v):
-    length = math.sqrt(sum(x * x for x in v))
-    if length == 0:
+    # GLM's vec3 normalize multiplies by inversesqrt(dot(v, v)).
+    squared = dot32(v, v)
+    if squared == 0 or not math.isfinite(squared):
         raise ValueError('zero direction')
-    return [x / length for x in v]
+    reciprocal = f32(1 / f32(math.sqrt(squared)))
+    return [f32(x * reciprocal) for x in v]
 
 
 def cross(a, b):
-    return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]
+    return [f32(f32(a[1]*b[2])-f32(a[2]*b[1])),
+            f32(f32(a[2]*b[0])-f32(a[0]*b[2])),
+            f32(f32(a[0]*b[1])-f32(a[1]*b[0]))]
+
+
+def dot32(a, b):
+    products = [f32(x*y) for x, y in zip(a, b)]
+    return f32(f32(products[0] + products[1]) + products[2])
 
 
 def dot(a, b):
@@ -48,11 +61,61 @@ def dot(a, b):
 
 
 def camera_basis(yaw, pitch):
-    y, p = math.radians(yaw), math.radians(pitch)
-    forward = unit([math.cos(y)*math.cos(p), math.sin(p), math.sin(y)*math.cos(p)])
+    radians = f32(math.pi / 180)
+    y, p = f32(f32(yaw) * radians), f32(f32(pitch) * radians)
+    # Camera::updateCameraVectors stores the trigonometric products in vec3.
+    forward = unit([f32(math.cos(y)*math.cos(p)), f32(math.sin(p)),
+                    f32(math.sin(y)*math.cos(p))])
     right = unit(cross(forward, [0, 1, 0]))
     up = unit(cross(right, forward))
     return right, up, forward
+
+
+def camera_view(position, yaw, pitch):
+    """Camera::GetViewMatrix: float32 lookAt(Position, Position + Front, Up)."""
+    position = [f32(value) for value in position]
+    _, up, front = camera_basis(yaw, pitch)
+    center = [f32(eye + direction) for eye, direction in zip(position, front)]
+    forward = unit([f32(target - eye) for target, eye in zip(center, position)])
+    right = unit(cross(forward, up))
+    up = cross(right, forward)
+    return [right[0], up[0], -forward[0], 0, right[1], up[1], -forward[1], 0,
+            right[2], up[2], -forward[2], 0,
+            -dot32(right, position), -dot32(up, position), dot32(forward, position), 1]
+
+
+def inverse_view(view):
+    """Float32 GLM mat4 inverse, including its cofactor/determinant ordering."""
+    m = [view[index:index + 4] for index in range(0, 16, 4)]
+    def minor(a, b, row, other):
+        return f32(f32(m[a][row] * m[b][other]) - f32(m[b][row] * m[a][other]))
+
+    factors = []
+    for row, other in ((2, 3), (1, 3), (1, 2), (0, 3), (0, 2), (0, 1)):
+        value = minor(2, 3, row, other)
+        factors.append([value, value, minor(1, 3, row, other), minor(1, 2, row, other)])
+    vectors = [[m[1][row], m[0][row], m[0][row], m[0][row]] for row in range(4)]
+    inverse = []
+    for column, terms in enumerate((((1, 0), (2, 1), (3, 2)),
+                                    ((0, 0), (2, 3), (3, 4)),
+                                    ((0, 1), (1, 3), (3, 5)),
+                                    ((0, 2), (1, 4), (2, 5)))):
+        for row in range(4):
+            products = [f32(vectors[v][row] * factors[f][row]) for v, f in terms]
+            value = f32(f32(products[0] - products[1]) + products[2])
+            inverse.append(value if (row + column) % 2 == 0 else -value)
+    products = [f32(m[0][row] * inverse[row * 4]) for row in range(4)]
+    determinant = f32(f32(products[0] + products[1]) + f32(products[2] + products[3]))
+    if determinant == 0 or not math.isfinite(determinant):
+        raise ValueError('singular camera view')
+    reciprocal = f32(1 / determinant)
+    return [f32(value * reciprocal) for value in inverse]
+
+
+def view_position(view):
+    # This diagnostic is evaluated in Python precision for both matrices. A
+    # float32 lookAt is not perfectly orthogonal, so it need not recover Position.
+    return [-sum(view[col*4+row]*view[12+row] for row in range(3)) for col in range(3)]
 
 
 def validate_cell(data, args):
@@ -135,10 +198,9 @@ def validate(data, args):
     if programs['observation'] != 'report_time_shader_state':
         raise ValueError('unexpected observation semantics')
     position = camera['position']
-    right, up, forward = camera_basis(camera['yaw'], camera['pitch'])
-    expected_view = [right[0], up[0], -forward[0], 0, right[1], up[1], -forward[1], 0,
-                     right[2], up[2], -forward[2], 0, -dot(right,position), -dot(up,position), dot(forward,position), 1]
-    expected_inverse = right + [0] + up + [0] + [-x for x in forward] + [0] + position + [1]
+    expected_view = camera_view(position, camera['yaw'], camera['pitch'])
+    expected_inverse = inverse_view(expected_view)
+    expected_position = view_position(expected_view)
     errors = {}
     for name in ['geometry', 'instanced_static_mesh']:
         program = programs.get(name, {})
@@ -146,8 +208,8 @@ def validate(data, args):
             raise ValueError(f'{name}: program unavailable')
         errors[name + '_view'] = close(program.get('view'), expected_view, 0.002, name + ' view/report')
         view = program['view']
-        observed_position = [-sum(view[col*4+row]*view[12+row] for row in range(3)) for col in range(3)]
-        errors[name + '_position'] = close(observed_position, position, 0.002, name + ' observed position/report')
+        observed_position = view_position(view)
+        errors[name + '_position'] = close(observed_position, expected_position, 0.002, name + ' observed position/report')
         projection = finite_vector(program.get('projection'), 16, name + ' projection')
         if projection[0] <= 0 or projection[5] <= 0:
             raise ValueError(f'{name}: invalid perspective scale')

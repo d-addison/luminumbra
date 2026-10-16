@@ -5,8 +5,8 @@ Each input is a CTest/JUnit XML file written by the ambient determinism receipt 
 is the single distinct line starting with ``AMBIENT_RECEIPT `` found in a ``system-out`` element, in
 an ``ambient_receipt`` property (child element form), or in an ``ambient_receipt`` attribute on a
 ``testcase`` element (the form GoogleTest writes for RecordProperty). A receipt taken from a
-testcase that has a failure, error or skipped child is rejected. Every key in COMPARED_KEYS must be
-identical across labels. Each lane must report its expected ``active_simd`` level and a CPU
+testcase with unsuccessful execution metadata or a failure, error or skipped child is rejected.
+Every key in COMPARED_KEYS must be identical across labels. Each lane must report its expected ``active_simd`` level and a CPU
 capability that supports it; higher CPU capabilities are allowed under the dispatch ceiling.
 ``--require-probe`` also requires a successful unpadded guard-page probe from the named lane.
 
@@ -68,6 +68,14 @@ def _receipt_lines(text):
     }
 
 
+def _unsuccessful(case):
+    # JUnit may omit execution attributes; CTest and GoogleTest use run/completed.
+    # Explicit unevaluated or unknown metadata must never qualify evidence.
+    return (case.get("status") not in (None, "run")
+            or case.get("result") not in (None, "completed")
+            or any(child.tag in FAILURE_TAGS for child in case))
+
+
 def _receipts_by_source(root):
     """Return (every receipt line, receipt lines taken from a failed testcase)."""
     found = set()
@@ -81,11 +89,11 @@ def _receipts_by_source(root):
         for element in testcase.iter("system-out"):
             lines.update(_receipt_lines("".join(element.itertext())))
         found.update(lines)
-        if any(child.tag in FAILURE_TAGS for child in testcase):
+        if _unsuccessful(testcase):
             failed.update(lines)
             any_unsuccessful = True
     # Suite-level output cannot be attributed to a testcase, so it is trusted only when no
-    # testcase in the report failed, errored or was skipped.
+    # testcase in the report failed, errored or was skipped/unevaluated.
     unattributed = set()
     for element in root.iter("system-out"):
         unattributed.update(_receipt_lines("".join(element.itertext())))
@@ -155,8 +163,8 @@ def _validate_probe(label, root, receipt):
     if len(cases) != 1:
         raise InputError(f"{label}: requires exactly one {PROBE_TEST} testcase")
     case = cases[0]
-    if any(child.tag in FAILURE_TAGS for child in case):
-        raise InputError(f"{label}: unpadded guard-page probe failed, errored or was skipped")
+    if _unsuccessful(case):
+        raise InputError(f"{label}: unpadded guard-page probe failed, errored or was skipped/unevaluated")
     statuses = set()
     levels = set()
     for key, values in (("probe_status", statuses), ("noise_simd_level", levels)):
@@ -196,7 +204,7 @@ def _load_receipt(label, path, require_probe=False):
     line = next(iter(lines))
     if line in failed:
         raise InputError(
-            f"{label}: receipt in {path} comes from a failed, errored or skipped testcase"
+            f"{label}: receipt in {path} comes from a failed, errored or skipped/unevaluated testcase"
         )
     receipt = _parse_receipt(label, line)
     _validate_lane(label, receipt)
