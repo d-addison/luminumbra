@@ -1,9 +1,11 @@
 # Persistent installed viewport host
 
-This recovery checkpoint extends the [installed static renderer](static-preview.md)
-with an authenticated persistent host and an external Python mailbox broker.
-It does not yet provide a Blender `RenderEngine` adapter. Recovered source is
-qualified anew; historical execution receipts retain their original source identities.
+The [installed static renderer](static-preview.md), authenticated persistent host,
+external Python mailbox broker and Blender `RenderEngine` adapter are implemented
+in the v0.3.0 scope. See the [installed Blender viewport](blender-installed-viewport.md)
+for the adapter, native probes and historical GPU presentation evidence. Historical
+execution receipts retain their original source identities; they do not qualify
+the current release candidate or the complete editor workflow.
 
 The host accepts complete camera and instance state over inherited binary pipes.
 It loads a service-compiled immutable prefab generation, atomically replaces its
@@ -26,9 +28,11 @@ views, and symmetric perspective or axis-aligned orthographic projections with
 finite reversed depth. Orthographic offsets are preserved and the camera kind is
 derived from the supplied projection matrix. The wire extent is
 limited to 1280 by 720. Shifted perspective cameras, translucent materials,
-skinning, morph animation, Blender presentation and interactive overlays remain
-unfinished. The portable basis helpers and protocol fixtures do not qualify these
-features or a native GPU.
+skinning and morph animation remain unsupported by this static profile. The
+Blender adapter and scoped GPU presentation evidence are implemented; complete
+interactive-overlay and editor workflow qualification remains outstanding. The
+portable basis helpers and protocol fixtures do not qualify these features or a
+native GPU.
 
 ## Reproduce installed acceptance
 
@@ -83,5 +87,8 @@ Portable tests are `python3 -B -m unittest discover -s test/viewport` and
 `python3 -B -m unittest discover -s tools/blender/authoring/extension_tests
 -p test_viewport_math.py`. CTest registers `ViewportProtocol.*`,
 `StaticSceneTest.*` and the compiler-dependency source identity check. Native
-Windows installed-host acceptance, real Blender presentation, editor failure recovery,
-multi-viewport and production content remain required before this work can land.
+Windows installed-host/runtime closure, complete Blender editor workflow,
+failure recovery, multi-viewport, production content and end-to-end performance
+qualification remain outstanding where no complete packet exists. Native
+acceptance not produced for v0.3.0 is deferred to v0.3.1; the historical GPU
+presentation checkpoint does not close those obligations or grant visual approval.

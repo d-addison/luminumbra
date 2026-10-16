@@ -86,7 +86,7 @@ struct Cursor {
     bool ok = true;
 
     bool Remaining(std::size_t n) const {
-        return ok && pos + n <= size;
+        return ok && pos <= size && n <= size - pos;
     }
     bool GetU8(std::uint8_t& v) {
         if (!Remaining(1)) {
@@ -194,6 +194,8 @@ std::vector<std::uint8_t> EncodeHello(const HelloMsg& m) {
     PutU16(p, m.tick_rate_hz);
     PutU32(p, m.client_id);
     PutString(p, m.preset);
+    PutString(p, m.system_config_identity);
+    PutString(p, m.preset_content_hash);
     return Frame(MessageType::Hello, p);
 }
 
@@ -243,6 +245,9 @@ bool DecodeHello(const std::vector<std::uint8_t>& frame, HelloMsg& out) {
         return false;
     if (!c.GetU16(out.protocol_version))
         return false;
+    // Older Hellos have no resolved-preset identity and cannot be admitted safely.
+    if (out.protocol_version != kLockstepProtocolVersion)
+        return false;
     if (!c.GetU64(out.seed))
         return false;
     if (!c.GetU16(out.tick_rate_hz))
@@ -250,6 +255,10 @@ bool DecodeHello(const std::vector<std::uint8_t>& frame, HelloMsg& out) {
     if (!c.GetU32(out.client_id))
         return false;
     if (!c.GetString(out.preset))
+        return false;
+    if (!c.GetString(out.system_config_identity))
+        return false;
+    if (!c.GetString(out.preset_content_hash))
         return false;
     return c.ok;
 }
@@ -301,7 +310,7 @@ LoopbackTransport::LoopbackTransport(std::shared_ptr<Channel> tx, std::shared_pt
 
 bool LoopbackTransport::SendFrame(const std::vector<std::uint8_t>& frame,
                                   FrameDelivery /*delivery*/) {
-    if (!m_tx || !m_tx->open)
+    if (frame.size() > kMaxFramePayloadBytes || !m_tx || !m_tx->open)
         return false;
     m_tx->queue.push_back(frame);
     return true;
@@ -345,6 +354,56 @@ MakeLoopbackPair() {
 // stream, not message-oriented). TryReceiveFrame is non-blocking: it pumps whatever bytes
 // are available into m_recv_buffer and only returns a frame once a full one is present.
 
+namespace {
+constexpr std::size_t kTcpReadChunkBytes = 64u * 1024u;
+// Read-ahead shares the frame buffer's budget rather than extending its maximum.
+constexpr std::size_t kTcpReceiveBufferBytes = 4 + kMaxFramePayloadBytes;
+} // namespace
+
+std::size_t TcpTransport::ReceiveBytesNeeded() {
+    const std::size_t buffered = m_recv_buffer.size() - m_recv_offset;
+    if (buffered < 4)
+        return 4 - buffered;
+    std::uint32_t frame_len = 0;
+    for (int i = 0; i < 4; ++i)
+        frame_len |= static_cast<std::uint32_t>(m_recv_buffer[m_recv_offset + i]) << (8 * i);
+    if (frame_len > kMaxFramePayloadBytes) {
+        Close();
+        return 0;
+    }
+    const std::size_t buffered_payload = buffered - 4;
+    // Read-ahead may contain later frames. Inspect only the front prefix so valid
+    // frames are delivered before an oversized prefix or EOF behind them.
+    if (buffered_payload >= frame_len)
+        return 0;
+    return static_cast<std::size_t>(frame_len) - buffered_payload;
+}
+
+void TcpTransport::CompactReceiveBuffer() {
+    if (m_recv_offset == 0)
+        return;
+    // Complete buffered frames drain by advancing the cursor. Only move the trailing
+    // incomplete frame when another socket read is needed, at most once per read batch.
+    m_recv_buffer.erase(m_recv_buffer.begin(), m_recv_buffer.begin() + m_recv_offset);
+    m_recv_offset = 0;
+}
+
+bool TcpTransport::IsPeerConnected() const {
+    if (m_socket < 0)
+        return false;
+    if (!m_peer_closed)
+        return true;
+    // A send failure must not hide complete frames already received. A partial
+    // tail or an oversized prefix cannot keep a closed peer connected.
+    const std::size_t buffered = m_recv_buffer.size() - m_recv_offset;
+    if (buffered < 4)
+        return false;
+    std::uint32_t frame_len = 0;
+    for (int i = 0; i < 4; ++i)
+        frame_len |= static_cast<std::uint32_t>(m_recv_buffer[m_recv_offset + i]) << (8 * i);
+    return frame_len <= kMaxFramePayloadBytes && frame_len <= buffered - 4;
+}
+
 #ifdef _WIN32
 
 namespace {
@@ -362,21 +421,34 @@ bool TcpTransport::PumpRecv() {
     if (!m_send_q.Empty() && FlushSendNonBlocking() < 0) {
         m_peer_closed = true;
     }
-    char buf[4096];
+    char buf[kTcpReadChunkBytes];
     for (;;) {
-        const int n = ::recv(static_cast<SOCKET>(m_socket), buf, sizeof(buf), 0);
+        if (ReceiveBytesNeeded() == 0)
+            return m_socket >= 0;
+        CompactReceiveBuffer();
+        // Read beyond the current frame, bounded even for a maximum-size payload.
+        // Stop pumping once the front frame is complete; drain buffered frames first.
+        const std::size_t want =
+            std::min(sizeof(buf), kTcpReceiveBufferBytes - m_recv_buffer.size());
+        const int n = ::recv(static_cast<SOCKET>(m_socket), buf, static_cast<int>(want), 0);
         if (n > 0) {
+            if (m_recv_buffer.size() + n > m_recv_buffer.capacity())
+                m_recv_buffer.reserve(
+                    std::min(kTcpReceiveBufferBytes,
+                             std::max(m_recv_buffer.size() + n, m_recv_buffer.capacity() * 2)));
             m_recv_buffer.insert(m_recv_buffer.end(), buf, buf + n);
             continue;
         }
         if (n == 0) {
-            m_peer_closed = true;
+            // recv runs only while the front frame is incomplete (the loop returns as
+            // soon as it is complete), so EOF can discard only a truncated tail.
+            Close();
             return true;
         } // graceful close
         const int err = ::WSAGetLastError();
         if (err == WSAEWOULDBLOCK)
-            return true;      // no more data right now
-        m_peer_closed = true; // real error -> treat as disconnect (clean end)
+            return true; // no more data right now
+        Close();         // real error -> treat as disconnect (clean end)
         return true;
     }
 }
@@ -479,7 +551,7 @@ int TcpTransport::FlushSendNonBlocking() {
 }
 
 bool TcpTransport::SendFrame(const std::vector<std::uint8_t>& frame, FrameDelivery /*delivery*/) {
-    if (m_socket < 0 || m_peer_closed)
+    if (frame.size() > kMaxFramePayloadBytes || m_socket < 0 || m_peer_closed)
         return false;
     // Frame = [u32 LE len][payload]; APPEND it whole to the bounded outbound queue. The
     // queue never drops a message.
@@ -522,25 +594,27 @@ bool TcpTransport::SendFrame(const std::vector<std::uint8_t>& frame, FrameDelive
 bool TcpTransport::TryReceiveFrame(std::vector<std::uint8_t>& out) {
     PumpRecv();
     // Need at least the u32 length prefix.
-    if (m_recv_buffer.size() < 4)
+    const std::size_t buffered = m_recv_buffer.size() - m_recv_offset;
+    if (buffered < 4)
         return false;
     std::uint32_t frame_len = 0;
     for (int i = 0; i < 4; ++i)
-        frame_len |= static_cast<std::uint32_t>(m_recv_buffer[i]) << (8 * i);
-    if (m_recv_buffer.size() < 4u + frame_len)
+        frame_len |= static_cast<std::uint32_t>(m_recv_buffer[m_recv_offset + i]) << (8 * i);
+    if (buffered - 4 < static_cast<std::size_t>(frame_len))
         return false; // frame not fully arrived
-    out.assign(m_recv_buffer.begin() + 4, m_recv_buffer.begin() + 4 + frame_len);
-    m_recv_buffer.erase(m_recv_buffer.begin(), m_recv_buffer.begin() + 4 + frame_len);
+    const auto payload = m_recv_buffer.begin() + m_recv_offset + 4;
+    out.assign(payload, payload + frame_len);
+    m_recv_offset += 4 + frame_len;
+    if (m_recv_offset == m_recv_buffer.size()) {
+        m_recv_buffer.clear();
+        m_recv_offset = 0;
+    }
     return true;
 }
 
-bool TcpTransport::IsPeerConnected() const {
-    // Connected while the socket is live and no EOF/error was seen, OR while buffered
-    // bytes remain to be drained (a clean close is observed after its queued frames).
-    return m_socket >= 0 && (!m_peer_closed || !m_recv_buffer.empty());
-}
-
 void TcpTransport::Close() {
+    std::vector<std::uint8_t>().swap(m_recv_buffer);
+    m_recv_offset = 0;
     if (m_socket >= 0) {
         ::shutdown(static_cast<SOCKET>(m_socket), SD_BOTH);
         ::closesocket(static_cast<SOCKET>(m_socket));
@@ -677,22 +751,33 @@ bool TcpTransport::PumpRecv() {
         return false;
     if (!m_send_q.Empty() && FlushSendNonBlocking() < 0)
         m_peer_closed = true;
-    char buf[4096];
+    char buf[kTcpReadChunkBytes];
     for (;;) {
-        const ssize_t n = ::recv(static_cast<int>(m_socket), buf, sizeof(buf), 0);
+        if (ReceiveBytesNeeded() == 0)
+            return m_socket >= 0;
+        CompactReceiveBuffer();
+        const std::size_t want =
+            std::min(sizeof(buf), kTcpReceiveBufferBytes - m_recv_buffer.size());
+        const ssize_t n = ::recv(static_cast<int>(m_socket), buf, want, 0);
         if (n > 0) {
+            if (m_recv_buffer.size() + n > m_recv_buffer.capacity())
+                m_recv_buffer.reserve(
+                    std::min(kTcpReceiveBufferBytes,
+                             std::max(m_recv_buffer.size() + n, m_recv_buffer.capacity() * 2)));
             m_recv_buffer.insert(m_recv_buffer.end(), buf, buf + n);
             continue;
         }
         if (n == 0) {
-            m_peer_closed = true;
+            // recv runs only while the front frame is incomplete (the loop returns as
+            // soon as it is complete), so EOF can discard only a truncated tail.
+            Close();
             return true;
         }
         if (errno == EINTR)
             continue;
         if (errno == EAGAIN || errno == EWOULDBLOCK)
             return true;
-        m_peer_closed = true;
+        Close();
         return true;
     }
 }
@@ -792,7 +877,7 @@ int TcpTransport::FlushSendNonBlocking() {
 }
 
 bool TcpTransport::SendFrame(const std::vector<std::uint8_t>& frame, FrameDelivery /*delivery*/) {
-    if (m_socket < 0 || m_peer_closed)
+    if (frame.size() > kMaxFramePayloadBytes || m_socket < 0 || m_peer_closed)
         return false;
     std::vector<std::uint8_t> out;
     PutU32(out, static_cast<std::uint32_t>(frame.size()));
@@ -818,23 +903,27 @@ bool TcpTransport::SendFrame(const std::vector<std::uint8_t>& frame, FrameDelive
 
 bool TcpTransport::TryReceiveFrame(std::vector<std::uint8_t>& out) {
     PumpRecv();
-    if (m_recv_buffer.size() < 4)
+    const std::size_t buffered = m_recv_buffer.size() - m_recv_offset;
+    if (buffered < 4)
         return false;
     std::uint32_t frame_len = 0;
     for (int i = 0; i < 4; ++i)
-        frame_len |= static_cast<std::uint32_t>(m_recv_buffer[i]) << (8 * i);
-    if (m_recv_buffer.size() < 4u + frame_len)
+        frame_len |= static_cast<std::uint32_t>(m_recv_buffer[m_recv_offset + i]) << (8 * i);
+    if (buffered - 4 < static_cast<std::size_t>(frame_len))
         return false;
-    out.assign(m_recv_buffer.begin() + 4, m_recv_buffer.begin() + 4 + frame_len);
-    m_recv_buffer.erase(m_recv_buffer.begin(), m_recv_buffer.begin() + 4 + frame_len);
+    const auto payload = m_recv_buffer.begin() + m_recv_offset + 4;
+    out.assign(payload, payload + frame_len);
+    m_recv_offset += 4 + frame_len;
+    if (m_recv_offset == m_recv_buffer.size()) {
+        m_recv_buffer.clear();
+        m_recv_offset = 0;
+    }
     return true;
 }
 
-bool TcpTransport::IsPeerConnected() const {
-    return m_socket >= 0 && (!m_peer_closed || !m_recv_buffer.empty());
-}
-
 void TcpTransport::Close() {
+    std::vector<std::uint8_t>().swap(m_recv_buffer);
+    m_recv_offset = 0;
     if (m_socket >= 0)
         ::shutdown(static_cast<int>(m_socket), SHUT_RDWR);
     CloseSocket(m_socket);
@@ -943,10 +1032,12 @@ LockstepSession::LockstepSession(LockstepConfig config,
 bool LockstepSession::Handshake() {
     // Send our Hello, then drain until the peer's Hello arrives (loopback: the peer's
     // Hello must already be queued by the single-process driver). A mismatched
-    // protocol/version/seed/preset/tick-rate is rejected loudly -- a mis-paired session
-    // would otherwise silently desync.
+    // protocol/version/seed/preset/tick-rate/config identity is rejected loudly.
+    // A mis-paired session would otherwise silently desync.
     HelloMsg mine;
     mine.protocol_version = kLockstepProtocolVersion;
+    mine.system_config_identity = m_config.system_config_identity;
+    mine.preset_content_hash = m_config.preset_content_hash;
     mine.seed = m_config.seed;
     mine.preset = m_config.preset;
     mine.tick_rate_hz = m_config.tick_rate_hz;
@@ -954,6 +1045,7 @@ bool LockstepSession::Handshake() {
     if (!m_transport->SendFrame(EncodeHello(mine))) {
         LUMINUMBRA_CORE_ERROR("lockstep[{}]: handshake send failed (peer gone)",
                               m_config.local_client_id);
+        TransportDisconnected();
         return false;
     }
 
@@ -972,7 +1064,9 @@ bool LockstepSession::Handshake() {
             return false;
         }
         if (!DecodeHello(frame, peer)) {
-            LUMINUMBRA_CORE_ERROR("lockstep[{}]: malformed Hello", m_config.local_client_id);
+            LUMINUMBRA_CORE_ERROR("lockstep[{}]: malformed or unsupported Hello version (requires "
+                                  "resolved preset identity)",
+                                  m_config.local_client_id);
             return false;
         }
         got_peer = true;
@@ -1012,39 +1106,143 @@ bool LockstepSession::Handshake() {
         return false;
     }
 
-    m_config.peer_client_id = peer.client_id;
-    m_handshaken = true;
-    m_status.handshaken = true;
+    if (mine.preset_content_hash.empty() || peer.preset_content_hash.empty() ||
+        mine.preset_content_hash != peer.preset_content_hash) {
+        LUMINUMBRA_CORE_ERROR(
+            "lockstep[{}]: resolved preset content hash mismatch or missing identity",
+            m_config.local_client_id);
+        return false;
+    }
+    if (!HelloMatches(mine, peer)) {
+        LUMINUMBRA_CORE_ERROR("lockstep[{}]: simulation configuration identity mismatch",
+                              m_config.local_client_id);
+        return false;
+    }
 
+    m_config.peer_client_id = peer.client_id;
     // Pre-schedule the local input for ticks [1.. horizon]: delay-based lockstep sends
     // inputs `horizon` ticks ahead, so the first `horizon` ticks' local inputs are in
     // flight before the first tick runs.
     for (std::uint64_t t = 1; t <= m_horizon; ++t) {
-        ScheduleLocalInput(t);
+        if (!ScheduleLocalInput(t))
+            return false;
+    }
+    m_handshaken = true;
+    m_status.handshaken = true;
+    return true;
+}
+
+void LockstepSession::TransportDisconnected() {
+    // Closing can discard queued frames. Compare all available hashes for executed
+    // ticks first, even when the final send (including Bye) was rejected.
+    if (!m_status.desynced) {
+        // A peer hash may have been buffered before its local tick was executed.
+        // The local cadence hash is now captured before any post-step send.
+        for (const auto& entry : m_peer_hashes) {
+            if (!ComparePeerHash(entry.second))
+                break;
+        }
+        if (!m_status.desynced)
+            DrainPeerMessages();
+    }
+    m_transport->Close();
+    m_disconnected = true;
+    if (!m_status.peer_disconnected)
+        m_status.disconnect_tick = m_agreed_tick;
+    m_status.peer_disconnected = true;
+    m_pending_outbound.clear();
+    m_pending_outbound_bytes = 0;
+}
+
+bool LockstepSession::SendOrQueueFrame(std::vector<std::uint8_t> frame) {
+    if (frame.size() > std::min(kMaxFramePayloadBytes, m_transport->MaxFramePayloadBytes())) {
+        TransportDisconnected();
+        return false;
+    }
+    if (m_pending_outbound.empty()) {
+        if (m_transport->SendFrame(frame))
+            return true;
+        // A terminal backend refusal reports closure after its received frames drain.
+        if (!DrainPeerMessages() || !m_transport->IsPeerConnected()) {
+            TransportDisconnected();
+            return false;
+        }
+    }
+    // Subtract before adding, so neither the capacity check nor accounting overflows.
+    if (m_pending_outbound.size() >= kPendingOutboundFrameLimit ||
+        frame.size() > kPendingOutboundByteLimit - m_pending_outbound_bytes) {
+        TransportDisconnected();
+        return false;
+    }
+    m_pending_outbound_bytes += frame.size();
+    m_pending_outbound.push_back(std::move(frame));
+    return true;
+}
+
+bool LockstepSession::FlushPendingOutbound() {
+    while (!m_pending_outbound.empty()) {
+        const auto& frame = m_pending_outbound.front();
+        if (!m_transport->SendFrame(frame)) {
+            if (!DrainPeerMessages() || !m_transport->IsPeerConnected()) {
+                TransportDisconnected();
+                return false;
+            }
+            return true;
+        }
+        m_pending_outbound_bytes -= frame.size();
+        m_pending_outbound.pop_front();
     }
     return true;
 }
 
-void LockstepSession::ScheduleLocalInput(std::uint64_t tick) {
+bool LockstepSession::ScheduleLocalInput(std::uint64_t tick) {
     if (tick <= m_local_input_scheduled_through)
-        return;
+        return true;
     std::vector<std::uint8_t> blob;
     if (m_hooks.collect_local_input) {
         blob = m_hooks.collect_local_input(tick, m_hooks.user);
     }
-    // Buffer our own input locally (so the merge sees it) and send it to the peer.
-    m_inputs[tick][m_config.local_client_id] = blob;
+    // Input frame: type + payload length + tick + client id + blob length + blob.
+    constexpr std::size_t overhead = 1 + 4 + 8 + 4 + 4;
+    const auto limit = std::min(kMaxFramePayloadBytes, m_transport->MaxFramePayloadBytes());
+    if (limit < overhead || blob.size() > limit - overhead) {
+        TransportDisconnected();
+        return false;
+    }
     InputMsg msg;
     msg.tick = tick;
     msg.client_id = m_config.local_client_id;
     msg.inputs = blob;
-    m_transport->SendFrame(EncodeInput(msg));
+    if (!SendOrQueueFrame(EncodeInput(msg))) {
+        return false;
+    }
+    // Buffer locally once the frame is accepted or retained for reliable retry.
+    m_inputs[tick][m_config.local_client_id] = std::move(blob);
     m_local_input_scheduled_through = tick;
+    return true;
+}
+
+bool LockstepSession::ComparePeerHash(const HashMsg& peer) {
+    const auto local = m_local_hashes.find(peer.tick);
+    if (local == m_local_hashes.end() || local->second.world_hash == peer.world_hash)
+        return true;
+    // Localize via authoritative sub-hashes, then fall back to world_hash.
+    std::string section = "world_hash";
+    if (local->second.terrain != peer.terrain)
+        section = "terrain";
+    else if (local->second.water != peer.water)
+        section = "water";
+    else if (local->second.entities != peer.entities)
+        section = "entities";
+    EmitDesyncDump(peer.tick, section);
+    return false;
 }
 
 bool LockstepSession::DrainPeerMessages() {
     std::vector<std::uint8_t> frame;
-    while (m_transport->TryReceiveFrame(frame)) {
+    bool saw_bye = false;
+    std::uint64_t bye_tick = 0;
+    while (!m_status.desynced && m_transport->TryReceiveFrame(frame)) {
         MessageType type;
         if (!PeekMessageType(frame, type))
             continue;
@@ -1061,34 +1259,19 @@ bool LockstepSession::DrainPeerMessages() {
                 if (DecodeHash(frame, h)) {
                     m_peer_hashes[h.tick] = h;
                     // Compare immediately if we already hold the local hash for that tick.
-                    auto local = m_local_hashes.find(h.tick);
-                    if (local != m_local_hashes.end()) {
-                        if (local->second.world_hash != h.world_hash) {
-                            // Localize via authoritative sub-hashes (terrain/water/entities),
-                            // then fall back to world_hash (mesh / non-authoritative).
-                            std::string section = "world_hash";
-                            if (local->second.terrain != h.terrain)
-                                section = "terrain";
-                            else if (local->second.water != h.water)
-                                section = "water";
-                            else if (local->second.entities != h.entities)
-                                section = "entities";
-                            EmitDesyncDump(h.tick, section);
-                            return false;
-                        }
-                    }
+                    ComparePeerHash(h);
                 }
                 break;
             }
             case MessageType::Bye: {
                 ByeMsg bye;
                 DecodeBye(frame, bye);
-                // A clean disconnect ENDS the session cleanly (regression review): it is NOT a
-                // desync. Record the disconnect tick and stop.
-                m_disconnected = true;
-                m_status.peer_disconnected = true;
-                m_status.disconnect_tick = bye.tick;
-                return false;
+                // End cleanly after draining: a queued hash for an executed tick
+                // still takes precedence over this Bye.
+                if (!saw_bye)
+                    bye_tick = bye.tick;
+                saw_bye = true;
+                break;
             }
             case MessageType::Hello:
             default:
@@ -1097,36 +1280,38 @@ bool LockstepSession::DrainPeerMessages() {
                 break;
         }
     }
-    return true;
+    if (saw_bye) {
+        m_disconnected = true;
+        m_status.peer_disconnected = true;
+        m_status.disconnect_tick = bye_tick;
+    }
+    return !m_status.desynced && !m_status.peer_disconnected;
 }
 
 TickResult LockstepSession::PumpTick(std::uint64_t budget_ticks) {
     TickResult result;
-    if (m_status.desynced) {
-        result.outcome = TickOutcome::Desync;
-        result.tick = m_status.desync_tick;
+    const auto terminal_result = [&] {
+        result.outcome = m_status.desynced ? TickOutcome::Desync : TickOutcome::PeerDisconnected;
+        result.tick = m_status.desynced ? m_status.desync_tick : m_status.disconnect_tick;
         return result;
-    }
-    if (m_status.peer_disconnected) {
-        result.outcome = TickOutcome::PeerDisconnected;
-        result.tick = m_status.disconnect_tick;
-        return result;
-    }
-    if (m_agreed_tick >= budget_ticks) {
+    };
+    if (m_status.desynced || m_status.peer_disconnected)
+        return terminal_result();
+    if (m_agreed_tick >= budget_ticks && m_pending_outbound.empty()) {
         result.outcome = TickOutcome::Finished;
         result.tick = m_agreed_tick;
         return result;
     }
 
     // 1) Drain peer messages (inputs, hash compares, disconnect). A fatal state stops here.
-    if (!DrainPeerMessages()) {
-        if (m_status.desynced) {
-            result.outcome = TickOutcome::Desync;
-            result.tick = m_status.desync_tick;
-        } else {
-            result.outcome = TickOutcome::PeerDisconnected;
-            result.tick = m_status.disconnect_tick;
-        }
+    if (!DrainPeerMessages())
+        return terminal_result();
+    if (!FlushPendingOutbound())
+        return terminal_result();
+    if (m_agreed_tick >= budget_ticks) {
+        result.outcome =
+            m_pending_outbound.empty() ? TickOutcome::Finished : TickOutcome::WaitingForPeer;
+        result.tick = m_agreed_tick;
         return result;
     }
 
@@ -1140,9 +1325,15 @@ TickResult LockstepSession::PumpTick(std::uint64_t budget_ticks) {
     const bool have_peer =
         it != m_inputs.end() && it->second.find(m_config.peer_client_id) != it->second.end();
 
+    if (!have_peer && !m_transport->IsPeerConnected()) {
+        TransportDisconnected();
+        return terminal_result();
+    }
+
     if (!have_local) {
         // Should not happen (we pre-scheduled), but be defensive: schedule it now.
-        ScheduleLocalInput(want);
+        if (!ScheduleLocalInput(want))
+            return terminal_result();
         it = m_inputs.find(want);
     }
 
@@ -1155,7 +1346,8 @@ TickResult LockstepSession::PumpTick(std::uint64_t budget_ticks) {
             ++m_horizon;
             m_status.max_horizon_reached = std::max(m_status.max_horizon_reached, m_horizon);
             // Sending the next-horizon local input ahead is what actually absorbs jitter.
-            ScheduleLocalInput(m_agreed_tick + m_horizon);
+            if (!ScheduleLocalInput(m_agreed_tick + m_horizon))
+                return terminal_result();
         }
         ++m_status.late_input_events;
         m_consecutive_slack_ticks = 0;
@@ -1211,41 +1403,65 @@ TickResult LockstepSession::PumpTick(std::uint64_t budget_ticks) {
     // Drop the consumed tick's inputs (bounded memory; we never re-run a tick -- no rollback).
     m_inputs.erase(want);
 
-    // 5) Schedule the local input that is now `horizon` ticks ahead of the new agreed tick.
-    ScheduleLocalInput(m_agreed_tick + m_horizon);
-
-    // 6) Desync oracle: at the cadence, capture the LOCAL hash, send it, and compare
-    // against any already-received peer hash for this tick.
-    if (m_config.hash_cadence_ticks > 0 && (want % m_config.hash_cadence_ticks) == 0) {
+    // 5) Capture the executed tick's LOCAL hash before any send can fail and drain
+    // new peer hashes. Every available hash for this tick can then be compared.
+    const bool hash_due =
+        m_config.hash_cadence_ticks > 0 && (want % m_config.hash_cadence_ticks) == 0;
+    if (hash_due) {
         HashMsg local;
         local.tick = want;
         if (m_hooks.capture_hashes) {
             m_hooks.capture_hashes(want, local, m_hooks.user);
         }
         m_local_hashes[want] = local;
-        m_transport->SendFrame(EncodeHash(local));
-        result.ran_hash_exchange = true;
-
-        auto peer = m_peer_hashes.find(want);
-        if (peer != m_peer_hashes.end()) {
-            if (peer->second.world_hash != local.world_hash) {
-                std::string section = "world_hash";
-                if (local.terrain != peer->second.terrain)
-                    section = "terrain";
-                else if (local.water != peer->second.water)
-                    section = "water";
-                else if (local.entities != peer->second.entities)
-                    section = "entities";
-                EmitDesyncDump(want, section);
-                result.outcome = TickOutcome::Desync;
-                result.tick = want;
-                return result;
-            }
-        }
     }
 
-    result.outcome =
-        (m_agreed_tick >= budget_ticks) ? TickOutcome::Finished : TickOutcome::Advanced;
+    // 6) Schedule the local input that is now `horizon` ticks ahead of the new agreed tick.
+    bool send_failed =
+        m_transport->IsPeerConnected() && !ScheduleLocalInput(m_agreed_tick + m_horizon);
+    if (m_status.desynced)
+        return terminal_result();
+
+    // 7) Send the cadence hash and compare any already-received peer hash for this tick.
+    if (hash_due) {
+        const auto& local = m_local_hashes.at(want);
+        if (m_transport->IsPeerConnected()) {
+            // Hash frame: type + payload length + tick + four string lengths/data.
+            constexpr std::size_t overhead = 1 + 4 + 8 + 4 * 4;
+            const auto limit = std::min(kMaxFramePayloadBytes, m_transport->MaxFramePayloadBytes());
+            bool oversized = limit < overhead;
+            std::size_t remaining = oversized ? 0 : limit - overhead;
+            for (const auto* part :
+                 {&local.world_hash, &local.terrain, &local.water, &local.entities}) {
+                if (part->size() > remaining) {
+                    oversized = true;
+                    break;
+                }
+                remaining -= part->size();
+            }
+            if (oversized || !SendOrQueueFrame(EncodeHash(local))) {
+                if (oversized)
+                    TransportDisconnected();
+                send_failed = true;
+                if (m_status.desynced)
+                    return terminal_result();
+            } else {
+                result.ran_hash_exchange = true;
+            }
+        }
+
+        auto peer = m_peer_hashes.find(want);
+        if (peer != m_peer_hashes.end() && !ComparePeerHash(peer->second))
+            return terminal_result();
+    }
+
+    // A failed send must not hide a divergence in the tick we just executed.
+    if (send_failed)
+        return terminal_result();
+
+    result.outcome = (m_agreed_tick >= budget_ticks && m_pending_outbound.empty())
+                         ? TickOutcome::Finished
+                         : TickOutcome::Advanced;
     return result;
 }
 
@@ -1259,6 +1475,8 @@ void LockstepSession::EmitDesyncDump(std::uint64_t divergence_tick, const std::s
     // the desync-repro artifact: replaying it reconstructs exactly what this peer ran).
     Luminumbra::Replay::ReplayHeader header;
     header.version = Luminumbra::Replay::kLrec1Version;
+    header.system_config_identity = m_config.system_config_identity;
+    header.preset_content_hash = m_config.preset_content_hash;
     header.tick_rate_hz = m_config.tick_rate_hz;
     header.seed = m_config.seed;
     header.seed_string = std::to_string(m_config.seed);
@@ -1307,11 +1525,22 @@ void LockstepSession::EmitDesyncDump(std::uint64_t divergence_tick, const std::s
 void LockstepSession::Disconnect() {
     if (m_disconnected)
         return;
+    if (!FlushPendingOutbound())
+        return;
+    if (!m_pending_outbound.empty()) {
+        TransportDisconnected();
+        return;
+    }
+    // A rejected Bye may itself close the transport, so drain before attempting it
+    // as well as before the explicit Close in TransportDisconnected.
+    if (!m_status.desynced)
+        DrainPeerMessages();
     ByeMsg bye;
     bye.tick = m_agreed_tick;
-    m_transport->SendFrame(EncodeBye(bye));
-    m_transport->Close();
-    m_disconnected = true;
+    if (!m_transport->SendFrame(EncodeBye(bye))) {
+        LUMINUMBRA_CORE_WARN("lockstep[{}]: disconnect send failed", m_config.local_client_id);
+    }
+    TransportDisconnected();
 }
 
 } // namespace Luminumbra::Net

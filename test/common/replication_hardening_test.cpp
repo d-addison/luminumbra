@@ -375,6 +375,7 @@ TEST(ReplHardening, AoiRadiusBoundaryIsDeterministicInclusive) {
     ReplicationServer server;
     server.AddClient(kClientId, pair.first.get());
     ReplicationClient client(kClientId, pair.second.get());
+    server.SetAoiChunkRadius(-1, 0);
     server.SetAoiRadiusMm(5000);
     std::vector<ReplEntityState> entities = {
         Ent(1, 0, 0, 0),     // own avatar (always in)
@@ -398,6 +399,7 @@ TEST(ReplHardening, AoiAlwaysIncludesOwnAvatar) {
     ReplicationServer server;
     server.AddClient(kClientId, pair.first.get());
     ReplicationClient client(kClientId, pair.second.get());
+    server.SetAoiChunkRadius(-1, 0);
     server.SetAoiRadiusMm(1); // tiny radius
     std::vector<ReplEntityState> entities = {Ent(1, 7000000, 0, 0), Ent(2, 7100000, 0, 0)};
     server.BroadcastSnapshot(1, entities);
@@ -415,6 +417,7 @@ TEST(ReplHardening, AoiNoOverflowAtExtremeCoordinates) {
     ReplicationServer server;
     server.AddClient(kClientId, pair.first.get());
     ReplicationClient client(kClientId, pair.second.get());
+    server.SetAoiChunkRadius(-1, 0);
     server.SetAoiRadiusMm(1000);
     const std::int32_t big = std::numeric_limits<std::int32_t>::max() - 10;
     std::vector<ReplEntityState> entities = {
@@ -481,6 +484,8 @@ TEST(ReplHardening, ChunkAoiNegativeOriginStable) {
 TEST(ReplHardening, AoiDisabledSendsFullSet) {
     auto pair = MakeLoopbackPair();
     ReplicationServer server;
+    server.SetAoiChunkRadius(-1, 0);
+    server.SetAoiRadiusMm(0);
     server.AddClient(kClientId, pair.first.get());
     ReplicationClient client(kClientId, pair.second.get());
     std::vector<ReplEntityState> entities = {Ent(1, 0, 0, 0), Ent(2, 9000000, 0, 0)};
@@ -498,7 +503,8 @@ TEST(ReplHardening, AoiDisabledSendsFullSet) {
 // entity, e.g. a spent arrow) reaches the client. This is the baseline the delta path must match.
 TEST(ReplHardening, FullModeDeliversTransientDespawn) {
     auto pair = MakeLoopbackPair();
-    ReplicationServer server; // delta OFF
+    ReplicationServer server; // explicit full snapshots
+    server.SetDeltaCompression(false);
     server.AddClient(kClientId, pair.first.get());
     ReplicationClient client(kClientId, pair.second.get());
     server.BroadcastSnapshot(1, {Ent(1, 0, 0, 0)}, {/*removed*/ 2000u});
