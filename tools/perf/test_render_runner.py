@@ -249,18 +249,37 @@ class RenderRunnerTests(unittest.TestCase):
         saved = saves[0]
         metadata = json.loads((saved / 'world_info.json').read_text(encoding="utf-8"))
         self.assertEqual(metadata['worldType'], 'default')
-        preset = json.loads((self.root / 'worlds/atlas/presets/default.json').read_text(encoding="utf-8"))
+        loaded = self.run_client('loaded', ['--load-world', saved.name,
+                                            '--render-benchmark-frames', '4'])
+        for data in (original, loaded):
+            contract.validate(data, data['adapter']['renderer'])
+        for key in ('preset', 'preset_revision', 'preset_identity', 'content_identity'):
+            self.assertEqual(loaded['workload'][key], original['workload'][key])
+
+        manifest = dict(original['workload'])
+        manifest['preset_identity'] = f"{int(manifest['preset_identity'], 16) ^ 1:016x}"
+        manifest['content_identity'] = str(int(manifest['content_identity']) ^ 1)
+        for key in ('preset_identity', 'content_identity'):
+            with self.assertRaisesRegex(ValueError, f'workload manifest does not match: {key}'):
+                contract.validate(original, original['adapter']['renderer'],
+                                  workload={key: manifest[key]})
+
+        preset = json.loads((saved / 'preset.json').read_text(encoding="utf-8"))
         preset['generation_params']['terrain']['height_offset'] += 1
         (saved / 'preset.json').write_text(json.dumps(preset), encoding="utf-8")
-        altered = self.run_client('altered', ['--load-world', saved.name, '--render-benchmark-frames', '4'])
-        self.assertEqual(altered['workload']['preset'], original['workload']['preset'])
-        for key in ('preset_identity', 'content_identity'):
-            self.assertNotEqual(altered['workload'][key], original['workload'][key])
-            with self.assertRaisesRegex(ValueError, 'workload manifest'):
-                contract.validate(altered, altered['adapter']['renderer'],
-                                  workload={key: original['workload'][key]})
-        log = self.run_client('refused', ['--load-world', saved.name, '--traversal', str(self.script)], expected_exit=2)
-        self.assertIn('content identity mismatch', log)
+
+        def save_bytes():
+            return {path.relative_to(saved): None if path.is_dir() else path.read_bytes()
+                    for path in saved.rglob('*')}
+
+        before = save_bytes()
+        for name, extra in (('altered', ['--render-benchmark-frames', '4']),
+                            ('refused', ['--traversal', str(self.script)])):
+            with self.subTest(name=name):
+                log = self.run_client(name, ['--load-world', saved.name, *extra], expected_exit=2)
+                self.assertIn('World open refused: Incompatible world preset: '
+                              'saved preset identity does not match.', log)
+                self.assertEqual(save_bytes(), before)
 
 
 if __name__ == '__main__':
