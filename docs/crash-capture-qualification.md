@@ -94,11 +94,12 @@ child checks to run.
 
 After a Windows crash, WER collection requires closed writers and an unchanged
 snapshot across a one-second stable window within the existing 30-second settle
-deadline. A `CreateFileW` read open with no sharing probes every observed dump;
-sharing or lock violations mean the writer is still active. Size, timestamps and
-sampled bytes alone cannot establish completion of a middle-only rewrite. The
-portable test seam accepts an injected writer probe; the POSIX fallback uses an
-advisory file lock, which only detects cooperating writers.
+deadline. A `CreateFileW` read open probes every observed dump, allowing read
+sharing while rejecting writers; sharing or lock violations defer collection.
+Size, timestamps and sampled bytes alone cannot establish completion of a
+middle-only rewrite. The portable test seam accepts an injected writer probe;
+the POSIX fallback uses an advisory file lock, which only detects cooperating
+writers.
 
 Snapshots read at most 64 KiB per file and 1 MiB total, sampling the prefix and
 suffix. Every regular file retains its size, file times and identity even when

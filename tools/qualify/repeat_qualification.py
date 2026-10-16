@@ -575,6 +575,8 @@ def copy_stable_file(
     A temporary destination is closed before publication or removal on all hosts.
     """
     def metadata(info: os.stat_result) -> tuple[int, int, tuple[int, int]]:
+        # These fields agree between path stat and handle fstat on every host.
+        # Windows stat uses creation time for ctime, while fstat uses change time.
         return info.st_size, info.st_mtime_ns, (info.st_dev, info.st_ino)
 
     temporary_path: Path | None = None
@@ -624,7 +626,7 @@ def copy_stable_file(
                 remaining -= len(chunk)
             final = os.fstat(reader.fileno())
             if (reader.read(1) or
-                    any(metadata(info) != metadata(initial) or info.st_ctime_ns != initial.st_ctime_ns
+                    any(metadata(info) != metadata(initial)
                         for info in (post_copy, final, source.stat())) or
                     source_digest.digest() != copied_digest.digest()):
                 raise DumpWriterBusyError(f"{source}: dump changed during copy")

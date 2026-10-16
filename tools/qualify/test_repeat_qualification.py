@@ -23,7 +23,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from unittest import mock
 
 SCRIPT = Path(__file__).resolve().with_name("repeat_qualification.py")
@@ -1939,7 +1939,10 @@ class DumpCopyTest(unittest.TestCase):
     def test_post_copy_metadata_change_retries_even_when_bytes_match(self) -> None:
         path = self.dump()
         after = self.settle()
+        original_bytes = path.read_bytes()
+        original_mtime = path.stat().st_mtime_ns
         opens = []
+        changed = False
 
         @contextmanager
         def change_mtime(source):
@@ -1948,20 +1951,71 @@ class DumpCopyTest(unittest.TestCase):
                 wrapped = mock.Mock(wraps=reader)
 
                 def read(length):
+                    nonlocal changed
                     data = reader.read(length)
-                    if length == 1 and not data and len(opens) == 1:
+                    if length == 1 and not data and not changed:
                         info = source.stat()
-                        os.utime(source, ns=(info.st_atime_ns, info.st_mtime_ns + 2_000_000_000))
+                        # Change a tracked field without changing any bytes.
+                        os.utime(source, ns=(info.st_atime_ns, original_mtime + 2_000_000_000))
+                        changed = True
                     return data
 
                 wrapped.read.side_effect = read
                 yield wrapped
 
         copies = self.collect(after, opener=change_mtime)
+        self.assertTrue(changed)
         self.assertEqual(opens, [1.0, 2.0])
+        self.assertEqual(copies, [str(self.destination / path.name)])
+        self.assertEqual(path.read_bytes(), original_bytes)
+        self.assertEqual(Path(copies[0]).read_bytes(), original_bytes)
+        self.assertEqual(path.stat().st_mtime_ns, original_mtime + 2_000_000_000)
+        self.assertEqual(Path(copies[0]).stat().st_mtime_ns, path.stat().st_mtime_ns)
+        self.assertEqual(list(self.destination.glob(".*.tmp")), [])
+
+    def test_windows_stat_fstat_ctime_difference_accepts_unchanged_dump(self) -> None:
+        path = self.dump()
+        after = self.settle()
+        creation_time = path.stat().st_ctime_ns
+        real_fstat = os.fstat
+        source_descriptors = set()
+        opens = []
+        handle_times = []
+
+        @contextmanager
+        def open_source(source):
+            opens.append(self.now)
+            with source.open("rb", buffering=0) as reader:
+                source_descriptors.add(reader.fileno())
+                try:
+                    yield reader
+                finally:
+                    source_descriptors.remove(reader.fileno())
+
+        def windows_fstat(descriptor):
+            info = real_fstat(descriptor)
+            if descriptor not in source_descriptors:
+                return info
+            # Windows path stat reports creation time in ctime, while fstat
+            # reports change time. All portable comparison fields still agree.
+            handle_times.append(creation_time + 2_000_000_000)
+            return SimpleNamespace(
+                st_size=info.st_size, st_mtime_ns=info.st_mtime_ns,
+                st_dev=info.st_dev, st_ino=info.st_ino,
+                st_atime_ns=info.st_atime_ns, st_ctime_ns=handle_times[-1],
+            )
+
+        errors = []
+        with mock.patch.object(rq.os, "fstat", side_effect=windows_fstat):
+            copies = self.collect(after, opener=open_source, errors=errors)
+        self.assertEqual(opens, [1.0])
+        self.assertEqual(handle_times, [creation_time + 2_000_000_000] * 2)
+        self.assertEqual(path.stat().st_ctime_ns, creation_time)
+        self.assertEqual(errors, [])
         self.assertEqual(copies, [str(self.destination / path.name)])
         self.assertEqual(Path(copies[0]).read_bytes(), path.read_bytes())
         self.assertEqual(Path(copies[0]).stat().st_mtime_ns, path.stat().st_mtime_ns)
+        self.assertEqual(list(self.destination.glob(".*.tmp")), [])
 
     def test_stable_file_is_collected_once_across_another_files_retry(self) -> None:
         stable = self.dump("a-stable.dmp")
