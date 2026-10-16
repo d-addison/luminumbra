@@ -1184,7 +1184,7 @@ def run_owned_qualification(
             preflight_reason = "; ".join(problems) + (
                 "; set `sysctl kernel.core_pattern=core.%p` or use --allow-no-dumps"
             )
-        if posix["core_directory"] is not None and pattern is not None:
+        if posix["core_directory"] is not None and pattern is not None and not problems:
             core_directory = Path(posix["core_directory"])
             core_skip = core_collection_skip(run_dir, receipt_path, pattern)
 

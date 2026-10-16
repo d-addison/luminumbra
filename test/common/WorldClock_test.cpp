@@ -19,24 +19,28 @@ using nlohmann::json;
 TEST(WorldClockTest, MidnightMidwinterPhasesAndIndicesWrapExactly) {
     const WorldClock clock;
     EXPECT_EQ(clock.calendar(), WorldCalendar{});
-    EXPECT_EQ(clock.year_length_ticks(), 288000u);
+    constexpr std::uint64_t day = WorldCalendar{}.dayLengthTicks;
+    constexpr std::uint64_t year = day * WorldCalendar{}.daysPerYear;
+    EXPECT_EQ(day, 216000u);
+    EXPECT_EQ(WorldCalendar{}.daysPerYear, 8u);
+    EXPECT_EQ(clock.year_length_ticks(), year);
     EXPECT_EQ(clock.day_phase(0), 0.0);
-    EXPECT_EQ(clock.day_phase(9000), 0.25);
-    EXPECT_EQ(clock.day_phase(18000), 0.5);
-    EXPECT_EQ(clock.day_phase(27000), 0.75);
-    EXPECT_EQ(clock.day_phase(36000), 0.0);
-    EXPECT_EQ(clock.year_phase(72000), 0.25);
-    EXPECT_EQ(clock.year_phase(144000), 0.5);
-    EXPECT_EQ(clock.year_phase(216000), 0.75);
-    EXPECT_EQ(clock.year_phase(288000), 0.0);
-    EXPECT_EQ(clock.day_index(35999), 0u);
-    EXPECT_EQ(clock.day_index(36000), 1u);
-    EXPECT_EQ(clock.day_index(288000), 8u);
-    EXPECT_EQ(clock.year_index(287999), 0u);
-    EXPECT_EQ(clock.year_index(288000), 1u);
+    EXPECT_EQ(clock.day_phase(day / 4), 0.25);
+    EXPECT_EQ(clock.day_phase(day / 2), 0.5);
+    EXPECT_EQ(clock.day_phase(day * 3 / 4), 0.75);
+    EXPECT_EQ(clock.day_phase(day), 0.0);
+    EXPECT_EQ(clock.year_phase(year / 4), 0.25);
+    EXPECT_EQ(clock.year_phase(year / 2), 0.5);
+    EXPECT_EQ(clock.year_phase(year * 3 / 4), 0.75);
+    EXPECT_EQ(clock.year_phase(year), 0.0);
+    EXPECT_EQ(clock.day_index(day - 1), 0u);
+    EXPECT_EQ(clock.day_index(day), 1u);
+    EXPECT_EQ(clock.day_index(year), 8u);
+    EXPECT_EQ(clock.year_index(year - 1), 0u);
+    EXPECT_EQ(clock.year_index(year), 1u);
     const auto last = WorldClock::kTickLimit - 1;
-    EXPECT_EQ(clock.day_phase(last), static_cast<double>(last % 36000) / 36000);
-    EXPECT_EQ(clock.year_index(last), last / 288000);
+    EXPECT_EQ(clock.day_phase(last), static_cast<double>(last % day) / day);
+    EXPECT_EQ(clock.year_index(last), last / year);
 }
 
 TEST(WorldClockTest, CustomCalendarAndCheckedTickLimits) {
@@ -59,13 +63,17 @@ TEST(WorldClockTest, CanonicalBytesAreTaggedLittleEndianAndIgnoreFrameTime) {
         std::string("world_clock:v1:") +
         std::string("\x08\x07\x06\x05\x04\x03\x02\x01\xa0\x8c\x00\x00\x08\x00\x00\x00", 16);
     EXPECT_EQ(clock.canonical_bytes(), expected);
+    const std::string default_expected =
+        std::string("world_clock:v1:") +
+        std::string("\x08\x07\x06\x05\x04\x03\x02\x01\xc0\x4b\x03\x00\x08\x00\x00\x00", 16);
+    EXPECT_EQ(WorldClock(clock.tick()).canonical_bytes(), default_expected);
     json metadata;
     clock.write_metadata(metadata);
     WorldClock restored;
     std::string error;
     ASSERT_TRUE(WorldClock::from_metadata(json::parse(metadata.dump()), restored, error));
     EXPECT_EQ(restored.canonical_bytes(), expected);
-    EXPECT_NE(WorldClock(clock.tick() + 1).canonical_bytes(), expected);
+    EXPECT_NE(WorldClock(clock.tick() + 1, clock.calendar()).canonical_bytes(), expected);
     EXPECT_NE(WorldClock(clock.tick(), {36001, 8}).canonical_bytes(), expected);
     EXPECT_NE(WorldClock(clock.tick(), {36000, 9}).canonical_bytes(), expected);
 }
@@ -79,6 +87,13 @@ TEST(WorldClockTest, MissingMetadataUsesPinnedDefaults) {
     ASSERT_TRUE(WorldClock::from_metadata(json::parse(R"({"simulationTick":13})"), clock, error));
     EXPECT_EQ(clock.tick(), 13u);
     EXPECT_EQ(clock.calendar(), WorldCalendar{});
+    ASSERT_TRUE(WorldClock::from_metadata(
+        json::parse(R"({"simulationTick":13,"calendar":{"dayLengthTicks":36000,"daysPerYear":8}})"),
+        clock,
+        error));
+    EXPECT_EQ(clock.tick(), 13u);
+    EXPECT_EQ(clock.calendar(), (WorldCalendar{36000, 8}));
+    EXPECT_EQ(clock.year_length_ticks(), 288000u);
     ASSERT_TRUE(WorldClock::from_metadata(
         json::parse(R"({"calendar":{"dayLengthTicks":1,"daysPerYear":1}})"), clock, error));
     EXPECT_EQ(clock.tick(), 0u);
@@ -158,11 +173,11 @@ TEST(WorldClockTest, SimulationClockResetRestoresBaseAndClearsFrameRemainder) {
     EXPECT_EQ(simulation.tick_count(), 0u); // legacy unsigned wrap, guarded by enabled WorldClock
 }
 
-TEST(WorldClockTest, ActiveRegionsIsGeneratedHashedAndDefaultOff) {
+TEST(WorldClockTest, ActiveRegionsIsGeneratedHashedAndDefaultOn) {
     using namespace luminumbra::core;
     const SystemConfig defaults;
-    EXPECT_FALSE(defaults.enabled(SysKey::SimActiveRegions));
-    EXPECT_TRUE(defaults.ComputeConfigSubHash().empty());
+    EXPECT_TRUE(defaults.enabled(SysKey::SimActiveRegions));
+    EXPECT_FALSE(defaults.ComputeConfigSubHash().empty());
     const auto enabled =
         SystemConfig::FromJsonString(R"({"sim":{"active_regions":{"enabled":true}}})");
     EXPECT_TRUE(enabled.enabled(SysKey::SimActiveRegions));
@@ -172,31 +187,40 @@ TEST(WorldClockTest, ActiveRegionsIsGeneratedHashedAndDefaultOff) {
 TEST(WorldClockTest, SkyCircadianAndStimulusSharePinnedCalendarPhases) {
     namespace ai = luminumbra::ai;
     namespace sky = Luminumbra::Rendering;
-    for (const auto tick :
-         {0ull, 9000ull, 18000ull, 27000ull, 36000ull, 72000ull, 144000ull, 216000ull, 288000ull}) {
+    constexpr std::uint64_t day = WorldCalendar{}.dayLengthTicks;
+    constexpr std::uint64_t year = day * WorldCalendar{}.daysPerYear;
+    for (const auto tick : {std::uint64_t{0},
+                            day / 4,
+                            day / 2,
+                            day * 3 / 4,
+                            day,
+                            year / 4,
+                            year / 2,
+                            year * 3 / 4,
+                            year}) {
         SCOPED_TRACE(tick);
         const WorldClock clock(tick);
-        const float day = static_cast<float>(clock.day_phase(tick));
+        const float day_phase = static_cast<float>(clock.day_phase(tick));
         ai::StimulusContext context;
         context.tick = tick;
         context.world_clock = &clock;
         const ai::StimulusChannelRegistry stimulus(context);
         EXPECT_FLOAT_EQ(stimulus.Sample(ai::StimulusChannel::TimeOfDay),
-                        ai::CircadianActivity(day, false));
+                        ai::CircadianActivity(day_phase, false));
         const auto season = sky::ComputeSeason(clock);
         EXPECT_FLOAT_EQ(season.phase, static_cast<float>(clock.spring_phase(tick)));
         EXPECT_NEAR(
             stimulus.Sample(ai::StimulusChannel::Season), (season.wave + 1.0f) * 0.5f, 1e-6f);
         const float sky_day = sky::TimeOfDayFromWorldClock(clock);
-        EXPECT_FLOAT_EQ(sky_day, day >= 0.5f ? day - 0.5f : day + 0.5f);
+        EXPECT_FLOAT_EQ(sky_day, day_phase >= 0.5f ? day_phase - 0.5f : day_phase + 0.5f);
         const auto sun = sky::ComputeSunGeometry(sky_day, season.sunDeclination);
-        if (day == 0.0f)
+        if (day_phase == 0.0f)
             EXPECT_LT(sun.upFactor, 0.0f);
-        if (day == 0.5f)
+        if (day_phase == 0.5f)
             EXPECT_GT(sun.upFactor, 0.0f);
     }
     EXPECT_NEAR(sky::ComputeSeason(WorldClock(0)).wave, -1.0f, 1e-6f);
-    EXPECT_NEAR(sky::ComputeSeason(WorldClock(144000)).wave, 1.0f, 1e-6f);
+    EXPECT_NEAR(sky::ComputeSeason(WorldClock(year / 2)).wave, 1.0f, 1e-6f);
 }
 
 TEST(WorldClockTest, BoundedWeatherRestorationMatchesStormMotionAndStrikes) {
