@@ -1,27 +1,31 @@
 cmake_minimum_required(VERSION 3.20)
 
-include("${CMAKE_CURRENT_LIST_DIR}/../../cmake/networking_runtime.cmake")
+# Script mode cannot create targets. Redirect property reads in the loaded
+# production source to fixture helpers, leaving CMake's built-in commands intact.
+# The selection logic is unchanged and no generated files are needed.
+file(READ "${CMAKE_CURRENT_LIST_DIR}/../../cmake/networking_runtime.cmake" _source)
+string(REGEX REPLACE "(^|[\r\n][ \t]*)(get_target_property|get_property)\\("
+    "\\1fixture_\\2(" _source "${_source}")
+cmake_language(EVAL CODE "${_source}")
 
-# Script mode cannot create targets. Replace only CMake's target-property reads
-# with an in-memory property table; run the production selection function intact.
 # Missing properties follow get_target_property's NOTFOUND convention, and SET
 # distinguishes an explicitly empty configuration mapping from an unset one.
-function(get_target_property OUT_VAR TARGET_NAME PROPERTY)
-    _get_property(_set GLOBAL PROPERTY "fixture_${TARGET_NAME}_${PROPERTY}" SET)
+function(fixture_get_target_property OUT_VAR TARGET_NAME PROPERTY)
+    get_property(_set GLOBAL PROPERTY "fixture_${TARGET_NAME}_${PROPERTY}" SET)
     if(_set)
-        _get_property(_value GLOBAL PROPERTY "fixture_${TARGET_NAME}_${PROPERTY}")
+        get_property(_value GLOBAL PROPERTY "fixture_${TARGET_NAME}_${PROPERTY}")
     else()
         set(_value "${OUT_VAR}-NOTFOUND")
     endif()
     set(${OUT_VAR} "${_value}" PARENT_SCOPE)
 endfunction()
 
-function(get_property OUT_VAR)
+function(fixture_get_property OUT_VAR)
     if(NOT ARGC EQUAL 6 OR NOT ARGV1 STREQUAL "TARGET"
        OR NOT ARGV3 STREQUAL "PROPERTY" OR NOT ARGV5 STREQUAL "SET")
         message(FATAL_ERROR "Unexpected target-property query: ${ARGV}")
     endif()
-    _get_property(_set GLOBAL PROPERTY "fixture_${ARGV2}_${ARGV4}" SET)
+    get_property(_set GLOBAL PROPERTY "fixture_${ARGV2}_${ARGV4}" SET)
     set(${OUT_VAR} "${_set}" PARENT_SCOPE)
 endfunction()
 
@@ -99,6 +103,11 @@ endforeach()
 fixture_properties(sdk TYPE SHARED_LIBRARY
     IMPORTED_LOCATION "${_sdk}/bin/backend.dll"
     IMPORTED_IMPLIB "${_sdk}/lib/backend.lib")
+# Fixture helpers must leave ordinary global property reads available.
+get_property(_sdk_type GLOBAL PROPERTY fixture_sdk_TYPE)
+if(NOT _sdk_type STREQUAL "SHARED_LIBRARY")
+    message(FATAL_ERROR "Built-in global property lookup failed")
+endif()
 fixture_properties(generic TYPE SHARED_LIBRARY
     IMPORTED_LOCATION "${_sdk}/bin/backend.dll"
     IMPORTED_IMPLIB "${_sdk}/lib/backend.lib"
