@@ -2272,6 +2272,7 @@ file(WRITE "${LUMINUMBRA_TEST_ARTIFACT_ROOT}/testing/ctest_manifest.json"
 
 # Pure CPU measurement contract, also runnable without a GL context.
 add_executable(render_measurement_test rendering/render_measurement_test.cpp)
+target_link_libraries(render_measurement_test PRIVATE gtest)
 target_include_directories(render_measurement_test PRIVATE ../src)
 target_compile_definitions(render_measurement_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
 luminumbra_configure_first_party_target(render_measurement_test)
@@ -2295,6 +2296,8 @@ luminumbra_configure_first_party_target(render_configuration_test)
 add_test(NAME RenderResolvedConfiguration COMMAND render_configuration_test)
 add_test(NAME RenderSavedAuthorityTampering COMMAND render_configuration_test saved-authority)
 add_test(NAME RenderContentReferenceContainment COMMAND render_configuration_test content-references)
+add_test(NAME RenderAudioReferenceContainment COMMAND render_configuration_test audio-references)
+add_test(NAME RenderOptionalAudioContent COMMAND render_configuration_test optional-audio)
 if(NOT Python3_FOUND)
     message(FATAL_ERROR "RenderContractPython requires a Python3 interpreter")
 endif()
@@ -2313,6 +2316,9 @@ add_test(NAME RenderBenchmarkAssets COMMAND "${Python3_EXECUTABLE}"
 set_tests_properties(RenderBenchmarkAssets PROPERTIES FIXTURES_SETUP render_benchmark_assets TIMEOUT 30)
 foreach(case IN ITEMS
     "RenderTraversalIntegrated;test_traversal_twice"
+    "RenderWorkloadSaveLoadIntegrated;test_v4_save_load_success"
+    "RenderWorkloadNoAudioIntegrated;test_v4_no_audio_success"
+    "RenderEscapingAudioRefusal;test_escaping_audio_refusal"
     "RenderAbsoluteTextureRefusal;test_absolute_texture_refusal"
     "RenderParentRelativeTextureRefusal;test_parent_relative_texture_refusal"
     "RenderSceneConfigSeparateRefusal;test_scene_config_separate_refusal"

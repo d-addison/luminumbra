@@ -1,5 +1,5 @@
+#include "../core/CaptureContentPaths.h"
 #include "PrefabRuntime.h"
-#include "luminumbra_common/core/CaptureContentPaths.h"
 
 #include "PrefabDigest.h"
 #include "PrefabValidation.h"

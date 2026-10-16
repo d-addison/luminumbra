@@ -1,5 +1,5 @@
 #include "MorphMesh.h"
-#include "luminumbra_common/core/CaptureContentPaths.h"
+#include "../core/CaptureContentPaths.h"
 
 #include <algorithm>
 #include <bit>

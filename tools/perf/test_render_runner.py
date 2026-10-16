@@ -175,6 +175,9 @@ class RenderRunnerTests(unittest.TestCase):
                      self.root / 'config/game-asset-packs.json')
         shutil.copytree(OPTIONS.assets / 'game-assets', self.root / 'game-assets',
                         copy_function=link_or_copy)
+        audio = OPTIONS.source / 'assets/audio'
+        if audio.is_dir():
+            shutil.copytree(audio, self.root / 'assets/audio', copy_function=link_or_copy)
         shutil.copytree(OPTIONS.source / 'worlds/atlas', self.root / 'worlds/atlas')
         self.environment = os.environ.copy()
         for name in list(self.environment):
@@ -188,10 +191,11 @@ class RenderRunnerTests(unittest.TestCase):
         text = text.replace('expected_ticks 1800', 'expected_ticks 4')
         self.script.write_bytes(text.encode('utf-8'))
 
-    def run_client(self, name, extra=(), environment=None, expected_exit=0, schema='v3'):
+    def run_client(self, name, extra=(), environment=None, expected_exit=0, schema='v3',
+                   audio=False):
         artifact = self.root / (name + '.json')
         log = OPTIONS.artifacts / (self._testMethodName + '-' + name + '.log')
-        command = [str(OPTIONS.client), '--no-audio', '--no-menu-backdrop',
+        command = [str(OPTIONS.client), *([] if audio else ['--no-audio']), '--no-menu-backdrop',
                    '--render-benchmark', str(artifact), '--render-benchmark-schema', schema,
                    '--capture-size', '160x90', '--perf-profile', 'quality',
                    '--render-benchmark-warmup', '2', *extra]
@@ -235,6 +239,43 @@ class RenderRunnerTests(unittest.TestCase):
                  'actions 2\naction 1 save 0 0 0 0\naction 2 reload 0 0 0 0\n')
         script.write_bytes(text.encode('utf-8'))
         return script
+
+    def test_v4_save_load_success(self):
+        self.validate_save_load_capture(audio=True)
+
+    def test_v4_no_audio_success(self):
+        audio = self.root / 'assets/audio'
+        if audio.exists():
+            shutil.rmtree(audio)
+        self.assertFalse(audio.exists())
+        data = self.validate_save_load_capture(audio=False)
+        self.assertIn('assets/audio', data['settings']['content_files'])
+        self.assertIsNone(data['settings']['content_files']['assets/audio'])
+
+    def validate_save_load_capture(self, audio):
+        script = self.short_save_load_script()
+        data = self.run_client('save-load', ['--traversal', str(script)], schema='v4', audio=audio)
+        contract.validate(data, data['adapter']['renderer'], traversal=script)
+        self.assertEqual(data['schema'], contract.WORKLOAD_SCHEMA)
+        self.assertEqual(data['workload']['actual_ticks'], 4)
+        self.assertEqual([(row['name'], row['succeeded']) for row in data['workload']['actions']],
+                         [('save', True), ('reload', True)])
+        self.assertIsNotNone(data['workload']['reload'])
+        return data
+
+    def test_escaping_audio_refusal(self):
+        bank = self.root / 'data/audio/sfx_main.bank.json'
+        document = json.loads(bank.read_bytes())
+        event = next(iter(document['events'].values()))
+        external = self.root / 'assets/private.mp3'
+        external.parent.mkdir(exist_ok=True)
+        external.write_bytes(b'outside the audio content tree')
+        event['files'] = ['assets/audio/../private.mp3']
+        _atomic_write(bank, json.dumps(document).encode('utf-8'))
+        log = self.run_client('refused-audio',
+                              ['--traversal', str(self.short_save_load_script())],
+                              expected_exit=2, schema='v4', audio=True)
+        self.assertIn('content reference escapes inventoried trees', log)
 
     def external_texture_refusal(self, absolute):
         manifest = self.root / 'data/models/trees/tree_textures.json'

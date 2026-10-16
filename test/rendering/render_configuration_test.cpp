@@ -117,6 +117,7 @@ void content_configuration() {
                               "data/ui/main_menu.rml",
                               "res/shaders/water.frag",
                               "config/game-asset-packs.json",
+                              "assets/audio/music/themes/main_menu_theme.mp3",
                               "game-assets/tree-small-02/1.0.0/data/models/trees/tree.lmesh"};
     for (const auto* file : files) {
         std::filesystem::create_directories((root / file).parent_path());
@@ -155,7 +156,7 @@ struct TemporaryContent {
     TemporaryContent() {
         require(std::filesystem::create_directory(root));
         for (const auto* tree : Luminumbra::Filesystem::kCaptureContentTrees)
-            require(std::filesystem::create_directory(root / tree));
+            require(std::filesystem::create_directories(root / tree));
     }
     ~TemporaryContent() {
         std::error_code error;
@@ -252,6 +253,73 @@ void saved_authority() {
     require_refusal([&] { require_saved_world_digest(directory, {}); });
 }
 
+void optional_audio() {
+    const TemporaryContent content;
+    require(std::filesystem::remove(content.root / "assets/audio"));
+    Luminumbra::Filesystem::CaptureContentPaths policy;
+    policy.enable(content.root);
+    require(policy.active());
+    require(!policy.refused());
+    const auto absent = workload_content(content.root);
+    require(absent.contains("assets/audio"));
+    require(absent.at("assets/audio").is_null());
+    const auto identity = render_identity(absent);
+    require(std::filesystem::create_directory(content.root / "assets/audio"));
+    const auto empty = workload_content(content.root);
+    require(!empty.contains("assets/audio"));
+    require(render_identity(empty) != identity);
+    content.write("assets/audio/included.ogg", "audio bytes");
+    const auto present = workload_content(content.root);
+    require(!present.contains("assets/audio"));
+    require(present.at("assets/audio/included.ogg") ==
+            content_digest(content.root / "assets/audio/included.ogg"));
+    require(render_identity(present) != identity);
+    require(render_identity(present) != render_identity(empty));
+    require(policy.allows(content.root / "assets/audio/included.ogg"));
+    require(!policy.refused());
+    require(std::filesystem::remove(content.root / "assets/audio/included.ogg"));
+    require(std::filesystem::remove(content.root / "assets/audio"));
+    require(workload_content(content.root) == absent);
+    content.write("assets/private.ogg", "outside audio tree");
+    require(!policy.allows(content.root / "assets/audio/../private.ogg"));
+    require(policy.refused());
+    // A missing tree cannot hide a redirected parent, including NTFS junctions.
+    require(std::filesystem::remove(content.root / "assets/private.ogg"));
+    require(std::filesystem::remove(content.root / "assets"));
+    const TemporaryContent outside;
+    link_directory(content.root / "assets", outside.root);
+    Luminumbra::Filesystem::CaptureContentPaths redirected;
+    require_refusal([&] { redirected.enable(content.root); });
+    require_refusal([&] { workload_content(content.root); });
+    require(std::filesystem::remove(content.root / "assets"));
+}
+
+void audio_references() {
+    const TemporaryContent content;
+    content.write("assets/audio/music/themes/main_menu_theme.mp3", "audio bytes");
+    Luminumbra::Filesystem::CaptureContentPaths policy;
+    policy.enable(content.root);
+    // These are the startup banks loaded with default audio enabled. Inspect
+    // every file reference through the same containment policy as LoadBank.
+    for (const char* bank : {"sfx_main.bank.json", "music.bank.json"}) {
+        std::ifstream input(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) / "data/audio" / bank);
+        const auto document = json::parse(input);
+        for (const auto& event : document.at("events"))
+            for (const auto& file : event.at("files"))
+                require(policy.allows(content.root / file.get<std::string>()));
+    }
+    require(!policy.refused());
+    const auto original = workload_content(content.root);
+    const auto identity = render_identity(original);
+    content.write("assets/audio/music/themes/main_menu_theme.mp3", "different audio bytes");
+    require(workload_content(content.root).at("assets/audio/music/themes/main_menu_theme.mp3") !=
+            original.at("assets/audio/music/themes/main_menu_theme.mp3"));
+    require(render_identity(workload_content(content.root)) != identity);
+    content.write("assets/private.mp3", "outside audio tree");
+    require(!policy.allows(content.root / "assets/audio/../private.mp3"));
+    require(policy.refused());
+}
+
 void content_references() {
     const TemporaryContent content;
     content.write("data/texture.ltex", "inventoried bytes");
@@ -317,6 +385,14 @@ int main(int argc, char** argv) {
         }
         if (argc == 2 && std::string_view(argv[1]) == "content-references") {
             content_references();
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "audio-references") {
+            audio_references();
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "optional-audio") {
+            optional_audio();
             return 0;
         }
         require(argc == 1);

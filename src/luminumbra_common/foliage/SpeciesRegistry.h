@@ -11,7 +11,7 @@
 // the sampled genes are clamped to [0,1]. Loading is pure file I/O; the sim/world_hash is
 // unaffected until a sampled plant is actually spawned (plants are opt-in via PlantTag).
 
-#include "luminumbra_common/core/CaptureContentPaths.h"
+#include "../core/CaptureContentPaths.h"
 #include <array>
 #include <cstdint>
 #include <filesystem>

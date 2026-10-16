@@ -367,6 +367,7 @@ def workload_artifact(kind, script):
             'data/common/systems.json', 'data/common/foliage/scatter_set.json',
             'data/common/creatures/species/example.json', 'data/common/materials.json',
             'data/ui/main_menu.rml', 'res/shaders/water.frag', 'config/game-asset-packs.json',
+            'assets/audio/music/themes/main_menu_theme.mp3',
             'game-assets/tree-small-02/1.0.0/data/models/trees/tree.lmesh',
             'inputs/systems_config.json', 'inputs/preset.json', 'inputs/user_settings.json')}
     data['render_identity'] = contract.render_identity(data['settings'])
@@ -424,6 +425,38 @@ class ScriptedWorkloadTests(unittest.TestCase):
                     data['render_identity'] = contract.render_identity(data['settings'])
                     self.assertEqual(capture.validate(data, args(traversal=script))['verdict'], 'PASS')
                     self.assertEqual(contract.validate(data, QUALIFIED, traversal=script)['frames'], 30)
+
+    def test_optional_audio_absence_is_validated_and_changes_identity(self):
+        script = self.scripts['save_load']
+        data = workload_artifact('save_load', script)
+        original_identity = data['render_identity']
+        content = data['settings']['content_files']
+        audio_path = 'assets/audio/music/themes/main_menu_theme.mp3'
+        del content[audio_path]
+        content['assets/audio'] = None
+        data['render_identity'] = contract.render_identity(data['settings'])
+        self.assertNotEqual(data['render_identity'], original_identity)
+        self.assertEqual(capture.validate(data, args(traversal=script))['verdict'], 'PASS')
+        absent_identity = data['render_identity']
+        del content['assets/audio']
+        data['render_identity'] = contract.render_identity(data['settings'])
+        self.assertNotEqual(data['render_identity'], absent_identity)
+        self.assertEqual(capture.validate(data, args(traversal=script))['verdict'], 'PASS')
+        for path, value in (('assets/audio', 'absent'),
+                            ('assets/private.mp3', 'fnv1a64:0000000000000000'),
+                            ('assets/audio/../private.mp3', 'fnv1a64:0000000000000000'),
+                            ('assets/audio/missing.ogg', None)):
+            with self.subTest(path=path):
+                invalid = copy.deepcopy(data)
+                invalid['settings']['content_files'][path] = value
+                invalid['render_identity'] = contract.render_identity(invalid['settings'])
+                with self.assertRaises(ValueError):
+                    capture.validate(invalid, args(traversal=script))
+        content['assets/audio'] = None
+        content[audio_path] = 'fnv1a64:0000000000000000'
+        data['render_identity'] = contract.render_identity(data['settings'])
+        with self.assertRaisesRegex(ValueError, 'absent audio tree'):
+            capture.validate(data, args(traversal=script))
 
     def test_all_new_required_fields_are_enforced(self):
         script = self.scripts['save_load']
@@ -609,6 +642,8 @@ class ScriptedWorkloadTests(unittest.TestCase):
                      lambda s: s['content_files'].pop('config/game-asset-packs.json'),
                      lambda s: s['content_files'].pop('game-assets/tree-small-02/1.0.0/data/models/trees/tree.lmesh'),
                      lambda s: s['content_files'].update({'data/../outside': 'fnv1a64:0000000000000000'}),
+                     lambda s: s['content_files'].update({'assets/private.mp3': 'fnv1a64:0000000000000000'}),
+                     lambda s: s['content_files'].update({'assets/audio/../private.mp3': 'fnv1a64:0000000000000000'}),
                      lambda s: s['content_files'].update({'data/common/materials.json': 'invalid'})]
         for mutate in mutations:
             data = workload_artifact('edit', script)

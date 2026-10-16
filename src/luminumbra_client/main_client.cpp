@@ -3336,18 +3336,25 @@ int main(int argc, char* argv[]) {
                         const Luminumbra::Vec3 position(static_cast<float>(action.position[0]),
                                                         static_cast<float>(action.position[1]),
                                                         static_cast<float>(action.position[2]));
-                        bool ready = true;
-                        if (action.tick == 0)
-                            ready = gameSession->GetWorldSystem()->EnsureSurfaceReadyNear(
-                                position, gameSession->GetPhysicsSystem(), 1, 1);
-                        const int modified = gameSession->GetWorldSystem()->EditTerrainVoxel(
-                            position,
-                            static_cast<float>(action.radius),
-                            fill,
-                            gameSession->GetPhysicsSystem());
-                        gameSession->NotifyGroundObjectEdit(position);
-                        return Measurement::ActionResult{
-                            ready && (modified > 0 || action.tick == 0), modified};
+                        auto* world = gameSession->GetWorldSystem();
+                        try {
+                            if (!world->PrepareTerrainVoxelEdit(position,
+                                                                static_cast<float>(action.radius)))
+                                return Measurement::ActionResult{false, 0};
+                            const int modified =
+                                world->EditTerrainVoxel(position,
+                                                        static_cast<float>(action.radius),
+                                                        fill,
+                                                        gameSession->GetPhysicsSystem());
+                            if (modified > 0)
+                                gameSession->NotifyGroundObjectEdit(position);
+                            // Tick-zero tunnel preparation may encounter already-carved air.
+                            return Measurement::ActionResult{modified > 0 || action.tick == 0,
+                                                             modified};
+                        } catch (const std::exception& error) {
+                            LUMINUMBRA_CORE_ERROR("Benchmark terrain refused: {}", error.what());
+                            return Measurement::ActionResult{false, 0};
+                        }
                     },
                     [&](bool main_menu) {
                         if (!session_persistence_allowed())

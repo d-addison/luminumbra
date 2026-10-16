@@ -112,7 +112,7 @@ inline void require_saved_world_digest(const std::filesystem::path& directory,
         throw std::runtime_error("workload saved authority changed before reload");
 }
 
-// Conservatively include the data, resource, config and installed asset trees:
+// Conservatively include data, resources, config, installed assets and audio:
 // scatter archetypes can reference models/textures (including asset packs),
 // presets can reference tuning, and UI documents can reference styles/fonts.
 // Sorting by portable relative path
@@ -125,6 +125,16 @@ inline nlohmann::json workload_content(const std::filesystem::path& root) {
     // also bound directory depth to 64, independently of filesystem traversal order.
     std::size_t entries = 0;
     for (const char* tree : Filesystem::kCaptureContentTrees) {
+        // Public packages omit audio. Record absence so an empty or populated
+        // audio tree appearing later also changes the render identity.
+        if (tree == Filesystem::kOptionalCaptureContentTree &&
+            !std::filesystem::exists(root / tree) && !std::filesystem::is_symlink(root / tree)) {
+            if (entries == 65536)
+                throw std::runtime_error("workload content manifest exceeds bounds");
+            ++entries;
+            result[tree] = nullptr;
+            continue;
+        }
         if (std::filesystem::is_symlink(root / tree) || !std::filesystem::is_directory(root / tree))
             throw std::runtime_error("missing workload content tree");
         for (auto iterator = std::filesystem::recursive_directory_iterator(root / tree);

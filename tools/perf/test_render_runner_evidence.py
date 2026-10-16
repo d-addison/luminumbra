@@ -18,6 +18,8 @@ import types
 import unittest
 from unittest import mock
 
+import test_render_contract as contract_fixtures
+
 
 parser = argparse.ArgumentParser(add_help=False)
 parser.add_argument('--runner', type=Path, default=Path(__file__).with_name('test_render_runner.py'))
@@ -175,6 +177,45 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         self.assertIs(caught.exception, self.process_exception)
         self.assertEqual((caught.exception.cmd, caught.exception.timeout),
                          self.process_exception_attributes)
+
+    def test_successful_v4_workload_runs_through_report_validation(self):
+        source = Path(__file__).resolve().parents[2]
+        runner.OPTIONS.source = source
+        script = self.case.short_save_load_script()
+        data = contract_fixtures.workload_artifact('save_load', script)
+        self.payload = (json.dumps(data) + '\n').encode('utf-8')
+        self.case.test_v4_save_load_success()
+        self.assertEqual(len(self.calls), 1)
+        command = self.calls[0][0]
+        self.assertEqual(command[command.index('--render-benchmark-schema') + 1], 'v4')
+        self.assertNotIn('--no-audio', command)
+        capture, _ = self.paths('save-load')
+        self.assertEqual(json.loads(capture.read_bytes()), data)
+        receipt = self.receipt('save-load')
+        self.assertEqual(receipt['outcome'], 'returned')
+        self.assertEqual(receipt['return_code'], 0)
+        self.assertEqual(receipt['capture_status'], 'retained')
+        self.assertEqual(receipt['capture_sha256'], hashlib.sha256(self.payload).hexdigest())
+
+    def test_successful_v4_without_audio_runs_through_report_validation(self):
+        runner.OPTIONS.source = Path(__file__).resolve().parents[2]
+        script = self.case.short_save_load_script()
+        data = contract_fixtures.workload_artifact('save_load', script)
+        content = data['settings']['content_files']
+        for path in list(content):
+            if path.startswith('assets/audio/'):
+                del content[path]
+        content['assets/audio'] = None
+        data['render_identity'] = runner.contract.render_identity(data['settings'])
+        self.payload = (json.dumps(data) + '\n').encode('utf-8')
+        self.case.test_v4_no_audio_success()
+        self.assertEqual(len(self.calls), 1)
+        command = self.calls[0][0]
+        self.assertIn('--no-audio', command)
+        self.assertEqual(command[command.index('--render-benchmark-schema') + 1], 'v4')
+        self.assertFalse((self.runtime / 'assets/audio').exists())
+        self.assertEqual(json.loads(self.paths('save-load')[0].read_bytes()), data)
+        self.assertEqual(self.receipt('save-load')['return_code'], 0)
 
     def test_timeout_retains_complete_capture_after_runtime_cleanup(self):
         self.assert_timeout()

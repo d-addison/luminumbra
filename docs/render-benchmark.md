@@ -306,7 +306,7 @@ additional required evidence is:
 | `settings.effective_render.systems` | Every `render.*` flag and resolved scalar/vector parameter, enumerated from the shared SystemConfig registry, including sky LUT and live weather; disabled entries retain their resolved inputs |
 | `settings.render_overrides` | Active render override declarations, also covered by the configuration identity |
 | `settings.simulation_identity` | Existing session `SystemConfigIdentity()` for effective simulation gates and tuning, including water resolution and ecology |
-| `settings.content_files` | Binary `fnv1a64:` digests keyed by portable relative paths for every file under `data/`, `res/`, `config/` and `game-assets/`, plus logical `inputs/` keys for explicit system-config and preset files and the user settings overlay when present |
+| `settings.content_files` | Binary `fnv1a64:` digests keyed by portable relative paths for every file under `data/`, `res/`, `config/`, `game-assets/` and the optional `assets/audio/` tree, plus logical `inputs/` keys for explicit system-config and preset files and the user settings overlay when present. An absent audio tree is recorded as `"assets/audio": null` |
 | `render_identity` | Stable `fnv1a64:` identity of the complete resolved `settings` object; recomputed by the validator |
 | `windows.startup` | Monotonic startup `elapsed_ms` through world identity checking and tick-zero preparation; its foliage observation precedes rendering |
 | `windows.warmup` | Every warmup `frame_wall_samples_ms`, plus distribution with p50/p95/p99/max/MAD, sample and unavailable counts |
@@ -321,11 +321,16 @@ to scatter sets, tuning, models, textures, shaders, UI styles and fonts cannot
 silently compare as identical workloads. Content is streamed before runtime
 initialization and checked again before writing the report; a change refuses
 the capture. Inventory reads are outside warmup and measured frame intervals.
-Referenced content must resolve inside those four trees. The shared loader check
-refuses external absolute paths, parent-relative escapes and symlinks leaving a
-tree, including nested JSON dependencies, shader includes, models, textures,
-scatter sets and UI resources. A loader's optional-asset fallback cannot clear
-this refusal. Capture mesh loading also disables build/source-tree fallbacks.
+The audio tree may be absent, including in public packages used with `--no-audio`;
+its absence participates in the inventory and render identity. When present,
+every audio file is hashed like the other content files.
+Referenced content must resolve inside the four required trees or `assets/audio/`.
+The shared loader check refuses external absolute paths, parent-relative escapes
+and symlinks leaving a tree, including nested JSON dependencies, shader includes, models, textures,
+scatter sets, UI resources and audio banks. Audio paths escaping their allowed
+tree are refused even when that tree is absent. A loader's optional-asset fallback
+cannot clear this refusal. Capture mesh loading also disables build/source-tree
+fallbacks.
 
 V4 presentation time starts at zero before UI initialization and holds there
 through startup. Warmup advances by one script tick per captured frame;

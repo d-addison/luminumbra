@@ -780,6 +780,11 @@ public:
     void SetVoxelEditObserver(std::function<void(const IVec3&)> observer) {
         m_voxelEditObserver = std::move(observer);
     }
+    // Host-thread preparation for bounded scripted edits (radius <= 16 m,
+    // coordinates within +/-32000 m). Drains streaming, then supplies full SDF
+    // lattices throughout the edit AABB, including chunks below the surface.
+    // False means unavailable/malformed terrain, never an already-air no-op.
+    bool PrepareTerrainVoxelEdit(const Vec3& world_pos, float radius_m);
     int EditTerrainVoxel(const Vec3& world_pos,
                          float radius_m,
                          bool fill,

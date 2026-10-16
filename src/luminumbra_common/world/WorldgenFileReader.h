@@ -1,6 +1,6 @@
 #pragma once
 
-#include "luminumbra_common/core/CaptureContentPaths.h"
+#include "../core/CaptureContentPaths.h"
 #include <array>
 #include <filesystem>
 #include <fstream>

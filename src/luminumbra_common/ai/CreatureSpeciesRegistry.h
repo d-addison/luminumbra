@@ -19,7 +19,7 @@
 // compiled-in behaviour. Any FUTURE field the sim consumes as an integer (tick counts,
 // counts) must be parsed as an integer (get<std::uint32_t>), never via a float round-trip.
 
-#include "luminumbra_common/core/CaptureContentPaths.h"
+#include "../core/CaptureContentPaths.h"
 #include <algorithm>
 #include <cstdint>
 #include <filesystem>

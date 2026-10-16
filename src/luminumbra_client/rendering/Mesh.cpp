@@ -80,8 +80,10 @@ std::ifstream OpenMeshFile(const std::string& path, std::filesystem::path& resol
         const std::filesystem::path requested(path);
         bool rooted_content = false;
         if (!requested.empty())
-            for (const auto* tree : Filesystem::kCaptureContentTrees)
-                rooted_content = rooted_content || *requested.begin() == tree;
+            for (const auto* tree : Filesystem::kCaptureContentTrees) {
+                const std::filesystem::path content_tree(tree);
+                rooted_content = rooted_content || *requested.begin() == *content_tree.begin();
+            }
         resolvedPath =
             Filesystem::IsAbsolutePath(requested)
                 ? requested

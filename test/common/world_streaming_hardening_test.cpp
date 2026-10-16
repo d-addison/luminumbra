@@ -677,6 +677,64 @@ TEST(StreamingHardening, ChunkSdfProvenanceRevisionLifecycleIsSticky) {
     EXPECT_FALSE(chunk.is_voxel_data_dirty());
 }
 
+TEST(StreamingHardening, ScriptedDigPreparesFullLatticesBelowSurfaceBand) {
+    auto params = FixtureParams();
+    params.base_amplitude = 0.0f;
+    params.height_offset = 64.0f;
+    SHIELD_WorldSystem world(nullptr, nullptr, params, 42);
+    // Eight chunks meet here, far below the surface band at y=64.
+    const Vec3 center(16.0f, -64.0f, 16.0f);
+    ASSERT_FALSE(world.find_streamed_chunk(IVec3(1, -4, 1)));
+    ASSERT_TRUE(world.PrepareTerrainVoxelEdit(center, 3.0f));
+    for (int z = 0; z <= 1; ++z)
+        for (int y = -5; y <= -4; ++y)
+            for (int x = 0; x <= 1; ++x) {
+                const auto chunk = world.find_streamed_chunk(IVec3(x, y, z));
+                ASSERT_TRUE(chunk);
+                ASSERT_EQ(chunk->sdf_data.size(), 17u * 17u * 17u);
+            }
+    ASSERT_EQ(world.EditTerrainVoxel(center, 3.0f, false, nullptr), 8);
+    const auto chunk = world.find_streamed_chunk(IVec3(1, -4, 1));
+    ASSERT_TRUE(chunk);
+    EXPECT_EQ(chunk->sdf_data.front(), 3.0f);
+    EXPECT_TRUE(chunk->is_voxel_data_dirty());
+    const auto carved = chunk->sdf_data;
+    ASSERT_TRUE(world.PrepareTerrainVoxelEdit(center, 3.0f));
+    EXPECT_EQ(chunk->sdf_data, carved); // Preparation preserves earlier edits.
+    EXPECT_EQ(world.EditTerrainVoxel(center, 3.0f, false, nullptr), 0); // Already air.
+    EXPECT_EQ(chunk->sdf_data, carved);
+}
+
+TEST(StreamingHardening, ScriptedDigPromotesCoarseTerrainBeforeEditing) {
+    auto params = FixtureParams();
+    params.base_amplitude = 0.0f;
+    params.height_offset = 64.0f;
+    SHIELD_WorldSystem world(nullptr, nullptr, params, 42);
+    const Vec3 center(8.0f, -56.0f, 8.0f);
+    const auto coarse = std::make_shared<Chunk>(IVec3(0, -4, 0));
+    world.GenerateChunkData(*coarse, 4);
+    ASSERT_TRUE(coarse->sdf_data.empty());
+    ASSERT_FALSE(coarse->heightmap_data.empty());
+    ASSERT_TRUE(world.adopt_streamed_chunk(coarse));
+    ASSERT_TRUE(world.PrepareTerrainVoxelEdit(center, 3.0f));
+    ASSERT_EQ(coarse->sdf_data.size(), 17u * 17u * 17u);
+    ASSERT_EQ(world.EditTerrainVoxel(center, 3.0f, false, nullptr), 1);
+    EXPECT_EQ(coarse->sdf_data[8u + 8u * 17u + 8u * 17u * 17u], 3.0f);
+}
+
+TEST(StreamingHardening, ScriptedDigRefusesMalformedTerrainAndUnboundedRequests) {
+    SHIELD_WorldSystem world(nullptr, nullptr, FixtureParams(), 42);
+    const Vec3 center(8.0f, -56.0f, 8.0f);
+    const auto malformed = std::make_shared<Chunk>(IVec3(0, -4, 0));
+    malformed->sdf_data = {-1.0f};
+    ASSERT_TRUE(world.adopt_streamed_chunk(malformed));
+    EXPECT_FALSE(world.PrepareTerrainVoxelEdit(center, 3.0f));
+    EXPECT_EQ(malformed->sdf_data, std::vector<float>{-1.0f});
+    EXPECT_FALSE(world.PrepareTerrainVoxelEdit(center, 0.0f));
+    EXPECT_FALSE(world.PrepareTerrainVoxelEdit(center, 17.0f));
+    EXPECT_FALSE(world.PrepareTerrainVoxelEdit(Vec3(32001.0f, 0.0f, 0.0f), 1.0f));
+}
+
 TEST(StreamingHardening, ChunkRecordEditedFlagRestoresOnlyDurableAuthority) {
     Persistence::WorldSaveService service;
     std::vector<std::string> errors;

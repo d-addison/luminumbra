@@ -6,10 +6,13 @@
 #include <atomic>
 #include <filesystem>
 #include <stdexcept>
+#include <string_view>
 
 namespace Luminumbra::Filesystem {
 
-inline constexpr std::array kCaptureContentTrees = {"data", "res", "config", "game-assets"};
+inline constexpr std::array kCaptureContentTrees = {
+    "data", "res", "config", "game-assets", "assets/audio"};
+inline constexpr std::string_view kOptionalCaptureContentTree = "assets/audio";
 
 // Configured once on the host thread before starting capture loaders/workers.
 // Only file-load boundaries perform filesystem work; inactive checks are O(1).
@@ -25,9 +28,13 @@ public:
             throw std::runtime_error("cannot canonicalize capture content root");
         for (std::size_t index = 0; index < trees_.size(); ++index) {
             const auto tree = root_ / kCaptureContentTrees[index];
-            if (std::filesystem::is_symlink(tree) || !std::filesystem::is_directory(tree))
+            const bool absent_audio = kCaptureContentTrees[index] == kOptionalCaptureContentTree &&
+                                      !std::filesystem::exists(tree);
+            if (std::filesystem::is_symlink(tree) ||
+                (!absent_audio && !std::filesystem::is_directory(tree)))
                 throw std::runtime_error("unsupported capture content tree");
-            trees_[index] = std::filesystem::canonical(tree);
+            trees_[index] = absent_audio ? std::filesystem::weakly_canonical(tree)
+                                         : std::filesystem::canonical(tree);
             lexical_trees_[index] = tree;
             if (trees_[index] != canonical_root / kCaptureContentTrees[index])
                 throw std::runtime_error("redirected capture content tree");

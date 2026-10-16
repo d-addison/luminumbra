@@ -3,7 +3,10 @@
 #include "luminumbra_client/core/PresentationClock.h"
 #include "luminumbra_client/rendering/FoliageCountObservation.h"
 
+#include <gtest/gtest.h>
+
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -17,6 +20,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -359,16 +363,31 @@ void reload_boundaries() {
     interval.observe(10, false, origin + milliseconds(2));
     require(!interval.result());
     interval.observe(11, true, origin + milliseconds(7));
-    require(interval.result()->request_frame == 10);
-    require(interval.result()->first_settled_frame == 11);
-    require(interval.result()->elapsed_ms == 7);
+    const auto first = interval.result();
+    ASSERT_TRUE(first.has_value());
+    if (first.has_value()) {
+        const auto& checked = first.value();
+        require(checked.request_frame == 10);
+        require(checked.first_settled_frame == 11);
+        require(checked.elapsed_ms == 7);
+    }
     interval.observe(12, true, origin + milliseconds(99));
-    require(interval.result()->first_settled_frame == 11 && interval.result()->elapsed_ms == 7);
+    const auto latched = interval.result();
+    ASSERT_TRUE(latched.has_value());
+    if (latched.has_value()) {
+        const auto& checked = latched.value();
+        require(checked.first_settled_frame == 11 && checked.elapsed_ms == 7);
+    }
     interval.request(20, origin + milliseconds(100));
     require(!interval.result());
     interval.observe(20, true, origin + milliseconds(103));
-    require(interval.result()->request_frame == 20 && interval.result()->first_settled_frame == 20);
-    require(interval.result()->elapsed_ms == 3);
+    const auto second = interval.result();
+    ASSERT_TRUE(second.has_value());
+    if (second.has_value()) {
+        const auto& checked = second.value();
+        require(checked.request_frame == 20 && checked.first_settled_frame == 20);
+        require(checked.elapsed_ms == 3);
+    }
 
     // Save must not open the reload interval. Drive the committed script with a
     // deterministic CPU clock, including request-frame and later presents.
@@ -381,7 +400,7 @@ void reload_boundaries() {
         throw std::runtime_error("unexpected save/load action");
     };
     for (int tick = 0; tick <= 304; ++tick) {
-        const auto frame = static_cast<std::uint64_t>(tick + 1);
+        const auto frame = static_cast<std::uint64_t>(tick) + 1;
         const auto frame_start = origin + milliseconds(tick * 10);
         require(dispatch_actions(
             script.actions,
@@ -407,13 +426,21 @@ void reload_boundaries() {
         if (tick < 303)
             require(!scripted.result());
         else {
-            require(scripted.result().has_value());
-            require(scripted.result()->request_frame == 301);
-            require(scripted.result()->first_settled_frame == 304);
-            require(scripted.result()->elapsed_ms == 36);
+            const auto result = scripted.result();
+            ASSERT_TRUE(result.has_value());
+            if (result.has_value()) {
+                const auto& checked = result.value();
+                require(checked.request_frame == 301);
+                require(checked.first_settled_frame == 304);
+                require(checked.elapsed_ms == 36);
+            }
         }
     }
     require(cursor == 2 && saves == 1);
+}
+
+TEST(RenderReloadInterval, Boundaries) {
+    reload_boundaries();
 }
 
 void menu_observations() {
@@ -585,9 +612,10 @@ int main(int argc, char** argv) {
             workload_definitions();
         else if (name == "dispatch")
             workload_dispatch();
-        else if (name == "reload")
-            reload_boundaries();
-        else if (name == "menus")
+        else if (name == "reload") {
+            ::testing::InitGoogleTest(&argc, argv);
+            return RUN_ALL_TESTS();
+        } else if (name == "menus")
             menu_observations();
         else if (name == "foliage")
             foliage_observations();

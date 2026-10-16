@@ -231,8 +231,12 @@ def validate_render_identity(data):
     if not any(path.startswith('game-assets/') for path in content):
         raise ValueError('missing workload asset pack digests')
     for path, digest in content.items():
+        if path == 'assets/audio' and digest is None:
+            if any(isinstance(name, str) and name.startswith('assets/audio/') for name in content):
+                raise ValueError('absent audio tree contains workload content')
+            continue
         if (not isinstance(path, str) or len(path.encode('utf-8')) > 4096 or
-            not path.startswith(('data/', 'res/', 'config/', 'game-assets/', 'inputs/')) or
+            not path.startswith(('data/', 'res/', 'config/', 'game-assets/', 'assets/audio/', 'inputs/')) or
             '\\' in path or ':' in path or
             any(part in ('', '.', '..') for part in path.split('/')) or
             not isinstance(digest, str) or not re.fullmatch(r'fnv1a64:[0-9a-f]{16}', digest)):

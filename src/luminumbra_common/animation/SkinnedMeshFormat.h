@@ -12,7 +12,7 @@
 //   - at most 256 joints per skeleton (joint indices fit in a u8),
 //   -.lanim tracks are keyed by the FNV-1a 32-bit hash of the joint name.
 
-#include "luminumbra_common/core/CaptureContentPaths.h"
+#include "../core/CaptureContentPaths.h"
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
