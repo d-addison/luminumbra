@@ -189,7 +189,10 @@ Recovery runs only after acquiring the project lock. Receiptless directories and
 interrupted jobs move intact to timestamped directories under
 `.luminumbra-author/quarantine/`; interrupted jobs retain a failed receipt under
 `jobs/` for status queries. Quarantine preserves all files and is never deleted
-automatically. Completed jobs and committed generations remain in place.
+automatically. Before moving an interrupted job, recovery records an intent and
+replays it on startup until the failed status receipt is saved. Process exits and
+write failures during quarantine therefore retain the job for status queries.
+Completed jobs and committed generations remain in place.
 
 Receipts record the host/Python profile, source/dependency hashes, exporter metadata through the hashed
 sidecar, service-code hashes, compiler/library identities, settings, outputs and

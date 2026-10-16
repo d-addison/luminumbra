@@ -1070,6 +1070,156 @@ class Project(unittest.TestCase):
             self.assertEqual((container / directory.name / "source.data").read_bytes(),
                              directory.name.encode())
 
+    def test_quarantine_transition_resumes_after_each_io_failure(self):
+        service = self.open()
+        service.close()
+        write = service_module.atomic_json
+        rename, mkdir, unlink = Path.rename, Path.mkdir, Path.unlink
+        phases = ("intent_before", "intent_after", "move_before", "move_after",
+                  "mkdir_before", "mkdir_after", "save_during", "save_after",
+                  "intent_remove_before", "intent_remove_after")
+        for index, phase in enumerate(phases, 1):
+            with self.subTest(phase=phase):
+                job_id = f"{index:032x}"
+                directory = service.root / "jobs" / job_id
+                directory.mkdir()
+                original = {"schema": service_module.RECEIPT, "mode": "NATIVE",
+                            "job_id": job_id, "status": "compiling", "findings": []}
+                write(directory / "receipt.json", original)
+                (directory / "source.data").write_bytes(b"Preserved source")
+                (directory / "outputs").mkdir()
+                (directory / "outputs" / "partial.data").write_bytes(b"Partial output")
+                before = {path.relative_to(directory): path.read_bytes()
+                          for path in directory.rglob("*") if path.is_file()}
+                intent = service.root / "quarantine-pending.json"
+                error = OSError("Injected quarantine failure")
+
+                def save(path, value):
+                    if path == intent and phase == "intent_before":
+                        raise error
+                    if path == directory / "receipt.json" and phase == "save_during":
+                        # Fail after writing and flushing the complete temporary receipt.
+                        with patch.object(os, "fsync", side_effect=error):
+                            write(path, value)
+                    write(path, value)
+                    if ((path == intent and phase == "intent_after")
+                            or (path == directory / "receipt.json" and phase == "save_after")):
+                        raise error
+
+                def move(path, target):
+                    if path == directory and phase == "move_before":
+                        raise error
+                    result = rename(path, target)
+                    if path == directory and phase == "move_after":
+                        raise error
+                    return result
+
+                def create(path, *args, **kwargs):
+                    recreating = path == directory and kwargs.get("exist_ok") is True
+                    if recreating and phase == "mkdir_before":
+                        raise error
+                    result = mkdir(path, *args, **kwargs)
+                    if recreating and phase == "mkdir_after":
+                        raise error
+                    return result
+
+                def remove(path, *args, **kwargs):
+                    if path == intent and phase == "intent_remove_before":
+                        raise error
+                    result = unlink(path, *args, **kwargs)
+                    if path == intent and phase == "intent_remove_after":
+                        raise error
+                    return result
+
+                with patch.object(service_module, "atomic_json", side_effect=save), \
+                     patch.object(Path, "rename", move), \
+                     patch.object(Path, "mkdir", create), \
+                     patch.object(Path, "unlink", remove):
+                    with self.assertRaisesRegex(OSError, "Injected quarantine failure"):
+                        self.open()
+
+                recovered = self.open()
+                result = recovered.status(job_id)
+                self.assertEqual(result, {**original, "status": "failed", "findings": [
+                    service_module.Refusal("job.orphaned",
+                        "Service exited before publication; submit a new build.").finding]})
+                self.assertEqual(read_json(directory / "receipt.json"), result)
+                self.assertEqual([path.name for path in directory.iterdir()], ["receipt.json"])
+                evidence = list((service.root / "quarantine").glob(f"*/{job_id}"))
+                self.assertEqual(len(evidence), 1)
+                self.assertEqual({path.relative_to(evidence[0]): path.read_bytes()
+                                  for path in evidence[0].rglob("*") if path.is_file()}, before)
+                self.assertFalse(intent.exists())
+                recovered.close()
+                reopened = self.open()
+                self.assertEqual(reopened.status(job_id), result)
+                self.assertEqual(list((service.root / "quarantine").glob(f"*/{job_id}")), evidence)
+                reopened.close()
+
+    def test_quarantine_replay_keeps_intent_across_repeated_save_failures(self):
+        service = self.open()
+        service.close()
+        directory = service.root / "jobs" / ("1" * 32)
+        directory.mkdir()
+        original = {"schema": service_module.RECEIPT, "mode": "NATIVE",
+                    "job_id": directory.name, "status": "compiling", "findings": []}
+        atomic_json(directory / "receipt.json", original)
+        (directory / "source.data").write_bytes(b"Preserve this evidence")
+        write = service_module.atomic_json
+
+        def fail_save(path, value):
+            if path == directory / "receipt.json":
+                raise OSError("Injected receipt failure")
+            write(path, value)
+
+        with patch.object(service_module, "atomic_json", side_effect=fail_save):
+            for _ in range(3):
+                with self.assertRaisesRegex(OSError, "Injected receipt failure"):
+                    self.open()
+                intent = read_json(service.root / "quarantine-pending.json")
+                archived = service.root / "quarantine" / intent["container"] / directory.name
+                self.assertEqual(read_json(archived / "receipt.json"), original)
+                self.assertEqual((archived / "source.data").read_bytes(), b"Preserve this evidence")
+                self.assertEqual(list((service.root / "quarantine").iterdir()), [archived.parent])
+        # A pending transition must not bypass exclusive project ownership.
+        with_owner = ProjectLock(self.project, service.root / "session.lock")
+        try:
+            with self.assertRaises(Refusal) as caught:
+                self.open()
+            self.assertEqual(caught.exception.finding["rule_id"], "session.busy")
+            self.assertEqual(read_json(service.root / "quarantine-pending.json"), intent)
+            self.assertFalse((directory / "receipt.json").exists())
+        finally:
+            with_owner.close()
+        recovered = self.open()
+        self.assertEqual(recovered.status(directory.name)["status"], "failed")
+        self.assertEqual(read_json(archived / "receipt.json"), original)
+        self.assertFalse((service.root / "quarantine-pending.json").exists())
+
+    def test_quarantine_replay_refuses_invalid_intent_without_moving_source(self):
+        service = self.open()
+        service.close()
+        directory = service.root / "jobs" / ("1" * 32)
+        directory.mkdir()
+        original = {"schema": service_module.RECEIPT, "mode": "NATIVE",
+                    "job_id": directory.name, "status": "compiling", "findings": []}
+        atomic_json(directory / "receipt.json", original)
+        intent = service.root / "quarantine-pending.json"
+        invalid = ([], {}, {"job_id": "../outside", "container": "20000101T000000Z"},
+                   {"job_id": directory.name, "container": "../outside"},
+                   {"job_id": directory.name, "container": 1})
+        for transition in invalid:
+            with self.subTest(transition=transition):
+                atomic_json(intent, transition)
+                with self.assertRaises(Refusal) as caught:
+                    self.open()
+                self.assertEqual(caught.exception.finding["rule_id"], "state.invalid")
+                self.assertEqual(read_json(intent), transition)
+                self.assertEqual(read_json(directory / "receipt.json"), original)
+                self.assertFalse((service.root / "quarantine").exists())
+        intent.unlink()
+        self.assertEqual(self.open().status(directory.name)["status"], "failed")
+
     def test_recovery_reclaims_receiptless_jobs_before_retained_limit(self):
         service = self.open()
         service.close()
