@@ -2,11 +2,17 @@
 
 The host ledger implements the persistent-active scheduling foundation in
 [distant-world.md](distant-world.md). It is gated by the existing
-`sim.active_regions` switch, absent and false by default. No systems.json value
-is added. Budgets remain unlimited in shipped configuration. Enabled host sessions consume this schedule for field pages, ground objects,
-weather, energy, foliage and resident water. Resident water uses the checked
-[regional continuation contract](regional-water-continuation.md). Diagnostics
+`sim.active_regions` switch, enabled in compiled and packaged defaults since
+v0.3.0. Explicit false selects the legacy clock path. Budgets remain unlimited in
+shipped configuration. Enabled host sessions consume this schedule for field pages,
+ground objects, weather, energy, foliage and resident water. Resident water uses the
+checked [regional continuation contract](regional-water-continuation.md). Diagnostics
 and measured budget activation remain separate qualification work.
+
+Strict distant policy and distant creatures (S8) are planned for v0.3.1. Regional
+continuation performance/default enablement is planned for v0.4.0 as
+[issue #320](https://github.com/d-addison/luminumbra/issues/320). The dedicated
+server autosaves every five minutes.
 
 ## Activation and ordering
 
@@ -87,8 +93,9 @@ refuses a resume before freeze. No callback consumer or catch-up is installed.
 The record is `<save>/chunks/region/active-regions.arl`, following the accepted
 contract's placement in the region integrity scan. This resolves the slice
 brief's conflicting save-root wording in favour of that contract. ARL1 does
-not alter LMR1 v2, the world manifest, preset revision 6, EFS1, plant payloads,
-FSD2 v3, or canonical chunk serialization. An anchor-only ledger is not a chunk
+not alter LMR1 v2, the world manifest, EFS1, plant payloads, FSD2 v3, or canonical
+chunk serialization. Presets now use revision 7 with revision-6 omission
+compatibility and frozen packaged-preset fallback. An anchor-only ledger is not a chunk
 snapshot: with active regions enabled, the first save with dirty chunks writes all
 resident chunks, including clean chunks in other regions. The disabled path keeps
 the legacy existing-save query: a plant-only save makes later saves incremental.
@@ -340,13 +347,13 @@ expected component hashes on mismatch. Diagnostic sources, component values,
 compiler commands and predecessor source identities accompany the campaign receipt
 under `ci-investigation/`.
 
-The subsequent [ambient dispatch repair](https://github.com/d-addison/luminumbra/pull/172)
+The subsequent ambient dispatch repair
 caps both FBm and Simplex nodes in all three ambient systems at terrain's x86
 AVX2 ceiling, preserving lower-ISA fallback and native non-x86 selection. Its
 Debug/Release controls and native qualification retain their own source identities;
 the historical table above is not relabelled as post-repair evidence. Integrated
-and native acceptance remain tracked by [#163](https://github.com/d-addison/luminumbra/issues/163).
-The wind input-padding defect tracked by [#173](https://github.com/d-addison/luminumbra/issues/173) was fixed afterwards on devel (df8a6716, e9b122e5); the evidence above is unchanged and pre-dates that fix.
+and native acceptance remain tracked by [issue #163](https://github.com/d-addison/luminumbra/issues/163).
+The wind input-padding defect tracked by [issue #173](https://github.com/d-addison/luminumbra/issues/173) was fixed afterwards on devel (df8a6716, e9b122e5); the evidence above is unchanged and pre-dates that fix.
 
 `RegionRecordingOverwrite` runs the shipping recorder/player with
 `--test-streaming-radius-cap 1` on every invocation. This diagnostic option applies

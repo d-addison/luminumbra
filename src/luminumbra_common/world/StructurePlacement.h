@@ -30,6 +30,8 @@
 #include <string>
 #include <vector>
 
+#include "WorldgenFileReader.h"
+
 namespace Luminumbra::World {
 
 // A single voxel box piece: an axis-aligned solid box of one material, in
@@ -65,6 +67,7 @@ struct StructureTemplatePool {
     std::vector<StructurePiece> pieces;
     std::vector<std::string> errors;
     std::vector<std::string> warnings;
+    bool io_failed = false; // distinguished from authored pools the generator rejects
     u64 content_hash = 0;
     // conservative half-extent (metres) of any assembled structure on the
     // X/Z plane relative to the site origin. Computed once in
@@ -101,8 +104,10 @@ struct StructureVoxel {
 // type's placement.json (spacing/separation/salt/density). Unknown keys are
 // warnings, never errors (loader discipline matches TerrainPresetLoader).
 // Raw NUL bytes report the same per-file parse failure before adopting that file.
-StructureTemplatePool LoadStructureTemplatePool(const std::filesystem::path& type_dir,
-                                                const std::string& type);
+StructureTemplatePool
+LoadStructureTemplatePool(const std::filesystem::path& type_dir,
+                          const std::string& type,
+                          const WorldgenFileReader& read_file = ReadWorldgenFile);
 
 // --- Deterministic placement grid ---
 //

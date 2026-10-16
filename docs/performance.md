@@ -17,13 +17,13 @@ cmake --build --preset perf --target luminumbra_server_app --parallel
 python tools/perf/perf.py run \
   --workload server-smoke --layer end-to-end --preset perf \
   --build-manifest build/perf/performance-build.json --mode gating \
-  --parameter ticks=30 --parameter surface_radius=1 \
+  --parameter ticks=30 --parameter autosave_ticks=30 --parameter surface_radius=1 \
   --parameter collision_radius=1 --parameter seed=1337 \
   --parameter world_preset=default --fixture-hash "$(git rev-parse HEAD:data)" \
   --evidence-contract server-smoke --evidence build/perf/server-smoke-evidence.json \
   --warmup 1 --samples 20 --output build/perf/server-smoke.json -- \
   build/perf/bin/luminumbra_server_app --smoke --preset default --seed 1337 \
-    --ticks 30 --radius 1 --collision-radius 1 \
+    --ticks 30 --autosave-ticks 30 --radius 1 --collision-radius 1 \
     --artifact build/perf/server-smoke-evidence.json
 ```
 
@@ -259,3 +259,17 @@ See [Terrain coverage diagnostics](terrain-coverage-diagnostics.md) for a record
 same-camera guard/bypass pair, original images, provenance joins and reproduction
 commands. Its coverage findings do not qualify a production ownership policy or
 ordinary-play performance.
+
+The paired server lane prepares an explicit common historical workload in isolated
+`base/perf-common` and `head/perf-common` roots. Both checkouts compile the same
+guarded fixture adapter, selected only by `.perf-controlled`, to pin legacy
+simulation gates, tuning and finite hydrology. Autosave is explicitly zero. The
+receipt records source hashes and the canonical input identity, including presets
+and systems.json. Generated saves do not enter that input hash. This measures a
+common workload with the existing 5% limit; a fixture transition alone is not a pass.
+
+Native candidate simulation-budget capture runs separately without that marker and
+requires effective active regions, High water, finite hydrology, weather rain/events
+and allocated stateful aether. Its repeated stage traces supply the existing budget
+proposal process. Null baseline identity/work ceilings require CI evidence before
+pinning; they must not be invented or treated as passing performance qualification.

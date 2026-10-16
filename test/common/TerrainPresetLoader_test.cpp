@@ -1,18 +1,21 @@
 // canonical TerrainPresetLoader unit coverage — consumed params,
 // shaping, biome, and feature blocks plus unknown-key
 // warnings, and the validation error contract.
+#include "../support/UniqueTempPath.h"
+#include "../support/WorldgenTestData.h"
 #include <gtest/gtest.h>
 
-#include "../support/UniqueTempPath.h"
-
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <system_error>
 
 #include <nlohmann/json.hpp>
 
 #include "luminumbra_common/core/FilesystemPath.h"
 #include "luminumbra_common/world/BiomeTable.h"
+#include "luminumbra_common/world/StructurePlacement.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
 
 namespace fs = std::filesystem;
@@ -68,6 +71,11 @@ TEST(TerrainPresetLoaderTest, RawNulRefusesBeforeAdoptingPreset) {
     const auto clean = LoadTerrainPreset(file.Path());
     ASSERT_TRUE(clean.ok);
     EXPECT_FLOAT_EQ(clean.params.base_amplitude, 12.0f);
+    std::string text = "unchanged";
+    std::string error;
+    const auto data_root = file.Path().parent_path() / "data";
+    ASSERT_TRUE(Luminumbra::world::LoadTerrainPresetOverride(file.Path(), data_root, text, error));
+    const auto clean_text = text;
     for (const auto& invalid : {std::string(kMinimalPreset) + '\0',
                                 std::string(kMinimalPreset) + '\0' + "garbage",
                                 std::string(kMinimalPreset) + '\x1a' + '\0' + "garbage",
@@ -79,12 +87,62 @@ TEST(TerrainPresetLoaderTest, RawNulRefusesBeforeAdoptingPreset) {
         EXPECT_NE(refused.errors.front().find("raw NUL"), std::string::npos);
         EXPECT_FLOAT_EQ(refused.params.base_amplitude,
                         Luminumbra::Systems::TerrainGenParams{}.base_amplitude);
+        EXPECT_FALSE(
+            Luminumbra::world::LoadTerrainPresetOverride(file.Path(), data_root, text, error));
+        EXPECT_EQ(text, clean_text);
+        EXPECT_NE(error.find("raw NUL"), std::string::npos);
     }
     write(kMinimalPreset);
     const auto restored = LoadTerrainPreset(file.Path());
     ASSERT_TRUE(restored.ok);
     EXPECT_FLOAT_EQ(restored.params.base_amplitude, clean.params.base_amplitude);
     EXPECT_EQ(restored.warnings, clean.warnings);
+}
+
+TEST(TerrainPresetLoaderTest, CapturedDependencyReadersRefuseRawNulBeforeAdoption) {
+    const Luminumbra::TestSupport::ScopedTempFile temp("dependency-nul-", ".json");
+    const auto root = temp.Path().parent_path();
+    Luminumbra::TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, root);
+    const auto type = root / "data/common/structures/cairn";
+    const auto placement = type / "placement.json";
+    std::vector<fs::path> dependencies{root / "data/common/biomes.json", placement};
+    for (const auto& entry : fs::directory_iterator(type)) {
+        if (entry.path().extension() == ".json" && entry.path() != placement)
+            dependencies.push_back(entry.path());
+    }
+    ASSERT_GT(dependencies.size(), 2u);
+    for (const auto& invalid_path : dependencies) {
+        SCOPED_TRACE(Luminumbra::Filesystem::GenericUtf8PathString(invalid_path));
+        std::size_t invalid_reads = 0;
+        const Luminumbra::World::WorldgenFileReader read_file = [&](const fs::path& path,
+                                                                    std::string& bytes) {
+            if (!Luminumbra::World::ReadWorldgenFile(path, bytes))
+                return false;
+            if (path == invalid_path) {
+                ++invalid_reads;
+                bytes += '\0';
+                bytes += "garbage";
+            }
+            return true;
+        };
+        if (invalid_path == dependencies.front()) {
+            const auto table = Luminumbra::World::BiomeTable::Load(invalid_path, read_file);
+            EXPECT_FALSE(table.ok());
+            EXPECT_TRUE(table.empty());
+            ASSERT_EQ(table.errors().size(), 1u);
+            EXPECT_NE(table.errors().front().find("raw NUL"), std::string::npos);
+        } else {
+            const auto pool =
+                Luminumbra::World::LoadStructureTemplatePool(type, "cairn", read_file);
+            EXPECT_FALSE(pool.ok());
+            EXPECT_FALSE(pool.io_failed);
+            ASSERT_EQ(pool.errors.size(), 1u);
+            EXPECT_NE(pool.errors.front().find("raw NUL"), std::string::npos);
+            if (invalid_path == placement)
+                EXPECT_TRUE(pool.pieces.empty());
+        }
+        EXPECT_EQ(invalid_reads, 1u);
+    }
 }
 
 TEST(TerrainPresetLoaderTest, LoadsShippedDefaultPreset) {
@@ -101,7 +159,7 @@ TEST(TerrainPresetLoaderTest, LoadsShippedDefaultPreset) {
     EXPECT_FLOAT_EQ(result.params.persistence, 0.5f);
     EXPECT_FLOAT_EQ(result.params.lacunarity, 2.0f);
     EXPECT_FLOAT_EQ(result.params.height_offset, 5.0f);
-    EXPECT_FALSE(result.params.island_mask_enabled);
+    EXPECT_TRUE(result.params.island_mask_enabled);
     EXPECT_TRUE(result.params.caves_enabled);
     EXPECT_FLOAT_EQ(result.params.cave_frequency, 0.02f);
     // Unconsumed cave fields keep the engine defaults when absent.
@@ -130,6 +188,650 @@ TEST(TerrainPresetLoaderTest, LoadsShippedDefaultPreset) {
     EXPECT_TRUE(result.warnings.empty()) << result.warnings.front();
 }
 
+TEST(TerrainPresetLoaderTest, CanonicalResolvedPresetBytesAndHashAreStable) {
+    using Luminumbra::world::CanonicalResolvedTerrainPresetJson;
+    using Luminumbra::world::TerrainPresetContentHash;
+    const auto preset = nlohmann::json::parse(kMinimalPreset);
+    const auto equivalent = nlohmann::json::parse(R"({"generation_params":{
+      "features":{"cave_frequency":0.02,"caves_enabled":true},
+      "terrain":{"height_offset":20.0,"lacunarity":2.0,"persistence":0.5,
+        "octaves":4,"base_amplitude":12.0,"base_frequency":0.01}},"name":"Minimal"})");
+    const std::string expected =
+        R"({"generation_params":{"biomes":{"relief_enabled":false,"table":""},"features":{"cave_frequency":0.02,"caves_enabled":true,"cliffs_enabled":false,"lakes_enabled":false,"rivers_enabled":false,"structures_enabled":false,"surface_breaks_enabled":false},"terrain":{"base_amplitude":12.0,"base_frequency":0.01,"height_offset":20.0,"hydro":{"enabled":false},"island_mask_enabled":false,"lacunarity":2.0,"octaves":4,"persistence":0.5}},"name":"Minimal","schema_rev":7})";
+    EXPECT_EQ(CanonicalResolvedTerrainPresetJson(preset), expected);
+    EXPECT_EQ(CanonicalResolvedTerrainPresetJson(equivalent), expected);
+    EXPECT_EQ(TerrainPresetContentHash(preset), "5dd4531c44219c30");
+    EXPECT_EQ(TerrainPresetContentHash(equivalent), "5dd4531c44219c30");
+    // A persisted, revision-upgraded copy retains the same resolved content identity.
+    EXPECT_EQ(CanonicalResolvedTerrainPresetJson(nlohmann::json::parse(expected)), expected);
+    const auto first = LoadTerrainPresetFromJson(preset, "data-one", "first");
+    const auto second = LoadTerrainPresetFromJson(equivalent, "data-two", "second");
+    ASSERT_TRUE(first.ok);
+    ASSERT_TRUE(second.ok);
+    EXPECT_EQ(first.preset_content_hash, "5dd4531c44219c30");
+    EXPECT_EQ(first.preset_content_hash, second.preset_content_hash);
+}
+
+TEST(TerrainPresetLoaderTest, DependencyBytesAreBoundIntoPresetIdentity) {
+    const Luminumbra::TestSupport::ScopedTempFile temp("preset-dependency-bytes-", ".json");
+    const auto root = temp.Path().parent_path();
+    Luminumbra::TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, root);
+    auto preset = nlohmann::json::parse(kMinimalPreset);
+    preset["schema_rev"] = 7; // selects the biome table and all structure types by default
+    const auto baseline = LoadTerrainPresetFromJson(preset, root / "data");
+    ASSERT_TRUE(baseline.ok);
+    ASSERT_FALSE(baseline.preset_content_hash.empty());
+    EXPECT_NE(baseline.preset_content_hash, Luminumbra::world::TerrainPresetContentHash(preset));
+    std::vector<fs::path> dependencies{root / "data/common/biomes.json"};
+    for (const auto& entry : fs::recursive_directory_iterator(root / "data/common/structures")) {
+        if (entry.is_regular_file() && entry.path().extension() == ".json")
+            dependencies.push_back(entry.path());
+    }
+    ASSERT_GT(dependencies.size(), 1u);
+    for (const auto& path : dependencies) {
+        SCOPED_TRACE(Luminumbra::Filesystem::GenericUtf8PathString(path));
+        const auto original_size = fs::file_size(path);
+        {
+            std::ofstream file(path, std::ios::binary | std::ios::app);
+            ASSERT_TRUE(file.good());
+            file << '\n'; // JSON semantics stay identical; the exact file bytes change.
+            file.close();
+            ASSERT_TRUE(file.good());
+        }
+        const auto changed = LoadTerrainPresetFromJson(preset, root / "data");
+        ASSERT_TRUE(changed.ok);
+        EXPECT_NE(changed.preset_content_hash, baseline.preset_content_hash);
+        fs::resize_file(path, original_size);
+        const auto restored = LoadTerrainPresetFromJson(preset, root / "data");
+        ASSERT_TRUE(restored.ok);
+        EXPECT_EQ(restored.preset_content_hash, baseline.preset_content_hash);
+    }
+}
+
+nlohmann::json HandoffPreset() {
+    auto preset = nlohmann::json::parse(kMinimalPreset);
+    preset["schema_rev"] = 7;
+    auto& terrain = preset["generation_params"]["terrain"];
+    terrain["base_amplitude"] = 4.0;
+    terrain["height_offset"] = 40.0;
+    terrain["island_mask_enabled"] = false;
+    terrain["hydro"]["enabled"] = false;
+    auto& features = preset["generation_params"]["features"];
+    for (const char* feature : {"caves_enabled",
+                                "rivers_enabled",
+                                "lakes_enabled",
+                                "cliffs_enabled",
+                                "surface_breaks_enabled"})
+        features[feature] = false;
+    return preset;
+}
+
+void ExpectSameGeneration(const Luminumbra::Systems::SHIELD_WorldSystem& actual,
+                          const Luminumbra::Systems::SHIELD_WorldSystem& expected,
+                          const Luminumbra::IVec3& coords) {
+    EXPECT_EQ(actual.biomes_enabled(), expected.biomes_enabled());
+    EXPECT_EQ(actual.biome_table().content_hash(), expected.biome_table().content_hash());
+    EXPECT_EQ(actual.structures_enabled(), expected.structures_enabled());
+    ASSERT_EQ(actual.structure_pools().size(), expected.structure_pools().size());
+    for (std::size_t i = 0; i < expected.structure_pools().size(); ++i) {
+        const auto& a = actual.structure_pools()[i];
+        const auto& b = expected.structure_pools()[i];
+        EXPECT_EQ(a.type, b.type);
+        EXPECT_EQ(a.content_hash, b.content_hash);
+        const auto a_site = actual.LocateStructure(a.type, 0, 0);
+        const auto b_site = expected.LocateStructure(b.type, 0, 0);
+        ASSERT_EQ(a_site.has_value(), b_site.has_value());
+        if (a_site.has_value() && b_site.has_value()) {
+            EXPECT_EQ(a_site->origin, b_site->origin);
+            EXPECT_EQ(a_site->site_seed, b_site->site_seed);
+            EXPECT_EQ(Luminumbra::World::ComputeAssembledVoxelHash(
+                          Luminumbra::World::AssembleStructure(a, *a_site)),
+                      Luminumbra::World::ComputeAssembledVoxelHash(
+                          Luminumbra::World::AssembleStructure(b, *b_site)));
+        }
+    }
+    Luminumbra::Chunk a(coords), b(coords);
+    actual.GenerateChunkData(a);
+    expected.GenerateChunkData(b);
+    EXPECT_EQ(a.sdf_data, b.sdf_data);
+    EXPECT_EQ(a.heightmap_data, b.heightmap_data);
+    EXPECT_EQ(a.material_data, b.material_data);
+}
+
+TEST(TerrainPresetLoaderTest, GenerationUsesLoadedSnapshotAfterDependencyMutationOrRemoval) {
+    const Luminumbra::TestSupport::ScopedTempFile temp("preset-handoff-", ".json");
+    const auto root = temp.Path().parent_path();
+    const auto control_root = root / "control";
+    Luminumbra::TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, control_root);
+    const auto preset = HandoffPreset();
+    const auto control = LoadTerrainPresetFromJson(preset, control_root / "data");
+    ASSERT_TRUE(control.ok);
+    ASSERT_TRUE(control.params.worldgen_dependencies);
+    Luminumbra::Systems::SHIELD_WorldSystem expected(nullptr, nullptr, control.params, 1337);
+    ASSERT_TRUE(expected.biomes_enabled());
+    ASSERT_TRUE(expected.structures_enabled());
+    const auto site = expected.LocateStructure("cairn", 0, 0);
+    ASSERT_TRUE(site.has_value());
+    if (!site.has_value())
+        return;
+    const float surface = expected.GetTerrainHeightAt(static_cast<float>(site->origin.x),
+                                                      static_cast<float>(site->origin.z));
+    const auto coords =
+        Luminumbra::Systems::SHIELD_WorldSystem::world_to_chunk_coords(Luminumbra::Vec3(
+            static_cast<float>(site->origin.x), surface, static_cast<float>(site->origin.z)));
+    Luminumbra::Chunk stamped(coords);
+    expected.GenerateChunkData(stamped);
+    ASSERT_FALSE(stamped.material_data.empty());
+
+    const std::vector<fs::path> dependencies = {"common/biomes.json",
+                                                "common/structures/cairn/placement.json",
+                                                "common/structures/cairn/cairn.json",
+                                                "common/structures"};
+    for (std::size_t i = 0; i < dependencies.size(); ++i) {
+        for (const bool remove : {false, true}) {
+            SCOPED_TRACE(dependencies[i]);
+            SCOPED_TRACE(remove);
+            const auto changed_root = root / (std::to_string(i) + (remove ? "r" : "m"));
+            Luminumbra::TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, changed_root);
+            const auto loaded = LoadTerrainPresetFromJson(preset, changed_root / "data");
+            ASSERT_TRUE(loaded.ok);
+            ASSERT_TRUE(loaded.params.worldgen_dependencies);
+            ASSERT_EQ(loaded.preset_content_hash, control.preset_content_hash);
+            EXPECT_EQ(loaded.params.worldgen_dependencies->manifest,
+                      control.params.worldgen_dependencies->manifest);
+            const auto path = changed_root / "data" / dependencies[i];
+            if (remove) {
+                ASSERT_GT(fs::remove_all(path), 0u);
+            } else if (i == dependencies.size() - 1) {
+                const auto added = path / "added";
+                fs::create_directory(added);
+                std::ofstream out(added / "piece.json", std::ios::binary);
+                out << R"({"boxes":[{"size":[1,1,1],"material":2}]})";
+                out.close();
+                ASSERT_TRUE(out.good());
+            } else {
+                // A semantic change, not just whitespace: reject the table/piece
+                // or suppress all cairn placement if generation reloads the file.
+                std::ofstream out(path, std::ios::binary | std::ios::trunc);
+                out << (i == 1 ? R"({"density":0})" : R"({})");
+                out.close();
+                ASSERT_TRUE(out.good());
+            }
+            const auto reloaded = LoadTerrainPresetFromJson(preset, changed_root / "data");
+            ASSERT_TRUE(reloaded.ok);
+            EXPECT_NE(reloaded.preset_content_hash, loaded.preset_content_hash);
+            Luminumbra::Systems::SHIELD_WorldSystem actual(nullptr, nullptr, loaded.params, 1337);
+            ExpectSameGeneration(actual, expected, coords);
+            EXPECT_EQ(loaded.preset_content_hash, control.preset_content_hash);
+        }
+    }
+}
+
+TEST(TerrainPresetLoaderTest, SnapshotPreservesAbsenceAndRejectionWhenInputsAppearOrAreRepaired) {
+    const Luminumbra::TestSupport::ScopedTempFile temp("preset-fallback-handoff-", ".json");
+    const auto root = temp.Path().parent_path();
+    const auto preset = HandoffPreset();
+    const std::vector<fs::path> dependencies = {"common/biomes.json",
+                                                "common/structures/cairn/placement.json",
+                                                "common/structures/cairn/cairn.json",
+                                                "common/structures"};
+    for (std::size_t i = 0; i < dependencies.size(); ++i) {
+        for (const bool absent : {false, true}) {
+            SCOPED_TRACE(dependencies[i]);
+            SCOPED_TRACE(absent);
+            const auto case_root = root / (std::to_string(i) + (absent ? "a" : "r"));
+            const auto control_root = case_root / "control";
+            const auto changed_root = case_root / "changed";
+            for (const auto& runtime_root : {control_root, changed_root}) {
+                Luminumbra::TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, runtime_root);
+                const auto path = runtime_root / "data" / dependencies[i];
+                if (absent) {
+                    ASSERT_GT(fs::remove_all(path), 0u);
+                } else if (i == dependencies.size() - 1) {
+                    ASSERT_GT(fs::remove_all(path), 0u);
+                    fs::create_directory(path); // present but empty, then populated at handoff
+                } else {
+                    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+                    out << "{invalid";
+                    out.close();
+                    ASSERT_TRUE(out.good());
+                }
+            }
+            const auto control = LoadTerrainPresetFromJson(preset, control_root / "data");
+            const auto loaded = LoadTerrainPresetFromJson(preset, changed_root / "data");
+            ASSERT_TRUE(control.ok);
+            ASSERT_TRUE(loaded.ok);
+            ASSERT_TRUE(control.params.worldgen_dependencies);
+            ASSERT_TRUE(loaded.params.worldgen_dependencies);
+            ASSERT_EQ(control.preset_content_hash, loaded.preset_content_hash);
+            EXPECT_EQ(control.params.worldgen_dependencies->manifest,
+                      loaded.params.worldgen_dependencies->manifest);
+            const auto repaired = changed_root / "data" / dependencies[i];
+            fs::remove_all(repaired);
+            fs::copy(fs::path(LUMINUMBRA_SOURCE_ROOT) / "data" / dependencies[i],
+                     repaired,
+                     fs::copy_options::recursive);
+            const auto reloaded = LoadTerrainPresetFromJson(preset, changed_root / "data");
+            ASSERT_TRUE(reloaded.ok);
+            EXPECT_NE(reloaded.preset_content_hash, loaded.preset_content_hash);
+            Luminumbra::Systems::SHIELD_WorldSystem expected(
+                nullptr, nullptr, control.params, 1337);
+            Luminumbra::Systems::SHIELD_WorldSystem actual(nullptr, nullptr, loaded.params, 1337);
+            ExpectSameGeneration(actual, expected, {0, 1, 0});
+        }
+    }
+}
+
+TEST(TerrainPresetLoaderTest, UnicodeGenerationOrderMatchesUtf8ManifestOrder) {
+    const Luminumbra::TestSupport::ScopedTempFile temp("preset-unicode-order-", ".json");
+    const auto data_root = temp.Path().parent_path() / "data";
+    const std::vector<fs::path> names = {fs::path(u8"\uE000"), fs::path(u8"\U0001F30D")};
+    // UTF-8 sorts E000 before 1F30D; UTF-16 sorts the surrogate pair first.
+    for (auto type = names.rbegin(); type != names.rend(); ++type) {
+        const auto dir = data_root / "common/structures" / *type;
+        fs::create_directories(dir);
+        for (auto piece = names.rbegin(); piece != names.rend(); ++piece) {
+            auto filename = *piece;
+            filename += ".json";
+            std::ofstream out(dir / filename, std::ios::binary);
+            out << R"({"boxes":[{"size":[1,1,1],"material":)" << (piece == names.rbegin() ? 2 : 1)
+                << "}]}";
+            out.close();
+            ASSERT_TRUE(out.good());
+        }
+    }
+    auto preset = HandoffPreset();
+    preset["generation_params"]["biomes"]["table"] = "";
+    const auto loaded = LoadTerrainPresetFromJson(preset, data_root);
+    ASSERT_TRUE(loaded.ok);
+    ASSERT_TRUE(loaded.params.worldgen_dependencies);
+    Luminumbra::Systems::SHIELD_WorldSystem world(nullptr, nullptr, loaded.params, 1337);
+    auto direct_params = loaded.params;
+    direct_params.worldgen_dependencies.reset();
+    Luminumbra::Systems::SHIELD_WorldSystem direct(nullptr, nullptr, direct_params, 1337);
+    ASSERT_EQ(world.structure_pools().size(), names.size());
+    ASSERT_EQ(direct.structure_pools().size(), names.size());
+    std::vector<std::string> manifest_types;
+    for (const auto& record : loaded.params.worldgen_dependencies->manifest) {
+        if (record.back() == "pool-accepted")
+            manifest_types.push_back(Luminumbra::Filesystem::GenericUtf8PathString(
+                Luminumbra::Filesystem::PathFromUtf8(record.front()).filename()));
+    }
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        const auto name = Luminumbra::Filesystem::GenericUtf8PathString(names[i]);
+        ASSERT_EQ(manifest_types.size(), names.size());
+        EXPECT_EQ(manifest_types[i], name);
+        EXPECT_EQ(world.structure_pools()[i].type, name);
+        EXPECT_EQ(direct.structure_pools()[i].type, name);
+        std::vector<std::string> manifest_pieces;
+        const std::string prefix = "common/structures/" + name + "/";
+        for (const auto& record : loaded.params.worldgen_dependencies->manifest) {
+            if (record.front().starts_with(prefix) && record.front() != prefix + "placement.json")
+                manifest_pieces.push_back(record.front());
+        }
+        ASSERT_EQ(manifest_pieces.size(), names.size());
+        ASSERT_EQ(world.structure_pools()[i].pieces.size(), names.size());
+        ASSERT_EQ(direct.structure_pools()[i].pieces.size(), names.size());
+        for (std::size_t j = 0; j < names.size(); ++j) {
+            const auto piece = Luminumbra::Filesystem::GenericUtf8PathString(names[j]);
+            EXPECT_EQ(manifest_pieces[j], prefix + piece + ".json");
+            EXPECT_EQ(world.structure_pools()[i].pieces[j].name, piece);
+            EXPECT_EQ(direct.structure_pools()[i].pieces[j].name, piece);
+        }
+    }
+    ExpectSameGeneration(direct, world, {0, 1, 0});
+}
+
+TEST(TerrainPresetLoaderTest, DependencyIdentityIgnoresRootLocationAndDirectoryOrder) {
+    const Luminumbra::TestSupport::ScopedTempFile temp("preset-dependency-roots-", ".json");
+    const auto first_root = temp.Path().parent_path() / fs::path(u8"first-\u732b\U0001f30d");
+    const auto second_root = temp.Path().parent_path() / fs::path(u8"second-\u732b\U0001f30d");
+    Luminumbra::TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, first_root);
+    std::vector<fs::path> files;
+    for (const auto& entry : fs::recursive_directory_iterator(first_root / "data")) {
+        if (entry.is_regular_file())
+            files.push_back(entry.path());
+    }
+    std::sort(files.rbegin(), files.rend());
+    for (const auto& file : files) {
+        const auto destination = second_root / file.lexically_relative(first_root);
+        fs::create_directories(destination.parent_path());
+        fs::copy_file(file, destination);
+    }
+    auto preset = nlohmann::json::parse(kMinimalPreset);
+    preset["schema_rev"] = 7;
+    const auto first = LoadTerrainPresetFromJson(preset, first_root / "data", "first");
+    const auto second = LoadTerrainPresetFromJson(preset, second_root / "data", "second");
+    ASSERT_TRUE(first.ok);
+    ASSERT_TRUE(second.ok);
+    EXPECT_NE(first.params.biome_table_path, second.params.biome_table_path);
+    EXPECT_EQ(first.preset_content_hash, second.preset_content_hash);
+
+    // Logical paths have a fixed UTF-8 encoding, independent of the native path encoding.
+    const fs::path unicode_table(u8"common/biomes-\u732b\U0001f30d.json");
+    const fs::path unicode_type(u8"\u732b\U0001f30d");
+    const fs::path unicode_piece(u8"\u732b\U0001f30d.json");
+    for (const auto& root : {first_root, second_root}) {
+        fs::copy_file(root / "data/common/biomes.json", root / "data" / unicode_table);
+        const auto type = root / "data/common/structures" / unicode_type;
+        fs::rename(root / "data/common/structures/cairn", type);
+        fs::rename(type / "cairn.json", type / unicode_piece);
+    }
+    preset["generation_params"]["biomes"]["table"] =
+        "common/biomes-\xe7\x8c\xab\xf0\x9f\x8c\x8d.json";
+    const auto unicode_first = LoadTerrainPresetFromJson(preset, first_root / "data");
+    const auto unicode_second = LoadTerrainPresetFromJson(preset, second_root / "data");
+    ASSERT_TRUE(unicode_first.ok);
+    ASSERT_TRUE(unicode_second.ok);
+    EXPECT_EQ(unicode_first.preset_content_hash, unicode_second.preset_content_hash);
+    const auto native_table =
+        Luminumbra::Filesystem::PathFromUtf8(unicode_first.params.biome_table_path);
+    EXPECT_EQ(native_table, first_root / "data" / unicode_table);
+    const auto table = Luminumbra::World::BiomeTable::Load(native_table);
+    ASSERT_TRUE(table.ok());
+    EXPECT_FALSE(table.empty());
+    // Exercise the generator handoff, not just manifest construction.
+    Luminumbra::Systems::SHIELD_WorldSystem world(nullptr, nullptr, unicode_first.params, 1337);
+    EXPECT_TRUE(world.biomes_enabled());
+    EXPECT_EQ(world.biome_table().content_hash(), table.content_hash());
+    EXPECT_TRUE(world.structures_enabled());
+    const auto type_name = Luminumbra::Filesystem::GenericUtf8PathString(unicode_type);
+    EXPECT_TRUE(std::any_of(world.structure_pools().begin(),
+                            world.structure_pools().end(),
+                            [&](const auto& pool) { return pool.type == type_name; }));
+}
+
+TEST(TerrainPresetLoaderTest, AbsentOptionalWorldgenInputsLoadWithDistinctIdentities) {
+    const Luminumbra::TestSupport::ScopedTempFile temp("preset-dependency-absent-", ".json");
+    const auto root = temp.Path().parent_path();
+    Luminumbra::TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, root);
+    auto preset = nlohmann::json::parse(kMinimalPreset);
+    preset["schema_rev"] = 7;
+    const auto full_data = LoadTerrainPresetFromJson(preset, root / "data");
+    ASSERT_TRUE(full_data.ok);
+    std::vector<std::string> identities{full_data.preset_content_hash};
+    for (const auto& relative : {fs::path("common/biomes.json"),
+                                 fs::path("common/structures"),
+                                 fs::path("common/structures/cairn/cairn.json")}) {
+        SCOPED_TRACE(Luminumbra::Filesystem::GenericUtf8PathString(relative));
+        const auto path = root / "data" / relative;
+        const auto hidden = root / "hidden";
+        fs::rename(path, hidden);
+        const auto absent = LoadTerrainPresetFromJson(preset, root / "data");
+        ASSERT_TRUE(absent.ok);
+        EXPECT_TRUE(absent.errors.empty());
+        EXPECT_FALSE(absent.preset_content_hash.empty());
+        for (const auto& identity : identities)
+            EXPECT_NE(absent.preset_content_hash, identity);
+        identities.push_back(absent.preset_content_hash);
+        fs::rename(hidden, path);
+        const auto restored = LoadTerrainPresetFromJson(preset, root / "data");
+        ASSERT_TRUE(restored.ok);
+        EXPECT_EQ(restored.preset_content_hash, full_data.preset_content_hash);
+    }
+}
+
+TEST(TerrainPresetLoaderTest, PresentUnreadableWorldgenInputsRefuseWithoutIdentity) {
+    const Luminumbra::TestSupport::ScopedTempFile temp("preset-dependency-unreadable-", ".json");
+    const auto root = temp.Path().parent_path();
+    Luminumbra::TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, root);
+    auto preset = nlohmann::json::parse(kMinimalPreset);
+    preset["schema_rev"] = 7;
+    // A directory at a file path is reliably unreadable on every platform,
+    // including privileged runners where removing permission bits has no effect.
+    for (const auto& relative :
+         {fs::path("common/biomes.json"), fs::path("common/structures/cairn/placement.json")}) {
+        const auto path = root / "data" / relative;
+        const auto hidden = root / "hidden";
+        fs::rename(path, hidden);
+        fs::create_directory(path);
+        const auto unreadable = LoadTerrainPresetFromJson(preset, root / "data");
+        EXPECT_FALSE(unreadable.ok);
+        EXPECT_TRUE(unreadable.preset_content_hash.empty());
+        ASSERT_FALSE(unreadable.errors.empty());
+        EXPECT_NE(unreadable.errors.front().find("worldgen"), std::string::npos);
+        fs::remove(path);
+        fs::rename(hidden, path);
+        ASSERT_TRUE(LoadTerrainPresetFromJson(preset, root / "data").ok);
+    }
+}
+
+TEST(TerrainPresetLoaderTest, BiomeStatusErrorFallsBackDirectlyButRefusesPreset) {
+    const Luminumbra::TestSupport::ScopedTempFile temp("preset-biome-status-", ".json");
+    const auto root = temp.Path().parent_path();
+    // An over-long component is unavailable even on privileged runners, but
+    // Windows runtimes can classify it as not_found with a nonzero error_code.
+    const auto relative =
+        Luminumbra::Filesystem::PathFromUtf8(std::string(4096, 'x')) / "biomes.json";
+    const auto path = root / relative;
+    std::error_code ec;
+    EXPECT_FALSE(fs::is_regular_file(path, ec));
+    ASSERT_TRUE(ec);
+    const auto resolved_path =
+        root / Luminumbra::Filesystem::LexicallyNormalPath(Luminumbra::Filesystem::PathFromUtf8(
+                   Luminumbra::Filesystem::GenericUtf8PathString(relative)));
+    ASSERT_EQ(resolved_path, path);
+    const auto native_status = fs::symlink_status(resolved_path, ec);
+    RecordProperty("native_biome_status_type", static_cast<int>(native_status.type()));
+    RecordProperty("native_biome_status_error", ec.value());
+    RecordProperty("native_biome_status_category", ec.category().name());
+    std::string bytes = "previous contents";
+    EXPECT_FALSE(Luminumbra::World::ReadWorldgenFile(path, bytes));
+    EXPECT_TRUE(bytes.empty());
+    Luminumbra::World::BiomeTable unavailable;
+    ASSERT_NO_THROW(unavailable = Luminumbra::World::BiomeTable::Load(path));
+    EXPECT_FALSE(unavailable.ok());
+    EXPECT_TRUE(unavailable.empty());
+    EXPECT_FALSE(unavailable.errors().empty());
+
+    // Inject an I/O status failure through the same query used by the
+    // reader and manifest, rather than depending on native not-found mappings.
+    const Luminumbra::World::WorldgenFileStatusReader read_status = [&](const fs::path& queried,
+                                                                        std::error_code& error) {
+        EXPECT_EQ(queried, path);
+        error = std::make_error_code(std::errc::io_error);
+        return fs::file_status(fs::file_type::none);
+    };
+    ASSERT_EQ(read_status(path, ec).type(), fs::file_type::none);
+    ASSERT_EQ(ec, std::errc::io_error);
+    const Luminumbra::World::WorldgenFileReader read_file = [&](const fs::path& file,
+                                                                std::string& contents) {
+        return Luminumbra::World::ReadWorldgenFileWithStatus(file, contents, read_status);
+    };
+    bytes = "previous contents";
+    EXPECT_FALSE(read_file(path, bytes));
+    EXPECT_TRUE(bytes.empty());
+    Luminumbra::World::BiomeTable table;
+    ASSERT_NO_THROW(table = Luminumbra::World::BiomeTable::Load(path, read_file));
+    EXPECT_FALSE(table.ok());
+    EXPECT_TRUE(table.empty());
+    EXPECT_FALSE(table.errors().empty());
+
+    Luminumbra::Systems::TerrainGenParams params;
+    params.biomes_enabled = true;
+    params.biome_table_path = Luminumbra::Filesystem::GenericUtf8PathString(path);
+    params.structures_enabled = false;
+    ASSERT_FALSE(params.worldgen_dependencies);
+    ASSERT_NO_THROW({
+        Luminumbra::Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+        EXPECT_FALSE(world.biomes_enabled());
+        EXPECT_FALSE(world.biome_table().ok());
+        const auto biome = world.BiomeIdAt(0.0f, 0.0f);
+        EXPECT_EQ(biome, Luminumbra::World::kNoBiome);
+        using Luminumbra::MaterialType;
+        EXPECT_EQ(world.SurfaceMaterialForColumn(32.0f, 33.0f, biome), MaterialType::Sand);
+        EXPECT_EQ(world.SurfaceMaterialForColumn(39.5f, 40.0f, biome), MaterialType::Grass);
+        EXPECT_EQ(world.SurfaceMaterialForColumn(38.0f, 40.0f, biome), MaterialType::Soil);
+        EXPECT_EQ(world.SurfaceMaterialForColumn(34.0f, 40.0f, biome), MaterialType::Stone);
+    });
+
+    auto preset = HandoffPreset();
+    preset["generation_params"]["biomes"]["table"] =
+        Luminumbra::Filesystem::GenericUtf8PathString(relative);
+    preset["generation_params"]["features"]["structures_enabled"] = false;
+    TerrainPresetLoadResult refused;
+    ASSERT_NO_THROW(refused = LoadTerrainPresetFromJson(preset, root, "<memory>", read_status));
+    EXPECT_FALSE(refused.ok);
+    EXPECT_TRUE(refused.preset_content_hash.empty());
+    EXPECT_FALSE(refused.params.worldgen_dependencies);
+    ASSERT_FALSE(refused.errors.empty());
+    EXPECT_NE(refused.errors.front().find("worldgen"), std::string::npos);
+}
+
+TEST(TerrainPresetLoaderTest, DanglingPlacementUsesAbsentDefaultsAndIdentity) {
+    const Luminumbra::TestSupport::ScopedTempFile temp("preset-placement-link-", ".json");
+    const auto root = temp.Path().parent_path();
+    Luminumbra::TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, root);
+    const auto preset = HandoffPreset();
+    const auto type = root / "data/common/structures/cairn";
+    const auto placement = type / "placement.json";
+    const auto authored = LoadTerrainPresetFromJson(preset, root / "data");
+    ASSERT_TRUE(authored.ok);
+    const auto authored_pool = Luminumbra::World::LoadStructureTemplatePool(type, "cairn");
+    ASSERT_TRUE(authored_pool.ok());
+    EXPECT_EQ(authored_pool.spacing, 96);
+    EXPECT_EQ(authored_pool.salt, 101u);
+
+    ASSERT_TRUE(fs::remove(placement));
+    const auto absent_pool = Luminumbra::World::LoadStructureTemplatePool(type, "cairn");
+    ASSERT_TRUE(absent_pool.ok());
+    EXPECT_FALSE(absent_pool.io_failed);
+    EXPECT_EQ(absent_pool.spacing, 64);
+    EXPECT_EQ(absent_pool.separation, 16);
+    EXPECT_EQ(absent_pool.salt, 0u);
+    EXPECT_FLOAT_EQ(absent_pool.density, 1.0f);
+    const auto absent = LoadTerrainPresetFromJson(preset, root / "data");
+    ASSERT_TRUE(absent.ok);
+    ASSERT_TRUE(absent.params.worldgen_dependencies);
+    EXPECT_NE(absent.preset_content_hash, authored.preset_content_hash);
+    const auto& manifest = absent.params.worldgen_dependencies->manifest;
+    EXPECT_NE(std::find(manifest.begin(),
+                        manifest.end(),
+                        std::vector<std::string>{"common/structures/cairn/placement.json",
+                                                 "placement-absent:compiled-defaults"}),
+              manifest.end());
+    Luminumbra::Systems::SHIELD_WorldSystem expected(nullptr, nullptr, absent.params, 1337);
+    ASSERT_TRUE(expected.structures_enabled());
+
+    std::error_code ec;
+    fs::create_symlink("missing-placement.json", placement, ec);
+#ifdef _WIN32
+    // Only symlink coverage needs Windows developer mode/privilege and a
+    // runtime that supports symlinks; absent-defaults coverage always runs.
+    if (ec.value() != 1314 && ec != std::errc::function_not_supported &&
+        ec != std::errc::operation_not_supported)
+#endif
+    {
+        ASSERT_FALSE(ec) << ec.message();
+        ASSERT_TRUE(fs::is_symlink(fs::symlink_status(placement)));
+        ASSERT_FALSE(fs::exists(placement));
+        const auto linked_pool = Luminumbra::World::LoadStructureTemplatePool(type, "cairn");
+        ASSERT_TRUE(linked_pool.ok());
+        EXPECT_FALSE(linked_pool.io_failed);
+        EXPECT_EQ(linked_pool.content_hash, absent_pool.content_hash);
+        const auto linked = LoadTerrainPresetFromJson(preset, root / "data");
+        ASSERT_TRUE(linked.ok);
+        EXPECT_EQ(linked.preset_content_hash, absent.preset_content_hash);
+        ASSERT_TRUE(linked.params.worldgen_dependencies);
+        EXPECT_EQ(linked.params.worldgen_dependencies->manifest, manifest);
+        Luminumbra::Systems::SHIELD_WorldSystem snapshot(nullptr, nullptr, linked.params, 1337);
+        ExpectSameGeneration(snapshot, expected, Luminumbra::IVec3(0, 1, 0));
+        auto direct_params = linked.params;
+        direct_params.worldgen_dependencies.reset();
+        Luminumbra::Systems::SHIELD_WorldSystem direct(nullptr, nullptr, direct_params, 1337);
+        ExpectSameGeneration(direct, expected, Luminumbra::IVec3(0, 1, 0));
+    }
+}
+
+TEST(TerrainPresetLoaderTest, RejectedBiomeTableBindsBytesAndLegacyFallback) {
+    const Luminumbra::TestSupport::ScopedTempFile temp("preset-biome-rejected-", ".json");
+    const auto root = temp.Path().parent_path();
+    Luminumbra::TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, root);
+    auto preset = nlohmann::json::parse(kMinimalPreset);
+    preset["schema_rev"] = 7;
+    const auto path = root / "data/common/biomes.json";
+    std::ofstream(path, std::ios::binary) << "{}";
+    const auto rejected = LoadTerrainPresetFromJson(preset, root / "data");
+    ASSERT_TRUE(rejected.ok);
+    Luminumbra::Systems::SHIELD_WorldSystem world(nullptr, nullptr, rejected.params, 1337);
+    EXPECT_FALSE(world.biomes_enabled());
+    std::ofstream(path, std::ios::binary) << "{ }";
+    const auto different_bytes = LoadTerrainPresetFromJson(preset, root / "data");
+    ASSERT_TRUE(different_bytes.ok);
+    EXPECT_NE(different_bytes.preset_content_hash, rejected.preset_content_hash);
+    fs::remove(path);
+    const auto absent = LoadTerrainPresetFromJson(preset, root / "data");
+    ASSERT_TRUE(absent.ok);
+    EXPECT_NE(absent.preset_content_hash, rejected.preset_content_hash);
+    EXPECT_NE(absent.preset_content_hash, different_bytes.preset_content_hash);
+}
+
+TEST(TerrainPresetLoaderTest, RejectedPoolsBindConsumedBytesAndTheGeneratorDecision) {
+    const Luminumbra::TestSupport::ScopedTempFile temp("preset-dependency-rejected-", ".json");
+    const auto root = temp.Path().parent_path();
+    Luminumbra::TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, root);
+    auto preset = nlohmann::json::parse(kMinimalPreset);
+    preset["schema_rev"] = 7;
+    const auto type = root / "data/common/structures/cairn";
+    const auto baseline = LoadTerrainPresetFromJson(preset, root / "data");
+    ASSERT_TRUE(baseline.ok);
+    // Malformed placement rejects the pool before it reads any pieces.
+    std::ofstream(type / "placement.json", std::ios::binary) << "{";
+    EXPECT_FALSE(Luminumbra::World::LoadStructureTemplatePool(type, "cairn").ok());
+    const auto rejected = LoadTerrainPresetFromJson(preset, root / "data");
+    ASSERT_TRUE(rejected.ok);
+    EXPECT_NE(rejected.preset_content_hash, baseline.preset_content_hash);
+    std::ofstream(type / "cairn.json", std::ios::binary) << "{bad piece";
+    const auto unread_piece = LoadTerrainPresetFromJson(preset, root / "data");
+    ASSERT_TRUE(unread_piece.ok);
+    EXPECT_EQ(unread_piece.preset_content_hash, rejected.preset_content_hash);
+    std::ofstream(type / "placement.json", std::ios::binary) << "{ ";
+    const auto changed_rejection = LoadTerrainPresetFromJson(preset, root / "data");
+    ASSERT_TRUE(changed_rejection.ok);
+    EXPECT_NE(changed_rejection.preset_content_hash, rejected.preset_content_hash);
+
+    // With optional placement absent, the generator reads and rejects the piece.
+    fs::remove(type / "placement.json");
+    const auto rejected_piece = LoadTerrainPresetFromJson(preset, root / "data");
+    ASSERT_TRUE(rejected_piece.ok);
+    EXPECT_FALSE(Luminumbra::World::LoadStructureTemplatePool(type, "cairn").ok());
+    std::ofstream(type / "cairn.json", std::ios::binary) << "{different bad piece";
+    const auto different_piece = LoadTerrainPresetFromJson(preset, root / "data");
+    ASSERT_TRUE(different_piece.ok);
+    EXPECT_NE(different_piece.preset_content_hash, rejected_piece.preset_content_hash);
+    std::ofstream(type / "cairn.json", std::ios::binary) << "{}"; // valid JSON, empty piece
+    const auto empty_piece = LoadTerrainPresetFromJson(preset, root / "data");
+    ASSERT_TRUE(empty_piece.ok);
+    EXPECT_FALSE(Luminumbra::World::LoadStructureTemplatePool(type, "cairn").ok());
+    EXPECT_NE(empty_piece.preset_content_hash, different_piece.preset_content_hash);
+}
+
+TEST(TerrainPresetLoaderTest, OptionalPlacementAndUnresolvedFilesFollowGeneratorSelection) {
+    const Luminumbra::TestSupport::ScopedTempFile temp("preset-dependency-selection-", ".json");
+    const auto root = temp.Path().parent_path();
+    Luminumbra::TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, root);
+    auto preset = nlohmann::json::parse(kMinimalPreset);
+    preset["schema_rev"] = 7;
+    const auto first = LoadTerrainPresetFromJson(preset, root / "data");
+    ASSERT_TRUE(first.ok);
+    const auto type = root / "data/common/structures/cairn";
+    std::ofstream(type / "ignored.txt") << "not a template";
+    fs::create_directory(type / "nested");
+    std::ofstream(type / "nested/ignored.json") << "{}";
+    const auto ignored = LoadTerrainPresetFromJson(preset, root / "data");
+    ASSERT_TRUE(ignored.ok);
+    EXPECT_EQ(ignored.preset_content_hash, first.preset_content_hash);
+    ASSERT_TRUE(fs::remove(type / "placement.json"));
+    const auto optional = LoadTerrainPresetFromJson(preset, root / "data");
+    ASSERT_TRUE(optional.ok); // the generator uses compiled placement defaults when omitted
+    EXPECT_NE(optional.preset_content_hash, first.preset_content_hash);
+    preset["generation_params"]["biomes"]["table"] = "";
+    preset["generation_params"]["features"]["structures_enabled"] = false;
+    const auto disabled = LoadTerrainPresetFromJson(preset, root / "absent-data");
+    ASSERT_TRUE(disabled.ok);
+    EXPECT_EQ(disabled.preset_content_hash, Luminumbra::world::TerrainPresetContentHash(preset));
+}
+
 TEST(TerrainPresetLoaderTest, MountainsOptsIntoBiomesAndRivers) {
     // /2/3: mountains is the showcase preset - it opts into the biome
     // table (consumed) and into rivers (consumed). Loading it must warn on
@@ -156,10 +858,14 @@ TEST(TerrainPresetLoaderTest, ShippedPresetResolvesReadableBiomeTable) {
     const auto result = LoadTerrainPreset(PresetDir() / "default.json");
     ASSERT_TRUE(result.ok);
     ASSERT_TRUE(result.params.biomes_enabled);
-    ASSERT_TRUE(Luminumbra::Filesystem::IsAbsolutePath(result.params.biome_table_path));
-    std::ifstream input(result.params.biome_table_path, std::ios::binary);
+    ASSERT_TRUE(Luminumbra::Filesystem::IsAbsolutePath(
+        Luminumbra::Filesystem::PathFromUtf8(result.params.biome_table_path)));
+    std::ifstream input(Luminumbra::Filesystem::PathFromUtf8(result.params.biome_table_path),
+                        std::ios::binary);
     ASSERT_TRUE(input.is_open()) << result.params.biome_table_path;
-    EXPECT_FALSE(Luminumbra::World::BiomeTable::Load(result.params.biome_table_path).empty());
+    EXPECT_FALSE(Luminumbra::World::BiomeTable::Load(
+                     Luminumbra::Filesystem::PathFromUtf8(result.params.biome_table_path))
+                     .empty());
 }
 
 TEST(TerrainPresetLoaderTest, AllShippedPresetsLoadWithoutErrorsOrWarnings) {
@@ -169,12 +875,44 @@ TEST(TerrainPresetLoaderTest, AllShippedPresetsLoadWithoutErrorsOrWarnings) {
                              "archipelago",
                              "temperate_forest",
                              "amplified",
-                             "caverns"}) {
+                             "caverns",
+                             "cave_dense"}) {
+        std::ifstream input(PresetDir() / (std::string(name) + ".json"));
+        ASSERT_TRUE(input.good()) << name;
+        EXPECT_EQ(nlohmann::json::parse(input).at("schema_rev"), 7) << name;
         const TerrainPresetLoadResult result =
             LoadTerrainPreset(PresetDir() / (std::string(name) + ".json"));
         EXPECT_TRUE(result.ok) << name;
         EXPECT_TRUE(result.errors.empty()) << name << ": " << result.errors.front();
         EXPECT_TRUE(result.warnings.empty()) << name << ": " << result.warnings.front();
+    }
+}
+
+TEST(TerrainPresetLoaderTest, CaveDensePreservesDensityAcrossRevisionSixAndSeven) {
+    for (const int revision : {6, 7}) {
+        SCOPED_TRACE(revision);
+        const auto directory =
+            revision == 6 ? PresetDir().parent_path() / "presets-rev6" : PresetDir();
+        const auto result = LoadTerrainPreset(directory / "cave_dense.json");
+        ASSERT_TRUE(result.ok);
+        EXPECT_TRUE(result.errors.empty());
+        EXPECT_TRUE(result.warnings.empty());
+        const auto& params = result.params;
+        const bool on = revision == 7;
+        EXPECT_EQ(params.island_mask_enabled, on);
+        EXPECT_EQ(params.biome_relief_enabled, on);
+        EXPECT_EQ(params.cliffs_enabled, on);
+        EXPECT_EQ(params.hydro_iterations, on ? 4 : 8);
+        EXPECT_TRUE(params.hydro_enabled);
+        EXPECT_TRUE(params.biomes_enabled);
+        EXPECT_TRUE(params.caves_enabled);
+        EXPECT_TRUE(params.surface_breaks_enabled);
+        EXPECT_TRUE(params.rivers_enabled);
+        EXPECT_TRUE(params.lakes_enabled);
+        EXPECT_TRUE(params.structures_enabled);
+        EXPECT_FLOAT_EQ(params.cave_threshold, 0.54f);
+        EXPECT_FLOAT_EQ(params.surface_break_density, 0.55f);
+        EXPECT_FLOAT_EQ(params.max_feature_radius, 52.0f);
     }
 }
 
@@ -261,8 +999,29 @@ TEST(TerrainPresetLoaderTest, MinimalPresetLoadsCleanly) {
     const TerrainPresetLoadResult result = LoadTerrainPreset(path);
     EXPECT_TRUE(result.ok);
     EXPECT_TRUE(result.warnings.empty());
+    // Unversioned fixtures keep revision-6 absence semantics; resolving defaults
+    // must not manufacture optional blocks or activate their shipping defaults.
     EXPECT_FALSE(result.extras.biomes.present);
+    EXPECT_FALSE(result.extras.hydro.present);
+    EXPECT_FALSE(result.params.biomes_enabled);
+    EXPECT_FALSE(result.params.hydro_enabled);
     fs::remove(path);
+}
+
+TEST(TerrainPresetLoaderTest, LegacyAbsentBlocksStayOffWhenMaterializedForRevisionUpgrade) {
+    auto resolved =
+        Luminumbra::world::ResolveTerrainPresetDefaults(nlohmann::json::parse(kMinimalPreset));
+    resolved["schema_rev"] = Luminumbra::world::kTerrainPresetSchemaRevision;
+    const auto result = LoadTerrainPresetFromJson(resolved, {});
+    ASSERT_TRUE(result.ok);
+    EXPECT_FALSE(result.params.biomes_enabled);
+    EXPECT_FALSE(result.params.biome_relief_enabled);
+    EXPECT_FALSE(result.params.hydro_enabled);
+    EXPECT_FALSE(result.params.island_mask_enabled);
+    EXPECT_FALSE(result.params.rivers_enabled);
+    EXPECT_FALSE(result.params.lakes_enabled);
+    EXPECT_FALSE(result.params.cliffs_enabled);
+    EXPECT_FALSE(result.params.surface_breaks_enabled);
 }
 
 TEST(TerrainPresetLoaderTest, MissingFileReportsOpenError) {
@@ -309,8 +1068,7 @@ TEST(TerrainPresetLoaderTest, MissingGenerationParamsIsAnError) {
 // the SAME params/extras as the on-disk loader for identical content — proving
 // the file path simply delegates and the create-world live preview gets the same
 // world the on-disk create would. Uses a FIXED literal with a biome table so the
-// data-root-relative resolution is exercised (NOT default.json — owned by the
-// concurrent worldgen agent).
+// data-root-relative resolution is exercised independently of the shipped presets.
 TEST(TerrainPresetLoaderTest, InMemorySeamMatchesOnDiskLoad) {
     const std::string kPreset = R"({
       "name": "SeamParity",
@@ -432,12 +1190,213 @@ TEST(TerrainPresetLoaderTest, PreservesContentSwitchesAndOptionalErosionAndBiome
     for (const char* name : {"flat_lands", "temperate_forest"}) {
         const auto result = LoadTerrainPreset(PresetDir() / (std::string(name) + ".json"));
         ASSERT_TRUE(result.ok);
-        EXPECT_FALSE(result.params.hydro_enabled) << name;
-        EXPECT_FALSE(result.params.biomes_enabled) << name;
+        const bool enabled = std::string(name) == "temperate_forest";
+        EXPECT_EQ(result.params.hydro_enabled, enabled) << name;
+        EXPECT_EQ(result.params.biomes_enabled, enabled) << name;
     }
     const auto archipelago = LoadTerrainPreset(PresetDir() / "archipelago.json");
     ASSERT_TRUE(archipelago.ok);
-    EXPECT_FALSE(archipelago.params.biomes_enabled);
+    EXPECT_TRUE(archipelago.params.biomes_enabled);
+}
+
+TEST(TerrainPresetLoaderTest, ExplicitOverridePreservesHistoricalTerrain) {
+    const auto root = PresetDir().parent_path().parent_path().parent_path();
+    const auto path = root / "worlds/atlas/presets-rev6/default.json";
+    std::string text;
+    std::string error;
+    ASSERT_TRUE(Luminumbra::world::LoadTerrainPresetOverride(path, root / "data", text, error))
+        << error;
+    EXPECT_TRUE(error.empty());
+    const auto document = nlohmann::json::parse(text);
+    EXPECT_EQ(document["schema_rev"], 6);
+    const auto historical = LoadTerrainPresetFromJson(document, root / "data");
+    ASSERT_TRUE(historical.ok);
+    EXPECT_FALSE(historical.params.island_mask_enabled);
+    EXPECT_EQ(historical.params.biome_table_path, LoadTerrainPreset(path).params.biome_table_path);
+    EXPECT_NE(historical.params.island_mask_enabled,
+              LoadTerrainPreset(PresetDir() / "default.json").params.island_mask_enabled);
+}
+
+TEST(TerrainPresetLoaderTest, ExplicitOverrideRefusesInvalidFilesWithoutChangingText) {
+    const auto root = PresetDir().parent_path().parent_path().parent_path();
+    const auto directory =
+        Luminumbra::TestSupport::CreateUniqueTempDirectory("lumin-preset-override-");
+    const auto path = directory / "override.json";
+    std::error_code remove_error;
+    std::string text = "unchanged";
+    std::string error;
+    EXPECT_FALSE(Luminumbra::world::LoadTerrainPresetOverride(path, root / "data", text, error));
+    EXPECT_EQ(text, "unchanged");
+    EXPECT_FALSE(error.empty());
+    for (const char* invalid : {"{", "[]", "{}", "{} trailing"}) {
+        SCOPED_TRACE(invalid);
+        {
+            std::ofstream file(path);
+            ASSERT_TRUE(file.good());
+            file << invalid;
+        }
+        EXPECT_FALSE(
+            Luminumbra::world::LoadTerrainPresetOverride(path, root / "data", text, error));
+        EXPECT_EQ(text, "unchanged");
+        EXPECT_FALSE(error.empty());
+    }
+    fs::remove_all(directory, remove_error);
 }
 
 } // namespace
+
+TEST(TerrainPresetLoaderTest, RevisionSevenDefaultsAndSixCompatibility) {
+    for (int revision : {6, 7}) {
+        auto preset = nlohmann::json::parse(kMinimalPreset);
+        preset["schema_rev"] = revision;
+        const auto parsed = LoadTerrainPresetFromJson(preset, PresetDir() / "../../../data");
+        ASSERT_TRUE(parsed.ok);
+        const bool on = revision == 7;
+        EXPECT_EQ(parsed.params.island_mask_enabled, on);
+        EXPECT_EQ(parsed.params.surface_breaks_enabled, on);
+        EXPECT_EQ(parsed.params.biomes_enabled, on);
+        EXPECT_EQ(parsed.params.biome_relief_enabled, on);
+        EXPECT_EQ(parsed.params.rivers_enabled, on);
+        EXPECT_EQ(parsed.params.lakes_enabled, on);
+        EXPECT_EQ(parsed.params.cliffs_enabled, on);
+        EXPECT_EQ(parsed.params.structures_enabled, on);
+        EXPECT_EQ(parsed.params.hydro_enabled, on);
+        auto saved = Luminumbra::world::ResolveTerrainPresetDefaults(preset);
+        saved["schema_rev"] = 7;
+        const auto reopened = LoadTerrainPresetFromJson(saved, {});
+        ASSERT_TRUE(reopened.ok);
+        EXPECT_EQ(reopened.params.island_mask_enabled, on);
+        EXPECT_EQ(reopened.params.surface_breaks_enabled, on);
+        EXPECT_EQ(reopened.params.biomes_enabled, on);
+        EXPECT_EQ(reopened.params.biome_relief_enabled, on);
+        EXPECT_EQ(reopened.params.rivers_enabled, on);
+        EXPECT_EQ(reopened.params.lakes_enabled, on);
+        EXPECT_EQ(reopened.params.cliffs_enabled, on);
+        EXPECT_EQ(reopened.params.structures_enabled, on);
+        EXPECT_EQ(reopened.params.hydro_enabled, on);
+
+        preset["generation_params"]["biomes"]["table"] = "";
+        preset["generation_params"]["terrain"]["island_mask_enabled"] = false;
+        preset["generation_params"]["terrain"]["hydro"]["enabled"] = false;
+        for (const char* key : {"surface_breaks_enabled",
+                                "rivers_enabled",
+                                "lakes_enabled",
+                                "cliffs_enabled",
+                                "structures_enabled"})
+            preset["generation_params"]["features"][key] = false;
+        const auto off = LoadTerrainPresetFromJson(preset, {});
+        ASSERT_TRUE(off.ok);
+        EXPECT_FALSE(off.params.biomes_enabled);
+        EXPECT_TRUE(off.params.biome_table_path.empty());
+        EXPECT_FALSE(off.params.island_mask_enabled);
+        EXPECT_FALSE(off.params.hydro_enabled);
+        EXPECT_FALSE(off.params.rivers_enabled);
+        EXPECT_FALSE(off.params.lakes_enabled);
+        EXPECT_FALSE(off.params.cliffs_enabled);
+        EXPECT_FALSE(off.params.structures_enabled);
+        EXPECT_FALSE(off.params.surface_breaks_enabled);
+    }
+}
+
+TEST(TerrainPresetLoaderTest, MalformedDefaultedBlocksReportContractErrors) {
+    for (int revision : {6, 7}) {
+        for (const char* field :
+             {"/generation_params/terrain/hydro", "/generation_params/biomes"}) {
+            for (const auto& invalid : {nlohmann::json(nullptr),
+                                        nlohmann::json::array(),
+                                        nlohmann::json(42),
+                                        nlohmann::json("invalid"),
+                                        nlohmann::json(false)}) {
+                SCOPED_TRACE(revision);
+                SCOPED_TRACE(field);
+                SCOPED_TRACE(invalid.dump());
+                auto preset = nlohmann::json::parse(kMinimalPreset);
+                preset["schema_rev"] = revision;
+                const nlohmann::json::json_pointer pointer(field);
+                preset[pointer] = invalid;
+                const auto resolved = Luminumbra::world::ResolveTerrainPresetDefaults(preset);
+                EXPECT_EQ(resolved[pointer], invalid);
+
+                const auto result = LoadTerrainPresetFromJson(preset, {}, "MalformedBlock");
+                EXPECT_FALSE(result.ok);
+                ASSERT_EQ(result.errors.size(), 1u);
+                const std::string scope = std::string(field) == "/generation_params/terrain/hydro"
+                                              ? "generation_params.terrain.hydro"
+                                              : "generation_params.biomes";
+                EXPECT_EQ(result.errors.front(),
+                          "world preset field must be object: " + scope + ": MalformedBlock");
+            }
+        }
+    }
+}
+
+TEST(TerrainPresetLoaderTest, MalformedDefaultedValuesReportContractErrors) {
+    for (int revision : {6, 7}) {
+        for (const char* field : {"/generation_params/terrain/island_mask_enabled",
+                                  "/generation_params/terrain/hydro/enabled",
+                                  "/generation_params/biomes/table",
+                                  "/generation_params/biomes/relief_enabled",
+                                  "/generation_params/features/rivers_enabled",
+                                  "/generation_params/features/lakes_enabled",
+                                  "/generation_params/features/cliffs_enabled",
+                                  "/generation_params/features/structures_enabled",
+                                  "/generation_params/features/surface_breaks_enabled"}) {
+            for (const auto& invalid : {nlohmann::json(nullptr),
+                                        nlohmann::json::array(),
+                                        nlohmann::json(42),
+                                        nlohmann::json::object()}) {
+                SCOPED_TRACE(revision);
+                SCOPED_TRACE(field);
+                SCOPED_TRACE(invalid.dump());
+                auto preset = nlohmann::json::parse(kMinimalPreset);
+                preset["schema_rev"] = revision;
+                const nlohmann::json::json_pointer pointer(field);
+                preset[pointer] = invalid;
+                const auto resolved = Luminumbra::world::ResolveTerrainPresetDefaults(preset);
+                EXPECT_EQ(resolved[pointer], invalid);
+
+                const auto result = LoadTerrainPresetFromJson(preset, {}, "MalformedValue");
+                EXPECT_FALSE(result.ok);
+                ASSERT_EQ(result.errors.size(), 1u);
+                EXPECT_NE(result.errors.front().find("world preset field must be "),
+                          std::string::npos);
+                std::string scope(field + 1);
+                for (char& character : scope) {
+                    if (character == '/')
+                        character = '.';
+                }
+                EXPECT_NE(result.errors.front().find(scope + ": MalformedValue"),
+                          std::string::npos);
+            }
+        }
+    }
+}
+
+TEST(TerrainPresetLoaderTest, AbsentOptionalBlocksAndFieldsReceiveVersionedDefaults) {
+    for (int revision : {6, 7}) {
+        for (bool empty_blocks : {false, true}) {
+            SCOPED_TRACE(revision);
+            SCOPED_TRACE(empty_blocks);
+            auto preset = nlohmann::json::parse(kMinimalPreset);
+            preset["schema_rev"] = revision;
+            if (empty_blocks) {
+                preset["generation_params"]["terrain"]["hydro"] = nlohmann::json::object();
+                preset["generation_params"]["biomes"] = nlohmann::json::object();
+            }
+            const auto result = LoadTerrainPresetFromJson(preset, {});
+            ASSERT_TRUE(result.ok);
+            EXPECT_TRUE(result.errors.empty());
+            const bool on = revision == 7;
+            EXPECT_EQ(result.params.hydro_enabled, on);
+            EXPECT_EQ(result.params.biomes_enabled, on);
+            EXPECT_EQ(result.params.biome_relief_enabled, on);
+            EXPECT_EQ(result.extras.biomes.table, on ? "common/biomes.json" : "");
+            EXPECT_EQ(result.params.island_mask_enabled, on);
+            EXPECT_EQ(result.params.rivers_enabled, on);
+            EXPECT_EQ(result.params.lakes_enabled, on);
+            EXPECT_EQ(result.params.cliffs_enabled, on);
+            EXPECT_EQ(result.params.structures_enabled, on);
+            EXPECT_EQ(result.params.surface_breaks_enabled, on);
+        }
+    }
+}
