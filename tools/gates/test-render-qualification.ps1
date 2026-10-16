@@ -54,10 +54,23 @@ function Remove-Override {
 # Function lookup intercepts the wrapper's command without a production test seam.
 # In-process preflight checks use the same script invocation as the acceptance driver.
 function python {
-    if (Test-Path -LiteralPath $script:recordPath) { throw "runner invoked more than once" }
+    # These stubs run through another script. Resolve fixture variables through
+    # the caller chain; $script: would refer to the wrapper's script scope.
+    if (Test-Path -LiteralPath $recordPath) { throw "runner invoked more than once" }
     $record = [ordered]@{ argv = @($args) }
-    [System.IO.File]::WriteAllText($script:recordPath, (ConvertTo-Json -InputObject $record))
-    $global:LASTEXITCODE = $script:runnerExitCode
+    [System.IO.File]::WriteAllText($recordPath, (ConvertTo-Json -InputObject $record))
+    if ($runnerFailure -eq "Interrupted") { throw [System.OperationCanceledException]::new("runner interrupted") }
+    if ($runnerFailure -eq "NoStatus") { return }
+    if ($runnerFailure -eq "NativeStderr") {
+        $shell = (Get-Process -Id $PID).Path
+        $nativeOutput = @(& $shell -NoLogo -NoProfile -NonInteractive -Command `
+            "[Console]::Error.WriteLine('fixture native stderr'); exit $runnerExitCode" 2>&1)
+        $nativeCode = $LASTEXITCODE
+        $nativeOutput | ForEach-Object { Write-Host ($_.ToString()) }
+        $global:LASTEXITCODE = $nativeCode
+        return
+    }
+    $global:LASTEXITCODE = $runnerExitCode
 }
 
 function Get-CimInstance {
@@ -71,12 +84,14 @@ function Get-CimInstance {
 
 function Invoke-Wrapper {
     param([hashtable]$Parameters = @{}, [int]$RunnerExitCode = 0,
-        [switch]$UseDefaultExe, [switch]$AsProcess, [switch]$FailCleanup)
+        [switch]$UseDefaultExe, [switch]$AsProcess, [switch]$FailCleanup,
+        [string]$RunnerFailure = "None")
     $wrapperParameters = @{ Exe = $clientRelative; OutDir = $outRelative }
     foreach ($key in $Parameters.Keys) { $wrapperParameters[$key] = $Parameters[$key] }
     if ($UseDefaultExe) { $wrapperParameters.Remove("Exe") }
     if (Test-Path -LiteralPath $recordPath) { Remove-Item -LiteralPath $recordPath -Force }
     $script:runnerExitCode = $RunnerExitCode
+    $script:runnerFailure = $RunnerFailure
     $global:LASTEXITCODE = 91
     # Relative paths must be resolved against the repository, even from another cwd.
     Push-Location -LiteralPath $fixtureRoot
@@ -86,6 +101,7 @@ function Invoke-Wrapper {
                 Wrapper = $wrapper; Parameters = $wrapperParameters
                 RecordPath = $recordPath; RunnerExitCode = $RunnerExitCode
                 FailCleanup = [bool]$FailCleanup
+                RunnerFailure = $RunnerFailure
             } | Export-Clixml -LiteralPath $childConfiguration -Depth 5
             $output = @(& $powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
                 -File $childHarness -Configuration $childConfiguration 2>&1)
@@ -150,6 +166,7 @@ Set-StrictMode -Version 2.0
 $config = Import-Clixml -LiteralPath $Configuration
 $recordPath = $config.RecordPath
 $runnerExitCode = $config.RunnerExitCode
+$runnerFailure = $config.RunnerFailure
 $failCleanup = $config.FailCleanup
 $parameters = $config.Parameters
 '@
@@ -160,7 +177,11 @@ function Remove-Item {
     param([string]$LiteralPath, [switch]$Force)
     Microsoft.PowerShell.Management\Remove-Item -LiteralPath $LiteralPath -Force:$Force
     $global:LASTEXITCODE = $null
-    if ($script:failCleanup) { throw "fixture cleanup failure" }
+    if ($failCleanup) { throw "fixture cleanup failure" }
+}
+if ($runnerFailure -eq "MissingPython") {
+    Microsoft.PowerShell.Management\Remove-Item -LiteralPath Function:python -Force
+    $env:PATH = ""
 }
 $global:LASTEXITCODE = 91
 $PSNativeCommandUseErrorActionPreference = $true
@@ -239,10 +260,31 @@ exit $global:LASTEXITCODE
         Assert-Test ($run.Code -eq $exitCode) "cleanup failure preserves runner exit $exitCode`: $($run.Message)"
         Assert-RunnerArguments $run (Join-Path $repo $clientRelative)
     }
+    $run = Invoke-Wrapper -RunnerExitCode -1073741510
+    Assert-Test ($run.Code -eq -1073741510) "Windows native interruption status is propagated unchanged"
+    Assert-RunnerArguments $run (Join-Path $repo $clientRelative)
     foreach ($package in @($packageRelative, (Join-Path $repo $packageRelative))) {
         $run = Invoke-Wrapper @{ Package = $package } -UseDefaultExe
         Assert-Test ($run.Code -eq 0) "package client runs successfully"
         Assert-RunnerArguments $run (Join-Path (Join-Path $repo $packageRelative) "luminumbra_client_qa_app.exe")
+    }
+    foreach ($failure in @("Interrupted", "NoStatus", "MissingPython")) {
+        $run = Invoke-Wrapper -AsProcess -RunnerFailure $failure
+        $expectedCode = if ($failure -eq "Interrupted") { 130 } else { 1 }
+        Assert-Test ($run.Code -eq $expectedCode) "$failure refuses stale success: $($run.Message)"
+        if ($failure -eq "MissingPython") {
+            Assert-Test (-not $run.Invoked) "missing python never invokes the runner"
+            Assert-Test ($run.Message.Contains("python")) "missing python is identified"
+            Assert-Test (@(Get-ChildItem -LiteralPath $outPath -Filter ".host-*.tmp").Count -eq 0) "missing python removes staged host evidence"
+        } else {
+            Assert-RunnerArguments $run (Join-Path $repo $clientRelative)
+        }
+    }
+    foreach ($exitCode in @(0, 7)) {
+        $run = Invoke-Wrapper -AsProcess -RunnerFailure "NativeStderr" -RunnerExitCode $exitCode
+        Assert-Test ($run.Code -eq $exitCode) "native stderr preserves runner exit $exitCode`: $($run.Message)"
+        Assert-Test ($run.Message.Contains("fixture native stderr")) "native stderr is retained"
+        Assert-RunnerArguments $run (Join-Path $repo $clientRelative)
     }
     $run = Invoke-Wrapper @{ DryRun = $true } -UseDefaultExe -AsProcess
     Assert-Test ($run.Code -eq 0) "default client supports dry run"

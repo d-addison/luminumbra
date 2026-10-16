@@ -837,43 +837,89 @@ TEST(GameSessionHeadlessWorldTest, MissingRuntimeDependenciesRefuseCreateReloadA
         ASSERT_TRUE(session.SaveWorldState());
     }
     // Valid data beside the saves must never mask missing runtime dependencies.
-    for (const auto& relative : {fs::path("common/biomes.json"),
-                                 fs::path("common/structures"),
-                                 fs::path("common/structures/cairn/cairn.json")}) {
-        for (const bool empty : {false, true}) {
-            SCOPED_TRACE(relative.string());
-            SCOPED_TRACE(empty);
-            const auto dependency = assets.path() / "data" / relative;
-            const auto hidden = assets.path() / "hidden-dependency";
-            fs::rename(dependency, hidden);
-            if (empty) {
-                if (fs::is_directory(hidden))
-                    fs::create_directory(dependency);
-                else
-                    std::ofstream(dependency, std::ios::binary) << "{}";
-            }
-            GameSession session;
-            session.SetJobSystem(&jobs);
-            session.SetRootPath(assets.root_string());
-            session.SetSaveRootPath(storage.path());
-            EXPECT_FALSE(session.CreateWorld("Refused", "12345", "default"));
-            EXPECT_FALSE(session.GetWorldOpenError().empty());
-            EXPECT_FALSE(session.CreateTransientWorld("Refused", "12345", "default"));
-            EXPECT_FALSE(session.GetWorldOpenError().empty());
-            EXPECT_FALSE(session.LoadWorld(world_id));
-            EXPECT_FALSE(session.GetWorldOpenError().empty());
-            EXPECT_EQ(session.GetWorldSystem(), nullptr);
-            const auto saved = Luminumbra::Persistence::InspectSavedWorld(
-                storage.path(), assets.path() / "data", world_id);
-            EXPECT_FALSE(saved.error.empty());
-            const auto catalog = Luminumbra::Persistence::EnumerateSavedWorlds(
-                storage.path(), assets.path() / "data");
-            ASSERT_EQ(catalog.worlds.size(), 1u);
-            EXPECT_FALSE(catalog.worlds.front().error.empty());
-            fs::remove_all(dependency);
-            fs::rename(hidden, dependency);
+    // An absent biome table supports legacy classification; a present invalid
+    // table and absent/empty structure pools are errors.
+    for (const auto& [relative, empty] :
+         {std::pair{fs::path("common/biomes.json"), true},
+          std::pair{fs::path("common/structures"), false},
+          std::pair{fs::path("common/structures"), true},
+          std::pair{fs::path("common/structures/cairn/cairn.json"), false},
+          std::pair{fs::path("common/structures/cairn/cairn.json"), true}}) {
+        SCOPED_TRACE(relative.string());
+        SCOPED_TRACE(empty);
+        const auto dependency = assets.path() / "data" / relative;
+        const auto hidden = assets.path() / "hidden-dependency";
+        fs::rename(dependency, hidden);
+        if (empty) {
+            if (fs::is_directory(hidden))
+                fs::create_directory(dependency);
+            else
+                std::ofstream(dependency, std::ios::binary) << "{}";
         }
+        GameSession session;
+        session.SetJobSystem(&jobs);
+        session.SetRootPath(assets.root_string());
+        session.SetSaveRootPath(storage.path());
+        EXPECT_FALSE(session.CreateWorld("Refused", "12345", "default"));
+        EXPECT_FALSE(session.GetWorldOpenError().empty());
+        EXPECT_FALSE(session.CreateTransientWorld("Refused", "12345", "default"));
+        EXPECT_FALSE(session.GetWorldOpenError().empty());
+        EXPECT_FALSE(session.LoadWorld(world_id));
+        EXPECT_FALSE(session.GetWorldOpenError().empty());
+        EXPECT_EQ(session.GetWorldSystem(), nullptr);
+        const auto saved = Luminumbra::Persistence::InspectSavedWorld(
+            storage.path(), assets.path() / "data", world_id);
+        EXPECT_FALSE(saved.error.empty());
+        const auto catalog =
+            Luminumbra::Persistence::EnumerateSavedWorlds(storage.path(), assets.path() / "data");
+        ASSERT_EQ(catalog.worlds.size(), 1u);
+        EXPECT_FALSE(catalog.worlds.front().error.empty());
+        fs::remove_all(dependency);
+        fs::rename(hidden, dependency);
     }
+    jobs.shutdown();
+}
+
+TEST(GameSessionHeadlessWorldTest, MissingBiomeTableUsesLegacyFallbackForCreateReloadAndCatalog) {
+    const HeadlessRoot assets;
+    const HeadlessRoot storage;
+    ASSERT_TRUE(fs::remove(assets.path() / "data/common/biomes.json"));
+    JobSystem jobs;
+    jobs.startup(1);
+    std::string world_id;
+    {
+        GameSession session;
+        session.SetJobSystem(&jobs);
+        session.SetRootPath(assets.root_string());
+        session.SetSaveRootPath(storage.path());
+        ASSERT_TRUE(session.CreateWorld("LegacyBiomes", "12345", "default"))
+            << session.GetWorldOpenError();
+        EXPECT_FALSE(session.GetWorldSystem()->biomes_enabled());
+        EXPECT_TRUE(session.GetWorldSystem()->biome_table().empty());
+        world_id = session.GetMetadata().worldId;
+        ASSERT_TRUE(session.SaveWorldState());
+    }
+    {
+        GameSession session;
+        session.SetJobSystem(&jobs);
+        session.SetRootPath(assets.root_string());
+        session.SetSaveRootPath(storage.path());
+        ASSERT_TRUE(session.CreateTransientWorld("LegacyBiomesTransient", "12345", "default"))
+            << session.GetWorldOpenError();
+        EXPECT_FALSE(session.GetWorldSystem()->biomes_enabled());
+        EXPECT_TRUE(session.GetWorldSystem()->biome_table().empty());
+        ASSERT_TRUE(session.LoadWorld(world_id)) << session.GetWorldOpenError();
+        EXPECT_FALSE(session.GetWorldSystem()->biomes_enabled());
+        EXPECT_TRUE(session.GetWorldSystem()->biome_table().empty());
+    }
+    const auto saved = Luminumbra::Persistence::InspectSavedWorld(
+        storage.path(), assets.path() / "data", world_id);
+    EXPECT_TRUE(saved.error.empty()) << saved.error;
+    const auto catalog =
+        Luminumbra::Persistence::EnumerateSavedWorlds(storage.path(), assets.path() / "data");
+    ASSERT_EQ(catalog.worlds.size(), 1u);
+    EXPECT_EQ(catalog.worlds.front().metadata.worldId, world_id);
+    EXPECT_TRUE(catalog.worlds.front().error.empty()) << catalog.worlds.front().error;
     jobs.shutdown();
 }
 

@@ -5,7 +5,7 @@ import copy
 import io
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import stat
 import sys
 import tempfile
@@ -29,7 +29,9 @@ RECEIPT = dict(schema=runner.RECEIPT_SCHEMA, command=['luminumbra_client_app.exe
 class ProcessReceiptSummaryTest(unittest.TestCase):
     def setUp(self):
         self._temp = tempfile.TemporaryDirectory()
-        self.root = Path(self._temp.name)
+        # Resolve directory aliases (including short Windows names) before race
+        # hooks compare paths with the reader's canonical evidence paths.
+        self.root = Path(self._temp.name).resolve(strict=True)
 
     def tearDown(self):
         self._temp.cleanup()
@@ -400,6 +402,117 @@ class ProcessReceiptSummaryTest(unittest.TestCase):
             with self.assertRaises(OSError):
                 os.fstat(descriptor)
 
+    def test_receipt_and_log_regular_file_replacement_at_open_refuse_without_reading(self):
+        receipt = self.write_timeout('replaced', 'Shutdown stage: world_save_started\n')
+        original = summary._open_descriptor
+        for target in (receipt, receipt.with_name('replaced.log')):
+            with self.subTest(target=target.name):
+                replacement = self.root / 'replacement'
+                replacement.write_bytes(target.read_bytes())
+                descriptors = []
+
+                def replace_at_open(path, root):
+                    if path == target:
+                        # Both files are closed; this also works with Windows
+                        # mandatory sharing rules and cannot reuse the old inode.
+                        os.replace(replacement, target)
+                    descriptor = original(path, root)
+                    descriptors.append(descriptor)
+                    return descriptor
+
+                with mock.patch.object(summary, '_open_descriptor', replace_at_open), \
+                        mock.patch.object(summary, 'bounded_bytes', wraps=summary.bounded_bytes) as read_receipt, \
+                        mock.patch.object(summary, 'read_log', wraps=summary.read_log) as read_log:
+                    self.assert_refused([str(receipt)], 'changed during open')
+                self.assertEqual(read_receipt.call_count, int(target != receipt))
+                read_log.assert_not_called()
+                for descriptor in descriptors:
+                    with self.assertRaises(OSError):
+                        os.fstat(descriptor)
+
+    def test_unavailable_identity_and_changed_metadata_refuse_before_reading(self):
+        receipt = self.write_timeout('metadata', 'Shutdown stage: world_save_started\n')
+        original = os.fstat
+        original_lstat = Path.lstat
+        for target in (receipt, receipt.with_name('metadata.log')):
+            for field in ('st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns'):
+                with self.subTest(target=target.name, field=field):
+                    descriptor_seen = []
+                    open_descriptor = summary._open_descriptor
+
+                    def record_open(path, root):
+                        descriptor = open_descriptor(path, root)
+                        if path == target:
+                            descriptor_seen.append(descriptor)
+                        return descriptor
+
+                    def changed_metadata(descriptor):
+                        info = original(descriptor)
+                        if field == 'st_ino' and descriptor_seen and descriptor == descriptor_seen[-1]:
+                            values = {name: getattr(info, name) for name in (
+                                'st_mode', 'st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns')}
+                            values['st_ino'] = 0
+                            return types.SimpleNamespace(**values)
+                        return info
+
+                    def changed_path_metadata(path, *args, **kwargs):
+                        info = original_lstat(path, *args, **kwargs)
+                        if path == target and (descriptor_seen or field == 'st_ino'):
+                            values = {name: getattr(info, name) for name in (
+                                'st_mode', 'st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns')}
+                            values[field] = 0 if field == 'st_ino' else values[field] + 1
+                            return types.SimpleNamespace(**values)
+                        return info
+
+                    with mock.patch.object(summary, '_open_descriptor', record_open), \
+                            mock.patch.object(summary.os, 'fstat', changed_metadata), \
+                            mock.patch.object(Path, 'lstat', changed_path_metadata), \
+                            mock.patch.object(summary, 'bounded_bytes', wraps=summary.bounded_bytes) as read_receipt, \
+                            mock.patch.object(summary, 'read_log', wraps=summary.read_log) as read_log:
+                        self.assert_refused([str(receipt)], 'during open')
+                    self.assertEqual(read_receipt.call_count, int(target != receipt))
+                    read_log.assert_not_called()
+                    self.assertEqual(len(descriptor_seen), 1)
+                    with self.assertRaises(OSError):
+                        original(descriptor_seen[0])
+
+    def test_receipt_and_log_disappearance_during_open_refuse_without_reading(self):
+        original_open = summary._open_descriptor
+        original_lstat = Path.lstat
+        for leaf in ('disappeared.process.json', 'disappeared.log'):
+            for after_open in (False, True):
+                with self.subTest(leaf=leaf, after_open=after_open):
+                    receipt = self.write_timeout('disappeared', 'Shutdown stage: world_save_started\n')
+                    target = self.root / leaf
+                    descriptors = []
+
+                    def open_descriptor(path, root):
+                        if path == target and not after_open:
+                            path.unlink()
+                        descriptor = original_open(path, root)
+                        if path == target:
+                            descriptors.append(descriptor)
+                        return descriptor
+
+                    def lstat(path, *args, **kwargs):
+                        # Simulate disappearance without unlinking an open file
+                        # on Windows. Initially absent logs remain covered above.
+                        if path == target and descriptors:
+                            raise FileNotFoundError(str(path))
+                        return original_lstat(path, *args, **kwargs)
+
+                    with mock.patch.object(summary, '_open_descriptor', open_descriptor), \
+                            mock.patch.object(Path, 'lstat', lstat), \
+                            mock.patch.object(summary, 'bounded_bytes', wraps=summary.bounded_bytes) as read_receipt, \
+                            mock.patch.object(summary, 'read_log', wraps=summary.read_log) as read_log:
+                        self.assert_refused([str(receipt)], 'changed during open')
+                    self.assertEqual(read_receipt.call_count, int(target != receipt))
+                    read_log.assert_not_called()
+                    self.assertEqual(len(descriptors), int(after_open))
+                    for descriptor in descriptors:
+                        with self.assertRaises(OSError):
+                            os.fstat(descriptor)
+
     def test_no_follow_flags_cover_ancestor_and_leaf_opens(self):
         if os.name == 'nt':
             # Native reparse-point checks are exercised by every Windows read.
@@ -419,6 +532,22 @@ class ProcessReceiptSummaryTest(unittest.TestCase):
         self.assertGreater(len(flags_seen), 1)
         for flags in flags_seen:
             self.assertEqual(flags & os.O_NOFOLLOW, os.O_NOFOLLOW)
+
+    def test_path_and_handle_timestamp_formats_need_not_match(self):
+        receipt = self.write_timeout('timestamps', 'Shutdown stage: world_save_started\n')
+        original = os.fstat
+
+        def handle_metadata(descriptor):
+            info = original(descriptor)
+            values = {name: getattr(info, name) for name in (
+                'st_mode', 'st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns')}
+            values['st_mtime_ns'] -= values['st_mtime_ns'] % 1_000_000_000
+            values['st_ctime_ns'] += 2_000_000_000
+            return types.SimpleNamespace(**values)
+
+        with mock.patch.object(summary.os, 'fstat', handle_metadata):
+            self.assertEqual(self.document([str(receipt)])['receipts'][0]['placement'],
+                             'in_world_save_started')
 
     def test_windows_reparse_and_outside_handles_refuse_before_reading(self):
         import ctypes
@@ -452,6 +581,49 @@ class ProcessReceiptSummaryTest(unittest.TestCase):
                 self.assertTrue(kernel.CreateFileW.call_args.args[5] & 0x00200000)
                 kernel.CloseHandle.assert_called_once_with(123)
                 crt.open_osfhandle.assert_not_called()
+
+    def test_windows_extended_and_ordinary_evidence_paths_share_containment_rules(self):
+        import ctypes
+        from ctypes import wintypes
+
+        roots = ((r'C:\evidence', r'\\?\C:\evidence'),
+                 (r'\\server\share\evidence', r'\\?\UNC\server\share\evidence'))
+        for aliases in roots:
+            for root_name in aliases:
+                for handle_root in aliases:
+                    for outside in (False, True):
+                        with self.subTest(root=root_name, handle=handle_root, outside=outside):
+                            kernel = mock.Mock()
+                            kernel.CreateFileW.return_value = 123
+                            crt = types.SimpleNamespace(open_osfhandle=mock.Mock(return_value=456))
+                            name = handle_root + ('-outside' if outside else '') + r'\inside.process.json'
+
+                            def attributes(_handle, _kind, buffer, _size):
+                                ctypes.cast(buffer, ctypes.POINTER(wintypes.DWORD))[0] = 0
+                                return 1
+
+                            def final_path(_handle, buffer, _size, _flags):
+                                if buffer is not None:
+                                    buffer.value = name
+                                return len(name) + int(buffer is None)
+
+                            kernel.GetFileInformationByHandleEx.side_effect = attributes
+                            kernel.GetFinalPathNameByHandleW.side_effect = final_path
+                            root = PureWindowsPath(root_name)
+                            with mock.patch.object(ctypes, 'WinDLL', return_value=kernel, create=True), \
+                                    mock.patch.object(summary.os, 'O_BINARY', 0x8000, create=True), \
+                                    mock.patch.dict(sys.modules, {'msvcrt': crt}):
+                                if outside:
+                                    with self.assertRaisesRegex(checker.InputError, 'escapes'):
+                                        summary._open_windows_descriptor(root / 'inside.process.json', root)
+                                    kernel.CloseHandle.assert_called_once_with(123)
+                                    crt.open_osfhandle.assert_not_called()
+                                else:
+                                    self.assertEqual(summary._open_windows_descriptor(
+                                        root / 'inside.process.json', root), 456)
+                                    crt.open_osfhandle.assert_called_once_with(
+                                        123, os.O_RDONLY | os.O_BINARY)
+                                    kernel.CloseHandle.assert_not_called()
 
     def test_platform_no_follow_refuses_replacement_at_the_actual_open(self):
         if os.name == 'nt':

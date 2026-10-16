@@ -149,14 +149,29 @@ $code = 1
 try {
     $host_record | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $hostTemporary -Encoding UTF8
     Write-Host "[render-qualification] python $($argv -join ' ')"
-    & python @argv
-    $code = $LASTEXITCODE
+    $python = Get-Command python -ErrorAction Stop
+    # A failed launch must never reuse the caller's previous native result.
+    $global:LASTEXITCODE = $null
+    $savedErrorActionPreference = $ErrorActionPreference
+    try {
+        # Windows PowerShell can promote redirected native stderr to errors.
+        # The runner's exit status remains authoritative even when it emits stderr.
+        $ErrorActionPreference = "Continue"
+        & $python @argv
+        if ($null -eq $LASTEXITCODE) { throw "python returned without an exit code" }
+        $code = [int]$LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $savedErrorActionPreference
+    }
     if ($DryRun) {
         Write-Host "[render-qualification] dry run: plan only, see qualification-plan.json in $outPath"
     } else {
         $qualification = Join-Path $outPath "qualification.json"
         Write-Host "[render-qualification] qualification.json: $qualification"
     }
+} catch [System.OperationCanceledException] {
+    $code = 130
+    Write-Host "[render-qualification] runner interrupted"
 } catch {
     Write-Host "[render-qualification] $($_.Exception.Message)"
 } finally {

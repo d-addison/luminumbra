@@ -24,7 +24,7 @@ import os
 import re
 import stat
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import render_runner_process as runner
 from check_gl_debug_log import InputError, bounded_bytes, read_log, MAX_FILE_BYTES, MAX_RECORDS
@@ -63,6 +63,16 @@ def regular_file(path, root):
     if not resolved.is_relative_to(root):
         raise InputError(f'{path}: evidence escapes supplied directory')
     return resolved, info
+
+
+def _windows_evidence_path(name):
+    """Compare resolved long paths in the same Win32 namespace on both sides."""
+    name = str(name)
+    if name.upper().startswith('\\\\?\\UNC\\'):
+        name = '\\\\' + name[8:]
+    elif name.startswith('\\\\?\\'):
+        name = name[4:]
+    return PureWindowsPath(name)
 
 
 def _open_windows_descriptor(path, root):
@@ -109,13 +119,8 @@ def _open_windows_descriptor(path, root):
         length = final_path(handle, buffer, len(buffer), 0)
         if not length or length >= len(buffer):
             raise InputError(f'{path}: cannot verify opened path')
-        name = buffer.value
-        if name.startswith('\\\\?\\UNC\\'):
-            name = '\\\\' + name[8:]
-        elif name.startswith('\\\\?\\'):
-            name = name[4:]
         # Both names use normalized long paths, including when argv used 8.3 names.
-        if not Path(name).is_relative_to(root):
+        if not _windows_evidence_path(buffer.value).is_relative_to(_windows_evidence_path(root)):
             raise InputError(f'{path}: opened evidence escapes supplied directory')
         descriptor = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
     except BaseException:
@@ -149,17 +154,35 @@ def open_regular_file(path, root):
     _resolved, before = regular_file(path, root)
     try:
         descriptor = _open_descriptor(path, root)
+    except FileNotFoundError as error:
+        # Only an initially absent log may be classified as log_missing.
+        raise InputError(f'{path}: evidence changed during open') from error
     except OSError as error:
         # Win32 API errors and descriptor-relative opens may omit the full path.
         error.filename = str(path)
         raise
     try:
         opened = os.fstat(descriptor)
-        _resolved, after = regular_file(path, root)
+        try:
+            _resolved, after = regular_file(path, root)
+        except FileNotFoundError as error:
+            raise InputError(f'{path}: evidence changed during open') from error
+
+        def snapshot(info):
+            # Reject unavailable file IDs rather than accepting two unknown IDs.
+            # Compare path metadata only with path metadata: Windows handle
+            # timestamps can have different meanings and precision.
+            if not info.st_ino:
+                raise InputError(f'{path}: evidence identity unavailable during open')
+            return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+        if not opened.st_ino:
+            raise InputError(f'{path}: evidence identity unavailable during open')
         identity = (opened.st_dev, opened.st_ino)
         if (not stat.S_ISREG(opened.st_mode)
                 or identity != (before.st_dev, before.st_ino)
-                or identity != (after.st_dev, after.st_ino)):
+                or identity != (after.st_dev, after.st_ino)
+                or snapshot(before) != snapshot(after)):
             raise InputError(f'{path}: evidence changed during open')
         if opened.st_size > MAX_FILE_BYTES:
             raise InputError(f'{path}: input exceeds {MAX_FILE_BYTES} byte cap')
