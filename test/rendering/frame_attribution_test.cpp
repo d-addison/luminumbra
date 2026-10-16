@@ -9,6 +9,7 @@
 #include <sstream>
 #include <streambuf>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -33,10 +34,18 @@ TEST(FrameAttribution, CapacityMarkerIsNeverAnObservedCount) {
     EXPECT_FALSE(generated_instance_count(true, false, false, capacity).has_value());
     EXPECT_FALSE(generated_instance_count(true, false, true, capacity).has_value());
     EXPECT_FALSE(generated_instance_count(true, true, false, capacity).has_value());
-    EXPECT_EQ(generated_instance_count(true, true, true, 123).value(), 123u);
-    EXPECT_EQ(generated_instance_count(true, true, true, 0).value(), 0u);
-    EXPECT_EQ(generated_instance_count(false, false, false, 123).value(), 123u);
-    EXPECT_EQ(generated_instance_count(false, false, false, 0).value(), 0u);
+    const auto gpu_count = generated_instance_count(true, true, true, 123);
+    ASSERT_TRUE(gpu_count.has_value());
+    EXPECT_EQ(gpu_count.value(), 123u);
+    const auto gpu_zero = generated_instance_count(true, true, true, 0);
+    ASSERT_TRUE(gpu_zero.has_value());
+    EXPECT_EQ(gpu_zero.value(), 0u);
+    const auto cpu_count = generated_instance_count(false, false, false, 123);
+    ASSERT_TRUE(cpu_count.has_value());
+    EXPECT_EQ(cpu_count.value(), 123u);
+    const auto cpu_zero = generated_instance_count(false, false, false, 0);
+    ASSERT_TRUE(cpu_zero.has_value());
+    EXPECT_EQ(cpu_zero.value(), 0u);
 }
 
 TEST(FrameAttribution, ExclusiveBucketsSumToFrameIncludingRemainder) {
@@ -212,6 +221,40 @@ TEST(FrameAttribution, FrameCollectorIncludesAllCallersAndDoesNotLeakBetweenFram
     EXPECT_EQ(next_frame.snapshot().rebuild.rebuild_calls, 0u);
     EXPECT_EQ(next_frame.snapshot().rebuild.path, FoliagePath::NotCalled);
     EXPECT_DOUBLE_EQ(next_frame.snapshot().rebuild_ms, 0);
+}
+
+TEST(FrameAttribution, FrameCollectorsAreIsolatedAcrossThreads) {
+    FoliageFrameScope frame(true);
+    record_foliage_rebuild({}, 10, 262144, 123, 7);
+    // The parent stays idle until join so a shared-pointer regression fails
+    // deterministically without racing accesses to either frame.
+    bool worker_initially_active = false;
+    bool worker_scope_active = false;
+    bool worker_finally_active = false;
+    FoliageFrame worker_snapshot{};
+    std::thread worker([&] {
+        worker_initially_active = foliage_frame_active();
+        record_foliage_rebuild({}, 20, 262144, 456, 8);
+        {
+            FoliageFrameScope worker_frame(true);
+            worker_scope_active = foliage_frame_active();
+            record_foliage_rebuild({}, 30, 262144, 789, 9);
+            worker_snapshot = worker_frame.snapshot();
+        }
+        worker_finally_active = foliage_frame_active();
+    });
+    worker.join();
+    EXPECT_FALSE(worker_initially_active);
+    EXPECT_TRUE(worker_scope_active);
+    EXPECT_FALSE(worker_finally_active);
+    EXPECT_EQ(worker_snapshot.rebuild.rebuild_calls, 1u);
+    EXPECT_EQ(worker_snapshot.generated_count, 789u);
+    EXPECT_TRUE(foliage_frame_active());
+    EXPECT_EQ(frame.snapshot().rebuild.rebuild_calls, 1u);
+    EXPECT_EQ(frame.snapshot().generated_count, 123u);
+    record_foliage_rebuild({}, 40, 262144, 321, 10);
+    EXPECT_EQ(frame.snapshot().rebuild.rebuild_calls, 2u);
+    EXPECT_EQ(frame.snapshot().generated_count, 321u);
 }
 
 TEST(FrameAttribution, DisabledCollectionDoesNotPublishOrChangeStageTotals) {

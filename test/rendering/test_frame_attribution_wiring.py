@@ -61,7 +61,7 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertIn("StageTimer menu_timer(rb_menu_ms, frame_attribution_enabled);", main)
         self.assertRegex(main, r'if \(frame_attribution_enabled\) LUMINUMBRA_CORE_WARN\(\s*"\s*foliage-split:')
         self.assertIn("explicit FoliageFrameScope(bool enabled = false);", self.header)
-        self.assertIn("current_foliage_frame = enabled ? &m_frame : nullptr;", self.collector)
+        self.assertIn("current_foliage_frame() = enabled ? &m_frame : nullptr;", self.collector)
         self.assertRegex(compact(self.foliage),
                          r"if \(collect_attribution\) \{ // Diagnostic[^\n]*? "
                          r"Attribution::ScatterSignature components\{\};")

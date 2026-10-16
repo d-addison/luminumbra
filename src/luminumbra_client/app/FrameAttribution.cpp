@@ -69,26 +69,30 @@ const char* fallback_name(FallbackReason reason) {
     return "unknown";
 }
 namespace {
-thread_local FoliageFrame* current_foliage_frame = nullptr;
+FoliageFrame*& current_foliage_frame() {
+    thread_local FoliageFrame* frame = nullptr;
+    return frame;
 }
+} // namespace
 FoliageFrameScope::FoliageFrameScope(bool enabled)
-    : m_previous(current_foliage_frame) {
-    current_foliage_frame = enabled ? &m_frame : nullptr;
+    : m_previous(current_foliage_frame()) {
+    current_foliage_frame() = enabled ? &m_frame : nullptr;
 }
 FoliageFrameScope::~FoliageFrameScope() {
-    current_foliage_frame = m_previous;
+    current_foliage_frame() = m_previous;
 }
 bool foliage_frame_active() {
-    return current_foliage_frame != nullptr;
+    return current_foliage_frame() != nullptr;
 }
 void record_foliage_rebuild(const FoliageRebuild& rebuild,
                             double milliseconds,
                             std::uint64_t capacity,
                             std::optional<std::size_t> count,
                             std::uint64_t count_generation) {
-    if (!current_foliage_frame)
+    auto* current_frame = current_foliage_frame();
+    if (!current_frame)
         return;
-    auto& frame = *current_foliage_frame;
+    auto& frame = *current_frame;
     auto& total = frame.rebuild;
     total.path =
         total.rebuild_calls == 0 || total.path == rebuild.path ? rebuild.path : FoliagePath::Mixed;
