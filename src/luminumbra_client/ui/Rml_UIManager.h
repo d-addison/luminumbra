@@ -5,6 +5,7 @@
 #include "persistence/AsyncSavedWorldCatalog.h"
 #include "world/WorldgenOverride.h" // WorldGenParam transport (engine-owned, not UI)
 #include <RmlUi/Core.h>
+#include <cstdint>
 #include <filesystem> // gallery fixture capture-source override
 #include <functional>
 #include <memory>
@@ -89,6 +90,11 @@ struct SettingsBridge {
 
 class Rml_UIManager {
 public:
+    // Changes on document replacement, including hot reload and failed loads
+    // which have closed the old document. Menu images must not cross that boundary.
+    std::uint64_t document_generation() const {
+        return m_documentGeneration;
+    }
     Rml_UIManager(const std::string& asset_root_path);
     ~Rml_UIManager();
 
@@ -265,6 +271,7 @@ private:
 
     std::string m_documentToLoad;
     std::string m_activeDocument;
+    std::uint64_t m_documentGeneration = 0;
     std::string m_selectedWorldId;
 
     // The asset root the file interface resolves against (kept here too so the

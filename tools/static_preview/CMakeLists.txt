@@ -13,6 +13,7 @@ add_library(luminumbra_render_static SHARED
     "${STATIC_PREVIEW_ROOT}/src/luminumbra_client/rendering/passes/LightingPass.cpp"
     "${STATIC_PREVIEW_ROOT}/src/luminumbra_client/rendering/GBufferTargets.cpp"
     "${STATIC_PREVIEW_ROOT}/src/luminumbra_client/rendering/Shader.cpp"
+    "${STATIC_PREVIEW_ROOT}/src/luminumbra_client/app/FrameAttribution.cpp"
     "${STATIC_PREVIEW_ROOT}/src/luminumbra_client/rendering/ShaderReflection.cpp"
     "${STATIC_PREVIEW_ROOT}/src/luminumbra_client/rendering/PassShaderLayouts.cpp"
     "${STATIC_PREVIEW_ROOT}/src/luminumbra_client/rendering/RenderResourceRegistry.cpp"
@@ -95,6 +96,8 @@ file(GLOB_RECURSE PREVIEW_IDENTITY_INPUTS CONFIGURE_DEPENDS
     "${STATIC_PREVIEW_ROOT}/src/luminumbra_common/authoring/*.h"
     "${STATIC_PREVIEW_ROOT}/src/luminumbra_client/rendering/*.h")
 list(APPEND PREVIEW_IDENTITY_INPUTS ${PREVIEW_SOURCES} "${CMAKE_CURRENT_LIST_FILE}"
+    "${STATIC_PREVIEW_ROOT}/src/luminumbra_client/app/FrameAttribution.h"
+    "${STATIC_PREVIEW_ROOT}/src/luminumbra_client/app/ProgramFirstUse.h"
     "${CMAKE_CURRENT_LIST_DIR}/main.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/ViewportProtocol.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/ViewportProtocol.h"

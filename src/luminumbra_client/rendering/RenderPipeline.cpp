@@ -42,6 +42,7 @@
 #include "passes/TaauPass.h"
 #include "passes/WaterPass.h"
 #include "passes/WaterfallPass.h"
+#include "rendering/AttributedGl.h"
 #include "rendering/Camera.h"
 #include "rendering/Shader.h"
 #include "rendering/TreeImpostorPolicy.h"
@@ -2088,7 +2089,8 @@ void RenderPipeline::draw_chunks_mdi(const std::vector<const ChunkCullEntry*>& v
         PreserveReplayObject(ReplayObjectKind::VertexArray, blocks[b].vao);
         glBindVertexBuffer(1, frame.origin_buffer, 0, sizeof(glm::vec4));
         glBindBuffer(GL_DRAW_INDIRECT_BUFFER, frame.indirect_buffer);
-        glMultiDrawElementsIndirect(
+        Luminumbra::Rendering::AttributedGl::Submit(
+            glMultiDrawElementsIndirect,
             GL_TRIANGLES,
             GL_UNSIGNED_INT,
             reinterpret_cast<const void*>(first * sizeof(DrawElementsIndirectCommand)),
@@ -3170,7 +3172,7 @@ void RenderPipeline::execute_stage_skybox(const Camera& camera) {
         m_cloud_composite_shader->setInt("u_cloudColor", 0);
         m_cloud_composite_shader->setInt("u_sceneDepth", 1);
         glBindVertexArray(m_screen_quad_vao);
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLE_STRIP, 0, 4);
         glBindVertexArray(0);
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, 0);

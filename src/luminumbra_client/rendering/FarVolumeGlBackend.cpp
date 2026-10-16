@@ -1,4 +1,5 @@
 #include "FarVolumeGlBackend.h"
+#include "rendering/AttributedGl.h"
 
 #include <glad/glad.h>
 #define GLFW_INCLUDE_NONE
@@ -239,7 +240,11 @@ bool FarVolumeGlDriver::DrawIndexed(std::int32_t index_count) noexcept {
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 6, static_cast<GLuint>(index_buffer));
     bool success = !HasError();
     if (success) {
-        glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(index_count), GL_UNSIGNED_INT, nullptr);
+        Luminumbra::Rendering::AttributedGl::Submit(glDrawElements,
+                                                    GL_TRIANGLES,
+                                                    static_cast<GLsizei>(index_count),
+                                                    GL_UNSIGNED_INT,
+                                                    nullptr);
         success = !HasError();
     }
     for (GLuint i = 0; i < saved.size(); ++i) {

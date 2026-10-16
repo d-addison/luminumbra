@@ -1,5 +1,6 @@
 #include "ShadowPass.h"
 #include "../FarWorldReplay.h"
+#include "rendering/AttributedGl.h"
 
 #include "../RenderResourceRegistry.h"
 #include "PassGlHelpers.h"
@@ -239,7 +240,7 @@ ShadowPass::execute(const RenderContext& ctx, const ShadowPassInput& input) {
                 m_tint_shader->setMat4("u_model", pane.model);
                 m_tint_shader->setVec3("u_tint", pane.tint);
                 m_tint_shader->setFloat("u_thickness", pane.thickness);
-                glDrawArrays(GL_TRIANGLES, 0, 6);
+                Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLES, 0, 6);
             }
             glBindVertexArray(0);
         }

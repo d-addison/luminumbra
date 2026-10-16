@@ -1,4 +1,5 @@
 #include "FarLodSystem.h"
+#include "rendering/AttributedGl.h"
 
 #include "Shader.h"
 #include "core/Log.h"
@@ -1874,8 +1875,11 @@ void FarLodSystem::draw_gbuffer(Shader& geometry_shader,
         geometry_shader.setMat4("model", model);
         geometry_shader.setMat3("normalMatrix", normal_matrix);
         glBindVertexArray(region.vao);
-        glDrawElements(
-            GL_TRIANGLES, static_cast<GLsizei>(region.element_count), GL_UNSIGNED_INT, nullptr);
+        Luminumbra::Rendering::AttributedGl::Submit(glDrawElements,
+                                                    GL_TRIANGLES,
+                                                    static_cast<GLsizei>(region.element_count),
+                                                    GL_UNSIGNED_INT,
+                                                    nullptr);
         ++draws_out;
         indices_out += region.element_count;
     }
@@ -1904,10 +1908,12 @@ void FarLodSystem::draw_gbuffer(Shader& geometry_shader,
         geometry_shader.setMat4("model", model);
         geometry_shader.setMat3("normalMatrix", normal_matrix);
         glBindVertexArray(region.water_vao);
-        glDrawElements(GL_TRIANGLES,
-                       static_cast<GLsizei>(region.water_element_count),
-                       GL_UNSIGNED_INT,
-                       nullptr);
+        Luminumbra::Rendering::AttributedGl::Submit(
+            glDrawElements,
+            GL_TRIANGLES,
+            static_cast<GLsizei>(region.water_element_count),
+            GL_UNSIGNED_INT,
+            nullptr);
         ++draws_out;
         indices_out += region.water_element_count;
         ++water_draws;

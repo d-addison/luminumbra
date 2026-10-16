@@ -1,4 +1,5 @@
 #include "ui/Rml_UIManager.h"
+#include "app/FrameAttribution.h"
 #include "audio/IAudioManager.h"
 #include <GLFW/glfw3.h>
 #include <RmlUi/Core.h>
@@ -354,6 +355,8 @@ void Rml_UIManager::Shutdown() {
 }
 
 void Rml_UIManager::Update() {
+    const Luminumbra::Client::Attribution::PhaseScope phase_scope(
+        Luminumbra::Client::Attribution::Phase::UiUpdate);
     if (m_context) {
         ProcessDocumentLoadRequest(); // Process async loads
         PollWorldScan();
@@ -371,6 +374,8 @@ void Rml_UIManager::Update() {
 }
 
 void Rml_UIManager::Render() {
+    const Luminumbra::Client::Attribution::PhaseScope phase_scope(
+        Luminumbra::Client::Attribution::Phase::UiRender);
     if (!m_context)
         return;
 
@@ -426,9 +431,12 @@ void Rml_UIManager::ProcessDocumentLoadRequest() {
 }
 
 void Rml_UIManager::LoadDocument(const std::string& rml_path) {
+    const Luminumbra::Client::Attribution::PhaseScope phase_scope(
+        Luminumbra::Client::Attribution::Phase::DocumentLoad);
     if (!m_context || rml_path == m_activeDocument)
         return;
 
+    ++m_documentGeneration;
     m_savedWorldScan.Cancel();
     m_worldScanPending = false;
     // Close existing documents (except the debugger)

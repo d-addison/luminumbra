@@ -143,10 +143,198 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertIn('capacity (count unavailable)', overlay)
         main = compact(self.main)
         self.assertIn("foliage_frame.capacity, foliage_frame.count_known, "
-                      "foliage_frame.generated_count, foliage_frame.count_generation)", main)
+                      "foliage_frame.generated_count, foliage_frame.count_generation, phase_scope.snapshot())", main)
         scope = compact(block(self.foliage, "~RebuildAttributionScope()"))
         self.assertIn("m_pass.frame_instance_count_known() ? "
                       "std::optional<std::size_t>(m_pass.frame_instance_count()) : std::nullopt", scope)
+
+    def test_menu_phase_collection_removes_nested_work_from_parent_buckets(self):
+        main = compact(self.main)
+        self.assertIn("PhaseFrameScope phase_scope(frame_attribution_enabled);", main)
+        for parent in ("menu", "render", "poll", "ui"):
+            self.assertIn(f"const double {parent}_phases_before = Attribution::phase_total_ms();", main)
+            self.assertIn(f"Attribution::phase_total_ms() - {parent}_phases_before", main)
+        self.assertIn("buckets.other(_wallMs, phase_scope.snapshot())", main)
+        self.assertIn("buckets.other(frame_ms, phases)", compact(self.collector))
+        self.assertIn("count_generation, phases)",
+                      compact(block(self.collector, "bool FrameRecorder::record(")))
+        self.assertIn("Phase::WorldCreateCallback", block(self.main, "auto start_world_creation ="))
+        self.assertIn("Phase::WorldLoadCallback", block(self.main, "auto start_world_load ="))
+        ui = read(CLIENT / "ui/Rml_UIManager.cpp")
+        for method, phase in (("Update()", "UiUpdate"), ("Render()", "UiRender"),
+                              ("LoadDocument(", "DocumentLoad")):
+            self.assertIn(f"Phase::{phase}", block(ui, f"void Rml_UIManager::{method}"))
+        for path, marker in (("ui/Rml_Interfaces.cpp", "RmlRenderer::LoadTexture("),
+                             ("ui/gl3/RmlUi_Renderer_GL3.cpp", "RenderInterface_GL3::LoadTexture("),
+                             ("ui/Rml_Interfaces.cpp", "RmlRenderer::GenerateTexture("),
+                             ("ui/gl3/RmlUi_Renderer_GL3.cpp", "RenderInterface_GL3::GenerateTexture(")):
+            self.assertIn("Phase::TextureLoad", block(read(CLIENT / path), marker))
+        preview = read(CLIENT / "world/WorldgenPreview.cpp")
+        self.assertIn("Phase::PreviewAdoption", block(preview, "void WorldgenPreview::swap_pending_into_live("))
+        for marker in ("bool WorldgenPreview::render(", "bool WorldgenPreview::render_to_backbuffer("):
+            self.assertIn("Phase::MenuScene", block(preview, marker))
+        backend = read(CLIENT / "ui/gl3/RmlUi_Renderer_GL3.cpp")
+        self.assertIn("Phase::UiFilters", block(backend, "void RenderInterface_GL3::RenderFilters("))
+        self.assertIn("Phase::ShaderLoad", block(backend, "static bool CreateShaders("))
+        self.assertIn("AttributedGl::UseProgram(glUseProgram,",
+                      block(backend, "void RenderInterface_GL3::UseProgram("))
+        for path, marker in (("rendering/ImpostorBake.cpp", "AttributedGl::Program CompileBakeProgram("),
+                             ("rendering/SkyAtmosphereLut.ipp", "AttributedGl::Program compile_compute("),
+                             ("rendering/passes/LuminanceMeterPass.cpp", "AttributedGl::Program create_compute_program("),
+                             ("rendering/passes/FoliagePass.cpp", "AttributedGl::Program compile_compute_program(")):
+            self.assertIn("Phase::ShaderLoad", block(read(CLIENT / path), marker))
+        legacy = read(CLIENT / "ui/Rml_Interfaces.cpp")
+        self.assertIn("Phase::ShaderLoad", block(legacy, "RmlRenderer::RmlRenderer()"))
+        self.assertIn("AttributedGl::UseProgram(glUseProgram,",
+                      block(legacy, "void RmlRenderer::RenderGeometry("))
+        self.assertRegex(block(legacy, "void RmlRenderer::RenderGeometry("),
+                         r"AttributedGl::Submit\(\s*glDrawElements,")
+        shader = read(CLIENT / "rendering/Shader.cpp")
+        self.assertIn("Phase::ShaderLoad", block(shader, "AttributedGl::Program Shader::buildProgram("))
+        self.assertIn("AttributedGl::UseProgram(glUseProgram,", block(shader, "void Shader::use()"))
+
+    def test_all_program_lifetimes_and_submissions_use_first_use_attribution(self):
+        # Enumerate the rendering and both UI backends, including state restores,
+        # platform branches, compute kernels, indirect and instanced submissions.
+        call = re.compile(r"\bgl(?:CreateProgram|DeleteProgram|UseProgram|"
+                          r"Draw(?:Arrays|Elements)\w*|MultiDraw\w*|DispatchCompute\w*)\s*\(")
+        count = 0
+        for tree in (CLIENT / "rendering", CLIENT / "ui"):
+            for path in sorted(tree.rglob("*")):
+                if path.suffix not in (".cpp", ".h", ".ipp"):
+                    continue
+                source = read(path)
+                code = re.sub(
+                    r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'',
+                    " ", source, flags=re.S)
+                self.assertIsNone(call.search(code), str(path.relative_to(ROOT)))
+                count += code.count("AttributedGl::Submit(")
+        self.assertGreater(count, 40)
+        helper = read(CLIENT / "app/ProgramFirstUse.h")
+        submit = compact(block(helper, "void submit("))
+        self.assertTrue(submit.startswith("if (m_bound->pending) {"))
+        self.assertNotIn("PhaseScope", submit)
+        self.assertNotIn("lookup(", submit)
+        self.assertLess(submit.index("m_bound->pending = false;"),
+                        submit.index("if (shader_first_use_collection_enabled)"))
+        for method, invocation in (("use_attributed(", "function(program);"),
+                                   ("submit_attributed(", "function(std::forward<Args>(args)...);")):
+            cold = compact(block(helper, "void " + method))
+            self.assertLess(cold.index("++m_attributed_calls;"), cold.index("const PhaseScope"))
+            self.assertLess(cold.index("const PhaseScope phase(Phase::ShaderFirstUse);"),
+                            cold.index(invocation))
+            self.assertIn("LUMINUMBRA_FIRST_USE_COLD void " + method, helper)
+            self.assertNotIn("phase.stop", cold)
+        use = compact(block(helper, "void use("))
+        self.assertIn("if (static_cast<unsigned>(shader_first_use_collection_enabled) & "
+                      "static_cast<unsigned>(m_bound->pending))", use)
+        self.assertNotIn("PhaseScope", use)
+        self.assertNotIn("lookup(", use)
+        self.assertEqual(compact(block(helper, "void bind(const Program&")),
+                         "m_bound = program.state;")
+        self.assertIn("__declspec(noinline)", helper)
+        self.assertIn("__attribute__((cold, noinline))", helper)
+        gl = read(CLIENT / "rendering/AttributedGl.h")
+        self.assertIn("return programs.created(function());", block(gl, "CreateProgram("))
+        self.assertIn("programs.deleted(program);", block(gl, "DeleteProgram("))
+        self.assertIn("programs.use(function, program);", block(gl, "UseProgram("))
+        self.assertIn("programs.submit(function, std::forward<Args>(args)...);",
+                      block(gl, "Submit("))
+        self.assertNotIn("thread_local", gl)
+        self.assertNotIn("PhaseScope", gl)
+        self.assertIn("inline constinit bool shader_first_use_collection_enabled = false;",
+                      self.header)
+        for method in ("PhaseFrameScope::PhaseFrameScope(", "PhaseFrameScope::~PhaseFrameScope()"):
+            self.assertIn("shader_first_use_collection_enabled = current_phases != nullptr;",
+                          block(self.collector, method))
+        preview = read(ROOT / "tools/static_preview/CMakeLists.txt")
+        self.assertIn('"${STATIC_PREVIEW_ROOT}/src/luminumbra_client/app/FrameAttribution.cpp"',
+                      preview)
+
+    def test_program_owners_retain_the_first_use_bit_on_every_backend(self):
+        for path, members in (
+            ("rendering/Shader.h", ("m_id",)),
+            ("rendering/passes/FoliagePass.h", ("m_compute_prog", "m_prefix_prog")),
+            ("rendering/passes/FroxelPass.h", ("m_inject_program", "m_integrate_program")),
+            ("rendering/passes/LuminanceMeterPass.h", ("m_reduce_program",)),
+            ("rendering/SkyAtmosphereLut.h", ("m_skyview_compute_prog",
+                                           "m_transmittance_compute_prog",
+                                           "m_multiscatter_compute_prog")),
+            ("ui/Rml_Interfaces.h", ("m_program",)),
+        ):
+            source = read(CLIENT / path)
+            for member in members:
+                self.assertIn(f"AttributedGl::Program {member}{{}};", source, path)
+        gl3 = read(CLIENT / "ui/gl3/RmlUi_Renderer_GL3.cpp")
+        self.assertIn("EnumArray<Luminumbra::Rendering::AttributedGl::Program, ProgramId>", gl3)
+        self.assertIn("const AttributedGl::Program& prog",
+                      read(CLIENT / "rendering/SkyAtmosphereLut.ipp"))
+        # Helpers must not erase the retained bit by converting creation to GLuint.
+        for path in CLIENT.rglob("*"):
+            if path.suffix in (".cpp", ".h", ".ipp"):
+                self.assertNotRegex(read(path),
+                                    r"\b(?:GLuint|u32|std::uint32_t)\s+\w+\s*=\s*"
+                                    r"(?:Luminumbra::Rendering::)?AttributedGl::CreateProgram\(",
+                                    str(path.relative_to(ROOT)))
+
+    def test_nested_phase_scopes_exclude_children_and_foliage(self):
+        constructor = compact(block(self.collector, "PhaseScope::PhaseScope("))
+        self.assertTrue(constructor.startswith("if (!enabled || !current_phases) return;"))
+        destructor = compact(block(self.collector, "PhaseScope::~PhaseScope()"))
+        self.assertTrue(destructor.startswith("if (!m_totals) return;"))
+        self.assertIn("m_totals->add(m_phase, elapsed, m_children_ms, foliage - m_child_foliage_ms)",
+                      destructor)
+        self.assertIn("m_parent->m_children_ms += elapsed;", destructor)
+        self.assertIn("m_parent->m_child_foliage_ms += foliage;", destructor)
+        rebuild = block(self.foliage, "~RebuildAttributionScope()")
+        self.assertIn("Attribution::phase_total_ms() - m_phases_before", rebuild)
+
+    def test_menu_cache_captures_before_ui_and_bypasses_render_on_reuse(self):
+        menu = block(read(CLIENT / "app/MenuScreens.cpp"), "void RenderMenuScreens(")
+        self.assertLess(menu.index("copy_scene_image(true)"), menu.index("uiManager->Render()"))
+        self.assertLess(menu.index("copy_scene_image(false)"), menu.index("uiManager->Render()"))
+        refresh = block(menu, "if (drawable && (refresh || !has_image))")
+        self.assertIn("render_to_backbuffer(renderPipeline, render_delta)", refresh)
+        self.assertIn("renderPipeline.render_frame(", refresh)
+        self.assertIn("schedule.rendered()", refresh)
+        reuse = block(menu, "else if (previewState.schedule.valid())")
+        self.assertEqual(compact(reuse), "previewState.scene_image.copy_scene_image(false);")
+        self.assertIn("document_generation()", menu)
+        self.assertIn("worldgenPreview->rebuild_generation()", menu)
+        self.assertIn(".renderer_target = renderPipeline.resize_generation()", compact(menu))
+        pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
+        for method in ("void RenderPipeline::on_resize(", "void RenderPipeline::set_render_scale("):
+            self.assertIn("++m_resize_generation;", block(pipeline, method))
+        for getter in ("render_scale", "get_exposure_override", "get_cloud_quality",
+                       "get_ssao_quality", "volumetric_quality", "taau_enabled",
+                       "sky_lut_gpu_enabled", "auto_exposure_metered"):
+            self.assertIn(f"renderPipeline.{getter}()", menu)
+        self.assertLess(menu.index("camera_revision.observe(camera_state())"),
+                        menu.index("camera->Yaw = 95.0f"))
+        self.assertGreater(menu.index("camera_revision.animated(camera_state())"),
+                           menu.index("camera->updateCameraVectors()"))
+        self.assertIn("schedule.update(now, key, interactive)", menu)
+        self.assertIn("menu_backdrop_yaw += menu_delta", menu)
+        self.assertIn("worldgenPreview->tick(menu_delta)", menu)
+        self.assertIn("menuPreviewState.schedule = {};", self.main)
+        self.assertLess(self.main.index("menuPreviewState.scene_image.release_scene_image();"),
+                        self.main.index("glfwDestroyWindow(window);", self.main.index("menuPreviewState.scene_image.release_scene_image();")))
+
+    def test_blur_reuses_geometry_and_kernels_without_changing_the_passes(self):
+        backend = read(CLIENT / "ui/gl3/RmlUi_Renderer_GL3.cpp")
+        quad = block(backend, "void RenderInterface_GL3::DrawFullscreenQuad(Rml::Vector2f")
+        identity = block(quad, "if (uv_offset == Rml::Vector2f() && uv_scaling == Rml::Vector2f(1.f))")
+        self.assertEqual(compact(identity), "DrawFullscreenQuad(); return;")
+        hit = block(quad, "if (const auto* cached = filter_quad_cache.find(key))")
+        self.assertNotIn("CompileGeometry", hit)
+        self.assertNotIn("ReleaseGeometry", hit)
+        self.assertIn("return;", hit)
+        self.assertIn("filter_quad_cache.store(key, geometry)", quad)
+        kernel = block(backend, "static void SetBlurWeights(")
+        hit = block(kernel, "if (const auto* cached = kernels.find(key))")
+        self.assertIn("glUniform1fv", hit)
+        self.assertNotIn("Exp(", hit)
+        self.assertIn("kernels.store(key, weights)", kernel)
 
     def test_recorder_propagates_writer_failure_and_checks_stream_state(self):
         record = compact(block(self.collector, "bool FrameRecorder::record("))
