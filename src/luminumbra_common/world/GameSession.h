@@ -117,6 +117,12 @@ public:
     // Load an existing world from disk
     bool LoadWorld(const std::string& worldId);
 
+    // Changes when create/load releases the previous world, including a
+    // replacement that subsequently fails. Refusal before replacement preserves it.
+    std::uint64_t WorldRevision() const {
+        return m_worldRevision;
+    }
+
     // Save the current world state
     bool SaveWorld();
 
@@ -478,6 +484,7 @@ private:
     float m_circadianAmplitude = 1.0f;
     float m_plantMutationRate = luminumbra::foliage::kPollinationMutationFrac;
     WorldMetadata m_metadata;
+    std::uint64_t m_worldRevision = 0;
     bool m_transientWorld = false;
     void ResetWorldSystems();
     void RestoreWorldClock(const WorldClock& clock);

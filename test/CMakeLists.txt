@@ -1143,6 +1143,12 @@ target_compile_definitions(world_entry_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CM
 target_link_libraries(world_entry_test PRIVATE gtest_main luminumbra_common)
 luminumbra_configure_first_party_target(world_entry_test)
 
+# Native-call interception is isolated from engine definitions of the journal.
+add_executable(created_world_artifacts_test persistence/created_world_artifacts_test.cpp)
+target_include_directories(created_world_artifacts_test PRIVATE ../src)
+target_link_libraries(created_world_artifacts_test PRIVATE gtest_main)
+luminumbra_configure_first_party_target(created_world_artifacts_test)
+
 add_executable(initial_world_loading_perf_test
     performance/initial_world_loading_perf_test.cpp
 )
@@ -1854,6 +1860,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     ui_page_load_test
     worldgen_preview_test
     world_entry_test
+    created_world_artifacts_test
     initial_world_loading_perf_test
     world_load_bounded_test
     # species JSON behaviour overrides — byte-identical

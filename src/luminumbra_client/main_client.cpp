@@ -2283,6 +2283,7 @@ int main(int argc, char* argv[]) {
         DrainWorldDressing(jobSystem, s_worldDressing, s_worldDressingHandle);
     };
 
+    auto entry_world_revision = gameSession->WorldRevision();
     std::string world_entry_error;
     auto refuse_world_entry = [&](const std::string& fallback, bool use_world_error = true) {
         const auto& detail = gameSession->GetWorldOpenError();
@@ -2291,8 +2292,10 @@ int main(int argc, char* argv[]) {
         LUMINUMBRA_CORE_ERROR("World open refused: {}", error);
         if (g_uiManager)
             g_uiManager->ShowMessage(error);
-        g_app.menu.menu_backdrop_active = false;
-        g_playerController.reset();
+        if (gameSession->WorldRevision() != entry_world_revision) {
+            g_app.menu.menu_backdrop_active = false;
+            g_playerController.reset();
+        }
         scenario_failed = benchmark_v3 || scenario_config.active() ||
                           HasCommandLineFlag(argc, argv, "--load-world") ||
                           HasCommandLineFlag(argc, argv, "--auto-create-world");
@@ -2505,6 +2508,7 @@ int main(int argc, char* argv[]) {
                                     const std::string& seed,
                                     const std::string& worldType,
                                     const std::vector<Luminumbra::Client::WorldGenParam>& params) {
+        entry_world_revision = gameSession->WorldRevision();
         const auto customPresetJson = build_world_preset(name, worldType, params);
         const auto* customPtr = customPresetJson.empty() && !scenario_config.preset_json_override
                                     ? nullptr
@@ -2533,6 +2537,7 @@ int main(int argc, char* argv[]) {
     };
 
     auto start_world_load = [&](const std::string& id) {
+        entry_world_revision = gameSession->WorldRevision();
         const auto asset_error = game_content_error();
         if (!asset_error.empty()) {
             refuse_world_entry(asset_error, false);
@@ -3124,6 +3129,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    entry_world_revision = gameSession->WorldRevision();
     int exit_code = 0;
     float lastFrame = 0.0f;
     // Scenario driving/capture seam (core/ScenarioRunner.h): the runner is
@@ -3325,10 +3331,14 @@ int main(int argc, char* argv[]) {
         // Keep the existing reader drains before clearing/replacing either owner.
         jobSystem.wait(entry_cpu_job);
         entry_cpu_job = {};
-        prepare_world_entry();
-        renderPipeline.cancel_waterfall_adoption();
-        if (auto* world = gameSession->GetWorldSystem())
-            world->clear_world(gameSession->GetPhysicsSystem());
+        if (gameSession->WorldRevision() != entry_world_revision) {
+            prepare_world_entry();
+            renderPipeline.cancel_waterfall_adoption();
+            if (auto* world = gameSession->GetWorldSystem())
+                world->clear_world(gameSession->GetPhysicsSystem());
+            g_app.menu.menu_backdrop_active = false;
+            g_playerController.reset();
+        }
         const auto rollback_error = entry_artifacts.rollback();
         if (!rollback_error.empty()) {
             LUMINUMBRA_CORE_ERROR("{}", rollback_error);
@@ -3341,8 +3351,6 @@ int main(int argc, char* argv[]) {
         entry_adoption_started = false;
         entry_worker_error.clear();
         entry_preset.clear();
-        g_app.menu.menu_backdrop_active = false;
-        g_playerController.reset();
         if (g_loading_visualizer)
             g_loading_visualizer->EndVisualization();
         const auto drained = std::chrono::steady_clock::now();
@@ -3677,6 +3685,7 @@ int main(int argc, char* argv[]) {
         bool entry_activated_this_frame = false;
         if (world_entry.state() == WorldEntryState::Requested) {
             entry_save_allowed = false;
+            entry_world_revision = gameSession->WorldRevision();
             // A prior rollback failure was reported and its leftovers retained
             // on disk. They must never become artifacts of a subsequent load.
             entry_artifacts.release();

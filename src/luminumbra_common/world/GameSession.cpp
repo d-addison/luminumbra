@@ -175,6 +175,7 @@ void GameSession::ResetWorldSystems() {
     // Keep all dependencies alive while the world destructor publishes completed work.
     if (m_physicsSystem)
         m_physicsSystem->set_world_system(nullptr);
+    ++m_worldRevision;
     m_worldSystem.reset();
     m_physicsSystem.reset();
     m_waterSystem.reset();

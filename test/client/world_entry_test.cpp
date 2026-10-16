@@ -277,6 +277,53 @@ protected:
     std::filesystem::path root;
 };
 
+TEST_F(WorldEntryFilesystem, WorldRevisionDistinguishesRefusalFromPartialReplacement) {
+    const auto presets = root / "worlds/atlas/presets";
+    std::filesystem::create_directories(presets);
+    std::filesystem::copy_file(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) /
+                                   "worlds/atlas/presets/default.json",
+                               presets / "default.json");
+    std::filesystem::copy(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) /
+                              "worlds/atlas/presets-rev6",
+                          root / "worlds/atlas/presets-rev6",
+                          std::filesystem::copy_options::recursive);
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    CreatedWorldArtifacts artifacts;
+    {
+        Luminumbra::world::GameSession session;
+        session.SetRootPath(root.generic_string() + "/");
+        session.SetJobSystem(&jobs);
+        const auto initial = session.WorldRevision();
+        ASSERT_TRUE(session.CreateTransientWorld("Menu Vista", "424242", "default"));
+        const auto menu_revision = session.WorldRevision();
+        EXPECT_NE(menu_revision, initial);
+        const auto* menu_world = session.GetWorldSystem();
+        const auto menu_spawn = session.GetMetadata().spawnPoint;
+        EXPECT_FALSE(session.LoadWorld("missing-world"));
+        EXPECT_EQ(session.WorldRevision(), menu_revision);
+        EXPECT_EQ(session.GetWorldSystem(), menu_world);
+        EXPECT_EQ(session.GetMetadata().spawnPoint, menu_spawn);
+        EXPECT_FALSE(session.CreateWorld("Refused", "1337", "../default"));
+        EXPECT_EQ(session.WorldRevision(), menu_revision);
+        EXPECT_EQ(session.GetWorldSystem(), menu_world);
+
+        // A false return does not imply that the menu world survived: metadata
+        // publication happens after the old world has been released.
+        Luminumbra::Persistence::WorldSaveService::set_interrupt_before_region_replace_for_testing(
+            true);
+        const bool created =
+            session.CreateWorld("Interrupted", "1337", "default", nullptr, artifacts);
+        Luminumbra::Persistence::WorldSaveService::set_interrupt_before_region_replace_for_testing(
+            false);
+        EXPECT_FALSE(created);
+        EXPECT_NE(session.WorldRevision(), menu_revision);
+        EXPECT_EQ(session.GetMetadata().name, "Interrupted");
+    }
+    jobs.shutdown();
+    EXPECT_TRUE(artifacts.rollback().empty());
+}
+
 TEST_F(WorldEntryFilesystem, CancelAfterOpenWorldRemovesPublishedCreationArtifacts) {
     WorldEntry<Request> entry;
     CreatedWorldArtifacts artifacts;
@@ -644,6 +691,61 @@ TEST(WorldEntryWiring, CleanupDrainsReadersBeforeReleasingWorldAndSuppressesInco
     ASSERT_NE(save, std::string::npos);
     EXPECT_LT(shutdown_drain, save_guard);
     EXPECT_LT(save_guard, save);
+}
+
+TEST(WorldEntryWiring, EarlyCancellationAndRefusalKeepTheMenuWorldAndBackdrop) {
+    const auto source = ReadSource("src/luminumbra_client/main_client.cpp");
+    const auto requested = source.find("if (world_entry.state() == WorldEntryState::Requested)");
+    const auto snapshot =
+        source.find("entry_world_revision = gameSession->WorldRevision();", requested);
+    const auto loading =
+        source.find("SetGameState(window, gameStateManager, GameState::WORLD_LOADING)", requested);
+    ASSERT_NE(requested, std::string::npos);
+    ASSERT_NE(snapshot, std::string::npos);
+    ASSERT_NE(loading, std::string::npos);
+    EXPECT_LT(snapshot, loading);
+
+    for (const auto* region : {"auto refuse_world_entry =", "auto drain_entry ="}) {
+        const auto start = source.find(region);
+        const auto end = source.find("\n    };", start);
+        ASSERT_NE(start, std::string::npos);
+        ASSERT_NE(end, std::string::npos);
+        const auto body = source.substr(start, end - start);
+        const auto guard = body.find("if (gameSession->WorldRevision() != entry_world_revision) {");
+        ASSERT_NE(guard, std::string::npos) << region;
+        const auto begin = body.find('{', guard);
+        std::size_t guard_end = begin + 1;
+        unsigned depth = 1;
+        for (; guard_end < body.size() && depth != 0; ++guard_end) {
+            if (body[guard_end] == '{')
+                ++depth;
+            else if (body[guard_end] == '}')
+                --depth;
+        }
+        ASSERT_EQ(depth, 0u);
+        const auto guarded = body.substr(begin, guard_end - begin);
+        const auto outside = body.substr(0, guard) + body.substr(guard_end);
+        for (const auto* destructive : {"prepare_world_entry()",
+                                        "cancel_waterfall_adoption()",
+                                        "clear_world(",
+                                        "menu_backdrop_active = false",
+                                        "g_playerController.reset()"}) {
+            EXPECT_EQ(outside.find(destructive), std::string::npos) << region << destructive;
+        }
+        EXPECT_NE(guarded.find("menu_backdrop_active = false"), std::string::npos);
+        EXPECT_NE(guarded.find("g_playerController.reset()"), std::string::npos);
+        if (std::string(region) == "auto drain_entry =") {
+            EXPECT_NE(guarded.find("prepare_world_entry()"), std::string::npos);
+            EXPECT_NE(guarded.find("cancel_waterfall_adoption()"), std::string::npos);
+            EXPECT_NE(guarded.find("clear_world("), std::string::npos);
+            const auto wait = body.find("jobSystem.wait(entry_cpu_job)");
+            const auto rollback = body.find("entry_artifacts.rollback()");
+            ASSERT_NE(wait, std::string::npos);
+            ASSERT_NE(rollback, std::string::npos);
+            EXPECT_LT(wait, guard);
+            EXPECT_GT(rollback, guard_end);
+        }
+    }
 }
 
 } // namespace

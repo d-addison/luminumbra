@@ -1,6 +1,7 @@
 #include "rendering/passes/ParticlePass.h"
 #include "rendering/passes/WaterfallPass.h"
 
+#include <glad/glad.h>
 #include <gtest/gtest.h>
 
 #include <algorithm>

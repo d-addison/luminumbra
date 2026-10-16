@@ -1,8 +1,11 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
+#include <exception>
 #include <filesystem>
 #include <optional>
 #include <stdexcept>
@@ -21,7 +24,10 @@
 #include <windows.h>
 #else
 #include <cerrno>
+#include <fcntl.h>
+#include <stdio.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 #endif
 
@@ -95,7 +101,8 @@ public:
     void write_file(const std::filesystem::path& path, const std::string& bytes) {
         reserve_file(path);
 #if defined(_WIN32)
-        auto* file = ::_wfopen(path.c_str(), L"wbx");
+        std::FILE* file = nullptr;
+        ::_wfopen_s(&file, path.c_str(), L"wbx");
 #else
         auto* file = std::fopen(path.c_str(), "wbx");
 #endif
@@ -164,11 +171,7 @@ public:
                 validate_parents(artifact);
                 if (!validate(artifact))
                     continue;
-                std::error_code error;
-                std::filesystem::remove(artifact.path, error);
-                if (error)
-                    throw std::filesystem::filesystem_error(
-                        "Could not remove world artifact", m_artifacts[index - 1].path, error);
+                remove_owned(artifact);
             }
             release();
             return {};
@@ -246,6 +249,163 @@ private:
         bool directory = false;
         std::optional<Identity> identity{};
     };
+
+    class ScopedFile {
+    public:
+        explicit ScopedFile(NativeFile native_file)
+            : m_file(native_file) {}
+        ~ScopedFile() {
+#if defined(_WIN32)
+            if (m_file != INVALID_HANDLE_VALUE)
+                ::CloseHandle(m_file);
+#else
+            if (m_file >= 0)
+                ::close(m_file);
+#endif
+        }
+        ScopedFile(const ScopedFile&) = delete;
+        ScopedFile& operator=(const ScopedFile&) = delete;
+        NativeFile get() const {
+            return m_file;
+        }
+
+    private:
+        NativeFile m_file;
+    };
+
+#if !defined(_WIN32)
+    // Restoring a quarantined entry must not overwrite a second replacement.
+#if defined(__linux__) || defined(__APPLE__)
+    static int restore_quarantined(int from, int to, const char* name) {
+#if defined(__linux__)
+        return ::renameat2(from, "artifact", to, name, RENAME_NOREPLACE);
+#else
+        return ::renameatx_np(from, "artifact", to, name, RENAME_EXCL);
+#endif
+    }
+#else
+    static int restore_quarantined(int, int, const char*) {
+        // Keep the entry quarantined on platforms without exclusive rename.
+        errno = ENOTSUP;
+        return -1;
+    }
+#endif
+#endif
+
+#if !defined(_WIN32)
+    class Quarantine {
+    public:
+        explicit Quarantine(int parent)
+            : m_parent(parent) {
+            static std::atomic<std::uint64_t> sequence{0};
+            // Bound collision retries; each private container holds just one entry.
+            for (unsigned attempt = 0; attempt < 128; ++attempt) {
+                auto candidate = ".world-rollback-" + std::to_string(::getpid()) + "-" +
+                                 std::to_string(sequence.fetch_add(1, std::memory_order_relaxed));
+                if (::mkdirat(m_parent, candidate.c_str(), S_IRWXU) == 0) {
+                    m_name = std::move(candidate);
+                    return;
+                }
+                if (errno != EEXIST)
+                    throw std::system_error(
+                        errno, std::generic_category(), "Could not quarantine world artifact");
+            }
+            throw std::runtime_error("Could not reserve world artifact quarantine.");
+        }
+        ~Quarantine() {
+            // Only an empty container is removed. A failed restore retains
+            // its entry for recovery, never recursively deletes it.
+            ::unlinkat(m_parent, m_name.c_str(), AT_REMOVEDIR);
+        }
+        Quarantine(const Quarantine&) = delete;
+        Quarantine& operator=(const Quarantine&) = delete;
+        const std::string& name() const {
+            return m_name;
+        }
+
+    private:
+        int m_parent;
+        std::string m_name{};
+    };
+#endif
+
+    void remove_owned(const Artifact& artifact) const {
+        if (!artifact.identity)
+            throw std::runtime_error("Unowned world artifact: " + artifact.path.string());
+#if defined(_WIN32)
+        // Do not request DELETE_ON_CLOSE before checking the opened object's ID.
+        const ScopedFile owned(
+            ::CreateFileW(artifact.path.c_str(),
+                          FILE_READ_ATTRIBUTES | DELETE,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                          nullptr,
+                          OPEN_EXISTING,
+                          FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                          nullptr));
+        if (owned.get() == INVALID_HANDLE_VALUE) {
+            const auto error = ::GetLastError();
+            if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)
+                return;
+            throw std::system_error(static_cast<int>(error),
+                                    std::system_category(),
+                                    "Could not open world artifact for removal");
+        }
+        if (identity_from(owned.get()) != *artifact.identity)
+            throw std::runtime_error("World artifact changed identity: " + artifact.path.string());
+        FILE_DISPOSITION_INFO disposition{.DeleteFile = TRUE};
+        if (!::SetFileInformationByHandle(
+                owned.get(), FileDispositionInfo, &disposition, sizeof(disposition)))
+            throw std::system_error(static_cast<int>(::GetLastError()),
+                                    std::system_category(),
+                                    "Could not remove world artifact");
+#else
+        const ScopedFile parent(::open(artifact.path.parent_path().c_str(),
+                                       O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+        if (parent.get() < 0)
+            throw std::system_error(errno, std::generic_category(), "Could not open save parent");
+        for (std::size_t index = 0; index < m_count; ++index) {
+            const auto& candidate = m_artifacts[index];
+            if (candidate.directory && candidate.path == artifact.path.parent_path() &&
+                (!candidate.identity || identity_from(parent.get()) != *candidate.identity))
+                throw std::runtime_error("World artifact parent changed identity: " +
+                                         candidate.path.string());
+        }
+
+        const Quarantine quarantine(parent.get());
+        const ScopedFile container(::openat(parent.get(),
+                                            quarantine.name().c_str(),
+                                            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+        if (container.get() < 0)
+            throw std::system_error(
+                errno, std::generic_category(), "Could not open world artifact quarantine");
+        const auto name = artifact.path.filename();
+        if (::renameat(parent.get(), name.c_str(), container.get(), "artifact") != 0) {
+            if (errno == ENOENT)
+                return;
+            throw std::system_error(
+                errno, std::generic_category(), "Could not quarantine world artifact");
+        }
+        try {
+            struct stat info {};
+            if (::fstatat(container.get(), "artifact", &info, AT_SYMLINK_NOFOLLOW) != 0)
+                throw std::system_error(
+                    errno, std::generic_category(), "Could not inspect quarantined artifact");
+            const Identity moved{.device = info.st_dev, .inode = info.st_ino};
+            if (moved != *artifact.identity)
+                throw std::runtime_error("World artifact changed identity: " +
+                                         artifact.path.string());
+            if (::unlinkat(container.get(), "artifact", artifact.directory ? AT_REMOVEDIR : 0) != 0)
+                throw std::system_error(
+                    errno, std::generic_category(), "Could not remove quarantined artifact");
+        } catch (const std::exception& error) {
+            if (restore_quarantined(container.get(), parent.get(), name.c_str()) != 0)
+                throw std::runtime_error(
+                    std::string(error.what()) + "; retained in quarantine: " +
+                    (artifact.path.parent_path() / quarantine.name()).string());
+            throw;
+        }
+#endif
+    }
 
     Artifact& find_artifact(const std::filesystem::path& path) {
         const auto normalized = std::filesystem::canonical(path.parent_path()) / path.filename();
