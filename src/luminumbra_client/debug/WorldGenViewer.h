@@ -33,8 +33,8 @@ public:
         return m_graphEnabled;
     }
 
-    // The main function to call each frame. It draws the ImGui window and handles updates.
-    void UpdateAndRender(bool& is_open, Systems::SHIELD_WorldSystem* main_world_system);
+    // Draw preview contents. A null live world disables the explicit application operation.
+    void DrawContents(Systems::SHIELD_WorldSystem* main_world_system);
 
 private:
     // Regenerates the preview texture based on current parameters.

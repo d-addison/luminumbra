@@ -1215,7 +1215,7 @@ bool LockstepSession::Handshake() {
     if (mine.preset_content_hash.empty() || peer.preset_content_hash.empty() ||
         mine.preset_content_hash != peer.preset_content_hash) {
         LUMINUMBRA_CORE_ERROR(
-            "lockstep[{}]: resolved preset content hash mismatch or missing identity",
+            "lockstep[{}]: resolved preset/species content hash mismatch or missing identity",
             m_config.local_client_id);
         return false;
     }

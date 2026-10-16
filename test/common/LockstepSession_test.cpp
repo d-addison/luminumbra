@@ -1855,7 +1855,7 @@ TEST(LockstepSessionTest, HundredThousandTicksBoundAllHistoryAndStreamEveryAppli
             ASSERT_TRUE(a.FlushReplayRecorder());
             ASSERT_TRUE(b.FlushReplayRecorder());
         }
-        for (const auto retained : {a.AdmissionStatus(), b.AdmissionStatus()}) {
+        for (const auto& retained : {a.AdmissionStatus(), b.AdmissionStatus()}) {
             ASSERT_LE(retained.applied_inputs, net::kReceiveQueueFrameLimit);
             ASSERT_LE(retained.applied_input_bytes, net::kMaxFramePayloadBytes);
             ASSERT_LE(retained.local_hashes, net::kReceiveQueueFrameLimit + 1);
@@ -2125,7 +2125,7 @@ TEST(LockstepSessionTest, CleanSessionsBoundDiskGrowthAndRemoveTheirWorkingSegme
                 ASSERT_TRUE(a.FlushReplayRecorder());
                 ASSERT_TRUE(b.FlushReplayRecorder());
             }
-            for (const auto retained : {a.AdmissionStatus(), b.AdmissionStatus()}) {
+            for (const auto& retained : {a.AdmissionStatus(), b.AdmissionStatus()}) {
                 ASSERT_LE(retained.replay_segments, 2u);
                 ASSERT_LE(retained.replay_bytes,
                           2 * replay::BoundedReplayRecorder::kSegmentTicks * (17 + 29));
@@ -2529,6 +2529,7 @@ TEST(LockstepSessionTest, DesyncDetectedAndDumpEmitted) {
     ASSERT_TRUE(b.Handshake());
 
     const auto r = DriveBoth(a, b, 90);
+    EXPECT_TRUE(r.a_outcome == net::TickOutcome::Desync || r.b_outcome == net::TickOutcome::Desync);
     // At least one side must report the desync (the one that holds both hashes at tick 30).
     const bool a_desync = a.Status().desynced;
     const bool b_desync = b.Status().desynced;

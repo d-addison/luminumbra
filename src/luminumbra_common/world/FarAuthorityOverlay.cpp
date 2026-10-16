@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <ios>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -653,6 +654,105 @@ FarBrickState ClassifyFarBrick(const std::array<std::int16_t, kFsv1SamplesPerBri
         return FarBrickState::HomogeneousAir;
     }
     return FarBrickState::Present;
+}
+
+FarOverlaySampleError SampleFarOverlay(std::span<const FarOverlayTile> tiles,
+                                       std::uint8_t tier_number,
+                                       const FarVolumePosition& position,
+                                       std::uint8_t pristine_material,
+                                       std::size_t max_tiles,
+                                       std::optional<FarVolumeSample>& out) {
+    using Error = FarOverlaySampleError;
+    if (tiles.size() > max_tiles)
+        return Error::WorkLimit;
+    const auto tier = FarTierAt(tier_number);
+    if (!tier)
+        return Error::InvalidInput;
+    const auto edge = static_cast<std::int64_t>(tier->brick_edge_meters);
+    const auto spacing = static_cast<std::int64_t>(tier->sample_spacing_meters);
+    const std::array<std::int64_t, 3> coordinates{position.x, position.y, position.z};
+    std::array<std::int64_t, 3> home{}, lower{};
+    const auto floor_div = [](std::int64_t value, std::int64_t divisor) {
+        return value / divisor - (value % divisor < 0 ? 1 : 0);
+    };
+    for (std::size_t axis = 0; axis < coordinates.size(); ++axis) {
+        const auto coordinate = coordinates[axis];
+        if (coordinate % spacing != 0)
+            return Error::InvalidInput;
+        home[axis] = floor_div(coordinate, edge);
+        if (home[axis] <= std::numeric_limits<std::int32_t>::min() ||
+            home[axis] > std::numeric_limits<std::int32_t>::max())
+            return Error::InvalidInput;
+        lower[axis] = home[axis] - (coordinate % edge == 0 ? 1 : 0);
+    }
+    for (std::size_t i = 0; i < tiles.size(); ++i) {
+        if (!IsValidKey(tiles[i].key) || (i != 0 && !(tiles[i - 1].key < tiles[i].key)))
+            return Error::InvalidInput;
+    }
+    std::optional<FarVolumeSample> present;
+    std::optional<FarBrickState> homogeneous;
+    bool tombstone_conflict = false;
+    for (auto bz = lower[2]; bz <= home[2]; ++bz) {
+        for (auto bx = lower[0]; bx <= home[0]; ++bx) {
+            const FarTileKey key{tier_number,
+                                 floor_div(bx, kFsv1BricksPerTileEdge),
+                                 floor_div(bz, kFsv1BricksPerTileEdge)};
+            const auto tile = std::lower_bound(
+                tiles.begin(), tiles.end(), key, [](const auto& value, const auto& target) {
+                    return value.key < target;
+                });
+            if (tile == tiles.end() || tile->key != key)
+                continue;
+            for (auto by = lower[1]; by <= home[1]; ++by) {
+                const auto target = OrderKey(static_cast<std::int32_t>(bx),
+                                             static_cast<std::int32_t>(by),
+                                             static_cast<std::int32_t>(bz));
+                const auto brick =
+                    std::lower_bound(tile->bricks.begin(),
+                                     tile->bricks.end(),
+                                     target,
+                                     [](const auto& value, const auto& order) {
+                                         return OrderKey(value.bx, value.by, value.bz) < order;
+                                     });
+                if (brick == tile->bricks.end() ||
+                    OrderKey(brick->bx, brick->by, brick->bz) != target)
+                    continue;
+                if (brick->state == FarBrickState::Present) {
+                    const auto x = static_cast<std::size_t>((position.x - bx * edge) / spacing);
+                    const auto y = static_cast<std::size_t>((position.y - by * edge) / spacing);
+                    const auto z = static_cast<std::size_t>((position.z - bz * edge) / spacing);
+                    const auto index = x + 5 * (y + 5 * z);
+                    if (brick->density[index] == kFsv1ForbiddenDensity)
+                        return Error::InvalidInput;
+                    const FarVolumeSample sample{brick->density[index] / kFsv1DensityScale,
+                                                 brick->material[index]};
+                    if (present && *present != sample)
+                        return Error::BoundaryConflict;
+                    present = sample;
+                } else if (brick->state == FarBrickState::HomogeneousAir ||
+                           brick->state == FarBrickState::HomogeneousSolid) {
+                    if (homogeneous && *homogeneous != brick->state)
+                        tombstone_conflict = true;
+                    homogeneous = brick->state;
+                } else {
+                    return Error::InvalidInput;
+                }
+            }
+        }
+    }
+    if (present) {
+        out = present;
+    } else if (tombstone_conflict) {
+        return Error::BoundaryConflict;
+    } else if (homogeneous) {
+        const auto sign = *homogeneous == FarBrickState::HomogeneousAir ? 1.0f : -1.0f;
+        out =
+            FarVolumeSample{QuantizeFarDensity(sign * static_cast<float>(edge)) / kFsv1DensityScale,
+                            pristine_material};
+    } else {
+        out.reset();
+    }
+    return Error::None;
 }
 
 } // namespace Luminumbra::World
