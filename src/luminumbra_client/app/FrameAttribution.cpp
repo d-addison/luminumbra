@@ -179,18 +179,30 @@ bool write_csv_row(std::ostream& out,
         << ',' << water.stale_columns << '\n';
     return out.good();
 }
+bool finalize_csv(std::ofstream& out) {
+    out.flush();
+    out.close();
+    return out.good();
+}
 FrameRecorder::FrameRecorder(bool enabled, const std::filesystem::path& logs) {
     if (!enabled)
         return;
     std::error_code error;
     std::filesystem::create_directories(logs, error);
-    if (error)
+    if (error) {
+        m_out.setstate(std::ios::failbit);
         return;
+    }
     m_out.rdbuf()->pubsetbuf(m_buffer.data(), static_cast<std::streamsize>(m_buffer.size()));
     m_out.imbue(std::locale::classic());
     m_out.open(logs / "frame-attribution.csv", std::ios::out | std::ios::trunc | std::ios::binary);
     if (active())
         write_csv_header(m_out);
+}
+bool FrameRecorder::finish() {
+    if (!m_out.is_open())
+        return m_out.good();
+    return finalize_csv(m_out);
 }
 bool FrameRecorder::record(std::uint64_t frame,
                            double frame_ms,

@@ -3,6 +3,7 @@
 #if defined(LUMINUMBRA_ENABLE_STEAM) || defined(LUMINUMBRA_ENABLE_GNS)
 
 #include <cstdint>
+#include <deque>
 #include <string>
 #include <vector>
 
@@ -43,6 +44,9 @@ public:
                    FrameDelivery delivery = FrameDelivery::Reliable) override;
     [[nodiscard]] std::size_t MaxFramePayloadBytes() const override;
     bool TryReceiveFrame(std::vector<std::uint8_t>& out) override;
+    bool TryReceiveFrameWithDelivery(std::vector<std::uint8_t>& out,
+                                     FrameDelivery& delivery) override;
+    void CloseWithReason(const std::string& reason) override;
     [[nodiscard]] bool IsPeerConnected() const override;
     void Close() override;
 
@@ -62,6 +66,9 @@ private:
     bool m_peer_closed = false; // drain the backend before releasing the connection
     bool m_is_host = false;
     MessageReceiveQueue m_recv;
+    // One delivery flag per queued frame, bounded by kReceiveQueueFrameLimit (1024).
+    std::deque<FrameDelivery> m_recv_delivery;
+    std::string m_close_reason;
 };
 
 } // namespace Luminumbra::Net
