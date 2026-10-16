@@ -5,13 +5,14 @@ from contextlib import contextmanager
 from pathlib import Path
 import os
 import stat
+import struct
 import tempfile
 import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from meshgen_e4_fixture import arguments, members
+from meshgen_e4_fixture import arguments, glb, members
 from luminumbra_author.contracts import Refusal, canonical, digest
 from luminumbra_author.meshgen_backend import bounded_json
 from luminumbra_author.meshgen_candidate import CandidateStore, read_member
@@ -47,6 +48,39 @@ class CandidateStorage(unittest.TestCase):
         self.assertFalse((candidate/'receipt.json').exists())
         self.assertTrue((area/'receipt.prepared.json').exists())
         self.refusal('request.conflict', lambda: self.store.publish(JOB, self.members))
+
+    def test_seal_rechecks_scene_selection_in_artifact_and_raw_evidence(self):
+        for member in ('candidate.glb', 'inputs/raw_backend.glb'):
+            for count, default, rule in ((1, 'absent', None), (2, 'absent', 'scene.ambiguous'),
+                                         (2, 0, None), (2, 1, None), (2, 2, 'glb.bounds')):
+                with self.subTest(member=member, count=count, default=default):
+                    evidence = dict(self.members)
+                    data = evidence[member]; size = struct.unpack_from('<I', data, 12)[0]
+                    doc = bounded_json(data[20:20+size])
+                    doc['scenes'] = [{} for _ in range(count)]
+                    doc['scenes'][default if type(default) is int and 0 <= default < count else 0] = {'nodes': [0]}
+                    if default == 'absent': doc.pop('scene')
+                    else: doc['scene'] = default
+                    evidence[member] = glb(doc, data[28+size:])
+                    provenance = bounded_json(evidence['provenance.json'])
+                    field = 'artifact' if member == 'candidate.glb' else 'raw_output'
+                    provenance[field]['sha256'] = digest(evidence[member])
+                    if field == 'raw_output':
+                        provenance[field]['bytes'] = len(evidence[member])
+                        result = bounded_json(evidence['inputs/result.json'])
+                        result.update(sha256=digest(evidence[member]), bytes=len(evidence[member]))
+                        evidence['inputs/result.json'] = canonical(result)+b'\n'
+                    evidence['provenance.json'] = canonical(provenance)+b'\n'
+                    job = digest(canonical([member, count, default]))[:32]
+                    candidate, area = self.store.paths(job)
+                    if rule:
+                        self.refusal(rule, lambda: self.store.publish(job, evidence))
+                        self.assertFalse(candidate.exists())
+                        self.assertFalse((area/'receipt.prepared.json').exists())
+                    else:
+                        receipt = self.store.publish(job, evidence)
+                        self.assertEqual(self.store.read(job)['members'], evidence)
+                        self.assertEqual(self.store.receipt(job), receipt)
 
     def test_member_tamper_missing_extra_and_manifest_rewrite(self):
         for mutation, rule in (('tamper', 'candidate.changed'), ('missing', 'candidate.members'), ('extra', 'candidate.members'), ('manifest', 'candidate.changed')):

@@ -29,6 +29,24 @@ class PortableMetrics(unittest.TestCase):
         self.assertEqual(observed['bounds_m'], [1, 1, 1])
         for key in ('has_normals', 'has_uv', 'watertight', 'budget_ok', 'uv_overlap_zero'): self.assertTrue(observed[key], key)
 
+    def test_scene_selection_requires_an_unambiguous_valid_default(self):
+        for count, default, rule in ((1, 'absent', None), (2, 'absent', 'scene.ambiguous'),
+                                     (2, 0, None), (2, 1, None), (2, 2, 'glb.bounds'),
+                                     (2, -1, 'glb.bounds'), (2, False, 'glb.bounds'),
+                                     (2, None, 'glb.bounds')):
+            with self.subTest(count=count, default=default):
+                def change(doc, blob):
+                    doc['scenes'] = [{} for _ in range(count)]
+                    doc['scenes'][default if type(default) is int and 0 <= default < count else 0] = {'nodes': [0]}
+                    if default == 'absent': doc.pop('scene')
+                    else: doc['scene'] = default
+                data = self.mutate(change)
+                if rule:
+                    self.refusal(rule, lambda: inspect_artifact(data, self.effective))
+                else:
+                    observed = inspect_artifact(data, self.effective)
+                    self.assertEqual((observed['triangles'], observed['vertices']), (12, 36))
+
     def test_malformed_bounds_indices_attributes_expansion_and_encodings(self):
         cases = [
             ('glb.bounds', lambda d, b: d['accessors'][1].update(byteOffset=10000)),

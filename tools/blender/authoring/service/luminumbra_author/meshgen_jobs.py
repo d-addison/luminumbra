@@ -887,7 +887,7 @@ def inspect_raw_glb(data, effective):
     """Minimal bounded static triangle intake; finisher decisions belong to E4/G2."""
     import math
     import struct
-    from .formats import validate_glb
+    from .formats import select_glb_scene, validate_glb
     require(len(data) <= effective["limits"]["result_bytes"], "backend.limit", "Raw GLB exceeds result cap.")
     json_size = raw_glb_container(data, effective["limits"])
     bounded_json(data[20:20+json_size], depth=effective["limits"]["json_depth"], items=effective["limits"]["collection_items"])
@@ -974,12 +974,7 @@ def inspect_raw_glb(data, effective):
     # Count scene instances as well as accessor data. Reusing a mesh in many
     # nodes must not bypass the pre-finish triangle ceiling.
     nodes, scenes = collection("nodes"), collection("scenes")
-    scene = document.get("scene", 0)
-    require(isinstance(nodes, list) and isinstance(scenes, list)
-            and len(nodes) <= effective["limits"]["collection_items"]
-            and len(scenes) <= effective["limits"]["collection_items"]
-            and type(scene) is int and 0 <= scene < len(scenes), "glb.bounds", "Invalid bounded scene graph.")
-    roots = scenes[scene].get("nodes", [])
+    roots = select_glb_scene(document, scenes).get("nodes", [])
     require(isinstance(roots, list) and len(roots) <= effective["limits"]["collection_items"], "glb.structure", "Invalid scene root nodes.")
     pending = [(index, 0) for index in roots]
     seen, instance_triangles, instance_vertices = set(), 0, 0

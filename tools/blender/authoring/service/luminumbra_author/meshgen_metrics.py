@@ -7,7 +7,7 @@ import math
 import struct
 
 from .contracts import require, Refusal
-from .formats import validate_glb
+from .formats import select_glb_scene, validate_glb
 from .meshgen_backend import bounded_json
 from .meshgen_jobs import raw_glb_container
 
@@ -106,9 +106,7 @@ def inspect_artifact(data, effective):
             parts.append((points, uv, indices))
         mesh_data.append(parts)
     nodes, scenes = collection('nodes'), collection('scenes')
-    scene = doc.get('scene', 0)
-    require(type(scene) is int and 0 <= scene < len(scenes), 'glb.bounds', 'Invalid scene.')
-    roots = scenes[scene].get('nodes', [])
+    roots = select_glb_scene(doc, scenes).get('nodes', [])
     require(isinstance(roots, list) and len(roots) <= limits['collection_items'], 'glb.bounds', 'Invalid roots.')
     pending, seen = [(i, 0) for i in roots], set()
     while pending:
