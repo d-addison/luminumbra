@@ -76,7 +76,7 @@ residency cannot retain scheduling history. Consumed work stops owning records
 on the next tick. Later consumers must extend the probe using simulation ownership.
 
 Invalid host input never throws out of the session. Non-finite or out-of-range
-(|x|,|z| >= 2^24) walking anchors, ground-object edit positions and region pins are
+(outside -2^24 <= x,z < 2^24) walking anchors, ground-object edit positions and region pins are
 ignored and counted (observational, never hashed or saved). Invalid replicated anchors, work for
 regions the ledger does not know, and visit-time ledger exhaustion are skipped inside the scheduler
 and counted in the schedule's `rejected` triple; the schedule digest appends that triple only when
@@ -246,8 +246,8 @@ WorldClock tick, and the canonical tick cannot exceed its validation ceiling.
 Configuration is stored and hashed with the ledger rather than
 read from an unrecorded machine-local budget.
 
-Frozen content is supplied at the transition by merging authoritative lod-0
-chunks by id, with complete resident authority taking precedence over durable
+Frozen content is supplied at the transition by merging authoritative chunks
+by id, with complete resident authority taking precedence over durable
 region records carrying the sticky edited flag. With active regions enabled,
 render eviction atomically persists a complete `LoadedOrEdited` chunk through
 the existing LMR1 durable replacement path before releasing it. This includes
@@ -273,10 +273,13 @@ full generation. Newly admitted natural chunks become durable authority; while
 their region remains active they follow the same rule as edited chunks.
 
 Replicated anchors take precedence over the saved walking anchor, including an
-explicitly empty list. Initialization is a pure function of seed, coordinates,
-generation and the fixed simulation resolution. Pristine chunks streamed outside
-the simulation set receive that same generated initial water state for rendering,
-remain frozen, and never contribute to simulation hashes or freeze digests.
+explicitly empty list. Natural-water initialization is a pure function of seed,
+coordinates, generation and the fixed simulation resolution. Pending edited-water
+initialization reuses the authoritative heightmap when its samples match the
+simulation cell centres, and otherwise samples canonical terrain. Pristine chunks
+streamed outside the simulation set receive that same generated initial water
+state for rendering, remain frozen, and never contribute to simulation hashes or
+freeze digests.
 Both synchronous horizon meshing and asynchronous meshing render their local
 water grids. Departing authority freezes without catch-up; returning authority
 resumes from the exact durable integer water state. No distant water continuation
@@ -285,8 +288,9 @@ chunk ids in order. Snapshot loads preserve the simulation-window cursor and
 pending resizes, and discard derived activity scores.
 
 Before creature or server-avatar physics, the owner thread admits the same
-simulation horizon and installs terrain colliders synchronously from canonical
-heightmaps, in chunk-id order. Active-mode rendering never allocates terrain bodies,
+simulation horizon and installs terrain colliders synchronously for chunks with
+complete canonical heightmaps, in chunk-id order. Partial heightmaps do not install
+terrain colliders. Active-mode rendering never allocates terrain bodies,
 so body allocation and contacts follow only the simulation schedule. Admission
 replaces stale render colliders immediately;
 render remeshing cannot invalidate simulation collision readiness. Before physics,
