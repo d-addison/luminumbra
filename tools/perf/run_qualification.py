@@ -479,6 +479,7 @@ def capture_ownership(receipt, retained, capture, out_dir):
     if receipt.get('capture_status') != 'retained':
         return 'capture evidence: capture not retained'
     if (receipt.get('outcome') != 'returned' or receipt.get('return_code') != 0
+            or receipt.get('binary_identity_status') != 'verified'
             or receipt.get('evidence_errors')):
         return 'capture evidence: process receipt unsuccessful'
     if receipt.get('capture_path') != retained.relative_to(out_dir).as_posix():

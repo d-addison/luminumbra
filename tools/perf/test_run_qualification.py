@@ -858,6 +858,29 @@ class ClientIdentityTests(RunnerTestBase):
     def receipt(self):
         return rq.read_json_object(self.out / 'cells' / f'{SURFACE_CELL}.process.json')
 
+    def test_unverified_interpreter_identity_is_refused(self):
+        original = rq.runner.run_process
+        for status in ('changed', 'pending', None):
+            for clear_hash in (False, True):
+                with self.subTest(status=status, clear_hash=clear_hash):
+                    def run_process(*args, **kwargs):
+                        result = original(*args, **kwargs)
+                        receipt = rq.read_json_object(kwargs['receipt_path'])
+                        receipt['binary_identity_status'] = status
+                        if clear_hash:
+                            receipt['binary_sha256'] = None
+                        kwargs['receipt_path'].write_text(json.dumps(receipt), encoding='utf-8')
+                        return result
+
+                    with mock.patch.object(rq.runner, 'run_process', side_effect=run_process):
+                        code, _, _ = self.run_main(self.argv('--only', SURFACE_CELL))
+                    self.assertEqual(code, 1)
+                    cell = self.load_qualification()['cells'][0]
+                    self.assertEqual(cell['state'], 'process_failed')
+                    self.assertEqual(cell['reason'], 'capture evidence: process receipt unsuccessful')
+                    self.assertIsNone(cell['artifact'])
+                    self.assertFalse((self.out / 'cells' / f'{SURFACE_CELL}.check.log').exists())
+
     def test_script_receipt_hashes_client_separately_from_interpreter(self):
         self.assertEqual(self.run_main(self.argv('--only', SURFACE_CELL))[0], 0)
         receipt = self.receipt()
@@ -1174,6 +1197,18 @@ class BuildManifestTests(RealCheckerTests):
         self.assertIsNone(cell['artifact'])
         self.assertFalse((self.out / 'cells' / f"{cell['id']}.check.log").exists())
 
+    def test_unverified_native_identity_is_refused(self):
+        for status in ('changed', 'pending', None):
+            with self.subTest(status=status):
+                code, cell, receipt = self.native_control(
+                    receipt_defect={'binary_identity_status': status})
+                self.assertEqual(code, 1)
+                self.assertEqual(cell['state'], 'process_failed')
+                self.assertEqual(cell['reason'], 'capture evidence: process receipt unsuccessful')
+                self.assertIsNone(cell['artifact'])
+                self.assertFalse((self.out / 'cells' / f"{cell['id']}.check.log").exists())
+                self.assertFalse(self.load_qualification()['render_floor_qualified'])
+
     def test_capture_changed_before_checker_is_refused(self):
         code, cell, receipt = self.native_control(mutate_checked_capture=True)
         self.assertEqual(code, 1)
@@ -1197,6 +1232,9 @@ class BuildManifestTests(RealCheckerTests):
         code, cell, receipt = self.native_control(mutate=True)
         self.assertEqual(code, 1)
         self.assertEqual(cell['state'], 'process_failed')
+        self.assertEqual(receipt['binary_identity_status'], 'changed')
+        self.assertIsNone(receipt['binary_sha256'])
+        self.assertTrue(receipt['evidence_errors'])
         self.assertFalse(receipt['client']['sha256_verified'])
         self.assertFalse(receipt['client']['native_build'])
 
