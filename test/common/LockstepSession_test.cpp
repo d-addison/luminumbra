@@ -6,8 +6,8 @@
 // desync detection + LREC1 dump emission, and clean disconnect. Both session ends run in
 // this one process, driven turn-by-turn so the loopback queues carry their frames.
 
-#include "../support/SystemConfigVariants.h"
 #include "../support/SimulationContentFixture.h"
+#include "../support/SystemConfigVariants.h"
 #include "../support/UniqueTempPath.h"
 #include <gtest/gtest.h>
 
