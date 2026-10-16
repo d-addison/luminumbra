@@ -56,7 +56,10 @@ struct FarFrozenCaptureSource {
     // separate render fingerprint; it never changes durable.generation.
     std::uint64_t content_identity = 0;
     FarFrozenUse use = FarFrozenUse::Committed;
-    FarFrozenTerrainOverride committed, parked, live;
+    // Required committed resolver, including an explicit Absent result for an
+    // empty committed layer. A missing resolver cannot prove edits are absent.
+    FarFrozenTerrainOverride committed;
+    FarFrozenTerrainOverride parked, live;
     // Required explicit committed water truth, even for dry worlds.
     std::function<std::optional<FarFrozenWaterSample>(std::int64_t, std::int64_t)> water;
     FarFrozenWaterOverride parked_water, live_water;
@@ -144,7 +147,7 @@ private:
     CaptureFarFrozenObservation(std::span<const FarFrozenRegion>,
                                 const FarFrozenCaptureSource&,
                                 const FarFrozenCaptureLimits&,
-                                std::shared_ptr<FarVolumeMemoryPool>,
+                                const std::shared_ptr<FarVolumeMemoryPool>&,
                                 std::shared_ptr<const FarFrozenObservation>&);
     struct Grid {
         FarFrozenRegion region;
@@ -174,7 +177,7 @@ FarFrozenCaptureError
 CaptureFarFrozenObservation(std::span<const FarFrozenRegion> regions,
                             const FarFrozenCaptureSource& source,
                             const FarFrozenCaptureLimits& limits,
-                            std::shared_ptr<FarVolumeMemoryPool> pool,
+                            const std::shared_ptr<FarVolumeMemoryPool>& pool,
                             std::shared_ptr<const FarFrozenObservation>& output);
 
 // Uses the existing edited-image/bake contract unchanged. The source identity
