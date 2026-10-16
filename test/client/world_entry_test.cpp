@@ -3,7 +3,9 @@
 #include "luminumbra_common/persistence/CreatedWorldArtifacts.h"
 #include "luminumbra_common/persistence/SyntheticSaveFixture.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
+#include "luminumbra_common/world/ActiveRegionLedger.h"
 #include "luminumbra_common/world/GameSession.h"
+#include "luminumbra_common/world/WorldClock.h"
 
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
@@ -256,6 +258,17 @@ protected:
         std::ifstream input(path, std::ios::binary);
         return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
     }
+    void InstallPresets() {
+        const auto presets = root / "worlds/atlas/presets";
+        std::filesystem::create_directories(presets);
+        std::filesystem::copy_file(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) /
+                                       "worlds/atlas/presets/default.json",
+                                   presets / "default.json");
+        std::filesystem::copy(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) /
+                                  "worlds/atlas/presets-rev6",
+                              root / "worlds/atlas/presets-rev6",
+                              std::filesystem::copy_options::recursive);
+    }
     void Publish(CreatedWorldArtifacts& artifacts, const std::filesystem::path& save) {
         artifacts.create_root(save);
         artifacts.write_file(save / "preset.json", "preset bytes\n");
@@ -277,16 +290,35 @@ protected:
     std::filesystem::path root;
 };
 
+TEST_F(WorldEntryFilesystem, CreatesWorldWithActiveRegionsAndFullArtifactJournal) {
+    InstallPresets();
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    CreatedWorldArtifacts artifacts;
+    std::filesystem::path save;
+    {
+        Luminumbra::world::GameSession session;
+        session.SetRootPath(root.generic_string() + "/");
+        session.SetJobSystem(&jobs);
+        ASSERT_TRUE(session.ActiveRegionsEnabled());
+        ASSERT_TRUE(session.CreateWorld("New world", "1337", "default", nullptr, artifacts))
+            << session.GetWorldOpenError();
+        save = root / "worlds/saves" / session.GetMetadata().worldId;
+        const auto bytes = DiskBytes(save);
+        EXPECT_EQ(bytes.size(), 5u);
+        EXPECT_TRUE(bytes.contains("preset.json"));
+        EXPECT_TRUE(bytes.contains("world_info.json"));
+        EXPECT_TRUE(bytes.contains("chunks"));
+        EXPECT_TRUE(bytes.contains("chunks/region"));
+        EXPECT_TRUE(bytes.contains("chunks/region/active-regions.arl"));
+    }
+    jobs.shutdown();
+    EXPECT_TRUE(artifacts.rollback().empty());
+    EXPECT_FALSE(std::filesystem::exists(save));
+}
+
 TEST_F(WorldEntryFilesystem, WorldRevisionDistinguishesRefusalFromPartialReplacement) {
-    const auto presets = root / "worlds/atlas/presets";
-    std::filesystem::create_directories(presets);
-    std::filesystem::copy_file(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) /
-                                   "worlds/atlas/presets/default.json",
-                               presets / "default.json");
-    std::filesystem::copy(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) /
-                              "worlds/atlas/presets-rev6",
-                          root / "worlds/atlas/presets-rev6",
-                          std::filesystem::copy_options::recursive);
+    InstallPresets();
     Luminumbra::JobSystem jobs;
     jobs.startup(1);
     CreatedWorldArtifacts artifacts;
@@ -525,6 +557,38 @@ TEST_F(WorldEntryFilesystem, DurablePresetWriterPublishesOwnedFileAndRollsBack) 
     EXPECT_EQ(DiskBytes(save).size(), 1u);
     EXPECT_TRUE(artifacts.rollback().empty());
     EXPECT_FALSE(std::filesystem::exists(save));
+}
+
+TEST_F(WorldEntryFilesystem, FailedFinalLedgerReservationRollsBackEveryOwnedArtifact) {
+    using Luminumbra::Persistence::WorldSaveService;
+    CreatedWorldArtifacts artifacts;
+    const auto save = root / "created-world";
+    artifacts.create_root(save);
+    std::vector<std::string> errors;
+    ASSERT_TRUE(WorldSaveService::write_file_durably(
+        save / "preset.json", "preset bytes\n", &errors, &artifacts));
+    // Consume one slot with an owned partial file so the final ledger temporary
+    // reservation exhausts the journal, after metadata and both directories exist.
+    artifacts.write_file(save / "partial.bin", "partial bytes\n");
+    const Luminumbra::world::WorldClock clock;
+    Luminumbra::world::ActiveRegionLedger ledger;
+    ASSERT_TRUE(ledger.try_set_local_anchor(Luminumbra::Vec3(0.0f, 100.0f, 0.0f)));
+    nlohmann::json metadata = {{"container_version", WorldSaveService::kContainerVersion},
+                               {"spawnPoint", {{"x", 0.0f}, {"y", 100.0f}, {"z", 0.0f}}}};
+    clock.write_metadata(metadata);
+    EXPECT_FALSE(WorldSaveService::save_metadata_and_active_regions(
+        metadata.dump() + "\n", ledger, save, &errors, &artifacts));
+    ASSERT_EQ(errors.size(), 1u);
+    EXPECT_EQ(errors.front(),
+              "Cannot save active-region ledger: Invalid world artifact journal capacity.");
+    EXPECT_EQ(Read(save / "preset.json"), "preset bytes\n");
+    EXPECT_EQ(Read(save / "partial.bin"), "partial bytes\n");
+    EXPECT_TRUE(std::filesystem::is_regular_file(save / "world_info.json"));
+    EXPECT_TRUE(std::filesystem::is_directory(save / "chunks/region"));
+    EXPECT_FALSE(std::filesystem::exists(save / "chunks/region/active-regions.arl"));
+    EXPECT_TRUE(artifacts.rollback().empty());
+    EXPECT_FALSE(std::filesystem::exists(save));
+    EXPECT_TRUE(artifacts.rollback().empty());
 }
 
 TEST_F(WorldEntryFilesystem, InterruptedDurablePresetWriterRetainsOwnedTemporaryFile) {
