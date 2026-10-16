@@ -1,6 +1,8 @@
 #include "WorldLoadingVisualizer.h"
 #include "core/Log.h"
+#include "luminumbra_client/core/PresentationClock.h"
 #include <GLFW/glfw3.h>
+#include <cmath>
 #include <glm/gtc/matrix_transform.hpp>
 #include <imgui.h>
 
@@ -139,7 +141,10 @@ void WorldLoadingVisualizer::UpdateAndRender(float delta_time,
         return;
 
     // 1. Update Orbiting Camera
-    m_camera_angle += 15.0f * delta_time; // degrees per second
+    if (const auto& seconds = presentation_clock.capture_seconds())
+        m_camera_angle = static_cast<float>(std::fmod(15.0 * *seconds, 360.0));
+    else
+        m_camera_angle += 15.0f * delta_time; // degrees per second
     if (m_camera_angle > 360.0f)
         m_camera_angle -= 360.0f;
     float rad = glm::radians(m_camera_angle);
@@ -168,7 +173,7 @@ void WorldLoadingVisualizer::UpdateAndRender(float delta_time,
     m_shader->setMat4("projection",
                       m_camera->GetProjectionMatrix(1280, 720)); // Assume fixed aspect for loading
     m_shader->setMat4("view", m_camera->GetViewMatrix());
-    m_shader->setFloat("u_time", static_cast<float>(glfwGetTime()));
+    m_shader->setFloat("u_time", static_cast<float>(presentation_clock.now(glfwGetTime)));
     m_shader->setVec3("u_viewPos", m_camera->Position);
 
     glBindVertexArray(m_cube_vao);

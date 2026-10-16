@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 
+#include "luminumbra_client/app/RenderConfiguration.h"
 #include "luminumbra_client/app/SessionExit.h"
+#include "luminumbra_common/persistence/SavedWorldCatalog.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/replay/RegionScheduleTrace.h"
 #include "luminumbra_server/modes/ModeHelpers.h"
@@ -11,6 +13,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -349,6 +352,7 @@ TEST_F(HostSchedulerFault, ClientFaultRequestsQuitAndSavesStateBeforeSpawnMetada
     // failure policy: neither update spawn metadata nor report a successful save.
     Luminumbra::Client::SaveSessionOnExit(
         &session,
+        true,
         [] { FAIL() << "A failed state save must not reach the spawn update"; },
         [] { FAIL() << "A failed state save must not be reported as successful"; });
     EXPECT_TRUE(quit_requested);
@@ -360,6 +364,7 @@ TEST_F(HostSchedulerFault, ClientFaultRequestsQuitAndSavesStateBeforeSpawnMetada
     const Luminumbra::Vec3 exit_spawn(19.0f, 23.0f, -17.0f);
     Luminumbra::Client::SaveSessionOnExit(
         &session,
+        true,
         [&] {
             // This callback runs only AFTER the recovery state is durable.
             ASSERT_NO_FATAL_FAILURE(ExpectRecoveryWorld(directory, expected_contents));
@@ -380,5 +385,86 @@ TEST_F(HostSchedulerFault, ClientFaultRequestsQuitAndSavesStateBeforeSpawnMetada
     // GLFW loop exit and renderer reader draining remain NEEDS-NATIVE. This
     // test covers the production quit/save decisions without simulating a window.
     ASSERT_NO_FATAL_FAILURE(ExpectRecoveryWorld(directory, expected_contents));
+}
+
+TEST_F(HostSchedulerFault, CapturePersistencePolicy) {
+    for (const bool capture_active : {false, true}) {
+        for (const int exit_code : {0, 2, 3}) {
+            for (const bool scenario_failed : {false, true}) {
+                for (const bool content_refused : {false, true}) {
+                    const bool allowed = Luminumbra::Client::SessionPersistenceAllowed(
+                        capture_active, exit_code, scenario_failed, content_refused);
+                    if (capture_active && (exit_code != 0 || scenario_failed || content_refused)) {
+                        EXPECT_FALSE(allowed);
+                    } else {
+                        EXPECT_TRUE(allowed);
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_F(HostSchedulerFault, RefusedCapturePreservesReplacementSave) {
+    namespace Measurement = Luminumbra::Client::Measurement;
+    // Exercise both persistence modes through the public session/save APIs.
+    for (const bool active_regions : {false, true}) {
+        Luminumbra::JobSystem jobs;
+        jobs.startup(1);
+        std::filesystem::path directory;
+        std::map<std::filesystem::path, std::string> replacement;
+        const auto contents = [&] {
+            std::map<std::filesystem::path, std::string> files;
+            for (const auto& entry : fs::recursive_directory_iterator(directory)) {
+                if (entry.is_regular_file())
+                    files.emplace(entry.path().lexically_relative(directory),
+                                  ReadHostFile(entry.path()));
+            }
+            return files;
+        };
+        {
+            GameSession session;
+            session.SetJobSystem(&jobs);
+            session.SetRootPath(root.generic_string() + "/");
+            session.SetActiveRegionsEnabled(active_regions);
+            ASSERT_TRUE(session.CreateWorld("Capture original", "1337", "default"));
+            ASSERT_TRUE(session.SaveWorldState());
+            ASSERT_TRUE(session.SaveWorld());
+            directory = session.GetWorldSaveDir();
+            const auto recorded = Measurement::saved_world_digest(directory);
+            const auto metadata_path = directory / "world_info.json";
+            auto metadata = nlohmann::json::parse(ReadHostFile(metadata_path));
+            metadata["name"] = "Capture replaced";
+            metadata["spawnPoint"]["x"] = 321.0f;
+            const auto stamp = fs::last_write_time(metadata_path);
+            WriteHostFile(metadata_path, metadata.dump(4) + "\n");
+            fs::last_write_time(metadata_path, stamp);
+            ASSERT_TRUE(
+                Luminumbra::Persistence::InspectSavedWorld(root, session.GetMetadata().worldId)
+                    .error.empty());
+            ASSERT_EQ(session.GetMetadata().name, "Capture original");
+            replacement = contents();
+            bool refused = false;
+            try {
+                Measurement::require_saved_world_digest(directory, recorded);
+            } catch (const std::runtime_error& error) {
+                EXPECT_STREQ(error.what(), "workload saved authority changed before reload");
+                refused = true;
+            }
+            ASSERT_TRUE(refused);
+            // The client records this refusal as scenario_failed before shutdown.
+            const bool allowed =
+                Luminumbra::Client::SessionPersistenceAllowed(true, 0, refused, false);
+            Luminumbra::Client::SaveSessionOnExit(
+                &session,
+                allowed,
+                [] { FAIL() << "A refused capture must not update spawn metadata"; },
+                [] { FAIL() << "A refused capture must not report a save"; });
+            EXPECT_EQ(contents(), replacement);
+        }
+        // Destruction also leaves every file and byte of the refused save intact.
+        EXPECT_EQ(contents(), replacement);
+        jobs.shutdown();
+    }
 }
 } // namespace

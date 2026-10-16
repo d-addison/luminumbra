@@ -1,6 +1,7 @@
 #include "Mesh.h"
 #include "core/Log.h"
 #include "luminumbra_common/animation/SkinnedMeshFormat.h"
+#include "luminumbra_common/core/CaptureContentPaths.h"
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -74,6 +75,22 @@ std::vector<std::filesystem::path> BuildMeshPathCandidates(const std::string& pa
 }
 
 std::ifstream OpenMeshFile(const std::string& path, std::filesystem::path& resolvedPath) {
+    // Capture resolution never falls back to a different build/source data tree.
+    if (Filesystem::capture_content_paths.active()) {
+        const std::filesystem::path requested(path);
+        bool rooted_content = false;
+        if (!requested.empty())
+            for (const auto* tree : Filesystem::kCaptureContentTrees)
+                rooted_content = rooted_content || *requested.begin() == tree;
+        resolvedPath =
+            Filesystem::IsAbsolutePath(requested)
+                ? requested
+                : Filesystem::capture_content_paths.root() /
+                      (rooted_content ? requested : std::filesystem::path("data") / requested);
+        if (!Filesystem::capture_content_paths.allows(resolvedPath))
+            return {};
+        return std::ifstream(resolvedPath, std::ios::binary);
+    }
     for (const auto& candidate : BuildMeshPathCandidates(path)) {
         std::ifstream file(candidate, std::ios::binary);
         if (file) {

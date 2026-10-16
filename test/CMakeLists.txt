@@ -2278,8 +2278,23 @@ luminumbra_configure_first_party_target(render_measurement_test)
 add_test(NAME RenderMeasurementStatistics COMMAND render_measurement_test statistics)
 add_test(NAME RenderTraversalDeterministic COMMAND render_measurement_test traversal)
 add_test(NAME RenderTraversalRefusal COMMAND render_measurement_test refusal)
+add_test(NAME RenderWorkloadDefinitions COMMAND render_measurement_test workloads)
+add_test(NAME RenderWorkloadDispatch COMMAND render_measurement_test dispatch)
+add_test(NAME RenderReloadInterval COMMAND render_measurement_test reload)
+add_test(NAME RenderPresentationClock COMMAND render_measurement_test presentation)
+add_test(NAME RenderWorkloadWorldAuthority COMMAND render_measurement_test world-authority)
+add_test(NAME RenderMenuObservations COMMAND render_measurement_test menus)
+add_test(NAME RenderFoliageObservations COMMAND render_measurement_test foliage)
 add_test(NAME RenderMeasurementFrameRing COMMAND render_measurement_test ring)
 add_test(NAME RenderMeasurementGpuQueries COMMAND render_measurement_test queries)
+add_executable(render_configuration_test rendering/render_configuration_test.cpp)
+target_include_directories(render_configuration_test PRIVATE ../src)
+target_compile_definitions(render_configuration_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+target_link_libraries(render_configuration_test PRIVATE luminumbra_common)
+luminumbra_configure_first_party_target(render_configuration_test)
+add_test(NAME RenderResolvedConfiguration COMMAND render_configuration_test)
+add_test(NAME RenderSavedAuthorityTampering COMMAND render_configuration_test saved-authority)
+add_test(NAME RenderContentReferenceContainment COMMAND render_configuration_test content-references)
 if(NOT Python3_FOUND)
     message(FATAL_ERROR "RenderContractPython requires a Python3 interpreter")
 endif()
@@ -2298,6 +2313,14 @@ add_test(NAME RenderBenchmarkAssets COMMAND "${Python3_EXECUTABLE}"
 set_tests_properties(RenderBenchmarkAssets PROPERTIES FIXTURES_SETUP render_benchmark_assets TIMEOUT 30)
 foreach(case IN ITEMS
     "RenderTraversalIntegrated;test_traversal_twice"
+    "RenderAbsoluteTextureRefusal;test_absolute_texture_refusal"
+    "RenderParentRelativeTextureRefusal;test_parent_relative_texture_refusal"
+    "RenderSceneConfigSeparateRefusal;test_scene_config_separate_refusal"
+    "RenderSceneConfigAssignmentRefusal;test_scene_config_assignment_refusal"
+    "RenderExistingWorldOptionFormsRefusal;test_existing_world_option_forms_refusal"
+    "RenderTraversalDurationOptionFormsRefusal;test_traversal_duration_option_forms_refusal"
+    "RenderCaptureOptionMissingValuesRefusal;test_capture_option_missing_values_refusal"
+    "RenderTraversalOwnerOptionFormsRefusal;test_traversal_owner_option_forms_refusal"
     "RenderBenchmarkImplicitCreationFailure;test_implicit_creation_failure"
     "RenderBenchmarkOverrideCollection;test_gl_debug_override_collection"
     "RenderTraversalEmbeddedPresetRefusal;test_embedded_preset_refusal")

@@ -2,6 +2,7 @@
 #include "FarWorldReplay.h"
 #include "ShaderSource.h"
 #include "core/Log.h"
+#include "luminumbra_common/core/CaptureContentPaths.h"
 #include "luminumbra_common/core/FilesystemPath.h"
 #include <algorithm>
 #include <filesystem>
@@ -27,6 +28,11 @@ bool LoadShaderSourceRecursive(const std::filesystem::path& path,
         return false;
     }
 
+    if (!Filesystem::capture_content_paths.allows(normalized)) {
+        diagnostic = "capture content reference escapes inventoried trees";
+        include_stack.erase(key);
+        return false;
+    }
     std::ifstream input(normalized, std::ios::binary);
     if (!input) {
         diagnostic = "cannot open shader source: " + key;

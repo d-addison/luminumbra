@@ -1,5 +1,6 @@
 #include "FroxelPass.h"
 #include "../FarWorldReplay.h"
+#include "luminumbra_common/core/CaptureContentPaths.h"
 
 #include "../FroxelGrid.h"
 #include "../ShaderReflection.h"
@@ -48,6 +49,8 @@ bool FroxelPass::execute_inject(const RenderContext& ctx, const std::filesystem:
             return false;
         // Lazy init: both kernels + both 3D volumes, together.
         auto load_comp = [&](const char* rel) -> GLuint {
+            if (!Filesystem::capture_content_paths.allows(std::filesystem::path(root_path) / rel))
+                return 0;
             std::ifstream file(std::filesystem::path(root_path) / rel);
             if (!file) {
                 LUMINUMBRA_CORE_ERROR("froxel: missing {}", rel);

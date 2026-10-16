@@ -1,5 +1,6 @@
 #include "FoliagePass.h"
 #include "../FarWorldReplay.h"
+#include "luminumbra_common/core/CaptureContentPaths.h"
 #include "rendering/BenchmarkGpuQueries.h"
 
 #include "GBufferPass.h"
@@ -234,6 +235,8 @@ void FoliagePass::clear_ground_meshes() {
     m_surf_grid_cache.clear();
     m_instances.clear();
     m_frame_instance_count = 0;
+    m_candidate_slots = 0;
+    m_candidate_count = 0;
     m_gpu_active = false;
     m_scatter_built = false;
     m_foliage_build_backlog = false;
@@ -325,6 +328,10 @@ GLuint compile_compute_program(const std::string& source) {
 void FoliagePass::init_compute(const std::filesystem::path& root_path) {
     // Load + compile the scatter compute shader. On any failure the pass keeps
     // m_gpu_scatter=false and the CPU rebuild loop is used (graceful fallback).
+    if (!Filesystem::capture_content_paths.allows(root_path / "res/shaders/grass_scatter.comp") ||
+        !Filesystem::capture_content_paths.allows(root_path /
+                                                  "res/shaders/grass_compact_prefix.comp"))
+        return;
     std::ifstream in(root_path / "res/shaders/grass_scatter.comp");
     if (!in) {
         LUMINUMBRA_CORE_WARN("FoliagePass: grass_scatter.comp not found; using CPU scatter.");
@@ -422,6 +429,8 @@ void FoliagePass::destroy_compute() {
 }
 
 bool FoliagePass::load_scatter_set(const std::filesystem::path& json_path) {
+    if (!Filesystem::capture_content_paths.allows(json_path))
+        return false;
     std::ifstream in(json_path);
     if (!in) {
         LUMINUMBRA_CORE_WARN("FoliagePass: scatter set not found '{}'.", json_path.string());
@@ -556,6 +565,8 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
     if (!m_enabled || m_archetypes.empty() || query == nullptr) {
         m_instances.clear();
         m_frame_instance_count = 0;
+        m_candidate_slots = 0;
+        m_candidate_count = 0;
         return;
     }
 
@@ -586,6 +597,8 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
     // CPU fallback path: builds m_instances directly this frame.
     m_instances.clear();
     m_frame_instance_count = 0;
+    m_candidate_slots = 0;
+    m_candidate_count = 0;
 
     //  implementation note: emit from the per-chunk CAMERA-INDEPENDENT cache. Each renderable
     //  chunk's
@@ -635,6 +648,11 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
         }
 
         const std::vector<InstanceRecord>& cached = *cachedp;
+        m_candidate_slots += kMaxCandidatesPerChunk;
+        m_candidate_count += std::min<std::size_t>(
+            kMaxCandidatesPerChunk,
+            static_cast<std::size_t>(std::lround(
+                chunk.density * static_cast<float>(kMaxCandidatesPerChunk) * m_density_scale)));
         for (const InstanceRecord& src : cached) {
             if (m_instances.size() >= kMaxInstances) {
                 break;
@@ -894,6 +912,7 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
         admitted.push_back(&chunk);
     }
 
+    std::uint64_t candidate_count = 0;
     std::vector<GpuChunk> chunk_params;
     std::vector<glm::vec4> surf_grid;
     chunk_params.reserve(admitted.size());
@@ -942,6 +961,10 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
         gc.id_density[2] = static_cast<float>(chunk.biome_id);
         gc.id_density[3] = chunk.density;
         chunk_params.push_back(gc);
+        candidate_count += std::min<std::size_t>(
+            kMaxCandidatesPerChunk,
+            static_cast<std::size_t>(std::lround(
+                chunk.density * static_cast<float>(kMaxCandidatesPerChunk) * m_density_scale)));
         surf_grid.insert(surf_grid.end(), gridp->begin(), gridp->end());
     }
 
@@ -959,6 +982,10 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
         return false;
     const int chunk_count = static_cast<int>(chunk_params.size());
     m_uploaded_chunk_count = chunk_count;
+    m_candidate_count = candidate_count;
+    // GPU admission is bounded to kMaxGpuChunks; each dispatch has this many
+    // slots per column, including slots rejected by density and surface gates.
+    m_candidate_slots = static_cast<std::uint64_t>(chunk_count) * kMaxCandidatesPerChunk;
     if (chunk_count == 0) {
         // Nothing to scatter (all chunks culled). Empty build; gate sees 0.
         const GLuint empty_draw[5] = {0u, 12u, 0u, 0u, 0u};
@@ -1078,6 +1105,25 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
         m_readback_enabled ? m_instances.size() : static_cast<std::size_t>(kMaxInstances);
     m_gpu_active = true;
     return true;
+}
+
+FoliagePass::CountObservation FoliagePass::observe_counts() const {
+    return observe_foliage_counts(
+        m_enabled,
+        m_scatter_built,
+        m_gpu_active,
+        m_frame_instance_count,
+        m_candidate_slots,
+        m_candidate_count,
+        [&]() {
+            GLint previous = 0;
+            glGetIntegerv(GL_SHADER_STORAGE_BUFFER_BINDING, &previous);
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_count_ssbo);
+            GLuint count = 0;
+            glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 2 * sizeof(GLuint), sizeof(count), &count);
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, static_cast<GLuint>(previous));
+            return static_cast<std::size_t>(count);
+        });
 }
 
 void FoliagePass::dispatch_scatter() {

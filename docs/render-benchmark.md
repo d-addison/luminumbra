@@ -18,7 +18,7 @@ manifest v1 and FSD2 payload v3 are unaffected.
 
 New options are:
 
-- `--render-benchmark-schema v2|v3` selects the artifact format; absent means v2.
+- `--render-benchmark-schema v2|v3|v4` selects the artifact format; absent means v2.
   Unknown versions are refused with exit 2 before world creation.
 - `--capture-size WxH` requests an undecorated framebuffer of that pixel size,
   with framebuffer scaling disabled. Each dimension must be in 1..16384 and the
@@ -71,8 +71,8 @@ wall duration is an observation and may be shorter or longer than simulation
 duration; it does not select camera poses or end the traversal. The measured
 frame count equals the expected tick count, within the 18000-frame capacity.
 Streaming transients inside the measured window are included. The example is
-surface flight only; cave-walk and edited-world save/bake qualification are not
-supplied.
+surface flight only. The scripted workloads below use traversal v2 and artifact
+v4; edited-world bake qualification remains separate.
 
 ## Artifact v3
 
@@ -195,6 +195,178 @@ The script is limited to 1 MiB. Unknown trailing fields, incomplete records,
 unsupported versions, invalid values and missing files are refused. Nothing is
 migrated or inferred from another script version.
 
+## Scripted workloads (issue #403)
+
+The same traversal parser, camera sampler, bounded frame ring and report checker
+also support `luminumbra.traversal.v2` with
+`luminumbra.render_benchmark.v4`. Select both explicitly; v2/v3 artifacts and
+traversal v1 retain their existing contracts. V4 requires one of these scripts:
+
+| Script in `tools/perf/fixtures` | Workload | Fixed schedule at 30 ticks/second |
+|---|---|---|
+| `cave.traversal` | `cave` | Prepare a connected shaft/tunnel with tick-zero digs, descend from Y=80 to Y=-8 by tick 600, traverse to X=56 by tick 1200, hold through 1800 |
+| `edit.traversal` | `edit` | Dig at tick 120 and fill at tick 300, both at (8,12,8), radius 8 m; hold the camera throughout |
+| `region-crossing.traversal` | `region_crossing` | Travel from X=8 to X=2056 by tick 600, return during ticks 900–1500, hold through 1800 |
+| `save-load.traversal` | `save_load` | Save at tick 240, reload at 300, hold through 1200, resume the path through 1800 |
+| `menu-entry.traversal` | `menu_entry` | Open pause at 120, settings at 240, return to pause at 360, resume at 480, save/leave to main menu at 600, enter that world at 900 |
+
+All five pin seed 424242 and the same default preset/content identities as the
+surface traversal. These identities are requirements, never inferred from the
+machine running a capture. A changed preset or content must have its identities
+recaptured and reviewed before the script can run. These scripts and the
+synthetic Python test reports are definitions and contract inputs, not native
+performance evidence.
+
+V2 adds `workload <name>` immediately after the version line. The remaining
+header fields retain v1 order and bounds. Each point becomes
+`point <tick> <x> <y> <z> <yaw> <pitch>`, with strictly increasing ticks starting
+at zero and ending at `expected_ticks`. Poses interpolate by these ticks;
+identical endpoints hold exactly. `speed_mps` remains a positive descriptive
+header field for compatibility; v2 key ticks determine motion, including holds.
+The native parser expands at most 18001 poses once, giving constant-time lookup
+per frame. A script tick advances once per measured frame regardless of wall
+time. Gameplay simulation advances one fixed 30 Hz tick on unpaused gameplay
+frames and stays paused during menus and warmup. Script ticks remain consecutive
+across save/load and menus; `actual_ticks` counts script ticks in v4.
+
+V4 starts from a newly created world. It refuses `--load-world` and loads of
+pre-existing worlds with exit code 2 because the capture identity does not cover
+initial saved state. Save/load and menu-entry actions may reload only the world
+created during that capture. Each successful scripted save records a digest of
+every saved file, with sorted relative paths and exact binary contents. Reload
+and menu-entry actions recheck that digest before opening the world; replaced,
+added, removed or renamed files refuse with exit code 2 even when the world ID
+is unchanged. Presentation time holds zero during startup,
+advances at 30 Hz through warmup and measurement, then holds the final script
+time through report, screenshot and AOV frames. ImGui uses a fixed 1/30-second
+delta throughout the capture, including startup and reloads.
+
+After the points, v2 requires `actions <count>` and exactly that many records:
+`action <tick> <name> <x> <y> <z> <radius>`. There are at most 64 actions. Dig/fill
+use finite positions within ±32000 m and radii in (0,16]; other actions require
+zero position/radius. Tick-zero digs are cave preparation before warmup. Other
+actions have distinct, increasing measured ticks below the final tick. Each
+workload permits only the action sequence in the table; unsupported versions,
+workloads, malformed/truncated fields and trailing tokens refuse. Both parsers
+accept LF and CRLF; scripts use ASCII tokens and whitespace, within the existing
+1 MiB file bound. Files that change size during native reading refuse.
+
+Cave preparation uses the normal terrain edit/remesh path to establish a fixed
+route, rather than searching for a different entrance at runtime. Qualification
+requires observed underground frames with requested/effective ladder mode,
+matching active cave policies, and a positive live voxel-air sample at the camera.
+An unavailable lattice or solid sample fails qualification. A legacy fallback
+fails cave qualification. The region workload sets the scheduler to work limit 0,
+hold 30 ticks and reduced shift 1 before world creation. It requires active
+regions, drives their local anchor from the scripted camera, and records real
+scheduler transitions. Validation requires both departure from Active and
+reactivation, plus camera positions on different 512 m regions.
+
+This base refuses live Ladder activation without immutable committed authority
+and dirty parking. Consequently the cave script can collect traversal evidence,
+but cannot qualify its active cave policy on this base. The report preserves the
+requested Ladder/effective Legacy distinction and the checker fails that capture.
+Renderer activation must be supplied before an owner can obtain a qualifying cave
+capture; the workload does not bypass that ownership gate.
+
+Save/load calls the normal world-state/metadata saves and shared world-load entry
+path. Entry completes its existing synchronous readiness work, restores the
+camera to the scripted pose, and continues normal rendering and streaming.
+`workload.reload` records the originating `request_frame`, the
+`first_settled_frame`, and monotonic `elapsed_ms` from the reload request through
+that frame's presentation endpoint. A settled frame requires gameplay, successful
+world-entry readiness, no scheduler fault, zero streaming queue depth, zero
+terrain/water upload candidates and no foliage build backlog. The corresponding
+queue counters and readiness flags are observed every measured frame. Validation
+recomputes the settled predicate and requires the first such frame after the
+request, duration within measured wall coverage, and subsequent camera motion.
+The duration must include every complete frame interval strictly between the
+request and settled frames (with a 0.000001 ms numerical tolerance). The two
+boundary frame intervals may be covered only partially.
+No timing threshold selects a camera pose or stops a script. A missing settled
+frame remains null and cannot qualify.
+
+Menu actions use the gameplay pause function, `settings.rml`, `pause.rml`, the
+main-menu game state, and the normal load callback. Menu-only frames stay in the
+measurement ring and whole-frame GPU interval, even when no scene pass runs.
+Observed gameplay/main-menu and pause states, and the visible UI document, must
+match the script. A queued document request alone is insufficient. No UI input
+or filesystem save outside the requested benchmark world is synthesized.
+
+V4 retains every v3 distribution, sample, adapter, profile and override check. Its
+additional required evidence is:
+
+| Field | Meaning |
+|---|---|
+| `settings.gns_enabled` | Actual compiled GNS networking setting, including false on builds without GNS |
+| `settings.active_regions` | Effective enabled flag, uint64 work limit, hold ticks, reduced shift |
+| `settings.far_mode` | Requested/effective far mode and requested/effective cave policy at the measured window end; each frame also records these values |
+| `settings.graphics_preset` | Clearly reserved for a future named settings preset; null on this base, with `graphics_preset_status: "not_exposed"` |
+| `settings.effective_render` | Effective dimensions, render scale, uncapped vsync, TAAU, SSAO/cloud/volumetric qualities, camera FOV, UI scale and window mode |
+| `settings.effective_render.systems` | Every `render.*` flag and resolved scalar/vector parameter, enumerated from the shared SystemConfig registry, including sky LUT and live weather; disabled entries retain their resolved inputs |
+| `settings.render_overrides` | Active render override declarations, also covered by the configuration identity |
+| `settings.simulation_identity` | Existing session `SystemConfigIdentity()` for effective simulation gates and tuning, including water resolution and ecology |
+| `settings.content_files` | Binary `fnv1a64:` digests keyed by portable relative paths for every file under `data/`, `res/`, `config/` and `game-assets/`, plus logical `inputs/` keys for explicit system-config and preset files and the user settings overlay when present |
+| `render_identity` | Stable `fnv1a64:` identity of the complete resolved `settings` object; recomputed by the validator |
+| `windows.startup` | Monotonic startup `elapsed_ms` through world identity checking and tick-zero preparation; its foliage observation precedes rendering |
+| `windows.warmup` | Every warmup `frame_wall_samples_ms`, plus distribution with p50/p95/p99/max/MAD, sample and unavailable counts |
+| `windows.measured` | Full measured frame-wall distribution, identical to the top-level distribution |
+| Each window's `foliage` | Actual `instances`, density-admitted `candidates`, submitted `candidate_slots`, `backend` (CPU/GPU), `observation: "window_end"` |
+| `workload.actions` | Observed tick, action name, success and modified chunk count; dig/fill in the edit workload must change terrain |
+| `workload.observations` | Consecutive tick/frame IDs, menu/pause state and visible document, region key/transitions, far/cave policies, underground and camera-in-air flags, terrain uploads, foliage build generation, queue counters and settled flag |
+
+Startup is elapsed time for initialization, not a rendered frame distribution.
+The content inventory deliberately includes indirect and unused assets so changes
+to scatter sets, tuning, models, textures, shaders, UI styles and fonts cannot
+silently compare as identical workloads. Content is streamed before runtime
+initialization and checked again before writing the report; a change refuses
+the capture. Inventory reads are outside warmup and measured frame intervals.
+Referenced content must resolve inside those four trees. The shared loader check
+refuses external absolute paths, parent-relative escapes and symlinks leaving a
+tree, including nested JSON dependencies, shader includes, models, textures,
+scatter sets and UI resources. A loader's optional-asset fallback cannot clear
+this refusal. Capture mesh loading also disables build/source-tree fallbacks.
+
+V4 presentation time starts at zero before UI initialization and holds there
+through startup. Warmup advances by one script tick per captured frame;
+measurement uses `(warmup_frames + tick) / tick_rate` seconds. The same clock
+drives shader time (water and foliage wind included), previous-frame animation
+time, sky/cloud drift, loading visualization and RmlUi elapsed time. Reloads
+preserve it, and menus continue to animate at the script rate while simulation
+is paused. Every workload observation records `presentation_seconds`, which
+the validator checks against its tick. Other captures and normal play retain
+the existing wall-clock sources.
+
+Warmup and measurement contain all their frame-wall samples, independently of
+slow-frame logging. The first warmup wall interval starts after preparation;
+measured intervals exclude startup, warmup and the report frame. Foliage counts
+are explicit window-end snapshots, not totals summed across frames or capacity
+markers. CPU fallback and GPU scatter collect candidate counts at admission. The
+GPU diagnostic reads only the current indirect draw count at window boundaries;
+it may wait there, outside measured frame intervals. The first measured interval
+starts after the warmup boundary observation, so that readback wait cannot leak
+into it. Ordinary play and legacy captures do not request these observations.
+
+Owner-machine example, with `BENCHMARK_OUTPUT` set to a directory outside the
+checkout:
+
+```sh
+build/debug/bin/luminumbra_client_app --no-audio \
+  --render-benchmark "$BENCHMARK_OUTPUT/edit.json" --render-benchmark-schema v4 \
+  --capture-size 3440x1440 --perf-profile quality \
+  --render-benchmark-warmup 400 --traversal tools/perf/fixtures/edit.traversal
+python3 tools/perf/validate_render_capture.py "$BENCHMARK_OUTPUT/edit.json" \
+  --qualified-renderer 'NVIDIA GeForce RTX 5070 Ti' \
+  --traversal tools/perf/fixtures/edit.traversal
+```
+
+Use each of the other scripts identically, subject to the cave activation gate
+above. Native captures remain owner
+machine work. The existing `RenderContractPython` suite and standard performance
+workflow run all new validator and deterministic script tests without a GPU.
+`RenderWorkloadDefinitions` registers the matching native parser regression in
+the existing CPU-only executable. No GPU timing case is added to CI.
+
 ## Checker, refusal and evidence
 
 `tools/perf/validate_render_capture.py` continues to accept existing v2 captures
@@ -224,9 +396,26 @@ refused; absent means only self-consistency checks for a fixed view. Traversals
 also require `--traversal` pointing to the expected script: exact script bytes,
 manifest fields, content identities, tick count and every observed camera sample must match. Camera
 comparison allows 0.002 m/degrees absolute tolerance for the engine's float
-camera representation (relative tolerance 1e-7). Future traversal versions are
+camera representation (relative tolerance 1e-7). Expected region IDs use an
+IEEE single-precision coordinate round-trip before division and floor, matching
+the native camera even at region boundaries. Future traversal versions are
 refused even inside a known v3 artifact. This checker does not certify the future
 far-volume ladder or its 90-second settle obligation.
+
+Use `--reference-capture reference.json` with the same expected traversal and
+adapter arguments to validate two captures and require equal render identities.
+Changes to default `systems.json` flags or parameters change this identity even
+without a CLI or environment override. The canonical hash uses sorted objects,
+length-prefixed UTF-8 strings, typed values and little-endian IEEE double bytes;
+it is independent of JSON formatting and platform byte order. Both v4 captures
+must contain the complete registry and a matching recomputed identity. V2 and v3
+reports remain accepted individually; they lack the complete configuration
+needed for this comparison.
+
+The registered native CPU regressions cover script dispatch order and ticks,
+reload request through first-settled present boundaries, visible menu state,
+CPU/GPU foliage count selection, and registry/configuration identity. They need
+no GPU timing or graphics context.
 
 Committed and generated evidence has these compatibility rules:
 

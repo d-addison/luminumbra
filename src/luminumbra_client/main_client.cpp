@@ -25,6 +25,8 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "app/MenuScreens.h"
 #include "app/ProcgenPalettes.h"
 #include "app/RenderBenchmarkReport.h"
+#include "app/RenderConfiguration.h"
+#include "app/RenderWorkload.h"
 #include "app/RuntimeRoot.h"
 #include "app/RuntimeStateRecorder.h"
 #include "app/SessionExit.h"
@@ -40,6 +42,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "core/IsolationConfig.h" // ScenarioHarness::ParseIsolationConfig (render-only layer isolation)
 #include "core/Log.h"
 #include "core/NvmlSampler.h" //  optional GPU power/clock sampling
+#include "core/PresentationClock.h"
 #include "core/RuntimeScenarioConfig.h"
 #include "core/ScenarioRunner.h"
 #include "debug/DebugCamera.h" // deterministic feature locator (--debug-goto cave|doline)
@@ -1337,6 +1340,7 @@ static void HandlePlayerVerbs(ClientAppContext& g_app,
 // Grandfathered monolith: main() currently scores 1281 against the gate's 250 threshold.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 int main(int argc, char* argv[]) {
+    const auto benchmark_process_start = std::chrono::steady_clock::now();
     ClientRuntimeState runtime;
     auto& g_camera = runtime.camera;
     auto& g_playerController = runtime.playerController;
@@ -1354,11 +1358,22 @@ int main(int argc, char* argv[]) {
     std::string root_path_str = RuntimeRootString(root_dir);
     LUMINUMBRA_CORE_INFO("Runtime root: {}", root_path_str);
 
+    const bool benchmark_v4 =
+        GetCommandLineOption(argc, argv, "--render-benchmark-schema", "v2") == "v4";
+    if (benchmark_v4) {
+        try {
+            if (HasCommandLineOption(argc, argv, "--scene-config"))
+                throw std::invalid_argument("schema v4 refuses --scene-config; the workload owns "
+                                            "scene configuration");
+            Luminumbra::Filesystem::capture_content_paths.enable(root_dir);
+        } catch (const std::exception& error) {
+            LUMINUMBRA_CORE_ERROR("Render benchmark content refused: {}", error.what());
+            return 2;
+        }
+    }
     RuntimeScenarioConfig scenario_config = ParseRuntimeScenarioConfig(argc, argv, root_dir);
     std::string override_error;
-    if (!scenario_config.systems_config_path.empty() ||
-        HasCommandLineFlag(argc, argv, "--systems-config") ||
-        HasCommandLineFlag(argc, argv, "--systems-config=")) {
+    if (HasCommandLineOption(argc, argv, "--systems-config")) {
         luminumbra::core::SystemConfig config;
         if (!luminumbra::core::SystemConfig::TryLoadFromFile(
                 scenario_config.systems_config_path, config, override_error)) {
@@ -1367,9 +1382,7 @@ int main(int argc, char* argv[]) {
         }
         scenario_config.systems_config_override = std::move(config);
     }
-    if (!scenario_config.preset_json_path.empty() ||
-        HasCommandLineFlag(argc, argv, "--preset-json") ||
-        HasCommandLineFlag(argc, argv, "--preset-json=")) {
+    if (HasCommandLineOption(argc, argv, "--preset-json")) {
         std::string json_text;
         if (!Luminumbra::world::LoadTerrainPresetOverride(
                 scenario_config.preset_json_path, root_dir / "data", json_text, override_error)) {
@@ -1456,7 +1469,7 @@ int main(int argc, char* argv[]) {
     namespace Measurement = Luminumbra::Client::Measurement;
     const std::string benchmark_schema =
         GetCommandLineOption(argc, argv, "--render-benchmark-schema", "v2");
-    const bool benchmark_v3 = benchmark_schema == "v3";
+    const bool benchmark_v3 = benchmark_schema == "v3" || benchmark_v4;
     const std::string capture_size = GetCommandLineOption(argc, argv, "--capture-size", "");
     const std::string perf_profile = GetCommandLineOption(argc, argv, "--perf-profile", "");
     const std::string traversal_path = GetCommandLineOption(argc, argv, "--traversal", "");
@@ -1464,19 +1477,40 @@ int main(int argc, char* argv[]) {
     std::string traversal_text;
     int capture_width = 0, capture_height = 0;
     nlohmann::json declared_overrides = nlohmann::json::object();
+    nlohmann::json benchmark_content;
+    const auto capture_content = [&]() {
+        auto content = Measurement::workload_content(root_dir);
+        if (!scenario_config.systems_config_path.empty())
+            content["inputs/systems_config.json"] =
+                Measurement::content_digest(scenario_config.systems_config_path);
+        if (!scenario_config.preset_json_path.empty())
+            content["inputs/preset.json"] =
+                Measurement::content_digest(scenario_config.preset_json_path);
+        const auto user_settings_path = luminumbra::core::SystemConfig::DefaultUserOverlayPath();
+        if (!user_settings_path.empty() && std::filesystem::exists(user_settings_path))
+            content["inputs/user_settings.json"] = Measurement::content_digest(user_settings_path);
+        return content;
+    };
     try {
         for (int index = 1; index < argc; ++index) {
-            const std::string option = argv[index];
+            const std::string argument = argv[index];
+            const auto assignment = argument.find('=');
+            const std::string option = argument.substr(0, assignment);
             if (option == "--render-benchmark-schema" || option == "--capture-size" ||
                 option == "--perf-profile" || option == "--traversal" ||
                 option == "--declare-render-overrides") {
-                if (index + 1 >= argc || std::string(argv[index + 1]).empty() ||
-                    std::string(argv[index + 1]).rfind("--", 0) == 0)
+                if (assignment != std::string::npos
+                        ? assignment + 1 == argument.size()
+                        : index + 1 >= argc || std::string(argv[index + 1]).empty() ||
+                              std::string(argv[index + 1]).rfind("--", 0) == 0)
                     throw std::invalid_argument("missing value for " + option);
             }
         }
         if (benchmark_schema != "v2" && !benchmark_v3)
             throw std::invalid_argument("unsupported render benchmark schema");
+        if (HasCommandLineOption(argc, argv, "--load-world"))
+            Measurement::require_workload_world_load(
+                benchmark_v4, GetCommandLineOption(argc, argv, "--load-world", ""), {});
         if (benchmark_v3 && scenario_config.active())
             throw std::invalid_argument(
                 "schema v3 cannot share a scenario-owned measurement window");
@@ -1514,28 +1548,45 @@ int main(int argc, char* argv[]) {
         }
         if (!traversal_path.empty()) {
             if (!benchmark_v3 || scenario_config.active() ||
-                HasCommandLineFlag(argc, argv, "--cam-pos") ||
-                HasCommandLineFlag(argc, argv, "--scene-config") ||
-                HasCommandLineFlag(argc, argv, "--debug-goto") ||
-                HasCommandLineFlag(argc, argv, "--profile-fly") ||
+                HasCommandLineOption(argc, argv, "--cam-pos") ||
+                HasCommandLineOption(argc, argv, "--cam-yaw") ||
+                HasCommandLineOption(argc, argv, "--cam-pitch") ||
+                HasCommandLineOption(argc, argv, "--scene-config") ||
+                HasCommandLineOption(argc, argv, "--debug-goto") ||
+                HasCommandLineOption(argc, argv, "--profile-fly") ||
+                HasCommandLineOption(argc, argv, "--timelapse-frames") ||
                 HasCommandLineFlag(argc, argv, "--timelapse"))
                 throw std::invalid_argument(
                     "traversal requires v3 and exclusive camera/world ownership");
-            if (std::filesystem::file_size(traversal_path) > 1024u * 1024u)
+            const auto script_size = std::filesystem::file_size(traversal_path);
+            // Read exactly the checked size (at most 1 MiB); a changing file refuses.
+            if (script_size > 1024u * 1024u)
                 throw std::invalid_argument("traversal manifest exceeds 1 MiB");
             std::ifstream input(traversal_path, std::ios::binary);
             if (!input)
                 throw std::invalid_argument("cannot read traversal manifest");
-            traversal_text.assign(std::istreambuf_iterator<char>(input),
-                                  std::istreambuf_iterator<char>());
+            traversal_text.resize(static_cast<std::size_t>(script_size));
+            input.read(traversal_text.data(), static_cast<std::streamsize>(script_size));
+            if (input.gcount() != static_cast<std::streamsize>(script_size) || input.bad() ||
+                input.peek() != std::char_traits<char>::eof())
+                throw std::invalid_argument("traversal manifest changed while reading");
             std::istringstream manifest(traversal_text);
             traversal = Measurement::Traversal::read(manifest);
+            if ((traversal->kind != "traversal") != benchmark_v4)
+                throw std::invalid_argument(
+                    "scripted workloads require schema v4; v1 traversal requires v3");
             if (!scenario_config.world_preset.empty() &&
                 scenario_config.world_preset != traversal->preset)
                 throw std::invalid_argument("traversal preset disagrees with --world-preset");
             scenario_config.world_preset = traversal->preset;
             scenario_config.auto_create_world = true;
             scenario_config.auto_enter_world = true;
+        }
+        if (benchmark_v4 && !traversal)
+            throw std::invalid_argument("schema v4 requires a workload traversal");
+        if (benchmark_v4) {
+            benchmark_content = capture_content();
+            Luminumbra::Client::presentation_clock.set_capture_tick(0, traversal->tickRate);
         }
     } catch (const std::exception& error) {
         LUMINUMBRA_CORE_ERROR("Render benchmark: {}", error.what());
@@ -1567,12 +1618,13 @@ int main(int argc, char* argv[]) {
     g_app.capture.render_benchmark_warmup =
         GetCommandLineIntOption(argc, argv, "--render-benchmark-warmup", 60);
     if (traversal) {
-        if (HasCommandLineFlag(argc, argv, "--render-benchmark-frames")) {
+        if (HasCommandLineOption(argc, argv, "--render-benchmark-frames")) {
             LUMINUMBRA_CORE_ERROR(
                 "Traversal owns the measured duration; omit --render-benchmark-frames");
             return 2;
         }
-        g_app.capture.render_benchmark_frames = static_cast<int>(Measurement::kMaxFrames);
+        g_app.capture.render_benchmark_frames =
+            benchmark_v4 ? traversal->expectedTicks : static_cast<int>(Measurement::kMaxFrames);
     }
     if (benchmark_v3 &&
         (g_app.capture.render_benchmark_frames < 1 ||
@@ -2041,6 +2093,9 @@ int main(int argc, char* argv[]) {
     gameSession->SetJobSystem(&jobSystem);
     gameSession->SetRootPath(root_path_str);
     gameSession->ApplySystemConfig(g_systemConfig);
+    if (traversal && traversal->kind == "region_crossing")
+        gameSession->SetRegionSchedulerConfig(
+            {.work_limit = 0, .hold_ticks = 30, .reduced_shift = 1});
 
     // Load creature species metadata (display names + rarity) for the codex/discovery
     // HUD. Missing/partial data degrades gracefully: DisplayName falls back to
@@ -2204,7 +2259,7 @@ int main(int argc, char* argv[]) {
         }
         glfwDestroyWindow(window);
         glfwTerminate();
-        return -1;
+        return Luminumbra::Filesystem::capture_content_paths.refused() ? 2 : -1;
     }
     // Render-optimization (cloud-raymarch-optimization): apply the reduced-res
     // sky-dome quality once the GL targets exist. No-op at 0 (full).
@@ -2269,6 +2324,16 @@ int main(int argc, char* argv[]) {
     }
 
     bool scenario_failed = false;
+    int exit_code = 0;
+    // All persistence entry points share this decision. In particular, digest
+    // refusal leaves the previous session loaded but must not rewrite its save.
+    const auto session_persistence_allowed = [&]() {
+        return Luminumbra::Client::SessionPersistenceAllowed(
+            benchmark_v4,
+            exit_code,
+            scenario_failed,
+            Luminumbra::Filesystem::capture_content_paths.refused());
+    };
     std::string scenario_failure_reason;
     bool scenario_ready = false;
     uint64_t scenario_frame_count = 0;
@@ -2290,7 +2355,7 @@ int main(int argc, char* argv[]) {
         g_app.menu.menu_backdrop_active = false;
         g_playerController.reset();
         scenario_failed = benchmark_v3 || scenario_config.active() ||
-                          HasCommandLineFlag(argc, argv, "--load-world") ||
+                          HasCommandLineOption(argc, argv, "--load-world") ||
                           HasCommandLineFlag(argc, argv, "--auto-create-world");
         scenario_failure_reason = error;
         runtime_state_recorder.capture("world_open_refused",
@@ -2345,7 +2410,7 @@ int main(int argc, char* argv[]) {
         }
 
         const bool bypass_loading_ui =
-            runtime_boot_recorder.enabled() ||
+            benchmark_v4 || runtime_boot_recorder.enabled() ||
             (scenario_config.active() && scenario_config.auto_enter_world);
         if (bypass_loading_ui) {
             LUMINUMBRA_CORE_INFO("Runtime scenario mode: entered world without loading UI.");
@@ -2376,6 +2441,8 @@ int main(int argc, char* argv[]) {
             }
             g_app.loading.world_render_data_initialized = true;
             SetGameState(window, gameStateManager, GameState::IN_GAME);
+            if (benchmark_v4 && g_uiManager)
+                g_uiManager->RequestLoadDocument("hud.rml");
             last_readiness_report = EvaluateReadiness(scenario_config, gameSession.get());
             if (!horizon_ready || !last_readiness_report.ready) {
                 scenario_failed = true;
@@ -2430,6 +2497,8 @@ int main(int argc, char* argv[]) {
         }
     };
 
+    std::string benchmark_created_world_id;
+    std::string benchmark_saved_world_digest;
     auto start_world_creation = [&](const std::string& name,
                                     const std::string& seed,
                                     const std::string& worldType,
@@ -2516,10 +2585,18 @@ int main(int argc, char* argv[]) {
             refuse_world_entry("Could not restore saved world state.");
             return;
         }
+        if (benchmark_v4)
+            benchmark_created_world_id = gameSession->GetMetadata().worldId;
         finish_world_entry();
     };
 
     auto start_world_load = [&](const std::string& id) {
+        try {
+            Measurement::require_workload_world_load(benchmark_v4, id, benchmark_created_world_id);
+        } catch (const std::exception& error) {
+            refuse_world_entry(error.what(), false);
+            return;
+        }
         const auto asset_error = game_content_error();
         if (!asset_error.empty()) {
             refuse_world_entry(asset_error, false);
@@ -2527,6 +2604,15 @@ int main(int argc, char* argv[]) {
         }
         // The UI's inspection is advisory: revalidate all artifacts at the moment of opening.
         prepare_world_entry();
+        if (benchmark_v4) {
+            try {
+                Measurement::require_saved_world_digest(gameSession->GetWorldSaveDir(),
+                                                        benchmark_saved_world_digest);
+            } catch (const std::exception& error) {
+                refuse_world_entry(error.what(), false);
+                return;
+            }
+        }
         if (!gameSession->LoadWorld(id)) {
             refuse_world_entry("Could not load this world.");
             return;
@@ -2866,6 +2952,8 @@ int main(int argc, char* argv[]) {
             if (act == "resume") {
                 SetGamePaused(window, false);
             } else if (act == "quit") {
+                if (!session_persistence_allowed())
+                    return;
                 if (g_camera)
                     gameSession->SetSpawnPoint(g_playerController
                                                    ? g_playerController->SavedSpawnAnchor()
@@ -3061,7 +3149,6 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    int exit_code = 0;
     float lastFrame = 0.0f;
     // Scenario driving/capture seam (core/ScenarioRunner.h): the runner is
     // created ONLY for `--scenario` runs (scenario_config.active()); a null
@@ -3119,6 +3206,27 @@ int main(int argc, char* argv[]) {
     std::chrono::steady_clock::time_point traversal_start{};
     double traversal_measured_duration = 0.0;
     nlohmann::json traversal_camera_samples = nlohmann::json::array();
+    std::size_t workload_action_index = 0;
+    nlohmann::json workload_actions = nlohmann::json::array();
+    nlohmann::json workload_observations = nlohmann::json::array();
+    nlohmann::json workload_windows = nlohmann::json::object();
+    nlohmann::json reload_result = nullptr;
+    Measurement::ReloadInterval reload_interval;
+    // Warmup and measurement are each bounded by kMaxFrames.
+    std::vector<double> workload_warmup_wall;
+    if (benchmark_v4)
+        workload_warmup_wall.reserve(
+            static_cast<std::size_t>(g_app.capture.render_benchmark_warmup));
+    const auto observe_workload_window = [&]() {
+        const auto* foliage = renderPipeline.foliage();
+        const auto counts = foliage ? foliage->observe_counts()
+                                    : Luminumbra::Rendering::FoliagePass::CountObservation{};
+        return nlohmann::json{{"instances", counts.instances},
+                              {"candidates", counts.candidates},
+                              {"candidate_slots", counts.candidate_slots},
+                              {"backend", counts.gpu ? "gpu" : "cpu"},
+                              {"observation", "window_end"}};
+    };
     auto active_overrides =
         benchmark_v3 ? Measurement::render_overrides(argc, argv) : nlohmann::json::object();
     if (benchmark_v3) {
@@ -3130,17 +3238,28 @@ int main(int argc, char* argv[]) {
         renderPipeline.set_benchmark_gpu_queries(benchmark_queries.get());
     }
     while (!glfwWindowShouldClose(window)) {
+        if (benchmark_v4 && Luminumbra::Filesystem::capture_content_paths.refused()) {
+            LUMINUMBRA_CORE_ERROR("Benchmark content reference escapes inventoried trees");
+            exit_code = 2;
+            break;
+        }
+        if (benchmark_v4 && scenario_failed) {
+            exit_code = 2;
+            break;
+        }
         MainLoopHeartbeat().fetch_add(1, std::memory_order_relaxed);
         float currentFrame = (float)glfwGetTime();
         float deltaTime = currentFrame - lastFrame;
         lastFrame = currentFrame;
-        deltaTime = std::min(deltaTime, 1.0f / 20.0f);
+        deltaTime = benchmark_v4 ? 1.0f / 30.0f : std::min(deltaTime, 1.0f / 20.0f);
         //  CPU-submit clock starts at frame top when benchmarking.
         const bool g_rb_active = !g_app.capture.render_benchmark_path.empty();
         if (g_rb_active)
             g_rb_frame_start = std::chrono::steady_clock::now();
         const bool measuring_v3 =
-            benchmark_v3 && gameStateManager.GetCurrentState() == GameState::IN_GAME &&
+            benchmark_v3 &&
+            (gameStateManager.GetCurrentState() == GameState::IN_GAME ||
+             (benchmark_v4 && benchmark_world_checked)) &&
             gameSession && g_app.benchmark.warmupFrames >= g_app.capture.render_benchmark_warmup &&
             g_app.benchmark.measuredFrames < g_app.capture.render_benchmark_frames;
         const auto measured_frame_id = static_cast<std::uint64_t>(
@@ -3172,17 +3291,35 @@ int main(int argc, char* argv[]) {
                     throw std::runtime_error(
                         "traversal world seed, preset or content identity mismatch");
                 benchmark_world_checked = true;
+                if (benchmark_v4) {
+                    if (traversal->kind == "region_crossing" &&
+                        !gameSession->ActiveRegionsEnabled())
+                        throw std::runtime_error("region crossing requires active regions");
+                    if (traversal->kind == "menu_entry" && !g_uiManager)
+                        throw std::runtime_error("menu entry requires the gameplay UI");
+                }
             } catch (const std::exception& error) {
                 LUMINUMBRA_CORE_ERROR("Benchmark world refused: {}", error.what());
                 exit_code = 2;
                 break;
             }
         }
+        const auto frame_presentation = Luminumbra::Client::select_frame_presentation(
+            benchmark_v4,
+            benchmark_world_checked,
+            static_cast<std::uint32_t>(g_app.benchmark.warmupFrames),
+            static_cast<std::uint32_t>(g_app.benchmark.measuredFrames),
+            static_cast<std::uint32_t>(g_app.capture.render_benchmark_warmup),
+            traversal ? static_cast<std::uint32_t>(traversal->expectedTicks) : 0u,
+            traversal ? traversal->tickRate : 30u);
+        if (frame_presentation.tick)
+            Luminumbra::Client::presentation_clock.set_capture_tick(*frame_presentation.tick,
+                                                                    traversal->tickRate);
         if (measuring_v3) {
             measured_samples->append(measured_frame_id);
             benchmark_queries->begin_frame(measured_frame_id);
         }
-        if (traversal && gameSession) {
+        if (traversal && gameSession && (!benchmark_v4 || benchmark_world_checked)) {
             if (measuring_v3) {
                 const auto now = std::chrono::steady_clock::now();
                 if (traversal_start.time_since_epoch().count() == 0)
@@ -3190,12 +3327,107 @@ int main(int argc, char* argv[]) {
                 // One fixed simulation tick per measured frame. Wall time is observation only.
                 traversal_target_tick = static_cast<int>(traversal_ticks) + 1;
             }
+            if (benchmark_v4) {
+                const bool succeeded = Measurement::dispatch_actions(
+                    traversal->actions,
+                    workload_action_index,
+                    traversal_target_tick,
+                    [&](const Measurement::Traversal::Action& action, bool fill) {
+                        const Luminumbra::Vec3 position(static_cast<float>(action.position[0]),
+                                                        static_cast<float>(action.position[1]),
+                                                        static_cast<float>(action.position[2]));
+                        bool ready = true;
+                        if (action.tick == 0)
+                            ready = gameSession->GetWorldSystem()->EnsureSurfaceReadyNear(
+                                position, gameSession->GetPhysicsSystem(), 1, 1);
+                        const int modified = gameSession->GetWorldSystem()->EditTerrainVoxel(
+                            position,
+                            static_cast<float>(action.radius),
+                            fill,
+                            gameSession->GetPhysicsSystem());
+                        gameSession->NotifyGroundObjectEdit(position);
+                        return Measurement::ActionResult{
+                            ready && (modified > 0 || action.tick == 0), modified};
+                    },
+                    [&](bool main_menu) {
+                        if (!session_persistence_allowed())
+                            return Measurement::ActionResult{false, 0};
+                        const bool saved =
+                            gameSession->SaveWorldState() && gameSession->SaveWorld();
+                        if (saved) {
+                            try {
+                                benchmark_saved_world_digest =
+                                    Measurement::saved_world_digest(gameSession->GetWorldSaveDir());
+                            } catch (const std::exception& error) {
+                                LUMINUMBRA_CORE_ERROR("Benchmark save refused: {}", error.what());
+                                return Measurement::ActionResult{false, 0};
+                            }
+                        }
+                        if (saved && main_menu) {
+                            prepare_world_entry();
+                            g_playerController.reset();
+                            SetGamePaused(window, false);
+                            SetGameState(window, gameStateManager, GameState::MAIN_MENU);
+                            g_uiManager->RequestLoadDocument("main_menu.rml");
+                        }
+                        return Measurement::ActionResult{saved, 0};
+                    },
+                    [&](bool reload) {
+                        if (reload)
+                            reload_interval.request(measured_frame_id,
+                                                    std::chrono::steady_clock::now());
+                        const std::string id = gameSession->GetMetadata().worldId;
+                        start_world_load(id);
+                        if (g_uiManager)
+                            g_uiManager->RequestLoadDocument("hud.rml");
+                        return Measurement::ActionResult{!scenario_failed, 0};
+                    },
+                    [&](bool open) {
+                        SetGamePaused(window, open);
+                        return Measurement::ActionResult{};
+                    },
+                    [&](bool open) {
+                        g_uiManager->RequestLoadDocument(open ? "settings.rml" : "pause.rml");
+                        return Measurement::ActionResult{};
+                    },
+                    [&](const Measurement::Traversal::Action& action,
+                        const Measurement::ActionResult& result) {
+                        workload_actions.push_back({{"tick", action.tick},
+                                                    {"name", action.name},
+                                                    {"succeeded", result.succeeded},
+                                                    {"modified_chunks", result.modified_chunks}});
+                        if (!result.succeeded)
+                            LUMINUMBRA_CORE_ERROR("Benchmark action failed: {}", action.name);
+                    });
+                if (!succeeded) {
+                    exit_code = 2;
+                    glfwSetWindowShouldClose(window, true);
+                    break;
+                }
+            }
             const auto pose = traversal->sample(traversal_target_tick);
+            if (benchmark_v4 && g_camera) {
+                g_camera->Position =
+                    glm::vec3(pose.position[0], pose.position[1], pose.position[2]);
+                g_camera->Yaw = static_cast<float>(pose.yaw);
+                g_camera->Pitch = static_cast<float>(pose.pitch);
+                g_camera->updateCameraVectors();
+            }
             g_app.capture.fixed_cam = true;
             g_app.capture.fixed_cam_pos =
                 glm::vec3(pose.position[0], pose.position[1], pose.position[2]);
             g_app.capture.fixed_cam_yaw = static_cast<float>(pose.yaw);
             g_app.capture.fixed_cam_pitch = static_cast<float>(pose.pitch);
+            if (benchmark_v4 && workload_windows.empty()) {
+                workload_windows["startup"] = {
+                    {"elapsed_ms",
+                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                               benchmark_process_start)
+                         .count()},
+                    {"foliage", observe_workload_window()}};
+                g_rb_frame_start = std::chrono::steady_clock::now();
+                g_app.benchmark.previousFrameEnd = g_rb_frame_start;
+            }
         }
         // runtime telemetry ( implementation note): always-on frame wall to localize
         // slideshow-on-move frames.
@@ -3436,6 +3668,8 @@ int main(int argc, char* argv[]) {
         if (g_app.overlay.imgui_enabled) {
             ImGui_ImplOpenGL3_NewFrame();
             ImGui_ImplGlfw_NewFrame();
+            if (frame_presentation.imgui_delta)
+                ImGui::GetIO().DeltaTime = *frame_presentation.imgui_delta;
             ImGui::NewFrame();
         }
 
@@ -3621,7 +3855,7 @@ int main(int argc, char* argv[]) {
                     if (elapsed > g_app.capture.profile_fly_seconds)
                         glfwSetWindowShouldClose(window, true);
                 } else if (scenario_drive == ScenarioRunner::InGameDrive::kFallThrough &&
-                           g_playerController && !g_app.hud.show_settings) {
+                           g_playerController && !benchmark_v4 && !g_app.hud.show_settings) {
                     g_playerController->Update(deltaTime); // movement paused while the menu is open
                 }
                 if (g_app.capture.timelapse_frames > 0 && g_camera && gameSession) {
@@ -3778,12 +4012,17 @@ int main(int argc, char* argv[]) {
                 // host, and camera-anchored streaming would diverge the hashed world.
                 _rb_sim_t0 = std::chrono::steady_clock::now(); //
                 if (!scenario_config.networked_session_smoke()) {
-                    if (g_playerController)
+                    if (benchmark_v4 && g_camera)
+                        gameSession->SetLocalPlayerSimulationPosition(g_camera->Position, true);
+                    else if (g_playerController)
                         gameSession->SetLocalPlayerSimulationPosition(
                             g_playerController->GetPosition(),
                             g_playerController->GetMovementMode() ==
                                 Luminumbra::Client::MovementMode::Walking);
-                    if (traversal) {
+                    if (benchmark_v4) {
+                        if (measuring_v3 && !g_app.hud.paused)
+                            gameSession->TickSimulation(1.0 / traversal->tickRate);
+                    } else if (traversal) {
                         while (measuring_v3 && !gameSession->GetRegionSchedulerFault() &&
                                traversal_ticks < static_cast<std::uint64_t>(traversal_target_tick))
                             traversal_ticks +=
@@ -4785,7 +5024,9 @@ int main(int argc, char* argv[]) {
         // GPU_work) + present. The old benchmark summed per-pass GPU timers ONLY
         // and was blind to the CPU-submit win this path provides; it also ran at idle
         // clock, so it now reports NVML power+clock to prove the GPU is at boost.
-        if (g_rb_active && currentState == GameState::IN_GAME && gameSession) {
+        if (g_rb_active &&
+            (currentState == GameState::IN_GAME || (benchmark_v4 && benchmark_world_checked)) &&
+            gameSession) {
             const auto rb_now =
                 benchmark_v3 ? benchmark_present_end : std::chrono::steady_clock::now();
             const double cpu_submit_ms =
@@ -4819,6 +5060,102 @@ int main(int argc, char* argv[]) {
                 if (g_app.capture.timeScale != 1.0f)
                     active_overrides["runtime:time_scale"] =
                         std::to_string(g_app.capture.timeScale);
+            }
+            if (benchmark_v4 && measuring_v3) {
+                traversal_ticks = static_cast<std::uint64_t>(traversal_target_tick);
+                const auto selection = renderPipeline.far_world_selection();
+                const auto cave = renderPipeline.far_world_renderer().CavePolicy(selection);
+                const auto* world = gameSession->GetWorldSystem();
+                const auto& uploads = renderPipeline.get_last_mesh_upload_stats();
+                const auto* foliage = renderPipeline.foliage();
+                const bool in_game = currentState == GameState::IN_GAME;
+                const bool settled = in_game && !gameSession->GetRegionSchedulerFault() &&
+                                     world->get_streaming_telemetry_stats().last_queue_depth == 0 &&
+                                     uploads.terrain_upload_candidates == 0 &&
+                                     uploads.water_upload_candidates == 0 &&
+                                     (!foliage || !foliage->build_pending()) && scenario_ready &&
+                                     !scenario_failed;
+                const auto region =
+                    Luminumbra::world::ActiveRegionLedger::region_at(g_camera->Position);
+                bool camera_in_air = false;
+                if (traversal->kind == "cave" && in_game) {
+                    const auto coords = world->world_to_chunk_coords(g_camera->Position);
+                    const auto chunk = world->find_streamed_chunk(coords);
+                    constexpr std::size_t size_x = Luminumbra::CHUNK_SIZE_X + 1;
+                    constexpr std::size_t size_y = Luminumbra::CHUNK_SIZE_Y + 1;
+                    constexpr std::size_t size_z = Luminumbra::CHUNK_SIZE_Z + 1;
+                    // Read one nearest lattice sample only after checking the exact fixed bound.
+                    if (chunk && chunk->get_state() == Luminumbra::ChunkState::Ready &&
+                        chunk->sdf_data.size() == size_x * size_y * size_z) {
+                        const auto local =
+                            g_camera->Position -
+                            glm::vec3(coords * Luminumbra::IVec3(Luminumbra::CHUNK_SIZE_X,
+                                                                 Luminumbra::CHUNK_SIZE_Y,
+                                                                 Luminumbra::CHUNK_SIZE_Z));
+                        const auto x = static_cast<std::size_t>(
+                            std::clamp(std::lround(local.x), 0L, static_cast<long>(size_x - 1)));
+                        const auto y = static_cast<std::size_t>(
+                            std::clamp(std::lround(local.y), 0L, static_cast<long>(size_y - 1)));
+                        const auto z = static_cast<std::size_t>(
+                            std::clamp(std::lround(local.z), 0L, static_cast<long>(size_z - 1)));
+                        camera_in_air = chunk->sdf_data[x + y * size_x + z * size_x * size_y] > 0;
+                    }
+                }
+                nlohmann::json transitions = nlohmann::json::array();
+                if (in_game && !g_app.hud.paused) {
+                    for (const auto& transition : gameSession->GetRegionSchedule().transitions)
+                        transitions.push_back({{"region", {transition.key.x, transition.key.z}},
+                                               {"from", static_cast<int>(transition.from)},
+                                               {"to", static_cast<int>(transition.to)}});
+                }
+                const auto menu = Measurement::observe_menu(
+                    in_game, g_app.hud.paused, [&](const char* identifier) {
+                        if (traversal->kind != "menu_entry" || !g_uiManager ||
+                            !g_uiManager->GetContext())
+                            return false;
+                        const auto* document = g_uiManager->GetContext()->GetDocument(identifier);
+                        return document && document->IsVisible();
+                    });
+                workload_observations.push_back(
+                    {{"tick", traversal_target_tick},
+                     {"presentation_seconds",
+                      *Luminumbra::Client::presentation_clock.capture_seconds()},
+                     {"frame", measured_frame_id},
+                     {"state", menu.state},
+                     {"ui_document", menu.document},
+                     {"paused", menu.paused},
+                     {"region", {region.x, region.z}},
+                     {"transitions", std::move(transitions)},
+                     {"far_requested",
+                      Luminumbra::Rendering::FarWorldModeName(selection.requested)},
+                     {"far_effective",
+                      Luminumbra::Rendering::FarWorldModeName(selection.effective)},
+                     {"cave_requested",
+                      cave.requested ? nlohmann::json(static_cast<int>(*cave.requested))
+                                     : nlohmann::json(nullptr)},
+                     {"cave_effective",
+                      cave.effective ? nlohmann::json(static_cast<int>(*cave.effective))
+                                     : nlohmann::json(nullptr)},
+                     {"underground",
+                      in_game &&
+                          g_camera->Position.y < world->GetTerrainHeightAt(g_camera->Position.x,
+                                                                           g_camera->Position.z)},
+                     {"camera_in_air", camera_in_air},
+                     {"foliage_build_generation", foliage ? foliage->build_generation() : 0},
+                     {"terrain_uploads", uploads.terrain_uploads},
+                     {"stream_queue_depth",
+                      world->get_streaming_telemetry_stats().last_queue_depth},
+                     {"terrain_upload_candidates", uploads.terrain_upload_candidates},
+                     {"water_upload_candidates", uploads.water_upload_candidates},
+                     {"foliage_pending", foliage && foliage->build_pending()},
+                     {"world_ready", scenario_ready && !scenario_failed},
+                     {"settled", settled}});
+                reload_interval.observe(measured_frame_id, settled, rb_now);
+                if (const auto& result = reload_interval.result();
+                    result && reload_result.is_null())
+                    reload_result = {{"request_frame", result->request_frame},
+                                     {"first_settled_frame", result->first_settled_frame},
+                                     {"elapsed_ms", result->elapsed_ms}};
             }
             rb_prev_end = rb_now;
 
@@ -4875,6 +5212,15 @@ int main(int argc, char* argv[]) {
 
             if (rb_warm < g_app.capture.render_benchmark_warmup) {
                 ++rb_warm;
+                if (benchmark_v4) {
+                    workload_warmup_wall.push_back(wall_ms > 0 ? wall_ms
+                                                               : cpu_submit_ms + present_ms);
+                    if (rb_warm == g_app.capture.render_benchmark_warmup) {
+                        workload_windows["warmup"]["foliage"] = observe_workload_window();
+                        // Boundary count readback is excluded from the first warm measurement.
+                        rb_prev_end = std::chrono::steady_clock::now();
+                    }
+                }
             } else if (rb_count < g_app.capture.render_benchmark_frames) {
                 rb_shadow += s.shadow_gpu_ms;
                 rb_gbuffer += s.gbuffer_gpu_ms;
@@ -4916,9 +5262,11 @@ int main(int argc, char* argv[]) {
                 if (traversal && measuring_v3) {
                     traversal_measured_duration =
                         std::chrono::duration<double>(rb_now - traversal_start).count();
-                    if (traversal_ticks == static_cast<std::uint64_t>(traversal->expectedTicks))
+                    if (traversal_ticks == static_cast<std::uint64_t>(traversal->expectedTicks)) {
                         g_app.capture.render_benchmark_frames = rb_count;
-                    else if (rb_count == static_cast<int>(Measurement::kMaxFrames)) {
+                        if (benchmark_v4)
+                            workload_windows["measured"]["foliage"] = observe_workload_window();
+                    } else if (rb_count == static_cast<int>(Measurement::kMaxFrames)) {
                         LUMINUMBRA_CORE_ERROR("Traversal exhausted its 18000-frame measurement "
                                               "ring before completion");
                         exit_code = 1;
@@ -5145,7 +5493,7 @@ int main(int argc, char* argv[]) {
                           {"last_frame", g_app.capture.render_benchmark_warmup + rb_count},
                           {"reason", "report and optional screenshot"}}});
                     j["workload"] = benchmark_world_identity;
-                    j["workload"]["kind"] = traversal ? "traversal" : "fixed_view";
+                    j["workload"]["kind"] = traversal ? traversal->kind : "fixed_view";
                     j["workload"]["expected_frames"] = g_app.capture.render_benchmark_frames;
                     if (traversal) {
                         j["workload"]["script"] = traversal_text;
@@ -5159,6 +5507,71 @@ int main(int argc, char* argv[]) {
                         j["workload"]["cold_cache"] = true;
                         j["workload"]["camera_samples"] = traversal_camera_samples;
                     }
+                }
+                if (benchmark_v4) {
+                    j["schema"] = "luminumbra.render_benchmark.v4";
+                    try {
+                        if (Luminumbra::Filesystem::capture_content_paths.refused())
+                            throw std::runtime_error("content reference escapes inventoried trees");
+                        if (capture_content() != benchmark_content)
+                            throw std::runtime_error("workload content changed during capture");
+                    } catch (const std::exception& error) {
+                        LUMINUMBRA_CORE_ERROR("Benchmark content refused: {}", error.what());
+                        exit_code = 2;
+                        break;
+                    }
+                    j["settings"]["simulation_identity"] = gameSession->SystemConfigIdentity();
+                    j["settings"]["content_files"] = benchmark_content;
+                    const auto& region_config = gameSession->GetActiveRegionLedger().config();
+#ifdef LUMINUMBRA_ENABLE_GNS
+                    j["settings"]["gns_enabled"] = true;
+#else
+                    j["settings"]["gns_enabled"] = false;
+#endif
+                    j["settings"]["active_regions"] = {
+                        {"enabled", gameSession->ActiveRegionsEnabled()},
+                        {"work_limit", region_config.work_limit},
+                        {"hold_ticks", region_config.hold_ticks},
+                        {"reduced_shift", region_config.reduced_shift}};
+                    // UserSettings has no named graphics preset on this base.
+                    const auto& last_observation = workload_observations.back();
+                    j["settings"]["far_mode"] = {
+                        {"requested", last_observation["far_requested"]},
+                        {"effective", last_observation["far_effective"]},
+                        {"cave_requested", last_observation["cave_requested"]},
+                        {"cave_effective", last_observation["cave_effective"]}};
+                    j["settings"]["graphics_preset"] = nullptr;
+                    j["settings"]["graphics_preset_status"] = "not_exposed";
+                    j["settings"]["effective_render"] = {
+                        {"render_scale", renderPipeline.render_scale()},
+                        {"vsync", false},
+                        {"taau", renderPipeline.taau_enabled()},
+                        {"ssao_quality", renderPipeline.get_ssao_quality()},
+                        {"cloud_quality", renderPipeline.get_cloud_quality()},
+                        {"fov", g_camera->Zoom},
+                        {"ui_scale", g_systemConfig.user().ui_scale},
+                        {"window_mode", WindowModeName(g_windowState.mode)},
+                        {"volumetric_quality", renderPipeline.volumetric_quality()},
+                        {"width", renderPipeline.screen_width()},
+                        {"height", renderPipeline.screen_height()},
+                        {"systems", Measurement::render_systems(g_systemConfig)}};
+                    j["settings"]["render_overrides"] = active_overrides;
+                    j["render_identity"] = Measurement::render_identity(j["settings"]);
+                    const auto warm_stats = Measurement::summarize(workload_warmup_wall);
+                    auto& warm = workload_windows["warmup"];
+                    warm["frame_wall_samples_ms"] = workload_warmup_wall;
+                    warm["distribution"] = {{"unit", "ms"},
+                                            {"sample_count", workload_warmup_wall.size()},
+                                            {"unavailable_count", 0}};
+                    const std::array<const char*, 5> names = {"p50", "p95", "p99", "max", "mad"};
+                    for (std::size_t index = 0; index < names.size(); ++index)
+                        warm["distribution"][names[index]] = warm_stats[index];
+                    workload_windows["measured"]["distribution"] =
+                        j["distribution"]["frame_wall_ms"];
+                    j["windows"] = workload_windows;
+                    j["workload"]["actions"] = workload_actions;
+                    j["workload"]["observations"] = workload_observations;
+                    j["workload"]["reload"] = reload_result;
                 }
                 std::error_code _rb_ec;
                 const std::filesystem::path rb_path(g_app.capture.render_benchmark_path);
@@ -5281,6 +5694,7 @@ int main(int argc, char* argv[]) {
     trace_shutdown("world_save_started");
     Luminumbra::Client::SaveSessionOnExit(
         gameSession.get(),
+        session_persistence_allowed(),
         [&] {
             if (!g_app.menu.menu_backdrop_active && g_camera)
                 gameSession->SetSpawnPoint(g_playerController
@@ -5345,5 +5759,5 @@ int main(int argc, char* argv[]) {
     }
     glfwDestroyWindow(window);
     glfwTerminate();
-    return exit_code;
+    return benchmark_v4 && Luminumbra::Filesystem::capture_content_paths.refused() ? 2 : exit_code;
 }

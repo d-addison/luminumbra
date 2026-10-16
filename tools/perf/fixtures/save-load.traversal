@@ -1,0 +1,20 @@
+luminumbra.traversal.v2
+workload save_load
+duration_seconds 60
+tick_rate 30
+speed_mps 8
+seed 424242
+preset default
+preset_revision 7
+preset_identity 0b5c29c7a27f611a
+content_identity 7583622726659997707
+expected_ticks 1800
+cold_cache true
+points 4
+point 0 8 80 8 0 -6
+point 240 72 80 8 0 -6
+point 1200 72 80 8 0 -6
+point 1800 232 80 8 0 -6
+actions 2
+action 240 save 0 0 0 0
+action 300 reload 0 0 0 0

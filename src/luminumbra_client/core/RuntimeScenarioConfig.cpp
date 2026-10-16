@@ -1,5 +1,6 @@
 #include "core/RuntimeScenarioConfig.h"
 #include "core/Log.h"
+#include "luminumbra_common/core/CaptureContentPaths.h"
 #include "luminumbra_common/core/Environment.h"
 #include <algorithm>
 #include <cstdlib>
@@ -7,6 +8,7 @@
 #include <fstream>
 #include <iomanip>
 #include <sstream>
+#include <string_view>
 
 namespace Luminumbra::Client::ScenarioHarness {
 
@@ -27,6 +29,16 @@ bool HasCommandLineFlag(int argc, char* argv[], const std::string& flag) {
         if (argv[i] == flag) {
             return true;
         }
+    }
+    return false;
+}
+
+bool HasCommandLineOption(int argc, char* argv[], const std::string& flag) {
+    const std::string assignment_prefix = flag + "=";
+    for (int i = 1; i < argc; ++i) {
+        const std::string_view argument = argv[i];
+        if (argument == flag || argument.starts_with(assignment_prefix))
+            return true;
     }
     return false;
 }
@@ -216,7 +228,9 @@ ParseRuntimeScenarioConfig(int argc, char* argv[], const std::filesystem::path& 
         GetCommandLineOption(argc, argv, "--skinned-albedo-texture", "");
     config.skinned_normal_texture =
         GetCommandLineOption(argc, argv, "--skinned-normal-texture", "");
-    if (config.skinned_albedo_texture.empty() && !config.creature_archetype.empty()) {
+    if (config.skinned_albedo_texture.empty() && !config.creature_archetype.empty() &&
+        Luminumbra::Filesystem::capture_content_paths.allows(root_dir /
+                                                             config.creature_archetype)) {
         std::ifstream archetype_in(root_dir / config.creature_archetype);
         if (archetype_in.is_open()) {
             try {

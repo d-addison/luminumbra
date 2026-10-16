@@ -188,11 +188,11 @@ class RenderRunnerTests(unittest.TestCase):
         text = text.replace('expected_ticks 1800', 'expected_ticks 4')
         self.script.write_bytes(text.encode('utf-8'))
 
-    def run_client(self, name, extra=(), environment=None, expected_exit=0):
+    def run_client(self, name, extra=(), environment=None, expected_exit=0, schema='v3'):
         artifact = self.root / (name + '.json')
         log = OPTIONS.artifacts / (self._testMethodName + '-' + name + '.log')
         command = [str(OPTIONS.client), '--no-audio', '--no-menu-backdrop',
-                   '--render-benchmark', str(artifact), '--render-benchmark-schema', 'v3',
+                   '--render-benchmark', str(artifact), '--render-benchmark-schema', schema,
                    '--capture-size', '160x90', '--perf-profile', 'quality',
                    '--render-benchmark-warmup', '2', *extra]
         retained = OPTIONS.artifacts / (self._testMethodName + '-' + name + '.json')
@@ -224,6 +224,90 @@ class RenderRunnerTests(unittest.TestCase):
             self.assertEqual([row['tick'] for row in data['workload']['camera_samples']], [1, 2, 3, 4])
         self.assertEqual(first['workload']['camera_samples'], second['workload']['camera_samples'])
         self.assertEqual(first['workload']['actual_ticks'], second['workload']['actual_ticks'])
+
+    def short_save_load_script(self):
+        script = self.root / 'save-load.traversal'
+        text = (OPTIONS.source / 'tools/perf/fixtures/save-load.traversal').read_text(encoding='utf-8')
+        text = text.split('points ', 1)[0]
+        text = text.replace('duration_seconds 60', 'duration_seconds 0.13333333333333333')
+        text = text.replace('expected_ticks 1800', 'expected_ticks 4')
+        text += ('points 2\npoint 0 8 80 8 0 -6\npoint 4 9 80 8 0 -6\n'
+                 'actions 2\naction 1 save 0 0 0 0\naction 2 reload 0 0 0 0\n')
+        script.write_bytes(text.encode('utf-8'))
+        return script
+
+    def external_texture_refusal(self, absolute):
+        manifest = self.root / 'data/models/trees/tree_textures.json'
+        document = json.loads(manifest.read_bytes())
+        external = self.root / 'external.ltex'
+        shutil.copy2(self.root / document['models'][0]['albedo'], external)
+        document['models'][0]['albedo'] = (str(external) if absolute
+                                           else 'data/../external.ltex')
+        # The fixture may share a hard link with the source; replace its inode.
+        _atomic_write(manifest, json.dumps(document).encode('utf-8'))
+        log = self.run_client('refused', ['--traversal', str(self.short_save_load_script())],
+                              expected_exit=2, schema='v4')
+        self.assertIn('content reference escapes inventoried trees', log)
+        self.assertNotIn('Traversal owns the measured duration', log)
+
+    def test_absolute_texture_refusal(self):
+        self.external_texture_refusal(absolute=True)
+
+    def test_parent_relative_texture_refusal(self):
+        self.external_texture_refusal(absolute=False)
+
+    def scene_config_refusal(self, assignment):
+        scene = self.root / 'external-scene.json'
+        scene.write_text(json.dumps({'moon': 0.75, 'weather': {'type': 'rain'},
+                                     'clouds': {'coverage': 0.9}}), encoding='utf-8')
+        option = [f'--scene-config={scene}'] if assignment else ['--scene-config', str(scene)]
+        log = self.run_client('refused', ['--traversal', str(self.short_save_load_script()),
+                                         *option], expected_exit=2, schema='v4')
+        self.assertIn('schema v4 refuses --scene-config', log)
+        self.assertNotIn('Scene-config loaded:', log)
+        self.assertNotIn('Scene-config parse failed:', log)
+        self.assertFalse((self.root / 'worlds/saves').exists())
+
+    def test_scene_config_separate_refusal(self):
+        self.scene_config_refusal(assignment=False)
+
+    def test_scene_config_assignment_refusal(self):
+        self.scene_config_refusal(assignment=True)
+
+    def test_existing_world_option_forms_refusal(self):
+        for option in (['--load-world', 'existing-world'], ['--load-world=existing-world'],
+                       ['--load-world=']):
+            with self.subTest(option=option):
+                log = self.run_client('refused', ['--traversal', str(self.short_save_load_script()),
+                                                 *option], expected_exit=2, schema='v4')
+                self.assertIn('schema v4 refuses --load-world', log)
+                self.assertNotIn('Static-model textures registered', log)
+                self.assertFalse((self.root / 'worlds/saves').exists())
+
+    def test_traversal_duration_option_forms_refusal(self):
+        for option in (['--render-benchmark-frames', '4'], ['--render-benchmark-frames=4']):
+            with self.subTest(option=option):
+                log = self.run_client('refused', ['--traversal', str(self.script), *option],
+                                      expected_exit=2)
+                self.assertIn('Traversal owns the measured duration', log)
+
+    def test_capture_option_missing_values_refusal(self):
+        for name in ('--render-benchmark-schema', '--capture-size', '--perf-profile',
+                     '--traversal', '--declare-render-overrides'):
+            for option in ([name, '--no-audio'], [f'{name}=']):
+                with self.subTest(option=option):
+                    log = self.run_client('refused', option, expected_exit=2)
+                    self.assertIn(f'missing value for {name}', log)
+
+    def test_traversal_owner_option_forms_refusal(self):
+        for name, value in (('--cam-pos', '1,2,3'), ('--cam-yaw', '10'), ('--cam-pitch', '5'),
+                            ('--debug-goto', 'spawn'), ('--profile-fly', '4'),
+                            ('--timelapse-frames', '4')):
+            for option in ([name, value], [f'{name}={value}']):
+                with self.subTest(option=option):
+                    log = self.run_client('refused', ['--traversal', str(self.script), *option],
+                                          expected_exit=2)
+                    self.assertIn('exclusive camera/world ownership', log)
 
     def test_implicit_creation_failure(self):
         log = self.run_client('missing', ['--world-preset', 'nonexistent_render_test_preset'], expected_exit=2)

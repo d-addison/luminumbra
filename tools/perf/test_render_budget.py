@@ -4,7 +4,6 @@ import copy
 import json
 from pathlib import Path
 import subprocess
-import sys
 import tempfile
 import unittest
 
@@ -90,8 +89,8 @@ class RenderBudgetTests(unittest.TestCase):
             budget.evaluate(data)
 
     def run_cli(self, path, *extra):
-        return subprocess.run([sys.executable, str(Path(capture.__file__)), str(path),
-                               '--qualified-renderer', base.QUALIFIED, *extra],
+        return subprocess.run(base.isolated_script(capture.__file__, str(path),
+                                        '--qualified-renderer', base.QUALIFIED, *extra),
                               capture_output=True, text=True, check=False)
 
     def test_cli_floor_flag_is_opt_in(self):
@@ -125,9 +124,8 @@ class RenderBudgetTests(unittest.TestCase):
             self.assertEqual(result.returncode, 2)
 
     def test_cli_adapter_mismatch_with_enforce_floor(self):
-        result = subprocess.run([sys.executable, str(Path(capture.__file__)),
-                                 str(FIXTURES / 'adapter-mismatch.v3.json'),
-                                 '--qualified-renderer', base.QUALIFIED, '--enforce-floor'],
+        result = subprocess.run(base.isolated_script(capture.__file__, str(FIXTURES / 'adapter-mismatch.v3.json'),
+                                      '--qualified-renderer', base.QUALIFIED, '--enforce-floor'),
                                 capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, 1)
 

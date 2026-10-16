@@ -12,6 +12,7 @@
 //   - at most 256 joints per skeleton (joint indices fit in a u8),
 //   -.lanim tracks are keyed by the FNV-1a 32-bit hash of the joint name.
 
+#include "luminumbra_common/core/CaptureContentPaths.h"
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -176,6 +177,8 @@ inline bool ValidateAnimTrack(const AnimTrack& track, float duration) {
 }
 
 inline bool LoadSkinnedMeshAsset(const std::string& path, SkinnedMeshAsset& out) {
+    if (!Luminumbra::Filesystem::capture_content_paths.allows(path))
+        return false;
     std::ifstream in(path, std::ios::binary | std::ios::ate);
     if (!in)
         return false;
@@ -261,6 +264,8 @@ inline bool LoadSkinnedMeshAsset(const std::string& path, SkinnedMeshAsset& out)
 }
 
 inline bool LoadAnimClipAsset(const std::string& path, AnimClipAsset& out) {
+    if (!Luminumbra::Filesystem::capture_content_paths.allows(path))
+        return false;
     std::ifstream in(path, std::ios::binary | std::ios::ate);
     if (!in)
         return false;

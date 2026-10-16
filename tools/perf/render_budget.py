@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render performance floor verdict over an already validated v3 capture.
+"""Render performance floor verdict over an already validated v3/v4 capture.
 
 The floor is a hard gate on frame_wall_ms p99. The target is reported only and
 never fails. Measurement validity lives in render_contract.py; this module only
@@ -31,8 +31,8 @@ def target_block(profile, p50, p99):
 
 
 def evaluate(data):
-    if data.get('schema') != render_contract.SCHEMA:
-        raise BudgetInputError('floor requires a v3 render capture')
+    if data.get('schema') not in render_contract.SCHEMAS:
+        raise BudgetInputError('floor requires a v3/v4 render capture')
     block = data['distribution']['frame_wall_ms']
     p50 = block.get('p50')
     p99 = block.get('p99')

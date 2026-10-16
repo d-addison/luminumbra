@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../../luminumbra_common/core/Log.h"
+#include "luminumbra_common/core/CaptureContentPaths.h"
 #include <glad/glad.h>
 #include <stb_image.h>
 #include <string>
@@ -8,6 +9,8 @@
 class AssetManager {
 public:
     static GLuint LoadTexture(const char* path) {
+        if (!Luminumbra::Filesystem::capture_content_paths.allows(path))
+            return 0;
         GLuint textureID = 0;
         glGenTextures(1, &textureID);
 

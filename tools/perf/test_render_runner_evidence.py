@@ -54,6 +54,46 @@ time.sleep(30)
 '''
 
 
+class RenderRunnerRefusalInputsTests(unittest.TestCase):
+    def check_texture_inputs(self, method):
+        # Validate the actual integration case's argv and script before substituting
+        # the native content loader's refusal. An option error must fail this check.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / 'data/models/trees/tree_textures.json'
+            manifest.parent.mkdir(parents=True)
+            texture = root / 'data/texture.ltex'
+            texture.write_bytes(b'texture bytes')
+            manifest.write_text(json.dumps({'models': [{'albedo': 'data/texture.ltex'}]}),
+                                encoding='utf-8')
+            case = runner.RenderRunnerTests(method)
+            case.root = root
+            def content_refusal(name, extra, *, expected_exit, schema):
+                self.assertEqual((name, expected_exit, schema), ('refused', 2, 'v4'))
+                self.assertEqual(extra[0], '--traversal')
+                self.assertEqual(len(extra), 2, 'content refusal must not have a duration override')
+                script = runner.contract.traversal_manifest(Path(extra[1]).read_text(encoding='utf-8'))
+                self.assertEqual(script['kind'], 'save_load')
+                self.assertEqual(script['expected_ticks'], 4)
+                self.assertEqual([action['tick'] for action in script['actions']], [1, 2])
+                document = json.loads(manifest.read_bytes())
+                reference = document['models'][0]['albedo']
+                self.assertEqual((root / reference).resolve(), (root / 'external.ltex').resolve())
+                self.assertEqual((root / 'external.ltex').read_bytes(), texture.read_bytes())
+                return 'Benchmark content reference escapes inventoried trees'
+            with mock.patch.object(runner, 'OPTIONS', types.SimpleNamespace(
+                    source=Path(__file__).resolve().parents[2]), create=True), \
+                    mock.patch.object(case, 'run_client', side_effect=content_refusal) as process:
+                getattr(case, method)()
+                process.assert_called_once()
+
+    def test_absolute_texture_case_reaches_content_gate(self):
+        self.check_texture_inputs('test_absolute_texture_refusal')
+
+    def test_parent_relative_texture_case_reaches_content_gate(self):
+        self.check_texture_inputs('test_parent_relative_texture_refusal')
+
+
 class RenderRunnerEvidenceTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()

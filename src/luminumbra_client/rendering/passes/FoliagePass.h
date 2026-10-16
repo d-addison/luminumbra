@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../AsyncReadbackRing.h"
+#include "../FoliageCountObservation.h"
 #include "../FoliageEvidence.h"
 #include "../FoliageGroundMesh.h"
 #include "../RenderContext.h"
@@ -180,6 +181,14 @@ public:
     }
     std::size_t frame_instance_count() const {
         return m_frame_instance_count;
+    }
+    using CountObservation = FoliageCountObservation;
+    // Window-boundary diagnostic only. Reads the actual indirect draw count,
+    // never the play-mode capacity marker. May wait for GPU completion; callers
+    // must keep this outside the measured frame intervals.
+    CountObservation observe_counts() const;
+    bool build_pending() const {
+        return m_foliage_build_backlog;
     }
 
     // Loads the scatter archetype set from data/common/foliage/scatter_set.json.
@@ -458,6 +467,8 @@ private:
     // CPU-side mirror of the instances built this frame (gate read-back source).
     std::vector<InstanceRecord> m_instances;
     std::size_t m_frame_instance_count = 0;
+    std::uint64_t m_candidate_slots = 0;
+    std::uint64_t m_candidate_count = 0;
 
     bool m_enabled = false;
     glm::vec2 m_wind_xz{0.0f, 0.0f};

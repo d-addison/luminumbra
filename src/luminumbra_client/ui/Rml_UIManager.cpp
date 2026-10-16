@@ -1,5 +1,6 @@
 #include "ui/Rml_UIManager.h"
 #include "audio/IAudioManager.h"
+#include "luminumbra_common/core/CaptureContentPaths.h"
 #include <GLFW/glfw3.h>
 #include <RmlUi/Core.h>
 #include <RmlUi/Core/Elements/ElementFormControl.h>
@@ -1152,6 +1153,8 @@ void Rml_UIManager::PopulateGallery(Rml::ElementDocument* document) {
     const fs::path thumbs_dir = m_galleryCaptureDir.empty()
                                     ? fs::path(m_assetRoot) / "data" / "ui" / "captures"
                                     : m_galleryCaptureDir;
+    if (!Filesystem::capture_content_paths.allows(thumbs_dir))
+        return;
     if (fs::exists(thumbs_dir, ec)) {
         for (const auto& entry : fs::directory_iterator(thumbs_dir, ec)) {
             if (entry.path().extension() != ".tga")
@@ -1180,8 +1183,11 @@ void Rml_UIManager::PopulateGallery(Rml::ElementDocument* document) {
             break; // one page of the most recent captures
         // Star rating from the sidecar (<root>/photos/photo-<N>.photo.json), if it's there.
         int stars = 0;
-        std::ifstream sf(fs::path(m_assetRoot) / "photos" /
-                         ("photo-" + std::to_string(id) + ".photo.json"));
+        const auto sidecar =
+            fs::path(m_assetRoot) / "photos" / ("photo-" + std::to_string(id) + ".photo.json");
+        if (!Filesystem::capture_content_paths.allows(sidecar))
+            return;
+        std::ifstream sf(sidecar);
         if (sf) {
             try {
                 nlohmann::json j;
