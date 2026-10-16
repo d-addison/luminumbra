@@ -677,6 +677,57 @@ TEST(StreamingHardening, ChunkSdfProvenanceRevisionLifecycleIsSticky) {
     EXPECT_FALSE(chunk.is_voxel_data_dirty());
 }
 
+TEST(StreamingHardening, PendingLodPreventsStreamingQuiescence) {
+    SHIELD_WorldSystem world(nullptr, nullptr, FixtureParams(), 42);
+    entt::registry registry;
+    const auto chunk = std::make_shared<Chunk>(IVec3(0));
+    chunk->set_state(ChunkState::Ready);
+    // Published terrain can remain Ready while its replacement mesh is in flight.
+    chunk->current_lod.store(1, std::memory_order_release);
+    chunk->pending_lod.store(0, std::memory_order_release);
+    ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+    world.update(registry, std::vector<Vec3>{}, nullptr);
+    const auto& stats = world.get_streaming_telemetry_stats();
+    EXPECT_EQ(stats.last_queue_depth, 0u);
+    EXPECT_EQ(stats.pending_lod_chunks, 1u);
+    EXPECT_FALSE(stats.quiescent());
+}
+
+TEST(StreamingHardening, UnpublishedBatchesPreventStreamingQuiescence) {
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    auto params = FixtureParams();
+    params.base_amplitude = 0.0f;
+    params.height_offset = 8.0f;
+    SHIELD_WorldSystem world(&jobs, nullptr, params, 42);
+    entt::registry registry;
+    const Vec3 anchor(8.0f);
+    ASSERT_TRUE(world.PrepareTerrainVoxelEdit(anchor, 1.0f));
+    // Tick-keyed publication keeps the real mesh batch outstanding regardless
+    // of worker timing. No additional chunks activate during these three updates.
+    world.begin_tick(0);
+    world.update(registry, anchor, nullptr);
+    world.quiesce_streaming_jobs_for_save();
+    world.update(registry, anchor, nullptr);
+    const auto pending = world.get_streaming_telemetry_stats();
+    EXPECT_EQ(pending.last_queue_depth, 0u);
+    EXPECT_EQ(pending.generation_batches, 0u);
+    EXPECT_FALSE(pending.promotion_pending);
+    EXPECT_EQ(pending.meshing_batches, 1u);
+    EXPECT_EQ(pending.pending_lod_chunks, 1u);
+    EXPECT_FALSE(pending.quiescent());
+
+    // The fixed activation latency is eight ticks. Publishing the batch, rather
+    // than merely finishing its workers, releases the reload completion guard.
+    world.begin_tick(8);
+    world.activate_due(8);
+    world.update(registry, anchor, nullptr);
+    const auto complete = world.get_streaming_telemetry_stats();
+    EXPECT_EQ(complete.meshing_batches, 0u);
+    EXPECT_EQ(complete.pending_lod_chunks, 0u);
+    EXPECT_TRUE(complete.quiescent());
+}
+
 TEST(StreamingHardening, ScriptedDigPreparesFullLatticesBelowSurfaceBand) {
     auto params = FixtureParams();
     params.base_amplitude = 0.0f;

@@ -104,7 +104,8 @@ add_executable(morph_asset_test
     tools/test_morph_asset.cpp
     "${ASSET_PROCESSOR_SOURCE}"
     "${CMAKE_CURRENT_SOURCE_DIR}/../tools/morph_asset_processor.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../src/luminumbra_common/animation/MorphMesh.cpp")
+    "${CMAKE_CURRENT_SOURCE_DIR}/../src/luminumbra_common/animation/MorphMesh.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../src/luminumbra_common/core/FilesystemPath.cpp")
 target_include_directories(morph_asset_test PRIVATE ../src)
 target_include_directories(morph_asset_test SYSTEM PRIVATE ../vendor/cgltf)
 target_link_libraries(morph_asset_test PRIVATE gtest_main nlohmann_json meshoptimizer stb_headers)
@@ -338,6 +339,7 @@ luminumbra_configure_first_party_target(unique_temp_path_test)
 add_executable(game_assets_test
     tools/game_assets_test.cpp
     ../src/luminumbra_client/app/GameAssets.cpp
+    ../src/luminumbra_common/core/FilesystemPath.cpp
 )
 target_include_directories(game_assets_test PRIVATE ../src)
 target_link_libraries(game_assets_test PRIVATE gtest_main nlohmann_json)

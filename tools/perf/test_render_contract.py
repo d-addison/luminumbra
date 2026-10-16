@@ -341,6 +341,8 @@ def workload_artifact(kind, script):
             cave_requested=0, cave_effective=0, underground=kind == 'cave' and tick >= count // 2,
             camera_in_air=kind == 'cave',
             foliage_build_generation=tick, terrain_uploads=0, stream_queue_depth=0,
+            stream_generation_batches=0, stream_meshing_batches=0, stream_pending_lod_chunks=0,
+            stream_promotion_pending=False, region_scheduler_fault=False,
             terrain_upload_candidates=0, water_upload_candidates=0, foliage_pending=False,
             world_ready=True, settled=state == 'gameplay'))
     if kind == 'save_load':
@@ -425,6 +427,48 @@ class ScriptedWorkloadTests(unittest.TestCase):
                     data['render_identity'] = contract.render_identity(data['settings'])
                     self.assertEqual(capture.validate(data, args(traversal=script))['verdict'], 'PASS')
                     self.assertEqual(contract.validate(data, QUALIFIED, traversal=script)['frames'], 30)
+
+    def test_v4_requires_visible_window_for_native_qualification(self):
+        script = self.scripts['save_load']
+        for mode in ('windowed', 'borderless', 'fullscreen', 'headless'):
+            data = workload_artifact('save_load', script)
+            data['settings']['effective_render']['window_mode'] = mode
+            data['render_identity'] = contract.render_identity(data['settings'])
+            with self.subTest(mode=mode):
+                if mode == 'headless':
+                    with self.assertRaisesRegex(ValueError, 'headless'):
+                        capture.validate(data, args(traversal=script))
+                else:
+                    self.assertEqual(capture.validate(data, args(traversal=script))['verdict'], 'PASS')
+
+    def test_reload_waits_for_all_streaming_lanes(self):
+        script = self.scripts['save_load']
+        for key, value in (('stream_generation_batches', 1), ('stream_meshing_batches', 1),
+                           ('stream_pending_lod_chunks', 1), ('stream_promotion_pending', True),
+                           ('region_scheduler_fault', True)):
+            data = workload_artifact('save_load', script)
+            reload = data['workload']['reload']
+            request = reload['request_frame']
+            row = data['workload']['observations'][request - data['warmup_frames']]
+            self.assertEqual(row['stream_queue_depth'], 0)
+            self.assertEqual(row['terrain_upload_candidates'], 0)
+            self.assertEqual(row['water_upload_candidates'], 0)
+            row.update({key: value, 'settled': False})
+            reload['first_settled_frame'] = request + 1
+            with self.subTest(lane=key):
+                self.assertEqual(capture.validate(data, args(traversal=script))['verdict'], 'PASS')
+                # Neither a stale settled flag nor an earlier reported endpoint is valid.
+                row['settled'] = True
+                with self.assertRaisesRegex(ValueError, 'settled marker'):
+                    capture.validate(data, args(traversal=script))
+                row['settled'] = False
+                reload['first_settled_frame'] = request
+                with self.assertRaisesRegex(ValueError, 'first settled frame'):
+                    capture.validate(data, args(traversal=script))
+                reload['first_settled_frame'] = request + 1
+                row[key] = -1 if type(value) is int else 1
+                with self.assertRaises(ValueError):
+                    capture.validate(data, args(traversal=script))
 
     def test_optional_audio_absence_is_validated_and_changes_identity(self):
         script = self.scripts['save_load']

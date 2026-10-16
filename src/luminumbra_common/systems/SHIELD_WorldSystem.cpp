@@ -3197,11 +3197,15 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
 
     m_last_streaming_budget_stats.active_chunks_after = m_streaming_state.chunks.size();
     clear_streaming_state_counts(m_last_streaming_budget_stats);
+    m_streaming_telemetry_stats.pending_lod_chunks = 0;
     for (auto const& [id, chunk_ptr] : m_streaming_state.chunks) {
         (void)id;
         if (!chunk_ptr) {
             continue;
         }
+
+        if (chunk_ptr->pending_lod.load(std::memory_order_acquire) >= 0)
+            ++m_streaming_telemetry_stats.pending_lod_chunks;
 
         const ChunkState state = chunk_ptr->get_state();
         if (state == ChunkState::Ready) {
@@ -3218,6 +3222,9 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
         }
     }
 
+    m_streaming_telemetry_stats.generation_batches = m_streaming_state.generation_batches.size();
+    m_streaming_telemetry_stats.meshing_batches = m_streaming_state.meshing_batches.size();
+    m_streaming_telemetry_stats.promotion_pending = promotion_pipeline_pending();
     const std::size_t queue_depth =
         m_last_streaming_budget_stats.loading_chunks + terrain_meshing_backlog;
     ++m_streaming_telemetry_stats.frames_observed;

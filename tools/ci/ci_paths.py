@@ -17,6 +17,7 @@ PYTHON_TESTS = (
     "tools/ci/test_cache_retention.py",
     "tools/ci/test_check_docs.py",
     "tools/ci/test_check_ctest_junit.py",
+    "tools/ci/test_containment_link_closure.py",
     "tools/ci/test_qualification_capture.py",
     "tools/ci/test_slowest_tests.py",
     "tools/ci/test_validate_performance_measurement.py",

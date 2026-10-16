@@ -481,6 +481,8 @@ def validate_workload(data, manifest):
         raise ValueError('invalid effective UI scale')
     if render['fov'] >= 180 or render['window_mode'] not in ('windowed', 'borderless', 'fullscreen', 'headless'):
         raise ValueError('invalid effective field of view or window mode')
+    if render['window_mode'] == 'headless':
+        raise ValueError('headless v4 captures cannot qualify native rendering')
     integer(render['ssao_quality'], 'ssao quality', 0, 3)
     integer(render['volumetric_quality'], 'volumetric quality', 0, 2)
     windows = data['windows']
@@ -543,12 +545,17 @@ def validate_workload(data, manifest):
             raise ValueError('observed menu state differs from script')
         integer(row['foliage_build_generation'], 'foliage build generation', 0, 2**64 - 1)
         integer(row['terrain_uploads'], 'terrain uploads', 0, 2**32 - 1)
-        for key in ('stream_queue_depth', 'terrain_upload_candidates', 'water_upload_candidates'):
+        for key in ('stream_queue_depth', 'stream_generation_batches', 'stream_meshing_batches',
+                    'stream_pending_lod_chunks', 'terrain_upload_candidates', 'water_upload_candidates'):
             integer(row[key], key, 0, 2**64 - 1)
-        for key in ('settled', 'underground', 'camera_in_air', 'foliage_pending', 'world_ready'):
+        for key in ('settled', 'underground', 'camera_in_air', 'foliage_pending', 'world_ready',
+                    'stream_promotion_pending', 'region_scheduler_fault'):
             if type(row[key]) is not bool:
                 raise ValueError('invalid workload observation flag')
         expected_settled = (state == 'gameplay' and row['world_ready'] and
+                            not row['region_scheduler_fault'] and
+                            row['stream_generation_batches'] == 0 and row['stream_meshing_batches'] == 0 and
+                            row['stream_pending_lod_chunks'] == 0 and not row['stream_promotion_pending'] and
                             row['stream_queue_depth'] == 0 and row['terrain_upload_candidates'] == 0 and
                             row['water_upload_candidates'] == 0 and not row['foliage_pending'])
         if row['settled'] != expected_settled:

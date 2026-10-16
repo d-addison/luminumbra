@@ -5076,8 +5076,10 @@ int main(int argc, char* argv[]) {
                 const auto& uploads = renderPipeline.get_last_mesh_upload_stats();
                 const auto* foliage = renderPipeline.foliage();
                 const bool in_game = currentState == GameState::IN_GAME;
-                const bool settled = in_game && !gameSession->GetRegionSchedulerFault() &&
-                                     world->get_streaming_telemetry_stats().last_queue_depth == 0 &&
+                const auto& streaming = world->get_streaming_telemetry_stats();
+                const bool region_scheduler_fault =
+                    gameSession->GetRegionSchedulerFault().has_value();
+                const bool settled = in_game && !region_scheduler_fault && streaming.quiescent() &&
                                      uploads.terrain_upload_candidates == 0 &&
                                      uploads.water_upload_candidates == 0 &&
                                      (!foliage || !foliage->build_pending()) && scenario_ready &&
@@ -5150,8 +5152,12 @@ int main(int argc, char* argv[]) {
                      {"camera_in_air", camera_in_air},
                      {"foliage_build_generation", foliage ? foliage->build_generation() : 0},
                      {"terrain_uploads", uploads.terrain_uploads},
-                     {"stream_queue_depth",
-                      world->get_streaming_telemetry_stats().last_queue_depth},
+                     {"stream_queue_depth", streaming.last_queue_depth},
+                     {"stream_generation_batches", streaming.generation_batches},
+                     {"stream_meshing_batches", streaming.meshing_batches},
+                     {"stream_pending_lod_chunks", streaming.pending_lod_chunks},
+                     {"stream_promotion_pending", streaming.promotion_pending},
+                     {"region_scheduler_fault", region_scheduler_fault},
                      {"terrain_upload_candidates", uploads.terrain_upload_candidates},
                      {"water_upload_candidates", uploads.water_upload_candidates},
                      {"foliage_pending", foliage && foliage->build_pending()},

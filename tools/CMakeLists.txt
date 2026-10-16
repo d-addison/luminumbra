@@ -4,6 +4,7 @@ add_executable(asset_processor
     asset_processor.cpp
     morph_asset_processor.cpp
     "${CMAKE_SOURCE_DIR}/src/luminumbra_common/animation/MorphMesh.cpp"
+    "${CMAKE_SOURCE_DIR}/src/luminumbra_common/core/FilesystemPath.cpp"
 )
 
 # Tell the target where to find "meshoptimizer.h"
@@ -65,6 +66,12 @@ if(BUILD_TESTING)
     luminumbra_configure_first_party_target(luminumbra_save_fixture)
 
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    add_test(
+        NAME ContainmentLinkClosureContract
+        COMMAND "${Python3_EXECUTABLE}" -I -B
+                "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_containment_link_closure.py")
+    set_tests_properties(ContainmentLinkClosureContract
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
     add_test(
         NAME WorldgenProbeSmokeValidatorContract
         COMMAND "${Python3_EXECUTABLE}"

@@ -275,9 +275,12 @@ camera to the scripted pose, and continues normal rendering and streaming.
 `workload.reload` records the originating `request_frame`, the
 `first_settled_frame`, and monotonic `elapsed_ms` from the reload request through
 that frame's presentation endpoint. A settled frame requires gameplay, successful
-world-entry readiness, no scheduler fault, zero streaming queue depth, zero
-terrain/water upload candidates and no foliage build backlog. The corresponding
-queue counters and readiness flags are observed every measured frame. Validation
+world-entry readiness, no scheduler fault, zero streaming queue depth, no
+unpublished generation or meshing batches, no pending LOD chunks or promotion work,
+zero terrain/water upload candidates and no foliage build backlog. Every measured
+frame records `stream_generation_batches`, `stream_meshing_batches`,
+`stream_pending_lod_chunks`, `stream_promotion_pending` and
+`region_scheduler_fault` alongside the existing queue and readiness evidence. Validation
 recomputes the settled predicate and requires the first such frame after the
 request, duration within measured wall coverage, and subsequent camera motion.
 The duration must include every complete frame interval strictly between the
@@ -316,6 +319,9 @@ additional required evidence is:
 | `workload.observations` | Consecutive tick/frame IDs, menu/pause state and visible document, region key/transitions, far/cave policies, underground and camera-in-air flags, terrain uploads, foliage build generation, queue counters and settled flag |
 
 Startup is elapsed time for initialization, not a rendered frame distribution.
+V4 native qualification and the performance floor require a visible window mode
+(`windowed`, `borderless` or `fullscreen`); headless captures are rejected.
+
 The content inventory deliberately includes indirect and unused assets so changes
 to scatter sets, tuning, models, textures, shaders, UI styles and fonts cannot
 silently compare as identical workloads. Content is streamed before runtime

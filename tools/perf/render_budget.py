@@ -33,6 +33,9 @@ def target_block(profile, p50, p99):
 def evaluate(data):
     if data.get('schema') not in render_contract.SCHEMAS:
         raise BudgetInputError('floor requires a v3/v4 render capture')
+    if (data['schema'] == render_contract.WORKLOAD_SCHEMA and
+            data['settings']['effective_render']['window_mode'] == 'headless'):
+        raise BudgetInputError('headless v4 captures cannot qualify the performance floor')
     block = data['distribution']['frame_wall_ms']
     p50 = block.get('p50')
     p99 = block.get('p99')
