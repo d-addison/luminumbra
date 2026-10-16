@@ -1195,90 +1195,190 @@ TEST_F(WorldOpenRefusal, ServerAutosaveAndFullSnapshotCarryTheAbsoluteClock) {
     loaded.Shutdown();
 }
 
+class SnapshotPresetFiles {
+public:
+    explicit SnapshotPresetFiles(const fs::path& destination)
+        : directory(destination)
+        , preset_bytes(Read(directory / "preset.json"))
+        , metadata_bytes(Read(directory / "world_info.json"))
+        , other_preset(nlohmann::json::parse(preset_bytes))
+        , other_metadata(nlohmann::json::parse(metadata_bytes)) {
+        other_preset["generation_params"]["terrain"]["height_offset"] = 123.0;
+        other_metadata["presetIdentity"] = Persistence::StableChecksum(other_preset.dump());
+    }
+
+    void Rewrite(const char* changed) const {
+        SCOPED_TRACE(directory.generic_string());
+        if (std::string(changed) != "identity")
+            ASSERT_NO_FATAL_FAILURE(Write(directory / "preset.json", other_preset.dump()));
+        if (std::string(changed) != "preset")
+            ASSERT_NO_FATAL_FAILURE(Write(directory / "world_info.json", other_metadata.dump()));
+    }
+
+    void Restore() const {
+        SCOPED_TRACE(directory.generic_string());
+        ASSERT_NO_FATAL_FAILURE(Write(directory / "preset.json", preset_bytes));
+        ASSERT_NO_FATAL_FAILURE(Write(directory / "world_info.json", metadata_bytes));
+    }
+
+private:
+    fs::path directory;
+    std::string preset_bytes;
+    std::string metadata_bytes;
+    nlohmann::json other_preset;
+    nlohmann::json other_metadata;
+};
+
+class SnapshotDestinationBytes {
+public:
+    explicit SnapshotDestinationBytes(const fs::path& destination)
+        : directory(destination)
+        , bytes(DiskBytes(directory)) {}
+
+    void ExpectUnchanged() const {
+        SCOPED_TRACE(directory.generic_string());
+        EXPECT_EQ(DiskBytes(directory), bytes);
+    }
+
+private:
+    fs::path directory;
+    std::map<std::string, std::string> bytes;
+};
+
+void PreparePendingSnapshot(GameSession& session,
+                            std::shared_ptr<Chunk>& chunk,
+                            bool existing_snapshot) {
+    SCOPED_TRACE("prepare pending snapshot");
+    chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
+    chunk->set_state(ChunkState::Idle);
+    chunk->heightmap_data = {8.0f, 9.0f, 10.0f};
+    chunk->mark_voxel_data_dirty();
+    ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    auto& registry = session.GetRegistry();
+    const auto plant = registry.create();
+    registry.emplace<Components::PlantTag>(plant);
+    registry.emplace<Components::PlantGenomeComponent>(plant).genes.fill(0.5f);
+    registry.emplace<Components::PlantGrowthComponent>(plant);
+    registry.emplace<Components::TransformComponent>(plant).position =
+        session.GetMetadata().spawnPoint;
+    auto* energy = session.GetEnergyFieldState();
+    ASSERT_NE(energy, nullptr);
+    energy->SetAnchorCell(0, 0);
+    energy->QueueDeposit(1, 0, 0, 0, 60000);
+    energy->Tick(0);
+    if (existing_snapshot) {
+        ASSERT_TRUE(session.SaveWorldState());
+        ASSERT_FALSE(chunk->is_voxel_data_dirty());
+    }
+    ASSERT_EQ(WorldSaveService::has_chunk_snapshot(session.GetWorldSaveDir()), existing_snapshot);
+
+    chunk->heightmap_data.front() = 42.0f;
+    chunk->mark_voxel_data_dirty();
+    registry.get<Components::PlantGrowthComponent>(plant).growth_points = 123;
+    energy->QueueDeposit(2, 0, 0, 0, 1000);
+    energy->Tick(0);
+}
+
+struct PendingSnapshotState {
+    explicit PendingSnapshotState(const GameSession& session)
+        : plant_hash(session.ComputePlantSubHash())
+        , energy_bytes(session.GetEnergyFieldState()->CanonicalBytes())
+        , ledger_bytes(session.GetActiveRegionLedger().canonical_bytes())
+        , clock_bytes(session.GetWorldClock().canonical_bytes()) {}
+
+    void ExpectUnchanged(const GameSession& session, const Chunk& chunk) const {
+        SCOPED_TRACE("pending snapshot state");
+        EXPECT_TRUE(chunk.is_voxel_data_dirty());
+        EXPECT_FLOAT_EQ(chunk.heightmap_data.front(), 42.0f);
+        EXPECT_EQ(session.ComputePlantSubHash(), plant_hash);
+        EXPECT_EQ(session.GetEnergyFieldState()->CanonicalBytes(), energy_bytes);
+        EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(), ledger_bytes);
+        EXPECT_EQ(session.GetWorldClock().canonical_bytes(), clock_bytes);
+    }
+
+    std::string plant_hash;
+    std::string energy_bytes;
+    std::string ledger_bytes;
+    std::string clock_bytes;
+};
+
+Server::ServerWorldRunnerConfig SnapshotRunnerConfig(const std::string& root_path,
+                                                     bool active_regions) {
+    Server::ServerWorldRunnerConfig config;
+    config.root_path = root_path;
+    config.systems_config_override = luminumbra::core::SystemConfig::FromJsonString(nlohmann::json{
+        {"sim",
+         {{"active_regions", {{"enabled", active_regions}}},
+          {"aether_state", {{"enabled", true}}}}}}.dump());
+    config.surface_radius = 0;
+    config.collision_radius = 0;
+    config.test_streaming_radius_cap = 1;
+    config.autosave_interval_ticks = 0;
+    return config;
+}
+
+void BootSnapshotRunner(Server::ServerWorldRunner& runner, bool active_regions) {
+    SCOPED_TRACE("boot snapshot runner");
+    ASSERT_TRUE(runner.Boot()) << runner.GetBootError();
+    auto* session = runner.Session();
+    ASSERT_NE(session, nullptr);
+    ASSERT_EQ(session->ActiveRegionsEnabled(), active_regions);
+    session->GetWorldSystem()->clear_world(session->GetPhysicsSystem());
+}
+
+void ExpectSnapshotReloaded(const PendingSnapshotState& pending,
+                            const Chunk& chunk,
+                            const Server::ServerWorldRunnerConfig& config,
+                            const std::string& world_id,
+                            JobSystem& jobs) {
+    SCOPED_TRACE(world_id);
+    GameSession loaded;
+    loaded.SetRootPath(config.root_path);
+    loaded.SetJobSystem(&jobs);
+    loaded.ApplySystemConfig(*config.systems_config_override);
+    ASSERT_TRUE(loaded.LoadWorld(world_id)) << loaded.GetWorldOpenError();
+    EXPECT_EQ(loaded.ComputePlantSubHash(), pending.plant_hash);
+    ASSERT_NE(loaded.GetEnergyFieldState(), nullptr);
+    EXPECT_EQ(loaded.GetEnergyFieldState()->CanonicalBytes(), pending.energy_bytes);
+    const auto restored_chunks = loaded.GetWorldSystem()->snapshot_streamed_chunks();
+    ASSERT_EQ(restored_chunks.size(), 1u);
+    EXPECT_EQ(restored_chunks.front()->get_id(), chunk.get_id());
+    EXPECT_EQ(restored_chunks.front()->heightmap_data, chunk.heightmap_data);
+}
+
 TEST_F(WorldOpenRefusal, ServerFullSnapshotPresetChangeRefusesWithoutWritesOrAcknowledgement) {
     for (const bool active_regions : {false, true}) {
         SCOPED_TRACE(active_regions);
         for (const bool existing_snapshot : {false, true}) {
             SCOPED_TRACE(existing_snapshot);
-            Server::ServerWorldRunnerConfig config;
-            config.root_path = RootString();
-            config.systems_config_override =
-                luminumbra::core::SystemConfig::FromJsonString(nlohmann::json{
-                    {"sim",
-                     {{"active_regions", {{"enabled", active_regions}}},
-                      {"aether_state", {{"enabled", true}}}}}}.dump());
-            config.surface_radius = 0;
-            config.collision_radius = 0;
-            config.test_streaming_radius_cap = 1;
-            config.autosave_interval_ticks = 0;
+            const auto config = SnapshotRunnerConfig(RootString(), active_regions);
             Server::ServerWorldRunner runner(config);
-            ASSERT_TRUE(runner.Boot()) << runner.GetBootError();
+            BootSnapshotRunner(runner, active_regions);
+            if (HasFatalFailure())
+                return;
             auto* session = runner.Session();
-            ASSERT_NE(session, nullptr);
-            ASSERT_EQ(session->ActiveRegionsEnabled(), active_regions);
-            auto* world_system = session->GetWorldSystem();
-            world_system->clear_world(session->GetPhysicsSystem());
             const auto destination = session->GetWorldSaveDir();
-            const auto preset_bytes = Read(destination / "preset.json");
-            const auto metadata_bytes = Read(destination / "world_info.json");
-            auto other_preset = nlohmann::json::parse(preset_bytes);
-            other_preset["generation_params"]["terrain"]["height_offset"] = 123.0;
-            auto other_metadata = nlohmann::json::parse(metadata_bytes);
-            other_metadata["presetIdentity"] = Persistence::StableChecksum(other_preset.dump());
+            const SnapshotPresetFiles preset_files(destination);
 
-            auto chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
-            chunk->set_state(ChunkState::Idle);
-            chunk->heightmap_data = {8.0f, 9.0f, 10.0f};
-            chunk->mark_voxel_data_dirty();
-            ASSERT_TRUE(world_system->adopt_streamed_chunk(chunk));
-            auto& registry = session->GetRegistry();
-            const auto plant = registry.create();
-            registry.emplace<Components::PlantTag>(plant);
-            registry.emplace<Components::PlantGenomeComponent>(plant).genes.fill(0.5f);
-            registry.emplace<Components::PlantGrowthComponent>(plant);
-            registry.emplace<Components::TransformComponent>(plant).position =
-                session->GetMetadata().spawnPoint;
-            auto* energy = session->GetEnergyFieldState();
-            ASSERT_NE(energy, nullptr);
-            energy->SetAnchorCell(0, 0);
-            energy->QueueDeposit(1, 0, 0, 0, 60000);
-            energy->Tick(0);
-            if (existing_snapshot) {
-                ASSERT_TRUE(session->SaveWorldState());
-                ASSERT_FALSE(chunk->is_voxel_data_dirty());
-            }
-            ASSERT_EQ(WorldSaveService::has_chunk_snapshot(destination), existing_snapshot);
-
-            chunk->heightmap_data.front() = 42.0f;
-            chunk->mark_voxel_data_dirty();
-            registry.get<Components::PlantGrowthComponent>(plant).growth_points = 123;
-            energy->QueueDeposit(2, 0, 0, 0, 1000);
-            energy->Tick(0);
-            const auto pending_plant_hash = session->ComputePlantSubHash();
-            const auto pending_energy = energy->CanonicalBytes();
-            const auto pending_ledger = session->GetActiveRegionLedger().canonical_bytes();
-            const auto pending_clock = session->GetWorldClock().canonical_bytes();
+            std::shared_ptr<Chunk> chunk;
+            PreparePendingSnapshot(*session, chunk, existing_snapshot);
+            if (HasFatalFailure())
+                return;
+            const PendingSnapshotState pending(*session);
 
             for (const auto* changed : {"preset", "identity", "both"}) {
                 SCOPED_TRACE(changed);
-                if (std::string(changed) != "identity")
-                    ASSERT_NO_FATAL_FAILURE(
-                        Write(destination / "preset.json", other_preset.dump()));
-                if (std::string(changed) != "preset")
-                    ASSERT_NO_FATAL_FAILURE(
-                        Write(destination / "world_info.json", other_metadata.dump()));
-                const auto before = DiskBytes(root);
+                preset_files.Rewrite(changed);
+                if (HasFatalFailure())
+                    return;
+                const SnapshotDestinationBytes before(root);
                 EXPECT_EQ(runner.SaveFullSnapshot(), 0u);
-                EXPECT_EQ(DiskBytes(root), before);
-                EXPECT_TRUE(chunk->is_voxel_data_dirty());
-                EXPECT_FLOAT_EQ(chunk->heightmap_data.front(), 42.0f);
-                EXPECT_EQ(session->ComputePlantSubHash(), pending_plant_hash);
-                EXPECT_EQ(energy->CanonicalBytes(), pending_energy);
-                EXPECT_EQ(session->GetActiveRegionLedger().canonical_bytes(), pending_ledger);
-                EXPECT_EQ(session->GetWorldClock().canonical_bytes(), pending_clock);
+                before.ExpectUnchanged();
+                pending.ExpectUnchanged(*session, *chunk);
                 EXPECT_EQ(runner.StreamedChunkCount(), 1u);
-                ASSERT_NO_FATAL_FAILURE(Write(destination / "preset.json", preset_bytes));
-                ASSERT_NO_FATAL_FAILURE(Write(destination / "world_info.json", metadata_bytes));
+                preset_files.Restore();
+                if (HasFatalFailure())
+                    return;
             }
 
             ASSERT_EQ(runner.SaveFullSnapshot(), 1u);
@@ -1287,19 +1387,9 @@ TEST_F(WorldOpenRefusal, ServerFullSnapshotPresetChangeRefusesWithoutWritesOrAck
             // The legacy full snapshot writes chunks/metadata; flush plants and energy too.
             ASSERT_TRUE(session->SaveWorldState());
             EXPECT_FALSE(chunk->is_voxel_data_dirty());
-            GameSession loaded;
-            loaded.SetRootPath(RootString());
-            loaded.SetJobSystem(&jobs);
-            loaded.ApplySystemConfig(*config.systems_config_override);
-            ASSERT_TRUE(loaded.LoadWorld(session->GetMetadata().worldId))
-                << loaded.GetWorldOpenError();
-            EXPECT_EQ(loaded.ComputePlantSubHash(), pending_plant_hash);
-            ASSERT_NE(loaded.GetEnergyFieldState(), nullptr);
-            EXPECT_EQ(loaded.GetEnergyFieldState()->CanonicalBytes(), pending_energy);
-            const auto restored_chunks = loaded.GetWorldSystem()->snapshot_streamed_chunks();
-            ASSERT_EQ(restored_chunks.size(), 1u);
-            EXPECT_EQ(restored_chunks.front()->get_id(), chunk->get_id());
-            EXPECT_EQ(restored_chunks.front()->heightmap_data, chunk->heightmap_data);
+            ExpectSnapshotReloaded(pending, *chunk, config, session->GetMetadata().worldId, jobs);
+            if (HasFatalFailure())
+                return;
             runner.Shutdown();
         }
     }
