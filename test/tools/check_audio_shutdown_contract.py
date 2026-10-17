@@ -2,8 +2,10 @@
 """Pin shutdown ordering and supply the production destructor to the native probe."""
 
 import argparse
+import os
 from pathlib import Path
 import re
+import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -26,6 +28,37 @@ def body(source, signature):
 
 def code(text):
     return re.sub(r"\s+", "", re.sub(r"//[^\n]*|/\*.*?\*/", "", text, flags=re.DOTALL))
+
+
+def check_generation(cmake):
+    configure = '''execute_process(
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${audio_shutdown_generator}"
+            --emit-destructor "${audio_shutdown_body}"
+        RESULT_VARIABLE audio_shutdown_result
+        ERROR_VARIABLE audio_shutdown_error)
+    if(NOT "${audio_shutdown_result}" STREQUAL "0")
+        message(FATAL_ERROR "Audio shutdown body generation failed (${audio_shutdown_result}): ${audio_shutdown_error}")
+    endif()'''
+    regeneration = '''set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${audio_shutdown_source}" "${audio_shutdown_generator}")'''
+    build = '''add_custom_command(OUTPUT "${audio_shutdown_body}"
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${audio_shutdown_generator}"
+            --emit-destructor "${audio_shutdown_body}"
+        DEPENDS "${audio_shutdown_source}" "${audio_shutdown_generator}"
+        VERBATIM)'''
+    # Ignore CMake comments so commented-out wiring cannot satisfy the contract.
+    wiring = code(re.sub(r"(?m)^\s*#.*$", "", cmake))
+    for contract in (configure, regeneration, build):
+        assert code(contract) in wiring, f"Missing checked generation/dependencies: {contract}"
+    target = 'add_executable(audio_shutdown_test "audio/audio_shutdown_test.cpp" "${audio_shutdown_body}")'
+    assert wiring.index(code(regeneration)) < wiring.index(code(configure))
+    assert wiring.index(code(configure)) < wiring.index(code(build)) < wiring.index(code(target)), \
+        "Generate and check the actual body before registering any compilation consumer"
+    for name, path in (
+            ("source", "${CMAKE_SOURCE_DIR}/src/luminumbra_client/audio/AudioPropagationSystem.cpp"),
+            ("generator", "${CMAKE_SOURCE_DIR}/test/tools/check_audio_shutdown_contract.py"),
+            ("body", "${CMAKE_CURRENT_BINARY_DIR}/audio_shutdown_body.inc")):
+        assert f'set(audio_shutdown_{name} "{path}")' in cmake
 
 
 def check():
@@ -85,14 +118,22 @@ def check():
     """), "Keep enqueue and notification semantics"
     cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
     for registration in (
-            "add_executable(audio_shutdown_test audio/audio_shutdown_test.cpp",
+            'add_executable(audio_shutdown_test "audio/audio_shutdown_test.cpp"',
             "add_test(NAME AudioShutdownTransition COMMAND audio_shutdown_test)",
             "add_test(NAME AudioShutdownSourceContract COMMAND",
             "${CMAKE_SOURCE_DIR}/test/tools/check_audio_shutdown_contract.py",
-            "--emit-destructor ${audio_shutdown_body}",
-            "DEPENDS ${audio_shutdown_source} ${audio_shutdown_generator}",
+            '--emit-destructor "${audio_shutdown_body}"',
+            'DEPENDS "${audio_shutdown_source}" "${audio_shutdown_generator}"',
             "luminumbra_configure_first_party_target(audio_shutdown_test)"):
         assert registration in cmake, f"Missing native/source registration: {registration}"
+    check_generation(cmake)
+    with tempfile.TemporaryDirectory(prefix="audio-shutdown-") as temporary:
+        destination = Path(temporary) / "audio_shutdown_body.inc"
+        emit(destination)
+        expected = ("ShutdownFixture::~ShutdownFixture() {\n"
+                    + destructor.replace("std::mutex", "TransitionMutex") + "\n}\n")
+        assert destination.read_bytes() == expected.replace("\n", os.linesep).encode("utf-8"), \
+            "Generated body must preserve the actual production extraction byte for byte"
     paths = (ROOT / "tools/ci/ci_paths.py").read_text(encoding="utf-8")
     assert '"test/tools/check_audio_shutdown_contract.py",' in paths
     print("Audio shutdown source contracts passed")
