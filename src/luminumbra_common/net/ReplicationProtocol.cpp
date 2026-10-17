@@ -217,7 +217,7 @@ bool PeekReplMessageType(const std::vector<std::uint8_t>& frame, ReplMessageType
 
 bool DecodeUsercmd(const std::vector<std::uint8_t>& frame, UsercmdMsg& out) {
     Cursor c(frame);
-    if (!OpenFrame(frame, ReplMessageType::Usercmd, c))
+    if (frame.size() != 5 + kUsercmdPayloadBytes || !OpenFrame(frame, ReplMessageType::Usercmd, c))
         return false;
     return c.GetU64(out.tick) && c.GetU32(out.player_id) && c.GetI16(out.move_x) &&
            c.GetI16(out.move_z) && c.GetI16(out.yaw_mrad) && c.GetU8(out.action_bits);

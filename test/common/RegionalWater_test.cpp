@@ -1,7 +1,10 @@
 #include <gtest/gtest.h>
 
+#include "luminumbra/core/Types.h"
+
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/components/IrrigationComponents.h"
+#include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/WaterComponents.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/systems/RegionalWater.h"
@@ -17,6 +20,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <latch>
 #include <limits>
 #include <map>
 #include <memory>
@@ -120,6 +124,143 @@ protected:
     std::vector<world::RegionWork> work;
 };
 
+// Occupy the sole worker until the host has published the next water tick.
+// Shared gate ownership and release during unwinding keep assertion exits safe.
+class MeshWorkerGate {
+public:
+    MeshWorkerGate(JobSystem& jobs, Systems::SHIELD_WorldSystem& shield)
+        : m_shield(shield) {
+        const auto state = m_state;
+        jobs.dispatch([state]() {
+            state->entered.count_down();
+            state->released.wait();
+        });
+        state->entered.wait();
+    }
+    MeshWorkerGate(const MeshWorkerGate&) = delete;
+    MeshWorkerGate& operator=(const MeshWorkerGate&) = delete;
+    ~MeshWorkerGate() {
+        Release();
+        m_shield.quiesce_streaming_jobs_for_save();
+    }
+    void Release() {
+        if (!m_released) {
+            m_released = true;
+            m_state->released.count_down();
+        }
+    }
+
+private:
+    struct State {
+        std::latch entered{1};
+        std::latch released{1};
+    };
+    Systems::SHIELD_WorldSystem& m_shield;
+    std::shared_ptr<State> m_state = std::make_shared<State>();
+    bool m_released = false;
+};
+
+void CheckDispatchedWaterSnapshot(bool active_mesh, int resolution) {
+    SCOPED_TRACE(active_mesh);
+    SCOPED_TRACE(resolution);
+    JobSystem jobs;
+    jobs.startup(1);
+    Systems::SHIELD_WorldSystem shield(&jobs, nullptr, Systems::TerrainGenParams{}, 1337);
+    Systems::WaterSystem water(nullptr, &shield);
+    water.SetRegionalScheduling(true);
+    water.SetSimResolution(8);
+    water.SetHydrology(true, 100, 0);
+    shield.SetWaterSystem(&water);
+    auto chunk = WaterChunk({0, 0, 0}, 999000, resolution);
+    chunk->sdf_data.assign(static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) *
+                               (CHUNK_SIZE_Z + 1),
+                           -1.0f);
+    if (active_mesh) {
+        chunk->mesh_vertices = {{Vec3(0), Vec3(0, 1, 0), 0u},
+                                {Vec3(1, 0, 0), Vec3(0, 1, 0), 0u},
+                                {Vec3(0, 0, 1), Vec3(0, 1, 0), 0u}};
+        chunk->mesh_indices = {0u, 1u, 2u};
+        chunk->current_lod.store(0);
+        chunk->set_state(ChunkState::Ready);
+    }
+    ASSERT_TRUE(shield.adopt_streamed_chunk(chunk));
+    entt::registry registry;
+    ActiveRegionLedger ledger;
+    ledger.mark_edited({0, 0}, WorldClock{});
+    RegionSchedule schedule;
+    schedule.due = {{0, 0}};
+    std::vector<world::RegionWork> work;
+    const std::vector<std::shared_ptr<Chunk>> resident{chunk};
+    const auto dispatched_levels = chunk->water_level_data;
+    MeshWorkerGate gate(jobs, shield);
+    shield.begin_tick(0);
+    shield.update(registry, Vec3(8, 8, 8), nullptr);
+    EXPECT_EQ(chunk->pending_lod.load(), 0);
+    EXPECT_FALSE(chunk->pending_mesh_ready.load());
+
+    // This is the real regional commit, including swapping all live mirrors.
+    water.UpdateRegional(registry, resident, ledger, schedule, work, kCapacity);
+    EXPECT_EQ(chunk->current_water_resolution.load(), 8);
+    EXPECT_NE(chunk->water_level_data, dispatched_levels);
+    const auto published_hash = shield.debug_water_state_hash();
+    gate.Release();
+    shield.quiesce_streaming_jobs_for_save();
+    EXPECT_EQ(shield.debug_water_state_hash().hash, published_hash.hash);
+    EXPECT_EQ(shield.debug_water_state_hash().water_chunks, published_hash.water_chunks);
+    EXPECT_TRUE(chunk->pending_mesh_ready.load());
+    EXPECT_FALSE(chunk->pending_mesh_failed.load());
+    EXPECT_FALSE(chunk->water_mesh_generated.load());
+    EXPECT_EQ(chunk->pending_water_mesh_vertices.size(),
+              static_cast<std::size_t>(resolution) * resolution * 4u);
+    EXPECT_EQ(chunk->pending_water_mesh_indices.size(),
+              static_cast<std::size_t>(resolution) * resolution * 6u);
+    for (const auto& vertex : chunk->pending_water_mesh_vertices)
+        EXPECT_EQ(vertex.position.y, 1000.0f);
+    shield.wait_for_streaming_jobs();
+    EXPECT_EQ(shield.debug_water_state_hash().hash, published_hash.hash);
+    EXPECT_EQ(shield.debug_water_state_hash().water_chunks, published_hash.water_chunks);
+    // Publishing the old render snapshot must leave the newer water due for remeshing.
+    EXPECT_FALSE(chunk->water_mesh_generated.load());
+    shield.update(registry, Vec3(8, 8, 8), nullptr);
+    shield.quiesce_streaming_jobs_for_save();
+    EXPECT_TRUE(chunk->pending_mesh_ready.load());
+    EXPECT_FALSE(chunk->water_mesh_generated.load());
+    shield.wait_for_streaming_jobs();
+    EXPECT_TRUE(chunk->water_mesh_generated.load());
+    EXPECT_EQ(shield.debug_water_state_hash().hash, published_hash.hash);
+}
+
+TEST(RegionalWater, DispatchedMeshRetainsWaterAcrossPublicationAndResize) {
+    // Idle hole fills use the High lane; Ready water remeshes use Normal.
+    for (const bool active_mesh : {false, true})
+        for (const int resolution : {4, 8})
+            ASSERT_NO_FATAL_FAILURE(CheckDispatchedWaterSnapshot(active_mesh, resolution));
+}
+
+TEST(RegionalWater, MeshSnapshotRefusesMalformedSizesAndOutOfBoundResolutions) {
+    for (const int fault : {0, 1, 2}) {
+        SCOPED_TRACE(fault);
+        Systems::SHIELD_WorldSystem shield(nullptr, nullptr, Systems::TerrainGenParams{}, 1337);
+        auto valid = WaterChunk({0, 0, 0});
+        auto chunk = WaterChunk({1, 0, 0});
+        chunk->sdf_data.assign(static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) *
+                                   (CHUNK_SIZE_Z + 1),
+                               -1.0f);
+        valid->sdf_data = chunk->sdf_data;
+        ASSERT_TRUE(shield.adopt_streamed_chunk(valid));
+        if (fault == 0)
+            chunk->water_flow_data.pop_back();
+        else
+            chunk->current_water_resolution.store(fault == 1 ? -1 : 33);
+        ASSERT_TRUE(shield.adopt_streamed_chunk(chunk));
+        entt::registry registry;
+        EXPECT_THROW(shield.update(registry, Vec3(8, 8, 8), nullptr), std::runtime_error);
+        EXPECT_EQ(valid->pending_lod.load(), -1);
+        EXPECT_EQ(chunk->pending_lod.load(), -1);
+        EXPECT_FALSE(chunk->pending_mesh_ready.load());
+    }
+}
+
 // Rebuild the old admitted map, neighbors and face tuples without using cache indexes.
 // Compare physical orientation as well as order: sorting must never exchange endpoints.
 void CheckPlanningOracle(Systems::RegionalWater::PlanningCache& cache,
@@ -140,8 +281,9 @@ void CheckPlanningOracle(Systems::RegionalWater::PlanningCache& cache,
         if (!chunk || chunk->get_state() == ChunkState::Loading)
             continue;
         const auto found = ledger.records().find(owner_of(*chunk));
-        if (found != ledger.records().end() && found->second.state != RegionState::Frozen)
+        if (found != ledger.records().end() && found->second.state != RegionState::Frozen) {
             ASSERT_TRUE(rebuilt.emplace(chunk->get_id(), chunk).second);
+        }
     }
     std::vector<ChunkID> expected_ids, actual_ids;
     for (const auto& [id, chunk] : rebuilt)
@@ -812,9 +954,9 @@ TEST(RegionalWater, ZeroThroughThreeWindowsPreserveInteriorAndSealUnfundedPairs)
                   world::water_share::kQ32 +
                       (windows - result.border_windows) * world::water_share::kQ32 -
                       result.allocated_windows * world::water_share::kQ32);
-        if (windows > 0)
+        if (windows > 0) {
             EXPECT_GE(result.used_windows, 1u);
-        else {
+        } else {
             EXPECT_EQ(CaptureWater(*chunks[0]), old);
             EXPECT_TRUE(work.empty());
         }
@@ -1432,8 +1574,9 @@ void RegionalWaterFixture::CheckColdStagingTransactions() {
             chunks[0] = WaterChunk({31, 0, 0}, 600);
             reference[0] = WaterChunk({31, 0, 0}, 600);
         }
-        if (tick == 8)
+        if (tick == 8) {
             ASSERT_NO_FATAL_FAILURE(ReloadWaterResidents(chunks, reference));
+        }
         if (tick == 9) {
             chunks.pop_back();
             reference.pop_back();

@@ -53,6 +53,20 @@ struct SavedWorldCatalog {
 // carries validated records into the same synchronous open. Its residency callback runs
 // after metadata/preset checks and must not mutate the save directory.
 // With admission, check can refuse content before any chunk scan or residency planning.
+// Split roots keep runtime presets and dependencies independent of save storage.
+SavedWorld InspectSavedWorld(
+    const std::filesystem::path& save_root,
+    const std::filesystem::path& runtime_root,
+    const std::string& world_id,
+    const std::stop_token& stop = {},
+    WorldSaveAdmission* admission = nullptr,
+    const SavedWorldChunkSelector& retain = {},
+    const World::WorldgenFileStatusReader& read_status = World::ReadWorldgenSymlinkStatus,
+    const SavedWorldOpenCheck& check = {});
+SavedWorldCatalog EnumerateSavedWorlds(const std::filesystem::path& save_root,
+                                       const std::filesystem::path& runtime_root,
+                                       const std::stop_token& stop = {});
+// Combined-root callers retain their original resolution semantics.
 SavedWorld InspectSavedWorld(
     const std::filesystem::path& root,
     const std::string& world_id,
