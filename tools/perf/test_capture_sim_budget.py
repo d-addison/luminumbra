@@ -277,6 +277,13 @@ class CaptureInputIdentityTests(unittest.TestCase):
         (root / "data/extra").mkdir(parents=True)
         (root / "data/extra/biomes.json").write_text('{"biomes":[]}', encoding="utf-8")
 
+    def test_existing_shipping_identity_is_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.write_fixture(root)
+            self.assertEqual(capture.capture_fixture_hash(root),
+                             "c3f1ba1a6dd9df17f88a5ac98f589d6fd542ad4f581894dd6274056c696f6196")
+
     def test_resolved_presets_and_all_referenced_inputs_affect_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
