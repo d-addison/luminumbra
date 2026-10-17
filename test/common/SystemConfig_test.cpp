@@ -7,13 +7,15 @@
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 
-#include "../support/UniqueTempPath.h"
-
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
 #include <utility>
+
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
 
 #include <glm/glm.hpp>
 #include <iomanip>
@@ -203,6 +205,54 @@ TEST(SystemConfig, ExplicitOverrideRefusesInvalidFilesWithoutChangingSnapshot) {
     std::filesystem::remove_all(directory, remove_error);
 }
 
+TEST(SystemConfig, FileReadersRefuseOversizeDirectoriesAndNonregularInputs) {
+    const Luminumbra::TestSupport::ScopedTempFile temporary("config_file_kinds_", ".json");
+    const auto& path = temporary.Path();
+    const auto defaults = SystemConfig::Defaults().ComputeConfigSubHash();
+    const std::string document =
+        R"({"sim":{"water_high_res":{"enabled":false}},"user":{"audio":{"master":0.25}}})";
+    const auto check_refusal = [&] {
+        const auto config_path = path.string();
+        auto config =
+            SystemConfig::FromJsonString(R"({"sim":{"water_high_res":{"enabled":false}}})");
+        const auto before = ConfigIdentity(config);
+        std::string error;
+        EXPECT_FALSE(SystemConfig::TryLoadFromFile(config_path, config, error));
+        EXPECT_FALSE(error.empty());
+        EXPECT_EQ(ConfigIdentity(config), before);
+        EXPECT_EQ(SystemConfig::LoadFromFile(config_path).ComputeConfigSubHash(), defaults);
+        const auto layered = SystemConfig::LoadLayered("", config_path);
+        EXPECT_EQ(layered.settings_load_report().state,
+                  luminumbra::core::SettingsLoadState::Recovery);
+    };
+    {
+        std::ofstream output(path, std::ios::binary);
+        output << document << std::string(1'048'576 - document.size(), ' ');
+        output.close();
+        ASSERT_TRUE(output.good());
+    }
+    SystemConfig exact;
+    std::string exact_error;
+    ASSERT_TRUE(SystemConfig::TryLoadFromFile(path.string(), exact, exact_error)) << exact_error;
+    EXPECT_FALSE(exact.enabled(SysKey::SimWaterHighRes));
+    EXPECT_FLOAT_EQ(SystemConfig::LoadLayered("", path.string()).user().audio_master, 0.25f);
+    {
+        std::ofstream output(path, std::ios::binary | std::ios::app);
+        output << ' ';
+        output.close();
+        ASSERT_TRUE(output.good());
+    }
+    check_refusal();
+    ASSERT_TRUE(std::filesystem::remove(path));
+    ASSERT_TRUE(std::filesystem::create_directory(path));
+    check_refusal();
+    ASSERT_TRUE(std::filesystem::remove(path));
+#ifndef _WIN32
+    ASSERT_EQ(::mkfifo(path.c_str(), 0600), 0);
+    check_refusal();
+#endif
+}
+
 TEST(SystemConfig, EmptyAndBlankJsonAreDefaults) {
     for (const char* text : {"",
                              "{}",
@@ -247,6 +297,15 @@ TEST(SystemConfig, RawNulRefusesWholeConfiguration) {
         EXPECT_FALSE(refused.enabled(SysKey::SimPlantGrowth));
         EXPECT_EQ(refused.ComputeConfigSubHash(), SystemConfig::Defaults().ComputeConfigSubHash());
         EXPECT_FLOAT_EQ(refused.param(SysParam::PlantMutationRate, -1.0f), -1.0f);
+        auto unchanged = clean;
+        std::string error;
+        EXPECT_FALSE(SystemConfig::TryLoadFromFile(file.Path().string(), unchanged, error));
+        EXPECT_FALSE(error.empty());
+        EXPECT_EQ(unchanged.ComputeConfigSubHash(), clean.ComputeConfigSubHash());
+        const auto audio_before = unchanged.user().audio_master;
+        unchanged.OverlayUserFromJsonString(std::string(R"({"user":{"audio":{"master":0.25}}})") +
+                                            '\0');
+        EXPECT_FLOAT_EQ(unchanged.user().audio_master, audio_before);
     }
     write(bytes);
     EXPECT_EQ(SystemConfig::LoadFromFile(file.Path().string()).ComputeConfigSubHash(),
@@ -760,10 +819,10 @@ TEST(SystemConfig, CaveFieldIsRenderOnlyAndIgnoredByUserOverlay) {
             EXPECT_EQ(cfg.ComputeConfigSubHash(), sim.ComputeConfigSubHash());
             cfg.OverlayUserFromJsonString(R"({"render":{"far_world_ladder":{
                 "enabled":true,"params":{"cave_field":1}}}})");
-            if (std::string(code) == "0")
+            if (std::string(code) == "0") {
                 EXPECT_EQ(ResolveFarWorldCaveField(cfg.param(SysParam::FarWorldCaveField, -1)),
                           FarCaveMode::BandLimited);
-            else if (std::string(code) == "1")
+            } else if (std::string(code) == "1")
                 EXPECT_EQ(ResolveFarWorldCaveField(cfg.param(SysParam::FarWorldCaveField, -1)),
                           FarCaveMode::BoxFiltered);
             else

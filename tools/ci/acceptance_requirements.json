@@ -2265,8 +2265,8 @@
     {
       "id": "ar.file.045",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Corrupt, truncated, oversized, duplicate, misordered or inconsistent records refuse with `Corrupt active-region ledger.` A valid magic followed by a version greater than 2 refuses distinctly with `Unsupported future active-region ledger version.` Version zero is corrupt.",
-      "text": "Corrupt, truncated, oversized, duplicate, misordered or inconsistent records refuse with `Corrupt active-region ledger.` A valid magic followed by a version greater than 2 refuses distinctly with `Unsupported future active-region ledger version.` Version zero is corrupt."
+      "quote": "Corrupt, truncated, oversized, duplicate, misordered or inconsistent records refuse with `Corrupt active-region ledger.` A valid magic followed by a version greater than 3 refuses distinctly with `Unsupported future active-region ledger version.` Version zero is corrupt.",
+      "text": "Corrupt, truncated, oversized, duplicate, misordered or inconsistent records refuse with `Corrupt active-region ledger.` A valid magic followed by a version greater than 3 refuses distinctly with `Unsupported future active-region ledger version.` Version zero is corrupt."
     },
     {
       "id": "ar.file.046",
@@ -2319,8 +2319,8 @@
     {
       "id": "ar.file.054",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "| 4 | 2 | version = 1 or 2 |",
-      "text": "| 4 | 2 | version = 1 or 2 |"
+      "quote": "| 4 | 2 | version = 1, 2 or 3 |",
+      "text": "| 4 | 2 | version = 1, 2 or 3 |"
     },
     {
       "id": "ar.file.055",
@@ -2505,8 +2505,8 @@
     {
       "id": "ar.file.085",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Total length must be exactly 56 + count * 104 + 8 for version 1, or 56 + count * 104 + 4 + ext_len + 8 for version 2.",
-      "text": "Total length must be exactly 56 + count * 104 + 8 for version 1, or 56 + count * 104 + 4 + ext_len + 8 for version 2."
+      "quote": "Total length must be exactly 56 + count * 104 + 8 for version 1, or 56 + count * 104 + 4 + ext_len + 8 for versions 2 and 3.",
+      "text": "Total length must be exactly 56 + count * 104 + 8 for version 1, or 56 + count * 104 + 4 + ext_len + 8 for versions 2 and 3."
     },
     {
       "id": "ar.file.086",
@@ -3351,8 +3351,8 @@
     {
       "id": "ar.file.102",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Version 2 uses the same header and records, then a LE u32 `ext_len` followed by exactly that many extension bytes.",
-      "text": "Version 2 uses the same header and records, then a LE u32 `ext_len` followed by exactly that many extension bytes."
+      "quote": "Versions 2 and 3 use the same header and records, then a LE u32 `ext_len` followed by exactly that many extension bytes.",
+      "text": "Versions 2 and 3 use the same header and records, then a LE u32 `ext_len` followed by exactly that many extension bytes."
     },
     {
       "id": "ar.file.103",
@@ -3405,8 +3405,8 @@
     {
       "id": "ar.file.111",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "The encoder emits version 2 whenever any supported extension is present;",
-      "text": "The encoder emits version 2 whenever any supported extension is present;"
+      "quote": "The encoder emits version 3 when content identity is present, version 2 for other extensions;",
+      "text": "The encoder emits version 3 when content identity is present, version 2 for other extensions;"
     },
     {
       "id": "ar.file.112",
@@ -3531,8 +3531,8 @@
     {
       "id": "ar.scope.008",
       "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
-      "quote": "Regional continuation performance qualification is planned for v0.4.0 as [issue #320](https://github.com/d-addison/luminumbra/issues/320).",
-      "text": "Regional continuation performance qualification is planned for v0.4.0 as [issue #320](https://github.com/d-addison/luminumbra/issues/320)."
+      "quote": "Regional continuation performance/default enablement is planned for v0.4.0 as [issue #320](https://github.com/d-addison/luminumbra/issues/320).",
+      "text": "Regional continuation performance/default enablement is planned for v0.4.0 as [issue #320](https://github.com/d-addison/luminumbra/issues/320)."
     },
     {
       "id": "ar.scope.010",
@@ -3591,8 +3591,8 @@
     {
       "id": "ar.file.126",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "| 5 | Simulation content identity: 40 bytes containing LE u16 encoding, defaults and algorithm versions, LE u16 zero reserved, then LE u64 policy, creature definitions, plant definitions and population digests. |",
-      "text": "| 5 | Simulation content identity: 40 bytes containing LE u16 encoding, defaults and algorithm versions, LE u16 zero reserved, then LE u64 policy, creature definitions, plant definitions and population digests. |"
+      "quote": "| 5 | Version 3 simulation content identity: 40 bytes containing LE u16 encoding, defaults and algorithm versions, LE u16 zero reserved, then LE u64 policy, creature definitions, plant definitions and population digests. |",
+      "text": "| 5 | Version 3 simulation content identity: 40 bytes containing LE u16 encoding, defaults and algorithm versions, LE u16 zero reserved, then LE u64 policy, creature definitions, plant definitions and population digests. |"
     },
     {
       "id": "ar.file.127",
@@ -3663,8 +3663,8 @@
     {
       "id": "ar.content.003",
       "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "each document is capped at 1 MiB and the captured inventories together at 16 MiB.",
-      "text": "each document is capped at 1 MiB and the captured inventories together at 16 MiB."
+      "quote": "each document is capped at 1 MiB and the captured inventories together at 16 MiB, with each directory scan capped at 512 entries including ignored files.",
+      "text": "each document is capped at 1 MiB and the captured inventories together at 16 MiB, with each directory scan capped at 512 entries including ignored files."
     },
     {
       "id": "ar.content.004",
@@ -3795,8 +3795,8 @@
     {
       "id": "ar.content.025",
       "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Malformed systems configuration, including raw NUL, selects defaults;",
-      "text": "Malformed systems configuration, including raw NUL, selects defaults;"
+      "quote": "Syntax errors and raw NUL in systems configuration select defaults;",
+      "text": "Syntax errors and raw NUL in systems configuration select defaults;"
     },
     {
       "id": "ar.content.026",
@@ -3897,8 +3897,8 @@
     {
       "id": "ar.content.042",
       "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "TLV 5 is always present in newly created enabled worlds, even with no regions or creatures.",
-      "text": "TLV 5 is always present in newly created enabled worlds, even with no regions or creatures."
+      "quote": "TLV 5 requires ledger version 3 and is always present in newly created enabled worlds, even with no regions or creatures.",
+      "text": "TLV 5 requires ledger version 3 and is always present in newly created enabled worlds, even with no regions or creatures."
     },
     {
       "id": "ar.content.043",
@@ -4107,8 +4107,8 @@
     {
       "id": "ar.content.077",
       "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "This feeds the existing enabled ecology/world hash at boot, including an empty creature world, without changing network or replay layouts.",
-      "text": "This feeds the existing enabled ecology/world hash at boot, including an empty creature world, without changing network or replay layouts."
+      "quote": "This feeds the existing enabled ecology/world hash at boot, including an empty creature world, and binds the opaque network/replay configuration identity to the same captured content without changing message layouts.",
+      "text": "This feeds the existing enabled ecology/world hash at boot, including an empty creature world, and binds the opaque network/replay configuration identity to the same captured content without changing message layouts."
     },
     {
       "id": "ar.content.078",
@@ -4155,8 +4155,8 @@
     {
       "id": "ar.content.085",
       "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "A present identity must match newly captured content exactly or open refuses with `Simulation content identity mismatch.` Unsupported identity/default/algorithm versions, nonzero reserved fields, wrong lengths and duplicate or misordered TLVs are corrupt.",
-      "text": "A present identity must match newly captured content exactly or open refuses with `Simulation content identity mismatch.` Unsupported identity/default/algorithm versions, nonzero reserved fields, wrong lengths and duplicate or misordered TLVs are corrupt."
+      "quote": "A present identity must match newly captured content exactly or open refuses with `Simulation content identity mismatch.` Unsupported identity/default/algorithm versions, nonzero reserved fields, wrong lengths, content identity in version 2, missing identity in version 3 and duplicate or misordered TLVs are corrupt.",
+      "text": "A present identity must match newly captured content exactly or open refuses with `Simulation content identity mismatch.` Unsupported identity/default/algorithm versions, nonzero reserved fields, wrong lengths, content identity in version 2, missing identity in version 3 and duplicate or misordered TLVs are corrupt."
     },
     {
       "id": "ar.content.086",

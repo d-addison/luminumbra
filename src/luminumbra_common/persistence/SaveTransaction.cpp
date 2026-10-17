@@ -1159,7 +1159,12 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
 
         auto digest_member = [this, errors](const std::string& rel, MemberDigest& digest) {
             std::string error;
-            if (m_digest_fn == nullptr || !m_digest_fn(m_save_dir, rel, digest, error)) {
+            // A legacy-readable record must also be readable after this index becomes
+            // the commit point. Keep permissive digests available to legacy consumers.
+            const auto digest_fn = m_digest_fn == &WorldSaveService::member_digest
+                                       ? &WorldSaveService::indexed_member_digest
+                                       : m_digest_fn;
+            if (digest_fn == nullptr || !digest_fn(m_save_dir, rel, digest, error)) {
                 AddError(errors,
                          "cannot validate snapshot member " + rel +
                              (error.empty() ? std::string() : ": " + error));
@@ -1185,23 +1190,36 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
                 "chunks/region/field-pages.fpg",
                 "chunks/region/active-regions.arl",
             };
+            const auto fixed_members = baseline.size();
             std::error_code ec;
             fs::directory_iterator it(m_save_dir / "chunks" / "region", ec);
             const fs::directory_iterator end;
-            if (!ec) {
-                for (; it != end; it.increment(ec)) {
-                    if (ec) {
-                        break;
-                    }
-                    std::error_code status_ec;
-                    if (!it->is_regular_file(status_ec) || status_ec) {
-                        continue;
-                    }
-                    const std::string rel = "chunks/region/" + it->path().filename().string();
-                    if (member_path_allowed(rel)) {
-                        baseline.push_back(rel);
-                    }
+            // An absent region directory is a clean first save. Every other scan
+            // failure must refuse publication rather than silently omit retained data.
+            if (ec == std::errc::no_such_file_or_directory)
+                ec.clear();
+            for (; !ec && it != end; it.increment(ec)) {
+                std::error_code status_ec;
+                const auto status = it->symlink_status(status_ec);
+                const std::string rel = "chunks/region/" + it->path().filename().string();
+                if (status_ec || !fs::is_regular_file(status) || !member_path_allowed(rel)) {
+                    AddError(errors, "cannot enumerate snapshot member: " + rel);
+                    abort(errors);
+                    return false;
                 }
+                // At most kMaxSnapshotMembers directory entries, plus the eight
+                // fixed paths above (some may be absent or also appear in the scan).
+                if (baseline.size() - fixed_members >= kMaxSnapshotMembers) {
+                    AddError(errors, "too many snapshot members");
+                    abort(errors);
+                    return false;
+                }
+                baseline.push_back(rel);
+            }
+            if (ec) {
+                AddError(errors, "cannot enumerate snapshot members: " + ec.message());
+                abort(errors);
+                return false;
             }
             for (const std::string& rel : baseline) {
                 MemberDigest digest;
@@ -1226,7 +1244,8 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
         // C4 keeps all-zero energy cadence in the ledger. Its omitted EFS payload is
         // an intentional absence, including the first indexed save (distant-world.md).
         // Generic transactions with a caller-supplied digest do not interpret world records.
-        if (m_digest_fn == &WorldSaveService::member_digest &&
+        if ((m_digest_fn == &WorldSaveService::member_digest ||
+             m_digest_fn == &WorldSaveService::indexed_member_digest) &&
             !members.contains("aether_state.efs")) {
             world::ActiveRegionLedger ledger;
             if (!WorldSaveService::load_active_regions(ledger, m_save_dir, errors)) {

@@ -15,7 +15,9 @@
 // within a run over a deterministic bounded region — there are no golden hashes —
 // and the non-vacuity guards (water_chunks / max_depth / seam_wet / found_water /
 // land_water) still prove real water was exercised.
+#include "../support/SimulationContentFixture.h"
 #include "../support/UniqueTempPath.h"
+#include "../support/WorldgenTestData.h"
 
 #include <gtest/gtest.h>
 
@@ -75,15 +77,9 @@ public:
             std::ofstream output(path);
             output << preset.dump(2);
         }
-        // The `default` preset has rivers_enabled + a biome table ("common/biomes.json"); copy it
-        // to the locations the loader probes so the rivers/water actually generate.
-        std::error_code ec;
-        fs::create_directories(root_ / "data" / "common", ec);
-        fs::create_directories(root_ / "common", ec);
-        fs::copy_file(
-            src / "data" / "common" / "biomes.json", root_ / "data" / "common" / "biomes.json", ec);
-        fs::copy_file(
-            src / "data" / "common" / "biomes.json", root_ / "common" / "biomes.json", ec);
+        Luminumbra::TestSupport::WriteSimulationContentFixture(root_);
+        fs::remove(root_ / "data/common/biomes.json");
+        Luminumbra::TestSupport::CopyWorldgenTestData(src, root_);
     }
     ~HeadlessRoot() {
         std::error_code ec;

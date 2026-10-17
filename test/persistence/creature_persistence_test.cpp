@@ -1206,9 +1206,10 @@ TEST(CreaturePersistence, LegacyControllerAbsenceLoadsAndNextSaveStampsNonpartic
             EXPECT_FALSE(restored.get<C::CreatureControllerComponent>(out).physics_controlled);
             EXPECT_FALSE(restored.all_of<C::CreaturePhysicsComponent>(out));
             EXPECT_EQ(restored.all_of<C::CreatureLocomotionStateComponent>(out), velocity);
-            if (velocity)
+            if (velocity) {
                 EXPECT_EQ(restored.get<C::CreatureLocomotionStateComponent>(out).velocity_y,
                           -0.375f);
+            }
             const auto saved = A::SerializeCreatureSnapshot(A::BuildCreatureSnapshot(restored));
             EXPECT_EQ(nlohmann::json::parse(saved)["entities"][0]["components"]["Controller"],
                       (nlohmann::json{{"version", 1}, {"data", {{"physics_controlled", false}}}}));
@@ -1242,8 +1243,9 @@ TEST(CreaturePersistence, EmitterRadiusRefusesExtremeValuesAndAcceptsLastNonzero
             EXPECT_EQ(restored.get<C::FieldEmitterComponent>(target).radius_cells, radius);
         }
         source.get<C::FieldEmitterComponent>(e).radius_cells = radius;
-        if (!accepted)
+        if (!accepted) {
             EXPECT_THROW(A::BuildCreatureSnapshot(source), std::invalid_argument);
+        }
     }
 }
 
@@ -1435,8 +1437,9 @@ TEST(CreaturePersistence, MaximumWaypointVectorsKeepTheLegacyNodeBudget) {
                 }
                 const auto saved = A::SerializeCreatureSnapshot(loaded);
                 EXPECT_EQ(saved.size(), bytes.size() + (stamped ? 0 : count * 63));
-                if (stamped)
+                if (stamped) {
                     EXPECT_EQ(saved, bytes);
+                }
             } else {
                 EXPECT_FALSE(A::LoadCreatureSnapshot(bytes, loaded, error));
                 EXPECT_NE(error.find("creature node limit"), std::string::npos) << error;
