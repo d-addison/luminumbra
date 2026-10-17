@@ -456,7 +456,7 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
             artifacts->reserve_file(out_temp);
         file = ::CreateFileW(out_temp.c_str(),
                              GENERIC_WRITE,
-                             0,
+                             artifacts ? FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE : 0,
                              nullptr,
                              CREATE_NEW,
                              FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH,
