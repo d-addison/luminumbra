@@ -16,13 +16,16 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 namespace Luminumbra::world {
 class GameSession;
-}
+struct FarWorldPublicationRequest;
+struct FarWorldPublication;
+} // namespace Luminumbra::world
 namespace Luminumbra::Rendering {
 class Camera;
 }
@@ -927,6 +930,26 @@ struct FarLodHorizonStation {
     float eye_height_meters = 1.8f;
 };
 
+// Production ON readiness, shared by scenario capture and file-only regressions.
+struct SavedFarHorizonSupport {
+    std::optional<float> terrain_height;
+    std::vector<Luminumbra::World::FarTileKey> wanted;
+    std::uint64_t world_epoch = 0;
+    Luminumbra::World::FarCaveMode caves = Luminumbra::World::FarCaveMode::BandLimited;
+    bool eye_captured = false;
+};
+// Poll the eye band, then the elevated band before exposing any sweep target.
+// Keeps the production incremental capture budget and monotone span ledger.
+bool CaptureSavedFarHorizonPublication(
+    Luminumbra::world::GameSession&,
+    Luminumbra::world::FarWorldPublicationRequest,
+    SavedFarHorizonSupport&,
+    std::shared_ptr<const Luminumbra::world::FarWorldPublication>&,
+    std::string& diagnostic);
+bool SavedFarStationReady(const Luminumbra::Rendering::FarWorldHandoffDiagnosticSnapshot&,
+                          const Luminumbra::Rendering::FarWorldSelection&,
+                          std::span<const Luminumbra::World::FarTileKey>,
+                          double settle_seconds);
 std::vector<FarLodHorizonStation> BuildFarLodHorizonStations();
 
 void ApplyFarLodHorizonCamera(Luminumbra::world::GameSession* game_session,
@@ -998,6 +1021,9 @@ struct FarLodHorizonStationCapture {
     FarLodHorizonStation station;
     // Includes combined water readiness and actual water indices from far ON.
     Luminumbra::Rendering::FarWorldDiagnosticSnapshot far_world;
+    // Production ON values; serialization avoids retaining worker input aliases.
+    nlohmann::json saved_far_world = nullptr;
+    Luminumbra::Rendering::FarWorldSelection selected_far_world{};
     double settle_seconds = 0;
     bool ready_within_deadline = false, paired_capture_preserved = false;
     std::string file;

@@ -196,6 +196,7 @@ add_executable(common_tests
     common/FarLodStore_test.cpp
     common/FarVolumeWorld_test.cpp
     common/FarFrozenObservation_test.cpp
+    common/FarEditedAcceptance_test.cpp
     common/FarVolumeRuntime_test.cpp
     common/FarVolumeTierMemory_test.cpp
     rendering/FarWorldWaterMesh_test.cpp
@@ -2225,6 +2226,17 @@ if(DEFINED ENV{VISUAL_SWEEP_PYTHON})
     list(APPEND _vc_candidates "$ENV{VISUAL_SWEEP_PYTHON}")
 endif()
 if(Python3_FOUND)
+    # Isolated stdlib bootstrap explicitly exposes only the gate module directory.
+    set(_far_edited_bootstrap "import runpy,sys; sys.path.insert(0,sys.argv[1]); sys.argv=sys.argv[2:]; runpy.run_path(sys.argv[0],run_name='__main__')")
+    add_test(NAME FarEditedQualificationContract
+        COMMAND "${Python3_EXECUTABLE}" -I -B -c "${_far_edited_bootstrap}"
+            "${CMAKE_SOURCE_DIR}/tools/gates" "${CMAKE_SOURCE_DIR}/tools/gates/test_far_edited_qualification.py")
+    set_tests_properties(FarEditedQualificationContract PROPERTIES LABELS "persistence;tools" TIMEOUT 60)
+    add_test(NAME FarEditedWriterContract
+        COMMAND "${Python3_EXECUTABLE}" -I -B -c "${_far_edited_bootstrap}"
+            "${CMAKE_SOURCE_DIR}/tools/gates" "${CMAKE_SOURCE_DIR}/tools/gates/test_far_edited_qualification.py"
+            --writer-fixture "$<TARGET_FILE:far_ladder_oracle_writer_fixture>")
+    set_tests_properties(FarEditedWriterContract PROPERTIES LABELS "persistence;tools" TIMEOUT 60)
     add_test(NAME FarHorizonV2ValidatorContract
         COMMAND "${Python3_EXECUTABLE}" -B -m unittest discover -s "${CMAKE_SOURCE_DIR}/tools/gates" -p test_far_ladder_oracle.py)
     set_tests_properties(FarHorizonV2ValidatorContract PROPERTIES LABELS "tools" TIMEOUT 60)

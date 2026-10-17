@@ -48,6 +48,9 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "core/NvmlSampler.h" //  optional GPU power/clock sampling
 #include "core/RuntimeScenarioConfig.h"
 #include "core/ScenarioRunner.h"
+#if defined(LUMINUMBRA_QA_RUNNER)
+#include "core/RuntimeScenarioHarness.h"
+#endif
 #include "debug/DebugCamera.h" // deterministic feature locator (--debug-goto cave|doline)
 #include "debug/DeveloperCommandRegistry.h"
 #include "debug/DeveloperConsole.h"
@@ -2360,7 +2363,13 @@ int main(int argc, char* argv[]) try {
     std::chrono::steady_clock::time_point scenario_play_started_at{};
     RuntimeReadinessReport last_readiness_report;
 
+#if defined(LUMINUMBRA_QA_RUNNER)
+    Luminumbra::Client::ScenarioHarness::SavedFarHorizonSupport saved_horizon_support;
+#endif
     auto prepare_world_entry = [&]() {
+#if defined(LUMINUMBRA_QA_RUNNER)
+        saved_horizon_support = {};
+#endif
         renderPipeline.prepare_world_swap();
         gameSession->ClearFarWorldPublication();
         DrainBackgroundWorldScan(jobSystem);
@@ -2375,7 +2384,15 @@ int main(int argc, char* argv[]) try {
             return;
         std::shared_ptr<const Luminumbra::world::FarWorldPublication> publication;
         std::string diagnostic;
-        if (gameSession->CaptureFarWorldPublication(request, publication, diagnostic))
+        const bool captured = [&] {
+#if defined(LUMINUMBRA_QA_RUNNER)
+            if (scenario_config.farlod_horizon_smoke())
+                return Luminumbra::Client::ScenarioHarness::CaptureSavedFarHorizonPublication(
+                    *gameSession, request, saved_horizon_support, publication, diagnostic);
+#endif
+            return gameSession->CaptureFarWorldPublication(request, publication, diagnostic);
+        }();
+        if (captured)
             renderPipeline.bind_saved_far_world(std::move(publication));
         else if (!diagnostic.empty())
             renderPipeline.refuse_saved_far_world_publication(std::move(diagnostic));

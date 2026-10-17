@@ -11,6 +11,9 @@ This page describes the codec in `world/FarAuthorityOverlay.{h,cpp}` and the pur
 edited bake in `world/FarEditedBake.{h,cpp}`. `FarEditedCache` supplies the owner-thread
 transactional publication and immutable acquisition lifecycle described below.
 
+See [saved far-world qualification](far-edited-qualification.md) for the target
+station oracle, bounded regressions and pending native measurement contract.
+
 ## File name
 
 `<save>/far/v<tier>.<tx>.<tz>.lmr`, with the tier in 1..5 and negative tile
