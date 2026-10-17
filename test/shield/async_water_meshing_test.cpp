@@ -9,8 +9,11 @@
 #include <entt/entity/fwd.hpp>
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <future>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -94,7 +97,7 @@ void CheckDugPondMesh(bool use_workers, MeshRequest request) {
             if (use_workers) {
                 jobs.startup(1);
             }
-            auto params = Test::SyntheticTerrainParams();
+            auto params = Luminumbra::Test::SyntheticTerrainParams();
             params.base_amplitude = 0.0f;
             params.height_offset = 8.0f;
             params.caves_enabled = false;
@@ -185,5 +188,292 @@ TEST(AsyncWaterMeshing, InlineTerrainRemeshKeepsDugPondDepth) {
 
 TEST(AsyncWaterMeshing, InlineWaterOnlyRemeshKeepsDugPondDepth) {
     CheckDugPondMesh(false, MeshRequest::WaterOnly);
+}
+// Occupy the sole worker through the public queue so simulation can advance
+// deterministically after dispatch and before the meshing job reads its inputs.
+class PendingMeshGate {
+public:
+    PendingMeshGate(JobSystem& jobs, SHIELD_WorldSystem& world)
+        : m_world(world) {
+        auto entered = std::make_shared<std::promise<void>>();
+        auto started = entered->get_future();
+        const auto release = m_release.get_future().share();
+        jobs.dispatch([entered, release]() {
+            entered->set_value();
+            release.wait();
+        });
+        EXPECT_EQ(started.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    }
+    ~PendingMeshGate() {
+        finish();
+    }
+    void finish() {
+        if (!m_finished) {
+            m_release.set_value();
+            m_finished = true;
+        }
+        m_world.wait_for_streaming_jobs();
+    }
+
+private:
+    SHIELD_WorldSystem& m_world;
+    std::promise<void> m_release;
+    bool m_finished = false;
+};
+
+std::unique_ptr<Chunk>
+ReferenceMesh(SHIELD_WorldSystem& world, WaterSystem& water, const Chunk& live) {
+    auto reference = std::make_unique<Chunk>(live.get_coords());
+    reference->sdf_data = live.sdf_data;
+    reference->heightmap_data = live.heightmap_data;
+    reference->material_data = live.material_data;
+    reference->water_depth_mm = live.water_depth_mm;
+    reference->water_level_data = live.water_level_data;
+    reference->has_water_sim.store(live.has_water_sim.load());
+    reference->current_water_resolution.store(live.current_water_resolution.load());
+    World::MarchingCubes::PolygoniseTerrain(world, *reference, 0.0f, 1);
+    World::MarchingCubes::GenerateWaterMesh(water, world, *reference);
+    return reference;
+}
+
+void CheckAdvancingWater(MeshRequest request, bool resize_pending) {
+    JobSystem jobs;
+    jobs.startup(1);
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.base_amplitude = 0.0f;
+    params.height_offset = 8.0f;
+    params.caves_enabled = false;
+    SHIELD_WorldSystem world(&jobs, nullptr, params, 1337);
+    WaterSystem water(&jobs, &world);
+    water.SetSimResolution(8);
+    water.SetHydrology(true, 100, 0);
+    world.SetWaterSystem(&water);
+    auto chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
+    FillDugPond(world, *chunk, 8);
+    if (request != MeshRequest::Initial) {
+        World::MarchingCubes::PolygoniseTerrain(world, *chunk, 0.0f, 1);
+        chunk->set_state(ChunkState::Ready);
+        chunk->current_lod.store(request == MeshRequest::TerrainRemesh ? 1 : 0);
+    }
+    ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+    PendingMeshGate gate(jobs, world);
+    entt::registry registry;
+    const Vec3 anchor(8.0f, 6.0f, 8.0f);
+    world.update(registry, anchor, nullptr);
+    ASSERT_EQ(world.get_last_streaming_budget_stats().scheduled_meshing, 1u);
+    ASSERT_EQ(chunk->pending_lod.load(), 0);
+    auto dispatched = ReferenceMesh(world, water, *chunk);
+    ASSERT_FALSE(dispatched->water_mesh_vertices.empty());
+    const auto dispatch_depth = chunk->water_depth_mm;
+    if (resize_pending) {
+        water.SetSimResolution(16);
+    }
+    for (int tick = 0; tick < 2; ++tick) {
+        world.update(registry, anchor, nullptr);
+        EXPECT_EQ(world.get_last_streaming_budget_stats().scheduled_meshing, 0u);
+        EXPECT_EQ(chunk->pending_lod.load(), 0);
+    }
+    EXPECT_NE(chunk->water_depth_mm, dispatch_depth);
+    EXPECT_EQ(chunk->current_water_resolution.load(), resize_pending ? 16 : 8);
+    gate.finish();
+    EXPECT_EQ(chunk->water_mesh_version.load(), 1u);
+    ExpectVerticesEqual(chunk->water_mesh_vertices, dispatched->water_mesh_vertices);
+    EXPECT_EQ(chunk->water_mesh_indices, dispatched->water_mesh_indices);
+    ExpectVerticesEqual(chunk->mesh_vertices, dispatched->mesh_vertices);
+    EXPECT_EQ(chunk->mesh_indices, dispatched->mesh_indices);
+    EXPECT_FALSE(chunk->water_mesh_generated.load());
+
+    // Keep simulation running for a second dispatch. The second worker must
+    // mesh the new state, and publication must not lose that invalidation.
+    PendingMeshGate next_gate(jobs, world);
+    world.update(registry, anchor, nullptr);
+    ASSERT_EQ(world.get_last_streaming_budget_stats().scheduled_meshing, 1u);
+    auto newer = ReferenceMesh(world, water, *chunk);
+    ASSERT_NE(newer->water_level_data, dispatched->water_level_data);
+    next_gate.finish();
+    EXPECT_EQ(chunk->water_mesh_version.load(), 2u);
+    ExpectVerticesEqual(chunk->water_mesh_vertices, newer->water_mesh_vertices);
+    EXPECT_EQ(chunk->water_mesh_indices, newer->water_mesh_indices);
+    EXPECT_TRUE(chunk->water_mesh_generated.load());
+}
+
+TEST(AsyncWaterMeshing, InitialMeshUsesDispatchStateWhileWaterAdvances) {
+    CheckAdvancingWater(MeshRequest::Initial, false);
+}
+
+TEST(AsyncWaterMeshing, TerrainRemeshUsesDispatchStateWhileWaterAdvances) {
+    CheckAdvancingWater(MeshRequest::TerrainRemesh, false);
+}
+
+TEST(AsyncWaterMeshing, WaterOnlyRemeshUsesDispatchStateWhileWaterAdvances) {
+    CheckAdvancingWater(MeshRequest::WaterOnly, false);
+}
+
+TEST(AsyncWaterMeshing, PendingMeshOwnsWaterGridAcrossResolutionChange) {
+    CheckAdvancingWater(MeshRequest::WaterOnly, true);
+}
+
+enum class SupersedingChange : std::uint8_t {
+    TerrainMesh,
+    WaterMesh,
+    VoxelEdit
+};
+
+TEST(AsyncWaterMeshing, StaleResultsCannotReplaceNewerMeshesOrVoxelEdits) {
+    for (const auto change : {SupersedingChange::TerrainMesh,
+                              SupersedingChange::WaterMesh,
+                              SupersedingChange::VoxelEdit}) {
+        SCOPED_TRACE(static_cast<int>(change));
+        JobSystem jobs;
+        jobs.startup(1);
+        auto params = Luminumbra::Test::SyntheticTerrainParams();
+        params.base_amplitude = 0.0f;
+        params.height_offset = 8.0f;
+        params.caves_enabled = false;
+        SHIELD_WorldSystem world(&jobs, nullptr, params, 1337);
+        WaterSystem water(&jobs, &world);
+        water.SetSimResolution(8);
+        world.SetWaterSystem(&water);
+        auto chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
+        FillDugPond(world, *chunk, 8);
+        ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+        PendingMeshGate gate(jobs, world);
+        entt::registry registry;
+        world.update(registry, Vec3(8.0f, 6.0f, 8.0f), nullptr);
+        ASSERT_EQ(chunk->pending_lod.load(), 0);
+        // Model a synchronous public mesh rebuild or a voxel edit while the
+        // asynchronous snapshot is queued. Its result must be retained.
+        if (change == SupersedingChange::TerrainMesh) {
+            chunk->mesh_version++;
+        } else if (change == SupersedingChange::WaterMesh) {
+            chunk->water_mesh_version++;
+        } else {
+            for (auto& density : chunk->sdf_data) {
+                density += 1.0f;
+            }
+            chunk->mark_voxel_data_dirty();
+            chunk->current_lod.store(-1);
+        }
+        auto newer = ReferenceMesh(world, water, *chunk);
+        chunk->mesh_vertices = newer->mesh_vertices;
+        chunk->mesh_indices = newer->mesh_indices;
+        chunk->water_mesh_vertices = newer->water_mesh_vertices;
+        chunk->water_mesh_indices = newer->water_mesh_indices;
+        const auto terrain_version = chunk->mesh_version.load();
+        const auto water_version = chunk->water_mesh_version.load();
+        gate.finish();
+        EXPECT_EQ(chunk->mesh_version.load(), terrain_version);
+        EXPECT_EQ(chunk->water_mesh_version.load(), water_version);
+        EXPECT_EQ(chunk->pending_lod.load(), -1);
+        ExpectVerticesEqual(chunk->mesh_vertices, newer->mesh_vertices);
+        EXPECT_EQ(chunk->mesh_indices, newer->mesh_indices);
+        ExpectVerticesEqual(chunk->water_mesh_vertices, newer->water_mesh_vertices);
+        EXPECT_EQ(chunk->water_mesh_indices, newer->water_mesh_indices);
+        if (change == SupersedingChange::VoxelEdit) {
+            world.update(registry, Vec3(8.0f, 6.0f, 8.0f), nullptr);
+            ASSERT_EQ(world.get_last_streaming_budget_stats().scheduled_meshing, 1u);
+            world.wait_for_streaming_jobs();
+            EXPECT_EQ(chunk->mesh_version.load(), terrain_version + 1u);
+            ExpectVerticesEqual(chunk->mesh_vertices, newer->mesh_vertices);
+        }
+    }
+}
+
+TEST(AsyncWaterMeshing, EvictedChunkResultCannotPublishIntoReplacementGeneration) {
+    JobSystem jobs;
+    jobs.startup(1);
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.base_amplitude = 0.0f;
+    params.height_offset = 8.0f;
+    params.caves_enabled = false;
+    SHIELD_WorldSystem world(&jobs, nullptr, params, 1337);
+    world.debug_set_streaming_radius_cap(1);
+    WaterSystem water(&jobs, &world);
+    water.SetSimResolution(8);
+    world.SetWaterSystem(&water);
+    auto old_chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
+    FillDugPond(world, *old_chunk, 8);
+    ASSERT_TRUE(world.adopt_streamed_chunk(old_chunk));
+    PendingMeshGate gate(jobs, world);
+    entt::registry registry;
+    world.update(registry, Vec3(8.0f, 6.0f, 8.0f), nullptr);
+    ASSERT_EQ(old_chunk->pending_lod.load(), 0);
+    const auto interval = world.get_last_streaming_budget_stats().update_interval_frames;
+    for (int frame = 1; frame < interval; ++frame) {
+        world.update(registry, Vec3(4096.0f, 6.0f, 4096.0f), nullptr);
+    }
+    ASSERT_EQ(world.find_streamed_chunk(IVec3(0, 0, 0)), nullptr);
+    auto replacement = std::make_shared<Chunk>(IVec3(0, 0, 0));
+    FillDugPond(world, *replacement, 8);
+    auto expected = ReferenceMesh(world, water, *replacement);
+    replacement->mesh_vertices = expected->mesh_vertices;
+    replacement->mesh_indices = expected->mesh_indices;
+    replacement->water_mesh_vertices = expected->water_mesh_vertices;
+    replacement->water_mesh_indices = expected->water_mesh_indices;
+    replacement->mesh_version.store(7);
+    replacement->water_mesh_version.store(9);
+    ASSERT_TRUE(world.adopt_streamed_chunk(replacement));
+    gate.finish();
+    EXPECT_EQ(world.find_streamed_chunk(IVec3(0, 0, 0)), replacement);
+    EXPECT_EQ(old_chunk->mesh_version.load(), 0u);
+    EXPECT_EQ(old_chunk->water_mesh_version.load(), 0u);
+    EXPECT_EQ(replacement->mesh_version.load(), 7u);
+    EXPECT_EQ(replacement->water_mesh_version.load(), 9u);
+    ExpectVerticesEqual(replacement->mesh_vertices, expected->mesh_vertices);
+    ExpectVerticesEqual(replacement->water_mesh_vertices, expected->water_mesh_vertices);
+}
+
+TEST(AsyncWaterMeshing, MalformedHeightmapsKeepAnalyticCoarseFallback) {
+    constexpr std::size_t kHeightmapCells =
+        static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Z + 1);
+    for (const bool use_workers : {false, true}) {
+        for (const auto cells : {std::size_t{0}, kHeightmapCells - 1u, kHeightmapCells + 1u}) {
+            SCOPED_TRACE(use_workers);
+            SCOPED_TRACE(cells);
+            JobSystem jobs;
+            if (use_workers) {
+                jobs.startup(1);
+            }
+            auto params = Luminumbra::Test::SyntheticTerrainParams();
+            params.base_amplitude = 0.0f;
+            params.height_offset = 8.0f;
+            params.caves_enabled = false;
+            SHIELD_WorldSystem world(use_workers ? &jobs : nullptr, nullptr, params, 1337);
+            auto chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
+            chunk->heightmap_data.assign(cells, 6.0f);
+            World::MarchingCubes::PolygoniseTerrain(world, *chunk, 0.0f, 2);
+            const auto expected_vertices = chunk->mesh_vertices;
+            const auto expected_indices = chunk->mesh_indices;
+            ASSERT_FALSE(expected_vertices.empty());
+            chunk->mesh_vertices.clear();
+            chunk->mesh_indices.clear();
+            ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+            entt::registry registry;
+            world.update(registry, Vec3(264.0f, 6.0f, 8.0f), nullptr);
+            world.wait_for_streaming_jobs();
+            EXPECT_EQ(chunk->current_lod.load(), 1);
+            ExpectVerticesEqual(chunk->mesh_vertices, expected_vertices);
+            EXPECT_EQ(chunk->mesh_indices, expected_indices);
+        }
+    }
+}
+
+TEST(AsyncWaterMeshing, InvalidResolutionAndPartialSurfaceRejectBeforeAllocation) {
+    SHIELD_WorldSystem world(nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+    const WaterSystem water(nullptr, &world);
+    Chunk chunk(IVec3(0, 0, 0));
+    chunk.has_water_sim.store(true);
+    for (const int resolution : {-1, 0, 1, 33, std::numeric_limits<int>::max(), 8}) {
+        SCOPED_TRACE(resolution);
+        chunk.current_water_resolution.store(resolution);
+        chunk.water_level_data.assign(resolution == 8 ? 63u : 0u, 6.0f);
+        chunk.water_mesh_vertices = {{Vec3(0.0f), Vec3(0.0f, 1.0f, 0.0f), 0u}};
+        chunk.water_mesh_indices = {0u};
+        chunk.water_mesh_generated.store(true);
+        World::MarchingCubes::GenerateWaterMesh(water, world, chunk);
+        EXPECT_TRUE(chunk.water_mesh_vertices.empty());
+        EXPECT_TRUE(chunk.water_mesh_indices.empty());
+        EXPECT_FALSE(chunk.water_mesh_generated.load());
+    }
 }
 } // namespace

@@ -873,6 +873,18 @@
       ]
     },
     {
+      "id": "iss.483",
+      "source": "issue #483",
+      "statement": "Asynchronous meshing captures bounded water and terrain inputs on the main thread. Pending initial meshes, terrain remeshes and water-only remeshes retain dispatch geometry while water simulation advances, including grid resizing, and subsequently mesh the newer water state. Publication rejects superseded chunk generations, mesh versions and voxel revisions; invalid water resolutions and partial surface grids are rejected before allocation. Malformed heightmaps retain the analytic coarse fallback.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.*"
+        }
+      ]
+    },
+    {
       "id": "contract.tier-values",
       "source": "docs/distant-world.md#far-range-declaration-and-compatibility",
       "statement": "The published one-based tier dimensions, nominal horizontal bands and invalid-input refusals have landed unit evidence; runtime adoption is tracked separately.",

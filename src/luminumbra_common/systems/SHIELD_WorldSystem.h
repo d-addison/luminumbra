@@ -923,6 +923,12 @@ private:
             std::shared_ptr<::Luminumbra::Chunk> chunk;
             bool terrain_mesh_required = true;
             u8 transition_faces = 0;
+            // Inputs captured on the main thread; only this job touches the scratch
+            // until its handle drains. Publication then consumes its mesh outputs.
+            std::shared_ptr<::Luminumbra::Chunk> scratch;
+            u32 mesh_version = 0;
+            u32 water_mesh_version = 0;
+            u32 voxel_revision = 0;
         };
         struct MeshingBatch {
             JobHandle handle;      // Normal lane
