@@ -2,6 +2,7 @@
 
 #include "ExclusiveRename.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <bit>
@@ -9,6 +10,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <exception>
 #include <filesystem>
 #include <optional>
@@ -16,6 +18,7 @@
 #include <string>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -76,7 +79,7 @@ public:
 #endif
 
     // Called immediately after exclusive creation, while the writer still owns
-    // the native handle. Retain a duplicate until release or completed removal
+    // the native handle. Retain the object until release or completed removal
     // so an unlinked object's identity cannot be recycled. Windows writers
     // must allow read/write/delete sharing for publication and rollback.
     void file_created(const std::filesystem::path& path, NativeFile file) {
@@ -100,10 +103,7 @@ public:
             throw std::runtime_error("Refusing to replace a world artifact destination.");
         target.retained = duplicate_file(source.retained.get());
 #if defined(_WIN32)
-        if (!::MoveFileExW(temp.c_str(), destination.c_str(), MOVEFILE_WRITE_THROUGH))
-            throw std::system_error(static_cast<int>(::GetLastError()),
-                                    std::system_category(),
-                                    "Could not exclusively publish world artifact");
+        publish_windows(source, target);
 #else
         if (Detail::RenameWithoutReplacement(
                 AT_FDCWD, temp.c_str(), AT_FDCWD, destination.c_str()) != 0)
@@ -338,14 +338,12 @@ private:
 
     static ScopedFile duplicate_file(NativeFile file) {
 #if defined(_WIN32)
-        HANDLE retained = INVALID_HANDLE_VALUE;
-        if (!::DuplicateHandle(::GetCurrentProcess(),
-                               file,
-                               ::GetCurrentProcess(),
-                               &retained,
-                               0,
-                               FALSE,
-                               DUPLICATE_SAME_ACCESS))
+        // A duplicate shares the writer's file object and its data access,
+        // which prevents renaming an ancestor on Windows even with share-delete.
+        // Reopen the SAME object for metadata only; never reopen its pathname.
+        const auto retained = ::ReOpenFile(
+            file, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0);
+        if (retained == INVALID_HANDLE_VALUE)
             throw std::system_error(static_cast<int>(::GetLastError()),
                                     std::system_category(),
                                     "Could not retain world artifact");
@@ -357,6 +355,45 @@ private:
 #endif
         return ScopedFile(retained);
     }
+
+#if defined(_WIN32)
+    static void publish_windows(const Artifact& source, const Artifact& target) {
+        const auto& name = target.path.native();
+        // Windows paths contain at most 32767 UTF-16 code units. Check before
+        // allocating the variable-length native rename record (less than 65 KiB).
+        if (name.size() > 32767)
+            throw std::runtime_error("World artifact destination is too long.");
+        const auto name_bytes = name.size() * sizeof(wchar_t);
+        const auto record_bytes =
+            (std::max)(sizeof(FILE_RENAME_INFO), offsetof(FILE_RENAME_INFO, FileName) + name_bytes);
+        std::vector<std::byte> storage(record_bytes);
+        auto* rename_info = reinterpret_cast<FILE_RENAME_INFO*>(storage.data());
+        rename_info->ReplaceIfExists = FALSE;
+        rename_info->RootDirectory = nullptr;
+        rename_info->FileNameLength = static_cast<DWORD>(name_bytes);
+        std::memcpy(rename_info->FileName, name.data(), name_bytes);
+        const ScopedFile bound(::CreateFileW(source.path.c_str(),
+                                             FILE_READ_ATTRIBUTES | DELETE,
+                                             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                             nullptr,
+                                             OPEN_EXISTING,
+                                             FILE_FLAG_OPEN_REPARSE_POINT,
+                                             nullptr));
+        if (bound.get() == INVALID_HANDLE_VALUE)
+            throw std::system_error(static_cast<int>(::GetLastError()),
+                                    std::system_category(),
+                                    "Could not bind world artifact for publication");
+        if (identity_from(bound.get()) != source.identity)
+            throw std::runtime_error("World artifact changed identity: " + source.path.string());
+        // MoveFileEx can report success for two names of the same file without
+        // moving either. Native no-replace rename must refuse that collision too.
+        if (!::SetFileInformationByHandle(
+                bound.get(), FileRenameInfo, rename_info, static_cast<DWORD>(record_bytes)))
+            throw std::system_error(static_cast<int>(::GetLastError()),
+                                    std::system_category(),
+                                    "Could not exclusively publish world artifact");
+    }
+#endif
 
     void create_owned_directory(Artifact artifact) {
 #if defined(_WIN32)
