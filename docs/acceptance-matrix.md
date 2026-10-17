@@ -6,14 +6,15 @@ Statuses declare the available evidence. Static validation requires a mapping fo
 
 | Status | Rows |
 | --- | ---: |
-| covered | 33 |
+| covered | 34 |
 | partial | 11 |
 | needs-native-run | 17 |
 | planned | 86 |
-| Total | 147 |
+| Total | 148 |
 
 | Row | Status | Source | Requirements | Statement | Evidence |
 | --- | --- | --- | --- | --- | --- |
+| iss.500 | covered | `issue #500` |  | Direct compile and tidy selection honors a nonempty LUMINUMBRA_BASE_REF, defaults to origin/devel when it is unset or empty, and gives explicit --base-ref priority. Unavailable or invalid refs fail without fallback or native work. The documented shell recipe uses the same environment default. | ctest: `ChangedTranslationUnitsContract`<br>doc: `docs/ci/local-checks.md` |
 | iss.482 | covered | `issue #482` |  | Synthetic v2 and v3 report-frame captures accept float rotation rounding at large camera positions with a bounded position-scaled translation allowance, and reject wrong matrices while preserving the small-position tolerance. Receipt evidence retains testcase attribution and requires successful execution metadata; software rendering evidence requires exact testcase identities. | ctest: `RenderContractPython`<br>ctest: `AmbientReceiptComparatorContract`<br>ctest: `QualificationCaptureContract`<br>ctest: `SoftwareGlEvidenceContract` |
 | render.frame-scan-schema | covered | `docs/render-benchmark.md#continuous-cpu-attribution-issue-387` |  | Frame scans declare luminumbra.frame_scan.v2 for nullable foliage.instances: integers include known zero, null means unknown, and instance_capacity is never a substitute count. The source wiring regression checks the shared writer used by direct captures and scene surveys, including the schema and known/unknown serialization branches; it does not execute the renderer. Registered rendering regressions check that ordinary and frozen generation rollover, delayed readback, empty and inactive builds, and resource recreation cannot publish a previous generation's count. Readback re-enabling retries a cleared snapshot, and disabled frozen rebuilds do not submit readbacks. | ctest: `FrameAttributionWiringPython`<br>ctest: `FoliageRebuildTest.CompletedCountIsUnknownAcrossOrdinaryAndFrozenGenerationRollover`<br>ctest: `FoliageRebuildTest.EmptyAndInactiveGenerationsCannotReadBackThePreviousCommand`<br>ctest: `FoliageRebuildTest.RecreationAndWorldClearRetireCountAndRebuildUnchangedInputs`<br>ctest: `FoliageRebuildTest.ReenabledReadbackRetriesOrdinaryAndFrozenSnapshots` |
 | perf.floor-p99 | needs-native-run | `docs/distant-world.md#performance-measurement-contract` | dw.mappings.006 | Both profiles meet p99 frame_wall of at most 16.67 ms on every workload. | ctest: `RenderContractPython`<br>script: `tools/perf/validate_render_capture.py`<br>script: `tools/perf/render_budget.py`<br>native: `tools/gates/run-render-qualification.ps1` (planned: render qualification gate (v0.3.1); owner: ac) -- command: `pwsh tools/gates/run-render-qualification.ps1 -Package <dir> -OutDir <dir>`; receipt: `luminumbra.render_qualification.v1` |

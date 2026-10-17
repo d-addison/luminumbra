@@ -1434,6 +1434,30 @@ class AcceptanceMatrixTests(unittest.TestCase):
         code, _, err = self.run_main(*self.base_args(), "--check-doc", str(doc))
         self.assertEqual(code, 0, err)
 
+    def test_merged_rows_with_stale_summary_are_rejected(self) -> None:
+        matrix = baseline_matrix()
+        original = MODULE.render_doc(matrix)
+        added = copy.deepcopy(matrix["rows"][0])
+        added.update(id="merged.covered", requirements=[])
+        matrix["rows"].append(added)
+        self.write_matrix(matrix)
+        rendered = MODULE.render_doc(matrix)
+        # A clean text merge can retain a parent's unchanged summary while
+        # adding the other parent's row. Every row cell still matches exactly.
+        stale = original.split("| Row |", 1)[0] + "| Row |" + rendered.split("| Row |", 1)[1]
+        doc = self.root / "docs/acceptance-matrix.md"
+        for newline in ("\n", "\r\n"):
+            with self.subTest(newline=newline):
+                doc.write_bytes(stale.replace("\n", newline).encode("utf-8"))
+                self.assertFalse(MODULE._doc_matches(doc, rendered))
+                code, _, err = self.run_main(*self.base_args(), "--check-doc", str(doc))
+                self.assertEqual(code, 1)
+                self.assertIn("is stale", err)
+                code, _, err = self.run_main(*self.base_args(), "--write-doc", str(doc))
+                self.assertEqual(code, 0, err)
+                self.assertEqual(doc.read_bytes(), rendered.encode("utf-8"))
+                self.assertTrue(MODULE._doc_matches(doc, rendered))
+
     def test_edited_doc_is_stale(self) -> None:
         self.write_matrix(baseline_matrix())
         doc = self.root / "docs" / "acceptance-matrix.md"
