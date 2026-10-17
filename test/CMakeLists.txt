@@ -2111,6 +2111,8 @@ set_tests_properties(ShieldRtSpike PROPERTIES
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 add_test(NAME FrameAttributionWiringPython COMMAND "${Python3_EXECUTABLE}" -I -B
     "${CMAKE_SOURCE_DIR}/test/rendering/test_frame_attribution_wiring.py")
+add_test(NAME ReplayWorkspacePython COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/tools/ci/test_replay_workspace.py")
 set(_common_isa_compiler_args --compiler "${CMAKE_CXX_COMPILER}")
 if(MSVC)
     list(APPEND _common_isa_compiler_args --msvc)
