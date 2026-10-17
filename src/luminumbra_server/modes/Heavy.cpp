@@ -187,7 +187,13 @@ int RunHeavy(const ServerCliOptions& options) try {
         loaded.Session()->SetSimBudgetTelemetryEnabled(true);
     }
     const auto orig_resim = original.RunFixedTicks(options.heavy_resim);
+    if (orig_resim.region_fault || orig_resim.ticks_executed != options.heavy_resim ||
+        original.Session()->GetRegionSchedulerFault())
+        throw std::runtime_error("Heavy original continuation failed");
     const auto loaded_resim = loaded.RunFixedTicks(options.heavy_resim);
+    if (loaded_resim.region_fault || loaded_resim.ticks_executed != options.heavy_resim ||
+        loaded.Session()->GetRegionSchedulerFault())
+        throw std::runtime_error("Heavy loaded continuation failed");
     const HeavyHashes orig_final = CaptureHashes(original);
     const HeavyHashes loaded_final = CaptureHashes(loaded);
 

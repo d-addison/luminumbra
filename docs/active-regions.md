@@ -78,13 +78,33 @@ are ignored and counted (observational, never hashed or saved). Region pins outs
 Invalid replicated anchors, work for regions the ledger does not know, and visit-time ledger exhaustion are skipped inside the scheduler
 and counted in the schedule's `rejected` triple; the schedule digest appends that triple only when
 it is non-zero, so valid input keeps its digest.
-A scheduler exception, or an edit/pin that cannot be recorded because the ledger is full, is a
-fail-stop fault: the failed schedule never mutates the ledger, the simulation clock is rewound to
-the faulting tick (whose systems ran), pending region work is dropped, the validation ceiling is raised
-to that tick, and every later tick returns zero. The server saves and exits with status 3, the
-client saves and quits, and replay recording aborts without a schedule trace. A faulted session can
-be saved and the save loads cleanly. A failed `load_active_regions` clears the world and restores the
-previous ambient anchor.
+A scheduler or simulation-consumer exception, or an edit/pin that cannot be recorded
+because the ledger is full, latches the first fail-stop fault. Both clocks identify the
+faulting tick T. Mutations already committed at T remain authoritative; unpublished
+completion credit is discarded, while pending events, deposits and activation obligations
+remain durable. A failed scheduler preparation retains the last committed schedule and
+inventory. Catch-up stops at T, no T+1 consumer runs, and subsequent tick requests return
+zero. The cached diagnostic hash loses current validity while retaining its historical
+tick and values; these diagnostics remain observational and unhashed.
+
+The server stops later physics and streaming publication, attempts a coherent recovery
+save, shuts down and exits with status 3 even if recovery-save preparation fails. The
+shutdown outcome retains a first fault raised by checked save preparation, so a healthy
+tick run also exits with status 3 if its first authority fault occurs during shutdown. The
+client stops the current frame through its shared continuation gate, requests quit, drains
+readers and attempts state, spawn and metadata saves in order. Recording refuses failed
+initial, checkpoint or final capture before finalization; lockstep disconnects without a
+fabricated hash; Heavy checks each continuation before stepping its sibling or comparing.
+
+A faulted session can save committed authority at a completed boundary without clearing
+its latch. A transient preparation failure can be removed and the saved world continued
+in a fresh session. Invalid content or population commands require correction before
+continuation. Ordinary birth allocation stays consumed after a later construction failure;
+a failed population transaction consumes no IDs. A failed public world replacement leaves
+the current world, pending work, first fault and saveability intact. A successful replacement
+adopts the validated candidate and resets the fault. Retryable save I/O failure remains
+retryable; checked authoritative preparation failure latches and returns failure without
+escaping shutdown.
 
 `BoundedRegionResumeHook` defines an opt-in interface receiving region key,
 freeze tick, resume tick and bounded elapsed ticks. `resume_window` clamps elapsed
@@ -102,8 +122,12 @@ compatibility and frozen packaged-preset fallback. An anchor-only ledger is not 
 snapshot: with active regions enabled, the first save with dirty chunks writes all
 resident chunks, including clean chunks in other regions. The disabled path keeps
 the legacy existing-save query: a plant-only save makes later saves incremental.
-Snapshot transaction publication is separate work; this slice uses the existing durable temporary-write and atomic
-replacement primitive for the ledger, without claiming cross-file atomicity.
+Enabled session saves publish one indexed snapshot transaction spanning metadata, chunk
+regions, plants, creatures, ground objects, field pages, energy, ledger and pending state.
+Every replacement is journaled before publication; the commit index is replaced last.
+Failure before that commit restores the previous complete snapshot and defers memory
+acknowledgements, dirty clearing and parked release until a successful commit. See the
+[snapshot protocol](distant-world.md#persistence-and-format-contract) for the wider persistence contract.
 
 Clock/ledger pair saves are synchronous and non-reentrant on the process's host
 thread. The client calls them during world creation, its main-thread pause-menu
@@ -117,9 +141,11 @@ pair writer against concurrent or reentrant calls. It does not serialize saves;
 there is no production locking scheme. Independently launched processes sharing
 one save directory are outside this ownership contract.
 
-Incoming pairs are validated before either replacement. Forward saves replace
-metadata first; rewinds replace the ledger first, preserving ledger tick <= clock
-tick at every boundary. Ledger bytes are staged as unique
+The underlying clock/ledger pair writer validates incoming pairs before either
+replacement. Its historical forward/rewind ordering preserves ledger tick <= clock tick
+between individual replacements. Enabled session saves now wrap these writes in the
+indexed transaction: readers select a committed snapshot after journal recovery, rather
+than accepting an intermediate pair as the whole session snapshot. Ledger bytes are staged as unique
 `<save>/active-regions.arl.tmp.<pid>.<sequence>` files, outside the strict
 `chunks/` and `chunks/region/` scans on the save filesystem, then atomically renamed into place.
 A separately mounted region directory causes replacement to fail across devices;
@@ -650,7 +676,12 @@ crash recovery restore the pending member with the rest of the snapshot.
 The immutable authority capture exposes framed pending event and deposit
 projections for regional and page diagnostic consumers, and includes both in
 composed authority. Nonempty retained deposits also enter the existing energy
-slot. Hash reads do not deliver events or consume deposits. Disabled delivery,
+slot. Hash reads do not deliver events or consume deposits. Pending snapshot and deposit
+preparation failures are contained at completed boundaries. Observational capture refuses
+without changing authority or the latch; checked capture clears every output and latches.
+Save preparation preserves an existing first fault, pending multiplicity and the previous
+snapshot. Recovery-save failure after creature replacement rolls back all indexed members.
+Neither capture nor save is permitted inside a catch-up batch. Disabled delivery,
 hash recipes, saves and artifacts retain their existing paths and bytes.
 
 ### Named authority hashes and checkpoints
@@ -760,3 +791,46 @@ Disabled Heavy retains its historical capture, comparison and artifact keys/byte
 artifacts additionally expose pre-save capture, save neutrality and reference-domain mismatch
 names. No raw reference payload is serialized. Native compilation, test execution, sanitizer
 and performance qualification remain pending.
+
+
+### Host fail-stop qualification sources
+
+`FaultStopsCatchUpFrame.PreservesCommittedAuthorityAndRecovery` selects projection,
+admission, full/coarse Genome and Perception construction, controller reconstruction,
+population entity/final preparation and validation, activation enqueue/delivery, freeze
+reading and an unknown exception. Every parameter selects the first, middle or last tick
+of one three-tick call. It then tests boundary preparation failures, rollback after real
+creature replacement, immediate and delayed saves with the latch retained, independent
+complete-authority reload comparison and valid-source continuation. Invalid population
+commands continue to refuse without consuming IDs. Repeated deposits, future sequences,
+references, parked travel, fields, ground, water and durable-only chunks make recovery
+nonempty.
+
+Each replacement rollback also starts with explicit dirty live and parked chunks.
+Failed preparation and replacement preserve their dirty flags, parked ownership and
+payloads, byte accounting, durable inventory and last successful save acknowledgement.
+Only a successful retry clears those obligations, releases parked memory and advances
+the successful save tick; the retry also checks the durable payloads.
+
+`PendingCaptureFailureIsContained` covers event/deposit preparation, standard/unknown
+exceptions and observational versus checked capture. `RetryableSaveIoFailurePreservesAuthorityWithoutFault`
+keeps retryable I/O separate. `UnknownPreparationBeforeClockAssignmentNamesFaultingTick`
+exercises the catch-all before WorldClock assignment. `FinalQuotaAutosavePreparationFaultIsReported`
+checks fault reporting when no next loop iteration remains. The shipping-mode cases in `host_scheduler_fault_test.cpp`
+check physics and streaming cessation, server exit 3 with failed recovery preparation,
+record artifact preservation, Heavy continuation ordering and the production client gate.
+`ServerExitsThreeWhenFirstFaultOccursDuringShutdown` checks a healthy run followed by
+checked preparation failure and fault retention across repeated shutdown.
+`RetryableShutdownIoFailureDoesNotBecomeSimulationFault` keeps a retryable shutdown
+write failure distinct from a fatal authority fault. The shipping server and recorder
+birth cases also assert construction-hook invocation and distant parents' Coarse tier.
+`FaultedCapturesAndRecoveryDoNotPublishQueuedGeneration` retains a completed but
+unpublished generation batch through refused server/network capture and recovery save.
+`IndexedContinuationRefusalPreservesLiveWorld` distinguishes fingerprint rejection
+from checksum-correct pending/reference/activation refusal, plus missing and unlisted
+indexed members. `FailedReplacementPreservesFaultAndSuccessfulReplacementResetsIt`
+covers the two replacement outcomes.
+
+These are registered regression sources, not native execution results. Native GLFW
+termination, reader drain and exit saves, F4 fault presentation, Windows crash recovery,
+issue #242 performance, allocation/timing and long-run qualification remain pending.

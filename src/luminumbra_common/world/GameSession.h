@@ -18,6 +18,7 @@
 #include "ActiveRegionLedger.h"
 #include "AuthorityHashState.h"
 #include "GroundObjectStore.h"
+#include "RegionDiagnostics.h"
 #include "RegionPopulator.h"
 #include "WorldClock.h"
 #include "WorldMetadata.h"
@@ -532,6 +533,14 @@ public:
     [[nodiscard]] const RegionSchedule& GetRegionSchedule() const {
         return m_regionSchedule;
     }
+    [[nodiscard]] const RegionTransitionRing& GetRegionTransitionRing() const noexcept {
+        return m_regionTransitions;
+    }
+    // Last existing host hash request only; opening the panel never requests a capture.
+    [[nodiscard]] const CachedRegionHashes& GetCachedRegionHashes() const noexcept {
+        return m_cachedRegionHashes;
+    }
+    [[nodiscard]] RegionWaterDiagnostics ObserveRegionalWaterWork() const noexcept;
     [[nodiscard]] const GroundObjectStore& GetGroundObjects() const {
         return m_groundObjects;
     }
@@ -553,13 +562,24 @@ public:
     void SetCreatureControllerPreparationHook(std::function<void()> hook) {
         m_creatureControllerPreparation = std::move(hook);
     }
+    // Inert unless installed by a host test. Runs before a candidate projection
+    // is published, including admission; exceptions retain the source authority.
+    void SetCreatureProjectionPreparationHook(std::function<void(entt::entity)> hook) {
+        m_creatureProjectionPreparation = std::move(hook);
+    }
+    // Boundary preparation seam shared by observational capture and saving.
+    // The phase distinguishes event and deposit candidate construction.
+    void SetPendingStatePreparationHook(std::function<void(const char*)> hook) {
+        m_pendingStatePreparation = std::move(hook);
+    }
 
     bool SetFoliageCell(const Vec3& position, bool soil, std::int32_t value);
     [[nodiscard]] std::int32_t SoilNutrientAt(const Vec3& position) const;
     [[nodiscard]] std::int32_t IrrigationAt(const Vec3& position) const;
     // A fatal scheduler/obligation fault. Once latched the session is fail-stop: the
-    // simulation clock is rewound to the faulting tick, no further ticks run, and hosts
-    // are expected to save and stop. Saving a faulted session is allowed.
+    // clocks identify the faulting tick, no further ticks run, and hosts save and stop.
+    // Committed mutations and durable pending work survive; unpublished work is discarded.
+    // Saving at a completed boundary is allowed and retains the first fault.
     struct RegionSchedulerFault {
         std::uint64_t tick = 0;
         std::string message;
@@ -785,6 +805,8 @@ private:
     ActiveRegionLedger m_activeRegionLedger;
     void ReplaceActiveRegionLedger(ActiveRegionLedger ledger);
     RegionSchedule m_regionSchedule;
+    RegionTransitionRing m_regionTransitions;
+    CachedRegionHashes m_cachedRegionHashes;
     world::RegionScheduleScratch m_regionScheduleScratch;
     mutable std::vector<RegionKey> m_sortedDueRegions, m_sortedDueSource;
     std::optional<std::vector<Vec3>> m_replicatedSimulationAnchors;
@@ -840,6 +862,8 @@ private:
     const CreatureDistantPolicy& CreaturePolicy(std::uint16_t species) const;
     CreatureActivity m_creatureActivity;
     std::function<void()> m_creatureControllerPreparation;
+    std::function<void(entt::entity)> m_creatureProjectionPreparation;
+    std::function<void(const char*)> m_pendingStatePreparation;
     void ReconcileCreatureTiers();
     void RunCoarseCreatureTick();
     void StepCreaturePhysics();

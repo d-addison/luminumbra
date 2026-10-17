@@ -921,8 +921,12 @@ void CaptureTimelapseFrame(ClientAppContext& g_app,
                 // Fast-forward the SIM (weather/wind/creatures/plants) by K EXTRA fixed
                 // ticks for the next frame (on top of the normal per-frame tick). Physics
                 // runs normally each frame so the player stays grounded.
-                for (int i = 0; i < g_app.capture.timelapse_ticks; ++i)
+                for (int i = 0; i < g_app.capture.timelapse_ticks; ++i) {
                     gameSession->TickSimulation(1.0 / 30.0);
+                    if (Luminumbra::Client::PollSessionFault(
+                            *gameSession, [&] { glfwSetWindowShouldClose(window, GLFW_TRUE); }))
+                        return;
+                }
                 if (g_app.capture.timelapse_daystep >
                     0.0f) { // drift the sun/sky for shade-over-time
                     g_app.capture.timelapse_tod += g_app.capture.timelapse_daystep;
@@ -1123,7 +1127,12 @@ void HandlePlayerVerbs(ClientAppContext& g_app,
                        Luminumbra::Rendering::RenderPipeline& renderPipeline,
                        ProcgenPlantState& g_procgen,
                        const UiInputRouter& inputRouter) {
-    if (!inputRouter.GameplayAllowed())
+    if (!g_playerController || currentState != GameState::IN_GAME || scenario_config.active() ||
+        g_app.hud.paused || !gameSession || !g_camera)
+        return;
+    const auto presses =
+        PollPlayerVerbPresses(g_app, window, *g_playerController, nullptr, &inputRouter);
+    if (g_app.overlay.region_panel.open || !inputRouter.GameplayAllowed())
         return;
     // ---  : player FARMING verbs (F/G/H/J) ---
     // Plant / water / fertilize / harvest the plant nearest the player's aim point,
@@ -1131,8 +1140,7 @@ void HandlePlayerVerbs(ClientAppContext& g_app,
     // (one action per key press). Interactive-only guard keeps it out of the
     // scenario/gate runs, so determinism is unaffected (gates never press these
     // keys).
-    if (g_playerController && currentState == GameState::IN_GAME && !scenario_config.active() &&
-        !g_app.hud.paused && gameSession && g_camera) {
+    {
         if (!g_app.hud.farmSpeciesLoaded) {
             std::vector<std::string> ferr;
             g_app.hud.farmSpecies.LoadFromDirectory(root_dir / "data/common/foliage/species", ferr);
@@ -1140,10 +1148,8 @@ void HandlePlayerVerbs(ClientAppContext& g_app,
         }
         // V cycles the selected species to plant (data-driven; oak/wheat/...).
         {
-            const bool fv_now = inputRouter.GameplayKeyAllowed(GLFW_KEY_V) &&
-                                glfwGetKey(window, GLFW_KEY_V) == GLFW_PRESS;
             const std::size_t n = g_app.hud.farmSpecies.all().size();
-            if (fv_now && !g_app.interactions.farmCycleSpecies && n > 0) {
+            if (presses.farmCycleSpecies && n > 0) {
                 g_app.hud.farmSelectedSpecies =
                     (g_app.hud.farmSelectedSpecies + 1) % static_cast<int>(n);
                 if (audioManager)
@@ -1151,15 +1157,7 @@ void HandlePlayerVerbs(ClientAppContext& g_app,
                 LUMINUMBRA_CORE_INFO("Farm: selected species '{}'",
                                      g_app.hud.farmSpecies.all()[g_app.hud.farmSelectedSpecies].id);
             }
-            g_app.interactions.farmCycleSpecies = fv_now;
         }
-        auto farmEdge = [&](Luminumbra::Client::InputAction a, bool& prev) {
-            const bool now = inputRouter.GameplayKeyAllowed(g_playerController->key(a)) &&
-                             glfwGetKey(window, g_playerController->key(a)) == GLFW_PRESS;
-            const bool fired = now && !prev;
-            prev = now;
-            return fired;
-        };
         const glm::vec3 ffwd =
             glm::normalize(glm::vec3(g_camera->Front.x, 0.0f, g_camera->Front.z));
         const glm::vec3 aimXZ = glm::vec3(g_camera->Position) + ffwd * 3.0f;
@@ -1169,8 +1167,7 @@ void HandlePlayerVerbs(ClientAppContext& g_app,
         const Luminumbra::Vec3 aim(aimXZ.x, aimY, aimXZ.z);
         auto& freg = gameSession->GetRegistry();
         const std::uint64_t ftick = gameSession->GetSimulationTickCount();
-        using IA = Luminumbra::Client::InputAction;
-        if (farmEdge(IA::FarmPlant, g_app.interactions.farmPlant)) {
+        if (presses.farmPlant) {
             const auto& species = g_app.hud.farmSpecies.all();
             if (!species.empty()) {
                 const luminumbra::foliage::SpeciesTemplate& tmpl =
@@ -1206,15 +1203,15 @@ void HandlePlayerVerbs(ClientAppContext& g_app,
             return e;
         };
         const glm::vec3 aimSnd(aim.x, aim.y, aim.z);
-        if (farmEdge(IA::FarmWater, g_app.interactions.farmWater)) {
+        if (presses.farmWater) {
             if (g_app.hud.farming.Water(freg, fpick()) && audioManager)
                 audioManager->PlayOneShot("farm_water", aimSnd);
         }
-        if (farmEdge(IA::FarmFertilize, g_app.interactions.farmFertilize)) {
+        if (presses.farmFertilize) {
             if (g_app.hud.farming.Fertilize(freg, fpick()) && audioManager)
                 audioManager->PlayOneShot("farm_fertilize", aimSnd);
         }
-        if (farmEdge(IA::FarmHarvest, g_app.interactions.farmHarvest)) {
+        if (presses.farmHarvest) {
             const auto hr = g_app.hud.farming.Harvest(freg, fpick());
             if (hr.harvestable) {
                 if (audioManager)
@@ -1240,16 +1237,9 @@ void HandlePlayerVerbs(ClientAppContext& g_app,
     // river/lake and a fill DAMS it. Edge-triggered (one carve per press).
     // Interactive-only guard keeps it out of scenario/gate runs, so determinism is
     // unaffected (gates never press R/T).
-    if (g_playerController && currentState == GameState::IN_GAME && !scenario_config.active() &&
-        !g_app.hud.paused && gameSession && g_camera && gameSession->GetWorldSystem()) {
-        const bool dig_now = inputRouter.GameplayKeyAllowed(GLFW_KEY_R) &&
-                             glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS;
-        const bool fill_now = inputRouter.GameplayKeyAllowed(GLFW_KEY_T) &&
-                              glfwGetKey(window, GLFW_KEY_T) == GLFW_PRESS;
-        const bool dig_fired = dig_now && !g_app.interactions.terraformDig;
-        g_app.interactions.terraformDig = dig_now;
-        const bool fill_fired = fill_now && !g_app.interactions.terraformFill;
-        g_app.interactions.terraformFill = fill_now;
+    if (gameSession->GetWorldSystem()) {
+        const bool dig_fired = presses.terraformDig;
+        const bool fill_fired = presses.terraformFill;
         if (dig_fired || fill_fired) {
             // Aim where the player looks: a point ~5 m down the camera ray.
             constexpr float kReach = 5.0f, kRadius = 3.0f;
@@ -3478,9 +3468,16 @@ int main(int argc, char* argv[]) try {
         benchmark_queries->initialize();
         renderPipeline.set_benchmark_gpu_queries(benchmark_queries.get());
     }
+    const auto stop_faulted_frame = [&] {
+        return gameSession && Luminumbra::Client::PollSessionFault(*gameSession, [&] {
+                   glfwSetWindowShouldClose(window, GLFW_TRUE);
+               });
+    };
     Luminumbra::Client::FrameLimiter frame_limiter;
     Luminumbra::Client::SteadyFrameTiming frame_timing;
     while (!glfwWindowShouldClose(window)) {
+        if (stop_faulted_frame())
+            break;
         MainLoopHeartbeat().fetch_add(1, std::memory_order_relaxed);
         const auto pacing = luminumbra::core::ResolveFramePacing(
             g_systemConfig.user().vsync, g_systemConfig.user().frame_cap, pacing_overrides);
@@ -3573,6 +3570,8 @@ int main(int argc, char* argv[]) try {
         // without an active scenario.
         if (scenario_runner) {
             scenario_runner->onLoopTop();
+            if (stop_faulted_frame())
+                break;
         }
 
         const auto _rb_poll_t0 = std::chrono::steady_clock::now(); // always-on (runtime telemetry)
@@ -3924,6 +3923,8 @@ int main(int argc, char* argv[]) try {
                 // branches below exactly like the original else-if chain did.
                 scenario_drive = scenario_runner ? scenario_runner->onGameStateInGame(deltaTime)
                                                  : ScenarioRunner::InGameDrive::kFallThrough;
+                if (stop_faulted_frame())
+                    break;
                 if (scenario_drive == ScenarioRunner::InGameDrive::kBreakCase) {
                     break;
                 }
@@ -3954,9 +3955,9 @@ int main(int argc, char* argv[]) try {
                         glfwSetWindowShouldClose(window, true);
                 } else if (scenario_drive == ScenarioRunner::InGameDrive::kFallThrough &&
                            g_playerController) {
-                    g_playerController->SetLiveInputGate(
-                        [&](int key) { return uiInputRouter.GameplayKeyAllowed(key); });
-                    g_playerController->Update(deltaTime); // live input uses current ownership
+                    g_playerController->SetLiveInputGate(&uiInputRouter);
+                    UpdateGameplayPlayer(
+                        g_app.overlay.region_panel, *g_playerController, deltaTime);
                 }
                 if (g_app.capture.timelapse_frames > 0 && g_camera && gameSession) {
                     // FIXED timelapse camera: elevated, looking down at the grove around spawn.
@@ -4102,6 +4103,8 @@ int main(int argc, char* argv[]) try {
                         g_camera->updateCameraVectors();
                     }
                 }
+                if (stop_faulted_frame())
+                    break;
                 if (auto* physics = gameSession->GetPhysicsSystem())
                     physics->update(deltaTime * g_app.capture.timeScale);
                 // fixed 30 Hz simulation tick (SimulationClock +
@@ -4141,19 +4144,21 @@ int main(int argc, char* argv[]) try {
                             const double step = std::min(simDt, kFourTicks);
                             const std::uint32_t t = gameSession->TickSimulation(step);
                             simDt -= step;
-                            if (t == 0u)
-                                break; // accumulator < 1 tick this frame
+                            if (stop_faulted_frame() || t == 0u)
+                                break;
                             ran += static_cast<int>(t);
                         }
                     } // g_app.capture.timeScale == 0 -> paused (no sim ticks; render/streaming
                       // continue)
-                    Luminumbra::Client::PollSessionFault(
-                        *gameSession, [&] { glfwSetWindowShouldClose(window, GLFW_TRUE); });
+                    if (stop_faulted_frame())
+                        break;
                     if (gameSession->PersistenceSaveRequested() ||
                         gameSession->PersistenceAutosaveDue()) {
                         // Parked-bytes pressure or the periodic interval: persist now.
                         gameSession->SaveWorldState(
                             nullptr, Luminumbra::world::WorldStateSaveScope::DurableChanges);
+                        if (stop_faulted_frame())
+                            break;
                     }
                     rb_sim_ms = std::chrono::duration<double, std::milli>(
                                     std::chrono::steady_clock::now() - _rb_sim_t0)
@@ -4220,6 +4225,12 @@ int main(int argc, char* argv[]) try {
                 break;
             default:
                 break;
+        }
+
+        if (stop_faulted_frame()) {
+            if (g_app.overlay.imgui_enabled)
+                ImGui::EndFrame();
+            break;
         }
 
         if (currentState != GameState::WORLD_LOADING) {
@@ -4396,6 +4407,11 @@ int main(int argc, char* argv[]) try {
                 // this exact point, before the per-frame render below.
                 if (scenario_runner) {
                     scenario_runner->onPreRenderWorldSweep();
+                    if (stop_faulted_frame()) {
+                        if (g_app.overlay.imgui_enabled)
+                            ImGui::EndFrame();
+                        break;
+                    }
                 }
                 if (gameSession->GetWorldSystem() && g_camera) {
                     // Live play runs on the
@@ -4577,6 +4593,11 @@ int main(int argc, char* argv[]) try {
                     // defaults above by frame order.
                     if (scenario_runner) {
                         scenario_runner->onPreRenderCapturePins();
+                        if (stop_faulted_frame()) {
+                            if (g_app.overlay.imgui_enabled)
+                                ImGui::EndFrame();
+                            break;
+                        }
                     }
                     //  re-bake the creature markers from the live (just-ticked) positions
                     // so the ecology timelapse shows them actually moving each frame.
@@ -4646,7 +4667,14 @@ int main(int argc, char* argv[]) try {
                     }
                     // Apply functional foliage QA after all camera/time overrides.
                     // Normal play, other scenarios and --play-paths retain the common path.
-                    if (!scenario_runner || !scenario_runner->onPreRenderFoliage()) {
+                    const bool scenario_foliage_handled =
+                        scenario_runner && scenario_runner->onPreRenderFoliage();
+                    if (stop_faulted_frame()) {
+                        if (g_app.overlay.imgui_enabled)
+                            ImGui::EndFrame();
+                        break;
+                    }
+                    if (!scenario_foliage_handled) {
                         UpdateFoliageScatter(g_app,
                                              root_dir,
                                              scenario_config,
@@ -4952,6 +4980,11 @@ int main(int argc, char* argv[]) try {
                     // at this exact position (currentState is IN_GAME here).
                     if (scenario_runner) {
                         scenario_runner->onPostRenderCapture(deltaTime);
+                        if (stop_faulted_frame()) {
+                            if (g_app.overlay.imgui_enabled)
+                                ImGui::EndFrame();
+                            break;
+                        }
                     }
                     if (runtime_boot_recorder.enabled()) {
                         runtime_boot_recorder.record_frame(deltaTime, renderPipeline);
@@ -4987,6 +5020,11 @@ int main(int argc, char* argv[]) try {
             // Ecology capture retains its explicit label override independently of preferences.
             if (g_app.capture.timelapse_creatures)
                 DrawCreatureNameplates(g_app, window, g_camera.get(), gameSession.get());
+            const bool regionPanelWasOpen = g_app.overlay.region_panel.open;
+            DrawFrameStatusOverlays(
+                g_app, currentState, scenario_config, g_playerController.get(), gameSession.get());
+            if (regionPanelWasOpen && !g_app.overlay.region_panel.open)
+                CloseRegionPanelInput(window);
             // --debug-glass-pane one-time capture subject (app/DebugOverlays.cpp).
             SpawnDebugGlassPanes(g_app, currentState, gameSession.get(), renderPipeline);
             // push the metering opt-in (idempotent per frame).
@@ -5082,6 +5120,8 @@ int main(int argc, char* argv[]) try {
 
         CaptureTimelapseFrame(
             g_app, window, currentState, gameSession.get(), renderPipeline, g_procgen);
+        if (stop_faulted_frame())
+            break;
         //  CPU-submit ends here (all GL work for the frame is
         // queued); present begins. With vsync off the swap drains the driver
         // queue, so its duration is the GPU/present wait.
@@ -5595,6 +5635,7 @@ int main(int argc, char* argv[]) try {
             }
         }
     }
+    CloseRegionPanelInput(window);
     std::vector<std::string> shutdown_milestones;
     const bool incremental_shutdown_record = scenario_config.hang_watchdog_seconds > 0;
     auto mark_shutdown = [&](const std::string& milestone) {

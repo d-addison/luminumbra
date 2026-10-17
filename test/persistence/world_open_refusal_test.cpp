@@ -14,10 +14,13 @@
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/components/CreatureComponents.h"
 #include "luminumbra_common/components/PlantComponents.h"
+#include "luminumbra_common/core/FilesystemPath.h"
 #include "luminumbra_common/core/JobSystem.h"
+#include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/fields/EnergyFieldState.h"
 #include "luminumbra_common/net/LockstepSession.h"
 #include "luminumbra_common/persistence/SavedWorldCatalog.h"
+#include "luminumbra_common/persistence/SimulationPendingState.h"
 #include "luminumbra_common/persistence/SyntheticSaveFixture.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
@@ -42,6 +45,7 @@
 #include <memory>
 #include <random>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <tuple>
 
@@ -1661,4 +1665,128 @@ TEST_F(WorldOpenRefusal, PresentContentMismatchPreservesCurrentWorld) {
     EXPECT_EQ(live.GetActiveRegionLedger().canonical_bytes(), current_ledger);
     EXPECT_EQ(DiskBytes(Fixture().save), before);
     EXPECT_TRUE(live.SaveWorldState());
+}
+
+TEST_F(WorldOpenRefusal, FaultedCapturesAndRecoveryDoNotPublishQueuedGeneration) {
+    const auto configuration_path = Fixture().root / "data/common/systems.json";
+    Write(configuration_path, R"({"sim":{"active_regions":{"enabled":true}}})");
+    Server::ServerWorldRunnerConfig config;
+    config.root_path = RootString();
+    config.world_id = "fixture";
+    config.surface_radius = 0;
+    config.collision_radius = 0;
+    config.test_streaming_radius_cap = 1;
+    Server::ServerWorldRunner runner(config);
+    ASSERT_TRUE(runner.Boot()) << runner.GetBootError();
+    auto& session = *runner.Session();
+    session.SetPendingStatePreparationHook(
+        [](const char*) { throw std::runtime_error("Boundary capture preparation failure"); });
+    std::string hash = "previous";
+    Persistence::WorldStreamingStateSubHashes sub;
+    EXPECT_FALSE(session.ComputeAuthorityWorldHashes(hash, sub));
+    const auto fault = session.GetRegionSchedulerFault();
+    ASSERT_TRUE(fault.has_value());
+    if (!fault.has_value())
+        return;
+    session.SetPendingStatePreparationHook({});
+    auto* world = session.GetWorldSystem();
+    const IVec3 coords{300, 0, 300};
+    world->dispatch_generation_jobs(std::vector<IVec3>{coords});
+    world->quiesce_streaming_jobs_for_save();
+    const auto generated = world->find_streamed_chunk(coords);
+    ASSERT_TRUE(generated);
+    ASSERT_TRUE(generated->pending_generation_ready.load());
+    ASSERT_EQ(generated->get_state(), ChunkState::Loading);
+    runner.ComputeWorldHashAndSubHashes(hash, sub);
+    EXPECT_TRUE(hash.empty());
+    EXPECT_TRUE(sub.terrain.empty());
+    EXPECT_EQ(generated->get_state(), ChunkState::Loading);
+    const auto configuration = luminumbra::core::SystemConfig::LoadFromFile(
+        Filesystem::GenericPathString(configuration_path));
+    EXPECT_FALSE(session.ComputeNetworkWorldHashes(configuration, hash, sub));
+    EXPECT_TRUE(hash.empty());
+    EXPECT_TRUE(sub.terrain.empty());
+    EXPECT_EQ(generated->get_state(), ChunkState::Loading);
+    EXPECT_GT(runner.SaveFullSnapshot(), 0u);
+    EXPECT_EQ(generated->get_state(), ChunkState::Loading);
+    EXPECT_TRUE(generated->pending_generation_ready.load());
+    EXPECT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 0u);
+    const auto retained_fault = session.GetRegionSchedulerFault();
+    ASSERT_TRUE(retained_fault.has_value());
+    if (!retained_fault.has_value())
+        return;
+    EXPECT_EQ(retained_fault->message, fault->message);
+    EXPECT_EQ(retained_fault->tick, fault->tick);
+    runner.Shutdown();
+}
+
+TEST_F(WorldOpenRefusal, FailedReplacementPreservesFaultAndSuccessfulReplacementResetsIt) {
+    GameSession session;
+    session.SetJobSystem(&Fixture().jobs);
+    session.SetRootPath(RootString());
+    session.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(session.LoadWorld("fixture"));
+    ASSERT_TRUE(session.SaveWorldState());
+    const auto valid = DiskBytes(Fixture().save);
+    session.SetPendingStatePreparationHook(
+        [](const char*) { throw std::runtime_error("Retained boundary fault"); });
+    std::string hash;
+    Persistence::WorldStreamingStateSubHashes sub;
+    EXPECT_FALSE(session.ComputeAuthorityWorldHashes(hash, sub));
+    const auto fault = session.GetRegionSchedulerFault();
+    ASSERT_TRUE(fault.has_value());
+    if (!fault.has_value())
+        return;
+    session.SetPendingStatePreparationHook({});
+    const auto* world = session.GetWorldSystem();
+    const auto clock = session.GetWorldClock().canonical_bytes();
+    const auto ledger = session.GetActiveRegionLedger().canonical_bytes();
+    const auto member = Fixture().save / Persistence::SimulationPendingState::kMember;
+    const auto pending_bytes = Read(member);
+    Write(member, "malformed pending");
+    const auto damaged = DiskBytes(Fixture().save);
+    EXPECT_FALSE(session.LoadWorld("fixture"));
+    EXPECT_EQ(session.GetWorldSystem(), world);
+    EXPECT_EQ(session.GetWorldClock().canonical_bytes(), clock);
+    EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(), ledger);
+    const auto retained_fault = session.GetRegionSchedulerFault();
+    ASSERT_TRUE(retained_fault.has_value());
+    if (!retained_fault.has_value())
+        return;
+    EXPECT_EQ(retained_fault->message, fault->message);
+    EXPECT_EQ(DiskBytes(Fixture().save), damaged);
+    Write(member, pending_bytes);
+    EXPECT_EQ(DiskBytes(Fixture().save), valid);
+    ASSERT_TRUE(session.SaveWorldState());
+    ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
+    EXPECT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+}
+
+TEST_F(WorldOpenRefusal, FinalQuotaAutosavePreparationFaultIsReported) {
+    Write(Fixture().root / "data/common/systems.json",
+          R"({"sim":{"active_regions":{"enabled":true}}})");
+    Server::ServerWorldRunnerConfig config;
+    config.root_path = RootString();
+    config.world_id = "fixture";
+    config.surface_radius = 0;
+    config.collision_radius = 0;
+    config.test_streaming_radius_cap = 1;
+    config.autosave_interval_ticks = 1;
+    Server::ServerWorldRunner runner(config);
+    ASSERT_TRUE(runner.Boot()) << runner.GetBootError();
+    runner.Session()->SetPendingStatePreparationHook(
+        [](const char*) { throw std::runtime_error("Final quota save preparation failure"); });
+    const auto report = runner.RunFixedTicks(1);
+    ASSERT_TRUE(report.region_fault);
+    EXPECT_FALSE(report.region_fault_message.empty());
+    EXPECT_EQ(report.ticks_executed, 1u);
+    EXPECT_EQ(report.frames_executed, 1u);
+    EXPECT_EQ(runner.Session()->GetWorldClock().tick(), 1u);
+    const auto refused = runner.RunFixedTicks(1);
+    EXPECT_TRUE(refused.region_fault);
+    EXPECT_EQ(refused.frames_executed, 0u);
+    EXPECT_EQ(refused.ticks_executed, 0u);
+    runner.Session()->SetPendingStatePreparationHook({});
+    runner.Shutdown();
 }

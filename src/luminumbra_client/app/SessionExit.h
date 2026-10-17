@@ -8,13 +8,15 @@ namespace Luminumbra::Client {
 // Keep the frame's fault decision independent of GLFW so headless hosts can
 // exercise the same quit request. The caller owns the window and shutdown loop.
 template<typename RequestQuit>
-void PollSessionFault(world::GameSession& session, RequestQuit request_quit) {
+bool PollSessionFault(world::GameSession& session, RequestQuit request_quit) {
     if (const auto& fault = session.GetRegionSchedulerFault()) {
         LUMINUMBRA_CORE_ERROR("Region scheduler fault at tick {}: {}; saving and quitting",
                               fault->tick,
                               fault->message);
         request_quit();
+        return true;
     }
+    return false;
 }
 
 // The client drains world readers before calling this and clears the world

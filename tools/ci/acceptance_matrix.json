@@ -119,7 +119,8 @@
           "kind": "ctest",
           "ref": "RenderMeasurementGpuQueries"
         }
-      ]
+      ],
+      "requirements": []
     },
     {
       "id": "perf.percentile-definition",
@@ -166,7 +167,8 @@
           "kind": "script",
           "ref": "tools/perf/perf.py"
         }
-      ]
+      ],
+      "requirements": []
     },
     {
       "id": "perf.fixed-view-workload",
@@ -380,7 +382,7 @@
     {
       "id": "em.snapshot-commit",
       "source": "docs/distant-world.md#evidence-map",
-      "statement": "Snapshot commit survives interruption after every rename and during the bake, and the catalog inspects read-only.",
+      "statement": "Indexed snapshot rollback and recovery preserve committed authority, while catalog inspection stays read-only. Interruption qualification remains incomplete.",
       "status": "partial",
       "evidence": [
         {
@@ -1668,7 +1670,7 @@
     {
       "id": "contract.dw.regions.04",
       "source": "docs/distant-world.md#persistent-active-regions",
-      "statement": "Acceptance obligations: Dirty state leaving the live disc is parked and written by the next save instead of being discarded. / Dirtiness is defined per record, not only by voxel edits: modified water depths, fluxes, sleep and scheduling state, page bytes, entity records and ledger entries each carry their own dirty flag. / The host autosaves on a tick interval short enough to cover a traversal capture, and parked memory is bounded by a byte limit: when parking would exceed it the host performs a blocking save first, and while a save is failing eviction of dirty chunks stops (they stay resident) and the failure is reported; / dirty state is never dropped. / Parked bytes, save latency and failures are shown in the diagnostic panel and qualified on the historical 5,433-chunk edited save. / The ledger and deterministic scheduler foundation is implemented and enabled by default;",
+      "statement": "Acceptance obligations: Dirty state leaving the live disc is parked and written by the next save instead of being discarded. / Dirtiness is defined per record, not only by voxel edits: modified water depths, fluxes, sleep and scheduling state, page bytes, entity records and ledger entries each carry their own dirty flag. / The host autosaves on a tick interval short enough to cover a traversal capture, and parked memory is bounded by a byte limit: when parking would exceed it the host performs a blocking save first, and while a save is failing eviction of dirty chunks stops (they stay resident) and the failure is reported; / dirty state is never dropped. / Parked bytes, save latency and failures are shown in the diagnostic panel and qualified on the historical 5,433-chunk edited save. / The ledger and deterministic scheduler are implemented and enabled by default, with regional creature, foliage, ground, weather, water and energy consumers.",
       "status": "planned",
       "requirements": [
         "dw.regions.019",
@@ -1689,7 +1691,7 @@
     {
       "id": "contract.dw.regions.05",
       "source": "docs/distant-world.md#persistent-active-regions",
-      "statement": "Acceptance obligations: see [the active-region format and scheduling guide](active-regions.md) for its canonical bytes, refusal behaviours and bounded slice boundaries. / It has no per-system consumers and no measured budget caps yet. / Dirty parking, snapshot transactions and the diagnostic panel are planned for v0.3.1. / Current default behaviour still evicts dirty chunks without a flush, the client saves only on quit or shutdown, and the dedicated server autosave interval defaults to 9000 ticks (five minutes at the canonical 30 Hz clock). / Explicit zero disables autosave; / capture and determinism fixtures explicitly use 30 ticks.",
+      "statement": "Acceptance obligations: See [active regions](active-regions.md) for the scheduling, pending-work and host fail-stop contracts. / Runtime performance caps and the native panel qualification still require measured evidence. / Full/coarse continuation, Frozen source/target gating, dirty parking, byte-pressure saves and periodic autosave operate through indexed snapshot transactions. / The dedicated server autosave interval defaults to 9000 ticks (five minutes at the canonical 30 Hz clock). / Explicit zero disables autosave; / capture and determinism fixtures explicitly use 30 ticks.",
       "status": "planned",
       "requirements": [
         "dw.regions.025",
@@ -1948,7 +1950,7 @@
     {
       "id": "contract.dw.persistence.05",
       "source": "docs/distant-world.md#persistence-and-format-contract",
-      "statement": "Acceptance obligations: The index enumerates every authoritative member the snapshot requires (chunk region files, the energy record, plant, creature, ground-object, ledger and page records, the clock metadata), each with its content identity and the generation in which it last changed, records intentionally empty or deleted members explicitly, and lists derived members (far overlay files) separately: a missing or stale derived member is rebuilt from the authoritative records, while a corrupt one is refused; / unchanged members are reused, not rewritten. / Catalog inspection is read-only and reports a save whose journal is pending recovery as such; / recovery and snapshot selection happen when the world is opened, before any member (including clock metadata) is read. / Existing payload bytes carry no transaction metadata; / the index does.",
+      "statement": "Acceptance obligations: The index enumerates every authoritative member the snapshot requires (chunk region files, the energy record, plant, creature, ground-object, ledger and page records, pending events/deposits and the clock metadata), each with its content identity and the generation in which it last changed, records intentionally empty or deleted members explicitly, and lists derived members (far overlay files) separately: a missing or stale derived member is rebuilt from the authoritative records, while a corrupt one is refused; / unchanged members are reused, not rewritten. / Catalog inspection is read-only and reports a save whose journal is pending recovery as such; / recovery and snapshot selection happen when the world is opened, before any member (including clock metadata) is read. / Existing payload bytes carry no transaction metadata; / the index does.",
       "status": "planned",
       "requirements": [
         "dw.persistence.025",
@@ -2112,7 +2114,7 @@
     {
       "id": "contract.dw.evidence.01",
       "source": "docs/distant-world.md#evidence-map",
-      "statement": "Acceptance obligations: | Far ladder, caves, seams | `far_volume_horizon_smoke` scenario (v2 artifact) through `validate-engine-frontier.ps1 -Mode FarLodHorizon` on default, mountains, archipelago and the cave-dense fixture; / `FarVolumeTile`, mesher and store gtests in the default ctest lane | / | Edits and far authority | `edit_bake_all_tiers_test`, `far_volume_store_test`, `world_open_refusal_test` cases, the `PersistenceRoundtrip` gate with the edited-world tour save | / | Snapshot commit and recovery | `snapshot_commit_test` (interruption after every rename and during the bake), catalog read-only inspection test, refusal matrix in `world_open_refusal_test` | / | Clock, ledger, pages, creatures, water | Unit gtests per record, `HeadlessServerTickHeavy` oracle extended to N-save-load-K versus N+K over every persisted subsystem with negative controls, `MovingResidency` 20 km drift, `PopulatedWorldReplay` | / | Hash and determinism | `validate-determinism-matrix.ps1` pins, `ecology_hash_test` additivity guards, `ReplayRoundtrip`, `LockstepLoopback` with checkpoint exchange enabled |",
+      "statement": "Acceptance obligations: | Far ladder, caves, seams | `far_volume_horizon_smoke` scenario (v2 artifact) through `validate-engine-frontier.ps1 -Mode FarLodHorizon` on default, mountains, archipelago and the cave-dense fixture; / `FarVolumeTile`, mesher and store gtests in the default ctest lane | / | Edits and far authority | `edit_bake_all_tiers_test`, `far_volume_store_test`, `world_open_refusal_test` cases, the `PersistenceRoundtrip` gate with the edited-world tour save | / | Snapshot commit and recovery | `SaveTransaction` interruption/crash cases, `FaultStopsCatchUpFrame.PreservesCommittedAuthorityAndRecovery` real-session rollback after creature replacement, `IndexedContinuationRefusalPreservesLiveWorld`, catalog and `world_open_refusal_test` refusal cases | / | Clock, ledger, pages, creatures, water | Unit gtests per record, `HeadlessServerTickHeavy` oracle extended to N-save-load-K versus N+K over every persisted subsystem with negative controls, `MovingResidency` 20 km drift, `PopulatedWorldReplay` | / | Hash and determinism | `validate-determinism-matrix.ps1` pins, `ecology_hash_test` additivity guards, `ReplayRoundtrip`, `LockstepLoopback` with checkpoint exchange enabled |",
       "status": "planned",
       "requirements": [
         "dw.evidence.001",
@@ -2133,7 +2135,7 @@
     {
       "id": "contract.dw.evidence.02",
       "source": "docs/distant-world.md#evidence-map",
-      "statement": "Acceptance obligations: | Performance | Benchmark schema v3 artifacts for six fixed views and three traversals per profile per display from the native command set, checked by `tools/perf/render_contract.py` and `validate_render_capture.py` | / | Client hang | `hang_watchdog_test`, the reproduction matrix records and hang reports archived with the campaign evidence | / Names of new tests are binding once their slices land; / the activation slice fills in fixture identifiers, thresholds and artifact schemas per row.",
+      "statement": "Acceptance obligations: | Performance | Benchmark schema v3 artifacts for six fixed views and three traversals per profile per display from the native command set, checked by `tools/perf/render_contract.py` and `validate_render_capture.py` | / | Client hang | `hang_watchdog_test`, the reproduction matrix records and hang reports archived with the campaign evidence | / The host-fault extensions above are registered source coverage. / They have not supplied native runtime results here.",
       "status": "planned",
       "requirements": [
         "dw.evidence.007",
@@ -2261,7 +2263,7 @@
     {
       "id": "contract.ar.activation.04",
       "source": "docs/active-regions.md#activation-and-ordering",
-      "statement": "Acceptance obligations: The queue is not persisted. / its simulation cursor, last-ticked stamp and frozen content digest do not advance. / A scheduler exception, or an edit/pin that cannot be recorded because the ledger is full, is a fail-stop fault: the failed schedule never mutates the ledger, the simulation clock is rewound to the faulting tick (whose systems ran), pending region work is dropped, the validation ceiling is raised to that tick, and every later tick returns zero. / The server saves and exits with status 3, the client saves and quits, and replay recording aborts without a schedule trace. / A faulted session can be saved and the save loads cleanly. / A failed `load_active_regions` clears the world and restores the previous ambient anchor.",
+      "statement": "Acceptance obligations: The queue is not persisted. / its simulation cursor, last-ticked stamp and frozen content digest do not advance. / A scheduler or simulation-consumer exception, or an edit/pin that cannot be recorded because the ledger is full, latches the first fail-stop fault. / The server stops later physics and streaming publication, attempts a coherent recovery save, shuts down and exits with status 3 even if recovery-save preparation fails. / A faulted session can save committed authority at a completed boundary without clearing its latch. / A failed public world replacement leaves the current world, pending work, first fault and saveability intact.",
       "status": "planned",
       "requirements": [
         "ar.activation.039",
@@ -2298,7 +2300,7 @@
     {
       "id": "contract.ar.file.01",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "statement": "Acceptance obligations: The record is `<save>/chunks/region/active-regions.arl`, following the accepted contract's placement in the region integrity scan. / This resolves the slice brief's conflicting save-root wording in favour of that contract. / ARL1 does not alter LMR1 v2, the world manifest, EFS1, plant payloads, FSD2 v3, or canonical chunk serialization. / An anchor-only ledger is not a chunk snapshot: with active regions enabled, the first save with dirty chunks writes all resident chunks, including clean chunks in other regions. / The disabled path keeps the legacy existing-save query: a plant-only save makes later saves incremental. / Snapshot transaction publication is separate work; / Presets now use revision 7 with revision-6 omission compatibility and frozen packaged-preset fallback.",
+      "statement": "Acceptance obligations: The record is `<save>/chunks/region/active-regions.arl`, following the accepted contract's placement in the region integrity scan. / This resolves the slice brief's conflicting save-root wording in favour of that contract. / ARL1 does not alter LMR1 v2, the world manifest, EFS1, plant payloads, FSD2 v3, or canonical chunk serialization. / An anchor-only ledger is not a chunk snapshot: with active regions enabled, the first save with dirty chunks writes all resident chunks, including clean chunks in other regions. / The disabled path keeps the legacy existing-save query: a plant-only save makes later saves incremental. / Enabled session saves publish one indexed snapshot transaction spanning metadata, chunk regions, plants, creatures, ground objects, field pages, energy, ledger and pending state. / Presets now use revision 7 with revision-6 omission compatibility and frozen packaged-preset fallback.",
       "status": "planned",
       "requirements": [
         "ar.file.001",
@@ -2320,7 +2322,7 @@
     {
       "id": "contract.ar.file.02",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "statement": "Acceptance obligations: this slice uses the existing durable temporary-write and atomic replacement primitive for the ledger, without claiming cross-file atomicity. / Clock/ledger pair saves are synchronous and non-reentrant on the process's host thread. / The client calls them during world creation, its main-thread pause-menu quit callback, and shutdown after the main loop returns. / Its explicit persistence scenario also runs on that thread. / The server calls them synchronously from `RunFixedTicks` autosave, `SaveFullSnapshot` between runs, and `Shutdown` after the tick loop. / Job workers do not call the pair writer.",
+      "statement": "Acceptance obligations: Every replacement is journaled before publication; / Clock/ledger pair saves are synchronous and non-reentrant on the process's host thread. / The client calls them during world creation, its main-thread pause-menu quit callback, and shutdown after the main loop returns. / Its explicit persistence scenario also runs on that thread. / The server calls them synchronously from `RunFixedTicks` autosave, `SaveFullSnapshot` between runs, and `Shutdown` after the tick loop. / Job workers do not call the pair writer.",
       "status": "planned",
       "requirements": [
         "ar.file.007",
@@ -2341,7 +2343,7 @@
     {
       "id": "contract.ar.file.03",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "statement": "Acceptance obligations: No overlapping production pair writers were found, including across sessions in one process. / The call sites state this ownership contract, and a debug-only atomic assertion guards the whole pair writer against concurrent or reentrant calls. / It does not serialize saves; / there is no production locking scheme. / Independently launched processes sharing one save directory are outside this ownership contract. / Incoming pairs are validated before either replacement.",
+      "statement": "Acceptance obligations: No overlapping production pair writers were found, including across sessions in one process. / The call sites state this ownership contract, and a debug-only atomic assertion guards the whole pair writer against concurrent or reentrant calls. / It does not serialize saves; / there is no production locking scheme. / Independently launched processes sharing one save directory are outside this ownership contract. / The underlying clock/ledger pair writer validates incoming pairs before either replacement.",
       "status": "planned",
       "requirements": [
         "ar.file.013",
@@ -2362,7 +2364,7 @@
     {
       "id": "contract.ar.file.04",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "statement": "Acceptance obligations: Forward saves replace metadata first; / rewinds replace the ledger first, preserving ledger tick <= clock tick at every boundary. / Ledger bytes are staged as unique `<save>/active-regions.arl.tmp.<pid>.<sequence>` files, outside the strict `chunks/` and `chunks/region/` scans on the save filesystem, then atomically renamed into place. / A separately mounted region directory causes replacement to fail across devices; / no copy fallback compromises atomicity. / Termination can leave staging debris in the save root;",
+      "statement": "Acceptance obligations: Its historical forward/rewind ordering preserves ledger tick <= clock tick between individual replacements. / Enabled session saves now wrap these writes in the indexed transaction: readers select a committed snapshot after journal recovery, rather than accepting an intermediate pair as the whole session snapshot. / Ledger bytes are staged as unique `<save>/active-regions.arl.tmp.<pid>.<sequence>` files, outside the strict `chunks/` and `chunks/region/` scans on the save filesystem, then atomically renamed into place. / A separately mounted region directory causes replacement to fail across devices; / no copy fallback compromises atomicity. / Termination can leave staging debris in the save root;",
       "status": "planned",
       "requirements": [
         "ar.file.019",
@@ -2425,7 +2427,7 @@
     {
       "id": "contract.ar.file.07",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "statement": "Acceptance obligations: the host supplies its spawn feet position for a legacy save. / No old-world migration occurs. / A save containing the ledger requires `sim.active_regions`; / opening or writing with it off refuses as incompatible configuration. / Older engine builds refuse this file as an unknown region file. / Unknown extension types cannot be skipped and are corrupt.",
+      "statement": "Acceptance obligations: the host supplies its spawn feet position for a legacy save. / This permits v0.3.0 saves to load in v0.3.1 without relabelling opaque old digests. / A save containing the ledger requires `sim.active_regions`; / opening or writing with it off refuses as incompatible configuration. / Older engine builds refuse this file as an unknown region file. / Unknown extension types cannot be skipped and are corrupt.",
       "status": "planned",
       "requirements": [
         "ar.file.042",
@@ -4574,6 +4576,585 @@
         "ar.named-hashes.028",
         "ar.named-hashes.029",
         "ar.named-hashes.030"
+      ]
+    },
+    {
+      "id": "contract.regional-continuation",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "statement": "Regional consumers, disabled compatibility, observational telemetry and cached panel hashes retain their continuation contracts; performance and presentation qualification remain outstanding.",
+      "status": "partial",
+      "requirements": [
+        "dw.regions.104",
+        "dw.regions.105",
+        "dw.regions.106",
+        "dw.regions.107"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "HeavyReference.HeavyContinuationRegionalCapture"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RegionTelemetry.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ProductionRegionPanel.*"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/distant-world.md",
+          "planned": "Execute the registered controls and complete native, sanitizer, portability and measured performance qualification against the exact linked statements; owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.clock-restoration",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "statement": "Enabled loading restores clock and ambient projections without simulation catch-up; disabled worlds retain existing clock and weather behavior.",
+      "status": "partial",
+      "requirements": [
+        "dw.calendar.024",
+        "dw.calendar.025"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FrozenAuthority.*"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/distant-world.md",
+          "planned": "Execute the registered controls and complete native, sanitizer, portability and measured performance qualification against the exact linked statements; owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.host-recovery-evidence",
+      "source": "docs/distant-world.md#evidence-map",
+      "statement": "Registered host-fault, snapshot, compatibility and observational controls are source evidence; runtime execution and measured starvation bounds still require qualification.",
+      "status": "partial",
+      "requirements": [
+        "dw.evidence.011",
+        "dw.evidence.012",
+        "dw.evidence.013",
+        "dw.evidence.014",
+        "dw.evidence.015",
+        "dw.evidence.016",
+        "dw.evidence.017",
+        "dw.evidence.018",
+        "dw.evidence.019",
+        "dw.evidence.020"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "HostSchedulerFault.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashIntegration.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "HeavyReference.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ProductionRegionPanel.*"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/distant-world.md",
+          "planned": "Execute the registered controls and complete native, sanitizer, portability and measured performance qualification against the exact linked statements; owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.remaining-qualification",
+      "source": "docs/distant-world.md#deferred",
+      "statement": "Host guards, recovery sources and panel integration do not establish native presentation, transaction recovery, performance or long-run qualification.",
+      "status": "partial",
+      "requirements": [
+        "dw.deferred.007",
+        "dw.deferred.008",
+        "dw.deferred.009",
+        "dw.deferred.010"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "HostSchedulerFault.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ProductionRegionPanel.*"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/distant-world.md",
+          "planned": "Execute the registered controls and complete native, sanitizer, portability and measured performance qualification against the exact linked statements; owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.fault-boundary-recovery",
+      "source": "docs/active-regions.md#activation-and-ordering",
+      "statement": "The first fault stops catch-up and host publication, retains committed authority and pending work, and permits coherent recovery at completed boundaries; replacement and retryable I/O retain distinct outcomes.",
+      "status": "partial",
+      "requirements": [
+        "ar.activation.065",
+        "ar.activation.066",
+        "ar.activation.067",
+        "ar.activation.068",
+        "ar.activation.069",
+        "ar.activation.070",
+        "ar.activation.071",
+        "ar.activation.072",
+        "ar.activation.073",
+        "ar.activation.074",
+        "ar.activation.075",
+        "ar.activation.076",
+        "ar.activation.077",
+        "ar.activation.078",
+        "ar.activation.079",
+        "ar.activation.080",
+        "ar.activation.081",
+        "ar.activation.082",
+        "ar.activation.083"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "FaultStopsCatchUpFrame.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "HostSchedulerFault.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.FailedReplacementPreservesFaultAndSuccessfulReplacementResetsIt"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Execute the registered controls and complete native, sanitizer, portability and measured performance qualification against the exact linked statements; owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.indexed-adoption",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "statement": "Indexed saves defer acknowledgements until commit. Historical projection adoption validates scratch authority atomically, preserves time and membership, and persists declarations only on a later successful save.",
+      "status": "partial",
+      "requirements": [
+        "ar.file.120",
+        "ar.file.121",
+        "ar.file.122",
+        "ar.file.123",
+        "ar.file.124",
+        "ar.file.125",
+        "ar.file.126"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "FrozenAuthority.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SaveLoadCorruptionCorpus.IndexedContinuationRefusalPreservesLiveWorld"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Execute the registered controls and complete native, sanitizer, portability and measured performance qualification against the exact linked statements; owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.replacement-saveability",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "statement": "Failed public replacement preserves the current session and saveability while reporting the candidate error separately.",
+      "status": "partial",
+      "requirements": [
+        "ar.frozen-adoption.015"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "FrozenAuthority.FailedPublicReplacementPreservesCurrentSaveability"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.FailedReplacementPreservesFaultAndSuccessfulReplacementResetsIt"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Execute the registered controls and complete native, sanitizer, portability and measured performance qualification against the exact linked statements; owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.checked-authority-capture",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "statement": "Boundary capture resolves validated authority without mutation, preserves Frozen continuation and exact disabled behavior, and frames durable pending events and deposits with contained failure semantics.",
+      "status": "partial",
+      "requirements": [
+        "ar.authority-capture.001",
+        "ar.authority-capture.002",
+        "ar.authority-capture.003",
+        "ar.authority-capture.004",
+        "ar.authority-capture.005",
+        "ar.authority-capture.006",
+        "ar.authority-capture.007",
+        "ar.authority-capture.008",
+        "ar.authority-capture.009",
+        "ar.authority-capture.010",
+        "ar.authority-capture.011",
+        "ar.authority-capture.012",
+        "ar.authority-capture.013",
+        "ar.authority-capture.014",
+        "ar.authority-capture.015",
+        "ar.authority-capture.016",
+        "ar.authority-capture.017",
+        "ar.authority-capture.018",
+        "ar.authority-capture.019",
+        "ar.authority-capture.020",
+        "ar.frozen-adoption.016",
+        "ar.frozen-adoption.017",
+        "ar.frozen-adoption.018",
+        "ar.frozen-adoption.019",
+        "ar.frozen-adoption.020",
+        "ar.frozen-adoption.021",
+        "ar.frozen-adoption.022",
+        "ar.frozen-adoption.023",
+        "ar.frozen-adoption.024",
+        "ar.frozen-adoption.025",
+        "ar.frozen-adoption.026",
+        "ar.frozen-adoption.027",
+        "ar.authority-capture.021",
+        "ar.authority-capture.022",
+        "ar.authority-capture.023",
+        "ar.authority-capture.024",
+        "ar.authority-capture.025",
+        "ar.pending.001",
+        "ar.pending.002",
+        "ar.pending.003",
+        "ar.pending.004",
+        "ar.pending.005",
+        "ar.pending.006",
+        "ar.pending.007",
+        "ar.pending.008",
+        "ar.pending.009",
+        "ar.pending.010",
+        "ar.pending.011",
+        "ar.pending.012",
+        "ar.pending.013",
+        "ar.pending.014",
+        "ar.pending.015",
+        "ar.pending.016",
+        "ar.pending.017",
+        "ar.pending.018",
+        "ar.pending.019",
+        "ar.pending.020",
+        "ar.pending.021",
+        "ar.pending.022",
+        "ar.pending.023",
+        "ar.pending.024",
+        "ar.pending.025",
+        "ar.pending.026",
+        "ar.pending.027",
+        "ar.pending.028",
+        "ar.pending.029",
+        "ar.pending.030",
+        "ar.pending.031",
+        "ar.pending.032",
+        "ar.pending.033",
+        "ar.pending.034",
+        "ar.pending.035",
+        "ar.pending.036",
+        "ar.pending.037",
+        "ar.pending.038",
+        "ar.pending.039",
+        "ar.pending.040",
+        "ar.pending.041",
+        "ar.pending.042",
+        "ar.pending.043",
+        "ar.pending.044",
+        "ar.pending.045",
+        "ar.pending.046",
+        "ar.pending.047",
+        "ar.pending.048",
+        "ar.pending.049",
+        "ar.pending.050",
+        "ar.capture.088",
+        "ar.capture.089",
+        "ar.capture.090",
+        "ar.capture.091",
+        "ar.capture.092",
+        "ar.capture.093",
+        "ar.pending.051"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "FrozenAuthority.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.PendingCaptureFailureIsContained"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FaultStopsCatchUpFrame.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.FaultedCapturesAndRecoveryDoNotPublishQueuedGeneration"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Execute the registered controls and complete native, sanitizer, portability and measured performance qualification against the exact linked statements; owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.named-checkpoints",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "statement": "All enabled hosts share checked immutable authority and effective configuration; capture refusal prevents checkpoints and disconnects, with unchanged HashMsg, LREC1 and disabled artifact bytes.",
+      "status": "partial",
+      "requirements": [
+        "ar.named-hashes.001",
+        "ar.named-hashes.002",
+        "ar.named-hashes.003",
+        "ar.named-hashes.004",
+        "ar.named-hashes.005",
+        "ar.named-hashes.006",
+        "ar.named-hashes.007",
+        "ar.named-hashes.008",
+        "ar.named-hashes.009",
+        "ar.named-hashes.010",
+        "ar.named-hashes.011",
+        "ar.named-hashes.012",
+        "ar.named-hashes.013",
+        "ar.named-hashes.014",
+        "ar.named-hashes.015",
+        "ar.named-hashes.016",
+        "ar.named-hashes.017",
+        "ar.named-hashes.018",
+        "ar.named-hashes.019",
+        "ar.named-hashes.020",
+        "ar.named-hashes.021",
+        "ar.named-hashes.022",
+        "ar.named-hashes.023",
+        "ar.named-hashes.024",
+        "ar.named-hashes.025",
+        "ar.named-hashes.026",
+        "ar.named-hashes.027",
+        "ar.named-hashes.028",
+        "ar.named-hashes.029",
+        "ar.named-hashes.030"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashIntegration.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "HostSchedulerFault.BoundaryCaptureNeverFinalizesRecordingOrSidecar"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Execute the registered controls and complete native, sanitizer, portability and measured performance qualification against the exact linked statements; owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.independent-heavy-reference",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "statement": "Heavy independently decodes and compares bounded complete authority before save, after load and during continuation, detects omitted domains, refuses corrupt inputs without mutation, and preserves legacy artifacts.",
+      "status": "partial",
+      "requirements": [
+        "ar.reference.001",
+        "ar.reference.002",
+        "ar.reference.003",
+        "ar.reference.004",
+        "ar.reference.005",
+        "ar.reference.006",
+        "ar.reference.007",
+        "ar.reference.008",
+        "ar.reference.009",
+        "ar.reference.010",
+        "ar.reference.011",
+        "ar.reference.012",
+        "ar.reference.013",
+        "ar.reference.014",
+        "ar.reference.015",
+        "ar.reference.016",
+        "ar.reference.017",
+        "ar.reference.018",
+        "ar.reference.019",
+        "ar.reference.020",
+        "ar.reference.021",
+        "ar.reference.022",
+        "ar.reference.023",
+        "ar.reference.024",
+        "ar.reference.025",
+        "ar.reference.026",
+        "ar.reference.027",
+        "ar.reference.028",
+        "ar.reference.029",
+        "ar.reference.030",
+        "ar.reference.031",
+        "ar.reference.032",
+        "ar.reference.033",
+        "ar.reference.034",
+        "ar.reference.035",
+        "ar.reference.036",
+        "ar.reference.037",
+        "ar.reference.038",
+        "ar.reference.039",
+        "ar.reference.040",
+        "ar.reference.041",
+        "ar.reference.042",
+        "ar.reference.043",
+        "ar.reference.044",
+        "ar.reference.045",
+        "ar.reference.046",
+        "ar.reference.047",
+        "ar.reference.048",
+        "ar.reference.049",
+        "ar.reference.050",
+        "ar.reference.051",
+        "ar.reference.052",
+        "ar.reference.053",
+        "ar.reference.054"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "HeavyReference.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RegionTelemetry.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RegionalTelemetryFixture.*"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Execute the registered controls and complete native, sanitizer, portability and measured performance qualification against the exact linked statements; owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.host-fail-stop-sources",
+      "source": "docs/active-regions.md#host-fail-stop-qualification-sources",
+      "statement": "Registered fault matrices cover tick position, preparation, rollback, recovery, pending work, shutdown and artifact preservation. Native client termination, Windows recovery, presentation and performance qualification remain outstanding.",
+      "status": "partial",
+      "requirements": [
+        "ar.host-faults.001",
+        "ar.host-faults.002",
+        "ar.host-faults.003",
+        "ar.host-faults.004",
+        "ar.host-faults.005",
+        "ar.host-faults.006",
+        "ar.host-faults.007",
+        "ar.host-faults.008",
+        "ar.host-faults.009",
+        "ar.host-faults.010",
+        "ar.host-faults.011",
+        "ar.host-faults.012",
+        "ar.host-faults.013",
+        "ar.host-faults.014",
+        "ar.host-faults.015",
+        "ar.host-faults.016",
+        "ar.host-faults.017",
+        "ar.host-faults.018",
+        "ar.host-faults.019",
+        "ar.host-faults.020",
+        "ar.host-faults.021",
+        "ar.host-faults.022"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "FaultStopsCatchUpFrame.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "HostSchedulerFault.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.PendingCaptureFailureIsContained"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.RetryableSaveIoFailurePreservesAuthorityWithoutFault"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.UnknownPreparationBeforeClockAssignmentNamesFaultingTick"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.FinalQuotaAutosavePreparationFaultIsReported"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SaveLoadCorruptionCorpus.IndexedContinuationRefusalPreservesLiveWorld"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Execute the registered controls and complete native, sanitizer, portability and measured performance qualification against the exact linked statements; owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.snapshot-commit-continuation",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "statement": "Snapshot commit writes the index last, restores the previous complete snapshot on failure and defers memory acknowledgements until commit. Both clocks identify the faulting tick. Registered regressions are authored evidence; native qualification remains pending.",
+      "status": "partial",
+      "requirements": [
+        "ar.activation.084",
+        "ar.file.136",
+        "ar.file.137",
+        "ar.file.138"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "HostSchedulerFault.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FaultStopsCatchUpFrame.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SaveTransaction.*"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Execute exact-candidate native continuation and recovery qualification; owner: ds"
+        }
       ]
     }
   ]

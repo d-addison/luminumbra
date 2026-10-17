@@ -450,6 +450,8 @@ TEST(ActiveRegionLedgerTest, CadenceRunsOnlyAtDerivedPhaseAndFailedFreezeLeavesL
 TEST(ActiveRegionLedgerTest, ValidAnchorBoundaries) {
     const auto nan = std::numeric_limits<float>::quiet_NaN();
     const auto inf = std::numeric_limits<float>::infinity();
+    EXPECT_TRUE(ActiveRegionLedger::valid_anchor(Vec3(-16777216.0f, 0, -16777216.0f)));
+    EXPECT_TRUE(ActiveRegionLedger::valid_anchor(Vec3(16777215.0f, 5, 16777215.0f)));
     EXPECT_TRUE(ActiveRegionLedger::valid_anchor(Vec3(-16777216.0f, 0, 0)));
     EXPECT_TRUE(ActiveRegionLedger::valid_anchor(Vec3(0, 0, -16777216.0f)));
     EXPECT_TRUE(ActiveRegionLedger::valid_anchor(Vec3(16777215.0f, 5, 0)));
