@@ -130,6 +130,8 @@ int RunLockstepLoopback(const ServerCliOptions& options) {
             : options.lockstep_dump_path;
     host.SetDumpPath(dump_path);
     peer.SetDumpPath(dump_path + ".peer");
+    // Both sessions automatically stream bounded diagnostic recordings beside
+    // these destinations and finalize the existing status.dump_path on desync.
 
     // Handshake: send each Hello, then complete both (single-process driver order).
     // peer's Hello must be queued before host.Handshake looks for it -- peer.Handshake
@@ -137,24 +139,12 @@ int RunLockstepLoopback(const ServerCliOptions& options) {
     // Hello (sent by host.Handshake) is then consumed by a second peer drain inside its
     // own PumpTick drain. To keep it simple+robust we send both Hellos first.
     {
-        Luminumbra::Net::HelloMsg ph;
-        ph.seed = seed_num;
-        ph.preset = options.preset;
-        ph.tick_rate_hz = 30;
-        ph.client_id = 1;
-        ph.system_config_identity = peer_cfg.system_config_identity;
-        ph.preset_content_hash = peer_cfg.preset_content_hash;
+        const auto ph = Luminumbra::Net::MakeLockstepHello(peer_cfg);
         if (!peer_transport->SendFrame(Luminumbra::Net::EncodeHello(ph))) {
             LUMINUMBRA_CORE_ERROR("lockstep: handshake send failed");
             return 1;
         }
-        Luminumbra::Net::HelloMsg hh;
-        hh.seed = seed_num;
-        hh.preset = options.preset;
-        hh.tick_rate_hz = 30;
-        hh.client_id = 0;
-        hh.system_config_identity = host_cfg.system_config_identity;
-        hh.preset_content_hash = host_cfg.preset_content_hash;
+        const auto hh = Luminumbra::Net::MakeLockstepHello(host_cfg);
         if (!host_transport->SendFrame(Luminumbra::Net::EncodeHello(hh))) {
             LUMINUMBRA_CORE_ERROR("lockstep: handshake send failed");
             return 1;
