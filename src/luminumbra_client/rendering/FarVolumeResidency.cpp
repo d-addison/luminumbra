@@ -1,9 +1,29 @@
 #include "FarVolumeResidency.h"
+#include "FarVolumeBuildQueue.h"
+#include "FarVolumeRenderMesh.h"
+#include "FarVolumeUpload.h"
+#include "core/JobSystem.h"
+#include "world/Chunk.h"
+#include "world/FarTierTable.h"
+#include "world/FarVolume.h"
+#include "world/FarVolumeMemory.h"
+#include "world/FarVolumeRuntime.h"
+#include "world/FarVolumeTierMemory.h"
+#include "world/FarWantedSet.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
 #include <limits>
+#include <memory_resource>
+#include <optional>
+#include <span>
 #include <stdexcept>
+#include <thread>
+#include <utility>
 
 namespace Luminumbra::Rendering {
 namespace {
@@ -84,7 +104,11 @@ FarVolumeResidency::FarVolumeResidency(JobSystem& jobs,
     }
 }
 FarVolumeResidency::~FarVolumeResidency() {
-    CancelAndDrain();
+    try {
+        CancelAndDrain();
+    } catch (...) {
+        std::terminate();
+    }
 }
 void FarVolumeResidency::CheckOwner() const {
     if (std::this_thread::get_id() != owner_)
@@ -105,7 +129,7 @@ FarVolumeResidency::Entry* FarVolumeResidency::Find(const World::FarTileKey& key
     return const_cast<Entry*>(std::as_const(*this).Find(key));
 }
 bool FarVolumeResidency::ReplaceWanted(std::span<const FarVolumeWantedRequest> requests) {
-    Guard guard(*this);
+    Guard const guard(*this);
     std::array<std::size_t, World::kFarTierCount> counts{};
     for (std::size_t i = 0; i < requests.size(); ++i) {
         const auto& request = requests[i];
@@ -239,7 +263,7 @@ FarVolumeFrameResult FarVolumeResidency::AdvanceFrame(double x,
                                                       const FarVolumeFrameLimits& limits,
                                                       const FarVolumeAuthorityProducer& producer,
                                                       const FarVolumeUploadBackend& backend) {
-    Guard guard(*this);
+    Guard const guard(*this);
     FarVolumeFrameResult result;
     if (!std::isfinite(x))
         x = 0;
@@ -329,6 +353,11 @@ FarVolumeFrameResult FarVolumeResidency::AdvanceFrame(double x,
     // One global dispatch budget; explicit single-key Pump avoids fallback.
     for (std::size_t n = tiers_.size(); n > 0; --n) {
         auto& tier = RequireEngaged(tiers_[n - 1]);
+        // Retained results share the queue allowance until upload or discard.
+        // Headroom eviction can only reduce this frame's conservative count.
+        std::size_t held = 0;
+        for (const auto& entry : tier.entries)
+            held += entry.completion.has_value();
         for (const auto i : tier.order) {
             auto& entry = tier.entries[i];
             if (entry.eligibility != FarVolumeEligibility::Wanted &&
@@ -336,10 +365,12 @@ FarVolumeFrameResult FarVolumeResidency::AdvanceFrame(double x,
                 continue;
             if (result.build_attempts == limits.builds)
                 break;
+            if (tier.queue.ResultCapacity(held) == 0)
+                break;
             ++result.build_attempts;
             if (entry.eligibility == FarVolumeEligibility::Pending) {
                 const std::array key{RequireEngaged(entry.desired).identity.key};
-                const auto dispatched = tier.queue.Pump(1, key);
+                const auto dispatched = tier.queue.Pump(1, key, held);
                 result.dispatched += dispatched;
                 if (dispatched != 0)
                     entry.eligibility = FarVolumeEligibility::Building;
@@ -382,7 +413,7 @@ FarVolumeFrameResult FarVolumeResidency::AdvanceFrame(double x,
                 continue;
             }
             const std::array key{entry.desired->identity.key};
-            const auto dispatched = tier.queue.Pump(1, key);
+            const auto dispatched = tier.queue.Pump(1, key, held);
             result.dispatched += dispatched;
             entry.eligibility =
                 dispatched == 0 ? FarVolumeEligibility::Pending : FarVolumeEligibility::Building;
@@ -486,7 +517,7 @@ bool FarVolumeResidency::CoarseMayYield(const World::FarTileKey& key) const {
     return true;
 }
 void FarVolumeResidency::CancelAndDrain() {
-    Guard guard(*this);
+    Guard const guard(*this);
     for (auto& tier : tiers_)
         RequireEngaged(tier).queue.CancelAndDrain();
     for (auto& tier : tiers_)
@@ -494,7 +525,7 @@ void FarVolumeResidency::CancelAndDrain() {
             entry = Entry{};
 }
 std::size_t FarVolumeResidency::VisitDraws(FarVolumeDrawVisitor visitor, void* context) {
-    Guard guard(*this);
+    Guard const guard(*this);
     if (!visitor)
         return 0;
     std::size_t count = 0;

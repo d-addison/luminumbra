@@ -104,7 +104,8 @@ struct FarVolumeQueueStats {
 
 // Generic immutable-authority CPU consumer; no saved-world producer, pristine
 // inference, GL upload or Ladder activation is supplied here. Explicit counts
-// bound tracked keys and running/untaken results; there are no shipped defaults.
+// bound tracked keys and running/untaken plus caller-reported retained results;
+// there are no shipped defaults.
 //
 // Methods and destruction belong to the constructing thread. Callbacks must
 // terminate without owner-thread service/reentrancy, remain immutable and be
@@ -134,7 +135,13 @@ public:
     // With an explicit order, ONLY its selected keys may start, in that order;
     // the owner supplies the wanted policy's coarsest/distance/key ordering.
     // Empty order retains generic descriptor order. No order storage is owned.
-    std::size_t Pump(std::size_t max_dispatches, std::span<const World::FarTileKey> order = {});
+    // Taken results retain their reservation until uploaded/discarded. Owners
+    // pass their retained count so it shares result_slots with occupied slots.
+    std::size_t Pump(std::size_t max_dispatches,
+                     std::span<const World::FarTileKey> order = {},
+                     std::size_t retained_results = 0);
+    // Constant-time admission check; call after Pump(0) to reap finished work.
+    std::size_t ResultCapacity(std::size_t retained_results = 0) const;
     void Cancel(const World::FarTileKey& key);
     void Forget(const World::FarTileKey& key);
     // Explicit retry after wanted-set/budget change; duplicates never auto-retry.
@@ -182,6 +189,7 @@ private:
     World::FarVolumeChargedResource resource_;
     std::pmr::vector<Descriptor> descriptors_;
     std::pmr::vector<Slot> slots_;
+    std::size_t occupied_results_ = 0;
     std::uint64_t dispatched_ = 0, stale_ = 0, rejected_ = 0;
 };
 
