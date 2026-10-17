@@ -1479,4 +1479,281 @@ TEST(AsyncWaterMeshing, DeferredAdmissionsCountOnlyCurrentCandidatesWithoutLosin
         EXPECT_EQ(chunk->get_state(), ChunkState::Ready);
     }
 }
+
+void CheckPromotionDueOrder(bool active_mesh, bool fill_future_queue) {
+    JobSystem jobs;
+    jobs.startup(1);
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.base_amplitude = 0.0f;
+    params.height_offset = 8.0f;
+    params.caves_enabled = false;
+    SHIELD_WorldSystem world(&jobs, nullptr, params, 1337);
+    WaterSystem water(&jobs, &world);
+    water.SetBootPaused(true);
+    world.SetWaterSystem(&water);
+    auto promoted = std::make_shared<Chunk>(IVec3(0, 0, 0));
+    FillDugPond(world, *promoted, 32);
+    promoted->material_data.clear();
+    world.GenerateChunkData(*promoted);
+    const auto expected = ReferenceMesh(world, water, *promoted);
+    if (active_mesh) {
+        World::MarchingCubes::PolygoniseTerrain(world, *promoted, 0.0f, 2);
+        ASSERT_FALSE(promoted->mesh_indices.empty());
+        promoted->current_lod.store(1);
+        promoted->set_state(ChunkState::Ready);
+    }
+    promoted->sdf_data.clear();
+    ASSERT_TRUE(world.adopt_streamed_chunk(promoted));
+    entt::registry registry;
+    world.begin_tick(0);
+    world.update(registry, std::vector<Vec3>{}, nullptr);
+    ASSERT_EQ(promoted->pending_lod.load(), 0);
+    // Keep stage A unpublished while later ordinary batches occupy the lane.
+    world.begin_tick(1);
+    std::vector<std::shared_ptr<Chunk>> ordinary;
+    const int batches = fill_future_queue ? 9 : 1;
+    for (int index = 0; index < batches; ++index) {
+        auto chunk = std::make_shared<Chunk>(IVec3(index + 1, 0, 0));
+        FillDugPond(world, *chunk, 32);
+        ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+        ordinary.push_back(chunk);
+        world.update(registry, std::vector<Vec3>{}, nullptr);
+        EXPECT_LE(world.last_meshing_snapshot_bytes(),
+                  SHIELD_WorldSystem::kMeshingSnapshotByteBudget);
+    }
+    if (fill_future_queue) {
+        // Eight future batches plus the reserved stage-B slot fill the cap.
+        EXPECT_EQ(ordinary.back()->pending_lod.load(), -1);
+        EXPECT_GT(world.get_last_streaming_budget_stats().deferred_meshing, 0u);
+    } else {
+        ASSERT_EQ(ordinary.front()->pending_lod.load(), 0);
+    }
+    world.quiesce_streaming_jobs_for_save();
+    world.activate_due(7);
+    EXPECT_EQ(promoted->mesh_version.load(), 0u);
+    world.begin_tick(8);
+    world.activate_due(8);
+    EXPECT_EQ(promoted->mesh_version.load(), 1u);
+    EXPECT_EQ(promoted->water_mesh_version.load(), 1u);
+    EXPECT_EQ(promoted->current_lod.load(), 0);
+    EXPECT_EQ(promoted->get_state(), ChunkState::Ready);
+    EXPECT_EQ(promoted->pending_lod.load(), -1);
+    EXPECT_FALSE(promoted->has_collision.load());
+    ExpectVerticesEqual(promoted->mesh_vertices, expected->mesh_vertices);
+    EXPECT_EQ(promoted->mesh_indices, expected->mesh_indices);
+    EXPECT_EQ(promoted->water_mesh_indices, expected->water_mesh_indices);
+    for (const auto& chunk : ordinary) {
+        EXPECT_EQ(chunk->mesh_version.load(), 0u);
+        EXPECT_NE(chunk->get_state(), ChunkState::Ready);
+    }
+    world.begin_tick(9);
+    world.activate_due(9);
+    for (const auto& chunk : ordinary) {
+        EXPECT_EQ(chunk->mesh_version.load(), 1u);
+        EXPECT_EQ(chunk->pending_lod.load(), -1);
+    }
+    world.wait_for_streaming_jobs();
+    EXPECT_EQ(promoted->mesh_version.load(), 1u);
+    EXPECT_EQ(world.promotion_dispatch_totals().chunks, 1u);
+}
+
+TEST(AsyncWaterMeshing, EarlierPromotionPublishesBeforeLaterOrdinaryBatch) {
+    CheckPromotionDueOrder(false, false);
+    CheckPromotionDueOrder(true, false);
+}
+
+TEST(AsyncWaterMeshing, EarlierPromotionKeepsHandoffSlotAcrossFutureBatchBackpressure) {
+    CheckPromotionDueOrder(false, true);
+    CheckPromotionDueOrder(true, true);
+}
+
+TEST(AsyncWaterMeshing, LastBatchSlotPreservesMixedDispatchInEitherOrder) {
+    for (const bool promotion_first : {false, true}) {
+        SCOPED_TRACE(promotion_first);
+        JobSystem jobs;
+        jobs.startup(1);
+        auto params = Luminumbra::Test::SyntheticTerrainParams();
+        params.base_amplitude = 0.0f;
+        params.height_offset = 8.0f;
+        params.caves_enabled = false;
+        SHIELD_WorldSystem world(&jobs, nullptr, params, 1337);
+        entt::registry registry;
+        world.begin_tick(0);
+        for (int index = 0; index < 8; ++index) {
+            auto chunk = std::make_shared<Chunk>(IVec3(index + 3, 0, 0));
+            world.GenerateChunkData(*chunk);
+            chunk->set_state(ChunkState::Idle);
+            ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+            world.update(registry, std::vector<Vec3>{}, nullptr);
+        }
+        auto promoted = std::make_shared<Chunk>(IVec3(0, 0, 0));
+        auto ordinary = std::make_shared<Chunk>(IVec3(1, 0, 0));
+        for (const auto& chunk : {promoted, ordinary}) {
+            world.GenerateChunkData(*chunk);
+            chunk->set_state(ChunkState::Idle);
+        }
+        auto& active = promotion_first ? ordinary : promoted;
+        World::MarchingCubes::PolygoniseTerrain(world, *active, 0.0f, 2);
+        ASSERT_FALSE(active->mesh_indices.empty());
+        active->current_lod.store(1);
+        active->set_state(ChunkState::Ready);
+        promoted->sdf_data.clear();
+        ASSERT_TRUE(world.adopt_streamed_chunk(promoted));
+        ASSERT_TRUE(world.adopt_streamed_chunk(ordinary));
+        world.begin_tick(1);
+        world.update(registry, std::vector<Vec3>{}, nullptr);
+        EXPECT_EQ(promoted->pending_lod.load(), 0);
+        EXPECT_EQ(ordinary->pending_lod.load(), 0);
+        EXPECT_EQ(world.get_last_streaming_budget_stats().deferred_meshing, 0u);
+        world.activate_due(8);
+        EXPECT_EQ(promoted->mesh_version.load(), 0u);
+        EXPECT_EQ(ordinary->mesh_version.load(), 0u);
+        world.begin_tick(9);
+        world.activate_due(9);
+        EXPECT_EQ(promoted->mesh_version.load(), 1u);
+        EXPECT_EQ(ordinary->mesh_version.load(), 1u);
+        EXPECT_EQ(world.promotion_dispatch_totals().chunks, 1u);
+    }
+}
+
+enum class RetainedChange : std::uint8_t {
+    MovingAnchor,
+    NeighbourLod,
+    WaterOnly,
+    TerrainRequired,
+    Satisfied
+};
+
+void CheckRetainedMetadata(RetainedChange change, bool use_workers) {
+    JobSystem jobs;
+    if (use_workers) {
+        jobs.startup(1);
+    }
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.base_amplitude = 0.0f;
+    params.height_offset = 8.0f;
+    params.caves_enabled = false;
+    SHIELD_WorldSystem world(use_workers ? &jobs : nullptr, nullptr, params, 1337);
+    WaterSystem water(use_workers ? &jobs : nullptr, &world);
+    water.SetBootPaused(true);
+    world.SetWaterSystem(&water);
+    BudgetedBurstMeshes burst;
+    ASSERT_NO_FATAL_FAILURE(PrepareBudgetedBurst(world, water, false, burst));
+    if (change == RetainedChange::TerrainRequired) {
+        for (std::size_t index = 0; index < burst.chunks.size(); ++index) {
+            auto& chunk = *burst.chunks[index];
+            chunk.mesh_vertices = burst.expected[index]->mesh_vertices;
+            chunk.mesh_indices = burst.expected[index]->mesh_indices;
+            chunk.current_lod.store(0);
+            chunk.set_state(ChunkState::Ready);
+        }
+    }
+    const bool starts_coarse = change == RetainedChange::NeighbourLod;
+    entt::registry registry;
+    world.begin_tick(0);
+    world.update(registry, starts_coarse ? Vec3(-256.0f, 6.0f, 0.0f) : Vec3(0.0f), nullptr);
+    world.quiesce_streaming_jobs_for_save();
+    const auto retained =
+        std::find_if(burst.chunks.begin(), burst.chunks.end(), [](const auto& chunk) {
+            return chunk->pending_lod.load() < 0 && chunk->mesh_version.load() == 0u &&
+                   chunk->get_state() == ChunkState::Idle;
+        });
+    auto target = retained == burst.chunks.end() ? std::shared_ptr<Chunk>{} : *retained;
+    if (change == RetainedChange::TerrainRequired) {
+        const auto water_retained =
+            std::find_if(burst.chunks.begin(), burst.chunks.end(), [](const auto& chunk) {
+                return chunk->pending_lod.load() < 0 && chunk->water_mesh_version.load() == 0u;
+            });
+        ASSERT_NE(water_retained, burst.chunks.end());
+        target = *water_retained;
+    }
+    ASSERT_NE(target, nullptr);
+    const int expected_lod = starts_coarse || change == RetainedChange::MovingAnchor ||
+                                     change == RetainedChange::Satisfied
+                                 ? 1
+                                 : 0;
+    u8 faces = World::MarchingCubes::kNoTransitionFaces;
+    if (change == RetainedChange::NeighbourLod) {
+        const IVec3 neighbor_coords = target->get_coords() + IVec3(1, 0, 0);
+        auto neighbor = world.find_streamed_chunk(neighbor_coords);
+        if (!neighbor) {
+            neighbor = std::make_shared<Chunk>(neighbor_coords);
+            FillDugPond(world, *neighbor, 32);
+            ASSERT_TRUE(world.adopt_streamed_chunk(neighbor));
+        }
+        World::MarchingCubes::PolygoniseTerrain(world, *neighbor, 0.0f, 1);
+        neighbor->current_lod.store(0);
+        neighbor->set_state(ChunkState::Ready);
+        faces = World::MarchingCubes::TransitionFaceMaxX;
+    } else if (change == RetainedChange::WaterOnly || change == RetainedChange::Satisfied) {
+        World::MarchingCubes::PolygoniseTerrain(world, *target, 0.0f, 1);
+        target->current_lod.store(expected_lod);
+        target->set_state(ChunkState::Ready);
+        target->water_mesh_generated.store(change == RetainedChange::Satisfied);
+    } else if (change == RetainedChange::TerrainRequired) {
+        target->current_lod.store(1);
+    }
+    if (expected_lod == 1) {
+        const auto chunks = world.snapshot_streamed_chunks();
+        const IVec3 coords = target->get_coords();
+        for (const auto& neighbor : chunks) {
+            if (neighbor->current_lod.load() != 0 || neighbor->mesh_vertices.empty() ||
+                neighbor->mesh_indices.empty()) {
+                continue;
+            }
+            const IVec3 delta = neighbor->get_coords() - coords;
+            if (delta == IVec3(-1, 0, 0)) {
+                faces |= World::MarchingCubes::TransitionFaceMinX;
+            } else if (delta == IVec3(1, 0, 0)) {
+                faces |= World::MarchingCubes::TransitionFaceMaxX;
+            } else if (delta == IVec3(0, 0, -1)) {
+                faces |= World::MarchingCubes::TransitionFaceMinZ;
+            } else if (delta == IVec3(0, 0, 1)) {
+                faces |= World::MarchingCubes::TransitionFaceMaxZ;
+            }
+        }
+    }
+    if (change == RetainedChange::Satisfied) {
+        target->applied_transition_faces.store(faces);
+        World::MarchingCubes::PolygoniseTerrain(world, *target, 0.0f, 2);
+        World::MarchingCubes::AddBoundaryTransitionSkirts(*target, 2, faces);
+    }
+    auto expected = ReferenceMesh(world, water, *target);
+    if (expected_lod == 1) {
+        World::MarchingCubes::PolygoniseTerrain(world, *expected, 0.0f, 2);
+        World::MarchingCubes::AddBoundaryTransitionSkirts(*expected, 2, faces);
+    }
+    world.begin_tick(1);
+    const Vec3 anchor = expected_lod == 1 ? Vec3(-256.0f, 6.0f, 0.0f) : Vec3(0.0f);
+    world.update(registry, anchor, nullptr);
+    EXPECT_LE(world.last_meshing_snapshot_bytes(), SHIELD_WorldSystem::kMeshingSnapshotByteBudget);
+    // The later pass refreshes metadata but keeps the original tick-8 boundary.
+    world.begin_tick(8);
+    world.activate_due(8);
+    EXPECT_EQ(target->pending_lod.load(), -1);
+    EXPECT_EQ(target->current_lod.load(), expected_lod);
+    EXPECT_EQ(target->get_state(), ChunkState::Ready);
+    EXPECT_EQ(target->mesh_version.load(), change == RetainedChange::WaterOnly ? 0u : 1u);
+    EXPECT_EQ(target->water_mesh_version.load(), 1u);
+    EXPECT_EQ(target->applied_transition_faces.load(), faces);
+    ExpectVerticesEqual(target->mesh_vertices, expected->mesh_vertices);
+    EXPECT_EQ(target->mesh_indices, expected->mesh_indices);
+    world.wait_for_streaming_jobs();
+}
+
+TEST(AsyncWaterMeshing, RetainedCandidateRefreshesMovingAnchorLodBeforeAdmission) {
+    for (const bool workers : {false, true}) {
+        CheckRetainedMetadata(RetainedChange::MovingAnchor, workers);
+    }
+}
+TEST(AsyncWaterMeshing, RetainedCandidateRefreshesNeighbourTransitionMaskBeforeAdmission) {
+    CheckRetainedMetadata(RetainedChange::NeighbourLod, true);
+}
+TEST(AsyncWaterMeshing, RetainedCandidateRefreshesTerrainAndWaterClassificationBeforeAdmission) {
+    CheckRetainedMetadata(RetainedChange::WaterOnly, true);
+    CheckRetainedMetadata(RetainedChange::TerrainRequired, true);
+}
+TEST(AsyncWaterMeshing, SatisfiedRetainedRequestKeepsCurrentLodAndOriginalOwnership) {
+    CheckRetainedMetadata(RetainedChange::Satisfied, true);
+}
 } // namespace

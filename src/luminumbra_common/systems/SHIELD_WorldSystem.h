@@ -880,8 +880,8 @@ public:
     std::int64_t current_sim_tick() const {
         return m_current_sim_tick;
     }
-    //  (activation queue ): tick-keyed activation. Publishes, in FIFO
-    // order, exactly the batches whose due_tick is at or before `tick` —
+    // Tick-keyed activation. Publishes, in stable due order,
+    // exactly the batches whose due_tick is at or before `tick` —
     // BLOCKING on a due-but-unfinished batch's jobs (K under-covering is a
     // wall-clock cost, never a schedule change) — plus the promotion lane
     // when due. Batches with due_tick -1 (dispatched with no tick, i.e. the
@@ -933,10 +933,10 @@ public:
 private:
     struct StreamingState {
         std::unordered_map<ChunkID, std::shared_ptr<::Luminumbra::Chunk>> chunks;
-        //   (activation queue): per-lane BATCH FIFOs. Each streaming
-        // dispatch appends a batch record {job handles, its chunks, due_tick};
-        // publication pops FRONT batches in FIFO order (deterministic
-        // publication order = dispatch order). Under the per-tick barrier the
+        // Per-lane batches retain handles, chunks and the original due tick.
+        // Generation follows dispatch order. Meshing uses stable due order
+        // because stage B can arrive after ordinary batches due later.
+        // Publication pops front batches. Under the per-tick barrier the
         // depth never exceeds 1 and every batch publishes the tick it was
         // dispatched, so this is byte-identical structure-only change; the
         // barrier swap gives due_tick = dispatch_tick + K its meaning.

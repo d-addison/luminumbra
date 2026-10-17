@@ -686,7 +686,7 @@ void SHIELD_WorldSystem::quiesce_streaming_jobs_for_save() {
 }
 
 void SHIELD_WorldSystem::activate_due(std::int64_t tick) {
-    // activation queue : publish, in FIFO order, exactly the batches due at or
+    // Publish, in stable due order, exactly the batches due at or
     // before `tick`. A due-but-unfinished batch BLOCKS on its jobs (K
     // under-covering is a wall-clock cost, never a schedule change); a batch
     // with due_tick -1 (no tick source at dispatch) publishes when drained.
@@ -3186,11 +3186,6 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
             }
 
             if (needs_meshing) {
-                const auto retained = deferred_indices.find(chunk_ptr->get_id());
-                if (retained != deferred_indices.end() &&
-                    m_deferred_meshing[retained->second].chunk == chunk_ptr) {
-                    m_deferred_meshing[retained->second].current_candidate = true;
-                }
                 const Vec3 chunk_center = (Vec3(chunk_ptr->get_coords()) + 0.5f) *
                                           Vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
                 if (required_lod == -1) {
@@ -3234,6 +3229,34 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
                                               terrain_mesh_required,
                                               vertical_surface_distance,
                                               distance_sq});
+            }
+
+            const auto retained = deferred_indices.find(chunk_ptr->get_id());
+            if (retained != deferred_indices.end() &&
+                m_deferred_meshing[retained->second].chunk == chunk_ptr) {
+                auto& item = m_deferred_meshing[retained->second];
+                // Refresh in the existing scan, without changing prefix ownership
+                // or its due tick. Even a satisfied request still owns a remesh,
+                // but must use today's LOD and neighbors rather than undo it.
+                if (required_lod < 0) {
+                    const Vec3 chunk_center = (Vec3(chunk_ptr->get_coords()) + 0.5f) *
+                                              Vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
+                    required_lod = get_required_lod_for_chunk(chunk_ptr->get_coords(),
+                                                              chunk_center,
+                                                              closest_anchor,
+                                                              chunk_ptr->current_lod.load());
+                }
+                item.lod_level = required_lod;
+                if (needs_meshing) {
+                    item.terrain_mesh_required = terrain_mesh_required;
+                }
+                const bool has_active_mesh = state == Luminumbra::ChunkState::Ready &&
+                                             !chunk_ptr->mesh_vertices.empty() &&
+                                             !chunk_ptr->mesh_indices.empty();
+                item.high_priority = !has_active_mesh &&
+                                     retained->second < MAX_HIGH_PRIORITY_MESHING_JOBS_PER_DISPATCH;
+                item.transition_faces = required_transition_faces(*chunk_ptr, required_lod);
+                item.current_candidate = needs_meshing;
             }
         }
 
@@ -5276,7 +5299,15 @@ SHIELD_WorldSystem::dispatch_meshing_jobs(std::span<const MeshingWorkItem> chunk
     process_completed_meshing_jobs(/*force=*/false);
     //  5b: refuse by FIFO depth (deterministic), not by raw job
     // activity. Unconsumed descriptors stay queued for a later bounded pass.
-    if (m_streaming_state.meshing_batches.size() >= kMaxMeshingBatchesInFlight) {
+    const auto batch_depth = m_streaming_state.meshing_batches.size();
+    // If every ordinary batch is due after a pending promotion, retain one
+    // of the nine slots for stage B. Batches due by the promotion tick can
+    // fill the lane: activate_due drains them before completing the handoff.
+    if (batch_depth >= kMaxMeshingBatchesInFlight ||
+        (batch_depth + 1u >= kMaxMeshingBatchesInFlight && promotion_pipeline_pending() &&
+         due_tick > m_streaming_state.promotion_due_tick &&
+         m_streaming_state.meshing_batches.front().due_tick >
+             m_streaming_state.promotion_due_tick)) {
         return {};
     }
 
@@ -5368,8 +5399,9 @@ SHIELD_WorldSystem::dispatch_meshing_jobs(std::span<const MeshingWorkItem> chunk
     // prefix first, so this mirrors the existing priority order.
     std::vector<Luminumbra::Job> high_priority_jobs;
     std::vector<Luminumbra::Job> normal_priority_jobs;
-    // build this dispatch's batch record locally; it is
-    // appended to the lane FIFO at the dispatch below. The due stamp (5a-3)
+    // Build this dispatch's batch record locally; insert it in stable due
+    // order below. Stage B can arrive after ordinary batches due later.
+    // The due stamp (5a-3)
     // is inert until the barrier swap; -1 = publish-when-drained (client).
     StreamingState::MeshingBatch mesh_batch;
     mesh_batch.due_tick = due_tick;
@@ -5512,7 +5544,6 @@ SHIELD_WorldSystem::dispatch_meshing_jobs(std::span<const MeshingWorkItem> chunk
         if (!normal_priority_jobs.empty()) {
             mesh_batch.handle = m_job_system->dispatch_batch(normal_priority_jobs);
         }
-        m_streaming_state.meshing_batches.push_back(std::move(mesh_batch));
     } else {
         for (auto& job : high_priority_jobs) {
             job();
@@ -5520,7 +5551,20 @@ SHIELD_WorldSystem::dispatch_meshing_jobs(std::span<const MeshingWorkItem> chunk
         for (auto& job : normal_priority_jobs) {
             job();
         }
-        m_streaming_state.meshing_batches.push_back(std::move(mesh_batch));
+    }
+    // At most nine records: insertion moves only bounded batch descriptors,
+    // never chunk buffers. upper_bound preserves dispatch order for equal ticks,
+    // including unticked (-1) client batches.
+    auto& batches = m_streaming_state.meshing_batches;
+    const auto position =
+        std::upper_bound(batches.begin(),
+                         batches.end(),
+                         due_tick,
+                         [](std::int64_t due, const StreamingState::MeshingBatch& batch) {
+                             return due < batch.due_tick;
+                         });
+    batches.insert(position, std::move(mesh_batch));
+    if (!m_job_system) {
         process_completed_meshing_jobs(/*force=*/true);
     }
     const auto candidate_count = [](const std::vector<MeshingWorkItem>& items) {
@@ -5645,9 +5689,8 @@ bool SHIELD_WorldSystem::publish_front_meshing_batch(bool force) {
 }
 
 void SHIELD_WorldSystem::process_completed_meshing_jobs(bool force) {
-    // Drain every publishable front batch, in FIFO order (publication order
-    // == dispatch order — deterministic; stops at the first still-running or
-    // not-yet-due batch so later batches never publish ahead of an earlier one).
+    // Drain publishable front batches in stable due order. Both job lanes must
+    // finish before publication; explicit force drains ignore tick stamps.
     while (publish_front_meshing_batch(force)) {}
 }
 
