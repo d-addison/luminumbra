@@ -42,6 +42,7 @@
 #include <utility>
 #include <vector>
 
+#include "luminumbra_client/app/FarmSpeciesCache.h"
 #include "luminumbra_client/rendering/TimeOfDayModel.h"
 #include "luminumbra_common/ai/CircadianSystem.h"
 #include "luminumbra_common/ai/CreatureSpeciesRegistry.h"
@@ -443,6 +444,80 @@ TEST(GameSessionHeadlessWorldTest, FoliageUnavailableAndEmptyDirectoriesHaveDist
     EXPECT_EQ(registry.LoadFromDirectory(empty, errors, &io_failed), 0u);
     EXPECT_FALSE(io_failed);
     EXPECT_TRUE(errors.empty());
+}
+
+TEST(GameSessionHeadlessWorldTest, FarmingSpeciesRetriesAtDeadlineAndLogsOnlyTransitions) {
+    using Cache = Luminumbra::Client::App::FarmSpeciesCache;
+    using Result = Cache::UpdateResult;
+    const HeadlessRoot root;
+    const auto directory = root.path() / "farm-species";
+    Cache cache;
+    EXPECT_TRUE(cache.NeedsUpdate(10.0));
+    EXPECT_EQ(cache.Update(10.0, directory), Result::Diagnostics);
+    EXPECT_FALSE(cache.loaded());
+    ASSERT_FALSE(cache.diagnostics().empty());
+    const auto first_error = cache.diagnostics();
+    // An unchanged persistent failure is retried, but does not repeat warnings.
+    EXPECT_EQ(cache.Update(15.0, directory), Result::Unchanged);
+    EXPECT_EQ(cache.diagnostics(), first_error);
+    // A different failure is reported at the next deadline.
+    {
+        std::ofstream file(directory);
+        file << "not a directory";
+    }
+    EXPECT_FALSE(cache.NeedsUpdate(19.999));
+    EXPECT_TRUE(cache.NeedsUpdate(20.0));
+    EXPECT_EQ(cache.Update(19.999, directory), Result::Unchanged);
+    EXPECT_EQ(cache.Update(20.0, directory), Result::Diagnostics);
+    EXPECT_NE(cache.diagnostics(), first_error);
+    fs::remove(directory);
+    fs::create_directory(directory);
+    {
+        std::ofstream file(directory / "valid.json");
+        file << R"({"id":"wheat"})";
+    }
+    {
+        std::ofstream file(directory / "partial.json");
+        file << R"({"id":)";
+    }
+    // Repair during cooldown cannot cause synchronous loading on waiting frames.
+    for (const double time : {20.0, 21.0, 24.999}) {
+        EXPECT_EQ(cache.Update(time, directory), Result::Unchanged);
+        EXPECT_FALSE(cache.loaded());
+        EXPECT_TRUE(cache.all().empty());
+    }
+    EXPECT_EQ(cache.Update(25.0, directory), Result::Recovered);
+    EXPECT_TRUE(cache.loaded());
+    ASSERT_EQ(cache.all().size(), 1u);
+    EXPECT_EQ(cache.all().front().id, "wheat");
+    ASSERT_EQ(cache.diagnostics().size(), 1u);
+    EXPECT_NE(cache.diagnostics().front().find("partial.json"), std::string::npos);
+    fs::remove_all(directory);
+    EXPECT_FALSE(cache.NeedsUpdate(100.0));
+    EXPECT_EQ(cache.Update(100.0, directory), Result::Unchanged);
+    EXPECT_EQ(cache.all().size(), 1u);
+}
+
+TEST(GameSessionHeadlessWorldTest, FarmingSpeciesEmptySuccessIsCachedAndRecoveryIsReportedOnce) {
+    using Cache = Luminumbra::Client::App::FarmSpeciesCache;
+    using Result = Cache::UpdateResult;
+    const HeadlessRoot root;
+    const auto directory = root.path() / "empty-farm-species";
+    fs::create_directory(directory);
+    Cache cache;
+    EXPECT_EQ(cache.Update(0.0, directory), Result::Diagnostics);
+    EXPECT_TRUE(cache.loaded());
+    EXPECT_TRUE(cache.all().empty());
+    EXPECT_TRUE(cache.diagnostics().empty());
+    fs::remove(directory);
+    EXPECT_EQ(cache.Update(10.0, directory), Result::Unchanged);
+    Cache recovering;
+    EXPECT_EQ(recovering.Update(0.0, directory), Result::Diagnostics);
+    fs::create_directory(directory);
+    EXPECT_EQ(recovering.Update(5.0, directory), Result::Recovered);
+    EXPECT_TRUE(recovering.loaded());
+    EXPECT_TRUE(recovering.diagnostics().empty());
+    EXPECT_EQ(recovering.Update(10.0, directory), Result::Unchanged);
 }
 
 TEST(GameSessionHeadlessWorldTest, SpeciesScanFailuresAreContainedBeforeAnyReads) {

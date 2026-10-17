@@ -138,6 +138,11 @@ public:
     // Load immediate regular *.json in UTF-8 filename order. Malformed names and
     // JSON are diagnosed and skipped. Scan/I/O errors set io_failed and leave the
     // registry unchanged so callers can retry without accumulating duplicates.
+    // Returns the appended count (zero on I/O failure). A valid empty directory
+    // succeeds with zero; io_failed distinguishes it from failure and is reset
+    // on every call. Existing errors are retained and new diagnostics appended.
+    // Successful calls append, so callers must stop retrying after success.
+    // Retry scheduling and transition-only logging are the caller's responsibility.
     // The iterator contract also supports directory providers with virtual paths.
     template<typename DirectoryIterator = std::filesystem::directory_iterator>
     std::size_t LoadFromDirectory(const std::filesystem::path& dir,

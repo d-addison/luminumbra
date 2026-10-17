@@ -108,6 +108,27 @@ class FarModeReportingTest(unittest.TestCase):
                 data['far_world']['frames'][index]['settings']['water_cells_per_side'] = 16
                 perf.validate_far_world_reporting(data, ladder_baseline=True)
 
+    def test_unavailable_identity_refuses_each_ladder_frame(self):
+        for index in range(4):
+            for identity in ('0', '00', '00000000000000000000'):
+                with self.subTest(index=index, identity=identity):
+                    data = far_capture()
+                    data['far_world']['frames'][index]['content_identity'] = identity
+                    perf.validate_far_world_reporting(data)
+                    with self.assertRaisesRegex(ValueError, 'Ladder baseline refused.*identity.*unavailable'):
+                        perf.validate_far_world_reporting(data, ladder_baseline=True)
+                    data['far_world']['frames'][index]['content_identity'] = '1'
+                    perf.validate_far_world_reporting(data, ladder_baseline=True)
+
+    def test_missing_or_invalid_identity_is_always_refused(self):
+        for identity in (None, '', 'unknown', '18446744073709551616', 0, False):
+            for baseline in (False, True):
+                with self.subTest(identity=identity, baseline=baseline):
+                    data = far_capture()
+                    data['far_world']['frames'][0]['content_identity'] = identity
+                    with self.assertRaisesRegex(ValueError, 'invalid far-world content identity'):
+                        perf.validate_far_world_reporting(data, ladder_baseline=baseline)
+
     def test_ladder_positive_and_rejection_controls(self):
         valid = far_capture()
         perf.validate_far_world_reporting(valid, ladder_baseline=True)

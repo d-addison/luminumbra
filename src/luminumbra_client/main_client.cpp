@@ -18,6 +18,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "app/ClientAppContext.h"
 #include "app/CrashHandler.h"
 #include "app/DebugOverlays.h"
+#include "app/FarmSpeciesCache.h"
 #include "app/FrameAudio.h"
 #include "app/GameAssets.h"
 #include "app/GraphicsSessionOverrides.h"
@@ -1150,7 +1151,8 @@ static void HandlePlayerVerbs(ClientAppContext& g_app,
                               Luminumbra::world::GameSession* gameSession,
                               Luminumbra::Rendering::RenderPipeline& renderPipeline,
                               ProcgenPlantState& g_procgen,
-                              const UiInputRouter& inputRouter) {
+                              const UiInputRouter& inputRouter,
+                              double frame_seconds) {
     if (!inputRouter.GameplayAllowed())
         return;
     // ---  : player FARMING verbs (F/G/H/J) ---
@@ -1161,14 +1163,16 @@ static void HandlePlayerVerbs(ClientAppContext& g_app,
     // keys).
     if (g_playerController && currentState == GameState::IN_GAME && !scenario_config.active() &&
         !g_app.hud.paused && gameSession && g_camera) {
-        if (!g_app.hud.farmSpeciesLoaded) {
-            std::vector<std::string> ferr;
-            bool io_failed = false;
-            g_app.hud.farmSpecies.LoadFromDirectory(
-                root_dir / "data/common/foliage/species", ferr, &io_failed);
-            g_app.hud.farmSpeciesLoaded = !io_failed;
-            for (const auto& error : ferr)
-                LUMINUMBRA_CORE_WARN("Farm species: {}", error);
+        if (g_app.hud.farmSpecies.NeedsUpdate(frame_seconds)) {
+            const auto species_update = g_app.hud.farmSpecies.Update(
+                frame_seconds, root_dir / "data/common/foliage/species");
+            using SpeciesUpdate = Luminumbra::Client::App::FarmSpeciesCache::UpdateResult;
+            if (species_update != SpeciesUpdate::Unchanged) {
+                for (const auto& error : g_app.hud.farmSpecies.diagnostics())
+                    LUMINUMBRA_CORE_WARN("Farm species: {}", error);
+                if (species_update == SpeciesUpdate::Recovered)
+                    LUMINUMBRA_CORE_INFO("Farm species: directory load recovered");
+            }
         }
         // V cycles the selected species to plant (data-driven; oak/wheat/...).
         {
@@ -5060,7 +5064,8 @@ int main(int argc, char* argv[]) {
                                       gameSession.get(),
                                       renderPipeline,
                                       g_procgen,
-                                      uiInputRouter);
+                                      uiInputRouter,
+                                      observedFrame);
                     // Photo-mode capture loop + codex/objectives/farming HUD
                     // (app/DebugOverlays.cpp). Render-side, read-only observer.
                     UpdatePhotoModeAndHud(g_app,

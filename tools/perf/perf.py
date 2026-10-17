@@ -362,6 +362,9 @@ def validate_far_world_reporting(document: Any, ladder_baseline: bool = False) -
         identity = row.get("content_identity")
         if not isinstance(identity, str) or not re.fullmatch(r"[0-9]{1,20}", identity) or int(identity) >= 2**64:
             raise ValueError("invalid far-world content identity")
+        if ladder_baseline and int(identity) == 0:
+            raise ValueError(f"Ladder baseline refused at measured frame {row['frame']}: "
+                             "far-world content identity is unavailable (zero)")
         if ladder_baseline and (row["requested_mode"] != "ladder" or row["effective_mode"] != "ladder"
                 or row["refusal"] != "None" or row["suppressed"]
                 or row["submission_refusal"] != "None" or unsettled):

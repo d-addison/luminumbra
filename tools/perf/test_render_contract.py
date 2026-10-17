@@ -129,6 +129,29 @@ class RenderContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Ladder baseline refused'):
             contract.validate(data, QUALIFIED, ladder_baseline=True)
 
+    def test_unavailable_identity_is_refused_by_both_schema_readers(self):
+        for schema in ('luminumbra.render_benchmark.v2', contract.SCHEMA):
+            for index in range(4):
+                if schema == contract.SCHEMA:
+                    data, expected = artifact(), args()
+                else:
+                    data = self.report_capture()
+                    data.update(frames=4, warmup_frames=2)
+                    expected = args(position=[0, 0, 0], yaw=0, pitch=0, tod=0,
+                                    qualified_renderer=None)
+                data['far_world'] = far_capture()['far_world']
+                data['far_world']['frames'][index]['content_identity'] = '0'
+                with self.subTest(schema=schema, index=index):
+                    self.assertEqual(capture.validate(data, expected)['verdict'], 'PASS')
+                    expected.ladder_baseline = True
+                    with self.assertRaisesRegex(ValueError, 'Ladder baseline refused.*identity.*unavailable'):
+                        capture.validate(data, expected)
+                    if schema == contract.SCHEMA:
+                        with self.assertRaisesRegex(ValueError, 'Ladder baseline refused.*identity.*unavailable'):
+                            contract.validate(data, QUALIFIED, ladder_baseline=True)
+                    data['far_world']['frames'][index]['content_identity'] = '1'
+                    self.assertEqual(capture.validate(data, expected)['verdict'], 'PASS')
+
     def test_ladder_baseline_cli_rejection_and_repair(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'capture.json'

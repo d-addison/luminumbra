@@ -141,8 +141,8 @@ full v2 checker, also supply its existing pose/TOD arguments. The Ladder rule
 rejects missing, malformed, noncontiguous or incomplete frame evidence,
 inconsistent summary counts, and any measured frame requesting/effectively using
 Legacy, reporting a refusal, suppressed submission, unsettled far coverage or
-pending streaming work. It cannot be waived by override declarations or by a
-passing final report frame.
+pending streaming work, or an unavailable (zero) far authority content identity.
+It cannot be waived by override declarations or by a passing final report frame.
 Older captures without these additive fields remain diagnostic inputs when the
 Ladder-baseline rule is not requested; they cannot qualify as Ladder baselines.
 The existing registered FarWorldDiagnostics C++ cases cover transition decisions,
