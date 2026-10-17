@@ -140,8 +140,9 @@ public:
     [[nodiscard]] static SystemConfig FromJsonString(const std::string& json_text);
     // Load a regular file of at most 1 MiB. Missing/unreadable file -> defaults.
     [[nodiscard]] static SystemConfig LoadFromFile(const std::string& path);
-    // Explicit CLI overrides must be readable JSON objects; failure leaves config unchanged.
-    // Success replaces only system flags/tuning, retaining player settings and their load report.
+    // Explicit CLI overrides must be readable JSON objects without raw NUL or trailing garbage;
+    // failure leaves config unchanged. Success replaces only system flags/tuning, retaining
+    // player settings and their load report.
     [[nodiscard]] static bool
     TryLoadFromFile(const std::string& path, SystemConfig& config, std::string& error);
 

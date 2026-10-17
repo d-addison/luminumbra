@@ -603,7 +603,7 @@ bool SystemConfig::TryLoadFromFile(const std::string& path,
             error = "systems config must be a JSON object: " + path;
             return false;
         }
-        config.ReplaceSystemsFrom(FromJsonString(document.dump()));
+        config.ReplaceSystemsFrom(FromJsonString(bytes));
     } catch (const nlohmann::json::exception& exception) {
         error = "invalid systems config: " + path + ": " + exception.what();
         return false;

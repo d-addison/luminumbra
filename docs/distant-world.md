@@ -378,8 +378,9 @@ nights; a calendar-relative lunar period needs a separate pacing decision.
 
 Preset revision 7 retains revision 6 omission compatibility; current-format saves
 without embedded packaged presets use frozen revision-6 copies. Lockstep protocol
-and LREC1 replay layout are version 3 and bind effective configuration plus
-resolved preset/dependency content; older layouts are refused. See the
+is version 4 and binds effective configuration, resolved preset/dependency content
+and captured simulation content; LREC1 replay layout is version 3 and binds effective
+configuration plus resolved preset/dependency content; older layouts are refused. See the
 [identity contract](development/system-config-identity.md).
 
 Unchanged: LMR1 container v2 for `chunks/region/*.lmr`

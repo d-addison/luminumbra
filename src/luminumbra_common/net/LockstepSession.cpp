@@ -32,6 +32,7 @@
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
+#include <limits>
 #include <utility>
 
 #include "core/EngineVersion.h"
@@ -128,11 +129,12 @@ struct Cursor {
         pos += 8;
         return true;
     }
-    bool GetString(std::string& s) {
+    bool GetString(std::string& s,
+                   std::size_t maximum_size = std::numeric_limits<std::size_t>::max()) {
         std::uint32_t len = 0;
         if (!GetU32(len))
             return false;
-        if (!Remaining(len)) {
+        if (len > maximum_size || !Remaining(len)) {
             ok = false;
             return false;
         }
@@ -185,6 +187,8 @@ bool OpenFrame(const std::vector<std::uint8_t>& frame, MessageType expected, Cur
 // --- Message encode/decode ---------------------------------------------------------
 
 std::vector<std::uint8_t> EncodeHello(const HelloMsg& m) {
+    if (m.simulation_content_identity.size() > kMaxSimulationContentIdentityBytes)
+        return {};
     std::vector<std::uint8_t> p;
     // A Hello payload leads with the magic so a stray/mis-protocol peer is caught at
     // handshake before any tick runs.
@@ -196,6 +200,7 @@ std::vector<std::uint8_t> EncodeHello(const HelloMsg& m) {
     PutString(p, m.preset);
     PutString(p, m.system_config_identity);
     PutString(p, m.preset_content_hash);
+    PutString(p, m.simulation_content_identity);
     return Frame(MessageType::Hello, p);
 }
 
@@ -245,7 +250,7 @@ bool DecodeHello(const std::vector<std::uint8_t>& frame, HelloMsg& out) {
         return false;
     if (!c.GetU16(out.protocol_version))
         return false;
-    // Older Hellos have no resolved-preset identity and cannot be admitted safely.
+    // Older Hellos do not bind captured simulation content and cannot be admitted safely.
     if (out.protocol_version != kLockstepProtocolVersion)
         return false;
     if (!c.GetU64(out.seed))
@@ -259,6 +264,8 @@ bool DecodeHello(const std::vector<std::uint8_t>& frame, HelloMsg& out) {
     if (!c.GetString(out.system_config_identity))
         return false;
     if (!c.GetString(out.preset_content_hash))
+        return false;
+    if (!c.GetString(out.simulation_content_identity, kMaxSimulationContentIdentityBytes))
         return false;
     return c.ok;
 }
@@ -1038,6 +1045,7 @@ bool LockstepSession::Handshake() {
     mine.protocol_version = kLockstepProtocolVersion;
     mine.system_config_identity = m_config.system_config_identity;
     mine.preset_content_hash = m_config.preset_content_hash;
+    mine.simulation_content_identity = m_config.simulation_content_identity;
     mine.seed = m_config.seed;
     mine.preset = m_config.preset;
     mine.tick_rate_hz = m_config.tick_rate_hz;
@@ -1065,7 +1073,7 @@ bool LockstepSession::Handshake() {
         }
         if (!DecodeHello(frame, peer)) {
             LUMINUMBRA_CORE_ERROR("lockstep[{}]: malformed or unsupported Hello version (requires "
-                                  "resolved preset identity)",
+                                  "captured simulation content identity)",
                                   m_config.local_client_id);
             return false;
         }
@@ -1114,7 +1122,7 @@ bool LockstepSession::Handshake() {
         return false;
     }
     if (!HelloMatches(mine, peer)) {
-        LUMINUMBRA_CORE_ERROR("lockstep[{}]: simulation configuration identity mismatch",
+        LUMINUMBRA_CORE_ERROR("lockstep[{}]: simulation configuration or content identity mismatch",
                               m_config.local_client_id);
         return false;
     }

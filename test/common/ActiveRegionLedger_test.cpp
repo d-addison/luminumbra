@@ -1,20 +1,25 @@
 #include <gtest/gtest.h>
+#include <luminumbra/core/Types.h>
 
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/world/ActiveRegionLedger.h"
+#include "luminumbra_common/world/DistantPolicy.h"
 
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <limits>
+#include <map>
 #include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -954,9 +959,12 @@ TEST(ActiveRegionLedgerTest, EvictedRegionStartsFreshWhenVisitedAgain) {
 
 TEST(ActiveRegionLedgerTest, RetentionKeepsTheLedgerBounded) {
     std::vector<Vec3> grid;
-    for (int i = 0; i < 600; ++i)
+    grid.reserve(600); // The fixture visits exactly 600 grid points.
+    for (int i = 0; i < 600; ++i) {
+        const int row = i / 30;
         grid.emplace_back(
-            static_cast<float>((i % 30) * 2048), 0.0f, static_cast<float>((i / 30) * 2048));
+            static_cast<float>((i % 30) * 2048), 0.0f, static_cast<float>(row * 2048));
+    }
     ActiveRegionLedger ledger;
     ledger.schedule(WorldClock(1), std::span<const Vec3>(grid));
     EXPECT_GT(ledger.records().size(), 1000u);
@@ -1315,7 +1323,7 @@ TEST(ActiveRegionLedgerTest, EnergyAgeCoexistsInAscendingAllocatorProjectionWork
               ActiveRegionLedger::kHeaderBytes +
                   ActiveRegionLedger::kMaxRegions * ActiveRegionLedger::kRecordBytes + 4u + 14u +
                   7u + 6u + SimulationContentIdentity::kEncodedBytes +
-                  3u * (10u + 16u * ActiveRegionLedger::kMaxRegions) + 8u);
+                  std::size_t{3} * (10u + std::size_t{16} * ActiveRegionLedger::kMaxRegions) + 8u);
 }
 
 TEST(ActiveRegionLedgerTest, ZeroEnergyAgeOwnsAnIdleRecordUntilExplicitReset) {
@@ -1446,7 +1454,7 @@ TEST(ActiveRegionLedgerTest, ContentIdentityIsImmutableAndHasAnExactVersionedWir
     std::string error;
     EXPECT_FALSE(ledger.validate_content_identity(changed, error));
     EXPECT_EQ(error, ActiveRegionLedger::kContentMismatchMessage);
-    ActiveRegionLedger historical;
+    const ActiveRegionLedger historical;
     EXPECT_FALSE(historical.validate_content_identity(identity, error));
     EXPECT_EQ(error, ActiveRegionLedger::kContentVersionMessage);
 }
@@ -1498,7 +1506,7 @@ TEST(ActiveRegionLedgerTest, ContentAndWorkEnvelopeRefusesMalformedOrMisorderedT
     for (const auto& bad : {identity.encode().substr(1), identity.encode() + "x"})
         ExpectRefused(replace_extensions(Tlv(5, bad) + work_tlv),
                       ActiveRegionLedger::kCorruptMessage);
-    for (std::size_t offset : {0u, 2u, 4u, 6u}) {
+    for (const std::size_t offset : {0u, 2u, 4u, 6u}) {
         auto bad = identity.encode();
         bad[offset] = 2;
         ExpectRefused(replace_extensions(Tlv(5, bad) + work_tlv),

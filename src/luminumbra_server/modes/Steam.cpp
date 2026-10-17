@@ -39,9 +39,7 @@ int RunSteamHost(const ServerCliOptions& options) {
         return 1;
     }
 
-    auto host_identity = RuntimeHelloFrom(options);
-    host_identity.system_config_identity = runner.Session()->SessionConfigIdentity();
-    host_identity.preset_content_hash = runner.Session()->PresetContentHash();
+    auto host_identity = RuntimeHelloFrom(options, runner.Session());
     host_identity.client_id = 0;
 
     Luminumbra::Net::SteamNetworkingTransport transport;
@@ -156,7 +154,9 @@ int RunSteamJoin(const ServerCliOptions& options) {
         cmd.tick = last_seq + 1;
         cmd.player_id = 1;
         cmd.move_x = 32767;
-        client.SendUsercmd(cmd);
+        // A snapshot proves admission. Unreliable commands must not overtake the reliable Hello.
+        if (client.has_snapshot())
+            client.SendUsercmd(cmd);
         client.PumpInbound();
         if (client.has_snapshot()) {
             last_seq = client.snapshot().snapshot_seq;

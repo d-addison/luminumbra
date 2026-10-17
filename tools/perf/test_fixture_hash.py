@@ -174,6 +174,36 @@ class FixtureHashTests(unittest.TestCase):
             module.main(["fixture_hash.py", str(self.root), "--scope", "typo"])
         self.assertEqual(raised.exception.code, 2)
 
+    def test_documentation_marker_used_as_preset_dependency_is_hashed(self) -> None:
+        # Preset dependency loading accepts JSON content regardless of its suffix.
+        write(self.root, "worlds/atlas/presets/default.json", json.dumps({
+            "schema_rev": 7,
+            "generation_params": {
+                "terrain": {"base_frequency": 0.01, "base_amplitude": 12.0,
+                            "octaves": 4, "persistence": 0.5, "lacunarity": 2.0,
+                            "height_offset": 20.0},
+                "features": {"caves_enabled": True, "cave_frequency": 0.02},
+                "biomes": {"table": "common/sim/README.md"},
+            },
+        }))
+        common = self.root / "data/common"
+        marker = "sim/README.md"
+        table = {"schema": "luminumbra.biome_table.v1", "biomes": [{
+            "id": 0, "name": "fixture_biome",
+            "surface": {"top": "Grass", "filler": "Soil", "depth": "Stone",
+                        "underwater": "Sand"},
+        }]}
+        write(common, marker, json.dumps(table))
+        roots_and_scopes = ((self.root, "all"), (common, "all"),
+                            (common, "headless-server"))
+        before = [module.fixture_hash(root, scope=scope)
+                  for root, scope in roots_and_scopes]
+        table["biomes"][0]["surface"]["top"] = "Sand"
+        write(common, marker, json.dumps(table))
+        for (root, scope), previous in zip(roots_and_scopes, before):
+            with self.subTest(scope=scope, root=root):
+                self.assertNotEqual(previous, module.fixture_hash(root, scope=scope))
+
 
 if __name__ == "__main__":
     unittest.main()

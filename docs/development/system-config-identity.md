@@ -106,13 +106,17 @@ Preserving an override on an absent-ledger load can change nondefault scheduling
 derived world/replay hashes compared with the previous default-substitution bug; no pins
 for that incorrect behavior are retained or introduced.
 
-Lockstep protocol and LREC1 layout versions are 3. Hello and replay headers carry
-length-prefixed configuration identity and `preset_content_hash` strings. Versions 1
-and 2 are explicitly rejected because they cannot bind resolved preset content.
+Lockstep protocol is version 4; LREC1 replay layout is version 3. Hello and replay
+headers carry length-prefixed configuration identity and `preset_content_hash` strings.
+Hello also carries the captured simulation-content identity, bounded to 40 bytes, or
+the explicit inactive identity when active regions are disabled. Earlier Hello versions
+are rejected because they cannot bind captured simulation content; replay versions 1
+and 2 are rejected because they cannot bind resolved preset content.
 Desync replay dumps include both identities captured at handshake. TCP (including
 runtime/soak modes) hosts validate the same Hello compatibility fields before adding a
-replication client. TCP joiners send Hello before user commands. TCP lockstep and replay
-enforce both identities before simulation starts.
+replication client. TCP joiners send Hello before user commands. TCP lockstep enforces
+all three identities before simulation starts; replay enforces the configuration and
+resolved preset-content identities.
 
 Runtime and soak TCP client slots allow 10 seconds from accept completion (when the
 host begins awaiting Hello) for a complete matching Hello frame. A monotonic
@@ -200,24 +204,26 @@ Enabled sessions instead require the strict species and policy admission in
 [the simulation content contract](../active-regions.md#distant-policy-adoption-and-simulation-content-identity).
 They match captured creature-file digests against the preset dependency snapshot, adopt
 the strict registry in declared-name order, and bind both identities. Invalid species
-cannot select a fallback in an enabled session.
+cannot select a fallback in an enabled session. The session configuration identity binds
+this captured content for network and replay callers.
 
-The same string continues through protocol-v3 Hello, replay-header-v3, server modes and
-NetworkedSessionDriver; their wire layout is unchanged. Earlier JSON-only identities
+The same resolved preset-content string continues through protocol-v4 Hello,
+replay-header-v3, server modes and NetworkedSessionDriver. Earlier JSON-only identities
 will mismatch the expanded identity and refuse admission/verification. The existing
 content-mismatch diagnostics apply; lockstep and replay explicitly identify
-`preset/species` content. No additional identity field or wire version is introduced.
+`preset/species` content. Hello v4 separately binds the captured simulation-content
+identity, including strict policy and both species inventories.
 The older numeric replay `preset_hash` remains name
 provenance only; admission and verification require `preset_content_hash` as well.
 
 The GNS and Steam transports are optional and disabled by default. Both use the
 unconditionally compiled `Luminumbra::Net` replication admission gate from issue #278.
-A connected joiner sends the existing v3 Hello reliably. The host checks its assigned
+A connected joiner sends the v4 Hello reliably. The host checks its assigned
 client ID and `HelloMatches` compatibility (protocol, seed, preset, tick rate, nonempty
-SystemConfig identity and resolved preset content hash). Host identities come from the
-booted runner session, replacing the two identity fields constructed by
-`RuntimeHelloFrom(options)`. GNS retains its port-to-client-slot mapping; Steam retains
-one remote slot, client ID 1.
+SystemConfig identity, resolved preset content hash and captured simulation-content
+identity). Hosts use `RuntimeHelloFrom(options, runner.Session())` to retain all three
+identities from the booted session; joiners resolve their local content before admission.
+GNS retains its port-to-client-slot mapping; Steam retains one remote slot, client ID 1.
 
 The host's reliable Hello with `client_id = 0` is the admission acknowledgement.
 Successful enqueueing admits the host slot and permits `AddClient`; the joiner admits
@@ -236,10 +242,9 @@ progress and callback or replication loop iteration counts. The host starts at
 connection establishment; the joiner starts when its Hello is successfully enqueued.
 Expiry is at elapsed tick `>= 150`. Each admission pump drains at most 32 frames, so
 continuous traffic cannot postpone deadline checks. The connection-establishment limit
-remains separately 30 seconds. The separate runtime TCP policy
-`kRuntimeTcpHelloTimeoutTicks` introduced by issue #315 is also 150 ticks / approximately
-5 seconds; the constants remain separately named. This optional-transport gate does not
-alter TCP admission or add a TCP acknowledgement.
+remains separately 30 seconds. Runtime TCP slots instead use
+`RuntimeTcpClientSlot::kHelloTimeout`, ten seconds from accept completion (issue #315).
+This optional-transport gate does not alter TCP admission or add a TCP acknowledgement.
 
 Hello and user commands share tag `0x01`. Admission validates the complete outer frame
 length first: exactly `kUsercmdPayloadBytes = 19` payload bytes (24 total) identifies a
@@ -248,9 +253,9 @@ the Hello magic and satisfy `DecodeHello(frame, hello) && EncodeHello(hello) == 
 Failed Hello decoding never falls back to command decoding. The general Hello decoder
 keeps its existing permissive TCP/lockstep behavior. `DecodeUsercmd` now rejects trailing
 extensions, including those whose outer length was adjusted to include the extra bytes.
-All valid encoder output is unchanged: lockstep protocol 3, replication protocol 1 and
-LREC1 layout 3 remain unchanged, as do TCP wire bytes, replay and hash layouts. Hello
-versions 1 and 2 remain rejected. Older optional joiners cannot admit through commands;
+Command encoding remains replication protocol 1, and LREC1 layout remains version 3.
+Hello uses lockstep protocol 4 with captured simulation-content identity; Hello
+versions 1 through 3 are rejected. Older optional joiners cannot admit through commands;
 new joiners discard older hosts' snapshots until acknowledgement timeout.
 
 The command-length compatibility audit found one production command encoder,

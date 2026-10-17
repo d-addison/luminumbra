@@ -523,6 +523,7 @@ TEST_F(TcpFrameBoundsTest, OversizedPrefixEndsLockstepSessionPermanently) {
     config.peer_client_id = 1;
     config.system_config_identity = "config";
     config.preset_content_hash = "preset";
+    config.simulation_content_identity = kInactiveSimulationContentIdentity;
     HelloMsg hello;
     hello.seed = config.seed;
     hello.preset = config.preset;
@@ -530,6 +531,7 @@ TEST_F(TcpFrameBoundsTest, OversizedPrefixEndsLockstepSessionPermanently) {
     hello.client_id = config.peer_client_id;
     hello.system_config_identity = config.system_config_identity;
     hello.preset_content_hash = config.preset_content_hash;
+    hello.simulation_content_identity = config.simulation_content_identity;
     const auto send_frame = [&](const std::vector<std::uint8_t>& frame) {
         std::vector<std::uint8_t> wire;
         for (int i = 0; i < 4; ++i)

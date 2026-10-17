@@ -23,6 +23,7 @@ HelloMsg Identity(std::uint32_t client_id) {
     Luminumbra::world::GameSession session;
     hello.system_config_identity = session.SystemConfigIdentity();
     hello.preset_content_hash = Luminumbra::TestSupport::PresetIdentityFixtureHash();
+    hello.simulation_content_identity = std::string(kMaxSimulationContentIdentityBytes, '\0');
     return hello;
 }
 
@@ -386,7 +387,10 @@ TEST(ReplicationAdmission, BothDirectionsRejectWrongVersionIdAndOtherIdentityFie
     for (const auto role : {ReplicationAdmissionRole::Host, ReplicationAdmissionRole::Joiner}) {
         const auto local = Identity(role == ReplicationAdmissionRole::Host ? 0u : 1u);
         const auto compatible = Identity(role == ReplicationAdmissionRole::Host ? 1u : 0u);
-        for (const std::uint16_t version : {std::uint16_t{1}, std::uint16_t{2}, std::uint16_t{4}}) {
+        for (const std::uint16_t version : {std::uint16_t{1},
+                                            std::uint16_t{2},
+                                            std::uint16_t{3},
+                                            std::uint16_t{kLockstepProtocolVersion + 1}}) {
             auto peer = compatible;
             peer.protocol_version = version;
             auto state = Waiting(role, local);
@@ -409,6 +413,41 @@ TEST(ReplicationAdmission, BothDirectionsRejectWrongVersionIdAndOtherIdentityFie
             EXPECT_EQ(state.reason(),
                       field == 0 ? "admission client id mismatch"
                                  : "admission seed, preset or tick rate mismatch");
+        }
+    }
+}
+
+TEST(ReplicationAdmission, BothDirectionsRequireMatchingCapturedSimulationContent) {
+    for (const auto role : {ReplicationAdmissionRole::Host, ReplicationAdmissionRole::Joiner}) {
+        const auto local = Identity(role == ReplicationAdmissionRole::Host ? 0u : 1u);
+        const auto compatible = Identity(role == ReplicationAdmissionRole::Host ? 1u : 0u);
+        auto accepted = Waiting(role, local);
+        const auto action = accepted.OnFrame(EncodeHello(compatible), FrameDelivery::Reliable);
+        if (role == ReplicationAdmissionRole::Host) {
+            EXPECT_EQ(action, ReplicationAdmissionAction::SendAck);
+            EXPECT_FALSE(accepted.admitted());
+            accepted.OnAckSendResult(true);
+        }
+        ASSERT_TRUE(accepted.admitted());
+        for (int field = 0; field < 5; ++field) {
+            SCOPED_TRACE(field);
+            auto mine = local;
+            auto peer = compatible;
+            if (field == 0)
+                peer.simulation_content_identity.back() = '\1';
+            if (field == 1)
+                peer.simulation_content_identity.clear();
+            if (field == 2)
+                mine.simulation_content_identity.clear();
+            if (field == 3)
+                peer.simulation_content_identity.push_back('\0');
+            if (field == 4)
+                mine.simulation_content_identity.push_back('\0');
+            auto state = Waiting(role, mine);
+            EXPECT_EQ(state.OnFrame(EncodeHello(peer), FrameDelivery::Reliable),
+                      ReplicationAdmissionAction::Discard);
+            EXPECT_TRUE(state.failed());
+            EXPECT_FALSE(state.admitted());
         }
     }
 }

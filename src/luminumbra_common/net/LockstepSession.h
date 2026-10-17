@@ -56,10 +56,15 @@ namespace Luminumbra::Net {
 
 // --- On-wire protocol (fixed-width little-endian; mirrors ReplayStream's discipline:
 // explicit per-byte shifts, length-prefixed strings/blobs, NO struct padding on the
-// wire, NO float bit-twiddling -- hashes travel as their hex strings). ------------
+// wire, NO float bit-twiddling -- hashes travel as their hex strings, captured
+// content identity as its canonical binary encoding). --------------------------
 
 inline constexpr char kLockstepMagic[5] = {'L', 'S', 'T', 'P', '1'};
-inline constexpr std::uint16_t kLockstepProtocolVersion = 3;
+inline constexpr std::uint16_t kLockstepProtocolVersion = 4;
+// Explicit identity for sessions with simulation content adoption disabled.
+inline constexpr char kInactiveSimulationContentIdentity[] = "simulation-content:inactive";
+// Captured content uses 40 encoded bytes; the inactive identity fits within the same bound.
+inline constexpr std::size_t kMaxSimulationContentIdentityBytes = 40;
 
 // Message type tags (u8 on the wire).
 enum class MessageType : std::uint8_t {
@@ -70,7 +75,7 @@ enum class MessageType : std::uint8_t {
 };
 
 // Handshake. Both peers send a Hello first; mismatched protocol/version/seed/preset/
-// tick-rate/config identity is REJECTED LOUDLY before simulation begins.
+// tick-rate/config/content identity is REJECTED LOUDLY before simulation begins.
 struct HelloMsg {
     std::uint16_t protocol_version = kLockstepProtocolVersion;
     std::uint64_t seed = 0;
@@ -81,6 +86,8 @@ struct HelloMsg {
     // Canonical resolved preset plus sorted data_root-relative dependency paths
     // and exact-byte file hashes (TerrainPresetLoadResult::preset_content_hash).
     std::string preset_content_hash;
+    // Captured SimulationContentIdentity::encode() bytes, or the explicit inactive identity.
+    std::string simulation_content_identity;
 };
 
 // Shared admission check for lockstep and TCP remote replication.
@@ -92,7 +99,12 @@ struct HelloMsg {
            !local.system_config_identity.empty() && !peer.system_config_identity.empty() &&
            peer.system_config_identity == local.system_config_identity &&
            !local.preset_content_hash.empty() && !peer.preset_content_hash.empty() &&
-           peer.preset_content_hash == local.preset_content_hash;
+           peer.preset_content_hash == local.preset_content_hash &&
+           !local.simulation_content_identity.empty() &&
+           !peer.simulation_content_identity.empty() &&
+           local.simulation_content_identity.size() <= kMaxSimulationContentIdentityBytes &&
+           peer.simulation_content_identity.size() <= kMaxSimulationContentIdentityBytes &&
+           peer.simulation_content_identity == local.simulation_content_identity;
 }
 
 // One client's input for one tick. The blob is OPAQUE (the game's per-tick input set's
@@ -424,6 +436,7 @@ struct LockstepConfig {
     std::uint32_t peer_client_id = 1;
     std::string system_config_identity;
     std::string preset_content_hash;
+    std::string simulation_content_identity;
 
     // Adaptive input horizon (in TICKS -- never wall-clock). Input for tick T is applied
     // at T+horizon. Starts at kStart; GROWS by 1 (up to kMax) when a peer input for the

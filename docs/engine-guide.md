@@ -289,8 +289,9 @@ resolved preset-content identities before admitting state or stepping ticks. The
 content identity binds canonical preset JSON and a sorted manifest of exact biome
 and structure dependency bytes; generation uses that immutable snapshot. Runtime
 and soak TCP slots release peers that fail to complete a matching Hello within
-10 seconds (issue #315). Lockstep protocol and LREC1 replay layout are version 3;
-versions 1 and 2 are refused. See the
+10 seconds (issue #315). Lockstep protocol is version 4 and also binds captured
+simulation content; earlier Hello versions are refused. LREC1 replay layout remains
+version 3; replay versions 1 and 2 are refused. See the
 [identity contract](development/system-config-identity.md) for the effective
 SystemConfig/presentation split, refusal rules and dependency encoding.
 
@@ -620,14 +621,18 @@ the scan before any reads. Resolver exceptions, including JSON serialization
 failures, return diagnostics without publishing an identity or dependency snapshot;
 failed create/load leaves the live world unchanged.
 
-Protocol-v3 Hello and LREC1-v3 headers retain their layouts. A species mismatch
+Protocol-v4 Hello binds captured simulation content as well as the resolved preset
+identity; LREC1-v3 headers retain their layout. A species mismatch
 refuses TCP admission, lockstep handshake and replay verification before simulation
 advances. Existing content-mismatch diagnostics apply; lockstep and replay name
 `preset/species` content. Older v0.3.0-era preset-only replay hashes mismatch when
 species records are present, in either engine direction, following the existing
-preset dependency compatibility rule. With no species directory, no new records
-are added. Current-format saves store no session content identity and adopt the
-loading installation's species content; the optional historical `presetIdentity`
+preset dependency compatibility rule. With active regions disabled and no species
+directory, no new records are added. Enabled sessions require strict policy and both
+species inventories, and persist their captured identity in ledger TLV 5. Loading a
+present identity requires an exact match; historical enabled saves without TLV 5 adopt
+current content and write it on their next save. Disabled sessions retain lenient
+species loading without a captured identity. The optional historical `presetIdentity`
 check still checks frozen preset JSON only. Older world-format refusals and save
 container versions are unchanged. See the full
 [identity contract](development/system-config-identity.md).

@@ -1,24 +1,47 @@
 #include "ModeHelpers.h"
 
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <string>
 #include <system_error>
 
+#include "../ServerCliOptions.h"
+#include "luminumbra_common/core/Log.h"
 #include "luminumbra_common/core/SystemConfig.h"
+#include "luminumbra_common/net/LockstepSession.h"
+#include "luminumbra_common/network/NetworkLoopbackAuthority.h"
+#include "luminumbra_common/simulation/SimBudgetProfile.h"
+#include "luminumbra_common/world/DistantPolicy.h"
+#include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
-#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
 
-Luminumbra::Net::HelloMsg RuntimeHelloFrom(const ServerCliOptions& options) {
+std::string CapturedSimulationIdentityForHello(const Luminumbra::world::GameSession& session) {
+    if (!session.ActiveRegionsEnabled())
+        return Luminumbra::Net::kInactiveSimulationContentIdentity;
+    const auto* content = session.GetSimulationContent();
+    return content ? content->identity.encode() : std::string{};
+}
+
+Luminumbra::Net::HelloMsg RuntimeHelloFrom(const ServerCliOptions& options,
+                                           const Luminumbra::world::GameSession* captured_session) {
     namespace fs = std::filesystem;
     const auto root = options.root.empty() ? fs::path(".") : fs::path(options.root);
-    auto path = root / "data/common/systems.json";
-    std::error_code error;
-    if (!fs::exists(path, error))
-        path = fs::path("data/common/systems.json");
     Luminumbra::Net::HelloMsg hello;
     hello.seed = std::strtoull(options.seed.c_str(), nullptr, 10);
     hello.preset = options.preset;
     hello.client_id = LocalNetworkPlayerId(options);
+    if (captured_session) {
+        hello.system_config_identity = captured_session->SessionConfigIdentity();
+        hello.preset_content_hash = captured_session->PresetContentHash();
+        hello.simulation_content_identity = CapturedSimulationIdentityForHello(*captured_session);
+        return hello;
+    }
+    auto path = root / "data/common/systems.json";
+    std::error_code error;
+    if (!fs::exists(path, error))
+        path = fs::path("data/common/systems.json");
     Luminumbra::world::GameSession session;
     session.ApplySystemConfig(options.systems_config_override
                                   ? *options.systems_config_override
@@ -32,12 +55,15 @@ Luminumbra::Net::HelloMsg RuntimeHelloFrom(const ServerCliOptions& options) {
         Luminumbra::world::SimulationContent content;
         std::string content_error;
         if (!Luminumbra::world::AdmitSimulationContent(root, content, content_error)) {
-            LUMINUMBRA_CORE_ERROR("Network content admission failed: {}", content_error);
+            LUMINUMBRA_CORE_ERROR("Network content admission refused: {}", content_error);
             hello.system_config_identity.clear();
-            return hello;
+            return hello; // Missing identities fail closed at admission.
         }
         hello.system_config_identity = Luminumbra::world::BindSimulationContentIdentity(
             hello.system_config_identity, content.identity);
+        hello.simulation_content_identity = content.identity.encode();
+    } else {
+        hello.simulation_content_identity = Luminumbra::Net::kInactiveSimulationContentIdentity;
     }
     const auto preset =
         options.preset_json_override

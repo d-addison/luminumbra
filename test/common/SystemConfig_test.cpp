@@ -270,6 +270,56 @@ TEST(SystemConfig, EmptyAndBlankJsonAreDefaults) {
     }
 }
 
+TEST(SystemConfig, ExplicitOverrideRefusesRawNulAndTrailingBytesWithoutChangingOutput) {
+    const Luminumbra::TestSupport::ScopedTempFile file("config_override_bytes_", ".json");
+    const auto original = SystemConfig::FromJsonString(R"({
+        "sim":{"plant_growth":{"enabled":false,"params":{"mutation_rate":0.2}}},
+        "render":{"moonlight":{"enabled":false,"params":{"color":[0.1,0.2,0.3]}}},
+        "user":{"video":{"fov":75},"controls":{"Jump":32}}})");
+    const std::string replacement = R"({"user":{"video":{"fov":90}}})";
+    for (const auto& bytes : {replacement + '\0',
+                              replacement + '\0' + "garbage",
+                              '\0' + replacement,
+                              replacement + '\x1a' + "garbage",
+                              replacement + " {}",
+                              replacement + " trailing"}) {
+        {
+            std::ofstream output(file.Path(), std::ios::binary | std::ios::trunc);
+            output << bytes;
+            output.close();
+            ASSERT_TRUE(output.good());
+        }
+        auto config = original;
+        std::string error;
+        EXPECT_FALSE(SystemConfig::TryLoadFromFile(file.Path().string(), config, error));
+        EXPECT_FALSE(error.empty());
+        EXPECT_EQ(ConfigIdentity(config), ConfigIdentity(original));
+        for (unsigned key = 0; key < static_cast<unsigned>(SysKey::Count); ++key)
+            EXPECT_EQ(config.enabled(static_cast<SysKey>(key)),
+                      original.enabled(static_cast<SysKey>(key)));
+        for (unsigned param = 0; param < static_cast<unsigned>(SysParam::Count); ++param) {
+            const auto id = static_cast<SysParam>(param);
+            EXPECT_EQ(config.param(id, -1.0f), original.param(id, -1.0f));
+            EXPECT_EQ(config.param3(id, glm::vec3(-1.0f)), original.param3(id, glm::vec3(-1.0f)));
+        }
+        EXPECT_FLOAT_EQ(config.user().fov, original.user().fov);
+        EXPECT_EQ(config.user().keybinds, original.user().keybinds);
+    }
+    {
+        std::ofstream output(file.Path(), std::ios::binary | std::ios::trunc);
+        output << replacement << "\r\n \t";
+        output.close();
+        ASSERT_TRUE(output.good());
+    }
+    auto config = original;
+    std::string error = "previous error";
+    ASSERT_TRUE(SystemConfig::TryLoadFromFile(file.Path().string(), config, error)) << error;
+    EXPECT_TRUE(error.empty());
+    EXPECT_FLOAT_EQ(config.user().fov, original.user().fov);
+    EXPECT_EQ(config.user().keybinds, original.user().keybinds);
+    EXPECT_EQ(config.ComputeConfigSubHash(), SystemConfig::Defaults().ComputeConfigSubHash());
+}
+
 TEST(SystemConfig, RawNulRefusesWholeConfiguration) {
     const std::string bytes =
         R"({"sim":{"plant_growth":{"enabled":true,"params":{"mutation_rate":0.08}}}})";

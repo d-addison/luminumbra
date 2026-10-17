@@ -504,8 +504,9 @@ versioned when its behavior changes.
 
 The ledger canonical projection appends `|content_identity:` and the exact identity record before
 `|completed_work:`. This feeds the existing enabled ecology/world hash at boot, including an empty
-creature world, and binds the opaque network/replay configuration identity to the same captured content without changing message layouts. TLV 5 precedes existing TLV 6 in the
-persistence envelope; completed-work encoding and next-decision behavior are unchanged. Identity
+creature world; the opaque network/replay configuration identity binds the same captured
+content. Hello version 4 also binds captured content identity, while replay layout
+remains version 3. TLV 5 precedes existing TLV 6 in the persistence envelope; completed-work encoding and next-decision behavior are unchanged. Identity
 adoption is immutable; repeated identical adoption is allowed, changing it refuses.
 
 Opening an enabled world without TLV 5 adopts the current resolved content, including historical

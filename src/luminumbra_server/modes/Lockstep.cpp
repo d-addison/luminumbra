@@ -1,6 +1,8 @@
 #include "ModeHelpers.h"
 #include "Modes.h"
 
+#include "luminumbra_common/net/LockstepSession.h"
+
 namespace fs = std::filesystem;
 
 namespace {
@@ -108,6 +110,7 @@ int RunLockstepLoopback(const ServerCliOptions& options) {
         c.peer_client_id = 1;
         c.system_config_identity = host_runner->Session()->SessionConfigIdentity();
         c.preset_content_hash = host_runner->Session()->PresetContentHash();
+        c.simulation_content_identity = CapturedSimulationIdentityForHello(*host_runner->Session());
         return c;
     }();
     auto peer_cfg = host_cfg;
@@ -115,6 +118,8 @@ int RunLockstepLoopback(const ServerCliOptions& options) {
     peer_cfg.peer_client_id = 0;
     peer_cfg.system_config_identity = peer_runner->Session()->SessionConfigIdentity();
     peer_cfg.preset_content_hash = peer_runner->Session()->PresetContentHash();
+    peer_cfg.simulation_content_identity =
+        CapturedSimulationIdentityForHello(*peer_runner->Session());
 
     Luminumbra::Net::LockstepHooks host_hooks = hooks_template;
     host_hooks.user = &host_ctx;
@@ -144,6 +149,7 @@ int RunLockstepLoopback(const ServerCliOptions& options) {
         ph.client_id = 1;
         ph.system_config_identity = peer_cfg.system_config_identity;
         ph.preset_content_hash = peer_cfg.preset_content_hash;
+        ph.simulation_content_identity = peer_cfg.simulation_content_identity;
         if (!peer_transport->SendFrame(Luminumbra::Net::EncodeHello(ph))) {
             LUMINUMBRA_CORE_ERROR("lockstep: handshake send failed");
             return 1;
@@ -155,6 +161,7 @@ int RunLockstepLoopback(const ServerCliOptions& options) {
         hh.client_id = 0;
         hh.system_config_identity = host_cfg.system_config_identity;
         hh.preset_content_hash = host_cfg.preset_content_hash;
+        hh.simulation_content_identity = host_cfg.simulation_content_identity;
         if (!host_transport->SendFrame(Luminumbra::Net::EncodeHello(hh))) {
             LUMINUMBRA_CORE_ERROR("lockstep: handshake send failed");
             return 1;

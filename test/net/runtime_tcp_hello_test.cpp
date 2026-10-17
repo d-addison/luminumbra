@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdint>
 #include <future>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -43,6 +44,7 @@ protected:
         expected.client_id = slot.client_id;
         expected.system_config_identity = "runtime-test-config";
         expected.preset_content_hash = "runtime-test-preset";
+        expected.simulation_content_identity = "runtime-test-content";
         ASSERT_TRUE(peer.Connect("127.0.0.1", slot.port, /*timeout_ms=*/1000));
         slot.transport = listener.AcceptOneBlocking(/*timeout_ms=*/1000);
         ASSERT_NE(slot.transport, nullptr);
@@ -219,6 +221,56 @@ TEST_F(RuntimeTcpHelloTest, WrongClientIdBeforeDeadlineStillReleasesSlot) {
         return slot.transport == nullptr;
     }));
     ExpectReleased();
+}
+
+TEST_F(RuntimeTcpHelloTest, MismatchedSimulationContentReleasesSlot) {
+    auto hello = expected;
+    hello.simulation_content_identity = "different-content";
+    ASSERT_TRUE(peer.SendFrame(EncodeHello(hello)));
+    ASSERT_TRUE(WaitUntil([&]() {
+        (void)PollRuntimeTcpAccept(slot, expected, accepted_at + 1s);
+        return slot.transport == nullptr;
+    }));
+    ExpectReleased();
+}
+
+// The same transport-independent admission is used by TCP, GNS and Steam hosts.
+TEST(RuntimeHelloAdmissionTest, ContentBindingAndFollowingFramesAcrossTransports) {
+    using namespace Luminumbra::Net;
+    for (const auto* variant :
+         {"matching", "different", "missing peer", "missing local", "old version"}) {
+        SCOPED_TRACE(variant);
+        const std::string name = variant;
+        auto [host, peer] = MakeLoopbackPair();
+        HelloMsg expected;
+        expected.client_id = 7;
+        expected.system_config_identity = "config";
+        expected.preset_content_hash = "preset";
+        expected.simulation_content_identity = std::string(40, '\0');
+        auto hello = expected;
+        if (name == "different")
+            hello.simulation_content_identity.back() = '\1';
+        if (name == "missing peer")
+            hello.simulation_content_identity.clear();
+        if (name == "missing local")
+            expected.simulation_content_identity.clear();
+        if (name == "old version")
+            hello.protocol_version = 3;
+        EXPECT_EQ(PollRuntimeHello(*host, expected, 7), RuntimeHelloAdmission::Pending);
+        ASSERT_TRUE(peer->SendFrame(EncodeHello(hello)));
+        const std::vector<std::uint8_t> following{9, 8, 7};
+        ASSERT_TRUE(peer->SendFrame(following));
+        const auto admission = PollRuntimeHello(*host, expected, 7);
+        if (name == "matching") {
+            EXPECT_EQ(admission, RuntimeHelloAdmission::Accepted);
+            std::vector<std::uint8_t> received;
+            ASSERT_TRUE(host->TryReceiveFrame(received));
+            EXPECT_EQ(received, following);
+        } else {
+            EXPECT_EQ(admission, RuntimeHelloAdmission::Refused);
+            EXPECT_FALSE(peer->IsPeerConnected());
+        }
+    }
 }
 
 } // namespace

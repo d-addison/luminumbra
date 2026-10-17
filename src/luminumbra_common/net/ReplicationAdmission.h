@@ -9,8 +9,8 @@
 
 namespace Luminumbra::Net {
 
-// Local 30 Hz handshake time, independent of simulation progress. Like the separate
-// kRuntimeTcpHelloTimeoutTicks policy, 150 ticks is nominally five seconds.
+// Local 30 Hz handshake time, independent of simulation progress: 150 ticks is
+// nominally five seconds. Runtime TCP slots use a separate ten-second deadline.
 inline constexpr std::uint64_t kAdmissionTimeoutTicks = 150;
 inline constexpr std::size_t kAdmissionDrainLimit = 32;
 

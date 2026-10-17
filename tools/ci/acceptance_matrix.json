@@ -670,7 +670,7 @@
     {
       "id": "iss.126",
       "source": "issue #126",
-      "statement": "Every inventoried requirement in both reviewed documents has a matrix row with named evidence or explicit planned work. The checker refuses omitted or stale statements and unaudited exclusions; native execution and planned acceptance work remain unqualified.",
+      "statement": "The static checker accounts for every source statement in both reviewed documents, requires each requirement to map to named evidence or explicit planned work, and rejects stale or omitted statements and unaudited exclusions. This row covers inventory completeness only; planned acceptance work and native qualification remain outstanding.",
       "status": "covered",
       "evidence": [
         {
@@ -1304,7 +1304,7 @@
     {
       "id": "contract.dw.scope.01",
       "source": "docs/distant-world.md#scope",
-      "statement": "Acceptance obligations: - The view radius is **16 km from the camera** and the world has **no fixed edge**: terrain streams procedurally in every direction. / The addressable extent is set by the packed chunk identity (`Chunk.h`, \u00b12^20 chunks of 16 m, about \u00b116,777 km on each horizontal axis; / coordinates are masked, never range checked). / World positions are 32-bit floats. / By owner decision (September 8, 2026) the contract requires qualification within 32 km of the world origin, where positions keep sub-centimetre precision; / the camera-relative (floating-origin) precision work that would qualify the full addressable extent is deliberately residual scope, not an open contract gap.",
+      "statement": "Acceptance obligations: - The view radius is **16 km from the camera** and the world has **no fixed edge**: terrain streams procedurally in every direction. / The addressable extent is set by the packed chunk identity (`Chunk.h`, ±2^20 chunks of 16 m, about ±16,777 km on each horizontal axis; / coordinates are masked, never range checked). / World positions are 32-bit floats. / By owner decision (September 8, 2026) the contract requires qualification within 32 km of the world origin, where positions keep sub-centimetre precision; / the camera-relative (floating-origin) precision work that would qualify the full addressable extent is deliberately residual scope, not an open contract gap.",
       "status": "planned",
       "requirements": [
         "dw.scope.001",
@@ -1406,7 +1406,7 @@
     {
       "id": "contract.dw.tiers.01",
       "source": "docs/distant-world.md#tier-ladder",
-      "statement": "Acceptance obligations: Far terrain is a ladder of five nested, world-origin-aligned volumetric tiers. / Each tier stores sparse 5\u00d75\u00d75 signed-distance bricks and is polygonised per tile with Marching Cubes; / a brick record exists where the field crosses zero. / Multi-tier residency and draw ownership are new machinery with an explicit arrival-state rule: the coarser tier is always resident and drawn beneath the finer one with a one-brick overlap; / a finer tile replaces the coarser surface inside its band only once it is built and uploaded, and until then the coarser surface stays visible, so a missing or late tile is never a hole; / ownership at the live edge is decided against the live chunks that are actually meshed and uploaded (including cave ceilings and floors), replacing today's camera-region skip;",
+      "statement": "Acceptance obligations: Far terrain is a ladder of five nested, world-origin-aligned volumetric tiers. / Each tier stores sparse 5×5×5 signed-distance bricks and is polygonised per tile with Marching Cubes; / a brick record exists where the field crosses zero. / Multi-tier residency and draw ownership are new machinery with an explicit arrival-state rule: the coarser tier is always resident and drawn beneath the finer one with a one-brick overlap; / a finer tile replaces the coarser surface inside its band only once it is built and uploaded, and until then the coarser surface stays visible, so a missing or late tile is never a hole; / ownership at the live edge is decided against the live chunks that are actually meshed and uploaded (including cave ceilings and floors), replacing today's camera-region skip;",
       "status": "planned",
       "requirements": [
         "dw.tiers.001",
@@ -2078,7 +2078,7 @@
     {
       "id": "contract.dw.persistence.10",
       "source": "docs/distant-world.md#persistence-and-format-contract",
-      "statement": "Acceptance obligations: The existing periodic hash exchange is state-divergence detection, not admission: qualified sessions must run with checkpoint exchange enabled, and a mismatch ends the session at the first exchange after it arises. / Preset revision 7 retains revision 6 omission compatibility; / current-format saves without embedded packaged presets use frozen revision-6 copies. / Lockstep protocol and LREC1 replay layout are version 3 and bind effective configuration plus resolved preset/dependency content; / older layouts are refused. / See the [identity contract](development/system-config-identity.md).",
+      "statement": "Acceptance obligations: The existing periodic hash exchange is state-divergence detection, not admission: qualified sessions must run with checkpoint exchange enabled, and a mismatch ends the session at the first exchange after it arises. / Preset revision 7 retains revision 6 omission compatibility; / current-format saves without embedded packaged presets use frozen revision-6 copies. / Lockstep protocol is version 4 and binds effective configuration, resolved preset/dependency content and captured simulation content; LREC1 replay layout is version 3 and binds effective configuration plus resolved preset/dependency content; / older layouts are refused. / See the [identity contract](development/system-config-identity.md).",
       "status": "planned",
       "requirements": [
         "dw.persistence.055",
@@ -2086,7 +2086,8 @@
         "dw.persistence.057",
         "dw.persistence.058",
         "dw.persistence.059",
-        "dw.persistence.060"
+        "dw.persistence.060",
+        "dw.persistence.061"
       ],
       "evidence": [
         {
@@ -2099,7 +2100,7 @@
     {
       "id": "contract.dw.perf.01",
       "source": "docs/distant-world.md#performance-measurement-contract",
-      "statement": "Acceptance obligations: Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840\u00d71600 and 3440\u00d71440. / Both profiles must meet the release floor on every workload; / the Performance profile exists to report the 120 fps target. / | Quality | 1.0 | p99 frame time at most 16.67 ms | p50 against 8.33 ms | / | Performance | 0.67 | p99 frame time at most 16.67 ms | p50 and p99 against 8.33 ms | / Workloads are settled fixed views (400 warm-up, 240 measured frames) and 60 s scripted traversals (surface flight, cave walk, edited-world tour) with pinned seeds, preset and content revisions, camera paths and speeds, expected simulation ticks and cold-cache state.",
+      "statement": "Acceptance obligations: Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840×1600 and 3440×1440. / Both profiles must meet the release floor on every workload; / the Performance profile exists to report the 120 fps target. / | Quality | 1.0 | p99 frame time at most 16.67 ms | p50 against 8.33 ms | / | Performance | 0.67 | p99 frame time at most 16.67 ms | p50 and p99 against 8.33 ms | / Workloads are settled fixed views (400 warm-up, 240 measured frames) and 60 s scripted traversals (surface flight, cave walk, edited-world tour) with pinned seeds, preset and content revisions, camera paths and speeds, expected simulation ticks and cold-cache state.",
       "status": "planned",
       "requirements": [
         "dw.perf.001",
@@ -3163,7 +3164,9 @@
         "ar.content.086",
         "ar.content.087",
         "ar.content.088",
-        "ar.content.089"
+        "ar.content.089",
+        "ar.content.090",
+        "ar.content.091"
       ],
       "evidence": [
         {
@@ -3251,9 +3254,595 @@
           "ref": "WorldOpenRefusal.NetworkHelloUsesCapturedPolicyAndPlantIdentity"
         },
         {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.NetworkHelloUsesCapturedContentAndRefusesUnreadableJoinContent"
+        },
+        {
           "kind": "doc",
           "ref": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
           "planned": "review integrated qualification for the content admission contract; owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.distant-policy.preflight",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "statement": "Create refuses invalid content before publishing a world; mismatch refuses both load paths. Full load ordering and const registry exposure still require dedicated evidence.",
+      "status": "partial",
+      "requirements": [
+        "ar.content.001",
+        "ar.content.020",
+        "ar.content.086"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.EnabledContentPreflightRefusesBeforePublishingOrSavingWorld"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.AdoptedContentIsImmutableAndPolicyMismatchRefusesBothLoadPaths"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.RawNulDefinitionsRefuseWithoutChangingAdoptedContentOrIdentityOutput"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Add regressions for malformed required inventories on both load paths, unchanged loaded ledger/consumer state on refusal, and the complete const content/registry interface contract; owner: ds"
+        }
+      ],
+      "discrepancy": "Add regressions for malformed required inventories on both load paths, unchanged loaded ledger/consumer state on refusal, and the complete const content/registry interface contract"
+    },
+    {
+      "id": "contract.distant-policy.inventory-limits",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "statement": "Inventory tests exercise resource refusals, name collisions, malformed definitions and selected compiled defaults. They do not independently prove every stated parser bound or every field default.",
+      "status": "partial",
+      "requirements": [
+        "ar.content.002",
+        "ar.content.003",
+        "ar.content.004",
+        "ar.content.005",
+        "ar.content.018",
+        "ar.content.019",
+        "ar.content.067"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PolicyUnknownSpeciesAndInventoryCountRefuse"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.DefinitionResourceCapsAndDirectoryChangesRefuseAtomically"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PolicyUtf8BomCrFinalLfAndDepthRefuse"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.CompleteInventoryCollisionAfterZeroRemapRefuses"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.DuplicateInventoryNamesRefuseAcrossDifferentPaths"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.DefinitionMalformedPresentFieldNeverDefaults"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.ResolvedSpeciesDefaultsEqualExplicitSimulationDefaults"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Add independent boundary and refusal cases in both species domains for empty and 256-entry inventories, document and aggregate byte caps, all name constraints, duplicate names, nesting/string/collection/event limits, non-finite numbers, and every omitted simulation field; owner: ds"
+        }
+      ],
+      "discrepancy": "Add independent boundary and refusal cases in both species domains for empty and 256-entry inventories, document and aggregate byte caps, all name constraints, duplicate names, nesting/string/collection/event limits, non-finite numbers, and every omitted simulation field"
+    },
+    {
+      "id": "contract.distant-policy.name-order",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "statement": "Species ID vectors, unknown-name refusals, renamed files and reversed inventories prove domain resolution and stable unsigned UTF-8 definition/registry ordering.",
+      "status": "covered",
+      "requirements": [
+        "ar.content.006",
+        "ar.content.007",
+        "ar.content.008",
+        "ar.content.009",
+        "ar.content.010",
+        "ar.content.055",
+        "ar.content.056"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.SpeciesIdentityCrossLanguageVectors"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PolicyUnknownSpeciesAndInventoryCountRefuse"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.IdentityExcludesPresentationWhitespacePathsAndJsonOrder"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.IdentityIndependentOfDirectoryEnumeration"
+        }
+      ]
+    },
+    {
+      "id": "contract.distant-policy.optional-file",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "statement": "A missing optional policy leaf under a readable existing parent selects the compiled defaults; the shipped content fixture admits without that file.",
+      "status": "covered",
+      "requirements": [
+        "ar.content.011",
+        "ar.content.012"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.ShippedContentAdmitsWithMissingOptionalPolicy"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PolicyCleanAbsenceSelectsDefaults"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PolicyAbsentEmptyAndExplicitDefaultsResolveEqually"
+        }
+      ]
+    },
+    {
+      "id": "contract.distant-policy.file-refusals",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "statement": "Content reads refuse missing or replaced parents, unreadable files, nonregular files, symlinks/reparse points, replacement and changed reads; platform-specific regressions cover POSIX permissions/symlinks and Windows access denial/junctions. The suite reference selects all applicable cases from each platform's CTest discovery.",
+      "status": "covered",
+      "requirements": [
+        "ar.content.013",
+        "ar.content.014"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.*"
+        }
+      ]
+    },
+    {
+      "id": "contract.distant-policy.document-syntax",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "statement": "Policy parsing enforces encoding, line endings, exact schema/fields and integer ranges/types; species accept JSON whitespace and both domains refuse raw NUL before adoption.",
+      "status": "covered",
+      "requirements": [
+        "ar.content.015",
+        "ar.content.016",
+        "ar.content.017",
+        "ar.content.028",
+        "ar.content.029",
+        "ar.content.030",
+        "ar.content.031",
+        "ar.content.032"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PolicyUtf8BomCrFinalLfAndDepthRefuse"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.IdentityExcludesPresentationWhitespacePathsAndJsonOrder"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.RawNulPolicyRefusesWithoutChangingAdoptedContent"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.RawNulDefinitionsRefuseWithoutChangingAdoptedContentOrIdentityOutput"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PolicyUnknownMissingDuplicateAndFutureFieldsRefuseAtomically"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PolicyEveryIntegerEndpoint"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PolicyBooleanDecimalExponentNegativeAndOverflowRefuse"
+        }
+      ]
+    },
+    {
+      "id": "contract.distant-policy.raw-nul-readers",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "statement": "Biome, preset, placement, piece and both registry readers reject raw NUL with their documented adoption and per-file error behavior, including captured worldgen dependency reads.",
+      "status": "covered",
+      "requirements": [
+        "ar.content.022",
+        "ar.content.023",
+        "ar.content.024"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "BiomeReverbTest.RawNulRefusesWholeTableAndCleanBytesLoadIdentically"
+        },
+        {
+          "kind": "ctest",
+          "ref": "TerrainPresetLoaderTest.RawNulRefusesBeforeAdoptingPreset"
+        },
+        {
+          "kind": "ctest",
+          "ref": "TerrainPresetLoaderTest.CapturedDependencyReadersRefuseRawNulBeforeAdoption"
+        },
+        {
+          "kind": "ctest",
+          "ref": "StructurePlacementTest.RawNulPlacementAndPieceRefusePool"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SpeciesRegistry.RawNulTextAndFilesRefuseWithoutChangingRegistry"
+        },
+        {
+          "kind": "ctest",
+          "ref": "CreatureSpeciesRegistry.RawNulTextAndFilesRefuseWithoutChangingRegistry"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.CustomPresetRawNulRefusesBeforePublishingOrSavingWorld"
+        }
+      ]
+    },
+    {
+      "id": "contract.distant-policy.configuration-refusals",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "statement": "Malformed systems configuration falls back to defaults, while malformed operator budget profiles refuse; both reject raw NUL across the entire document.",
+      "status": "covered",
+      "requirements": [
+        "ar.content.025",
+        "ar.content.026"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "SystemConfig.EmptyAndBlankJsonAreDefaults"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SystemConfig.RawNulRefusesWholeConfiguration"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimBudgetProfileTest.RefusesMalformedJson"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimBudgetProfileTest.RawNulRefusesWholeProfile"
+        }
+      ]
+    },
+    {
+      "id": "contract.distant-policy.defaults",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "statement": "Absent, empty and explicit-default policy resolve equally at defaults version 1, with the specified creature/plant values; override JSON round-trips independently.",
+      "status": "covered",
+      "requirements": [
+        "ar.content.033",
+        "ar.content.037",
+        "ar.content.060",
+        "ar.content.061"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PolicyAbsentEmptyAndExplicitDefaultsResolveEqually"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.OverrideCanonicalRoundTripAndSemanticDefaults"
+        }
+      ]
+    },
+    {
+      "id": "contract.distant-policy.consumer-semantics",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "statement": "Zero-value runtime effects and the algorithm-versioned interpretation of owner due steps require evidence in the consuming simulation systems.",
+      "status": "planned",
+      "requirements": [
+        "ar.content.034",
+        "ar.content.035",
+        "ar.content.036",
+        "ar.content.038",
+        "ar.content.039",
+        "ar.content.040",
+        "ar.content.041"
+      ],
+      "evidence": [
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Register consumer regressions proving zero need/travel, disabled lifecycle/promotion, discarded zero-cap catch-up, and exactly one accepted owner due step under algorithm version 1; owner: ds"
+        }
+      ],
+      "discrepancy": "Register consumer regressions proving zero need/travel, disabled lifecycle/promotion, discarded zero-cap catch-up, and exactly one accepted owner due step under algorithm version 1"
+    },
+    {
+      "id": "contract.distant-policy.identity-wire",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "statement": "The identity has an exact 40-byte versioned little-endian wire record, immutable adoption, ordered TLVs and strict corruption/mismatch refusal; completed work and the next scheduler decision survive round-trip.",
+      "status": "covered",
+      "requirements": [
+        "ar.content.043",
+        "ar.content.044",
+        "ar.content.045",
+        "ar.content.046",
+        "ar.content.047",
+        "ar.content.048",
+        "ar.content.049",
+        "ar.content.050",
+        "ar.content.051",
+        "ar.content.078",
+        "ar.content.079",
+        "ar.content.080",
+        "ar.content.081",
+        "ar.content.085"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedgerTest.ContentIdentityIsImmutableAndHasAnExactVersionedWireRecord"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedgerTest.ContentIdentityPrecedesCompletedWorkAndPreservesNextDecision"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedgerTest.ContentAndWorkEnvelopeRefusesMalformedOrMisorderedTlvsAtomically"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.AdoptedContentIsImmutableAndPolicyMismatchRefusesBothLoadPaths"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.SpeciesSimulationMismatchRefusesAndPresentationChangesReload"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.RegisteredPopulationIdentityRefusesChangedConfigurationOnLoad"
+        }
+      ]
+    },
+    {
+      "id": "contract.distant-policy.canonical-projections",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "statement": "Digest smoke vectors and identity sensitivity tests exercise canonicalization, but do not pin the complete documented byte projections, framing, field order or canonical ledger tag placement.",
+      "status": "partial",
+      "requirements": [
+        "ar.content.052",
+        "ar.content.053",
+        "ar.content.054",
+        "ar.content.057",
+        "ar.content.058",
+        "ar.content.059",
+        "ar.content.062",
+        "ar.content.063",
+        "ar.content.064",
+        "ar.content.065",
+        "ar.content.066",
+        "ar.content.070",
+        "ar.content.071",
+        "ar.content.076"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.SpeciesIdentityCrossLanguageVectors"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.IdentityIncludesDefaultAndAlgorithmVersionsAndPopulationConfiguration"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedgerTest.ContentIdentityPrecedesCompletedWorkAndPreservesNextDecision"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Register independent exact-byte/digest fixtures for resolved policy including all-species overrides, creature/plant payload ordering and defaults, population none:v1 framing, and canonical content_identity placement before completed_work; owner: ds"
+        }
+      ],
+      "discrepancy": "Register independent exact-byte/digest fixtures for resolved policy including all-species overrides, creature/plant payload ordering and defaults, population none:v1 framing, and canonical content_identity placement before completed_work"
+    },
+    {
+      "id": "contract.distant-policy.definition-sensitivity",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "statement": "Presentation fields, whitespace and JSON order do not affect identity; unreferenced creature and plant simulation definitions do.",
+      "status": "covered",
+      "requirements": [
+        "ar.content.068",
+        "ar.content.069"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.IdentityExcludesPresentationWhitespacePathsAndJsonOrder"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.IdentityIncludesUnreferencedCreatureAndPlantSimulationDefinitions"
+        }
+      ]
+    },
+    {
+      "id": "contract.distant-policy.population-inputs",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "statement": "Caller-supplied non-JSON population configuration contributes framed identity before create/load; changing configuration refuses load and changing inputs after world adoption refuses.",
+      "status": "covered",
+      "requirements": [
+        "ar.content.027",
+        "ar.content.072"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PopulationIdentityInputsAreAdoptedAndBoundedAtomically"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.IdentityIncludesDefaultAndAlgorithmVersionsAndPopulationConfiguration"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.RegisteredPopulationIdentityRefusesChangedConfigurationOnLoad"
+        }
+      ]
+    },
+    {
+      "id": "contract.distant-policy.population-limits",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "statement": "Population admission tests prove empty-contract and oversized-configuration refusal, but do not cover all contract UTF-8/length boundaries.",
+      "status": "partial",
+      "requirements": [
+        "ar.content.073"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PopulationIdentityInputsAreAdoptedAndBoundedAtomically"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Register population contract admission cases for valid and malformed UTF-8, embedded NUL, 256/257-byte contract limits and exact configuration byte-cap acceptance; owner: ds"
+        }
+      ],
+      "discrepancy": "Register population contract admission cases for valid and malformed UTF-8, embedded NUL, 256/257-byte contract limits and exact configuration byte-cap acceptance"
+    },
+    {
+      "id": "contract.distant-policy.population-consumers",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "statement": "The identity seam and future registered population consumers need evidence that supplied content is complete before adoption and versioned with behavior changes.",
+      "status": "planned",
+      "requirements": [
+        "ar.content.074",
+        "ar.content.075"
+      ],
+      "evidence": [
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Register population-consumer regressions for content supplied before adoption, behavior-version mismatch, and separation from population callback/file adoption; owner: ds"
+        }
+      ],
+      "discrepancy": "Register population-consumer regressions for content supplied before adoption, behavior-version mismatch, and separation from population callback/file adoption"
+    },
+    {
+      "id": "contract.distant-policy.boot-hash-layout",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "statement": "Session tests show content changes affect the enabled boot hash; optional-transport admission tests require matching captured content. Empty-world TLV emission and exact replay compatibility still require independent evidence.",
+      "status": "partial",
+      "requirements": [
+        "ar.content.042",
+        "ar.content.077",
+        "ar.content.090"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.AdoptedContentIsImmutableAndPolicyMismatchRefusesBothLoadPaths"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedgerTest.ContentIdentityIsImmutableAndHasAnExactVersionedWireRecord"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ReplicationAdmission.BothDirectionsRequireMatchingCapturedSimulationContent"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Register an enabled session fixture asserting no regions or creatures while TLV 5 persists, and exact ecology/world-hash, Hello encoding and replay compatibility controls; owner: ds"
+        }
+      ],
+      "discrepancy": "Register an enabled session fixture asserting no regions or creatures while TLV 5 persists, and exact ecology/world-hash, Hello encoding and replay compatibility controls"
+    },
+    {
+      "id": "contract.distant-policy.session-identity",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "statement": "An open session retains adopted content; historical enabled/indexed saves adopt identity without rewriting until save, and identity mismatch prevents subsequent saving.",
+      "status": "covered",
+      "requirements": [
+        "ar.content.021",
+        "ar.content.082",
+        "ar.content.083",
+        "ar.content.084",
+        "ar.content.087"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.AdoptedContentIsImmutableAndPolicyMismatchRefusesBothLoadPaths"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.IndexedEnabledHistoricalLedgerAdoptsIdentityOnNextSave"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.EnabledContentPreflightRefusesBeforePublishingOrSavingWorld"
+        }
+      ]
+    },
+    {
+      "id": "contract.distant-policy.legacy-opt-in",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "statement": "A flag-off legacy save opting into strict current content needs a dedicated load-and-save regression.",
+      "status": "planned",
+      "requirements": [
+        "ar.content.088"
+      ],
+      "evidence": [
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Register a legacy flag-off save loaded with active regions enabled, proving current-content adoption and TLV 5 on the next save, plus invalid-content refusal; owner: ds"
+        }
+      ],
+      "discrepancy": "Register a legacy flag-off save loaded with active regions enabled, proving current-content adoption and TLV 5 on the next save, plus invalid-content refusal"
+    },
+    {
+      "id": "contract.distant-policy.disabled-compatibility",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "statement": "With active regions disabled, malformed policy does not affect save/hash/artifact bytes; legacy load and resave retain existing world bytes without an identity.",
+      "status": "covered",
+      "requirements": [
+        "ar.content.089"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FlagOffPolicyHasNoEffectOnSaveHashOrArtifactBytes"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FlagOffLoadThenSavePreservesExistingWorldBytes"
         }
       ]
     },
