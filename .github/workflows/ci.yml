@@ -985,7 +985,9 @@ jobs:
   linux-result:
     name: Linux / GCC
     needs: [changes, linux]
-    if: ${{ always() }}
+    # Keep invalid dependencies on the explicit failure path during cancellation.
+    # Otherwise cancellation must stop the job even after its first guard.
+    if: ${{ !cancelled() || needs.changes.result != 'success' || (needs.linux.result != 'success' && needs.linux.result != 'skipped') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
@@ -1004,23 +1006,25 @@ jobs:
           fi
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Reject cancelled workflow
-        if: ${{ cancelled() }}
+      - name: Reject invalid dependencies
+        if: ${{ always() && (needs.changes.result != 'success' || (needs.linux.result != 'success' && needs.linux.result != 'skipped')) }}
         run: |
-          echo "Native test workflow was cancelled" >&2
+          echo "Aggregate dependencies did not pass" >&2
           exit 1
       - name: Require expected producers and route
         env:
+          CI_PATHS_RESULT: ${{ needs.changes.result }}
           SHARD_RESULT: ${{ needs.linux.result }}
           NEEDS_CPP: ${{ needs.changes.outputs.needs_cpp }}
+          CI_CANCELLED: "false"
           CI_EVENT: ${{ github.event_name }}
           CI_DRAFT: ${{ github.event.pull_request.draft }}
           CI_QUALIFICATION: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture }}
           CI_ENABLED: "true"
         run: >-
           python3 tools/ci/ctest_shards.py gate --result "$SHARD_RESULT" --cpp "$NEEDS_CPP"
-          --cancelled false --event "$CI_EVENT" --draft "$CI_DRAFT"
-          --qualification "$CI_QUALIFICATION" --enabled "$CI_ENABLED"
+          --cancelled "$CI_CANCELLED" --event "$CI_EVENT" --draft "$CI_DRAFT"
+          --qualification "$CI_QUALIFICATION" --enabled "$CI_ENABLED" --classification "$CI_PATHS_RESULT"
       - name: Download shard JUnit
         if: needs.linux.result == 'success' && needs.changes.outputs.needs_cpp != 'false'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
@@ -1076,7 +1080,9 @@ jobs:
   windows-msvc-result:
     name: Windows / MSVC
     needs: [changes, windows-msvc]
-    if: ${{ always() }}
+    # Keep invalid dependencies on the explicit failure path during cancellation.
+    # Otherwise cancellation must stop the job even after its first guard.
+    if: ${{ !cancelled() || needs.changes.result != 'success' || (needs.windows-msvc.result != 'success' && needs.windows-msvc.result != 'skipped') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
@@ -1095,23 +1101,25 @@ jobs:
           fi
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Reject cancelled workflow
-        if: ${{ cancelled() }}
+      - name: Reject invalid dependencies
+        if: ${{ always() && (needs.changes.result != 'success' || (needs.windows-msvc.result != 'success' && needs.windows-msvc.result != 'skipped')) }}
         run: |
-          echo "Native test workflow was cancelled" >&2
+          echo "Aggregate dependencies did not pass" >&2
           exit 1
       - name: Require expected producers and route
         env:
+          CI_PATHS_RESULT: ${{ needs.changes.result }}
           SHARD_RESULT: ${{ needs.windows-msvc.result }}
           NEEDS_CPP: ${{ needs.changes.outputs.needs_cpp }}
+          CI_CANCELLED: "false"
           CI_EVENT: ${{ github.event_name }}
           CI_DRAFT: ${{ github.event.pull_request.draft }}
           CI_QUALIFICATION: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture }}
           CI_ENABLED: "true"
         run: >-
           python3 tools/ci/ctest_shards.py gate --result "$SHARD_RESULT" --cpp "$NEEDS_CPP"
-          --cancelled false --event "$CI_EVENT" --draft "$CI_DRAFT"
-          --qualification "$CI_QUALIFICATION" --enabled "$CI_ENABLED"
+          --cancelled "$CI_CANCELLED" --event "$CI_EVENT" --draft "$CI_DRAFT"
+          --qualification "$CI_QUALIFICATION" --enabled "$CI_ENABLED" --classification "$CI_PATHS_RESULT"
       - name: Download shard JUnit
         if: needs.windows-msvc.result == 'success' && needs.changes.outputs.needs_cpp != 'false'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
@@ -1150,7 +1158,9 @@ jobs:
   windows-ucrt64-result:
     name: Windows / MSYS2 UCRT64
     needs: [changes, windows-ucrt64]
-    if: ${{ always() }}
+    # Keep invalid dependencies on the explicit failure path during cancellation.
+    # Otherwise cancellation must stop the job even after its first guard.
+    if: ${{ !cancelled() || needs.changes.result != 'success' || (needs.windows-ucrt64.result != 'success' && needs.windows-ucrt64.result != 'skipped') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
@@ -1169,23 +1179,25 @@ jobs:
           fi
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Reject cancelled workflow
-        if: ${{ cancelled() }}
+      - name: Reject invalid dependencies
+        if: ${{ always() && (needs.changes.result != 'success' || (needs.windows-ucrt64.result != 'success' && needs.windows-ucrt64.result != 'skipped')) }}
         run: |
-          echo "Native test workflow was cancelled" >&2
+          echo "Aggregate dependencies did not pass" >&2
           exit 1
       - name: Require expected producers and route
         env:
+          CI_PATHS_RESULT: ${{ needs.changes.result }}
           SHARD_RESULT: ${{ needs.windows-ucrt64.result }}
           NEEDS_CPP: ${{ needs.changes.outputs.needs_cpp }}
+          CI_CANCELLED: "false"
           CI_EVENT: ${{ github.event_name }}
           CI_DRAFT: ${{ github.event.pull_request.draft }}
           CI_QUALIFICATION: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture }}
           CI_ENABLED: ${{ needs.changes.outputs.needs_cpp != 'false' && (github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
         run: >-
           python3 tools/ci/ctest_shards.py gate --result "$SHARD_RESULT" --cpp "$NEEDS_CPP"
-          --cancelled false --event "$CI_EVENT" --draft "$CI_DRAFT"
-          --qualification "$CI_QUALIFICATION" --enabled "$CI_ENABLED"
+          --cancelled "$CI_CANCELLED" --event "$CI_EVENT" --draft "$CI_DRAFT"
+          --qualification "$CI_QUALIFICATION" --enabled "$CI_ENABLED" --classification "$CI_PATHS_RESULT"
       - name: Download shard JUnit
         if: needs.windows-ucrt64.result == 'success' && needs.changes.outputs.needs_cpp != 'false'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
@@ -1297,13 +1309,20 @@ jobs:
           key: tidy-cache-${{ runner.os }}-shard${{ matrix.shard }}of3-${{ github.sha }}
 
   tidy:
-    # Always report the required result on ready runs, including routed skips.
+    # Report the required result on uncancelled ready runs, including routed skips.
     name: Static analysis / clang-tidy
     needs: [changes, tidy-shard]
-    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+    # Keep invalid dependencies on the explicit failure path during cancellation.
+    # Otherwise cancellation must stop the job even after its first guard.
+    if: ${{ (!cancelled() || needs.changes.result != 'success' || (needs.tidy-shard.result != 'success' && needs.tidy-shard.result != 'skipped')) && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
+      - name: Reject invalid dependencies
+        if: ${{ always() && (needs.changes.result != 'success' || (needs.tidy-shard.result != 'success' && needs.tidy-shard.result != 'skipped')) }}
+        run: |
+          echo "Aggregate dependencies did not pass" >&2
+          exit 1
       - name: Require all clang-tidy shards to pass
         env:
           TIDY_SHARD_RESULT: ${{ needs.tidy-shard.result }}

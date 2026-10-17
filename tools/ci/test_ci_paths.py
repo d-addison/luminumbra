@@ -249,6 +249,9 @@ class PathGateTests(unittest.TestCase):
             ("ci", "diligent-rhi", "ready-native"),
             ("ci", "tidy-shard", "ready-native"),
             ("ci", "tidy", "aggregate"),
+            ("ci", "linux-result", "required-aggregate"),
+            ("ci", "windows-msvc-result", "required-aggregate"),
+            ("ci", "windows-ucrt64-result", "required-aggregate"),
             ("asan", "asan-shard", "guarded-native"),
             ("asan", "asan", "required-aggregate"),
             ("performance", "preview-frame", "guarded-native"),
@@ -264,9 +267,9 @@ class PathGateTests(unittest.TestCase):
                         for cancelled in (False, True):
                             ready = event != "pull_request" or draft is False
                             if route == "required-aggregate":
-                                expected = True
+                                expected = not cancelled
                             elif route == "aggregate":
-                                expected = ready
+                                expected = not cancelled and ready
                             elif route == "guarded-python":
                                 expected = not cancelled
                             elif route == "guarded-native":
@@ -275,18 +278,49 @@ class PathGateTests(unittest.TestCase):
                                 expected = not cancelled and ready and (
                                     route == "ready-python" or cpp != "false"
                                 )
-                            actual = expression.replace(
+                            actual = re.sub(r"needs\.[\w-]+\.result", repr("success"), expression).replace(
                                 "toJSON(github.event.pull_request.draft)", repr(json.dumps(draft))
                             ).replace("!cancelled()", repr(not cancelled)).replace(
                                 "always()", "True"
                             ).replace("github.event_name", repr(event)).replace(
                                 "github.event.pull_request.draft", repr(draft)
+                            ).replace("needs.changes.result", repr("success")).replace(
+                                "needs.asan-shard.result", repr("success")
+                            ).replace("needs.tidy-shard.result", repr("success")
                             ).replace("needs.changes.outputs.needs_cpp", repr(cpp)).replace(
                                 "== false", "== False"
                             ).replace("!= false", "!= False").replace("&&", "and").replace("||", "or")
                             with self.subTest(workflow=workflow, job=job, event=event,
                                               draft=draft, cpp=cpp, cancelled=cancelled):
                                 self.assertEqual(eval(actual, {"__builtins__": {}}), expected)
+
+    def test_required_aggregate_graph_keeps_dependency_failures_reachable(self):
+        for filename, producer, aggregate in (
+            ("ci", "linux", "linux-result"),
+            ("ci", "windows-msvc", "windows-msvc-result"),
+            ("ci", "windows-ucrt64", "windows-ucrt64-result"),
+            ("ci", "tidy-shard", "tidy"),
+            ("asan", "asan-shard", "asan"),
+        ):
+            workflow = (ROOT / f".github/workflows/{filename}.yml").read_text(encoding="utf-8")
+            body = re.split(r"\n  [\w-]+:\n", workflow.split(f"  {aggregate}:\n", 1)[1])[0]
+            condition = re.search(r"^    if: (.*)$", body, re.MULTILINE)[1]
+            for classification in ("success", "failure", "cancelled", "skipped", "", "unknown"):
+                for result in ("success", "failure", "cancelled", "skipped", "", "unknown"):
+                    invalid = classification != "success" or result not in ("success", "skipped")
+                    for workflow_cancelled in (False, True):
+                        expression = condition.removeprefix("${{ ").removesuffix(" }}")
+                        expression = expression.replace("!cancelled()", repr(not workflow_cancelled))
+                        expression = expression.replace("always()", "True").replace("failure()", repr("failure" in (classification, result)))
+                        expression = expression.replace("needs.changes.result", repr(classification))
+                        expression = expression.replace(f"needs.{producer}.result", repr(result))
+                        expression = expression.replace("github.event_name", repr("push"))
+                        expression = expression.replace("github.event.pull_request.draft", "False")
+                        expression = expression.replace("== false", "== False").replace("&&", "and").replace("||", "or")
+                        with self.subTest(job=aggregate, classification=classification,
+                                          result=result, cancelled=workflow_cancelled):
+                            self.assertEqual(bool(eval(expression, {"__builtins__": {}})),
+                                             not workflow_cancelled or invalid)
 
     def test_new_files_in_covered_directories_require_builds(self):
         for path in gate.PYTHON_MODULES | gate.AUTHORING_PYTHON_FILES:
@@ -448,6 +482,8 @@ class PathGateTests(unittest.TestCase):
         commands = gate.python_test_commands(ROOT)
         for test in (
             "tools/ci/test_ci_paths.py", "tools/ci/test_qualification_capture.py",
+            "tools/ci/test_asan_shards.py", "tools/ci/test_ctest_shards.py",
+            "tools/ci/test_workflow_policy.py",
             "tools/perf/test_capture_sim_budget.py", "tools/perf/test_foliage_evidence.py",
             "tools/perf/test_terrain_aovs.py", "tools/perf/test_render_runner_evidence.py",
             "tools/release/test_sbom.py", "tools/persistence/test_save_receipt.py",

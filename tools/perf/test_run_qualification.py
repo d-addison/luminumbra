@@ -11,6 +11,7 @@ import json
 import math
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -25,6 +26,7 @@ import plan_qualification as planner
 import qualification_matrix as matrix_lib
 import run_qualification as rq
 import validate_render_capture as capture_checker
+from check_gl_debug_log import MAX_FILE_BYTES
 
 MATRIX_PATH = planner.DEFAULT_MATRIX
 FIXTURE_PATH = Path(__file__).resolve().parent / 'fixtures' / 'adapter-mismatch.v3.json'
@@ -42,6 +44,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import time
 
 mode = os.environ.get('FAKE_CLIENT_MODE', 'ok')
 argv = sys.argv[1:]
@@ -53,6 +56,9 @@ def value(flag):
 
 if mode == 'exit3':
     sys.exit(3)
+if mode == 'hang':
+    time.sleep(30)
+    sys.exit(0)
 artifact = Path(value('--render-benchmark'))
 if mode == 'noartifact':
     sys.exit(0)
@@ -216,7 +222,9 @@ class RunnerTestBase(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
-        self.tmp = Path(self.directory.name)
+        # Match the runner's canonical output paths when the temporary directory
+        # uses a Windows short name or a macOS directory alias.
+        self.tmp = Path(self.directory.name).resolve()
         self.fake_client = self.tmp / 'fake_client.py'
         self.fake_client.write_text(FAKE_CLIENT, encoding='utf-8')
         self.make_runtime(self.tmp)
@@ -568,6 +576,30 @@ class SelectionTests(RunnerTestBase):
         self.assertEqual(code, 2)
         self.assertIn('cannot write', err)
 
+    def test_out_dir_file_is_not_reported_as_held_lock(self):
+        self.out.write_text('not a directory', encoding='utf-8')
+        with mock.patch.object(rq, 'run_cells') as launch:
+            code, _, err = self.run_main(self.argv('--only', SURFACE_CELL))
+        self.assertEqual(code, 2, err)
+        self.assertIn('cannot write', err)
+        self.assertNotIn('output directory locked', err)
+        launch.assert_not_called()
+        self.assertEqual(self.out.read_text(encoding='utf-8'), 'not a directory')
+
+    def test_mkdir_file_exists_error_is_not_reported_as_held_lock(self):
+        # Windows can report an obstructing parent file as FileExistsError.
+        with mock.patch.object(Path, 'mkdir', side_effect=FileExistsError('blocked parent')), \
+                mock.patch.object(rq.os, 'open') as open_file, \
+                mock.patch.object(rq, 'run_cells') as launch:
+            code, _, err = self.run_main(self.argv('--only', SURFACE_CELL))
+        self.assertEqual(code, 2, err)
+        self.assertIn('cannot write', err)
+        self.assertIn('blocked parent', err)
+        self.assertNotIn('output directory locked', err)
+        open_file.assert_not_called()
+        launch.assert_not_called()
+        self.assertFalse(self.out.exists())
+
     def test_relative_paths_resolve_from_caller_cwd(self):
         previous = os.getcwd()
         os.chdir(self.tmp)
@@ -626,7 +658,15 @@ class ProcessFailureTests(RunnerTestBase):
         self.assert_cell('process_failed', 'capture evidence: capture not retained',
                          {'FAKE_CLIENT_MODE': 'noartifact'})
 
-    def test_timeout_writes_receipt(self):
+    def test_hang_times_out_and_writes_receipt(self):
+        self.assert_cell('process_failed', 'timed_out', {'FAKE_CLIENT_MODE': 'hang'},
+                         '--timeout-seconds', '1')
+        receipt = json.loads((self.out / 'cells' / f'{SURFACE_CELL}.process.json')
+                             .read_text(encoding='utf-8'))
+        self.assertEqual(receipt['outcome'], 'timed_out')
+        self.assertEqual(receipt['timeout_seconds'], 1)
+
+    def test_injected_timeout_writes_receipt(self):
         def timeout(command, **kwargs):
             raise subprocess.TimeoutExpired(command, kwargs['timeout'])
 
@@ -835,7 +875,7 @@ class CheckCommandTests(unittest.TestCase):
     def test_fixed_view_gets_settled_geometry_camera_and_fov_flags(self):
         command = self.command(FOREST_CELL)
         for flag in ('--require-settled', '--require-geometry', '--require-camera-chunk'):
-            self.assertIn(flag, command)
+            self.assertEqual(command.count(flag), 1)
         self.assertEqual(command[command.index('--fov') + 1], '45.0')
         self.assertEqual(command[1], str(Path('/chk/validate.py')))
         self.assert_cell_expectations(command, self.cells[FOREST_CELL])
@@ -914,7 +954,8 @@ class DirectoryLockTests(RunnerTestBase):
         lock.write_text('held by another worker', encoding='utf-8')
         before = {path: path.read_bytes() for path in self.out.rglob('*') if path.is_file()}
         with mock.patch.object(rq, 'run_cells') as launch:
-            code, _, err = self.run_main(self.argv('--only', SURFACE_CELL))
+            code, _, err = self.run_main(self.argv('--only', SURFACE_CELL,
+                                                   out=self.out / '..' / self.out.name))
         self.assertEqual(code, 2)
         launch.assert_not_called()
         self.assertIn(str(lock.resolve()), err)
@@ -961,6 +1002,430 @@ class DirectoryLockTests(RunnerTestBase):
         self.assertIn('publication failed', err)
         self.assertFalse((self.out / rq.LOCK_NAME).exists())
         self.assertEqual(self.run_main(self.argv('--only', SURFACE_CELL))[0], 0)
+
+
+class HostEvidenceTests(RunnerTestBase):
+    def setUp(self):
+        super().setUp()
+        self.host = {'os_caption': 'Windows', 'os_version': '10.0',
+                     'powershell': '7.4',
+                     'gpus': [{'Name': RENDERER, 'DriverVersion': '1.2'}]}
+        self.staged_host = self.tmp / 'staged-host.json'
+        # Windows PowerShell 5.1 Set-Content emits a UTF-8 BOM.
+        self.staged_host.write_text(json.dumps(self.host), encoding='utf-8-sig')
+        self.out.mkdir()
+        self.previous_qualification = b'previous qualification\n'
+        self.previous_host = b'previous host\n'
+        (self.out / rq.QUALIFICATION_NAME).write_bytes(self.previous_qualification)
+        (self.out / 'host.json').write_bytes(self.previous_host)
+
+    def host_argv(self, *extra, **kwargs):
+        return self.argv('--host-record', str(self.staged_host), *extra, **kwargs)
+
+    def assert_previous_pair(self):
+        self.assertEqual((self.out / rq.QUALIFICATION_NAME).read_bytes(),
+                         self.previous_qualification)
+        self.assertEqual((self.out / 'host.json').read_bytes(), self.previous_host)
+        self.assertEqual(list(self.out.glob('*.prev-*')), [])
+
+    def assert_current_host(self):
+        self.assertEqual(rq.read_json_object(self.out / 'host.json'), self.host)
+        self.assertTrue(self.staged_host.exists())
+        self.assertFalse((self.out / rq.LOCK_NAME).exists())
+
+    def test_host_published_for_pass_fail_and_unevaluated_exits(self):
+        cases = [(0, self.matrix_path, SURFACE_CELL, {}),
+                 (1, self.matrix_path, SURFACE_CELL, {'FAKE_CHECKER_EXIT': '4'}),
+                 (3, MATRIX_PATH, FOREST_CELL, {})]
+        for expected, matrix, cell, env in cases:
+            with self.subTest(exit_code=expected):
+                (self.out / 'host.json').write_bytes(self.previous_host)
+                code, _, err = self.run_main(self.host_argv('--only', cell, matrix=matrix),
+                                            env=env)
+                self.assertEqual(code, expected, err)
+                self.assert_current_host()
+                self.assertEqual(rq.exit_code(self.load_qualification()['summary']), expected)
+
+    def test_host_published_with_fail_closed_error_record(self):
+        with mock.patch.object(rq, 'run_cells', side_effect=RuntimeError('boom')):
+            code, _, err = self.run_main(self.host_argv('--only', SURFACE_CELL))
+        self.assertEqual(code, 1, err)
+        self.assertEqual(self.load_qualification()['error'], 'boom')
+        self.assert_current_host()
+
+    def test_missing_or_invalid_host_refuses_without_changing_pair(self):
+        documents = [None, [], {}, dict(self.host, os_version=''),
+                     dict(self.host, powershell=7), dict(self.host, gpus=[]),
+                     dict(self.host, gpus=[{'Name': RENDERER}]),
+                     dict(self.host, gpus=[None]), dict(self.host, extra=float('nan'))]
+        for document in documents:
+            with self.subTest(document=document):
+                self.staged_host.write_text(json.dumps(document), encoding='utf-8')
+                with mock.patch.object(rq, 'run_cells') as launch:
+                    code, _, err = self.run_main(self.host_argv('--only', SURFACE_CELL))
+                self.assertEqual(code, 2, err)
+                self.assertIn('--host-record', err)
+                launch.assert_not_called()
+                self.assert_previous_pair()
+                self.assertFalse((self.out / rq.LOCK_NAME).exists())
+        for content in (b'not JSON', b'\xff'):
+            self.staged_host.write_bytes(content)
+            self.assertEqual(self.run_main(self.host_argv('--only', SURFACE_CELL))[0], 2)
+            self.assert_previous_pair()
+        self.staged_host.unlink()
+        self.assertEqual(self.run_main(self.host_argv('--only', SURFACE_CELL))[0], 2)
+        self.assert_previous_pair()
+
+    def test_preflight_and_lock_refusals_preserve_pair(self):
+        for extra in (('--only', 'unknown-cell'), ('--timeout-seconds', '0'),
+                      ('--build-manifest', str(self.tmp / 'absent.json'))):
+            with self.subTest(extra=extra):
+                self.assertEqual(self.run_main(self.host_argv(*extra))[0], 2)
+                self.assert_previous_pair()
+        lock = self.out / rq.LOCK_NAME
+        lock.write_text('held', encoding='utf-8')
+        with mock.patch.object(rq, 'run_cells') as launch:
+            self.assertEqual(self.run_main(self.host_argv('--only', SURFACE_CELL))[0], 2)
+        launch.assert_not_called()
+        self.assert_previous_pair()
+        self.assertEqual(lock.read_text(encoding='utf-8'), 'held')
+
+    def test_dry_run_preserves_pair_and_publishes_separate_host(self):
+        with mock.patch.object(rq, 'run_cells') as launch:
+            code, _, err = self.run_main(self.host_argv(
+                '--dry-run', '--runtime-root', str(self.tmp / 'missing-runtime')))
+        self.assertEqual(code, 2, err)
+        self.assertIn('runtime root missing', err)
+        launch.assert_not_called()
+        self.assert_previous_pair()
+        self.assertFalse((self.out / 'host-dryrun.json').exists())
+        self.assertFalse((self.out / rq.LOCK_NAME).exists())
+        with mock.patch.object(rq, 'run_cells') as launch:
+            self.assertEqual(self.run_main(self.host_argv('--dry-run'))[0], 0)
+        launch.assert_not_called()
+        self.assert_previous_pair()
+        self.assertEqual(rq.read_json_object(self.out / 'host-dryrun.json'), self.host)
+
+    def test_both_records_publish_under_lock_and_competing_run_refuses(self):
+        original_write = rq.runner.atomic_write
+        observed = []
+
+        def write(path, payload):
+            if path.name in ('host.json', rq.QUALIFICATION_NAME):
+                self.assertTrue((self.out / rq.LOCK_NAME).is_file())
+                before = {p.name: p.read_bytes() for p in self.out.iterdir() if p.is_file()}
+                with mock.patch.object(rq, 'run_cells') as launch:
+                    code, _, err = self.run_main(self.host_argv('--only', SURFACE_CELL))
+                self.assertEqual(code, 2, err)
+                launch.assert_not_called()
+                self.assertEqual(before, {p.name: p.read_bytes() for p in self.out.iterdir()
+                                          if p.is_file()})
+                observed.append(path.name)
+            return original_write(path, payload)
+
+        for fail_closed in (False, True):
+            with self.subTest(fail_closed=fail_closed):
+                observed.clear()
+                with contextlib.ExitStack() as stack:
+                    stack.enter_context(mock.patch.object(rq.runner, 'atomic_write',
+                                                           side_effect=write))
+                    if fail_closed:
+                        stack.enter_context(mock.patch.object(rq, 'run_cells',
+                                                               side_effect=RuntimeError('boom')))
+                    code, _, err = self.run_main(self.host_argv('--only', SURFACE_CELL))
+                self.assertEqual(code, 1 if fail_closed else 0, err)
+                self.assertEqual(observed, ['host.json', rq.QUALIFICATION_NAME])
+                self.assert_current_host()
+                self.assertEqual(list(self.out.glob('*.tmp')), [])
+
+    def test_execution_uses_validated_host_snapshot(self):
+        original_run = rq.run_cells
+
+        def run(*args, **kwargs):
+            self.staged_host.write_text('changed after validation', encoding='utf-8')
+            return original_run(*args, **kwargs)
+
+        with mock.patch.object(rq, 'run_cells', side_effect=run):
+            self.assertEqual(self.run_main(self.host_argv('--only', SURFACE_CELL))[0], 0)
+        self.assert_current_host()
+
+    def test_publication_failures_do_not_leave_new_host_without_aggregate(self):
+        original_write = rq.runner.atomic_write
+        for failing in ('host.json', rq.QUALIFICATION_NAME):
+            for prior_host in (False, True):
+                with self.subTest(failing=failing, prior_host=prior_host):
+                    host_path = self.out / 'host.json'
+                    if prior_host:
+                        host_path.write_bytes(self.previous_host)
+                    else:
+                        host_path.unlink(missing_ok=True)
+
+                    def write(path, payload):
+                        self.assertTrue((self.out / rq.LOCK_NAME).is_file())
+                        if path.name == failing:
+                            raise OSError('publication failed')
+                        return original_write(path, payload)
+
+                    with mock.patch.object(rq.runner, 'atomic_write', side_effect=write):
+                        code, _, err = self.run_main(self.host_argv('--only', SURFACE_CELL))
+                    self.assertEqual(code, 2, err)
+                    self.assertIn('publication failed', err)
+                    self.assertFalse((self.out / rq.LOCK_NAME).exists())
+                    self.assertFalse((self.out / rq.QUALIFICATION_NAME).exists())
+                    if prior_host:
+                        self.assertEqual(host_path.read_bytes(), self.previous_host)
+                    else:
+                        self.assertFalse(host_path.exists())
+
+    def test_hostless_publications_retire_host_under_lock(self):
+        original_write = rq.runner.atomic_write
+        host_path = self.out / 'host.json'
+        observed = []
+
+        def write(path, payload):
+            if path.name == rq.QUALIFICATION_NAME:
+                self.assertTrue((self.out / rq.LOCK_NAME).is_file())
+                self.assertFalse(host_path.exists())
+                with mock.patch.object(rq, 'run_cells') as launch:
+                    self.assertEqual(self.run_main(self.argv('--only', SURFACE_CELL))[0], 2)
+                launch.assert_not_called()
+                observed.append(path.name)
+            return original_write(path, payload)
+
+        cases = [(0, self.matrix_path, SURFACE_CELL, {}, False),
+                 (1, self.matrix_path, SURFACE_CELL, {'FAKE_CHECKER_EXIT': '4'}, False),
+                 (3, MATRIX_PATH, FOREST_CELL, {}, False),
+                 (1, self.matrix_path, SURFACE_CELL, {}, True)]
+        for expected, matrix, cell, env, fail_closed in cases:
+            with self.subTest(exit_code=expected, fail_closed=fail_closed):
+                host_path.write_bytes(self.previous_host)
+                observed.clear()
+                with contextlib.ExitStack() as stack:
+                    stack.enter_context(mock.patch.object(rq.runner, 'atomic_write',
+                                                           side_effect=write))
+                    if fail_closed:
+                        stack.enter_context(mock.patch.object(rq, 'run_cells',
+                                                               side_effect=RuntimeError('boom')))
+                    code, _, err = self.run_main(self.argv('--only', cell, matrix=matrix), env)
+                self.assertEqual(code, expected, err)
+                self.assertEqual(observed, [rq.QUALIFICATION_NAME])
+                self.assertFalse(host_path.exists())
+                self.assertFalse((self.out / rq.LOCK_NAME).exists())
+
+    def test_hostless_publication_failure_restores_host_under_lock(self):
+        original_write = rq.runner.atomic_write
+        host_path = self.out / 'host.json'
+        observed = []
+
+        def write(path, payload):
+            self.assertTrue((self.out / rq.LOCK_NAME).is_file())
+            if path.name == rq.QUALIFICATION_NAME:
+                self.assertFalse(host_path.exists())
+                observed.append('aggregate')
+                raise OSError('publication failed')
+            if path == host_path:
+                self.assertFalse(host_path.exists())
+                self.assertEqual(payload, self.previous_host)
+                observed.append('restore')
+            result = original_write(path, payload)
+            if path == host_path:
+                self.assertTrue((self.out / rq.LOCK_NAME).is_file())
+                self.assertEqual(host_path.read_bytes(), self.previous_host)
+                with mock.patch.object(rq, 'run_cells') as launch:
+                    code, _, err = self.run_main(self.argv('--only', SURFACE_CELL))
+                self.assertEqual(code, 2, err)
+                launch.assert_not_called()
+            return result
+
+        with mock.patch.object(rq.runner, 'atomic_write', side_effect=write):
+            code, _, err = self.run_main(self.argv('--only', SURFACE_CELL,
+                                                   out=self.out / '..' / self.out.name))
+        self.assertEqual(code, 2, err)
+        self.assertEqual(observed, ['aggregate', 'restore'])
+        self.assertEqual(host_path.read_bytes(), self.previous_host)
+        self.assertFalse((self.out / rq.LOCK_NAME).exists())
+
+    def test_deep_host_json_refuses_before_decode_or_execution(self):
+        prefix = json.dumps(self.host)[:-1] + ', "extra": '
+        for opening, closing in (('[', ']'), ('{"nested":', '}')):
+            with self.subTest(opening=opening):
+                self.staged_host.write_text(prefix + opening * 2000 + '0'
+                                            + closing * 2000 + '}', encoding='utf-8')
+                original_loads = rq.json.loads
+
+                def loads(payload, *args, **kwargs):
+                    self.assertNotIn('"extra"', str(payload))
+                    return original_loads(payload, *args, **kwargs)
+
+                with mock.patch.object(rq.json, 'loads', side_effect=loads), \
+                        mock.patch.object(rq, 'run_cells') as launch:
+                    code, _, err = self.run_main(self.host_argv('--only', SURFACE_CELL))
+                self.assertEqual(code, 2, err)
+                self.assertIn('depth', err)
+                launch.assert_not_called()
+                self.assert_previous_pair()
+                self.assertFalse((self.out / rq.LOCK_NAME).exists())
+
+    def test_oversized_staged_host_refuses_without_modifying_pair(self):
+        content = json.dumps(self.host).encode('utf-8')
+        self.staged_host.write_bytes(content + b' ' * (MAX_FILE_BYTES + 1 - len(content)))
+        with mock.patch.object(rq, 'run_cells') as launch:
+            code, _, err = self.run_main(self.host_argv('--only', SURFACE_CELL))
+        self.assertEqual(code, 2, err)
+        self.assertIn('byte cap', err)
+        launch.assert_not_called()
+        self.assert_previous_pair()
+
+    def test_host_json_depth_boundary_and_escaped_brackets(self):
+        prefix = json.dumps(self.host)[:-1] + ', "extra": '
+        for depth in (rq.MAX_HOST_JSON_DEPTH, rq.MAX_HOST_JSON_DEPTH + 1):
+            with self.subTest(depth=depth):
+                # The host object itself accounts for one container level.
+                self.staged_host.write_text(prefix + '[' * (depth - 1) + '0'
+                                            + ']' * (depth - 1) + '}', encoding='utf-8')
+                if depth == rq.MAX_HOST_JSON_DEPTH:
+                    self.assertIsNotNone(rq.load_host_record(self.staged_host))
+                else:
+                    with self.assertRaisesRegex(rq.UsageError, 'depth'):
+                        rq.load_host_record(self.staged_host)
+        note = ('[{' * 2000) + '"escaped quote" \\ ' + ('}]' * 2000)
+        self.host['extra'] = note
+        self.staged_host.write_text(json.dumps(self.host), encoding='utf-8-sig')
+        self.assertEqual(json.loads(rq.load_host_record(self.staged_host)), self.host)
+
+    def test_host_reads_accept_exact_byte_cap(self):
+        content = json.dumps(self.host).encode('utf-8')
+        payload = content + b' ' * (MAX_FILE_BYTES - len(content))
+        self.staged_host.write_bytes(payload)
+        self.assertEqual(json.loads(rq.load_host_record(self.staged_host)), self.host)
+        host_path = self.out / 'host.json'
+        host_path.write_bytes(payload)
+        code, _, err = self.run_main(self.host_argv('--only', SURFACE_CELL))
+        self.assertEqual(code, 0, err)
+        self.assert_current_host()
+
+    def test_non_ascii_host_near_cap_publishes_and_round_trips(self):
+        self.host['extra'] = ''
+        empty = json.dumps(self.host, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+        self.host['extra'] = 'é' * ((MAX_FILE_BYTES - len(empty) - 1) // 2)
+        content = json.dumps(self.host, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+        self.staged_host.write_bytes(content)
+        self.assertLessEqual(len(content), MAX_FILE_BYTES)
+        self.assertGreaterEqual(len(content), MAX_FILE_BYTES - 2)
+        code, _, err = self.run_main(self.host_argv('--only', SURFACE_CELL))
+        self.assertEqual(code, 0, err)
+        host_path = self.out / 'host.json'
+        published = host_path.read_bytes()
+        self.assertLessEqual(len(published), MAX_FILE_BYTES)
+        self.assertIn('é'.encode('utf-8'), published)
+        self.assert_current_host()
+        # Use the published record as both staged input and the previous host.
+        code, _, err = self.run_main(self.argv('--host-record', str(host_path),
+                                               '--only', SURFACE_CELL))
+        self.assertEqual(code, 0, err)
+        self.assert_current_host()
+        self.assertEqual(host_path.read_bytes(), published)
+        code, _, err = self.run_main(self.argv('--only', SURFACE_CELL))
+        self.assertEqual(code, 0, err)
+        self.assertFalse(host_path.exists())
+
+    def test_serialized_host_over_cap_refuses_before_execution(self):
+        self.host['extra'] = ''
+        empty = json.dumps(self.host, separators=(',', ':')).encode('utf-8')
+        self.host['extra'] = 'x' * (MAX_FILE_BYTES - len(empty))
+        content = json.dumps(self.host, separators=(',', ':')).encode('utf-8')
+        self.assertEqual(len(content), MAX_FILE_BYTES)
+        self.staged_host.write_bytes(content)
+        # The terminating newline makes the published record exceed the cap.
+        with mock.patch.object(rq, 'run_cells') as launch:
+            code, _, err = self.run_main(self.host_argv('--only', SURFACE_CELL))
+        self.assertEqual(code, 2, err)
+        self.assertIn('byte cap', err)
+        launch.assert_not_called()
+        self.assert_previous_pair()
+        self.assertFalse((self.out / rq.LOCK_NAME).exists())
+
+    def test_host_growth_after_stat_is_bounded(self):
+        original_fstat = os.fstat
+        for candidate in (self.staged_host, self.out / 'host.json'):
+            with self.subTest(candidate=candidate.name):
+                candidate.write_text(json.dumps(self.host), encoding='utf-8')
+                identity = candidate.stat()
+
+                def fstat(descriptor):
+                    info = original_fstat(descriptor)
+                    if (info.st_dev, info.st_ino) == (identity.st_dev, identity.st_ino):
+                        with candidate.open('ab') as output:
+                            output.write(b' ' * (MAX_FILE_BYTES + 1 - info.st_size))
+                    return info
+
+                with mock.patch.object(os, 'fstat', side_effect=fstat), \
+                        mock.patch.object(rq, 'run_cells') as launch:
+                    code, _, err = self.run_main(self.host_argv('--only', SURFACE_CELL))
+                self.assertEqual(code, 2, err)
+                self.assertIn('byte cap', err)
+                launch.assert_not_called()
+                self.assertEqual((self.out / rq.QUALIFICATION_NAME).read_bytes(),
+                                 self.previous_qualification)
+                self.assertFalse((self.out / rq.LOCK_NAME).exists())
+                candidate.write_text(json.dumps(self.host), encoding='utf-8')
+
+    def test_oversized_previous_host_refuses_hostful_and_hostless_runs(self):
+        host_path = self.out / 'host.json'
+        with host_path.open('wb') as output:
+            output.truncate(MAX_FILE_BYTES + 1)
+        for hostful in (False, True):
+            with self.subTest(hostful=hostful):
+                argv = self.host_argv if hostful else self.argv
+                with mock.patch.object(rq, 'run_cells') as launch:
+                    code, _, err = self.run_main(argv('--only', SURFACE_CELL))
+                self.assertEqual(code, 2, err)
+                self.assertIn('byte cap', err)
+                launch.assert_not_called()
+                self.assertEqual(host_path.stat().st_size, MAX_FILE_BYTES + 1)
+                self.assertEqual((self.out / rq.QUALIFICATION_NAME).read_bytes(),
+                                 self.previous_qualification)
+                self.assertEqual(list(self.out.glob('*.prev-*')), [])
+                self.assertFalse((self.out / rq.LOCK_NAME).exists())
+
+    def test_nonregular_hosts_refuse_before_open_or_execution(self):
+        original_lstat = Path.lstat
+        original_open = Path.open
+        original_os_open = os.open
+        for candidate in (self.staged_host, self.out / 'host.json'):
+            for mode in (stat.S_IFLNK, stat.S_IFDIR, stat.S_IFCHR, stat.S_IFIFO):
+                for hostful in ((True,) if candidate == self.staged_host else (False, True)):
+                    with self.subTest(candidate=candidate.name, mode=mode, hostful=hostful):
+                        # Model filesystem types without symlink or device privileges.
+                        inspected = []
+
+                        def lstat(path, *args, **kwargs):
+                            if path == candidate:
+                                inspected.append(path)
+                                return mock.Mock(st_mode=mode | 0o600)
+                            return original_lstat(path, *args, **kwargs)
+
+                        def open_file(path, *args, **kwargs):
+                            self.assertNotEqual(path, candidate)
+                            return original_open(path, *args, **kwargs)
+
+                        def os_open(path, *args, **kwargs):
+                            self.assertNotEqual(Path(path), candidate)
+                            return original_os_open(path, *args, **kwargs)
+
+                        argv = self.host_argv if hostful else self.argv
+                        with mock.patch.object(Path, 'lstat', lstat), \
+                                mock.patch.object(Path, 'open', open_file), \
+                                mock.patch.object(rq.os, 'open', os_open), \
+                                mock.patch.object(rq, 'run_cells') as launch:
+                            code, _, err = self.run_main(argv(
+                                '--only', SURFACE_CELL, out=self.out / '..' / self.out.name))
+                        self.assertEqual(code, 2, err)
+                        self.assertIn('regular file', err)
+                        self.assertEqual(inspected, [candidate])
+                        launch.assert_not_called()
+                        self.assert_previous_pair()
+                        self.assertFalse((self.out / rq.LOCK_NAME).exists())
 
 
 class RuntimeRootTests(RunnerTestBase):
@@ -1064,7 +1529,7 @@ class SystemsConfigTests(RunnerTestBase):
     def test_changed_or_removed_config_is_refused(self):
         systems_config = self.tmp / 'data/common/systems.json'
         systems_config.parent.mkdir(parents=True, exist_ok=True)
-        original = rq.runner.run_process
+        original = rq.runner.subprocess.run
         for change in ('replace', 'remove'):
             with self.subTest(change=change):
                 systems_config.write_text('{}', encoding='utf-8')
@@ -1078,7 +1543,7 @@ class SystemsConfigTests(RunnerTestBase):
                         systems_config.unlink()
                     return result
 
-                with mock.patch.object(rq.runner, 'run_process', side_effect=run_process):
+                with mock.patch.object(rq.runner.subprocess, 'run', side_effect=run_process):
                     cell = self.run_fixed_view()
                 self.assertEqual(cell['state'], 'process_failed')
                 self.assertIn('systems configuration SHA-256 changed', cell['reason'])
@@ -1092,6 +1557,75 @@ class SystemsConfigTests(RunnerTestBase):
 class ClientIdentityTests(RunnerTestBase):
     def receipt(self):
         return rq.read_json_object(self.out / 'cells' / f'{SURFACE_CELL}.process.json')
+
+    def test_client_receipt_finalization_holds_all_process_output_locks(self):
+        cells = self.out / 'cells'
+        cells.mkdir(parents=True)
+        artifact = self.tmp / 'capture.json'
+        retained = cells / 'capture.artifact.json'
+        receipt_path = cells / 'capture.process.json'
+        log = self.tmp / 'client.log'
+        outputs = (artifact, retained, receipt_path, log)
+        kwargs = dict(cwd=self.tmp, environment=os.environ.copy(), log=log,
+                      artifact=artifact, retained=retained, receipt_path=receipt_path)
+        original_write = rq.runner.atomic_write
+        publications = []
+
+        def snapshot():
+            return {path: path.read_bytes() if path.exists() else None for path in outputs}
+
+        def publish(path, payload):
+            if path == receipt_path and 'client' in json.loads(payload):
+                before = snapshot()
+                for output in outputs:
+                    with self.assertRaises(FileExistsError):
+                        with rq.runner._output_locks((output,)):
+                            self.fail('process output unlocked during client finalization')
+                with self.assertRaises(FileExistsError):
+                    rq.runner.run_process([sys.executable], **kwargs)
+                self.assertEqual(snapshot(), before)
+                publications.append(json.loads(payload)['outcome'])
+            return original_write(path, payload)
+
+        def run():
+            return rq.run_client_process(
+                [sys.executable], client=self.fake_client, build_manifest=None,
+                systems_config=self.tmp / 'data/common/systems.json',
+                runtime_root=self.tmp, save_root=self.tmp / 'saves', **kwargs)
+
+        for outcome in ('returned', 'timed_out', 'spawn_error'):
+            error = (subprocess.TimeoutExpired([sys.executable], 180) if outcome == 'timed_out'
+                     else OSError('fixture launch refused'))
+
+            def launch(command, **spawn_kwargs):
+                artifact.write_bytes(b'{}')
+                if outcome != 'returned':
+                    raise error
+                return subprocess.CompletedProcess(command, 0)
+
+            with self.subTest(outcome=outcome), \
+                    mock.patch.object(rq.runner, 'atomic_write', side_effect=publish), \
+                    mock.patch.object(rq.runner.subprocess, 'run', side_effect=launch), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                if outcome == 'returned':
+                    completed, errors, identity = run()
+                    self.assertEqual(completed.returncode, 0)
+                    self.assertEqual(errors, [])
+                    self.assertTrue(identity['sha256_verified'])
+                else:
+                    with self.assertRaises(type(error)) as caught:
+                        run()
+                    self.assertIs(caught.exception, error)
+                receipt = rq.read_json_object(receipt_path)
+                self.assertEqual(receipt['outcome'], outcome)
+                self.assertTrue(receipt['client']['sha256_verified'])
+                self.assertTrue(receipt['systems_config']['sha256_verified'])
+                with rq.runner._output_locks(outputs):
+                    before = snapshot()
+                    with self.assertRaises(FileExistsError):
+                        run()
+                    self.assertEqual(snapshot(), before)
+        self.assertEqual(publications, ['returned', 'timed_out', 'spawn_error'])
 
     def test_unverified_interpreter_identity_is_refused(self):
         original = rq.runner.run_process
@@ -1182,12 +1716,8 @@ class RealCheckerTests(RunnerTestBase):
                     internal_width=display['width'], internal_height=display['height'])
         data['profile'].update(width=display['width'], height=display['height'])
         position = [POSE[key] for key in ('x', 'y', 'z')]
-        right, up, forward = capture_checker.camera_basis(POSE['yaw'], POSE['pitch'])
-        dot = capture_checker.dot
-        view = [right[0], up[0], -forward[0], 0, right[1], up[1], -forward[1], 0,
-                right[2], up[2], -forward[2], 0,
-                -dot(right, position), -dot(up, position), dot(forward, position), 1]
-        inverse = right + [0] + up + [0] + [-x for x in forward] + [0] + position + [1]
+        view = capture_checker.camera_view(position, POSE['yaw'], POSE['pitch'])
+        inverse = capture_checker.inverse_view(view)
         scale = 1 / math.tan(math.radians(45) / 2)
         projection = [scale / (data['width'] / data['height']), 0, 0, 0,
                       0, scale, 0, 0, 0, 0, -1, -1, 0, 0, -0.2, 0]
@@ -1301,7 +1831,6 @@ class BuildManifestTests(RealCheckerTests):
         self.assertFalse(document['render_floor_qualified'])
         self.assertIn('client_not_native_build', document['render_floor_qualified_reasons'])
 
-    @unittest.skipIf(os.name == 'nt', 'shebang execution requires POSIX')
     def test_suffixless_script_is_never_a_native_build(self):
         client = self.tmp / 'renamed-client'
         client.write_text(FAKE_CLIENT, encoding='utf-8')
@@ -1309,9 +1838,24 @@ class BuildManifestTests(RealCheckerTests):
         path = self.write_build_manifest(client)
         args = self.argv('--only', SURFACE_CELL, '--build-manifest', str(path))
         args[1] = str(client)
-        self.assertEqual(self.run_main(args)[0], 0)
-        self.assertEqual(self.load_qualification()['cells'][0]['client']['reason'],
-                         'client_not_native_build')
+        original_run = subprocess.run
+
+        def run(command, **kwargs):
+            # Execute the suffixless fixture portably while identity checks and
+            # receipt hashing still see the original client path.
+            if Path(command[0]) == client.resolve():
+                command = [sys.executable] + command
+            return original_run(command, **kwargs)
+
+        with mock.patch.object(rq.runner.subprocess, 'run', side_effect=run):
+            code, _, err = self.run_main(args)
+        self.assertEqual(code, 0, err)
+        cell = self.load_qualification()['cells'][0]
+        self.assertEqual(cell['state'], 'pass')
+        self.assertEqual(cell['client']['reason'], 'client_not_native_build')
+        self.assertEqual(cell['client']['kind'], 'script')
+        self.assertTrue(cell['client']['sha256_verified'])
+        self.assertFalse(cell['client']['native_build'])
 
     def test_mz_prefixed_command_scripts_are_never_native(self):
         for suffix in ('.cmd', '.bat', '.CMD', '.exe'):

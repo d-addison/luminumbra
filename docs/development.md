@@ -218,16 +218,16 @@ Full native validation and the existing platform limits remain required after
 merge; offline policy tests do not establish hosted-runner qualification.
 
 The required `Linux / GCC`, `Windows / MSVC`, `Windows / MSYS2 UCRT64` and
-`Linux / GCC ASan` checks are ordinary aggregates scheduled with `always()`.
-They reject drafts, missing draft metadata, cancellations and missing or
-unsuccessful expected producers. GCC and MSVC retain their Python-only route;
-UCRT64 runs on ready native PR routes, every main/devel push, and every manual
+`Linux / GCC ASan` checks are ordinary aggregates. Workflow cancellation stops
+aggregates with valid dependencies; invalid dependencies still reach an explicit
+failure step. They reject drafts, missing draft metadata, cancellations and
+missing or unsuccessful expected producers. GCC and MSVC retain their Python-only
+route; UCRT64 runs on ready native PR routes, every main/devel push, and every manual
 dispatch. Devel pushes seed its trusted compiler cache. The existing draft
-guard and job limit remain in place. Manual native qualification captures use
-a single full-suite producer, explicitly distinguished from two-shard evidence.
-Their existing binary-bound manifests, report bytes and qualification artifact
-paths remain intact. Qualification validation checks both the full producer and
-its aggregate.
+guard and job limit remain in place. Manual native qualification captures use a
+single full-suite producer, explicitly distinguished from two-shard evidence. Their existing
+binary-bound manifests, report bytes and qualification artifact paths remain
+intact. Qualification validation checks both the full producer and its aggregate.
 
 Native shard artifact names include lane, shard, SHA, run and attempt. Reports,
 inventories and partition evidence are retained for 30 days. An aggregate-only
@@ -353,8 +353,9 @@ CTest-registered check. Doxygen always runs because `docs/` feeds its input.
 
 Required job names and workflow PR triggers remain present for every PR. Native
 lanes depend directly on the always-running classifier. The clang-tidy aggregate
-also depends on the shards and uses `always()` to report their result even when
-they are skipped. Linux/GCC and Windows/MSVC select their native or Python
+also depends on the shards and reports their result, including routed skips.
+Workflow cancellation stops aggregates with valid dependencies; invalid
+dependencies reach an explicit failure step. Linux/GCC and Windows/MSVC select their native or Python
 steps. Other unaffected heavy lanes report a terminal `skipped` conclusion,
 which GitHub accepts for required checks, rather than leaving a missing status
 pending. Public tree, Format, Doxygen, and runner contracts run independently

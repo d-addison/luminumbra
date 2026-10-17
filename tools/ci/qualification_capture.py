@@ -138,8 +138,14 @@ def ambient_receipt(path):
             require(len(lines) <= 1, "duplicate receipt lines in one representation")
             values.extend(lines)
         if values:
-            require(not any(child.tag in ("failure", "error", "skipped") for child in testcase), "ambient testcase failed or skipped")
-            require(testcase.get("name", "").endswith("AmbientDeterminismReceipt.EmitsConstructorAndEvolvedHashes"), "receipt from an unexpected testcase")
+            require(testcase.get("status") in (None, "run")
+                    and testcase.get("result") in (None, "completed")
+                    and not any(child.tag in ("failure", "error", "skipped") for child in testcase),
+                    "ambient testcase failed or skipped/unevaluated")
+            require(testcase.get("name") == "AmbientDeterminismReceipt.EmitsConstructorAndEvolvedHashes"
+                    or (testcase.get("classname") == "AmbientDeterminismReceipt"
+                        and testcase.get("name") == "EmitsConstructorAndEvolvedHashes"),
+                    "receipt from an unexpected testcase")
             require(len(set(values)) == 1, "conflicting ambient representations")
             producers.append(values[0])
     for element in root.iter():
@@ -188,7 +194,9 @@ def write_asan_shard(args):
     record = dict(binding, shard=args.shard, producers=outcomes,
                   binary_sha256=digest(args.binary), junit_sha256=digest(args.junit))
     cases = ET.parse(args.junit).getroot().iter("testcase")
-    if any(case.get("name", "").endswith("AmbientDeterminismReceipt.EmitsConstructorAndEvolvedHashes")
+    if any(case.get("name") == "AmbientDeterminismReceipt.EmitsConstructorAndEvolvedHashes"
+           or (case.get("classname") == "AmbientDeterminismReceipt"
+               and case.get("name") == "EmitsConstructorAndEvolvedHashes")
            for case in cases):
         record["ambient"] = ambient_receipt(args.junit)
     with args.output.open("x", encoding="utf-8") as stream:

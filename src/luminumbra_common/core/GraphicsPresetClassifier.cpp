@@ -1,8 +1,14 @@
 #include "GraphicsPresetClassifier.h"
+#include "GraphicsPresets.h"
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
+#include <cstdint>
 #include <limits>
+#include <optional>
+#include <string>
+#include <string_view>
 
 namespace luminumbra::core {
 namespace {
@@ -396,7 +402,7 @@ std::optional<std::uint64_t> DedicatedVideoMemoryBytesFromNvx(bool extensionAdve
     return kilobytes * 1024;
 }
 
-std::string_view GraphicsPresetName(GraphicsPreset preset) {
+std::string_view GraphicsPresetDisplayName(GraphicsPreset preset) {
     switch (preset) {
         case GraphicsPreset::Low:
             return "Low";

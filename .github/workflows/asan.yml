@@ -228,6 +228,7 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: asan-test-evidence-${{ github.sha }}-shard-${{ matrix.shard }}
+          overwrite: true
           path: |
             build/debug-asan/ctest.junit.xml
             build/debug-asan/Testing/Temporary
@@ -238,12 +239,14 @@ jobs:
   asan:
     name: Linux / GCC ASan
     needs: [changes, asan-shard]
-    # Cancellation must reach the refusal step, never a successful job skip.
+    # Invalid dependencies must reach the refusal step.
     # The first guard still rejects every draft (including docs-only drafts).
     # A successful classification with needs_cpp=false and a skipped shard
     # preserves the path gate's successful required check. Failed classification
-    # or missing output still requires successful shards.
-    if: ${{ always() }}
+    # is rejected even when the shards succeed.
+    # Keep invalid dependencies on the explicit failure path during cancellation.
+    # Otherwise cancellation must stop the job even after its first guard.
+    if: ${{ !cancelled() || needs.changes.result != 'success' || (needs.asan-shard.result != 'success' && needs.asan-shard.result != 'skipped') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
@@ -262,10 +265,10 @@ jobs:
           fi
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Reject cancelled workflow
-        if: ${{ cancelled() }}
+      - name: Reject invalid dependencies
+        if: ${{ always() && (needs.changes.result != 'success' || (needs.asan-shard.result != 'success' && needs.asan-shard.result != 'skipped')) }}
         run: |
-          echo "ASan workflow was cancelled" >&2
+          echo "Aggregate dependencies did not pass" >&2
           exit 1
       - name: Require all ASan shards to pass
         if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)

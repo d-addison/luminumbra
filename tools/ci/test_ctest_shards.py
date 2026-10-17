@@ -149,6 +149,28 @@ class CTestShardTests(unittest.TestCase):
         self.assertEqual(sorted(case.get("name") for case in cases), sorted(self.names))
         self.assertTrue(all(case.findtext("system-out") == "receipt: " + case.get("name") for case in cases))
 
+    def test_result_metadata_refuses_on_every_native_route_without_overwriting(self):
+        output = self.root / "merged.xml"
+        for profile in ("gcc", "msvc", "ucrt64"):
+            for full in (False, True):
+                for shard in ((0,) if full else (1, 2)):
+                    for result in (None, "completed", "suppressed", "skipped", "failed", "unknown", ""):
+                        with self.subTest(profile=profile, full=full, shard=shard, result=result):
+                            self.reports(full=full, profile=profile)
+                            path = self.root / f"shard-{shard}/ctest.junit.xml"
+                            tree = ET.parse(path)
+                            if result is not None:
+                                tree.getroot()[0].set("result", result)
+                            tree.write(path)
+                            output.write_bytes(b"unchanged")
+                            if result in (None, "completed"):
+                                self.merge(full=full, profile=profile)
+                                self.assertNotEqual(output.read_bytes(), b"unchanged")
+                            else:
+                                with self.assertRaisesRegex(ValueError, "unevaluated"):
+                                    self.merge(full=full, profile=profile)
+                                self.assertEqual(output.read_bytes(), b"unchanged")
+
     def test_report_write_failure_keeps_existing_output_and_cleans_staging(self):
         self.reports()
         output = self.root / "merged.xml"
@@ -831,6 +853,19 @@ class CTestShardTests(unittest.TestCase):
             shards.collect(self.root, "prefix", 1)
         self.assertEqual(sorted(path.name for path in self.root.iterdir()), before)
 
+    def test_gate_refuses_failed_or_unknown_classification_on_every_route(self):
+        for classification in ("failure", "cancelled", "skipped", "", "unknown"):
+            for result, cpp, enabled, qualification in (
+                    ("success", "true", "true", "false"),
+                    ("success", "false", "true", "false"),
+                    ("skipped", "false", "false", "false"),
+                    ("success", "true", "true", "true")):
+                with self.subTest(classification=classification, result=result,
+                                  cpp=cpp, enabled=enabled, qualification=qualification):
+                    with self.assertRaisesRegex(ValueError, "classification"):
+                        shards.gate(result, cpp, "false", "workflow_dispatch", "",
+                                    qualification, enabled, classification)
+
     def test_gate_all_results_cancellation_drafts_and_explicit_routes(self):
         for result in ("success", "failure", "cancelled", "skipped", "", "unknown"):
             for cancelled in ("false", "true", ""):
@@ -839,17 +874,17 @@ class CTestShardTests(unittest.TestCase):
                         accepted = result == "success" and cancelled == draft == "false"
                         with self.subTest(result=result, cancelled=cancelled, draft=draft, cpp=cpp):
                             if accepted:
-                                self.assertEqual(shards.gate(result, cpp, cancelled, "pull_request", draft, "false", "true"),
+                                self.assertEqual(shards.gate(result, cpp, cancelled, "pull_request", draft, "false", "true", "success"),
                                                  "python-only" if cpp == "false" else "sharded")
                             else:
                                 with self.assertRaises(ValueError):
-                                    shards.gate(result, cpp, cancelled, "pull_request", draft, "false", "true")
-        self.assertEqual(shards.gate("success", "true", "false", "workflow_dispatch", "", "true", "true"), "full")
-        self.assertEqual(shards.gate("skipped", "true", "false", "push", "", "false", "false"), "skipped")
+                                    shards.gate(result, cpp, cancelled, "pull_request", draft, "false", "true", "success")
+        self.assertEqual(shards.gate("success", "true", "false", "workflow_dispatch", "", "true", "true", "success"), "full")
+        self.assertEqual(shards.gate("skipped", "true", "false", "push", "", "false", "false", "success"), "skipped")
         with self.assertRaises(ValueError):
-            shards.gate("success", "false", "false", "workflow_dispatch", "", "true", "true")
+            shards.gate("success", "false", "false", "workflow_dispatch", "", "true", "true", "success")
         with self.assertRaises(ValueError):
-            shards.gate("skipped", "false", "true", "push", "", "false", "false")
+            shards.gate("skipped", "false", "true", "push", "", "false", "false", "success")
 
 
 if __name__ == "__main__":
