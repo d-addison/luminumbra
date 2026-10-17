@@ -367,7 +367,12 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
 
 bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
                                  const std::filesystem::path& destination,
-                                 std::vector<std::string>* errors) {
+                                 std::vector<std::string>* errors,
+                                 CreatedWorldArtifacts* artifacts = nullptr) {
+    if (artifacts) {
+        artifacts->publish_file(temp, destination);
+        return true;
+    }
     const DWORD attributes = ::GetFileAttributesW(destination.c_str());
     if (attributes != INVALID_FILE_ATTRIBUTES) {
         if (::ReplaceFileW(destination.c_str(),
@@ -491,11 +496,14 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
 
 bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
                                  const std::filesystem::path& destination,
-                                 std::vector<std::string>* errors) {
+                                 std::vector<std::string>* errors,
+                                 CreatedWorldArtifacts* artifacts = nullptr) {
     // POSIX rename replaces an existing same-filesystem destination atomically.
     // LMR1 staging is beside the live file; ledger staging is in the save root,
     // outside the chunks scan. A cross-filesystem rename fails without replacing.
-    if (std::rename(temp.c_str(), destination.c_str()) != 0) {
+    if (artifacts) {
+        artifacts->publish_file(temp, destination);
+    } else if (std::rename(temp.c_str(), destination.c_str()) != 0) {
         const int error = errno;
         AddError(errors,
                  "failed to atomically replace region file: " + destination.string() + ": " +
@@ -911,9 +919,7 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
         AddError(errors, "interrupted before metadata replacement");
         return false;
     }
-    if (artifacts)
-        artifacts->publishing_file(temp, destination);
-    if (!ReplaceRegionFileAtomically(temp, destination, errors)) {
+    if (!ReplaceRegionFileAtomically(temp, destination, errors, artifacts)) {
         RemoveTemporaryFile(temp, artifacts);
         return false;
     }
@@ -1144,9 +1150,7 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
             AddError(errors, "interrupted before active-region ledger replacement");
             return false;
         }
-        if (artifacts)
-            artifacts->publishing_file(temp, path);
-        if (!ReplaceRegionFileAtomically(temp, path, errors)) {
+        if (!ReplaceRegionFileAtomically(temp, path, errors, artifacts)) {
             RemoveTemporaryFile(temp, artifacts);
             return false;
         }
@@ -1456,9 +1460,7 @@ bool WorldSaveService::write_file_durably(const std::filesystem::path& destinati
                      destination.string());
         return false;
     }
-    if (artifacts)
-        artifacts->publishing_file(temp_path, destination);
-    if (!ReplaceRegionFileAtomically(temp_path, destination, errors)) {
+    if (!ReplaceRegionFileAtomically(temp_path, destination, errors, artifacts)) {
         RemoveTemporaryFile(temp_path, artifacts);
         return false;
     }

@@ -1,3 +1,4 @@
+#include "../support/WorldgenTestData.h"
 #include "luminumbra_client/world/WorldEntry.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/persistence/CreatedWorldArtifacts.h"
@@ -242,6 +243,7 @@ protected:
                 break;
             }
         }
+        Luminumbra::TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, root);
     }
     void TearDown() override {
         std::error_code error;

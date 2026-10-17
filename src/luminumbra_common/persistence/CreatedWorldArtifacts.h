@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ExclusiveRename.h"
+
 #include <array>
 #include <atomic>
 #include <bit>
@@ -80,10 +82,10 @@ public:
         artifact.identity = identity_from(file);
     }
 
-    // Reserve the destination's identity before rename: a successful rename
-    // keeps the temporary object's identity, even if the later directory flush fails.
-    void publishing_file(const std::filesystem::path& temp,
-                         const std::filesystem::path& destination) {
+    // Record identity before exclusive publication, so rollback also owns the
+    // destination if a later directory flush fails. A racing occupant is never
+    // replaced, even after validation has observed a vacant destination.
+    void publish_file(const std::filesystem::path& temp, const std::filesystem::path& destination) {
         const auto& source = find_artifact(temp);
         auto& target = find_artifact(destination);
         validate_parents(source);
@@ -92,6 +94,17 @@ public:
             std::filesystem::exists(std::filesystem::symlink_status(target.path)))
             throw std::runtime_error("Refusing to replace a world artifact destination.");
         target.identity = source.identity;
+#if defined(_WIN32)
+        if (!::MoveFileExW(temp.c_str(), destination.c_str(), MOVEFILE_WRITE_THROUGH))
+            throw std::system_error(static_cast<int>(::GetLastError()),
+                                    std::system_category(),
+                                    "Could not exclusively publish world artifact");
+#else
+        if (Detail::RenameWithoutReplacement(
+                AT_FDCWD, temp.c_str(), AT_FDCWD, destination.c_str()) != 0)
+            throw std::system_error(
+                errno, std::generic_category(), "Could not exclusively publish world artifact");
+#endif
     }
 
     // Exclusively create a file and record its identity before the first byte.
@@ -362,18 +375,8 @@ private:
                 errno, std::generic_category(), "Could not bind staged world directory");
         recorded.identity = identity_from(directory.get());
         validate(recorded);
-#if defined(__linux__)
-        const auto result = ::renameat2(
-            AT_FDCWD, recorded.path.c_str(), AT_FDCWD, destination.c_str(), RENAME_NOREPLACE);
-#elif defined(__APPLE__)
-        const auto result = ::renameatx_np(
-            AT_FDCWD, recorded.path.c_str(), AT_FDCWD, destination.c_str(), RENAME_EXCL);
-#else
-        // No portable exclusive directory rename: retain the identified stage
-        // for rollback rather than overwrite an unrelated destination.
-        errno = ENOTSUP;
-        const auto result = -1;
-#endif
+        const auto result = Detail::RenameWithoutReplacement(
+            AT_FDCWD, recorded.path.c_str(), AT_FDCWD, destination.c_str());
         if (result != 0)
             throw std::system_error(
                 errno, std::generic_category(), "Could not publish world directory");
@@ -387,21 +390,9 @@ private:
 
 #if !defined(_WIN32)
     // Restoring a quarantined entry must not overwrite a second replacement.
-#if defined(__linux__) || defined(__APPLE__)
     static int restore_quarantined(int from, int to, const char* name) {
-#if defined(__linux__)
-        return ::renameat2(from, "artifact", to, name, RENAME_NOREPLACE);
-#else
-        return ::renameatx_np(from, "artifact", to, name, RENAME_EXCL);
-#endif
+        return Detail::RenameWithoutReplacement(from, "artifact", to, name);
     }
-#else
-    static int restore_quarantined(int, int, const char*) {
-        // Keep the entry quarantined on platforms without exclusive rename.
-        errno = ENOTSUP;
-        return -1;
-    }
-#endif
 #endif
 
 #if !defined(_WIN32)
