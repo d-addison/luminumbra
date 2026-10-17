@@ -591,6 +591,58 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         self.assertEqual(len(set(comments.values())), 1, comments)
 
 
+class WorkflowCacheCleanupPolicyTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.workflow = (ROOT / ".github/workflows/cache-cleanup.yml").read_text(encoding="utf-8")
+
+    def test_only_cache_writer_completions_trigger_serialized_cleanup(self):
+        triggers = self.workflow.split("\non:\n", 1)[1].split("\npermissions:\n", 1)[0]
+        events = "\n".join(line for line in triggers.splitlines() if not line.lstrip().startswith("#"))
+        self.assertEqual(events.strip(),
+                         "workflow_run:\n"
+                         "    workflows: [CI, AddressSanitizer, Performance observations]\n"
+                         "    types: [completed]")
+        self.assertEqual(value(self.workflow, "group", 2), "cache-cleanup")
+        self.assertEqual(value(self.workflow, "cancel-in-progress", 2), "false")
+
+    def test_completion_list_covers_every_cache_saving_workflow(self):
+        writers = set()
+        for path in (ROOT / ".github/workflows").glob("*.yml"):
+            workflow = path.read_text(encoding="utf-8")
+            # Include combined restore/save actions and action-managed package
+            # caches as well as explicit save steps, across every platform lane.
+            saves = re.search(r"^\s+(?:- )?uses: actions/cache(?:/save)?@", workflow, re.MULTILINE)
+            package_cache = any(
+                setting.strip() != "false"
+                for setting in re.findall(r"^\s+cache: ([^\n#]+)", workflow, re.MULTILINE)
+            )
+            if saves or package_cache:
+                writers.add(value(workflow, "name", 0))
+        self.assertEqual(writers, {"CI", "AddressSanitizer", "Performance observations"})
+        completions = value(self.workflow, "workflows", 4).strip("[]").split(", ")
+        self.assertEqual(set(completions), writers)
+
+    def test_cleanup_filter_accepts_only_main_and_devel_push_completions(self):
+        expression = value(jobs(self.workflow)["cleanup"], "if", 4)
+        for event in ("workflow_run", "push", "pull_request", "workflow_dispatch"):
+            for source_event in ("push", "pull_request", "schedule", "workflow_dispatch"):
+                for branch in ("main", "devel", "feature"):
+                    for ref in ("refs/heads/main", "refs/heads/devel", "refs/heads/feature"):
+                        actual = expression
+                        for key, replacement in (
+                            ("github.event.workflow_run.head_branch", branch),
+                            ("github.event.workflow_run.event", source_event),
+                            ("github.event_name", event), ("github.ref", ref),
+                        ):
+                            actual = actual.replace(key, repr(replacement))
+                        actual = actual.replace("&&", "and").replace("||", "or")
+                        expected = (event == "workflow_run" and source_event == "push"
+                                    and branch in ("main", "devel"))
+                        with self.subTest(event=event, source_event=source_event, branch=branch, ref=ref):
+                            self.assertEqual(eval(actual, {"__builtins__": {}}), expected)
+
+
 class WorkflowAttributionPolicyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

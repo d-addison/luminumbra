@@ -270,6 +270,7 @@ jobs:
           done
           python3 tools/ci/asan_shards.py merge --directory build/asan-shards --output build/debug-asan/ctest.junit.xml
           # Keep devel's inventory floor on the verified union of both shards.
+          # Require each developer target explicitly; total-count margin cannot hide one.
           python3 tools/ci/check_ctest_junit.py build/debug-asan/ctest.junit.xml --minimum-tests 2320 --require-test ConsoleFixture.CompleteInventoryDefaultsBindingsAndUnavailableRows --require-test UiFixture.DefaultPassiveHudRendersWithoutShellOrFocusAndCanBeDisabled --require-test DeveloperPersistence.DirectConstructionMatchesFactoryDefaultsAndInitializesRecords
           # This lane must exercise the unpadded guard-page probe at the expected active ISA.
           python3 tools/ci/compare_ambient_receipts.py asan=build/debug-asan/ctest.junit.xml \
