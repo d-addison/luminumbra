@@ -565,6 +565,19 @@ bool SHIELD_WorldSystem::generation_batch_outstanding() const {
     return !m_streaming_state.generation_batches.empty();
 }
 
+std::size_t SHIELD_WorldSystem::pending_publication_chunks() const {
+    std::size_t pending = m_streaming_state.promotion_job_chunks.size() +
+                          m_streaming_state.pending_promotion_mesh.size();
+    // Streaming updates bound FIFO depths to kMaxGenerationBatchesInFlight (3)
+    // and kMaxMeshingBatchesInFlight (9); boot generation callers drain explicitly.
+    // No per-chunk scan or worker-counter read.
+    for (const auto& batch : m_streaming_state.generation_batches)
+        pending += batch.chunks.size();
+    for (const auto& batch : m_streaming_state.meshing_batches)
+        pending += batch.chunks.size();
+    return pending;
+}
+
 bool SHIELD_WorldSystem::sim_available_lod0(const ::Luminumbra::Chunk& chunk) {
     // Barrier-era definition: the LOD0 render mesh has published. The
     // activation queue redefines this to tick-keyed availability at the
@@ -871,14 +884,15 @@ void SHIELD_WorldSystem::process_completed_promotion_jobs(bool force) {
     }
 }
 
-void SHIELD_WorldSystem::dispatch_promotion_jobs(
-    const std::vector<MeshingWorkItem>& chunks_to_promote, std::int64_t due_tick) {
+std::size_t
+SHIELD_WorldSystem::dispatch_promotion_jobs(const std::vector<MeshingWorkItem>& chunks_to_promote,
+                                            std::int64_t due_tick) {
     process_completed_promotion_jobs(/*force=*/false);
     if (promotion_jobs_active()) {
         // One promotion batch in flight at a time (the meshing lane's
         // semantics); refused items re-candidate on a later pass, exactly as
         // a refused meshing dispatch would.
-        return;
+        return 0;
     }
 
     std::vector<Luminumbra::Job> high_priority_jobs;
@@ -959,6 +973,7 @@ void SHIELD_WorldSystem::dispatch_promotion_jobs(
         }
         process_completed_promotion_jobs(/*force=*/true);
     }
+    return chunks_to_promote.size();
 }
 
 void SHIELD_WorldSystem::reinitialize_noise(const TerrainGenParams* params,
@@ -3032,9 +3047,6 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
                                  activation_ran_this_tick || !m_last_pass_drained;
     m_last_anchor_positions = anchor_positions;
     m_last_chunk_count = m_streaming_state.chunks.size();
-    // Hoisted out of the gated block: the queue-depth telemetry below (after the gate) reads it.
-    // Recomputed FRESH inside every non-elided pass (never a stale cross-frame dispatch input).
-    std::size_t terrain_meshing_backlog = 0;
     if (streaming_dirty) {
         // Snapshot meshed-chunk LODs per horizontal column so the candidate loop
         // below can cheaply detect coarse chunks whose transition skirts went
@@ -3095,6 +3107,17 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
                 0, 1, Luminumbra::World::MarchingCubes::TransitionFaceMaxZ);
             return required;
         };
+
+        // At most one capped scheduler prefix: map only retained descriptors,
+        // then mark membership during the existing candidate scan. Old requests
+        // can remain valid even after anchor motion removes them from candidates.
+        std::unordered_map<ChunkID, std::size_t> deferred_indices;
+        deferred_indices.reserve(m_deferred_meshing.size() - m_deferred_meshing_cursor);
+        for (std::size_t index = m_deferred_meshing_cursor; index < m_deferred_meshing.size();
+             ++index) {
+            m_deferred_meshing[index].current_candidate = false;
+            deferred_indices.emplace(m_deferred_meshing[index].chunk->get_id(), index);
+        }
 
         // Chunk state logging removed from hot path - too expensive
 
@@ -3163,6 +3186,11 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
             }
 
             if (needs_meshing) {
+                const auto retained = deferred_indices.find(chunk_ptr->get_id());
+                if (retained != deferred_indices.end() &&
+                    m_deferred_meshing[retained->second].chunk == chunk_ptr) {
+                    m_deferred_meshing[retained->second].current_candidate = true;
+                }
                 const Vec3 chunk_center = (Vec3(chunk_ptr->get_coords()) + 0.5f) *
                                           Vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
                 if (required_lod == -1) {
@@ -3210,7 +3238,7 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
         }
 
         m_last_streaming_budget_stats.meshing_candidates = meshing_candidates.size();
-        terrain_meshing_backlog = 0;
+        std::size_t terrain_meshing_backlog = 0;
         for (const MeshingCandidate& candidate : meshing_candidates) {
             if (candidate.terrain_mesh_required) {
                 ++terrain_meshing_backlog;
@@ -3298,10 +3326,11 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
                 m_current_sim_tick >= 0 ? m_current_sim_tick + kActivationPipelineLatencyTicks : -1;
         }
         if (deferred_meshing_pending() && !meshing_job_active) {
-            const auto admitted = dispatch_deferred_meshing();
-            m_last_streaming_budget_stats.scheduled_meshing = admitted;
+            const auto result = dispatch_deferred_meshing();
+            m_last_streaming_budget_stats.scheduled_meshing = result.admitted;
+            m_last_streaming_budget_stats.submitted_meshing = result.submitted_candidates;
             m_last_streaming_budget_stats.deferred_meshing =
-                meshing_candidates.size() - std::min(meshing_candidates.size(), admitted);
+                meshing_candidates.size() - result.submitted_candidates;
         }
 
         // Post-pass QUIESCENCE test (decides whether a FUTURE tick may elide — NOT whether THIS
@@ -3384,8 +3413,22 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
         }
     }
 
-    const std::size_t queue_depth =
-        m_last_streaming_budget_stats.loading_chunks + terrain_meshing_backlog;
+    // Pending items leave the candidate set at dispatch, even when their
+    // active mesh keeps them Ready. Count them through publication, plus
+    // candidates not submitted this frame (including a backpressured lane).
+    // Retained requests outside this scan still own future work. The suffix is
+    // bounded by the existing scheduler prefix, never by the resident world.
+    const auto retained_non_candidates = static_cast<std::size_t>(std::count_if(
+        m_deferred_meshing.begin() + static_cast<std::ptrdiff_t>(m_deferred_meshing_cursor),
+        m_deferred_meshing.end(),
+        [](const MeshingWorkItem& item) { return !item.current_candidate; }));
+    m_last_streaming_budget_stats.deferred_meshing =
+        m_last_streaming_budget_stats.meshing_candidates -
+        m_last_streaming_budget_stats.submitted_meshing + retained_non_candidates;
+    const std::size_t queue_depth = pending_publication_chunks() + retained_non_candidates +
+                                    m_deferred_generation_candidates +
+                                    (m_last_streaming_budget_stats.meshing_candidates -
+                                     m_last_streaming_budget_stats.submitted_meshing);
     ++m_streaming_telemetry_stats.frames_observed;
     m_streaming_telemetry_stats.last_queue_depth = queue_depth;
     m_streaming_telemetry_stats.peak_queue_depth =
@@ -3725,6 +3768,7 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
 
     m_last_streaming_budget_stats.scheduled_generation = generate_now.size();
     m_last_streaming_budget_stats.deferred_generation = to_create.size() - generate_now.size();
+    m_deferred_generation_candidates = m_last_streaming_budget_stats.deferred_generation;
     if (!generate_now.empty()) {
         dispatch_generation_jobs(generate_now);
         for (const ChunkGenerationRequest& request : generate_now) {
@@ -4674,6 +4718,7 @@ std::vector<Luminumbra::Chunk*> SHIELD_WorldSystem::get_renderable_chunks() {
 
     // Performance logging removed from hot path - use profiler instead
 
+    m_snapshot_copies.fetch_add(renderable.size(), std::memory_order_relaxed);
     return renderable;
 }
 
@@ -5210,7 +5255,7 @@ bool SHIELD_WorldSystem::deferred_meshing_pending() const {
     return m_deferred_meshing_cursor < m_deferred_meshing.size();
 }
 
-std::size_t SHIELD_WorldSystem::dispatch_deferred_meshing() {
+SHIELD_WorldSystem::MeshingDispatchResult SHIELD_WorldSystem::dispatch_deferred_meshing() {
     const auto result = dispatch_meshing_jobs(
         std::span<const MeshingWorkItem>(m_deferred_meshing).subspan(m_deferred_meshing_cursor),
         m_deferred_meshing_due_tick);
@@ -5220,7 +5265,7 @@ std::size_t SHIELD_WorldSystem::dispatch_deferred_meshing() {
         m_deferred_meshing_cursor = 0;
         m_deferred_meshing_due_tick = -1;
     }
-    return result.admitted;
+    return result;
 }
 
 SHIELD_WorldSystem::MeshingDispatchResult
@@ -5304,11 +5349,14 @@ SHIELD_WorldSystem::dispatch_meshing_jobs(std::span<const MeshingWorkItem> chunk
     // items re-candidate on a later pass — the meshing lane's semantics.
     std::size_t admitted_promotions = 0;
     if (!promotion_items.empty() && !promotion_pipeline_pending()) {
-        dispatch_promotion_jobs(promotion_items, due_tick);
-        admitted_promotions = promotion_items.size();
+        admitted_promotions = dispatch_promotion_jobs(promotion_items, due_tick);
     }
     if (mesh_items.empty()) {
-        return {admitted_promotions, consumed};
+        const auto submitted = static_cast<std::size_t>(std::count_if(
+            promotion_items.begin(), promotion_items.end(), [](const MeshingWorkItem& item) {
+                return item.current_candidate;
+            }));
+        return {admitted_promotions, consumed, admitted_promotions == 0 ? 0 : submitted};
     }
 
     // Transition masks travel with the finite scheduler prefix. Subpasses
@@ -5475,7 +5523,16 @@ SHIELD_WorldSystem::dispatch_meshing_jobs(std::span<const MeshingWorkItem> chunk
         m_streaming_state.meshing_batches.push_back(std::move(mesh_batch));
         process_completed_meshing_jobs(/*force=*/true);
     }
-    return {admitted_promotions + mesh_items.size(), consumed};
+    const auto candidate_count = [](const std::vector<MeshingWorkItem>& items) {
+        return static_cast<std::size_t>(
+            std::count_if(items.begin(), items.end(), [](const MeshingWorkItem& item) {
+                return item.current_candidate;
+            }));
+    };
+    return {admitted_promotions + mesh_items.size(),
+            consumed,
+            candidate_count(mesh_items) +
+                (admitted_promotions == 0 ? 0 : candidate_count(promotion_items))};
 }
 
 bool SHIELD_WorldSystem::publish_front_meshing_batch(bool force) {
@@ -5618,6 +5675,7 @@ void SHIELD_WorldSystem::clear_world(PhysicsSystem* physics_system) {
         }
     }
     m_streaming_state.chunks.clear();
+    m_deferred_generation_candidates = 0;
     m_shadow_generation_dispatch_tick.clear();
     m_shadow_promotion_dispatch_tick.clear();
     LUMINUMBRA_CORE_INFO("World cleared.");
@@ -5680,6 +5738,7 @@ SHIELD_WorldSystem::snapshot_streamed_chunks() const {
             chunks.push_back(chunk_ptr);
         }
     }
+    m_snapshot_copies.fetch_add(chunks.size(), std::memory_order_relaxed);
     return chunks;
 }
 

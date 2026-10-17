@@ -299,6 +299,9 @@ public:
         std::size_t deferred_generation = 0;
         std::size_t meshing_candidates = 0;
         std::size_t scheduled_meshing = 0;
+        // Accepted items matching this update's current candidates, excluding
+        // promotion refusals and stage-B dispatches from earlier selections.
+        std::size_t submitted_meshing = 0;
         std::size_t deferred_meshing = 0;
         std::size_t unloaded_chunks = 0;
         bool generation_job_active = false;
@@ -331,6 +334,9 @@ public:
     };
 
     struct StreamingTelemetryStats {
+        // Queue depths include all unpublished generation/promotion/mesh items
+        // and unsubmitted candidates, including retained scheduler descriptors
+        // outside the current candidate scan.
         std::size_t peak_queue_depth = 0;
         std::size_t peak_meshing_candidates = 0;
         std::size_t cumulative_scheduled_meshing = 0;
@@ -669,6 +675,10 @@ public:
     const StreamingTelemetryStats& get_streaming_telemetry_stats() const {
         return m_streaming_telemetry_stats;
     }
+    // Owner-thread diagnostic: dispatched chunk items awaiting publication,
+    // including Ready remeshes and either promotion stage. Worker completion
+    // does not reduce this count; only publication or pipeline retirement does.
+    [[nodiscard]] std::size_t pending_publication_chunks() const;
     const std::vector<ChunkLOD>& get_lod_levels() const {
         return m_lod_levels;
     }
@@ -894,6 +904,11 @@ public:
     ActivationShadowReport activation_shadow_report() const;
     // Shared-ownership snapshot of every streamed chunk (save path).
     std::vector<std::shared_ptr<::Luminumbra::Chunk>> snapshot_streamed_chunks() const;
+    // Lifetime count of pointer entries copied by streamed/renderable snapshots.
+    // Const diagnostic only; relaxed atomic supports concurrent diagnostic reads.
+    [[nodiscard]] std::uint64_t snapshot_copies() const {
+        return m_snapshot_copies.load(std::memory_order_relaxed);
+    }
     // Owner-thread capture for a 32x32 chunk far region plus a one-chunk X/Z
     // halo. Only exact full SDF lattices are copied into the immutable result.
     std::shared_ptr<const FarLodSdfSnapshot> capture_far_lod_sdf_snapshot(i32 rx, i32 rz) const;
@@ -1007,6 +1022,7 @@ private:
     StreamingBudgetFrameStats m_last_streaming_budget_stats;
     std::size_t m_last_meshing_snapshot_bytes = 0;
     bool m_meshing_snapshot_pass_active = false;
+    mutable std::atomic<std::uint64_t> m_snapshot_copies{0};
     // debug_set_streaming_radius_cap: 0 = uncapped (production behaviour).
     int m_streaming_radius_cap = 0;
     DbgStreamTimings m_dbg_stream; // runtime telemetry
@@ -1045,6 +1061,9 @@ private:
     std::uint64_t m_last_activation_dirty_generation = 0;
     std::size_t m_last_activation_pending =
         0; // scheduled_generation + deferred_generation last pass
+    // Outstanding candidates survive frames between activation passes; the
+    // per-frame generation counters reset even when activation does not run.
+    std::size_t m_deferred_generation_candidates = 0;
     std::size_t m_last_chunk_count = 0;
     bool m_last_pass_drained = false; // sticky: false forces the next tick's candidate pass to run
 
@@ -1118,10 +1137,13 @@ private:
         // MAX_HIGH_PRIORITY_MESHING_JOBS_PER_DISPATCH in the.cpp).
         bool high_priority = false;
         u8 transition_faces = 0;
+        // Owner-thread diagnostic membership in the latest candidate scan.
+        bool current_candidate = true;
     };
     struct MeshingDispatchResult {
         std::size_t admitted = 0;
         std::size_t consumed = 0;
+        std::size_t submitted_candidates = 0;
     };
     // At most one scheduler prefix (4 * MAX_CHUNKS_TO_PROCESS_PER_FRAME). Only
     // descriptors are retained: mutable chunk buffers are copied at admission.
@@ -1129,8 +1151,8 @@ private:
     std::size_t m_deferred_meshing_cursor = 0;
     std::int64_t m_deferred_meshing_due_tick = -1;
     bool deferred_meshing_pending() const;
-    std::size_t dispatch_deferred_meshing();
-    // Returns the admitted prefix count for streaming-budget telemetry.
+    MeshingDispatchResult dispatch_deferred_meshing();
+    // Returns consumed and admitted counts, including current-candidate admissions.
     MeshingDispatchResult dispatch_meshing_jobs(std::span<const MeshingWorkItem> chunks_to_mesh,
                                                 std::int64_t due_tick);
     void process_completed_meshing_jobs(bool force);
@@ -1141,8 +1163,8 @@ private:
     // thread and dispatches stage B. promotion_pipeline_pending covers the
     // whole pipeline (jobs in flight OR unpublished results OR stage B not yet
     // dispatched) for the scheduling gates that today read meshing activity.
-    void dispatch_promotion_jobs(const std::vector<MeshingWorkItem>& chunks_to_promote,
-                                 std::int64_t due_tick);
+    std::size_t dispatch_promotion_jobs(const std::vector<MeshingWorkItem>& chunks_to_promote,
+                                        std::int64_t due_tick);
     void process_completed_promotion_jobs(bool force);
     // MAIN-THREAD generation publication — flips completed
     // (pending_generation_ready) batch chunks Loading→Idle and clears the

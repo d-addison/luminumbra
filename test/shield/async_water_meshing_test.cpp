@@ -1427,4 +1427,56 @@ TEST(AsyncWaterMeshing, SnapshotByteBudgetAdmitsExactFitAndEmptySnapshot) {
         EXPECT_EQ(world.last_meshing_snapshot_bytes(), sizeof(float));
     }
 }
+
+TEST(AsyncWaterMeshing, DeferredAdmissionsCountOnlyCurrentCandidatesWithoutLosingBacklog) {
+    JobSystem jobs;
+    jobs.startup(1);
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.base_amplitude = 0.0f;
+    params.height_offset = 8.0f;
+    params.caves_enabled = false;
+    SHIELD_WorldSystem world(&jobs, nullptr, params, 1337);
+    WaterSystem water(&jobs, &world);
+    water.SetBootPaused(true);
+    world.SetWaterSystem(&water);
+    BudgetedBurstMeshes burst;
+    PrepareBudgetedBurst(world, water, false, burst);
+    entt::registry registry;
+    world.begin_tick(1);
+    world.update(registry, std::vector<Vec3>{}, nullptr);
+    ASSERT_GT(world.get_last_streaming_budget_stats().scheduled_meshing, 0u);
+    ASSERT_GT(world.get_last_streaming_budget_stats().deferred_meshing, 0u);
+    world.quiesce_streaming_jobs_for_save();
+
+    // Simulate another public producer satisfying the deferred chunks. Their
+    // retained descriptors still own a remesh, but no longer match candidates.
+    for (std::size_t index = 0; index < burst.chunks.size(); ++index) {
+        auto& chunk = *burst.chunks[index];
+        if (chunk.pending_lod.load() >= 0)
+            continue;
+        chunk.mesh_vertices = burst.expected[index]->mesh_vertices;
+        chunk.mesh_indices = burst.expected[index]->mesh_indices;
+        chunk.current_lod.store(0);
+        chunk.water_mesh_generated.store(true);
+        chunk.set_state(ChunkState::Ready);
+    }
+    auto extra = std::make_shared<Chunk>(IVec3(3, 0, 0));
+    FillDugPond(world, *extra, 32);
+    ASSERT_TRUE(world.adopt_streamed_chunk(extra));
+    world.begin_tick(2);
+    world.update(registry, std::vector<Vec3>{}, nullptr);
+    const auto& frame = world.get_last_streaming_budget_stats();
+    EXPECT_EQ(frame.meshing_candidates, 1u);
+    EXPECT_GT(frame.scheduled_meshing, 1u);
+    EXPECT_EQ(frame.submitted_meshing, 0u);
+    EXPECT_EQ(extra->pending_lod.load(), -1);
+    EXPECT_EQ(world.get_streaming_telemetry_stats().last_queue_depth, kBurstChunks + 1u);
+    EXPECT_EQ(frame.deferred_meshing + world.pending_publication_chunks(), kBurstChunks + 1u);
+    world.wait_for_streaming_jobs();
+    for (const auto& chunk : burst.chunks) {
+        EXPECT_EQ(chunk->pending_lod.load(), -1);
+        EXPECT_EQ(chunk->current_lod.load(), 0);
+        EXPECT_EQ(chunk->get_state(), ChunkState::Ready);
+    }
+}
 } // namespace
