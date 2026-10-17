@@ -186,6 +186,11 @@ public:
     uint32_t add_emitter(const std::filesystem::path& json_path, const glm::vec3& world_origin);
     void clear_emitters();
 
+    // The pass owns this cached emitter so every clear also invalidates it.
+    // Repeated updates recenter it in constant time; failed loads can be retried.
+    void update_ambient_motes(const std::filesystem::path& root_path,
+                              const glm::vec3& camera_position);
+
     //  RE-CENTER an existing emitter's spawn region on a
     // new base origin (render-only). `base_origin` is the same un-offset world
     // anchor that add_emitter takes -- the emitter's data.origin (e.g. the rain
@@ -310,6 +315,7 @@ private:
     // Per-frame instance count actually written to the mapping.
     std::size_t m_frame_instance_count = 0;
     uint32_t m_next_emitter_id = 0;
+    std::size_t m_ambient_emitter_index = kMaxEmitters;
     std::array<uint32_t, 2> m_precip_emitters{kInvalidEmitter, kInvalidEmitter};
     std::array<bool, 2> m_precip_load_attempted{};
 

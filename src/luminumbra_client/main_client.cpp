@@ -5149,15 +5149,7 @@ int main(int argc, char* argv[]) {
                     // each frame so the motes are always present as you explore.
                     {
                         if (auto* particles = renderPipeline.particles()) {
-                            if (g_app.foliage.ambientMotes ==
-                                Luminumbra::Rendering::ParticlePass::kInvalidEmitter) {
-                                g_app.foliage.ambientMotes = particles->add_emitter(
-                                    root_dir / "data/common/particles/ambient_motes.json",
-                                    g_camera->Position);
-                            } else {
-                                particles->set_emitter_origin(g_app.foliage.ambientMotes,
-                                                              g_camera->Position);
-                            }
+                            particles->update_ambient_motes(root_dir, g_camera->Position);
                         }
                     }
                     //  re-bake the LIVE sim plant roster each frame so player-seeded
