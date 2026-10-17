@@ -1366,6 +1366,62 @@ TEST(CreaturePersistence, ParserBudgetsRefuseLargeCollectionsBeforeMaterializing
     refuse(std::string(33, '[') + "0" + std::string(33, ']'), "nesting limit");
 }
 
+void CheckMaximumWaypointBudget(const A::CreatureRecord& input_prototype,
+                                bool stamped,
+                                std::size_t count) {
+    SCOPED_TRACE(stamped);
+    SCOPED_TRACE(count);
+    A::CreatureSnapshot snapshot;
+    snapshot.entities.reserve(count);
+    std::string bytes = "{\"entities\":[";
+    for (std::size_t i = 1; i <= count; ++i) {
+        auto record = input_prototype;
+        record.id = i;
+        record.components["Region"]["data"]["persistent_id"] = i;
+        if (i != 1)
+            bytes += ',';
+        bytes += nlohmann::json{{"id", i}, {"components", record.components}}.dump();
+        snapshot.entities.push_back(std::move(record));
+    }
+    bytes += "],\"schema\":\"";
+    bytes += A::kCreatureSchema;
+    bytes += "\"}\n";
+    EXPECT_LT(bytes.size(), 23u * 1024u * 1024u);
+    ASSERT_LT(bytes.size(), A::kMaxCreatureBytes);
+    const auto total_nodes = 5 + count * (stamped ? 1405 : 1397);
+    const bool fits = count == 3000;
+    EXPECT_EQ(total_nodes <= A::CreatureNodeLimit(count, stamped ? count * 8 : 0), fits);
+    if (fits) {
+        EXPECT_NO_THROW(A::SerializeCreatureSnapshot(snapshot));
+    } else {
+        EXPECT_THROW(A::SerializeCreatureSnapshot(snapshot), std::invalid_argument);
+    }
+    snapshot.entities.clear();
+    snapshot.entities.shrink_to_fit();
+    A::CreatureSnapshot loaded;
+    std::string error;
+    if (fits) {
+        ASSERT_TRUE(A::LoadCreatureSnapshot(bytes, loaded, error)) << error;
+        ASSERT_EQ(loaded.entities.size(), count);
+        for (std::size_t i = 0; i < loaded.entities.size(); ++i) {
+            const auto& record = loaded.entities[i];
+            EXPECT_EQ(record.id, i + 1);
+            EXPECT_EQ(record.components["LocomotionPath"]["data"]["waypoints"].size(),
+                      A::kMaxCreatureVector);
+            EXPECT_EQ(record.components["Controller"]["data"]["physics_controlled"], false);
+        }
+        const auto saved = A::SerializeCreatureSnapshot(loaded);
+        EXPECT_EQ(saved.size(), bytes.size() + (stamped ? 0 : count * 63));
+        if (stamped) {
+            EXPECT_EQ(saved, bytes);
+        }
+    } else {
+        EXPECT_FALSE(A::LoadCreatureSnapshot(bytes, loaded, error));
+        EXPECT_NE(error.find("creature node limit"), std::string::npos) << error;
+        EXPECT_TRUE(loaded.entities.empty());
+    }
+}
+
 TEST(CreaturePersistence, MaximumWaypointVectorsKeepTheLegacyNodeBudget) {
     entt::registry registry;
     const auto e = Creature(registry, 1);
@@ -1394,57 +1450,7 @@ TEST(CreaturePersistence, MaximumWaypointVectorsKeepTheLegacyNodeBudget) {
         if (!stamped)
             input_prototype.components.erase("Controller");
         for (const std::size_t count : {3000u, 3003u, 3200u}) {
-            SCOPED_TRACE(stamped);
-            SCOPED_TRACE(count);
-            A::CreatureSnapshot snapshot;
-            snapshot.entities.reserve(count);
-            std::string bytes = "{\"entities\":[";
-            for (std::size_t i = 1; i <= count; ++i) {
-                auto record = input_prototype;
-                record.id = i;
-                record.components["Region"]["data"]["persistent_id"] = i;
-                if (i != 1)
-                    bytes += ',';
-                bytes += nlohmann::json{{"id", i}, {"components", record.components}}.dump();
-                snapshot.entities.push_back(std::move(record));
-            }
-            bytes += "],\"schema\":\"";
-            bytes += A::kCreatureSchema;
-            bytes += "\"}\n";
-            EXPECT_LT(bytes.size(), 23u * 1024u * 1024u);
-            ASSERT_LT(bytes.size(), A::kMaxCreatureBytes);
-            const auto total_nodes = 5 + count * (stamped ? 1405 : 1397);
-            const bool fits = count == 3000;
-            EXPECT_EQ(total_nodes <= A::CreatureNodeLimit(count, stamped ? count * 8 : 0), fits);
-            if (fits) {
-                EXPECT_NO_THROW(A::SerializeCreatureSnapshot(snapshot));
-            } else {
-                EXPECT_THROW(A::SerializeCreatureSnapshot(snapshot), std::invalid_argument);
-            }
-            snapshot.entities.clear();
-            snapshot.entities.shrink_to_fit();
-            A::CreatureSnapshot loaded;
-            std::string error;
-            if (fits) {
-                ASSERT_TRUE(A::LoadCreatureSnapshot(bytes, loaded, error)) << error;
-                ASSERT_EQ(loaded.entities.size(), count);
-                for (std::size_t i = 0; i < loaded.entities.size(); ++i) {
-                    const auto& record = loaded.entities[i];
-                    EXPECT_EQ(record.id, i + 1);
-                    EXPECT_EQ(record.components["LocomotionPath"]["data"]["waypoints"].size(),
-                              A::kMaxCreatureVector);
-                    EXPECT_EQ(record.components["Controller"]["data"]["physics_controlled"], false);
-                }
-                const auto saved = A::SerializeCreatureSnapshot(loaded);
-                EXPECT_EQ(saved.size(), bytes.size() + (stamped ? 0 : count * 63));
-                if (stamped) {
-                    EXPECT_EQ(saved, bytes);
-                }
-            } else {
-                EXPECT_FALSE(A::LoadCreatureSnapshot(bytes, loaded, error));
-                EXPECT_NE(error.find("creature node limit"), std::string::npos) << error;
-                EXPECT_TRUE(loaded.entities.empty());
-            }
+            ASSERT_NO_FATAL_FAILURE(CheckMaximumWaypointBudget(input_prototype, stamped, count));
         }
     }
 }

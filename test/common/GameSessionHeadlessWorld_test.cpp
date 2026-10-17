@@ -8309,6 +8309,246 @@ TEST(GameSessionHeadlessWorldTest,
     EXPECT_THROW(CA::SerializeCreatureSnapshot(snapshot), std::invalid_argument);
 }
 
+namespace {
+void WriteCreatureRefusal(const luminumbra::ai::CreatureSnapshot& baseline,
+                          const std::filesystem::path& save,
+                          int refusal) {
+    namespace CA = luminumbra::ai;
+    namespace C = Luminumbra::Components;
+    const bool public_load = refusal == 4;
+    auto incoming = baseline;
+    auto& components = incoming.entities[0].components;
+    if (refusal == 0 || public_load) {
+        const auto unknown = C::CreatureSpeciesId16("unregistered_creature");
+        ASSERT_NE(unknown, C::CreatureSpeciesId16("fixture_creature"));
+        components["Creature"]["data"]["species_id"] = unknown;
+    } else if (refusal == 1) {
+        components["FieldEmitter"] = {{"version", 1},
+                                      {"data",
+                                       {{"channel", 0},
+                                        {"rate_raw_per_tick", 1},
+                                        {"radius_cells", std::numeric_limits<int>::max()}}}};
+    } else if (refusal == 2) {
+        components["Senses"] = {{"version", 1},
+                                {"data",
+                                 {{"nearest_food_source", {{"kind", "null"}, {"id", 0}}},
+                                  {"nearest_water_source", {{"kind", "null"}, {"id", 0}}},
+                                  {"nearest_threat", {{"kind", "creature"}, {"id", 99}}},
+                                  {"threat_distance_bits", 0}}}};
+    }
+    // Keep membership integrity valid, so semantic preflight is exercised.
+    const auto bytes = CA::SerializeCreatureSnapshot(incoming);
+    ASSERT_TRUE(P::WorldSaveService::durable_write_file(
+        P::WorldSaveService::creature_entities_path(save), bytes));
+    P::SnapshotIndex index;
+    ASSERT_TRUE(P::read_snapshot_index(save, index, nullptr));
+    for (auto& member : index.members)
+        if (member.path == "chunks/region/creature-entities.json") {
+            member.bytes = bytes.size();
+            member.fnv64 = P::fnv1a64_bytes(bytes.data(), bytes.size());
+        }
+    ASSERT_TRUE(P::WorldSaveService::durable_write_file(P::snapshot_index_path(save),
+                                                        P::encode_snapshot_index(index)));
+    if (refusal == 0 || refusal == 3 || public_load) {
+        ASSERT_TRUE(P::WorldSaveService::validate_save(save));
+    }
+}
+
+// Retain the exact subsystem objects across a refused load, independently of their payloads.
+class CreatureRefusalSystems {
+    decltype(std::declval<GameSession&>().GetWorldSystem()) world_system;
+    decltype(std::declval<GameSession&>().GetWaterSystem()) water_system;
+    decltype(std::declval<GameSession&>().GetPhysicsSystem()) physics_system;
+    decltype(std::declval<GameSession&>().GetWindFieldSystem()) wind_system;
+    decltype(std::declval<GameSession&>().GetWeatherSystem()) weather_system;
+    decltype(std::declval<GameSession&>().GetAetherFieldSystem()) aether_system;
+    decltype(std::declval<GameSession&>().GetEnergyFieldState()) energy_state;
+    decltype(std::declval<GameSession&>().GetScentField()) scent_field;
+    decltype(std::declval<GameSession&>().GetScriptState()) script_state;
+    decltype(std::declval<GameSession&>().GetSpeciesTable()) species;
+    decltype(std::declval<GameSession&>().GetSimulationContent()) content;
+
+public:
+    explicit CreatureRefusalSystems(GameSession& live)
+        : world_system(live.GetWorldSystem())
+        , water_system(live.GetWaterSystem())
+        , physics_system(live.GetPhysicsSystem())
+        , wind_system(live.GetWindFieldSystem())
+        , weather_system(live.GetWeatherSystem())
+        , aether_system(live.GetAetherFieldSystem())
+        , energy_state(live.GetEnergyFieldState())
+        , scent_field(live.GetScentField())
+        , script_state(live.GetScriptState())
+        , species(live.GetSpeciesTable())
+        , content(live.GetSimulationContent()) {}
+
+    void ExpectUnchanged(GameSession& live) const {
+        EXPECT_EQ(live.GetWorldSystem(), world_system);
+        EXPECT_EQ(live.GetWaterSystem(), water_system);
+        EXPECT_EQ(live.GetPhysicsSystem(), physics_system);
+        EXPECT_EQ(live.GetWindFieldSystem(), wind_system);
+        EXPECT_EQ(live.GetWeatherSystem(), weather_system);
+        EXPECT_EQ(live.GetAetherFieldSystem(), aether_system);
+        EXPECT_EQ(live.GetEnergyFieldState(), energy_state);
+        EXPECT_EQ(live.GetScentField(), scent_field);
+        EXPECT_EQ(live.GetScriptState(), script_state);
+        EXPECT_EQ(live.GetSpeciesTable(), species);
+        EXPECT_EQ(live.GetSimulationContent(), content);
+    }
+};
+
+void CheckPopulatedCreatureRefusal(GameSession& live,
+                                   GameSession& owner,
+                                   const std::filesystem::path& save,
+                                   int refusal,
+                                   entt::entity plant,
+                                   entt::entity creature,
+                                   entt::entity runtime_entity,
+                                   const std::shared_ptr<Luminumbra::Chunk>& chunk) {
+    namespace CA = luminumbra::ai;
+    namespace C = Luminumbra::Components;
+    const bool public_load = refusal == 4;
+    auto& registry = live.GetRegistry();
+    const auto chunks = live.GetWorldSystem()->snapshot_streamed_chunks();
+    const auto ledger = live.GetActiveRegionLedger().encode();
+    const auto ground = live.GetGroundObjects().canonical_bytes();
+    const auto fields = live.GetFieldPages().serialize();
+    const auto energy = live.GetEnergyFieldState()->CanonicalRegionalBytes();
+    const auto clock = live.GetWorldClock();
+    const auto tick = live.GetSimulationTickCount();
+    const auto schedule = live.GetRegionSchedule();
+    const auto plants = S7PlantBytes(live);
+    const auto creatures = CA::SerializeCreatureSnapshot(CA::BuildCreatureSnapshot(registry));
+    const auto hash = SessionWorldHash(live);
+    const auto metadata = live.GetMetadata();
+    const auto directory = live.GetWorldSaveDir();
+    const auto loaded_chunks = live.GetLastLoadedChunkCount();
+    const auto pending_events = live.GetSimulationEventBus().pending_count();
+    const auto simulation_clock = live.GetSimulationClock();
+    const auto persistence = live.GetPersistenceStatus();
+    const auto rejections = live.GetRegionInputRejections();
+    const CreatureRefusalSystems systems(live);
+    if (public_load) {
+        EXPECT_FALSE(live.LoadWorld(owner.GetMetadata().worldId));
+    } else {
+        EXPECT_FALSE(live.LoadWorldStateFrom(save));
+    }
+    EXPECT_FALSE(live.GetWorldOpenError().empty());
+    systems.ExpectUnchanged(live);
+    EXPECT_EQ(live.GetWorldSaveDir(), directory);
+    EXPECT_EQ(live.GetMetadata().name, metadata.name);
+    EXPECT_EQ(live.GetMetadata().seed, metadata.seed);
+    EXPECT_EQ(live.GetMetadata().worldType, metadata.worldType);
+    EXPECT_EQ(live.GetMetadata().worldId, metadata.worldId);
+    EXPECT_EQ(live.GetMetadata().creationTime, metadata.creationTime);
+    EXPECT_EQ(live.GetMetadata().spawnPoint, metadata.spawnPoint);
+    EXPECT_EQ(live.GetLastLoadedChunkCount(), loaded_chunks);
+    EXPECT_EQ(live.GetSimulationEventBus().pending_count(), pending_events);
+    EXPECT_EQ(live.GetSimulationClock().accumulator(), simulation_clock.accumulator());
+    EXPECT_EQ(live.GetSimulationClock().dropped_time_seconds(),
+              simulation_clock.dropped_time_seconds());
+    EXPECT_EQ(live.GetSimulationClock().dropped_frame_count(),
+              simulation_clock.dropped_frame_count());
+    EXPECT_EQ(live.GetPersistenceStatus().last_save_tick, persistence.last_save_tick);
+    EXPECT_EQ(live.GetPersistenceStatus().last_save_ms, persistence.last_save_ms);
+    EXPECT_EQ(live.GetPersistenceStatus().failures, persistence.failures);
+    EXPECT_EQ(live.GetPersistenceStatus().parked_count, persistence.parked_count);
+    EXPECT_EQ(live.GetPersistenceStatus().parked_bytes, persistence.parked_bytes);
+    EXPECT_EQ(live.GetPersistenceStatus().oldest_parked_tick, persistence.oldest_parked_tick);
+    EXPECT_EQ(live.GetPersistenceStatus().save_requested, persistence.save_requested);
+    EXPECT_EQ(live.GetRegionInputRejections().anchors, rejections.anchors);
+    EXPECT_EQ(live.GetRegionInputRejections().edits, rejections.edits);
+    EXPECT_EQ(live.GetRegionInputRejections().pins, rejections.pins);
+    EXPECT_EQ(live.GetRegionInputRejections().ground_spawns, rejections.ground_spawns);
+    EXPECT_EQ(live.GetRegionInputRejections().field_pages, rejections.field_pages);
+    EXPECT_FALSE(live.GetRegionSchedulerFault());
+    EXPECT_EQ(live.GetActiveRegionLedger().encode(), ledger);
+    EXPECT_EQ(live.GetGroundObjects().canonical_bytes(), ground);
+    EXPECT_EQ(live.GetFieldPages().serialize(), fields);
+    EXPECT_EQ(live.GetEnergyFieldState()->CanonicalRegionalBytes(), energy);
+    EXPECT_EQ(live.GetWorldClock().tick(), clock.tick());
+    EXPECT_EQ(live.GetWorldClock().calendar(), clock.calendar());
+    EXPECT_EQ(live.GetSimulationTickCount(), tick);
+    EXPECT_EQ(live.GetRegionSchedule(), schedule);
+    EXPECT_EQ(live.GetWorldSystem()->snapshot_streamed_chunks(), chunks);
+    EXPECT_EQ(chunk->heightmap_data, std::vector<float>{42.0f});
+    EXPECT_EQ(S7PlantBytes(live), plants);
+    EXPECT_EQ(CA::SerializeCreatureSnapshot(CA::BuildCreatureSnapshot(registry)), creatures);
+    EXPECT_EQ(SessionWorldHash(live), hash);
+    EXPECT_TRUE(registry.valid(plant));
+    EXPECT_TRUE(registry.valid(creature));
+    ASSERT_TRUE(registry.valid(runtime_entity));
+    EXPECT_EQ(registry.get<C::TransformComponent>(runtime_entity).position,
+              Luminumbra::Vec3(12, 34, 56));
+    if (refusal == 0 || public_load) {
+        EXPECT_NE(live.GetWorldOpenError().find("Unknown persistent creature species"),
+                  std::string::npos);
+    }
+    if (refusal == 3) {
+        EXPECT_NE(live.GetWorldOpenError().find("duplicate"), std::string::npos);
+    }
+    if (public_load) {
+        ASSERT_TRUE(live.SaveWorldState()) << live.GetWorldOpenError();
+        ASSERT_TRUE(live.SaveWorld()) << live.GetWorldOpenError();
+        EXPECT_TRUE(P::WorldSaveService::validate_save(directory));
+        EXPECT_EQ(live.GetWorldSaveDir(), directory);
+        EXPECT_EQ(S7PlantBytes(live), plants);
+        EXPECT_EQ(CA::SerializeCreatureSnapshot(CA::BuildCreatureSnapshot(registry)), creatures);
+    }
+}
+
+void RunPopulatedCreatureRefusal(GameSession& owner,
+                                 const HeadlessRoot& root,
+                                 JobSystem& jobs,
+                                 const std::filesystem::path& save,
+                                 const luminumbra::ai::CreatureSnapshot& baseline,
+                                 int refusal) {
+    namespace C = Luminumbra::Components;
+    const bool public_load = refusal == 4;
+    ASSERT_NO_FATAL_FAILURE(WriteCreatureRefusal(baseline, save, refusal));
+    GameSession live;
+    std::uint64_t id = 0;
+    live.SetAetherStateEnabled(true);
+    ASSERT_NO_FATAL_FAILURE(CreateGroundWorld(live, root, jobs, "Populated live creature refusal"));
+    ASSERT_NO_FATAL_FAILURE(TickOnce(live));
+    ASSERT_FALSE(live.GetFieldPages().empty());
+    ASSERT_NE(SpawnGround(live, 5200, -1500), 0u);
+    const auto position = live.GetMetadata().spawnPoint;
+    const auto plant = ClockTestPlant(live.GetRegistry(), position);
+    ASSERT_TRUE(live.AdmitPlant(plant));
+    auto& live_ledger = const_cast<ActiveRegionLedger&>(live.GetActiveRegionLedger());
+    ASSERT_TRUE(live_ledger.allocate_persistent_id(id));
+    ASSERT_EQ(id, baseline.entities[0].id);
+    live.NotifyGroundObjectEdit(position);
+    const auto region = ActiveRegionLedger::region_at(position);
+    ASSERT_TRUE(live.GetActiveRegionLedger().records().contains(region));
+    ASSERT_TRUE(live.GetActiveRegionLedger().records().at(region).edited);
+    ASSERT_FALSE(live.GetRegionSchedulerFault());
+    auto& registry = live.GetRegistry();
+    const auto creature = registry.create();
+    registry.emplace<C::TransformComponent>(creature).position = position;
+    registry.emplace<C::CreatureComponent>(creature).species_id =
+        C::CreatureSpeciesId16("fixture_creature");
+    registry.emplace<C::CreatureRegionComponent>(creature) =
+        C::CreatureRegionComponent{id, region.x, region.z, live.GetWorldClock().tick()};
+    registry.emplace<C::CreatureCoarseComponent>(creature);
+    if (public_load) {
+        ASSERT_TRUE(live.SaveWorldState());
+    }
+    auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+    chunk->set_state(Luminumbra::ChunkState::Idle);
+    chunk->heightmap_data = {42.0f};
+    chunk->mark_voxel_data_dirty();
+    ASSERT_TRUE(live.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    const auto runtime_entity = registry.create();
+    registry.emplace<C::TransformComponent>(runtime_entity).position = {12, 34, 56};
+    live.GetSimulationEventBus().publish(
+        live.GetSimulationTickCount() + 1, "fixture.pending", "retained");
+    ASSERT_NO_FATAL_FAILURE(CheckPopulatedCreatureRefusal(
+        live, owner, save, refusal, plant, creature, runtime_entity, chunk));
+}
+} // namespace
+
 TEST(GameSessionHeadlessWorldTest, CreatureRefusalsLeaveEveryPopulatedLiveMemberUnchanged) {
     namespace CA = luminumbra::ai;
     namespace C = Luminumbra::Components;
@@ -8316,7 +8556,7 @@ TEST(GameSessionHeadlessWorldTest, CreatureRefusalsLeaveEveryPopulatedLiveMember
     JobSystem jobs;
     jobs.startup(1);
     GameSession owner;
-    CreateGroundWorld(owner, root, jobs, "Creature refusal source");
+    ASSERT_NO_FATAL_FAILURE(CreateGroundWorld(owner, root, jobs, "Creature refusal source"));
     auto& source_ledger = const_cast<ActiveRegionLedger&>(owner.GetActiveRegionLedger());
     std::uint64_t id = 0;
     for (int i = 0; i < 3; ++i)
@@ -8338,190 +8578,11 @@ TEST(GameSessionHeadlessWorldTest, CreatureRefusalsLeaveEveryPopulatedLiveMember
     ASSERT_TRUE(owner.SaveWorldState());
     const auto baseline = CA::BuildCreatureSnapshot(source);
     const auto save = owner.GetWorldSaveDir();
+    // Jobs and the source owner outlive every populated refusal session.
     for (const int refusal : {0, 1, 2, 3, 4}) {
         SCOPED_TRACE(refusal);
-        const bool public_load = refusal == 4;
-        auto incoming = baseline;
-        auto& components = incoming.entities[0].components;
-        if (refusal == 0 || public_load) {
-            const auto unknown = C::CreatureSpeciesId16("unregistered_creature");
-            ASSERT_NE(unknown, C::CreatureSpeciesId16("fixture_creature"));
-            components["Creature"]["data"]["species_id"] = unknown;
-        } else if (refusal == 1) {
-            components["FieldEmitter"] = {{"version", 1},
-                                          {"data",
-                                           {{"channel", 0},
-                                            {"rate_raw_per_tick", 1},
-                                            {"radius_cells", std::numeric_limits<int>::max()}}}};
-        } else if (refusal == 2) {
-            components["Senses"] = {{"version", 1},
-                                    {"data",
-                                     {{"nearest_food_source", {{"kind", "null"}, {"id", 0}}},
-                                      {"nearest_water_source", {{"kind", "null"}, {"id", 0}}},
-                                      {"nearest_threat", {{"kind", "creature"}, {"id", 99}}},
-                                      {"threat_distance_bits", 0}}}};
-        }
-        // Keep membership integrity valid, so semantic preflight is exercised.
-        const auto bytes = CA::SerializeCreatureSnapshot(incoming);
-        ASSERT_TRUE(P::WorldSaveService::durable_write_file(
-            P::WorldSaveService::creature_entities_path(save), bytes));
-        P::SnapshotIndex index;
-        ASSERT_TRUE(P::read_snapshot_index(save, index, nullptr));
-        for (auto& member : index.members)
-            if (member.path == "chunks/region/creature-entities.json") {
-                member.bytes = bytes.size();
-                member.fnv64 = P::fnv1a64_bytes(bytes.data(), bytes.size());
-            }
-        ASSERT_TRUE(P::WorldSaveService::durable_write_file(P::snapshot_index_path(save),
-                                                            P::encode_snapshot_index(index)));
-        if (refusal == 0 || refusal == 3 || public_load) {
-            ASSERT_TRUE(P::WorldSaveService::validate_save(save));
-        }
-
-        GameSession live;
-        live.SetAetherStateEnabled(true);
-        CreateGroundWorld(live, root, jobs, "Populated live creature refusal");
-        TickOnce(live);
-        ASSERT_FALSE(live.GetFieldPages().empty());
-        ASSERT_NE(SpawnGround(live, 5200, -1500), 0u);
-        const auto position = live.GetMetadata().spawnPoint;
-        const auto plant = ClockTestPlant(live.GetRegistry(), position);
-        ASSERT_TRUE(live.AdmitPlant(plant));
-        auto& live_ledger = const_cast<ActiveRegionLedger&>(live.GetActiveRegionLedger());
-        ASSERT_TRUE(live_ledger.allocate_persistent_id(id));
-        ASSERT_EQ(id, incoming.entities[0].id);
-        live.NotifyGroundObjectEdit(position);
-        const auto region = ActiveRegionLedger::region_at(position);
-        ASSERT_TRUE(live.GetActiveRegionLedger().records().contains(region));
-        ASSERT_TRUE(live.GetActiveRegionLedger().records().at(region).edited);
-        ASSERT_FALSE(live.GetRegionSchedulerFault());
-        auto& registry = live.GetRegistry();
-        const auto creature = registry.create();
-        registry.emplace<C::TransformComponent>(creature).position = position;
-        registry.emplace<C::CreatureComponent>(creature).species_id =
-            C::CreatureSpeciesId16("fixture_creature");
-        registry.emplace<C::CreatureRegionComponent>(creature) =
-            C::CreatureRegionComponent{id, region.x, region.z, live.GetWorldClock().tick()};
-        registry.emplace<C::CreatureCoarseComponent>(creature);
-        if (public_load) {
-            ASSERT_TRUE(live.SaveWorldState());
-        }
-        auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
-        chunk->set_state(Luminumbra::ChunkState::Idle);
-        chunk->heightmap_data = {42.0f};
-        chunk->mark_voxel_data_dirty();
-        ASSERT_TRUE(live.GetWorldSystem()->adopt_streamed_chunk(chunk));
-        const auto runtime_entity = registry.create();
-        registry.emplace<C::TransformComponent>(runtime_entity).position = {12, 34, 56};
-        live.GetSimulationEventBus().publish(
-            live.GetSimulationTickCount() + 1, "fixture.pending", "retained");
-        const auto chunks = live.GetWorldSystem()->snapshot_streamed_chunks();
-        const auto ledger = live.GetActiveRegionLedger().encode();
-        const auto ground = live.GetGroundObjects().canonical_bytes();
-        const auto fields = live.GetFieldPages().serialize();
-        const auto energy = live.GetEnergyFieldState()->CanonicalRegionalBytes();
-        const auto clock = live.GetWorldClock();
-        const auto tick = live.GetSimulationTickCount();
-        const auto schedule = live.GetRegionSchedule();
-        const auto plants = S7PlantBytes(live);
-        const auto creatures = CA::SerializeCreatureSnapshot(CA::BuildCreatureSnapshot(registry));
-        const auto hash = SessionWorldHash(live);
-        const auto metadata = live.GetMetadata();
-        const auto directory = live.GetWorldSaveDir();
-        const auto loaded_chunks = live.GetLastLoadedChunkCount();
-        const auto pending_events = live.GetSimulationEventBus().pending_count();
-        const auto simulation_clock = live.GetSimulationClock();
-        const auto persistence = live.GetPersistenceStatus();
-        const auto rejections = live.GetRegionInputRejections();
-        const auto* world_system = live.GetWorldSystem();
-        const auto* water_system = live.GetWaterSystem();
-        const auto* physics_system = live.GetPhysicsSystem();
-        const auto* wind_system = live.GetWindFieldSystem();
-        const auto* weather_system = live.GetWeatherSystem();
-        const auto* aether_system = live.GetAetherFieldSystem();
-        const auto* energy_state = live.GetEnergyFieldState();
-        const auto* scent_field = live.GetScentField();
-        const auto* script_state = live.GetScriptState();
-        const auto* species = live.GetSpeciesTable();
-        const auto* content = live.GetSimulationContent();
-        if (public_load) {
-            EXPECT_FALSE(live.LoadWorld(owner.GetMetadata().worldId));
-        } else {
-            EXPECT_FALSE(live.LoadWorldStateFrom(save));
-        }
-        EXPECT_FALSE(live.GetWorldOpenError().empty());
-        EXPECT_EQ(live.GetWorldSystem(), world_system);
-        EXPECT_EQ(live.GetWaterSystem(), water_system);
-        EXPECT_EQ(live.GetPhysicsSystem(), physics_system);
-        EXPECT_EQ(live.GetWindFieldSystem(), wind_system);
-        EXPECT_EQ(live.GetWeatherSystem(), weather_system);
-        EXPECT_EQ(live.GetAetherFieldSystem(), aether_system);
-        EXPECT_EQ(live.GetEnergyFieldState(), energy_state);
-        EXPECT_EQ(live.GetScentField(), scent_field);
-        EXPECT_EQ(live.GetScriptState(), script_state);
-        EXPECT_EQ(live.GetSpeciesTable(), species);
-        EXPECT_EQ(live.GetSimulationContent(), content);
-        EXPECT_EQ(live.GetWorldSaveDir(), directory);
-        EXPECT_EQ(live.GetMetadata().name, metadata.name);
-        EXPECT_EQ(live.GetMetadata().seed, metadata.seed);
-        EXPECT_EQ(live.GetMetadata().worldType, metadata.worldType);
-        EXPECT_EQ(live.GetMetadata().worldId, metadata.worldId);
-        EXPECT_EQ(live.GetMetadata().creationTime, metadata.creationTime);
-        EXPECT_EQ(live.GetMetadata().spawnPoint, metadata.spawnPoint);
-        EXPECT_EQ(live.GetLastLoadedChunkCount(), loaded_chunks);
-        EXPECT_EQ(live.GetSimulationEventBus().pending_count(), pending_events);
-        EXPECT_EQ(live.GetSimulationClock().accumulator(), simulation_clock.accumulator());
-        EXPECT_EQ(live.GetSimulationClock().dropped_time_seconds(),
-                  simulation_clock.dropped_time_seconds());
-        EXPECT_EQ(live.GetSimulationClock().dropped_frame_count(),
-                  simulation_clock.dropped_frame_count());
-        EXPECT_EQ(live.GetPersistenceStatus().last_save_tick, persistence.last_save_tick);
-        EXPECT_EQ(live.GetPersistenceStatus().last_save_ms, persistence.last_save_ms);
-        EXPECT_EQ(live.GetPersistenceStatus().failures, persistence.failures);
-        EXPECT_EQ(live.GetPersistenceStatus().parked_count, persistence.parked_count);
-        EXPECT_EQ(live.GetPersistenceStatus().parked_bytes, persistence.parked_bytes);
-        EXPECT_EQ(live.GetPersistenceStatus().oldest_parked_tick, persistence.oldest_parked_tick);
-        EXPECT_EQ(live.GetPersistenceStatus().save_requested, persistence.save_requested);
-        EXPECT_EQ(live.GetRegionInputRejections().anchors, rejections.anchors);
-        EXPECT_EQ(live.GetRegionInputRejections().edits, rejections.edits);
-        EXPECT_EQ(live.GetRegionInputRejections().pins, rejections.pins);
-        EXPECT_EQ(live.GetRegionInputRejections().ground_spawns, rejections.ground_spawns);
-        EXPECT_EQ(live.GetRegionInputRejections().field_pages, rejections.field_pages);
-        EXPECT_FALSE(live.GetRegionSchedulerFault());
-        EXPECT_EQ(live.GetActiveRegionLedger().encode(), ledger);
-        EXPECT_EQ(live.GetGroundObjects().canonical_bytes(), ground);
-        EXPECT_EQ(live.GetFieldPages().serialize(), fields);
-        EXPECT_EQ(live.GetEnergyFieldState()->CanonicalRegionalBytes(), energy);
-        EXPECT_EQ(live.GetWorldClock().tick(), clock.tick());
-        EXPECT_EQ(live.GetWorldClock().calendar(), clock.calendar());
-        EXPECT_EQ(live.GetSimulationTickCount(), tick);
-        EXPECT_EQ(live.GetRegionSchedule(), schedule);
-        EXPECT_EQ(live.GetWorldSystem()->snapshot_streamed_chunks(), chunks);
-        EXPECT_EQ(chunk->heightmap_data, std::vector<float>{42.0f});
-        EXPECT_EQ(S7PlantBytes(live), plants);
-        EXPECT_EQ(CA::SerializeCreatureSnapshot(CA::BuildCreatureSnapshot(registry)), creatures);
-        EXPECT_EQ(SessionWorldHash(live), hash);
-        EXPECT_TRUE(registry.valid(plant));
-        EXPECT_TRUE(registry.valid(creature));
-        ASSERT_TRUE(registry.valid(runtime_entity));
-        EXPECT_EQ(registry.get<C::TransformComponent>(runtime_entity).position,
-                  Luminumbra::Vec3(12, 34, 56));
-        if (refusal == 0 || public_load) {
-            EXPECT_NE(live.GetWorldOpenError().find("Unknown persistent creature species"),
-                      std::string::npos);
-        }
-        if (refusal == 3) {
-            EXPECT_NE(live.GetWorldOpenError().find("duplicate"), std::string::npos);
-        }
-        if (public_load) {
-            ASSERT_TRUE(live.SaveWorldState()) << live.GetWorldOpenError();
-            ASSERT_TRUE(live.SaveWorld()) << live.GetWorldOpenError();
-            EXPECT_TRUE(P::WorldSaveService::validate_save(directory));
-            EXPECT_EQ(live.GetWorldSaveDir(), directory);
-            EXPECT_EQ(S7PlantBytes(live), plants);
-            EXPECT_EQ(CA::SerializeCreatureSnapshot(CA::BuildCreatureSnapshot(registry)),
-                      creatures);
-        }
+        ASSERT_NO_FATAL_FAILURE(
+            RunPopulatedCreatureRefusal(owner, root, jobs, save, baseline, refusal));
     }
 }
 
