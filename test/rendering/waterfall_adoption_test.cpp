@@ -198,4 +198,60 @@ TEST(WaterfallAdoption, InvalidPayloadIsRefusedBeforeGlAllocation) {
     EXPECT_EQ(capture.allocations, 0u);
     EXPECT_TRUE(pass.adopt_next(nullptr, {}));
 }
+
+TEST(WaterfallAdoption, CancellationRecreatesAmbientMotesWithoutMovingReusedSprayId) {
+    ParticlePass particles;
+    const auto root = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT);
+    particles.update_ambient_motes(root, glm::vec3(0));
+    particles.rebuild_emitter_descriptors(123, 0);
+    ASSERT_EQ(particles.emitter_descriptors().size(), 1u);
+    const auto ambient_id = particles.emitter_descriptors().front().id;
+    particles.clear_emitters();
+    particles.clear_emitters(); // Cancellation without any emitters is also safe.
+    const auto spray_id = particles.add_waterfall_spray(
+        root / "data/common/particles/waterfall_spray.json", glm::vec3(10, 0, 0), 20, 4);
+    ASSERT_EQ(spray_id, ambient_id);
+    particles.rebuild_emitter_descriptors(123, 1);
+    ASSERT_EQ(particles.emitter_descriptors().size(), 1u);
+    const auto spray = particles.emitter_descriptors().front();
+    particles.update_ambient_motes(root, glm::vec3(100, 0, 0));
+    particles.update_ambient_motes(root, glm::vec3(200, 0, 0));
+    particles.rebuild_emitter_descriptors(123, 2);
+    ASSERT_EQ(particles.emitter_descriptors().size(), 2u);
+    EXPECT_EQ(particles.emitter_descriptors().front().id, spray_id);
+    for (std::size_t axis = 0; axis < 3; ++axis)
+        EXPECT_EQ(particles.emitter_descriptors().front().origin_region[axis],
+                  spray.origin_region[axis]);
+    EXPECT_EQ(particles.emitter_descriptors().back().origin_region[0], 200000);
+    particles.clear_emitters();
+    particles.update_ambient_motes(root, glm::vec3(300, 0, 0));
+    particles.rebuild_emitter_descriptors(123, 3);
+    ASSERT_EQ(particles.emitter_descriptors().size(), 1u);
+    EXPECT_EQ(particles.emitter_descriptors().front().origin_region[0], 300000);
+}
+
+TEST(WaterfallAdoption, FailedAmbientCreationCanRetryAfterMissingDataOrFullPass) {
+    ParticlePass particles;
+    const auto root = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT);
+    particles.update_ambient_motes(root / "missing", glm::vec3(0));
+    EXPECT_FALSE(particles.has_emitters());
+    particles.update_ambient_motes(root, glm::vec3(0));
+    particles.rebuild_emitter_descriptors(123, 0);
+    ASSERT_EQ(particles.emitter_descriptors().size(), 1u);
+    particles.clear_emitters();
+    for (std::size_t index = 0; index < ParticlePass::kMaxEmitters; ++index)
+        ASSERT_NE(particles.add_emitter(root / "data/common/particles/fixture_sparkle.json",
+                                        glm::vec3(0)),
+                  ParticlePass::kInvalidEmitter);
+    particles.update_ambient_motes(root, glm::vec3(100, 0, 0));
+    particles.rebuild_emitter_descriptors(123, 1);
+    ASSERT_EQ(particles.emitter_descriptors().size(), ParticlePass::kMaxEmitters);
+    for (const auto& emitter : particles.emitter_descriptors())
+        EXPECT_EQ(emitter.origin_region[0], 0);
+    particles.clear_emitters();
+    particles.update_ambient_motes(root, glm::vec3(200, 0, 0));
+    particles.rebuild_emitter_descriptors(123, 2);
+    ASSERT_EQ(particles.emitter_descriptors().size(), 1u);
+    EXPECT_EQ(particles.emitter_descriptors().front().origin_region[0], 200000);
+}
 } // namespace

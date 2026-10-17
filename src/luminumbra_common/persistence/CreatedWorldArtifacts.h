@@ -2,9 +2,11 @@
 
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <filesystem>
 #include <optional>
@@ -22,6 +24,7 @@
 #endif
 #include <io.h>
 #include <windows.h>
+#include <winternl.h>
 #else
 #include <cerrno>
 #include <fcntl.h>
@@ -48,18 +51,13 @@ public:
             throw std::runtime_error("A new world still has uncommitted artifacts.");
         auto root = std::filesystem::canonical(path.parent_path()) / path.filename();
         Artifact artifact{.path = std::move(root), .directory = true, .identity = {}};
-        if (!std::filesystem::create_directory(artifact.path))
+        if (std::filesystem::exists(std::filesystem::symlink_status(artifact.path)))
             throw std::runtime_error("Refusing to reuse an existing world save directory.");
-        m_artifacts[m_count++] = std::move(artifact);
-        m_artifacts[m_count - 1].identity = identity_at(m_artifacts[m_count - 1].path);
+        create_owned_directory(std::move(artifact));
     }
 
     void create_directory(const std::filesystem::path& path) {
-        auto artifact = vacant_artifact(path, true);
-        if (!std::filesystem::create_directory(artifact.path))
-            throw std::runtime_error("Refusing to reuse a world artifact directory.");
-        m_artifacts[m_count++] = std::move(artifact);
-        m_artifacts[m_count - 1].identity = identity_at(m_artifacts[m_count - 1].path);
+        create_owned_directory(vacant_artifact(path, true));
     }
 
     void reserve_file(const std::filesystem::path& path) {
@@ -202,6 +200,8 @@ private:
                                     "Could not identify world artifact");
         if ((info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
             throw std::runtime_error("Refusing a reparse point world artifact.");
+        if (info.nFileIndexHigh == 0 && info.nFileIndexLow == 0)
+            throw std::runtime_error("Unknown world artifact identity.");
         return {.volume = info.dwVolumeSerialNumber,
                 .file_high = info.nFileIndexHigh,
                 .file_low = info.nFileIndexLow};
@@ -210,6 +210,8 @@ private:
         if (::fstat(file, &info) != 0)
             throw std::system_error(
                 errno, std::generic_category(), "Could not identify world artifact");
+        if (info.st_ino == 0)
+            throw std::runtime_error("Unknown world artifact identity.");
         return {.device = info.st_dev, .inode = info.st_ino};
 #endif
     }
@@ -272,6 +274,116 @@ private:
     private:
         NativeFile m_file;
     };
+
+    void create_owned_directory(Artifact artifact) {
+#if defined(_WIN32)
+        // Win32 CreateDirectory followed by CreateFile cannot identify the
+        // directory we created. NtCreateFile exclusively creates AND returns
+        // the directory handle, relative to a bound parent directory.
+        const ScopedFile parent(
+            ::CreateFileW(artifact.path.parent_path().c_str(),
+                          FILE_ADD_SUBDIRECTORY | FILE_TRAVERSE,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                          nullptr,
+                          OPEN_EXISTING,
+                          FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                          nullptr));
+        if (parent.get() == INVALID_HANDLE_VALUE)
+            throw std::system_error(static_cast<int>(::GetLastError()),
+                                    std::system_category(),
+                                    "Could not open save parent");
+        auto name = artifact.path.filename().native();
+        // UNICODE_STRING lengths are bytes in a USHORT, without a terminator.
+        if (name.size() > 32767)
+            throw std::runtime_error("World directory name is too long.");
+        const auto bytes = static_cast<USHORT>(name.size() * sizeof(wchar_t));
+        UNICODE_STRING native_name{.Length = bytes, .MaximumLength = bytes, .Buffer = name.data()};
+        OBJECT_ATTRIBUTES attributes{};
+        attributes.Length = static_cast<ULONG>(sizeof(attributes));
+        attributes.RootDirectory = parent.get();
+        attributes.ObjectName = &native_name;
+        attributes.Attributes = 0x40; // OBJ_CASE_INSENSITIVE.
+        using CreateDirectoryFunction = NTSTATUS(NTAPI*)(PHANDLE,
+                                                         ACCESS_MASK,
+                                                         POBJECT_ATTRIBUTES,
+                                                         PIO_STATUS_BLOCK,
+                                                         PLARGE_INTEGER,
+                                                         ULONG,
+                                                         ULONG,
+                                                         ULONG,
+                                                         ULONG,
+                                                         PVOID,
+                                                         ULONG);
+        const auto library = ::GetModuleHandleW(L"ntdll.dll");
+        const FARPROC entry = library ? ::GetProcAddress(library, "NtCreateFile") : nullptr;
+        const auto create = std::bit_cast<CreateDirectoryFunction>(entry);
+        if (!create)
+            throw std::runtime_error("Exclusive directory creation is unavailable.");
+        HANDLE handle = INVALID_HANDLE_VALUE;
+        IO_STATUS_BLOCK status{};
+        // Native create disposition FILE_CREATE (2) refuses an existing name.
+        // FILE_DIRECTORY_FILE (1) requires a directory rather than a file;
+        // FILE_SYNCHRONOUS_IO_NONALERT (0x20) completes creation before return.
+        const auto result = create(&handle,
+                                   FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                                   &attributes,
+                                   &status,
+                                   nullptr,
+                                   FILE_ATTRIBUTE_NORMAL,
+                                   FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                   2,
+                                   1 | 0x20,
+                                   nullptr,
+                                   0);
+        if (result < 0)
+            throw std::runtime_error("Could not exclusively create world directory (status " +
+                                     std::to_string(result) + ").");
+        const ScopedFile directory(handle);
+        m_artifacts[m_count++] = std::move(artifact);
+        auto& recorded = m_artifacts[m_count - 1];
+        recorded.identity = identity_from(directory.get());
+#else
+        // POSIX mkdir has no creating descriptor. Prepare an unpredictable,
+        // private (0700) staging directory, bind its descriptor and identity,
+        // then publish with an exclusive rename. Never infer ownership from
+        // the public name after mkdir: it may already name a replacement.
+        auto staging = (artifact.path.parent_path() / ".world-create-XXXXXX").native();
+        if (!::mkdtemp(staging.data()))
+            throw std::system_error(
+                errno, std::generic_category(), "Could not stage world directory");
+        auto destination = std::move(artifact.path);
+        artifact.path = staging;
+        m_artifacts[m_count++] = std::move(artifact);
+        auto& recorded = m_artifacts[m_count - 1];
+        const ScopedFile directory(
+            ::open(recorded.path.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+        if (directory.get() < 0)
+            throw std::system_error(
+                errno, std::generic_category(), "Could not bind staged world directory");
+        recorded.identity = identity_from(directory.get());
+        validate(recorded);
+#if defined(__linux__)
+        const auto result = ::renameat2(
+            AT_FDCWD, recorded.path.c_str(), AT_FDCWD, destination.c_str(), RENAME_NOREPLACE);
+#elif defined(__APPLE__)
+        const auto result = ::renameatx_np(
+            AT_FDCWD, recorded.path.c_str(), AT_FDCWD, destination.c_str(), RENAME_EXCL);
+#else
+        // No portable exclusive directory rename: retain the identified stage
+        // for rollback rather than overwrite an unrelated destination.
+        errno = ENOTSUP;
+        const auto result = -1;
+#endif
+        if (result != 0)
+            throw std::system_error(
+                errno, std::generic_category(), "Could not publish world directory");
+        recorded.path = std::move(destination);
+#endif
+        validate_parents(recorded);
+        if (!validate(recorded))
+            throw std::runtime_error(
+                "Created world directory disappeared before publication completed.");
+    }
 
 #if !defined(_WIN32)
     // Restoring a quarantined entry must not overwrite a second replacement.
