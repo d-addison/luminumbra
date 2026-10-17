@@ -115,6 +115,49 @@ class RuntimeConfigSourceContract(unittest.TestCase):
             self.assertIn("ReclaimAbandonedStaging(staging);", write)
             self.assertIn("WriteDurableRegionTemp(staging,", write)
 
+    def test_writers_hold_shared_ownership_through_cleanup_and_publication(self):
+        service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
+                              .read_text(encoding="utf-8"))
+        for name in ("save_metadata", "save_metadata_and_active_regions", "save_plant_entities",
+                     "save_active_regions", "upsert_container_records", "save_dirty_chunks",
+                     "write_snapshot", "write_file_durably", "remove_file_and_staging"):
+            start = service.index("WorldSaveService::" + name + "(")
+            body = service.index("{", start)
+            self.assertTrue(service[body:].startswith("{constSaveGuardguard;"), name)
+        self.assertIn("std::recursive_mutex&SaveMutex()", service)
+        self.assertIn("m_lock(SaveMutex(),std::defer_lock)", service)
+        self.assertIn("m_lock.lock();", service)
+        self.assertNotIn("PairedSaveGuard", service)
+        # Scope includes the real read/merge, not just temporary-file creation.
+        upsert = service[service.index("boolWorldSaveService::upsert_container_records("):]
+        self.assertLess(upsert.index("constSaveGuardguard;"),
+                        upsert.index("ReadRegionFile("))
+        shared = service[service.index("boolWorldSaveService::write_file_durably("):]
+        self.assertLess(shared.index("constSaveGuardguard;"),
+                        shared.index("ReclaimAbandonedStaging(destination);"))
+        self.assertLess(shared.index("ReclaimAbandonedStaging(destination);"),
+                        shared.index("WriteFileDurably("))
+
+    def test_energy_empty_and_nonempty_saves_share_owned_cleanup(self):
+        session = compact_cpp((ROOT / "src/luminumbra_common/world/GameSession.cpp")
+                              .read_text(encoding="utf-8"))
+        start = session.index("boolGameSession::SaveEnergyFieldRecord(")
+        end = session.index("std::stringGameSession::ComputeAetherStateSubHash", start)
+        energy = session[start:end]
+        self.assertIn('WorldSaveService::remove_file_and_staging(save_dir/"aether_state.efs")',
+                      energy)
+        self.assertIn('WorldSaveService::write_file_durably(save_dir/"aether_state.efs",record)',
+                      energy)
+        self.assertNotIn("fs::remove(", energy)
+        service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
+                              .read_text(encoding="utf-8"))
+        ledger = service[service.index("boolWorldSaveService::save_active_regions("):]
+        self.assertLess(ledger.index("ReclaimAbandonedStaging(staging);"),
+                        ledger.index("if(ledger.records().empty()"))
+        remove = service[service.index("boolWorldSaveService::remove_file_and_staging("):]
+        self.assertLess(remove.index("ReclaimAbandonedStaging(destination);"),
+                        remove.index("std::filesystem::remove(destination,error);"))
+
     def test_roundtrip_export_requests_a_complete_snapshot(self):
         scenario = compact_cpp((ROOT / "src/luminumbra_client/core/scenarios/PersistenceRoundtrip.cpp")
                                .read_text(encoding="utf-8"))

@@ -121,8 +121,8 @@ public:
                               std::vector<std::string>* errors = nullptr);
     // Prevalidate the incoming pair and keep the installed ledger tick <= clock tick
     // between replacements, including when an explicit snapshot rewinds the clock.
-    // Host-thread-only, synchronous and non-reentrant across sessions. Production
-    // callers own one save destination; debug builds assert if pair saves overlap.
+    // Writes are serialized within the process, including nested pair saves and
+    // region merges. Callers keep their input objects stable until return.
     static bool save_metadata_and_active_regions(const std::string& bytes,
                                                  world::ActiveRegionLedger& ledger,
                                                  const std::filesystem::path& save_dir,
@@ -207,15 +207,27 @@ public:
     // test seam above) removes the temporary file; the destination is then the
     // previous complete file, or on POSIX the new complete file when only the final
     // directory flush failed, never a partial file. Used for derived files that live
-    // beside the save, such as the far authority overlay.
+    // beside the save, such as the far authority overlay. Before every write,
+    // reclaim abandoned staging. All process writers serialize through cleanup
+    // and replacement, independent of destination spelling. Independently launched
+    // processes sharing a destination are outside this ownership contract.
     static bool write_file_durably(const std::filesystem::path& destination,
                                    const std::string& bytes,
                                    std::vector<std::string>* errors = nullptr);
 
+    // Retires a neutral optional record and reclaims abandoned staging without
+    // creating directories. Uses the same synchronization as durable writes.
+    static bool remove_file_and_staging(const std::filesystem::path& destination,
+                                        std::vector<std::string>* errors = nullptr);
+
+    // Const diagnostic: number of writers currently waiting for process save
+    // ownership. Includes all destinations; does not inspect or mutate the disk.
+    static std::size_t waiting_save_writers();
+
     // Called after ledger staging is flushed/closed, before replacement. Returning
     // false fails the write and cleans up; a test subprocess may terminate here
-    // to leave real crash debris. Single-threaded persistence tests only; nullptr
-    // disables the hook.
+    // to leave real crash debris. Install/clear while no writers are running.
+    // The hook runs while save ownership is held; nullptr disables it.
     static void set_before_active_regions_replace_for_testing(bool (*hook)());
 
     // Serializes the full streaming state into the save directory, creating

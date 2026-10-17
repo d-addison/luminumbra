@@ -5,6 +5,7 @@
 #include <gtest/gtest.h>
 #include <thread>
 
+#include "luminumbra/core/Types.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/components/PlantComponents.h"
 #include "luminumbra_common/core/JobSystem.h"
@@ -20,10 +21,12 @@
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_common/systems/WindFieldSystem.h"
+#include "luminumbra_common/world/ActiveRegionLedger.h"
 #include "luminumbra_common/world/Chunk.h"
 #include "luminumbra_common/world/FarLodStore.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
+#include "luminumbra_common/world/WorldStreamingState.h"
 #include "luminumbra_server/ServerCliOptions.h"
 #include "luminumbra_server/ServerWorldRunner.h"
 #include "luminumbra_server/modes/ModeHelpers.h"
@@ -31,19 +34,25 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <map>
 #include <memory>
 #include <random>
 #include <sstream>
+#include <stop_token>
 #include <string>
 #include <system_error>
 #include <tuple>
+#include <utility>
+#include <vector>
 
 #include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -59,7 +68,7 @@ using Persistence::WorldSaveService;
 using world::GameSession;
 
 std::string Read(const fs::path& path) {
-    std::ifstream input(path, std::ios::binary);
+    const std::ifstream input(path, std::ios::binary);
     std::ostringstream bytes;
     bytes << input.rdbuf();
     return bytes.str();
@@ -116,11 +125,15 @@ void ExpectMissingPresetReason(const std::string& error, const fs::path& expecte
               expected_path.lexically_normal());
 }
 
-class WorldOpenRefusal : public testing::TestWithParam<std::tuple<int, int>> {
-protected:
+struct WorldOpenFixtureState {
     fs::path root;
     fs::path save;
     JobSystem jobs;
+};
+
+class WorldOpenRefusal : public testing::TestWithParam<std::tuple<int, int>>,
+                         protected WorldOpenFixtureState {
+protected:
     void SetUp() override {
         root = UniqueRoot();
         fs::create_directories(root / "worlds/atlas/presets");
@@ -664,7 +677,7 @@ TEST_F(WorldOpenRefusal, CatalogSeparatesEmptyUnavailableAndRealMetadataWithoutW
 
 TEST_F(WorldOpenRefusal, CancelledValidationNeverReportsAValidSaveOrLeavesPartialAuthority) {
     const auto before = DiskBytes(root);
-    std::stop_source cancellation;
+    const std::stop_source cancellation;
     cancellation.request_stop();
     const auto inspected =
         Persistence::InspectSavedWorld(root, "fixture", cancellation.get_token());
@@ -1391,7 +1404,8 @@ void PreparePendingSnapshot(GameSession& session,
     energy->Tick(0);
 }
 
-struct PendingSnapshotState {
+class PendingSnapshotState {
+public:
     explicit PendingSnapshotState(const GameSession& session)
         : plant_hash(session.ComputePlantSubHash())
         , energy_bytes(session.GetEnergyFieldState()->CanonicalBytes())
@@ -1408,10 +1422,18 @@ struct PendingSnapshotState {
         EXPECT_EQ(session.GetWorldClock().canonical_bytes(), clock_bytes);
     }
 
-    std::string plant_hash;
-    std::string energy_bytes;
-    std::string ledger_bytes;
-    std::string clock_bytes;
+    const std::string& PlantHash() const {
+        return plant_hash;
+    }
+    const std::string& EnergyBytes() const {
+        return energy_bytes;
+    }
+
+private:
+    const std::string plant_hash;
+    const std::string energy_bytes;
+    const std::string ledger_bytes;
+    const std::string clock_bytes;
 };
 
 Server::ServerWorldRunnerConfig SnapshotRunnerConfig(const std::string& root_path,
@@ -1452,9 +1474,9 @@ void ExpectSnapshotReloaded(const PendingSnapshotState& pending,
         return;
     loaded.ApplySystemConfig(*config.systems_config_override);
     ASSERT_TRUE(loaded.LoadWorld(world_id)) << loaded.GetWorldOpenError();
-    EXPECT_EQ(loaded.ComputePlantSubHash(), pending.plant_hash);
+    EXPECT_EQ(loaded.ComputePlantSubHash(), pending.PlantHash());
     ASSERT_NE(loaded.GetEnergyFieldState(), nullptr);
-    EXPECT_EQ(loaded.GetEnergyFieldState()->CanonicalBytes(), pending.energy_bytes);
+    EXPECT_EQ(loaded.GetEnergyFieldState()->CanonicalBytes(), pending.EnergyBytes());
     const auto restored_chunks = loaded.GetWorldSystem()->snapshot_streamed_chunks();
     ASSERT_EQ(restored_chunks.size(), 1u);
     EXPECT_EQ(restored_chunks.front()->get_id(), chunk.get_id());
@@ -1568,8 +1590,8 @@ TEST_P(SnapshotEnergyFailure, FailureKeepsDirtyChunksAndRetryPersistsAllState) {
     EXPECT_EQ(chunk->is_voxel_data_dirty(), dirty);
     EXPECT_EQ(Read(destination / "world_info.json"), metadata_bytes);
     EXPECT_EQ(Read(energy_file / "keep"), "destination occupied");
-    EXPECT_EQ(session->GetEnergyFieldState()->CanonicalBytes(), pending.energy_bytes);
-    EXPECT_EQ(session->ComputePlantSubHash(), pending.plant_hash);
+    EXPECT_EQ(session->GetEnergyFieldState()->CanonicalBytes(), pending.EnergyBytes());
+    EXPECT_EQ(session->ComputePlantSubHash(), pending.PlantHash());
     if (dirty)
         pending.ExpectUnchanged(*session, *chunk);
     if (had_energy) {
@@ -1904,21 +1926,30 @@ TEST_F(WorldOpenRefusal, EmptyEnergyRemovalFailureKeepsMetadataInBothRegionModes
         const auto destination = session->GetWorldSaveDir();
         const auto metadata = Read(destination / "world_info.json");
         const auto energy = destination / "aether_state.efs";
+        const auto abandoned = fs::path(energy.string() + ".tmp.abandoned");
+        Write(abandoned, "partial field snapshot");
+        // Nonempty saves reclaim abandoned energy before publishing metadata.
+        ASSERT_TRUE(session->SaveWorldState());
+        EXPECT_FALSE(fs::exists(abandoned));
         const auto preserved = root / "previous-energy";
         fs::rename(energy, preserved);
         fs::create_directory(energy);
         Write(energy / "keep", "occupied");
         session->GetEnergyFieldState()->ResetEmptyAtTick(session->GetSimulationTickCount());
+        Write(abandoned, "partial field snapshot");
         session->SetSpawnPoint(Vec3(29, 31, 37));
         chunk->mark_voxel_data_dirty();
         EXPECT_FALSE(session->SaveWorldState());
         EXPECT_TRUE(chunk->is_voxel_data_dirty());
         EXPECT_EQ(Read(destination / "world_info.json"), metadata);
         EXPECT_EQ(Read(energy / "keep"), "occupied");
+        EXPECT_FALSE(fs::exists(abandoned));
+        Write(abandoned, "partial field snapshot");
         fs::remove_all(energy);
         fs::rename(preserved, energy);
         ASSERT_TRUE(session->SaveWorldState());
         EXPECT_FALSE(fs::exists(energy));
+        EXPECT_FALSE(fs::exists(abandoned));
         EXPECT_FALSE(chunk->is_voxel_data_dirty());
         runner.Shutdown();
     }
@@ -2036,7 +2067,7 @@ TEST_F(WorldOpenRefusal, LegacyFullSnapshotCallbackSucceedsAndMetadataFailureRef
 
 TEST_F(WorldOpenRefusal, LegacyExplicitSessionSnapshotsKeepLargeKeylessMetadata) {
     auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
-    metadata["extension"] = std::string(1024 * 1024, 'x');
+    metadata["extension"] = std::string(std::size_t{1024} * 1024, 'x');
     Write(save / "world_info.json", metadata.dump());
     GameSession session;
     session.SetRootPath(RootString());

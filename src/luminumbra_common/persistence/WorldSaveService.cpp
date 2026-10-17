@@ -17,7 +17,6 @@
 
 #include <algorithm>
 #include <atomic>
-#include <cassert>
 #include <cerrno>
 #include <charconv>
 #include <cmath>
@@ -32,6 +31,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -134,27 +134,42 @@ ActiveRegionsReplaceHook& BeforeActiveRegionsReplaceForTesting() {
     return hook;
 }
 
-#ifndef NDEBUG
-// Production pair saves are synchronous on the process's host thread. Detect
-// concurrent or reentrant callers instead of silently serializing a violated
-// ownership contract. This guard does not wait and is absent in release builds.
-class PairedSaveGuard {
+// A process-wide lock also covers aliases of the same destination, nested pair
+// saves, and region read/merge/write transactions. No path-keyed lock cache grows
+// with the number of saves. Inputs owned by callers must remain stable for a call.
+std::recursive_mutex& SaveMutex() {
+    static std::recursive_mutex mutex;
+    return mutex;
+}
+
+std::atomic<std::size_t>& WaitingSaveWriters() {
+    static std::atomic<std::size_t> waiting{0};
+    return waiting;
+}
+
+class WaitingSaveWriter {
 public:
-    PairedSaveGuard() {
-        const bool already_saving = saving().test_and_set(std::memory_order_acquire);
-        assert(!already_saving && "Clock/ledger saves must not overlap");
+    WaitingSaveWriter() {
+        WaitingSaveWriters().fetch_add(1, std::memory_order_release);
     }
-    ~PairedSaveGuard() {
-        saving().clear(std::memory_order_release);
+    ~WaitingSaveWriter() {
+        WaitingSaveWriters().fetch_sub(1, std::memory_order_release);
+    }
+};
+
+class SaveGuard {
+public:
+    SaveGuard()
+        : m_lock(SaveMutex(), std::defer_lock) {
+        if (!m_lock.try_lock()) {
+            const WaitingSaveWriter waiting;
+            m_lock.lock();
+        }
     }
 
 private:
-    static std::atomic_flag& saving() {
-        static std::atomic_flag flag = ATOMIC_FLAG_INIT;
-        return flag;
-    }
+    std::unique_lock<std::recursive_mutex> m_lock;
 };
-#endif
 
 // One record of an LMR1 region file kept in its on-disk (compressed) form so
 // untouched records survive a merge byte-for-byte without a decode pass.
@@ -263,17 +278,18 @@ void RemoveTemporaryFile(const std::filesystem::path& path) {
     std::filesystem::remove(path, remove_error);
 }
 
-// Reclaim staging files abandoned by a terminated save. Saves are serialized per
-// destination by construction, so any staging file that already exists for this
-// destination was left by a process that is no longer writing it. Without this,
-// every interruption leaks a full ledger copy and repeated crashes exhaust the
-// volume. Best effort: a file that cannot be removed is left alone and never
-// blocks the save, because staging lives outside every scanned directory.
+// SaveGuard spans enumeration through replacement/removal for every writer.
+// Existing staging belongs to a completed or terminated save, never another
+// active in-process writer. Independently launched processes sharing a save
+// directory are outside the persistence ownership contract. Best effort: one
+// pass over the staging directory, outside strict save scans.
 std::size_t ReclaimAbandonedStaging(const std::filesystem::path& destination) {
     std::error_code list_error;
     const auto directory =
         destination.has_parent_path() ? destination.parent_path() : std::filesystem::path(".");
-    const auto prefix = destination.filename().string() + ".tmp.";
+    // Compare native filename code units, including Unicode on Windows.
+    auto prefix = destination.filename();
+    prefix += ".tmp.";
     std::size_t reclaimed = 0;
     std::filesystem::directory_iterator it(directory, list_error);
     if (list_error)
@@ -284,7 +300,7 @@ std::size_t ReclaimAbandonedStaging(const std::filesystem::path& destination) {
         std::error_code kind_error;
         if (!entry.is_regular_file(kind_error) || kind_error)
             continue;
-        if (entry.path().filename().string().rfind(prefix, 0) != 0)
+        if (entry.path().filename().native().rfind(prefix.native(), 0) != 0)
             continue;
         std::error_code remove_error;
         if (std::filesystem::remove(entry.path(), remove_error) && !remove_error)
@@ -889,6 +905,7 @@ WorldSaveService::region_staging_path(const std::filesystem::path& destination) 
 bool WorldSaveService::save_metadata(const std::string& bytes,
                                      const std::filesystem::path& save_dir,
                                      std::vector<std::string>* errors) {
+    const SaveGuard guard;
     if (!validate_save(save_dir, errors))
         return false;
     world::WorldClock clock;
@@ -912,6 +929,7 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
         return false;
     }
     const auto destination = save_dir / "world_info.json";
+    ReclaimAbandonedStaging(destination);
     std::filesystem::path temp;
     if (!WriteDurableRegionTemp(destination, bytes, temp, errors))
         return false;
@@ -931,9 +949,7 @@ bool WorldSaveService::save_metadata_and_active_regions(const std::string& bytes
                                                         world::ActiveRegionLedger& ledger,
                                                         const std::filesystem::path& save_dir,
                                                         std::vector<std::string>* errors) {
-#ifndef NDEBUG
-    const PairedSaveGuard guard;
-#endif
+    const SaveGuard guard;
     const auto metadata = nlohmann::json::parse(bytes, nullptr, false);
     world::WorldClock clock;
     std::optional<Vec3> ambient_anchor;
@@ -1023,6 +1039,7 @@ std::filesystem::path WorldSaveService::plant_entities_path(const std::filesyste
 bool WorldSaveService::save_plant_entities(const Luminumbra::Ecs::EntityRegistrySnapshot& snapshot,
                                            const std::filesystem::path& save_dir,
                                            std::vector<std::string>* errors) {
+    const SaveGuard guard;
     if (!validate_save(save_dir, errors))
         return false;
     const std::filesystem::path path = plant_entities_path(save_dir);
@@ -1114,8 +1131,11 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
                                            const world::WorldClock& clock,
                                            const std::filesystem::path& save_dir,
                                            std::vector<std::string>* errors) {
+    const SaveGuard guard;
     if (!validate_save(save_dir, errors))
         return false;
+    const auto staging = save_dir / active_regions_path(save_dir).filename();
+    ReclaimAbandonedStaging(staging);
     // Keep an anchor-only ledger: it restores last walking feet before activation.
     if (ledger.records().empty() && !ledger.local_anchor() &&
         !std::filesystem::exists(active_regions_path(save_dir)))
@@ -1137,8 +1157,6 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
         // Keep abandoned staging files outside the strict region integrity scan.
         // The save root is on the save filesystem; replacement refuses EXDEV
         // if a separately mounted chunks/region/ directory violates that layout.
-        const auto staging = save_dir / path.filename();
-        ReclaimAbandonedStaging(staging);
         if (!WriteDurableRegionTemp(staging, bytes, temp, errors))
             return false;
         if (const auto hook = BeforeActiveRegionsReplaceForTesting(); hook && !hook()) {
@@ -1367,6 +1385,7 @@ bool WorldSaveService::read_authoritative_region_chunks(
 bool WorldSaveService::upsert_container_records(const std::filesystem::path& region_file,
                                                 const std::vector<ContainerRecord>& records,
                                                 std::vector<std::string>* errors) {
+    const SaveGuard guard;
     try {
         const std::filesystem::path parent = region_file.parent_path();
         if (!parent.empty()) {
@@ -1419,6 +1438,7 @@ bool WriteFileDurably(const std::filesystem::path& destination,
                       const std::string& bytes,
                       const std::filesystem::path& staging,
                       std::vector<std::string>* errors) {
+    // Both callers hold SaveGuard and reclaim staging before reaching this helper.
     std::error_code directory_error;
     if (destination.has_parent_path()) {
         std::filesystem::create_directories(destination.parent_path(), directory_error);
@@ -1466,7 +1486,26 @@ bool WriteFileDurably(const std::filesystem::path& destination,
 bool WorldSaveService::write_file_durably(const std::filesystem::path& destination,
                                           const std::string& bytes,
                                           std::vector<std::string>* errors) {
+    const SaveGuard guard;
+    ReclaimAbandonedStaging(destination);
     return WriteFileDurably(destination, bytes, destination, errors);
+}
+
+bool WorldSaveService::remove_file_and_staging(const std::filesystem::path& destination,
+                                               std::vector<std::string>* errors) {
+    const SaveGuard guard;
+    ReclaimAbandonedStaging(destination);
+    std::error_code error;
+    std::filesystem::remove(destination, error);
+    if (error) {
+        AddError(errors, "cannot remove file: " + destination.string() + ": " + error.message());
+        return false;
+    }
+    return true;
+}
+
+std::size_t WorldSaveService::waiting_save_writers() {
+    return WaitingSaveWriters().load(std::memory_order_acquire);
 }
 
 void WorldSaveService::set_directory_flush_failure_for_testing(int flushes_to_skip) {
@@ -1663,6 +1702,7 @@ WorldSaveDirtyReport WorldSaveService::save_dirty_chunks(WorldStreamingState& st
                                                          const std::filesystem::path& save_dir,
                                                          std::vector<std::string>* errors,
                                                          bool acknowledge_dirty) const {
+    const SaveGuard guard;
     WorldSaveDirtyReport report;
     report.chunks_total = state.size();
 
@@ -1716,6 +1756,7 @@ bool WorldSaveService::write_snapshot(const std::vector<std::shared_ptr<Chunk>>&
                                       const std::filesystem::path& save_dir,
                                       std::vector<std::string>* errors,
                                       std::size_t* regions_written) const {
+    const SaveGuard guard;
     try {
         if (!validate_save(save_dir, errors))
             return false;

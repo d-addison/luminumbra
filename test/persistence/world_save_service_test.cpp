@@ -16,6 +16,7 @@
 
 #include <array>
 #include <atomic>
+#include <barrier>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -30,6 +31,7 @@
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -278,6 +280,210 @@ TEST(WorldSaveService, DurableContainerStagingHandlesParentComponentsAndInterrup
     }
     for (const auto& entry : std::filesystem::recursive_directory_iterator(save_dir.path()))
         EXPECT_EQ(entry.path().filename().string().find(".tmp."), std::string::npos);
+}
+
+namespace {
+struct OverlapObservation {
+    std::barrier<> staged{2};
+    std::barrier<> release{2};
+};
+OverlapObservation* overlap_observation = nullptr;
+
+bool HoldStagedLedger() {
+    overlap_observation->staged.arrive_and_wait();
+    overlap_observation->release.arrive_and_wait();
+    return true;
+}
+
+} // namespace
+
+TEST(WorldSaveService, OverlappingRegionReclaimWaitsUntilStagedOwnerCompletes) {
+    enum class Operation : std::uint8_t {
+        Region,
+        Shared,
+        Empty
+    };
+    // Three clients and two threads bound this pass. Each real save overlaps
+    // the staged ledger owner and uses the same staging base.
+    for (const auto operation : {Operation::Region, Operation::Shared, Operation::Empty}) {
+        const TempSaveDir save_dir("overlap");
+        Luminumbra::world::WorldClock clock;
+        Luminumbra::world::ActiveRegionLedger ledger;
+        ledger.set_local_anchor(Vec3(1, 2, 3));
+        OverlapObservation observation;
+        overlap_observation = &observation;
+        WorldSaveService::set_before_active_regions_replace_for_testing(&HoldStagedLedger);
+        bool ledger_saved = false;
+        bool region_saved = false;
+        std::atomic<bool> region_done{false};
+        std::jthread ledger_writer([&] {
+            ledger_saved = WorldSaveService::save_active_regions(ledger, clock, save_dir.path());
+        });
+        observation.staged.arrive_and_wait();
+        // Raw containers may use any destination. This one shares the ledger's
+        // staging base, so an unprotected region reclaimer deletes its ACTIVE temp.
+        const auto region = save_dir.path() / "active-regions.arl";
+        const WorldSaveService::ContainerRecord record{
+            .id = 7, .lod_level = 1, .flags = 0, .payload = "overlapping region"};
+        std::jthread region_writer([&] {
+            switch (operation) {
+                case Operation::Region:
+                    region_saved = WorldSaveService::upsert_container_records(region, {record});
+                    break;
+                case Operation::Shared:
+                    region_saved = WorldSaveService::write_file_durably(region, record.payload);
+                    break;
+                case Operation::Empty:
+                    region_saved = WorldSaveService::remove_file_and_staging(region);
+                    break;
+            }
+            region_done.store(true, std::memory_order_release);
+        });
+        // No timing assumptions: the first writer cannot leave the barrier until
+        // the second is either demonstrably waiting for ownership or has completed.
+        while (WorldSaveService::waiting_save_writers() == 0 &&
+               !region_done.load(std::memory_order_acquire))
+            std::this_thread::yield();
+        EXPECT_FALSE(region_done.load(std::memory_order_acquire));
+        EXPECT_EQ(WorldSaveService::waiting_save_writers(), 1u);
+        observation.release.arrive_and_wait();
+        ledger_writer.join();
+        region_writer.join();
+        WorldSaveService::set_before_active_regions_replace_for_testing(nullptr);
+        overlap_observation = nullptr;
+        EXPECT_TRUE(ledger_saved);
+        EXPECT_TRUE(region_saved);
+        EXPECT_EQ(WorldSaveService::waiting_save_writers(), 0u);
+        Luminumbra::world::ActiveRegionLedger loaded;
+        ASSERT_TRUE(WorldSaveService::load_active_regions(loaded, save_dir.path()));
+        EXPECT_EQ(loaded.local_anchor(), ledger.local_anchor());
+        if (operation == Operation::Region) {
+            std::vector<WorldSaveService::ContainerRecord> records;
+            ASSERT_TRUE(WorldSaveService::read_container_records(region, records));
+            ASSERT_EQ(records.size(), 1u);
+            EXPECT_EQ(records.front().payload, record.payload);
+        } else if (operation == Operation::Shared) {
+            const std::ifstream input(region, std::ios::binary);
+            std::ostringstream bytes;
+            bytes << input.rdbuf();
+            EXPECT_EQ(bytes.str(), record.payload);
+        } else {
+            EXPECT_FALSE(std::filesystem::exists(region));
+        }
+        for (const auto& entry : std::filesystem::directory_iterator(save_dir.path()))
+            EXPECT_EQ(entry.path().filename().string().find(".tmp."), std::string::npos);
+    }
+}
+
+TEST(WorldSaveService, OverlappingRegionMergesRetainBothWritersRecords) {
+    const TempSaveDir save_dir("overlapping_merges");
+    const auto region = save_dir.path() / "records.lmr";
+    const std::array<WorldSaveService::ContainerRecord, 2> records{{
+        {.id = 7, .lod_level = 1, .flags = 0, .payload = "first"},
+        {.id = 8, .lod_level = 1, .flags = 0, .payload = "second"},
+    }};
+    Luminumbra::world::WorldClock clock;
+    Luminumbra::world::ActiveRegionLedger ledger;
+    ledger.set_local_anchor(Vec3(1, 2, 3));
+    OverlapObservation observation;
+    overlap_observation = &observation;
+    WorldSaveService::set_before_active_regions_replace_for_testing(&HoldStagedLedger);
+    bool ledger_saved = false;
+    std::array<bool, 2> merged{false, false};
+    std::atomic<unsigned> completed{0};
+    std::jthread ledger_writer([&] {
+        ledger_saved = WorldSaveService::save_active_regions(ledger, clock, save_dir.path());
+    });
+    observation.staged.arrive_and_wait();
+    const auto merge = [&](std::size_t index) {
+        merged[index] = WorldSaveService::upsert_container_records(region, {records[index]});
+        completed.fetch_add(1, std::memory_order_release);
+    };
+    // Two region writers overlap at the same destination while a third writer
+    // holds ownership. Releasing the barrier permits either merge order.
+    std::jthread first_writer(merge, 0u);
+    std::jthread second_writer(merge, 1u);
+    while (WorldSaveService::waiting_save_writers() < 2u &&
+           completed.load(std::memory_order_acquire) == 0u)
+        std::this_thread::yield();
+    EXPECT_EQ(completed.load(std::memory_order_acquire), 0u);
+    EXPECT_EQ(WorldSaveService::waiting_save_writers(), 2u);
+    observation.release.arrive_and_wait();
+    ledger_writer.join();
+    first_writer.join();
+    second_writer.join();
+    WorldSaveService::set_before_active_regions_replace_for_testing(nullptr);
+    overlap_observation = nullptr;
+    EXPECT_TRUE(ledger_saved);
+    EXPECT_TRUE(merged[0]);
+    EXPECT_TRUE(merged[1]);
+    EXPECT_EQ(WorldSaveService::waiting_save_writers(), 0u);
+    std::vector<WorldSaveService::ContainerRecord> loaded;
+    ASSERT_TRUE(WorldSaveService::read_container_records(region, loaded));
+    ASSERT_EQ(loaded.size(), records.size());
+    for (std::size_t index = 0; index < records.size(); ++index) {
+        EXPECT_EQ(loaded[index].id, records[index].id);
+        EXPECT_EQ(loaded[index].payload, records[index].payload);
+    }
+}
+
+TEST(WorldSaveService, SharedWritesAndEmptyRemovalReclaimStagingOnEverySave) {
+    const TempSaveDir save_dir("shared_cleanup");
+    const auto file = save_dir.path() / Luminumbra::Filesystem::PathFromUtf8("aether_\xc3\xa9.efs");
+    auto abandoned = file;
+    abandoned += ".tmp.abandoned";
+    const auto unrelated = save_dir.path() / "other.efs.tmp.abandoned";
+    auto retained_directory = file;
+    retained_directory += ".tmp.directory";
+    std::filesystem::create_directory(retained_directory);
+    ASSERT_TRUE(WorldSaveService::write_file_durably(unrelated, "keep"));
+    for (const bool empty : {false, true}) {
+        ASSERT_TRUE(WorldSaveService::write_file_durably(abandoned, "partial field"));
+        if (empty)
+            ASSERT_TRUE(WorldSaveService::remove_file_and_staging(file));
+        else
+            ASSERT_TRUE(WorldSaveService::write_file_durably(file, "complete field"));
+        EXPECT_FALSE(std::filesystem::exists(abandoned));
+        EXPECT_TRUE(std::filesystem::exists(unrelated));
+        EXPECT_TRUE(std::filesystem::is_directory(retained_directory));
+        EXPECT_EQ(std::filesystem::exists(file), !empty);
+    }
+    const auto missing = save_dir.path() / "missing/field.efs";
+    ASSERT_TRUE(WorldSaveService::remove_file_and_staging(missing));
+    EXPECT_FALSE(std::filesystem::exists(missing.parent_path()));
+    std::filesystem::create_directory(file);
+    ASSERT_TRUE(WorldSaveService::write_file_durably(file / "keep", "occupied"));
+    EXPECT_FALSE(WorldSaveService::remove_file_and_staging(file));
+    EXPECT_TRUE(std::filesystem::exists(file / "keep"));
+}
+
+TEST(WorldSaveService, EmptyLedgerAndMetadataSavesReclaimBeforeTheirWriteOrNoop) {
+    const TempSaveDir save_dir("empty_ledger_cleanup");
+    const auto ledger_staging = save_dir.path() / "active-regions.arl.tmp.abandoned";
+    ASSERT_TRUE(WorldSaveService::write_file_durably(ledger_staging, "partial ledger"));
+    Luminumbra::world::ActiveRegionLedger ledger;
+    const Luminumbra::world::WorldClock clock;
+    ASSERT_TRUE(WorldSaveService::save_active_regions(ledger, clock, save_dir.path()));
+    EXPECT_FALSE(std::filesystem::exists(ledger_staging));
+    EXPECT_FALSE(std::filesystem::exists(WorldSaveService::region_directory(save_dir.path())));
+    EXPECT_TRUE(std::filesystem::is_empty(save_dir.path()));
+
+    const auto metadata_staging = save_dir.path() / "world_info.json.tmp.abandoned";
+    ASSERT_TRUE(WorldSaveService::write_file_durably(metadata_staging, "partial metadata"));
+    ASSERT_TRUE(WorldSaveService::save_metadata("{}", save_dir.path()));
+    EXPECT_FALSE(std::filesystem::exists(metadata_staging));
+    ASSERT_TRUE(WorldSaveService::write_file_durably(metadata_staging, "partial metadata"));
+    EXPECT_FALSE(
+        WorldSaveService::save_metadata(R"({"simulationTick":"invalid"})", save_dir.path()));
+    // Refusal happens before cleanup or publication; prior bytes remain complete.
+    EXPECT_TRUE(std::filesystem::exists(metadata_staging));
+    std::ifstream input(save_dir.path() / "world_info.json", std::ios::binary);
+    std::ostringstream bytes;
+    bytes << input.rdbuf();
+    EXPECT_EQ(bytes.str(), "{}");
+    input.close();
+    ASSERT_TRUE(WorldSaveService::save_metadata("{}", save_dir.path()));
+    EXPECT_FALSE(std::filesystem::exists(metadata_staging));
 }
 
 TEST(WorldSaveService, LoadFromEmptySaveDirIsCleanMissWithoutErrors) {
