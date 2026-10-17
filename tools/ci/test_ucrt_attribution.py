@@ -12,11 +12,13 @@ import sys
 import tempfile
 import unittest
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ci_shell import bash_executable
 from test_check_worldgen_probe_smoke import valid_report
 
 SCRIPT = Path(__file__).with_name("ucrt_attribution.sh")
 CHECKER = SCRIPT.with_name("check_worldgen_probe_smoke.py")
-BASH = shutil.which("bash")
+BASH = None
 COMMANDS = (
     "awk", "basename", "cat", "cmake", "cmp", "cp", "curl", "date", "dirname",
     "find", "g++", "grep", "head", "mkdir", "mv", "ninja", "pacman", "pgrep",
@@ -419,7 +421,7 @@ class AttributionTests(unittest.TestCase):
                                STUB_SCENARIO=scenario, MSYSTEM="UCRT64",
                                MSYSTEM_PREFIX=prefix.as_posix(), CELLS=cells,
                                GITHUB_STEP_SUMMARY=(root / "step-summary.md").as_posix())
-            result = subprocess.run([BASH, "--noprofile", "--norc", script.as_posix()],
+            result = subprocess.run([BASH or bash_executable(), "--noprofile", "--norc", script.as_posix()],
                                     cwd=root, env=environment, capture_output=True,
                                     stdin=subprocess.DEVNULL, text=True, timeout=20)
             artifacts = {path.relative_to(root).as_posix(): path.read_text(encoding="utf-8")
@@ -634,7 +636,7 @@ done
 '''
             script = root / "hot-calls.sh"
             script.write_bytes(shell.encode("utf-8"))
-            result = subprocess.run([BASH, "--noprofile", "--norc", script.as_posix()],
+            result = subprocess.run([BASH or bash_executable(), "--noprofile", "--norc", script.as_posix()],
                                     cwd=root, env=self.environment(root), stdin=subprocess.DEVNULL,
                                     capture_output=True, text=True, timeout=20)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -657,7 +659,7 @@ done
 _python_dispatch() { printf 'sed reached Python\n' >&2; return 99; }
 _stub sed -n 's/.*surface ready (took \([0-9][0-9]*\)ms).*/\1/p' 'performance log.txt'
 ''').encode("utf-8"))
-            process = subprocess.Popen([BASH, "--noprofile", "--norc", script.as_posix()],
+            process = subprocess.Popen([BASH or bash_executable(), "--noprofile", "--norc", script.as_posix()],
                                        cwd=root, env=self.environment(root), stdin=subprocess.PIPE,
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             try:
@@ -681,7 +683,5 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--bash")
     options, remaining = parser.parse_known_args()
-    BASH = options.bash or shutil.which("bash")
-    if not BASH:
-        raise SystemExit("Bash is required for attribution regression tests")
+    BASH = bash_executable(options.bash)
     unittest.main(argv=[sys.argv[0], *remaining])

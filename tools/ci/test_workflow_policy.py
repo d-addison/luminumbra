@@ -9,12 +9,19 @@ import fnmatch
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import ci_shell as shell
+
+
+BASH = shell.bash_executable()
 ROOT = Path(__file__).resolve().parents[2]
 GUARDED = {
     "ci.yml": ("linux-result", "Linux / GCC"),
@@ -40,6 +47,147 @@ SERVER_ROUTE = (
     "(github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && "
     "github.event.before != '0000000000000000000000000000000000000000'))"
 )
+
+
+class WorkflowShellTests(unittest.TestCase):
+    def test_windows_candidates_prefer_git_over_wsl_for_all_git_layouts(self):
+        root = r"C:\Program Files\Git"
+        wsl = r"C:\Windows\System32\bash.exe"
+        expected = [root + r"\bin\bash.exe", root + r"\usr\bin\bash.exe", wsl]
+        for location in (r"cmd\git.exe", r"bin\git.exe", r"mingw64\bin\git.exe",
+                         r"mingw32\bin\git.exe", r"usr\bin\git.exe"):
+            with self.subTest(location=location):
+                self.assertEqual(shell._windows_candidates(root + "\\" + location, wsl, ""), expected)
+        self.assertEqual(shell._windows_candidates(None, wsl, ""), [wsl])
+        self.assertEqual(shell._windows_candidates(r"relative\git.exe", None, ""), [])
+        self.assertEqual(shell._windows_candidates(None, None, ""), [])
+
+    def test_active_msys_keeps_its_path_shell_and_deduplicates_git_siblings(self):
+        msys = r"D:\MSYS installation\usr\bin\bash.exe"
+        git = r"D:\MSYS installation\usr\bin\git.exe"
+        self.assertEqual(shell._windows_candidates(git, msys, "UCRT64"),
+                         [msys, r"D:\MSYS installation\bin\bash.exe"])
+        self.assertEqual(shell._windows_candidates(None, msys, "UCRT64"), [msys])
+
+    def test_lookup_excludes_empty_and_relative_path_entries_and_cwd_results(self):
+        entries = ["", ".", "relative/bin", str(ROOT / "directory with spaces")]
+        with patch.object(shell.os, "get_exec_path", return_value=entries), patch.object(
+                shell.shutil, "which", return_value=str(ROOT / "directory with spaces/bash")) as which:
+            self.assertEqual(shell._absolute_which("bash"), str(ROOT / "directory with spaces/bash"))
+            which.assert_called_once_with("bash", path=entries[-1])
+            which.return_value = "bash.exe"
+            self.assertIsNone(shell._absolute_which("bash"))
+        with patch.object(shell.os, "get_exec_path", return_value=["", "."]), patch.object(
+                shell.shutil, "which") as which:
+            self.assertIsNone(shell._absolute_which("bash"))
+            which.assert_not_called()
+
+    def windows_resolution(self, msystem="", responses=None):
+        git = r"C:\Program Files\Git\cmd\git.exe"
+        wsl = r"C:\Windows\System32\bash.exe"
+
+        def path(candidate):
+            result = MagicMock()
+            result.is_absolute.return_value = True
+            result.is_file.return_value = True
+            result.resolve.return_value = result
+            result.__str__.return_value = candidate
+            return result
+
+        with patch.object(shell.sys, "platform", "win32"), patch.dict(
+                os.environ, MSYSTEM=msystem), patch.object(
+                shell, "_absolute_which", side_effect=lambda name: git if name == "git" else wsl), patch.object(
+                shell, "Path", side_effect=path), patch.object(shell.os, "access", return_value=True), patch.object(
+                shell.subprocess, "run", side_effect=responses) as run:
+            return shell.bash_executable(), run.call_args_list
+
+    def test_native_windows_resolution_uses_absolute_git_path_as_one_argument(self):
+        success = subprocess.CompletedProcess([], 0, b"ci-bash-ready\n", b"")
+        executable, calls = self.windows_resolution(responses=[success])
+        self.assertEqual(executable, r"C:\Program Files\Git\bin\bash.exe")
+        self.assertEqual(len(calls), 1)
+        args, kwargs = calls[0]
+        self.assertEqual(args[0][:-1], [executable, "--noprofile", "--norc", "-e", "-c"])
+        self.assertIn('[[ "$OSTYPE" == msys* ]] || exit 1;', args[0][-1])
+        self.assertIn('[[ -n "$BASH_VERSION" ]] || exit 1;', args[0][-1])
+        self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
+        self.assertTrue(kwargs["capture_output"])
+        self.assertEqual(kwargs["timeout"], 2)
+        self.assertNotIn("shell", kwargs)
+
+    def test_windows_rejects_wsl_collision_and_tries_git_siblings(self):
+        wsl = subprocess.CompletedProcess([], 1, "Windows Subsystem for Linux has no installed distributions".encode("utf-16"), b"")
+        success = subprocess.CompletedProcess([], 0, b"ci-bash-ready\n", b"")
+        executable, calls = self.windows_resolution("UCRT64", [wsl, OSError("unusable"), success])
+        self.assertEqual(executable, r"C:\Program Files\Git\usr\bin\bash.exe")
+        self.assertEqual([call.args[0][0] for call in calls], [
+            r"C:\Windows\System32\bash.exe", r"C:\Program Files\Git\bin\bash.exe", executable])
+        with self.assertRaisesRegex(RuntimeError, "usable native Bash"):
+            self.windows_resolution(responses=[wsl, wsl, wsl])
+
+    def test_posix_lookup_preserves_path_selection_and_does_not_query_git(self):
+        with patch.object(shell.sys, "platform", "linux"), patch.object(
+                shell, "_absolute_which", return_value=BASH) as which:
+            self.assertEqual(shell.bash_executable(), BASH)
+            which.assert_called_once_with("bash")
+        with patch.object(shell.sys, "platform", "linux"), patch.object(
+                shell, "_absolute_which", return_value=None), self.assertRaises(RuntimeError):
+            shell.bash_executable()
+
+    def test_overrides_require_absolute_regular_executable_files_without_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for candidate in ("", "relative/bash", str(root / "missing"), str(root)):
+                with self.subTest(candidate=candidate), patch.object(shell, "_absolute_which") as which, patch.object(
+                        shell.subprocess, "run") as run, self.assertRaises(RuntimeError):
+                    shell.bash_executable(candidate)
+                which.assert_not_called()
+                run.assert_not_called()
+        for failure in (False, PermissionError("denied"), RuntimeError("link loop")):
+            with self.subTest(failure=failure), patch.object(shell.os, "access", **(
+                    {"return_value": failure} if failure is False else {"side_effect": failure})), patch.object(
+                    shell.subprocess, "run") as run, self.assertRaises(RuntimeError):
+                shell.bash_executable(BASH)
+            run.assert_not_called()
+
+    def test_probe_refuses_partial_output_wsl_errors_deadline_and_unusable_binaries(self):
+        failures = [
+            subprocess.CompletedProcess([], 1, b"ci-bash-ready\n", b""),
+            subprocess.CompletedProcess([], 0, b"ci-bash", b""),
+            subprocess.CompletedProcess([], 0, b"ci-bash-ready\n", b"warning"),
+            subprocess.CompletedProcess([], 0, "Windows Subsystem for Linux has no installed distributions".encode("utf-16-le"), b""),
+            subprocess.TimeoutExpired([BASH], 2), PermissionError("denied"), OSError("invalid executable"),
+        ]
+        for failure in failures:
+            with self.subTest(failure=failure), patch.object(shell.subprocess, "run", **(
+                    {"side_effect": failure} if isinstance(failure, Exception) else {"return_value": failure})), self.assertRaises(RuntimeError):
+                shell.bash_executable(BASH)
+
+    def test_probe_does_not_run_inherited_shell_startup_hooks(self):
+        untrusted = dict(BASH_ENV="untrusted", ENV="untrusted", SHELLOPTS="untrusted", BASHOPTS="untrusted",
+                         OSTYPE="msys", BASH_VERSION="untrusted")
+        untrusted["BASH_FUNC_exit%%"] = "() { return 0; }"
+        with patch.dict(os.environ, untrusted), patch.object(
+                shell.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, b"ci-bash-ready\n", b"")) as run:
+            self.assertEqual(shell.bash_executable(BASH), BASH)
+        self.assertFalse(untrusted.keys() & run.call_args.kwargs["env"].keys())
+
+    def test_resolved_bash_executes_literal_arguments_cwd_crlf_and_exit_status(self):
+        with tempfile.TemporaryDirectory(prefix="shell contract ") as directory:
+            root = Path(directory)
+            (root / "input with spaces.txt").write_bytes(b"first\r\nsecond\r\n")
+            script = ('[[ "$1" == \'C:/directory with spaces/file\' && "$2" == \'a "quote"\' && -z "$3" ]]\n'
+                      '[[ "$CONTRACT_VALUE" == kept ]]\n'
+                      'IFS= read -r line < "input with spaces.txt"\n'
+                      '[[ "$line" == $\'first\\r\' ]]\n'
+                      'printf \'contract passed\\n\'\nexit 7')
+            result = subprocess.run([shell.bash_executable(), "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script,
+                                     "contract", "C:/directory with spaces/file", 'a "quote"', ""],
+                                    cwd=root, env=dict(os.environ, CONTRACT_VALUE="kept"),
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 7, result.stdout + result.stderr)
+            self.assertEqual(result.stdout, "contract passed\n")
+            self.assertEqual(result.stderr, "")
 
 
 def jobs(workflow):
@@ -241,7 +389,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                 for event, draft, expected in cases:
                     with self.subTest(workflow=filename, job=job_id, event=event, draft=draft):
                         result = subprocess.run(
-                            ["bash", "--noprofile", "--norc", "-e", "-c", script],
+                            [BASH, "--noprofile", "--norc", "-e", "-c", script],
                             cwd=directory,
                             env=dict(os.environ, CI_EVENT_NAME=event, CI_PR_DRAFT=draft),
                             capture_output=True,
@@ -527,7 +675,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                         if filename != missing:
                             (source / filename).write_text(f"owner-{owner}-{filename}", encoding="utf-8")
                     result = subprocess.run(
-                        ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", prepare],
+                        [BASH, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", prepare],
                         cwd=root, env=dict(os.environ, CI_QUALIFICATION=full),
                         capture_output=True, text=True, timeout=10)
                     self.assertEqual(result.returncode == 0, missing is None, result.stderr)
@@ -547,7 +695,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                         continue
                     script = re.sub(r"\$\{\{.*?\}\}", "1", script)
                     with self.subTest(workflow=filename, job=job_id, step=step.splitlines()[0]):
-                        result = subprocess.run(["bash", "--noprofile", "--norc", "-n", "-c", script],
+                        result = subprocess.run([BASH, "--noprofile", "--norc", "-n", "-c", script],
                                                 capture_output=True, text=True, timeout=10)
                         self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -763,7 +911,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                                 self.assertEqual(refuses, invalid)
                             if admitted and invalid:
                                 process = subprocess.run(
-                                    ["bash", "--noprofile", "--norc", "-e", "-c", value(refusal, "run", 8)],
+                                    [BASH, "--noprofile", "--norc", "-e", "-c", value(refusal, "run", 8)],
                                     capture_output=True, text=True, timeout=10)
                                 self.assertNotEqual(process.returncode, 0)
             # Re-evaluate admission after each actual step, including download,
@@ -799,7 +947,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             self.assertIsNone(value(refusal, "continue-on-error", 8))
             # This must be an unconditional failure whenever the refusal runs.
             process = subprocess.run(
-                ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c",
+                [BASH, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c",
                  value(refusal, "run", 8)], capture_output=True, text=True, timeout=10,
             )
             self.assertNotEqual(process.returncode, 0, process.stdout + process.stderr)
@@ -913,7 +1061,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                                     continue
                                 refuses = evaluate_condition(value(refusal, "if", 8), dependencies, failed=False)
                                 process = subprocess.run(
-                                    ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c",
+                                    [BASH, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c",
                                      (refusal_script + "\n" if refuses else "") + script],
                                     env=dict(os.environ, NEEDS_CPP=cpp, ASAN_SHARD_RESULT=result,
                                              CI_PATHS_RESULT=classification,
@@ -942,7 +1090,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                 self.assertIsNone(value(gate, "continue-on-error", 8))
                 self.assertLess(aggregate.index(refusal), aggregate.index(gate))
                 result = subprocess.run(
-                    ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c",
+                    [BASH, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c",
                      value(refusal, "run", 8)], capture_output=True, text=True, timeout=10)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("Aggregate dependencies did not pass", result.stderr)
@@ -1118,6 +1266,7 @@ class WorkflowAttributionPolicyTests(unittest.TestCase):
         cls.input_paths = [
             ".github/workflows/ucrt-attribution.yml",
             "tools/ci/ucrt_attribution.sh",
+            "tools/ci/ci_shell.py",
             "tools/ci/test_ucrt_attribution.py",
             "tools/ci/test_ucrt_gcc_cohort.py",
             "tools/ci/check_worldgen_probe_smoke.py",
