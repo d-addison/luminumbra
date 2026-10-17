@@ -45,11 +45,11 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections import Counter
+from collections import Counter, deque
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, BinaryIO, Callable, ContextManager, Iterator, NamedTuple
 
 try:
     import resource as _resource_module
@@ -65,6 +65,15 @@ DEFAULT_GTEST_FILTER = (
 DEFAULT_TIMEOUT_SECONDS = 120.0
 CLEANUP_TIMEOUT_SECONDS = 5.0
 DUMP_SETTLE_SECONDS = 30.0
+DUMP_STABLE_SECONDS = 1.0
+# Poll for delayed WER creation for five seconds, bounded by the settle deadline.
+DUMP_EMPTY_GRACE_SECONDS = 5.0
+DUMP_COPY_MIN_SECONDS = 30.0
+DUMP_COPY_MAX_SECONDS = 300.0
+DUMP_COPY_BYTES_PER_SECOND = 16 * 1024 * 1024
+SNAPSHOT_FILE_READ_BYTES = 64 * 1024
+SNAPSHOT_TOTAL_READ_BYTES = 1024 * 1024
+COPY_CHUNK_BYTES = 1024 * 1024  # Bound every transient copy and verification buffer to 1 MiB.
 REGISTRY_QUERY_TIMEOUT_SECONDS = 30.0
 PREFLIGHT_EXIT_CODE = 3
 CRASH_DIR_ENV = "LUMINUMBRA_CRASH_DIR"
@@ -213,18 +222,84 @@ def make_run_directory(parent: Path, stamp: str, pid: int) -> Path:
     return run_dir
 
 
+class FileStamp(NamedTuple):
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+    identity: tuple[int, int]
+    # At most two range digests per file; raw sample bytes are never retained.
+    fingerprints: tuple[tuple[int, int, str], ...]
+    # Budget exhaustion is valid empty coverage; a failed read is not.
+    read_complete: bool = True
+    # Failed stat entries retain the path without claiming any metadata evidence.
+    metadata_complete: bool = True
+    # Settled candidates retain a digest of every byte, including unsampled ranges.
+    full_sha256: str | None = None
+
+
+class FileSnapshot(dict[str, FileStamp]):
+    """File evidence plus whether the entire directory inventory was observed.
+
+    Per-file inspection errors retain unknown entries; directory inspection or
+    traversal errors instead make attribution unsafe for the whole folder.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.scan_complete = True
+
+
+def check_baseline_complete(before: dict[str, FileStamp]) -> None:
+    if isinstance(before, FileSnapshot) and not before.scan_complete:
+        raise OSError("incomplete baseline directory scan; dumps are unattributable")
+
+
+def check_snapshot_complete(snapshot: dict[str, FileStamp]) -> None:
+    if isinstance(snapshot, FileSnapshot) and not snapshot.scan_complete:
+        raise OSError("incomplete dump directory scan; stability and copying are unsafe")
+
+
+class DumpWriterBusyError(OSError):
+    """An incompatible open handle requires another settle attempt."""
+
+
+def check_settle_deadline(deadline: float | None, clock: Callable[[], float]) -> None:
+    if deadline is not None and clock() >= deadline:
+        raise TimeoutError("dump settle deadline expired")
+
+
 def snapshot_files(
     root: Path | None,
     recursive: bool,
     skip: Callable[[Path], bool] | None = None,
     errors: list[str] | None = None,
-) -> dict[str, tuple[int, int]]:
-    """Map regular files to (size, mtime_ns); collect inspection errors or propagate them."""
+    *,
+    baseline: dict[str, FileStamp] | None = None,
+    deadline: float | None = None,
+    clock: Callable[[], float] | None = None,
+    writer_probe: Callable[[Path], bool] | None = None,
+) -> FileSnapshot:
+    """Record metadata and bounded range hashes; never omit an oversized file.
+
+    Preserve baseline coverage for files with unchanged size and identity, even
+    when they have no samples. Read those ranges first; their total already fits
+    SNAPSHOT_TOTAL_READ_BYTES. Allocate the remainder in sorted path order.
+    Deadline expiry always propagates, even when inspection errors are collected.
+    Failed stat entries retain their paths with unknown metadata; a later
+    successful inspection makes them eligible as changed rather than new files.
+    Directory inspection and traversal failures mark the inventory incomplete.
+    When given, writer_probe must succeed for the inventory before any reads;
+    busy handles are retryable, while probe errors and failed reads are fatal.
+    """
+    clock = clock or time.monotonic
+    check_settle_deadline(deadline, clock)
+    result = FileSnapshot()
     if root is None:
-        return {}
-    result: dict[str, tuple[int, int]] = {}
+        return result
+    remaining = SNAPSHOT_TOTAL_READ_BYTES
 
     def inspection_error(path: Path, exc: OSError) -> None:
+        check_settle_deadline(deadline, clock)
         if errors is None:
             raise exc
         errors.append(f"{path}: {type(exc).__name__}: {exc}")
@@ -232,23 +307,30 @@ def snapshot_files(
     try:
         root_stat = root.stat()
     except OSError as exc:
+        result.scan_complete = False
         inspection_error(root, exc)
         return result
+    check_settle_deadline(deadline, clock)
     if not stat.S_ISDIR(root_stat.st_mode):
+        result.scan_complete = False
         return result
 
     def traversal_error(exc: OSError) -> None:
+        result.scan_complete = False
         inspection_error(Path(exc.filename) if exc.filename else root, exc)
 
+    check_settle_deadline(deadline, clock)
+
     # os.walk's onerror reports directory traversal failures that rglob may hide.
-    paths = (
-        (Path(directory) / name
-         for directory, _directories, names in os.walk(root, onerror=traversal_error)
-         for name in names)
-        if recursive else root.iterdir()
-    )
     try:
+        paths = (
+            (Path(directory) / name
+             for directory, _directories, names in os.walk(root, onerror=traversal_error)
+             for name in names)
+            if recursive else root.iterdir()
+        )
         for path in paths:
+            check_settle_deadline(deadline, clock)
             if path.name == DUMP_LOCK_NAME:
                 continue
             if skip is not None and skip(path):
@@ -257,13 +339,75 @@ def snapshot_files(
                 file_stat = path.stat()
             except OSError as exc:
                 inspection_error(path, exc)
+                result[str(path)] = FileStamp(0, 0, 0, (0, 0), (), False, False)
                 continue
+            check_settle_deadline(deadline, clock)
             if stat.S_ISREG(file_stat.st_mode):
-                result[str(path)] = (file_stat.st_size, file_stat.st_mtime_ns)
+                result[str(path)] = FileStamp(
+                    file_stat.st_size, file_stat.st_mtime_ns, file_stat.st_ctime_ns,
+                    (file_stat.st_dev, file_stat.st_ino), (),
+                )
     except OSError as exc:
         if errors is None:
             raise
         traversal_error(exc)
+
+    if writer_probe is not None:
+        for source, stamp in result.items():
+            if not stamp.metadata_complete:
+                continue
+            check_settle_deadline(deadline, clock)
+            try:
+                closed = writer_probe(Path(source))
+            except Exception as exc:
+                # Platform imports and ctypes calls can also fail without an
+                # OSError. Unknown completion must never become settled evidence.
+                raise OSError(f"{source} writer probe: {type(exc).__name__}: {exc}") from exc
+            check_settle_deadline(deadline, clock)
+            if not closed:
+                raise DumpWriterBusyError(f"{source}: dump writer still open")
+
+    def pinned(path: str) -> bool:
+        previous = baseline.get(path) if baseline is not None else None
+        return (previous is not None and previous.metadata_complete and
+                previous.size == result[path].size and
+                previous.identity == result[path].identity)
+
+    for source in sorted(result, key=lambda path: (not pinned(path), path)):
+        check_settle_deadline(deadline, clock)
+        stamp = result[source]
+        if not stamp.metadata_complete:
+            continue
+        if baseline is not None and pinned(source):
+            ranges = [(offset, length) for offset, length, _digest in baseline[source].fingerprints]
+        else:
+            allowance = min(stamp.size, SNAPSHOT_FILE_READ_BYTES, remaining)
+            prefix = (allowance + 1) // 2
+            ranges = [(0, prefix)] if allowance else []
+            if allowance > prefix:
+                ranges.append((stamp.size - (allowance - prefix), allowance - prefix))
+        fingerprints: list[tuple[int, int, str]] = []
+        if ranges:
+            # Reserve all ranges, including reused baseline samples, even if
+            # opening or reading fails before any bytes can be fingerprinted.
+            remaining -= sum(length for _offset, length in ranges)
+            try:
+                with Path(source).open("rb", buffering=0) as handle:
+                    for offset, length in ranges:
+                        check_settle_deadline(deadline, clock)
+                        handle.seek(offset)
+                        # Each transient chunk is at most SNAPSHOT_FILE_READ_BYTES.
+                        chunk = handle.read(length)
+                        check_settle_deadline(deadline, clock)
+                        if len(chunk) != length:
+                            raise OSError(errno.EIO, "short dump fingerprint read")
+                        fingerprints.append((offset, length, hashlib.sha256(chunk).hexdigest()))
+            except OSError as exc:
+                inspection_error(Path(source), exc)
+                fingerprints = []
+                stamp = stamp._replace(read_complete=False)
+        result[source] = stamp._replace(fingerprints=tuple(fingerprints))
+    check_settle_deadline(deadline, clock)
     return result
 
 
@@ -399,44 +543,313 @@ def core_collection_skip(
     return skip
 
 
-def changed_files(before: dict[str, tuple[int, int]], after: dict[str, tuple[int, int]]) -> list[str]:
-    return sorted(path for path, stamp in after.items() if before.get(path) != stamp)
+def file_rewritten(before: FileStamp, after: FileStamp) -> bool:
+    if not after.read_complete or not after.metadata_complete:
+        return False
+    if not before.metadata_complete:
+        return True
+    if before[:4] != after[:4]:
+        return True
+    if not before.read_complete:
+        # Missing baseline bytes cannot establish that a readable file is stale.
+        # Keep it as a candidate for full verification or a settling refusal.
+        return True
+    # Only equal byte-range coverage can establish a content change. Two empty
+    # samples rely on metadata; the settle writer probe covers deferred-timestamp
+    # rewrites when there is no sampling budget.
+    before_ranges = [(offset, length) for offset, length, _digest in before.fingerprints]
+    after_ranges = [(offset, length) for offset, length, _digest in after.fingerprints]
+    return before_ranges == after_ranges and before.fingerprints != after.fingerprints
+
+
+def changed_files(before: dict[str, FileStamp], after: dict[str, FileStamp]) -> list[str]:
+    return sorted(path for path, stamp in after.items()
+                  if stamp.read_complete and
+                  (path not in before or file_rewritten(before[path], stamp)))
+
+
+def dump_io_budget(size: int) -> float:
+    """Size each full-file hash or verified copy at the same throughput floor."""
+    return min(DUMP_COPY_MAX_SECONDS, max(
+        DUMP_COPY_MIN_SECONDS, size / DUMP_COPY_BYTES_PER_SECOND,
+    ))
+
+
+def hash_dump_content(
+    source: Path, expected: FileStamp, clock: Callable[[], float],
+    *, settle_deadline: float,
+) -> FileStamp:
+    """Bind a snapshot to all source bytes within both collection deadlines.
+
+    Snapshot sampling and writer probes precede this pass. Use bounded reads and
+    reject metadata changes during hashing; copying must match the resulting hash.
+    The original settle deadline also bounds every candidate's size-scaled budget.
+    """
+    deadline = min(settle_deadline, clock() + dump_io_budget(expected.size))
+
+    def check_hash_deadline() -> None:
+        if clock() >= deadline:
+            raise TimeoutError("dump hash deadline expired")
+
+    def check_metadata() -> None:
+        info = source.stat()
+        check_hash_deadline()
+        if (info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+                (info.st_dev, info.st_ino)) != expected[:4]:
+            raise DumpWriterBusyError(f"{source}: dump changed during settle hashing")
+
+    check_hash_deadline()
+    check_metadata()
+    digest = hashlib.sha256()
+    with source.open("rb", buffering=0) as reader:
+        remaining = expected.size
+        while remaining:
+            check_hash_deadline()
+            chunk = reader.read(min(remaining, COPY_CHUNK_BYTES))
+            check_hash_deadline()
+            if not chunk:
+                raise DumpWriterBusyError(f"{source}: dump shortened during settle hashing")
+            digest.update(chunk)
+            remaining -= len(chunk)
+        extra = reader.read(1)
+        check_hash_deadline()
+        if extra:
+            raise DumpWriterBusyError(f"{source}: dump grew during settle hashing")
+    check_metadata()
+    return expected._replace(full_sha256=digest.hexdigest())
+
+
+@contextmanager
+def open_dump_for_copy(path: Path) -> Iterator[BinaryIO]:
+    """Select the platform source transport for the verified copier."""
+    if os.name == "nt":
+        with windows_dump_for_copy(path) as reader:
+            yield reader
+    else:
+        with path.open("rb", buffering=0) as reader:
+            yield reader
+
+
+@contextmanager
+def windows_dump_for_copy(path: Path) -> Iterator[BinaryIO]:
+    """On Windows, retain a read-only share-mode handle through copy and validation.
+
+    The CRT descriptor owns the original Win32 handle, so reads (including the
+    verification pass) never reopen a path or bypass mandatory byte-range locks.
+    """
+    try:
+        import msvcrt
+
+        kernel32, handle = open_windows_dump_handle(path)
+        try:
+            descriptor = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+        except BaseException:
+            kernel32.CloseHandle(handle)
+            raise
+        try:
+            reader = os.fdopen(descriptor, "rb", buffering=0)
+        except BaseException:
+            os.close(descriptor)
+            raise
+    except OSError:
+        raise
+    except Exception as exc:
+        raise OSError(f"{path} copy open: {type(exc).__name__}: {exc}") from exc
+    with reader:
+        yield reader
+
+
+def copy_stable_file(
+    source: Path,
+    target: Path,
+    expected: FileStamp,
+    *,
+    opener: Callable[[Path], ContextManager[BinaryIO]],
+    deadline: float,
+    clock: Callable[[], float],
+) -> None:
+    """Publish only bytes matching the settled hash, a source reread and metadata.
+
+    An opener must retain the same readable file through both passes. Windows'
+    default opener additionally prevents writers from reopening during them.
+    A temporary destination is closed before publication or removal on all hosts.
+    deadline bounds copying and verification independently of dump settling.
+    """
+    def check_copy_deadline() -> None:
+        if clock() >= deadline:
+            raise TimeoutError("dump copy deadline expired")
+
+    def metadata(info: os.stat_result) -> tuple[int, int, tuple[int, int]]:
+        # These fields agree between path stat and handle fstat on every host.
+        # Windows stat uses creation time for ctime, while fstat uses change time.
+        return info.st_size, info.st_mtime_ns, (info.st_dev, info.st_ino)
+
+    temporary_path: Path | None = None
+    try:
+        check_copy_deadline()
+        with opener(source) as reader:
+            initial = os.fstat(reader.fileno())
+            check_copy_deadline()
+            if metadata(initial) != (expected.size, expected.mtime_ns, expected.identity):
+                raise DumpWriterBusyError(f"{source}: dump changed before copy")
+            # Validate the final snapshot's samples using the retained handle.
+            for offset, length, digest in expected.fingerprints:
+                check_copy_deadline()
+                reader.seek(offset)
+                sample = reader.read(length)
+                check_copy_deadline()
+                if hashlib.sha256(sample).hexdigest() != digest:
+                    raise DumpWriterBusyError(f"{source}: dump changed before copy")
+            reader.seek(0)
+            copied_digest = hashlib.sha256()
+            with tempfile.NamedTemporaryFile(dir=target.parent, prefix=".lumdump-",
+                                             suffix=".tmp", delete=False) as temporary:
+                temporary_path = Path(temporary.name)
+                remaining = initial.st_size
+                while remaining:
+                    check_copy_deadline()
+                    chunk = reader.read(min(remaining, COPY_CHUNK_BYTES))
+                    check_copy_deadline()
+                    if not chunk:
+                        raise DumpWriterBusyError(f"{source}: dump shortened during copy")
+                    if temporary.write(chunk) != len(chunk):
+                        raise OSError(errno.EIO, "short dump copy write")
+                    copied_digest.update(chunk)
+                    remaining -= len(chunk)
+                extra = reader.read(1)
+                check_copy_deadline()
+                if extra:
+                    raise DumpWriterBusyError(f"{source}: dump grew during copy")
+            # Hash the source again after the copy, through the same handle. A
+            # path stat also detects replacement of the name on POSIX. Bound
+            # this pass to the copied size so a growing file cannot extend it.
+            post_copy = source.stat()
+            reader.seek(0)
+            source_digest = hashlib.sha256()
+            remaining = initial.st_size
+            while remaining:
+                check_copy_deadline()
+                chunk = reader.read(min(remaining, COPY_CHUNK_BYTES))
+                check_copy_deadline()
+                if not chunk:
+                    raise DumpWriterBusyError(f"{source}: dump shortened after copy")
+                source_digest.update(chunk)
+                remaining -= len(chunk)
+            final = os.fstat(reader.fileno())
+            extra = reader.read(1)
+            check_copy_deadline()
+            if (extra or
+                    any(metadata(info) != metadata(initial)
+                        for info in (post_copy, final, source.stat())) or
+                    source_digest.digest() != copied_digest.digest()):
+                raise DumpWriterBusyError(f"{source}: dump changed during copy")
+            if copied_digest.hexdigest() != expected.full_sha256:
+                raise DumpWriterBusyError(f"{source}: dump content changed since settling")
+            check_copy_deadline()
+            os.utime(temporary_path, ns=(initial.st_atime_ns, initial.st_mtime_ns))
+            os.replace(temporary_path, target)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def copy_changed_files(
     root: Path | None,
-    before: dict[str, tuple[int, int]],
+    before: dict[str, FileStamp],
     destination: Path,
     recursive: bool = False,
     skip: Callable[[Path], bool] | None = None,
     errors: list[str] | None = None,
+    *,
+    after: dict[str, FileStamp] | None = None,
+    opener: Callable[[Path], ContextManager[BinaryIO]] | None = None,
+    deadline: float | None = None,
+    clock: Callable[[], float] | None = None,
+    pause: Callable[[float], None] | None = None,
 ) -> list[str]:
     """Copy new or rewritten files under root, keeping their path relative to root.
 
     A file that cannot be copied, or a directory that cannot be listed, is described in errors when a
     list is given, so one unreadable entry does not discard the rest of the iteration. Without a list
-    the error propagates.
+    the error propagates. Changed sources and incompatible writer handles restart
+    settling within the original deadline; an unverified copy is never published.
+    An incomplete baseline inventory makes the entire folder unattributable.
+    opener is the platform source opener, injectable for share-mode transports.
+    Each full hash has a size-scaled I/O budget bounded by the settle deadline.
+    Verified copies have separate size-scaled budgets starting when copying begins.
     """
+    clock = clock or time.monotonic
+    deadline = deadline if deadline is not None else clock() + DUMP_SETTLE_SECONDS
+    opener = opener or open_dump_for_copy
     copies: list[str] = []
     try:
-        changed = changed_files(before, snapshot_files(root, recursive, skip, errors))
+        check_baseline_complete(before)
+        after = after if after is not None else snapshot_files(
+            root, recursive, skip, errors, baseline=before, deadline=deadline, clock=clock,
+        )
+        check_snapshot_complete(after)
+        pending = deque(changed_files(before, after))
+        # Record all direct collectors' full hashes before copying. WER settling
+        # already supplies them. All hashes share the original settle deadline.
+        for source in pending:
+            if after[source].full_sha256 is not None:
+                continue
+            try:
+                after[source] = hash_dump_content(
+                    Path(source), after[source], clock, settle_deadline=deadline,
+                )
+            except DumpWriterBusyError:
+                assert root is not None
+                after = wait_for_dump_settle(
+                    root, before, max(0.0, deadline - clock()), errors, skip,
+                    clock=clock, pause=pause, recursive=recursive,
+                )
+                break
+            except OSError as exc:
+                if errors is None:
+                    raise
+                errors.append(f"{source}: {type(exc).__name__}: {exc}")
+                after[source] = after[source]._replace(read_complete=False)
+        pending = deque(changed_files(before, after))
     except OSError as exc:
         if errors is None:
             raise
         errors.append(f"{root} listing: {type(exc).__name__}: {exc}")
         return copies
-    for source in changed:
+    completed: set[str] = set()
+    while pending:
+        source = pending.popleft()
         relative = Path(source).relative_to(root) if root is not None else Path(source).name
         target = destination / relative
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target)
+            copy_deadline = clock() + dump_io_budget(after[source].size)
+            copy_stable_file(Path(source), target, after[source], opener=opener,
+                             deadline=copy_deadline, clock=clock)
+        except DumpWriterBusyError:
+            try:
+                # Keep probe-before-read ordering, including baseline entries,
+                # and require a fresh full stable window after a copy race.
+                assert root is not None
+                after = wait_for_dump_settle(
+                    root, before, max(0.0, deadline - clock()), errors, skip,
+                    clock=clock, pause=pause, recursive=recursive,
+                )
+            except OSError as exc:
+                if errors is None:
+                    raise
+                errors.append(f"{source} copy settle: {type(exc).__name__}: {exc}")
+                return copies
+            pending = deque(path for path in changed_files(before, after) if path not in completed)
+            continue
         except OSError as exc:
             if errors is None:
                 raise
             errors.append(f"{source}: {type(exc).__name__}: {exc}")
+            completed.add(source)
             continue
         copies.append(str(target))
+        completed.add(source)
     return copies
 
 
@@ -1015,14 +1428,23 @@ def run_locked_iteration(
         artifacts = sorted(snapshot_files(crash_dir, recursive=True, errors=collection_errors))
     except OSError as exc:
         collection_errors.append(f"crash directory listing: {type(exc).__name__}: {exc}")
+    dump_ready = True
+    dump_deadline = time.monotonic() + DUMP_SETTLE_SECONDS
+    settled: dict[str, FileStamp] | None = None
     if IS_WINDOWS and dump_folder is not None and result["status"] not in ("exit:0", "timeout"):
         try:
-            wait_for_dump_settle(dump_folder, dump_before, DUMP_SETTLE_SECONDS, collection_errors, dump_skip)
+            settled = wait_for_dump_settle(
+                dump_folder, dump_before, max(0.0, dump_deadline - time.monotonic()),
+                collection_errors, dump_skip,
+            )
         except OSError as exc:
             collection_errors.append(f"dump folder settle: {type(exc).__name__}: {exc}")
-    artifacts += copy_changed_files(
-        dump_folder, dump_before, iter_dir / "wer", skip=dump_skip, errors=collection_errors
-    )
+            dump_ready = False
+    if dump_ready:
+        artifacts += copy_changed_files(
+            dump_folder, dump_before, iter_dir / "wer", skip=dump_skip,
+            errors=collection_errors, after=settled, deadline=dump_deadline,
+        )
     artifacts += copy_changed_files(
         core_directory, core_before, iter_dir / "core", recursive=True, skip=core_skip,
         errors=collection_errors,
@@ -1032,22 +1454,156 @@ def run_locked_iteration(
     )
 
 
+def open_windows_dump_handle(path: Path) -> tuple[Any, int]:
+    """Open for reading with FILE_SHARE_READ only; the caller owns the handle.
+
+    CreateFileW checks sharing in both directions: FILE_SHARE_READ permits an
+    existing reader that shares our GENERIC_READ access, while omitting
+    FILE_SHARE_WRITE rejects existing writers even if they permit read sharing.
+    Readers that deny read sharing remain incompatible and must also be deferred.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+    handle = create_file(str(path), 0x80000000, 0x1, None, 3, 0x80, None)
+    if handle == ctypes.c_void_p(-1).value:
+        error = ctypes.get_last_error()
+        if error in (32, 33):  # ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION
+            raise DumpWriterBusyError(f"{path}: dump writer still open")
+        raise ctypes.WinError(error)
+    return kernel32, handle
+
+
+def windows_dump_writer_closed(path: Path) -> bool:
+    """Probe with the same sharing contract as the retained copy handle."""
+    import ctypes
+
+    try:
+        kernel32, handle = open_windows_dump_handle(path)
+    except DumpWriterBusyError:
+        return False
+    close_handle = kernel32.CloseHandle
+    if not close_handle(handle):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return True
+
+
+def dump_writer_closed(path: Path) -> bool:
+    """Probe WER handles on Windows, cooperative advisory writers on POSIX.
+
+    A shared advisory probe allows cooperative readers and rejects exclusive
+    writers. POSIX has no mandatory share-mode equivalent for arbitrary writers. WER
+    collection uses Windows; the advisory fallback and injectable probe allow
+    deterministic portable tests without claiming native WER qualification.
+    """
+    if os.name == "nt":
+        return windows_dump_writer_closed(path)
+    import fcntl
+
+    with path.open("rb", buffering=0) as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in (errno.EACCES, errno.EAGAIN):
+                return False
+            raise
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    return True
+
+
 def wait_for_dump_settle(
     folder: Path,
-    before: dict[str, tuple[int, int]],
+    before: dict[str, FileStamp],
     timeout: float,
     errors: list[str] | None = None,
     skip: Callable[[Path], bool] | None = None,
-) -> None:
-    """Wait until new dump files stop changing, so WER output is not copied half-written."""
-    deadline = time.monotonic() + timeout
-    previous: dict[str, tuple[int, int]] | None = None
-    while time.monotonic() < deadline:
-        current = {path: stamp for path, stamp in snapshot_files(folder, False, skip, errors).items() if before.get(path) != stamp}
-        if current and current == previous:
-            return
+    *,
+    probe: Callable[[Path], bool] | None = None,
+    clock: Callable[[], float] | None = None,
+    pause: Callable[[float], None] | None = None,
+    recursive: bool = False,
+    empty_grace: float = DUMP_EMPTY_GRACE_SECONDS,
+) -> dict[str, FileStamp]:
+    """Require closed writers and unchanged snapshots for the full stable window.
+
+    Byte sampling alone cannot rule out a middle-only rewrite with deferred file
+    timestamps. The writer probe is required on both ends of the stable window.
+    Expiry during collection or probing must never be accepted as stability.
+    With no changed files or busy probes, poll through the creation grace window
+    (injectable), bounded by timeout. Busy baseline probes still require settling.
+    An incomplete baseline directory scan fails immediately as unattributable.
+    The timeout bounds polling and all final full hashes. Unknown metadata defers
+    the empty creation grace until inspection succeeds or the deadline expires.
+    """
+    clock = clock or time.monotonic
+    pause = pause or time.sleep
+    probe = probe or dump_writer_closed
+    deadline = clock() + timeout
+    empty_grace = min(empty_grace, timeout)
+    previous: dict[str, FileStamp] | None = None
+    stable_since: float | None = None
+    empty_since: float | None = None
+    check_baseline_complete(before)
+    if any(not stamp.read_complete and stamp.metadata_complete for stamp in before.values()):
+        raise OSError("incomplete baseline dump fingerprint coverage")
+    while True:
+        check_settle_deadline(deadline, clock)
+        try:
+            # Probe even baseline files before reading: Windows may defer their
+            # timestamps until close. Compatible readers do not block the probe.
+            snapshot = snapshot_files(folder, recursive, skip, errors, baseline=before,
+                                      deadline=deadline, clock=clock, writer_probe=probe)
+        except DumpWriterBusyError:
+            snapshot = {}
+            closed = False
+        else:
+            check_snapshot_complete(snapshot)
+            if any(not stamp.read_complete and stamp.metadata_complete for stamp in snapshot.values()):
+                raise OSError("incomplete dump fingerprint coverage")
+            closed = True
+        current = {path: snapshot[path] for path in changed_files(before, snapshot)}
+        check_settle_deadline(deadline, clock)
+        now = clock()
+        if closed and not current and all(stamp.metadata_complete for stamp in snapshot.values()):
+            if empty_since is None:
+                empty_since = now
+            if now - empty_since >= empty_grace:
+                check_settle_deadline(deadline, clock)
+                return snapshot
+        else:
+            empty_since = None
+        if not closed or not current:
+            stable_since = None
+        elif current != previous or stable_since is None:
+            stable_since = now
+        elif now - stable_since >= DUMP_STABLE_SECONDS:
+            check_settle_deadline(deadline, clock)
+            try:
+                for source in current:
+                    snapshot[source] = hash_dump_content(
+                        Path(source), snapshot[source], clock, settle_deadline=deadline,
+                    )
+            except DumpWriterBusyError:
+                # A change while recording full content needs a fresh stable window.
+                stable_since = None
+            else:
+                check_settle_deadline(deadline, clock)
+                return snapshot
         previous = current
-        time.sleep(1.0)
+        next_check = deadline
+        if empty_since is not None:
+            next_check = min(next_check, empty_since + empty_grace)
+        pause(min(DUMP_STABLE_SECONDS, max(0.0, next_check - clock())))
 
 
 def build_entry(
