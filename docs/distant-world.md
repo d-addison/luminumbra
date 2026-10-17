@@ -398,7 +398,8 @@ and omit the marker on saves. Markers survive normal saves and explicit
 snapshots; explicit loads replace the rendering calendar even if metadata is
 absent. Competing marker/clock authorities are refused.
 
-The lunar period is independent of year length and solar phase. Tick zero is
+The lunar period is independent of year length and solar phase.
+The lunar month follows the selected calendar's recorded day length and lunar-day count. Tick zero is
 full moon; default day four is the new-moon illumination floor 0.08 and day eight
 is full again. Imported 36,000- and 216,000-tick days have lunar months of
 288,000 and 1,728,000 ticks, so imported moon brightness can change. Environment
@@ -414,10 +415,11 @@ their existing batching and pause–16× range; ideal 16× gives a 337.5-second 
 ## Persistence and format contract
 
 Preset revision 7 retains revision 6 omission compatibility; current-format saves
-without embedded packaged presets use frozen revision-6 copies. Lockstep protocol
-and LREC1 replay layout are version 3 and bind effective configuration plus
-resolved preset/dependency content; older layouts are refused. See the
-[identity contract](development/system-config-identity.md).
+without embedded packaged presets use frozen revision-6 copies. Lockstep
+Hello is version 4; LREC1 uses version 3 for complete streams and version 4 for
+diagnostic suffixes with an elided prefix. Both replay versions bind effective
+configuration plus resolved preset/dependency content; older layouts are refused.
+See the [identity contract](development/system-config-identity.md).
 
 Unchanged: LMR1 container v2 for `chunks/region/*.lmr`
 including its lod-level and flag validation, the

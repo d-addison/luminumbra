@@ -40,6 +40,17 @@ def run_block(workflow: str, step: str) -> str:
 
 
 class PathGateTests(unittest.TestCase):
+    def test_asan_shard_suite_is_registered_in_every_test_entrypoint(self):
+        path = "tools/ci/test_asan_shards.py"
+        self.assertIn((path,), gate.python_test_commands(ROOT))
+        self.assertTrue(gate.needs_cpp(path))
+        self.assertTrue(gate.needs_python(path))
+        cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn('add_test(NAME AsanShardContractPython COMMAND "${Python3_EXECUTABLE}" -I -B\n'
+                      '    ${CMAKE_SOURCE_DIR}/' + path + ')', cmake)
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertIn("python3 " + path, workflow)
+
     def setUp(self):
         history = patch.object(gate.subprocess, "check_output", return_value="false\n")
         self.history = history.start()
@@ -239,7 +250,8 @@ class PathGateTests(unittest.TestCase):
             ("ci", "diligent-rhi", "ready-native"),
             ("ci", "tidy-shard", "ready-native"),
             ("ci", "tidy", "aggregate"),
-            ("asan", "asan", "guarded-native"),
+            ("asan", "asan-shard", "guarded-native"),
+            ("asan", "asan", "required-aggregate"),
             ("performance", "preview-frame", "guarded-native"),
         )
         for workflow, job, route in routes:
@@ -252,8 +264,10 @@ class PathGateTests(unittest.TestCase):
                     for cpp in ("true", "false", ""):
                         for cancelled in (False, True):
                             ready = event != "pull_request" or draft is False
-                            if route == "aggregate":
-                                expected = ready
+                            if route == "required-aggregate":
+                                expected = not cancelled
+                            elif route == "aggregate":
+                                expected = not cancelled and ready
                             elif route == "guarded-python":
                                 expected = not cancelled
                             elif route == "guarded-native":
@@ -268,6 +282,9 @@ class PathGateTests(unittest.TestCase):
                                 "always()", "True"
                             ).replace("github.event_name", repr(event)).replace(
                                 "github.event.pull_request.draft", repr(draft)
+                            ).replace("needs.changes.result", repr("success")).replace(
+                                "needs.asan-shard.result", repr("success")
+                            ).replace("needs.tidy-shard.result", repr("success")
                             ).replace("needs.changes.outputs.needs_cpp", repr(cpp)).replace(
                                 "== false", "== False"
                             ).replace("!= false", "!= False").replace("&&", "and").replace("||", "or")

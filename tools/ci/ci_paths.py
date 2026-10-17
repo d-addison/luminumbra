@@ -18,6 +18,7 @@ PYTHON_TESTS = (
     "tools/ci/test_cache_retention.py",
     "tools/ci/test_check_docs.py",
     "tools/ci/test_check_ctest_junit.py",
+    "tools/ci/test_asan_shards.py",
     "tools/ci/test_qualification_capture.py",
     "tools/ci/test_compare_ambient_receipts.py",
     "tools/ci/test_qualify_prefab_runtime.py",

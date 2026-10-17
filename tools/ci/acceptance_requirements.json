@@ -3495,8 +3495,8 @@
     {
       "id": "dw.persistence.058",
       "source": "docs/distant-world.md#persistence-and-format-contract",
-      "quote": "Lockstep protocol and LREC1 replay layout are version 3 and bind effective configuration plus resolved preset/dependency content;",
-      "text": "Lockstep protocol and LREC1 replay layout are version 3 and bind effective configuration plus resolved preset/dependency content;"
+      "quote": "Lockstep Hello is version 4;",
+      "text": "Lockstep Hello is version 4;"
     },
     {
       "id": "dw.persistence.059",
@@ -4439,6 +4439,24 @@
       "source": "docs/distant-world.md#station-discovery-req-e4",
       "quote": "Logical dependency names must be relative portable UTF-8 paths without root names, root directories, traversal components, backslashes, colons or NULs.",
       "text": "Logical dependency names must be relative portable UTF-8 paths without root names, root directories, traversal components, backslashes, colons or NULs."
+    },
+    {
+      "id": "dw.persistence.061",
+      "source": "docs/distant-world.md#persistence-and-format-contract",
+      "quote": "LREC1 uses version 3 for complete streams and version 4 for diagnostic suffixes with an elided prefix.",
+      "text": "LREC1 uses version 3 for complete streams and version 4 for diagnostic suffixes with an elided prefix."
+    },
+    {
+      "id": "dw.persistence.062",
+      "source": "docs/distant-world.md#persistence-and-format-contract",
+      "quote": "Both replay versions bind effective configuration plus resolved preset/dependency content;",
+      "text": "Both replay versions bind effective configuration plus resolved preset/dependency content;"
+    },
+    {
+      "id": "dw.calendar.023",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "The lunar month follows the selected calendar's recorded day length and lunar-day count.",
+      "text": "The lunar month follows the selected calendar's recorded day length and lunar-day count."
     }
   ],
   "exclusions": [

@@ -108,8 +108,10 @@ Preserving an override on an absent-ledger load can change nondefault scheduling
 derived world/replay hashes compared with the previous default-substitution bug; no pins
 for that incorrect behavior are retained or introduced.
 
-Lockstep protocol and LREC1 layout versions are 3. Hello and replay headers carry
-length-prefixed configuration identity and `preset_content_hash` strings. Versions 1
+Lockstep Hello is version 4. Complete LREC1 streams use version 3; diagnostic suffixes
+with an elided prefix use version 4. Replay readers accept both versions. Hello and
+replay headers carry length-prefixed configuration identity and `preset_content_hash`
+strings. Versions 1
 and 2 are explicitly rejected because they cannot bind resolved preset content.
 Desync replay dumps include both identities captured at handshake. TCP (including
 runtime/soak modes) hosts validate the same Hello compatibility fields before adding a
@@ -198,17 +200,20 @@ within the registry, including for client metadata callers. Registry order uses
 the same generic UTF-8 filename order, including when native UTF-16 path order
 would differ.
 
-The same string continues through protocol-v3 Hello, replay-header-v3, server modes and
-NetworkedSessionDriver; their wire layout is unchanged. Earlier JSON-only identities
-will mismatch the expanded identity and refuse admission/verification. The existing
+The same string continues through protocol-v4 Hello, replay-header-v3 (or v4 for
+elided diagnostic suffixes), server modes and NetworkedSessionDriver. Hello v4
+appends negotiated lockstep admission limits; the configuration identity encoding
+and complete replay layout are unchanged. Earlier JSON-only identities will
+mismatch the expanded identity and refuse admission/verification. The existing
 content-mismatch diagnostics apply; lockstep and replay explicitly identify
-`preset/species` content. No additional identity field or wire version is introduced.
+`preset/species` content. Binding species introduces no additional identity field
+or wire version.
 The older numeric replay `preset_hash` remains name
 provenance only; admission and verification require `preset_content_hash` as well.
 
 The GNS and Steam transports are optional and disabled by default. Both use the
 unconditionally compiled `Luminumbra::Net` replication admission gate from issue #278.
-A connected joiner sends the existing v3 Hello reliably. The host checks its assigned
+A connected joiner sends the existing v4 Hello reliably. The host checks its assigned
 client ID and `HelloMatches` compatibility (protocol, seed, preset, tick rate, nonempty
 SystemConfig identity and resolved preset content hash). Host identities come from the
 booted runner session, replacing the two identity fields constructed by
@@ -232,22 +237,23 @@ progress and callback or replication loop iteration counts. The host starts at
 connection establishment; the joiner starts when its Hello is successfully enqueued.
 Expiry is at elapsed tick `>= 150`. Each admission pump drains at most 32 frames, so
 continuous traffic cannot postpone deadline checks. The connection-establishment limit
-remains separately 30 seconds. The separate runtime TCP policy
-`kRuntimeTcpHelloTimeoutTicks` introduced by issue #315 is also 150 ticks / approximately
-5 seconds; the constants remain separately named. This optional-transport gate does not
-alter TCP admission or add a TCP acknowledgement.
+remains separately 30 seconds. Runtime and soak TCP slots use their separate
+10-second `RuntimeTcpClientSlot::kHelloTimeout` steady-clock deadline. This
+optional-transport gate does not alter TCP admission or add a TCP acknowledgement.
 
 Hello and user commands share tag `0x01`. Admission validates the complete outer frame
 length first: exactly `kUsercmdPayloadBytes = 19` payload bytes (24 total) identifies a
 command, even when its tick starts with `LSTP1`. Other frames with this tag must carry
 the Hello magic and satisfy `DecodeHello(frame, hello) && EncodeHello(hello) == frame`.
-Failed Hello decoding never falls back to command decoding. The general Hello decoder
-keeps its existing permissive TCP/lockstep behavior. `DecodeUsercmd` now rejects trailing
-extensions, including those whose outer length was adjusted to include the extra bytes.
-All valid encoder output is unchanged: lockstep protocol 3, replication protocol 1 and
-LREC1 layout 3 remain unchanged, as do TCP wire bytes, replay and hash layouts. Hello
-versions 1 and 2 remain rejected. Older optional joiners cannot admit through commands;
-new joiners discard older hosts' snapshots until acknowledgement timeout.
+Failed Hello decoding never falls back to command decoding. The shared Hello decoder
+requires the complete v4 identity and admission fields; replication admission's
+exact re-encoding check rejects trailing bytes.
+`DecodeUsercmd` rejects trailing extensions, including those whose outer length was
+adjusted to include the extra bytes. Replication protocol 1 and complete LREC1 layout 3
+remain unchanged; Hello v4 and diagnostic LREC1 suffix version 4 follow the version
+rules above. Hello versions 1, 2 and 3 are rejected. Older optional joiners cannot
+admit through commands; new joiners discard older hosts' snapshots until
+acknowledgement timeout.
 
 The command-length compatibility audit found one production command encoder,
 `EncodeUsercmd`, writing exactly `u64 tick + u32 player_id + 3 * i16 + u8 = 19` bytes,
