@@ -7972,15 +7972,25 @@ TEST(GameSessionHeadlessWorldTest, IndexedOpenAdmitsEachRecordOnceThroughClientI
     EXPECT_EQ(RepeatedSaveBytes(owner.GetWorldSaveDir()), saved_files);
     // Use the same identity inspection as the render client after entering the world.
     // Both retained and excluded authority must hit admission facts without decoding again.
-    const auto identity = reopened.InspectCurrentSavedWorld();
-    ASSERT_TRUE(identity.error.empty()) << identity.error;
-    EXPECT_EQ(identity.metadata.worldId, owner.GetMetadata().worldId);
-    EXPECT_EQ(identity.metadata.seed, owner.GetMetadata().seed);
-    EXPECT_EQ(identity.metadata.worldType, owner.GetMetadata().worldType);
-    EXPECT_EQ(identity.preset_path, owner.GetWorldSaveDir() / "preset.json");
-    EXPECT_EQ(Service::decode_count_for_testing() - admissions, 2u);
-    EXPECT_EQ(Service::chunk_decode_count_for_testing() - chunks, 3u);
-    EXPECT_EQ(RepeatedSaveBytes(owner.GetWorldSaveDir()), saved_files);
+    for (std::size_t inspection = 0; inspection < 2; ++inspection) {
+        SCOPED_TRACE(inspection);
+        const auto before_identity = reopened.GetChunkValidationCacheStats();
+        const auto identity = reopened.InspectCurrentSavedWorld();
+        ASSERT_TRUE(identity.error.empty()) << identity.error;
+        EXPECT_EQ(identity.metadata.worldId, owner.GetMetadata().worldId);
+        EXPECT_EQ(identity.metadata.seed, owner.GetMetadata().seed);
+        EXPECT_EQ(identity.metadata.worldType, owner.GetMetadata().worldType);
+        EXPECT_EQ(identity.preset_path, owner.GetWorldSaveDir() / "preset.json");
+        EXPECT_EQ(Service::decode_count_for_testing() - admissions, 2u + inspection);
+        EXPECT_EQ(Service::chunk_decode_count_for_testing() - chunks, 3u);
+        const auto after_identity = reopened.GetChunkValidationCacheStats();
+        EXPECT_EQ(after_identity.modes[1].hits - before_identity.modes[1].hits, 3u);
+        EXPECT_EQ(after_identity.misses, before_identity.misses);
+        EXPECT_EQ(after_identity.modes[1].decodes, before_identity.modes[1].decodes);
+        EXPECT_EQ(reopened.GetWorldSystem()->find_streamed_chunk(excluded), nullptr);
+        EXPECT_EQ(reopened.GetWorldSystem()->snapshot_streamed_chunks().size(), 2u);
+        EXPECT_EQ(RepeatedSaveBytes(owner.GetWorldSaveDir()), saved_files);
+    }
     // Exact-byte admission facts survive reset, so the next unchanged save only
     // verifies its baseline through the cache, including the nonresident record.
     const auto save_decodes = Service::chunk_decode_count_for_testing();
@@ -7990,6 +8000,33 @@ TEST(GameSessionHeadlessWorldTest, IndexedOpenAdmitsEachRecordOnceThroughClientI
     // Reinspection still reads current metadata and presets. Match the uncached catalog's
     // refusal exactly, preserve live state, and leave every on-disk byte untouched.
     ASSERT_NO_FATAL_FAILURE(AssertCatalogRefusesMalformedMetadata(root, owner, reopened));
+    EXPECT_EQ(RepeatedSaveBytes(owner.GetWorldSaveDir()), saved_files);
+    // Cached facts cannot hide a missing excluded region from current-file validation.
+    int excluded_rx = 0, excluded_rz = 0;
+    Service::region_coords_for_chunk(excluded, excluded_rx, excluded_rz);
+    const auto excluded_region =
+        Service::region_file_path(owner.GetWorldSaveDir(), excluded_rx, excluded_rz);
+    const auto parked_region = root.path() / "excluded-region.lmr";
+    const auto* admitted_world = reopened.GetWorldSystem();
+    const auto admitted_tick = reopened.GetSimulationTickCount();
+    fs::rename(excluded_region, parked_region);
+    const auto missing_files = RepeatedSaveBytes(owner.GetWorldSaveDir());
+    const auto missing_decodes = Service::chunk_decode_count_for_testing();
+    const auto missing_identity = reopened.InspectCurrentSavedWorld();
+    EXPECT_FALSE(missing_identity.error.empty());
+    EXPECT_EQ(Service::chunk_decode_count_for_testing(), missing_decodes);
+    const auto uncached_missing =
+        P::InspectSavedWorld(root.root_string(), owner.GetMetadata().worldId);
+    EXPECT_EQ(missing_identity.error, uncached_missing.error);
+    EXPECT_EQ(reopened.GetWorldSystem(), admitted_world);
+    EXPECT_EQ(reopened.GetSimulationTickCount(), admitted_tick);
+    EXPECT_TRUE(reopened.GetWorldOpenError().empty());
+    EXPECT_EQ(RepeatedSaveBytes(owner.GetWorldSaveDir()), missing_files);
+    fs::rename(parked_region, excluded_region);
+    const auto restored_decodes = Service::chunk_decode_count_for_testing();
+    const auto restored_identity = reopened.InspectCurrentSavedWorld();
+    EXPECT_TRUE(restored_identity.error.empty()) << restored_identity.error;
+    EXPECT_EQ(Service::chunk_decode_count_for_testing(), restored_decodes);
     EXPECT_EQ(RepeatedSaveBytes(owner.GetWorldSaveDir()), saved_files);
     // Excluded authority stays available for later demand without eager residency.
     ASSERT_TRUE(reopened.GetWorldSystem()->restore_authoritative_chunk(excluded));
