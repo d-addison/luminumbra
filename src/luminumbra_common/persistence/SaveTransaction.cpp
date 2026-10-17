@@ -4,6 +4,7 @@
 #include "../core/BoundedFileReader.h"
 #include "../fields/FieldPageState.h"
 #include "../world/ActiveRegionLedger.h"
+#include "../world/FarAuthorityOverlay.h"
 #include "../world/GroundObjectStore.h"
 #include "WorldSaveService.h"
 
@@ -13,6 +14,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <exception>
@@ -20,13 +22,18 @@
 #include <functional>
 #include <ios>
 #include <istream>
+#include <limits>
 #include <map>
+#include <memory>
+#include <mutex>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <stop_token>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -43,6 +50,18 @@ constexpr std::size_t kHashBlockBytes = 65536; // Fixed 64 KiB hash working buff
 SaveTransaction*& ActiveTransaction() {
     static thread_local SaveTransaction* active = nullptr;
     return active;
+}
+
+// Recovery and begin share this gate so no thread can recover a live transaction,
+// including the interval before begin publishes its first journal document.
+struct RecoveryState {
+    std::recursive_mutex mutex;
+    std::vector<std::pair<fs::path, const SaveTransaction*>> live;
+};
+
+RecoveryState& RecoveryGate() {
+    static RecoveryState state;
+    return state;
 }
 
 SnapshotStepHook& StepHook() {
@@ -138,6 +157,10 @@ std::size_t& JournalBytesRead() {
 }
 
 std::size_t MemberByteLimit(std::string_view path) {
+    if (path == "far/catalog.json")
+        return kMaxSnapshotIndexBytes;
+    if (path.starts_with("far/"))
+        return World::kFsv1MaxFileBytes;
     if (path == kSnapshotIndexRelativePath)
         return kMaxSnapshotIndexBytes;
     if (path == "world_info.json")
@@ -161,6 +184,11 @@ std::size_t MemberByteLimit(std::string_view path) {
 
 bool SamePath(const fs::path& lhs, const fs::path& rhs) {
     std::error_code ec;
+    // Compare existing directory identity before spelling: Windows case and 8.3 aliases
+    // must share the live-transaction gate even when canonical strings differ.
+    if (fs::equivalent(lhs, rhs, ec) && !ec)
+        return true;
+    ec.clear();
     fs::path lhs_canonical = fs::weakly_canonical(lhs, ec);
     if (ec) {
         lhs_canonical = lhs.lexically_normal();
@@ -172,11 +200,45 @@ bool SamePath(const fs::path& lhs, const fs::path& rhs) {
     return lhs_canonical == rhs_canonical;
 }
 
-// Removes stale staging files (names containing ".tmp.") directly in save_dir and chunks/region.
-// Returns false when a listed temporary could not be removed. Affected directories are flushed.
+bool HasLiveTransaction(const fs::path& save_dir) {
+    return std::any_of(RecoveryGate().live.begin(),
+                       RecoveryGate().live.end(),
+                       [&save_dir](const auto& entry) { return SamePath(entry.first, save_dir); });
+}
+
+void ReleaseRecoveryGate(const SaveTransaction* transaction) {
+    const std::lock_guard lock(RecoveryGate().mutex);
+    std::erase_if(RecoveryGate().live,
+                  [transaction](const auto& entry) { return entry.second == transaction; });
+}
+
+std::uint64_t DerivedByteCap(std::string_view path) {
+    return path == "far/catalog.json" ? kMaxSnapshotIndexBytes : World::kFsv1MaxFileBytes;
+}
+
+bool AdmitDerivedUndo(const fs::path& save_dir,
+                      const std::string& relative,
+                      std::vector<std::string>* errors) {
+    std::error_code ec;
+    const auto path = save_dir / relative;
+    const bool exists = fs::exists(path, ec);
+    if (!ec && !exists)
+        return true;
+    if (!ec) {
+        const auto size = fs::file_size(path, ec);
+        if (!ec && size <= DerivedByteCap(relative))
+            return true;
+    }
+    AddError(errors, "cannot admit derived undo within byte cap: " + relative);
+    return false;
+}
+
+// Removes stale staging files directly in save_dir, chunks/region and far.
+// Refuses directories beyond the member visit cap or failed removals; flushes affected directories.
 bool SweepTemporaries(const fs::path& save_dir) {
     bool ok = true;
-    const std::array<fs::path, 2> directories = {save_dir, save_dir / "chunks" / "region"};
+    const std::array<fs::path, 3> directories = {
+        save_dir, save_dir / "chunks" / "region", save_dir / "far"};
     for (const fs::path& directory : directories) {
         std::error_code ec;
         fs::directory_iterator it(directory, ec);
@@ -184,8 +246,14 @@ bool SweepTemporaries(const fs::path& save_dir) {
             continue;
         }
         bool removed_any = false;
+        // Bound visits, including non-temporaries and non-regular entries, per directory.
+        std::size_t visits = 0;
         const fs::directory_iterator end;
         for (; it != end; it.increment(ec)) {
+            if (++visits > kMaxSnapshotMembers) {
+                ok = false;
+                break;
+            }
             if (ec) {
                 ok = false;
                 break;
@@ -298,7 +366,8 @@ public:
         if (value.size() > kMaxJournalStringBytes)
             return Fail("journal string exceeds cap");
         if (m_state == State::Root && m_field == Field::Schema)
-            return value == kJournalSchema || Fail("unsupported journal schema");
+            return value == kJournalSchema || value == kDerivedJournalSchema ||
+                   Fail("unsupported journal schema");
         if (m_state == State::Entry) {
             switch (m_field) {
                 case Field::Path:
@@ -472,6 +541,8 @@ std::string EncodeJournal(std::uint64_t txn_id,
     root["new_generation"] = new_generation;
     nlohmann::json list = nlohmann::json::array();
     for (const JournalEntry& entry : entries) {
+        if (ClassifySnapshotMember(entry.path) == MemberClass::Derived)
+            root["schema"] = kDerivedJournalSchema;
         nlohmann::json item = nlohmann::json::object();
         item["path"] = entry.path;
         item["action"] = entry.action;
@@ -627,7 +698,8 @@ fs::path journal_directory(const fs::path& save_dir) {
     return save_dir / "journal";
 }
 
-bool member_path_allowed(std::string_view relative_path) {
+namespace {
+bool AuthoritativePathAllowed(std::string_view relative_path) {
     if (relative_path.empty() || relative_path.front() == '/') {
         return false;
     }
@@ -660,6 +732,26 @@ bool member_path_allowed(std::string_view relative_path) {
     }
     return IsRegionCoordinate(middle.substr(0, dot)) && IsRegionCoordinate(middle.substr(dot + 1));
 }
+} // namespace
+
+std::optional<MemberClass> ClassifySnapshotMember(std::string_view path) {
+    if (AuthoritativePathAllowed(path))
+        return MemberClass::Authoritative;
+    if (path == "far/catalog.json")
+        return MemberClass::Derived;
+    if (path.starts_with("far/")) {
+        const auto key = World::ParseFarOverlayFileName(path.substr(4));
+        if (key.has_value() && key->tx >= -World::kFsv1MaxAbsTileIndex &&
+            key->tx <= World::kFsv1MaxAbsTileIndex && key->tz >= -World::kFsv1MaxAbsTileIndex &&
+            key->tz <= World::kFsv1MaxAbsTileIndex)
+            return MemberClass::Derived;
+    }
+    return std::nullopt;
+}
+
+bool member_path_allowed(std::string_view path) {
+    return ClassifySnapshotMember(path).has_value();
+}
 
 std::string encode_snapshot_index(const SnapshotIndex& index) {
     nlohmann::json root = nlohmann::json::object();
@@ -674,6 +766,11 @@ std::string encode_snapshot_index(const SnapshotIndex& index) {
     root["anchors"] = std::move(anchors);
     nlohmann::json members = nlohmann::json::array();
     for (const SnapshotMember& member : index.members) {
+        const auto cls = ClassifySnapshotMember(member.path);
+        if (cls.has_value() && *cls != member.cls)
+            throw std::invalid_argument("snapshot member class disagrees with path");
+        if (member.cls == MemberClass::Derived)
+            root["schema"] = kDerivedSnapshotIndexSchema;
         nlohmann::json item = nlohmann::json::object();
         item["path"] = member.path;
         item["class"] = member.cls == MemberClass::Authoritative ? "authoritative" : "derived";
@@ -700,7 +797,9 @@ bool decode_snapshot_index(std::string_view bytes, SnapshotIndex& out, std::stri
         return false;
     }
     const nlohmann::json* schema = Field(root, "schema");
-    if (!schema || !schema->is_string() || schema->get<std::string>() != kSnapshotIndexSchema) {
+    if (!schema || !schema->is_string() ||
+        (schema->get<std::string>() != kSnapshotIndexSchema &&
+         schema->get<std::string>() != kDerivedSnapshotIndexSchema)) {
         error = "unsupported snapshot schema";
         return false;
     }
@@ -770,6 +869,11 @@ bool decode_snapshot_index(std::string_view bytes, SnapshotIndex& out, std::stri
             error = "snapshot member class invalid";
             return false;
         }
+        const auto expected_class = ClassifySnapshotMember(member.path);
+        if (!expected_class.has_value() || *expected_class != member.cls) {
+            error = "snapshot member class disagrees with path";
+            return false;
+        }
         const std::string state_name = state->get<std::string>();
         if (state_name == "present") {
             member.present = true;
@@ -785,6 +889,11 @@ bool decode_snapshot_index(std::string_view bytes, SnapshotIndex& out, std::stri
         }
         member.bytes = member_bytes->get<std::uint64_t>();
         member.generation = member_generation->get<std::uint64_t>();
+        if (member.generation > index.generation ||
+            (!member.present && (member.bytes != 0 || member.fnv64 != 0))) {
+            error = "snapshot member generation or absence invalid";
+            return false;
+        }
         index.members.push_back(std::move(member));
     }
     out = std::move(index);
@@ -887,12 +996,16 @@ bool admit_recovery_payloads(const fs::path& save_dir,
         return false;
     if (!fs::exists(txn_path))
         return true;
-    std::string bytes;
     JournalDocument document;
     std::string error;
-    if (!ReadAllBytes(txn_path, bytes, nullptr) || !ParseJournal(bytes, document, error) ||
-        !admit_entries(document.entries.size()))
+    try {
+        Filesystem::BoundedFileInput input(txn_path, kMaxJournalBytes);
+        if (!ParseJournal(input.stream(), document, error) ||
+            !admit_entries(document.entries.size()))
+            return false;
+    } catch (const std::exception&) {
         return false;
+    }
     for (const auto& entry : document.entries) {
         if (entry.action == "replace" && (!admit_file(save_dir / entry.path) ||
                                           !admit_file(journal_directory(save_dir) / entry.undo)))
@@ -905,6 +1018,11 @@ RecoveryOutcome recover_pending_journal(const fs::path& save_dir,
                                         std::vector<std::string>* errors) {
     JournalBytesRead() = 0;
     try {
+        const std::lock_guard lock(RecoveryGate().mutex);
+        if (HasLiveTransaction(save_dir)) {
+            AddError(errors, "cannot recover a live snapshot transaction");
+            return RecoveryOutcome::Failed;
+        }
         const fs::path journal = journal_directory(save_dir);
         std::error_code ec;
         const bool journal_exists = fs::exists(journal, ec);
@@ -1011,6 +1129,7 @@ SaveTransaction::~SaveTransaction() {
     if (m_registered) {
         ActiveTransaction() = nullptr;
     }
+    ReleaseRecoveryGate(this);
 }
 
 SaveTransaction* SaveTransaction::active_for(const fs::path& save_dir) {
@@ -1022,15 +1141,25 @@ SaveTransaction* SaveTransaction::active_for(const fs::path& save_dir) {
 }
 
 bool SaveTransaction::begin(std::vector<std::string>* errors) {
-    if (m_state != State::Idle) {
+    if (!owner_thread() || !m_registered || m_state != State::Idle) {
         AddError(errors, "save transaction already begun");
         return false;
     }
     try {
+        const std::lock_guard lock(RecoveryGate().mutex);
+        if (HasLiveTransaction(m_save_dir)) {
+            AddError(errors, "save already has a live snapshot transaction");
+            return false;
+        }
         if (recover_pending_journal(m_save_dir, errors) == RecoveryOutcome::Failed) {
             return false;
         }
         if (!read_snapshot_index(m_save_dir, m_previous, errors)) {
+            return false;
+        }
+        if (m_previous.generation == std::numeric_limits<std::uint64_t>::max() ||
+            m_previous.txn_id == std::numeric_limits<std::uint64_t>::max()) {
+            AddError(errors, "snapshot generation exhausted");
             return false;
         }
         m_new_generation = m_previous.generation + 1;
@@ -1047,6 +1176,7 @@ bool SaveTransaction::begin(std::vector<std::string>* errors) {
         if (!WorldSaveService::durable_flush_directory(m_save_dir, errors)) {
             return false;
         }
+        RecoveryGate().live.emplace_back(m_save_dir, this);
         m_state = State::Open;
         return true;
     } catch (const std::exception& ex) {
@@ -1057,9 +1187,22 @@ bool SaveTransaction::begin(std::vector<std::string>* errors) {
 
 bool SaveTransaction::protect(const std::vector<std::string>& relative_paths,
                               std::vector<std::string>* errors) {
-    if (m_state != State::Open) {
+    return protect_members(relative_paths, errors, false);
+}
+
+bool SaveTransaction::protect_members(const std::vector<std::string>& relative_paths,
+                                      std::vector<std::string>* errors,
+                                      bool allow_derived) {
+    if (!owner_thread() || m_state != State::Open || m_rollback_failed || m_protection_failed) {
         AddError(errors, "save transaction is not open");
         return false;
+    }
+    for (const auto& path : relative_paths) {
+        const auto cls = ClassifySnapshotMember(path);
+        if (!cls.has_value() || (*cls == MemberClass::Derived && !allow_derived)) {
+            AddError(errors, "member requires its path-derived writer: " + path);
+            return false;
+        }
     }
     try {
         std::vector<std::string> queued_paths;
@@ -1081,6 +1224,7 @@ bool SaveTransaction::protect(const std::vector<std::string>& relative_paths,
             if (!append(rel))
                 return false;
 
+        m_protection_failed = true;
         const fs::path undo_directory = journal_directory(m_save_dir) / "undo";
         bool added = false;
         for (const std::string& rel : queued_paths) {
@@ -1101,6 +1245,11 @@ bool SaveTransaction::protect(const std::vector<std::string>& relative_paths,
             Entry entry;
             entry.path = rel;
             if (exists) {
+                if (allow_derived && rel != kSnapshotIndexRelativePath &&
+                    bytes > DerivedByteCap(rel)) {
+                    AddError(errors, "derived undo exceeds byte cap: " + rel);
+                    return false;
+                }
                 std::string previous;
                 if (!read_bounded_save_file(destination, previous, MemberByteLimit(rel), errors)) {
                     return false;
@@ -1123,6 +1272,7 @@ bool SaveTransaction::protect(const std::vector<std::string>& relative_paths,
             added = true;
         }
         if (!added) {
+            m_protection_failed = false;
             return true;
         }
         if (!WorldSaveService::durable_flush_directory(undo_directory, errors)) {
@@ -1132,6 +1282,7 @@ bool SaveTransaction::protect(const std::vector<std::string>& relative_paths,
             return false;
         }
         report_snapshot_step("journal-published", journal_directory(m_save_dir) / "txn.json");
+        m_protection_failed = false;
         return true;
     } catch (const std::exception& ex) {
         AddError(errors, std::string("cannot protect snapshot members: ") + ex.what());
@@ -1161,157 +1312,393 @@ bool SaveTransaction::write_journal(std::vector<std::string>* errors) {
         journal_directory(m_save_dir) / "txn.json", bytes, errors);
 }
 
+bool SaveTransaction::owner_thread() const {
+    return m_owner_thread == std::this_thread::get_id();
+}
+
+std::optional<SaveTransaction::DerivedGroup>
+SaveTransaction::BeginDerivedGroup(const std::vector<std::string>& paths,
+                                   std::vector<std::string>* errors,
+                                   MemberDigestFn catalog_digest) {
+    if (!owner_thread() || m_state != State::Open || m_rollback_failed || paths.empty() ||
+        paths.size() > kMaxSnapshotMembers ||
+        paths.size() > kMaxSnapshotMembers - std::min(kMaxSnapshotMembers, m_entries.size())) {
+        AddError(errors, "cannot begin derived publication group");
+        return std::nullopt;
+    }
+    auto sorted = paths;
+    std::sort(sorted.begin(), sorted.end());
+    for (std::size_t i = 0; i < sorted.size(); ++i) {
+        const auto cls = ClassifySnapshotMember(sorted[i]);
+        if (!cls.has_value() || *cls != MemberClass::Derived ||
+            (i != 0 && sorted[i] == sorted[i - 1]) || capture_member_protected(sorted[i])) {
+            AddError(errors, "invalid or overlapping derived group path: " + sorted[i]);
+            return std::nullopt;
+        }
+        if (!AdmitDerivedUndo(m_save_dir, sorted[i], errors))
+            return std::nullopt;
+    }
+    GroupState state;
+    state.identity =
+        std::make_shared<const GroupIdentity>(GroupIdentity{this, m_derived_groups.size()});
+    state.paths = std::move(sorted);
+    state.catalog_digest = catalog_digest;
+    m_derived_groups.push_back(std::move(state));
+    const bool protected_ok = protect_members(m_derived_groups.back().paths, errors, true);
+    if (!protected_ok) {
+        abort(errors); // no caller can replace members after incomplete undo publication
+        return std::nullopt;
+    }
+    return m_derived_groups.back().identity;
+}
+
+SaveTransaction::GroupState* SaveTransaction::writable_group(const DerivedGroup& group,
+                                                             std::string_view path) {
+    if (!owner_thread() || m_state != State::Open || m_rollback_failed || m_protection_failed ||
+        !group || group->owner != this || group->index >= m_derived_groups.size())
+        return nullptr;
+    auto& state = m_derived_groups[group->index];
+    if (state.identity != group || state.rolled_back ||
+        std::find(state.paths.begin(), state.paths.end(), path) == state.paths.end())
+        return nullptr;
+    return &state;
+}
+
+bool SaveTransaction::RollbackDerivedGroup(const DerivedGroup& group,
+                                           std::vector<std::string>* errors) {
+    if (!owner_thread() || m_state != State::Open || !group || group->owner != this ||
+        group->index >= m_derived_groups.size()) {
+        AddError(errors, "invalid derived rollback handle");
+        return false;
+    }
+    auto& state = m_derived_groups[group->index];
+    if (state.identity != group) {
+        AddError(errors, "unissued derived rollback handle");
+        return false;
+    }
+    if (state.rolled_back)
+        return true;
+    try {
+        std::vector<JournalEntry> entries;
+        for (const auto& entry : m_entries) {
+            if (std::binary_search(state.paths.begin(), state.paths.end(), entry.path))
+                entries.push_back(JournalEntry{
+                    entry.path, entry.action, entry.prev_bytes, entry.prev_fnv64, entry.undo});
+        }
+        if (RollbackEntries(m_save_dir, entries, errors)) {
+            state.rolled_back = true;
+            return true;
+        }
+    } catch (const std::exception& error) {
+        AddError(errors, std::string("derived rollback failed: ") + error.what());
+    }
+    m_rollback_failed = true;
+    return false;
+}
+
+bool SaveTransaction::WriteDerivedMember(const DerivedGroup& group,
+                                         std::string_view path,
+                                         const std::string& bytes,
+                                         std::vector<std::string>* errors) {
+    if (!writable_group(group, path)) {
+        AddError(errors, "derived write outside an open publication group");
+        RollbackDerivedGroup(group, errors);
+        return false;
+    }
+    try {
+        if (bytes.size() > DerivedByteCap(path)) {
+            AddError(errors, "derived candidate exceeds byte cap: " + std::string(path));
+            RollbackDerivedGroup(group, errors);
+            return false;
+        }
+        const auto destination = m_save_dir / std::string(path);
+        std::error_code ec;
+        fs::create_directories(destination.parent_path(), ec);
+        if (!ec && WorldSaveService::durable_flush_directory(m_save_dir, errors) &&
+            WorldSaveService::durable_write_file(destination, bytes, errors))
+            return true;
+    } catch (const std::exception& error) {
+        AddError(errors, std::string("derived write failed: ") + error.what());
+    }
+    RollbackDerivedGroup(group, errors);
+    return false;
+}
+
+bool SaveTransaction::RemoveDerivedMember(const DerivedGroup& group,
+                                          std::string_view path,
+                                          std::vector<std::string>* errors) {
+    if (!writable_group(group, path)) {
+        AddError(errors, "derived removal outside an open publication group");
+        RollbackDerivedGroup(group, errors);
+        return false;
+    }
+    try {
+        if (WorldSaveService::durable_remove(m_save_dir / std::string(path), errors))
+            return true;
+    } catch (const std::exception& error) {
+        AddError(errors, std::string("derived removal failed: ") + error.what());
+    }
+    RollbackDerivedGroup(group, errors);
+    return false;
+}
+
+bool SaveTransaction::AddFinalizerOnce(std::string key, Finalizer callback) {
+    if (!owner_thread() || m_state != State::Open || key.empty() || !callback)
+        return false;
+    for (const auto& entry : m_finalizers)
+        if (entry.first == key)
+            return true;
+    if (m_running_finalizers || m_finalizers.size() >= kMaxSnapshotMembers)
+        return false;
+    m_finalizers.emplace_back(std::move(key), std::move(callback));
+    return true;
+}
+
+bool SaveTransaction::derived_rolled_back(std::string_view path) const {
+    for (const auto& group : m_derived_groups)
+        if (group.rolled_back &&
+            std::find(group.paths.begin(), group.paths.end(), path) != group.paths.end())
+            return true;
+    return false;
+}
+
+bool SaveTransaction::prepare_derived_groups(std::vector<std::string>* errors) {
+    for (std::size_t i = 0; i < m_derived_groups.size(); ++i) {
+        auto& state = m_derived_groups[i];
+        if (state.rolled_back)
+            continue;
+        bool valid = true;
+        for (const auto& path : state.paths) {
+            MemberDigest digest;
+            std::string error;
+            if (!WorldSaveService::derived_member_digest(
+                    m_save_dir, path, m_new_generation, digest, error, state.catalog_digest)) {
+                std::string message = "derived publication due: ";
+                message += path;
+                message += ": ";
+                message += error;
+                AddError(errors, message);
+                valid = false;
+                break;
+            }
+        }
+        if (!valid) {
+            if (!RollbackDerivedGroup(state.identity, errors))
+                return false;
+        }
+    }
+    return true;
+}
+
 void SaveTransaction::defer_until_commit(std::function<void()> action) {
-    if (m_state != State::Open)
+    if (!owner_thread() || m_state != State::Open)
         throw std::logic_error("cannot defer acknowledgement on a closed save transaction");
     m_committed_actions.push_back(std::move(action));
 }
 
+bool SaveTransaction::digest_member(const std::string& rel,
+                                    MemberDigest& digest,
+                                    std::vector<std::string>* errors) {
+    std::string error;
+    const auto cls = ClassifySnapshotMember(rel);
+    if (cls.has_value() && *cls == MemberClass::Derived) {
+        MemberDigestFn catalog_digest = nullptr;
+        for (const auto& group : m_derived_groups)
+            if (std::binary_search(group.paths.begin(), group.paths.end(), rel))
+                catalog_digest = group.catalog_digest;
+        const bool ok = WorldSaveService::derived_member_digest(
+            m_save_dir, rel, m_new_generation, digest, error, catalog_digest);
+        if (!ok)
+            AddError(errors, "cannot validate derived member " + rel + ": " + error);
+        return ok;
+    }
+    if (m_digest_fn == nullptr || !m_digest_fn(m_save_dir, rel, digest, error)) {
+        AddError(errors,
+                 "cannot validate snapshot member " + rel +
+                     (error.empty() ? std::string() : ": " + error));
+        return false;
+    }
+    return true;
+}
+
+bool SaveTransaction::adopt_baseline(MemberMap& members, std::vector<std::string>* errors) {
+    // First indexing of this directory: enumerate the baseline members.
+    std::vector<std::string> baseline = {
+        "world_info.json",
+        "aether_state.efs",
+        "chunks/region/world-manifest.json",
+        "chunks/region/plant-entities.json",
+        "chunks/region/creature-entities.json",
+        "chunks/region/ground-objects.json",
+        "chunks/region/field-pages.fpg",
+        "chunks/region/active-regions.arl",
+    };
+    std::error_code ec;
+    fs::directory_iterator it(m_save_dir / "chunks" / "region", ec);
+    const fs::directory_iterator end;
+    // Baseline adoption shares the member bound; count even entries that are ignored.
+    std::size_t visits = 0;
+    if (!ec) {
+        for (; it != end; it.increment(ec)) {
+            if (++visits > kMaxSnapshotMembers) {
+                AddError(errors, "baseline directory entry limit");
+                return false;
+            }
+            if (ec) {
+                break;
+            }
+            std::error_code status_ec;
+            if (!it->is_regular_file(status_ec) || status_ec) {
+                continue;
+            }
+            const std::string rel = "chunks/region/" + it->path().filename().string();
+            if (member_path_allowed(rel)) {
+                if (baseline.size() >= kMaxSnapshotMembers) {
+                    AddError(errors, "baseline member limit");
+                    return false;
+                }
+                baseline.push_back(rel);
+            }
+        }
+    }
+    for (const std::string& rel : baseline) {
+        MemberDigest digest;
+        if (!digest_member(rel, digest, errors)) {
+            abort(errors);
+            return false;
+        }
+        if (!digest.present) {
+            continue;
+        }
+        SnapshotMember member;
+        member.path = rel;
+        member.cls = MemberClass::Authoritative;
+        member.present = true;
+        member.bytes = digest.bytes;
+        member.fnv64 = digest.fnv64;
+        member.generation = m_new_generation;
+        members[rel] = std::move(member);
+    }
+    return true;
+}
+
+bool SaveTransaction::assemble_index(SnapshotIndex& next, std::vector<std::string>* errors) {
+    next = m_previous;
+    next.generation = m_new_generation;
+    next.tick = m_tick;
+    next.txn_id = m_txn_id;
+    next.anchors = m_anchors;
+
+    MemberMap members;
+    for (const SnapshotMember& member : m_previous.members) {
+        members.emplace(member.path, member);
+    }
+
+    if (m_previous.generation == 0 && !adopt_baseline(members, errors))
+        return false;
+
+    // C4 keeps all-zero energy cadence in the ledger. Its omitted EFS payload is
+    // an intentional absence, including the first indexed save (distant-world.md).
+    // Generic transactions with a caller-supplied digest do not interpret world records.
+    if (m_digest_fn == &WorldSaveService::member_digest && !members.contains("aether_state.efs")) {
+        world::ActiveRegionLedger ledger;
+        if (!WorldSaveService::load_active_regions(ledger, m_save_dir, errors)) {
+            abort(errors);
+            return false;
+        }
+        if (!ledger.energy_ages().empty()) {
+            MemberDigest energy;
+            if (!digest_member("aether_state.efs", energy, errors)) {
+                abort(errors);
+                return false;
+            }
+            members.emplace("aether_state.efs",
+                            SnapshotMember{.path = "aether_state.efs",
+                                           .cls = MemberClass::Authoritative,
+                                           .present = energy.present,
+                                           .bytes = energy.bytes,
+                                           .fnv64 = energy.fnv64,
+                                           .generation = m_new_generation});
+        }
+    }
+
+    for (const Entry& entry : m_entries) {
+        if (entry.path == kSnapshotIndexRelativePath || derived_rolled_back(entry.path)) {
+            continue;
+        }
+        MemberDigest digest;
+        if (!digest_member(entry.path, digest, errors)) {
+            abort(errors);
+            return false;
+        }
+        const bool known = members.count(entry.path) != 0;
+        if (!digest.present && entry.action != "replace" && !known &&
+            entry.path != "chunks/region/creature-entities.json") {
+            continue; // absent and never indexed: not recorded
+        }
+        if (known) {
+            const auto& previous = members.at(entry.path);
+            if (previous.present == digest.present &&
+                previous.bytes == (digest.present ? digest.bytes : 0) &&
+                previous.fnv64 == (digest.present ? digest.fnv64 : 0)) {
+                continue; // unchanged content retains its member generation (design.md D5)
+            }
+        }
+        SnapshotMember member;
+        member.path = entry.path;
+        const auto cls = ClassifySnapshotMember(entry.path);
+        if (!cls.has_value()) {
+            abort(errors);
+            return false;
+        }
+        member.cls = *cls;
+        member.present = digest.present;
+        member.bytes = digest.present ? digest.bytes : 0;
+        member.fnv64 = digest.present ? digest.fnv64 : 0;
+        member.generation = m_new_generation;
+        members[entry.path] = std::move(member);
+    }
+
+    if (members.size() > kMaxSnapshotMembers) {
+        AddError(errors, "too many snapshot members");
+        abort(errors);
+        return false;
+    }
+    next.members.clear();
+    next.members.reserve(members.size());
+    for (auto& [path, member] : members) {
+        next.members.push_back(std::move(member));
+    }
+    return true;
+}
+
 bool SaveTransaction::commit(std::vector<std::string>* errors) {
-    if (m_state != State::Open) {
+    if (!owner_thread() || m_state != State::Open || m_running_finalizers) {
         AddError(errors, "save transaction is not open");
         return false;
     }
     try {
-        SnapshotIndex next = m_previous;
-        next.generation = m_new_generation;
-        next.tick = m_tick;
-        next.txn_id = m_txn_id;
-        next.anchors = m_anchors;
-
-        auto digest_member = [this, errors](const std::string& rel, MemberDigest& digest) {
-            std::string error;
-            if (m_digest_fn == nullptr || !m_digest_fn(m_save_dir, rel, digest, error)) {
-                AddError(errors,
-                         "cannot validate snapshot member " + rel +
-                             (error.empty() ? std::string() : ": " + error));
-                return false;
-            }
-            return true;
-        };
-
-        std::map<std::string, SnapshotMember> members;
-        for (const SnapshotMember& member : m_previous.members) {
-            members.emplace(member.path, member);
-        }
-
-        if (m_previous.generation == 0) {
-            // First indexing of this directory: enumerate the baseline members.
-            std::vector<std::string> baseline = {
-                "world_info.json",
-                "aether_state.efs",
-                "chunks/region/world-manifest.json",
-                "chunks/region/plant-entities.json",
-                "chunks/region/creature-entities.json",
-                "chunks/region/ground-objects.json",
-                "chunks/region/field-pages.fpg",
-                "chunks/region/active-regions.arl",
-            };
-            std::error_code ec;
-            fs::directory_iterator it(m_save_dir / "chunks" / "region", ec);
-            const fs::directory_iterator end;
-            if (!ec) {
-                for (; it != end; it.increment(ec)) {
-                    if (ec) {
-                        break;
-                    }
-                    std::error_code status_ec;
-                    if (!it->is_regular_file(status_ec) || status_ec) {
-                        continue;
-                    }
-                    const std::string rel = "chunks/region/" + it->path().filename().string();
-                    if (member_path_allowed(rel)) {
-                        baseline.push_back(rel);
-                    }
-                }
-            }
-            for (const std::string& rel : baseline) {
-                MemberDigest digest;
-                if (!digest_member(rel, digest)) {
-                    abort(errors);
-                    return false;
-                }
-                if (!digest.present) {
-                    continue;
-                }
-                SnapshotMember member;
-                member.path = rel;
-                member.cls = MemberClass::Authoritative;
-                member.present = true;
-                member.bytes = digest.bytes;
-                member.fnv64 = digest.fnv64;
-                member.generation = m_new_generation;
-                members[rel] = std::move(member);
-            }
-        }
-
-        // C4 keeps all-zero energy cadence in the ledger. Its omitted EFS payload is
-        // an intentional absence, including the first indexed save (distant-world.md).
-        // Generic transactions with a caller-supplied digest do not interpret world records.
-        if (m_digest_fn == &WorldSaveService::member_digest &&
-            !members.contains("aether_state.efs")) {
-            world::ActiveRegionLedger ledger;
-            if (!WorldSaveService::load_active_regions(ledger, m_save_dir, errors)) {
-                abort(errors);
-                return false;
-            }
-            if (!ledger.energy_ages().empty()) {
-                MemberDigest energy;
-                if (!digest_member("aether_state.efs", energy)) {
-                    abort(errors);
-                    return false;
-                }
-                members.emplace("aether_state.efs",
-                                SnapshotMember{.path = "aether_state.efs",
-                                               .cls = MemberClass::Authoritative,
-                                               .present = energy.present,
-                                               .bytes = energy.bytes,
-                                               .fnv64 = energy.fnv64,
-                                               .generation = m_new_generation});
-            }
-        }
-
-        for (const Entry& entry : m_entries) {
-            if (entry.path == kSnapshotIndexRelativePath) {
-                continue;
-            }
-            MemberDigest digest;
-            if (!digest_member(entry.path, digest)) {
-                abort(errors);
-                return false;
-            }
-            const bool known = members.count(entry.path) != 0;
-            if (!digest.present && entry.action != "replace" && !known &&
-                entry.path != "chunks/region/creature-entities.json") {
-                continue; // absent and never indexed: not recorded
-            }
-            if (known) {
-                const auto& previous = members.at(entry.path);
-                if (previous.present == digest.present &&
-                    previous.bytes == (digest.present ? digest.bytes : 0) &&
-                    previous.fnv64 == (digest.present ? digest.fnv64 : 0)) {
-                    continue; // unchanged content retains its member generation (design.md D5)
-                }
-            }
-            SnapshotMember member;
-            member.path = entry.path;
-            member.cls = MemberClass::Authoritative;
-            member.present = digest.present;
-            member.bytes = digest.present ? digest.bytes : 0;
-            member.fnv64 = digest.present ? digest.fnv64 : 0;
-            member.generation = m_new_generation;
-            members[entry.path] = std::move(member);
-        }
-
-        if (members.size() > kMaxSnapshotMembers) {
-            AddError(errors, "too many snapshot members");
+        if (m_rollback_failed || m_protection_failed) {
             abort(errors);
             return false;
         }
-        next.members.clear();
-        next.members.reserve(members.size());
-        for (auto& [path, member] : members) {
-            next.members.push_back(std::move(member));
+        m_running_finalizers = true;
+        for (auto& entry : m_finalizers) {
+            if (!entry.second(*this, errors)) {
+                m_running_finalizers = false;
+                abort(errors);
+                return false;
+            }
+        }
+        m_running_finalizers = false;
+        if (m_state != State::Open || m_rollback_failed || !prepare_derived_groups(errors)) {
+            abort(errors);
+            return false;
+        }
+        SnapshotIndex next;
+        if (!assemble_index(next, errors)) {
+            abort(errors);
+            return false;
         }
         const std::string encoded = encode_snapshot_index(next);
         if (encoded.size() > kMaxSnapshotIndexBytes) {
@@ -1320,6 +1707,13 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
             return false;
         }
 
+        auto receipt = std::make_shared<const SnapshotCommitReceipt>(SnapshotCommitReceipt{
+            next.generation, next.txn_id, fnv1a64_bytes(encoded.data(), encoded.size())});
+        // Even a zero-dirty save protects the old index before replacing it.
+        if (!protect({}, errors)) {
+            abort(errors);
+            return false;
+        }
         m_state = State::Committing;
         const fs::path index_path = snapshot_index_path(m_save_dir);
         std::error_code directory_error;
@@ -1352,6 +1746,7 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
             return false;
         }
         m_state = State::Committed;
+        m_receipt = std::move(receipt);
         publish_edited_sources(next);
         auto actions = std::move(m_committed_actions);
         for (auto& action : actions) {
@@ -1365,18 +1760,21 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
         }
         report_snapshot_step("commit-point", index_path);
         FinishJournal(m_save_dir);
+        ReleaseRecoveryGate(this);
         return true;
     } catch (const std::exception& ex) {
         AddError(errors, std::string("snapshot commit failed: ") + ex.what());
-        if (m_state == State::Committed)
+        if (m_state == State::Committed) {
+            ReleaseRecoveryGate(this);
             return true; // cleanup faults cannot undo a published durable index
+        }
         abort(errors);
         return false;
     }
 }
 
 void SaveTransaction::abort(std::vector<std::string>* errors) {
-    if (m_state != State::Open && m_state != State::Committing) {
+    if (!owner_thread() || (m_state != State::Open && m_state != State::Committing)) {
         return;
     }
     try {
@@ -1402,6 +1800,7 @@ void SaveTransaction::abort(std::vector<std::string>* errors) {
     m_committed_actions.clear();
     for (auto& weak : m_edited_sources)
         weak.reset();
+    ReleaseRecoveryGate(this);
 }
 
 bool SaveTransaction::capture_open_on_owner_thread() const {
@@ -1447,6 +1846,8 @@ void SaveTransaction::publish_edited_sources(const SnapshotIndex& next) {
             if (found == next.members.end())
                 matches = matches && !dependency.present;
         }
+        if (matches)
+            token->m_receipt = m_receipt;
         token->m_committed.store(matches, std::memory_order_release);
     }
     for (auto& weak : m_edited_sources)

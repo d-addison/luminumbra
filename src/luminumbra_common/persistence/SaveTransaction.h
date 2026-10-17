@@ -19,12 +19,15 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <stop_token>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace Luminumbra::Persistence {
@@ -53,6 +56,9 @@ struct SnapshotIndex {
 
 inline constexpr const char* kSnapshotIndexSchema = "luminumbra.snapshot.v1";
 inline constexpr const char* kJournalSchema = "luminumbra.journal.v1";
+// Derived paths require an explicit schema that authoritative-only readers refuse.
+inline constexpr const char* kDerivedSnapshotIndexSchema = "luminumbra.snapshot.v2";
+inline constexpr const char* kDerivedJournalSchema = "luminumbra.journal.v2";
 inline constexpr std::size_t kMaxSnapshotMembers = 1'048'576;
 inline constexpr std::size_t kMaxSnapshotIndexBytes = 16u * 1024u * 1024u;
 // Recovery/open allocation limits: journal JSON 16 MiB, at most 65536 entries, and
@@ -103,6 +109,9 @@ std::filesystem::path journal_directory(const std::filesystem::path& save_dir);
 // Rejects empty, absolute, drive/UNC, backslash and any ".." component. snapshot.json itself is not
 // a member.
 bool member_path_allowed(std::string_view relative_path);
+// No caller may reclassify authority. Only canonical overlay names and far/catalog.json
+// are derived members; an unrecognized path has no class.
+std::optional<MemberClass> ClassifySnapshotMember(std::string_view relative_path);
 
 // Canonical deterministic JSON encoding / strict decoding. decode enforces the schema, sorted
 // unique member paths, member_path_allowed, the member cap and the index size cap.
@@ -143,7 +152,8 @@ bool admit_recovery_payloads(const std::filesystem::path& save_dir,
                              const std::function<bool(const std::filesystem::path&)>& admit_file,
                              const std::function<bool(std::size_t)>& admit_entries);
 
-// Idempotent and crash-safe (see the protocol in specs/ds/s4-impl.md). Failed appends a diagnostic.
+// Owner-thread open boundary. Idempotent and crash-safe (see specs/ds/s4-impl.md).
+// Refuses a transaction live on any thread; Failed appends a diagnostic.
 RecoveryOutcome recover_pending_journal(const std::filesystem::path& save_dir,
                                         std::vector<std::string>* errors);
 
@@ -161,6 +171,12 @@ using MemberDigestFn = bool (*)(const std::filesystem::path& save_dir,
                                 MemberDigest& out,
                                 std::string& error);
 
+struct SnapshotCommitReceipt {
+    std::uint64_t generation = 0;
+    std::uint64_t txn_id = 0;
+    std::uint64_t index_fnv64 = 0;
+};
+
 class EditedSourceCaptureAccess;
 // A producer-created token proves publication of the exact captured dependency set.
 // It never changes the immutable image's Prepared identity.
@@ -169,12 +185,16 @@ public:
     [[nodiscard]] bool committed() const {
         return m_committed.load(std::memory_order_acquire);
     }
+    [[nodiscard]] std::shared_ptr<const SnapshotCommitReceipt> receipt() const {
+        return committed() ? m_receipt : nullptr;
+    }
 
 private:
     friend class SaveTransaction;
     friend class EditedSourceCaptureAccess;
     EditedSourcePublicationToken() = default;
     std::atomic<bool> m_committed{false};
+    std::shared_ptr<const SnapshotCommitReceipt> m_receipt;
     // Keeps the capture allocation reservation alive while the token is inspected.
     std::shared_ptr<const void> m_retention;
     std::vector<SnapshotMember> m_dependencies;
@@ -182,7 +202,15 @@ private:
 };
 
 class SaveTransaction {
+    struct GroupIdentity {
+        const SaveTransaction* owner = nullptr;
+        std::size_t index = 0;
+    };
+
 public:
+    // Opaque immutable identity; only the exact issued handle admits group mutation.
+    using DerivedGroup = std::shared_ptr<const GroupIdentity>;
+    using Finalizer = std::function<bool(SaveTransaction&, std::vector<std::string>*)>;
     // Opens the thread_local "active transaction" slot for save_dir. Only one may be active per
     // thread.
     SaveTransaction(std::filesystem::path save_dir,
@@ -203,6 +231,24 @@ public:
     // replaces them. Already protected paths are skipped. The index file is protected on the first
     // call.
     bool protect(const std::vector<std::string>& relative_paths, std::vector<std::string>* errors);
+    // Existing overlay/catalog bytes must fit their codec/index caps before undo capture.
+    // Groups are disjoint and declared before replacement. Undo protection survives a safe
+    // optional rollback until the outer transaction commits or recovers. Catalog semantics
+    // belong to the catalog consumer, which must supply its strict digest validator.
+    std::optional<DerivedGroup> BeginDerivedGroup(const std::vector<std::string>& paths,
+                                                  std::vector<std::string>* errors = nullptr,
+                                                  MemberDigestFn catalog_digest = nullptr);
+    bool RollbackDerivedGroup(const DerivedGroup& group,
+                              std::vector<std::string>* errors = nullptr);
+    bool WriteDerivedMember(const DerivedGroup& group,
+                            std::string_view path,
+                            const std::string& bytes,
+                            std::vector<std::string>* errors = nullptr);
+    bool RemoveDerivedMember(const DerivedGroup& group,
+                             std::string_view path,
+                             std::vector<std::string>* errors = nullptr);
+    // First registration wins. Runs in registration order, after staging and before indexing.
+    bool AddFinalizerOnce(std::string key, Finalizer callback);
     // Commits: validates and re-hashes every protected member via digest_fn, publishes the new
     // index (durable commit point), then deletes the journal. Failure before the commit point rolls
     // back.
@@ -225,6 +271,9 @@ public:
     [[nodiscard]] bool was_indexed() const {
         return m_previous.generation != 0;
     }
+    [[nodiscard]] std::shared_ptr<const SnapshotCommitReceipt> receipt() const {
+        return m_receipt;
+    }
 
 private:
     friend class EditedSourceCaptureAccess;
@@ -246,6 +295,24 @@ private:
         std::string undo; // relative to the journal directory, empty for create
     };
     bool write_journal(std::vector<std::string>* errors);
+    bool protect_members(const std::vector<std::string>& paths,
+                         std::vector<std::string>* errors,
+                         bool allow_derived);
+    bool owner_thread() const;
+    struct GroupState {
+        DerivedGroup identity;
+        std::vector<std::string> paths;
+        MemberDigestFn catalog_digest = nullptr;
+        bool rolled_back = false;
+    };
+    GroupState* writable_group(const DerivedGroup& group, std::string_view path);
+    bool prepare_derived_groups(std::vector<std::string>* errors);
+    bool derived_rolled_back(std::string_view path) const;
+    using MemberMap = std::map<std::string, SnapshotMember>;
+    bool
+    digest_member(const std::string& path, MemberDigest& digest, std::vector<std::string>* errors);
+    bool adopt_baseline(MemberMap& members, std::vector<std::string>* errors);
+    bool assemble_index(SnapshotIndex& next, std::vector<std::string>* errors);
 
     std::filesystem::path m_save_dir;
     std::uint64_t m_tick = 0;
@@ -258,6 +325,12 @@ private:
     std::vector<Entry> m_entries;
     std::set<std::string> m_protected_paths;
     std::vector<std::function<void()>> m_committed_actions;
+    std::vector<GroupState> m_derived_groups;
+    std::vector<std::pair<std::string, Finalizer>> m_finalizers;
+    bool m_running_finalizers = false;
+    bool m_protection_failed = false;
+    bool m_rollback_failed = false;
+    std::shared_ptr<const SnapshotCommitReceipt> m_receipt;
     std::uint64_t m_next_undo = 0;
     bool m_registered = false;
     const std::thread::id m_owner_thread = std::this_thread::get_id();

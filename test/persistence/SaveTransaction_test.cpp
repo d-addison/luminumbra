@@ -275,7 +275,7 @@ SnapshotIndex MakeIndex() {
     index.members.push_back(MakeMember(
         "chunks/region/plant-entities.json", MemberClass::Authoritative, false, 0, 0, 3));
     index.members.push_back(
-        MakeMember("world_info.json", MemberClass::Derived, true, 20, 0xfeedULL, 2));
+        MakeMember("far/v1.0.0.lmr", MemberClass::Derived, true, 20, 0xfeedULL, 2));
     return index;
 }
 
@@ -479,7 +479,7 @@ TEST(SaveTransaction, IndexDecodeRejectsMalformedInput) {
     const std::vector<std::pair<std::string, std::string>> cases = {
         {"empty", ""},
         {"not json", "not json"},
-        {"wrong schema", ReplaceFirst(good, kSnapshotIndexSchema, "luminumbra.snapshot.v9")},
+        {"wrong schema", ReplaceFirst(good, kDerivedSnapshotIndexSchema, "luminumbra.snapshot.v9")},
         {"unsorted members", encode_snapshot_index(unsorted)},
         {"duplicate member", encode_snapshot_index(duplicated)},
         {"traversal member", encode_snapshot_index(traversal)},
@@ -753,6 +753,39 @@ TEST(SaveTransaction, BoundedJournalStillRecoversValidAndEmptyTransactions) {
     EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::NothingToDo);
     Put(journal_directory(save.path()) / "txn.json", RecoveryJournal(""));
     EXPECT_EQ(recover_pending_journal(save.path(), nullptr), RecoveryOutcome::RolledBack);
+}
+
+TEST(SaveTransaction, CapturePreflightUsesBoundedJournalWithoutMutatingPayloads) {
+    const TempSave save;
+    const auto journal = journal_directory(save.path()) / "txn.json";
+    const auto admit_file = [](const fs::path&) {
+        return true;
+    };
+    const auto admit_entries = [](std::size_t count) {
+        return count <= 1;
+    };
+    EXPECT_TRUE(admit_recovery_payloads(save.path(), admit_file, admit_entries));
+    Put(save.path() / "world_info.json", "retained");
+    for (const auto& entries : {std::string{}, CreateRecoveryEntry()}) {
+        Put(journal, RecoveryJournal(entries));
+        EXPECT_TRUE(admit_recovery_payloads(save.path(), admit_file, admit_entries));
+        EXPECT_EQ(Get(save.path() / "world_info.json"), "retained");
+    }
+    EXPECT_FALSE(
+        admit_recovery_payloads(save.path(), admit_file, [](std::size_t) { return false; }));
+    EXPECT_FALSE(
+        admit_recovery_payloads(save.path(), [](const fs::path&) { return false; }, admit_entries));
+    for (const auto* invalid : {"{", "{}", R"({"unknown":0})"}) {
+        Put(journal, invalid);
+        EXPECT_FALSE(admit_recovery_payloads(save.path(), admit_file, admit_entries));
+    }
+    Put(journal, RecoveryJournal(""));
+    fs::resize_file(journal, kMaxJournalBytes + 1);
+    EXPECT_FALSE(admit_recovery_payloads(save.path(), admit_file, admit_entries));
+    fs::remove(journal);
+    fs::create_directory(journal);
+    EXPECT_FALSE(admit_recovery_payloads(save.path(), admit_file, admit_entries));
+    EXPECT_EQ(Get(save.path() / "world_info.json"), "retained");
 }
 
 TEST(SaveTransaction, RecoveryRefusesUnreadableJournalAndMissingOrOversizedUndo) {

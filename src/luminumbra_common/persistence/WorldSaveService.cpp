@@ -25,6 +25,7 @@
 #include "SaveTransaction.h"
 #include "WorldPersistenceRoundtrip.h"
 #include "systems/WaterSystem.h"
+#include "world/FarAuthorityOverlay.h"
 #include "world/FarLodStore.h"
 
 #include "nlohmann/json.hpp"
@@ -1239,6 +1240,8 @@ std::string VerifySnapshotIndex(const std::filesystem::path& save_dir,
                                               "chunks/region/active-regions.arl"};
     std::set<std::string> listed;
     for (const SnapshotMember& member : index.members) {
+        if (member.cls == MemberClass::Derived)
+            continue; // optional cache presence never participates in authoritative validation
         listed.insert(member.path);
         MemberDigest actual;
         const auto region = region_digests.find(member.path);
@@ -2377,13 +2380,21 @@ bool WorldSaveService::has_chunk_snapshot(const std::filesystem::path& save_dir)
 
 bool WorldSaveService::validate_save(const std::filesystem::path& save_dir,
                                      std::vector<std::string>* errors,
-                                     const std::stop_token& stop) {
-    if (SaveFactsScope* facts = SaveFactsScope::active_for(save_dir))
+                                     const std::stop_token& stop,
+                                     MemberDigestFn catalog_digest) {
+    if (SaveFactsScope* facts = SaveFactsScope::active_for(save_dir); facts && !catalog_digest)
         return facts->validate(errors);
     WorldStreamingState state;
     std::vector<std::string> diagnostics;
     WorldSaveService{}.load_world(
-        state, save_dir, diagnostics, stop, [](const IVec3&) { return false; });
+        state,
+        save_dir,
+        diagnostics,
+        stop,
+        [](const IVec3&) { return false; },
+        nullptr,
+        nullptr,
+        catalog_digest);
     for (const auto& message : diagnostics)
         AddError(errors, message);
     return diagnostics.empty();
@@ -2806,6 +2817,22 @@ bool WorldSaveService::member_digest_impl(const std::filesystem::path& save_dir,
             error = "member path is not allowed";
             return false;
         }
+        const auto cls = ClassifySnapshotMember(relative_path);
+        if (cls.has_value() && *cls == MemberClass::Derived) {
+            SnapshotIndex index;
+            if (!read_snapshot_index(save_dir, index, nullptr)) {
+                error = "invalid snapshot index";
+                return false;
+            }
+            const auto* transaction = SaveTransaction::active_for(save_dir);
+            const auto generation = transaction ? transaction->new_generation() : index.generation;
+            return derived_member_digest(save_dir,
+                                         relative_path,
+                                         generation == 0 ? std::numeric_limits<std::uint64_t>::max()
+                                                         : generation,
+                                         out,
+                                         error);
+        }
         const std::string relative(relative_path);
         const std::filesystem::path path = save_dir / relative;
         std::error_code ec;
@@ -3003,11 +3030,168 @@ bool WorldSaveService::member_digest_impl(const std::filesystem::path& save_dir,
     }
 }
 
+bool WorldSaveService::derived_member_digest(const std::filesystem::path& save_dir,
+                                             std::string_view relative_path,
+                                             std::uint64_t source_generation_limit,
+                                             MemberDigest& out,
+                                             std::string& error,
+                                             MemberDigestFn catalog_digest) {
+    out = {};
+    const auto cls = ClassifySnapshotMember(relative_path);
+    if (!cls.has_value() || *cls != MemberClass::Derived) {
+        error = "not a canonical derived member";
+        return false;
+    }
+    try {
+        const auto path = save_dir / std::string(relative_path);
+        std::error_code ec;
+        const bool exists = std::filesystem::exists(path, ec);
+        if (ec) {
+            error = "cannot inspect derived member";
+            return false;
+        }
+        if (!exists)
+            return true;
+        if (relative_path == "far/catalog.json") {
+            if (std::filesystem::file_size(path) > kMaxSnapshotIndexBytes || !catalog_digest) {
+                error = "present catalog requires bounded catalog validation";
+                return false;
+            }
+            if (!catalog_digest(save_dir, relative_path, out, error))
+                return false;
+            if (!out.present) {
+                error = "present catalog validated as absent";
+                return false;
+            }
+            return true;
+        }
+        const auto key = World::ParseFarOverlayFileName(relative_path.substr(4));
+        if (!key.has_value()) {
+            error = "invalid overlay path";
+            return false;
+        }
+        // Validate and fingerprint the same bounded bytes from one regular-file handle.
+        // Reopening the path after decoding could receipt an unrelated replacement.
+        std::string bytes;
+        if (!read_bounded_save_file(path, bytes, save_member_byte_limit(relative_path), nullptr)) {
+            error = "cannot read derived overlay";
+            return false;
+        }
+        const auto decoded = World::DecodeFarOverlay(bytes, *key);
+        if (decoded.error != World::FarOverlayError::None) {
+            error = std::string("invalid derived overlay: ") +
+                    World::FarOverlayErrorName(decoded.error);
+            return false;
+        }
+        if (decoded.tile.generation > source_generation_limit) {
+            error = "future derived source generation";
+            return false;
+        }
+        out.bytes = bytes.size();
+        out.fnv64 = fnv1a64_bytes(bytes.data(), bytes.size());
+        out.present = true;
+        return true;
+    } catch (const std::exception& exception) {
+        error = exception.what();
+        return false;
+    }
+}
+
+bool WorldSaveService::inspect_derived_member(const std::filesystem::path& save_dir,
+                                              std::string_view relative_path,
+                                              const SnapshotIndex& index,
+                                              DerivedMemberState& state,
+                                              std::string& error,
+                                              MemberDigestFn catalog_digest) {
+    if (journal_pending(save_dir) && !SaveTransaction::active_for(save_dir)) {
+        state = DerivedMemberState::RecoveryPending;
+        error = "pending snapshot recovery";
+        return false;
+    }
+    MemberDigest actual;
+    const auto generation =
+        index.generation == 0 ? std::numeric_limits<std::uint64_t>::max() : index.generation;
+    if (!derived_member_digest(save_dir, relative_path, generation, actual, error, catalog_digest))
+        return false;
+    if (!actual.present) {
+        state = DerivedMemberState::Missing;
+        return true;
+    }
+    const auto found =
+        std::find_if(index.members.begin(),
+                     index.members.end(),
+                     [relative_path](const auto& member) { return member.path == relative_path; });
+    if (found == index.members.end() || !found->present) {
+        state = DerivedMemberState::Unreceipted;
+        return true;
+    }
+    if (found->cls != MemberClass::Derived || found->generation > index.generation) {
+        error = "invalid derived membership";
+        return false;
+    }
+    state = found->bytes == actual.bytes && found->fnv64 == actual.fnv64
+                ? DerivedMemberState::Receipted
+                : DerivedMemberState::Stale;
+    return true;
+}
+
+bool WorldSaveService::verify_derived_members(const std::filesystem::path& save_dir,
+                                              const SnapshotIndex& index,
+                                              std::vector<std::string>* errors,
+                                              MemberDigestFn catalog_digest) {
+    if (journal_pending(save_dir) && !SaveTransaction::active_for(save_dir)) {
+        AddError(errors, "pending snapshot recovery");
+        return false;
+    }
+    try {
+        std::set<std::string> paths;
+        for (const auto& member : index.members)
+            if (member.cls == MemberClass::Derived)
+                paths.insert(member.path);
+        const auto directory = save_dir / "far";
+        std::error_code ec;
+        const bool exists = std::filesystem::exists(directory, ec);
+        if (ec)
+            throw std::runtime_error("cannot inspect far directory");
+        std::size_t visits = 0;
+        if (exists) {
+            for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+                if (++visits > kMaxSnapshotMembers)
+                    throw std::runtime_error("derived directory entry limit");
+                const auto relative = "far/" + entry.path().filename().string();
+                // Recognition is broader than publication eligibility: a parsed key outside
+                // codec bounds is present malformed data, not an absent optional cache.
+                if (relative == "far/catalog.json" ||
+                    World::ParseFarOverlayFileName(entry.path().filename().string()).has_value())
+                    paths.insert(relative);
+                if (paths.size() > kMaxSnapshotMembers)
+                    throw std::runtime_error("derived member limit");
+            }
+        }
+        for (const auto& path : paths) {
+            DerivedMemberState state = DerivedMemberState::Missing;
+            std::string error;
+            if (!inspect_derived_member(save_dir, path, index, state, error, catalog_digest)) {
+                std::string message = path;
+                message += ": ";
+                message += error;
+                AddError(errors, message);
+                return false;
+            }
+        }
+        return true;
+    } catch (const std::exception& exception) {
+        AddError(errors, std::string("derived validation failed: ") + exception.what());
+        return false;
+    }
+}
+
 bool WorldSaveService::write_member_bytes(const std::filesystem::path& save_dir,
                                           std::string_view relative_path,
                                           const std::string& bytes,
                                           std::vector<std::string>* errors) {
-    if (!member_path_allowed(relative_path)) {
+    const auto cls = ClassifySnapshotMember(relative_path);
+    if (!cls.has_value() || *cls != MemberClass::Authoritative) {
         AddError(errors, "member path is not allowed: " + std::string(relative_path));
         return false;
     }
@@ -3028,7 +3212,8 @@ bool WorldSaveService::write_member_bytes(const std::filesystem::path& save_dir,
 bool WorldSaveService::remove_member(const std::filesystem::path& save_dir,
                                      std::string_view relative_path,
                                      std::vector<std::string>* errors) {
-    if (!member_path_allowed(relative_path)) {
+    const auto cls = ClassifySnapshotMember(relative_path);
+    if (!cls.has_value() || *cls != MemberClass::Authoritative) {
         AddError(errors, "member path is not allowed: " + std::string(relative_path));
         return false;
     }
@@ -3355,7 +3540,8 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                                   const std::stop_token& stop,
                                   const std::function<bool(const IVec3&)>& retain_chunk,
                                   std::vector<IVec3>* authoritative_inventory,
-                                  WorldSaveRecords* validated_records) const {
+                                  WorldSaveRecords* validated_records,
+                                  MemberDigestFn catalog_digest) const {
     if (auto* cache = ChunkValidationCache::active())
         cache->exclude_save_directory(save_dir);
     const ChunkValidationCache::InventoryScope inventory(ChunkValidationCache::active());
@@ -3376,6 +3562,8 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
     try {
         if (stop.stop_requested())
             return reject("Saved-world validation cancelled.");
+        if (journal_pending(save_dir) && !SaveTransaction::active_for(save_dir))
+            return reject("pending snapshot recovery");
         // An indexed directory is verified against its snapshot index (S4). Legacy directories
         // (no index, no marker) load exactly as before.
         const bool indexed = snapshot_index_exists(save_dir);
@@ -3407,8 +3595,10 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
             std::filesystem::exists(chunks_dir / kWorldStateBackupFileName)) {
             return reject(kObsoleteWorldMessage);
         }
-        if (!std::filesystem::exists(chunks_dir))
+        if (!std::filesystem::exists(chunks_dir)) {
+            verify_derived_members(save_dir, snapshot_index, &errors, catalog_digest);
             return false;
+        }
         for (const auto& entry : std::filesystem::directory_iterator(chunks_dir)) {
             if (stop.stop_requested())
                 return reject("Saved-world validation cancelled.");
@@ -3416,8 +3606,10 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                 return reject("corrupt or unknown world persistence artifact: " +
                               entry.path().string());
         }
-        if (!std::filesystem::exists(region_dir))
+        if (!std::filesystem::exists(region_dir)) {
+            verify_derived_members(save_dir, snapshot_index, &errors, catalog_digest);
             return false;
+        }
         std::vector<std::filesystem::path> region_files;
         bool present = false;
         for (const auto& entry : std::filesystem::directory_iterator(region_dir)) {
@@ -3451,6 +3643,7 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                 if (!mismatch.empty())
                     return reject("inconsistent snapshot: " + mismatch);
             }
+            verify_derived_members(save_dir, snapshot_index, &errors, catalog_digest);
             return false;
         }
         if (const std::string manifest_error = CheckManifestFile(world_manifest_path(save_dir));
@@ -3561,6 +3754,8 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
             if (!mismatch.empty())
                 return reject("inconsistent snapshot: " + mismatch);
         }
+        if (!verify_derived_members(save_dir, snapshot_index, &errors, catalog_digest))
+            return reject("");
         if (validated_records) {
             validated_records->ledger = std::move(ledger);
             validated_records->ground = std::move(ground);

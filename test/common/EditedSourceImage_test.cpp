@@ -1,27 +1,39 @@
 #include "../support/SimulationContentFixture.h"
 #include "../support/UniqueTempPath.h"
 #include "core/JobSystem.h"
+#include "fields/FieldPageState.h"
+#include "luminumbra/core/Types.h"
 #include "nlohmann/json.hpp"
 #include "persistence/EditedSourceImage.h"
+#include "persistence/SaveTransaction.h"
 #include "persistence/WorldPersistenceRoundtrip.h"
 #include "persistence/WorldSaveService.h"
 #include "systems/SHIELD_WorldSystem.h"
+#include "world/ActiveRegionLedger.h"
 #include "world/Chunk.h"
+#include "world/FarEditedBake.h"
+#include "world/FarTierTable.h"
+#include "world/FarVolumeMemory.h"
 #include "world/GameSession.h"
+#include "world/GroundObjectStore.h"
 #include "world/WorldStreamingState.h"
 #include "gtest/gtest.h"
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <ios>
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <nlohmann/json_fwd.hpp>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -30,17 +42,24 @@ using namespace Luminumbra;
 using namespace Luminumbra::Persistence;
 using namespace Luminumbra::World;
 namespace fs = std::filesystem;
-constexpr std::size_t kSamples = (CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+constexpr std::size_t kSamples =
+    (std::size_t{CHUNK_SIZE_X} + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
 constexpr std::size_t kInterior = 1 + 17 * (1 + 17);
 
-struct SaveRoot {
+class SaveRoot {
+public:
     SaveRoot()
-        : path(TestSupport::CreateUniqueTempDirectory("edited_source_")) {}
+        : m_path(TestSupport::CreateUniqueTempDirectory("edited_source_")) {}
     ~SaveRoot() {
         std::error_code ec;
-        fs::remove_all(path, ec);
+        fs::remove_all(m_path, ec);
     }
-    fs::path path;
+    const fs::path& path() const {
+        return m_path;
+    }
+
+private:
+    const fs::path m_path;
 };
 EditedSourceLimits Limits() {
     EditedSourceLimits limits;
@@ -48,13 +67,13 @@ EditedSourceLimits Limits() {
     limits.max_members = 32;
     limits.max_records = 32;
     limits.max_directory_entries = 128;
-    limits.max_file_bytes = 4 * 1024 * 1024;
-    limits.max_decode_bytes = 4 * 1024 * 1024;
+    limits.max_file_bytes = 4ull * 1024 * 1024;
+    limits.max_decode_bytes = 4ull * 1024 * 1024;
     limits.max_samples = 32 * kSamples;
     limits.max_boundary_probes = 1'000'000;
     limits.max_selection_probes = 10'000;
-    limits.max_image_bytes = 4 * 1024 * 1024;
-    limits.max_scratch_bytes = 256 * 1024 * 1024;
+    limits.max_image_bytes = 4ull * 1024 * 1024;
+    limits.max_scratch_bytes = 256ull * 1024 * 1024;
     limits.memory = std::make_shared<FarVolumeMemoryPool>(1024ull * 1024 * 1024);
     return limits;
 }
@@ -87,10 +106,10 @@ void Wet(Chunk& chunk) {
     chunk.set_water_authority();
 }
 bool Save(const SaveRoot& root, const WorldStreamingState& state) {
-    return WorldSaveService{}.save_world(state, root.path);
+    return WorldSaveService{}.save_world(state, root.path());
 }
 bool Index(const SaveRoot& root) {
-    SaveTransaction transaction(root.path, 0, {}, &WorldSaveService::member_digest);
+    SaveTransaction transaction(root.path(), 0, {}, &WorldSaveService::member_digest);
     return transaction.begin(nullptr) && transaction.commit(nullptr);
 }
 const FarEditedLattice* Find(const EditedSourceImage& image, std::uint64_t id) {
@@ -108,7 +127,7 @@ std::string Read(const fs::path& path) {
 }
 
 TEST(EditedSourceImage, CopiedTerrainMaterialWaterSurviveEditEvictionAndClose) {
-    SaveRoot root;
+    SaveRoot const root;
     WorldStreamingState state;
     auto chunk = EditedChunk(state);
     Wet(*chunk);
@@ -117,7 +136,7 @@ TEST(EditedSourceImage, CopiedTerrainMaterialWaterSurviveEditEvictionAndClose) {
     auto limits = Limits();
     const std::array tiles{Tile(1)};
     std::shared_ptr<const EditedSourceImage> image;
-    ASSERT_EQ(CaptureCommittedEditedSource(root.path, 1, {tiles}, limits, image),
+    ASSERT_EQ(CaptureCommittedEditedSource(root.path(), 1, {tiles}, limits, image),
               EditedSourceError::None);
     ASSERT_TRUE(image);
     ASSERT_EQ(image->Lattices().size(), 1u);
@@ -127,7 +146,7 @@ TEST(EditedSourceImage, CopiedTerrainMaterialWaterSurviveEditEvictionAndClose) {
     chunk->water_depth_mm[0] = 999;
     state.clear();
     chunk.reset();
-    fs::remove_all(root.path);
+    fs::remove_all(root.path());
     EXPECT_EQ(image->Lattices()[0].density[kInterior], -3);
     EXPECT_EQ(image->Lattices()[0].material[kInterior], 7);
     EXPECT_EQ(image->Water()[0].depth_mm[0], 125);
@@ -146,7 +165,7 @@ TEST(EditedSourceImage, CopiedTerrainMaterialWaterSurviveEditEvictionAndClose) {
 }
 
 TEST(EditedSourceImage, DiskOnlyInventoryIsCompleteAcrossAllTiersAndNegativeBoundaries) {
-    SaveRoot root;
+    SaveRoot const root;
     WorldStreamingState state;
     auto a = EditedChunk(state, {-1, 0, 0});
     auto b = EditedChunk(state, {0, 0, 0});
@@ -169,9 +188,9 @@ TEST(EditedSourceImage, DiskOnlyInventoryIsCompleteAcrossAllTiersAndNegativeBoun
     auto limits = Limits();
     const std::array tiles{Tile(1), Tile(2), Tile(3), Tile(4), Tile(5)};
     std::shared_ptr<const EditedSourceImage> first, second;
-    ASSERT_EQ(CaptureCommittedEditedSource(root.path, 1, {tiles}, limits, first),
+    ASSERT_EQ(CaptureCommittedEditedSource(root.path(), 1, {tiles}, limits, first),
               EditedSourceError::None);
-    ASSERT_EQ(CaptureCommittedEditedSource(root.path, 1, {tiles}, limits, second),
+    ASSERT_EQ(CaptureCommittedEditedSource(root.path(), 1, {tiles}, limits, second),
               EditedSourceError::None);
     ASSERT_TRUE(first);
     ASSERT_TRUE(second);
@@ -203,7 +222,7 @@ TEST(EditedSourceImage, DiskOnlyInventoryIsCompleteAcrossAllTiersAndNegativeBoun
 }
 
 TEST(EditedSourceImage, CommittedCaptureExcludesUnsavedLiveAndParkedChanges) {
-    SaveRoot root;
+    SaveRoot const root;
     WorldStreamingState state;
     auto live = EditedChunk(state);
     auto parked = EditedChunk(state, {2, 0, 0});
@@ -216,7 +235,7 @@ TEST(EditedSourceImage, CommittedCaptureExcludesUnsavedLiveAndParkedChanges) {
     auto limits = Limits();
     const std::array tiles{Tile(1)};
     std::shared_ptr<const EditedSourceImage> committed;
-    ASSERT_EQ(CaptureCommittedEditedSource(root.path, 1, {tiles}, limits, committed),
+    ASSERT_EQ(CaptureCommittedEditedSource(root.path(), 1, {tiles}, limits, committed),
               EditedSourceError::None);
     ASSERT_TRUE(committed);
     ASSERT_EQ(committed->Lattices().size(), 2u);
@@ -246,7 +265,7 @@ TEST(EditedSourceImage, CommittedCaptureExcludesUnsavedLiveAndParkedChanges) {
 }
 
 TEST(EditedSourceImage, PreparedIncludesStagedAndUnchangedDiskEditsWithCommitReceipt) {
-    SaveRoot root;
+    SaveRoot const root;
     WorldStreamingState state;
     auto changed = EditedChunk(state);
     auto disk = EditedChunk(state, {40, 0, 0});
@@ -262,9 +281,9 @@ TEST(EditedSourceImage, PreparedIncludesStagedAndUnchangedDiskEditsWithCommitRec
     auto limits = Limits();
     std::shared_ptr<const EditedSourceImage> prepared, receipt;
     {
-        SaveTransaction transaction(root.path, 0, {}, &WorldSaveService::member_digest);
+        SaveTransaction transaction(root.path(), 0, {}, &WorldSaveService::member_digest);
         ASSERT_TRUE(transaction.begin(nullptr));
-        ASSERT_TRUE(WorldSaveService{}.save_dirty_chunks(state, root.path).saved);
+        ASSERT_TRUE(WorldSaveService{}.save_dirty_chunks(state, root.path()).saved);
         ASSERT_EQ(CapturePreparedEditedSource(transaction, {tiles}, limits, prepared),
                   EditedSourceError::None);
         ASSERT_TRUE(prepared);
@@ -272,6 +291,7 @@ TEST(EditedSourceImage, PreparedIncludesStagedAndUnchangedDiskEditsWithCommitRec
         EXPECT_EQ(prepared->Identity().state, FarEditedImageState::Prepared);
         EXPECT_EQ(PublishCommittedEditedSource(prepared, receipt), EditedSourceError::Ineligible);
         EXPECT_FALSE(receipt);
+        EXPECT_FALSE(prepared->PublicationReceipt());
         const auto* staged = Find(*prepared, changed_id);
         const auto* unchanged = Find(*prepared, disk_id);
         ASSERT_NE(staged, nullptr);
@@ -290,10 +310,16 @@ TEST(EditedSourceImage, PreparedIncludesStagedAndUnchangedDiskEditsWithCommitRec
     EXPECT_EQ(prepared->Identity().state, FarEditedImageState::Prepared);
     EXPECT_FALSE(prepared->RendererEligible());
     EXPECT_EQ(prepared->Lattices().data(), receipt->Lattices().data());
+    const auto publication = receipt->PublicationReceipt();
+    ASSERT_TRUE(publication);
+    EXPECT_EQ(publication, prepared->PublicationReceipt());
+    EXPECT_EQ(publication->generation, receipt->Identity().generation);
+    const auto index_bytes = Read(snapshot_index_path(root.path()));
+    EXPECT_EQ(publication->index_fnv64, fnv1a64_bytes(index_bytes.data(), index_bytes.size()));
 }
 
 TEST(EditedSourceImage, AbortedPreparedPayloadRemainsReadableWithoutRendererAuthority) {
-    SaveRoot root;
+    SaveRoot const root;
     WorldStreamingState state;
     auto chunk = EditedChunk(state);
     ASSERT_TRUE(Save(root, state));
@@ -302,11 +328,11 @@ TEST(EditedSourceImage, AbortedPreparedPayloadRemainsReadableWithoutRendererAuth
     const std::array tiles{Tile(1)};
     std::shared_ptr<const EditedSourceImage> prepared, output;
     {
-        SaveTransaction transaction(root.path, 0, {}, &WorldSaveService::member_digest);
+        SaveTransaction transaction(root.path(), 0, {}, &WorldSaveService::member_digest);
         ASSERT_TRUE(transaction.begin(nullptr));
         chunk->sdf_data[kInterior] = -55;
         chunk->mark_voxel_data_dirty();
-        ASSERT_TRUE(WorldSaveService{}.save_dirty_chunks(state, root.path).saved);
+        ASSERT_TRUE(WorldSaveService{}.save_dirty_chunks(state, root.path()).saved);
         ASSERT_EQ(CapturePreparedEditedSource(transaction, {tiles}, limits, prepared),
                   EditedSourceError::None);
         transaction.abort(nullptr);
@@ -315,8 +341,9 @@ TEST(EditedSourceImage, AbortedPreparedPayloadRemainsReadableWithoutRendererAuth
     EXPECT_EQ(prepared->Lattices()[0].density[kInterior], -55);
     EXPECT_FALSE(prepared->RendererEligible());
     EXPECT_EQ(PublishCommittedEditedSource(prepared, output), EditedSourceError::Ineligible);
+    EXPECT_FALSE(prepared->PublicationReceipt());
     EXPECT_FALSE(output);
-    ASSERT_EQ(CaptureCommittedEditedSource(root.path, 1, {tiles}, limits, output),
+    ASSERT_EQ(CaptureCommittedEditedSource(root.path(), 1, {tiles}, limits, output),
               EditedSourceError::None);
     ASSERT_TRUE(output);
     EXPECT_EQ(output->Lattices()[0].density[kInterior], -3);
@@ -324,7 +351,7 @@ TEST(EditedSourceImage, AbortedPreparedPayloadRemainsReadableWithoutRendererAuth
 
 TEST(EditedSourceImage, ChangedOrAddedDependenciesAfterCaptureCannotPublishOldPreparedImage) {
     for (const bool addition : {false, true}) {
-        SaveRoot root;
+        SaveRoot const root;
         WorldStreamingState state;
         auto chunk = EditedChunk(state);
         ASSERT_TRUE(Save(root, state));
@@ -332,7 +359,7 @@ TEST(EditedSourceImage, ChangedOrAddedDependenciesAfterCaptureCannotPublishOldPr
         auto limits = Limits();
         const std::array tiles{Tile(2)};
         std::shared_ptr<const EditedSourceImage> prepared, receipt;
-        SaveTransaction transaction(root.path, 0, {}, &WorldSaveService::member_digest);
+        SaveTransaction transaction(root.path(), 0, {}, &WorldSaveService::member_digest);
         ASSERT_TRUE(transaction.begin(nullptr));
         ASSERT_EQ(CapturePreparedEditedSource(transaction, {tiles}, limits, prepared),
                   EditedSourceError::None);
@@ -342,7 +369,7 @@ TEST(EditedSourceImage, ChangedOrAddedDependenciesAfterCaptureCannotPublishOldPr
             chunk->sdf_data[kInterior] = -66;
             chunk->mark_voxel_data_dirty();
         }
-        ASSERT_TRUE(WorldSaveService{}.save_dirty_chunks(state, root.path).saved);
+        ASSERT_TRUE(WorldSaveService{}.save_dirty_chunks(state, root.path()).saved);
         ASSERT_TRUE(transaction.commit(nullptr));
         EXPECT_EQ(PublishCommittedEditedSource(prepared, receipt), EditedSourceError::Ineligible);
         EXPECT_FALSE(receipt);
@@ -350,7 +377,7 @@ TEST(EditedSourceImage, ChangedOrAddedDependenciesAfterCaptureCannotPublishOldPr
 }
 
 TEST(EditedSourceImage, GenerationMismatchAndFutureMemberGenerationPreserveOutput) {
-    SaveRoot root;
+    SaveRoot const root;
     WorldStreamingState state;
     EditedChunk(state);
     ASSERT_TRUE(Save(root, state));
@@ -358,20 +385,20 @@ TEST(EditedSourceImage, GenerationMismatchAndFutureMemberGenerationPreserveOutpu
     auto limits = Limits();
     const std::array tiles{Tile(1)};
     std::shared_ptr<const EditedSourceImage> output;
-    ASSERT_EQ(CaptureCommittedEditedSource(root.path, 1, {tiles}, limits, output),
+    ASSERT_EQ(CaptureCommittedEditedSource(root.path(), 1, {tiles}, limits, output),
               EditedSourceError::None);
     const auto previous = output;
     const auto used = limits.memory->used();
-    EXPECT_EQ(CaptureCommittedEditedSource(root.path, 2, {tiles}, limits, output),
+    EXPECT_EQ(CaptureCommittedEditedSource(root.path(), 2, {tiles}, limits, output),
               EditedSourceError::GenerationMismatch);
     EXPECT_EQ(output, previous);
     SnapshotIndex index;
-    ASSERT_TRUE(read_snapshot_index(root.path, index, nullptr));
+    ASSERT_TRUE(read_snapshot_index(root.path(), index, nullptr));
     ASSERT_FALSE(index.members.empty());
     index.members.front().generation = 2;
     ASSERT_TRUE(WorldSaveService::durable_write_file(
-        snapshot_index_path(root.path), encode_snapshot_index(index), nullptr));
-    EXPECT_EQ(CaptureCommittedEditedSource(root.path, 1, {tiles}, limits, output),
+        snapshot_index_path(root.path()), encode_snapshot_index(index), nullptr));
+    EXPECT_EQ(CaptureCommittedEditedSource(root.path(), 1, {tiles}, limits, output),
               EditedSourceError::GenerationMismatch);
     EXPECT_EQ(output, previous);
     EXPECT_EQ(limits.memory->used(), used);
@@ -379,14 +406,14 @@ TEST(EditedSourceImage, GenerationMismatchAndFutureMemberGenerationPreserveOutpu
 
 TEST(EditedSourceImage, InvalidLatticeNonfiniteDensityAndMaterialCountRefuse) {
     for (const int corruption : {0, 1, 2}) {
-        SaveRoot root;
+        SaveRoot const root;
         WorldStreamingState state;
         auto chunk = EditedChunk(state);
         ASSERT_TRUE(Save(root, state));
         auto limits = Limits();
         const std::array tiles{Tile(1)};
         std::shared_ptr<const EditedSourceImage> output;
-        ASSERT_EQ(CaptureCommittedEditedSource(root.path, 0, {tiles}, limits, output),
+        ASSERT_EQ(CaptureCommittedEditedSource(root.path(), 0, {tiles}, limits, output),
                   EditedSourceError::None);
         const auto previous = output;
         const auto used = limits.memory->used();
@@ -403,8 +430,8 @@ TEST(EditedSourceImage, InvalidLatticeNonfiniteDensityAndMaterialCountRefuse) {
         bad.flags = 1;
         bad.payload = payload.dump();
         ASSERT_TRUE(WorldSaveService::upsert_container_records(
-            WorldSaveService::region_file_path(root.path, 0, 0), {bad}));
-        EXPECT_EQ(CaptureCommittedEditedSource(root.path, 0, {tiles}, limits, output),
+            WorldSaveService::region_file_path(root.path(), 0, 0), {bad}));
+        EXPECT_EQ(CaptureCommittedEditedSource(root.path(), 0, {tiles}, limits, output),
                   EditedSourceError::InvalidRecord);
         EXPECT_EQ(output, previous);
         EXPECT_EQ(limits.memory->used(), used);
@@ -417,14 +444,14 @@ TEST(EditedSourceImage, FingerprintConsistentInvalidChannelsRefuseWithoutCapture
         256, maximum_unsigned, -1, 1.0, true, nullptr, "255", nlohmann::json::object()};
     for (std::size_t corruption = 0; corruption < invalid_materials.size() + 7; ++corruption) {
         SCOPED_TRACE(corruption);
-        SaveRoot root;
+        SaveRoot const root;
         WorldStreamingState state;
         const auto chunk = EditedChunk(state);
         ASSERT_TRUE(Save(root, state));
         ASSERT_TRUE(Index(root));
         SnapshotIndex index;
-        ASSERT_TRUE(read_snapshot_index(root.path, index, nullptr));
-        const auto path = WorldSaveService::region_file_path(root.path, 0, 0);
+        ASSERT_TRUE(read_snapshot_index(root.path(), index, nullptr));
+        const auto path = WorldSaveService::region_file_path(root.path(), 0, 0);
         const auto member =
             std::find_if(index.members.begin(), index.members.end(), [](const auto& entry) {
                 return entry.path == "chunks/region/r.0.0.lmr";
@@ -440,7 +467,7 @@ TEST(EditedSourceImage, FingerprintConsistentInvalidChannelsRefuseWithoutCapture
         ASSERT_EQ(member->bytes, static_cast<std::uint64_t>(baseline.size()));
         ASSERT_EQ(member->fnv64, fnv1a64_bytes(baseline.data(), baseline.size()));
         // The raw fixture writer is intentionally unindexed; install a matching index below.
-        ASSERT_TRUE(fs::remove(snapshot_index_path(root.path)));
+        ASSERT_TRUE(fs::remove(snapshot_index_path(root.path())));
         auto payload = nlohmann::json::parse(SerializeWorldStreamingStateSnapshotJson(state));
         auto& record = payload["chunks"][0];
         if (corruption < invalid_materials.size()) {
@@ -468,6 +495,9 @@ TEST(EditedSourceImage, FingerprintConsistentInvalidChannelsRefuseWithoutCapture
                 case 6:
                     record["sdf_data"][kSamples - 1] = nullptr;
                     break;
+                default:
+                    FAIL() << "unexpected corruption case";
+                    return;
             }
         }
         WorldSaveService::ContainerRecord bad;
@@ -478,7 +508,7 @@ TEST(EditedSourceImage, FingerprintConsistentInvalidChannelsRefuseWithoutCapture
         const auto limits = Limits();
         const std::array tiles{Tile(1)};
         std::shared_ptr<const EditedSourceImage> output, prepared, published;
-        EXPECT_EQ(CaptureCommittedEditedSource(root.path, 0, {tiles}, limits, output),
+        EXPECT_EQ(CaptureCommittedEditedSource(root.path(), 0, {tiles}, limits, output),
                   EditedSourceError::InvalidRecord);
         EXPECT_FALSE(output);
         EXPECT_EQ(limits.memory->used(), 0u);
@@ -495,12 +525,12 @@ TEST(EditedSourceImage, FingerprintConsistentInvalidChannelsRefuseWithoutCapture
         member->bytes = static_cast<std::uint64_t>(fingerprinted.size());
         member->fnv64 = fnv1a64_bytes(fingerprinted.data(), fingerprinted.size());
         ASSERT_TRUE(WorldSaveService::durable_write_file(
-            snapshot_index_path(root.path), encode_snapshot_index(index), nullptr));
-        EXPECT_EQ(CaptureCommittedEditedSource(root.path, 1, {tiles}, limits, output),
+            snapshot_index_path(root.path()), encode_snapshot_index(index), nullptr));
+        EXPECT_EQ(CaptureCommittedEditedSource(root.path(), 1, {tiles}, limits, output),
                   EditedSourceError::InvalidRecord);
         EXPECT_FALSE(output);
         EXPECT_EQ(limits.memory->used(), 0u);
-        SaveTransaction transaction(root.path, 0, {}, &WorldSaveService::member_digest);
+        SaveTransaction transaction(root.path(), 0, {}, &WorldSaveService::member_digest);
         ASSERT_TRUE(transaction.begin(nullptr));
         EXPECT_EQ(CapturePreparedEditedSource(transaction, {tiles}, limits, prepared),
                   EditedSourceError::InvalidRecord);
@@ -513,19 +543,19 @@ TEST(EditedSourceImage, FingerprintConsistentInvalidChannelsRefuseWithoutCapture
 }
 
 TEST(EditedSourceImage, UnrelatedSaveTransactionAllowsCommittedCapture) {
-    SaveRoot root, unrelated;
+    const SaveRoot root, unrelated;
     WorldStreamingState state;
     EditedChunk(state);
     ASSERT_TRUE(Save(root, state));
     ASSERT_TRUE(Index(root));
     ASSERT_TRUE(Save(unrelated, state));
     ASSERT_TRUE(Index(unrelated));
-    SaveTransaction transaction(unrelated.path, 0, {}, &WorldSaveService::member_digest);
+    SaveTransaction transaction(unrelated.path(), 0, {}, &WorldSaveService::member_digest);
     ASSERT_TRUE(transaction.begin(nullptr));
     const auto limits = Limits();
     const std::array tiles{Tile(1)};
     std::shared_ptr<const EditedSourceImage> output;
-    ASSERT_EQ(CaptureCommittedEditedSource(root.path, 1, {tiles}, limits, output),
+    ASSERT_EQ(CaptureCommittedEditedSource(root.path(), 1, {tiles}, limits, output),
               EditedSourceError::None);
     ASSERT_TRUE(output);
     EXPECT_TRUE(output->RendererEligible());
@@ -536,19 +566,19 @@ TEST(EditedSourceImage, UnrelatedSaveTransactionAllowsCommittedCapture) {
 
 TEST(EditedSourceImage, SharedBoundaryDisagreementRefusesBeforeCoarseSampling) {
     for (const bool material : {false, true}) {
-        SaveRoot root;
+        SaveRoot const root;
         WorldStreamingState state;
         EditedChunk(state, {-1, 0, 0});
         auto conflicting = EditedChunk(state, {0, 0, 0});
         if (material)
-            conflicting->material_data[17 * (1 + 17)] = 2;
+            conflicting->material_data[std::size_t{17} * (1 + 17)] = 2;
         else
-            conflicting->sdf_data[17 * (1 + 17)] = 2;
+            conflicting->sdf_data[std::size_t{17} * (1 + 17)] = 2;
         ASSERT_TRUE(Save(root, state));
         auto limits = Limits();
         const std::array tiles{Tile(5)};
         std::shared_ptr<const EditedSourceImage> output;
-        EXPECT_EQ(CaptureCommittedEditedSource(root.path, 0, {tiles}, limits, output),
+        EXPECT_EQ(CaptureCommittedEditedSource(root.path(), 0, {tiles}, limits, output),
                   EditedSourceError::BoundaryConflict);
         EXPECT_FALSE(output);
         EXPECT_EQ(limits.memory->used(), 0u);
@@ -556,7 +586,7 @@ TEST(EditedSourceImage, SharedBoundaryDisagreementRefusesBeforeCoarseSampling) {
 }
 
 TEST(EditedSourceImage, UnreadableExpectedMemberIsUnavailableRatherThanAbsent) {
-    SaveRoot root;
+    SaveRoot const root;
     WorldStreamingState state;
     EditedChunk(state);
     ASSERT_TRUE(Save(root, state));
@@ -564,17 +594,17 @@ TEST(EditedSourceImage, UnreadableExpectedMemberIsUnavailableRatherThanAbsent) {
     auto limits = Limits();
     const std::array tiles{Tile(1)};
     std::shared_ptr<const EditedSourceImage> output;
-    ASSERT_EQ(CaptureCommittedEditedSource(root.path, 1, {tiles}, limits, output),
+    ASSERT_EQ(CaptureCommittedEditedSource(root.path(), 1, {tiles}, limits, output),
               EditedSourceError::None);
     const auto previous = output;
-    ASSERT_TRUE(fs::remove(WorldSaveService::region_file_path(root.path, 0, 0)));
-    EXPECT_EQ(CaptureCommittedEditedSource(root.path, 1, {tiles}, limits, output),
+    ASSERT_TRUE(fs::remove(WorldSaveService::region_file_path(root.path(), 0, 0)));
+    EXPECT_EQ(CaptureCommittedEditedSource(root.path(), 1, {tiles}, limits, output),
               EditedSourceError::Unavailable);
     EXPECT_EQ(output, previous);
 }
 
 TEST(EditedSourceImage, EveryWorkAndByteCapPreservesOutputAndReleasesNewCharges) {
-    SaveRoot root;
+    SaveRoot const root;
     WorldStreamingState state;
     EditedChunk(state);
     EditedChunk(state, {1, 0, 0});
@@ -583,7 +613,7 @@ TEST(EditedSourceImage, EveryWorkAndByteCapPreservesOutputAndReleasesNewCharges)
     auto limits = Limits();
     const std::array tiles{Tile(1)};
     std::shared_ptr<const EditedSourceImage> output;
-    ASSERT_EQ(CaptureCommittedEditedSource(root.path, 1, {tiles}, limits, output),
+    ASSERT_EQ(CaptureCommittedEditedSource(root.path(), 1, {tiles}, limits, output),
               EditedSourceError::None);
     const auto previous = output;
     const auto used = limits.memory->used();
@@ -627,7 +657,7 @@ TEST(EditedSourceImage, EveryWorkAndByteCapPreservesOutputAndReleasesNewCharges)
                 FAIL();
                 break;
         }
-        EXPECT_NE(CaptureCommittedEditedSource(root.path, 1, {tiles}, refused, output),
+        EXPECT_NE(CaptureCommittedEditedSource(root.path(), 1, {tiles}, refused, output),
                   EditedSourceError::None)
             << cap;
         EXPECT_EQ(output, previous) << cap;
@@ -637,7 +667,7 @@ TEST(EditedSourceImage, EveryWorkAndByteCapPreservesOutputAndReleasesNewCharges)
         auto refused = limits;
         refused.memory = std::make_shared<FarVolumeMemoryPool>(limits.memory->limit());
         refused.memory->RefuseAttemptsFrom(fail_at);
-        EXPECT_EQ(CaptureCommittedEditedSource(root.path, 1, {tiles}, refused, output),
+        EXPECT_EQ(CaptureCommittedEditedSource(root.path(), 1, {tiles}, refused, output),
                   EditedSourceError::ByteLimit);
         EXPECT_EQ(output, previous);
         EXPECT_EQ(refused.memory->used(), 0u);
@@ -671,18 +701,18 @@ TEST(EditedSourceImage, PreviewAdmissionFailuresPreserveBothLayersAndReleaseChar
 }
 
 TEST(EditedSourceImage, LegacyAbsenceAdoptsGenerationZeroWithoutFabricatingEditsOrWriting) {
-    SaveRoot root;
+    SaveRoot const root;
     WorldStreamingState state;
     const auto chunk = EditedChunk(state);
     chunk->mark_sdf_generated_current_params();
     ASSERT_TRUE(Save(root, state));
-    const auto region = WorldSaveService::region_file_path(root.path, 0, 0);
+    const auto region = WorldSaveService::region_file_path(root.path(), 0, 0);
     const auto before = Read(region);
     const auto world_hash = WorldSaveService{}.world_hash(state);
     auto limits = Limits();
     const std::array tiles{Tile(1)};
     std::shared_ptr<const EditedSourceImage> image;
-    ASSERT_EQ(CaptureCommittedEditedSource(root.path, 0, {tiles}, limits, image),
+    ASSERT_EQ(CaptureCommittedEditedSource(root.path(), 0, {tiles}, limits, image),
               EditedSourceError::None);
     ASSERT_TRUE(image);
     EXPECT_TRUE(image->LegacyAuthority());
@@ -690,26 +720,26 @@ TEST(EditedSourceImage, LegacyAbsenceAdoptsGenerationZeroWithoutFabricatingEdits
     EXPECT_EQ(image->Identity().generation, 0u);
     EXPECT_TRUE(image->Lattices().empty());
     EXPECT_TRUE(image->Water().empty());
-    EXPECT_FALSE(snapshot_index_exists(root.path));
+    EXPECT_FALSE(snapshot_index_exists(root.path()));
     EXPECT_EQ(Read(region), before);
     EXPECT_EQ(WorldSaveService{}.world_hash(state), world_hash);
 }
 
 TEST(EditedSourceImage, LegacyEditedAuthorityUsesZeroUntilSuccessfulAdoptionCommit) {
-    SaveRoot root;
+    SaveRoot const root;
     WorldStreamingState state;
     EditedChunk(state);
     ASSERT_TRUE(Save(root, state));
     auto limits = Limits();
     const std::array tiles{Tile(1)};
     std::shared_ptr<const EditedSourceImage> legacy, prepared, receipt;
-    ASSERT_EQ(CaptureCommittedEditedSource(root.path, 0, {tiles}, limits, legacy),
+    ASSERT_EQ(CaptureCommittedEditedSource(root.path(), 0, {tiles}, limits, legacy),
               EditedSourceError::None);
     ASSERT_TRUE(legacy);
     ASSERT_EQ(legacy->Lattices().size(), 1u);
     EXPECT_EQ(legacy->Lattices()[0].member_generation, 0u);
     {
-        SaveTransaction transaction(root.path, 0, {}, &WorldSaveService::member_digest);
+        SaveTransaction transaction(root.path(), 0, {}, &WorldSaveService::member_digest);
         ASSERT_TRUE(transaction.begin(nullptr));
         ASSERT_EQ(CapturePreparedEditedSource(transaction, {tiles}, limits, prepared),
                   EditedSourceError::None);
@@ -723,7 +753,7 @@ TEST(EditedSourceImage, LegacyEditedAuthorityUsesZeroUntilSuccessfulAdoptionComm
 }
 
 TEST(EditedSourceImage, RemovalProducesEmptyInventoryAndRetainsAnAbsentDependency) {
-    SaveRoot root;
+    SaveRoot const root;
     WorldStreamingState state;
     EditedChunk(state);
     ASSERT_TRUE(Save(root, state));
@@ -731,12 +761,12 @@ TEST(EditedSourceImage, RemovalProducesEmptyInventoryAndRetainsAnAbsentDependenc
     const std::array tiles{Tile(1)};
     auto limits = Limits();
     std::shared_ptr<const EditedSourceImage> before, prepared, receipt;
-    ASSERT_EQ(CaptureCommittedEditedSource(root.path, 1, {tiles}, limits, before),
+    ASSERT_EQ(CaptureCommittedEditedSource(root.path(), 1, {tiles}, limits, before),
               EditedSourceError::None);
     {
-        SaveTransaction transaction(root.path, 0, {}, &WorldSaveService::member_digest);
+        SaveTransaction transaction(root.path(), 0, {}, &WorldSaveService::member_digest);
         ASSERT_TRUE(transaction.begin(nullptr));
-        ASSERT_TRUE(WorldSaveService::remove_member(root.path, "chunks/region/r.0.0.lmr"));
+        ASSERT_TRUE(WorldSaveService::remove_member(root.path(), "chunks/region/r.0.0.lmr"));
         ASSERT_EQ(CapturePreparedEditedSource(transaction, {tiles}, limits, prepared),
                   EditedSourceError::None);
         ASSERT_TRUE(transaction.commit(nullptr));
@@ -756,7 +786,7 @@ TEST(EditedSourceImage, RemovalProducesEmptyInventoryAndRetainsAnAbsentDependenc
 }
 
 TEST(EditedSourceImage, ReceiptAdmissionRefusalPreservesOutputAndSharedPayloadCharge) {
-    SaveRoot root;
+    SaveRoot const root;
     WorldStreamingState state;
     EditedChunk(state);
     ASSERT_TRUE(Save(root, state));
@@ -764,11 +794,11 @@ TEST(EditedSourceImage, ReceiptAdmissionRefusalPreservesOutputAndSharedPayloadCh
     auto limits = Limits();
     const std::array tiles{Tile(1)};
     std::shared_ptr<const EditedSourceImage> output, prepared;
-    ASSERT_EQ(CaptureCommittedEditedSource(root.path, 1, {tiles}, limits, output),
+    ASSERT_EQ(CaptureCommittedEditedSource(root.path(), 1, {tiles}, limits, output),
               EditedSourceError::None);
     const auto previous = output;
     {
-        SaveTransaction transaction(root.path, 0, {}, &WorldSaveService::member_digest);
+        SaveTransaction transaction(root.path(), 0, {}, &WorldSaveService::member_digest);
         ASSERT_TRUE(transaction.begin(nullptr));
         ASSERT_EQ(CapturePreparedEditedSource(transaction, {tiles}, limits, prepared),
                   EditedSourceError::None);
@@ -783,13 +813,13 @@ TEST(EditedSourceImage, ReceiptAdmissionRefusalPreservesOutputAndSharedPayloadCh
 
 TEST(EditedSourceImage, PresentMalformedOrFutureRecordsRefuseLegacyAdoption) {
     for (const std::string bad : {"{", "{\"schema\":\"luminumbra.snapshot.v2\"}"}) {
-        SaveRoot root;
+        SaveRoot const root;
         auto limits = Limits();
         const std::array tiles{Tile(1)};
         std::shared_ptr<const EditedSourceImage> output;
         ASSERT_TRUE(
-            WorldSaveService::durable_write_file(snapshot_index_path(root.path), bad, nullptr));
-        EXPECT_EQ(CaptureCommittedEditedSource(root.path, 0, {tiles}, limits, output),
+            WorldSaveService::durable_write_file(snapshot_index_path(root.path()), bad, nullptr));
+        EXPECT_EQ(CaptureCommittedEditedSource(root.path(), 0, {tiles}, limits, output),
                   EditedSourceError::InvalidRecord);
         EXPECT_FALSE(output);
         EXPECT_EQ(limits.memory->used(), 0u);
@@ -797,16 +827,16 @@ TEST(EditedSourceImage, PresentMalformedOrFutureRecordsRefuseLegacyAdoption) {
 }
 
 TEST(EditedSourceImage, DecodeLengthAdmissionRefusesBeforeAnyChunkVisitor) {
-    SaveRoot root;
+    SaveRoot const root;
     WorldStreamingState state;
     EditedChunk(state);
     ASSERT_TRUE(Save(root, state));
-    auto bytes = Read(WorldSaveService::region_file_path(root.path, 0, 0));
+    auto bytes = Read(WorldSaveService::region_file_path(root.path(), 0, 0));
     ASSERT_GT(bytes.size(), 22u);
     for (std::size_t i = 18; i < 22; ++i)
         bytes[i] = static_cast<char>(0xff);
     ASSERT_TRUE(WorldSaveService::durable_write_file(
-        WorldSaveService::region_file_path(root.path, 0, 0), bytes, nullptr));
+        WorldSaveService::region_file_path(root.path(), 0, 0), bytes, nullptr));
     const auto limits = Limits();
     const WorldSaveService::EditedRegionReadLimits read_limits{limits.max_file_bytes,
                                                                limits.max_decode_bytes,
@@ -817,7 +847,7 @@ TEST(EditedSourceImage, DecodeLengthAdmissionRefusesBeforeAnyChunkVisitor) {
     std::uint64_t decoded = 0;
     MemberDigest digest;
     EXPECT_FALSE(WorldSaveService::read_edited_source_region(
-        WorldSaveService::region_file_path(root.path, 0, 0),
+        WorldSaveService::region_file_path(root.path(), 0, 0),
         read_limits,
         false,
         [&](const Chunk&, std::uint64_t) {
@@ -831,12 +861,12 @@ TEST(EditedSourceImage, DecodeLengthAdmissionRefusesBeforeAnyChunkVisitor) {
 }
 
 TEST(EditedSourceImage, SessionCaptureIsOwnerThreadOnlyAndSimulationNeutralAfterClose) {
-    SaveRoot runtime;
-    SaveRoot storage;
-    fs::create_directories(runtime.path / "worlds/atlas/presets");
+    SaveRoot const runtime;
+    SaveRoot const storage;
+    fs::create_directories(runtime.path() / "worlds/atlas/presets");
     fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets/default.json",
-                  runtime.path / "worlds/atlas/presets/default.json");
-    TestSupport::WriteSimulationContentFixture(runtime.path);
+                  runtime.path() / "worlds/atlas/presets/default.json");
+    TestSupport::WriteSimulationContentFixture(runtime.path());
     JobSystem jobs;
     jobs.startup();
     auto limits = Limits();
@@ -845,12 +875,12 @@ TEST(EditedSourceImage, SessionCaptureIsOwnerThreadOnlyAndSimulationNeutralAfter
     {
         world::GameSession session;
         session.SetJobSystem(&jobs);
-        session.SetRootPath(runtime.path.string() +
+        session.SetRootPath(runtime.path().string() +
                             static_cast<char>(fs::path::preferred_separator));
-        session.SetSaveRootPath(storage.path);
+        session.SetSaveRootPath(storage.path());
         ASSERT_TRUE(session.CreateWorld("Source capture", "12345", "default"));
-        EXPECT_EQ(session.GetWorldSaveDir().parent_path(), storage.path / "worlds/saves");
-        EXPECT_FALSE(fs::exists(runtime.path / "worlds/saves"));
+        EXPECT_EQ(session.GetWorldSaveDir().parent_path(), storage.path() / "worlds/saves");
+        EXPECT_FALSE(fs::exists(runtime.path() / "worlds/saves"));
         ASSERT_NE(session.GetWorldSystem(), nullptr);
         WorldStreamingState state;
         const auto chunk = EditedChunk(state);
@@ -893,14 +923,14 @@ TEST(EditedSourceImage, SessionCaptureIsOwnerThreadOnlyAndSimulationNeutralAfter
 }
 
 TEST(EditedSourceImage, PreparedPublicationSlotAdmissionPreservesOutputAndExpiredSlotsAreReusable) {
-    SaveRoot root;
+    SaveRoot const root;
     WorldStreamingState state;
     EditedChunk(state);
     ASSERT_TRUE(Save(root, state));
     ASSERT_TRUE(Index(root));
     auto limits = Limits();
     const std::array tiles{Tile(1)};
-    SaveTransaction transaction(root.path, 0, {}, &WorldSaveService::member_digest);
+    SaveTransaction transaction(root.path(), 0, {}, &WorldSaveService::member_digest);
     ASSERT_TRUE(transaction.begin(nullptr));
     std::vector<std::shared_ptr<const EditedSourceImage>> retained;
     retained.reserve(64);
@@ -927,7 +957,7 @@ TEST(EditedSourceImage, PreparedPublicationSlotAdmissionPreservesOutputAndExpire
 }
 
 TEST(EditedSourceImage, MetadataDependencyChangedAfterPreparedCaptureCannotPublish) {
-    SaveRoot root;
+    SaveRoot const root;
     WorldStreamingState state;
     EditedChunk(state);
     ASSERT_TRUE(Save(root, state));
@@ -935,13 +965,13 @@ TEST(EditedSourceImage, MetadataDependencyChangedAfterPreparedCaptureCannotPubli
     auto limits = Limits();
     const std::array tiles{Tile(1)};
     std::shared_ptr<const EditedSourceImage> prepared, receipt;
-    SaveTransaction transaction(root.path, 0, {}, &WorldSaveService::member_digest);
+    SaveTransaction transaction(root.path(), 0, {}, &WorldSaveService::member_digest);
     ASSERT_TRUE(transaction.begin(nullptr));
     ASSERT_EQ(CapturePreparedEditedSource(transaction, {tiles}, limits, prepared),
               EditedSourceError::None);
-    const auto manifest = Read(WorldSaveService::world_manifest_path(root.path));
+    const auto manifest = Read(WorldSaveService::world_manifest_path(root.path()));
     ASSERT_TRUE(WorldSaveService::write_member_bytes(
-        root.path, "chunks/region/world-manifest.json", manifest + "\n"));
+        root.path(), "chunks/region/world-manifest.json", manifest + "\n"));
     ASSERT_TRUE(transaction.commit(nullptr));
     EXPECT_EQ(PublishCommittedEditedSource(prepared, receipt), EditedSourceError::Ineligible);
     EXPECT_FALSE(receipt);
@@ -972,7 +1002,7 @@ TEST(EditedSourceImage, PreviewRetainsParkedAuthorityWhenLiveObservationIsAbsent
 }
 
 TEST(EditedSourceImage, SourceSampleAdmissionRefusesBeforeAnyChunkVisitor) {
-    SaveRoot root;
+    SaveRoot const root;
     WorldStreamingState state;
     EditedChunk(state);
     ASSERT_TRUE(Save(root, state));
@@ -986,7 +1016,7 @@ TEST(EditedSourceImage, SourceSampleAdmissionRefusesBeforeAnyChunkVisitor) {
     std::uint64_t decoded = 0;
     MemberDigest digest;
     EXPECT_FALSE(WorldSaveService::read_edited_source_region(
-        WorldSaveService::region_file_path(root.path, 0, 0),
+        WorldSaveService::region_file_path(root.path(), 0, 0),
         read_limits,
         false,
         [&](const Chunk&, std::uint64_t) {
@@ -1000,7 +1030,7 @@ TEST(EditedSourceImage, SourceSampleAdmissionRefusesBeforeAnyChunkVisitor) {
 }
 
 TEST(EditedSourceImage, RecoveryAdmitsUndoAndWorkBeforeReadingOrReplacingPayloads) {
-    SaveRoot root;
+    SaveRoot const root;
     WorldStreamingState state;
     EditedChunk(state);
     ASSERT_TRUE(Save(root, state));
@@ -1008,18 +1038,19 @@ TEST(EditedSourceImage, RecoveryAdmitsUndoAndWorkBeforeReadingOrReplacingPayload
     const std::array tiles{Tile(1)};
     auto limits = Limits();
     std::shared_ptr<const EditedSourceImage> output;
-    ASSERT_EQ(CaptureCommittedEditedSource(root.path, 1, {tiles}, limits, output),
+    ASSERT_EQ(CaptureCommittedEditedSource(root.path(), 1, {tiles}, limits, output),
               EditedSourceError::None);
     const auto previous = output;
     const auto used = limits.memory->used();
-    const auto destination = root.path / "world_info.json";
+    const auto destination = root.path() / "world_info.json";
     const std::string installed = R"({"container_version":2})";
     const std::string undo =
-        nlohmann::json{{"container_version", 2}, {"padding", std::string(64 * 1024, 'x')}}.dump();
+        nlohmann::json{{"container_version", 2}, {"padding", std::string(64ull * 1024, 'x')}}
+            .dump();
     std::ostringstream digest;
     digest << std::hex << std::setw(16) << std::setfill('0')
            << fnv1a64_bytes(undo.data(), undo.size());
-    const auto undo_path = journal_directory(root.path) / "undo/0";
+    const auto undo_path = journal_directory(root.path()) / "undo/0";
     ASSERT_TRUE(WorldSaveService::durable_write_file(destination, installed, nullptr));
     ASSERT_TRUE(WorldSaveService::durable_write_file(undo_path, undo, nullptr));
     const auto journal = nlohmann::json{{"schema", kJournalSchema},
@@ -1033,23 +1064,23 @@ TEST(EditedSourceImage, RecoveryAdmitsUndoAndWorkBeforeReadingOrReplacingPayload
                                            {"prev_fnv64", digest.str()},
                                            {"undo", "undo/0"}}}}}
                              .dump();
-    const auto txn_path = journal_directory(root.path) / "txn.json";
+    const auto txn_path = journal_directory(root.path()) / "txn.json";
     ASSERT_TRUE(WorldSaveService::durable_write_file(txn_path, journal, nullptr));
     ASSERT_LT(journal.size(), 16 * 1024u);
     ASSERT_GT(undo.size(), 16 * 1024u);
     for (const int cap : {0, 1, 2, 3, 4}) {
         auto refused = limits;
         if (cap == 0)
-            refused.max_file_bytes = 16 * 1024;
+            refused.max_file_bytes = 16ull * 1024;
         else if (cap == 1)
-            refused.max_decode_bytes = 16 * 1024;
+            refused.max_decode_bytes = 16ull * 1024;
         else if (cap == 2)
-            refused.max_scratch_bytes = 8 * 1024 * 1024;
+            refused.max_scratch_bytes = 8ull * 1024 * 1024;
         else if (cap == 3)
             refused.max_records = 0;
         else
             refused.max_members = 0;
-        EXPECT_EQ(CaptureCommittedEditedSource(root.path, 1, {tiles}, refused, output),
+        EXPECT_EQ(CaptureCommittedEditedSource(root.path(), 1, {tiles}, refused, output),
                   cap < 3 ? EditedSourceError::ByteLimit : EditedSourceError::WorkLimit);
         EXPECT_EQ(output, previous);
         EXPECT_EQ(limits.memory->used(), used);
@@ -1058,13 +1089,13 @@ TEST(EditedSourceImage, RecoveryAdmitsUndoAndWorkBeforeReadingOrReplacingPayload
         EXPECT_EQ(Read(undo_path), undo);
     }
     // The exact undo is valid: ordinary recovery can restore it without capture caps.
-    EXPECT_EQ(recover_pending_journal(root.path, nullptr), RecoveryOutcome::RolledBack);
+    EXPECT_EQ(recover_pending_journal(root.path(), nullptr), RecoveryOutcome::RolledBack);
     EXPECT_EQ(Read(destination), undo);
 }
 
 TEST(EditedSourceImage, LegacyAndPreviewRejectInvalidWaterGridsAndContinuation) {
     for (const int corruption : {0, 1, 2, 3, 4, 5, 6, 7}) {
-        SaveRoot root;
+        SaveRoot const root;
         WorldStreamingState state;
         auto chunk = EditedChunk(state);
         Wet(*chunk);
@@ -1076,7 +1107,7 @@ TEST(EditedSourceImage, LegacyAndPreviewRejectInvalidWaterGridsAndContinuation) 
         const EditedSourcePreviewProducer producer = [&](std::size_t, const auto& visit) {
             return visit(*chunk, false);
         };
-        ASSERT_EQ(CaptureCommittedEditedSource(root.path, 0, {tiles}, limits, output),
+        ASSERT_EQ(CaptureCommittedEditedSource(root.path(), 0, {tiles}, limits, output),
                   EditedSourceError::None);
         ASSERT_EQ(CaptureEditedSourcePreview(producer, {tiles}, limits, live, parked),
                   EditedSourceError::None);
@@ -1104,8 +1135,8 @@ TEST(EditedSourceImage, LegacyAndPreviewRejectInvalidWaterGridsAndContinuation) 
         bad.flags = 1;
         bad.payload = SerializeWorldStreamingStateSnapshotJson(state);
         ASSERT_TRUE(WorldSaveService::upsert_container_records(
-            WorldSaveService::region_file_path(root.path, 0, 0), {bad}));
-        EXPECT_EQ(CaptureCommittedEditedSource(root.path, 0, {tiles}, limits, output),
+            WorldSaveService::region_file_path(root.path(), 0, 0), {bad}));
+        EXPECT_EQ(CaptureCommittedEditedSource(root.path(), 0, {tiles}, limits, output),
                   EditedSourceError::InvalidRecord);
         EXPECT_EQ(CaptureEditedSourcePreview(producer, {tiles}, limits, live, parked),
                   EditedSourceError::InvalidRecord);
@@ -1118,7 +1149,7 @@ TEST(EditedSourceImage, LegacyAndPreviewRejectInvalidWaterGridsAndContinuation) 
 
 TEST(EditedSourceImage, SupportedLegacyWaterRepresentationsRemainReadable) {
     for (const bool float_only : {false, true}) {
-        SaveRoot root;
+        SaveRoot const root;
         WorldStreamingState state;
         auto chunk = EditedChunk(state);
         Wet(*chunk);
@@ -1137,13 +1168,13 @@ TEST(EditedSourceImage, SupportedLegacyWaterRepresentationsRemainReadable) {
         legacy.id = chunk->get_id();
         legacy.flags = 1;
         legacy.payload = payload.dump();
-        const auto path = WorldSaveService::region_file_path(root.path, 0, 0);
+        const auto path = WorldSaveService::region_file_path(root.path(), 0, 0);
         ASSERT_TRUE(WorldSaveService::upsert_container_records(path, {legacy}));
         const auto before = Read(path);
         const std::array tiles{Tile(1)};
         auto limits = Limits();
         std::shared_ptr<const EditedSourceImage> image;
-        ASSERT_EQ(CaptureCommittedEditedSource(root.path, 0, {tiles}, limits, image),
+        ASSERT_EQ(CaptureCommittedEditedSource(root.path(), 0, {tiles}, limits, image),
                   EditedSourceError::None);
         ASSERT_EQ(image->Water().size(), 1u);
         EXPECT_TRUE(image->Water()[0].has_sim);
@@ -1164,12 +1195,12 @@ TEST(EditedSourceImage, SupportedLegacyWaterRepresentationsRemainReadable) {
         EXPECT_EQ(live->Water()[0].depth_mm.size(), float_only ? 0u : 16u);
         EXPECT_EQ(live->Water()[0].level[0], 1.125f);
         EXPECT_EQ(Read(path), before);
-        EXPECT_FALSE(snapshot_index_exists(root.path));
+        EXPECT_FALSE(snapshot_index_exists(root.path()));
     }
 }
 
 TEST(EditedSourceImage, ValidUnindexedNewGroundRecordIsAdoptedWithoutChangingNormalReader) {
-    SaveRoot root;
+    SaveRoot const root;
     WorldStreamingState state;
     EditedChunk(state);
     ASSERT_TRUE(Save(root, state));
@@ -1181,48 +1212,48 @@ TEST(EditedSourceImage, ValidUnindexedNewGroundRecordIsAdoptedWithoutChangingNor
     world::GroundObjectStore objects;
     ASSERT_TRUE(objects.insert(object));
     ASSERT_TRUE(WorldSaveService::durable_write_file(
-        WorldSaveService::active_regions_path(root.path), ledger.encode(), nullptr));
+        WorldSaveService::active_regions_path(root.path()), ledger.encode(), nullptr));
     const auto bytes = objects.serialize();
     ASSERT_TRUE(WorldSaveService::durable_write_file(
-        WorldSaveService::ground_objects_path(root.path), bytes, nullptr));
+        WorldSaveService::ground_objects_path(root.path()), bytes, nullptr));
     world::GroundObjectStore normal;
     EXPECT_FALSE(
-        WorldSaveService::load_ground_objects(normal, root.path, ledger.next_persistent_id()));
+        WorldSaveService::load_ground_objects(normal, root.path(), ledger.next_persistent_id()));
     const std::array tiles{Tile(1)};
     auto limits = Limits();
     std::shared_ptr<const EditedSourceImage> image;
-    ASSERT_EQ(CaptureCommittedEditedSource(root.path, 0, {tiles}, limits, image),
+    ASSERT_EQ(CaptureCommittedEditedSource(root.path(), 0, {tiles}, limits, image),
               EditedSourceError::None);
     EXPECT_TRUE(image->LegacyAuthority());
     EXPECT_TRUE(image->RendererEligible());
-    EXPECT_FALSE(snapshot_index_exists(root.path));
-    EXPECT_EQ(Read(WorldSaveService::ground_objects_path(root.path)), bytes);
+    EXPECT_FALSE(snapshot_index_exists(root.path()));
+    EXPECT_EQ(Read(WorldSaveService::ground_objects_path(root.path())), bytes);
 }
 
 TEST(EditedSourceImage, DigestConsistentOrphanedFieldPageRefusesCommittedAndPreparedCapture) {
-    SaveRoot root;
+    SaveRoot const root;
     WorldStreamingState state;
     EditedChunk(state);
     ASSERT_TRUE(Save(root, state));
     const std::array tiles{Tile(1)};
     auto limits = Limits();
     std::shared_ptr<const EditedSourceImage> output;
-    ASSERT_EQ(CaptureCommittedEditedSource(root.path, 0, {tiles}, limits, output),
+    ASSERT_EQ(CaptureCommittedEditedSource(root.path(), 0, {tiles}, limits, output),
               EditedSourceError::None);
     const auto previous = output;
     const auto used = limits.memory->used();
     world::FieldPageState pages;
     ASSERT_TRUE(pages.activate_region({0, 0}, 7, 0));
     const auto bytes = pages.serialize();
-    const auto path = WorldSaveService::field_pages_path(root.path);
+    const auto path = WorldSaveService::field_pages_path(root.path());
     ASSERT_TRUE(WorldSaveService::durable_write_file(path, bytes, nullptr));
     ASSERT_TRUE(Index(root));
     MemberDigest digest;
     std::string error;
-    ASSERT_TRUE(
-        WorldSaveService::member_digest(root.path, "chunks/region/field-pages.fpg", digest, error));
+    ASSERT_TRUE(WorldSaveService::member_digest(
+        root.path(), "chunks/region/field-pages.fpg", digest, error));
     SnapshotIndex index;
-    ASSERT_TRUE(read_snapshot_index(root.path, index, nullptr));
+    ASSERT_TRUE(read_snapshot_index(root.path(), index, nullptr));
     const auto member = std::find_if(index.members.begin(), index.members.end(), [](const auto& m) {
         return m.path == "chunks/region/field-pages.fpg";
     });
@@ -1231,22 +1262,22 @@ TEST(EditedSourceImage, DigestConsistentOrphanedFieldPageRefusesCommittedAndPrep
     EXPECT_EQ(member->fnv64, digest.fnv64);
     WorldStreamingState loaded;
     std::vector<std::string> errors;
-    EXPECT_FALSE(WorldSaveService{}.load_world(loaded, root.path, errors));
+    EXPECT_FALSE(WorldSaveService{}.load_world(loaded, root.path(), errors));
     ASSERT_FALSE(errors.empty());
     EXPECT_NE(errors.front().find("orphaned page"), std::string::npos);
-    EXPECT_EQ(CaptureCommittedEditedSource(root.path, 1, {tiles}, limits, output),
+    EXPECT_EQ(CaptureCommittedEditedSource(root.path(), 1, {tiles}, limits, output),
               EditedSourceError::InvalidRecord);
     EXPECT_EQ(output, previous);
     EXPECT_EQ(limits.memory->used(), used);
     // A baseline validation cache cannot certify a newly staged candidate.
-    SaveRoot prepared_root;
+    SaveRoot const prepared_root;
     ASSERT_TRUE(Save(prepared_root, state));
     ASSERT_TRUE(Index(prepared_root));
-    SaveTransaction transaction(prepared_root.path, 0, {}, &WorldSaveService::member_digest);
+    SaveTransaction transaction(prepared_root.path(), 0, {}, &WorldSaveService::member_digest);
     ASSERT_TRUE(transaction.begin(nullptr));
     ASSERT_TRUE(transaction.protect({"chunks/region/field-pages.fpg"}, nullptr));
     ASSERT_TRUE(WorldSaveService::durable_write_file(
-        WorldSaveService::field_pages_path(prepared_root.path), bytes, nullptr));
+        WorldSaveService::field_pages_path(prepared_root.path()), bytes, nullptr));
     EXPECT_EQ(CapturePreparedEditedSource(transaction, {tiles}, limits, output),
               EditedSourceError::InvalidRecord);
     EXPECT_EQ(output, previous);
@@ -1284,5 +1315,51 @@ TEST(EditedSourceImage, PreviewSelectionAndBoundaryCapsAreSharedAcrossLayers) {
     EXPECT_EQ(live, old_live);
     EXPECT_EQ(parked, old_parked);
     EXPECT_EQ(limits.memory->used(), 0u);
+}
+TEST(EditedSourceImage, AuthoritativeChunksCommitAndPublishReceiptWithDerivedReconstructionDue) {
+    SaveRoot const root;
+    WorldStreamingState state;
+    auto chunk = EditedChunk(state);
+    Wet(*chunk);
+    ASSERT_TRUE(Save(root, state));
+    ASSERT_TRUE(Index(root));
+    chunk->sdf_data[kInterior] = -45;
+    chunk->mark_voxel_data_dirty();
+    const std::array tiles{Tile(1)};
+    auto limits = Limits();
+    std::shared_ptr<const EditedSourceImage> prepared, committed;
+    {
+        SaveTransaction transaction(root.path(), 0, {}, &WorldSaveService::member_digest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(WorldSaveService{}.save_dirty_chunks(state, root.path()).saved);
+        ASSERT_EQ(CapturePreparedEditedSource(transaction, {tiles}, limits, prepared),
+                  EditedSourceError::None);
+        const auto group = transaction.BeginDerivedGroup({"far/v1.0.0.lmr"});
+        ASSERT_TRUE(group.has_value());
+        if (!group.has_value())
+            return;
+        ASSERT_TRUE(transaction.WriteDerivedMember(*group, "far/v1.0.0.lmr", "malformed"));
+        EXPECT_TRUE(chunk->is_voxel_data_dirty());
+        EXPECT_EQ(PublishCommittedEditedSource(prepared, committed), EditedSourceError::Ineligible);
+        ASSERT_TRUE(transaction.commit(nullptr));
+        EXPECT_FALSE(chunk->is_voxel_data_dirty());
+        EXPECT_FALSE(fs::exists(root.path() / "far/v1.0.0.lmr"));
+        ASSERT_EQ(PublishCommittedEditedSource(prepared, committed), EditedSourceError::None);
+        ASSERT_TRUE(committed);
+        EXPECT_EQ(committed->PublicationReceipt(), transaction.receipt());
+    }
+    ASSERT_TRUE(committed);
+    ASSERT_EQ(committed->Lattices().size(), 1u);
+    ASSERT_EQ(committed->Water().size(), 1u);
+    EXPECT_EQ(committed->Lattices()[0].density[kInterior], -45);
+    EXPECT_EQ(committed->Water()[0].depth_mm[0], 125);
+    EXPECT_TRUE(committed->RendererEligible());
+    std::shared_ptr<const EditedSourceImage> reopened;
+    ASSERT_EQ(CaptureCommittedEditedSource(root.path(), 2, {tiles}, limits, reopened),
+              EditedSourceError::None);
+    ASSERT_TRUE(reopened);
+    ASSERT_EQ(reopened->Lattices().size(), 1u);
+    EXPECT_EQ(reopened->Lattices()[0].density[kInterior], -45);
+    EXPECT_EQ(reopened->Dependencies().size(), committed->Dependencies().size());
 }
 } // namespace

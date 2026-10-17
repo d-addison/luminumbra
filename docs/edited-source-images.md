@@ -117,3 +117,87 @@ selection rather than assuming that bake scratch accounts for source images.
 Capture is observational: it does not generate chunks, activate regions, advance
 water or entities, change simulation flags or add hash inputs. Derived overlay
 publication, catalog currency and renderer scheduling are separate consumers.
+
+## Durable derived publication
+
+`ClassifySnapshotMember` derives membership from the relative path. Existing
+authoritative paths retain their class. The only derived paths are canonical
+`far/v<tier>.<tx>.<tz>.lmr` names within codec bounds and `far/catalog.json`.
+Index encoding and decoding reject a class that disagrees with the path. Existing
+member and journal entry encodings retain their bytes. Authoritative-only
+documents retain their v1 schemas; documents containing derived paths emit
+`luminumbra.snapshot.v2` or `luminumbra.journal.v2`, so readers without derived
+support refuse them as unsupported schemas. Readers also accept existing v1
+documents, including derived paths, for recovery compatibility. Derived files never
+enter an authoritative fingerprint, world hash or simulation policy.
+
+`SaveTransaction::BeginDerivedGroup` declares disjoint, bounded paths and durably
+publishes undo copies and the journal before returning a handle. Derived writes
+and removals require that handle; generic authoritative writers refuse derived
+paths. Existing files are admitted before undo capture, and replacement candidates
+before installation, using the existing 64 MiB overlay and 16 MiB catalog caps.
+Admission refusal preserves authority and existing journal protection. All
+transaction operations, finalizers, rollback and acknowledgements
+belong to the transaction's owner thread. Workers retain immutable inputs and
+receipts and perform no transaction mutation.
+
+`WriteDerivedMember` and `RemoveDerivedMember` restore the complete optional group
+on a replacement failure, including a failure reported after rename. Commit also
+validates staged derived records and restores an invalid group. A restored group
+keeps its previous index membership, including unreceipted absence, while staged
+authority may commit with reconstruction due. Undo records remain protected until
+the outer transaction finishes. A failed durable restoration poisons the outer
+commit and leaves recovery protection when outer rollback also cannot finish.
+
+`AddFinalizerOnce(key, callback)` retains the first registration for a key.
+Finalizers run in registration order after authoritative staging and before index
+assembly; a false result or exception aborts the transaction. An optional consumer
+must return success after safely restoring failed derived work. Registration is
+independent of dirty counts, destination and save entry point, so first saves,
+incremental saves, metadata saves and zero-dirty retries use the same commit seam.
+The consumer owns registration for its lifecycle and any capture/bake scheduling.
+
+The index is protected even for a zero-dirty commit and is always published last.
+Unchanged membership preserves its original generation; changed content and
+recorded removal receive the new snapshot generation. Only the durable index
+publication enables acknowledgements and prepared-source publication. An immutable
+`SnapshotCommitReceipt` carries the committed generation, transaction identity and
+fingerprint of the exact index bytes. `SaveTransaction::receipt()` and
+`EditedSourceImage::PublicationReceipt()` share that receipt after dependency
+validation. Aborts expose no receipt. Prepared images keep their original identity
+even after a separate committed handle is created.
+
+The owner-thread session open boundary recovers a pending journal before loading
+and validating installed records. Recovery and transaction begin share a process
+gate: recovery refuses any transaction live on another thread or its own thread.
+Rollback restores the index first and retains undo payloads until all affected
+directories are durable, so interruption and repeated replay are safe. Far staging
+temporaries are swept alongside existing persistence temporaries during recovery.
+`load_world`, `validate_save` and saved-world catalog inspection are read-only;
+pending recovery and stray staging files remain intact during inspection.
+`inspect_derived_member` reports `RecoveryPending` for a pending journal.
+
+Derived inspection validates structure before membership currency. A missing file
+is `Missing`; a valid file with no present index member is `Unreceipted`; differing
+valid bytes are `Stale`; matching bytes are `Receipted`. That last state proves
+membership only: full currency additionally requires the catalog consumer's
+dependency, removal, halo and content/terrain/numeric/cave checks. Older unchanged
+member/source generations remain permitted. A malformed overlay, future format
+or source generation beyond an indexed snapshot refuses, even if stale or
+unreceipted. Filename recognition is independent of publication eligibility: a
+recognized overlay name outside codec coordinate bounds also refuses loading.
+Legacy authority without an index permits validated unreceipted
+overlays without treating their generation as proof of a committed snapshot.
+
+Catalog contents remain the catalog consumer's responsibility. It supplies a
+strict `MemberDigestFn` to `BeginDerivedGroup`, derived inspection/verification,
+and the optional catalog-validator argument on `load_world` or `validate_save`.
+A present catalog without a validator refuses; absent catalogs need no validator.
+This seam does not invent a catalog format or accept an unvalidated catalog as
+current. Derived inspection admits canonical paths and existing count/byte caps.
+
+Validated legacy records can still be adopted by an explicitly opened snapshot
+transaction without enabling distant simulation or creating active-region state.
+Open alone does not stamp an index or fabricate optional content. Cache absence
+does not invalidate authoritative membership. Cache reconstruction, inventory
+reconciliation, renderer handoff and client activation remain consumer work.
