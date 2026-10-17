@@ -181,6 +181,15 @@ protected:
         }
         return result;
     }
+    static void ExpectWorkItemTicks(const SimBudgetTelemetry& trace, std::uint64_t ticks) {
+        for (std::size_t counter = 0; counter < trace.WorkItems().size(); ++counter) {
+            SCOPED_TRACE(counter);
+            const auto& samples = trace.WorkItems()[counter];
+            ASSERT_EQ(samples.size(), ticks);
+            for (std::size_t i = 0; i < samples.size(); ++i)
+                EXPECT_EQ(samples[i].tick, i + 1);
+        }
+    }
 };
 
 TEST_P(SimBudgetWorldParity, Populated3600TicksPreserveWorldHashAndReplayWork) {
@@ -222,9 +231,13 @@ TEST_P(SimBudgetWorldParity, Populated3600TicksPreserveWorldHashAndReplayWork) {
             for (const auto& samples : runner.Session()->GetSimBudgetTelemetry().SamplesByStage()) {
                 EXPECT_TRUE(samples.empty());
             }
+            for (const auto& samples : runner.Session()->GetSimBudgetTelemetry().WorkItems()) {
+                EXPECT_TRUE(samples.empty());
+            }
         } else {
             EXPECT_EQ(hash, untraced_hash);
             const auto& trace = runner.Session()->GetSimBudgetTelemetry();
+            ASSERT_NO_FATAL_FAILURE(ExpectWorkItemTicks(trace, ticks));
             ASSERT_NO_FATAL_FAILURE(ExpectStageSamples(trace, ticks, GetParam()));
             ExpectWorkSummary(trace, ticks, GetParam());
             // Capture before the save toggle clears session telemetry.

@@ -1,4 +1,5 @@
 #include "../fixtures/TerrainFixtureParams.h"
+#include "luminumbra_client/app/FrameAttribution.h"
 #include "luminumbra_client/app/GraphicsSessionOverrides.h"
 #include "luminumbra_client/rendering/FarLodSystem.h"
 #include "luminumbra_client/rendering/GraphicsRuntimeConfig.h"
@@ -329,6 +330,58 @@ TEST_F(GraphicsRuntime, PreviewExitRestoresEveryPresetIncludingUltraWithUnchange
         EXPECT_FLOAT_EQ(foliage->fade_end_m(), ends[i]);
         EXPECT_EQ(state().allocations, allocations);
     }
+}
+
+TEST_F(GraphicsRuntime, FoliageAttributionRetainsHistoryAcrossGraphicsInvalidation) {
+    namespace Attribution = Luminumbra::Client::Attribution;
+    FoliagePass foliage;
+    const auto reasons = [&] {
+        const Attribution::FoliageFrameScope frame(true);
+        // Empty inputs and an unavailable surface query need no graphics resources.
+        foliage.rebuild_instances({}, nullptr, nullptr, glm::vec3(0));
+        return frame.snapshot().rebuild.reasons;
+    };
+    foliage.set_density_scale(1.2f);
+    foliage.set_fade_distances(40.f, 80.f);
+    EXPECT_EQ(reasons(), Attribution::Initial);
+    EXPECT_EQ(reasons(), 0u);
+
+    foliage.set_density_scale(.8f);
+    EXPECT_EQ(reasons(), Attribution::Config);
+    foliage.set_density_scale(.801f); // Same quantized signature, different live setting.
+    EXPECT_EQ(reasons(), Attribution::Config);
+    foliage.set_density_scale(.801f);
+    EXPECT_EQ(reasons(), 0u);
+
+    foliage.set_fade_distances(32.f, 64.f);
+    EXPECT_EQ(reasons(), Attribution::Config);
+    foliage.set_fade_distances(32.1f, 64.1f); // Also below signature quantization.
+    EXPECT_EQ(reasons(), Attribution::Config);
+    foliage.set_fade_distances(32.1f, 64.1f);
+    EXPECT_EQ(reasons(), 0u);
+
+    foliage.set_density_scale(-1.f);
+    EXPECT_EQ(reasons(), Attribution::Config);
+    EXPECT_FLOAT_EQ(foliage.density_scale(), 1.f);
+    foliage.set_density_scale(0.f); // Same normalized value does not invalidate.
+    EXPECT_EQ(reasons(), 0u);
+
+    foliage.clear_ground_meshes();
+    EXPECT_EQ(reasons(), Attribution::Initial);
+    EXPECT_EQ(reasons(), 0u);
+}
+
+TEST_F(GraphicsRuntime, FoliageAttributionStartsWithTheFirstCollectedSignature) {
+    namespace Attribution = Luminumbra::Client::Attribution;
+    FoliagePass foliage;
+    {
+        const Attribution::FoliageFrameScope disabled;
+        foliage.rebuild_instances({}, nullptr, nullptr, glm::vec3(0));
+    }
+    const Attribution::FoliageFrameScope frame(true);
+    foliage.rebuild_instances({}, nullptr, nullptr, glm::vec3(0));
+    EXPECT_EQ(frame.snapshot().rebuild.reasons, Attribution::Initial);
+    EXPECT_EQ(frame.snapshot().rebuild.rebuild_calls, 1u);
 }
 
 TEST_F(GraphicsRuntime, EveryPresetReachesPassesAndUnchangedApplicationDoesNotAllocate) {

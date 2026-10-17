@@ -28,6 +28,34 @@
       "requirements": []
     },
     {
+      "id": "render.frame-scan-schema",
+      "source": "docs/render-benchmark.md#continuous-cpu-attribution-issue-387",
+      "statement": "Frame scans declare luminumbra.frame_scan.v2 for nullable foliage.instances: integers include known zero, null means unknown, and instance_capacity is never a substitute count. The source wiring regression checks the shared writer used by direct captures and scene surveys, including the schema and known/unknown serialization branches; it does not execute the renderer. Registered rendering regressions check that ordinary and frozen generation rollover, delayed readback, empty and inactive builds, and resource recreation cannot publish a previous generation's count. Readback re-enabling retries a cleared snapshot, and disabled frozen rebuilds do not submit readbacks.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "FrameAttributionWiringPython"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FoliageRebuildTest.CompletedCountIsUnknownAcrossOrdinaryAndFrozenGenerationRollover"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FoliageRebuildTest.EmptyAndInactiveGenerationsCannotReadBackThePreviousCommand"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FoliageRebuildTest.RecreationAndWorldClearRetireCountAndRebuildUnchangedInputs"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FoliageRebuildTest.ReenabledReadbackRetriesOrdinaryAndFrozenSnapshots"
+        }
+      ]
+    },
+    {
       "id": "perf.floor-p99",
       "source": "docs/distant-world.md#performance-measurement-contract",
       "statement": "Both profiles meet p99 frame_wall of at most 16.67 ms on every workload.",
@@ -1162,12 +1190,12 @@
       "requirements": [
         "ar.activation.050"
       ],
-      "discrepancy": "`docs/active-regions.md#activation-and-ordering` and ActiveRegionLedgerTest.ValidAnchorBoundaries agree on the half-open interval [-2^24, 2^24). The validator regression covers both axes; boundary rejection and counting through walking anchors, ground-object edits and region pins still require end-to-end evidence, tracked in issue #250. Full walking-anchor, ground-object edit and pin boundary coverage remains planned.",
+      "discrepancy": "`docs/active-regions.md#activation-and-ordering` and ActiveRegionLedgerTest.ValidAnchorBoundaries agree on the half-open interval [-2^24, 2^24). The validator regression covers both axes; an integrated boundary regression with full endpoint coverage remains planned; boundary rejection and counting through walking anchors, ground-object edits and region pins still require end-to-end evidence, tracked in issue #250. Full walking-anchor, ground-object edit and pin boundary coverage remains planned.",
       "evidence": [
         {
           "kind": "ctest",
           "ref": "ActiveRegionLedgerTest.AnchorBoundaryInputRefusals",
-          "planned": "Add a half-open-boundary regression accepting -2^24 and the adjacent interior coordinates, and rejecting and counting +2^24 and the adjacent exterior coordinates (including the next representable value below -2^24) on X and Z through walking anchors, ground-object edits and pins.; owner: ds Cover both endpoints: accept -2^24 and reject +2^24, including the next representable float below -2^24."
+          "planned": "Add a half-open-boundary regression accepting -2^24 and the adjacent interior coordinates, and rejecting and counting +2^24 and the adjacent exterior coordinates (including the next representable value below -2^24) on X and Z through walking anchors, ground-object edits and pins.; owner: ds Cover both X and Z endpoints: accept -2^24 and reject +2^24, including the next representable float below -2^24."
         }
       ]
     },

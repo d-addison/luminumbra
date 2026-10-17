@@ -306,8 +306,12 @@ TEST(ActiveRegionLedgerTest, FrozenContentsAndCursorDoNotAdvanceAndResumeIsBound
                   .elapsed_ticks,
               36000u);
     EXPECT_EQ(ActiveRegionLedger::resume_window(kFar, 3, WorldClock(100000), 7).elapsed_ticks, 7u);
-    EXPECT_THROW(static_cast<void>(ActiveRegionLedger::resume_window(kFar, 3, WorldClock(2), 7)),
-                 std::invalid_argument);
+    EXPECT_THROW(
+        {
+            const auto window = ActiveRegionLedger::resume_window(kFar, 3, WorldClock(2), 7);
+            ADD_FAILURE() << "Expected invalid clock rejection, received " << window.elapsed_ticks;
+        },
+        std::invalid_argument);
 }
 
 TEST(ActiveRegionLedgerTest, UnlimitedDefaultNeverReducesOrFreezes) {
