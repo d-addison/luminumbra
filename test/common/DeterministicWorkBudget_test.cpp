@@ -251,8 +251,9 @@ TEST(DeterministicWorkBudget, OccupiedPromotionLaneKeepsRefusedCandidatesInBackl
 
         ASSERT_TRUE(world.adopt_streamed_chunk(chunks[1]));
         ASSERT_TRUE(world.adopt_streamed_chunk(chunks[2]));
-        if (include_regular_remesh)
+        if (include_regular_remesh) {
             ASSERT_TRUE(world.adopt_streamed_chunk(chunks[3]));
+        }
         world.begin_tick(2);
         world.update(registry, std::vector<Vec3>{anchor}, nullptr);
         const std::size_t regular_remeshes = include_regular_remesh ? 1u : 0u;
@@ -388,8 +389,9 @@ TEST(DeterministicWorkBudget, LiveSubsystemMovementEditAndDrainStayBounded) {
         SCOPED_TRACE(step);
         // Move one streaming column at step 8; edit loaded support at step 24.
         const Vec3 anchor{step < 8 ? 8.0f : 24.0f, 35, 8};
-        if (step == 24)
+        if (step == 24) {
             ASSERT_GT(world.EditTerrainVoxel({24, 32.5f, 8}, 1.5f, false, nullptr), 0);
+        }
         physics.update(1.0f / 30.0f);
         physics.update_player({0, 0, 0}, false, 0, 1.0f / 30.0f);
         physics.update_avatars(1.0f / 30.0f);

@@ -273,8 +273,12 @@ public:
     // the gate exact)..
     void set_readback_enabled(bool e) {
         m_readback_enabled = e;
-        if (!e)
+        if (!e) {
             m_gpu_generated_count.reset();
+            // Re-enabling must request a fresh snapshot even when the build
+            // and its previously consumed readback had the same generation.
+            m_readback_submitted_generation = 0;
+        }
     }
     // Gate readback provides generated counts; normal indirect draws expose capacity
     // separately and leave the generated count unknown.

@@ -474,6 +474,10 @@ public:
         bool shaft = false;       // true => vertical cenote shaft
     };
     SurfaceBreakInfo FindLargestSurfaceBreak(float near_x, float near_z, float scan_radius_m) const;
+    // Read-only station discovery catalogue; shares the live placement decoder.
+    SurfaceBreakInfo SurfaceBreakInCell(int cell_x, int cell_z) const;
+    float SurfaceBreakCellSize() const;
+    float SurfaceBreakMaxRadius() const;
     // Elevation-aware water surface level at a column: the local lake surface
     // inside a lake basin (held above the carved floor by its rim), or SEA_LEVEL
     // elsewhere. The WaterSystem seeds + pins its per-cell rest level from this so

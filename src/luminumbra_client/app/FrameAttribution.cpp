@@ -1,8 +1,15 @@
 #include "FrameAttribution.h"
 
+#include <cstddef>
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
+#include <ios>
 #include <locale>
+#include <optional>
 #include <ostream>
+#include <system_error>
 
 namespace Luminumbra::Client::Attribution {
 std::uint32_t classify_rebuild(const ScatterSignature& previous,

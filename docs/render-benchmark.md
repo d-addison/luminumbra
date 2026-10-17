@@ -566,9 +566,13 @@ The optional profiling build uses `-DLUMINUMBRA_ENABLE_TRACY=ON` in a separate
 build directory. The client links the profiler interface in all variants; with
 the default `OFF` setting it adds no profiling definitions or dependencies.
 
-Completed GPU counts are only exposed with readback active and carry their
-source generation (which can precede this frame's rebuild); CPU fallback counts
-are available directly. Frame scans use `luminumbra.frame_scan.v2`:
+Completed GPU counts are only exposed with readback active and a matching build
+generation. Ordinary and frozen rebuilds clear the known count until that
+generation's readback completes; empty builds have a known zero count. Retained
+blade snapshots keep their own source generation for qualification. CPU fallback
+counts are available directly. Disabling readback retires its submission marker;
+re-enabling retries the snapshot even when inputs are unchanged. Frozen rebuilds
+also obey the disabled readback policy. Frame scans use `luminumbra.frame_scan.v2`:
 `foliage.instances` is a nonnegative integer when known (including zero), or
 `null` when unavailable. Readers must preserve unknown counts rather than
 coercing them to zero. `foliage.instance_capacity` is storage capacity, never a

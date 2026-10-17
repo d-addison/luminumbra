@@ -86,12 +86,13 @@ void ExpectStageSamples(const SimBudgetTelemetry& trace, std::uint64_t ticks, bo
         ASSERT_EQ(samples.size(), ticks);
         for (std::size_t i = 0; i < samples.size(); ++i) {
             EXPECT_EQ(samples[i].tick, i + 1);
-            if (identity == SimBudgetStage::Wind || identity == SimBudgetStage::Weather)
+            if (identity == SimBudgetStage::Wind || identity == SimBudgetStage::Weather) {
                 EXPECT_EQ(samples[i].work, 64u * 64u);
-            else if (identity == SimBudgetStage::WindWeather)
+            } else if (identity == SimBudgetStage::WindWeather) {
                 EXPECT_EQ(samples[i].work, 2u * 64u * 64u);
-            else if (identity == SimBudgetStage::ServerPhysics)
+            } else if (identity == SimBudgetStage::ServerPhysics) {
                 EXPECT_EQ(samples[i].work, 1u);
+            }
         }
     }
 }
@@ -259,7 +260,7 @@ TEST_P(SimBudgetWorldParity, Populated3600TicksPreserveWorldHashAndReplayWork) {
 INSTANTIATE_TEST_SUITE_P(ActiveRegions,
                          SimBudgetWorldParity,
                          testing::Bool(),
-                         [](const testing::TestParamInfo<bool>& info) {
-                             return info.param ? "Enabled" : "Disabled";
+                         [](const testing::TestParamInfo<bool>& parameter) {
+                             return parameter.param ? "Enabled" : "Disabled";
                          });
 } // namespace
