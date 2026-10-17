@@ -12,8 +12,29 @@ namespace Luminumbra::Server {
 namespace {
 constexpr const char* kServerTickArtifactSchema = "luminumbra.server_tick.v1";
 
+void AppendNamedHashes(nlohmann::json& object, const SmokeRunResult& run) {
+    if (!run.sub_hashes.active_regions)
+        return;
+    object["regions"] = run.sub_hashes.regions;
+    object["creatures"] = run.sub_hashes.creatures;
+    object["items"] = run.sub_hashes.items;
+    object["pages"] = run.sub_hashes.pages;
+}
+
+bool NamedHashesMatch(const SmokeRunResult& first, const SmokeRunResult& replay) {
+    if (first.sub_hashes.active_regions != replay.sub_hashes.active_regions)
+        return false;
+    if (!first.sub_hashes.active_regions)
+        return true;
+    const auto& a = first.sub_hashes;
+    const auto& b = replay.sub_hashes;
+    return !a.regions.empty() && !a.creatures.empty() && !a.items.empty() && !a.pages.empty() &&
+           a.regions == b.regions && a.creatures == b.creatures && a.items == b.items &&
+           a.pages == b.pages;
+}
+
 nlohmann::json SmokeRunJson(const SmokeRunResult& run) {
-    return nlohmann::json{
+    nlohmann::json result{
         {"ok", run.ok},
         {"world_hash", run.world_hash},
         {"sub_hashes",
@@ -48,6 +69,8 @@ nlohmann::json SmokeRunJson(const SmokeRunResult& run) {
              {"saved", run.shutdown_save.saved},
          }},
     };
+    AppendNamedHashes(result["sub_hashes"], run);
+    return result;
 }
 
 } // namespace
@@ -63,16 +86,16 @@ int WriteSmokeArtifact(const ServerCliOptions& options,
     // WorldPersistenceRoundtrip kRenderMeshHashExcludedFields), so it is reported for
     // localization but NOT required to match run==replay. Every SIM-truth sub-hash below
     // (terrain/water/entities/wind/weather/aether/scents/ecology/plants) must still match.
-    const bool sub_hashes_match = first.sub_hashes.terrain == replay.sub_hashes.terrain &&
-                                  first.sub_hashes.water == replay.sub_hashes.water &&
-                                  first.sub_hashes.entities == replay.sub_hashes.entities &&
-                                  first.sub_hashes.wind == replay.sub_hashes.wind &&
-                                  first.sub_hashes.weather == replay.sub_hashes.weather &&
-                                  first.sub_hashes.aether == replay.sub_hashes.aether &&
-                                  first.sub_hashes.aether_state == replay.sub_hashes.aether_state &&
-                                  first.scent_hash == replay.scent_hash &&
-                                  first.ecology_hash == replay.ecology_hash &&
-                                  first.plant_hash == replay.plant_hash;
+    const bool sub_hashes_match =
+        first.sub_hashes.terrain == replay.sub_hashes.terrain &&
+        first.sub_hashes.water == replay.sub_hashes.water &&
+        first.sub_hashes.entities == replay.sub_hashes.entities &&
+        first.sub_hashes.wind == replay.sub_hashes.wind &&
+        first.sub_hashes.weather == replay.sub_hashes.weather &&
+        first.sub_hashes.aether == replay.sub_hashes.aether &&
+        first.sub_hashes.aether_state == replay.sub_hashes.aether_state &&
+        first.scent_hash == replay.scent_hash && first.ecology_hash == replay.ecology_hash &&
+        first.plant_hash == replay.plant_hash && NamedHashesMatch(first, replay);
 
     const bool deterministic = first.ok && replay.ok && first.world_hash == replay.world_hash &&
                                sub_hashes_match &&
@@ -173,6 +196,9 @@ int WriteSmokeArtifact(const ServerCliOptions& options,
         {"deterministic", deterministic},
         {"passed", passed},
     };
+
+    AppendNamedHashes(artifact["sub_hashes"], first);
+    AppendNamedHashes(artifact["sub_hashes_replay"], replay);
 
     // main-thread streaming-wait latency (the cost the activation queue activation queue
     // targets). Wall-clock observability — never feeds world_hash.

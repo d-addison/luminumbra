@@ -5,6 +5,7 @@
 #include "luminumbra_common/ai/CreaturePersistence.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/components/CreatureComponents.h"
+#include "luminumbra_common/core/FilesystemPath.h"
 #include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/replay/RegionScheduleTrace.h"
@@ -14,9 +15,11 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <system_error>
@@ -633,6 +636,8 @@ TEST_F(LockstepReplayHardening, EnabledFreshWorldCreatureReplayMatchesStartAndCh
     ASSERT_EQ(HostSchedulerFaultModes::RunRecord(options), 0);
     const auto recording = Luminumbra::Replay::ReadReplay(options.record_path);
     ASSERT_TRUE(recording);
+    if (!recording)
+        return;
     ASSERT_EQ(recording->checkpoints.size(), 1u);
     EXPECT_EQ(recording->checkpoints[0].tick, 30u);
     EXPECT_FALSE(recording->header.start_world_hash.empty());

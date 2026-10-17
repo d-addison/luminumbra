@@ -166,8 +166,9 @@ TEST(TerrainPresetLoaderTest, CapturedDependencyReadersRefuseRawNulBeforeAdoptio
             EXPECT_FALSE(pool.io_failed);
             ASSERT_EQ(pool.errors.size(), 1u);
             EXPECT_NE(pool.errors.front().find("raw NUL"), std::string::npos);
-            if (invalid_path == placement)
+            if (invalid_path == placement) {
                 EXPECT_TRUE(pool.pieces.empty());
+            }
         }
         EXPECT_EQ(invalid_reads, 1u);
     }

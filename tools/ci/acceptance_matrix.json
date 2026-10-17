@@ -4490,6 +4490,91 @@
           "planned": "Complete independent native format, refusal, recovery and endpoint qualification for the pending-state contract; owner: ds"
         }
       ]
+    },
+    {
+      "id": "contract.named-authority-hashes",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "statement": "Enabled consumers share checked authority captures and named diagnostic hashes, preserve wire layouts and disabled artifacts, and refuse failed checkpoint captures. Network hosts inherit configuration and storage roots. Native runtime and performance qualification remains pending.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashIntegration.AllHashEntryPointsUseSameAuthorityCapture"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashIntegration.CaptureRefusalDisconnectReachesPeer"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashIntegration.NetworkCheckpointPeersShareEffectiveConfiguration"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashIntegration.NetworkPeerConfigurationRefusesMissingSnapshot"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashIntegration.NetworkHostCreationFailurePreservesPeer"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashIntegration.NamedHashDomainMutationMatrix"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashIntegration.RecordReplayAndLockstepEnabledHashIdentity"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashIntegration.FrameGroupingPreservesCheckpointHashes"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashIntegration.HashMsgAndLREC1EncodingUnchanged"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashIntegration.FlagOffProductionArtifactBytesUnchanged"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Complete native consumer, format, refusal and performance qualification for named authority hashes; owner: ds"
+        }
+      ],
+      "requirements": [
+        "ar.named-hashes.001",
+        "ar.named-hashes.002",
+        "ar.named-hashes.003",
+        "ar.named-hashes.004",
+        "ar.named-hashes.005",
+        "ar.named-hashes.006",
+        "ar.named-hashes.007",
+        "ar.named-hashes.008",
+        "ar.named-hashes.009",
+        "ar.named-hashes.010",
+        "ar.named-hashes.011",
+        "ar.named-hashes.012",
+        "ar.named-hashes.013",
+        "ar.named-hashes.014",
+        "ar.named-hashes.015",
+        "ar.named-hashes.016",
+        "ar.named-hashes.017",
+        "ar.named-hashes.018",
+        "ar.named-hashes.019",
+        "ar.named-hashes.020",
+        "ar.named-hashes.021",
+        "ar.named-hashes.022",
+        "ar.named-hashes.023",
+        "ar.named-hashes.024",
+        "ar.named-hashes.025",
+        "ar.named-hashes.026",
+        "ar.named-hashes.027",
+        "ar.named-hashes.028",
+        "ar.named-hashes.029",
+        "ar.named-hashes.030"
+      ]
     }
   ]
 }

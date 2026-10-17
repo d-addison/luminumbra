@@ -431,8 +431,8 @@ TEST_P(PassLayoutValidation, FarWorldDepthUniformsAndFloatDepthRemainActive) {
 INSTANTIATE_TEST_SUITE_P(RegisteredPasses,
                          PassLayoutValidation,
                          ::testing::ValuesIn(RegisteredLayoutNames()),
-                         [](const ::testing::TestParamInfo<std::string>& info) {
-                             return info.param;
+                         [](const ::testing::TestParamInfo<std::string>& case_data) {
+                             return case_data.param;
                          });
 
 // ----------------------------------------------------------------------------

@@ -1206,9 +1206,10 @@ TEST(CreaturePersistence, LegacyControllerAbsenceLoadsAndNextSaveStampsNonpartic
             EXPECT_FALSE(restored.get<C::CreatureControllerComponent>(out).physics_controlled);
             EXPECT_FALSE(restored.all_of<C::CreaturePhysicsComponent>(out));
             EXPECT_EQ(restored.all_of<C::CreatureLocomotionStateComponent>(out), velocity);
-            if (velocity)
+            if (velocity) {
                 EXPECT_EQ(restored.get<C::CreatureLocomotionStateComponent>(out).velocity_y,
                           -0.375f);
+            }
             const auto saved = A::SerializeCreatureSnapshot(A::BuildCreatureSnapshot(restored));
             EXPECT_EQ(nlohmann::json::parse(saved)["entities"][0]["components"]["Controller"],
                       (nlohmann::json{{"version", 1}, {"data", {{"physics_controlled", false}}}}));
@@ -1242,8 +1243,9 @@ TEST(CreaturePersistence, EmitterRadiusRefusesExtremeValuesAndAcceptsLastNonzero
             EXPECT_EQ(restored.get<C::FieldEmitterComponent>(target).radius_cells, radius);
         }
         source.get<C::FieldEmitterComponent>(e).radius_cells = radius;
-        if (!accepted)
+        if (!accepted) {
             EXPECT_THROW(A::BuildCreatureSnapshot(source), std::invalid_argument);
+        }
     }
 }
 
@@ -1364,6 +1366,36 @@ TEST(CreaturePersistence, ParserBudgetsRefuseLargeCollectionsBeforeMaterializing
     refuse(std::string(33, '[') + "0" + std::string(33, ']'), "nesting limit");
 }
 
+namespace {
+void CheckWaypointNodeBudgetRoundtrip(const std::string& bytes,
+                                      std::size_t count,
+                                      bool stamped,
+                                      bool fits) {
+    A::CreatureSnapshot loaded;
+    std::string error;
+    if (fits) {
+        ASSERT_TRUE(A::LoadCreatureSnapshot(bytes, loaded, error)) << error;
+        ASSERT_EQ(loaded.entities.size(), count);
+        for (std::size_t i = 0; i < loaded.entities.size(); ++i) {
+            const auto& record = loaded.entities[i];
+            EXPECT_EQ(record.id, i + 1);
+            EXPECT_EQ(record.components["LocomotionPath"]["data"]["waypoints"].size(),
+                      A::kMaxCreatureVector);
+            EXPECT_EQ(record.components["Controller"]["data"]["physics_controlled"], false);
+        }
+        const auto saved = A::SerializeCreatureSnapshot(loaded);
+        EXPECT_EQ(saved.size(), bytes.size() + (stamped ? 0 : count * 63));
+        if (stamped) {
+            EXPECT_EQ(saved, bytes);
+        }
+    } else {
+        EXPECT_FALSE(A::LoadCreatureSnapshot(bytes, loaded, error));
+        EXPECT_NE(error.find("creature node limit"), std::string::npos) << error;
+        EXPECT_TRUE(loaded.entities.empty());
+    }
+}
+} // namespace
+
 TEST(CreaturePersistence, MaximumWaypointVectorsKeepTheLegacyNodeBudget) {
     entt::registry registry;
     const auto e = Creature(registry, 1);
@@ -1421,27 +1453,7 @@ TEST(CreaturePersistence, MaximumWaypointVectorsKeepTheLegacyNodeBudget) {
             }
             snapshot.entities.clear();
             snapshot.entities.shrink_to_fit();
-            A::CreatureSnapshot loaded;
-            std::string error;
-            if (fits) {
-                ASSERT_TRUE(A::LoadCreatureSnapshot(bytes, loaded, error)) << error;
-                ASSERT_EQ(loaded.entities.size(), count);
-                for (std::size_t i = 0; i < loaded.entities.size(); ++i) {
-                    const auto& record = loaded.entities[i];
-                    EXPECT_EQ(record.id, i + 1);
-                    EXPECT_EQ(record.components["LocomotionPath"]["data"]["waypoints"].size(),
-                              A::kMaxCreatureVector);
-                    EXPECT_EQ(record.components["Controller"]["data"]["physics_controlled"], false);
-                }
-                const auto saved = A::SerializeCreatureSnapshot(loaded);
-                EXPECT_EQ(saved.size(), bytes.size() + (stamped ? 0 : count * 63));
-                if (stamped)
-                    EXPECT_EQ(saved, bytes);
-            } else {
-                EXPECT_FALSE(A::LoadCreatureSnapshot(bytes, loaded, error));
-                EXPECT_NE(error.find("creature node limit"), std::string::npos) << error;
-                EXPECT_TRUE(loaded.entities.empty());
-            }
+            ASSERT_NO_FATAL_FAILURE(CheckWaypointNodeBudgetRoundtrip(bytes, count, stamped, fits));
         }
     }
 }

@@ -1557,6 +1557,12 @@ nlohmann::json SessionWorldSubHashes(GameSession& session) {
 }
 
 std::string SessionWorldHash(GameSession& session) {
+    if (session.ActiveRegionsEnabled()) {
+        std::string hash;
+        P::WorldStreamingStateSubHashes sub;
+        EXPECT_TRUE(session.ComputeAuthorityWorldHashes(hash, sub));
+        return hash;
+    }
     const auto hashes = SessionWorldSubHashes(session);
     return P::ComposeWorldHash(hashes.at("chunk"),
                                hashes.at("wind"),
@@ -8209,18 +8215,12 @@ void AssertCreatureRefusalCanSave(GameSession& live,
     EXPECT_EQ(CA::SerializeCreatureSnapshot(CA::BuildCreatureSnapshot(registry)), creatures);
 }
 
-void AssertCreatureRefusal(const HeadlessRoot& root,
-                           JobSystem& jobs,
-                           GameSession& owner,
-                           const luminumbra::ai::CreatureSnapshot& baseline,
-                           int refusal) {
+void PrepareCreatureRefusal(const fs::path& save,
+                            luminumbra::ai::CreatureSnapshot& incoming,
+                            int refusal) {
     namespace CA = luminumbra::ai;
     namespace C = Luminumbra::Components;
-    const auto save = owner.GetWorldSaveDir();
-    std::uint64_t id = 0;
-    SCOPED_TRACE(refusal);
     const bool public_load = refusal == 4;
-    auto incoming = baseline;
     auto& components = incoming.entities[0].components;
     if (refusal == 0 || public_load) {
         const auto unknown = C::CreatureSpeciesId16("unregistered_creature");
@@ -8256,7 +8256,21 @@ void AssertCreatureRefusal(const HeadlessRoot& root,
     if (refusal == 0 || refusal == 3 || public_load) {
         ASSERT_TRUE(P::WorldSaveService::validate_save(save));
     }
+}
 
+void AssertCreatureRefusal(const HeadlessRoot& root,
+                           JobSystem& jobs,
+                           GameSession& owner,
+                           const luminumbra::ai::CreatureSnapshot& baseline,
+                           int refusal) {
+    namespace CA = luminumbra::ai;
+    namespace C = Luminumbra::Components;
+    const auto save = owner.GetWorldSaveDir();
+    std::uint64_t id = 0;
+    SCOPED_TRACE(refusal);
+    const bool public_load = refusal == 4;
+    auto incoming = baseline;
+    ASSERT_NO_FATAL_FAILURE(PrepareCreatureRefusal(save, incoming, refusal));
     GameSession live;
     CreateGroundWorld(live, root, jobs, "Populated live creature refusal", true);
     ASSERT_NE(live.GetEnergyFieldState(), nullptr);
@@ -9800,6 +9814,8 @@ TEST(GameSessionHeadlessWorldTest, S8GSaveBeforeActivationDeliveryRestoresOutbox
     TickOnce(session);
     ASSERT_TRUE(session.GetRegionSchedulerFault());
     ASSERT_TRUE(saved_key);
+    if (!saved_key)
+        return;
     EXPECT_FALSE(session.GetActiveRegionLedger().pending_activations().empty());
     const auto populated_count = calls.size();
     restored.SetRegionPopulator(SessionPopulation(&calls));
@@ -9843,6 +9859,8 @@ TEST(GameSessionHeadlessWorldTest, S8GSuccessfulHandlerSavePreservesNextTickWork
     ASSERT_TRUE(returned);
     ASSERT_TRUE(saved);
     ASSERT_TRUE(saved_key);
+    if (!saved_key)
+        return;
     ASSERT_FALSE(session.GetRegionSchedulerFault());
     ASSERT_TRUE(session.GetActiveRegionLedger().pending_activations().empty());
     const auto completed = session.GetActiveRegionLedger().completed_work();
@@ -10809,7 +10827,11 @@ TEST(GameSessionHeadlessWorldTest, WaterRuleIdentitiesObserveIndependentSetters)
     const auto finite_off = first.CaptureAuthorityState();
     const auto finite_on = second.CaptureAuthorityState();
     ASSERT_TRUE(finite_off.state) << finite_off.error;
+    if (!finite_off.state)
+        return;
     ASSERT_TRUE(finite_on.state) << finite_on.error;
+    if (!finite_on.state)
+        return;
     EXPECT_EQ(finite_off.state->terrain_hash(), finite_on.state->terrain_hash());
     EXPECT_EQ(finite_off.state->water_hash(), finite_on.state->water_hash());
     EXPECT_NE(finite_off.state->chunk_hash(), finite_on.state->chunk_hash());

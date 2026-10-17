@@ -84,9 +84,18 @@ constexpr const char* kRegionDirectoryName = "region";
 constexpr const char* kWorldManifestFileName = "world-manifest.json";
 constexpr const char* kWorldManifestSchema = "luminumbra.persistence.world_manifest.v1";
 constexpr const char* kRegionFileExtension = ".lmr";
-std::atomic<std::uint64_t> LedgerLoadCount{0};
-std::atomic<std::uint64_t> PendingReaderCount{0};
-std::atomic<std::uint64_t> PendingProbeCount{0};
+std::atomic<std::uint64_t>& LedgerLoadCount() {
+    static std::atomic<std::uint64_t> count{0};
+    return count;
+}
+std::atomic<std::uint64_t>& PendingReaderCount() {
+    static std::atomic<std::uint64_t> count{0};
+    return count;
+}
+std::atomic<std::uint64_t>& PendingProbeCount() {
+    static std::atomic<std::uint64_t> count{0};
+    return count;
+}
 
 // Container constants (the deterministic runtime contract section 3).
 constexpr char kRegionMagic[4] = {'L', 'M', 'R', '1'};
@@ -1277,7 +1286,7 @@ std::string VerifySnapshotIndex(const std::filesystem::path& save_dir,
             std::uint64_t fnv64 = 0;
             bool exists = false;
             if (member.path == SimulationPendingState::kMember)
-                PendingProbeCount.fetch_add(1, std::memory_order_relaxed);
+                PendingProbeCount().fetch_add(1, std::memory_order_relaxed);
             if (!hash_file(save_dir / member.path,
                            bytes,
                            fnv64,
@@ -1310,7 +1319,7 @@ std::string VerifySnapshotIndex(const std::filesystem::path& save_dir,
             continue;
         std::error_code ec;
         if (single == SimulationPendingState::kMember)
-            PendingProbeCount.fetch_add(1, std::memory_order_relaxed);
+            PendingProbeCount().fetch_add(1, std::memory_order_relaxed);
         if (std::filesystem::exists(save_dir / single, ec))
             return single;
     }
@@ -2157,10 +2166,10 @@ bool ReadPendingStateFile(SimulationPendingState& out,
                           const std::filesystem::path& save_dir,
                           std::vector<std::string>* errors,
                           MemberDigest* digest = nullptr) {
-    PendingReaderCount.fetch_add(1, std::memory_order_relaxed);
+    PendingReaderCount().fetch_add(1, std::memory_order_relaxed);
     const auto path = save_dir / SimulationPendingState::kMember;
     std::error_code ec;
-    PendingProbeCount.fetch_add(1, std::memory_order_relaxed);
+    PendingProbeCount().fetch_add(1, std::memory_order_relaxed);
     const bool exists = std::filesystem::exists(path, ec);
     if (ec) {
         AddError(errors, "Cannot inspect simulation pending state: " + ec.message());
@@ -2224,7 +2233,7 @@ bool WorldSaveService::load_active_regions(world::ActiveRegionLedger& ledger,
         std::string bytes;
         if (!read_bounded_save_file(path, bytes, world::ActiveRegionLedger::kMaxFileBytes, errors))
             return false;
-        LedgerLoadCount.fetch_add(1, std::memory_order_relaxed);
+        LedgerLoadCount().fetch_add(1, std::memory_order_relaxed);
         std::string error;
         if (!world::ActiveRegionLedger::decode(bytes, ledger, error)) {
             AddError(errors, error.empty() ? world::ActiveRegionLedger::kCorruptMessage : error);
@@ -2794,13 +2803,13 @@ std::uint64_t WorldSaveService::decode_count_for_testing() {
     return DecodeCounter().load(std::memory_order_acquire);
 }
 std::uint64_t WorldSaveService::ledger_load_count_for_testing() {
-    return LedgerLoadCount.load(std::memory_order_relaxed);
+    return LedgerLoadCount().load(std::memory_order_relaxed);
 }
 std::uint64_t WorldSaveService::pending_reader_count_for_testing() {
-    return PendingReaderCount.load(std::memory_order_relaxed);
+    return PendingReaderCount().load(std::memory_order_relaxed);
 }
 std::uint64_t WorldSaveService::pending_probe_count_for_testing() {
-    return PendingProbeCount.load(std::memory_order_relaxed);
+    return PendingProbeCount().load(std::memory_order_relaxed);
 }
 
 std::uint64_t WorldSaveService::field_page_decode_count_for_testing() {
@@ -2964,7 +2973,7 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
         if (relative == SimulationPendingState::kMember) {
             if (facts && !facts->m_pending_enabled)
                 return true;
-            PendingProbeCount.fetch_add(1, std::memory_order_relaxed);
+            PendingProbeCount().fetch_add(1, std::memory_order_relaxed);
         }
         const std::filesystem::path path = save_dir / relative;
         std::error_code ec;

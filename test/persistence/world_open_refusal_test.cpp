@@ -295,8 +295,9 @@ TEST_P(WorldOpenRefusal, RefusesBeforeGenerationAndPreservesAllDiskBytes) {
         client = std::make_unique<GameSession>();
         client->SetJobSystem(&Fixture().jobs);
         client->SetRootPath(RootString());
-        if (entry == 1)
+        if (entry == 1) {
             ASSERT_TRUE(client->CreateWorld("Client", "1337", "default"));
+        }
     }
     Damage(kind);
     const auto before = DiskBytes(Fixture().root);
@@ -348,9 +349,9 @@ TEST_P(WorldOpenRefusal, RefusesBeforeGenerationAndPreservesAllDiskBytes) {
         EXPECT_FALSE(session.LoadWorldStateFrom(Fixture().save));
     }
     ASSERT_FALSE(error.empty());
-    if (obsolete)
+    if (obsolete) {
         EXPECT_EQ(error, WorldSaveService::kObsoleteWorldMessage);
-    else if (future)
+    } else if (future)
         EXPECT_NE(error.find("future"), std::string::npos);
     else {
         EXPECT_NE(error, WorldSaveService::kObsoleteWorldMessage);
@@ -807,8 +808,9 @@ TEST_F(WorldOpenRefusal, EveryFrozenPresetResolvesHistoricalBytesAndChecksIdenti
                       fs::copy_options::overwrite_existing);
         const auto identity =
             Persistence::StableChecksum(nlohmann::json::parse(Read(historical)).dump());
-        if (std::string(name) == "cave_dense")
+        if (std::string(name) == "cave_dense") {
             EXPECT_EQ(identity, "e70158a4777ee36b");
+        }
         auto metadata = original_metadata;
         metadata["worldType"] = name;
         for (const auto& identity_metadata : {nlohmann::json::object(),
@@ -821,9 +823,9 @@ TEST_F(WorldOpenRefusal, EveryFrozenPresetResolvesHistoricalBytesAndChecksIdenti
             const auto before = DiskBytes(Fixture().root);
             const auto inspected = Persistence::InspectSavedWorld(Fixture().root, "fixture");
             EXPECT_EQ(inspected.preset_path, historical);
-            if (saved_metadata.value("presetIdentity", identity) == identity)
+            if (saved_metadata.value("presetIdentity", identity) == identity) {
                 EXPECT_TRUE(inspected.error.empty()) << inspected.error;
-            else
+            } else
                 EXPECT_NE(inspected.error.find("identity"), std::string::npos);
             EXPECT_EQ(DiskBytes(Fixture().root), before);
         }
@@ -1344,10 +1346,12 @@ public:
 
     void Rewrite(const char* changed) const {
         SCOPED_TRACE(directory.generic_string());
-        if (std::string(changed) != "identity")
+        if (std::string(changed) != "identity") {
             ASSERT_NO_FATAL_FAILURE(Write(directory / "preset.json", other_preset.dump()));
-        if (std::string(changed) != "preset")
+        }
+        if (std::string(changed) != "preset") {
             ASSERT_NO_FATAL_FAILURE(Write(directory / "world_info.json", other_metadata.dump()));
+        }
     }
 
     void Restore() const {
@@ -1523,8 +1527,9 @@ TEST_F(WorldOpenRefusal, ServerFullSnapshotPresetChangeRefusesWithoutWritesOrAck
             }
 
             ASSERT_EQ(runner.SaveFullSnapshot(), 1u);
-            if (active_regions)
+            if (active_regions) {
                 EXPECT_FALSE(chunk->is_voxel_data_dirty());
+            }
             // The legacy full snapshot writes chunks/metadata; flush plants and energy too.
             ASSERT_TRUE(session->SaveWorldState());
             EXPECT_FALSE(chunk->is_voxel_data_dirty());
@@ -1587,23 +1592,23 @@ TEST_F(WorldOpenRefusal, LegacyExplicitSessionSnapshotsKeepLargeKeylessMetadata)
 } // namespace
 
 TEST_F(WorldOpenRefusal, LegacyEnabledWorldWithoutS8RecordsAdoptsAndStamps) {
-    EXPECT_FALSE(fs::exists(WorldSaveService::creature_entities_path(save)));
-    EXPECT_FALSE(fs::exists(WorldSaveService::active_regions_path(save)));
+    EXPECT_FALSE(fs::exists(WorldSaveService::creature_entities_path(Fixture().save)));
+    EXPECT_FALSE(fs::exists(WorldSaveService::active_regions_path(Fixture().save)));
     GameSession session;
-    session.SetJobSystem(&jobs);
+    session.SetJobSystem(&Fixture().jobs);
     session.SetRootPath(RootString());
     session.SetActiveRegionsEnabled(true);
-    const auto original_bytes = DiskBytes(save);
+    const auto original_bytes = DiskBytes(Fixture().save);
     ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
-    EXPECT_EQ(DiskBytes(save), original_bytes);
+    EXPECT_EQ(DiskBytes(Fixture().save), original_bytes);
     EXPECT_TRUE(session.GetActiveRegionLedger().content_identity().has_value());
     EXPECT_TRUE(session.GetRegistry().view<Luminumbra::Components::CreatureComponent>().empty());
     ASSERT_TRUE(session.SaveWorld());
     ASSERT_TRUE(session.SaveWorldState());
-    EXPECT_TRUE(fs::exists(WorldSaveService::active_regions_path(save)));
-    EXPECT_TRUE(Persistence::snapshot_index_exists(save));
+    EXPECT_TRUE(fs::exists(WorldSaveService::active_regions_path(Fixture().save)));
+    EXPECT_TRUE(Persistence::snapshot_index_exists(Fixture().save));
     GameSession reopened;
-    reopened.SetJobSystem(&jobs);
+    reopened.SetJobSystem(&Fixture().jobs);
     reopened.SetRootPath(RootString());
     reopened.SetActiveRegionsEnabled(true);
     ASSERT_TRUE(reopened.LoadWorld("fixture")) << reopened.GetWorldOpenError();
@@ -1613,47 +1618,47 @@ TEST_F(WorldOpenRefusal, LegacyEnabledWorldWithoutS8RecordsAdoptsAndStamps) {
 
 TEST_F(WorldOpenRefusal, PresentMalformedCreatureOrActivationDataRefuses) {
     for (const bool creatures : {true, false}) {
-        const auto path = creatures ? WorldSaveService::creature_entities_path(save)
-                                    : WorldSaveService::active_regions_path(save);
+        const auto path = creatures ? WorldSaveService::creature_entities_path(Fixture().save)
+                                    : WorldSaveService::active_regions_path(Fixture().save);
         Write(path,
               creatures ? "{\"schema\":\"luminumbra.creature_entities.v1\",\"entities\":[{}]}"
                         : "malformed activation ledger");
-        const auto before = DiskBytes(save);
+        const auto before = DiskBytes(Fixture().save);
         GameSession session;
-        session.SetJobSystem(&jobs);
+        session.SetJobSystem(&Fixture().jobs);
         session.SetRootPath(RootString());
         session.SetActiveRegionsEnabled(true);
         EXPECT_FALSE(session.LoadWorld("fixture"));
         EXPECT_FALSE(session.GetWorldOpenError().empty());
-        EXPECT_EQ(DiskBytes(save), before);
+        EXPECT_EQ(DiskBytes(Fixture().save), before);
         ASSERT_TRUE(fs::remove(path));
     }
 }
 
 TEST_F(WorldOpenRefusal, PresentContentMismatchPreservesCurrentWorld) {
     GameSession writer;
-    writer.SetJobSystem(&jobs);
+    writer.SetJobSystem(&Fixture().jobs);
     writer.SetRootPath(RootString());
     writer.SetActiveRegionsEnabled(true);
     ASSERT_TRUE(writer.LoadWorld("fixture"));
     ASSERT_TRUE(writer.SaveWorld());
     ASSERT_TRUE(writer.SaveWorldState());
-    Write(root / "data/common/creatures/species/fixture_creature.json",
+    Write(Fixture().root / "data/common/creatures/species/fixture_creature.json",
           R"({"id":"fixture_creature","predator":true})");
     GameSession live;
-    live.SetJobSystem(&jobs);
+    live.SetJobSystem(&Fixture().jobs);
     live.SetRootPath(RootString());
     live.SetActiveRegionsEnabled(true);
     ASSERT_TRUE(live.CreateWorld("Current world", "1337", "default"));
     const auto current_id = live.GetMetadata().worldId;
     const auto current_clock = live.GetWorldClock().tick();
     const auto current_ledger = live.GetActiveRegionLedger().canonical_bytes();
-    const auto before = DiskBytes(save);
+    const auto before = DiskBytes(Fixture().save);
     EXPECT_FALSE(live.LoadWorld("fixture"));
     EXPECT_FALSE(live.GetWorldOpenError().empty());
     EXPECT_EQ(live.GetMetadata().worldId, current_id);
     EXPECT_EQ(live.GetWorldClock().tick(), current_clock);
     EXPECT_EQ(live.GetActiveRegionLedger().canonical_bytes(), current_ledger);
-    EXPECT_EQ(DiskBytes(save), before);
+    EXPECT_EQ(DiskBytes(Fixture().save), before);
     EXPECT_TRUE(live.SaveWorldState());
 }

@@ -281,8 +281,9 @@ void CheckPlanningOracle(Systems::RegionalWater::PlanningCache& cache,
         if (!chunk || chunk->get_state() == ChunkState::Loading)
             continue;
         const auto found = ledger.records().find(owner_of(*chunk));
-        if (found != ledger.records().end() && found->second.state != RegionState::Frozen)
+        if (found != ledger.records().end() && found->second.state != RegionState::Frozen) {
             ASSERT_TRUE(rebuilt.emplace(chunk->get_id(), chunk).second);
+        }
     }
     std::vector<ChunkID> expected_ids, actual_ids;
     for (const auto& [id, chunk] : rebuilt)
@@ -953,9 +954,9 @@ TEST(RegionalWater, ZeroThroughThreeWindowsPreserveInteriorAndSealUnfundedPairs)
                   world::water_share::kQ32 +
                       (windows - result.border_windows) * world::water_share::kQ32 -
                       result.allocated_windows * world::water_share::kQ32);
-        if (windows > 0)
+        if (windows > 0) {
             EXPECT_GE(result.used_windows, 1u);
-        else {
+        } else {
             EXPECT_EQ(CaptureWater(*chunks[0]), old);
             EXPECT_TRUE(work.empty());
         }
@@ -1573,8 +1574,9 @@ void RegionalWaterFixture::CheckColdStagingTransactions() {
             chunks[0] = WaterChunk({31, 0, 0}, 600);
             reference[0] = WaterChunk({31, 0, 0}, 600);
         }
-        if (tick == 8)
+        if (tick == 8) {
             ASSERT_NO_FATAL_FAILURE(ReloadWaterResidents(chunks, reference));
+        }
         if (tick == 9) {
             chunks.pop_back();
             reference.pop_back();

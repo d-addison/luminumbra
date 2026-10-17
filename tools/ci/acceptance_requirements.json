@@ -5207,6 +5207,186 @@
       "source": "docs/active-regions.md#checked-authority-hash-capture",
       "quote": "Disabled delivery, hash recipes, saves and artifacts retain their existing paths and bytes.",
       "text": "Disabled delivery, hash recipes, saves and artifacts retain their existing paths and bytes."
+    },
+    {
+      "id": "ar.named-hashes.001",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "Enabled server, record/replay, lockstep, smoke and networked-session captures use one checked `AuthorityHashState` per request.",
+      "text": "Enabled server, record/replay, lockstep, smoke and networked-session captures use one checked `AuthorityHashState` per request."
+    },
+    {
+      "id": "ar.named-hashes.002",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "The common persistence composer consumes that immutable capture, including the canonical host avatar snapshot.",
+      "text": "The common persistence composer consumes that immutable capture, including the canonical host avatar snapshot."
+    },
+    {
+      "id": "ar.named-hashes.003",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "Enabled host plant rosters are admitted in entity order before the first tick-zero capture.",
+      "text": "Enabled host plant rosters are admitted in entity order before the first tick-zero capture."
+    },
+    {
+      "id": "ar.named-hashes.004",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "An absent avatar argument denotes the canonical empty roster.",
+      "text": "An absent avatar argument denotes the canonical empty roster."
+    },
+    {
+      "id": "ar.named-hashes.005",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "Enabled terrain and water diagnostics read the resolved authoritative inventory and exclude residency and lifecycle state.",
+      "text": "Enabled terrain and water diagnostics read the resolved authoritative inventory and exclude residency and lifecycle state."
+    },
+    {
+      "id": "ar.named-hashes.006",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "Smoke artifacts add four enabled-only `sub_hashes` keys, also present in each run and in `sub_hashes_replay`: `regions` frames clock, ledger/configuration and pending events;",
+      "text": "Smoke artifacts add four enabled-only `sub_hashes` keys, also present in each run and in `sub_hashes_replay`: `regions` frames clock, ledger/configuration and pending events;"
+    },
+    {
+      "id": "ar.named-hashes.007",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "`creatures` covers the complete persistent creature snapshot;",
+      "text": "`creatures` covers the complete persistent creature snapshot;"
+    },
+    {
+      "id": "ar.named-hashes.008",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "`items` covers canonical ground objects;",
+      "text": "`items` covers canonical ground objects;"
+    },
+    {
+      "id": "ar.named-hashes.009",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "`pages` frames complete field pages, regional energy and retained deposits.",
+      "text": "`pages` frames complete field pages, regional energy and retained deposits."
+    },
+    {
+      "id": "ar.named-hashes.010",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "All four participate in the smoke verdict.",
+      "text": "All four participate in the smoke verdict."
+    },
+    {
+      "id": "ar.named-hashes.011",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "Their values are diagnostics;",
+      "text": "Their values are diagnostics;"
+    },
+    {
+      "id": "ar.named-hashes.012",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "the composed hash retains its existing slots and regional content recipe.",
+      "text": "the composed hash retains its existing slots and regional content recipe."
+    },
+    {
+      "id": "ar.named-hashes.013",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "Enabled network peers cover the same admitted content/configuration identity through the common composer at checkpoints.",
+      "text": "Enabled network peers cover the same admitted content/configuration identity through the common composer at checkpoints."
+    },
+    {
+      "id": "ar.named-hashes.014",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "The client establishes one immutable effective `SystemConfig` before creating its world;",
+      "text": "The client establishes one immutable effective `SystemConfig` before creating its world;"
+    },
+    {
+      "id": "ar.named-hashes.015",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "the network driver's `Begin` calls the headless `GameSession::CreateNetworkHost` factory.",
+      "text": "the network driver's `Begin` calls the headless `GameSession::CreateNetworkHost` factory."
+    },
+    {
+      "id": "ar.named-hashes.016",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "That factory forwards the snapshot through `ConfigureSimulationFromPeer` before world creation, then loads host state and prepares the spawn surface.",
+      "text": "That factory forwards the snapshot through `ConfigureSimulationFromPeer` before world creation, then loads host state and prepares the spawn surface."
+    },
+    {
+      "id": "ar.named-hashes.017",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "The snapshot includes active regions, water, weather, energy and all creature/plant tuning.",
+      "text": "The snapshot includes active regions, water, weather, energy and all creature/plant tuning."
+    },
+    {
+      "id": "ar.named-hashes.018",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "Both checkpoint hooks select their recipe from that shared snapshot.",
+      "text": "Both checkpoint hooks select their recipe from that shared snapshot."
+    },
+    {
+      "id": "ar.named-hashes.019",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "A contradictory local active-regions flag refuses capture instead of silently switching recipes.",
+      "text": "A contradictory local active-regions flag refuses capture instead of silently switching recipes."
+    },
+    {
+      "id": "ar.named-hashes.020",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "Configuration replacement after world creation refuses without changing the admitted configuration.",
+      "text": "Configuration replacement after world creation refuses without changing the admitted configuration."
+    },
+    {
+      "id": "ar.named-hashes.021",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "A capture failure clears all outputs, latches the session fault and prevents checkpoint publication.",
+      "text": "A capture failure clears all outputs, latches the session fault and prevents checkpoint publication."
+    },
+    {
+      "id": "ar.named-hashes.022",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "Recording checks initial, checkpoint and final captures before finalizing;",
+      "text": "Recording checks initial, checkpoint and final captures before finalizing;"
+    },
+    {
+      "id": "ar.named-hashes.023",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "lockstep capture refusal stops the exchange before storing or sending a hash, sends the existing disconnect notification at the agreed tick and closes the transport.",
+      "text": "lockstep capture refusal stops the exchange before storing or sending a hash, sends the existing disconnect notification at the agreed tick and closes the transport."
+    },
+    {
+      "id": "ar.named-hashes.024",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "No later simulation tick runs.",
+      "text": "No later simulation tick runs."
+    },
+    {
+      "id": "ar.named-hashes.025",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "Recovery saves continue to use the existing fault contract.",
+      "text": "Recovery saves continue to use the existing fault contract."
+    },
+    {
+      "id": "ar.named-hashes.026",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "HashMsg and LREC1 retain tick, world, terrain, water and entities, without named diagnostic fields.",
+      "text": "HashMsg and LREC1 retain tick, world, terrain, water and entities, without named diagnostic fields."
+    },
+    {
+      "id": "ar.named-hashes.027",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "Frame grouping does not change checkpoint authority at a completed tick.",
+      "text": "Frame grouping does not change checkpoint authority at a completed tick."
+    },
+    {
+      "id": "ar.named-hashes.028",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "With active regions disabled, the historical hash recipes and artifact bytes remain unchanged;",
+      "text": "With active regions disabled, the historical hash recipes and artifact bytes remain unchanged;"
+    },
+    {
+      "id": "ar.named-hashes.029",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "new named keys are omitted even if a reused in-memory result contains diagnostic values.",
+      "text": "new named keys are omitted even if a reused in-memory result contains diagnostic values."
+    },
+    {
+      "id": "ar.named-hashes.030",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "Native compiler, runtime and performance qualification remains pending.",
+      "text": "Native compiler, runtime and performance qualification remains pending."
     }
   ],
   "exclusions": [

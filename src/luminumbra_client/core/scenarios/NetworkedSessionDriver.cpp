@@ -49,6 +49,7 @@
 #include <iomanip>
 #include <limits>
 #include <sstream>
+#include <stdexcept>
 #include <system_error>
 
 namespace Luminumbra::Client::ScenarioHarness {
@@ -71,25 +72,26 @@ struct NetSessionPeerContext {
     Luminumbra::world::GameSession* session = nullptr;
     Luminumbra::Vec3 spawn_anchor{0.0f};
     double fixed_dt = 1.0 / 30.0;
-    // The client peer owns no
+    const luminumbra::core::SystemConfig* configuration = nullptr;
+    // The peer owns no
     // independent wind/weather/aether/scent/ecology field state — it renders the
-    // server-authoritative world via `session` and captures only the bare chunk
-    // hash. Those fields are SERVER-side (GameSession::Get*FieldSystem /
-    // ComputeScentSubHash / ai::ComputeEcologySubHash, folded by the server's
-    // ComposeWorldHash). If a client-owned copy of any of them is ever added to
-    // this context, the size assert below fails to compile — forcing a revisit of
-    // the server-authoritative hash boundary before the quantities can diverge.
+    // server-authoritative world via `session`. Enabled hashes use its complete authority. Those
+    // fields are SERVER-side (GameSession::Get*FieldSystem / ComputeScentSubHash /
+    // ai::ComputeEcologySubHash, folded by the server's ComposeWorldHash). If a client-owned copy
+    // of any of them is ever added to this context, the size assert below fails to compile —
+    // forcing a revisit of the server-authoritative hash boundary before the quantities can
+    // diverge.
 };
 namespace net_capture_tripwire {
-// Reference layout: the EXACTLY-three members the client peer is allowed to own
-// (a pointer to the server-authoritative session it renders, the hashed-step
-// anchor, and the fixed dt). No wind/weather/aether/scent/ecology field state.
+// Reference layout: session, hashed-step anchor, fixed dt and shared configuration.
+// No wind/weather/aether/scent/ecology field state.
 struct ExpectedPeerContextLayout {
     Luminumbra::world::GameSession* session = nullptr;
     Luminumbra::Vec3 spawn_anchor{0.0f};
     double fixed_dt = 1.0 / 30.0;
+    const luminumbra::core::SystemConfig* configuration = nullptr;
 };
-// Same intent for the captured message: tick + the bare-chunk sub-hash set only.
+// Captured message layout stays tick + world/terrain/water/entities in both modes.
 struct ExpectedHashMsgLayout {
     std::uint64_t tick = 0;
     std::string world_hash, terrain, water, entities;
@@ -102,9 +104,8 @@ static_assert(sizeof(NetSessionPeerContext) ==
               "server-authoritative hash boundary before adding sub-term state here.");
 static_assert(sizeof(Luminumbra::Net::HashMsg) ==
                   sizeof(net_capture_tripwire::ExpectedHashMsgLayout),
-              "Luminumbra::Net::HashMsg shape changed: a composite sub-term "
-              "(wind/weather/aether/scents/ecology) must not be folded into the "
-              "client capture path without revisiting the deferred client fold.");
+              "Luminumbra::Net::HashMsg shape changed: named diagnostics must remain "
+              "outside the checkpoint wire layout.");
 
 // the client's WORLD-AFFECTING input set is EMPTY today (no gameplay
 // inputs yet). The empty blob still travels the lockstep path -- it is collected
@@ -125,7 +126,9 @@ bool NetSessionApplyStep(std::uint64_t /*tick*/,
                          const std::vector<std::uint8_t>& /*merged*/,
                          void* user) {
     auto* ctx = static_cast<NetSessionPeerContext*>(user);
-    if (!ctx || !ctx->session) {
+    if (!ctx || !ctx->session || !ctx->configuration ||
+        ctx->session->ActiveRegionsEnabled() !=
+            ctx->configuration->enabled(luminumbra::core::SysKey::SimActiveRegions)) {
         return false;
     }
     auto* world_system = ctx->session->GetWorldSystem();
@@ -138,53 +141,28 @@ bool NetSessionApplyStep(std::uint64_t /*tick*/,
     // then quiesce so the next scheduler decision observes the identical settled
     // state on both peers. The streaming anchor is the spawn point -- NOT the
     // client camera -- so render-side look can never alter the hashed world.
+    if (ctx->configuration->enabled(luminumbra::core::SysKey::SimActiveRegions))
+        ctx->session->SetReplicatedSimulationAnchors({}); // Same zero-avatar host inputs.
     physics_system->update(static_cast<float>(ctx->fixed_dt));
     const std::uint32_t ran = ctx->session->TickSimulation(ctx->fixed_dt);
+    if (ctx->session->GetRegionSchedulerFault())
+        return false;
     world_system->update(ctx->session->GetRegistry(), ctx->spawn_anchor, physics_system);
     world_system->wait_for_streaming_jobs();
     return ran == 1;
 }
 
-// Captures this peer's CLIENT-PATH hashes (the BARE streamed-chunk world_hash +
-// terrain/water/entities sub-hashes) over the live streamed-chunk snapshot.
-//
-// This is not the same quantity as ServerWorldRunner::ComputeWorldHashAndSubHashes.
-// The server COMPOSITE world_hash ComposeWorldHash-folds five MORE
-// server-authoritative sub-terms on top of the chunk hash —
-// wind|weather|aether|scents|ecology — none of which the client owns independent
-// state for (those fields live on the server-authoritative session; the client
-// renders the server's world). So the client deliberately pins the bare chunk hash
-// (its own deterministic value, 5b316f81a0c72a71), and the NetworkedSession oracle
-// is host==client over THIS client quantity on both peers (both compute the same
-// bare hash) — directly comparable, not the composite. Wiring the client to fold
-// the full canonical quantity belongs to the server-authoritative boundary. The static_assert
-// below keeps that boundary honest: it fails to compile if a client-owned wind/weather/
-// aether/scent/ecology field is ever added to this capture context without
-// revisiting the fold decision.
+// Enabled peers capture the same admitted session authority as the server runner.
+// The disabled scenario retains its historical bare streamed-chunk projection.
 void NetSessionCaptureHashes(std::uint64_t tick, Luminumbra::Net::HashMsg& out, void* user) {
     auto* ctx = static_cast<NetSessionPeerContext*>(user);
+    out = {};
     out.tick = tick;
-    if (!ctx || !ctx->session || !ctx->session->GetWorldSystem()) {
-        return;
-    }
-    auto* world_system = ctx->session->GetWorldSystem();
-    world_system->wait_for_streaming_jobs();
-
-    Luminumbra::WorldStreamingState state;
-    for (const auto& chunk : world_system->snapshot_streamed_chunks()) {
-        state.insert_chunk(chunk);
-    }
-    Luminumbra::Persistence::WorldSaveService service;
-    out.world_hash = service.world_hash(state);
-
-    // Terrain/water authority only here (no streamed game entities), so the
-    // entities sub-hash is the stable checksum of the EMPTY canonical ECS
-    // snapshot -- present (not blank) so an entity-bearing world reports an
-    // entity-section divergence rather than a silent gap. Same as the server.
-    const std::string empty_entities = Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(
-        Luminumbra::Ecs::EntityRegistrySnapshot{});
-    const Luminumbra::Persistence::WorldStreamingStateSubHashes sub =
-        Luminumbra::Persistence::ComputeWorldStreamingStateSubHashes(state, empty_entities);
+    if (!ctx || !ctx->session || !ctx->configuration)
+        throw std::runtime_error("Network authority capture requires a configured live session");
+    Luminumbra::Persistence::WorldStreamingStateSubHashes sub;
+    if (!ctx->session->ComputeNetworkWorldHashes(*ctx->configuration, out.world_hash, sub))
+        throw std::runtime_error("Network authority capture failed");
     out.terrain = sub.terrain;
     out.water = sub.water;
     out.entities = sub.entities;
@@ -204,6 +182,7 @@ struct NetworkedSessionDriver::Impl {
     std::unique_ptr<Luminumbra::Net::LockstepSession> host;
     std::unique_ptr<Luminumbra::Net::LockstepSession> client;
 
+    std::shared_ptr<const luminumbra::core::SystemConfig> simulation_configuration;
     NetSessionPeerContext host_ctx;
     NetSessionPeerContext client_ctx;
 
@@ -239,6 +218,11 @@ bool NetworkedSessionDriver::Begin(Luminumbra::world::GameSession* client_sessio
         m_failure_reason = "client_session_null";
         return false;
     }
+    m_impl->simulation_configuration = client_session->GetSimulationConfiguration();
+    if (!m_impl->simulation_configuration) {
+        m_failure_reason = "simulation_configuration_missing";
+        return false;
+    }
     m_impl->config = config;
 
     // --- Boot the HOST authority world (a headless GameSession in this process).
@@ -246,46 +230,29 @@ bool NetworkedSessionDriver::Begin(Luminumbra::world::GameSession* client_sessio
     // hashes agree at every cadence. Mirrors ServerWorldRunner::Boot.
     m_impl->host_job_system.startup(1); // single worker: streamed hash is worker-count invariant
     m_impl->host_booted = true;
-    m_impl->host_session = std::make_unique<Luminumbra::world::GameSession>();
-    m_impl->host_session->SetJobSystem(&m_impl->host_job_system);
-    m_impl->host_session->SetRootPath(config.root_path);
-    m_impl->host_session->SetSaveRootPath(client_session->GetSaveRootPath());
-    auto systems_path = std::filesystem::path(config.root_path) / "data/common/systems.json";
-    std::error_code systems_error;
-    if (!std::filesystem::exists(systems_path, systems_error))
-        systems_path = std::filesystem::path("data/common/systems.json");
-    m_impl->host_session->ApplySystemConfig(
-        config.systems_config_override
-            ? *config.systems_config_override
-            : luminumbra::core::SystemConfig::LoadFromFile(systems_path.string()));
-    if (!m_impl->host_session->CreateWorld(
-            "Networked Host",
-            std::to_string(config.seed),
-            config.preset,
-            config.preset_json_override ? &*config.preset_json_override : nullptr)) {
-        m_failure_reason = "host_create_world_failed";
+    const Luminumbra::world::GameSession::NetworkHostConfig host_config{
+        .root_path = config.root_path,
+        .seed = std::to_string(config.seed),
+        .preset = config.preset,
+        .surface_radius = config.surface_radius,
+        .collision_radius = config.collision_radius,
+        .systems_config_override =
+            config.systems_config_override ? &*config.systems_config_override : nullptr,
+        .preset_json_override =
+            config.preset_json_override ? &*config.preset_json_override : nullptr};
+    m_impl->host_session = Luminumbra::world::GameSession::CreateNetworkHost(
+        *client_session, m_impl->host_job_system, host_config, m_failure_reason);
+    if (!m_impl->host_session)
         return false;
-    }
-    if (!m_impl->host_session->LoadWorldState()) {
-        m_failure_reason = m_impl->host_session->GetWorldOpenError();
-        return false;
-    }
-    auto* host_ws = m_impl->host_session->GetWorldSystem();
-    auto* host_phys = m_impl->host_session->GetPhysicsSystem();
-    if (!host_ws || !host_phys) {
-        m_failure_reason = "host_world_systems_missing";
-        return false;
-    }
     m_spawn_anchor = m_impl->host_session->GetMetadata().spawnPoint;
-    if (!host_ws->EnsureSurfaceReadyNear(
-            m_spawn_anchor, host_phys, config.surface_radius, config.collision_radius)) {
-        m_failure_reason = "host_surface_not_ready";
-        return false;
-    }
 
     const double fixed_dt = m_impl->host_session->GetSimulationClock().fixed_dt();
-    m_impl->host_ctx = NetSessionPeerContext{m_impl->host_session.get(), m_spawn_anchor, fixed_dt};
-    m_impl->client_ctx = NetSessionPeerContext{client_session, m_spawn_anchor, fixed_dt};
+    m_impl->host_ctx = NetSessionPeerContext{m_impl->host_session.get(),
+                                             m_spawn_anchor,
+                                             fixed_dt,
+                                             m_impl->simulation_configuration.get()};
+    m_impl->client_ctx = NetSessionPeerContext{
+        client_session, m_spawn_anchor, fixed_dt, m_impl->simulation_configuration.get()};
 
     // --- Build the loopback pair + both session ends (no sockets/ports). The
     // client is client_id 1 (one remote) and the host is client_id 0 (authority).
@@ -434,12 +401,18 @@ bool NetworkedSessionDriver::WriteArtifact(const std::filesystem::path& artifact
     std::string client_hash;
     if (m_impl->host_session && m_impl->host_session->GetWorldSystem() &&
         m_impl->client_ctx.session && m_impl->client_ctx.session->GetWorldSystem()) {
-        Luminumbra::Net::HashMsg hm;
-        NetSessionCaptureHashes(m_agreed_ticks, hm, &m_impl->host_ctx);
-        host_hash = hm.world_hash;
-        Luminumbra::Net::HashMsg cm;
-        NetSessionCaptureHashes(m_agreed_ticks, cm, &m_impl->client_ctx);
-        client_hash = cm.world_hash;
+        try {
+            Luminumbra::Net::HashMsg hm;
+            NetSessionCaptureHashes(m_agreed_ticks, hm, &m_impl->host_ctx);
+            host_hash = hm.world_hash;
+            Luminumbra::Net::HashMsg cm;
+            NetSessionCaptureHashes(m_agreed_ticks, cm, &m_impl->client_ctx);
+            client_hash = cm.world_hash;
+        } catch (const std::exception&) {
+            m_impl->last_world_hash.clear();
+            m_failure_reason = "authority_capture_failed";
+            return false;
+        }
     }
     m_impl->last_world_hash = host_hash;
 

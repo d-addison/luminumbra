@@ -2054,7 +2054,8 @@ int main(int argc, char* argv[]) try {
     gameSession->SetJobSystem(&jobSystem);
     gameSession->SetRootPath(root_path_str);
     gameSession->SetSaveRootPath(path_options.save_root);
-    gameSession->ApplySystemConfig(g_systemConfig);
+    gameSession->ConfigureSimulation(
+        std::make_shared<const luminumbra::core::SystemConfig>(g_systemConfig));
 
     // Load creature species metadata (display names + rarity) for the codex/discovery
     // HUD. Missing/partial data degrades gracefully: DisplayName falls back to

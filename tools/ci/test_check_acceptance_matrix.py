@@ -897,6 +897,28 @@ class AcceptanceMatrixTests(unittest.TestCase):
         watchdog = row_of(matrix, "em.client-hang")
         self.assertIn("HangWatchdog.RearmsAfterHeartbeatResumes", {e["ref"] for e in watchdog["evidence"]})
 
+    def test_repository_named_hashes_retain_consumer_and_refusal_evidence(self) -> None:
+        matrix = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_matrix.json")
+        inventory = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_requirements.json")
+        row = row_of(matrix, "contract.named-authority-hashes")
+        named = {entry["id"]: entry for entry in inventory["requirements"]
+                 if entry["id"].startswith("ar.named-hashes.")}
+        self.assertEqual(len(named), 30)
+        self.assertEqual(set(row["requirements"]), set(named))
+        self.assertEqual(row["status"], "partial")
+        refs = {item["ref"] for item in row["evidence"]}
+        for name in ("AllHashEntryPointsUseSameAuthorityCapture",
+                     "CaptureRefusalDisconnectReachesPeer",
+                     "NetworkCheckpointPeersShareEffectiveConfiguration",
+                     "NetworkPeerConfigurationRefusesMissingSnapshot",
+                     "NetworkHostCreationFailurePreservesPeer",
+                     "NamedHashDomainMutationMatrix",
+                     "RecordReplayAndLockstepEnabledHashIdentity",
+                     "FrameGroupingPreservesCheckpointHashes",
+                     "HashMsgAndLREC1EncodingUnchanged",
+                     "FlagOffProductionArtifactBytesUnchanged"):
+            self.assertIn("AuthorityHashIntegration." + name, refs)
+
     def test_repository_pending_state_retains_combined_contract_inventory(self) -> None:
         matrix = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_matrix.json")
         inventory = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_requirements.json")

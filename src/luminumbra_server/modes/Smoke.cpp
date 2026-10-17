@@ -52,11 +52,17 @@ SmokeRunResult RunSmokeOnce(const ServerCliOptions& options, const char* run_lab
                              grounded,
                              a0.position.y);
     }
-    result.world_hash = runner.ComputeWorldHash();
-    result.sub_hashes = runner.ComputeWorldSubHashes();
-    result.scent_hash = runner.Session() ? runner.Session()->ComputeScentSubHash() : std::string();
-    result.ecology_hash = runner.ComputeEcologySubHash();
-    result.plant_hash = runner.Session() ? runner.Session()->ComputePlantSubHash() : std::string();
+    runner.ComputeWorldHashAndSubHashes(result.world_hash, result.sub_hashes);
+    result.sub_hashes.active_regions = runner.Session()->ActiveRegionsEnabled();
+    if (result.sub_hashes.active_regions) {
+        result.scent_hash = result.sub_hashes.scents;
+        result.ecology_hash = result.sub_hashes.ecology;
+        result.plant_hash = result.sub_hashes.plants;
+    } else {
+        result.scent_hash = runner.Session()->ComputeScentSubHash();
+        result.ecology_hash = runner.ComputeEcologySubHash();
+        result.plant_hash = runner.Session()->ComputePlantSubHash();
+    }
     result.creature_count_end = runner.CreatureCount();
     result.avail_trace = runner.AvailabilityTrace();   // empty unless --avail-trace
     result.water_hash_trace = runner.WaterHashTrace(); // empty unless --water-hash-trace

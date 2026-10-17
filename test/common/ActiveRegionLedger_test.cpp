@@ -138,10 +138,12 @@ TEST(ActiveRegionLedgerTest, ReductionFreezeRecoveryAndHoldsSurviveReload) {
             EXPECT_EQ(r.frozen_at, 5u);
             EXPECT_EQ(r.frozen_digest, 0x123456789abcdef0ull);
         }
-        if (tick == 8)
+        if (tick == 8) {
             EXPECT_EQ(r.state, RegionState::Reduced);
-        if (tick == 10)
+        }
+        if (tick == 10) {
             EXPECT_EQ(r.state, RegionState::Active);
+        }
     }
 }
 
@@ -151,8 +153,9 @@ TEST(ActiveRegionLedgerTest, RestoringNewerClockPreservesHoldsAndFrozenSimulatio
     for (std::uint64_t tick = 2; tick <= 6; ++tick) {
         Step(ledger, tick, tick < 6 ? 11 : 0);
         const auto& record = ledger.records().at(kFar);
-        if (tick == 2)
+        if (tick == 2) {
             ASSERT_EQ(record.over_hold, 1u);
+        }
         if (tick == 6) {
             ASSERT_EQ(record.state, RegionState::Frozen);
             ASSERT_EQ(record.under_hold, 1u);

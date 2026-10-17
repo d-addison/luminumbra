@@ -110,10 +110,11 @@ TEST(FrameLimiter, QuantizedSleepsMaintainTheSelectedRate) {
             EXPECT_LE(achieved, static_cast<double>(cap));
             EXPECT_NEAR(achieved, static_cast<double>(cap), static_cast<double>(cap) * 0.0005);
             EXPECT_GT(timing.spins, 0);
-            if (quantum <= 2ms || cap <= 60)
+            if (quantum <= 2ms || cap <= 60) {
                 EXPECT_EQ(timing.sleeps, frames);
-            else
+            } else {
                 EXPECT_EQ(timing.sleeps, 0);
+            }
         }
     }
 }

@@ -1020,13 +1020,13 @@ void Rml_UIManager::PopulateUserPresets(Rml::ElementDocument* document) {
         chip->SetInnerRML(name);
         // A small delete affordance per user chip (curated chips have none). The id encodes
         // the preset type so the e2e can target a specific chip's delete control.
-        Rml::ElementPtr del = document->CreateElement("span");
-        if (del) {
-            del->SetClassNames("preset-delete");
-            del->SetId("del_" + type);
-            del->SetAttribute("data-delete", type);
-            del->SetInnerRML("&#10005;"); // ✕
-            chip->AppendChild(std::move(del));
+        Rml::ElementPtr delete_control = document->CreateElement("span");
+        if (delete_control) {
+            delete_control->SetClassNames("preset-delete");
+            delete_control->SetId("del_" + type);
+            delete_control->SetAttribute("data-delete", type);
+            delete_control->SetInnerRML("&#10005;"); // ✕
+            chip->AppendChild(std::move(delete_control));
         }
         Rml::Element* added = row->AppendChild(std::move(chip));
         // Same behaviour as the curated chips: select + drive #world_type + re-seed the form.

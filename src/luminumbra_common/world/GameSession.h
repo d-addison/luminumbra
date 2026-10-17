@@ -116,6 +116,38 @@ public:
     GameSession();
     ~GameSession();
 
+    // Apply one immutable effective configuration before create/load. Network peers share it.
+    void ConfigureSimulation(std::shared_ptr<const luminumbra::core::SystemConfig> configuration);
+    [[nodiscard]] const std::shared_ptr<const luminumbra::core::SystemConfig>&
+    GetSimulationConfiguration() const {
+        return m_simulationConfiguration;
+    }
+    // Host setup seam: forward the peer snapshot before create/load. Missing snapshots
+    // and configuration replacement on a live destination refuse without mutation.
+    void ConfigureSimulationFromPeer(const GameSession& peer);
+    struct NetworkHostConfig {
+        std::string root_path;
+        std::string seed = "424242";
+        std::string preset = "default";
+        int surface_radius = 12;
+        int collision_radius = 4;
+        // Optional overrides; borrowed only for the synchronous host boot.
+        // Explicit simulation rules must agree with the peer's admitted snapshot.
+        const luminumbra::core::SystemConfig* systems_config_override = nullptr;
+        const std::string* preset_json_override = nullptr;
+    };
+    // Complete headless host boot used by the network driver. The job system must outlive
+    // the returned session. Failure returns null with a reason and leaves the peer unchanged.
+    [[nodiscard]] static std::unique_ptr<GameSession>
+    CreateNetworkHost(const GameSession& peer,
+                      JobSystem& jobs,
+                      const NetworkHostConfig& config,
+                      std::string& failure_reason);
+    // Network checkpoint recipe is chosen by the shared configuration. Refuses local flag drift.
+    bool ComputeNetworkWorldHashes(const luminumbra::core::SystemConfig& configuration,
+                                   std::string& world_hash,
+                                   Persistence::WorldStreamingStateSubHashes& sub_hashes);
+
     // Initialize a new world with the given parameters.
     // customPresetJson (optional): a fully-resolved preset JSON (base preset + create-world
     // customize overrides). When provided it is written into THIS world's own save dir
@@ -325,6 +357,8 @@ public:
     // Data-driven creature-brain tuning (energy/sleep/hunger/stamina/herd/
     // catch). Defaults to the compiled constants -> byte-identical until a caller overrides it from
     // SystemConfig sim.ecology (ai::ResolveEcologyTuning). Set once after construction.
+    // Copies the effective configuration into an immutable snapshot before create/load.
+    // Like ConfigureSimulation, replacement on a live session refuses without mutation.
     void ApplySystemConfig(const luminumbra::core::SystemConfig& config);
     // Computed on demand from the current effective simulation gates and tuning.
     [[nodiscard]] std::string SystemConfigIdentity() const;
@@ -567,6 +601,12 @@ public:
     // Success owns only immutable projections; failure contains no digest and changes no state.
     [[nodiscard]] AuthorityHashCapture
     CaptureAuthorityState(const std::string& avatar_snapshot = {}) const;
+    // Checked enabled host capture. Failure clears outputs and latches the first fault.
+    [[nodiscard]] bool
+    ComputeAuthorityWorldHashes(std::string& world_hash,
+                                Persistence::WorldStreamingStateSubHashes& sub_hashes,
+                                const std::string& avatar_snapshot = {});
+
     [[nodiscard]] bool IsSimulationTickBoundary() const {
         return !m_activeRegionsEnabled || (!m_simulationBatchInProgress && m_regionWork.empty());
     }
@@ -845,6 +885,7 @@ private:
     bool AdoptSimulationContent(std::shared_ptr<const SimulationContent> content);
     void ApplyWeatherRainWiring();     // Wires weather to rain when opted in.
     void ApplyWaterResolutionWiring(); // Raises the water solver to High when opted in.
+    std::shared_ptr<const luminumbra::core::SystemConfig> m_simulationConfiguration;
     bool m_finiteHydrologyEnabled = true;
     bool m_waterHighResEnabled = true;      // See SetWaterHighResEnabled.
     bool m_weatherRainEnabled = true;       // See SetWeatherRainEnabled.

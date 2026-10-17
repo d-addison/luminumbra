@@ -198,6 +198,8 @@ TEST(SimulationPendingState, FutureEventsAndSequenceRoundtrip) {
     auto& bus = world.session.GetSimulationEventBus();
     const auto empty = world.session.CaptureAuthorityState();
     ASSERT_TRUE(empty.state) << empty.error;
+    if (!empty.state)
+        return;
     EXPECT_EQ(bus.publish(9, std::string("topic\0x", 7), std::string("data\0z", 6), 2), 0u);
     EXPECT_EQ(bus.publish(9, "first", "negative lane", -7), 1u);
     EXPECT_EQ(bus.publish(3, "earlier", "retired"), 2u);
@@ -205,6 +207,8 @@ TEST(SimulationPendingState, FutureEventsAndSequenceRoundtrip) {
     const auto expected = Snapshot(world.session).encode();
     const auto capture = world.session.CaptureAuthorityState();
     ASSERT_TRUE(capture.state) << capture.error;
+    if (!capture.state)
+        return;
     EXPECT_NE(capture.state->authority_bytes(), empty.state->authority_bytes());
     EXPECT_EQ(capture.state->pending_event_bytes(), Snapshot(world.session).event_bytes());
     const auto dir = world.session.GetWorldSaveDir();
@@ -224,6 +228,8 @@ TEST(SimulationPendingState, FutureEventsAndSequenceRoundtrip) {
     const auto tree = Tree(dir);
     const auto repeated = world.session.CaptureAuthorityState();
     ASSERT_TRUE(repeated.state) << repeated.error;
+    if (!repeated.state)
+        return;
     EXPECT_EQ(repeated.state->authority_bytes(), capture.state->authority_bytes());
     EXPECT_EQ(Tree(dir), tree);
     W::GameSession loaded;
@@ -233,6 +239,8 @@ TEST(SimulationPendingState, FutureEventsAndSequenceRoundtrip) {
     EXPECT_EQ(Snapshot(loaded).encode(), expected);
     const auto restored = loaded.CaptureAuthorityState();
     ASSERT_TRUE(restored.state) << restored.error;
+    if (!restored.state)
+        return;
     EXPECT_EQ(restored.state->authority_bytes(), capture.state->authority_bytes());
     EXPECT_EQ(loaded.GetSimulationEventBus().publish(10, "probe", ""), 3u);
     const auto delivered = loaded.GetSimulationEventBus().drain_enabled(9, [] { return true; }, {});
@@ -247,9 +255,13 @@ TEST(SimulationPendingState, FutureEventsAndSequenceRoundtrip) {
     auto sequence_only = loaded.GetSimulationEventBus().snapshot();
     const auto sequenced = loaded.CaptureAuthorityState();
     ASSERT_TRUE(sequenced.state) << sequenced.error;
+    if (!sequenced.state)
+        return;
     loaded.GetSimulationEventBus().commit_batch(S::OrderedEventBus::prepare_restore({}));
     const auto reset_sequence = loaded.CaptureAuthorityState();
     ASSERT_TRUE(reset_sequence.state) << reset_sequence.error;
+    if (!reset_sequence.state)
+        return;
     EXPECT_NE(reset_sequence.state->authority_bytes(), sequenced.state->authority_bytes());
     loaded.GetSimulationEventBus().commit_batch(
         S::OrderedEventBus::prepare_restore(std::move(sequence_only)));
@@ -278,6 +290,8 @@ void CheckLimitRecovery(PendingWorld& world) {
     const auto expected = Snapshot(world.session).encode();
     const auto capture = world.session.CaptureAuthorityState();
     ASSERT_TRUE(capture.state) << capture.error;
+    if (!capture.state)
+        return;
     ASSERT_NO_FATAL_FAILURE(SaveWithDecodeBudget(world.session, world.root / "at-limit", 0, 0));
     ASSERT_NO_FATAL_FAILURE(
         SaveWithDecodeBudget(world.session, world.session.GetWorldSaveDir(), 1, 1));
@@ -292,6 +306,8 @@ void CheckLimitRecovery(PendingWorld& world) {
     EXPECT_EQ(Snapshot(world.session).encode(), expected);
     const auto fault_capture = world.session.CaptureAuthorityState();
     ASSERT_TRUE(fault_capture.state) << fault_capture.error;
+    if (!fault_capture.state)
+        return;
     EXPECT_EQ(world.session.TickSimulation(1.0), 0u);
     ASSERT_TRUE(world.session.SaveWorldState());
     ASSERT_TRUE(world.session.GetRegionSchedulerFault());
@@ -591,6 +607,8 @@ TEST(SimulationPendingState, RetainedEnergyDepositsSurviveFaultSaveLoad) {
     EXPECT_EQ(energy->PendingDeposits(), deposits);
     const auto capture = world.session.CaptureAuthorityState();
     ASSERT_TRUE(capture.state) << capture.error;
+    if (!capture.state)
+        return;
     ASSERT_TRUE(world.session.SaveWorldState());
     const auto expected = Snapshot(world.session).encode();
     EXPECT_EQ(energy->PendingDeposits(), deposits);
@@ -603,6 +621,8 @@ TEST(SimulationPendingState, RetainedEnergyDepositsSurviveFaultSaveLoad) {
     EXPECT_EQ(loaded.GetEnergyFieldState()->PendingDeposits(), deposits);
     const auto restored = loaded.CaptureAuthorityState();
     ASSERT_TRUE(restored.state) << restored.error;
+    if (!restored.state)
+        return;
     EXPECT_EQ(restored.state->authority_bytes(), capture.state->authority_bytes());
     // Multiplicity contributes to pages even when the stored energy layer is empty.
     auto positive = Snapshot(loaded);
@@ -611,6 +631,8 @@ TEST(SimulationPendingState, RetainedEnergyDepositsSurviveFaultSaveLoad) {
     ASSERT_TRUE(loaded.GetEnergyFieldState()->RestorePendingDeposits(positive.deposits));
     const auto changed = loaded.CaptureAuthorityState();
     ASSERT_TRUE(changed.state) << changed.error;
+    if (!changed.state)
+        return;
     EXPECT_NE(changed.state->authority_bytes(), restored.state->authority_bytes());
     EXPECT_NE(changed.state->energy_bytes(), restored.state->energy_bytes());
     ASSERT_TRUE(loaded.GetEnergyFieldState()->RestorePendingDeposits(deposits));
@@ -925,6 +947,8 @@ TEST(SimulationPendingState, AboveCapacityHistoricalOutboxAdoptsAndDeliversExact
     EXPECT_EQ(adopted.GetSimulationEventBus().snapshot().next_sequence, State::kMaxEvents);
     const auto capture = adopted.CaptureAuthorityState();
     ASSERT_TRUE(capture.state) << capture.error;
+    if (!capture.state)
+        return;
     ASSERT_NO_FATAL_FAILURE(SaveWithDecodeBudget(adopted, dir, 0, 1));
     W::GameSession resumed;
     world.Configure(resumed);
@@ -960,6 +984,39 @@ TEST(SimulationPendingState, AboveCapacityHistoricalOutboxAdoptsAndDeliversExact
     EXPECT_TRUE(complete.GetActiveRegionLedger().pending_activations().empty());
     EXPECT_EQ(complete.GetSimulationEventBus().pending_count(), 0u);
     EXPECT_EQ(complete.GetSimulationEventBus().snapshot().next_sequence, count);
+}
+
+void CheckFirstPendingPublication(const fs::path& dir,
+                                  const fs::path& committed,
+                                  const State& pending,
+                                  std::vector<std::string>& errors,
+                                  Luminumbra::WorldStreamingState& loaded,
+                                  State& restored,
+                                  bool& present) {
+    ASSERT_TRUE(P::snapshot_index_exists(dir));
+    EXPECT_FALSE(P::journal_pending(dir));
+    P::SnapshotIndex index;
+    ASSERT_TRUE(P::read_snapshot_index(dir, index, nullptr));
+    const auto member = std::find_if(index.members.begin(),
+                                     index.members.end(),
+                                     [](const auto& row) { return row.path == State::kMember; });
+    ASSERT_NE(member, index.members.end());
+    EXPECT_TRUE(member->present);
+    EXPECT_EQ(member->cls, P::MemberClass::Authoritative);
+    EXPECT_EQ(member->bytes, pending.encode().size());
+    EXPECT_EQ(member->fnv64, P::fnv1a64_bytes(pending.encode().data(), pending.encode().size()));
+    ASSERT_TRUE(P::journal_pending(committed));
+    EXPECT_EQ(P::recover_pending_journal(committed, nullptr), P::RecoveryOutcome::DiscardedStale);
+    EXPECT_EQ(Tree(committed), Tree(dir));
+    EXPECT_EQ(P::recover_pending_journal(committed, nullptr), P::RecoveryOutcome::NothingToDo);
+    // Both a new save and its recovered committed copy support enabled loading.
+    for (const auto& destination : {dir, committed}) {
+        ASSERT_TRUE(P::WorldSaveService{}.load_world(
+            loaded, destination, errors, {}, {}, nullptr, &restored, &present, true));
+        EXPECT_TRUE(errors.empty());
+        EXPECT_TRUE(present);
+        EXPECT_EQ(restored.encode(), pending.encode());
+    }
 }
 
 TEST(SimulationPendingState, StandaloneFirstPendingPublicationIsIndexed) {
@@ -1027,33 +1084,8 @@ TEST(SimulationPendingState, StandaloneFirstPendingPublicationIsIndexed) {
         }
         EXPECT_EQ(State::decode_count_for_testing() - decodes, raw ? 1u : 0u);
         EXPECT_TRUE(errors.empty());
-        ASSERT_TRUE(P::snapshot_index_exists(dir));
-        EXPECT_FALSE(P::journal_pending(dir));
-        P::SnapshotIndex index;
-        ASSERT_TRUE(P::read_snapshot_index(dir, index, nullptr));
-        const auto member =
-            std::find_if(index.members.begin(), index.members.end(), [](const auto& row) {
-                return row.path == State::kMember;
-            });
-        ASSERT_NE(member, index.members.end());
-        EXPECT_TRUE(member->present);
-        EXPECT_EQ(member->cls, P::MemberClass::Authoritative);
-        EXPECT_EQ(member->bytes, pending.encode().size());
-        EXPECT_EQ(member->fnv64,
-                  P::fnv1a64_bytes(pending.encode().data(), pending.encode().size()));
-        ASSERT_TRUE(P::journal_pending(committed));
-        EXPECT_EQ(P::recover_pending_journal(committed, nullptr),
-                  P::RecoveryOutcome::DiscardedStale);
-        EXPECT_EQ(Tree(committed), Tree(dir));
-        EXPECT_EQ(P::recover_pending_journal(committed, nullptr), P::RecoveryOutcome::NothingToDo);
-        // Both a new save and its recovered committed copy support enabled loading.
-        for (const auto& destination : {dir, committed}) {
-            ASSERT_TRUE(P::WorldSaveService{}.load_world(
-                loaded, destination, errors, {}, {}, nullptr, &restored, &present, true));
-            EXPECT_TRUE(errors.empty());
-            EXPECT_TRUE(present);
-            EXPECT_EQ(restored.encode(), pending.encode());
-        }
+        ASSERT_NO_FATAL_FAILURE(CheckFirstPendingPublication(
+            dir, committed, pending, errors, loaded, restored, present));
     }
 }
 

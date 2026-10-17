@@ -989,10 +989,11 @@ TEST(WorldSaveServiceTest, RegionDigestAuthorityAndLifecycleMatrix) {
                                    .durable = {},
                                    .ground_object_bytes = {},
                                    .field_page_bytes = {}});
-            if (edited)
+            if (edited) {
                 ASSERT_NE(settled, empty);
-            else
+            } else {
                 ASSERT_EQ(settled, empty);
+            }
             chunk->set_state(lifecycle);
             const auto in_memory = lifecycle == ChunkState::Loading ? empty : settled;
             EXPECT_EQ(WorldSaveService::region_simulation_digest(

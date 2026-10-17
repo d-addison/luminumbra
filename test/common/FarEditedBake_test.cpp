@@ -317,10 +317,11 @@ TEST(FarEditedBake, DisjointFootprintsBoundUniqueGrowthAtExactCapsDuringEnumerat
         EXPECT_LE(work.reserved_tile_slots, refused.max_tiles);
         EXPECT_LE(work.unique_bricks, refused.max_affected_bricks);
         EXPECT_LE(work.unique_tiles, refused.max_tiles);
-        if (fewer_bricks)
+        if (fewer_bricks) {
             EXPECT_EQ(work.unique_bricks, refused.max_affected_bricks);
-        else
+        } else {
             EXPECT_EQ(work.unique_tiles, refused.max_tiles);
+        }
         EXPECT_EQ(affected.bricks, previous.bricks);
         EXPECT_EQ(affected.tiles, previous.tiles);
     }

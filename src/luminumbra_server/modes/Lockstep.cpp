@@ -1,5 +1,7 @@
 #include "ModeHelpers.h"
 #include "Modes.h"
+#include <cstdlib>
+#include <stdexcept>
 
 namespace fs = std::filesystem;
 
@@ -41,13 +43,19 @@ bool LockstepApplyStep(std::uint64_t /*tick*/,
                        void* user) {
     auto* ctx = static_cast<LockstepPeerContext*>(user);
     const auto step = ctx->runner->RunFixedTicks(1);
-    return step.ticks_executed == 1;
+    return step.ticks_executed == 1 && !step.region_fault;
 }
 
 void LockstepCaptureHashes(std::uint64_t tick, Luminumbra::Net::HashMsg& out, void* user) {
+    out = {};
+    out.tick = tick;
     auto* ctx = static_cast<LockstepPeerContext*>(user);
+    if (!ctx || !ctx->runner || !ctx->runner->Session())
+        throw std::runtime_error("Lockstep authority capture requires a live session");
     Luminumbra::Persistence::WorldStreamingStateSubHashes sub;
     ctx->runner->ComputeWorldHashAndSubHashes(out.world_hash, sub);
+    if (out.world_hash.empty() || ctx->runner->Session()->GetRegionSchedulerFault())
+        throw std::runtime_error("Lockstep authority capture failed");
     out.terrain = sub.terrain;
     out.water = sub.water;
     out.entities = sub.entities;
@@ -210,9 +218,29 @@ int RunLockstepLoopback(const ServerCliOptions& options) {
     const std::string emitted_dump =
         host_status.desynced ? host_status.dump_path : peer_status.dump_path;
 
+    if (hr.outcome == Luminumbra::Net::TickOutcome::PeerDisconnected ||
+        pr.outcome == Luminumbra::Net::TickOutcome::PeerDisconnected) {
+        LUMINUMBRA_CORE_ERROR("lockstep: session or authority capture failed");
+        host.Disconnect();
+        peer.Disconnect();
+        host_runner->Shutdown();
+        peer_runner->Shutdown();
+        return 1;
+    }
+
     // Final hashes from BOTH worlds (settled), for the gate's identical-end-hash assert.
     const std::string host_hash = host_runner->ComputeWorldHash();
     const std::string peer_hash = peer_runner->ComputeWorldHash();
+    if (host_hash.empty() || peer_hash.empty() ||
+        host_runner->Session()->GetRegionSchedulerFault() ||
+        peer_runner->Session()->GetRegionSchedulerFault()) {
+        LUMINUMBRA_CORE_ERROR("lockstep: final authority capture failed");
+        host.Disconnect();
+        peer.Disconnect();
+        host_runner->Shutdown();
+        peer_runner->Shutdown();
+        return 1;
+    }
 
     const fs::path host_save = host_runner->Session()->GetWorldSaveDir();
     const fs::path peer_save = peer_runner->Session()->GetWorldSaveDir();

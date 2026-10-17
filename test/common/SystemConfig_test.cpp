@@ -760,14 +760,15 @@ TEST(SystemConfig, CaveFieldIsRenderOnlyAndIgnoredByUserOverlay) {
             EXPECT_EQ(cfg.ComputeConfigSubHash(), sim.ComputeConfigSubHash());
             cfg.OverlayUserFromJsonString(R"({"render":{"far_world_ladder":{
                 "enabled":true,"params":{"cave_field":1}}}})");
-            if (std::string(code) == "0")
+            if (std::string(code) == "0") {
                 EXPECT_EQ(ResolveFarWorldCaveField(cfg.param(SysParam::FarWorldCaveField, -1)),
                           FarCaveMode::BandLimited);
-            else if (std::string(code) == "1")
+            } else if (std::string(code) == "1") {
                 EXPECT_EQ(ResolveFarWorldCaveField(cfg.param(SysParam::FarWorldCaveField, -1)),
                           FarCaveMode::BoxFiltered);
-            else
+            } else {
                 EXPECT_FALSE(ResolveFarWorldCaveField(cfg.param(SysParam::FarWorldCaveField, -1)));
+            }
             EXPECT_EQ(cfg.enabled(SysKey::RenderFarWorldLadder), std::string(enabled) == "true");
         }
     }

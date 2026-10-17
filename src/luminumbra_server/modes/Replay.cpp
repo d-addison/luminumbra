@@ -1,7 +1,10 @@
 #include "ModeHelpers.h"
 #include "Modes.h"
+#include "luminumbra_common/core/FilesystemPath.h"
 #include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/replay/RegionScheduleTrace.h"
+#include <cstdlib>
+#include <optional>
 
 namespace fs = std::filesystem;
 
@@ -35,7 +38,8 @@ Luminumbra::Server::ServerWorldRunnerConfig ReplayBootConfig(const ServerCliOpti
         systems = fs::path("data/common/systems.json");
     const auto configuration = options.systems_config_override
                                    ? *options.systems_config_override
-                                   : luminumbra::core::SystemConfig::LoadFromFile(systems.string());
+                                   : luminumbra::core::SystemConfig::LoadFromFile(
+                                         Luminumbra::Filesystem::GenericPathString(systems));
     if (configuration.enabled(luminumbra::core::SysKey::SimActiveRegions))
         return RunnerConfigFrom(options);
     Luminumbra::Server::ServerWorldRunnerConfig config;
@@ -45,12 +49,14 @@ Luminumbra::Server::ServerWorldRunnerConfig ReplayBootConfig(const ServerCliOpti
 
 // Captures a checkpoint record at the given tick from a booted runner. Uses the
 // single-snapshot combined hash path (one settled-state read per checkpoint).
-Luminumbra::Replay::CheckpointRecord
+std::optional<Luminumbra::Replay::CheckpointRecord>
 CaptureCheckpoint(std::uint64_t tick, Luminumbra::Server::ServerWorldRunner& runner) {
     Luminumbra::Replay::CheckpointRecord cp;
     cp.tick = tick;
     Luminumbra::Persistence::WorldStreamingStateSubHashes sub;
     runner.ComputeWorldHashAndSubHashes(cp.world_hash, sub);
+    if (cp.world_hash.empty() || runner.Session()->GetRegionSchedulerFault())
+        return std::nullopt;
     cp.terrain = sub.terrain;
     cp.water = sub.water;
     cp.entities = sub.entities;
@@ -89,6 +95,10 @@ int RunRecord(const ServerCliOptions& options) {
     header.collision_radius = static_cast<std::uint32_t>(options.collision_radius);
     header.engine_version = std::string(luminumbra::core::GetEngineVersionString());
     header.start_world_hash = runner.ComputeWorldHash();
+    if (header.start_world_hash.empty() || runner.Session()->GetRegionSchedulerFault()) {
+        LUMINUMBRA_CORE_ERROR("record: initial authority capture failed; recording aborted");
+        return 1;
+    }
     header.system_config_identity = runner.Session()->SystemConfigIdentity();
     header.preset_content_hash = runner.Session()->PresetContentHash();
 
@@ -124,8 +134,19 @@ int RunRecord(const ServerCliOptions& options) {
         if (runner.Session()->ActiveRegionsEnabled())
             schedule_trace.emplace_back(executed, runner.Session()->GetRegionSchedule().digest);
         if ((executed % kCheckpointIntervalTicks) == 0) {
-            writer.RecordCheckpoint(CaptureCheckpoint(executed, runner));
+            const auto checkpoint = CaptureCheckpoint(executed, runner);
+            if (!checkpoint) {
+                LUMINUMBRA_CORE_ERROR("record: authority capture failed; recording aborted");
+                return 1;
+            }
+            writer.RecordCheckpoint(*checkpoint);
         }
+    }
+
+    const std::string final_hash = runner.ComputeWorldHash();
+    if (final_hash.empty() || runner.Session()->GetRegionSchedulerFault()) {
+        LUMINUMBRA_CORE_ERROR("record: final authority capture failed; recording aborted");
+        return 1;
     }
 
     if (!writer.Finalize(executed)) {
@@ -151,7 +172,6 @@ int RunRecord(const ServerCliOptions& options) {
             return 1;
         }
     }
-    const std::string final_hash = runner.ComputeWorldHash();
     const fs::path save_dir = runner.Session()->GetWorldSaveDir();
     runner.Shutdown();
     if (!save_dir.empty()) {
@@ -243,6 +263,10 @@ int RunReplay(const ServerCliOptions& options) {
     // The post-boot hash must match the recorded start_world_hash, else the boot
     // parameters or worldgen drifted before tick 1 (a tick-0 divergence).
     const std::string live_start = runner.ComputeWorldHash();
+    if (live_start.empty() || runner.Session()->GetRegionSchedulerFault()) {
+        LUMINUMBRA_CORE_ERROR("replay: initial authority capture failed");
+        return 1;
+    }
     bool start_match = (live_start == header.start_world_hash);
 
     // Drive the recorded ticks. At each checkpoint, compare live vs recorded.
@@ -303,7 +327,12 @@ int RunReplay(const ServerCliOptions& options) {
                 runner.Shutdown();
                 return 1;
             }
-            const auto live = CaptureCheckpoint(executed, runner);
+            const auto checkpoint = CaptureCheckpoint(executed, runner);
+            if (!checkpoint) {
+                LUMINUMBRA_CORE_ERROR("replay: authority capture failed");
+                return 1;
+            }
+            const auto& live = *checkpoint;
             // Compare top-level hash, then localize via authoritative sub-hashes.
             if (live.world_hash != recorded->world_hash) {
                 diverged = true;
@@ -329,6 +358,10 @@ int RunReplay(const ServerCliOptions& options) {
     }
 
     const std::string live_end = diverged ? actual_hash : runner.ComputeWorldHash();
+    if (live_end.empty() || runner.Session()->GetRegionSchedulerFault()) {
+        LUMINUMBRA_CORE_ERROR("replay: final authority capture failed");
+        return 1;
+    }
     const bool end_hash_match = !diverged && (live_end == [&]() -> std::string {
         // The recorded end-hash is the last checkpoint's world_hash if the run
         // ends on a checkpoint boundary; otherwise re-derive from the trailer

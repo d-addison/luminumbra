@@ -9,6 +9,7 @@
 #include "persistence/WorldPersistenceRoundtrip.h"
 #include "systems/FoliageRegistryStage.h"
 
+#include <bit>
 #include <exception>
 #include <set>
 #include <stdexcept>
@@ -97,6 +98,15 @@ std::string AuthorityHashState::FoldEcology(const std::string& ecology) const {
 
 const std::string& AuthorityHashState::AmbientBytes(std::uint8_t channels, bool weather) const {
     return m_ambient.at({channels, weather});
+}
+
+std::string
+AuthorityHashState::AmbientHash(std::uint8_t channels, bool weather, const Vec3& anchor) const {
+    auto bytes = AmbientBytes(channels, weather);
+    bytes += "|ambient_anchor:";
+    for (const float coordinate : {anchor.x, anchor.z})
+        Append(bytes, std::bit_cast<std::uint32_t>(coordinate), 4);
+    return Persistence::StableChecksum(bytes);
 }
 
 AuthorityHashCapture CaptureAuthorityHashState(const AuthorityHashInputs& inputs) {
@@ -189,10 +199,15 @@ AuthorityHashCapture CaptureAuthorityHashState(const AuthorityHashInputs& inputs
             (void)age;
             owners.insert(key);
         }
+        const auto empty_avatar_snapshot =
+            Ecs::SerializeEntityRegistrySnapshotJson(Ecs::EntityRegistrySnapshot{});
+        const std::string_view avatar_bytes = inputs.avatar_bytes == empty_avatar_snapshot
+                                                  ? std::string_view{}
+                                                  : std::string_view{inputs.avatar_bytes};
         std::string chunk_envelope = "authority_chunks:v1:";
         Append(chunk_envelope, 3, 4);
         Frame(chunk_envelope, "identity", inputs.identity_bytes);
-        Frame(chunk_envelope, "avatars", inputs.avatar_bytes);
+        Frame(chunk_envelope, "avatars", avatar_bytes);
         std::string contents;
         Append(contents, owners.size(), 8);
         for (const auto key : owners) {
@@ -257,6 +272,8 @@ AuthorityHashCapture CaptureAuthorityHashState(const AuthorityHashInputs& inputs
         state.m_pendingDeposits = pending.deposit_bytes();
         if (!pending.deposits.empty())
             Frame(state.m_energy, "pending_deposits", state.m_pendingDeposits);
+        const auto ground_bytes = inputs.ground.canonical_bytes();
+        const auto field_bytes = inputs.fields.canonical_bytes();
         state.m_authority = "simulation_authority:v1:";
         Append(state.m_authority, 10, 4);
         Frame(state.m_authority, "clock", inputs.clock_bytes);
@@ -272,13 +289,45 @@ AuthorityHashCapture CaptureAuthorityHashState(const AuthorityHashInputs& inputs
             Append(empty_configuration, config.reduced_shift, 1);
         }
         Frame(state.m_authority, "empty_ledger_configuration", empty_configuration);
-        Frame(state.m_authority, "ground", inputs.ground.canonical_bytes());
-        Frame(state.m_authority, "fields", inputs.fields.canonical_bytes());
+        Frame(state.m_authority, "ground", ground_bytes);
+        Frame(state.m_authority, "fields", field_bytes);
         Frame(state.m_authority, "energy", state.m_energy);
         Frame(state.m_authority, "creatures", state.m_creatures);
         Frame(state.m_authority, "plants", state.m_plants);
         Frame(state.m_authority, "pending_events", state.m_pendingEvents);
         Frame(state.m_authority, "pending_deposits", state.m_pendingDeposits);
+        // Named domains localize authority without adding ComposeWorldHash slots.
+        std::string regions = "authority_regions:v1:";
+        Append(regions, 4, 4);
+        Frame(regions, "clock", inputs.clock_bytes);
+        Frame(regions, "ledger", ledger_bytes);
+        Frame(regions, "empty_ledger_configuration", empty_configuration);
+        Frame(regions, "pending_events", state.m_pendingEvents);
+        std::string pages = "authority_pages:v1:";
+        Append(pages, 3, 4);
+        Frame(pages, "fields", field_bytes);
+        Frame(pages, "energy", state.m_energy);
+        Frame(pages, "pending_deposits", state.m_pendingDeposits);
+        auto& sub = state.m_subHashes;
+        sub.active_regions = true;
+        sub.terrain = state.m_terrainHash;
+        sub.water = state.m_waterHash;
+        sub.entities = Persistence::StableChecksum(avatar_bytes.empty() ? empty_avatar_snapshot
+                                                                        : inputs.avatar_bytes);
+        sub.regions = Persistence::StableChecksum(regions);
+        sub.creatures = Persistence::StableChecksum(state.m_creatures);
+        sub.items = Persistence::StableChecksum(ground_bytes);
+        sub.pages = Persistence::StableChecksum(pages);
+        const auto hash_nonempty = [](const std::string& bytes) {
+            return bytes.empty() ? std::string{} : Persistence::StableChecksum(bytes);
+        };
+        sub.aether_state = hash_nonempty(state.m_energy);
+        sub.scents = hash_nonempty(state.m_scent);
+        sub.plants = hash_nonempty(state.m_plants);
+        sub.ecology = state.FoldEcology(
+            state.m_creatures.empty()
+                ? std::string{}
+                : Persistence::StableChecksum("ecology:creatures:v3:" + state.m_creatures));
         state.m_ambient.emplace(std::make_pair(std::uint8_t{3}, false),
                                 inputs.fields.ambient_bytes(3, false));
         state.m_ambient.emplace(std::make_pair(std::uint8_t{12}, true),

@@ -1,5 +1,6 @@
 #include "WorldPersistenceRoundtrip.h"
 #include "../systems/WaterSystem.h"
+#include "world/AuthorityHashState.h"
 
 #include "../core/Log.h"
 #include "../core/ResidencyContract.h" // the hash scope derives from the contract
@@ -1741,6 +1742,27 @@ ComputeWorldStreamingStateSubHashes(const WorldStreamingState& state,
     WorldStreamingStateSubHashes sub = ComputeWorldStreamingStateSubHashes(state);
     sub.entities = Checksum(entity_snapshot_json);
     return sub;
+}
+
+void ComputeAuthorityWorldHashes(const world::AuthorityHashState& authority,
+                                 const Vec3& ambient_anchor,
+                                 std::string& world_hash,
+                                 WorldStreamingStateSubHashes& sub_hashes) {
+    auto sub = authority.sub_hashes();
+    sub.wind = authority.AmbientHash(3, false, ambient_anchor);
+    sub.weather = authority.AmbientHash(12, true, ambient_anchor);
+    sub.aether = authority.AmbientHash(16, false, ambient_anchor);
+    if (!sub.aether_state.empty())
+        sub.aether = StableChecksum(sub.aether + "|state:" + sub.aether_state);
+    auto composed = ComposeWorldHash(authority.chunk_hash(),
+                                     sub.wind,
+                                     sub.weather,
+                                     sub.aether,
+                                     sub.scents,
+                                     sub.ecology,
+                                     sub.plants);
+    world_hash = std::move(composed);
+    sub_hashes = std::move(sub);
 }
 
 std::string ComposeWorldHash(const std::string& chunk_hash,
