@@ -41,11 +41,18 @@ Hydraulic/thermal relief defaults on in revision 7; explicit
 Biome tables, climate frequencies and biome relief retain their controls. The
 [SDF contract](shield/sdf-contract.md) describes their sampling semantics.
 
-Current-format saves without embedded presets that name one of the eight packaged
-presets resolve to frozen revision-6 copies in
-`worlds/atlas/presets-rev6/`; new saves embed resolved choices. Other named presets
-retain their previous resolution and validation. This is preset fallback within
-the current save format, not obsolete-world migration.
+New saves embed resolved choices in `preset.json` and write `presetFormat: 1`
+and `presetIdentity` in `world_info.json`. The identity is `StableChecksum` (FNV-1a)
+of the canonical preset JSON (`nlohmann::json::parse(...).dump()`), independent of
+whitespace and distinct from the runtime identity that includes dependencies.
+A marked save refuses a missing embedded preset, a missing or mismatched identity,
+or an unsupported preset format; it never substitutes packaged content. Refusal
+does not modify files. Only legacy saves without the marker and embedded preset
+may fall back: the eight packaged names resolve to frozen revision-6 copies in
+`worlds/atlas/presets-rev6/`, and other names retain their original atlas path.
+Any recorded legacy identity is still verified. Resaving an opened legacy world
+embeds its exact preset and records the marker and identity. This is preset
+fallback within the current container format, not obsolete-world migration.
 
 Failures are deliberately distinct. Recognized older versions receive the refusal
 above. Higher versions report `unsupported future LMR1 container version`,
@@ -158,6 +165,9 @@ continuation are planned for v0.3.1. Five-minute dedicated-server autosave does
 not implement those persistence slices. LMR1 v2,
 world_manifest.v1, FSD2 v3, and existing canonical chunk and entity serialization
 are unchanged; preset revision 7 retains revision 6 omission compatibility.
+The additive metadata contract `presetFormat: 1` requires an embedded preset
+and its canonical-JSON checksum. It changes neither the container version nor
+the existing `StableChecksum` algorithm or runtime dependency-content hash.
 
 An absent energy record restores an empty layer with its next firing on the
 next absolute eight-tick boundary. A legacy import may carry a different
