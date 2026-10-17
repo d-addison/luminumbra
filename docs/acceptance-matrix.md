@@ -6,14 +6,15 @@ Statuses declare the available evidence. Static validation requires a mapping fo
 
 | Status | Rows |
 | --- | ---: |
-| covered | 18 |
+| covered | 19 |
 | partial | 8 |
 | needs-native-run | 17 |
 | planned | 85 |
-| Total | 128 |
+| Total | 129 |
 
 | Row | Status | Source | Requirements | Statement | Evidence |
 | --- | --- | --- | --- | --- | --- |
+| render.frame-scan-schema | covered | `docs/render-benchmark.md#continuous-cpu-attribution-issue-387` |  | Frame scans declare luminumbra.frame_scan.v2 for nullable foliage.instances: integers include known zero, null means unknown, and instance_capacity is never a substitute count. The source wiring regression checks the shared writer used by direct captures and scene surveys, including the schema and known/unknown serialization branches; it does not execute the renderer. | ctest: `FrameAttributionWiringPython` |
 | perf.floor-p99 | needs-native-run | `docs/distant-world.md#performance-measurement-contract` | dw.mappings.006 | Both profiles meet p99 frame_wall of at most 16.67 ms on every workload. | ctest: `RenderContractPython`<br>script: `tools/perf/validate_render_capture.py`<br>script: `tools/perf/render_budget.py`<br>native: `tools/gates/run-render-qualification.ps1` (planned: render qualification gate (v0.3.1); owner: ac) -- command: `pwsh tools/gates/run-render-qualification.ps1 -Package <dir> -OutDir <dir>`; receipt: `luminumbra.render_qualification.v1` |
 | perf.target-report-only | covered | `docs/distant-world.md#performance-measurement-contract` | dw.mappings.007 | The Python budget evaluator reports the 8.33 ms target (p50 for Quality, p50 and p99 for Performance); its pass/fail decision uses only the floor verdict. | ctest: `RenderBudgetPython`<br>script: `tools/perf/render_budget.py` |
 | perf.adapter-identity | needs-native-run | `docs/distant-world.md#performance-measurement-contract` | dw.mappings.008 | Client reports must record GL vendor, renderer and version from glGetString. RenderContractPython accepts synthetic qualified-adapter strings and rejects a renderer mismatch against the qualified RTX 5070 Ti; it does not exercise glGetString or the client report assignments. GL identity recording remains outstanding native qualification. | ctest: `RenderContractPython`<br>script: `tools/perf/validate_render_capture.py`<br>native: `tools/perf/run_qualification.py` (planned: render qualification runner (v0.3.1); owner: ac) -- command: `python tools/perf/run_qualification.py --package <dir> --out <dir> --declare-refresh 3840x1600=143`; receipt: `luminumbra.render_qualification.v1` |
