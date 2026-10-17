@@ -160,6 +160,18 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertIn("m_pass.frame_instance_count_known() ? "
                       "std::optional<std::size_t>(m_pass.frame_instance_count()) : std::nullopt", scope)
 
+    def test_nullable_frame_scan_count_requires_v2_for_all_capture_paths(self):
+        writer = compact(block(read(CLIENT / "rendering/FrameScan.cpp"),
+                               "bool WriteFrameScanReport("))
+        self.assertIn('j["schema"] = "luminumbra.frame_scan.v2";', writer)
+        self.assertIn('foliage["instances"] = report.foliage_instance_count_known ? '
+                      'nlohmann::json(report.foliage_instances) : nlohmann::json(nullptr);', writer)
+        self.assertIn('foliage["instance_capacity"] = report.foliage_instance_capacity;', writer)
+        self.assertIn('j["foliage"] = std::move(foliage);', writer)
+        for source in (self.main, read(CLIENT / "rendering/SceneSurvey.cpp")):
+            self.assertIn("WriteFrameScanReport(", source)
+            self.assertNotIn("luminumbra.frame_scan.", source)
+
     def test_recorder_propagates_writer_failure_and_checks_stream_state(self):
         record = compact(block(self.collector, "bool FrameRecorder::record("))
         self.assertTrue(record.startswith("if (!active()) return false; return write_csv_row(m_out,"))
