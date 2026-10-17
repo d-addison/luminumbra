@@ -45,6 +45,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -80,6 +81,141 @@ _ENV_NAMES = (
 
 class CacheMiss(Exception):
     """The key for this unit cannot be established; run clang-tidy."""
+
+
+class _WindowsJob:
+    """Own a suspended driver and all descendants, including orphaned ones."""
+
+    def __init__(self):
+        import ctypes
+        from ctypes import wintypes
+
+        class ThreadEntry(ctypes.Structure):
+            _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+                        ("th32ThreadID", wintypes.DWORD), ("th32OwnerProcessID", wintypes.DWORD),
+                        ("tpBasePri", wintypes.LONG), ("tpDeltaPri", wintypes.LONG),
+                        ("dwFlags", wintypes.DWORD)]
+
+        class Accounting(ctypes.Structure):
+            _fields_ = [(name, ctypes.c_longlong) for name in (
+                "TotalUserTime", "TotalKernelTime", "ThisPeriodTotalUserTime", "ThisPeriodTotalKernelTime"
+            )] + [(name, wintypes.DWORD) for name in (
+                "TotalPageFaultCount", "TotalProcesses", "ActiveProcesses", "TotalTerminatedProcesses")]
+
+        self._ctypes, self._thread_entry, self._accounting = ctypes, ThreadEntry, Accounting
+        self._api = ctypes.WinDLL("kernel32", use_last_error=True)
+        signatures = {
+            "CreateJobObjectW": (wintypes.HANDLE, (ctypes.c_void_p, wintypes.LPCWSTR)),
+            "AssignProcessToJobObject": (wintypes.BOOL, (wintypes.HANDLE, wintypes.HANDLE)),
+            "TerminateJobObject": (wintypes.BOOL, (wintypes.HANDLE, wintypes.UINT)),
+            "QueryInformationJobObject": (wintypes.BOOL, (wintypes.HANDLE, ctypes.c_int,
+                                                       ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p)),
+            "CreateToolhelp32Snapshot": (wintypes.HANDLE, (wintypes.DWORD, wintypes.DWORD)),
+            "Thread32First": (wintypes.BOOL, (wintypes.HANDLE, ctypes.POINTER(ThreadEntry))),
+            "Thread32Next": (wintypes.BOOL, (wintypes.HANDLE, ctypes.POINTER(ThreadEntry))),
+            "OpenThread": (wintypes.HANDLE, (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)),
+            "ResumeThread": (wintypes.DWORD, (wintypes.HANDLE,)),
+            "CloseHandle": (wintypes.BOOL, (wintypes.HANDLE,)),
+        }
+        for name, (result, arguments) in signatures.items():
+            function = getattr(self._api, name)
+            function.restype, function.argtypes = result, arguments
+        self._handle = self._require(self._api.CreateJobObjectW(None, None))
+
+    def _require(self, value):
+        if not value:
+            raise self._ctypes.WinError(self._ctypes.get_last_error())
+        return value
+
+    def start(self, process):
+        self._require(self._api.AssignProcessToJobObject(self._handle, int(process._handle)))
+        # Popen closes the primary thread handle. Find that sole suspended
+        # thread with Toolhelp, then resume it only after job assignment.
+        snapshot = self._api.CreateToolhelp32Snapshot(4, 0)  # TH32CS_SNAPTHREAD
+        if snapshot == self._ctypes.c_void_p(-1).value:
+            raise self._ctypes.WinError(self._ctypes.get_last_error())
+        try:
+            entry = self._thread_entry()
+            entry.dwSize = self._ctypes.sizeof(entry)
+            found = self._api.Thread32First(snapshot, self._ctypes.byref(entry))
+            while found:
+                if entry.dwSize < self._ctypes.sizeof(entry):
+                    raise OSError("incomplete tool thread information")
+                if entry.th32OwnerProcessID == process.pid:
+                    thread = self._require(self._api.OpenThread(2, False, entry.th32ThreadID))
+                    try:
+                        if self._api.ResumeThread(thread) == 0xFFFFFFFF:
+                            raise self._ctypes.WinError(self._ctypes.get_last_error())
+                        return
+                    finally:
+                        self._api.CloseHandle(thread)
+                found = self._api.Thread32Next(snapshot, self._ctypes.byref(entry))
+            raise OSError("cannot find suspended tool thread")
+        finally:
+            self._api.CloseHandle(snapshot)
+
+    def terminate(self):
+        self._require(self._api.TerminateJobObject(self._handle, 1))
+        accounting = self._accounting()
+        while True:
+            self._require(self._api.QueryInformationJobObject(
+                self._handle, 1, self._ctypes.byref(accounting), self._ctypes.sizeof(accounting), None))
+            if not accounting.ActiveProcesses:
+                return
+            time.sleep(0.01)
+
+    def close(self):
+        self._api.CloseHandle(self._handle)
+
+
+def run_process(command, *, timeout, capture_output=False, check=False, **kwargs):
+    """Run a timed tool and terminate its entire tree before releasing files."""
+    if capture_output:
+        if "stdout" in kwargs or "stderr" in kwargs:
+            raise ValueError("capture_output cannot be combined with stdout or stderr")
+        kwargs.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    job = None
+    if os.name == "nt":
+        # CREATE_SUSPENDED closes the race between launch and job assignment:
+        # even a fast wrapper cannot spawn a child outside the job.
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | 4
+        job = _WindowsJob()
+    else:
+        kwargs["start_new_session"] = True
+    try:
+        with subprocess.Popen(command, **kwargs) as process:
+            try:
+                if job is not None:
+                    job.start(process)
+                stdout, stderr = process.communicate(timeout=timeout)
+            except BaseException as error:
+                try:
+                    if job is not None:
+                        job.terminate()
+                        # Assignment may have failed while the driver was
+                        # still suspended, outside the otherwise empty job.
+                        process.kill()
+                    else:
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass  # The entire group has already exited.
+                except BaseException:
+                    process.kill()
+                    process.wait()
+                    raise
+                stdout, stderr = process.communicate()
+                if isinstance(error, subprocess.TimeoutExpired) and job is not None:
+                    # Windows reader threads collect partial output on join.
+                    error.stdout, error.stderr = stdout, stderr
+                raise
+            completed = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+            if check:
+                completed.check_returncode()
+            return completed
+    finally:
+        if job is not None:
+            job.close()
 
 
 def parse_shard(value: str) -> tuple[int, int]:
@@ -381,7 +517,7 @@ class ToolIdentity:
             if known is not None and content == known[1]:
                 value = known[2]
             else:
-                completed = subprocess.run(
+                completed = run_process(
                     [resolved, "--version"],
                     stdin=subprocess.DEVNULL,
                     capture_output=True,
@@ -436,7 +572,7 @@ class KeyBuilder:
             compiler_version = self._tools.describe(arguments[0], directory)
             command = dependency_command(arguments)
             try:
-                completed = subprocess.run(
+                completed = run_process(
                     command,
                     cwd=directory,
                     stdin=subprocess.DEVNULL,
@@ -573,7 +709,7 @@ def run_command(args: argparse.Namespace) -> int:
         tu, key, _ = item
         command = [args.clang_tidy, "-p", args.build_dir, "-quiet", f"--config={args.config}", tu]
         try:
-            completed = subprocess.run(
+            completed = run_process(
                 command,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,

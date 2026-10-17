@@ -5,12 +5,14 @@ whole analysis input is identical to an earlier passing run."""
 import importlib.util
 import concurrent.futures
 import contextlib
+import ctypes
 import io
 import json
 import ntpath
 import os
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -21,7 +23,7 @@ import time
 import unittest
 from types import SimpleNamespace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "tidy_cache.py"
@@ -106,6 +108,340 @@ sys.exit(0)
 """
 
 
+def assert_tree_timeout(case, launch, error_type=subprocess.TimeoutExpired, *, driver_exits=False):
+    """Exercise a real driver and grandchild, and reap the fixture on failure."""
+    with tempfile.TemporaryDirectory(prefix="process-tree-") as temporary:
+        directory = Path(temporary)
+        ready = directory / "grandchild.pid"
+        script = directory / "driver.py"
+        script.write_text(
+            "import subprocess, sys, time\n"
+            'code = ("import os, pathlib, sys, time; "\n'
+            '        "ready = pathlib.Path(sys.argv[1]); pending = ready.with_suffix(\\".ready\\"); "\n'
+            '        "pending.write_text(str(os.getpid())); pending.replace(ready); time.sleep(60)")\n'
+            "subprocess.Popen([sys.executable, '-I', '-B', '-c', code, sys.argv[1]])\n"
+            "print('driver output', flush=True)\n"
+            + ("sys.exit(0)\n" if driver_exits else "time.sleep(60)\n"), encoding="utf-8")
+        grandchild = None
+        handle = None
+        process = None
+        subreaper = None
+        terminated = False
+        if sys.platform == "linux":
+            # Adopt the orphan so the regression verifies reaping as well as
+            # termination, even in containers whose init does not reap zombies.
+            libc = ctypes.CDLL(None, use_errno=True)
+            subreaper = ctypes.c_int()
+            case.assertEqual(libc.prctl(37, ctypes.byref(subreaper), 0, 0, 0), 0)
+            case.assertEqual(libc.prctl(36, 1, 0, 0, 0), 0)
+        if os.name == "nt":
+            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel.OpenProcess.argtypes = (ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong)
+            kernel.OpenProcess.restype = ctypes.c_void_p
+            kernel.WaitForSingleObject.argtypes = (ctypes.c_void_p, ctypes.c_ulong)
+            kernel.TerminateProcess.argtypes = (ctypes.c_void_p, ctypes.c_uint)
+            kernel.CloseHandle.argtypes = (ctypes.c_void_p,)
+        popen = subprocess.Popen
+
+        def start(command, **kwargs):
+            nonlocal process
+            process = popen(command, **kwargs)
+            communicate = process.communicate
+
+            def wait_until_ready(input=None, timeout=None):
+                nonlocal grandchild, handle
+                if timeout is not None:
+                    deadline = time.monotonic() + 5
+                    while not ready.exists() or not ready.read_text():
+                        case.assertLess(time.monotonic(), deadline, "grandchild did not start")
+                        time.sleep(0.01)
+                    grandchild = int(ready.read_text())
+                    if os.name == "nt":
+                        handle = kernel.OpenProcess(0x100001, False, grandchild)
+                        case.assertTrue(handle)
+                    # Start the actual timeout only after the descendant exists.
+                    return communicate(input, timeout=0.05)
+                return communicate(input)
+
+            process.communicate = wait_until_ready
+            return process
+
+        def gone():
+            nonlocal terminated
+            if terminated:
+                return True
+            if os.name == "nt":
+                terminated = kernel.WaitForSingleObject(handle, 0) == 0
+                return terminated
+            try:
+                waited, _ = os.waitpid(grandchild, os.WNOHANG)
+                if waited:
+                    terminated = True
+                    return True
+            except ChildProcessError:
+                pass
+            try:
+                os.kill(grandchild, 0)
+            except ProcessLookupError:
+                terminated = True
+                return True
+            return False
+
+        try:
+            def driver_only(command, **kwargs):
+                return start(command, **kwargs) if command[0] == sys.executable else popen(command, **kwargs)
+
+            with patch.object(subprocess, "Popen", side_effect=driver_only):
+                with case.assertRaises(error_type):
+                    launch([sys.executable, "-I", "-B", str(script), str(ready)], directory)
+            case.assertIsNotNone(grandchild)
+            case.assertIsNotNone(process.returncode)
+            deadline = time.monotonic() + 2
+            while not gone():
+                case.assertLess(time.monotonic(), deadline, "grandchild survived the timeout")
+                time.sleep(0.01)
+        finally:
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.wait()
+            if grandchild is not None and not gone():
+                if os.name == "nt":
+                    kernel.TerminateProcess(handle, 1)
+                    kernel.WaitForSingleObject(handle, 5000)
+                else:
+                    os.kill(grandchild, signal.SIGKILL)
+                    if subreaper is not None:
+                        os.waitpid(grandchild, 0)
+            if handle is not None:
+                kernel.CloseHandle(handle)
+            if subreaper is not None:
+                case.assertEqual(libc.prctl(36, subreaper.value, 0, 0, 0), 0)
+
+
+class ProcessRunnerContractTests(unittest.TestCase):
+    def setUp(self):
+        self.process = MagicMock(pid=123, returncode=0)
+        self.process.__enter__.return_value = self.process
+        self.popen = patch.object(MODULE.subprocess, "Popen", return_value=self.process).start()
+        self.addCleanup(patch.stopall)
+
+    def test_success_output_exit_codes_and_capture_validation(self):
+        for output in ((b"out", b"err"), ("out", "err"), (None, None)):
+            with self.subTest(output=output):
+                self.process.communicate.return_value = output
+                result = MODULE.run_process(["tool"], timeout=7)
+                self.assertEqual((result.stdout, result.stderr), output)
+                self.assertEqual(result.returncode, 0)
+        self.process.returncode = 2
+        self.assertEqual(MODULE.run_process(["tool"], timeout=7).returncode, 2)
+        with self.assertRaises(subprocess.CalledProcessError):
+            MODULE.run_process(["tool"], timeout=7, check=True)
+        self.popen.reset_mock()
+        for name in ("stdout", "stderr"):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                MODULE.run_process(["tool"], timeout=7, capture_output=True, **{name: subprocess.PIPE})
+        self.popen.assert_not_called()
+        self.popen.side_effect = OSError("cannot launch")
+        with self.assertRaisesRegex(OSError, "cannot launch"):
+            MODULE.run_process(["tool"], timeout=7)
+
+    def test_posix_timeout_and_interruption_kill_group_before_draining(self):
+        for error in (subprocess.TimeoutExpired("tool", 7, b"partial"), KeyboardInterrupt()):
+            with self.subTest(error=type(error)), patch.object(MODULE.os, "name", "posix"), \
+                    patch.object(MODULE.signal, "SIGKILL", 9, create=True), \
+                    patch.object(MODULE.os, "killpg", create=True) as killpg:
+                self.process.communicate.side_effect = [error, (b"partial", b"diagnostic")]
+                with self.assertRaises(type(error)):
+                    MODULE.run_process(["tool"], timeout=7, capture_output=True)
+                self.assertTrue(self.popen.call_args.kwargs["start_new_session"])
+                killpg.assert_called_once_with(123, signal.SIGKILL)
+                self.assertEqual(self.process.communicate.call_args_list[-1].kwargs, {})
+
+    def test_posix_missing_group_is_reaped_and_cleanup_errors_propagate(self):
+        for failure in (ProcessLookupError(), PermissionError("cannot terminate")):
+            with self.subTest(failure=type(failure)), patch.object(MODULE.os, "name", "posix"), \
+                    patch.object(MODULE.signal, "SIGKILL", 9, create=True), \
+                    patch.object(MODULE.os, "killpg", create=True, side_effect=failure):
+                self.process.communicate.side_effect = [subprocess.TimeoutExpired("tool", 7), (b"", b"")]
+                expected = subprocess.TimeoutExpired if isinstance(failure, ProcessLookupError) else PermissionError
+                with self.assertRaises(expected):
+                    MODULE.run_process(["tool"], timeout=7)
+                if expected is PermissionError:
+                    self.process.kill.assert_called_once()
+                    self.process.wait.assert_called_once()
+
+    def test_windows_job_flags_output_and_failure_inputs(self):
+        for stage in (None, "create", "launch", "start", "terminate"):
+            with self.subTest(stage=stage), patch.object(MODULE.os, "name", "nt"), \
+                    patch.object(MODULE.subprocess, "CREATE_NEW_PROCESS_GROUP", 512, create=True), \
+                    patch.object(MODULE, "_WindowsJob") as factory:
+                self.process.reset_mock()
+                self.process.communicate.side_effect = [subprocess.TimeoutExpired("tool", 7),
+                                                       (b"partial", b"diagnostic")]
+                job = factory.return_value
+                failure = OSError("job failure")
+                if stage == "create":
+                    factory.side_effect = failure
+                elif stage == "launch":
+                    self.popen.side_effect = failure
+                elif stage is not None:
+                    getattr(job, stage).side_effect = failure
+                    if stage == "start":
+                        self.process.communicate.side_effect = [(b"", b"")]
+                expected = OSError if stage else subprocess.TimeoutExpired
+                with self.assertRaises(expected) as raised:
+                    MODULE.run_process(["tool"], timeout=7, capture_output=True)
+                if stage == "create":
+                    job.close.assert_not_called()
+                    continue
+                self.assertEqual(self.popen.call_args.kwargs["creationflags"], 516)
+                job.close.assert_called_once()
+                if stage == "launch":
+                    job.start.assert_not_called()
+                    self.popen.side_effect = None
+                    continue
+                job.start.assert_called_once_with(self.process)
+                job.terminate.assert_called_once()
+                self.process.kill.assert_called_once()
+                if stage == "terminate":
+                    self.process.wait.assert_called_once()
+                elif stage is None:
+                    self.assertEqual(raised.exception.stdout, b"partial")
+                    self.assertEqual(raised.exception.stderr, b"diagnostic")
+
+    def test_windows_success_releases_job_after_collecting_output(self):
+        with patch.object(MODULE.os, "name", "nt"), \
+                patch.object(MODULE.subprocess, "CREATE_NEW_PROCESS_GROUP", 512, create=True), \
+                patch.object(MODULE, "_WindowsJob") as factory:
+            self.process.communicate.return_value = (b"out", b"err")
+            result = MODULE.run_process(["tool"], timeout=7)
+            self.assertEqual((result.stdout, result.stderr), (b"out", b"err"))
+            factory.return_value.start.assert_called_once_with(self.process)
+            factory.return_value.close.assert_called_once()
+            factory.return_value.terminate.assert_not_called()
+
+
+class WindowsJobTests(unittest.TestCase):
+    def make_job(self):
+        self.kernel = MagicMock()
+        self.kernel.CreateJobObjectW.return_value = 11
+        self.kernel.CreateToolhelp32Snapshot.return_value = 22
+        self.kernel.OpenThread.return_value = 33
+        self.kernel.ResumeThread.return_value = 1
+        self.kernel.QueryInformationJobObject.return_value = 1
+
+        def entry(snapshot, pointer):
+            pointer._obj.th32OwnerProcessID = 123
+            pointer._obj.th32ThreadID = 456
+            return True
+
+        self.kernel.Thread32First.side_effect = entry
+        patch.object(ctypes, "WinDLL", return_value=self.kernel, create=True).start()
+        patch.object(ctypes, "WinError", side_effect=lambda code: OSError("Windows API failure"),
+                     create=True).start()
+        patch.object(ctypes, "get_last_error", return_value=5, create=True).start()
+        self.addCleanup(patch.stopall)
+        return MODULE._WindowsJob()
+
+    def test_assign_before_resume_and_wait_for_every_descendant(self):
+        job = self.make_job()
+        job.start(SimpleNamespace(pid=123, _handle=44))
+        self.kernel.AssignProcessToJobObject.assert_called_once_with(11, 44)
+        self.kernel.OpenThread.assert_called_once_with(2, False, 456)
+        self.kernel.ResumeThread.assert_called_once_with(33)
+        calls = [call[0] for call in self.kernel.mock_calls]
+        self.assertLess(calls.index("AssignProcessToJobObject"), calls.index("ResumeThread"))
+        active = iter((2, 1, 0))
+
+        def query(handle, kind, pointer, size, returned):
+            pointer._obj.ActiveProcesses = next(active)
+            return True
+
+        self.kernel.QueryInformationJobObject.side_effect = query
+        with patch.object(MODULE.time, "sleep") as sleep:
+            job.terminate()
+        self.assertEqual(self.kernel.QueryInformationJobObject.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+        job.close()
+        self.assertEqual([call.args[0] for call in self.kernel.CloseHandle.call_args_list], [33, 22, 11])
+
+    def test_kernel_failure_inputs_release_acquired_handles(self):
+        for stage in ("CreateJobObjectW", "AssignProcessToJobObject", "CreateToolhelp32Snapshot",
+                      "Thread32First", "Thread32Next", "OpenThread", "ResumeThread",
+                      "TerminateJobObject", "QueryInformationJobObject"):
+            with self.subTest(stage=stage):
+                job = self.make_job()
+                function = getattr(self.kernel, stage)
+                function.side_effect = None
+                function.return_value = (ctypes.c_void_p(-1).value if stage == "CreateToolhelp32Snapshot"
+                                         else 0xFFFFFFFF if stage == "ResumeThread" else 0)
+                if stage == "Thread32Next":
+                    self.kernel.Thread32First.side_effect = None
+                    self.kernel.Thread32First.return_value = True
+                try:
+                    with self.assertRaises(OSError):
+                        if stage == "CreateJobObjectW":
+                            MODULE._WindowsJob()
+                        elif stage in {"TerminateJobObject", "QueryInformationJobObject"}:
+                            job.terminate()
+                        else:
+                            job.start(SimpleNamespace(pid=123, _handle=44))
+                finally:
+                    job.close()
+                handles = [call.args[0] for call in self.kernel.CloseHandle.call_args_list]
+                self.assertEqual(handles[-1], 11)
+                if stage in {"Thread32First", "Thread32Next", "OpenThread", "ResumeThread"}:
+                    self.assertIn(22, handles)
+                if stage == "ResumeThread":
+                    self.assertIn(33, handles)
+
+    def test_thread_enumeration_ignores_other_processes(self):
+        job = self.make_job()
+        entry = self.kernel.Thread32First.side_effect
+
+        def unrelated(snapshot, pointer):
+            pointer._obj.th32OwnerProcessID = 789
+            return True
+
+        self.kernel.Thread32First.side_effect = unrelated
+        self.kernel.Thread32Next.side_effect = entry
+        job.start(SimpleNamespace(pid=123, _handle=44))
+        self.kernel.Thread32Next.assert_called_once()
+        self.kernel.OpenThread.assert_called_once_with(2, False, 456)
+        job.close()
+
+    def test_partial_thread_information_refuses_resume_and_releases_snapshot(self):
+        job = self.make_job()
+
+        def partial(snapshot, pointer):
+            pointer._obj.dwSize = 8
+            return True
+
+        self.kernel.Thread32First.side_effect = partial
+        with self.assertRaisesRegex(OSError, "incomplete tool thread information"):
+            job.start(SimpleNamespace(pid=123, _handle=44))
+        self.kernel.ResumeThread.assert_not_called()
+        self.kernel.CloseHandle.assert_called_once_with(22)
+        job.close()
+
+
+class ProcessTreeTests(unittest.TestCase):
+    def test_timeout_terminates_and_reaps_grandchild(self):
+        for driver_exits in (False, True):
+            with self.subTest(driver_exits=driver_exits):
+                assert_tree_timeout(self, lambda command, directory: MODULE.run_process(
+                    command, cwd=directory, capture_output=True, timeout=1), driver_exits=driver_exits)
+
+    def test_dependency_timeout_terminates_grandchild_before_cache_miss(self):
+        def launch(command, directory):
+            builder = MODULE.KeyBuilder("hash", "tidy", SimpleNamespace(describe=lambda *args: "tool"))
+            entry = {"directory": str(directory), "arguments": command}
+            with patch.object(MODULE, "dependency_command", return_value=command):
+                builder.key_for(str(directory / "unit.cpp"), [entry], "{}")
+
+        assert_tree_timeout(self, launch, MODULE.CacheMiss)
+
+
 class TidyCacheTests(unittest.TestCase):
     def setUp(self):
         # Match tool identity paths even when Windows supplies an 8.3 temp path.
@@ -155,7 +491,7 @@ class TidyCacheTests(unittest.TestCase):
             "--clang-tidy", str(self.tidy), "--config", config,
             "--tool-file", str(tool_file or self.tool_file), "--", *map(str, files),
         ]
-        original_run = subprocess.run
+        original_run = MODULE.run_process
 
         def run_fixture(argv, **kwargs):
             # Preserve tool-file hashing, argv, output and exit status; only the
@@ -165,7 +501,7 @@ class TidyCacheTests(unittest.TestCase):
 
         out, err = io.StringIO(), io.StringIO()
         with patch.dict(os.environ, self.env, clear=True), patch.object(
-            MODULE.subprocess, "run", side_effect=run_fixture
+            MODULE, "run_process", side_effect=run_fixture
         ), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             status = MODULE.main(command)
         return subprocess.CompletedProcess(command, status, out.getvalue(), err.getvalue())
@@ -482,7 +818,7 @@ class ToolIdentityTests(unittest.TestCase):
 
     def test_same_tick_rewrite_is_detected_on_delayed_reuse(self):
         result = subprocess.CompletedProcess([], 0, b"tool version\n", b"")
-        with patch.object(MODULE.subprocess, "run", return_value=result) as version, \
+        with patch.object(MODULE, "run_process", return_value=result) as version, \
                 patch.object(MODULE.time, "time_ns", return_value=self.tick + 500_000_000) as clock:
             before = self.tools.describe(str(self.tool), str(self.root))
             self.write_tool(b"new tool")
@@ -496,7 +832,7 @@ class ToolIdentityTests(unittest.TestCase):
 
     def test_identity_is_revalidated_until_tick_closes(self):
         result = subprocess.CompletedProcess([], 0, b"tool version\n", b"")
-        with patch.object(MODULE.subprocess, "run", return_value=result) as version, \
+        with patch.object(MODULE, "run_process", return_value=result) as version, \
                 patch.object(MODULE, "sha256_file", wraps=MODULE.sha256_file) as content, \
                 patch.object(MODULE.time, "time_ns", return_value=self.tick + 500_000_000) as clock:
             before = self.tools.describe(str(self.tool), str(self.root))
@@ -513,7 +849,7 @@ class ToolIdentityTests(unittest.TestCase):
 
     def test_identical_content_with_new_fingerprint_reuses_version(self):
         result = subprocess.CompletedProcess([], 0, b"tool version\r\n", b"")
-        with patch.object(MODULE.subprocess, "run", return_value=result) as version, \
+        with patch.object(MODULE, "run_process", return_value=result) as version, \
                 patch.object(MODULE, "sha256_file", wraps=MODULE.sha256_file) as content:
             before = self.tools.describe(str(self.tool), str(self.root))
             os.utime(self.tool, ns=(self.tick + 1, self.tick + 1))
@@ -531,7 +867,7 @@ class ToolIdentityTests(unittest.TestCase):
                 patch.object(ntpath, "realpath", side_effect=ntpath.normpath), \
                 patch.object(MODULE.os, "stat", return_value=info), \
                 patch.object(MODULE, "sha256_file", return_value="content") as content, \
-                patch.object(MODULE.subprocess, "run", return_value=result) as version, \
+                patch.object(MODULE, "run_process", return_value=result) as version, \
                 patch.object(MODULE.shutil, "which") as which, \
                 patch.object(MODULE.time, "time_ns", return_value=self.tick + 2_000_000_000):
             before = self.tools.describe("../bin/CLANG++.EXE", r"C:\toolchain\build")
@@ -576,7 +912,7 @@ class ToolIdentityTests(unittest.TestCase):
         result = subprocess.CompletedProcess([], 0, b"tool version\n", b"")
         with patch.object(MODULE.concurrent.futures, "Future", ObservedFuture), \
                 patch.object(MODULE, "sha256_file", side_effect=hash_tool) as content, \
-                patch.object(MODULE.subprocess, "run", return_value=result) as version, \
+                patch.object(MODULE, "run_process", return_value=result) as version, \
                 patch.object(MODULE.time, "time_ns", return_value=self.tick + 500_000_000):
             threads[0].start()
             try:
@@ -606,7 +942,7 @@ class ToolIdentityTests(unittest.TestCase):
         self.assertTrue(all(isinstance(outcome, MODULE.CacheMiss) for outcome in outcomes))
         self.assertTrue(all("unreadable executable" in str(outcome) for outcome in outcomes))
         result = subprocess.CompletedProcess([], 0, b"tool version\n", b"")
-        with patch.object(MODULE.subprocess, "run", return_value=result) as version:
+        with patch.object(MODULE, "run_process", return_value=result) as version:
             self.assertIn(MODULE.sha256_bytes(b"old tool"),
                           self.tools.describe(str(self.tool), str(self.root)))
             self.assertEqual(version.call_count, 1)
@@ -615,7 +951,7 @@ class ToolIdentityTests(unittest.TestCase):
         result = subprocess.CompletedProcess([], 0, b"tool version\n", b"")
         for failure in (PermissionError("unreadable"), OSError("partial read")):
             with self.subTest(failure=failure), \
-                    patch.object(MODULE.subprocess, "run", return_value=result) as version, \
+                    patch.object(MODULE, "run_process", return_value=result) as version, \
                     patch.object(MODULE.time, "time_ns", return_value=self.tick + 500_000_000):
                 self.tools = MODULE.ToolIdentity()
                 before = self.tools.describe(str(self.tool), str(self.root))
@@ -635,10 +971,10 @@ class ToolIdentityTests(unittest.TestCase):
                     patch.object(MODULE.time, "time_ns", return_value=self.tick + 500_000_000):
                 self.tools = MODULE.ToolIdentity()
                 self.write_tool(b"old tool")
-                with patch.object(MODULE.subprocess, "run", return_value=success):
+                with patch.object(MODULE, "run_process", return_value=success):
                     before = self.tools.describe(str(self.tool), str(self.root))
                 self.write_tool(b"new tool")
-                with patch.object(MODULE.subprocess, "run", side_effect=[failure, success]) as version:
+                with patch.object(MODULE, "run_process", side_effect=[failure, success]) as version:
                     with self.assertRaises(MODULE.CacheMiss):
                         self.tools.describe(str(self.tool), str(self.root))
                     after = self.tools.describe(str(self.tool), str(self.root))
@@ -649,7 +985,7 @@ class ToolIdentityTests(unittest.TestCase):
 
     def test_identity_observed_after_tick_closes_uses_fingerprint(self):
         result = subprocess.CompletedProcess([], 0, b"tool version\n", b"")
-        with patch.object(MODULE.subprocess, "run", return_value=result) as version, \
+        with patch.object(MODULE, "run_process", return_value=result) as version, \
                 patch.object(MODULE.time, "time_ns", return_value=self.tick + 2_000_000_000):
             before = self.tools.describe(str(self.tool), str(self.root))
             self.assertEqual(self.tools.describe(str(self.tool), str(self.root)), before)
@@ -664,7 +1000,7 @@ class ToolIdentityTests(unittest.TestCase):
                 info = SimpleNamespace(st_mode=stat.S_IFREG, st_dev=1, st_ino=1,
                                        st_size=8, st_mtime_ns=self.tick)
                 with patch.object(MODULE.os, "stat", return_value=info), \
-                        patch.object(MODULE.subprocess, "run", return_value=result) as version, \
+                        patch.object(MODULE, "run_process", return_value=result) as version, \
                         patch.object(MODULE.time, "time_ns", return_value=self.tick + 2_000_000_000):
                     before = tools.describe(str(self.tool), str(self.root))
                     self.write_tool(b"new tool")
@@ -680,7 +1016,7 @@ class ToolIdentityTests(unittest.TestCase):
                                st_size=8, st_mtime_ns=self.tick)
         with patch.object(MODULE.os.path, "isfile", return_value=True), \
                 patch.object(MODULE.os, "stat", return_value=info), \
-                patch.object(MODULE.subprocess, "run", return_value=result) as version, \
+                patch.object(MODULE, "run_process", return_value=result) as version, \
                 patch.object(MODULE.time, "time_ns", return_value=self.tick + 2_000_000_000):
             self.tools.describe(str(self.tool), str(self.root))
             # Model a replacement between the path check and the stat call.

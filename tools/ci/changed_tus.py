@@ -16,6 +16,7 @@ import importlib.util
 import json
 import ntpath
 import os
+from os import walk as walk_header_directories
 from pathlib import Path
 import re
 import shlex
@@ -251,7 +252,7 @@ def compiler_header_roots(arguments: list[str], directory: Path) -> tuple[Path, 
 def _compiler_header_roots(probe: tuple[str, ...], directory: Path,
                            environment: tuple[tuple[str, str], ...]) -> tuple[Path, ...]:
     try:
-        result = subprocess.run(list(probe), cwd=directory, stdin=subprocess.DEVNULL,
+        result = _DEPS.run_process(list(probe), cwd=directory, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, timeout=1800,
                                 env=dict(environment))
@@ -326,7 +327,10 @@ def check_pch_search_roots(compiler: str, search: set[Path]) -> None:
             # Resolve before deduplication and keying: Windows handles expand
             # short names, and Path equality folds native case/separators.
             roots = tuple(sorted({path.resolve() for path in search}))
-            key = (compiler, roots)
+            # Compiler spellings are case/separator insensitive on Windows.
+            # Keep the launch argument intact; only the scan identity changes.
+            compiler_key = ntpath.normcase(ntpath.normpath(compiler)) if os.name == "nt" else compiler
+            key = (compiler_key, roots)
             # Sample before walking or checking membership, so crossing a
             # timestamp tick during either operation cannot confer trust.
             checked_at = time.time_ns()
@@ -339,7 +343,7 @@ def check_pch_search_roots(compiler: str, search: set[Path]) -> None:
                     stamps[root] = (directory_stamp(root), None)
                     if stamps[root][0] is None:
                         continue  # Compilers ignore nonexistent include directories.
-                    for current, children, files in os.walk(root, followlinks=True, onerror=fail):
+                    for current, children, files in walk_header_directories(root, followlinks=True, onerror=fail):
                         path = Path(current)
                         # Capture each directory before os.walk enumerates it,
                         # so a concurrent insertion cannot acquire a cached
@@ -528,7 +532,7 @@ def parse_arguments(arguments: list[str]) -> tuple[list[str], list[str]]:
 
 
 def execute(command, directory: Path, check=True):
-    completed = subprocess.run(command, cwd=directory, stdin=subprocess.DEVNULL,
+    completed = _DEPS.run_process(command, cwd=directory, stdin=subprocess.DEVNULL,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                text=True, timeout=1800)
     if check and completed.returncode:

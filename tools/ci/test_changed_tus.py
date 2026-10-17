@@ -2,7 +2,7 @@
 """Isolated stdlib contracts for dependency-expanded compile and tidy checks."""
 
 import argparse
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import importlib.util
 import io
 import json
@@ -787,7 +787,7 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
                             + '\r\n#include <...> search starts here:\r\n ' + str(search)
                             + '\r\nEnd of search list.\r\n')
                         with patch.object(tus, "compiler_header_roots", side_effect=COMPILER_HEADER_ROOTS), \
-                                patch.object(tus.subprocess, "run", return_value=result) as probe:
+                                patch.object(tus._DEPS, "run_process", return_value=result) as probe:
                             entry = self.entries()[0]
                             self.assertEqual(tus.replay_arguments(entry), tus.clean_arguments(entry["arguments"]))
                             self.assertEqual(probe.call_count, 1)
@@ -819,7 +819,7 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         # A cache beside a shadowed header must not change forced-header lookup.
         (second / "forced.hpp.pch").write_bytes(b"shadowed cache")
         with patch.object(tus, "compiler_header_roots", side_effect=COMPILER_HEADER_ROOTS), \
-                patch.object(tus.subprocess, "run", return_value=result) as probe:
+                patch.object(tus._DEPS, "run_process", return_value=result) as probe:
             self.entries()
             probe.assert_not_called()
             (first / "forced.hpp.pch").write_bytes(b"shadowed cache")
@@ -856,7 +856,7 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         for result in results:
             with self.subTest(result=result), \
                     patch.object(tus, "compiler_header_roots", side_effect=COMPILER_HEADER_ROOTS), \
-                    patch.object(tus.subprocess, "run", side_effect=[result]), \
+                    patch.object(tus._DEPS, "run_process", side_effect=[result]), \
                     self.assertRaisesRegex(tus.SelectionError, "compiler header search paths"):
                 self.entries()
         is_file = Path.is_file
@@ -918,7 +918,7 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
             result = subprocess.CompletedProcess([], 0, "", '#include "..." search starts here:\r\n'
                 '#include <...> search starts here:\r\n ' + str(search) + '\r\nEnd of search list.\r\n')
             with patch.object(tus, "compiler_header_roots", side_effect=COMPILER_HEADER_ROOTS), \
-                    patch.object(tus.subprocess, "run", return_value=result) as probe:
+                    patch.object(tus._DEPS, "run_process", return_value=result) as probe:
                 self.assertEqual(tus.replay_arguments(entry), tus.clean_arguments(entry["arguments"]))
                 for is_directory in (False, True):
                     binary = Path(str(header) + ".gch")
@@ -959,9 +959,22 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         entries = self.entries()
         result = subprocess.CompletedProcess([], 0, "", '#include <...> search starts here:\n '
             + str(search) + '\nEnd of search list.\n')
+        temporary_directory = tempfile.TemporaryDirectory
+
+        @contextmanager
+        def cleanup_with_walk(**kwargs):
+            with temporary_directory(**kwargs) as name:
+                yield name
+                # Windows cleanup also walks directories. Its OS calls must
+                # not be mistaken for another compiler header search.
+                for _ in os.walk(name):
+                    pass
+
         with patch.object(tus, "compiler_header_roots", side_effect=COMPILER_HEADER_ROOTS), \
-                patch.object(tus.subprocess, "run", return_value=result) as probe, \
-                patch.object(tus.os, "walk", wraps=os.walk) as walk:
+                patch.object(tus._DEPS, "run_process", return_value=result) as probe, \
+                patch.object(tus, "walk_header_directories", wraps=os.walk) as walk, \
+                patch.object(tus.tempfile, "TemporaryDirectory", side_effect=cleanup_with_walk), \
+                patch.object(os, "walk", wraps=os.walk) as cleanup_walk:
             tus.dependencies(entries[0])
             self.assertGreater(walk.call_count, 0)
             first_scans = walk.call_count
@@ -970,6 +983,7 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
             with patch.object(tus.shutil, "which", return_value="clang-tidy"):
                 tus.run_checks(self.arguments("tidy"), self.root, entries, self.build)
             self.assertEqual(walk.call_count, first_scans)
+            self.assertGreater(cleanup_walk.call_count, 0)
             self.assertEqual(probe.call_count, 1)
             # Reuse must not conceal caches added below an already scanned root.
             binary = search / "nested/current.hpp.gch"
@@ -995,7 +1009,7 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         for result in results:
             with self.subTest(result=result), \
                     patch.object(tus, "compiler_header_roots", side_effect=COMPILER_HEADER_ROOTS), \
-                    patch.object(tus.subprocess, "run", side_effect=[result]):
+                    patch.object(tus._DEPS, "run_process", side_effect=[result]):
                 with self.assertRaisesRegex(tus.SelectionError, "compiler header search paths"):
                     tus.replay_arguments(entry)
         self.assertEqual(self.commands, [])
@@ -1024,7 +1038,7 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
                 patch.object(Path, "is_symlink", autospec=True,
                              side_effect=lambda path: path == link), \
                 patch.object(tus, "directory_entries", side_effect=entries), \
-                patch.object(tus.os, "walk", side_effect=lambda *args, **kwargs: iter(frames)) as walk:
+                patch.object(tus, "walk_header_directories", side_effect=lambda *args, **kwargs: iter(frames)) as walk:
             tus.replay_arguments(entry)
             tus.replay_arguments(entry)
             self.assertEqual(walk.call_count, 1)
@@ -1115,7 +1129,7 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         with patch.object(tus, "directory_stamp", return_value=stamp), \
                 patch.object(tus.time, "time_ns", return_value=tick + 500_000_000) as clock, \
                 patch.object(tus.os, "listdir", wraps=os.listdir) as membership, \
-                patch.object(tus.os, "walk", wraps=os.walk) as walk:
+                patch.object(tus, "walk_header_directories", wraps=os.walk) as walk:
             tus.check_pch_search_roots("g++", {search})
             self.assertEqual(membership.call_count, 0)
             tus.check_pch_search_roots("g++", {search})
@@ -1135,7 +1149,7 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         with patch.object(tus, "directory_stamp", return_value=stamp), \
                 patch.object(tus.time, "time_ns", return_value=tick + 2_000_000_000), \
                 patch.object(tus.os, "listdir", wraps=os.listdir) as membership, \
-                patch.object(tus.os, "walk", wraps=os.walk) as walk:
+                patch.object(tus, "walk_header_directories", wraps=os.walk) as walk:
             tus.check_pch_search_roots("g++", {search})
             tus.check_pch_search_roots("g++", {search})
             self.assertEqual(membership.call_count, 0)
@@ -1154,7 +1168,7 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
                         # are intentionally memoized during normal replay.
                         tus._compiler_header_roots.cache_clear()
                         with self.subTest(arguments=arguments, trailing=trailing), \
-                                patch.object(tus.subprocess, "run", return_value=result) as run:
+                                patch.object(tus._DEPS, "run_process", return_value=result) as run:
                             self.assertEqual(COMPILER_HEADER_ROOTS(arguments + trailing, self.build), ())
                             self.assertEqual(run.call_args.args[0][-3:], ["-x", expected, "-"])
 
@@ -1687,7 +1701,7 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
     def test_profile_baseline_runs_real_execute_contract_and_preserves_nonfatal_targets(self):
         entry = self.entries()[0]
         args = self.arguments(warning_profile="msvc-approx", baseline_records=self.baseline_records(entry))
-        with patch.object(tus, "execute", side_effect=EXECUTE), patch.object(tus.subprocess, "run") as run:
+        with patch.object(tus, "execute", side_effect=EXECUTE), patch.object(tus._DEPS, "run_process") as run:
             run.side_effect = [subprocess.CompletedProcess([], 0, "", ""), self.diagnostic_result()]
             with redirect_stdout(io.StringIO()):
                 tus.run_checks(args, self.root, [entry], self.build)
@@ -1896,7 +1910,7 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         self.assertEqual(list((self.root / "scratch").glob("local-checks-*")), [])
 
     def test_subprocess_failures_and_diagnostics_propagate(self):
-        with patch.object(tus.subprocess, "run", return_value=subprocess.CompletedProcess([], 2, "out", "diagnostic")):
+        with patch.object(tus._DEPS, "run_process", return_value=subprocess.CompletedProcess([], 2, "out", "diagnostic")):
             with self.assertRaisesRegex(tus.SelectionError, "command failed.*"):
                 EXECUTE(["g++", "-c", str(self.a)], self.build)
 
@@ -1973,6 +1987,21 @@ COMPILER_HEADER_ROOTS = tus.compiler_header_roots
 # The implementation is saved before any setUp patch replaces the entry point.
 
 
+class ProcessTimeoutTests(unittest.TestCase):
+    def test_replay_and_probe_timeout_terminate_grandchildren(self):
+        spec = importlib.util.spec_from_file_location("tree_timeout_tests", ROOT / "tools/ci/test_tidy_cache.py")
+        fixtures = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fixtures)
+        actions = (
+            (lambda command, directory: EXECUTE(command, directory), subprocess.TimeoutExpired),
+            (lambda command, directory: tus._compiler_header_roots(
+                tuple(command), directory, tuple(os.environ.items())), tus.SelectionError),
+        )
+        for launch, error_type in actions:
+            with self.subTest(error_type=error_type):
+                fixtures.assert_tree_timeout(self, launch, error_type)
+
+
 class WindowsSearchPathTests(unittest.TestCase):
     class SearchPath(PureWindowsPath):
         def resolve(self):
@@ -1996,20 +2025,22 @@ class WindowsSearchPathTests(unittest.TestCase):
                 patch.object(tus, "directory_stamp", side_effect=lambda path: tuple(stamp)) as stamps, \
                 patch.object(tus, "directory_entries", side_effect=lambda *args: tuple(
                     (name, stat.S_IFREG, 1, 2) for name in files)), \
-                patch.object(tus.os, "walk", side_effect=lambda *args, **kwargs:
+                patch.object(tus, "walk_header_directories", side_effect=lambda *args, **kwargs:
                              iter([(str(root), [], list(files))])) as walk:
-            for variant in variants:
-                tus.check_pch_search_roots("g++.exe", {variant, root})
+            compilers = (r"C:\Toolchain\G++.EXE", "c:/toolchain/g++.exe",
+                         r"c:\TOOLCHAIN\.\g++.exe", r"C:\Toolchain\bin\..\g++.exe")
+            for compiler, variant in zip(compilers, variants):
+                tus.check_pch_search_roots(compiler, {variant, root})
             self.assertEqual(walk.call_count, 1)
             self.assertEqual(len(tus._PCH_SEARCH_CACHE), 1)
             self.assertTrue(all(call.args[0] == root for call in stamps.call_args_list))
             files.append("header.hpp.gch")
             stamp[4] += 1
             with self.assertRaisesRegex(tus.SelectionError, "binary PCH.*remove"):
-                tus.check_pch_search_roots("g++.exe", {variants[-1]})
+                tus.check_pch_search_roots(compilers[-1], {variants[-1]})
             self.assertEqual(walk.call_count, 2)
             with self.assertRaisesRegex(tus.SelectionError, "binary PCH.*remove"):
-                tus.check_pch_search_roots("g++.exe", {variants[1]})
+                tus.check_pch_search_roots(compilers[1], {variants[1]})
             self.assertEqual(walk.call_count, 2)
 
     def test_equivalent_windows_probe_directories_reuse_search_list(self):
@@ -2018,7 +2049,7 @@ class WindowsSearchPathTests(unittest.TestCase):
         tus._compiler_header_roots.cache_clear()
         with patch.object(tus.os, "name", "nt"), \
                 patch.object(tus, "Path", self.SearchPath), \
-                patch.object(tus.subprocess, "run", return_value=result) as probe:
+                patch.object(tus._DEPS, "run_process", return_value=result) as probe:
             for directory in (r"C:\Header Directory", "c:/header directory", r"C:\HEADER~1"):
                 roots = COMPILER_HEADER_ROOTS(["g++.exe", r"C:\changed_tus\unit.cpp"],
                                              self.SearchPath(directory))
@@ -2027,12 +2058,19 @@ class WindowsSearchPathTests(unittest.TestCase):
 
     def test_unresolvable_root_refuses_and_empty_roots_do_not_walk(self):
         with patch.object(tus, "_PCH_SEARCH_CACHE", {}), \
-                patch.object(tus.os, "walk") as walk:
+                patch.object(tus, "walk_header_directories") as walk:
             tus.check_pch_search_roots("g++", set())
             with patch.object(Path, "resolve", side_effect=PermissionError("unreadable root")), \
                     self.assertRaisesRegex(tus.SelectionError, "cannot check binary PCH search directory"):
                 tus.check_pch_search_roots("g++", {Path("headers")})
             walk.assert_not_called()
+
+    def test_posix_compiler_case_remains_distinct(self):
+        with patch.object(tus.os, "name", "posix"), \
+                patch.object(tus, "_PCH_SEARCH_CACHE", {}) as cache:
+            for compiler in ("G++", "g++"):
+                tus.check_pch_search_roots(compiler, set())
+            self.assertEqual(len(cache), 2)
 
 
 class PchEntryIdentityTests(unittest.TestCase):
@@ -2073,7 +2111,7 @@ class PchEntryIdentityTests(unittest.TestCase):
         for mock in patches:
             mock.start()
             self.addCleanup(mock.stop)
-        self.walk = patch.object(tus.os, "walk", side_effect=walk).start()
+        self.walk = patch.object(tus, "walk_header_directories", side_effect=walk).start()
         self.clock = patch.object(tus.time, "time_ns", return_value=self.tick + 500_000_000).start()
         self.addCleanup(patch.stopall)
 
