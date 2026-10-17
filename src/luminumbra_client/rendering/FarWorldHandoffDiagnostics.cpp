@@ -1,5 +1,13 @@
 #include "FarWorldHandoffDiagnostics.h"
+#include "luminumbra_client/rendering/FarVolumeHandoff.h"
+#include "luminumbra_client/rendering/FarVolumeResidency.h"
+#include "world/FarVolumeTile.h"
+#include "world/FarWantedSet.h"
+#include <cstddef>
+#include <cstdint>
 #include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
+#include <utility>
 
 namespace Luminumbra::Rendering {
 void CaptureFarWorldHandoffDiagnostic(FarVolumeHandoff& owner,

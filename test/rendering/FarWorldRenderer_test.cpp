@@ -1,17 +1,46 @@
+#include "core/JobSystem.h"
 #include "luminumbra_client/rendering/Camera.h"
+#include "luminumbra_client/rendering/FarVolumeGpuBackend.h"
+#include "luminumbra_client/rendering/FarVolumeHandoff.h"
+#include "luminumbra_client/rendering/FarVolumeRenderMesh.h"
+#include "luminumbra_client/rendering/FarVolumeResidency.h"
+#include "luminumbra_client/rendering/FarWorldDiagnostics.h"
 #include "luminumbra_client/rendering/FarWorldHandoffRenderer.h"
+#include "luminumbra_client/rendering/FarWorldOwnership.h"
 #include "luminumbra_client/rendering/FarWorldRenderer.h"
+#include "luminumbra_client/rendering/FarWorldSelection.h"
+#include "luminumbra_client/rendering/FarWorldWaterMesh.h"
 #include "luminumbra_common/core/SystemConfig.h"
+#include "world/FarEditedBake.h"
+#include "world/FarFrozenObservation.h"
+#include "world/FarHorizon.h"
+#include "world/FarTierTable.h"
+#include "world/FarVolume.h"
+#include "world/FarVolumeMemory.h"
+#include "world/FarVolumeRuntime.h"
+#include "world/FarVolumeTile.h"
+#include "world/FarWantedSet.h"
 
+#include <array>
 #include <atomic>
+#include <bit>
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <glm/matrix.hpp>
 #include <gtest/gtest.h>
 #include <latch>
 #include <limits>
 #include <memory>
+#include <memory_resource>
 #include <nlohmann/json.hpp>
+#include <optional>
+#include <span>
 #include <stdexcept>
+#include <thread>
 #include <utility>
+#include <vector>
 
 namespace {
 using namespace Luminumbra;
@@ -158,8 +187,9 @@ public:
     ~Fixture() override {
         EXPECT_EQ(state_.live, 0u);
         EXPECT_FALSE(state_.destroyed);
-        if (gate_ && !gate_->first_sample.load())
+        if (gate_ && !gate_->first_sample.load()) {
             EXPECT_TRUE(gate_->exited.try_wait());
+        }
         state_.fixture_released = true;
     }
     std::uint64_t content_identity() const noexcept override {
@@ -218,11 +248,8 @@ FarVolumeWantedRequest Request(FarTileKey key = {5, 0, 0}) {
     EXPECT_TRUE(ToFarVolumeTileKey(key, canonical));
     return {{1, 42, 0, key, 1, 1}, {canonical, {}}, 0};
 }
-struct Owner {
-    DriverState state;
-    JobSystem jobs;
-    FarWorldRenderer renderer{FarWorldMode::Ladder};
-    std::uint64_t frame = 0;
+class Owner {
+public:
     explicit Owner(const FarWorldExperimentalLimits& limits = FarWorldDevelopmentLimits(),
                    FarWorldWaterCapability water = FarWorldWaterCapability::ExplicitlyDry,
                    float level = 0) {
@@ -257,6 +284,24 @@ struct Owner {
         } while (std::chrono::steady_clock::now() < deadline);
         return false;
     }
+    DriverState& State() noexcept {
+        return state;
+    }
+    JobSystem& Jobs() noexcept {
+        return jobs;
+    }
+    FarWorldRenderer& Renderer() noexcept {
+        return renderer;
+    }
+    std::uint64_t& Frame() noexcept {
+        return frame;
+    }
+
+private:
+    DriverState state;
+    JobSystem jobs;
+    FarWorldRenderer renderer{FarWorldMode::Ladder};
+    std::uint64_t frame = 0;
 };
 
 void ExpectManifestRefusedTransactionally(Owner& owner,
@@ -264,16 +309,16 @@ void ExpectManifestRefusedTransactionally(Owner& owner,
                                           FarWorldRefusal expected) {
     // Finish prior worker activity so charge comparisons cannot race a build.
     // The refused manifest must neither dispatch work nor mutate residency.
-    owner.jobs.shutdown();
-    const auto before = owner.renderer.Residency()->Snapshot();
-    const auto frame = owner.renderer.LastFrame();
-    const auto live = owner.state.live;
-    const auto deletes = owner.state.deletes;
-    EXPECT_FALSE(owner.renderer.AdvanceFrame(++owner.frame, {0, 0, 0}, requests));
-    const auto selection = owner.renderer.Selection(FarWorldPurpose::World);
+    owner.Jobs().shutdown();
+    const auto before = owner.Renderer().Residency()->Snapshot();
+    const auto frame = owner.Renderer().LastFrame();
+    const auto live = owner.State().live;
+    const auto deletes = owner.State().deletes;
+    EXPECT_FALSE(owner.Renderer().AdvanceFrame(++owner.Frame(), {0, 0, 0}, requests));
+    const auto selection = owner.Renderer().Selection(FarWorldPurpose::World);
     EXPECT_EQ(selection.refusal, expected);
     EXPECT_EQ(selection.effective, FarWorldMode::Legacy);
-    const auto after = owner.renderer.Residency()->Snapshot();
+    const auto after = owner.Renderer().Residency()->Snapshot();
     for (std::size_t tier = 0; tier < kFarTierCount; ++tier) {
         EXPECT_EQ(after[tier].wanted, before[tier].wanted);
         EXPECT_EQ(after[tier].pending, before[tier].pending);
@@ -287,11 +332,11 @@ void ExpectManifestRefusedTransactionally(Owner& owner,
         EXPECT_EQ(after[tier].memory.peak_total, before[tier].memory.peak_total);
         EXPECT_EQ(after[tier].memory.admission_refusals, before[tier].memory.admission_refusals);
     }
-    EXPECT_EQ(owner.renderer.LastFrame().dispatched, frame.dispatched);
-    EXPECT_EQ(owner.renderer.LastFrame().uploaded, frame.uploaded);
-    EXPECT_EQ(owner.renderer.LastFrame().upload_bytes, frame.upload_bytes);
-    EXPECT_EQ(owner.state.live, live);
-    EXPECT_EQ(owner.state.deletes, deletes);
+    EXPECT_EQ(owner.Renderer().LastFrame().dispatched, frame.dispatched);
+    EXPECT_EQ(owner.Renderer().LastFrame().uploaded, frame.uploaded);
+    EXPECT_EQ(owner.Renderer().LastFrame().upload_bytes, frame.upload_bytes);
+    EXPECT_EQ(owner.State().live, live);
+    EXPECT_EQ(owner.State().deletes, deletes);
 }
 } // namespace
 
@@ -420,23 +465,23 @@ TEST(FarWorldRenderer, OneAdvancementPerLogicalFrameAndGlobalCoarseFirst) {
     limits.frame.builds = 1;
     Owner owner(limits);
     const std::array wanted{Request({1, 0, 0}), Request({5, 0, 0})};
-    ASSERT_TRUE(owner.renderer.AdvanceFrame(10, {0, 0, 0}, wanted));
-    const auto first = owner.renderer.LastFrame();
+    ASSERT_TRUE(owner.Renderer().AdvanceFrame(10, {0, 0, 0}, wanted));
+    const auto first = owner.Renderer().LastFrame();
     EXPECT_EQ(first.dispatched, 1u);
-    const auto coarse = owner.renderer.Residency()->Observe(wanted[1].identity.key);
+    const auto coarse = owner.Renderer().Residency()->Observe(wanted[1].identity.key);
     ASSERT_TRUE(coarse) << "Missing coarse tile observation";
     if (coarse) {
         EXPECT_EQ(coarse->eligibility, FarVolumeEligibility::Building);
     }
-    const auto fine = owner.renderer.Residency()->Observe(wanted[0].identity.key);
+    const auto fine = owner.Renderer().Residency()->Observe(wanted[0].identity.key);
     ASSERT_TRUE(fine) << "Missing fine tile observation";
     if (fine) {
         EXPECT_EQ(fine->eligibility, FarVolumeEligibility::Wanted);
     }
-    EXPECT_FALSE(owner.renderer.AdvanceFrame(10, {0, 0, 0}, wanted));
-    EXPECT_FALSE(owner.renderer.AdvanceFrame(9, {0, 0, 0}, wanted));
-    EXPECT_EQ(owner.renderer.LastFrame().dispatched, first.dispatched);
-    EXPECT_TRUE(owner.renderer.AdvanceFrame(11, {0, 0, 0}, wanted));
+    EXPECT_FALSE(owner.Renderer().AdvanceFrame(10, {0, 0, 0}, wanted));
+    EXPECT_FALSE(owner.Renderer().AdvanceFrame(9, {0, 0, 0}, wanted));
+    EXPECT_EQ(owner.Renderer().LastFrame().dispatched, first.dispatched);
+    EXPECT_TRUE(owner.Renderer().AdvanceFrame(11, {0, 0, 0}, wanted));
 }
 
 TEST(FarWorldRenderer, IncompatibleEntryDescriptorLimitsRefuseWithoutThrowing) {
@@ -478,12 +523,12 @@ TEST(FarWorldRenderer, StaleBindingIdentityCannotReplaceWanted) {
         if (field == 4)
             --stale.identity.span_generation;
         EXPECT_FALSE(owner.Advance(stale));
-        const auto observed = owner.renderer.Residency()->Observe(valid.identity.key);
+        const auto observed = owner.Renderer().Residency()->Observe(valid.identity.key);
         ASSERT_TRUE(observed);
         if (observed) {
             EXPECT_EQ(observed->desired, valid.identity);
         }
-        EXPECT_EQ(owner.renderer.Selection(FarWorldPurpose::World).refusal,
+        EXPECT_EQ(owner.Renderer().Selection(FarWorldPurpose::World).refusal,
                   FarWorldRefusal::InvalidRequests);
     }
 }
@@ -492,98 +537,100 @@ TEST(FarWorldRenderer, UploadedDrawMetadataAndSynchronousBorrowing) {
     Owner owner;
     const auto request = Request();
     ASSERT_TRUE(owner.WaitSettled(request));
-    owner.renderer.BeginLiveOwnership(owner.frame);
-    ASSERT_TRUE(owner.renderer.FinishLiveOwnership());
-    const auto stats = owner.renderer.Submit({.5, -128.25, -.25}, [&](const auto& command) {
+    owner.Renderer().BeginLiveOwnership(owner.Frame());
+    ASSERT_TRUE(owner.Renderer().FinishLiveOwnership());
+    const auto stats = owner.Renderer().Submit({.5, -128.25, -.25}, [&](const auto& command) {
         EXPECT_FLOAT_EQ(command.relative_origin[0], -.5f);
         EXPECT_FLOAT_EQ(command.relative_origin[1], -127.75f);
         EXPECT_FLOAT_EQ(command.relative_origin[2], .25f);
         EXPECT_EQ(command.horizontal_outer_clip_meters, 16384);
         EXPECT_EQ(command.view_ray_bias_meters, 32);
         EXPECT_GT(command.index_count, 0);
-        EXPECT_THROW(owner.renderer.PrepareWorldSwap(), std::logic_error);
+        EXPECT_THROW(owner.Renderer().PrepareWorldSwap(), std::logic_error);
         return true;
     });
     EXPECT_EQ(stats.draws, 1u);
     EXPECT_EQ(stats.refused, 0u);
-    EXPECT_EQ(owner.state.draws, 1u);
+    EXPECT_EQ(owner.State().draws, 1u);
 }
 
 TEST(FarWorldRenderer, WorldSwapDrainsBeforeAuthorityMemoryDriverAndContextRelease) {
     Owner owner;
     ASSERT_TRUE(owner.WaitSettled(Request()));
-    ASSERT_GT(owner.state.live, 0u);
+    ASSERT_GT(owner.State().live, 0u);
     // Preview/offscreen selection retains the Ladder owner's resources. A swap
     // must drain them even though the current effective renderer is Legacy.
-    const auto preview = owner.renderer.Selection(FarWorldPurpose::Preview);
+    const auto preview = owner.Renderer().Selection(FarWorldPurpose::Preview);
     EXPECT_EQ(preview.effective, FarWorldMode::Legacy);
-    EXPECT_EQ(owner.renderer.Selection(FarWorldPurpose::OffscreenPreview).effective,
+    EXPECT_EQ(owner.Renderer().Selection(FarWorldPurpose::OffscreenPreview).effective,
               FarWorldMode::Legacy);
-    EXPECT_GT(owner.state.live, 0u);
-    owner.state.ownership_bound = true; // Drain must unbind before GPU destruction.
-    owner.renderer.PrepareWorldSwap();
-    EXPECT_EQ(owner.state.live, 0u);
-    EXPECT_TRUE(owner.state.fixture_released);
-    EXPECT_TRUE(owner.state.released_with_context);
-    EXPECT_FALSE(owner.state.destroyed);
-    EXPECT_EQ(owner.renderer.world_epoch(), 0u);
-    EXPECT_EQ(owner.renderer.Selection(FarWorldPurpose::World).effective, FarWorldMode::Legacy);
-    owner.renderer.Shutdown();
-    EXPECT_TRUE(owner.state.destroyed);
-    owner.state.current = false; // Client may now destroy the context.
+    EXPECT_GT(owner.State().live, 0u);
+    owner.State().ownership_bound = true; // Drain must unbind before GPU destruction.
+    owner.Renderer().PrepareWorldSwap();
+    EXPECT_EQ(owner.State().live, 0u);
+    EXPECT_TRUE(owner.State().fixture_released);
+    EXPECT_TRUE(owner.State().released_with_context);
+    EXPECT_FALSE(owner.State().destroyed);
+    EXPECT_EQ(owner.Renderer().world_epoch(), 0u);
+    EXPECT_EQ(owner.Renderer().Selection(FarWorldPurpose::World).effective, FarWorldMode::Legacy);
+    owner.Renderer().Shutdown();
+    EXPECT_TRUE(owner.State().destroyed);
+    owner.State().current = false; // Client may now destroy the context.
 }
 
 TEST(FarWorldRenderer, SwapAndShutdownJoinHeldWorkerBeforeFixtureAndDriverRelease) {
     for (const bool shutdown : {false, true}) {
         const auto gate = std::make_shared<BuildGate>();
         Owner owner;
-        owner.renderer.PrepareWorldSwap();
-        ASSERT_EQ(owner.renderer.BindFixture(owner.jobs,
-                                             std::make_shared<const Fixture>(
-                                                 owner.state, FarCaveMode::BandLimited, 42, gate),
-                                             1,
-                                             1,
-                                             FarWorldDevelopmentLimits()),
-                  FarWorldRefusal::None);
-        owner.state.release_on_drain = gate.get();
+        owner.Renderer().PrepareWorldSwap();
+        ASSERT_EQ(
+            owner.Renderer().BindFixture(
+                owner.Jobs(),
+                std::make_shared<const Fixture>(owner.State(), FarCaveMode::BandLimited, 42, gate),
+                1,
+                1,
+                FarWorldDevelopmentLimits()),
+            FarWorldRefusal::None);
+        owner.State().release_on_drain = gate.get();
         ASSERT_TRUE(owner.Advance(Request()));
-        ASSERT_EQ(owner.renderer.LastFrame().dispatched, 1u);
+        ASSERT_EQ(owner.Renderer().LastFrame().dispatched, 1u);
         gate->entered.wait();
         EXPECT_FALSE(gate->exited.try_wait());
         if (shutdown)
-            owner.renderer.Shutdown();
+            owner.Renderer().Shutdown();
         else
-            owner.renderer.PrepareWorldSwap();
+            owner.Renderer().PrepareWorldSwap();
         EXPECT_TRUE(gate->exited.try_wait());
-        EXPECT_EQ(owner.state.held_build_drains, 1u);
-        EXPECT_TRUE(owner.state.fixture_released);
-        EXPECT_EQ(owner.state.destroyed, shutdown);
-        EXPECT_EQ(owner.state.uploads, 0u);
-        EXPECT_EQ(owner.renderer.Residency(), nullptr);
-        EXPECT_EQ(owner.renderer.Selection(FarWorldPurpose::World).effective, FarWorldMode::Legacy);
+        EXPECT_EQ(owner.State().held_build_drains, 1u);
+        EXPECT_TRUE(owner.State().fixture_released);
+        EXPECT_EQ(owner.State().destroyed, shutdown);
+        EXPECT_EQ(owner.State().uploads, 0u);
+        EXPECT_EQ(owner.Renderer().Residency(), nullptr);
+        EXPECT_EQ(owner.Renderer().Selection(FarWorldPurpose::World).effective,
+                  FarWorldMode::Legacy);
         EXPECT_FALSE(owner.Advance(Request()));
-        owner.renderer.Shutdown();
-        owner.state.current = false;
+        owner.Renderer().Shutdown();
+        owner.State().current = false;
     }
 }
 
 TEST(FarWorldRenderer, MatchingImmutableCaveBindingPublishesRequestedBoundAndEffectivePolicy) {
     Owner owner;
     for (const auto caves : {FarCaveMode::BandLimited, FarCaveMode::BoxFiltered}) {
-        owner.renderer.SetRequestedCavePolicy(caves);
+        owner.Renderer().SetRequestedCavePolicy(caves);
         // Drain even when rebinding the same policy: this is new immutable content.
-        owner.renderer.PrepareWorldSwap();
+        owner.Renderer().PrepareWorldSwap();
         const auto identity = caves == FarCaveMode::BandLimited ? 42u : 43u;
-        ASSERT_EQ(owner.renderer.BindFixture(
-                      owner.jobs,
-                      std::make_shared<const Fixture>(owner.state, caves, identity),
+        ASSERT_EQ(owner.Renderer().BindFixture(
+                      owner.Jobs(),
+                      std::make_shared<const Fixture>(owner.State(), caves, identity),
                       1,
                       1,
                       FarWorldDevelopmentLimits()),
                   FarWorldRefusal::None);
-        const auto selected = owner.renderer.Selection(FarWorldPurpose::World);
+        const auto selected = owner.Renderer().Selection(FarWorldPurpose::World);
         ASSERT_EQ(selected.effective, FarWorldMode::Ladder);
-        const auto policy = owner.renderer.CavePolicy(selected);
+        const auto policy = owner.Renderer().CavePolicy(selected);
         EXPECT_EQ(policy.requested, caves);
         EXPECT_EQ(policy.bound, caves);
         EXPECT_EQ(policy.effective, caves);
@@ -591,13 +638,13 @@ TEST(FarWorldRenderer, MatchingImmutableCaveBindingPublishesRequestedBoundAndEff
         request.identity.content_hash = identity;
         request.identity.cave_policy = static_cast<std::uint8_t>(caves);
         ASSERT_TRUE(owner.WaitSettled(request));
-        const auto observed = owner.renderer.Residency()->Observe(request.identity.key);
+        const auto observed = owner.Renderer().Residency()->Observe(request.identity.key);
         ASSERT_TRUE(observed);
         if (observed) {
             EXPECT_EQ(observed->desired, request.identity);
         }
         for (const auto purpose : {FarWorldPurpose::Preview, FarWorldPurpose::OffscreenPreview}) {
-            const auto preview_policy = owner.renderer.CavePolicy(purpose);
+            const auto preview_policy = owner.Renderer().CavePolicy(purpose);
             EXPECT_EQ(preview_policy.requested, caves);
             EXPECT_EQ(preview_policy.bound, caves);
             EXPECT_FALSE(preview_policy.effective);
@@ -605,7 +652,7 @@ TEST(FarWorldRenderer, MatchingImmutableCaveBindingPublishesRequestedBoundAndEff
         auto pass_refused = selected;
         pass_refused.effective = FarWorldMode::Legacy;
         pass_refused.refusal = FarWorldRefusal::ShaderProgramUnavailable;
-        EXPECT_FALSE(owner.renderer.CavePolicy(pass_refused).effective);
+        EXPECT_FALSE(owner.Renderer().CavePolicy(pass_refused).effective);
     }
 }
 
@@ -661,58 +708,58 @@ TEST(FarWorldRenderer, DiagnosticRecordsRequestedBoxFilteredWithoutFixture) {
 
 TEST(FarWorldRenderer, LegacyDiagnosticPreservesDistinctRequestedAndBoundCavePolicies) {
     Owner owner;
-    owner.renderer.SetRequested(FarWorldMode::Legacy);
-    owner.renderer.SetRequestedCavePolicy(FarCaveMode::BoxFiltered);
-    ASSERT_EQ(owner.renderer.BindFixture(owner.jobs,
-                                         std::make_shared<const Fixture>(owner.state),
-                                         1,
-                                         1,
-                                         FarWorldDevelopmentLimits()),
+    owner.Renderer().SetRequested(FarWorldMode::Legacy);
+    owner.Renderer().SetRequestedCavePolicy(FarCaveMode::BoxFiltered);
+    ASSERT_EQ(owner.Renderer().BindFixture(owner.Jobs(),
+                                           std::make_shared<const Fixture>(owner.State()),
+                                           1,
+                                           1,
+                                           FarWorldDevelopmentLimits()),
               FarWorldRefusal::None);
-    const auto selection = owner.renderer.Selection(FarWorldPurpose::World);
+    const auto selection = owner.Renderer().Selection(FarWorldPurpose::World);
     EXPECT_EQ(selection.effective, FarWorldMode::Legacy);
-    owner.renderer.CaptureDiagnostic(selection, 1, {0, 0, 0}, kLegacyFarPlaneMeters, false, 0, 0);
-    const auto snapshot = owner.renderer.Diagnostic();
+    owner.Renderer().CaptureDiagnostic(selection, 1, {0, 0, 0}, kLegacyFarPlaneMeters, false, 0, 0);
+    const auto snapshot = owner.Renderer().Diagnostic();
     EXPECT_EQ(snapshot.requested_cave_policy, FarCaveMode::BoxFiltered);
     EXPECT_EQ(snapshot.bound_cave_policy, FarCaveMode::BandLimited);
     const auto json = FarWorldDiagnosticJson(snapshot);
     EXPECT_EQ(json["requested_cave_policy"], 1);
     EXPECT_EQ(json["bound_cave_policy"], 0);
-    ExpectPairedCaveDiagnosticPreserved(owner.renderer);
+    ExpectPairedCaveDiagnosticPreserved(owner.Renderer());
 }
 
 TEST(FarWorldRenderer, MismatchedImmutableCaveBindingRefusesWithoutRelabeling) {
     for (const auto requested : {FarCaveMode::BandLimited, FarCaveMode::BoxFiltered}) {
         Owner owner;
-        owner.renderer.SetRequestedCavePolicy(requested);
+        owner.Renderer().SetRequestedCavePolicy(requested);
         const auto other = requested == FarCaveMode::BandLimited ? FarCaveMode::BoxFiltered
                                                                  : FarCaveMode::BandLimited;
         ASSERT_EQ(
-            owner.renderer.BindFixture(owner.jobs,
-                                       std::make_shared<const Fixture>(owner.state, other, 43),
-                                       1,
-                                       1,
-                                       FarWorldDevelopmentLimits()),
+            owner.Renderer().BindFixture(owner.Jobs(),
+                                         std::make_shared<const Fixture>(owner.State(), other, 43),
+                                         1,
+                                         1,
+                                         FarWorldDevelopmentLimits()),
             FarWorldRefusal::CavePolicyMismatch);
-        const auto selected = owner.renderer.Selection(FarWorldPurpose::World);
+        const auto selected = owner.Renderer().Selection(FarWorldPurpose::World);
         EXPECT_EQ(selected.requested, FarWorldMode::Ladder);
         EXPECT_EQ(selected.effective, FarWorldMode::Legacy);
         EXPECT_EQ(selected.refusal, FarWorldRefusal::CavePolicyMismatch);
         EXPECT_STREQ(FarWorldRefusalName(selected.refusal), "CavePolicyMismatch");
-        EXPECT_EQ(owner.renderer.CavePolicy(selected).requested, requested);
-        EXPECT_FALSE(owner.renderer.CavePolicy(selected).bound);
-        EXPECT_FALSE(owner.renderer.CavePolicy(selected).effective);
-        EXPECT_EQ(owner.renderer.Residency(), nullptr);
-        EXPECT_EQ(owner.renderer.world_epoch(), 0u);
-        EXPECT_EQ(owner.state.live, 0u);
-        owner.renderer.CaptureDiagnostic(
+        EXPECT_EQ(owner.Renderer().CavePolicy(selected).requested, requested);
+        EXPECT_FALSE(owner.Renderer().CavePolicy(selected).bound);
+        EXPECT_FALSE(owner.Renderer().CavePolicy(selected).effective);
+        EXPECT_EQ(owner.Renderer().Residency(), nullptr);
+        EXPECT_EQ(owner.Renderer().world_epoch(), 0u);
+        EXPECT_EQ(owner.State().live, 0u);
+        owner.Renderer().CaptureDiagnostic(
             selected, 1, {0, 0, 0}, kLegacyFarPlaneMeters, false, 0, 0);
-        EXPECT_EQ(owner.renderer.Diagnostic().requested_cave_policy, requested);
-        EXPECT_FALSE(owner.renderer.Diagnostic().bound_cave_policy);
-        const auto json = FarWorldDiagnosticJson(owner.renderer.Diagnostic());
+        EXPECT_EQ(owner.Renderer().Diagnostic().requested_cave_policy, requested);
+        EXPECT_FALSE(owner.Renderer().Diagnostic().bound_cave_policy);
+        const auto json = FarWorldDiagnosticJson(owner.Renderer().Diagnostic());
         EXPECT_EQ(json["requested_cave_policy"], static_cast<int>(requested));
         EXPECT_TRUE(json["bound_cave_policy"].is_null());
-        ExpectPairedCaveDiagnosticPreserved(owner.renderer);
+        ExpectPairedCaveDiagnosticPreserved(owner.Renderer());
     }
 }
 
@@ -720,22 +767,22 @@ TEST(FarWorldRenderer, ChangedCavePolicyDrainsUploadsAndRequiresNewImmutableBind
     Owner owner;
     const auto old = Request();
     ASSERT_TRUE(owner.WaitSettled(old));
-    ASSERT_GT(owner.state.live, 0u);
-    owner.renderer.SetRequestedCavePolicy(FarCaveMode::BoxFiltered);
-    EXPECT_EQ(owner.state.live, 0u);
-    EXPECT_TRUE(owner.state.fixture_released);
-    EXPECT_TRUE(owner.state.released_with_context);
-    EXPECT_FALSE(owner.state.destroyed);
-    EXPECT_EQ(owner.renderer.Residency(), nullptr);
-    EXPECT_EQ(owner.renderer.world_epoch(), 0u);
+    ASSERT_GT(owner.State().live, 0u);
+    owner.Renderer().SetRequestedCavePolicy(FarCaveMode::BoxFiltered);
+    EXPECT_EQ(owner.State().live, 0u);
+    EXPECT_TRUE(owner.State().fixture_released);
+    EXPECT_TRUE(owner.State().released_with_context);
+    EXPECT_FALSE(owner.State().destroyed);
+    EXPECT_EQ(owner.Renderer().Residency(), nullptr);
+    EXPECT_EQ(owner.Renderer().world_epoch(), 0u);
     EXPECT_FALSE(owner.Advance(old));
-    EXPECT_EQ(owner.renderer.Selection(FarWorldPurpose::World).refusal,
+    EXPECT_EQ(owner.Renderer().Selection(FarWorldPurpose::World).refusal,
               FarWorldRefusal::ImmutableAuthorityUnavailable);
-    EXPECT_FALSE(owner.renderer.CavePolicy(FarWorldPurpose::World).bound);
+    EXPECT_FALSE(owner.Renderer().CavePolicy(FarWorldPurpose::World).bound);
 
-    ASSERT_EQ(owner.renderer.BindFixture(
-                  owner.jobs,
-                  std::make_shared<const Fixture>(owner.state, FarCaveMode::BoxFiltered, 43),
+    ASSERT_EQ(owner.Renderer().BindFixture(
+                  owner.Jobs(),
+                  std::make_shared<const Fixture>(owner.State(), FarCaveMode::BoxFiltered, 43),
                   1,
                   1,
                   FarWorldDevelopmentLimits()),
@@ -745,14 +792,14 @@ TEST(FarWorldRenderer, ChangedCavePolicyDrainsUploadsAndRequiresNewImmutableBind
     current.identity.cave_policy = static_cast<std::uint8_t>(FarCaveMode::BoxFiltered);
     EXPECT_NE(old.identity, current.identity);
     ASSERT_TRUE(owner.WaitSettled(current));
-    const auto before = owner.renderer.Residency()->Observe(current.identity.key);
+    const auto before = owner.Renderer().Residency()->Observe(current.identity.key);
     ASSERT_TRUE(before);
     if (before) {
         EXPECT_EQ(before->desired, current.identity);
     }
     ExpectManifestRefusedTransactionally(
         owner, std::span(&old, 1), FarWorldRefusal::InvalidRequests);
-    const auto after = owner.renderer.Residency()->Observe(current.identity.key);
+    const auto after = owner.Renderer().Residency()->Observe(current.identity.key);
     ASSERT_TRUE(after);
     if (after) {
         EXPECT_EQ(after->desired, current.identity);
@@ -762,22 +809,22 @@ TEST(FarWorldRenderer, ChangedCavePolicyDrainsUploadsAndRequiresNewImmutableBind
 TEST(FarWorldRenderer, InFlightCaveSwitchDrainsStaleBuildAndAcceptsNewPolicySubmission) {
     const auto gate = std::make_shared<BuildGate>();
     Owner owner;
-    owner.renderer.PrepareWorldSwap();
-    ASSERT_EQ(owner.renderer.BindFixture(
-                  owner.jobs,
-                  std::make_shared<const Fixture>(owner.state, FarCaveMode::BandLimited, 42, gate),
-                  1,
-                  1,
-                  FarWorldDevelopmentLimits()),
+    owner.Renderer().PrepareWorldSwap();
+    ASSERT_EQ(owner.Renderer().BindFixture(owner.Jobs(),
+                                           std::make_shared<const Fixture>(
+                                               owner.State(), FarCaveMode::BandLimited, 42, gate),
+                                           1,
+                                           1,
+                                           FarWorldDevelopmentLimits()),
               FarWorldRefusal::None);
-    EXPECT_FALSE(owner.state.fixture_released);
+    EXPECT_FALSE(owner.State().fixture_released);
     const auto old = Request();
-    owner.state.release_on_drain = gate.get(); // Also releases on assertion-failure cleanup.
+    owner.State().release_on_drain = gate.get(); // Also releases on assertion-failure cleanup.
     ASSERT_TRUE(owner.Advance(old));
-    ASSERT_EQ(owner.renderer.LastFrame().dispatched, 1u);
+    ASSERT_EQ(owner.Renderer().LastFrame().dispatched, 1u);
     gate->entered.wait(); // Worker is inside the actual facade's density callback.
     EXPECT_FALSE(gate->exited.try_wait());
-    const auto held = owner.renderer.Residency()->Observe(old.identity.key);
+    const auto held = owner.Renderer().Residency()->Observe(old.identity.key);
     ASSERT_TRUE(held);
     if (held) {
         EXPECT_EQ(held->desired, old.identity);
@@ -787,27 +834,27 @@ TEST(FarWorldRenderer, InFlightCaveSwitchDrainsStaleBuildAndAcceptsNewPolicySubm
 
     // Drain's first driver unbind releases the held worker. This call must join
     // its stale result before dropping the immutable fixture and residency.
-    owner.renderer.SetRequestedCavePolicy(FarCaveMode::BoxFiltered);
-    EXPECT_EQ(owner.state.held_build_drains, 1u);
+    owner.Renderer().SetRequestedCavePolicy(FarCaveMode::BoxFiltered);
+    EXPECT_EQ(owner.State().held_build_drains, 1u);
     EXPECT_TRUE(gate->exited.try_wait());
-    EXPECT_TRUE(owner.state.fixture_released);
-    EXPECT_EQ(owner.state.uploads, 0u); // The old completion was never accepted for upload.
-    EXPECT_EQ(owner.state.live, 0u);
-    EXPECT_EQ(owner.renderer.Residency(), nullptr);
-    EXPECT_EQ(owner.renderer.world_epoch(), 0u);
-    EXPECT_EQ(owner.renderer.Selection(FarWorldPurpose::World).refusal,
+    EXPECT_TRUE(owner.State().fixture_released);
+    EXPECT_EQ(owner.State().uploads, 0u); // The old completion was never accepted for upload.
+    EXPECT_EQ(owner.State().live, 0u);
+    EXPECT_EQ(owner.Renderer().Residency(), nullptr);
+    EXPECT_EQ(owner.Renderer().world_epoch(), 0u);
+    EXPECT_EQ(owner.Renderer().Selection(FarWorldPurpose::World).refusal,
               FarWorldRefusal::ImmutableAuthorityUnavailable);
     EXPECT_FALSE(owner.Advance(old));
 
-    ASSERT_EQ(owner.renderer.BindFixture(
-                  owner.jobs,
-                  std::make_shared<const Fixture>(owner.state, FarCaveMode::BoxFiltered, 43),
+    ASSERT_EQ(owner.Renderer().BindFixture(
+                  owner.Jobs(),
+                  std::make_shared<const Fixture>(owner.State(), FarCaveMode::BoxFiltered, 43),
                   1,
                   1,
                   FarWorldDevelopmentLimits()),
               FarWorldRefusal::None);
-    EXPECT_FALSE(owner.renderer.Residency()->Observe(old.identity.key));
-    for (const auto& tier : owner.renderer.Residency()->Snapshot()) {
+    EXPECT_FALSE(owner.Renderer().Residency()->Observe(old.identity.key));
+    for (const auto& tier : owner.Renderer().Residency()->Snapshot()) {
         EXPECT_EQ(tier.wanted, 0u);
         EXPECT_EQ(tier.covering, 0u);
         EXPECT_EQ(tier.uploaded_pairs, 0u);
@@ -818,11 +865,11 @@ TEST(FarWorldRenderer, InFlightCaveSwitchDrainsStaleBuildAndAcceptsNewPolicySubm
     current.identity.cave_policy = static_cast<std::uint8_t>(FarCaveMode::BoxFiltered);
     EXPECT_NE(current.identity, old.identity);
     ASSERT_TRUE(owner.Advance(current)); // A fresh submission after the switch.
-    ASSERT_EQ(owner.renderer.LastFrame().dispatched, 1u);
-    owner.jobs.shutdown();               // Joins the new worker; no polling, sleep or deadline.
+    ASSERT_EQ(owner.Renderer().LastFrame().dispatched, 1u);
+    owner.Jobs().shutdown();             // Joins the new worker; no polling, sleep or deadline.
     ASSERT_TRUE(owner.Advance(current)); // Reaps and accepts only the new identity.
-    EXPECT_EQ(owner.renderer.LastFrame().uploaded, 1u);
-    const auto accepted = owner.renderer.Residency()->Observe(current.identity.key);
+    EXPECT_EQ(owner.Renderer().LastFrame().uploaded, 1u);
+    const auto accepted = owner.Renderer().Residency()->Observe(current.identity.key);
     ASSERT_TRUE(accepted);
     if (accepted) {
         EXPECT_EQ(accepted->desired, current.identity);
@@ -831,18 +878,18 @@ TEST(FarWorldRenderer, InFlightCaveSwitchDrainsStaleBuildAndAcceptsNewPolicySubm
         EXPECT_TRUE(IsFarTileCovering(accepted->coverage));
     }
     std::size_t covering = 0;
-    for (const auto& tier : owner.renderer.Residency()->Snapshot()) {
+    for (const auto& tier : owner.Renderer().Residency()->Snapshot()) {
         covering += tier.covering;
         EXPECT_EQ(tier.building, 0u);
         EXPECT_EQ(tier.ready, 0u);
     }
     EXPECT_EQ(covering, 1u);
-    EXPECT_EQ(owner.renderer.CavePolicy(FarWorldPurpose::World).effective,
+    EXPECT_EQ(owner.Renderer().CavePolicy(FarWorldPurpose::World).effective,
               FarCaveMode::BoxFiltered);
-    owner.renderer.BeginLiveOwnership(owner.frame);
-    ASSERT_TRUE(owner.renderer.FinishLiveOwnership());
-    EXPECT_EQ(owner.renderer.Submit({0, 0, 0}, [](const auto&) { return true; }).draws, 1u);
-    EXPECT_EQ(owner.state.draws, 1u);
+    owner.Renderer().BeginLiveOwnership(owner.Frame());
+    ASSERT_TRUE(owner.Renderer().FinishLiveOwnership());
+    EXPECT_EQ(owner.Renderer().Submit({0, 0, 0}, [](const auto&) { return true; }).draws, 1u);
+    EXPECT_EQ(owner.State().draws, 1u);
     ExpectManifestRefusedTransactionally(
         owner, std::span(&old, 1), FarWorldRefusal::InvalidRequests);
 }
@@ -851,26 +898,26 @@ TEST(FarWorldRenderer, SamePolicyPreservesBindingAndPressureOrCameraCannotSelect
     auto limits = FarWorldDevelopmentLimits();
     limits.frame.builds = limits.frame.uploads = 1;
     // Enough for bounded V1 control storage, less than the requested build headroom.
-    limits.budgets.bytes[0] = 1024 * 1024;
+    limits.budgets.bytes[0] = 1024ULL * 1024;
     Owner owner(limits);
     auto pressured = Request({1, 0, 0});
-    pressured.build_headroom_bytes = 2 * 1024 * 1024;
+    pressured.build_headroom_bytes = 2ULL * 1024 * 1024;
     ASSERT_TRUE(owner.Advance(pressured));
-    EXPECT_GT(owner.renderer.LastFrame().rejected, 0u);
-    const auto observed = owner.renderer.Residency()->Observe(pressured.identity.key);
+    EXPECT_GT(owner.Renderer().LastFrame().rejected, 0u);
+    const auto observed = owner.Renderer().Residency()->Observe(pressured.identity.key);
     ASSERT_TRUE(observed);
     if (observed) {
         EXPECT_EQ(observed->eligibility, FarVolumeEligibility::RequestRejected);
     }
-    const auto* residency = owner.renderer.Residency();
-    owner.renderer.SetRequestedCavePolicy(FarCaveMode::BandLimited);
-    EXPECT_EQ(owner.renderer.Residency(), residency);
+    const auto* residency = owner.Renderer().Residency();
+    owner.Renderer().SetRequestedCavePolicy(FarCaveMode::BandLimited);
+    EXPECT_EQ(owner.Renderer().Residency(), residency);
     for (const std::array<double, 3> camera :
          {std::array<double, 3>{0, -1024, 0}, std::array<double, 3>{16384, 1024, -16384}}) {
-        ASSERT_TRUE(owner.renderer.PrepareFrame(++owner.frame, camera));
-        EXPECT_EQ(owner.renderer.CavePolicy(FarWorldPurpose::World).requested,
+        ASSERT_TRUE(owner.Renderer().PrepareFrame(++owner.Frame(), camera));
+        EXPECT_EQ(owner.Renderer().CavePolicy(FarWorldPurpose::World).requested,
                   FarCaveMode::BandLimited);
-        EXPECT_EQ(owner.renderer.CavePolicy(FarWorldPurpose::World).effective,
+        EXPECT_EQ(owner.Renderer().CavePolicy(FarWorldPurpose::World).effective,
                   FarCaveMode::BandLimited);
     }
 }
@@ -878,51 +925,51 @@ TEST(FarWorldRenderer, SamePolicyPreservesBindingAndPressureOrCameraCannotSelect
 TEST(FarWorldRenderer, InvalidTypedPolicyDrainsAndRefusesUntilValidPolicyIsRebound) {
     Owner owner;
     ASSERT_TRUE(owner.WaitSettled(Request()));
-    owner.renderer.SetRequestedCavePolicy(static_cast<FarCaveMode>(255));
-    EXPECT_EQ(owner.renderer.Residency(), nullptr);
-    EXPECT_EQ(owner.state.live, 0u);
-    EXPECT_TRUE(owner.state.fixture_released);
-    EXPECT_EQ(owner.renderer.Selection(FarWorldPurpose::World).refusal,
+    owner.Renderer().SetRequestedCavePolicy(std::bit_cast<FarCaveMode>(std::uint8_t{255}));
+    EXPECT_EQ(owner.Renderer().Residency(), nullptr);
+    EXPECT_EQ(owner.State().live, 0u);
+    EXPECT_TRUE(owner.State().fixture_released);
+    EXPECT_EQ(owner.Renderer().Selection(FarWorldPurpose::World).refusal,
               FarWorldRefusal::InvalidCavePolicy);
     EXPECT_STREQ(FarWorldRefusalName(FarWorldRefusal::InvalidCavePolicy), "InvalidCavePolicy");
-    owner.renderer.SetRequestedCavePolicy(FarCaveMode::BandLimited);
-    EXPECT_EQ(owner.renderer.Selection(FarWorldPurpose::World).refusal,
+    owner.Renderer().SetRequestedCavePolicy(FarCaveMode::BandLimited);
+    EXPECT_EQ(owner.Renderer().Selection(FarWorldPurpose::World).refusal,
               FarWorldRefusal::ImmutableAuthorityUnavailable);
-    ASSERT_EQ(owner.renderer.BindFixture(owner.jobs,
-                                         std::make_shared<const Fixture>(owner.state),
-                                         1,
-                                         1,
-                                         FarWorldDevelopmentLimits()),
+    ASSERT_EQ(owner.Renderer().BindFixture(owner.Jobs(),
+                                           std::make_shared<const Fixture>(owner.State()),
+                                           1,
+                                           1,
+                                           FarWorldDevelopmentLimits()),
               FarWorldRefusal::None);
     EXPECT_TRUE(owner.WaitSettled(Request()));
 }
 
 TEST(FarWorldRenderer, CaveRequestWithLegacyEffectiveLeavesSchedulingAndBindingInert) {
     Owner owner;
-    owner.renderer.SetRequested(FarWorldMode::Legacy);
-    ASSERT_EQ(owner.renderer.BindFixture(owner.jobs,
-                                         std::make_shared<const Fixture>(owner.state),
-                                         1,
-                                         1,
-                                         FarWorldDevelopmentLimits()),
+    owner.Renderer().SetRequested(FarWorldMode::Legacy);
+    ASSERT_EQ(owner.Renderer().BindFixture(owner.Jobs(),
+                                           std::make_shared<const Fixture>(owner.State()),
+                                           1,
+                                           1,
+                                           FarWorldDevelopmentLimits()),
               FarWorldRefusal::None);
-    const auto* residency = owner.renderer.Residency();
+    const auto* residency = owner.Renderer().Residency();
     for (const auto requested :
          {std::optional(FarCaveMode::BoxFiltered), std::optional<FarCaveMode>{}}) {
-        owner.renderer.SetRequestedCavePolicy(requested);
-        const auto selected = owner.renderer.Selection(FarWorldPurpose::World);
+        owner.Renderer().SetRequestedCavePolicy(requested);
+        const auto selected = owner.Renderer().Selection(FarWorldPurpose::World);
         EXPECT_EQ(selected.effective, FarWorldMode::Legacy);
         EXPECT_EQ(selected.refusal, FarWorldRefusal::None);
-        EXPECT_EQ(owner.renderer.Residency(), residency);
+        EXPECT_EQ(owner.Renderer().Residency(), residency);
         EXPECT_FALSE(owner.Advance(Request()));
-        EXPECT_FALSE(owner.renderer.CavePolicy(selected).effective);
-        EXPECT_EQ(owner.renderer.CavePolicy(selected).bound, FarCaveMode::BandLimited);
-        EXPECT_EQ(owner.renderer.LastFrame().dispatched, 0u);
-        EXPECT_EQ(owner.state.live, 0u);
+        EXPECT_FALSE(owner.Renderer().CavePolicy(selected).effective);
+        EXPECT_EQ(owner.Renderer().CavePolicy(selected).bound, FarCaveMode::BandLimited);
+        EXPECT_EQ(owner.Renderer().LastFrame().dispatched, 0u);
+        EXPECT_EQ(owner.State().live, 0u);
     }
-    owner.renderer.SetRequested(FarWorldMode::Ladder);
-    EXPECT_EQ(owner.renderer.Residency(), nullptr);
-    EXPECT_EQ(owner.renderer.Selection(FarWorldPurpose::World).refusal,
+    owner.Renderer().SetRequested(FarWorldMode::Ladder);
+    EXPECT_EQ(owner.Renderer().Residency(), nullptr);
+    EXPECT_EQ(owner.Renderer().Selection(FarWorldPurpose::World).refusal,
               FarWorldRefusal::InvalidCavePolicy);
 }
 
@@ -930,38 +977,38 @@ TEST(FarWorldRenderer, FailedRebuildRetainsOldAllocationAndLogicalChargeButDoesN
     Owner owner;
     auto request = Request();
     ASSERT_TRUE(owner.WaitSettled(request));
-    const auto* old = owner.renderer.Residency()->Resource(request.identity.key);
+    const auto* old = owner.Renderer().Residency()->Resource(request.identity.key);
     ASSERT_NE(old, nullptr);
     const auto bytes = old->bytes();
-    const auto live = owner.state.live;
+    const auto live = owner.State().live;
     request.intent.extra_span = FarVolumeCoverageSpan{-512, 512};
     ++request.identity.span_generation;
-    owner.state.fail_upload = true;
+    owner.State().fail_upload = true;
     EXPECT_FALSE(owner.WaitSettled(request));
-    EXPECT_EQ(owner.renderer.Residency()->Resource(request.identity.key), old);
-    const auto observed = owner.renderer.Residency()->Observe(request.identity.key);
+    EXPECT_EQ(owner.Renderer().Residency()->Resource(request.identity.key), old);
+    const auto observed = owner.Renderer().Residency()->Observe(request.identity.key);
     ASSERT_TRUE(observed);
     if (observed) {
         EXPECT_EQ(observed->gpu_bytes, bytes);
         EXPECT_FALSE(IsFarTileCovering(observed->coverage));
     }
-    EXPECT_EQ(owner.state.live, live);
-    owner.renderer.BeginLiveOwnership(owner.frame);
-    ASSERT_TRUE(owner.renderer.FinishLiveOwnership());
+    EXPECT_EQ(owner.State().live, live);
+    owner.Renderer().BeginLiveOwnership(owner.Frame());
+    ASSERT_TRUE(owner.Renderer().FinishLiveOwnership());
     std::size_t prepares = 0;
-    const auto submission = owner.renderer.Submit({0, 0, 0}, [&](const auto&) {
+    const auto submission = owner.Renderer().Submit({0, 0, 0}, [&](const auto&) {
         ++prepares;
         return true;
     });
     EXPECT_EQ(submission.draws, 0u);
     EXPECT_EQ(submission.refused, 0u); // complete mask; stale residency itself excludes the draw
     EXPECT_EQ(prepares, 0u);
-    const auto attempts = owner.renderer.LastFrame().upload_attempts;
+    const auto attempts = owner.Renderer().LastFrame().upload_attempts;
     EXPECT_EQ(attempts, 1u);
-    EXPECT_GT(owner.renderer.LastFrame().upload_bytes, 0u);
-    EXPECT_EQ(owner.renderer.LastFrame().successful_upload_bytes, 0u);
+    EXPECT_GT(owner.Renderer().LastFrame().upload_bytes, 0u);
+    EXPECT_EQ(owner.Renderer().LastFrame().successful_upload_bytes, 0u);
     ASSERT_TRUE(owner.Advance(request));
-    EXPECT_EQ(owner.renderer.LastFrame().upload_attempts, 0u);
+    EXPECT_EQ(owner.Renderer().LastFrame().upload_attempts, 0u);
 }
 
 TEST(FarWorldRenderer, LogicalAdmissionIncludesIntegrationBeforeAnyBuildOrUpload) {
@@ -979,7 +1026,7 @@ TEST(FarWorldRenderer, LogicalAdmissionIncludesIntegrationBeforeAnyBuildOrUpload
 }
 
 TEST(FarWorldRenderer, FramePlaneProjectionAndInverseFollowEffectiveSelection) {
-    Camera camera;
+    Camera const camera;
     for (const auto mode : {FarWorldMode::Legacy, FarWorldMode::Ladder}) {
         camera.SelectFarWorldPlane(mode);
         EXPECT_EQ(camera.GetFarPlane(), FarWorldPlane(mode));
@@ -1000,49 +1047,49 @@ TEST(FarWorldRenderer, UploadByteAdmissionRefusesBeforeAnyNativeAllocation) {
     limits.frame.upload_bytes = 1;
     Owner owner(limits);
     EXPECT_FALSE(owner.WaitSettled(Request()));
-    const auto observed = owner.renderer.Residency()->Observe(Request().identity.key);
+    const auto observed = owner.Renderer().Residency()->Observe(Request().identity.key);
     ASSERT_TRUE(observed);
     if (observed) {
         EXPECT_EQ(observed->eligibility, FarVolumeEligibility::RequestRejected);
         EXPECT_EQ(observed->gpu_bytes, 0u);
     }
-    EXPECT_EQ(owner.state.live, 0u);
-    EXPECT_EQ(owner.state.deletes, 0u);
+    EXPECT_EQ(owner.State().live, 0u);
+    EXPECT_EQ(owner.State().deletes, 0u);
 }
 
 TEST(FarWorldRenderer, CameraXZWantedSetSpanGrowthAndRejectedExtensionAreTransactional) {
     Owner owner;
     std::vector<FarTileKey> wanted;
     ASSERT_EQ(ComputeFarWantedSet(-.5, -512.25, wanted), FarWantedError::None);
-    ASSERT_TRUE(owner.renderer.PrepareFrame(1, {-.5, -20, -512.25}));
-    const auto first = owner.renderer.Residency()->Snapshot();
+    ASSERT_TRUE(owner.Renderer().PrepareFrame(1, {-.5, -20, -512.25}));
+    const auto first = owner.Renderer().Residency()->Snapshot();
     std::size_t count = 0;
     for (const auto& tier : first)
         count += tier.wanted;
     EXPECT_EQ(count, wanted.size());
-    const auto before = owner.renderer.Residency()->Observe(wanted.front());
+    const auto before = owner.Renderer().Residency()->Observe(wanted.front());
     EXPECT_TRUE(before);
     ASSERT_TRUE(before);
-    ASSERT_TRUE(owner.renderer.PrepareFrame(2, {-.5, 100, -512.25}));
-    const auto after = owner.renderer.Residency()->Observe(wanted.front());
+    ASSERT_TRUE(owner.Renderer().PrepareFrame(2, {-.5, 100, -512.25}));
+    const auto after = owner.Renderer().Residency()->Observe(wanted.front());
     ASSERT_TRUE(after);
     if (before && after) {
         EXPECT_GT(after->desired.span_generation, before->desired.span_generation);
     }
-    ASSERT_TRUE(owner.renderer.PrepareFrame(3, {-.5, 0, -512.25}));
-    const auto unchanged = owner.renderer.Residency()->Observe(wanted.front());
+    ASSERT_TRUE(owner.Renderer().PrepareFrame(3, {-.5, 0, -512.25}));
+    const auto unchanged = owner.Renderer().Residency()->Observe(wanted.front());
     ASSERT_TRUE(unchanged) << "Missing tile observation after unchanged span";
     if (unchanged && after) {
         EXPECT_EQ(unchanged->desired, after->desired);
     }
     const std::array invalid{FarVolumeCoverageSpan{-9000, 0}};
-    EXPECT_FALSE(owner.renderer.PrepareFrame(4, {-.5, 0, -512.25}, invalid));
-    const auto rejected = owner.renderer.Residency()->Observe(wanted.front());
+    EXPECT_FALSE(owner.Renderer().PrepareFrame(4, {-.5, 0, -512.25}, invalid));
+    const auto rejected = owner.Renderer().Residency()->Observe(wanted.front());
     ASSERT_TRUE(rejected) << "Missing tile observation after rejected extension";
     if (rejected && after) {
         EXPECT_EQ(rejected->desired, after->desired);
     }
-    EXPECT_EQ(owner.renderer.Selection(FarWorldPurpose::World).refusal,
+    EXPECT_EQ(owner.Renderer().Selection(FarWorldPurpose::World).refusal,
               FarWorldRefusal::SpanRejected);
 }
 
@@ -1050,13 +1097,13 @@ TEST(FarWorldRenderer, LeaveAndReturnPreservesAcceptedExtensionsAndGeneration) {
     Owner owner;
     const FarTileKey key{1, -1, -2};
     const std::array extensions{FarVolumeCoverageSpan{-100, 1200}};
-    ASSERT_TRUE(owner.renderer.PrepareFrame(1, {-.5, 1000, -512.25}, extensions));
-    const auto before = owner.renderer.Residency()->Observe(key);
+    ASSERT_TRUE(owner.Renderer().PrepareFrame(1, {-.5, 1000, -512.25}, extensions));
+    const auto before = owner.Renderer().Residency()->Observe(key);
     ASSERT_TRUE(before);
-    ASSERT_TRUE(owner.renderer.PrepareFrame(2, {65536, 500, 65536}));
-    EXPECT_FALSE(owner.renderer.Residency()->Observe(key));
-    ASSERT_TRUE(owner.renderer.PrepareFrame(3, {-.5, 500, -512.25}));
-    const auto returned = owner.renderer.Residency()->Observe(key);
+    ASSERT_TRUE(owner.Renderer().PrepareFrame(2, {65536, 500, 65536}));
+    EXPECT_FALSE(owner.Renderer().Residency()->Observe(key));
+    ASSERT_TRUE(owner.Renderer().PrepareFrame(3, {-.5, 500, -512.25}));
+    const auto returned = owner.Renderer().Residency()->Observe(key);
     ASSERT_TRUE(returned);
     if (!returned)
         return;
@@ -1069,20 +1116,20 @@ TEST(FarWorldRenderer, LeaveAndReturnPreservesAcceptedExtensionsAndGeneration) {
     expected.identity = returned->desired;
     expected.intent.extra_span = extensions.front();
     expected.build_headroom_bytes = FarWorldDevelopmentLimits().build_headroom_bytes;
-    owner.frame = 3;
+    owner.Frame() = 3;
     EXPECT_TRUE(owner.Advance(expected));
 }
 
 TEST(FarWorldRenderer, LeaveAndReturnSpanGrowthKeepsGenerationMonotone) {
     Owner owner;
     const FarTileKey key{1, 0, 0};
-    ASSERT_TRUE(owner.renderer.PrepareFrame(1, {0, 1000, 0}));
-    const auto before = owner.renderer.Residency()->Observe(key);
+    ASSERT_TRUE(owner.Renderer().PrepareFrame(1, {0, 1000, 0}));
+    const auto before = owner.Renderer().Residency()->Observe(key);
     ASSERT_TRUE(before);
-    ASSERT_TRUE(owner.renderer.PrepareFrame(2, {65536, 0, 65536}));
-    EXPECT_FALSE(owner.renderer.Residency()->Observe(key));
-    ASSERT_TRUE(owner.renderer.PrepareFrame(3, {0, 0, 0}));
-    const auto returned = owner.renderer.Residency()->Observe(key);
+    ASSERT_TRUE(owner.Renderer().PrepareFrame(2, {65536, 0, 65536}));
+    EXPECT_FALSE(owner.Renderer().Residency()->Observe(key));
+    ASSERT_TRUE(owner.Renderer().PrepareFrame(3, {0, 0, 0}));
+    const auto returned = owner.Renderer().Residency()->Observe(key);
     ASSERT_TRUE(returned);
     auto expected = Request(key);
     expected.build_headroom_bytes = FarWorldDevelopmentLimits().build_headroom_bytes;
@@ -1092,13 +1139,13 @@ TEST(FarWorldRenderer, LeaveAndReturnSpanGrowthKeepsGenerationMonotone) {
         }
         expected.identity = returned->desired;
         expected.intent.extra_span = FarVolumeCoverageSpan{0, 1000};
-        owner.frame = 3;
+        owner.Frame() = 3;
         ASSERT_TRUE(owner.Advance(expected));
     }
-    ASSERT_TRUE(owner.renderer.PrepareFrame(5, {65536, 0, 65536}));
-    EXPECT_FALSE(owner.renderer.Residency()->Observe(key));
-    ASSERT_TRUE(owner.renderer.PrepareFrame(6, {0, -100, 0}));
-    const auto grown = owner.renderer.Residency()->Observe(key);
+    ASSERT_TRUE(owner.Renderer().PrepareFrame(5, {65536, 0, 65536}));
+    EXPECT_FALSE(owner.Renderer().Residency()->Observe(key));
+    ASSERT_TRUE(owner.Renderer().PrepareFrame(6, {0, -100, 0}));
+    const auto grown = owner.Renderer().Residency()->Observe(key);
     ASSERT_TRUE(grown);
     if (!grown)
         return;
@@ -1107,7 +1154,7 @@ TEST(FarWorldRenderer, LeaveAndReturnSpanGrowthKeepsGenerationMonotone) {
     }
     expected.identity = grown->desired;
     expected.intent.extra_span = FarVolumeCoverageSpan{-100, 1000};
-    owner.frame = 6;
+    owner.Frame() = 6;
     EXPECT_TRUE(owner.Advance(expected));
 }
 
@@ -1126,33 +1173,33 @@ TEST(FarWorldRenderer, SpanHistoryCapacityExhaustionRefusesTransactionally) {
         std::vector<FarTileKey> wanted;
         ASSERT_EQ(ComputeFarWantedSet(coordinate, coordinate, wanted), FarWantedError::None);
         if (tracked + wanted.size() <= history_slots) {
-            ASSERT_TRUE(owner.renderer.PrepareFrame(station + 1, {coordinate, 0, coordinate}));
+            ASSERT_TRUE(owner.Renderer().PrepareFrame(station + 1, {coordinate, 0, coordinate}));
             tracked += wanted.size();
             last_key = wanted.front();
-            const auto observed = owner.renderer.Residency()->Observe(last_key);
+            const auto observed = owner.Renderer().Residency()->Observe(last_key);
             ASSERT_TRUE(observed);
             if (observed) {
                 last_identity = observed->desired;
             }
-            last_snapshot = owner.renderer.Residency()->Snapshot();
-            last_frame = owner.renderer.LastFrame();
+            last_snapshot = owner.Renderer().Residency()->Snapshot();
+            last_frame = owner.Renderer().LastFrame();
             continue;
         }
         ASSERT_GT(tracked, 0u);
-        EXPECT_FALSE(owner.renderer.PrepareFrame(station + 1, {coordinate, 0, coordinate}));
-        const auto selection = owner.renderer.Selection(FarWorldPurpose::World);
+        EXPECT_FALSE(owner.Renderer().PrepareFrame(station + 1, {coordinate, 0, coordinate}));
+        const auto selection = owner.Renderer().Selection(FarWorldPurpose::World);
         EXPECT_EQ(selection.refusal, FarWorldRefusal::SpanHistoryExhausted);
         EXPECT_EQ(selection.effective, FarWorldMode::Legacy);
-        const auto observed = owner.renderer.Residency()->Observe(last_key);
+        const auto observed = owner.Renderer().Residency()->Observe(last_key);
         ASSERT_TRUE(observed);
         if (observed) {
             EXPECT_EQ(observed->desired, last_identity);
         }
-        EXPECT_FALSE(owner.renderer.Residency()->Observe(wanted.front()));
-        const auto snapshot = owner.renderer.Residency()->Snapshot();
+        EXPECT_FALSE(owner.Renderer().Residency()->Observe(wanted.front()));
+        const auto snapshot = owner.Renderer().Residency()->Snapshot();
         for (std::size_t tier = 0; tier < kFarTierCount; ++tier)
             EXPECT_EQ(snapshot[tier].wanted, last_snapshot[tier].wanted);
-        EXPECT_EQ(owner.renderer.LastFrame().dispatched, last_frame.dispatched);
+        EXPECT_EQ(owner.Renderer().LastFrame().dispatched, last_frame.dispatched);
         return;
     }
     FAIL() << "Disjoint wanted sets must exhaust the bounded retained history";
@@ -1164,14 +1211,14 @@ TEST(FarWorldRenderer, AdvanceFrameLeaveAndReturnRejectsGenerationRegression) {
     accepted.identity.span_generation = 2;
     accepted.intent.extra_span = FarVolumeCoverageSpan{-100, 1200};
     ASSERT_TRUE(owner.Advance(accepted));
-    ASSERT_TRUE(owner.renderer.AdvanceFrame(++owner.frame, {0, 0, 0}, {}));
-    ASSERT_FALSE(owner.renderer.Residency()->Observe(accepted.identity.key));
+    ASSERT_TRUE(owner.Renderer().AdvanceFrame(++owner.Frame(), {0, 0, 0}, {}));
+    ASSERT_FALSE(owner.Renderer().Residency()->Observe(accepted.identity.key));
     auto stale = accepted;
     stale.identity.span_generation = 1;
     stale.intent.extra_span = FarVolumeCoverageSpan{0, 0};
     ExpectManifestRefusedTransactionally(
         owner, std::span(&stale, 1), FarWorldRefusal::InvalidRequests);
-    EXPECT_FALSE(owner.renderer.Residency()->Observe(accepted.identity.key));
+    EXPECT_FALSE(owner.Renderer().Residency()->Observe(accepted.identity.key));
 }
 
 TEST(FarWorldRenderer, AdvanceFrameLeaveAndReturnRejectsGenerationReuseWithChangedIntent) {
@@ -1180,15 +1227,15 @@ TEST(FarWorldRenderer, AdvanceFrameLeaveAndReturnRejectsGenerationReuseWithChang
     accepted.identity.span_generation = 2;
     accepted.intent.extra_span = FarVolumeCoverageSpan{-100, 1200};
     ASSERT_TRUE(owner.Advance(accepted));
-    ASSERT_TRUE(owner.renderer.AdvanceFrame(++owner.frame, {0, 0, 0}, {}));
-    ASSERT_FALSE(owner.renderer.Residency()->Observe(accepted.identity.key));
+    ASSERT_TRUE(owner.Renderer().AdvanceFrame(++owner.Frame(), {0, 0, 0}, {}));
+    ASSERT_FALSE(owner.Renderer().Residency()->Observe(accepted.identity.key));
     auto reused = accepted;
     reused.intent.extra_span = FarVolumeCoverageSpan{-200, 1200};
     // A valid prefix must not be admitted before rejecting the returning key.
     const std::array manifest{Request({1, 100, 100}), reused};
     ExpectManifestRefusedTransactionally(owner, manifest, FarWorldRefusal::InvalidRequests);
-    EXPECT_FALSE(owner.renderer.Residency()->Observe(manifest.front().identity.key));
-    EXPECT_FALSE(owner.renderer.Residency()->Observe(accepted.identity.key));
+    EXPECT_FALSE(owner.Renderer().Residency()->Observe(manifest.front().identity.key));
+    EXPECT_FALSE(owner.Renderer().Residency()->Observe(accepted.identity.key));
 }
 
 TEST(FarWorldRenderer, AdvanceFrameLeaveAndReturnRejectsCoverageShrinkage) {
@@ -1200,15 +1247,15 @@ TEST(FarWorldRenderer, AdvanceFrameLeaveAndReturnRejectsCoverageShrinkage) {
         accepted.identity.span_generation = 2;
         accepted.intent.extra_span = FarVolumeCoverageSpan{-100, 1200};
         ASSERT_TRUE(owner.Advance(accepted));
-        ASSERT_TRUE(owner.renderer.AdvanceFrame(++owner.frame, {0, 0, 0}, {}));
-        ASSERT_FALSE(owner.renderer.Residency()->Observe(accepted.identity.key));
+        ASSERT_TRUE(owner.Renderer().AdvanceFrame(++owner.Frame(), {0, 0, 0}, {}));
+        ASSERT_FALSE(owner.Renderer().Residency()->Observe(accepted.identity.key));
         auto shrinking = accepted;
         ++shrinking.identity.span_generation;
         shrinking.intent.extra_span = extension;
         const std::array manifest{Request({1, 100, 100}), shrinking};
         ExpectManifestRefusedTransactionally(owner, manifest, FarWorldRefusal::SpanRejected);
-        EXPECT_FALSE(owner.renderer.Residency()->Observe(manifest.front().identity.key));
-        EXPECT_FALSE(owner.renderer.Residency()->Observe(accepted.identity.key));
+        EXPECT_FALSE(owner.Renderer().Residency()->Observe(manifest.front().identity.key));
+        EXPECT_FALSE(owner.Renderer().Residency()->Observe(accepted.identity.key));
     }
 }
 
@@ -1219,32 +1266,32 @@ TEST(FarWorldRenderer, AdvanceFrameSpanHistoryCapacityExhaustionRefusesTransacti
     for (std::size_t offset = 0; offset < history_slots; offset += batch.size()) {
         for (std::size_t i = 0; i < batch.size(); ++i)
             batch[i] = Request({1, static_cast<std::int64_t>(100 + offset + i), 100});
-        ASSERT_TRUE(owner.renderer.AdvanceFrame(++owner.frame, {0, 0, 0}, batch));
+        ASSERT_TRUE(owner.Renderer().AdvanceFrame(++owner.Frame(), {0, 0, 0}, batch));
     }
     // Replaying existing keys at full capacity still succeeds.
-    ASSERT_TRUE(owner.renderer.AdvanceFrame(++owner.frame, {0, 0, 0}, batch));
+    ASSERT_TRUE(owner.Renderer().AdvanceFrame(++owner.Frame(), {0, 0, 0}, batch));
     const auto retained = batch.back();
     auto growth = retained;
     ++growth.identity.span_generation;
     growth.intent.extra_span = FarVolumeCoverageSpan{0, 0};
     const std::array manifest{growth, Request({1, 612, 100})};
     ExpectManifestRefusedTransactionally(owner, manifest, FarWorldRefusal::SpanHistoryExhausted);
-    const auto observed = owner.renderer.Residency()->Observe(retained.identity.key);
+    const auto observed = owner.Renderer().Residency()->Observe(retained.identity.key);
     ASSERT_TRUE(observed);
     if (observed) {
         EXPECT_EQ(observed->desired, retained.identity);
     }
-    EXPECT_FALSE(owner.renderer.Residency()->Observe(manifest.back().identity.key));
+    EXPECT_FALSE(owner.Renderer().Residency()->Observe(manifest.back().identity.key));
 }
 
 TEST(FarWorldRenderer, MixedPrepareFrameAndAdvanceFramePreserveHistoryAndGenerations) {
     Owner owner;
     const FarTileKey key{1, 0, 0};
     const std::array extensions{FarVolumeCoverageSpan{-100, 1200}};
-    ASSERT_TRUE(owner.renderer.PrepareFrame(++owner.frame, {0, 1000, 0}, extensions));
-    const auto prepared = owner.renderer.Residency()->Observe(key);
-    ASSERT_TRUE(owner.renderer.AdvanceFrame(++owner.frame, {0, 0, 0}, {}));
-    ASSERT_FALSE(owner.renderer.Residency()->Observe(key));
+    ASSERT_TRUE(owner.Renderer().PrepareFrame(++owner.Frame(), {0, 1000, 0}, extensions));
+    const auto prepared = owner.Renderer().Residency()->Observe(key);
+    ASSERT_TRUE(owner.Renderer().AdvanceFrame(++owner.Frame(), {0, 0, 0}, {}));
+    ASSERT_FALSE(owner.Renderer().Residency()->Observe(key));
     ASSERT_TRUE(prepared);
     if (!prepared)
         return;
@@ -1256,17 +1303,17 @@ TEST(FarWorldRenderer, MixedPrepareFrameAndAdvanceFramePreserveHistoryAndGenerat
     request.identity.span_generation += 7;
     request.intent.extra_span = FarVolumeCoverageSpan{-200, 1200};
     ASSERT_TRUE(owner.Advance(request));
-    ASSERT_TRUE(owner.renderer.AdvanceFrame(++owner.frame, {0, 0, 0}, {}));
-    ASSERT_FALSE(owner.renderer.Residency()->Observe(key));
-    ASSERT_TRUE(owner.renderer.PrepareFrame(++owner.frame, {0, 500, 0}));
-    const auto returned = owner.renderer.Residency()->Observe(key);
+    ASSERT_TRUE(owner.Renderer().AdvanceFrame(++owner.Frame(), {0, 0, 0}, {}));
+    ASSERT_FALSE(owner.Renderer().Residency()->Observe(key));
+    ASSERT_TRUE(owner.Renderer().PrepareFrame(++owner.Frame(), {0, 500, 0}));
+    const auto returned = owner.Renderer().Residency()->Observe(key);
     ASSERT_TRUE(returned);
     if (returned) {
         EXPECT_EQ(returned->desired, request.identity);
     }
     ASSERT_TRUE(owner.Advance(request)); // Equal identity also checks the complete intent.
-    ASSERT_TRUE(owner.renderer.PrepareFrame(++owner.frame, {0, -300, 0}));
-    const auto grown = owner.renderer.Residency()->Observe(key);
+    ASSERT_TRUE(owner.Renderer().PrepareFrame(++owner.Frame(), {0, -300, 0}));
+    const auto grown = owner.Renderer().Residency()->Observe(key);
     ASSERT_TRUE(grown);
     if (!grown)
         return;
@@ -1275,7 +1322,7 @@ TEST(FarWorldRenderer, MixedPrepareFrameAndAdvanceFramePreserveHistoryAndGenerat
     expected.identity = grown->desired;
     expected.intent.extra_span = FarVolumeCoverageSpan{-300, 1200};
     ASSERT_TRUE(owner.Advance(expected));
-    ASSERT_TRUE(owner.renderer.AdvanceFrame(++owner.frame, {0, 0, 0}, {}));
+    ASSERT_TRUE(owner.Renderer().AdvanceFrame(++owner.Frame(), {0, 0, 0}, {}));
     // AdvanceFrame must consult the later generation accepted by PrepareFrame.
     ExpectManifestRefusedTransactionally(
         owner, std::span(&request, 1), FarWorldRefusal::InvalidRequests);
@@ -1286,11 +1333,11 @@ TEST(FarWorldRenderer, PrepareFrameHistoryRejectsChangedIntentAndShrinkageThroug
         Owner owner;
         const FarTileKey key{1, 0, 0};
         const std::array extensions{FarVolumeCoverageSpan{-100, 1200}};
-        ASSERT_TRUE(owner.renderer.PrepareFrame(++owner.frame, {0, 1000, 0}, extensions));
-        const auto prepared = owner.renderer.Residency()->Observe(key);
+        ASSERT_TRUE(owner.Renderer().PrepareFrame(++owner.Frame(), {0, 1000, 0}, extensions));
+        const auto prepared = owner.Renderer().Residency()->Observe(key);
         ASSERT_TRUE(prepared);
         if (prepared) {
-            ASSERT_TRUE(owner.renderer.AdvanceFrame(++owner.frame, {0, 0, 0}, {}));
+            ASSERT_TRUE(owner.Renderer().AdvanceFrame(++owner.Frame(), {0, 0, 0}, {}));
             auto request = Request(key);
             request.identity = prepared->desired;
             request.build_headroom_bytes = FarWorldDevelopmentLimits().build_headroom_bytes;
@@ -1304,7 +1351,7 @@ TEST(FarWorldRenderer, PrepareFrameHistoryRejectsChangedIntentAndShrinkageThroug
                                                  std::span(&request, 1),
                                                  shrink ? FarWorldRefusal::SpanRejected
                                                         : FarWorldRefusal::InvalidRequests);
-            EXPECT_FALSE(owner.renderer.Residency()->Observe(key));
+            EXPECT_FALSE(owner.Renderer().Residency()->Observe(key));
         }
     }
 }
@@ -1314,7 +1361,7 @@ TEST(FarWorldRenderer, CheckedDrawRejectsForeignBackendAndRestoresBindingsOnFail
         std::uint64_t bytes() const noexcept override {
             return 96;
         }
-    } foreign;
+    } const foreign;
     DriverState state, other_state;
     Driver driver(state), other(other_state);
     FarVolumeRenderMesh mesh;
@@ -1403,65 +1450,65 @@ TEST(FarWorldRenderer, DrawOwnershipKeyAndArrivalSpansNeverDependOnCamera) {
 TEST(FarWorldRenderer, IncompleteAndWrongFrameOwnershipRefuseFarSubmission) {
     Owner owner;
     ASSERT_TRUE(owner.WaitSettled(Request()));
-    owner.renderer.BeginLiveOwnership(owner.frame, 1);
-    ASSERT_TRUE(owner.renderer.AddLiveUpload({{0, 0, 0, 0}, 1, 1, 3, true}));
-    EXPECT_FALSE(owner.renderer.AddLiveUpload({{1, 0, 0, 0}, 1, 1, 3, true}));
-    EXPECT_FALSE(owner.renderer.FinishLiveOwnership());
+    owner.Renderer().BeginLiveOwnership(owner.Frame(), 1);
+    ASSERT_TRUE(owner.Renderer().AddLiveUpload({{0, 0, 0, 0}, 1, 1, 3, true}));
+    EXPECT_FALSE(owner.Renderer().AddLiveUpload({{1, 0, 0, 0}, 1, 1, 3, true}));
+    EXPECT_FALSE(owner.Renderer().FinishLiveOwnership());
     std::size_t prepares = 0;
     const auto prepare = [&](const auto&) {
         ++prepares;
         return true;
     };
-    EXPECT_EQ(owner.renderer.Submit({0, 0, 0}, prepare).refused, 1u);
-    owner.renderer.BeginLiveOwnership(owner.frame - 1);
-    ASSERT_TRUE(owner.renderer.FinishLiveOwnership());
-    EXPECT_EQ(owner.renderer.Submit({0, 0, 0}, prepare).refused, 1u);
+    EXPECT_EQ(owner.Renderer().Submit({0, 0, 0}, prepare).refused, 1u);
+    owner.Renderer().BeginLiveOwnership(owner.Frame() - 1);
+    ASSERT_TRUE(owner.Renderer().FinishLiveOwnership());
+    EXPECT_EQ(owner.Renderer().Submit({0, 0, 0}, prepare).refused, 1u);
     EXPECT_EQ(prepares, 0u);
-    EXPECT_EQ(owner.state.draws, 0u);
-    owner.renderer.BeginLiveOwnership(owner.frame);
-    ASSERT_TRUE(owner.renderer.FinishLiveOwnership());
-    EXPECT_EQ(owner.renderer.Submit({0, 0, 0}, prepare).draws, 1u);
+    EXPECT_EQ(owner.State().draws, 0u);
+    owner.Renderer().BeginLiveOwnership(owner.Frame());
+    ASSERT_TRUE(owner.Renderer().FinishLiveOwnership());
+    EXPECT_EQ(owner.Renderer().Submit({0, 0, 0}, prepare).draws, 1u);
 }
 
 TEST(FarWorldRenderer, FailedSubmissionAndPrepareExceptionUnbindBeforeNextSubmission) {
     Owner owner;
     ASSERT_TRUE(owner.WaitSettled(Request()));
-    owner.renderer.BeginLiveOwnership(owner.frame);
-    ASSERT_TRUE(owner.renderer.FinishLiveOwnership());
+    owner.Renderer().BeginLiveOwnership(owner.Frame());
+    ASSERT_TRUE(owner.Renderer().FinishLiveOwnership());
     const FarWorldPrepareDraw prepare = [](const auto&) {
         return true;
     };
-    owner.state.fail_draw = true;
-    const auto failed = owner.renderer.Submit({0, 0, 0}, prepare);
+    owner.State().fail_draw = true;
+    const auto failed = owner.Renderer().Submit({0, 0, 0}, prepare);
     EXPECT_EQ(failed.draws, 0u);
     EXPECT_EQ(failed.refused, 1u);
-    EXPECT_FALSE(owner.state.ownership_bound);
-    owner.state.fail_draw = false;
-    const auto refused = owner.renderer.Submit({0, 0, 0}, [](const auto&) { return false; });
+    EXPECT_FALSE(owner.State().ownership_bound);
+    owner.State().fail_draw = false;
+    const auto refused = owner.Renderer().Submit({0, 0, 0}, [](const auto&) { return false; });
     EXPECT_EQ(refused.draws, 0u);
     EXPECT_EQ(refused.refused, 1u);
-    EXPECT_FALSE(owner.state.ownership_bound);
-    EXPECT_THROW(owner.renderer.Submit({0, 0, 0},
-                                       [](const FarWorldDrawCommand&) -> bool {
-                                           throw std::runtime_error("prepare failed");
-                                       }),
+    EXPECT_FALSE(owner.State().ownership_bound);
+    EXPECT_THROW(owner.Renderer().Submit({0, 0, 0},
+                                         [](const FarWorldDrawCommand&) -> bool {
+                                             throw std::runtime_error("prepare failed");
+                                         }),
                  std::runtime_error);
-    EXPECT_FALSE(owner.state.ownership_bound);
-    EXPECT_EQ(owner.renderer.Submit({0, 0, 0}, prepare).draws, 1u);
-    EXPECT_FALSE(owner.state.ownership_bound);
+    EXPECT_FALSE(owner.State().ownership_bound);
+    EXPECT_EQ(owner.Renderer().Submit({0, 0, 0}, prepare).draws, 1u);
+    EXPECT_FALSE(owner.State().ownership_bound);
 }
 
 TEST(FarWorldRenderer, DiagnosticUsesSelectedFrameAndSuccessfulDrawsNotRetainedResidency) {
     Owner owner;
     const auto request = Request();
     ASSERT_TRUE(owner.WaitSettled(request));
-    owner.renderer.BeginLiveOwnership(owner.frame);
-    ASSERT_TRUE(owner.renderer.FinishLiveOwnership());
-    const auto selection = owner.renderer.Selection(FarWorldPurpose::World);
-    const auto stats = owner.renderer.Submit({0, 0, 0}, [](const auto&) { return true; });
-    owner.renderer.CaptureDiagnostic(
-        selection, owner.frame, {0, 0, 0}, kFarPlaneMeters, true, stats.draws, stats.indices);
-    const auto on = owner.renderer.Diagnostic();
+    owner.Renderer().BeginLiveOwnership(owner.Frame());
+    ASSERT_TRUE(owner.Renderer().FinishLiveOwnership());
+    const auto selection = owner.Renderer().Selection(FarWorldPurpose::World);
+    const auto stats = owner.Renderer().Submit({0, 0, 0}, [](const auto&) { return true; });
+    owner.Renderer().CaptureDiagnostic(
+        selection, owner.Frame(), {0, 0, 0}, kFarPlaneMeters, true, stats.draws, stats.indices);
+    const auto on = owner.Renderer().Diagnostic();
     ASSERT_EQ(on.tile_count, 1u);
     EXPECT_EQ(on.requested_cave_policy, FarCaveMode::BandLimited);
     EXPECT_EQ(on.bound_cave_policy, FarCaveMode::BandLimited);
@@ -1475,7 +1522,7 @@ TEST(FarWorldRenderer, DiagnosticUsesSelectedFrameAndSuccessfulDrawsNotRetainedR
     EXPECT_EQ(on.tiers[4].draws, 1u);
     EXPECT_GT(on.tiers[4].resident.retained_gpu_bytes, 0u);
     EXPECT_TRUE(on.submission_occurred);
-    EXPECT_EQ(on.upload.upload_attempts, owner.renderer.LastFrame().upload_attempts);
+    EXPECT_EQ(on.upload.upload_attempts, owner.Renderer().LastFrame().upload_attempts);
 
     const auto off = FarWorldSubmissionOverride(selection, false);
     bool advanced = false;
@@ -1483,45 +1530,45 @@ TEST(FarWorldRenderer, DiagnosticUsesSelectedFrameAndSuccessfulDrawsNotRetainedR
     const auto paired = SubmitSelectedFarWorld(
         off,
         [] { return FarWorldSubmitStats{}; },
-        [&](const auto& prepare) { return owner.renderer.Submit({0, 0, 0}, prepare); },
+        [&](const auto& prepare) { return owner.Renderer().Submit({0, 0, 0}, prepare); },
         [](const auto&) { return true; });
     EXPECT_FALSE(advanced);
     EXPECT_EQ(paired.draws, 0u);
     // Paired dispatch intentionally performs no CaptureDiagnostic.
-    EXPECT_EQ(owner.renderer.Diagnostic().frame, on.frame);
-    EXPECT_EQ(owner.renderer.Diagnostic().camera, on.camera);
-    EXPECT_EQ(owner.renderer.Diagnostic().world_epoch, on.world_epoch);
-    EXPECT_EQ(owner.renderer.Diagnostic().far_plane, on.far_plane);
-    EXPECT_EQ(owner.renderer.Diagnostic().requested_cave_policy, on.requested_cave_policy);
-    EXPECT_EQ(owner.renderer.Diagnostic().bound_cave_policy, on.bound_cave_policy);
-    EXPECT_EQ(owner.renderer.Diagnostic().tiers[4].resident.covering,
+    EXPECT_EQ(owner.Renderer().Diagnostic().frame, on.frame);
+    EXPECT_EQ(owner.Renderer().Diagnostic().camera, on.camera);
+    EXPECT_EQ(owner.Renderer().Diagnostic().world_epoch, on.world_epoch);
+    EXPECT_EQ(owner.Renderer().Diagnostic().far_plane, on.far_plane);
+    EXPECT_EQ(owner.Renderer().Diagnostic().requested_cave_policy, on.requested_cave_policy);
+    EXPECT_EQ(owner.Renderer().Diagnostic().bound_cave_policy, on.bound_cave_policy);
+    EXPECT_EQ(owner.Renderer().Diagnostic().tiers[4].resident.covering,
               on.tiers[4].resident.covering);
-    EXPECT_EQ(owner.renderer.Diagnostic().draws, on.draws);
-    EXPECT_EQ(owner.renderer.Diagnostic().upload.upload_bytes, on.upload.upload_bytes);
-    EXPECT_EQ(owner.state.draws, 1u);
-    EXPECT_FALSE(owner.renderer.AdvanceFrame(owner.frame, {0, 0, 0}, std::span(&request, 1)));
+    EXPECT_EQ(owner.Renderer().Diagnostic().draws, on.draws);
+    EXPECT_EQ(owner.Renderer().Diagnostic().upload.upload_bytes, on.upload.upload_bytes);
+    EXPECT_EQ(owner.State().draws, 1u);
+    EXPECT_FALSE(owner.Renderer().AdvanceFrame(owner.Frame(), {0, 0, 0}, std::span(&request, 1)));
 
-    owner.state.fail_draw = true;
-    const auto failed = owner.renderer.Submit({0, 0, 0}, [](const auto&) { return true; });
-    owner.renderer.CaptureDiagnostic(
-        selection, owner.frame, {0, 0, 0}, kFarPlaneMeters, false, failed.draws, failed.indices);
-    EXPECT_EQ(owner.renderer.Diagnostic().draws, 0u);
-    EXPECT_FALSE(owner.renderer.Diagnostic().submission_occurred);
-    EXPECT_EQ(owner.renderer.Diagnostic().tiers[4].resident.uploaded_pairs, 1u);
-    EXPECT_EQ(owner.renderer.Diagnostic().tiers[4].draw_refusals, 1u);
+    owner.State().fail_draw = true;
+    const auto failed = owner.Renderer().Submit({0, 0, 0}, [](const auto&) { return true; });
+    owner.Renderer().CaptureDiagnostic(
+        selection, owner.Frame(), {0, 0, 0}, kFarPlaneMeters, false, failed.draws, failed.indices);
+    EXPECT_EQ(owner.Renderer().Diagnostic().draws, 0u);
+    EXPECT_FALSE(owner.Renderer().Diagnostic().submission_occurred);
+    EXPECT_EQ(owner.Renderer().Diagnostic().tiers[4].resident.uploaded_pairs, 1u);
+    EXPECT_EQ(owner.Renderer().Diagnostic().tiers[4].draw_refusals, 1u);
 
     auto refused = selection;
     refused.effective = FarWorldMode::Legacy;
     refused.refusal = FarWorldRefusal::ShaderProgramUnavailable;
-    owner.renderer.CaptureDiagnostic(
-        refused, owner.frame + 1, {0, 0, 0}, kLegacyFarPlaneMeters, false, 0, 0, 9);
-    EXPECT_EQ(owner.renderer.Diagnostic().selection.requested, FarWorldMode::Ladder);
-    EXPECT_EQ(owner.renderer.Diagnostic().selection.effective, FarWorldMode::Legacy);
-    EXPECT_EQ(owner.renderer.Diagnostic().selection.refusal,
+    owner.Renderer().CaptureDiagnostic(
+        refused, owner.Frame() + 1, {0, 0, 0}, kLegacyFarPlaneMeters, false, 0, 0, 9);
+    EXPECT_EQ(owner.Renderer().Diagnostic().selection.requested, FarWorldMode::Ladder);
+    EXPECT_EQ(owner.Renderer().Diagnostic().selection.effective, FarWorldMode::Legacy);
+    EXPECT_EQ(owner.Renderer().Diagnostic().selection.refusal,
               FarWorldRefusal::ShaderProgramUnavailable);
-    EXPECT_EQ(owner.renderer.Diagnostic().tiers[4].resident.covering, 1u);
-    EXPECT_EQ(owner.renderer.Diagnostic().tiers[4].draws, 0u);
-    EXPECT_EQ(owner.renderer.Diagnostic().world_epoch, 9u);
+    EXPECT_EQ(owner.Renderer().Diagnostic().tiers[4].resident.covering, 1u);
+    EXPECT_EQ(owner.Renderer().Diagnostic().tiers[4].draws, 0u);
+    EXPECT_EQ(owner.Renderer().Diagnostic().world_epoch, 9u);
 }
 
 TEST(FarWorldRenderer, DiagnosticRangeAndStaleCountersAccumulateOncePerTransition) {
@@ -1531,38 +1578,38 @@ TEST(FarWorldRenderer, DiagnosticRangeAndStaleCountersAccumulateOncePerTransitio
     ++request.identity.span_generation;
     request.intent.extra_span = FarVolumeCoverageSpan{-300, 100};
     ASSERT_TRUE(owner.Advance(request));
-    auto selection = owner.renderer.Selection(FarWorldPurpose::World);
-    owner.renderer.CaptureDiagnostic(
-        selection, owner.frame, {0, 0, 0}, kFarPlaneMeters, true, 0, 0);
-    EXPECT_EQ(owner.renderer.Diagnostic().tiers[4].stale_rebuilds, 1u);
-    EXPECT_NE(owner.renderer.Diagnostic().tiles[0].built, request.identity);
-    ASSERT_TRUE(owner.renderer.AdvanceFrame(++owner.frame, {0, 0, 0}, {}));
-    owner.renderer.CaptureDiagnostic(
-        selection, owner.frame, {0, 0, 0}, kFarPlaneMeters, true, 0, 0);
-    EXPECT_EQ(owner.renderer.Diagnostic().tiers[4].evicted_range, 1u);
-    ASSERT_TRUE(owner.renderer.AdvanceFrame(++owner.frame, {0, 0, 0}, {}));
-    owner.renderer.CaptureDiagnostic(
-        selection, owner.frame, {0, 0, 0}, kFarPlaneMeters, true, 0, 0);
-    EXPECT_EQ(owner.renderer.Diagnostic().tiers[4].evicted_range, 1u);
+    auto selection = owner.Renderer().Selection(FarWorldPurpose::World);
+    owner.Renderer().CaptureDiagnostic(
+        selection, owner.Frame(), {0, 0, 0}, kFarPlaneMeters, true, 0, 0);
+    EXPECT_EQ(owner.Renderer().Diagnostic().tiers[4].stale_rebuilds, 1u);
+    EXPECT_NE(owner.Renderer().Diagnostic().tiles[0].built, request.identity);
+    ASSERT_TRUE(owner.Renderer().AdvanceFrame(++owner.Frame(), {0, 0, 0}, {}));
+    owner.Renderer().CaptureDiagnostic(
+        selection, owner.Frame(), {0, 0, 0}, kFarPlaneMeters, true, 0, 0);
+    EXPECT_EQ(owner.Renderer().Diagnostic().tiers[4].evicted_range, 1u);
+    ASSERT_TRUE(owner.Renderer().AdvanceFrame(++owner.Frame(), {0, 0, 0}, {}));
+    owner.Renderer().CaptureDiagnostic(
+        selection, owner.Frame(), {0, 0, 0}, kFarPlaneMeters, true, 0, 0);
+    EXPECT_EQ(owner.Renderer().Diagnostic().tiers[4].evicted_range, 1u);
 }
 
 TEST(FarWorldRenderer, DiagnosticEmptyPairCoversWithoutDrawingOrRetainedGpuStore) {
     Owner owner;
     const auto empty = Request({5, 1, 1}); // immutable fixture is air outside its central column
     ASSERT_TRUE(owner.WaitSettled(empty));
-    owner.renderer.BeginLiveOwnership(owner.frame);
-    ASSERT_TRUE(owner.renderer.FinishLiveOwnership());
-    const auto stats = owner.renderer.Submit({0, 0, 0}, [](const auto&) { return true; });
+    owner.Renderer().BeginLiveOwnership(owner.Frame());
+    ASSERT_TRUE(owner.Renderer().FinishLiveOwnership());
+    const auto stats = owner.Renderer().Submit({0, 0, 0}, [](const auto&) { return true; });
     EXPECT_EQ(stats.draws, 0u);
-    EXPECT_EQ(owner.state.draws, 0u);
-    owner.renderer.CaptureDiagnostic(owner.renderer.Selection(FarWorldPurpose::World),
-                                     owner.frame,
-                                     {0, 0, 0},
-                                     kFarPlaneMeters,
-                                     true,
-                                     stats.draws,
-                                     stats.indices);
-    const auto& snapshot = owner.renderer.Diagnostic();
+    EXPECT_EQ(owner.State().draws, 0u);
+    owner.Renderer().CaptureDiagnostic(owner.Renderer().Selection(FarWorldPurpose::World),
+                                       owner.Frame(),
+                                       {0, 0, 0},
+                                       kFarPlaneMeters,
+                                       true,
+                                       stats.draws,
+                                       stats.indices);
+    const auto& snapshot = owner.Renderer().Diagnostic();
     ASSERT_EQ(snapshot.tile_count, 1u);
     EXPECT_EQ(snapshot.tiles[0].coverage.state, FarTileState::Empty);
     EXPECT_EQ(snapshot.tiles[0].built, empty.identity);
@@ -1578,8 +1625,8 @@ TEST(FarWorldRenderer, WaterBoundGrowsSpanBeforeIdentityAndRefusesOutOfBudgetHei
     std::uint64_t dry_generation = 0;
     {
         auto dry = std::make_unique<Owner>();
-        ASSERT_TRUE(dry->renderer.PrepareFrame(++dry->frame, {0, 0, 0}));
-        const auto dry_observation = dry->renderer.Residency()->Observe({5, 0, 0});
+        ASSERT_TRUE(dry->Renderer().PrepareFrame(++dry->Frame(), {0, 0, 0}));
+        const auto dry_observation = dry->Renderer().Residency()->Observe({5, 0, 0});
         ASSERT_TRUE(dry_observation);
         if (dry_observation) {
             dry_generation = dry_observation->desired.span_generation;
@@ -1588,8 +1635,8 @@ TEST(FarWorldRenderer, WaterBoundGrowsSpanBeforeIdentityAndRefusesOutOfBudgetHei
     {
         auto wet = std::make_unique<Owner>(
             FarWorldDevelopmentLimits(), FarWorldWaterCapability::Wet, 500.0f);
-        ASSERT_TRUE(wet->renderer.PrepareFrame(++wet->frame, {0, 0, 0}));
-        const auto wet_observation = wet->renderer.Residency()->Observe({5, 0, 0});
+        ASSERT_TRUE(wet->Renderer().PrepareFrame(++wet->Frame(), {0, 0, 0}));
+        const auto wet_observation = wet->Renderer().Residency()->Observe({5, 0, 0});
         ASSERT_TRUE(wet_observation);
         if (wet_observation) {
             EXPECT_GT(wet_observation->desired.span_generation, dry_generation);
@@ -1598,20 +1645,20 @@ TEST(FarWorldRenderer, WaterBoundGrowsSpanBeforeIdentityAndRefusesOutOfBudgetHei
     auto limits = FarWorldDevelopmentLimits();
     limits.spans.max_y = 400;
     auto refused = std::make_unique<Owner>(limits, FarWorldWaterCapability::Wet, 500.0f);
-    EXPECT_FALSE(refused->renderer.PrepareFrame(++refused->frame, {0, 0, 0}));
-    EXPECT_EQ(refused->renderer.Selection(FarWorldPurpose::World).refusal,
+    EXPECT_FALSE(refused->Renderer().PrepareFrame(++refused->Frame(), {0, 0, 0}));
+    EXPECT_EQ(refused->Renderer().Selection(FarWorldPurpose::World).refusal,
               FarWorldRefusal::WaterSpanRefused);
-    EXPECT_EQ(refused->renderer.LastFrame().dispatched, 0u);
+    EXPECT_EQ(refused->Renderer().LastFrame().dispatched, 0u);
 }
 
 TEST(FarWorldRenderer, ExplicitWetManifestRefusesMissingWaterSpanBeforeDispatch) {
     Owner owner(FarWorldDevelopmentLimits(), FarWorldWaterCapability::Wet, 500);
     auto request = Request();
     request.intent.extra_span = FarVolumeCoverageSpan{0, 0};
-    EXPECT_FALSE(owner.renderer.AdvanceFrame(++owner.frame, {0, 0, 0}, std::span(&request, 1)));
-    EXPECT_EQ(owner.renderer.Selection(FarWorldPurpose::World).refusal,
+    EXPECT_FALSE(owner.Renderer().AdvanceFrame(++owner.Frame(), {0, 0, 0}, std::span(&request, 1)));
+    EXPECT_EQ(owner.Renderer().Selection(FarWorldPurpose::World).refusal,
               FarWorldRefusal::WaterSpanRefused);
-    EXPECT_EQ(owner.renderer.LastFrame().dispatched, 0u);
+    EXPECT_EQ(owner.Renderer().LastFrame().dispatched, 0u);
 }
 
 TEST(FarWorldRenderer, UnavailableWaterRefusesActivationWithoutAssumingDry) {
@@ -1657,43 +1704,44 @@ TEST(FarWorldRenderer, WetEmptyTerrainCountsRetainedAndActualSubmissionSeparatel
     auto wet_request = request;
     wet_request.intent.extra_span = FarVolumeCoverageSpan{0, 0};
     ASSERT_TRUE(owner.WaitSettled(wet_request));
-    const auto observation = owner.renderer.Residency()->Observe(request.identity.key);
+    const auto observation = owner.Renderer().Residency()->Observe(request.identity.key);
     ASSERT_TRUE(observation);
     if (observation) {
         EXPECT_EQ(observation->coverage.state, FarTileState::Uploaded);
         EXPECT_EQ(observation->terrain_indices, 0u);
         EXPECT_EQ(observation->water_indices, 98304u);
     }
-    owner.renderer.BeginLiveOwnership(owner.frame);
-    ASSERT_TRUE(owner.renderer.FinishLiveOwnership());
-    owner.state.fail_draw = true;
-    EXPECT_EQ(owner.renderer.Submit({0, 0, 0}, [](const auto&) { return true; }).water_indices, 0u);
-    owner.renderer.CaptureDiagnostic(owner.renderer.Selection(FarWorldPurpose::World),
-                                     owner.frame,
-                                     {0, 0, 0},
-                                     17408,
-                                     true,
-                                     0,
-                                     0);
-    EXPECT_EQ(owner.renderer.Diagnostic().tiers[4].resident.retained_water_indices, 98304u);
-    EXPECT_EQ(owner.renderer.Diagnostic().tiers[4].resident.submitted_water_indices, 0u);
-    owner.state.fail_draw = false;
-    const auto submitted = owner.renderer.Submit({0, 0, 0}, [](const auto&) { return true; });
+    owner.Renderer().BeginLiveOwnership(owner.Frame());
+    ASSERT_TRUE(owner.Renderer().FinishLiveOwnership());
+    owner.State().fail_draw = true;
+    EXPECT_EQ(owner.Renderer().Submit({0, 0, 0}, [](const auto&) { return true; }).water_indices,
+              0u);
+    owner.Renderer().CaptureDiagnostic(owner.Renderer().Selection(FarWorldPurpose::World),
+                                       owner.Frame(),
+                                       {0, 0, 0},
+                                       17408,
+                                       true,
+                                       0,
+                                       0);
+    EXPECT_EQ(owner.Renderer().Diagnostic().tiers[4].resident.retained_water_indices, 98304u);
+    EXPECT_EQ(owner.Renderer().Diagnostic().tiers[4].resident.submitted_water_indices, 0u);
+    owner.State().fail_draw = false;
+    const auto submitted = owner.Renderer().Submit({0, 0, 0}, [](const auto&) { return true; });
     EXPECT_EQ(submitted.water_indices, 98304u);
-    owner.renderer.CaptureDiagnostic(owner.renderer.Selection(FarWorldPurpose::World),
-                                     owner.frame,
-                                     {0, 0, 0},
-                                     17408,
-                                     true,
-                                     submitted.draws,
-                                     submitted.indices);
-    const auto on = owner.renderer.Diagnostic();
+    owner.Renderer().CaptureDiagnostic(owner.Renderer().Selection(FarWorldPurpose::World),
+                                       owner.Frame(),
+                                       {0, 0, 0},
+                                       17408,
+                                       true,
+                                       submitted.draws,
+                                       submitted.indices);
+    const auto on = owner.Renderer().Diagnostic();
     EXPECT_EQ(on.tiers[4].resident.submitted_water_indices, 98304u);
     EXPECT_EQ(on.tiers[4].resident.water_wet_tiles, 1u);
     EXPECT_TRUE(on.ladder_water_available);
     const auto off = FarWorldSubmissionOverride(on.selection, false);
     SubmitSelectedFarWorld(off, {}, {}, {});
-    EXPECT_EQ(owner.renderer.Diagnostic().tiers[4].resident.submitted_water_indices,
+    EXPECT_EQ(owner.Renderer().Diagnostic().tiers[4].resident.submitted_water_indices,
               on.tiers[4].resident.submitted_water_indices);
 }
 
@@ -1709,7 +1757,7 @@ FarVolumeResidencyLimits RendererHandoffLimits() {
 }
 FarTierBudgets RendererHandoffBudgets() {
     FarTierBudgets budgets;
-    budgets.bytes.fill(64 * 1024 * 1024);
+    budgets.bytes.fill(64ULL * 1024 * 1024);
     return budgets;
 }
 FarHandoffTileInput RendererHandoffInput(FarWorldHandoffRenderer& renderer,
@@ -1724,6 +1772,9 @@ FarHandoffTileInput RendererHandoffInput(FarWorldHandoffRenderer& renderer,
     FarFrozenCaptureSource source;
     source.content_identity = source.pristine.field_identity = wanted.identity.content_hash;
     source.durable = {generation, FarEditedImageState::Committed};
+    source.committed = [](std::uint8_t, const FarVolumePosition&) {
+        return FarFrozenOverride<FarVolumeSample>{FarFrozenPresence::Absent, {}};
+    };
     source.pristine.height = [](std::int64_t, std::int64_t) {
         return 0.0f;
     };
@@ -1745,7 +1796,7 @@ FarHandoffTileInput RendererHandoffInput(FarWorldHandoffRenderer& renderer,
     std::shared_ptr<const FarFrozenObservation> image;
     EXPECT_EQ(CaptureFarVolumeObservation(request,
                                           source,
-                                          {1, 100'000, 2'000'000, 100'000, 32 * 1024 * 1024},
+                                          {1, 100'000, 2'000'000, 100'000, 32ULL * 1024 * 1024},
                                           renderer.MemoryPool(key.tier),
                                           image),
               FarFrozenCaptureError::None);
@@ -1773,13 +1824,16 @@ class RendererHandoffGate final : public std::pmr::memory_resource {
 public:
     explicit RendererHandoffGate(BuildGate& gate)
         : gate_(gate) {}
-    std::atomic<bool> armed{false};
+    void Arm() {
+        armed_ = true;
+    }
 
 private:
+    std::atomic<bool> armed_{false};
     BuildGate& gate_;
     const std::thread::id owner_ = std::this_thread::get_id();
     void* do_allocate(std::size_t bytes, std::size_t alignment) override {
-        if (std::this_thread::get_id() != owner_ && armed.exchange(false)) {
+        if (std::this_thread::get_id() != owner_ && armed_.exchange(false)) {
             gate_.entered.count_down();
             gate_.release.wait();
             gate_.exited.count_down();
@@ -1813,7 +1867,7 @@ TEST(FarWorldHandoffRenderer, SameFrameOwnershipAndSubmitExceptionRestoreBinding
     ASSERT_TRUE(renderer.StageTarget(RendererHandoffManifest(1, inputs)));
     std::uint64_t frame = 0;
     ASSERT_TRUE(RendererHandoffWait([&] {
-        renderer.AdvanceFrame(++frame, {0, 0, 0}, {1, 1, 16 * 1024 * 1024});
+        renderer.AdvanceFrame(++frame, {0, 0, 0}, {1, 1, 16ULL * 1024 * 1024});
         return renderer.Handoff()->State().serving_serial == 1;
     }));
     std::size_t prepares = 0;
@@ -1860,15 +1914,21 @@ TEST(FarWorldHandoffRenderer, WorldSwapUnbindsBeforeJoiningAndReleasesBothGenera
     RendererHandoffGate gate(barrier);
     FarWorldHandoffRenderer renderer;
     // Fatal test exits still release the worker before renderer destruction.
-    struct Release {
-        BuildGate& barrier;
-        DriverState& state;
+    class Release {
+    public:
+        Release(BuildGate& barrier, DriverState& state)
+            : barrier_(barrier)
+            , state_(state) {}
         ~Release() {
-            if (!barrier.release.try_wait())
-                barrier.release.count_down();
-            state.release_on_drain = nullptr;
+            if (!barrier_.release.try_wait())
+                barrier_.release.count_down();
+            state_.release_on_drain = nullptr;
         }
-    } release{barrier, state};
+
+    private:
+        BuildGate& barrier_;
+        DriverState& state_;
+    } const release{barrier, state};
     renderer.InstallBackend(std::make_unique<Driver>(state));
     ASSERT_TRUE(renderer.Bind(jobs,
                               1,
@@ -1882,7 +1942,7 @@ TEST(FarWorldHandoffRenderer, WorldSwapUnbindsBeforeJoiningAndReleasesBothGenera
     ASSERT_TRUE(renderer.StageTarget(RendererHandoffManifest(1, a)));
     std::uint64_t frame = 0;
     ASSERT_TRUE(RendererHandoffWait([&] {
-        renderer.AdvanceFrame(++frame, {0, 0, 0}, {2, 2, 16 * 1024 * 1024});
+        renderer.AdvanceFrame(++frame, {0, 0, 0}, {2, 2, 16ULL * 1024 * 1024});
         const auto observed = renderer.Handoff()->Observe({4, 0, 0});
         if (!observed)
             return false;
@@ -1891,11 +1951,11 @@ TEST(FarWorldHandoffRenderer, WorldSwapUnbindsBeforeJoiningAndReleasesBothGenera
     auto b = std::array{RendererHandoffInput(renderer, {5, 0, 0}, 2, true),
                         RendererHandoffInput(renderer, {4, 0, 0}, 2, true)};
     ASSERT_TRUE(renderer.StageTarget(RendererHandoffManifest(2, b)));
-    gate.armed = true;
+    gate.Arm();
     renderer.AdvanceFrame(++frame, {0, 0, 0}, {1, 0, 0});
     ASSERT_TRUE(RendererHandoffWait([&] { return barrier.entered.try_wait(); }));
     ASSERT_TRUE(RendererHandoffWait([&] {
-        renderer.AdvanceFrame(++frame, {0, 0, 0}, {1, 1, 16 * 1024 * 1024});
+        renderer.AdvanceFrame(++frame, {0, 0, 0}, {1, 1, 16ULL * 1024 * 1024});
         const auto observed = renderer.Handoff()->Observe({4, 0, 0});
         if (!observed)
             return false;
@@ -1907,7 +1967,7 @@ TEST(FarWorldHandoffRenderer, WorldSwapUnbindsBeforeJoiningAndReleasesBothGenera
     if (!staged)
         return;
     EXPECT_GT(staged->staged_gpu_bytes, 0u);
-    std::weak_ptr<const FarFrozenObservation> held = b[0].observation;
+    std::weak_ptr<const FarFrozenObservation> const held = b[0].observation;
     a = {};
     b = {};
     const auto creates = state.live;
@@ -1936,7 +1996,7 @@ TEST(FarWorldHandoffRenderer, ExternalCaptureAliasesKeepOneMemoryDomainAliveAfte
                               RendererHandoffBudgets(),
                               RendererHandoffLimits()));
     auto pool = renderer.MemoryPool(5);
-    std::weak_ptr<FarVolumeMemoryPool> weak = pool;
+    std::weak_ptr<FarVolumeMemoryPool> const weak = pool;
     auto input = RendererHandoffInput(renderer, {5, 0, 0}, 1, false);
     const auto before_alias = pool->used();
     auto alias = input;

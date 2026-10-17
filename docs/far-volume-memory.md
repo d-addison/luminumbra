@@ -86,7 +86,8 @@ retained output, so only the pool is required for them.
 
 `FarVolumeHandoff` is an owner-thread companion to the fixture controller. Its
 bounded manifests use complete per-tile build identities and committed frozen
-terrain/water observations. `MakeFarHandoffTileInput` creates the water bridge
+terrain/water observations. Preview-use captures are refused even when their
+durable identity is committed. `MakeFarHandoffTileInput` creates the water bridge
 from that same observation and admits its shared allocation in the image pool.
 Frozen capture must use the controller's tier pool; every image alias retains
 its original allocation charge. Publication serials are process-local render

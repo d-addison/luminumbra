@@ -1,9 +1,33 @@
 #include "FarVolumeHandoff.h"
+#include "core/JobSystem.h"
+#include "luminumbra_client/rendering/FarVolumeBuildQueue.h"
+#include "luminumbra_client/rendering/FarVolumeResidency.h"
+#include "luminumbra_client/rendering/FarVolumeUpload.h"
+#include "luminumbra_client/rendering/FarWorldWaterMesh.h"
+#include "world/Chunk.h"
+#include "world/FarEditedBake.h"
+#include "world/FarFrozenObservation.h"
+#include "world/FarTierTable.h"
+#include "world/FarVolume.h"
+#include "world/FarVolumeMemory.h"
+#include "world/FarVolumeRuntime.h"
+#include "world/FarVolumeTierMemory.h"
+#include "world/FarVolumeTile.h"
+#include "world/FarWantedSet.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
 #include <limits>
+#include <memory>
+#include <memory_resource>
+#include <optional>
 #include <stdexcept>
+#include <thread>
+#include <utility>
 
 namespace Luminumbra::Rendering {
 namespace {
@@ -36,33 +60,39 @@ private:
     FarWorldFrozenWaterObservation water_;
 };
 template<class T>
-struct WaterAllocator {
+class WaterAllocator {
+public:
     using value_type = T;
-    std::shared_ptr<World::FarVolumeMemoryPool> pool;
     explicit WaterAllocator(std::shared_ptr<World::FarVolumeMemoryPool> p)
-        : pool(std::move(p)) {}
+        : pool_(std::move(p)) {}
     template<class U>
     WaterAllocator(const WaterAllocator<U>& other)
-        : pool(other.pool) {}
+        : pool_(other.Pool()) {}
     T* allocate(std::size_t count) {
         if (count > std::numeric_limits<std::size_t>::max() / sizeof(T) ||
-            !pool->TryReserve(count * sizeof(T)))
+            !pool_->TryReserve(count * sizeof(T)))
             throw World::FarVolumeMemoryRefused();
         try {
             return std::allocator<T>{}.allocate(count);
         } catch (...) {
-            pool->Release(count * sizeof(T));
+            pool_->Release(count * sizeof(T));
             throw;
         }
     }
     void deallocate(T* pointer, std::size_t count) noexcept {
         std::allocator<T>{}.deallocate(pointer, count);
-        pool->Release(count * sizeof(T));
+        pool_->Release(count * sizeof(T));
     }
     template<class U>
     bool operator==(const WaterAllocator<U>& other) const noexcept {
-        return pool == other.pool;
+        return pool_ == other.Pool();
     }
+    const std::shared_ptr<World::FarVolumeMemoryPool>& Pool() const noexcept {
+        return pool_;
+    }
+
+private:
+    std::shared_ptr<World::FarVolumeMemoryPool> pool_;
 };
 bool Same(const FarVolumeWantedRequest& a, const FarVolumeWantedRequest& b) {
     return a.identity == b.identity && a.intent == b.intent &&
@@ -152,7 +182,11 @@ FarVolumeHandoff::FarVolumeHandoff(JobSystem& jobs,
             jobs, *memory.Pool(i + 1), limits.entry_slots[i], limits.queues[i], upstream);
 }
 FarVolumeHandoff::~FarVolumeHandoff() {
-    CancelAndDrain();
+    try {
+        CancelAndDrain();
+    } catch (...) {
+        std::terminate();
+    }
 }
 void FarVolumeHandoff::CheckOwner() const {
     if (std::this_thread::get_id() != owner_)
@@ -211,7 +245,8 @@ bool FarVolumeHandoff::ValidateInput(const FarHandoffManifest& manifest,
     const auto& key = identity.key;
     const auto& image = *input.observation;
     const auto* water = dynamic_cast<const HandoffWater*>(wanted.water.get());
-    if (image.memory_pool() != memory_.Pool(key.tier) ||
+    if (image.use() != World::FarFrozenUse::Committed ||
+        image.memory_pool() != memory_.Pool(key.tier) ||
         image.durable_identity().state != World::FarEditedImageState::Committed ||
         image.durable_identity().generation != manifest.committed_generation ||
         image.caves() != manifest.caves || image.numeric() != manifest.numeric ||
@@ -266,8 +301,8 @@ bool FarVolumeHandoff::ValidateInput(const FarHandoffManifest& manifest,
     const auto bound = wanted.water_bound;
     if (!support || !bound || !std::isfinite(bound->min_y) || !std::isfinite(bound->max_y) ||
         bound->min_y > bound->max_y ||
-        (!bound->known_dry &&
-         (bound->min_y < resolved.span.min_y || bound->max_y > resolved.span.max_y)))
+        (!bound->known_dry && (double(bound->min_y) < double(resolved.span.min_y) ||
+                               double(bound->max_y) > double(resolved.span.max_y))))
         return false;
     if (old && old->history &&
         (resolved.span.min_y > old->history_span.span.min_y ||
@@ -280,7 +315,7 @@ bool FarVolumeHandoff::ValidateInput(const FarHandoffManifest& manifest,
     return true;
 }
 bool FarVolumeHandoff::StageTarget(const FarHandoffManifest& manifest) {
-    Guard guard(*this);
+    Guard const guard(*this);
     if (manifest.world_epoch == 0 || manifest.publication_serial == 0 ||
         (manifest.caves != World::FarCaveMode::BandLimited &&
          manifest.caves != World::FarCaveMode::BoxFiltered) ||
@@ -422,7 +457,7 @@ FarVolumeFrameResult FarVolumeHandoff::AdvanceFrame(double x,
                                                     double z,
                                                     const FarVolumeFrameLimits& limits,
                                                     const FarVolumeUploadBackend& backend) {
-    Guard guard(*this);
+    Guard const guard(*this);
     FarVolumeFrameResult result;
     if (!std::isfinite(x) || !std::isfinite(z) ||
         std::abs(x) > World::kFarWantedCameraLimitMeters ||
@@ -570,7 +605,7 @@ FarVolumeFrameResult FarVolumeHandoff::AdvanceFrame(double x,
     return result;
 }
 bool FarVolumeHandoff::TryPromote() {
-    Guard guard(*this);
+    Guard const guard(*this);
     if (state_.target_serial == 0)
         return false;
     const bool replacement = state_.serving_serial != state_.target_serial;
@@ -697,7 +732,7 @@ bool FarVolumeHandoff::CoarseMayYield(const World::FarTileKey& key,
     return true;
 }
 std::size_t FarVolumeHandoff::VisitServingDraws(FarVolumeDrawVisitor visitor, void* context) {
-    Guard guard(*this);
+    Guard const guard(*this);
     if (!visitor)
         return 0;
     std::size_t count = 0;
@@ -741,7 +776,7 @@ std::size_t FarVolumeHandoff::VisitServingDraws(FarVolumeDrawVisitor visitor, vo
     return count;
 }
 void FarVolumeHandoff::VisitObservations(FarHandoffObservationVisitor visitor, void* context) {
-    Guard guard(*this);
+    Guard const guard(*this);
     if (visitor) {
         for (const auto& tier : tiers_) {
             if (!tier)
@@ -769,7 +804,7 @@ std::array<World::FarVolumeTierMemoryStats, World::kFarTierCount> FarVolumeHando
     return result;
 }
 void FarVolumeHandoff::CancelAndDrain() {
-    Guard guard(*this);
+    Guard const guard(*this);
     // Drain every worker before either generation releases its input authority.
     for (auto& tier : tiers_) {
         if (!tier)

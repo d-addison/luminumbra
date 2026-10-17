@@ -1,18 +1,45 @@
 #include "FarWorldHandoffRenderer.h"
+#include "core/JobSystem.h"
+#include "luminumbra_client/rendering/FarVolumeGpuBackend.h"
+#include "luminumbra_client/rendering/FarVolumeHandoff.h"
+#include "luminumbra_client/rendering/FarVolumeResidency.h"
+#include "luminumbra_client/rendering/FarWorldHandoffDiagnostics.h"
+#include "luminumbra_client/rendering/FarWorldOwnership.h"
+#include "luminumbra_client/rendering/FarWorldRenderer.h"
+#include "luminumbra_client/rendering/FarWorldSelection.h"
+#include "world/FarTierTable.h"
+#include "world/FarVolume.h"
+#include "world/FarVolumeMemory.h"
+#include "world/FarVolumeTierMemory.h"
+#include "world/FarWantedSet.h"
+#include <array>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <memory>
+#include <memory_resource>
 #include <stdexcept>
+#include <thread>
+#include <utility>
 
 namespace Luminumbra::Rendering {
 namespace {
-struct HandoffMemoryDomain {
-    World::FarVolumeTierMemory memory;
-    World::FarVolumeMemoryLease charge;
+class HandoffMemoryDomain {
+public:
     explicit HandoffMemoryDomain(const World::FarTierBudgets& budgets)
-        : memory(budgets)
-        , charge(*memory.Pool(World::kFarTierCount)) {
-        if (!charge.TryCharge(sizeof(*this) + 2 * sizeof(void*)))
+        : memory_(budgets)
+        , charge_(*memory_.Pool(World::kFarTierCount)) {
+        if (!charge_.TryCharge(sizeof(*this) + 2 * sizeof(void*)))
             throw World::FarVolumeMemoryRefused();
     }
+    World::FarVolumeTierMemory& Memory() noexcept {
+        return memory_;
+    }
+
+private:
+    World::FarVolumeTierMemory memory_;
+    World::FarVolumeMemoryLease charge_;
 };
 } // namespace
 class FarWorldHandoffRenderer::Guard {
@@ -30,7 +57,11 @@ private:
     FarWorldHandoffRenderer& owner_;
 };
 FarWorldHandoffRenderer::~FarWorldHandoffRenderer() {
-    Shutdown();
+    try {
+        Shutdown();
+    } catch (...) {
+        std::terminate();
+    }
 }
 void FarWorldHandoffRenderer::CheckOwner() const {
     if (std::this_thread::get_id() != owner_ || submitting_ || mutating_)
@@ -44,7 +75,7 @@ void FarWorldHandoffRenderer::Unbind() noexcept {
     }
 }
 void FarWorldHandoffRenderer::InstallBackend(std::unique_ptr<FarVolumeGpuDriver> driver) {
-    Guard guard(*this);
+    Guard const guard(*this);
     Drain();
     driver_ = std::move(driver);
 }
@@ -55,7 +86,7 @@ bool FarWorldHandoffRenderer::Bind(JobSystem& jobs,
                                    const World::FarTierBudgets& budgets,
                                    const FarVolumeResidencyLimits& limits,
                                    std::pmr::memory_resource* upstream) {
-    Guard guard(*this);
+    Guard const guard(*this);
     if (handoff_ || !driver_ || !driver_->ValidContext() || epoch == 0 ||
         (caves != World::FarCaveMode::BandLimited && caves != World::FarCaveMode::BoxFiltered) ||
         (numeric != World::FarVolumeNumericProfile::RawFloat &&
@@ -70,7 +101,7 @@ bool FarWorldHandoffRenderer::Bind(JobSystem& jobs,
         return false;
     try {
         auto domain = std::make_shared<HandoffMemoryDomain>(budgets);
-        memory_ = std::shared_ptr<World::FarVolumeTierMemory>(domain, &domain->memory);
+        memory_ = std::shared_ptr<World::FarVolumeTierMemory>(domain, &domain->Memory());
         auto& charge = charge_.emplace(*memory_->Pool(World::kFarTierCount));
         if (!charge.TryCharge(sizeof(*this)))
             throw World::FarVolumeMemoryRefused();
@@ -96,7 +127,7 @@ FarWorldHandoffRenderer::MemoryPool(std::size_t tier) const {
                : nullptr;
 }
 bool FarWorldHandoffRenderer::StageTarget(const FarHandoffManifest& manifest) {
-    Guard guard(*this);
+    Guard const guard(*this);
     if (!handoff_ || manifest.world_epoch != world_epoch_ || manifest.caves != caves_ ||
         manifest.numeric != numeric_)
         return false;
@@ -110,7 +141,7 @@ bool FarWorldHandoffRenderer::StageTarget(const FarHandoffManifest& manifest) {
 bool FarWorldHandoffRenderer::AdvanceFrame(std::uint64_t frame,
                                            const std::array<double, 3>& camera,
                                            const FarVolumeFrameLimits& limits) {
-    Guard guard(*this);
+    Guard const guard(*this);
     if (!handoff_ || (frame_ && frame <= *frame_))
         return false;
     for (const auto coordinate : camera)
@@ -141,18 +172,24 @@ bool FarWorldHandoffRenderer::FinishLiveOwnership() {
 }
 FarWorldSubmitStats FarWorldHandoffRenderer::Submit(const std::array<double, 3>& camera,
                                                     const FarWorldPrepareDraw& prepare) {
-    Guard guard(*this);
+    Guard const guard(*this);
     FarWorldSubmitStats stats;
     diagnostic_.submission = {};
     for (std::size_t i = 0; i < diagnostic_.draw_count; ++i)
         diagnostic_.draws[i].submitted = false;
-    struct RecordSubmission {
-        FarWorldHandoffDiagnosticSnapshot& diagnostic;
-        FarWorldSubmitStats& stats;
+    class RecordSubmission {
+    public:
+        RecordSubmission(FarWorldHandoffDiagnosticSnapshot& diagnostic, FarWorldSubmitStats& stats)
+            : diagnostic_(diagnostic)
+            , stats_(stats) {}
         ~RecordSubmission() {
-            diagnostic.submission = stats;
+            diagnostic_.submission = stats_;
         }
-    } record_submission{diagnostic_, stats};
+
+    private:
+        FarWorldHandoffDiagnosticSnapshot& diagnostic_;
+        FarWorldSubmitStats& stats_;
+    } const record_submission{diagnostic_, stats};
     if (!handoff_ || !prepare)
         return stats;
     if (!frame_ || !ownership_.complete() || ownership_.frame() != *frame_) {
@@ -170,17 +207,25 @@ FarWorldSubmitStats FarWorldHandoffRenderer::Submit(const std::array<double, 3>&
     std::uint32_t vao = 0, vbo = 0;
     driver_->GetVertexArrayBinding(vao);
     driver_->GetVertexBufferBinding(vbo);
-    struct Restore {
-        FarVolumeGpuDriver& driver;
-        bool& submitting;
-        std::uint32_t vao, vbo;
+    class Restore {
+    public:
+        Restore(FarVolumeGpuDriver& driver, bool& submitting, std::uint32_t vao, std::uint32_t vbo)
+            : driver_(driver)
+            , submitting_(submitting)
+            , vao_(vao)
+            , vbo_(vbo) {}
         ~Restore() {
-            driver.UnbindLiveOwnership();
-            driver.BindVertexArray(vao);
-            driver.BindBuffer(FarVolumeBufferKind::Vertex, vbo);
-            submitting = false;
+            driver_.UnbindLiveOwnership();
+            driver_.BindVertexArray(vao_);
+            driver_.BindBuffer(FarVolumeBufferKind::Vertex, vbo_);
+            submitting_ = false;
         }
-    } restore{*driver_, submitting_, vao, vbo};
+
+    private:
+        FarVolumeGpuDriver& driver_;
+        bool& submitting_;
+        std::uint32_t vao_, vbo_;
+    } const restore{*driver_, submitting_, vao, vbo};
     submitting_ = true;
     if (!driver_->BindLiveOwnership(ownership_.cells())) {
         driver_->ReleaseLiveOwnership();
@@ -228,7 +273,7 @@ const FarWorldHandoffDiagnosticSnapshot& FarWorldHandoffRenderer::Diagnostic() c
     return diagnostic_;
 }
 void FarWorldHandoffRenderer::PrepareWorldSwap() {
-    Guard guard(*this);
+    Guard const guard(*this);
     Drain();
 }
 void FarWorldHandoffRenderer::Drain() {
@@ -247,7 +292,7 @@ void FarWorldHandoffRenderer::Drain() {
     world_epoch_ = 0;
 }
 void FarWorldHandoffRenderer::Shutdown() {
-    Guard guard(*this);
+    Guard const guard(*this);
     Drain();
     driver_.reset();
 }

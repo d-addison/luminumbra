@@ -2915,6 +2915,30 @@
           "planned": "map discriminating regression and qualification evidence for the updated contract; owner: ac"
         }
       ]
+    },
+    {
+      "id": "render.committed-residency-handoff",
+      "source": "docs/far-volume-memory.md#serving-and-target-handoff",
+      "statement": "The handoff fixture accepts committed frozen terrain/water captures and refuses preview-use captures with committed durable identities. Replacement publication preserves serving coverage until every wanted fallback covers; serving child masks and spans remain tied to the published manifest. Controller, renderer and diagnostic regressions cover overlap admission, supersession, upload failure and drain ownership.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "FarVolumeHandoff.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarVolumeHandoffArrivalTest.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarWorldHandoffRenderer.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarWorldHandoffDiagnostics.*"
+        }
+      ]
     }
   ]
 }
