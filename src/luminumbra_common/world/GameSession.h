@@ -43,6 +43,7 @@ class LuaState;
 
 namespace luminumbra::ai {
 class ScentField;
+struct CoarseBirth;
 class CreatureSpeciesRegistry; // per-world species definition table
 } // namespace luminumbra::ai
 
@@ -478,6 +479,19 @@ public:
     // Main-thread admission/edit seams. Enabled edits are transactional and own
     // their region before publishing any cell or identity.
     bool AdmitPlant(entt::entity entity);
+    bool AdmitCreature(entt::entity entity, bool physics_controlled = false);
+    struct CreatureActivity {
+        std::uint64_t full = 0, coarse = 0, frozen = 0;
+        std::uint64_t promotions = 0, demotions = 0, full_updates = 0, coarse_updates = 0;
+        std::uint64_t births = 0, deaths = 0, removals = 0, parked_travel = 0;
+        std::uint64_t controllers_created = 0, controllers_removed = 0, stale_handles = 0;
+    };
+    [[nodiscard]] CreatureActivity GetCreatureActivity() const;
+    // Preparation hook for deterministic controller-construction fault coverage.
+    void SetCreatureControllerPreparationHook(std::function<void()> hook) {
+        m_creatureControllerPreparation = std::move(hook);
+    }
+
     bool SetFoliageCell(const Vec3& position, bool soil, std::int32_t value);
     [[nodiscard]] std::int32_t SoilNutrientAt(const Vec3& position) const;
     [[nodiscard]] std::int32_t IrrigationAt(const Vec3& position) const;
@@ -645,6 +659,8 @@ private:
             RegionKey owner;
             Components::CreatureTier tier;
             std::uint64_t id;
+            Vec3 position;
+            bool alive;
         };
         std::uint64_t tick = 0;
         std::map<entt::entity, Previous> previous;
@@ -660,8 +676,21 @@ private:
     bool CreatureGrazerEligible(entt::entity entity) const;
     void RecordCreatureOperation(entt::entity entity);
     bool AdmitCreatureBirth(const luminumbra::ai::CreatureBirthProposal& birth);
+    const CreatureDistantPolicy& CreaturePolicy(std::uint16_t species) const;
+    CreatureActivity m_creatureActivity;
+    std::function<void()> m_creatureControllerPreparation;
+    void ReconcileCreatureTiers();
+    void RunCoarseCreatureTick();
+    void StepCreaturePhysics();
+    void RunFullCreatureBrain();
+    void CompleteCreatureMovement(entt::entity entity, Vec3 position);
+    void PublishCreaturePosition(entt::entity entity, const Vec3& position, RegionKey owner);
+    void SynchronizeCreatureLocomotion(entt::entity entity);
+    void CaptureFullCreature(entt::entity entity);
+    void ImportCoarseCreature(entt::entity entity);
+    entt::entity AdmitCoarseBirth(const luminumbra::ai::CoarseBirth& birth,
+                                  const std::map<std::uint64_t, entt::entity>& parents);
     void RunRegionalEnergyTick(std::uint64_t tick);
-    void CaptureCreatureLocomotionForSave();
     void RunRegionalWaterTick();
     void RunRegionalFoliageTick(luminumbra::simulation::SimBudgetTelemetry::TickScope& budget,
                                 std::uint64_t tick);
@@ -669,7 +698,8 @@ private:
                                     std::uint64_t tick,
                                     const FieldPageState& previous,
                                     const std::map<RegionKey, std::uint32_t>& windows,
-                                    const std::map<RegionKey, std::uint64_t>& resumes);
+                                    const std::map<RegionKey, std::uint64_t>& resumes,
+                                    std::map<std::uint64_t, std::uint32_t> plant_windows);
     void RunFoliageTick(luminumbra::simulation::SimBudgetTelemetry::TickScope& budget,
                         std::uint64_t tick);
     [[nodiscard]] luminumbra::foliage::PlantEnvSample

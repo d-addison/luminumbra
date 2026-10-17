@@ -32,6 +32,17 @@ rounded result against these domains. Converting back divides by 1,000 or
 to the session adapter, outside the integer kernel. Unrelated full-AI floats
 retain their exact persisted bits while the coarse tier runs.
 
+The session validates Full transforms against the same horizontal and vertical
+domains as persistence before publishing kinematic, controller or restored
+positions. A rounded horizontal bridge that reaches the next owner while its
+Full float is still inside the previous owner parks at that owner's last
+millimetre. Admission, demotion and movement use this same owner-preserving
+quantization; rounding does not authorize a transfer. Stationary Full positions
+retain their exact bits. Traversal skips zero-delta axes and uses only finite,
+bounded crossing fractions when parking at an absent or Frozen owner. Proposals
+outside the persisted domain are refused and controllers return to the valid
+pre-step position before continuation is synchronized.
+
 One living coarse creature whose previous owner is due and whose `region_stamp`
 is less than the absolute tick accepts a cadence only if it has not already
 stepped in the current owner's absolute cadence window. For shift `s`, the window
@@ -180,7 +191,7 @@ D owns brain and kinematic brain integration, both mating phases, steering and
 survival blending, thirst, scavenging, alarm, decomposition, circadian,
 territory, pack, migration, creature lifespan and the creature side of grazing.
 E now gates instinct, perception, scent and emitters through the same sealed
-admission. F still owns tier choice, the living coarse adapter, movement boundary
+admission. The session owns tier choice, the living coarse adapter, movement boundary
 admission and controller physics. D-only session regressions omit E-owned
 participants; E adds the complete persisted AI inventory regression without runtime
 physics controllers. The pure C kernel remains unchanged.
@@ -281,3 +292,64 @@ flag-off save path/byte map and file count, world hash and artifact bytes; enabl
 regressions cover complete blocked inventory, real recipient wiring, restored
 persistent references and scent/energy continuation. Native execution of these
 regressions remains a separate validation step.
+
+
+The enabled session prepares durable consumers, schedules regions, reconciles
+creature tiers and runtime controllers, then seals the real-tick cohorts. One
+integer kernel pass reads the previous owners and stamps. Births are admitted in
+mother identity order after that read pass; ordinary failed admission consumes an
+already allocated identity. Failed birth preparation destroys staged children
+before parental coarse results publish. Transfers and deaths publish from the
+complete result. An existing Mortal is marked dead without adding optional
+lifecycle components. Newly dead coarse creatures first decay on a later accepted
+corpse cadence. Full AI retains its established order, with selected creature
+physics in the movement lane. Final creature stamps precede event delivery;
+completed work publishes only after successful delivery. Consumer faults stop the
+remaining frame ticks and discard unpublished work, while coherent continuation
+remains saveable.
+
+Horizontal proximity uses validated simulation anchors and rounded millimetres,
+with coordinate differences bounded before squaring. Promotion is inclusive at
+the species distance and requires an Active owner. Full creatures retain their
+tier through the additional 64 metre hysteresis band. Reduced owners, disabled
+promotion and missing valid anchors demote Full creatures. Frozen owners only
+remove runtime attachments: persisted tier, position, optional presence, wishes,
+velocity and counters remain unchanged until thaw. Rendering and frame duration
+never choose a tier. Demotion captures position and matching named pressures;
+promotion imports them. Need names, order and Full growth rates remain intact.
+Integer-to-float projection stays inside the admitted owner even when a boundary
+millimetre cannot be represented by a float. Independent Full tick counters and
+coarse cadence counters survive repeated transitions without conversion.
+
+`AdmitCreature` resolves immutable species policy and admits required authority
+through the shared allocator. Controller participation remains explicit: false
+stays kinematic, including adopted legacy absence. True requires saved locomotion
+continuation. Runtime physics handles are opaque, removable and fresh on reused
+storage; surviving handles remain stable and stale handles refuse selected
+stepping. Creature selection follows PersistentId, independently of storage slots,
+and never steps unselected players or dormant creatures. Reconstruction restores
+all velocity components and the grounded branch before the first step. Each
+selected step synchronizes continuation immediately, so saving does not sample
+controllers or change creature authority. Full movement walks the horizontal
+region path, checks intervening owners and corner neighbors, and parks inside
+the last admitted owner at an absent or Frozen border. Movement never activates a
+region. The legacy index API and all-avatar stepping remain available for the
+disabled host path.
+
+Plants use species-specific cadence independently of page and water eligibility:
+Active shift zero, Reduced shift equal to the smaller of the region shift and the
+species maximum, and the ledger's phase at that effective shift. Persisted plant
+stamps bound each elapsed window. Resume windows also obey the species cap,
+calendar day bound and 36,000 tick bound. A zero cap stamps and acknowledges the
+resume without evolving that plant. All affected plants and admitted births are
+resolved before the shared resume token is acknowledged. Faster plant eligibility
+does not authorize extra page or water updates. Historical replay continues to
+exclude creature lifespan, decay, needs and feeding; final-substep grazing retains
+the transient positional source compatibility rule.
+
+`GetCreatureActivity` provides observational tier counts, transitions, accepted
+updates, births, deaths, admitted removals, parked travel and controller lifecycle counts. Sampling
+it neither allocates identities nor changes authority. These diagnostics do not
+feed scheduling, RNG, hashes or completed-work accounting. Complete creature and
+region projections, existing compatibility adoption rules and all persistence,
+network and checkpoint layouts remain unchanged.

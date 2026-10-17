@@ -2,7 +2,9 @@
 
 #include "../fields/FieldPageState.h"
 #include "../simulation/SimBudgetTelemetry.h"
+#include "../world/DistantPolicy.h"
 #include "IrrigationSystem.h"
+#include "RegionConsumerGate.h"
 #include "SoilNutrientSystem.h"
 #include <algorithm>
 #include <array>
@@ -19,6 +21,36 @@ using ::Luminumbra::world::FoliageFieldPages;
 using ::Luminumbra::world::RegionKey;
 using ::Luminumbra::world::RegionState;
 using ::Luminumbra::world::ScentCellKey;
+
+// Species cadence never changes region-owned page or water scheduling.
+inline bool PlantPolicyDue(const ::Luminumbra::world::ActiveRegionRecord& record,
+                           RegionKey key,
+                           const ::Luminumbra::world::PlantDistantPolicy& policy,
+                           std::uint64_t tick) {
+    if (record.state == RegionState::Frozen)
+        return false;
+    const auto shift = record.state == RegionState::Active
+                           ? std::uint8_t{0}
+                           : std::min(record.cadence_shift, policy.max_cadence_shift);
+    return (tick & ((std::uint64_t{1} << shift) - 1)) == ActiveRegionLedger::phase(key, shift);
+}
+inline std::optional<std::uint32_t>
+PlantPolicyWindow(const ::Luminumbra::world::ActiveRegionRecord& record,
+                  RegionKey key,
+                  const ::Luminumbra::world::PlantDistantPolicy& policy,
+                  const ::Luminumbra::world::WorldClock& clock,
+                  std::uint64_t stamp) {
+    if (record.state == RegionState::Frozen || stamp > clock.tick())
+        return {};
+    if (record.frozen_at) {
+        const auto resume = ActiveRegionLedger::resume_window(
+            key, record.frozen_at, clock, std::min(policy.resume_cap_ticks, std::uint32_t{36000}));
+        return static_cast<std::uint32_t>(std::min(clock.tick() - stamp, resume.elapsed_ticks));
+    }
+    if (!PlantPolicyDue(record, key, policy, clock.tick()))
+        return {};
+    return static_cast<std::uint32_t>(std::min(clock.tick() - stamp, std::uint64_t{65536}));
+}
 
 inline ScentCellKey FoliageCell(const ::Luminumbra::Vec3& p) {
     if (!ActiveRegionLedger::valid_anchor(p))
@@ -147,6 +179,21 @@ inline bool ActivateFoliagePage(FieldPageState& pages, ScentCellKey cell, bool s
     return true;
 }
 
+struct AllFoliageParticipants {
+    bool operator()(entt::entity) const {
+        return true;
+    }
+};
+
+template<class ParticipantGate>
+inline bool AdmitFoliageParticipant(const ParticipantGate& gate, entt::entity entity) {
+    return gate(entity);
+}
+inline bool AdmitFoliageParticipant(const ::Luminumbra::world::RegionEntityGate& gate,
+                                    entt::entity entity) {
+    return ::Luminumbra::world::AdmitRegionEntity(gate, entity);
+}
+
 // One sealed snapshot/index preparation per interleaved catch-up. Each step
 // touches only due owners; values are published before plant environment samples.
 // Births may admit soil pages between steps: import just that page on first use.
@@ -183,22 +230,24 @@ public:
         auto& soil = owners[FieldPageState::region_of_scent_cell(cell)].soil;
         AdmitSoilPage(pages, cell, soil);
     }
+    template<class ParticipantGate = AllFoliageParticipants>
     std::map<RegionKey, std::uint64_t>
     Step(entt::registry& reg,
          FieldPageState& pages,
          const std::map<RegionKey, std::uint32_t>& due,
          std::optional<std::uint64_t> current_tick = {},
-         simulation::SimBudgetTelemetry::TickScope* budget = nullptr) {
+         simulation::SimBudgetTelemetry::TickScope* budget = nullptr,
+         const ParticipantGate& participant_gate = {}) {
         std::map<RegionKey, std::uint64_t> completed;
         if (budget)
             budget->Next(simulation::SimBudgetStage::Soil,
                          [this, &due] { return DueCells(due, true); });
-        FeedSoil(reg, pages, due, current_tick, completed);
+        FeedSoil(reg, pages, due, current_tick, completed, participant_gate);
         EvolveSoil(pages, due, completed);
         if (budget)
             budget->Next(simulation::SimBudgetStage::Irrigation,
                          [this, &due] { return DueCells(due, false); });
-        DepositMoisture(reg, due, current_tick, completed);
+        DepositMoisture(reg, due, current_tick, completed, participant_gate);
         EvolveMoisture(pages, due, completed);
         return completed;
     }
@@ -255,17 +304,20 @@ private:
             return a.first < b.first;
         });
     }
+    template<class ParticipantGate>
     void FeedSoil(entt::registry& reg,
                   const FieldPageState& pages,
                   const std::map<RegionKey, std::uint32_t>& due,
                   std::optional<std::uint64_t> current_tick,
-                  std::map<RegionKey, std::uint64_t>& completed) {
+                  std::map<RegionKey, std::uint64_t>& completed,
+                  const ParticipantGate& participant_gate) {
         std::vector<entt::entity> feeders;
         for (auto entity : reg.view<Comp::PlantTag,
                                     Comp::SoilFeederComponent,
                                     Comp::PlantGrowthComponent,
                                     Comp::TransformComponent>())
-            feeders.push_back(entity);
+            if (AdmitFoliageParticipant(participant_gate, entity))
+                feeders.push_back(entity);
         std::sort(feeders.begin(), feeders.end(), [&reg](auto a, auto b) {
             return reg.get<Comp::PlantRegionComponent>(a).persistent_id <
                    reg.get<Comp::PlantRegionComponent>(b).persistent_id;
@@ -308,12 +360,16 @@ private:
             }
         }
     }
+    template<class ParticipantGate>
     void DepositMoisture(entt::registry& reg,
                          const std::map<RegionKey, std::uint32_t>& due,
                          std::optional<std::uint64_t> current_tick,
-                         std::map<RegionKey, std::uint64_t>& completed) {
+                         std::map<RegionKey, std::uint64_t>& completed,
+                         const ParticipantGate& participant_gate) {
         std::map<ScentCellKey, std::int64_t> deposits;
         for (auto entity : reg.view<Comp::WaterSourceComponent, Comp::TransformComponent>()) {
+            if (!AdmitFoliageParticipant(participant_gate, entity))
+                continue;
             const auto cell = FoliageCell(reg.get<Comp::TransformComponent>(entity).position);
             const auto key = FieldPageState::region_of_scent_cell(cell);
             const auto window = due.find(key);
@@ -363,12 +419,14 @@ private:
 
 // Standalone constant-input replay. The host also keeps one replay object across
 // its interleaved growth/living steps, preserving per-tick clamping and samples.
+template<class ParticipantGate = AllFoliageParticipants>
 inline std::map<RegionKey, std::uint64_t>
 AdvanceFoliageInteriors(entt::registry& reg,
                         FieldPageState& pages,
                         const std::map<RegionKey, std::uint32_t>& windows,
                         std::optional<std::uint64_t> current_tick = {},
-                        simulation::SimBudgetTelemetry::TickScope* budget = nullptr) {
+                        simulation::SimBudgetTelemetry::TickScope* budget = nullptr,
+                        const ParticipantGate& participant_gate = {}) {
     std::uint32_t max_window = 0;
     for (const auto& [key, ticks] : windows) {
         if (ticks > 65536)
@@ -382,7 +440,8 @@ AdvanceFoliageInteriors(entt::registry& reg,
         for (const auto& [key, ticks] : windows)
             if (step < ticks)
                 due.emplace(key, 1);
-        for (const auto& [key, updates] : replay.Step(reg, pages, due, current_tick, budget))
+        for (const auto& [key, updates] :
+             replay.Step(reg, pages, due, current_tick, budget, participant_gate))
             work[key] += updates;
     }
     return work;

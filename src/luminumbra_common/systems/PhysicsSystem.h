@@ -16,7 +16,11 @@
 #include <cstddef>
 #include <functional>
 #include <glm/glm.hpp>
+#include <limits>
+#include <map>
 #include <memory>
+#include <optional>
+#include <span>
 #include <unordered_map>
 #include <vector>
 
@@ -99,6 +103,14 @@ public:
     glm::vec3 get_avatar_position(std::size_t index) const;
     glm::vec3 get_avatar_velocity(std::size_t index) const;
     bool is_avatar_grounded(std::size_t index) const;
+
+    // Opaque handles are distinct from legacy numeric indices and never persisted.
+    std::size_t
+    create_avatar_handle(const glm::vec3& position, const glm::vec3& velocity, bool grounded);
+    bool remove_avatar_handle(std::size_t handle);
+    bool valid_avatar_handle(std::size_t handle) const;
+    bool update_selected_avatars(std::span<const std::size_t> handles, float dt);
+    bool set_avatar_position(std::size_t handle, const glm::vec3& position);
 
     // --- Audio-Physics Integration ---
     // Non-owning world-generation seam for surface-material classification on
@@ -207,6 +219,12 @@ private:
     std::vector<std::unique_ptr<JPH::CharacterVirtual>> m_avatar_characters;
     std::vector<glm::vec2> m_avatar_wish; // per-avatar horizontal wish velocity (m/s)
     JPH::Ref<JPH::Shape> m_avatar_shape;
+
+    std::map<std::size_t, std::size_t> m_avatar_slots;
+    std::map<std::size_t, bool> m_restored_grounded;
+    std::size_t m_next_avatar_handle = std::numeric_limits<std::size_t>::max() / 2;
+    std::size_t ResolveAvatar(std::size_t handle) const;
+    void StepAvatar(std::size_t slot, float dt, bool grounded);
 
     // Track collision bodies for loaded chunks
     std::unordered_map<ChunkID, ChunkCollisionData> m_chunk_bodies;
