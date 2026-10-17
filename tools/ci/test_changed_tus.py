@@ -1979,11 +1979,14 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
 
     def test_suites_are_registered_and_retain_native_routing(self):
         commands = tus._PATHS.python_test_commands(ROOT)
+        registration = (ROOT / "tools/ci/local_check_contracts.cmake").read_text()
+        self.assertIn('include("${CMAKE_CURRENT_SOURCE_DIR}/ci/local_check_contracts.cmake")',
+                      (ROOT / "tools/CMakeLists.txt").read_text())
         for name in ("changed_tus", "offline_deps"):
             self.assertIn((f"tools/ci/test_{name}.py",), commands)
             self.assertTrue(tus._PATHS.covered_python(f"tools/ci/{name}.py"))
             self.assertTrue(tus._PATHS.needs_cpp(f"tools/ci/{name}.py"))
-            self.assertIn(f'ci/test_{name}.py', (ROOT / "tools/CMakeLists.txt").read_text())
+            self.assertIn(f'${{_local_check_source_dir}}/test_{name}.py', registration)
 
     def test_unrecognized_gate_configuration_fails_closed(self):
         (self.root / "scripts/tidy.sh").write_text("gate_checks=dynamic\n")

@@ -1049,6 +1049,12 @@ class CachedGitSafetyTests(unittest.TestCase):
 
     @classmethod
     def initialize(cls, source, cache):
+        # Nested fixtures need the same complete initial repository as the
+        # top-level copies. Reuse its immutable seed instead of starting three
+        # more Git processes; subsequent gitlink and HEAD mutations stay real.
+        if source != cls.template_source:
+            shutil.copytree(cls.template_source, source, dirs_exist_ok=True)
+            return
         deps.git(source, "init", "--quiet", cache=cache)
         (source / "input.h").write_text("content\n")
         deps.git(source, "add", "input.h", cache=cache)
@@ -1119,6 +1125,57 @@ class CachedGitSafetyTests(unittest.TestCase):
             action()
         self.assertEqual((fresh.root / "scratch/staged/sample/input.h").read_text(), "content\n")
         self.assertFalse(fresh.marker.exists())
+
+    def test_nested_initialization_copies_complete_independent_repositories_without_git(self):
+        def state(source):
+            # Include empty metadata directories and file modes as well as
+            # every byte; filesystem identity must be independent of the seed.
+            return {path.relative_to(source): (path.stat().st_mode,
+                    path.read_bytes() if path.is_file() else None)
+                    for path in source.rglob("*")}
+
+        before = state(self.template_source)
+        nested = self.source / "nested seed"
+        child = nested / "child seed"
+        for source in (nested, child):
+            source.mkdir()
+            with patch.object(deps.subprocess, "check_output",
+                              side_effect=AssertionError("nested fixture setup started Git")):
+                self.initialize(source, self.cache)
+            self.assertEqual(state(source), before)
+            self.assertEqual(deps.head(source, self.cache), self.template_identity["commit"])
+            self.assertEqual(deps.submodules(source, self.cache), {})
+        (nested / "input.h").write_text("changed nested source\n")
+        (nested / ".git/config").write_text('[include]\npath = missing\n')
+        (nested / ".git/HEAD").unlink()
+        for source in (child, self.template_source):
+            self.assertEqual(state(source), before)
+
+    def test_nested_copy_failure_preserves_seed_and_is_cleaned_with_fixture(self):
+        before = {path.relative_to(self.template_source): path.read_bytes()
+                  for path in self.template_source.rglob("*") if path.is_file()}
+        for failure in (PermissionError("unreadable seed"), OSError("partial nested copy")):
+            with self.subTest(failure=failure):
+                fresh = type(self)()
+                self.addCleanup(fresh.doCleanups)
+                fresh.setUp()
+                source = fresh.source / "nested"
+                source.mkdir()
+
+                def fail(seed, destination, **options):
+                    self.assertEqual(seed, self.template_source)
+                    (destination / "partial").write_bytes(b"partial metadata")
+                    raise failure
+
+                with patch.object(shutil, "copytree", side_effect=fail):
+                    with self.assertRaises(OSError) as caught:
+                        fresh.initialize(source, fresh.cache)
+                self.assertIs(caught.exception, failure)
+                self.assertTrue((source / "partial").is_file())
+                self.assertTrue(fresh.doCleanups())
+                self.assertFalse(fresh.base.exists())
+                self.assertEqual({path.relative_to(self.template_source): path.read_bytes()
+                                  for path in self.template_source.rglob("*") if path.is_file()}, before)
 
     def test_failed_fixture_copy_removes_partial_data_and_preserves_template(self):
         before = {path.relative_to(self.template_source): path.read_bytes()
