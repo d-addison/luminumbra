@@ -1,4 +1,5 @@
 """Fault injection for publication; native compiler acceptance is a separate lane."""
+from contextlib import ExitStack
 import errno
 import json
 import os
@@ -19,6 +20,7 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from luminumbra_author import service as service_module
 from luminumbra_author import locking as locking_module
+from luminumbra_author import process as process_module
 from luminumbra_author.__main__ import dispatch
 from luminumbra_author.contracts import (ASSET, PROFILE, PREFAB_PROFILE, TOOLCHAIN, Refusal, atomic_json,
                                          canonical, digest, read_json, validate_asset)
@@ -104,7 +106,8 @@ class Locking(unittest.TestCase):
                 marker.close()
             except Exception as error:
                 errors.append(error)
-        thread = threading.Thread(target=close)
+        thread = threading.Thread(target=close, daemon=True)
+        self.addCleanup(thread.join, 5)
         thread.start()
         thread.join(timeout=5)
         self.assertFalse(thread.is_alive())
@@ -172,13 +175,23 @@ class Locking(unittest.TestCase):
                 lock.close()
             except Exception as error:
                 errors.append(error)
-        threads = [threading.Thread(target=close) for _ in range(count)]
-        for thread in threads:
-            thread.start()
-        ready.wait(timeout=5)
-        for thread in threads:
-            thread.join(timeout=5)
-            self.assertFalse(thread.is_alive())
+        threads = [threading.Thread(target=close, daemon=True) for _ in range(count)]
+        started, released = [], False
+        try:
+            for thread in threads:
+                thread.start()
+                started.append(thread)
+            ready.wait(timeout=5)
+            released = True
+        finally:
+            if not released:
+                ready.abort()
+            with ExitStack() as cleanup:
+                def join(thread):
+                    thread.join(timeout=5)
+                    self.assertFalse(thread.is_alive())
+                for thread in started:
+                    cleanup.callback(join, thread)
         self.assertEqual(errors, [])
 
     def test_cross_thread_release_and_double_close(self):
@@ -454,6 +467,170 @@ class Project(unittest.TestCase):
             with self.subTest(emit_lods=emit_lods, cap=cap), patch.object(service, "_invoke") as invoke:
                 service._compile("unused", source, outputs, emit_lods, cap)
                 invoke.assert_called_once_with("unused", source, outputs / "asset.lmesh", arguments)
+
+    def test_compile_receipt_failure_closes_pipe_and_reaps_supervisor(self):
+        service = self.open()
+        job_id = "1" * 32
+        service.jobs[job_id] = {"job_id": job_id, "status": "compiling"}
+        failure = OSError("Injected engine receipt publication failure")
+        spawn = subprocess.Popen
+        workers = []
+
+        def supervisor(*args, **kwargs):
+            worker = spawn([sys.executable, "-I", "-B", "-c",
+                            "import sys; sys.stdin.buffer.read()"],
+                           stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL)
+            workers.append(worker)
+            return worker
+
+        def save(job):
+            self.assertIs(job["engine_executed"], True)
+            self.assertIsNone(workers[0].poll())
+            raise failure
+
+        try:
+            with patch.object(service_module.subprocess, "Popen", side_effect=supervisor), \
+                 patch.object(service, "_save", side_effect=save):
+                with self.assertRaises(OSError) as caught:
+                    service._invoke(job_id, self.root / "input.glb",
+                                    self.root / "outputs" / "asset.lmesh", [])
+            self.assertIs(caught.exception, failure)
+            self.assertEqual(len(workers), 1)
+            self.assertTrue(workers[0].stdin.closed)
+            self.assertEqual(workers[0].returncode, 0)
+        finally:
+            for worker in workers:
+                with ExitStack() as cleanup:
+                    if os.name == 'nt': cleanup.callback(worker._handle.Close)
+                    cleanup.callback(worker.stdin.close)
+                    cleanup.callback(worker.wait, timeout=5)
+                    if worker.poll() is None:
+                        worker.kill()
+
+    def test_compile_receipt_failure_preserves_error_through_cleanup_failures(self):
+        service = self.open()
+        service.jobs["unused"] = {"job_id": "unused", "status": "compiling"}
+        failure = OSError("Injected engine receipt publication failure")
+        for phase in ("close", "wait", "kill", "reap", "timeout"):
+            with self.subTest(phase=phase):
+                worker = Mock()
+                if phase == "close":
+                    worker.stdin.close.side_effect = OSError("Injected pipe close failure")
+                elif phase == "wait":
+                    worker.wait.side_effect = [OSError("Injected wait failure"), 0]
+                else:
+                    worker.wait.side_effect = [subprocess.TimeoutExpired("supervisor", 10),
+                                              OSError("Injected reap failure") if phase == "reap" else 0]
+                    if phase == "kill":
+                        worker.kill.side_effect = OSError("Injected kill failure")
+                with patch.object(service_module.subprocess, "Popen", return_value=worker), \
+                     patch.object(service, "_save", side_effect=failure):
+                    with self.assertRaises(OSError) as caught:
+                        service._invoke("unused", self.root / "input.glb",
+                                        self.root / "outputs" / "asset.lmesh", [])
+                self.assertIs(caught.exception, failure)
+                worker.stdin.close.assert_called_once_with()
+                self.assertEqual(worker.wait.call_args_list[0].kwargs, {"timeout": 10})
+                if phase in ("wait", "kill", "reap", "timeout"):
+                    worker.kill.assert_called_once_with()
+                    self.assertEqual(worker.wait.call_count, 2)
+                    self.assertEqual(worker.wait.call_args.kwargs, {"timeout": 10})
+
+    def test_compile_deadline_setup_failure_closes_and_reaps_supervisor(self):
+        service = self.open()
+        failure = RuntimeError("Injected deadline setup failure")
+        worker = Mock()
+        with patch.object(service_module.subprocess, "Popen", return_value=worker), \
+             patch.object(service, "_change"), \
+             patch.object(service_module.time, "monotonic", side_effect=failure):
+            with self.assertRaises(RuntimeError) as caught:
+                service._invoke("unused", self.root / "input.glb",
+                                self.root / "outputs" / "asset.lmesh", [])
+        self.assertIs(caught.exception, failure)
+        worker.stdin.close.assert_called_once_with()
+        worker.wait.assert_called_once_with(timeout=10)
+
+    def test_compile_success_still_reaps_after_pipe_close_failure(self):
+        service = self.open()
+        failure = OSError("Injected pipe close failure")
+        worker = Mock(returncode=0)
+        worker.poll.return_value = 0
+        worker.stdin.close.side_effect = failure
+        with patch.object(service_module.subprocess, "Popen", return_value=worker), \
+             patch.object(service, "_change"), \
+             patch.object(service_module, "read_json", return_value={
+                 "timed_out": False, "cancelled": False, "returncode": 0}):
+            with self.assertRaises(OSError) as caught:
+                service._invoke("unused", self.root / "input.glb",
+                                self.root / "outputs" / "asset.lmesh", [])
+        self.assertIs(caught.exception, failure)
+        worker.wait.assert_called_once_with(timeout=10)
+
+    def test_shutdown_retains_project_until_failed_receipt_supervisor_is_reaped(self):
+        service = self.open()
+        waiting, release, shutdown = (threading.Event() for _ in range(3))
+        worker = Mock(returncode=None)
+        worker.stdin.closed = False
+        failure = OSError("Injected engine receipt publication failure")
+        save, executor_shutdown = service._save, service.executor.shutdown
+        errors = []
+
+        def close_pipe():
+            worker.stdin.closed = True
+
+        def reap(*, timeout):
+            self.assertTrue(worker.stdin.closed)
+            waiting.set()
+            self.assertTrue(release.wait(5))
+            worker.returncode = 0
+            return 0
+
+        def publish(job):
+            if job.get("engine_executed") and job["status"] == "compiling":
+                raise failure
+            save(job)
+
+        def stop_executor(*args, **kwargs):
+            shutdown.set()
+            return executor_shutdown(*args, **kwargs)
+
+        def close_service():
+            try:
+                service.close()
+            except BaseException as error:
+                errors.append(error)
+
+        worker.stdin.close.side_effect = close_pipe
+        worker.wait.side_effect = reap
+        closer = threading.Thread(target=close_service, daemon=True)
+        with patch.object(service_module.subprocess, "Popen", return_value=worker), \
+             patch.object(service, "_save", side_effect=publish), \
+             patch.object(service.executor, "shutdown", side_effect=stop_executor):
+            try:
+                job = service.submit("asset.json", 1)
+                self.assertTrue(waiting.wait(5), "Supervisor cleanup never acquired ownership")
+                closer.start()
+                self.assertTrue(shutdown.wait(5))
+                self.assertTrue(closer.is_alive())
+                self.assertFalse(service.project_lock.closed)
+                self.assertIsNone(worker.returncode)
+                with self.assertRaises(Refusal) as caught:
+                    BuildService(self.project, self.toolchain)
+                self.assertEqual(caught.exception.finding["rule_id"], "session.busy")
+            finally:
+                release.set()
+                if closer.ident is not None:
+                    closer.join(timeout=5)
+                service.close()
+        self.assertFalse(closer.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(worker.returncode, 0)
+        self.assertTrue(service.project_lock.closed)
+        result = service.status(job["job_id"])
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["findings"], [Refusal("job.failed", str(failure)).finding])
+        self.open()
 
     def test_max_tris_actual_count_and_failed_publication(self):
         service = self.open()
@@ -1684,28 +1861,210 @@ class Formats(unittest.TestCase):
 
 
 class Supervisor(unittest.TestCase):
+    def setUp(self):
+        # Platform simulations belong to the subject module. Mutating the
+        # shared os/sys/threading modules also changes pathlib and live workers.
+        for name in ('os', 'sys', 'signal', 'threading', 'subprocess'):
+            context = patch.object(process_module, name,
+                                   SimpleNamespace(**vars(getattr(process_module, name))))
+            context.start()
+            self.addCleanup(context.stop)
+
+    def test_thread_setup_failure_closes_and_reaps_compiler_on_both_platforms(self):
+        for host in ("nt", "posix"):
+            for phase in ("construct", "watcher_start", "reader_start"):
+                with self.subTest(host=host, phase=phase):
+                    failure = RuntimeError("Injected thread setup failure")
+                    worker = Mock()
+                    worker.poll.return_value = None
+                    watcher, reader = Mock(), Mock()
+                    if phase != "construct":
+                        (watcher if phase == "watcher_start" else reader).start.side_effect = failure
+                    with patch.object(process_module.os, "name", host), \
+                         patch.object(process_module.sys, "platform", "win32" if host == "nt" else "linux"), \
+                         patch.object(process_module.signal, "SIGKILL", 9, create=True), \
+                         patch.object(process_module.os, "killpg", create=True) as kill_group, \
+                         patch.object(process_module.subprocess, "Popen", return_value=worker) as spawn, \
+                         patch.object(process_module.threading, "Thread",
+                                      side_effect=failure if phase == "construct" else [watcher, reader]):
+                        with self.assertRaises(RuntimeError) as caught:
+                            process_module.supervise(["unused"], "unused.json", 1)
+                    self.assertIs(caught.exception, failure)
+                    if phase == "construct":
+                        spawn.assert_not_called()
+                    else:
+                        worker.wait.assert_called_once_with(timeout=5)
+                        worker.stdout.close.assert_called_once_with()
+                        if host == "nt":
+                            worker.kill.assert_called_once_with()
+                            kill_group.assert_not_called()
+                        else:
+                            kill_group.assert_called_once_with(worker.pid, 9)
+                    reader.join.assert_not_called()
+
+    def test_thread_start_error_survives_all_compiler_cleanup_failures(self):
+        failure = RuntimeError("Injected watcher start failure")
+        worker, watcher = Mock(), Mock()
+        worker.poll.return_value = None
+        watcher.start.side_effect = failure
+        for action in (worker.kill, worker.wait, worker.stdout.close):
+            action.side_effect = OSError("Injected compiler cleanup failure")
+        with patch.object(process_module.os, "name", "nt"), \
+             patch.object(process_module.sys, "platform", "win32"), \
+             patch.object(process_module.subprocess, "Popen", return_value=worker), \
+             patch.object(process_module.threading, "Thread", return_value=watcher):
+            with self.assertRaises(RuntimeError) as caught:
+                process_module.supervise(["unused"], "unused.json", 1)
+        self.assertIs(caught.exception, failure)
+        worker.kill.assert_called_once_with()
+        worker.wait.assert_called_once_with(timeout=5)
+        worker.stdout.close.assert_called_once_with()
+
+    def test_supervisor_cleanup_failure_still_reaps_joins_and_closes(self):
+        for phase in ("kill", "wait", "join", "close"):
+            with self.subTest(phase=phase):
+                failure = OSError("Injected compiler cleanup failure")
+                worker, watcher, reader = Mock(), Mock(), Mock()
+                worker.poll.return_value = None
+                worker.wait.side_effect = [0, failure if phase == "wait" else 0]
+                if phase != "wait":
+                    {"kill": worker.kill, "join": reader.join,
+                     "close": worker.stdout.close}[phase].side_effect = failure
+                with patch.object(process_module.os, "name", "nt"), \
+                     patch.object(process_module.sys, "platform", "win32"), \
+                     patch.object(process_module.subprocess, "Popen", return_value=worker), \
+                     patch.object(process_module.threading, "Thread", side_effect=[watcher, reader]), \
+                     patch.object(process_module, "atomic_json") as publish:
+                    with self.assertRaises(OSError) as caught:
+                        process_module.supervise(["unused"], "unused.json", 1)
+                self.assertIs(caught.exception, failure)
+                self.assertEqual(worker.wait.call_count, 2)
+                self.assertEqual(worker.wait.call_args.kwargs, {"timeout": 5})
+                reader.join.assert_called_once_with(timeout=5)
+                worker.stdout.close.assert_called_once_with()
+                publish.assert_not_called()
+
+    def test_owned_worker_event_setup_failure_precedes_spawn_on_both_platforms(self):
+        for host in ("nt", "posix"):
+            with self.subTest(host=host):
+                failure = RuntimeError("Injected event setup failure")
+                with patch.object(process_module.os, "name", host), \
+                     patch.object(process_module.sys, "platform", "win32" if host == "nt" else "linux"), \
+                     patch.object(process_module, "_require_pidfds"), \
+                     patch.object(process_module, "_owned_command", return_value=(["unused"], 11, 12)) as command, \
+                     patch.object(process_module.os, "close"), \
+                     patch.object(process_module.subprocess, "Popen") as spawn, \
+                     patch.object(process_module.threading, "Event", side_effect=failure):
+                    with self.assertRaises(RuntimeError) as caught:
+                        process_module.run_owned(["unused"], b"", timeout=1, cancel=Mock())
+                self.assertIs(caught.exception, failure)
+                spawn.assert_not_called()
+                command.assert_not_called()
+
+    def test_owned_worker_control_close_failure_still_kills_reaps_and_closes(self):
+        failure = OSError("Injected control close failure")
+        worker = Mock()
+        closed = []
+
+        def close(fd):
+            closed.append(fd)
+            if fd == 11:
+                raise failure
+
+        with patch.object(process_module.os, "name", "posix"), \
+             patch.object(process_module.sys, "platform", "linux"), \
+             patch.object(process_module, "_require_pidfds"), \
+             patch.object(process_module, "_owned_command", return_value=(["unused"], 11, 12)), \
+             patch.object(process_module.os, "close", side_effect=close), \
+             patch.object(process_module.subprocess, "Popen", return_value=worker), \
+             patch.object(process_module, "ProcessTree") as tree:
+            with self.assertRaises(OSError) as caught:
+                process_module.run_owned(["unused"], b"", timeout=1)
+        self.assertIs(caught.exception, failure)
+        self.assertEqual(closed, [11, 12])
+        tree.assert_not_called()
+        worker.kill.assert_called_once_with()
+        worker.wait.assert_called_once()
+        for stream in (worker.stdin, worker.stdout, worker.stderr):
+            stream.close.assert_called_once_with()
+
+    def test_host_simulations_supply_apis_unavailable_on_windows(self):
+        # Use module-local copies so the runner keeps its real filesystem host.
+        host_os = SimpleNamespace(**vars(process_module.os))
+        host_os.name = "nt"
+        for name in ("killpg", "getpgrp", "waitpid", "WNOHANG", "pidfd_open"):
+            host_os.__dict__.pop(name, None)
+        host_signal = SimpleNamespace(**vars(process_module.signal))
+        for name in ("SIGKILL", "pidfd_send_signal"):
+            host_signal.__dict__.pop(name, None)
+        host_sys = SimpleNamespace(**vars(process_module.sys))
+        host_sys.platform = "win32"
+        with patch.object(process_module, "os", host_os), \
+             patch.object(process_module, "signal", host_signal), \
+             patch.object(process_module, "sys", host_sys):
+            self.test_thread_setup_failure_closes_and_reaps_compiler_on_both_platforms()
+            self.test_owned_worker_event_setup_failure_precedes_spawn_on_both_platforms()
+            self.test_owned_worker_control_close_failure_still_kills_reaps_and_closes()
+            self.test_thread_start_error_survives_all_compiler_cleanup_failures()
+            self.test_supervisor_cleanup_failure_still_reaps_joins_and_closes()
+
     def run_child(self, script, timeout=5, cancel=False):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             output = root / "result.json"
-            env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1])}
-            command = [sys.executable, "-m", "luminumbra_author", "_compiler", str(output), str(timeout),
-                       sys.executable, "-c", script]
+            ready = root / "compiler-ready"
+            fixture = ("from pathlib import Path; Path(" + repr(str(ready)) + ").touch(); " + script)
+            # Trigger TimeoutExpired only after the real compiler has entered
+            # the fixture. Startup throughput cannot consume a 100 ms budget.
+            bootstrap = """import subprocess,sys,time
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+from luminumbra_author import process
+original = subprocess.Popen
+class Child(original):
+    def wait(self, timeout=None):
+        if sys.argv[4] == 'expire' and timeout == .1:
+            until = time.monotonic()+5
+            while not Path(sys.argv[3]).exists():
+                if time.monotonic() >= until:
+                    raise AssertionError('Compiler readiness was not observed')
+                time.sleep(.005)
+            raise subprocess.TimeoutExpired(self.args, timeout)
+        return super().wait(timeout=timeout)
+process.subprocess.Popen = Child
+process.supervise([sys.executable,'-I','-B','-c',sys.argv[5]],sys.argv[2],float(sys.argv[6]))
+"""
+            command = [sys.executable, "-I", "-B", "-c", bootstrap,
+                       str(Path(__file__).resolve().parents[1]), str(output), str(ready),
+                       "expire" if timeout == .1 else "normal", fixture, str(timeout)]
             child = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                     stderr=subprocess.PIPE, env=env)
-            if cancel:
-                child.stdin.close()
+                                     stderr=subprocess.PIPE, close_fds=True)
             try:
+                if cancel:
+                    until = time.monotonic() + 5
+                    while not ready.exists():
+                        self.assertLess(time.monotonic(), until, "Compiler did not enter fixture")
+                        time.sleep(.005)
+                    child.stdin.close()
                 child.wait(timeout=10)
                 self.assertEqual(child.returncode, 0, child.stderr.read().decode())
                 return read_json(output)
             finally:
-                child.stdin.close()
-                if child.poll() is None:
-                    child.kill()
-                    child.wait()
-                child.stdout.close()
-                child.stderr.close()
+                with ExitStack() as cleanup:
+                    if os.name == 'nt': cleanup.callback(child._handle.Close)
+                    cleanup.callback(child.stderr.close)
+                    cleanup.callback(child.stdout.close)
+                    try:
+                        # EOF lets the supervisor reap its compiler before the
+                        # owner itself exits, including on an assertion failure.
+                        child.stdin.close()
+                    finally:
+                        if child.poll() is None:
+                            try:
+                                child.wait(timeout=10)
+                            except subprocess.TimeoutExpired:
+                                child.kill()
+                                child.wait(timeout=10)
 
     def test_logs_are_drained_and_bounded(self):
         result = self.run_child("print('x' * 200000)")

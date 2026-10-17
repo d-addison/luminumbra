@@ -396,7 +396,7 @@ std::optional<std::uint64_t> DedicatedVideoMemoryBytesFromNvx(bool extensionAdve
     return kilobytes * 1024;
 }
 
-std::string_view GraphicsPresetName(GraphicsPreset preset) {
+std::string_view GraphicsPresetDisplayName(GraphicsPreset preset) {
     switch (preset) {
         case GraphicsPreset::Low:
             return "Low";

@@ -317,9 +317,9 @@ class BuildService:
         worker = subprocess.Popen(worker_command() + [str(result_path), str(self.timeout), *command],
                                   stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                                   stderr=subprocess.DEVNULL, cwd=directory, env=env)
-        self._change(job_id, engine_executed=True)
-        deadline = time.monotonic() + self.timeout + 10
         try:
+            self._change(job_id, engine_executed=True)
+            deadline = time.monotonic() + self.timeout + 10
             while worker.poll() is None:
                 if self.cancellations[job_id].wait(0.02):
                     worker.stdin.close()
@@ -336,12 +336,25 @@ class BuildService:
             require(not result["cancelled"], "job.cancelled", "Compiler ownership pipe closed.")
             require(result["returncode"] == 0, "compiler.failed", "Asset compiler rejected this snapshot; inspect the bounded log.")
         finally:
-            worker.stdin.close()
+            primary_error = sys.exc_info()[0] is not None
+            cleanup_errors = []
+            def cleanup(action):
+                try:
+                    action()
+                except BaseException as error:
+                    cleanup_errors.append(error)
+            cleanup(worker.stdin.close)
             try:
                 worker.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                worker.kill()
-                worker.wait()
+                cleanup(worker.kill)
+                cleanup(lambda: worker.wait(timeout=10))
+            except BaseException as error:
+                cleanup_errors.append(error)
+                cleanup(worker.kill)
+                cleanup(lambda: worker.wait(timeout=10))
+            if cleanup_errors and not primary_error:
+                raise cleanup_errors[0]
 
     def _compile_prefab(self, job_id, outputs, plan):
         parts = []
