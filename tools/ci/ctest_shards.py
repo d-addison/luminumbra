@@ -239,6 +239,7 @@ def run(directory, profile="gcc"):
     shard = manifest["shard"]
     require(shard in (0, 1, 2) and len(parts) == (1 if shard == 0 else 2), "invalid execution partition")
     roots = inventory_roots(directory)
+    require(manifest["roots"] == roots, "execution source or build roots differ from plan")
     require(manifest == {**evidence_for(roster(directory), parts, profile, manifest["timings"], roots), "shard": shard},
             "execution partition digest differs from plan")
     require(evidence_for(current_tests, parts, profile, manifest["timings"], roots) ==
