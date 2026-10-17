@@ -67,13 +67,22 @@ def unresolved_lock(root: Path) -> dict:
 
 
 def contained(path: Path, parent: Path) -> Path:
+    # Refuse lexical escapes before filesystem queries: hostile metadata can
+    # contain bytes Windows cannot stat. Still inspect the original components
+    # below before resolving, so '..' cannot erase a redirecting component.
+    # Other spellings (including Windows 8.3 aliases) need resolved comparison.
+    lexical_path, lexical_parent = Path(os.path.abspath(path)), Path(os.path.abspath(parent))
+    if (path.absolute().is_relative_to(parent.absolute())
+            and (lexical_path == lexical_parent or not lexical_path.is_relative_to(lexical_parent))):
+        raise DependencyError(f"path must be strictly inside {parent.name}: {path}")
     reject_reparse_points(path)
     reject_reparse_points(parent)
     try:
         resolved = path.resolve()
+        resolved_parent = parent.resolve()
     except RuntimeError as error:
         raise DependencyError(f"cyclic path: {path}") from error
-    if resolved == parent.resolve() or not resolved.is_relative_to(parent.resolve()):
+    if resolved == resolved_parent or not resolved.is_relative_to(resolved_parent):
         raise DependencyError(f"path must be strictly inside {parent.name}: {path}")
     return resolved
 
@@ -446,9 +455,9 @@ def remove_stage(dest: Path) -> None:
 
 def stage(root: Path, cache: Path, lock_path: Path, dest: Path, init: Path) -> None:
     scratch = root / "scratch"
-    reject_reparse_points(scratch)
     if scratch.is_symlink():
         raise DependencyError("symlinked scratch root")
+    reject_reparse_points(scratch)
     contained(scratch, root)
 
     def destination(path):

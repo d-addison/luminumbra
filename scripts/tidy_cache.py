@@ -667,7 +667,9 @@ class KeyBuilder:
                     sort_keys=True,
                 )
             )
-        parts.extend(sorted(entry_parts))
+        # clang-tidy may choose the first matching command for a duplicated
+        # source. Database order is therefore part of the analysis input.
+        parts.extend(entry_parts)
         return sha256_bytes("\n".join(parts).encode("utf-8"))
 
 

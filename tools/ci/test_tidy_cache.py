@@ -85,7 +85,7 @@ print("main.o: " + " \\\\\\n ".join(p.replace(" ", "\\\\ ") for p in order))
 """
 
 FAKE_TIDY = """
-import os, sys
+import json, os, sys
 args = sys.argv[1:]
 if args == ["--version"]:
     print("faketidy " + os.environ.get("FAKE_TIDY_VERSION", "1"))
@@ -93,6 +93,12 @@ if args == ["--version"]:
 target = args[-1]
 with open(os.environ["FAKE_TIDY_LOG"], "a", encoding="utf-8") as log:
     log.write(target + "\\n")
+database = os.path.join(args[args.index("-p") + 1], "compile_commands.json")
+with open(database, encoding="utf-8") as handle:
+    entries = json.load(handle)
+first = next((entry for entry in entries if os.path.normcase(os.path.abspath(
+    os.path.join(entry["directory"], entry["file"]))) == os.path.normcase(os.path.abspath(target))), None)
+flag_failure = first is not None and "-DTIDY_FAIL" in first["arguments"]
 swap = os.environ.get("FAKE_TIDY_DB_FROM")
 if swap:
     import shutil
@@ -101,7 +107,7 @@ mutate = os.environ.get("FAKE_TIDY_MUTATE")
 if mutate:
     with open(mutate, "a", encoding="utf-8") as handle:
         handle.write("// changed while the analysis was running\\n")
-if "TIDY_FAIL" in open(target, encoding="utf-8").read():
+if flag_failure or "TIDY_FAIL" in open(target, encoding="utf-8").read():
     print("fake diagnostic in " + target)
     sys.exit(1)
 sys.exit(0)
@@ -714,6 +720,38 @@ class TidyCacheTests(unittest.TestCase):
         self.entries = [self.entry(["-DONE"]), self.entry(["-DTHREE"])]
         self.write_db()
         self.assertRan(self.run_cache(), 2)
+
+    def test_reordered_duplicate_commands_cannot_hide_failing_first_flags(self):
+        self.entries = [self.entry(["-DONE"]), self.entry(["-DTIDY_FAIL"])]
+        self.write_db()
+        self.assertRan(self.run_cache(), 1)
+        result = self.run_cache()
+        self.assertRan(result, 1)
+        self.assertIn("1 hit(s)", result.stdout)
+        self.entries.reverse()
+        self.write_db()
+        for runs in (2, 3):
+            result = self.run_cache()
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("0 hit(s)", result.stdout)
+            self.assertIn("fake diagnostic", result.stdout)
+            self.assertEqual(self.tidy_runs(), runs)
+            self.assertEqual(len(list(self.cache.rglob("*.json"))), 1)
+        self.entries.reverse()
+        self.write_db()
+        result = self.run_cache()
+        self.assertRan(result, 3)
+        self.assertIn("1 hit(s)", result.stdout)
+
+    def test_duplicate_order_changing_during_analysis_is_not_recorded(self):
+        self.entries = [self.entry(["-DONE"]), self.entry(["-DTWO"])]
+        self.write_db()
+        replacement = self.root / "replacement_db.json"
+        replacement.write_text(json.dumps(list(reversed(self.entries))), encoding="utf-8")
+        self.env["FAKE_TIDY_DB_FROM"] = str(replacement)
+        self.env["FAKE_TIDY_DB"] = str(self.build / "compile_commands.json")
+        self.assertRan(self.run_cache(), 1)
+        self.assertEqual(list(self.cache.rglob("*.json")), [])
 
     def test_corrupt_or_foreign_records_are_misses(self):
         self.assertRan(self.run_cache(), 1)

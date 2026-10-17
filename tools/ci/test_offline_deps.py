@@ -383,6 +383,18 @@ class OfflineDependenciesTests(unittest.TestCase):
             self.skipTest(f"symlinks unavailable: {error}")
         self.assert_symlinked_stage_refused_without_writes()
 
+    def test_symlinked_scratch_diagnostic_precedes_reparse_validation(self):
+        scratch = self.root / "scratch"
+        is_symlink = Path.is_symlink
+        before = self.fixture_state()
+        # No symlink privilege is needed to check refusal ordering on Windows.
+        with patch.object(Path, "is_symlink", lambda path: path == scratch or is_symlink(path)), \
+                patch.object(deps, "reject_reparse_points", side_effect=AssertionError("reparse lookup ran")), \
+                patch.object(deps, "verify", side_effect=AssertionError("verification ran")):
+            with self.assertRaisesRegex(deps.DependencyError, "symlinked scratch root"):
+                self.stage()
+        self.assertEqual(self.fixture_state(), before)
+
     def test_symlinked_intermediate_stage_components_refused_without_writes(self):
         scratch = self.root / "scratch"
         target = scratch / "existing target"
@@ -542,44 +554,57 @@ class OfflineDependenciesTests(unittest.TestCase):
     def test_readonly_symlink_failure_cleanup_preserves_targets_and_retry_succeeds(self):
         directory, content = self.readonly_source()
         mode = directory.stat().st_mode
-        directory.chmod(mode | stat.S_IWUSR)
-        try:
-            for name, target in (("file link", content), ("directory link", directory)):
-                try:
-                    (directory / name).symlink_to(target.name if target == content else ".",
-                                                  target_is_directory=target == directory)
-                except OSError as error:
-                    if (error.errno not in (errno.EPERM, errno.EACCES, errno.ENOSYS,
-                                           errno.EOPNOTSUPP)
-                            and getattr(error, "winerror", None) not in (1, 50, 1314)):
-                        raise
-                    self.skipTest(f"Symlink creation is unavailable: {error}")
-        finally:
-            directory.chmod(mode)
+        # Source snapshots must be valid on Windows, where all reparse points
+        # are refused. Inject hostile links into the partial copy instead.
         self.write_lock()
         modes = [path.stat().st_mode for path in (directory, content)]
         real_copy = deps.shutil.copytree
         real_chmod, real_unlink, real_rmdir = os.chmod, os.unlink, os.rmdir
+        real_lstat, real_symlink = os.lstat, os.symlink
 
-        for phase in ("publication", "copy"):
-            with self.subTest(phase=phase):
-                dest = self.root / "scratch" / phase
-                init = self.root / "scratch" / (phase + ".cmake")
+        for phase, deny_links in ((phase, denied) for phase in ("publication", "copy") for denied in (False, True)):
+            with self.subTest(phase=phase, deny_links=deny_links):
+                fixture = phase + (" denied links" if deny_links else "")
+                dest = self.root / "scratch" / fixture
+                init = self.root / "scratch" / (fixture + ".cmake")
                 original = OSError("injected " + phase + " failure")
                 cleaning = False
                 retried_links = set()
+                simulated_links = {}
+
+                def lstat(path, *args, **kwargs):
+                    info = real_lstat(path, *args, **kwargs)
+                    if Path(path) in simulated_links:
+                        fields = {name: getattr(info, name) for name in dir(info) if name.startswith("st_")}
+                        fields["st_mode"] = stat.S_IFLNK | 0o777
+                        return SimpleNamespace(**fields)
+                    return info
+
+                def symlink(target, link, *, target_is_directory):
+                    try:
+                        if deny_links:
+                            raise PermissionError(errno.EPERM, "symlink creation denied")
+                        real_symlink(target, link, target_is_directory=target_is_directory)
+                    except OSError as error:
+                        if (error.errno not in (errno.EPERM, errno.EACCES, errno.ENOSYS, errno.EOPNOTSUPP)
+                                and getattr(error, "winerror", None) not in (1, 50, 1314)):
+                            raise
+                        # A stand-in directory entry plus lstat metadata models
+                        # no-follow cleanup even without symlink privileges.
+                        link.write_text("link stand-in")
+                        simulated_links[link] = target
 
                 def fail():
                     nonlocal cleaning
                     copied = dest / "sample/readonly directory"
-                    self.assertEqual((copied / "file link").read_text(), "readonly content\n")
+                    self.assertEqual((copied / content.name).read_text(), "readonly content\n")
                     # Model links pointing outside the partial stage. Cleanup
                     # must neither traverse them nor chmod their cache targets.
                     real_chmod(copied, mode | stat.S_IWUSR)
                     for name, target in (("file link", content), ("directory link", directory)):
                         link = copied / name
-                        link.unlink()
-                        link.symlink_to(target, target_is_directory=target == directory)
+                        symlink(target, link, target_is_directory=target == directory)
+                        self.assertTrue(stat.S_ISLNK(os.lstat(link).st_mode))
                     real_chmod(copied, mode)
                     cleaning = True
                     raise original
@@ -609,22 +634,28 @@ class OfflineDependenciesTests(unittest.TestCase):
 
                 with patch.object(deps.shutil, "copytree", side_effect=copy), \
                         patch.object(deps.os, "replace", side_effect=publish), \
+                        patch.object(deps.os, "lstat", side_effect=lstat), \
+                        patch.object(Path, "lstat", lstat), \
                         patch.object(deps.os, "chmod", side_effect=chmod), \
                         patch.object(deps.os, "unlink", side_effect=lambda *a, **kw: remove(real_unlink, *a, **kw)), \
                         patch.object(deps.os, "rmdir", side_effect=lambda *a, **kw: remove(real_rmdir, *a, **kw)):
                     with self.assertRaises(OSError) as caught:
                         self.stage(dest, init)
                 self.assertIs(caught.exception, original)
-                self.assertFalse(dest.exists())
+                self.assertFalse(dest.exists(), getattr(original, "__notes__", ()))
                 self.assertFalse(init.exists())
                 self.assertEqual(list(init.parent.glob(init.name + ".*.tmp")), [])
                 self.assertEqual(retried_links, {"file link", "directory link"})
                 self.assertEqual([path.stat().st_mode for path in (directory, content)], modes)
+                self.assertEqual(content.read_text(), "readonly content\n")
+                if deny_links:
+                    self.assertEqual({path.name for path in simulated_links}, retried_links)
                 self.stage(dest, init)
                 copied = dest / "sample/readonly directory"
-                self.assertTrue((copied / "file link").is_symlink())
-                self.assertTrue((copied / "directory link").is_symlink())
-                self.assertEqual((copied / "file link").read_text(), "readonly content\n")
+                self.assertFalse((copied / "file link").exists())
+                self.assertFalse((copied / "directory link").exists())
+                self.assertEqual((copied / content.name).read_text(), "readonly content\n")
+                self.assertEqual(deps.source_digest(dest / "sample"), deps.source_digest(self.source))
                 self.assertEqual([path.stat().st_mode for path in (directory, content)], modes)
                 self.assertIn("FETCHCONTENT_SOURCE_DIR_SAMPLE", init.read_text())
 
@@ -1083,6 +1114,42 @@ class CachedGitSafetyTests(unittest.TestCase):
                     with self.assertRaisesRegex(deps.DependencyError, "strictly inside"):
                         deps.git_metadata(self.source, self.cache)
                     self.assert_refused_without_writes()
+
+    def test_lexical_containment_refuses_escapes_before_filesystem_lookup(self):
+        # Exercise the Windows refusal order on every host, including bytes
+        # that cannot be passed to a Windows filesystem API.
+        for name in ("..", "../outside", "x\v../../../outside", "x\r../../../outside", "."):
+            with self.subTest(name=name), patch.object(
+                    deps, "reject_reparse_points", side_effect=AssertionError("filesystem lookup ran")):
+                with self.assertRaisesRegex(deps.DependencyError, "strictly inside"):
+                    deps.contained(self.cache / name, self.cache)
+
+    def test_resolved_aliases_require_containment_and_original_path_checks(self):
+        # Model a Windows short name without requiring 8.3 generation or
+        # symlink privileges. Resolving may expand a path outside its spelling.
+        alias = self.base / "CACHE~1/objects"
+        resolve = Path.resolve
+        for target in (self.cache / "objects", self.base / "outside", self.cache):
+            with self.subTest(target=target), patch.object(
+                    Path, "resolve", lambda path: target if path == alias else resolve(path)), \
+                    patch.object(deps, "reject_reparse_points") as check:
+                if target == self.cache / "objects":
+                    self.assertEqual(deps.contained(alias, self.cache), target)
+                else:
+                    with self.assertRaisesRegex(deps.DependencyError, "strictly inside"):
+                        deps.contained(alias, self.cache)
+                self.assertEqual([call.args[0] for call in check.call_args_list], [alias, self.cache])
+        for failure in (PermissionError("unreadable alias"), RuntimeError("cyclic alias")):
+            def failed_resolve(path):
+                if path == alias:
+                    raise failure
+                return resolve(path)
+            with self.subTest(failure=type(failure)), patch.object(Path, "resolve", failed_resolve), \
+                    patch.object(deps, "reject_reparse_points"):
+                expected = PermissionError if isinstance(failure, PermissionError) else deps.DependencyError
+                message = "unreadable alias" if isinstance(failure, PermissionError) else "cyclic path"
+                with self.assertRaisesRegex(expected, message):
+                    deps.contained(alias, self.cache)
 
     def test_head_uses_commit_peeling_without_argument_globs(self):
         expected = json.loads(self.lock.read_text())["dependencies"]["sample"]["commit"]

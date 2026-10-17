@@ -1941,16 +1941,29 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
 
     def test_git_selection_includes_merge_base_staged_unstaged_and_untracked(self):
         outputs = [b"a" * 40 + b"\n", b"src/committed.cpp\0", b"src/unstaged.hpp\0",
-                   b"src/staged.cpp\0", b"src/new name\nfile.hpp\0"]
+                   b"src/staged.cpp\0", "src/new name \u00fc file.hpp\0".encode()]
         with patch.object(tus.subprocess, "check_output", side_effect=outputs) as git:
             paths = tus.changed_paths(self.root, "local-base")
         self.assertEqual(paths, {self.root / name for name in (
-            "src/committed.cpp", "src/unstaged.hpp", "src/staged.cpp", "src/new name\nfile.hpp")})
+            "src/committed.cpp", "src/unstaged.hpp", "src/staged.cpp", "src/new name \u00fc file.hpp")})
         commands = [call.args[0] for call in git.call_args_list]
         self.assertEqual(commands[0], ["git", "merge-base", "local-base", "HEAD"])
         self.assertTrue(any("--cached" in c for c in commands))
         self.assertTrue(any("--others" in c for c in commands))
         self.assertFalse(any("fetch" in c for c in commands))
+
+    def test_git_nul_records_preserve_filename_line_separators(self):
+        # Exercise Git's byte protocol without asking the host filesystem to
+        # accept names that Windows forbids. Real path validation is covered
+        # by the selection and escape tests.
+        names = [f"src/new{separator}file.hpp" for separator in ("\n", "\r", "\v", "\x1c", "\u2028")]
+        payload = b"\0".join(os.fsencode(name) for name in names) + b"\0"
+        with patch.object(tus.subprocess, "check_output", side_effect=[b"a" * 40, payload]), \
+                patch.object(tus, "checked_resolve", side_effect=lambda path: path) as resolve:
+            paths = tus.changed_paths(self.root, "base", False, False)
+        expected = [self.root / name for name in names]
+        self.assertEqual(paths, set(expected))
+        self.assertEqual([call.args[0] for call in resolve.call_args_list], expected)
 
     def test_missing_local_merge_base_fails(self):
         with patch.object(tus.subprocess, "check_output", side_effect=subprocess.CalledProcessError(1, "git")):
