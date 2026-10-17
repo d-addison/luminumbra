@@ -3018,6 +3018,34 @@
       ]
     },
     {
+      "id": "render.committed-residency-handoff",
+      "source": "docs/far-volume-memory.md#serving-and-target-handoff",
+      "statement": "The handoff fixture accepts committed frozen terrain/water captures and refuses preview-use captures with committed durable identities. Replacement publication preserves serving coverage until every wanted fallback covers; serving child masks and spans remain tied to the published manifest. Bounded retired-key history permits traversal beyond descriptor capacity while preserving serving/target span checks and global publication checks. Controller, renderer and diagnostic regressions using a fake GPU driver cover software behaviour for result-slot backpressure, overlap admission, supersession, upload failure and drain ownership. Native rendering qualification is still outstanding.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "FarVolumeHandoff.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarVolumeHandoffArrivalTest.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarWorldHandoffRenderer.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarWorldHandoffDiagnostics.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarVolumeHandoffTraversal.*"
+        }
+      ]
+    },
+    {
       "id": "station.architecture",
       "source": "docs/distant-world.md#station-discovery-req-e4",
       "statement": "The discovery executable is CPU-only and constructs an unstreamed read-only query world with an explicit data root; its contract and CLI smoke are ordinary CTest entries.",
