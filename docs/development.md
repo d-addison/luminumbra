@@ -408,16 +408,21 @@ Removed entries remain in the inventory and are printed in decision fragments
 with their existing IDs and candidate rows. Review their removal or replacement
 explicitly. Rows with several possible source locators also receive a fragment.
 Any unresolved decision or static validation error makes refresh exit unsuccessfully
-without writing any files. Repeating refresh reports the same decisions until
+without changing any outputs. Repeating refresh reports the same decisions until
 the inventory and mappings are explicitly resolved.
 
 Refresh regenerates `docs/acceptance-matrix.md` through the existing renderer when
-the view changes and all decisions and validation errors are resolved. All output
-bytes are computed and staged before replacing any file. The generated view and
-matrix are replaced before the inventory, preserving the original locators until
-the remaining replacements can complete. If a replacement fails, including a
-locked file on Windows, close the locking program and retry the same command;
-the retry completes any remaining relocation. After manual accounting or evidence
-edits, use `--write-doc docs/acceptance-matrix.md` and rerun `--check-doc`.
+the view changes and all decisions and validation errors are resolved. Writers
+hold an operating-system lock in the checkout's Git metadata from input reads
+through the final replacement. Lock acquisition fails clearly after two seconds;
+a crashed holder releases its lock automatically. The persistent lock file stays
+outside the public tree and must not be removed while a writer is running.
+Refresh also checks the input bytes and discovered test sources before and during
+publication, refusing changes made while it was running. All output bytes and
+rollback copies are staged before replacing any file. A failed replacement,
+including a locked file on Windows, restores the previous outputs. Close the
+locking program and retry after resolving concurrent source edits. After manual
+accounting or evidence edits, use `--write-doc docs/acceptance-matrix.md` and rerun
+`--check-doc`.
 The inventory-completeness error for `iss.126` clears exactly when the inventory
 and mappings are complete; refresh does not change that row's status to hide it.

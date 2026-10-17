@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
+import errno
 import hashlib
 import json
 import os
@@ -14,13 +16,14 @@ import shlex
 import stat
 import subprocess
 import sys
+import time
 import unicodedata
 import xml.etree.ElementTree as ET
 from collections import Counter
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Callable, Iterator
 
 
 SCHEMA = "luminumbra.acceptance_matrix.v2"
@@ -860,36 +863,141 @@ def refresh_inventory(
     return refreshed, updated_matrix, decisions
 
 
-def _replace_outputs(outputs: list[tuple[Path, str]], *, private_output: Path | None = None) -> None:
-    """Stage every output before replacing closed files on Windows or POSIX.
+def _refresh_lock_path(root: Path) -> Path:
+    """Keep the persistent lock outside the public tree, including worktrees."""
+    metadata = root / ".git"
+    if metadata.is_file():
+        locator = metadata.read_text(encoding="utf-8").strip()
+        if not locator.startswith("gitdir: ") or not locator[8:].strip():
+            raise MatrixError("cannot locate refresh lock: invalid Git directory locator")
+        metadata = (root / locator[8:]).resolve()
+        if metadata.is_relative_to(root):
+            raise MatrixError("refresh lock requires Git metadata outside the public tree")
+    if not metadata.is_dir():
+        raise MatrixError("inventory refresh requires a Git metadata directory")
+    return metadata / "acceptance-refresh.lock"
 
-    Callers put the inventory last: until it is replaced, the original locators
-    remain available to recompute every relocation on retry. Earlier outputs
-    may already contain their new bytes after a failed replacement; a retry
-    compares bytes and completes the remaining outputs without consuming moves.
-    """
+
+def _try_refresh_lock(handle: Any) -> None:
+    if os.name == "nt":
+        import msvcrt
+        # Lock one byte even in an empty file. Never read or write this mandatory
+        # locked range through another handle, or rename/unlink the lock file.
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+@contextlib.contextmanager
+def _refresh_lock(root: Path, *, timeout: float = 2.0) -> Iterator[None]:
+    # Kernel ownership, rather than a PID or age check, makes a crashed holder
+    # harmless and prevents stealing a live holder's lock. Closing releases it.
+    path = _refresh_lock_path(root)
+    with path.open("a+b") as handle:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                _try_refresh_lock(handle)
+                break
+            except OSError as exc:
+                if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                    raise
+                if time.monotonic() >= deadline:
+                    raise MatrixError("cannot acquire inventory refresh lock within deadline") from exc
+                time.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
+        yield
+
+
+class _RefreshSnapshot:
+    """Bind validation to input bytes and the complete discovery file sets."""
+    def __init__(self, root: Path, paths: list[Path]) -> None:
+        self.root = root
+        self.discovery = self._discover()
+        self.fingerprints: dict[Path, tuple[Path, bytes | None]] = {}
+        self.add([*paths, *sorted(self.discovery), *(root / path for path in CONTRACT_DOCUMENTS)])
+
+    def _discover(self) -> set[Path]:
+        return set(_cmake_files(self.root) + _gtest_sources(self.root))
+
+    @staticmethod
+    def _fingerprint(path: Path) -> bytes | None:
+        try:
+            return hashlib.sha256(path.read_bytes()).digest()
+        except FileNotFoundError:
+            return None
+
+    def add(self, paths: list[Path]) -> None:
+        for path in paths:
+            path = path.absolute()
+            if path not in self.fingerprints:
+                self.fingerprints[path] = (path.resolve(), self._fingerprint(path))
+
+    def verify(self, published: dict[Path, bytes]) -> None:
+        if (self._discover() != self.discovery or any(
+                path.resolve() != target or self._fingerprint(path) != published.get(target, fingerprint)
+                for path, (target, fingerprint) in self.fingerprints.items())):
+            raise MatrixError("refresh input snapshot changed; retry after source edits finish")
+
+
+def _replace_outputs(
+    outputs: list[tuple[Path, str]], *, private_output: Path | None = None,
+    verify: Callable[[dict[Path, bytes]], None] | None = None,
+) -> None:
+    """Stage closed files and rollback copies before publishing on either OS."""
     staged: list[tuple[Path, Path]] = []
+    backups: dict[Path, Path | None] = {}
+    temporary_paths: list[Path] = []
+    replaced: list[Path] = []
+    digests: dict[Path, bytes] = {}
+    published: dict[Path, bytes] = {}
+
+    def stage(path: Path, data: bytes, mode: int | None, private: bool) -> Path:
+        # A 128-bit random name plus exclusive creation prevents clobbering
+        # another file. Register it for cleanup only after creation succeeds.
+        temporary = path.parent / (".acceptance-" + secrets.token_hex(16))
+        creation_mode = 0o600 if mode is not None or private else 0o666
+        with open(temporary, "xb", opener=lambda name, flags: os.open(name, flags, creation_mode)) as handle:
+            temporary_paths.append(temporary)
+            handle.write(data)
+        if mode is not None:
+            temporary.chmod(mode)
+        return temporary
+
     try:
         for path, text in outputs:
+            # --write-doc may explicitly name the standard generated document.
+            if path in backups:
+                continue
             data = text.encode("utf-8")
-            if path.is_file() and path.read_bytes() == data:
+            original = path.read_bytes() if path.exists() else None
+            if original == data:
                 continue
             mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else None
-            # A 128-bit random name plus exclusive creation prevents clobbering
-            # another file. Register it for cleanup only after creation succeeds.
-            temporary = path.parent / (".acceptance-" + secrets.token_hex(16))
-            # New documents use normal creation permissions and inherited ACLs.
-            # Keep receipts and replacements private until their mode is set.
-            creation_mode = 0o600 if mode is not None or path == private_output else 0o666
-            with open(temporary, "xb", opener=lambda name, flags: os.open(name, flags, creation_mode)) as handle:
-                staged.append((temporary, path))
-                handle.write(data)
-            if mode is not None:
-                temporary.chmod(mode)
+            backups[path] = stage(path, original, mode, True) if original is not None else None
+            staged.append((stage(path, data, mode, path == private_output), path))
+            digests[path] = hashlib.sha256(data).digest()
+        if verify is not None:
+            verify(published)
         for temporary, path in staged:
+            if verify is not None:
+                verify(published)
             temporary.replace(path)
+            replaced.append(path)
+            published[path.resolve()] = digests[path]
+        if verify is not None:
+            verify(published)
+    except BaseException:
+        for path in reversed(replaced):
+            backup = backups[path]
+            if backup is None:
+                path.unlink()
+            else:
+                os.replace(backup, path)
+        raise
     finally:
-        for temporary, _ in staged:
+        for temporary in temporary_paths:
             try:
                 temporary.unlink(missing_ok=True)
             except PermissionError:
@@ -1352,6 +1460,47 @@ def _doc_matches(path: Path, expected: str) -> bool:
     return text.replace("\r\n", "\n") == expected
 
 
+def _matrix_input_paths(matrix: dict[str, Any], root: Path) -> list[Path]:
+    references: list[str] = []
+    rows = matrix.get("rows", [])
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        source = row.get("source")
+        if _is_nonempty_str(source):
+            references.append(source.partition("#")[0])
+        evidence = row.get("evidence", [])
+        for item in evidence if isinstance(evidence, list) else []:
+            if isinstance(item, dict) and item.get("kind") != "ctest" and _is_nonempty_str(item.get("ref")):
+                references.append(item["ref"])
+    return [root / ref for ref in references
+            if not _path_problem(root, ref, must_exist=False) and not (root / ref).is_dir()]
+
+
+def _check_output_paths(args: argparse.Namespace, root: Path, matrix_path: Path, inputs: list[Path]) -> None:
+    inventory = root / "tools/ci/acceptance_requirements.json"
+    doc = root / "docs/acceptance-matrix.md"
+    targets = [inventory, matrix_path, doc] if args.refresh_inventory else []
+    if args.write_doc is not None and (not args.refresh_inventory or args.write_doc.resolve() != doc.resolve()):
+        targets.append(args.write_doc)
+    if args.execution_receipt is not None:
+        targets.append(args.execution_receipt)
+    if len({path.resolve() for path in targets}) != len(targets):
+        raise MatrixError("refresh output paths must be distinct" if args.refresh_inventory
+                          else "output paths must be distinct")
+    if args.write_doc is None and args.execution_receipt is None:
+        return
+    protected = {path.resolve() for path in (
+        matrix_path, inventory, *(root / path for path in CONTRACT_DOCUMENTS),
+        *_cmake_files(root), *_gtest_sources(root), *inputs, *args.junit,
+        *([args.discovery] if args.discovery is not None else []), _refresh_lock_path(root))}
+    for path in (args.write_doc, args.execution_receipt):
+        if path is not None and path.resolve() in protected and path.resolve() != doc.resolve():
+            raise MatrixError(f"output path overlaps an input: {path}")
+    if args.execution_receipt is not None and args.execution_receipt.resolve() == doc.resolve():
+        raise MatrixError("output path overlaps an input: generated document")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Check the acceptance matrix.")
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
@@ -1374,6 +1523,41 @@ def main(argv: list[str] | None = None) -> int:
     if bool(args.junit) != bool(args.discovery) or ((args.execution_receipt or args.ci_context) and not args.junit):
         print("error: --junit and --discovery are required together for execution evidence", file=sys.stderr)
         return 2
+    try:
+        # Use one identity for aliases, including Windows short names and paths
+        # containing parent components, throughout snapshots and publication.
+        for name in ("matrix", "check_doc", "write_doc", "discovery", "execution_receipt"):
+            path = getattr(args, name)
+            if path is not None:
+                setattr(args, name, path.resolve())
+        args.junit = [path.resolve() for path in args.junit]
+        # Every writer participates, so a standalone --write-doc or receipt
+        # cannot interleave with a refresh. Readers need no metadata writes.
+        writing = args.refresh_inventory or args.write_doc is not None or args.execution_receipt is not None
+        with _refresh_lock(root) if writing else contextlib.nullcontext():
+            if writing:
+                lock = _refresh_lock_path(root).resolve()
+                if any(path is not None and path.resolve() == lock
+                       for path in (args.write_doc, args.execution_receipt)):
+                    raise MatrixError("output path overlaps an input: refresh lock")
+                if any(path is not None and path.resolve() == lock
+                       for path in (args.matrix, args.discovery, args.check_doc, *args.junit)):
+                    raise MatrixError("refresh lock cannot be used as an input")
+            snapshot = None
+            if args.refresh_inventory:
+                paths = [root / "tools/ci/acceptance_requirements.json",
+                         args.matrix if args.matrix is not None else root / "tools/ci/acceptance_matrix.json",
+                         root / "docs/acceptance-matrix.md", *args.junit]
+                paths.extend(path for path in (args.discovery, args.check_doc, args.write_doc,
+                                               args.execution_receipt) if path is not None)
+                snapshot = _RefreshSnapshot(root, paths)
+            return _run(args, root, snapshot)
+    except (MatrixError, OSError, UnicodeError, RuntimeError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+
+def _run(args: argparse.Namespace, root: Path, snapshot: _RefreshSnapshot | None) -> int:
     matrix_path = args.matrix if args.matrix is not None else root / "tools" / "ci" / "acceptance_matrix.json"
     try:
         matrix = load_matrix(matrix_path)
@@ -1381,6 +1565,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
+    inputs = _matrix_input_paths(matrix, root)
+    _check_output_paths(args, root, matrix_path, inputs)
     refreshed = None
     decisions: list[dict[str, Any]] = []
     outputs: list[tuple[Path, str]] = []
@@ -1388,17 +1574,11 @@ def main(argv: list[str] | None = None) -> int:
         inventory_path = root / "tools/ci/acceptance_requirements.json"
         doc = root / "docs/acceptance-matrix.md"
         try:
-            targets = [inventory_path, matrix_path, doc]
-            if args.write_doc is not None and args.write_doc.resolve() != doc.resolve():
-                targets.append(args.write_doc)
-            if args.execution_receipt is not None:
-                targets.append(args.execution_receipt)
-            if len({path.resolve() for path in targets}) != len(targets):
-                raise MatrixError("refresh output paths must be distinct")
+            if snapshot is not None:
+                snapshot.add(inputs)
             inventory = load_matrix(inventory_path)
             refreshed, refreshed_matrix, decisions = refresh_inventory(inventory, matrix, root)
             # Matrix precedes inventory even when only canonical formatting changes.
-            # Retaining old inventory locators makes every partial replacement retryable.
             if refreshed_matrix != matrix or refreshed != inventory:
                 outputs.append((matrix_path, json.dumps(refreshed_matrix, indent=2, sort_keys=True) + "\n"))
             if refreshed != inventory:
@@ -1446,8 +1626,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: {exc}", file=sys.stderr)
             return 2
     try:
-        _replace_outputs(outputs, private_output=args.execution_receipt)
-    except OSError as exc:
+        _replace_outputs(outputs, private_output=args.execution_receipt,
+                         verify=snapshot.verify if snapshot is not None else None)
+    except (MatrixError, OSError) as exc:
         print(f"error: cannot replace output: {exc}", file=sys.stderr)
         return 2
     if args.junit:

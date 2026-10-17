@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import errno
 import importlib.util
 import io
 import json
 import os
 import re
 import stat
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 import xml.etree.ElementTree as ET
@@ -168,6 +171,8 @@ class AcceptanceMatrixTests(unittest.TestCase):
         self.tmp = Path(tmp.name).resolve()
         self.root = self.tmp / "repo"
         (self.root / "test").mkdir(parents=True)
+        (self.root / ".git").mkdir()
+        (self.root / ".git/acceptance-refresh.lock").touch()
         (self.root / "tools").mkdir()
         (self.root / "docs").mkdir()
         (self.root / "CMakeLists.txt").write_text(
@@ -258,6 +263,294 @@ class AcceptanceMatrixTests(unittest.TestCase):
     def refresh_decisions(self, output: str) -> list[dict[str, Any]]:
         return [json.loads(line.removeprefix("inventory decision: "))
                 for line in output.splitlines() if line.startswith("inventory decision: ")]
+
+    def start_paused_refresh(self) -> subprocess.Popen[str]:
+        ready = self.tmp / "refresh-ready"
+        ready.unlink(missing_ok=True)
+        program = """
+import pathlib, runpy, sys
+module = runpy.run_path(sys.argv[1])["main"].__globals__
+original = module["refresh_inventory"]
+def paused(*args):
+    result = original(*args)
+    pathlib.Path(sys.argv[4]).write_bytes(b"ready")
+    sys.stdin.read(1)
+    return result
+module["refresh_inventory"] = paused
+raise SystemExit(module["main"](["--root", sys.argv[2], "--matrix", sys.argv[3], "--refresh-inventory"]))
+"""
+        child = subprocess.Popen([sys.executable, "-I", "-B", "-c", program, str(MODULE_PATH),
+                                  str(self.root), str(self.matrix_path), str(ready)],
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, text=True)
+        def cleanup() -> None:
+            if child.poll() is None:
+                child.kill()
+            child.communicate(timeout=5)
+        self.addCleanup(cleanup)
+        deadline = time.monotonic() + 5
+        while not ready.exists():
+            if child.poll() is not None:
+                self.fail(f"refresh exited before synchronization: {child.communicate()}")
+            if time.monotonic() >= deadline:
+                self.fail("refresh did not reach synchronization")
+            time.sleep(0.01)
+        return child
+
+    def test_overlapping_refresh_is_refused_without_stealing_live_lock(self) -> None:
+        self.prepare_refresh()
+        (self.root / MODULE.CONTRACT_DOCUMENTS[1]).write_text(
+            "# Moved\nEvery requirement has evidence.\n", encoding="utf-8")
+        paths = (self.matrix_path, self.root / "tools/ci/acceptance_requirements.json",
+                 self.root / "docs/acceptance-matrix.md")
+        before = [path.read_bytes() for path in paths]
+        child = self.start_paused_refresh()
+        acquire = MODULE._refresh_lock
+        with mock.patch.object(MODULE, "_refresh_lock", side_effect=lambda root: acquire(root, timeout=0.05)):
+            code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+        self.assertEqual(code, 2, err)
+        self.assertIn("cannot acquire inventory refresh lock within deadline", err)
+        self.assertIsNone(child.poll())
+        self.assertEqual([path.read_bytes() for path in paths], before)
+        out, err = child.communicate("x", timeout=5)
+        self.assertEqual(child.returncode, 0, (out, err))
+        after = [path.read_bytes() for path in paths]
+        self.assertTrue(all(old != new for old, new in zip(before, after)))
+        self.assertEqual(self.run_main(*self.base_args(), "--refresh-inventory")[0], 0)
+        self.assertEqual([path.read_bytes() for path in paths], after)
+
+    def test_crashed_holder_releases_lock_without_removing_persistent_file(self) -> None:
+        self.prepare_refresh()
+        child = self.start_paused_refresh()
+        lock = MODULE._refresh_lock_path(self.root)
+        identity = os.stat(lock)
+        child.kill()
+        child.communicate(timeout=5)
+        self.assertTrue(lock.exists())
+        code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+        self.assertEqual(code, 0, err)
+        self.assertTrue(os.path.samestat(identity, os.stat(lock)))
+        self.assertEqual(lock.read_bytes(), b"")
+
+    def test_refresh_lock_location_and_failures_are_private_and_clear(self) -> None:
+        self.prepare_refresh()
+        metadata = self.root / ".git"
+        linked = self.tmp / "metadata"
+        metadata.rename(linked)
+        metadata.write_text("gitdir: ../metadata\n", encoding="utf-8")
+        self.assertEqual(MODULE._refresh_lock_path(self.root), linked / "acceptance-refresh.lock")
+        self.assertEqual(self.run_main(*self.base_args(), "--refresh-inventory")[0], 0)
+        for locator in ("", "gitdir: ", "unknown", "gitdir: ../absent", "gitdir: tools"):
+            with self.subTest(locator=locator):
+                metadata.write_text(locator, encoding="utf-8")
+                code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+                self.assertEqual(code, 2, err)
+                self.assertIn("Git", err)
+        metadata.write_bytes(b"gitdir: \xff")
+        code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+        self.assertEqual(code, 2, err)
+        self.assertIn("decode", err)
+        metadata.unlink()
+        code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+        self.assertEqual(code, 2, err)
+        self.assertIn("Git metadata", err)
+        linked.rename(metadata)
+        for error in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+            with self.subTest(error=error), \
+                    mock.patch.object(MODULE, "_try_refresh_lock", side_effect=OSError(error, "busy")):
+                with self.assertRaisesRegex(MODULE.MatrixError, "within deadline"):
+                    with MODULE._refresh_lock(self.root, timeout=0):
+                        self.fail("contended lock was acquired")
+        for failure in (PermissionError("lock unreadable"), OSError(errno.EIO, "lock unavailable")):
+            with self.subTest(failure=failure), mock.patch.object(MODULE, "_try_refresh_lock", side_effect=failure):
+                code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+                self.assertEqual(code, 2, err)
+                self.assertIn(str(failure), err)
+        with mock.patch.object(Path, "open", side_effect=PermissionError("lock open denied")):
+            code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+        self.assertEqual(code, 2, err)
+        self.assertIn("lock open denied", err)
+        # A real Git listing excludes private metadata even with untracked files.
+        subprocess.run(["git", "init", "--quiet", str(self.root)], check=True, capture_output=True)
+        self.assertNotIn(".git/acceptance-refresh.lock", PUBLIC_TREE.tracked_paths(self.root))
+        self.assertEqual(PUBLIC_TREE.validate(self.root), [])
+
+    def test_refresh_lock_uses_both_platform_primitives(self) -> None:
+        for name, module_name in (("nt", "msvcrt"), ("posix", "fcntl")):
+            with self.subTest(platform=name):
+                primitive = mock.Mock()
+                primitive.LOCK_EX = 2
+                primitive.LOCK_NB = 4
+                handle = mock.Mock()
+                with mock.patch.object(MODULE, "os", mock.Mock(name=name)), \
+                        mock.patch.dict(sys.modules, {module_name: primitive}):
+                    MODULE.os.name = name
+                    MODULE._try_refresh_lock(handle)
+                if name == "nt":
+                    handle.seek.assert_called_once_with(0)
+                    primitive.locking.assert_called_once_with(handle.fileno(), primitive.LK_NBLCK, 1)
+                    handle.read.assert_not_called()
+                    handle.write.assert_not_called()
+                else:
+                    primitive.flock.assert_called_once_with(
+                        handle.fileno(), primitive.LOCK_EX | primitive.LOCK_NB)
+
+    def test_refresh_source_changes_before_or_during_publication_are_rolled_back(self) -> None:
+        for during in (False, True):
+            for source in (*MODULE.CONTRACT_DOCUMENTS, "docs/d.md", "test/x_test.cpp",
+                           "test/CMakeLists.txt", "tools/script.py", "test/added.cpp",
+                           "tools/ci/acceptance_requirements.json", "matrix"):
+                with self.subTest(during=during, source=source):
+                    self.write_inventory()
+                    self.prepare_refresh()
+                    (self.root / MODULE.CONTRACT_DOCUMENTS[1]).write_text(
+                        "# Moved\nEvery requirement has evidence.\n", encoding="utf-8")
+                    paths = (self.matrix_path, self.root / "tools/ci/acceptance_requirements.json",
+                             self.root / "docs/acceptance-matrix.md")
+                    before = {path: path.read_bytes() for path in paths}
+                    changed = self.matrix_path if source == "matrix" else self.root / source
+                    original = changed.read_bytes() if changed.exists() else None
+                    mutated = False
+                    def mutate() -> None:
+                        nonlocal mutated
+                        if mutated:
+                            return
+                        mutated = True
+                        changed.write_bytes((original or b"") + b"\n ")
+                        if changed in before:
+                            before[changed] = changed.read_bytes()
+                    replace = Path.replace
+                    publish = MODULE._replace_outputs
+                    def replace_then_edit(file: Path, target: Path) -> Path:
+                        result = replace(file, target)
+                        mutate()
+                        return result
+                    def edit_then_publish(*args: Any, **kwargs: Any) -> None:
+                        mutate()
+                        publish(*args, **kwargs)
+                    try:
+                        with mock.patch.object(Path, "replace", replace_then_edit if during else replace), \
+                                mock.patch.object(MODULE, "_replace_outputs", publish if during else edit_then_publish):
+                            code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+                        self.assertEqual(code, 2, err)
+                        self.assertIn("input snapshot changed", err)
+                        self.assertEqual({path: path.read_bytes() for path in paths}, before)
+                    finally:
+                        if original is None:
+                            changed.unlink(missing_ok=True)
+                        else:
+                            changed.write_bytes(original)
+
+    def test_optional_outputs_cannot_overwrite_inputs_or_each_other(self) -> None:
+        self.prepare_refresh()
+        discovery, report = self.execution_inputs()
+        for refresh in (False, True):
+            for target in (self.root / MODULE.CONTRACT_DOCUMENTS[0], self.root / "docs/d.md",
+                           self.root / "test/x_test.cpp", self.root / "tools/script.py",
+                           self.root / "CMakeLists.txt", discovery, report,
+                           MODULE._refresh_lock_path(self.root)):
+                for option in ("--write-doc", "--execution-receipt"):
+                    with self.subTest(refresh=refresh, target=target, option=option):
+                        before = target.read_bytes()
+                        args = [*self.base_args(), "--junit", str(report), "--discovery", str(discovery)]
+                        if refresh:
+                            args.append("--refresh-inventory")
+                        with mock.patch.object(Path, "replace") as replace:
+                            code, _, err = self.run_main(*args, option, str(target))
+                        self.assertEqual(code, 2, err)
+                        self.assertIn("output path overlaps an input", err)
+                        replace.assert_not_called()
+                        self.assertEqual(target.read_bytes(), before)
+            target = self.tmp / "additional.md"
+            args = [*self.base_args(), "--junit", str(report), "--discovery", str(discovery),
+                    "--write-doc", str(target), "--execution-receipt", str(target)]
+            if refresh:
+                args.append("--refresh-inventory")
+            code, _, err = self.run_main(*args)
+            self.assertEqual(code, 2, err)
+            self.assertIn("output paths must be distinct", err)
+            self.assertFalse(target.exists())
+        doc = self.root / "docs/acceptance-matrix.md"
+        before = doc.read_bytes()
+        code, _, err = self.run_main(*self.base_args(), "--junit", str(report),
+                                     "--discovery", str(discovery), "--execution-receipt", str(doc))
+        self.assertEqual(code, 2, err)
+        self.assertIn("output path overlaps an input", err)
+        self.assertEqual(doc.read_bytes(), before)
+
+    def test_empty_snapshot_and_added_or_removed_discovery_sources(self) -> None:
+        root = self.tmp / "empty"
+        root.mkdir()
+        snapshot = MODULE._RefreshSnapshot(root, [])
+        snapshot.verify({})
+        source = root / "CMakeLists.txt"
+        source.write_bytes(b"add_test(NAME New COMMAND new)\n")
+        with self.assertRaisesRegex(MODULE.MatrixError, "input snapshot changed"):
+            snapshot.verify({})
+        snapshot = MODULE._RefreshSnapshot(root, [])
+        source.unlink()
+        with self.assertRaisesRegex(MODULE.MatrixError, "input snapshot changed"):
+            snapshot.verify({})
+
+    def test_refresh_aliased_inputs_and_standard_document_share_one_identity(self) -> None:
+        self.prepare_refresh()
+        (self.root / MODULE.CONTRACT_DOCUMENTS[1]).write_text(
+            "# Moved\nEvery requirement has evidence.\n", encoding="utf-8")
+        doc = self.root / "docs/acceptance-matrix.md"
+        args = ["--root", str(self.root / "test/.."),
+                "--matrix", str(self.root / ".." / self.matrix_path.name),
+                "--write-doc", str(self.root / "docs/../docs/acceptance-matrix.md"),
+                "--refresh-inventory", "--check-doc", str(doc)]
+        code, _, err = self.run_main(*args)
+        self.assertEqual(code, 0, err)
+        matrix = MODULE.load_matrix(self.matrix_path)
+        self.assertEqual(row_of(matrix, "iss.126")["source"], MODULE.CONTRACT_DOCUMENTS[1] + "#moved")
+        self.assertEqual(self.errors(matrix), [])
+        self.assertEqual(doc.read_text(encoding="utf-8"), MODULE.render_doc(matrix))
+        before = doc.read_bytes(), doc.stat().st_mtime_ns
+        self.assertEqual(self.run_main(*args)[0], 0)
+        self.assertEqual((doc.read_bytes(), doc.stat().st_mtime_ns), before)
+
+    def test_changed_published_output_and_unreadable_commit_input_restore_old_outputs(self) -> None:
+        for failure in ("changed-output", "changed-last-output", "unreadable", "removed", "partial"):
+            with self.subTest(failure=failure):
+                self.write_inventory()
+                self.prepare_refresh()
+                source = self.root / MODULE.CONTRACT_DOCUMENTS[1]
+                source.write_text("# Moved\nEvery requirement has evidence.\n", encoding="utf-8")
+                original = source.read_bytes()
+                paths = (self.matrix_path, self.root / "tools/ci/acceptance_requirements.json",
+                         self.root / "docs/acceptance-matrix.md")
+                before = [path.read_bytes() for path in paths]
+                replace = Path.replace
+                read = Path.read_bytes
+                replaced = False
+                def replace_then_change(file: Path, target: Path) -> Path:
+                    nonlocal replaced
+                    result = replace(file, target)
+                    replaced = True
+                    if failure == "changed-output" or (
+                            failure == "changed-last-output" and target == paths[1]):
+                        target.write_bytes(b"external change\n")
+                    elif failure == "removed":
+                        source.unlink()
+                    elif failure == "partial":
+                        source.write_bytes(b"# Part")
+                    return result
+                def unreadable(file: Path) -> bytes:
+                    if replaced and file == source and failure == "unreadable":
+                        raise PermissionError("commit input unreadable")
+                    return read(file)
+                try:
+                    with mock.patch.object(Path, "replace", replace_then_change), \
+                            mock.patch.object(Path, "read_bytes", unreadable):
+                        code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+                    self.assertEqual(code, 2, err)
+                    self.assertIn("commit input unreadable" if failure == "unreadable"
+                                  else "input snapshot changed", err)
+                    self.assertEqual([path.read_bytes() for path in paths], before)
+                finally:
+                    source.write_bytes(original)
 
     def test_refresh_moves_statement_and_clears_only_derived_inventory_error(self) -> None:
         matrix = self.prepare_refresh()
@@ -677,7 +970,7 @@ class AcceptanceMatrixTests(unittest.TestCase):
         self.assertEqual(path.read_bytes(), before)
         self.assertEqual(list(path.parent.iterdir()), [path])
 
-    def test_refresh_retries_every_partial_replacement_including_windows_locks(self) -> None:
+    def test_refresh_rolls_back_every_failed_replacement_including_windows_locks(self) -> None:
         for failed_name in ("document", "matrix", "inventory"):
             with self.subTest(failure=failed_name):
                 self.prepare_refresh()
@@ -704,7 +997,7 @@ class AcceptanceMatrixTests(unittest.TestCase):
                                      "inventory": [doc, self.matrix_path]}
                 self.assertEqual(replaced, expected_replaced[failed_name])
                 for name, path in paths.items():
-                    self.assertEqual(path.read_bytes() != before[name], path in replaced)
+                    self.assertEqual(path.read_bytes(), before[name])
                 code, _, err = self.run_main(*self.base_args(), "--refresh-inventory",
                                               "--check-doc", str(doc))
                 self.assertEqual(code, 0, err)
@@ -720,7 +1013,7 @@ class AcceptanceMatrixTests(unittest.TestCase):
     def test_refresh_stages_all_outputs_before_replacement_and_retries_partial_data(self) -> None:
         create = open
         for failure, fail_at in ((failure, stage) for failure in ("create", "partial")
-                                 for stage in range(1, 6)):
+                                 for stage in range(1, 9)):
             with self.subTest(failure=failure, stage=fail_at):
                 self.prepare_refresh()
                 self.write_inventory()
@@ -838,14 +1131,28 @@ class AcceptanceMatrixTests(unittest.TestCase):
             code, _, err = self.run_main(*args)
         self.assertEqual(code, 2, err)
         self.assertEqual(paths[0].read_bytes(), before[0])
-        self.assertTrue(receipt.exists())
-        self.assertTrue(extra_doc.exists())
+        self.assertFalse(receipt.exists())
+        self.assertFalse(extra_doc.exists())
+        self.assertEqual([path.read_bytes() for path in paths], before)
         code, _, err = self.run_main(*args)
         self.assertEqual(code, 0, err)
         self.assertEqual(json.loads(receipt.read_text(encoding="utf-8"))["matrix_sha256"],
                          MODULE._sha256(self.matrix_path))
         self.assertEqual(self.errors(MODULE.load_matrix(self.matrix_path)), [])
         self.assertEqual(extra_doc.read_bytes(), paths[2].read_bytes())
+        (self.root / MODULE.CONTRACT_DOCUMENTS[1]).write_text(
+            "# Moved again\nEvery requirement has evidence.\n", encoding="utf-8")
+        all_paths = (*paths, extra_doc, receipt)
+        old = [path.read_bytes() for path in all_paths]
+        def inventory_locked(file: Path, target: Path) -> Path:
+            if target == paths[0]:
+                raise PermissionError("inventory locked")
+            return replace(file, target)
+        with mock.patch.object(Path, "replace", inventory_locked):
+            code, _, err = self.run_main(*args)
+        self.assertEqual(code, 2, err)
+        self.assertIn("inventory locked", err)
+        self.assertEqual([path.read_bytes() for path in all_paths], old)
         for target in (*paths, extra_doc):
             with self.subTest(collision=target):
                 code, _, err = self.run_main(*args, "--execution-receipt", str(target))
