@@ -42,6 +42,14 @@ public:
         preset_file << Preset().dump();
         preset_file.close();
         EXPECT_TRUE(preset_file.good());
+        // Enabled sessions also require plant definitions and a readable policy parent.
+        std::filesystem::create_directories(Root() / "data/common/sim");
+        const auto plants = Root() / "data/common/foliage/species";
+        std::filesystem::create_directories(plants);
+        std::ofstream plant_file(plants / "plant.json", std::ios::binary);
+        plant_file << "{\"id\":\"plant\"}\n";
+        plant_file.close();
+        EXPECT_TRUE(plant_file.good());
         Write("deer.json", OriginalBytes());
     }
 

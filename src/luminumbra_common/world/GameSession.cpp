@@ -79,45 +79,51 @@
 #include "../systems/WindFieldSystem.h"
 #include "ActiveRegionLedger.h"
 #include "Chunk.h"
+#include "DistantPolicy.h"
 #include "GroundObjectStore.h"
 #include "TerrainPresetLoader.h"
 #include "WorldStreamingState.h"
+#include "WorldgenDependencySnapshot.h"
 #include "WorldgenFileReader.h"
+#include "luminumbra/core/Types.h"
 #include "nlohmann/json.hpp" // For parsing JSON
 #include <array>
 #include <atomic>
 #include <bit>
 #include <cmath> // std::floor (energy-layer anchor quantization)
-#include <cstddef>
-#include <cstdint>
-#include <ctime>
 #include <entt/entity/entity.hpp>
 #include <entt/entity/fwd.hpp>
 #include <entt/entity/registry.hpp>
-#include <exception>
-#include <functional>
-#include <ios>
-#include <limits>
-#include <luminumbra/core/Types.h>
-#include <map>
 #include <nlohmann/json_fwd.hpp>
-#include <ratio>
-#include <span>
-#include <string>
-#include <system_error>
 
 #include <algorithm> // explicit: stabilise std template instantiation for entt storage helpers
+#include <charconv>
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <ctime>
+#include <exception>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iomanip>
-#include <iterator> // (GCC-15 vague-linkage: must be visible at the GrazeableComponent storage
-#include <memory>   //  instantiation point, else std::__advance/iter_move get externalized)
+#include <ios>
+// Keep iterator visible at the GrazeableComponent storage instantiation point;
+// otherwise GCC-15 externalizes the iterator helpers with vague linkage.
+#include <iterator>
+#include <limits>
+#include <map>
+#include <memory>
 #include <optional>
 #include <random>
+#include <ratio>
 #include <set>
+#include <span>
 #include <sstream>
 #include <stdexcept>
+#include <string>
+#include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -176,6 +182,41 @@ fs::path PresetPathFor(const std::string& root_path, const std::string& world_ty
     return RuntimeRoot(root_path) / "worlds" / "atlas" / "presets" / (world_type + ".json");
 }
 
+bool SimulationSpeciesMatchSnapshot(const Luminumbra::world::SimulationContent& content,
+                                    const Luminumbra::World::WorldgenDependencySnapshot& snapshot) {
+    // Admission only: at most 256 captured definitions. Match exact-byte hashes,
+    // including multiplicity, before either identity or registry becomes live.
+    std::multiset<std::string> expected;
+    for (const auto& definition : content.creature_definitions) {
+        // A 64-bit hash occupies at most 16 hexadecimal digits.
+        std::array<char, 16> hex{};
+        const auto converted =
+            std::to_chars(hex.data(),
+                          hex.data() + hex.size(),
+                          Luminumbra::world::SimulationContentDigest(definition.bytes),
+                          16);
+        const auto digits = static_cast<std::size_t>(converted.ptr - hex.data());
+        expected.insert(std::string(hex.size() - digits, '0') + std::string(hex.data(), digits));
+    }
+    constexpr std::string_view species_prefix = "common/creatures/species/";
+    // The published manifest is path-sorted. Visit only its species range: at most
+    // 256 matches plus one rejected extra entry, independent of structure content.
+    auto entry_it = std::lower_bound(
+        snapshot.manifest.begin(),
+        snapshot.manifest.end(),
+        species_prefix,
+        [](const auto& entry, std::string_view prefix) { return entry.front() < prefix; });
+    for (; entry_it != snapshot.manifest.end() && entry_it->front().starts_with(species_prefix);
+         ++entry_it) {
+        const auto& entry = *entry_it;
+        const auto found = expected.find(entry[1]);
+        if (found == expected.end())
+            return false;
+        expected.erase(found);
+    }
+    return expected.empty();
+}
+
 // Clamp generation params to sane invariants BEFORE building the world system. The preset loader
 // only type-checks; a customized (or hand-edited) preset can still carry octaves=0, negative
 // amplitude, persistence outside (0,1], etc., which are degenerate/UB in the noise backend. This
@@ -225,6 +266,8 @@ void GameSession::ResetWorldSystems(bool keep_admitted_chunk_facts) {
     if (!keep_admitted_chunk_facts)
         m_chunkValidationCache.clear();
     m_registry.clear();
+    m_simulationContent.reset();
+    m_speciesTable.reset();
     m_soilGrid.reset();
     m_irrigationGrid.reset();
     m_simulationClock.reset();
@@ -287,10 +330,11 @@ void GameSession::ApplyWeatherRainWiring() {
 
 // Apply the same simulation gates and tuning before client/server world boot.
 void GameSession::ApplySystemConfig(const luminumbra::core::SystemConfig& config) {
+    // Refuse an incompatible live-world gate before changing any effective tuning.
+    SetActiveRegionsEnabled(config.enabled(luminumbra::core::SysKey::SimActiveRegions));
     m_appliedSystemConfig = config;
     SetEcologyTuning(luminumbra::ai::ResolveEcologyTuning(config));
     SetWeatherRainEnabled(config.enabled(luminumbra::core::SysKey::SimHydrologyWeather));
-    SetActiveRegionsEnabled(config.enabled(luminumbra::core::SysKey::SimActiveRegions));
     SetWaterHighResEnabled(config.enabled(luminumbra::core::SysKey::SimWaterHighRes));
     SetWeatherEventsEnabled(config.enabled(luminumbra::core::SysKey::SimWeatherEvents));
     SetAetherStateEnabled(config.enabled(luminumbra::core::SysKey::SimAetherState));
@@ -400,6 +444,13 @@ std::string GameSession::SystemConfigIdentity() const {
     return values.ComputeIdentity();
 }
 
+std::string GameSession::SessionConfigIdentity() const {
+    const auto identity = SystemConfigIdentity();
+    return m_activeRegionsEnabled && m_simulationContent
+               ? BindSimulationContentIdentity(identity, m_simulationContent->identity)
+               : identity;
+}
+
 // apply the session water-sim resolution when the owner opted in
 // (sim.water_high_res -> SetWaterHighResEnabled). Called from BOTH CreateWorld and
 // LoadWorld immediately after the water system is constructed and linked — before its
@@ -413,6 +464,32 @@ void GameSession::ApplyWaterResolutionWiring() {
                                                               ? Systems::WaterDetailLevel::High
                                                               : Systems::WaterDetailLevel::Medium));
     LUMINUMBRA_CORE_INFO("Water resolution wired: {}", m_waterHighResEnabled ? "High" : "Medium");
+}
+
+bool GameSession::PreflightSimulationContent(std::shared_ptr<const SimulationContent>& content) {
+    if (!m_activeRegionsEnabled)
+        return true;
+    SimulationContent candidate;
+    if (!AdmitSimulationContent(RuntimeRoot(m_rootPath),
+                                candidate,
+                                m_worldOpenError,
+                                m_populationContract,
+                                m_populationConfiguration)) {
+        LUMINUMBRA_CORE_ERROR("World open refused: {}", m_worldOpenError);
+        return false;
+    }
+    content = std::make_shared<const SimulationContent>(std::move(candidate));
+    return true;
+}
+
+bool GameSession::AdoptSimulationContent(std::shared_ptr<const SimulationContent> content) {
+    if (!content || !m_activeRegionLedger.adopt_content_identity(content->identity)) {
+        m_worldOpenError = "Simulation content adoption failed.";
+        return false;
+    }
+    m_speciesTable = content->creatures;
+    m_simulationContent = std::move(content);
+    return true;
 }
 
 std::uint32_t GameSession::TickSimulation(double frame_dt) {
@@ -1274,6 +1351,15 @@ bool GameSession::CreateWorldInternal(const std::string& name,
         return false;
     }
 
+    if (customPresetJson && customPresetJson->find('\0') != std::string::npos) {
+        m_worldOpenError = "Invalid world preset: raw NUL in content.";
+        return false;
+    }
+
+    std::shared_ptr<const SimulationContent> content;
+    if (!PreflightSimulationContent(content))
+        return false;
+
     WorldMetadata metadata;
     metadata.name = name;
     metadata.seed = seed.empty() ? std::to_string(std::random_device{}()) : seed;
@@ -1303,6 +1389,10 @@ bool GameSession::CreateWorldInternal(const std::string& name,
                 std::string bytes;
                 if (!World::ReadWorldgenFile(preset_to_load, bytes)) {
                     m_worldOpenError = "Could not read this world's preset within its size limit.";
+                    return false;
+                }
+                if (bytes.find('\0') != std::string::npos) {
+                    m_worldOpenError = "Invalid world preset: raw NUL in content.";
                     return false;
                 }
                 resolved = nlohmann::json::parse(bytes);
@@ -1344,7 +1434,13 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     TerrainGenParams params = preset.params;
     ClampTerrainParams(params);
 
+    if (content && !SimulationSpeciesMatchSnapshot(*content, *params.worldgen_dependencies)) {
+        m_worldOpenError = "Simulation species changed during world admission.";
+        return false;
+    }
     ResetWorldSystems();
+    if (m_activeRegionsEnabled && !AdoptSimulationContent(std::move(content)))
+        return false;
     m_presetContentHash = preset.preset_content_hash;
     m_savedPresetJson = std::move(saved_preset_json);
     m_metadata = std::move(metadata);
@@ -1417,8 +1513,9 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     AttachRegionEditObserver();
     InitializeScentField(m_metadata.spawnPoint);
 
-    // Adopt the registry parsed from the bytes bound into the session identity.
-    m_speciesTable = preset.params.worldgen_dependencies->species_table;
+    // Enabled sessions retain the strict registry matched to the preset snapshot.
+    if (!m_activeRegionsEnabled)
+        m_speciesTable = preset.params.worldgen_dependencies->species_table;
 
     // wire weather-driven rain into the water solver when the
     // owner opted in (sim.hydrology_weather via SetWeatherRainEnabled). Explicit OFF =
@@ -1560,7 +1657,19 @@ bool GameSession::LoadWorldChecked(const std::string& worldId,
     TerrainGenParams params = preset.params;
     ClampTerrainParams(params);
 
+    std::shared_ptr<const SimulationContent> content;
+    if (!PreflightSimulationContent(content))
+        return false;
+    if (content && !SimulationSpeciesMatchSnapshot(*content, *params.worldgen_dependencies)) {
+        m_worldOpenError = "Simulation species changed during world admission.";
+        return false;
+    }
+    if (content && admission.records.has_ledger && admission.records.ledger.content_identity() &&
+        !admission.records.ledger.validate_content_identity(content->identity, m_worldOpenError))
+        return false;
     ResetWorldSystems(true);
+    if (m_activeRegionsEnabled && !AdoptSimulationContent(std::move(content)))
+        return false;
     m_presetContentHash = preset.preset_content_hash;
     m_savedPresetJson = saved.preset_source_json;
     m_metadata = saved.metadata;
@@ -1619,8 +1728,9 @@ bool GameSession::LoadWorldChecked(const std::string& worldId,
     }
     InitializeScentField(m_metadata.spawnPoint);
 
-    // Saved worlds adopt the same captured session content as new worlds.
-    m_speciesTable = preset.params.worldgen_dependencies->species_table;
+    // Saved worlds adopt captured content through the same path as new worlds.
+    if (!m_activeRegionsEnabled)
+        m_speciesTable = preset.params.worldgen_dependencies->species_table;
 
     // restore the rotating water sim-window cursor so the loaded session
     // resimulates the exact windows the original would from the same water state.
@@ -3637,6 +3747,24 @@ bool GameSession::AdoptWorldState(const std::filesystem::path& save_dir,
             m_ambientFieldAnchor = previous_ambient_anchor;
             m_worldOpenError = "Incompatible configuration: persisted region scheduler differs "
                                "from explicit override.";
+            m_worldSystem->clear_world(m_physicsSystem.get());
+            return false;
+        }
+        // Historical worlds without an identity adopt current content on load and persist it
+        // on their next save.
+        if (m_simulationContent && !ledger.content_identity()) {
+            if (!ledger.adopt_content_identity(m_simulationContent->identity)) {
+                m_worldOpenError = "Simulation content identity adoption failed.";
+                m_ambientFieldAnchor = previous_ambient_anchor;
+                m_worldSystem->clear_world(m_physicsSystem.get());
+                return false;
+            }
+        }
+        if (!m_simulationContent ||
+            !ledger.validate_content_identity(m_simulationContent->identity, m_worldOpenError)) {
+            if (!m_simulationContent)
+                m_worldOpenError = "Simulation content was not adopted.";
+            m_ambientFieldAnchor = previous_ambient_anchor;
             m_worldSystem->clear_world(m_physicsSystem.get());
             return false;
         }

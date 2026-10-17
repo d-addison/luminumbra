@@ -129,6 +129,7 @@ std::string TerrainPresetContentHash(const nlohmann::json& preset);
 // result carries ok=false and human-readable messages; params/extras are only
 // meaningful when ok=true. Absent biome tables use legacy classification; present
 // tables must be readable and valid. Enabled structure pools must exist.
+// Raw NUL bytes refuse before parsing; identity binds dependency outcomes and bytes.
 // Runtime callers supply data_root independently of the preset storage location.
 // The status reader permits deterministic dependency I/O failure coverage.
 TerrainPresetLoadResult LoadTerrainPreset(

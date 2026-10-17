@@ -491,7 +491,7 @@ std::string ActiveRegionLedger::payload(bool observational) const {
     return bytes;
 }
 std::string ActiveRegionLedger::canonical_bytes() const {
-    if (m_records.empty() && m_nextPersistentId == 1)
+    if (m_records.empty() && m_nextPersistentId == 1 && !m_contentIdentity)
         return {};
     std::string bytes = "active_regions:v1:" + payload(false);
     if (m_nextPersistentId != 1)
@@ -514,6 +514,8 @@ std::string ActiveRegionLedger::canonical_bytes() const {
             Append(bytes, age, 8);
         }
     }
+    if (m_contentIdentity)
+        bytes += "|content_identity:" + m_contentIdentity->encode();
     if (!m_completedWork.empty()) {
         bytes += "|completed_work:";
         Append(bytes, m_completedWork.size(), 4);
@@ -524,6 +526,27 @@ std::string ActiveRegionLedger::canonical_bytes() const {
         }
     }
     return bytes;
+}
+bool ActiveRegionLedger::adopt_content_identity(const SimulationContentIdentity& identity) {
+    SimulationContentIdentity validated;
+    if (!SimulationContentIdentity::decode(identity.encode(), validated) ||
+        (m_contentIdentity && *m_contentIdentity != identity))
+        return false;
+    m_contentIdentity = identity;
+    return true;
+}
+bool ActiveRegionLedger::validate_content_identity(const SimulationContentIdentity& identity,
+                                                   std::string& error) const {
+    if (!m_contentIdentity) {
+        error = kContentVersionMessage;
+        return false;
+    }
+    if (*m_contentIdentity != identity) {
+        error = kContentMismatchMessage;
+        return false;
+    }
+    error.clear();
+    return true;
 }
 bool ActiveRegionLedger::any_frozen_history() const {
     for (const auto& [key, r] : m_records) {
@@ -538,9 +561,9 @@ std::string ActiveRegionLedger::encode() const {
     const bool declare_projection = any_frozen_history() && m_legacyFrozenDigests.empty();
     const bool allocator_advanced = m_nextPersistentId != 1;
     const bool extension = declare_projection || allocator_advanced || !m_waterDebts.empty() ||
-                           !m_energyAges.empty() || !m_completedWork.empty();
+                           !m_energyAges.empty() || m_contentIdentity || !m_completedWork.empty();
     std::string bytes = "ARL1";
-    Append(bytes, extension ? 2 : 1, 2);
+    Append(bytes, m_contentIdentity ? 3 : extension ? 2 : 1, 2);
     Append(bytes, 0, 2);
     bytes += payload(true);
     if (extension) {
@@ -576,6 +599,11 @@ std::string ActiveRegionLedger::encode() const {
                 Append(tlvs, age, 8);
             }
         }
+        if (m_contentIdentity) {
+            Append(tlvs, 5, 2);
+            Append(tlvs, SimulationContentIdentity::kEncodedBytes, 4);
+            tlvs += m_contentIdentity->encode();
+        }
         if (!m_completedWork.empty()) {
             Append(tlvs, 6, 2);
             Append(tlvs, 4 + 16 * m_completedWork.size(), 4);
@@ -600,12 +628,12 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
         return false;
     Reader version_reader(bytes.substr(4));
     const auto version = version_reader.read(2);
-    if (version > 2) {
+    if (version > 3) {
         error = kFutureMessage;
         return false;
     }
-    // Version 2 carries a u32 extension length between the records and the checksum.
-    const std::size_t extension_prefix = version == 2 ? 4 : 0;
+    // Versions 2 and 3 carry a u32 extension length between records and checksum.
+    const std::size_t extension_prefix = version >= 2 ? 4 : 0;
     if (version == 0 || bytes.size() < kHeaderBytes + extension_prefix + 8 ||
         bytes.size() > kMaxFileBytes)
         return false;
@@ -637,7 +665,7 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
         const auto count = in.read(4);
         if (count > kMaxRegions)
             return false;
-        // Records end here; a version 2 extension length (checked below) follows them.
+        // Records end here; a version 2/3 extension length (checked below) follows them.
         const std::uint64_t records_end = kHeaderBytes + count * kRecordBytes;
         if (bytes.size() < records_end + extension_prefix + 8 ||
             (version == 1 && bytes.size() != records_end + 8))
@@ -693,7 +721,7 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
             result.m_records.emplace(key, r);
         }
         bool declared_projection = false;
-        if (version == 2) {
+        if (version >= 2) {
             const auto extension_length = in.read(4);
             const auto extension_begin = records_end + 4;
             if (extension_length == 0 || bytes.size() != extension_begin + extension_length + 8)
@@ -714,9 +742,7 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
                     return false;
                 const auto value = extension.substr(at, length);
                 at += length;
-                // Type 5 remains reserved until its consumer decoder exists.
-                if ((have_previous && type <= previous_type) ||
-                    (type != 1 && type != 2 && type != 3 && type != 4 && type != 6))
+                if ((have_previous && type <= previous_type) || (type < 1 || type > 6))
                     return false;
                 have_previous = true;
                 previous_type = type;
@@ -775,6 +801,15 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
                     }
                     continue;
                 }
+                if (type == 5) {
+                    if (version != 3)
+                        return false;
+                    SimulationContentIdentity identity;
+                    if (!SimulationContentIdentity::decode(value, identity))
+                        return false;
+                    result.m_contentIdentity = identity;
+                    continue;
+                }
                 if (type == 6) {
                     if (length < 4)
                         return false;
@@ -821,6 +856,8 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
         // until each has been recomputed at a later freeze or evicted.
         // Also refuses alternate encodings (negative zero, reserved bytes).
         if (result.encode() != bytes)
+            return false;
+        if (version == 3 && !result.m_contentIdentity)
             return false;
         out = std::move(result);
         error.clear();

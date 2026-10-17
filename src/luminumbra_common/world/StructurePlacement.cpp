@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cstdlib>
-#include <fstream>
 #include <system_error>
 
 #include "nlohmann/json.hpp"
@@ -123,6 +122,10 @@ StructureTemplatePool LoadStructureTemplatePool(const std::filesystem::path& typ
             pool.errors.push_back("failed to read placement.json");
             return pool;
         }
+        if (bytes.find('\0') != std::string::npos) {
+            pool.errors.push_back("placement.json parse error: raw NUL in content");
+            return pool;
+        }
         nlohmann::json data;
         try {
             data = nlohmann::json::parse(bytes);
@@ -171,6 +174,11 @@ StructureTemplatePool LoadStructureTemplatePool(const std::filesystem::path& typ
             pool.io_failed = true;
             pool.errors.push_back("failed to read structure piece: " +
                                   Filesystem::GenericUtf8PathString(piece_path.filename()));
+            continue;
+        }
+        if (bytes.find('\0') != std::string::npos) {
+            pool.errors.push_back(Filesystem::GenericUtf8PathString(piece_path.filename()) +
+                                  " parse error: raw NUL in content");
             continue;
         }
         nlohmann::json data;

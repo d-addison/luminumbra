@@ -1124,9 +1124,9 @@ TEST(PassContext, FoliageActualDrawFeedbackSurvivesReloadAndPreservesFrameIdenti
             const auto& b = proof.vertices[1].vertices[blade * 12 + j];
             const double displacement =
                 glm::distance(glm::dvec3(a[0], a[1], a[2]), glm::dvec3(b[0], b[1], b[2]));
-            if (a[3] == 0 || !proof.vertices[0].sways[blade])
+            if (a[3] == 0 || !proof.vertices[0].sways[blade]) {
                 EXPECT_LE(displacement, .00001);
-            else {
+            } else {
                 EXPECT_GT(displacement, .00001);
                 EXPECT_LE(displacement, proof.vertices[0].blade_heights[blade] * .45 + .0001);
             }

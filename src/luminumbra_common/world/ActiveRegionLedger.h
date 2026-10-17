@@ -1,5 +1,6 @@
 #pragma once
 
+#include "DistantPolicy.h"
 #include "WorldClock.h"
 #include "luminumbra/core/Types.h"
 
@@ -109,14 +110,19 @@ public:
     // anchor presence and anchor.
     static constexpr std::size_t kHeaderBytes = 56;
     // Version 2 adds a u32 extension length and ascending TLVs: type 1 allocator (14 bytes),
-    // type 2 digest projection (7 bytes), type 3 water debt, type 4 energy ages and type 6
-    // completed work (each 10 + 16 bytes per owned key). Type 5 remains reserved and refuses.
-    static constexpr std::size_t kMaxFileBytes =
-        kHeaderBytes + kMaxRegions * kRecordBytes + 4 + 7 + 14 + 3 * (6 + 4 + 16 * kMaxRegions) + 8;
+    // type 2 digest projection (7 bytes), type 3 water debt, type 4 energy ages, and type 6
+    // completed work (10 + 16 bytes per owned key). Version 3 requires type 5 content
+    // identity (46 bytes); version 2 keeps that type reserved and refuses it.
+    static constexpr std::size_t kMaxFileBytes = kHeaderBytes + kMaxRegions * kRecordBytes + 4 + 7 +
+                                                 14 + 6 + SimulationContentIdentity::kEncodedBytes +
+                                                 3 * (6 + 4 + 16 * kMaxRegions) + 8;
     static constexpr const char* kCorruptMessage = "Corrupt active-region ledger.";
     static constexpr const char* kProjectionMessage = "Unsupported frozen digest projection.";
     static constexpr const char* kFutureMessage =
         "Unsupported future active-region ledger version.";
+    static constexpr const char* kContentVersionMessage =
+        "Incompatible simulation content version: active-region identity is missing.";
+    static constexpr const char* kContentMismatchMessage = "Simulation content identity mismatch.";
     using DurableDigest = std::function<std::uint64_t(RegionKey)>;
     // Reports whether a region is still owned by a consumer, so it must not be evicted.
     using OwnershipProbe = std::function<bool(RegionKey)>;
@@ -152,6 +158,16 @@ public:
     [[nodiscard]] std::uint64_t next_persistent_id() const {
         return m_nextPersistentId;
     }
+    [[nodiscard]] const std::optional<SimulationContentIdentity>&
+    content_identity() const noexcept {
+        return m_contentIdentity;
+    }
+    // First adoption is immutable. A repeated identical adoption is harmless.
+    bool adopt_content_identity(const SimulationContentIdentity& identity);
+    // Open adopts current content for historical ledgers without an identity before comparing,
+    // and compares before adopting any loaded consumer state.
+    bool validate_content_identity(const SimulationContentIdentity& identity,
+                                   std::string& error) const;
     // Returns false and changes nothing once next_persistent_id() reaches kPersistentIdLimit.
     bool allocate_persistent_id(std::uint64_t& id);
     using WaterDebts = std::map<RegionKey, std::uint64_t>;
@@ -253,6 +269,7 @@ private:
     std::uint64_t m_tick = 0;
     std::uint64_t m_headerTick = 0;
     std::uint64_t m_nextPersistentId = 1;
+    std::optional<SimulationContentIdentity> m_contentIdentity;
 };
 
 } // namespace Luminumbra::world

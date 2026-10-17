@@ -5,6 +5,7 @@
 // dirty chunks resident and requests a persistence save. Also pins the chunk-level
 // contracts the parking path relies on (normalize_for_park, the water revision and the
 // water-authority promotion).
+#include "../support/SimulationContentFixture.h"
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -87,7 +88,7 @@ constexpr char kResidencyPreset[] = R"({
     }
 })";
 
-// Temp root containing ONLY the test preset (headless — no res/data assets).
+// Temp root with the test preset and required simulation species; no client assets.
 // The root is unique per fixture instance so concurrent common_tests processes
 // never share (or clobber) a directory. The destructor removes the tree.
 class HeadlessRoot {
@@ -102,6 +103,7 @@ public:
         preset.open(root_ / "worlds" / "atlas" / "presets" / "durable.json");
         preset << kResidencyPreset;
         preset.close();
+        Luminumbra::TestSupport::WriteSimulationContentFixture(root_);
     }
     ~HeadlessRoot() {
         std::error_code ec;

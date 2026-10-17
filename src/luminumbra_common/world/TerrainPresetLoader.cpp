@@ -458,6 +458,12 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
         return result;
     }
 
+    if (bytes.find('\0') != std::string::npos) {
+        result.errors.push_back("failed to parse world preset JSON '" +
+                                Filesystem::GenericUtf8PathString(preset_path) +
+                                "': raw NUL in content");
+        return result;
+    }
     nlohmann::json data;
     try {
         data = nlohmann::json::parse(bytes);
@@ -804,6 +810,11 @@ bool LoadTerrainPresetOverride(const std::filesystem::path& preset_path,
     std::string bytes;
     if (!World::ReadWorldgenFile(preset_path, bytes)) {
         error = "cannot read preset override: " + Filesystem::GenericUtf8PathString(preset_path);
+        return false;
+    }
+    if (bytes.find('\0') != std::string::npos) {
+        error = "invalid preset override: " + Filesystem::GenericUtf8PathString(preset_path) +
+                ": raw NUL in content";
         return false;
     }
     try {

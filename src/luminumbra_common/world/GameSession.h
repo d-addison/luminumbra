@@ -28,7 +28,9 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace luminumbra::fields {
@@ -320,6 +322,8 @@ public:
     void ApplySystemConfig(const luminumbra::core::SystemConfig& config);
     // Computed on demand from the current effective simulation gates and tuning.
     [[nodiscard]] std::string SystemConfigIdentity() const;
+    // Network/replay configuration identity also binds admitted enabled content.
+    [[nodiscard]] std::string SessionConfigIdentity() const;
     // Resolved preset, biome/structure dependencies and captured species bytes.
     // Shared by TCP Hello, lockstep and replay; never re-reads content.
     [[nodiscard]] const std::string& PresetContentHash() const {
@@ -428,20 +432,28 @@ public:
     // named diagnostic for the heavy oracle's authoritative compare.
     [[nodiscard]] std::string ComputeAetherStateSubHash() const;
 
-    // Returns the per-world species-definition table, loaded at world
-    // create/load from <root>/data/common/creatures/species/*.json (filename-sorted — a pure
-    // function of file content, never filesystem iteration order). Each entry's behaviour
-    // blocks (IAUS "brain" overrides + "genome_ranges") default to the compiled constants,
-    // so a missing directory / absent overrides resolve byte-identically to the compiled-in
-    // behaviour. The creature brain and reproduction systems resolve each entity's behaviour
-    // weights and genome bounds through this table. Never null after CreateWorld/LoadWorld;
-    // null before either (callers must null-check).
+    // Immutable per-world creature definitions. Enabled worlds preflight the full species
+    // inventories and resolved policy; disabled worlds retain lenient legacy loading.
     [[nodiscard]] const luminumbra::ai::CreatureSpeciesRegistry* GetSpeciesTable() const {
         return m_speciesTable.get();
+    }
+    [[nodiscard]] const SimulationContent* GetSimulationContent() const noexcept {
+        return m_simulationContent.get();
+    }
+    // Identity inputs only. A registered populator supplies its versioned contract and
+    // canonical simulation configuration before create/load; callback execution is separate.
+    void SetSimulationPopulationIdentity(std::string contract,
+                                         std::string canonical_configuration = {}) {
+        if (m_worldSystem || m_simulationContent)
+            throw std::logic_error("Set population identity before creating or opening a world");
+        m_populationContract = std::move(contract);
+        m_populationConfiguration = std::move(canonical_configuration);
     }
 
     // Set before creating/opening a world, like the other sim feature keys.
     void SetActiveRegionsEnabled(bool enabled) {
+        if (m_worldSystem && enabled != m_activeRegionsEnabled)
+            throw std::logic_error("Set active regions before creating or opening a world");
         m_activeRegionsEnabled = enabled;
     }
     [[nodiscard]] bool ActiveRegionsEnabled() const {
@@ -693,9 +705,11 @@ private:
     std::unique_ptr<Luminumbra::scripting::LuaState> m_scriptState;
     bool m_aetherStateEnabled = true;
     std::unique_ptr<luminumbra::ai::ScentField> m_scentField;
-    // Immutable species definitions shared with the captured dependency snapshot.
-    // Only the forward declaration is needed for the header-only parsing registry.
+    // Immutable species registries and enabled content, adopted once per world.
     std::shared_ptr<const luminumbra::ai::CreatureSpeciesRegistry> m_speciesTable;
+    std::shared_ptr<const SimulationContent> m_simulationContent;
+    std::string m_populationContract = std::string(kDefaultPopulationContract);
+    std::string m_populationConfiguration;
     // Living-world substrate fields (lazily created when a participant first opts in, so a world
     // with none stays byte-identical). Anchored at the spawn point with a fixed grid extent.
     std::unique_ptr<luminumbra::foliage::SoilGrid> m_soilGrid;
@@ -720,6 +734,8 @@ private:
     // Persist the layer's record beside the chunk save (null/all-zero -> no
     // file). Serialize normalizes, which is state-idempotent at save time.
     bool SaveEnergyFieldRecord(const std::filesystem::path& save_dir);
+    bool PreflightSimulationContent(std::shared_ptr<const SimulationContent>& content);
+    bool AdoptSimulationContent(std::shared_ptr<const SimulationContent> content);
     void ApplyWeatherRainWiring();     // Wires weather to rain when opted in.
     void ApplyWaterResolutionWiring(); // Raises the water solver to High when opted in.
     bool m_finiteHydrologyEnabled = true;

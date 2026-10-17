@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -21,6 +22,7 @@
 #include <variant>
 #include <vector>
 
+#include "core/BoundedFileReader.h"
 #include "core/Environment.h"
 #include "core/FramePacing.h"
 #include "core/GraphicsPresets.h"
@@ -475,19 +477,17 @@ bool ParseGraphicsSection(const nlohmann::json& data,
     return true;
 }
 
-// Bound settings overlays to 1 MiB before allocating/parsing. Read through the
-// owning stream without separate file-size probes (also valid for Windows locks).
+// Bound configuration files and overlays to 1 MiB before allocating/parsing.
+// Verify regular-file type, size and complete reads through the same owning handle.
 constexpr std::size_t kMaxSettingsBytes = 1'048'576;
-bool ReadSettingsText(std::istream& file, std::string& text) {
-    std::array<char, 4096> chunk{};
-    while (file) {
-        file.read(chunk.data(), static_cast<std::streamsize>(chunk.size()));
-        const auto count = static_cast<std::size_t>(file.gcount());
-        if (count > kMaxSettingsBytes - text.size())
-            return false;
-        text.append(chunk.data(), count);
+bool ReadSettingsText(const std::string& path, std::string& text) {
+    try {
+        return Luminumbra::Filesystem::ReadBoundedFile(
+            std::filesystem::path(path), text, kMaxSettingsBytes);
+    } catch (const std::exception&) {
+        text.clear();
+        return false;
     }
-    return file.eof() && !file.bad();
 }
 
 } // namespace
@@ -509,6 +509,8 @@ std::map<std::string, bool> SystemConfig::SimulationGates() const {
 
 SystemConfig SystemConfig::FromJsonString(const std::string& json_text) {
     SystemConfig cfg; // start from all-defaults; overlay only what the JSON names
+    if (json_text.find('\0') != std::string::npos)
+        return cfg; // raw NUL is malformed JSON, not an end-of-input marker
 
     nlohmann::json data;
     try {
@@ -577,30 +579,26 @@ SystemConfig SystemConfig::FromJsonString(const std::string& json_text) {
 }
 
 SystemConfig SystemConfig::LoadFromFile(const std::string& path) {
-    std::ifstream file(path);
-    if (!file)
+    std::string bytes;
+    if (!ReadSettingsText(path, bytes))
         return SystemConfig{}; // missing/unreadable -> defaults
-    std::ostringstream buffer;
-    buffer << file.rdbuf();
-    return FromJsonString(buffer.str());
+    return FromJsonString(bytes);
 }
 
 bool SystemConfig::TryLoadFromFile(const std::string& path,
                                    SystemConfig& config,
                                    std::string& error) {
-    std::ifstream file(path);
-    if (!file) {
+    std::string bytes;
+    if (!ReadSettingsText(path, bytes)) {
         error = "cannot read systems config: " + path;
         return false;
     }
-    std::ostringstream buffer;
-    buffer << file.rdbuf();
-    if (file.bad()) {
-        error = "cannot read systems config: " + path;
+    if (bytes.find('\0') != std::string::npos) {
+        error = "invalid systems config: " + path + ": raw NUL byte";
         return false;
     }
     try {
-        const auto document = nlohmann::json::parse(buffer.str());
+        const auto document = nlohmann::json::parse(bytes);
         if (!document.is_object()) {
             error = "systems config must be a JSON object: " + path;
             return false;
@@ -757,6 +755,10 @@ void SystemConfig::OverlayUserFromJsonString(const std::string& json_text) {
         recover("settings overlay exceeds 1 MiB");
         return;
     }
+    if (json_text.find('\0') != std::string::npos) {
+        recover("settings overlay contains a raw NUL byte");
+        return;
+    }
     try {
         const auto data = ParseSettingsJson(json_text);
         if (!data.is_object() || !data.contains("user") || !data["user"].is_object()) {
@@ -802,10 +804,9 @@ SystemConfig SystemConfig::LoadLayered(const std::string& defaults_path,
         return cfg;
     }
     // Directories, dangling symlinks and unreadable files are recovery, not first launch.
-    if (!ec && std::filesystem::is_regular_file(overlay_path, ec) && !ec) {
-        std::ifstream overlay(overlay_path, std::ios::binary);
+    if (!ec) {
         std::string text;
-        if (overlay && ReadSettingsText(overlay, text)) {
+        if (ReadSettingsText(overlay_path, text)) {
             cfg.OverlayUserFromJsonString(text);
             return cfg;
         }

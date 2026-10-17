@@ -4,7 +4,6 @@
 #include <array>
 #include <bit>
 #include <cstring>
-#include <fstream>
 #include <initializer_list>
 #include <optional>
 #include <type_traits>
@@ -127,6 +126,13 @@ BiomeTable BiomeTable::Load(const std::filesystem::path& table_path,
         return table;
     }
 
+    // The JSON lexer treats raw NUL as end-of-input and can ignore a trailing suffix.
+    if (bytes.find('\0') != std::string::npos) {
+        table.m_errors.push_back("failed to parse biome table JSON '" +
+                                 Filesystem::GenericUtf8PathString(table_path) +
+                                 "': raw NUL in content");
+        return table;
+    }
     nlohmann::json data;
     try {
         data = nlohmann::json::parse(bytes);

@@ -135,9 +135,10 @@ public:
     // All shipping flags on, including the far-world ladder; explicit enabled:false opts out.
     // Params unset (caller fallback). sim.* hashed; render.* excluded from the config sub-hash.
     [[nodiscard]] static SystemConfig Defaults();
-    // Parse a systems.json document. Malformed/empty/blank text -> all-defaults (no throw).
+    // Parse systems.json. Syntax errors/empty/blank text -> defaults; schema errors may throw.
+    // Raw NUL bytes are malformed, including after an otherwise valid document.
     [[nodiscard]] static SystemConfig FromJsonString(const std::string& json_text);
-    // Load from disk. Missing/unreadable file -> all-defaults (no throw).
+    // Load a regular file of at most 1 MiB. Missing/unreadable file -> defaults.
     [[nodiscard]] static SystemConfig LoadFromFile(const std::string& path);
     // Explicit CLI overrides must be readable JSON objects; failure leaves config unchanged.
     // Success replaces only system flags/tuning, retaining player settings and their load report.

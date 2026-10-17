@@ -3,8 +3,8 @@
 `GameSession::SystemConfigIdentity()` computes identity on demand from the session's
 current simulation gates and tuning. It works without `ApplySystemConfig`, using the
 compiled session defaults, and observes subsequent public tuning setters. Peers compare
-this identity before TCP lockstep join or TCP remote replication admission; replay playback
-compares the recorded identity with the live session before stepping any replay tick.
+the content-bound `SessionConfigIdentity()` before TCP lockstep join or TCP remote
+replication admission; replay playback compares the recorded identity with the live session before stepping any replay tick.
 Missing identities on either side always fail compatibility, including two empty strings.
 
 The fields are the simulation keys and owned parameters in `ConfigSchema.json`, plus
@@ -18,8 +18,9 @@ such an override with default tuning therefore leaves the effective identity unc
 Parameters come from current session storage, including clamped plant mutation and the
 integer reproduction counts resolved by `ApplySystemConfig`. Scheduler values come
 directly from the live active-region ledger's effective `config()`. Presentation and user
-settings are excluded. This contract covers effective session rules, rather than world
-content, initial rosters or per-tick inputs.
+settings are excluded. `GameSession::SessionConfigIdentity()` additionally binds captured
+simulation content after enabled world admission. Before admission and with active regions
+disabled, it retains the rules-only identity. Network and replay callers use this session identity.
 
 Canonical bytes start with ASCII `system-config:v3:`. In generated schema order, each
 included key emits its `SysKey` id as u8, then its effective enabled flag as u8. Each owned
@@ -183,8 +184,8 @@ Nested files and other extensions are not consumed. Species JSON references no
 additional files; `brain` and `genome_ranges` are inline blocks.
 
 The species loader parses the bytes supplied by the manifest reader. Its immutable
-registry is retained in `WorldgenDependencySnapshot` and adopted by GameSession
-on both create and load, without reopening the files. Invalid JSON warns and skips
+registry is retained in `WorldgenDependencySnapshot` and adopted by disabled GameSession
+sessions on both create and load, without reopening the files. Invalid JSON warns and skips
 that entry, preserving compiled fallback behavior while still binding its bytes.
 A present unreadable species input, non-directory species path or enumeration
 failure refuses resolution without publishing an identity. The runtime world is
@@ -194,6 +195,12 @@ no files and leaves existing entries unchanged. Loader exceptions are contained
 within the registry, including for client metadata callers. Registry order uses
 the same generic UTF-8 filename order, including when native UTF-16 path order
 would differ.
+
+Enabled sessions instead require the strict species and policy admission in
+[the simulation content contract](../active-regions.md#distant-policy-adoption-and-simulation-content-identity).
+They match captured creature-file digests against the preset dependency snapshot, adopt
+the strict registry in declared-name order, and bind both identities. Invalid species
+cannot select a fallback in an enabled session.
 
 The same string continues through protocol-v3 Hello, replay-header-v3, server modes and
 NetworkedSessionDriver; their wire layout is unchanged. Earlier JSON-only identities
@@ -328,3 +335,7 @@ and excluded from the world hash. The frozen preset also preserves the disabled 
 mask; disabling simulation flags alone would not restore historical terrain. Shipping
 defaults remain exercised by the unpinned headless, moving, and water trace workloads.
 Capturing shipping-default absolute hashes still requires native runs.
+
+Enabled admitted sessions hash `simulation-session:v1:`, the rules identity framed with a little-endian u32 byte length, and the exact 40-byte simulation content identity record with FNV-1a-64, rendered as 16 lowercase hexadecimal digits. Runtime network clients use the same content admission and binding before sending Hello. Policy, plant, creature and population identity changes therefore refuse Hello and replay compatibility before simulation steps.
+
+Configuration files and user overlays are limited to 1 MiB. Each disk reader opens a regular file without following a final symlink or reparse point, checks its size before allocation, and refuses partial or growing reads. Explicit overrides refuse raw NUL bytes without replacing the current systems snapshot; malformed user overlays retain current user settings and enter recovery.

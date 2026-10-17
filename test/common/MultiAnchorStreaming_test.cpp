@@ -3,6 +3,7 @@
 // for multi-player / multi-camera streaming. The single-anchor path is covered
 // byte-identically by HeadlessServerTick + PlayerView; this exercises the 2-anchor path
 // the forwarding overload does not reach.
+#include "../support/SimulationContentFixture.h"
 #include "../support/UniqueTempPath.h"
 #include "../support/WorldgenTestData.h"
 
@@ -42,6 +43,8 @@ public:
         fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds" / "atlas" / "presets" /
                           "default.json",
                       root_ / "worlds" / "atlas" / "presets" / "default.json");
+        Luminumbra::TestSupport::WriteSimulationContentFixture(root_);
+        fs::remove(root_ / "data/common/biomes.json");
         Luminumbra::TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, root_);
     }
     ~HeadlessRoot() {

@@ -1714,7 +1714,7 @@
     {
       "id": "contract.dw.regions.05",
       "source": "docs/distant-world.md#persistent-active-regions",
-      "statement": "Acceptance obligations: see [the active-region format and scheduling guide](active-regions.md) for its canonical bytes, refusal behaviours and bounded slice boundaries. / It has no per-system consumers and no measured budget caps yet. / Dirty parking, snapshot transactions and the diagnostic panel are planned for v0.3.1. / Current default behaviour still evicts dirty chunks without a flush, the client saves only on quit or shutdown, and the dedicated server autosave interval defaults to 9000 ticks (five minutes at the canonical 30 Hz clock). / Explicit zero disables autosave; / capture and determinism fixtures explicitly use 30 ticks.",
+      "statement": "Acceptance obligations: see [the active-region format and scheduling guide](active-regions.md) for its canonical bytes, refusal behaviours and bounded slice boundaries. / It has no per-system consumers and no measured budget caps yet. / Dirty parking, snapshot transactions and the diagnostic panel are planned for v0.3.1. / Current default behaviour still evicts dirty chunks without a flush, the client saves only on quit or shutdown, and the dedicated server autosave interval defaults to 9000 ticks (five minutes at the canonical 30 Hz clock). / Explicit zero disables autosave; / capture and determinism fixtures explicitly use 30 ticks. / The dedicated server autosaves every five minutes by default.",
       "status": "planned",
       "requirements": [
         "dw.regions.025",
@@ -2503,7 +2503,7 @@
     {
       "id": "contract.ar.file.08",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "statement": "Acceptance obligations: All integers are little endian, signed integers use two's complement, floats are IEEE binary32 (finite, with positive zero as the sole zero encoding). / The header is exactly 56 bytes: / | 0 | 4 | ASCII ARL1 | / | 4 | 2 | version = 1 or 2 | / | 6 | 2 | reserved zero | / | 8 | 8 | canonical scheduler tick;",
+      "statement": "Acceptance obligations: All integers are little endian, signed integers use two's complement, floats are IEEE binary32 (finite, with positive zero as the sole zero encoding). / The header is exactly 56 bytes: / | 0 | 4 | ASCII ARL1 | / | 4 | 2 | version = 1, 2 or 3 | / | 6 | 2 | reserved zero | / | 8 | 8 | canonical scheduler tick;",
       "status": "planned",
       "requirements": [
         "ar.file.051",
@@ -2608,7 +2608,7 @@
     {
       "id": "contract.ar.file.13",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "statement": "Acceptance obligations: | 80 | 8 | u32 over-hold, u32 under-hold | / | 88 | 8 | u64 water cursor | / | 96 | 8 | u64 frozen simulation content digest | / The footer is one LE u64 FNV-1a-64 checksum over every preceding byte, including the extension length and TLVs (offset basis 14695981039346656037, multiplier 1099511628211). / Total length must be exactly 56 + count * 104 + 8 for version 1, or 56 + count * 104 + 4 + ext_len + 8 for version 2. / No trailing bytes, padding, native structs, section omission or alternate encodings are accepted.",
+      "statement": "Acceptance obligations: | 80 | 8 | u32 over-hold, u32 under-hold | / | 88 | 8 | u64 water cursor | / | 96 | 8 | u64 frozen simulation content digest | / The footer is one LE u64 FNV-1a-64 checksum over every preceding byte, including the extension length and TLVs (offset basis 14695981039346656037, multiplier 1099511628211). / Total length must be exactly 56 + count * 104 + 8 for version 1, or 56 + count * 104 + 4 + ext_len + 8 for versions 2 and 3. / No trailing bytes, padding, native structs, section omission or alternate encodings are accepted.",
       "status": "planned",
       "requirements": [
         "ar.file.081",
@@ -3066,6 +3066,194 @@
         {
           "kind": "ctest",
           "ref": "GameSessionHeadlessWorldTest.LegacyMemberWriteRefusalsFailCleanAndDirtySaves"
+        }
+      ]
+    },
+    {
+      "id": "contract.simulation-content",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "statement": "Strict policy and species admission, canonical content identity, and ledger compatibility have registered parser, persistence and session regressions. Integrated native qualification and acceptance evidence review remain outstanding.",
+      "status": "partial",
+      "requirements": [
+        "ar.content.001",
+        "ar.content.002",
+        "ar.content.003",
+        "ar.content.004",
+        "ar.content.005",
+        "ar.content.006",
+        "ar.content.007",
+        "ar.content.008",
+        "ar.content.009",
+        "ar.content.010",
+        "ar.content.011",
+        "ar.content.012",
+        "ar.content.013",
+        "ar.content.014",
+        "ar.content.015",
+        "ar.content.016",
+        "ar.content.017",
+        "ar.content.018",
+        "ar.content.019",
+        "ar.content.020",
+        "ar.content.021",
+        "ar.content.022",
+        "ar.content.023",
+        "ar.content.024",
+        "ar.content.025",
+        "ar.content.026",
+        "ar.content.027",
+        "ar.content.028",
+        "ar.content.029",
+        "ar.content.030",
+        "ar.content.031",
+        "ar.content.032",
+        "ar.content.033",
+        "ar.content.034",
+        "ar.content.035",
+        "ar.content.036",
+        "ar.content.037",
+        "ar.content.038",
+        "ar.content.039",
+        "ar.content.040",
+        "ar.content.041",
+        "ar.content.042",
+        "ar.content.043",
+        "ar.content.044",
+        "ar.content.045",
+        "ar.content.046",
+        "ar.content.047",
+        "ar.content.048",
+        "ar.content.049",
+        "ar.content.050",
+        "ar.content.051",
+        "ar.content.052",
+        "ar.content.053",
+        "ar.content.054",
+        "ar.content.055",
+        "ar.content.056",
+        "ar.content.057",
+        "ar.content.058",
+        "ar.content.059",
+        "ar.content.060",
+        "ar.content.061",
+        "ar.content.062",
+        "ar.content.063",
+        "ar.content.064",
+        "ar.content.065",
+        "ar.content.066",
+        "ar.content.067",
+        "ar.content.068",
+        "ar.content.069",
+        "ar.content.070",
+        "ar.content.071",
+        "ar.content.072",
+        "ar.content.073",
+        "ar.content.074",
+        "ar.content.075",
+        "ar.content.076",
+        "ar.content.077",
+        "ar.content.078",
+        "ar.content.079",
+        "ar.content.080",
+        "ar.content.081",
+        "ar.content.082",
+        "ar.content.083",
+        "ar.content.084",
+        "ar.content.085",
+        "ar.content.086",
+        "ar.content.087",
+        "ar.content.088",
+        "ar.content.089"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PolicyEveryIntegerEndpoint"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PolicyBooleanDecimalExponentNegativeAndOverflowRefuse"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PolicyUnknownMissingDuplicateAndFutureFieldsRefuseAtomically"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PolicyUtf8BomCrFinalLfAndDepthRefuse"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.MissingPolicyParentRefusesWithoutChangingAdoptedContent"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PolicyIoSymlinkNonregularOversizeAndChangedReadRefuse"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.DefinitionResourceCapsAndDirectoryChangesRefuseAtomically"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.IdentityExcludesPresentationWhitespacePathsAndJsonOrder"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.IdentityIncludesUnreferencedCreatureAndPlantSimulationDefinitions"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.IdentityIncludesDefaultAndAlgorithmVersionsAndPopulationConfiguration"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PopulationIdentityInputsAreAdoptedAndBoundedAtomically"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedgerTest.ContentIdentityIsImmutableAndHasAnExactVersionedWireRecord"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedgerTest.ContentAndWorkEnvelopeRefusesMalformedOrMisorderedTlvsAtomically"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.EnabledContentPreflightRefusesBeforePublishingOrSavingWorld"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.SpeciesSimulationMismatchRefusesAndPresentationChangesReload"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.SpeciesChangesBetweenPresetAndContentAdmissionRetainLiveWorld"
+        },
+        {
+          "kind": "ctest",
+          "ref": "TerrainPresetLoaderTest.RawNulRefusesBeforeAdoptingPreset"
+        },
+        {
+          "kind": "ctest",
+          "ref": "TerrainPresetLoaderTest.DiskAndOverrideLoadsRefuseOversizedPresetsBeforeParsing"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedgerTest.ContentIdentityRequiresItsOwnEnvelopeVersion"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.NonDefinitionEntriesCannotBypassDirectoryWorkBound"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.NetworkHelloUsesCapturedPolicyAndPlantIdentity"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+          "planned": "review integrated qualification for the content admission contract; owner: ds"
         }
       ]
     },

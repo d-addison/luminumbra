@@ -1,3 +1,4 @@
+#include "../support/SimulationContentFixture.h"
 #include "../support/WorldgenTestData.h"
 #include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/world/ActiveRegionLedger.h"
@@ -30,6 +31,7 @@
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
 #include "luminumbra_server/ServerWorldRunner.h"
+#include "luminumbra_server/modes/ModeHelpers.h"
 
 #include <algorithm>
 #include <atomic>
@@ -126,9 +128,11 @@ protected:
 
     void SetUp() override {
         Fixture().root = UniqueRoot();
+        Luminumbra::TestSupport::WriteSimulationContentFixture(Fixture().root);
         fs::create_directories(Fixture().root / "worlds/atlas/presets");
         fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets/default.json",
                       Fixture().root / "worlds/atlas/presets/default.json");
+        ASSERT_TRUE(fs::remove(Fixture().root / "data/common/biomes.json"));
         TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, Fixture().root);
         fs::copy(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets-rev6",
                  Fixture().root / "worlds/atlas/presets-rev6",
@@ -294,8 +298,9 @@ TEST_P(WorldOpenRefusal, RefusesBeforeGenerationAndPreservesAllDiskBytes) {
         client = std::make_unique<GameSession>();
         client->SetJobSystem(&Fixture().jobs);
         client->SetRootPath(RootString());
-        if (entry == 1)
+        if (entry == 1) {
             ASSERT_TRUE(client->CreateWorld("Client", "1337", "default"));
+        }
     }
     Damage(kind);
     const auto before = DiskBytes(Fixture().root);
@@ -347,9 +352,9 @@ TEST_P(WorldOpenRefusal, RefusesBeforeGenerationAndPreservesAllDiskBytes) {
         EXPECT_FALSE(session.LoadWorldStateFrom(Fixture().save));
     }
     ASSERT_FALSE(error.empty());
-    if (obsolete)
+    if (obsolete) {
         EXPECT_EQ(error, WorldSaveService::kObsoleteWorldMessage);
-    else if (future)
+    } else if (future)
         EXPECT_NE(error.find("future"), std::string::npos);
     else {
         EXPECT_NE(error, WorldSaveService::kObsoleteWorldMessage);
@@ -806,8 +811,9 @@ TEST_F(WorldOpenRefusal, EveryFrozenPresetResolvesHistoricalBytesAndChecksIdenti
                       fs::copy_options::overwrite_existing);
         const auto identity =
             Persistence::StableChecksum(nlohmann::json::parse(Read(historical)).dump());
-        if (std::string(name) == "cave_dense")
+        if (std::string(name) == "cave_dense") {
             EXPECT_EQ(identity, "e70158a4777ee36b");
+        }
         auto metadata = original_metadata;
         metadata["worldType"] = name;
         for (const auto& identity_metadata : {nlohmann::json::object(),
@@ -820,9 +826,9 @@ TEST_F(WorldOpenRefusal, EveryFrozenPresetResolvesHistoricalBytesAndChecksIdenti
             const auto before = DiskBytes(Fixture().root);
             const auto inspected = Persistence::InspectSavedWorld(Fixture().root, "fixture");
             EXPECT_EQ(inspected.preset_path, historical);
-            if (saved_metadata.value("presetIdentity", identity) == identity)
+            if (saved_metadata.value("presetIdentity", identity) == identity) {
                 EXPECT_TRUE(inspected.error.empty()) << inspected.error;
-            else
+            } else
                 EXPECT_NE(inspected.error.find("identity"), std::string::npos);
             EXPECT_EQ(DiskBytes(Fixture().root), before);
         }
@@ -1343,10 +1349,12 @@ public:
 
     void Rewrite(const char* changed) const {
         SCOPED_TRACE(directory.generic_string());
-        if (std::string(changed) != "identity")
+        if (std::string(changed) != "identity") {
             ASSERT_NO_FATAL_FAILURE(Write(directory / "preset.json", other_preset.dump()));
-        if (std::string(changed) != "preset")
+        }
+        if (std::string(changed) != "preset") {
             ASSERT_NO_FATAL_FAILURE(Write(directory / "world_info.json", other_metadata.dump()));
+        }
     }
 
     void Restore() const {
@@ -1522,8 +1530,9 @@ TEST_F(WorldOpenRefusal, ServerFullSnapshotPresetChangeRefusesWithoutWritesOrAck
             }
 
             ASSERT_EQ(runner.SaveFullSnapshot(), 1u);
-            if (active_regions)
+            if (active_regions) {
                 EXPECT_FALSE(chunk->is_voxel_data_dirty());
+            }
             // The legacy full snapshot writes chunks/metadata; flush plants and energy too.
             ASSERT_TRUE(session->SaveWorldState());
             EXPECT_FALSE(chunk->is_voxel_data_dirty());
@@ -1584,3 +1593,35 @@ TEST_F(WorldOpenRefusal, LegacyExplicitSessionSnapshotsKeepLargeKeylessMetadata)
 }
 
 } // namespace
+
+TEST_F(WorldOpenRefusal, NetworkHelloUsesCapturedPolicyAndPlantIdentity) {
+    ServerCliOptions options;
+    options.root = RootString();
+    options.seed = "1337";
+    options.preset = "default";
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&Fixture().jobs);
+    ASSERT_TRUE(session.CreateTransientWorld("Network content", "1337", "default"));
+    const auto baseline = RuntimeHelloFrom(options);
+    ASSERT_FALSE(baseline.system_config_identity.empty());
+    EXPECT_EQ(baseline.system_config_identity, session.SessionConfigIdentity());
+    EXPECT_EQ(baseline.preset_content_hash, session.PresetContentHash());
+    const auto plant = Fixture().root / "data/common/foliage/species/fixture_plant.json";
+    const auto original_plant = Read(plant);
+    Write(plant, "{\"id\":\"fixture_plant\",\"lifespan_ticks\":1}\n");
+    EXPECT_FALSE(Net::HelloMatches(baseline, RuntimeHelloFrom(options)));
+    Write(plant, original_plant);
+    EXPECT_TRUE(Net::HelloMatches(baseline, RuntimeHelloFrom(options)));
+    const auto policy = Fixture().root / "data/common/sim/distant_policy.json";
+    Write(
+        policy,
+        R"({"schema":"luminumbra.distant_policy.v1","creature_species":{},"plant_species":{"fixture_plant":{"max_cadence_shift":1,"resume_cap_ticks":0}}})"
+        "\n");
+    EXPECT_FALSE(Net::HelloMatches(baseline, RuntimeHelloFrom(options)));
+    Write(policy, "{}");
+    EXPECT_TRUE(RuntimeHelloFrom(options).system_config_identity.empty());
+    ASSERT_TRUE(fs::remove(policy));
+    ASSERT_TRUE(fs::remove(plant));
+    EXPECT_TRUE(RuntimeHelloFrom(options).system_config_identity.empty());
+}
