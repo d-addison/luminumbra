@@ -5841,6 +5841,8 @@ int main(int argc, char* argv[]) {
             }
         }
     }
+    if (menuPreviewState.capture_failed && exit_code == 0)
+        exit_code = 1;
     if (!frame_recorder.finish()) {
         LUMINUMBRA_CORE_ERROR("Frame attribution CSV finalization failed");
         if (exit_code == 0)

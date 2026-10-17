@@ -56,6 +56,125 @@ def cpp_expression(expression, **bindings):
     return eval(compile(tree, "<production predicate>", "eval"), {"__builtins__": {}}, names)
 
 
+class CaptureGateEvaluation:
+    """Interpret the shipping scalar gate; this does not execute C++ or GL."""
+
+    def __init__(self):
+        self.source = block(read(CLIENT / "app/MenuSceneSchedule.h"), "class MenuCaptureGate")
+        self.state = {}
+        for name, assigned, braced in re.findall(
+                r"(?:Time|std::size_t|bool) (\w+)(?:\s*=\s*([^;]+)|\{([^}]*)\});",
+                self.source[self.source.index("private:"):]):
+            expression = assigned or braced or "0"
+            self.state[name] = cpp_expression(expression, true=True, false=False)
+
+    def call(self, method, **inputs):
+        body = block(self.source, method)
+        body = re.sub(r"std::chrono::seconds\{(\d+)\}", r"\1", body)
+        statement = re.compile(
+            r"if\s*\(([^()]*)\)\s*return\s+([^;]+);|"
+            r"return\s+([^;]+);|(\w+)\s*=\s*([^;]+);"
+        )
+        position = 0
+        for match in statement.finditer(body):
+            if body[position:match.start()].strip():
+                raise AssertionError("Unsupported production gate control flow")
+            position = match.end()
+            condition, guarded_return, returned, name, assigned = match.groups()
+            values = dict(self.state, **inputs, true=True, false=False)
+            if assigned is not None:
+                self.state[name] = cpp_expression(assigned, **values)
+            elif condition is None or cpp_expression(condition, **values):
+                expression = guarded_return if condition is not None else returned
+                if expression.startswith("Result::"):
+                    return expression.removeprefix("Result::")
+                return cpp_expression(expression, **values)
+        if body[position:].strip():
+            raise AssertionError("Incomplete production gate control flow")
+        return None
+
+    def arm(self, now=0, index=0, thumbnail=False):
+        return self.call("bool arm(", now=now, index=index, thumbnail=thumbnail)
+
+    def decide(self, now, settled=False, drawable=True, content_ready=True):
+        return self.call("Result decide(", now=now, settled=settled,
+                         drawable=drawable, content_ready=content_ready)
+
+
+class MenuCaptureEvaluation:
+    """Trace production capture predicates, including the pre-deadline path.
+
+    This scalar policy evaluation supplies render/readiness observations. It is
+    not a renderer, and provides no native screenshot qualification.
+    """
+
+    def __init__(self, live=False):
+        source = read(CLIENT / "app/MenuScreens.cpp")
+        self.menu = block(source, "void RenderMenuScreens(")
+        self.gate = CaptureGateEvaluation() if "if (!PrepareMenuCapture(" in self.menu else None
+        self.live = live
+        self.count = 0
+        self.start = None
+        regular = re.sub(r"//[^\n]*", "", block(self.menu, "else if (app.capture.ui_screenshot_settle <"))
+        self.admission = re.fullmatch(r"\s*if \((.*?)\)\s*"
+                                      r"\+\+app.capture.ui_screenshot_settle;\s*", regular, re.S).group(1)
+        self.required = int(re.search(r"else if \(app.capture.ui_screenshot_settle < (\d+)\)", self.menu).group(1))
+        self.content = re.search(r"const bool content_ready\s*=\s*(.*?);", source, re.S)
+
+    def frame(self, now, rendered=False, preview=True, ready=False,
+              drawable=True, failed=False, document=True, index=0, source_failed=False,
+              candidate_ready=None):
+        if self.start is None:
+            self.start = now
+        if self.gate:
+            if self.gate.arm(now, index=index):
+                self.count = 0
+                self.start = now
+            if self.gate.decide(now) == "TimedOut":
+                return "TimedOut"
+        values = dict(scene_rendered=rendered, scenic=False, previewActive=preview)
+        if self.live:
+            live = block(self.menu, "if (preview_live_screen)")
+            live = live[live.index("const bool world_ready"):]
+            reset = re.search(r"if \((.*?)\)\s*app.capture.ui_preview_settle_after_ready = 0;", live, re.S).group(1)
+            increment = re.search(r"else if \((.*?)\)\s*\+\+app.capture.ui_preview_settle_after_ready;", live, re.S).group(1)
+            values["world_ready"] = ready
+            if cpp_expression(reset, **values):
+                self.count = 0
+            elif cpp_expression(increment, **values):
+                self.count += 1
+            expressions = dict(re.findall(r"const bool (settled|timed_out) = (.*?);", live, re.S))
+            constants = dict((name, float(number)) for name, number in re.findall(
+                r"constexpr (?:double|int) (\w+) =\s*(\d+(?:\.\d+)?);", live))
+            values.update(constants)
+            values.update({"app.capture.ui_preview_settle_after_ready": self.count,
+                           "waited_s": now - self.start})
+            for name in ("settled", "timed_out"):
+                values[name] = cpp_expression(expressions[name], **values)
+            requested = cpp_expression(re.search(r"ready_to_capture = (.*?);", live, re.S).group(1), **values)
+        else:
+            requested = self.count >= self.required
+            if not requested and cpp_expression(self.admission, **values):
+                self.count += 1
+        content_ready = True
+        if self.content:
+            content_ready = cpp_expression(self.content.group(1), **{
+                "previewState.capture_document_ready": document,
+                "app.menu.menu_backdrop_active": False, "scenic": False,
+                "expects_preview": preview, "previewActive": preview,
+                "worldgenPreview": preview, "worldgenPreview->world_ready()": ready,
+                "worldgenPreview->candidate_ready()": ready if candidate_ready is None else candidate_ready,
+                "worldgenPreview->last_build_failed()": failed,
+                "previewState.candidate_source_failed": source_failed})
+            if not content_ready or not drawable:
+                self.count = 0
+                requested = False
+        if self.gate:
+            return self.gate.decide(now, settled=requested, drawable=drawable,
+                                    content_ready=content_ready)
+        return "Ready" if requested else "Waiting"
+
+
 class FrameAttributionWiring(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -612,6 +731,276 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertIn("app.capture.ui_thumbs_settle < 28", thumbs)
         self.assertIn("app.capture.ui_thumbs_settle = 0;", thumbs)
         self.assertIn("++app.capture.ui_thumbs_index;", thumbs)
+
+    def test_capture_gate_expires_refused_ordinary_and_live_preview(self):
+        for content_ready in (False, True):
+            gate = CaptureGateEvaluation()
+            self.assertTrue(gate.arm())
+            self.assertEqual(gate.decide(44.999, content_ready=content_ready), "Waiting")
+            self.assertFalse(gate.arm(44.999))
+            self.assertEqual(gate.decide(45, content_ready=content_ready), "TimedOut")
+            self.assertEqual(gate.decide(46, settled=True), "TimedOut")
+        gate = CaptureGateEvaluation()
+        self.assertEqual(gate.decide(45, settled=True), "Waiting")
+        gate.arm()
+        self.assertEqual(gate.decide(44.999, settled=True), "Ready")
+        self.assertEqual(gate.decide(45, settled=True), "TimedOut")
+
+    def test_real_capture_policy_refused_first_candidate_fails_both_modes(self):
+        for live in (False, True):
+            capture = MenuCaptureEvaluation(live=live)
+            for tick in range(45):
+                self.assertEqual(capture.frame(tick), "Waiting")
+                self.assertEqual(capture.count, 0)
+            self.assertEqual(capture.frame(45), "TimedOut")
+
+    def test_real_capture_policy_wait_replay_refusal_and_actual_renders(self):
+        for live, needed in ((False, 30), (True, 40)):
+            capture = MenuCaptureEvaluation(live=live)
+            self.assertEqual(capture.frame(0), "Waiting")
+            for tick in range(1, 40):
+                self.assertEqual(capture.frame(tick / 100, ready=True), "Waiting")
+                self.assertEqual(capture.count, 0)
+            # A rejected new candidate may leave an older world drawable.
+            self.assertEqual(capture.frame(1, rendered=True, ready=True, failed=True), "Waiting")
+            self.assertEqual(capture.count, 0)
+            for sample in range(1, needed + 1):
+                result = capture.frame(2 + sample / 100, rendered=True, ready=True)
+                self.assertEqual(capture.count, sample)
+                self.assertEqual(result, "Ready" if live and sample == needed else "Waiting")
+            self.assertEqual(capture.frame(3, ready=True), "Ready")
+
+    def test_real_capture_policy_ui_layout_and_readiness_loss(self):
+        capture = MenuCaptureEvaluation()
+        for tick in range(30):
+            self.assertEqual(capture.frame(tick / 100, preview=False), "Waiting")
+        self.assertEqual(capture.frame(0.3, preview=False), "Ready")
+        for missing in (dict(drawable=False), dict(document=False)):
+            self.assertEqual(capture.frame(1, preview=False, **missing), "Waiting")
+            self.assertEqual(capture.count, 0)
+        self.assertEqual(capture.frame(45, preview=False), "TimedOut")
+
+    def test_refused_source_cannot_be_cleared_by_an_older_successful_build(self):
+        for live in (False, True):
+            capture = MenuCaptureEvaluation(live=live)
+            self.assertEqual(capture.frame(0, failed=True, source_failed=True), "Waiting")
+            # An earlier/default candidate can finish after this request was refused.
+            for sample in range(1, 100):
+                self.assertEqual(capture.frame(sample / 10, rendered=True, ready=True,
+                                               source_failed=True), "Waiting")
+                self.assertEqual(capture.count, 0)
+            self.assertEqual(capture.frame(45, rendered=True, ready=True,
+                                           source_failed=True), "TimedOut")
+            self.assertEqual(capture.frame(46, rendered=True, ready=True, index=1), "Waiting")
+            self.assertEqual(capture.count, 1)
+
+        source = read(CLIENT / "world/WorldgenPreview.cpp")
+        admission = block(source, "bool WorldgenPreview::set_candidate(")
+        refused = block(admission, "if (!result.ok)")
+        self.assertIn("return false;", refused)
+        self.assertNotIn("set_params(", refused)
+        self.assertLess(admission.index("return false;"), admission.index("m_data_root = data_root;"))
+        self.assertLess(admission.index("set_params(result.params, seed);"),
+                        admission.index("return true;"))
+        candidate = block(read(CLIENT / "app/MenuScreens.cpp"), "if (sig != previewState.lastSig)")
+        self.assertIn("previewState.candidate_source_failed = "
+                      "!worldgenPreview->set_candidate(resolved, data_root, seedVal);", compact(candidate))
+
+    def test_older_world_cannot_settle_a_pending_or_refused_replacement(self):
+        readiness = block(read(CLIENT / "world/WorldgenPreview.h"), "bool candidate_ready() const")
+        predicate = re.fullmatch(r"\s*return (.*?);\s*", readiness, re.S).group(1)
+        for world, dirty, inflight, failed in ((False, False, False, False),
+                                             (True, True, False, False),
+                                             (True, False, True, False),
+                                             (True, False, False, True),
+                                             (True, False, False, False)):
+            self.assertEqual(cpp_expression(predicate, **{
+                "world_ready()": world, "m_pending_dirty": dirty,
+                "m_build_inflight.load()": inflight, "m_last_build_failed": failed}),
+                world and not (dirty or inflight or failed))
+        for live, required in ((False, 30), (True, 40)):
+            capture = MenuCaptureEvaluation(live=live)
+            for sample in range(100):
+                self.assertEqual(capture.frame(sample / 10, rendered=True, ready=True,
+                                               candidate_ready=False), "Waiting")
+                self.assertEqual(capture.count, 0)
+            for sample in range(required):
+                capture.frame(11 + sample / 100, rendered=True, ready=True, candidate_ready=True)
+            self.assertEqual(capture.count, required)
+            self.assertEqual(capture.frame(12, ready=True, candidate_ready=True), "Ready")
+            self.assertEqual(capture.frame(13, rendered=True, ready=True, candidate_ready=False), "Waiting")
+            self.assertEqual(capture.count, 0)
+            self.assertEqual(capture.frame(45, ready=True, candidate_ready=False), "TimedOut")
+
+    def test_capture_gate_rearms_for_screen_advance_and_mode_changes_only(self):
+        gate = CaptureGateEvaluation()
+        gate.arm()
+        self.assertEqual(gate.decide(44, settled=True), "Ready")
+        self.assertTrue(gate.arm(44, index=1))
+        self.assertEqual(gate.decide(45), "Waiting")
+        for tick in range(45, 89):
+            self.assertFalse(gate.arm(tick, index=1))
+        self.assertEqual(gate.decide(89), "TimedOut")
+        self.assertTrue(gate.arm(89, index=1, thumbnail=True))
+        self.assertEqual(gate.decide(90, settled=True), "Ready")
+        self.assertFalse(gate.arm(133, index=1, thumbnail=True))
+        self.assertEqual(gate.decide(134), "TimedOut")
+        gate.call("void reset()")
+        self.assertEqual(gate.decide(150, settled=True), "Waiting")
+        self.assertTrue(gate.arm(150, index=1, thumbnail=True))
+
+    def test_capture_gate_uses_real_settling_admission_for_wait_replay_and_ui(self):
+        menu = block(read(CLIENT / "app/MenuScreens.cpp"), "void RenderMenuScreens(")
+        regular = re.sub(r"//[^\n]*", "", block(menu, "else if (app.capture.ui_screenshot_settle < 30)"))
+        predicate = re.fullmatch(r"\s*if \((.*?)\)\s*"
+                                 r"\+\+app.capture.ui_screenshot_settle;\s*", regular, re.S).group(1)
+        for scenic, preview in ((True, False), (False, True), (False, False)):
+            gate = CaptureGateEvaluation()
+            gate.arm()
+            count = 0
+            for tick in range(120):
+                rendered = tick >= 60 and tick % 2 == 0
+                settled = count >= 30  # The shipping ordinary branch captures on the next frame.
+                if not settled and cpp_expression(predicate, scene_rendered=rendered,
+                                                   scenic=scenic, previewActive=preview):
+                    count += 1
+                expected = "Ready" if (tick >= 30 if not (scenic or preview) else tick == 119) else "Waiting"
+                self.assertEqual(gate.decide(tick / 60, settled=settled), expected)
+            self.assertEqual(count, 30)
+
+    def test_capture_target_or_content_loss_cannot_publish_or_extend_deadline(self):
+        for drawable, content in ((False, True), (True, False), (False, False)):
+            gate = CaptureGateEvaluation()
+            gate.arm()
+            for tick in range(45):
+                self.assertEqual(gate.decide(tick, settled=True, drawable=drawable,
+                                            content_ready=content), "Waiting")
+                self.assertFalse(gate.arm(tick))
+            self.assertEqual(gate.decide(45, settled=True, drawable=drawable,
+                                        content_ready=content), "TimedOut")
+
+    def test_capture_deadline_is_armed_before_every_render_and_failure_closes(self):
+        source = read(CLIENT / "app/MenuScreens.cpp")
+        menu = block(source, "void RenderMenuScreens(")
+        setup = block(source, "bool PrepareMenuCapture(")
+        capturing = block(setup, "if (capturing)")
+        self.assertLess(capturing.index("capture_gate.arm("), capturing.index("capture_gate.decide("))
+        self.assertLess(menu.index("if (!PrepareMenuCapture("), menu.index("renderPipeline.render_frame("))
+        self.assertRegex(compact(menu), r"if \(!PrepareMenuCapture\([^;]*\)\) return;")
+        self.assertIn("const bool capturing = thumbnails_pending || screenshot_pending;", compact(setup))
+        self.assertIn("!thumbnails_pending && !app.capture.ui_screens.empty()", menu)
+        failure = block(source, "void FailMenuCapture(")
+        self.assertIn("previewState.capture_failed = true;", failure)
+        self.assertIn("glfwSetWindowShouldClose(window, GLFW_TRUE);", failure)
+        self.assertRegex(compact(self.main), r"if \(menuPreviewState.capture_failed && exit_code == 0\) exit_code = 1;")
+        self.assertNotIn("static bool s_preview_wait_armed", source)
+        self.assertIn("previewState.preview_wait_armed = false;", capturing)
+
+    def test_capture_refusal_missing_document_and_zero_size_reset_settling(self):
+        menu = block(read(CLIENT / "app/MenuScreens.cpp"), "void RenderMenuScreens(")
+        content = re.search(r"const bool content_ready\s*=\s*(.*?);", read(CLIENT / "app/MenuScreens.cpp"), re.S).group(1)
+        for fragment in ("previewState.capture_document_ready", "previewActive && worldgenPreview",
+                         "worldgenPreview->world_ready()", "!worldgenPreview->last_build_failed()",
+                         "worldgenPreview->candidate_ready()", "!previewState.candidate_source_failed"):
+            self.assertIn(fragment, content)
+        ready = {"previewState.capture_document_ready": True,
+                 "app.menu.menu_backdrop_active": False, "scenic": False,
+                 "previewActive": True, "expects_preview": True, "worldgenPreview": True,
+                 "worldgenPreview->world_ready()": True,
+                 "worldgenPreview->candidate_ready()": True,
+                 "worldgenPreview->last_build_failed()": False,
+                 "previewState.candidate_source_failed": False}
+        self.assertTrue(cpp_expression(content, **ready))
+        for name in ("previewState.capture_document_ready", "previewActive", "worldgenPreview",
+                     "worldgenPreview->world_ready()", "worldgenPreview->last_build_failed()",
+                     "worldgenPreview->candidate_ready()", "previewState.candidate_source_failed"):
+            refused = dict(ready)
+            refused[name] = not refused[name]
+            self.assertFalse(cpp_expression(content, **refused))
+        ui_only = dict(ready, expects_preview=False, previewActive=False, worldgenPreview=False)
+        self.assertTrue(cpp_expression(content, **ui_only))
+        ui_only["app.menu.menu_backdrop_active"] = True
+        self.assertFalse(cpp_expression(content, **ui_only))
+        reset = block(menu, "if (!content_ready || !drawable)")
+        for fragment in ("app.capture.ui_screenshot_settle = 0;",
+                         "app.capture.ui_preview_settle_after_ready = 0;", "ready_to_capture = false;"):
+            self.assertIn(fragment, reset)
+        candidate = block(menu, "if (sig != previewState.lastSig)")
+        self.assertLess(candidate.index("candidate_source_failed = true;"), candidate.index("std::ifstream in"))
+        self.assertIn("previewState.candidate_source_failed = "
+                      "!worldgenPreview->set_candidate(resolved, data_root, seedVal);", compact(candidate))
+        setup = block(read(CLIENT / "app/MenuScreens.cpp"), "bool PrepareMenuCapture(")
+        self.assertIn("requested && requested->IsVisible()", setup)
+        self.assertIn("context->GetDocument(documents - 1)", setup)
+        self.assertIn("requested->GetSourceURL().ends_with(", setup)
+        self.assertIn("if (armed || capture_width != previewState.capture_width", setup)
+        self.assertEqual(setup.count("capture_gate.arm("), 1)
+        drawable = re.search(r"const bool drawable = (.*?);", menu[menu.index("const bool expects_preview"):], re.S).group(1)
+        for width, height in ((0, 0), (0, 720), (1280, 0), (-1, 720), (1280, -1), (1280, 720)):
+            self.assertEqual(cpp_expression(drawable, capture_width=width, capture_height=height),
+                             width > 0 and height > 0)
+
+    def test_capture_final_decisions_and_output_errors_precede_advancement(self):
+        menu = block(read(CLIENT / "app/MenuScreens.cpp"), "void RenderMenuScreens(")
+        setup = block(read(CLIENT / "app/MenuScreens.cpp"), "bool PrepareMenuCapture(")
+        self.assertEqual((menu + setup).count("MenuCaptureGate::Result::TimedOut"), 3)
+        capture = menu[menu.index("const bool expects_preview"):]
+        self.assertIn("ready_to_capture = decision == MenuCaptureGate::Result::Ready;", capture)
+        self.assertIn("capture_gate.decide( std::chrono::steady_clock::now(), "
+                      "ready_to_capture, drawable, content_ready)", compact(capture))
+        self.assertLess(capture.index("MenuCaptureGate::Result::TimedOut"), capture.index("if (ready_to_capture)"))
+        for body, advance in ((capture, "++app.capture.ui_screen_index;"),
+                              (block(menu, "if (app.capture.ui_thumbs > 0"), "++app.capture.ui_thumbs_index;")):
+            refusal = block(body, "if (!WritePixelBufferPpm(")
+            self.assertIn("fail_capture(", refusal)
+            self.assertIn("return;", refusal)
+            self.assertLess(body.index("if (!WritePixelBufferPpm("), body.index(advance))
+        output = block(read(CLIENT / "app/MenuScreens.cpp"), "bool WritePixelBufferPpm(")
+        self.assertLess(output.index("if (!rgba_bytes)"), output.index("std::vector<unsigned char>"))
+        self.assertIn("(*rgba_bytes / 4) * 3", output)
+        self.assertIn("return WritePixelBufferPpm(shot, width, height, pixels);", output)
+        self.assertIn("return false;", block(output, "catch (const std::exception& error)"))
+
+    def test_capture_writer_reports_write_flush_and_close_failures(self):
+        writer = block(read(CLIENT / "rendering/PixelIo.cpp"), "bool WritePixelBufferPpm(")
+        tail = writer[writer.index("output.write("):]
+        self.assertLess(tail.index("output.flush();"), tail.index("output.close();"))
+        self.assertLess(tail.index("output.close();"), tail.index("if (!output)"))
+        self.assertIn("return false;", block(tail, "if (!output)"))
+        self.assertLess(tail.index("if (!output)"), tail.index("return true;"))
+
+    def test_thumbnail_keys_and_readback_refusals_preserve_batch_progress(self):
+        source = read(CLIENT / "app/MenuScreens.cpp")
+        pending = re.fullmatch(r"\s*return (.*?);\s*",
+                               block(source, "bool MenuThumbnailsPending("), re.S).group(1)
+        for requested, index in ((0, 0), (-1, 0), (1, 0), (1, 1), (1, 2), (2, 1)):
+            self.assertEqual(cpp_expression(pending, **{
+                "app.capture.ui_thumbs": requested, "app.capture.ui_thumbs_index": index}),
+                requested > 0 and index < requested)
+        menu = block(source, "void RenderMenuScreens(")
+        thumbs = block(menu, "if (app.capture.ui_thumbs > 0")
+        scene = block(menu, "if (scenic || previewActive)")
+        self.assertEqual(compact(block(thumbs, ".settings =")),
+                         compact(block(scene, ".settings =")))
+        for fragment in (".width = capture_width", ".height = capture_height",
+                         ".document = previewState.capture_document",
+                         ".renderer_target = renderPipeline.resize_generation()",
+                         ".camera = previewState.camera_revision.observe(MenuCameraState(*camera))",
+                         ".wireframe = app.overlay.wireframe_mode"):
+            self.assertIn(fragment, thumbs)
+        self.assertLess(thumbs.index("camera->updateCameraVectors();"), thumbs.index("thumbnail_key{"))
+        changed = block(thumbs, "if (previewState.capture_key != thumbnail_key)")
+        self.assertIn("app.capture.ui_thumbs_settle = 0;", changed)
+        self.assertIn("previewState.capture_key = thumbnail_key;", changed)
+        self.assertNotIn("capture_gate.arm", changed)
+        zero = block(thumbs, "if (capture_width <= 0 || capture_height <= 0)")
+        self.assertIn("app.capture.ui_thumbs_settle = 0;", zero)
+        self.assertIn("return;", zero)
+        self.assertIn("app.capture.ui_thumbs_index >= app.capture.ui_thumbs && "
+                      "app.capture.ui_screen_index >= app.capture.ui_screens.size()", compact(thumbs))
+        readback = block(source, "bool WritePixelBufferPpm(const std::filesystem::path& shot, GLFWwindow* window)")
+        self.assertRegex(compact(readback), r"if \(!WritePixelBufferPpm\(shot, width, height\)\) return false;")
+        self.assertLess(readback.index("return false;"), readback.index("UI screenshot written"))
 
     def test_blur_reuses_geometry_and_kernels_without_changing_the_passes(self):
         backend = read(CLIENT / "ui/gl3/RmlUi_Renderer_GL3.cpp")

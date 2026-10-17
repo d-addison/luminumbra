@@ -31,6 +31,126 @@ constexpr MenuSceneKey kScenery{.width = 1920,
                                 .preview_active = false,
                                 .wireframe = false};
 
+TEST(MenuPresentation, RefusedFirstCaptureCandidateExpiresWithoutAnImage) {
+    MenuCaptureGate gate;
+    const MenuCaptureGate::Time start{};
+    ASSERT_TRUE(gate.arm(start, 0, false));
+    EXPECT_EQ(gate.decide(start + seconds{44}, false, true, false),
+              MenuCaptureGate::Result::Waiting);
+    // An ordinary preview gets the same bound as an explicitly live preview.
+    EXPECT_FALSE(gate.arm(start + seconds{44}, 0, false));
+    EXPECT_EQ(gate.decide(start + seconds{45}, false, true, false),
+              MenuCaptureGate::Result::TimedOut);
+}
+
+TEST(MenuPresentation, TransientCaptureWaitCanCompleteWithActualSceneSamples) {
+    MenuCaptureGate gate;
+    const MenuCaptureGate::Time start{};
+    ASSERT_TRUE(gate.arm(start, 0, false));
+    EXPECT_EQ(gate.decide(start + seconds{2}, false, true, false),
+              MenuCaptureGate::Result::Waiting);
+    MenuSceneSchedule schedule;
+    int successful = 0;
+    for (int tick = 0; tick < 1000; ++tick) {
+        const auto elapsed = milliseconds{tick};
+        if (schedule.update(elapsed, kScenery)) {
+            schedule.rendered();
+            ++successful;
+        }
+        EXPECT_EQ(gate.decide(start + seconds{2} + elapsed, successful >= 30, true, true),
+                  successful >= 30 ? MenuCaptureGate::Result::Ready
+                                   : MenuCaptureGate::Result::Waiting);
+    }
+    EXPECT_EQ(successful, 30);
+}
+
+TEST(MenuPresentation, CaptureReplayDoesNotReplaceUnsettledSceneSamples) {
+    MenuCaptureGate gate;
+    const MenuCaptureGate::Time start{};
+    ASSERT_TRUE(gate.arm(start, 0, false));
+    MenuSceneSchedule schedule;
+    ASSERT_TRUE(schedule.update(nanoseconds{0}, kScenery));
+    schedule.rendered();
+    for (int tick = 1; tick <= 32; ++tick) {
+        EXPECT_FALSE(schedule.update(milliseconds{tick}, kScenery));
+        // A valid cached image is not a settled capture of thirty scene samples.
+        EXPECT_EQ(gate.decide(start + milliseconds{tick}, false, true, schedule.valid()),
+                  MenuCaptureGate::Result::Waiting);
+    }
+    EXPECT_EQ(gate.decide(start + seconds{45}, false, true, schedule.valid()),
+              MenuCaptureGate::Result::TimedOut);
+}
+
+TEST(MenuPresentation, CaptureAdvancementRearmsEachScreenAndThumbnail) {
+    MenuCaptureGate gate;
+    const MenuCaptureGate::Time start{};
+    ASSERT_TRUE(gate.arm(start, 0, false));
+    ASSERT_EQ(gate.decide(start + seconds{44}, true, true, true), MenuCaptureGate::Result::Ready);
+    ASSERT_TRUE(gate.arm(start + seconds{44}, 1, false));
+    EXPECT_EQ(gate.decide(start + seconds{45}, false, true, false),
+              MenuCaptureGate::Result::Waiting);
+    EXPECT_FALSE(gate.arm(start + seconds{88}, 1, false));
+    EXPECT_EQ(gate.decide(start + seconds{89}, false, true, false),
+              MenuCaptureGate::Result::TimedOut);
+    ASSERT_TRUE(gate.arm(start + seconds{89}, 1, true));
+    EXPECT_EQ(gate.decide(start + seconds{90}, true, true, true), MenuCaptureGate::Result::Ready);
+    EXPECT_FALSE(gate.arm(start + seconds{133}, 1, true));
+    EXPECT_EQ(gate.decide(start + seconds{134}, false, true, false),
+              MenuCaptureGate::Result::TimedOut);
+    gate.reset();
+    EXPECT_EQ(gate.decide(start + seconds{200}, true, true, true),
+              MenuCaptureGate::Result::Waiting);
+    EXPECT_TRUE(gate.arm(start + seconds{200}, 1, true));
+}
+
+TEST(MenuPresentation, LivePreviewDeadlineCannotPublishEvenASettledImageAtExpiry) {
+    MenuCaptureGate gate;
+    const MenuCaptureGate::Time start{};
+    ASSERT_TRUE(gate.arm(start, 0, false));
+    EXPECT_EQ(gate.decide(start + seconds{45} - nanoseconds{1}, true, true, true),
+              MenuCaptureGate::Result::Ready);
+    EXPECT_EQ(gate.decide(start + seconds{45}, true, true, true),
+              MenuCaptureGate::Result::TimedOut);
+    EXPECT_EQ(gate.decide(start + seconds{46}, true, true, true),
+              MenuCaptureGate::Result::TimedOut);
+}
+
+TEST(MenuPresentation, UiOnlyCaptureNeedsLayoutSettlingAndADrawableTarget) {
+    MenuCaptureGate gate;
+    const MenuCaptureGate::Time start{};
+    ASSERT_TRUE(gate.arm(start, 0, false));
+    EXPECT_EQ(gate.decide(start + milliseconds{29}, false, true, true),
+              MenuCaptureGate::Result::Waiting);
+    EXPECT_EQ(gate.decide(start + milliseconds{30}, true, true, true),
+              MenuCaptureGate::Result::Ready);
+    EXPECT_EQ(gate.decide(start + milliseconds{31}, true, false, true),
+              MenuCaptureGate::Result::Waiting);
+    EXPECT_EQ(gate.decide(start + milliseconds{32}, true, true, false),
+              MenuCaptureGate::Result::Waiting);
+    EXPECT_EQ(gate.decide(start + seconds{45}, true, false, true),
+              MenuCaptureGate::Result::TimedOut);
+}
+
+TEST(MenuPresentation, CaptureKeyChangesAndReadinessLossCannotMoveDeadline) {
+    MenuCaptureGate gate;
+    MenuSceneSchedule schedule;
+    const MenuCaptureGate::Time start{};
+    ASSERT_TRUE(gate.arm(start, 0, false));
+    auto key = kScenery;
+    for (int tick = 0; tick < 45; ++tick) {
+        ++key.document;
+        ++key.preview_world;
+        ++key.renderer_target;
+        ASSERT_TRUE(schedule.update(seconds{tick}, key));
+        schedule.rendered();
+        EXPECT_FALSE(gate.arm(start + seconds{tick}, 0, false));
+        EXPECT_EQ(gate.decide(start + seconds{tick}, true, true, false),
+                  MenuCaptureGate::Result::Waiting);
+    }
+    EXPECT_EQ(gate.decide(start + seconds{45}, false, true, false),
+              MenuCaptureGate::Result::TimedOut);
+}
+
 TEST(MenuPresentation, ThirtyHertzUsesAbsoluteElapsedSlotsWithoutDrift) {
     MenuSceneSchedule schedule;
     ASSERT_TRUE(schedule.update(seconds{1}, kScenery));

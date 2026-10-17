@@ -146,7 +146,7 @@ void WorldgenPreview::ensure_target(int width, int height) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
-void WorldgenPreview::set_candidate(const nlohmann::json& resolved_preset_json,
+bool WorldgenPreview::set_candidate(const nlohmann::json& resolved_preset_json,
                                     const std::filesystem::path& data_root,
                                     int seed) {
     // Build candidate TerrainGenParams IN MEMORY via the additive loader seam,
@@ -159,11 +159,12 @@ void WorldgenPreview::set_candidate(const nlohmann::json& resolved_preset_json,
         m_last_error =
             result.errors.empty() ? "candidate preset parse failed" : result.errors.front();
         LUMINUMBRA_CORE_WARN("WorldgenPreview candidate parse failed: {}", m_last_error);
-        return;
+        return false;
     }
     // Remember the data root so the foliage scatter set resolves.
     m_data_root = data_root;
     set_params(result.params, seed);
+    return true;
 }
 
 void WorldgenPreview::set_params(const Systems::TerrainGenParams& params, int seed) {

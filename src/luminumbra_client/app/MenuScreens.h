@@ -59,6 +59,14 @@ struct MenuSceneState : MenuPreviewState {
     float last_tod = -1;
     std::string last_weather;
     std::chrono::steady_clock::time_point last_menu_frame{};
+    MenuCaptureGate capture_gate;
+    bool capture_failed = false;
+    bool candidate_source_failed = false;
+    bool preview_wait_armed = false;
+    std::chrono::steady_clock::time_point preview_wait_start{};
+    int capture_width = 0, capture_height = 0;
+    std::uint64_t capture_document = 0;
+    bool capture_document_ready = false;
     MenuSceneImage scene_image;
 };
 

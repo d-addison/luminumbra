@@ -127,4 +127,45 @@ inline std::optional<std::size_t> menu_image_bytes(int width, int height) {
         return std::nullopt;
     return w * h * 4;
 }
+
+// One deadline per requested image, shared by every menu capture mode. Scene,
+// readiness and target changes may restart settling, but cannot extend this wait.
+// The caller supplies successful-render settling; cached replay is not a sample.
+class MenuCaptureGate {
+public:
+    using Time = std::chrono::steady_clock::time_point;
+    enum class Result {
+        Waiting,
+        Ready,
+        TimedOut
+    };
+
+    bool arm(Time now, std::size_t index, bool thumbnail) {
+        if (m_armed && index == m_index && thumbnail == m_thumbnail)
+            return false;
+        m_armed = true;
+        m_index = index;
+        m_thumbnail = thumbnail;
+        m_start = now;
+        return true;
+    }
+    Result decide(Time now, bool settled, bool drawable, bool content_ready) const {
+        if (!m_armed)
+            return Result::Waiting;
+        if (now - m_start >= std::chrono::seconds{45})
+            return Result::TimedOut;
+        if (settled && drawable && content_ready)
+            return Result::Ready;
+        return Result::Waiting;
+    }
+    void reset() {
+        m_armed = false;
+    }
+
+private:
+    Time m_start{};
+    std::size_t m_index = 0;
+    bool m_thumbnail = false;
+    bool m_armed = false;
+};
 } // namespace Luminumbra::Client::App
