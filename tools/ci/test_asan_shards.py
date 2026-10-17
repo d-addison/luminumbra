@@ -224,22 +224,46 @@ class AsanShardTests(unittest.TestCase):
 
     def test_unchanged_roster_runs_in_the_same_ctest_context_and_preserves_status(self):
         self.planned_selection(self.tests, self.tests)
+        for shard in (1, 2):
+            with self.subTest(shard=shard):
+                shards.plan(self.root, shard)
+                self.assert_execution_context(self.root)
+
+    def assert_execution_context(self, directory):
+        resolved = directory.resolve()
         for status in (0, 8):
             with self.subTest(status=status):
                 discovery = subprocess.CompletedProcess([], 0, stdout=json.dumps({"tests": self.tests}))
                 execution = subprocess.CompletedProcess([], status)
                 with patch.object(shards.subprocess, "run", side_effect=[discovery, execution]) as invoke:
-                    self.assertEqual(shards.run(self.root), status)
+                    self.assertEqual(shards.run(directory), status)
                 check, execute = invoke.call_args_list
-                common = ["ctest", "--preset", "debug-asan", "--test-dir", str(self.root), "-LE", "manual"]
+                common = ["ctest", "--preset", "debug-asan", "--test-dir", str(resolved), "-LE", "manual"]
                 self.assertEqual(check.args[0], [*common, "--show-only=json-v1"])
                 self.assertEqual(check.kwargs, {"check": True, "capture_output": True, "text": True, "encoding": "utf-8"})
                 self.assertEqual(execute.args[0], [*common, "--no-tests=error", "-I",
-                                                 str(self.root / "ctest.shard-index.txt"),
+                                                 str(resolved / "ctest.shard-index.txt"),
                                                  "--parallel", "2", "--timeout", "300",
                                                  "--output-junit", "ctest.junit.xml"])
                 # Both calls inherit the wrapper's cwd and environment.
                 self.assertEqual(execute.kwargs, {})
+
+    def test_windows_short_alias_uses_exact_resolved_execution_context(self):
+        self.planned_selection(self.tests, self.tests)
+        resolved = self.root.resolve()
+
+        # Model the filesystem's short-name expansion without requiring Windows
+        # symlink privilege or enabled 8.3 names. All reads use real plan files.
+        class WindowsBuildAlias(type(self.root)):
+            def resolve(self):
+                return resolved
+
+        alias = WindowsBuildAlias("C:/Users/RUNNER~1/AppData/Local/Temp/build")
+        self.assertNotEqual(str(alias), str(resolved))
+        for shard in (1, 2):
+            with self.subTest(shard=shard):
+                shards.plan(self.root, shard)
+                self.assert_execution_context(alias)
 
     def test_failed_or_malformed_execution_discovery_never_launches_tests(self):
         self.planned_selection(self.tests, self.tests)
