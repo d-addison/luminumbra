@@ -28,6 +28,34 @@
       "requirements": []
     },
     {
+      "id": "render.frame-scan-schema",
+      "source": "docs/render-benchmark.md#continuous-cpu-attribution-issue-387",
+      "statement": "Frame scans declare luminumbra.frame_scan.v2 for nullable foliage.instances: integers include known zero, null means unknown, and instance_capacity is never a substitute count. The source wiring regression checks the shared writer used by direct captures and scene surveys, including the schema and known/unknown serialization branches; it does not execute the renderer. Registered rendering regressions check that ordinary and frozen generation rollover, delayed readback, empty and inactive builds, and resource recreation cannot publish a previous generation's count. Readback re-enabling retries a cleared snapshot, and disabled frozen rebuilds do not submit readbacks.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "FrameAttributionWiringPython"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FoliageRebuildTest.CompletedCountIsUnknownAcrossOrdinaryAndFrozenGenerationRollover"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FoliageRebuildTest.EmptyAndInactiveGenerationsCannotReadBackThePreviousCommand"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FoliageRebuildTest.RecreationAndWorldClearRetireCountAndRebuildUnchangedInputs"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FoliageRebuildTest.ReenabledReadbackRetriesOrdinaryAndFrozenSnapshots"
+        }
+      ]
+    },
+    {
       "id": "perf.floor-p99",
       "source": "docs/distant-world.md#performance-measurement-contract",
       "statement": "Both profiles meet p99 frame_wall of at most 16.67 ms on every workload.",
@@ -935,7 +963,7 @@
     {
       "id": "contract.calendar",
       "source": "docs/distant-world.md#simulation-clock-and-calendar",
-      "statement": "The default 162,000-tick calendar, solar horizons, linear indices and seasonal offsets have unit evidence on the real simulation tick path; simulation curves use integer ticks. Weather, storms, wind and aether retain their absolute tick periods.",
+      "statement": "The default 162,000-tick calendar, solar horizons, linear indices and seasonal offsets have unit evidence on the real simulation tick path; simulation curves use integer ticks. Weather, storms, wind and aether retain their absolute tick periods. Snapshots refuse inside a batched catch-up and are taken only at tick boundaries.",
       "status": "covered",
       "requirements": [
         "dw.calendar.001",
@@ -956,7 +984,8 @@
         "dw.calendar.033",
         "dw.calendar.035",
         "dw.calendar.036",
-        "dw.calendar.020"
+        "dw.calendar.020",
+        "dw.calendar.016"
       ],
       "evidence": [
         {
@@ -1002,6 +1031,10 @@
         {
           "kind": "ctest",
           "ref": "WorldOpenRefusal.ServerAutosaveAndFullSnapshotCarryTheAbsoluteClock"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.ClockSnapshotsRefuseInsideCatchUpBatch"
         }
       ]
     },
@@ -1190,7 +1223,7 @@
       "requirements": [
         "ar.activation.050"
       ],
-      "discrepancy": "docs/active-regions.md now agrees with the asymmetric interval [-2^24, 2^24). ActiveRegionLedgerTest.ValidAnchorBoundaries in test/common/ActiveRegionLedger_test.cpp covers the ledger predicate; full walking-anchor, ground-object edit and pin boundary coverage remains planned under issue #250.",
+      "discrepancy": "docs/active-regions.md and the ledger specify the half-open interval [-2^24, 2^24). ActiveRegionLedgerTest.ValidAnchorBoundaries in test/common/ActiveRegionLedger_test.cpp covers the ledger predicate on both axes; full walking-anchor, ground-object edit and pin endpoint coverage remains planned under issue #250.",
       "evidence": [
         {
           "kind": "ctest",

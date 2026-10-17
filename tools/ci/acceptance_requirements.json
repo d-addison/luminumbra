@@ -2965,6 +2965,12 @@
       "text": "Neither artifact grants permission to alter another checkout."
     },
     {
+      "id": "dw.calendar.016",
+      "source": "docs/distant-world.md#simulation-clock-and-calendar",
+      "quote": "Snapshots are taken only on tick boundaries, never inside a batched client catch-up.",
+      "text": "Snapshots are taken only on tick boundaries, never inside a batched client catch-up."
+    },
+    {
       "id": "dw.calendar.017",
       "source": "docs/distant-world.md#simulation-clock-and-calendar",
       "quote": "With `sim.active_regions` disabled, opening a world restarts the tick counter at zero and biological consumers retain their legacy periods.",

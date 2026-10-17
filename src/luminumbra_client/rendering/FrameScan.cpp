@@ -1,18 +1,27 @@
 #include "FrameScan.h"
 
+#include "GBuffer.h"
 #include "RenderPipeline.h"
 #include "core/Log.h"
+#include "luminumbra/core/Types.h"
 #include "passes/FoliagePass.h"
 
 #include <glad/glad.h>
 #include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
+#include <exception>
+#include <filesystem>
 #include <fstream>
+#include <string>
 #include <system_error>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace Luminumbra::Rendering {
 
@@ -183,6 +192,8 @@ FrameScanReport ScanFrame(const RenderPipeline& pipeline,
     // --- 5. Foliage tally (separate alpha-keyed scatter pass) -----------------
     if (const FoliagePass* fol = pipeline.foliage()) {
         report.foliage_instances = static_cast<std::uint64_t>(fol->frame_instance_count());
+        report.foliage_instance_capacity = fol->instance_capacity();
+        report.foliage_instance_count_known = fol->frame_instance_count_known();
     }
 
     report.ok = true;
@@ -191,7 +202,7 @@ FrameScanReport ScanFrame(const RenderPipeline& pipeline,
 
 bool WriteFrameScanReport(const FrameScanReport& report, const std::filesystem::path& out_path) {
     nlohmann::json j;
-    j["schema"] = "luminumbra.frame_scan.v1";
+    j["schema"] = "luminumbra.frame_scan.v2";
     j["width"] = report.width;
     j["height"] = report.height;
     j["total_pixels"] = report.total_pixels;
@@ -217,7 +228,10 @@ bool WriteFrameScanReport(const FrameScanReport& report, const std::filesystem::
     j["water"] = std::move(water);
 
     nlohmann::json foliage;
-    foliage["instances"] = report.foliage_instances;
+    foliage["instances"] = report.foliage_instance_count_known
+                               ? nlohmann::json(report.foliage_instances)
+                               : nlohmann::json(nullptr);
+    foliage["instance_capacity"] = report.foliage_instance_capacity;
     j["foliage"] = std::move(foliage);
 
     std::error_code ec;
