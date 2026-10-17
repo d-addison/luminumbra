@@ -304,7 +304,7 @@ additional required evidence is:
 | `settings.gns_enabled` | Actual compiled GNS networking setting, including false on builds without GNS |
 | `settings.active_regions` | Effective enabled flag, uint64 work limit, hold ticks, reduced shift |
 | `settings.far_mode` | Requested/effective far mode and requested/effective cave policy at the measured window end; each frame also records these values |
-| `settings.graphics_preset` | Selected base preset name, with `graphics_preset_status: "named"`; the effective graphics block records its revision and saved/session overrides |
+| `settings.graphics_preset` | Nonempty selected base preset name, with `graphics_preset_status: "named"`; null presets and `"not_exposed"` status cannot qualify v4 captures. The effective graphics block records its revision and saved/session overrides |
 | `settings.effective_render` | Effective dimensions, render scale, uncapped vsync, TAAU, SSAO/cloud/volumetric qualities, camera FOV, UI scale and window mode |
 | `settings.effective_render.systems` | Every `render.*` flag and resolved scalar/vector parameter, enumerated from the shared SystemConfig registry, including sky LUT and live weather; disabled entries retain their resolved inputs |
 | `settings.render_overrides` | Active render override declarations, also covered by the configuration identity |

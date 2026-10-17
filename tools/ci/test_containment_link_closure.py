@@ -11,6 +11,7 @@ from copy import deepcopy
 from functools import lru_cache
 from pathlib import Path
 import re
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -18,19 +19,76 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2]
 POLICY = Path("src/luminumbra_common/core/CaptureContentPaths.h")
 OWNER = Path("src/luminumbra_common/core/FilesystemPath.cpp")
-COMMAND = re.compile(
-    r"\b(set|include|get_filename_component|add_executable|add_library|"
-    r"target_sources|target_link_libraries)\s*\((.*?)\)", re.DOTALL | re.IGNORECASE,
-)
+COMMAND = re.compile(r"\b([a-z_][a-z_0-9]*)\s*\(", re.IGNORECASE)
+BRACKET = re.compile(r'\[(=*)\[')
 TOKEN = re.compile(r'"([^"\n]*)"|([^\s]+)')
-VARIABLE = re.compile(r"\$\{([^}]+)\}")
+VARIABLE = re.compile(r"\$\{([^${}]+)\}")
 INCLUDE = re.compile(r'^\s*#\s*include\s*["<]([^">]+)[">]', re.MULTILINE)
+
+
+def cmake_commands(body):
+    """Read whole commands, including quoted parentheses and bracket arguments."""
+    commands = []
+    offset = 0
+    while offset < len(body):
+        if body[offset].isspace():
+            offset += 1
+            continue
+        if body[offset] == '#':
+            offset = body.find('\n', offset)
+            if offset < 0:
+                break
+            continue
+        match = COMMAND.match(body, offset)
+        if not match:
+            raise ValueError('invalid CMake command')
+        offset = match.end()
+        depth, quoted = 1, False
+        argument = []
+        while offset < len(body) and depth:
+            char = body[offset]
+            bracket = BRACKET.match(body, offset) if not quoted else None
+            if char == '\\' and offset + 1 < len(body):
+                argument.append(body[offset:offset + 2])
+                offset += 2
+                continue
+            if bracket:
+                end = body.find(']' + bracket[1] + ']', bracket.end())
+                if end < 0:
+                    raise ValueError('unterminated CMake bracket argument')
+                end += len(bracket[1]) + 2
+                argument.append(body[offset:end])
+                offset = end
+                continue
+            if char == '"':
+                quoted = not quoted
+            elif not quoted:
+                if char == '#':
+                    end = body.find('\n', offset)
+                    offset = len(body) if end < 0 else end
+                    argument.append(' ')
+                    continue
+                if char == '(':
+                    depth += 1
+                elif char == ')':
+                    depth -= 1
+            if depth:
+                argument.append(char)
+            offset += 1
+        if depth or quoted:
+            raise ValueError('unterminated CMake command')
+        commands.append((match[1].lower(), ''.join(argument)))
+    return commands
 
 
 def targets_in(root, cmake):
     """Return explicit sources and links, with source-list variables expanded."""
-    variables = {"CMAKE_SOURCE_DIR": str(root), "ENGINE_SOURCE": str(root)}
+    # The offline graph uses a symbolic binary directory; FetchContent's default
+    # source location is resolved without configuring or downloading dependencies.
+    variables = {"CMAKE_SOURCE_DIR": str(root), "ENGINE_SOURCE": str(root),
+                 "CMAKE_BINARY_DIR": str(root / 'build')}
     targets = {}
+    reading = set()
 
     def expand(value):
         for _ in range(20):
@@ -40,18 +98,59 @@ def targets_in(root, cmake):
             value = result
         raise ValueError(f"recursive CMake variable in {cmake}: {value}")
 
-    def read(path):
-        previous = variables.get("CMAKE_CURRENT_LIST_DIR")
-        variables["CMAKE_CURRENT_LIST_DIR"] = str(path.parent)
-        variables["CMAKE_CURRENT_SOURCE_DIR"] = str(cmake.parent)
-        body = re.sub(r"#[^\n]*", "", path.read_text(encoding="utf-8"))
-        for match in COMMAND.finditer(body):
-            command = match[1].lower()
-            args = [expand(a or b) for a, b in TOKEN.findall(match[2])]
+    def execute(commands, path):
+        index = 0
+        while index < len(commands):
+            command, text = commands[index]
+            index += 1
+            args = [expand(a or b) for a, b in TOKEN.findall(text)]
+            if command == 'endforeach':
+                raise ValueError('unexpected CMake endforeach')
+            if command == 'foreach' and not args:
+                raise ValueError('missing CMake foreach variable')
             if not args:
                 continue
+            if command in {'add_executable', 'add_library', 'target_sources', 'target_link_libraries'}:
+                if '${' in args[0] or '$<' in args[0]:
+                    raise ValueError(f'unresolved target in {cmake}: {args[0]}')
+            if command == 'foreach':
+                start, depth = index, 1
+                while index < len(commands) and depth:
+                    nested = commands[index][0]
+                    depth += (nested == 'foreach') - (nested == 'endforeach')
+                    index += 1
+                if depth:
+                    raise ValueError('unterminated CMake foreach')
+                values = args[1:]
+                if values[:1] == ['IN']:
+                    if len(values) < 2 or values[1] not in ('ITEMS', 'LISTS'):
+                        raise ValueError('unsupported CMake foreach')
+                    values = (values[2:] if values[1] == 'ITEMS' else
+                              [variables.get(name, '') for name in values[2:]])
+                previous = variables.get(args[0])
+                for value in (item for value in values for item in value.split(';') if item):
+                    variables[args[0]] = value
+                    execute(commands[start:index - 1], path)
+                if previous is None:
+                    variables.pop(args[0], None)
+                else:
+                    variables[args[0]] = previous
+                continue
             if command == "set":
-                variables[args[0]] = ";".join(args[1:])
+                values = args[1:]
+                if 'CACHE' in values:
+                    values = values[:values.index('CACHE')]
+                variables[args[0]] = ";".join(values)
+            elif command == 'list' and args[0] == 'APPEND':
+                if len(args) < 2:
+                    raise ValueError('missing CMake list variable')
+                variables[args[1]] = ';'.join(filter(None, [variables.get(args[1], ''), *args[2:]]))
+            elif command == 'fetchcontent_getproperties':
+                if len(args) != 3 or args[1] != 'SOURCE_DIR':
+                    raise ValueError('unsupported FetchContent properties')
+                base = variables.get('FETCHCONTENT_BASE_DIR', variables['CMAKE_BINARY_DIR'] + '/_deps')
+                variables[args[2]] = variables.get(args[0] + '_SOURCE_DIR',
+                                                  str(Path(base) / (args[0].lower() + '-src')))
             elif command == "get_filename_component" and args[-1] == "ABSOLUTE":
                 variables[args[0]] = str((path.parent / args[1]).resolve())
             elif command == "include" and args[0].endswith("/sources.cmake"):
@@ -60,19 +159,37 @@ def targets_in(root, cmake):
                 target = targets.setdefault(args[0], {"sources": set(), "links": set()})
                 for arg in args[1:]:
                     for source in arg.split(";"):
-                        if Path(source).suffix.lower() not in {".cpp", ".cc", ".cxx", ".c", ".h", ".hpp"}:
-                            continue
                         if "${" in source or "$<" in source:
                             raise ValueError(f"unresolved source in {cmake}: {source}")
+                        if Path(source).suffix.lower() not in {".cpp", ".cc", ".cxx", ".c", ".h", ".hpp"}:
+                            continue
                         resolved = (cmake.parent / source).resolve()
                         # Only first-party files can use the policy.
                         if resolved.is_relative_to(root) and resolved.is_file():
                             target["sources"].add(resolved.relative_to(root))
             elif command == "target_link_libraries":
                 target = targets.setdefault(args[0], {"sources": set(), "links": set()})
-                target["links"].update(item for arg in args[1:] for item in arg.split(";"))
+                for arg in args[1:]:
+                    # This form is used by the networking runtime fixture.
+                    arg = re.sub(r'\$<TARGET_LINKER_FILE:([^<>]+)>', r'\1', arg)
+                    if '$<' in arg:
+                        raise ValueError(f'unresolved link in {cmake}: {arg}')
+                    target['links'].update(arg.split(';'))
+
+    def read(path):
+        path = path.resolve()
+        if path in reading:
+            raise ValueError(f'recursive CMake include: {path}')
+        reading.add(path)
+        previous = variables.get("CMAKE_CURRENT_LIST_DIR")
+        variables["CMAKE_CURRENT_LIST_DIR"] = str(path.parent)
+        variables["CMAKE_CURRENT_SOURCE_DIR"] = str(cmake.parent)
+        execute(cmake_commands(path.read_text(encoding="utf-8")), path)
         if previous is not None:
             variables["CMAKE_CURRENT_LIST_DIR"] = previous
+        else:
+            variables.pop('CMAKE_CURRENT_LIST_DIR', None)
+        reading.remove(path)
 
     read(cmake)
     return targets
@@ -154,11 +271,142 @@ def audit(targets, graph):
     return users, failures
 
 
+class CMakeSourceParserTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name).resolve()
+        self.cmake = self.root / 'CMakeLists.txt'
+
+    def sources(self, body, names=()):
+        for name in names:
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('', encoding='utf-8')
+        self.cmake.write_text(body, encoding='utf-8')
+        return targets_in(self.root, self.cmake)
+
+    def test_set_nested_variables_and_source_lists(self):
+        names = ('imgui/imgui.cpp', 'imgui/imgui_draw.cpp', 'extra (copy)#1.cpp')
+        targets = self.sources('''
+set(_dependency imgui)
+set(imgui_source "${CMAKE_CURRENT_SOURCE_DIR}/imgui")
+set(_developer_imgui_source "${${_dependency}_source}")
+set(core "${_developer_imgui_source}/imgui.cpp;${_developer_imgui_source}/imgui_draw.cpp")
+set(sources ${core})
+list(APPEND sources "${CMAKE_CURRENT_SOURCE_DIR}/extra (copy)#1.cpp")
+add_executable(developer_console_imgui_test ${sources})
+''', names)
+        self.assertEqual(targets['developer_console_imgui_test']['sources'], set(map(Path, names)))
+
+    def test_fetchcontent_properties_resolve_sources(self):
+        names = tuple(f'build/_deps/imgui_src-src/{name}.cpp' for name in
+                      ('imgui', 'imgui_draw', 'imgui_tables', 'imgui_widgets'))
+        targets = self.sources('''
+FetchContent_GetProperties(imgui_src SOURCE_DIR _developer_imgui_source)
+add_executable(imgui_test "${_developer_imgui_source}/imgui.cpp"
+    "${_developer_imgui_source}/imgui_draw.cpp"
+    "${_developer_imgui_source}/imgui_tables.cpp"
+    "${_developer_imgui_source}/imgui_widgets.cpp")
+set(imgui_src_SOURCE_DIR "${CMAKE_SOURCE_DIR}/local")
+FetchContent_GetProperties(imgui_src SOURCE_DIR local_source)
+target_sources(imgui_test PRIVATE "${local_source}/local.cpp")
+''', (*names, 'local/local.cpp'))
+        self.assertEqual(targets['imgui_test']['sources'], set(map(Path, (*names, 'local/local.cpp'))))
+
+    def test_foreach_lists_items_and_generator_links(self):
+        targets = self.sources('''
+set(targets client;qa)
+set(empty)
+foreach(target IN LISTS empty)
+    add_executable(ghost missing.cpp)
+endforeach()
+foreach(target ${targets})
+    add_executable(${target} main.cpp)
+    foreach(library IN ITEMS windows posix)
+        target_link_libraries(${target} PRIVATE ${library})
+    endforeach()
+endforeach()
+foreach(target IN LISTS targets)
+    target_link_libraries(${target} PRIVATE "$<TARGET_LINKER_FILE:leaf>")
+endforeach()
+''', ('main.cpp',))
+        self.assertEqual(set(targets), {'client', 'qa'})
+        for target in targets.values():
+            self.assertEqual(target['sources'], {Path('main.cpp')})
+            self.assertEqual(target['links'], {'PRIVATE', 'windows', 'posix', 'leaf'})
+
+    def test_included_manifests_restore_list_directory(self):
+        manifest = self.root / 'nested' / 'sources.cmake'
+        manifest.parent.mkdir()
+        manifest.write_text('set(sources "${CMAKE_CURRENT_LIST_DIR}/included.cpp")', encoding='utf-8')
+        targets = self.sources('''
+include("${CMAKE_CURRENT_LIST_DIR}/nested/sources.cmake")
+add_library(core ${sources} "${CMAKE_CURRENT_LIST_DIR}/local.cpp")
+''', ('nested/included.cpp', 'local.cpp'))
+        self.assertEqual(targets['core']['sources'], {Path('nested/included.cpp'), Path('local.cpp')})
+
+    def test_unresolved_and_partial_input_is_refused(self):
+        for body in ('add_library(core ${missing})',
+                     'add_library(core "$<UNKNOWN:main.cpp>")',
+                     'target_link_libraries(core "$<UNKNOWN:leaf>")',
+                     'add_library(${missing} main.cpp)',
+                     'target_link_libraries(${missing} PRIVATE leaf)',
+                     'list(APPEND)',
+                     'FetchContent_GetProperties(imgui SOURCE_DIR)',
+                     'FetchContent_GetProperties(imgui UNKNOWN value)',
+                     'foreach()\nendforeach()',
+                     'foreach(item IN RANGE 2)\nendforeach()',
+                     'foreach(item one)\nadd_library(core main.cpp)',
+                     'endforeach()', 'set(source "main.cpp)',
+                     'set(source [==[main.cpp)', 'invalid input'):
+            with self.subTest(body=body), self.assertRaises(ValueError):
+                self.sources(body)
+
+    def test_recursive_expansion_and_includes_are_refused(self):
+        with self.assertRaisesRegex(ValueError, 'recursive CMake variable'):
+            self.sources('set(loop "${loop}x")\nadd_library(core ${loop})')
+        (self.root / 'sources.cmake').write_text(
+            'include("${CMAKE_CURRENT_LIST_DIR}/sources.cmake")', encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'recursive CMake include'):
+            self.sources('include("${CMAKE_CURRENT_LIST_DIR}/sources.cmake")')
+
+    def test_fetchcontent_base_and_cached_variables(self):
+        targets = self.sources('''
+set(FETCHCONTENT_BASE_DIR "${CMAKE_SOURCE_DIR}/dependencies" CACHE PATH "unused.cpp")
+FetchContent_GetProperties(ImGui SOURCE_DIR source)
+add_library(core "${source}/imgui.cpp")
+''', ('dependencies/imgui-src/imgui.cpp',))
+        self.assertEqual(targets['core']['sources'], {Path('dependencies/imgui-src/imgui.cpp')})
+
+    def test_unreadable_manifest_is_refused(self):
+        with self.assertRaises(OSError):
+            self.sources('include("${CMAKE_CURRENT_LIST_DIR}/sources.cmake")')
+
+    def test_quoted_and_bracket_commands_do_not_create_targets(self):
+        targets = self.sources('''
+file(GENERATE OUTPUT unused CONTENT "set(fake missing.cpp)\\nadd_library(ghost ${fake})")
+message([==[parentheses (and # comments) do not end this command]==])
+add_library(core main.cpp) # trailing comment
+''', ('main.cpp',))
+        self.assertEqual(targets, {'core': {'sources': {Path('main.cpp')}, 'links': set()}})
+
+
 class ContainmentLinkClosureTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.targets = repository_targets(ROOT)
         cls.graph = IncludeGraph(ROOT)
+
+    def test_real_imgui_sources_and_platform_loop_are_resolved(self):
+        imgui = self.targets[(Path('test/CMakeLists.txt'), 'developer_console_imgui_test')]
+        self.assertIn(Path('test/client/developer_console_imgui_test.cpp'), imgui['sources'])
+        self.assertIn(Path('src/luminumbra_client/debug/DeveloperConsoleUi.cpp'), imgui['sources'])
+        for name in ('luminumbra_client_app', 'luminumbra_client_qa_app'):
+            with self.subTest(target=name):
+                links = self.targets[(Path('src/CMakeLists.txt'), name)]['links']
+                self.assertTrue({'opengl32', 'DbgHelp', 'Psapi', 'OpenGL::GL'} <= links)
+        self.assertFalse(any('${' in name for _, name in self.targets))
 
     def test_repository_targets_have_complete_closures(self):
         users, failures = audit(self.targets, self.graph)

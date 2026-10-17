@@ -257,6 +257,11 @@
           "ref": "tools/perf/validate_render_capture.py"
         },
         {
+          "kind": "doc",
+          "ref": "docs/render-benchmark.md",
+          "detail": "V4 qualification requires a nonempty named graphics preset; RenderContractPython rejects null presets and not_exposed status for every scripted workload."
+        },
+        {
           "kind": "script",
           "ref": "tools/perf/far_settle_check.py",
           "planned": "far ladder settle evidence (90 s limit) is not yet in the artifact or validator; owner: fw"

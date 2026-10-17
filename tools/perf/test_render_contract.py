@@ -403,7 +403,7 @@ def workload_artifact(kind, script):
     data['settings'] = dict(gns_enabled=False,
         active_regions=dict(enabled=True, work_limit=0, hold_ticks=30, reduced_shift=1),
         far_mode=dict(requested='ladder', effective='ladder', cave_requested=0, cave_effective=0),
-        graphics_preset=None, graphics_preset_status='not_exposed',
+        graphics_preset='high', graphics_preset_status='named',
         effective_render=dict(render_scale=1.0, width=1280, height=720, vsync=False,
                               taau=True, ssao_quality=0, cloud_quality=2, fov=45.0,
                               ui_scale=1.0,
@@ -455,6 +455,18 @@ class ScriptedWorkloadTests(unittest.TestCase):
                 lines[index] = ' '.join(tokens)
             path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
             self.scripts[kind] = path
+
+    def test_every_workload_requires_named_graphics_preset(self):
+        for kind, script in self.scripts.items():
+            for status, preset in (('not_exposed', None), ('not_exposed', 'high'),
+                                   ('named', None), ('named', ''), ('named', 1),
+                                   ('unknown', None), ('unknown', 'high'), (None, None)):
+                with self.subTest(kind=kind, status=status, preset=preset):
+                    data = workload_artifact(kind, script)
+                    data['settings'].update(graphics_preset=preset, graphics_preset_status=status)
+                    data['render_identity'] = contract.render_identity(data['settings'])
+                    with self.assertRaisesRegex(ValueError, 'graphics preset provenance'):
+                        capture.validate(data, args(traversal=script))
 
     def test_named_graphics_preset_and_overrides_are_bound_to_identity(self):
         script = self.scripts["edit"]
@@ -600,7 +612,7 @@ class ScriptedWorkloadTests(unittest.TestCase):
                      lambda d: d['settings']['effective_render'].update(taau=1),
                      lambda d: d['settings']['effective_render'].update(render_scale=0.67),
                      lambda d: d['settings']['effective_render'].update(ui_scale=3.0),
-                     lambda d: d['settings'].update(graphics_preset='quality'),
+                     lambda d: d['settings'].update(graphics_preset='quality', graphics_preset_status='not_exposed'),
                      lambda d: d['settings']['far_mode'].update(effective='legacy'),
                      lambda d: d['settings']['far_mode'].update(cave_effective=False),
                      lambda d: d['windows']['warmup']['distribution'].update(p99=0),

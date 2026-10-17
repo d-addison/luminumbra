@@ -466,10 +466,8 @@ def validate_workload(data, manifest):
     integer(regions['work_limit'], 'region work limit', 0, 2**64 - 1)
     integer(regions['hold_ticks'], 'region hold ticks', 1, 2**32 - 1)
     integer(regions['reduced_shift'], 'region reduced shift', 1, 30)
-    if settings['graphics_preset_status'] == 'not_exposed':
-        if settings['graphics_preset'] is not None:
-            raise ValueError('unexposed graphics preset must be null')
-    elif settings['graphics_preset_status'] != 'named' or not isinstance(settings['graphics_preset'], str) or not settings['graphics_preset']:
+    if (settings['graphics_preset_status'] != 'named' or
+        not isinstance(settings['graphics_preset'], str) or not settings['graphics_preset']):
         raise ValueError('invalid graphics preset provenance')
     render = settings['effective_render']
     equal_number(render['render_scale'], data['render_scale'], 'effective render scale')
