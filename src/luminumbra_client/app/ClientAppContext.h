@@ -11,6 +11,7 @@
 // teardown contract that moved the UI hot-reload watcher into main() scope).
 
 #include "app/DeveloperUiPolicy.h"
+#include "app/FarmSpeciesCache.h"
 
 #include "../../../include/luminumbra/core/Types.h"
 #include "core/HardwareInfo.h"
@@ -100,8 +101,7 @@ struct HudState {
     // the species registry is loaded once for player seeding. Interactive-only
     // (never touched by gates).
     luminumbra::foliage::FarmingController farming;
-    luminumbra::foliage::SpeciesRegistry farmSpecies;
-    bool farmSpeciesLoaded = false;
+    FarmSpeciesCache farmSpecies;
     // Player-selected species to plant (index into farmSpecies.all; V cycles
     // it). So FarmPlant isn't hard-coded to wheat — the player picks
     // oak/wheat/etc. from the data-driven registry.

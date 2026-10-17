@@ -836,6 +836,22 @@ public:
     const FarWorldDiagnosticSnapshot& far_world_diagnostic() const {
         return m_far_world->Diagnostic();
     }
+    FarWorldReportingState far_world_reporting_state() const {
+        const auto& diagnostic = m_far_world->Diagnostic();
+        const bool terrain_submission =
+            m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Terrain);
+        if (diagnostic.captured) {
+            auto state = FarWorldReportState(diagnostic, terrain_submission);
+            state.coverage_settled =
+                state.coverage_settled && diagnostic.frame == m_far_world_frame;
+            return state;
+        }
+        return {.selection = m_far_world->Selection(FarWorldPurpose::World),
+                .submission_refusal = terrain_submission
+                                          ? FarWorldSubmissionRefusal::None
+                                          : FarWorldSubmissionRefusal::IsolationSuppressed,
+                .coverage_settled = false};
+    }
     void set_far_world_submission(bool submit) {
         m_far_world_submission = submit;
     }

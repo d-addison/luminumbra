@@ -871,6 +871,44 @@ class AcceptanceMatrixTests(unittest.TestCase):
         self.assertTrue(any("planned" in item and "tangencies" in item["planned"]
                             for item in rows[0]["evidence"]))
 
+    def test_repository_boundary_contract_and_watchdog_rearming_evidence(self) -> None:
+        matrix = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_matrix.json")
+        rows = [row for row in matrix["rows"] if "ar.activation.050" in row.get("requirements", [])]
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["status"], "partial")
+        self.assertIn("outside -2^24 <= x,z < 2^24", row["statement"])
+        self.assertIn("docs/active-regions.md#activation-and-ordering", row["discrepancy"])
+        self.assertIn("`docs/active-regions.md#activation-and-ordering`", row["discrepancy"])
+        self.assertIn("integrated boundary regression", row["discrepancy"])
+        self.assertEqual(row["source"], "docs/active-regions.md#activation-and-ordering")
+        self.assertIn("ActiveRegionLedgerTest.ValidAnchorBoundaries", row["discrepancy"])
+        self.assertIn("half-open interval [-2^24, 2^24)", row["discrepancy"])
+        self.assertIn("still require end-to-end evidence", row["discrepancy"])
+        self.assertEqual(row["source"], "docs/active-regions.md#activation-and-ordering")
+        self.assertIn("issue #250", row["discrepancy"])
+        self.assertIn("docs/active-regions.md", row["discrepancy"])
+        self.assertIn("coverage remains planned", row["discrepancy"])
+        planned = next(item for item in row["evidence"]
+                       if item["ref"] == "ActiveRegionLedgerTest.AnchorBoundaryInputRefusals")
+        self.assertIn("owner: ds", planned["planned"])
+        self.assertEqual(planned["ref"], "ActiveRegionLedgerTest.AnchorBoundaryInputRefusals")
+        self.assertIn("half-open-boundary regression", planned["planned"])
+        self.assertIn("rejecting and counting +2^24", planned["planned"])
+        self.assertIn("accepting -2^24", planned["planned"])
+        self.assertIn("adjacent exterior coordinates", planned["planned"])
+        self.assertIn("next representable value below -2^24", planned["planned"])
+        self.assertIn("accept -2^24", planned["planned"])
+        self.assertIn("reject +2^24", planned["planned"])
+        self.assertIn("both X and Z endpoints", planned["planned"])
+        self.assertIn("adjacent interior coordinates", planned["planned"])
+        self.assertIn("adjacent exterior coordinates", planned["planned"])
+        self.assertIn("next representable float below -2^24", planned["planned"])
+        self.assertIn("walking anchors, ground-object edits and pins", planned["planned"])
+        self.assertIn(MODULE._escape_cell("Discrepancy: " + row["discrepancy"]), MODULE.render_doc(matrix))
+        watchdog = row_of(matrix, "em.client-hang")
+        self.assertIn("HangWatchdog.RearmsAfterHeartbeatResumes", {e["ref"] for e in watchdog["evidence"]})
+
     def test_repository_boundary_discrepancy_and_watchdog_rearming_evidence(self) -> None:
         matrix = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_matrix.json")
         rows = [row for row in matrix["rows"] if "ar.activation.050" in row.get("requirements", [])]
@@ -889,8 +927,8 @@ class AcceptanceMatrixTests(unittest.TestCase):
             {"kind": "ctest", "ref": "ActiveRegionLedgerTest.InvalidSchedulerInputsAreSkippedAndCounted"},
             {"kind": "ctest", "ref": "GameSessionHeadlessWorldTest.InvalidHostInputsNeverThrowAndAreCounted"},
         ])
-        self.assertEqual(len(row["evidence"]), 4)
-        planned = row["evidence"][3]
+        self.assertEqual(len(row["evidence"]), 5)
+        planned = row["evidence"][4]
         self.assertEqual(planned["kind"], "ctest")
         self.assertEqual(planned["ref"], "ActiveRegionLedgerTest.SymmetricAnchorBoundaries")
         self.assertIn("owner: ds", planned["planned"])

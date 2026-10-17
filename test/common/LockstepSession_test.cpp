@@ -1625,8 +1625,9 @@ TEST(LockstepSessionTest, DifferentPeerInputsMergeIdenticallyUnderTransientRefus
     ASSERT_TRUE(b_finished);
     EXPECT_EQ(a_state.applied, b_state.applied);
     ASSERT_EQ(a_state.applied.size(), 10u);
-    for (std::uint8_t tick = 1; tick <= 10; ++tick)
+    for (std::uint8_t tick = 1; tick <= 10; ++tick) {
         EXPECT_EQ(a_state.applied[tick - 1], (std::vector<std::uint8_t>{0, tick, 1, tick}));
+    }
 }
 
 TEST(LockstepSessionTest, TransientInputAndHashRefusalsRetryExactFramesInOrder) {
@@ -1709,8 +1710,9 @@ TEST(LockstepSessionTest, TransientInputAndHashRefusalsRetryExactFramesInOrder) 
         ASSERT_EQ(transport.State().refused_frames.size(), 5u);
         const auto& first_refused =
             type == net::MessageType::Input ? expected.front() : expected[4];
-        for (std::size_t index = 0; index < 3; ++index)
+        for (std::size_t index = 0; index < 3; ++index) {
             EXPECT_EQ(transport.State().refused_frames[index], first_refused);
+        }
         EXPECT_EQ(transport.State().refused_frames[3], expected.back());
         EXPECT_EQ(transport.State().refused_frames[4], expected.back());
     }

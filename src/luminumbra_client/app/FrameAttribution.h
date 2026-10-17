@@ -109,7 +109,8 @@ public:
     }
 
 private:
-    FoliageFrame m_frame{};
+    // Render-thread callbacks collect diagnostics even through a const scope.
+    mutable FoliageFrame m_frame{};
     FoliageFrame* m_previous = nullptr;
 };
 bool foliage_frame_active();

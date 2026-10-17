@@ -328,9 +328,9 @@ TEST_P(WorldOpenRefusal, RefusesBeforeGenerationAndPreservesAllDiskBytes) {
     ASSERT_FALSE(error.empty());
     if (obsolete) {
         EXPECT_EQ(error, WorldSaveService::kObsoleteWorldMessage);
-    } else if (future)
+    } else if (future) {
         EXPECT_NE(error.find("future"), std::string::npos);
-    else {
+    } else {
         EXPECT_NE(error, WorldSaveService::kObsoleteWorldMessage);
         EXPECT_EQ(error.find("future"), std::string::npos);
     }
@@ -794,8 +794,9 @@ TEST_F(WorldOpenRefusal, EveryFrozenPresetResolvesHistoricalBytesAndChecksIdenti
             EXPECT_EQ(inspected.preset_path, historical);
             if (saved_metadata.value("presetIdentity", identity) == identity) {
                 EXPECT_TRUE(inspected.error.empty()) << inspected.error;
-            } else
+            } else {
                 EXPECT_NE(inspected.error.find("identity"), std::string::npos);
+            }
             EXPECT_EQ(DiskBytes(root), before);
         }
         // Even metadata without an identity must refuse if its frozen file is absent.

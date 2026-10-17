@@ -296,6 +296,93 @@ def read_evidence_metric(path: Path, name: str) -> float:
     return float(value)
 
 
+def validate_far_world_reporting(document: Any, ladder_baseline: bool = False) -> None:
+    """Validate measured-frame evidence; a Ladder label never waives missing coverage."""
+    if not isinstance(document, dict):
+        raise ValueError("far-world capture must be an object")
+    block = document.get("far_world")
+    if block is None and not ladder_baseline:
+        return  # Older diagnostic captures have no far-world evidence.
+    if not isinstance(block, dict):
+        raise ValueError("Ladder baseline requires far-world frame evidence")
+    count, warmup = document.get("frames"), document.get("warmup_frames")
+    if type(count) is not int or not 1 <= count <= 18000 or type(warmup) is not int or warmup < 0:
+        raise ValueError("invalid far-world measured window")
+    rows = block.get("frames")
+    if not isinstance(rows, list) or len(rows) != count:
+        raise ValueError("incomplete far-world frame evidence")
+    summary: dict[str, Any] = {key: {} for key in (
+        "requested_mode", "effective_mode", "refusal", "submission_refusal")}
+    summary.update(suppressed_frames=0, unsettled_frames=0)
+    reasons = {"None", "ImmutableAuthorityUnavailable", "MissingLimits", "BackendUnavailable",
+               "AdmissionFailed", "InvalidRequests", "SpanRejected", "PreviewOverride",
+               "OffscreenSuppressed", "SpanHistoryExhausted", "ShaderProgramUnavailable",
+               "InvalidCavePolicy", "CavePolicyMismatch", "WaterUnavailable", "WaterSpanRefused"}
+    submission_reasons = {"None", "LiveOwnershipIncomplete", "LogicalStoreAdmission",
+                          "BackendUnavailable", "DrawRejected", "IsolationSuppressed"}
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict) or type(row.get("frame")) is not int or row["frame"] != warmup + index:
+            raise ValueError("far-world frame evidence is not contiguous")
+        for key, allowed in (("requested_mode", {"legacy", "ladder"}),
+                             ("effective_mode", {"legacy", "ladder"}),
+                             ("refusal", reasons), ("submission_refusal", submission_reasons)):
+            value = row.get(key)
+            if not isinstance(value, str) or value not in allowed:
+                raise ValueError(f"invalid far-world {key}")
+            summary[key][value] = summary[key].get(value, 0) + 1
+        if type(row.get("suppressed")) is not bool or type(row.get("coverage_settled")) is not bool:
+            raise ValueError("invalid far-world suppression/coverage evidence")
+        if row["submission_refusal"] != "None" and not row["suppressed"]:
+            raise ValueError("far-world submission refusal must report suppression")
+        summary["suppressed_frames"] += row["suppressed"]
+        streaming = row.get("streaming")
+        if not isinstance(streaming, dict) or any(type(streaming.get(key)) is not int
+                or streaming[key] < 0 for key in ("generation_pending", "meshing_pending", "terrain_uploads_pending")):
+            raise ValueError("missing or invalid measured streaming coverage")
+        if any(type(streaming.get(key)) is not bool
+               for key in ("generation_outstanding", "meshing_outstanding")):
+            raise ValueError("missing or invalid outstanding streaming coverage")
+        unsettled = not row["coverage_settled"] or any(streaming[key] != 0 for key in (
+            "generation_pending", "meshing_pending", "terrain_uploads_pending",
+            "generation_outstanding", "meshing_outstanding"))
+        summary["unsettled_frames"] += unsettled
+        settings = row.get("settings")
+        if not isinstance(settings, dict) or any(type(settings.get(key)) is not bool
+                for key in ("gns_compiled", "active_regions")):
+            raise ValueError("missing resolved far-world settings")
+        water = settings.get("water_cells_per_side")
+        if type(water) is not int or water < 0 or (ladder_baseline and water == 0):
+            raise ValueError("invalid resolved water resolution")
+        if "grass_density_scale" not in settings:
+            raise ValueError("missing resolved grass density")
+        density = settings["grass_density_scale"]
+        if density is not None and (isinstance(density, bool) or not isinstance(density, (int, float))
+                                    or not math.isfinite(density) or density < 0):
+            raise ValueError("invalid resolved grass density")
+        identity = row.get("content_identity")
+        if not isinstance(identity, str) or not re.fullmatch(r"[0-9]{1,20}", identity) or int(identity) >= 2**64:
+            raise ValueError("invalid far-world content identity")
+        if ladder_baseline and int(identity) == 0:
+            raise ValueError(f"Ladder baseline refused at measured frame {row['frame']}: "
+                             "far-world content identity is unavailable (zero)")
+        if ladder_baseline and (row["requested_mode"] != "ladder" or row["effective_mode"] != "ladder"
+                or row["refusal"] != "None" or row["suppressed"]
+                or row["submission_refusal"] != "None" or unsettled):
+            raise ValueError(f"Ladder baseline refused at measured frame {row['frame']}")
+    actual = block.get("summary")
+    if not isinstance(actual, dict) or set(actual) != set(summary):
+        raise ValueError("missing far-world summary counts")
+    for key, expected in summary.items():
+        value = actual[key]
+        if isinstance(expected, dict):
+            valid = (isinstance(value, dict) and set(value) == set(expected)
+                     and all(type(n) is int and n == expected[k] for k, n in value.items()))
+        else:
+            valid = type(value) is int and value == expected
+        if not valid:
+            raise ValueError("inconsistent far-world summary counts")
+
+
 def validate_workload_evidence(
     contract: str, path: Path | None, parameters: dict[str, Any]
 ) -> None:
@@ -913,11 +1000,19 @@ def compare_command(args: argparse.Namespace) -> int:
 
 def validate_command(args: argparse.Namespace) -> int:
     try:
-        load_run(args.run)
+        if args.ladder_baseline:
+            document = json.loads(args.run.read_text(encoding="utf-8-sig"))
+            if not isinstance(document, dict) or document.get("schema") not in (
+                    "luminumbra.render_benchmark.v2", "luminumbra.render_benchmark.v3"):
+                raise ValueError("Ladder baseline requires a render benchmark capture")
+            validate_far_world_reporting(document, ladder_baseline=True)
+        else:
+            load_run(args.run)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"performance run is invalid: {exc}", file=sys.stderr)
         return 1
-    print(f"valid performance run: {args.run}")
+    label = "valid Ladder frame evidence" if args.ladder_baseline else "valid performance run"
+    print(f"{label}: {args.run}")
     return 0
 
 
@@ -980,6 +1075,8 @@ def parser() -> argparse.ArgumentParser:
 
     validate = commands.add_parser("validate", help="validate a run document")
     validate.add_argument("run", type=Path)
+    validate.add_argument("--ladder-baseline", action="store_true",
+                          help="validate every measured far-mode frame in a render capture")
     validate.set_defaults(handler=validate_command)
     return root
 

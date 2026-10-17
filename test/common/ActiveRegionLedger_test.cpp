@@ -210,9 +210,10 @@ TEST(ActiveRegionLedgerTest, PrioritySelectsLowestForReductionAndHighestForRecov
     const std::vector<RegionKey> wake_priority{{7, 7}, {3, 3}};
     ASSERT_EQ(wake.transitions.size(), wake_priority.size());
     EXPECT_EQ(wake.due, wake_priority);
-    for (std::size_t i = 0; i < wake_priority.size(); ++i)
+    for (std::size_t i = 0; i < wake_priority.size(); ++i) {
         EXPECT_EQ(wake.transitions[i],
                   (RegionTransition{wake_priority[i], RegionState::Frozen, RegionState::Active}));
+    }
 
     // Every region is eligible at once: recovery must choose forward priority,
     // including pin/edit rank, proximity age and coordinate tie breaks.
@@ -802,9 +803,8 @@ TEST(ActiveRegionLedgerTest, RetentionKeepsTheLedgerBounded) {
     std::vector<Vec3> grid;
     grid.reserve(600);
     for (int i = 0; i < 600; ++i) {
-        const int row = i / 30;
-        grid.emplace_back(
-            static_cast<float>((i % 30) * 2048), 0.0f, static_cast<float>(row * 2048));
+        const int grid_z = (i / 30) * 2048;
+        grid.emplace_back(static_cast<float>((i % 30) * 2048), 0.0f, static_cast<float>(grid_z));
     }
     ActiveRegionLedger ledger;
     ledger.schedule(WorldClock(1), std::span<const Vec3>(grid));

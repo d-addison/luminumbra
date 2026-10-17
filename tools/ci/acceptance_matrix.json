@@ -1190,7 +1190,7 @@
       "requirements": [
         "ar.activation.050"
       ],
-      "discrepancy": "docs/active-regions.md and the ledger specify [-2^24, 2^24). ActiveRegionLedgerTest.ValidAnchorBoundaries covers the half-open interval on both axes; an integrated boundary regression for walking anchors, ground-object edits and region pins with full endpoint coverage remains planned under issue #250.",
+      "discrepancy": "`docs/active-regions.md#activation-and-ordering` and ActiveRegionLedgerTest.ValidAnchorBoundaries agree on the half-open interval [-2^24, 2^24). The validator regression covers both axes; an integrated boundary regression with full endpoint coverage remains planned; boundary rejection and counting through walking anchors, ground-object edits and region pins still require end-to-end evidence, tracked in issue #250. Full walking-anchor, ground-object edit and pin boundary coverage remains planned.",
       "evidence": [
         {
           "kind": "ctest",
@@ -1203,6 +1203,11 @@
         {
           "kind": "ctest",
           "ref": "GameSessionHeadlessWorldTest.InvalidHostInputsNeverThrowAndAreCounted"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedgerTest.AnchorBoundaryInputRefusals",
+          "planned": "Add a half-open-boundary regression accepting -2^24 and the adjacent interior coordinates, and rejecting and counting +2^24 and the adjacent exterior coordinates (including the next representable value below -2^24) on X and Z through walking anchors, ground-object edits and pins.; owner: ds Cover both X and Z endpoints: accept -2^24 and reject +2^24, including the next representable float below -2^24."
         },
         {
           "kind": "ctest",
@@ -1362,7 +1367,7 @@
     {
       "id": "contract.dw.scope.01",
       "source": "docs/distant-world.md#scope",
-      "statement": "Acceptance obligations: - The view radius is **16 km from the camera** and the world has **no fixed edge**: terrain streams procedurally in every direction. / The addressable extent is set by the packed chunk identity (`Chunk.h`, ±2^20 chunks of 16 m, about ±16,777 km on each horizontal axis; / coordinates are masked, never range checked). / World positions are 32-bit floats. / By owner decision (September 8, 2026) the contract requires qualification within 32 km of the world origin, where positions keep sub-centimetre precision; / the camera-relative (floating-origin) precision work that would qualify the full addressable extent is deliberately residual scope, not an open contract gap.",
+      "statement": "Acceptance obligations: - The view radius is **16 km from the camera** and the world has **no fixed edge**: terrain streams procedurally in every direction. / The addressable extent is set by the packed chunk identity (`Chunk.h`, \u00b12^20 chunks of 16 m, about \u00b116,777 km on each horizontal axis; / coordinates are masked, never range checked). / World positions are 32-bit floats. / By owner decision (September 8, 2026) the contract requires qualification within 32 km of the world origin, where positions keep sub-centimetre precision; / the camera-relative (floating-origin) precision work that would qualify the full addressable extent is deliberately residual scope, not an open contract gap.",
       "status": "planned",
       "requirements": [
         "dw.scope.001",
@@ -1464,7 +1469,7 @@
     {
       "id": "contract.dw.tiers.01",
       "source": "docs/distant-world.md#tier-ladder",
-      "statement": "Acceptance obligations: Far terrain is a ladder of five nested, world-origin-aligned volumetric tiers. / Each tier stores sparse 5×5×5 signed-distance bricks and is polygonised per tile with Marching Cubes; / a brick record exists where the field crosses zero. / Multi-tier residency and draw ownership are new machinery with an explicit arrival-state rule: the coarser tier is always resident and drawn beneath the finer one with a one-brick overlap; / a finer tile replaces the coarser surface inside its band only once it is built and uploaded, and until then the coarser surface stays visible, so a missing or late tile is never a hole; / ownership at the live edge is decided against the live chunks that are actually meshed and uploaded (including cave ceilings and floors), replacing today's camera-region skip;",
+      "statement": "Acceptance obligations: Far terrain is a ladder of five nested, world-origin-aligned volumetric tiers. / Each tier stores sparse 5\u00d75\u00d75 signed-distance bricks and is polygonised per tile with Marching Cubes; / a brick record exists where the field crosses zero. / Multi-tier residency and draw ownership are new machinery with an explicit arrival-state rule: the coarser tier is always resident and drawn beneath the finer one with a one-brick overlap; / a finer tile replaces the coarser surface inside its band only once it is built and uploaded, and until then the coarser surface stays visible, so a missing or late tile is never a hole; / ownership at the live edge is decided against the live chunks that are actually meshed and uploaded (including cave ceilings and floors), replacing today's camera-region skip;",
       "status": "planned",
       "requirements": [
         "dw.tiers.001",
@@ -1856,7 +1861,7 @@
     {
       "id": "contract.dw.policy.04",
       "source": "docs/distant-world.md#per-system-distant-policy",
-      "statement": "Acceptance obligations: no catch-up (this deliberately replaces the energy field's catch-up rule) | / | Existing energy layer (`aether_state.efs`) | Unchanged | Under active regions its window policy is replaced by region activation with the same no-catch-up rule; / its serializer never mutates state, the per-owner cadence and active-age metadata live in the ledger record (the EFS1 payload is unchanged), frozen pages hash as their stored bytes, and an all-zero layer writes no record while the snapshot index records the record as intentionally absent | Frozen pages kept | / | Scent and foraging | Spawn-anchored near facility; / the scent grid is historical state and is persisted with the page records so near consumers resume continuously | Not simulated at distance; / distant creatures do not use scent | — |",
+      "statement": "Acceptance obligations: no catch-up (this deliberately replaces the energy field's catch-up rule) | / | Existing energy layer (`aether_state.efs`) | Unchanged | Under active regions its window policy is replaced by region activation with the same no-catch-up rule; / its serializer never mutates state, the per-owner cadence and active-age metadata live in the ledger record (the EFS1 payload is unchanged), frozen pages hash as their stored bytes, and an all-zero layer writes no record while the snapshot index records the record as intentionally absent | Frozen pages kept | / | Scent and foraging | Spawn-anchored near facility; / the scent grid is historical state and is persisted with the page records so near consumers resume continuously | Not simulated at distance; / distant creatures do not use scent | \u2014 |",
       "status": "planned",
       "requirements": [
         "dw.policy.019",
@@ -1877,7 +1882,7 @@
     {
       "id": "contract.dw.policy.05",
       "source": "docs/distant-world.md#per-system-distant-policy",
-      "statement": "Acceptance obligations: | Ground objects | Settle, persist, despawn | Despawn deadlines are active-age counters, advancing only while the owning region is due | Nothing advances | / | Scheduled game events | Not implemented | Deferred to a later milestone | — | / Authority is server-only on the deterministic fixed tick with per-region seeded random streams; / clients render coarse results only, and delivering coarse state to remote clients is outside v0.3 (host-local evidence). / Distant water simulates only where its millimetre arrays are resident; / a simulation-only residency class is not part of this contract and would be a separate decision.",
+      "statement": "Acceptance obligations: | Ground objects | Settle, persist, despawn | Despawn deadlines are active-age counters, advancing only while the owning region is due | Nothing advances | / | Scheduled game events | Not implemented | Deferred to a later milestone | \u2014 | / Authority is server-only on the deterministic fixed tick with per-region seeded random streams; / clients render coarse results only, and delivering coarse state to remote clients is outside v0.3 (host-local evidence). / Distant water simulates only where its millimetre arrays are resident; / a simulation-only residency class is not part of this contract and would be a separate decision.",
       "status": "planned",
       "requirements": [
         "dw.policy.025",
@@ -2127,7 +2132,7 @@
     {
       "id": "contract.dw.perf.01",
       "source": "docs/distant-world.md#performance-measurement-contract",
-      "statement": "Acceptance obligations: Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840×1600 and 3440×1440. / Both profiles must meet the release floor on every workload; / the Performance profile exists to report the 120 fps target. / | Quality | 1.0 | p99 frame time at most 16.67 ms | p50 against 8.33 ms | / | Performance | 0.67 | p99 frame time at most 16.67 ms | p50 and p99 against 8.33 ms | / Workloads are settled fixed views (400 warm-up, 240 measured frames) and 60 s scripted traversals (surface flight, cave walk, edited-world tour) with pinned seeds, preset and content revisions, camera paths and speeds, expected simulation ticks and cold-cache state.",
+      "statement": "Acceptance obligations: Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840\u00d71600 and 3440\u00d71440. / Both profiles must meet the release floor on every workload; / the Performance profile exists to report the 120 fps target. / | Quality | 1.0 | p99 frame time at most 16.67 ms | p50 against 8.33 ms | / | Performance | 0.67 | p99 frame time at most 16.67 ms | p50 and p99 against 8.33 ms | / Workloads are settled fixed views (400 warm-up, 240 measured frames) and 60 s scripted traversals (surface flight, cave walk, edited-world tour) with pinned seeds, preset and content revisions, camera paths and speeds, expected simulation ticks and cold-cache state.",
       "status": "planned",
       "requirements": [
         "dw.perf.001",
@@ -2984,6 +2989,126 @@
       ]
     },
     {
+      "id": "render.benchmark-far-frame-storage",
+      "source": "docs/render-benchmark.md#compatibility-and-commands",
+      "statement": "Both benchmark schemas allocate a bounded far-mode frame ring; ordinary play allocates none. Only v3 issues additional GL queries.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "FarWorldDiagnostics.BenchmarkFrameCountStrictlyParsesBeforeApplyingBounds"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarWorldDiagnostics.BenchmarkSerializesEveryMeasuredFarStateAndSummary"
+        }
+      ]
+    },
+    {
+      "id": "render.benchmark-output-completion",
+      "source": "docs/render-benchmark.md#compatibility-and-commands",
+      "statement": "Both benchmark schemas reject incomplete artifact output. Registered regressions cover directory creation and file-open errors plus partial stream writes and flush failure; the writer also checks file-close completion.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "RenderBenchmarkOutput.BothSchemasRejectPartialWritesAndFlushFailures"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RenderBenchmarkOutput.BothSchemasCheckFileOpenAndDirectoryCreation"
+        }
+      ]
+    },
+    {
+      "id": "render.benchmark-workload-assignments",
+      "source": "docs/render-benchmark.md#compatibility-and-commands",
+      "statement": "Assignment-form workload options do not become debug overrides or consume successor arguments; non-workload options remain observable overrides.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "RenderBenchmarkOverrides.WorkloadAssignmentsDoNotConsumeSuccessorsOrHideOverrides"
+        }
+      ]
+    },
+    {
+      "id": "content.foliage-directory-recovery",
+      "source": "docs/engine-guide.md#shipping-defaults",
+      "statement": "Foliage skips unencodable filenames with a diagnostic and loads valid neighbours in UTF-8 order. Scan and file I/O failures roll back, report failure to the gameplay cache, and allow retry; valid empty directories succeed. Creature dependency loading contains conversion exceptions and refuses incomplete identity. LoadFromDirectory appends on success, resets io_failed on entry, preserves existing errors and distinguishes empty success from I/O failure. Interactive farming retries failures every five seconds of frame time, logs changed errors and recovery once, and caches all successful loads.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FoliageSkipsUnencodableNamesAndLoadsBothValidNeighbours"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FoliageScanFailuresRemainRetryable"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FoliageFileIoFailureRollsBackBeforeRetry"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FoliageDirectoryProviderExceptionsAreContained"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FoliageUnavailableAndEmptyDirectoriesHaveDistinctResults"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FoliageSpeciesUsePortableFilenameOrderForDuplicateIds"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FarmingSpeciesRetriesAtDeadlineAndLogsOnlyTransitions"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FarmingSpeciesEmptySuccessIsCachedAndRecoveryIsReportedOnce"
+        }
+      ]
+    },
+    {
+      "id": "graphics.horizon-authority",
+      "source": "docs/engine-guide.md#world-generation-and-streaming",
+      "statement": "Legacy graphics horizon changes preserve edited chunk authority and reject stale captures through the chunk voxel revision even when world/region publication revisions are unchanged. This row covers the owner-thread snapshot and admission regression, not native rendering qualification.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GraphicsRuntimePure.ShrinkingAndGrowingHorizonRetainsEditedAuthorityAndRejectsStaleCapture"
+        },
+        {
+          "kind": "ctest",
+          "ref": "StreamingHardening.FarLodSnapshotOwnsBytesAndRejectsStaleLiveData"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarLodWorker.AuthoritativeCaptureBuildsPersistsAndStales"
+        }
+      ]
+    },
+    {
+      "id": "render.ladder-content-identity",
+      "source": "docs/render-benchmark.md#far-mode-reporting-and-ladder-baselines",
+      "statement": "Both benchmark schema readers refuse unavailable zero far authority content identities in every measured Ladder baseline frame; diagnostic captures retain zero as unavailable. Missing, malformed and overflowing identities are refused in both modes.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "script",
+          "ref": "tools/perf/test_perf.py"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RenderContractPython"
+        }
+      ]
+    },
+    {
       "id": "station.architecture",
       "source": "docs/distant-world.md#station-discovery-req-e4",
       "statement": "The discovery executable is CPU-only and constructs an unstreamed read-only query world with an explicit data root; its contract and CLI smoke are ordinary CTest entries.",
@@ -3389,26 +3514,6 @@
       "requirements": [
         "dw.station.099",
         "dw.station.100"
-      ]
-    },
-    {
-      "id": "graphics.horizon-authority",
-      "source": "docs/engine-guide.md#world-generation-and-streaming",
-      "statement": "Legacy graphics horizon changes preserve edited chunk authority and reject stale captures through the chunk voxel revision even when world/region publication revisions are unchanged. This row covers the owner-thread snapshot and admission regression, not native rendering qualification.",
-      "status": "covered",
-      "evidence": [
-        {
-          "kind": "ctest",
-          "ref": "GraphicsRuntimePure.ShrinkingAndGrowingHorizonRetainsEditedAuthorityAndRejectsStaleCapture"
-        },
-        {
-          "kind": "ctest",
-          "ref": "StreamingHardening.FarLodSnapshotOwnsBytesAndRejectsStaleLiveData"
-        },
-        {
-          "kind": "ctest",
-          "ref": "FarLodWorker.AuthoritativeCaptureBuildsPersistsAndStales"
-        }
       ]
     },
     {

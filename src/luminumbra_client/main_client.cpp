@@ -18,6 +18,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "app/ClientAppContext.h"
 #include "app/CrashHandler.h"
 #include "app/DebugOverlays.h"
+#include "app/FarmSpeciesCache.h"
 #include "app/FrameAttribution.h"
 #include "app/FrameAudio.h"
 #include "app/GameAssets.h"
@@ -1155,7 +1156,8 @@ static void HandlePlayerVerbs(ClientAppContext& g_app,
                               Luminumbra::world::GameSession* gameSession,
                               Luminumbra::Rendering::RenderPipeline& renderPipeline,
                               ProcgenPlantState& g_procgen,
-                              const UiInputRouter& inputRouter) {
+                              const UiInputRouter& inputRouter,
+                              double frame_seconds) {
     if (!inputRouter.GameplayAllowed())
         return;
     // ---  : player FARMING verbs (F/G/H/J) ---
@@ -1166,10 +1168,16 @@ static void HandlePlayerVerbs(ClientAppContext& g_app,
     // keys).
     if (g_playerController && currentState == GameState::IN_GAME && !scenario_config.active() &&
         !g_app.hud.paused && gameSession && g_camera) {
-        if (!g_app.hud.farmSpeciesLoaded) {
-            std::vector<std::string> ferr;
-            g_app.hud.farmSpecies.LoadFromDirectory(root_dir / "data/common/foliage/species", ferr);
-            g_app.hud.farmSpeciesLoaded = true;
+        if (g_app.hud.farmSpecies.NeedsUpdate(frame_seconds)) {
+            const auto species_update = g_app.hud.farmSpecies.Update(
+                frame_seconds, root_dir / "data/common/foliage/species");
+            using SpeciesUpdate = Luminumbra::Client::App::FarmSpeciesCache::UpdateResult;
+            if (species_update != SpeciesUpdate::Unchanged) {
+                for (const auto& error : g_app.hud.farmSpecies.diagnostics())
+                    LUMINUMBRA_CORE_WARN("Farm species: {}", error);
+                if (species_update == SpeciesUpdate::Recovered)
+                    LUMINUMBRA_CORE_INFO("Farm species: directory load recovered");
+            }
         }
         // V cycles the selected species to plant (data-driven; oak/wheat/...).
         {
@@ -1597,8 +1605,12 @@ int main(int argc, char* argv[]) {
     g_app.capture.profile_fly_seconds = static_cast<double>(GetCommandLineIntOption(
         argc, argv, "--profile-fly", 0)); // runtime telemetry: constant-speed eye-level moving
                                           // profiler (normal-play, self-exits)
-    g_app.capture.render_benchmark_frames =
-        GetCommandLineIntOption(argc, argv, "--render-benchmark-frames", 120);
+    try {
+        g_app.capture.render_benchmark_frames = Measurement::benchmark_frame_count(argc, argv);
+    } catch (const std::invalid_argument& error) {
+        LUMINUMBRA_CORE_ERROR("{}", error.what());
+        return 2;
+    }
     g_app.capture.render_benchmark_warmup =
         GetCommandLineIntOption(argc, argv, "--render-benchmark-warmup", 60);
     if (traversal) {
@@ -1608,6 +1620,12 @@ int main(int argc, char* argv[]) {
             return 2;
         }
         g_app.capture.render_benchmark_frames = static_cast<int>(Measurement::kMaxFrames);
+    }
+    if (!g_app.capture.render_benchmark_path.empty() &&
+        (g_app.capture.render_benchmark_frames < 1 ||
+         g_app.capture.render_benchmark_frames > static_cast<int>(Measurement::kMaxFrames))) {
+        LUMINUMBRA_CORE_ERROR("Render benchmark requires 1..18000 measured frames");
+        return 2;
     }
     if (benchmark_v3 &&
         (g_app.capture.render_benchmark_frames < 1 ||
@@ -2204,23 +2222,28 @@ int main(int argc, char* argv[]) {
         scenario_config.isolation_layers, scenario_config.isolation_backdrop));
     // far-LOD tile builds ride the JobSystem Normal lane.
     renderPipeline.attach_farlod_job_system(&jobSystem);
-    const auto farWorldCavePolicy =
-        renderPipeline.set_far_world_cave_policy(Luminumbra::Rendering::ResolveFarWorldCaveField(
-            g_systemConfig.param(luminumbra::core::SysParam::FarWorldCaveField,
-                                 Luminumbra::Rendering::kDefaultFarWorldCaveFieldCode)));
+    renderPipeline.set_far_world_cave_policy(Luminumbra::Rendering::ResolveFarWorldCaveField(
+        g_systemConfig.param(luminumbra::core::SysParam::FarWorldCaveField,
+                             Luminumbra::Rendering::kDefaultFarWorldCaveFieldCode)));
     // systems.json defaults to Ladder; enabled:false explicitly requests Legacy.
     renderPipeline.set_far_world_mode(Luminumbra::Rendering::RequestedFarWorldMode(
         g_systemConfig.enabled(luminumbra::core::SysKey::RenderFarWorldLadder)));
-    if (g_systemConfig.enabled(luminumbra::core::SysKey::RenderFarWorldLadder)) {
-        if (!farWorldCavePolicy.requested)
-            LUMINUMBRA_CORE_WARN(
-                "Far-world Ladder refused: cave_field requires exact 0 (BandLimited) "
-                "or 1 (BoxFiltered). Legacy remains effective.");
-        else
-            LUMINUMBRA_CORE_WARN(
-                "Far-world Ladder requested; normal world activation refuses without "
-                "immutable committed authority and dirty parking. Legacy remains effective.");
-    }
+    std::optional<Luminumbra::Rendering::FarWorldReportingState> previous_far_report;
+    const auto report_far_transition = [&] {
+        using namespace Luminumbra::Rendering;
+        const auto state = renderPipeline.far_world_reporting_state();
+        if (FarWorldReportChanged(previous_far_report, state)) {
+            LUMINUMBRA_CORE_INFO("Far world: requested={} effective={} refusal={} suppressed={} "
+                                 "submission_refusal={}",
+                                 FarWorldModeName(state.selection.requested),
+                                 FarWorldModeName(state.selection.effective),
+                                 FarWorldRefusalName(state.selection.refusal),
+                                 FarWorldReportSuppressed(state),
+                                 FarWorldSubmissionRefusalName(state.submission_refusal));
+            previous_far_report = state;
+        }
+    };
+    report_far_transition();
     // set the sky-LUT GPU flag BEFORE startup so the one-shot precompute
     // (init_sky_lut, inside startup) takes the GPU compute path. render.sky_lut_gpu, default OFF.
     renderPipeline.set_sky_lut_gpu_enabled(
@@ -3560,9 +3583,11 @@ int main(int argc, char* argv[]) {
     nlohmann::json traversal_camera_samples = nlohmann::json::array();
     auto active_overrides =
         benchmark_v3 ? Measurement::render_overrides(argc, argv) : nlohmann::json::object();
-    if (benchmark_v3) {
+    if (!g_app.capture.render_benchmark_path.empty()) {
         measured_samples =
             std::make_unique<Measurement::SampleRing>(g_app.capture.render_benchmark_frames);
+    }
+    if (benchmark_v3) {
         benchmark_queries =
             std::make_unique<Luminumbra::Rendering::BenchmarkGpuQueries>(*measured_samples);
         benchmark_queries->initialize();
@@ -3589,7 +3614,7 @@ int main(int argc, char* argv[]) {
         // Delta time below still includes pacing so simulation follows real time.
         frame_limiter.pace(pacing.frame_cap, frame_timing);
         const auto _frameStart = std::chrono::steady_clock::now();
-        Attribution::FoliageFrameScope foliage_scope(frame_attribution_enabled);
+        const Attribution::FoliageFrameScope foliage_scope(frame_attribution_enabled);
         const double observedFrame = glfwGetTime();
         observedFrameSeconds = observedFrame - previousObservedFrame;
         previousObservedFrame = observedFrame;
@@ -5087,7 +5112,8 @@ int main(int argc, char* argv[]) {
                                       gameSession.get(),
                                       renderPipeline,
                                       g_procgen,
-                                      uiInputRouter);
+                                      uiInputRouter,
+                                      observedFrame);
                     // Photo-mode capture loop + codex/objectives/farming HUD
                     // (app/DebugOverlays.cpp). Render-side, read-only observer.
                     UpdatePhotoModeAndHud(g_app,
@@ -5266,6 +5292,7 @@ int main(int argc, char* argv[]) {
         glfwSwapBuffers(window);
         const auto benchmark_present_end = benchmark_v3 ? std::chrono::steady_clock::now()
                                                         : std::chrono::steady_clock::time_point{};
+        report_far_transition();
         // runtime telemetry ( implementation note): localize slideshow-on-move frames. Logs the
         // phase split for any frame slower than ~30 fps. sim = TickSimulation
         // (physics+ecology), stream = SHIELD_WorldSystem::update, render = render_frame CPU,
@@ -5301,28 +5328,39 @@ int main(int argc, char* argv[]) {
                     LUMINUMBRA_CORE_ERROR("Frame attribution CSV write failed");
             }
             if (_wallMs > 12.0 && g_app.telemetry.slowFrameCount++ < 400) {
+                const auto slow_far = renderPipeline.far_world_reporting_state();
                 const double _other =
                     frame_attribution_enabled
                         ? buckets.other(_wallMs)
                         : _wallMs - rb_sim_ms - rb_stream_ms - rb_render_call_ms - _presentMs;
-                LUMINUMBRA_CORE_WARN("SLOWFRAME {:.1f}ms ({:.0f}fps): sim={:.1f} stream={:.1f} "
-                                     "render={:.1f} present={:.1f} other={:.1f} | "
-                                     "foliage_inst={:.1f} scatter={:.1f} rebake={:.1f} poll={:.1f} "
-                                     "foliage={:.1f} menu={:.1f} ui={:.1f}",
-                                     _wallMs,
-                                     1000.0 / _wallMs,
-                                     rb_sim_ms,
-                                     rb_stream_ms,
-                                     rb_render_bucket_ms,
-                                     _presentMs,
-                                     _other,
-                                     rb_foliage_ms,
-                                     rb_scatter_ms,
-                                     rb_rebake_ms,
-                                     rb_poll_ms,
-                                     foliage_frame.rebuild_ms,
-                                     rb_menu_ms,
-                                     rb_ui_ms);
+                LUMINUMBRA_CORE_WARN(
+                    "SLOWFRAME {:.1f}ms ({:.0f}fps): sim={:.1f} stream={:.1f} "
+                    "render={:.1f} present={:.1f} other={:.1f} | "
+                    "foliage_inst={:.1f} scatter={:.1f} rebake={:.1f} poll={:.1f} "
+                    "foliage={:.1f} menu={:.1f} ui={:.1f} "
+                    "far_requested={} far_effective={} far_refusal={} "
+                    "far_suppressed={} far_submission_refusal={} far_settled={}",
+                    _wallMs,
+                    1000.0 / _wallMs,
+                    rb_sim_ms,
+                    rb_stream_ms,
+                    rb_render_bucket_ms,
+                    _presentMs,
+                    _other,
+                    rb_foliage_ms,
+                    rb_scatter_ms,
+                    rb_rebake_ms,
+                    rb_poll_ms,
+                    foliage_frame.rebuild_ms,
+                    rb_menu_ms,
+                    rb_ui_ms,
+                    Luminumbra::Rendering::FarWorldModeName(slow_far.selection.requested),
+                    Luminumbra::Rendering::FarWorldModeName(slow_far.selection.effective),
+                    Luminumbra::Rendering::FarWorldRefusalName(slow_far.selection.refusal),
+                    Luminumbra::Rendering::FarWorldReportSuppressed(slow_far),
+                    Luminumbra::Rendering::FarWorldSubmissionRefusalName(
+                        slow_far.submission_refusal),
+                    slow_far.coverage_settled);
                 if (frame_attribution_enabled)
                     LUMINUMBRA_CORE_WARN(
                         "  foliage-split: signature={:.3f} sort={:.3f} surface={:.3f} "
@@ -5462,6 +5500,41 @@ int main(int argc, char* argv[]) {
             if (rb_warm < g_app.capture.render_benchmark_warmup) {
                 ++rb_warm;
             } else if (rb_count < g_app.capture.render_benchmark_frames) {
+                const auto frame_id =
+                    static_cast<std::uint64_t>(rb_warm) + static_cast<std::uint64_t>(rb_count);
+                auto& frame_sample = benchmark_v3 ? measured_samples->at(frame_id)
+                                                  : measured_samples->append(frame_id);
+                const auto far_state = renderPipeline.far_world_reporting_state();
+                auto& far_sample = frame_sample.far_world;
+                far_sample.requested_mode =
+                    Luminumbra::Rendering::FarWorldModeName(far_state.selection.requested);
+                far_sample.effective_mode =
+                    Luminumbra::Rendering::FarWorldModeName(far_state.selection.effective);
+                far_sample.refusal =
+                    Luminumbra::Rendering::FarWorldRefusalName(far_state.selection.refusal);
+                far_sample.submission_refusal =
+                    Luminumbra::Rendering::FarWorldSubmissionRefusalName(
+                        far_state.submission_refusal);
+                far_sample.suppressed = Luminumbra::Rendering::FarWorldReportSuppressed(far_state);
+                far_sample.coverage_settled = far_state.coverage_settled;
+#ifdef LUMINUMBRA_ENABLE_GNS
+                far_sample.gns_compiled = true;
+#endif
+                far_sample.active_regions = gameSession->ActiveRegionsEnabled();
+                if (const auto* world = gameSession->GetWorldSystem()) {
+                    far_sample.water_cells_per_side = world->debug_water_sim_resolution();
+                    const auto& streaming = world->get_last_streaming_budget_stats();
+                    far_sample.generation_pending = streaming.deferred_generation;
+                    far_sample.meshing_pending = streaming.deferred_meshing;
+                    far_sample.generation_outstanding = streaming.generation_job_active;
+                    far_sample.meshing_outstanding = streaming.meshing_job_active;
+                }
+                far_sample.terrain_uploads_pending =
+                    renderPipeline.get_last_mesh_upload_stats().terrain_uploads_deferred;
+                if (const auto* foliage = renderPipeline.foliage())
+                    far_sample.grass_density_scale = foliage->density_scale();
+                far_sample.content_identity =
+                    renderPipeline.far_world_diagnostic().content_identity;
                 rb_shadow += s.shadow_gpu_ms;
                 rb_gbuffer += s.gbuffer_gpu_ms;
                 rb_ssao += s.ssao_gpu_ms;
@@ -5705,6 +5778,11 @@ int main(int argc, char* argv[]) {
                 // Heuristic bound attribution for the log line: CPU-bound if the
                 // CPU submit dominates the GPU pass-timer sum.
                 j["bound"] = (cpu > gpu_sum * 1.1) ? "cpu" : "gpu_or_present";
+                Measurement::add_far_world_reporting(j, *measured_samples);
+                if (const auto* world = gameSession->GetWorldSystem())
+                    j["world_content_identity"] =
+                        std::to_string(Luminumbra::World::ComputeTerrainParamsHash(
+                            world->get_params(), world->get_seed()));
                 if (benchmark_v3) {
                     benchmark_queries->drain();
                     j["schema"] = "luminumbra.render_benchmark.v3";
@@ -5746,14 +5824,8 @@ int main(int argc, char* argv[]) {
                         j["workload"]["camera_samples"] = traversal_camera_samples;
                     }
                 }
-                std::error_code _rb_ec;
                 const std::filesystem::path rb_path(g_app.capture.render_benchmark_path);
-                if (rb_path.has_parent_path())
-                    std::filesystem::create_directories(rb_path.parent_path(), _rb_ec);
-                std::ofstream out(rb_path, benchmark_v3 ? std::ios::binary : std::ios::out);
-                out << j.dump(2);
-                out.close();
-                if (benchmark_v3 && !out) {
+                if (!Measurement::write_render_benchmark(rb_path, j, benchmark_v3)) {
                     LUMINUMBRA_CORE_ERROR("Could not write complete render benchmark artifact {}",
                                           rb_path.string());
                     exit_code = 1;

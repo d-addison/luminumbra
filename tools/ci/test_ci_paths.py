@@ -364,6 +364,18 @@ class PathGateTests(unittest.TestCase):
         for test in gate.PYTHON_TESTS:
             self.assertIn((test,), commands)
 
+    def test_performance_lane_selects_every_registered_render_runner_case(self):
+        cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        cases = re.findall(r'"(Render\w+);test_\w+"', cmake)
+        self.assertTrue(cases)
+        workflow = (ROOT / ".github/workflows/performance.yml").read_text(encoding="utf-8")
+        body = run_block(workflow, "Test native render runner")
+        selection = re.search(r"-R '([^']+)'", body)
+        self.assertIsNotNone(selection)
+        for case in cases:
+            with self.subTest(case=case):
+                self.assertIsNotNone(re.fullmatch(selection.group(1), case))
+
     def test_standalone_plan_covers_ctest_python_contracts_without_native_runner(self):
         commands = gate.python_test_commands(ROOT)
         for test in (
@@ -372,6 +384,12 @@ class PathGateTests(unittest.TestCase):
             "tools/perf/test_terrain_aovs.py", "tools/perf/test_render_runner_evidence.py",
             "tools/release/test_sbom.py", "tools/persistence/test_save_receipt.py",
             "tools/rendering/acceptance/test_scene_matrix.py",
+            "tools/ci/test_check_acceptance_matrix.py",
+            "tools/gates/test_station_discovery.py",
+            "tools/perf/test_check_gl_debug_log.py",
+            "tools/perf/test_plan_qualification.py",
+            "tools/perf/test_run_qualification.py",
+            "tools/perf/test_summarize_process_receipts.py",
         ):
             with self.subTest(test=test):
                 self.assertIn((test,), commands)
