@@ -108,7 +108,7 @@ class WorkflowShellTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         args, kwargs = calls[0]
         self.assertEqual(args[0][:-1], [executable, "--noprofile", "--norc", "-e", "-c"])
-        self.assertIn('[[ "$OSTYPE" == msys* ]] || { ci_bash_observe ostype; exit 12; };', args[0][-1])
+        self.assertIn('[[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin ]] || { ci_bash_observe ostype; exit 12; };', args[0][-1])
         self.assertIn('[[ -n "$BASH_VERSION" ]] || { ci_bash_observe bash-version; exit 11; };', args[0][-1])
         self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
         self.assertTrue(kwargs["capture_output"])
@@ -295,7 +295,7 @@ class WorkflowShellDiagnosticTests(unittest.TestCase):
                 self.assertIn(f"candidate[{index}].probe.returncode=1", message)
                 self.assertEqual(call.args[0][0], candidate)
                 self.assertEqual(call.kwargs["timeout"], 2)
-                self.assertIn('[[ "$OSTYPE" == msys* ]] || { ci_bash_observe ostype; exit 12; };', call.args[0][-1])
+                self.assertIn('[[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin ]] || { ci_bash_observe ostype; exit 12; };', call.args[0][-1])
 
     def test_validation_failures_name_the_last_stage_without_extra_checks_or_fallback(self):
         for stage in ("is_absolute", "is_file", "access"):
@@ -481,6 +481,52 @@ class WorkflowShellDiagnosticTests(unittest.TestCase):
                 run.assert_called_once()
                 stdout.write.assert_not_called()
                 stderr.write.assert_not_called()
+
+    def test_actual_windows_probe_accepts_legacy_msys_and_documented_cygwin(self):
+        for msystem in ("", "UCRT64", "untrusted"):
+            for ostype, version in (("msys", "4.4.23(1)-release"),
+                                    ("msys2", "5.3.20(2)-release"),
+                                    ("cygwin", "5.3.20(2)-release")):
+                with self.subTest(msystem=msystem, ostype=ostype), patch.dict(os.environ, MSYSTEM=msystem):
+                    result, _ = self.run_probe_body(prefix=f"BASH_VERSION='{version}'; OSTYPE={ostype}; ")
+                self.assertEqual((result.returncode, result.stdout, result.stderr), (0, b"ci-bash-ready\n", b""))
+                # Feed the executed probe's raw result through the Windows
+                # override path, including spaces and an 8.3 installation alias.
+                for candidate in (r"D:\MSYS installation\usr\bin\bash.exe",
+                                  r"C:\PROGRA~1\Git\usr\bin\bash.exe"):
+                    with self.subTest(candidate=candidate), patch.object(shell.sys, "platform", "win32"), patch.object(
+                            shell, "Path", side_effect=self.candidate_path), patch.object(
+                            shell.os, "access", return_value=True), patch.object(shell, "_absolute_which") as which, patch.object(
+                            shell.subprocess, "run", return_value=result) as run, patch.object(
+                            shell.sys, "stdout") as stdout, patch.object(shell.sys, "stderr") as stderr:
+                        self.assertEqual(shell.bash_executable(candidate), candidate)
+                    which.assert_not_called()
+                    run.assert_called_once()
+                    self.assertEqual(run.call_args.args[0][0], candidate)
+                    self.assertEqual(run.call_args.kwargs["timeout"], 2)
+                    stdout.write.assert_not_called()
+                    stderr.write.assert_not_called()
+
+    def test_actual_windows_probe_refuses_other_identities_despite_msystem(self):
+        for msystem in ("", "UCRT64", "MINGW64"):
+            for ostype in ("", "linux-gnu", "linux-musl", "unknown", "cygwin-extra", "CYGWIN", "darwin"):
+                # WSL and caller-supplied Windows identities cannot override the
+                # actual shell intrinsics. Hooks must also remain filtered.
+                untrusted = dict(MSYSTEM=msystem, WSL_DISTRO_NAME="Ubuntu", WSL_INTEROP="untrusted",
+                                 OSTYPE="cygwin", BASH_VERSION="5.3.20(2)-release",
+                                 BASH_ENV="untrusted", ENV="untrusted", SHELLOPTS="untrusted", BASHOPTS="untrusted")
+                untrusted["BASH_FUNC_exit%%"] = "() { return 0; }"
+                with self.subTest(msystem=msystem, ostype=ostype), patch.dict(os.environ, untrusted):
+                    result, script = self.run_probe_body(prefix=f"BASH_VERSION='5.3.20(2)-release'; OSTYPE='{ostype}'; ")
+                self.assert_refusal_observations(result, script, 12, "ostype")
+                self.assertIn(b"BASH_VERSION=5.3.20\\(2\\)-release OSTYPE=" + (ostype.encode("ascii") or b"''"),
+                              result.stderr)
+
+    def test_actual_documented_cygwin_identity_still_refuses_empty_bash_version(self):
+        with patch.dict(os.environ, MSYSTEM="UCRT64"):
+            result, script = self.run_probe_body(prefix="BASH_VERSION=; OSTYPE=cygwin; ")
+        self.assert_refusal_observations(result, script, 11, "bash-version")
+        self.assertEqual(result.stderr, b"stage=bash-version BASH_VERSION='' OSTYPE=cygwin\n")
 
     def test_actual_abort_without_guard_observations_leaves_body_stage_unknown(self):
         result, _ = self.run_probe_body(prefix="exit 1; ")
