@@ -72,6 +72,44 @@ class CaptureContract(unittest.TestCase):
         with patch.object(capture, "module", return_value=self.comparator()):
             self.assertEqual(capture.ambient_receipt(self.junit(property_too=True)), RECEIPT)
 
+    def test_exact_ctest_and_google_test_producer_identities(self):
+        identities = (
+            (None, "AmbientDeterminismReceipt.EmitsConstructorAndEvolvedHashes", True),
+            ("AmbientDeterminismReceipt", "EmitsConstructorAndEvolvedHashes", True),
+            (None, "Other.AmbientDeterminismReceipt.EmitsConstructorAndEvolvedHashes", False),
+            ("Other", "EmitsConstructorAndEvolvedHashes", False),
+            (None, "EmitsConstructorAndEvolvedHashes", False),
+            (None, "AmbientDeterminismReceipt.Other", False),
+            (None, "", False),
+            (None, None, False),
+        )
+        for classname, name, accepted in identities:
+            with self.subTest(classname=classname, name=name):
+                path = self.junit(property_too=True)
+                tree = ET.parse(path)
+                case = tree.getroot().find("testcase")
+                if classname is not None:
+                    case.set("classname", classname)
+                if name is None:
+                    del case.attrib["name"]
+                else:
+                    case.set("name", name)
+                tree.write(path)
+                with patch.object(capture, "module", return_value=self.comparator()):
+                    if accepted:
+                        self.assertEqual(capture.ambient_receipt(path), RECEIPT)
+                    else:
+                        with self.assertRaisesRegex(ValueError, "unexpected testcase"):
+                            capture.ambient_receipt(path)
+
+    def test_unrelated_disabled_case_does_not_invalidate_attributed_receipt(self):
+        path = self.junit(property_too=True)
+        tree = ET.parse(path)
+        ET.SubElement(tree.getroot(), "testcase", name="Unrelated", status="disabled")
+        tree.write(path)
+        with patch.object(capture, "module", return_value=self.comparator()):
+            self.assertEqual(capture.ambient_receipt(path), RECEIPT)
+
     def test_zero_duplicate_failed_and_unattributed_receipts_refuse(self):
         for arguments in ({"producers": 0}, {"producers": 2}, {"duplicate": True},
                           {"failed": "failure"}, {"failed": "error"}, {"failed": "skipped"}, {"suite": True}):
@@ -91,6 +129,27 @@ class CaptureContract(unittest.TestCase):
                 else:
                     with self.assertRaisesRegex(ValueError, "unevaluated"):
                         capture.ambient_receipt(path)
+
+    def test_unevaluated_receipt_testcases_refuse(self):
+        for field, value in (("status", "disabled"), ("status", "notrun"),
+                             ("status", "skipped"), ("status", "unknown"), ("status", ""),
+                             ("result", "suppressed"), ("result", "skipped"),
+                             ("result", "unknown"), ("result", "")):
+            with self.subTest(field=field, value=value):
+                path = self.junit(property_too=True)
+                tree = ET.parse(path)
+                tree.getroot().find("testcase").set(field, value)
+                tree.write(path)
+                with patch.object(capture, "module", return_value=self.comparator()), self.assertRaisesRegex(ValueError, "unevaluated"):
+                    capture.ambient_receipt(path)
+
+    def test_explicit_success_status_and_result_are_accepted(self):
+        path = self.junit()
+        tree = ET.parse(path)
+        tree.getroot().find("testcase").attrib.update(status="run", result="completed")
+        tree.write(path)
+        with patch.object(capture, "module", return_value=self.comparator()):
+            self.assertEqual(capture.ambient_receipt(path), RECEIPT)
 
     def test_receipt_parser_error_and_changed_ceiling_refuse(self):
         parser = types.SimpleNamespace(_parse_receipt=lambda *_: {**RECEIPT, "ceiling": "1024"}, InputError=ValueError)
@@ -150,6 +209,25 @@ class CaptureContract(unittest.TestCase):
                 with self.subTest(shard=shard, attempt=attempt), \
                         self.assertRaisesRegex(ValueError, "ASan shard binary digests differ"):
                     capture.asan_producers(self.asan_binding(), records)
+
+    def test_asan_shard_records_split_google_test_receipt_identity(self):
+        path = self.junit()
+        tree = ET.parse(path)
+        tree.getroot().find("testcase").attrib.update(
+            classname="AmbientDeterminismReceipt", name="EmitsConstructorAndEvolvedHashes")
+        tree.write(path)
+        binary = self.root / "common_tests"
+        binary.write_bytes(b"binary digest fixture")
+        args = types.SimpleNamespace(lane="asan", expected_sha=HEAD, shard=1,
+                                     binary=binary, junit=path,
+                                     output=self.root / "qualification-shard.json")
+        outcomes = dict.fromkeys(capture.LANES["asan"][2], "success")
+        with patch.object(capture, "source_identity", return_value=self.asan_binding()), \
+                patch.dict(capture.os.environ, {"QUALIFICATION_PRODUCERS": json.dumps(outcomes)}), \
+                patch.object(capture, "module", return_value=self.comparator()):
+            capture.write_asan_shard(args)
+        self.assertIn("ambient", capture.read_json(args.output))
+        self.assertEqual(capture.read_json(args.output)["ambient"], RECEIPT)
 
     def write_asan_capture(self, shard_attempts=(2, 2)):
         binary = self.root / "common_tests"

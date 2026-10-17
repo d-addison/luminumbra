@@ -39,7 +39,9 @@ def main() -> int:
     if len(cases) != 1:
         return fail(f"expected one {args.test!r} result, found {len(cases)}")
     case = cases[0]
-    if case.get("status") not in (None, "run") or case.find("skipped") is not None:
+    if (case.find("skipped") is not None
+            or case.get("status") not in (None, "run")
+            or case.get("result") not in (None, "completed")):
         return fail("the benchmark was skipped or unevaluated")
 
     if measurement.get("schema") != "luminumbra.performance_measurement.v3":

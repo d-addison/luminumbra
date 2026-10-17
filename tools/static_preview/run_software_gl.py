@@ -11,6 +11,41 @@ import tempfile
 import xml.etree.ElementTree as ET
 
 
+# Exact registrations in test/rendering/static_preview_render_test.cpp. Keep the
+# evidence inventory explicit so a removed obligation cannot be substituted.
+EXPECTED_CASES = frozenset({
+    ("StaticPreviewRendererProfile", "NativeRequiresExactPinsAndRefusesSoftwareIdentities"),
+} | {
+    ("StaticPreviewRender", name) for name in (
+        "ProductionBackgroundDepthCoverageAndShaderBindingsAgree",
+        "OrthographicDepthKeepsApparentSizeAndNearestSurfaceWins",
+        "OrthographicPanZoomAndResizeChangeActualCoverage",
+        "OrthographicSpecularUsesParallelRaysAndPerspectiveRestoresPointEye",
+        "DistantAuthoredPositionsRemainFiniteBeyondBinary16Range",
+        "TransformUpdatesReuseImmutableMeshAndChangeActualPixels",
+        "TrueSamplerWrapChangesSamplingWithoutChangingRawGeometry",
+        "MaskUsesNumericCutoffAndOpaqueIgnoresTextureAlpha",
+        "NormalBasisUsesRawUvAndNormalScaleChangesActualLighting",
+        "FullAffineMirrorPreservesWindingAndShearRemainsVisible",
+        "AuthoredRgbEmissionAndMaterialOcclusionReachProductionLighting",
+        "UnsupportedMaterialRefusesAndDoesNotConsumeFrameSequence",
+        "RepeatedFailedUploadsReleaseResourcesAndPreserveSuccessfulCache",
+        "TerrainSnowPreservesAuthoredMaterialButStillAffectsLegacySurface",
+    )
+})
+
+
+def validate_report(root):
+    """Require the exact successful GoogleTest inventory before claiming a render pass."""
+    cases = root.findall('.//testcase')
+    if (len(cases) != len(EXPECTED_CASES)
+            or {(x.get('classname'), x.get('name')) for x in cases} != EXPECTED_CASES):
+        raise RuntimeError('Expected fourteen production rendering tests and one renderer-profile test')
+    if any(x.find('skipped') is not None or x.find('failure') is not None or x.find('error') is not None or
+           x.get('status') != 'run' or x.get('result') not in (None, 'completed') for x in cases):
+        raise RuntimeError('Rendering tests contain a skipped, failed or unexecuted case')
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--binary', required=True)
@@ -56,12 +91,7 @@ def main():
             if result.returncode:
                 raise RuntimeError(f'Production software rendering tests exited {result.returncode}')
             root = ET.parse(output / 'tests.xml').getroot()
-            cases = root.findall('.//testcase')
-            if len(cases) != 15 or len({(x.get('classname'), x.get('name')) for x in cases}) != 15:
-                raise RuntimeError('Expected fourteen production rendering tests and one renderer-profile test')
-            if any(x.find('skipped') is not None or x.find('failure') is not None or
-                   x.get('status') != 'run' for x in cases):
-                raise RuntimeError('Rendering tests contain a skipped, failed or unexecuted case')
+            validate_report(root)
             print(f'Software GL: 14 actual llvmpipe cases and one profile test passed; artifacts: {output}')
     finally:
         if write_fd >= 0:

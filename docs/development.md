@@ -173,9 +173,10 @@ GCC/MSVC keep four CTest workers and a 180-second default; UCRT64 keeps four
 workers and 360 seconds. Job limits remain 60, 90 and 85 minutes respectively.
 
 The required `Linux / GCC`, `Windows / MSVC`, `Windows / MSYS2 UCRT64` and
-`Linux / GCC ASan` checks are ordinary aggregates scheduled with `always()`.
-They reject drafts, missing draft metadata, cancellations and missing or
-unsuccessful expected producers. GCC and MSVC retain their Python-only route;
+`Linux / GCC ASan` checks are ordinary aggregates. Workflow cancellation stops
+aggregates with valid dependencies; invalid dependencies still reach an explicit
+failure step. They reject drafts, missing draft metadata, cancellations and
+missing or unsuccessful expected producers. GCC and MSVC retain their Python-only route;
 UCRT64 retains its path/event gates and also builds on devel pushes to seed its
 trusted cache. Manual native qualification captures instead use a single full-suite
 producer, explicitly distinguished from two-shard evidence. Their existing

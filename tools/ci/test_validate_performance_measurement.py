@@ -16,7 +16,8 @@ TEST_NAME = "WorldgenPreviewTest.PerFrameRenderProducesComparableObservation"
 
 class PerformanceMeasurementValidatorTest(unittest.TestCase):
     def run_validator(
-        self, *, junit_pass: bool = True, absolute_threshold: bool = False, status: str | None = None
+        self, *, junit_pass: bool = True, absolute_threshold: bool = False,
+        execution: str = "", child: str = "", status: str | None = None
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -26,8 +27,8 @@ class PerformanceMeasurementValidatorTest(unittest.TestCase):
             failure = "" if junit_pass else '<failure message="measurement failed" />'
             status_attribute = "" if status is None else f' status="{status}"'
             report.write_text(
-                f'<testsuite><testcase name="{TEST_NAME}" time="0.1"{status_attribute}>'
-                f"{failure}</testcase></testsuite>",
+                f'<testsuite><testcase name="{TEST_NAME}" time="0.1"{status_attribute} {execution}>'
+                f"{failure}{child}</testcase></testsuite>",
                 encoding="utf-8",
             )
             samples = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
@@ -85,6 +86,21 @@ class PerformanceMeasurementValidatorTest(unittest.TestCase):
                 else:
                     self.assertEqual(completed.returncode, 1, completed.stderr)
                     self.assertIn("unevaluated", completed.stderr)
+
+    def test_unevaluated_benchmark_evidence_is_rejected(self) -> None:
+        for field, value in (("status", "disabled"), ("status", "notrun"),
+                             ("status", "skipped"), ("status", "unknown"), ("status", ""),
+                             ("result", "suppressed"), ("result", "skipped"),
+                             ("result", "unknown"), ("result", "")):
+            with self.subTest(field=field, value=value):
+                completed = self.run_validator(execution=f'{field}="{value}"')
+                self.assertEqual(completed.returncode, 1)
+                self.assertIn("unevaluated", completed.stderr)
+        self.assertEqual(self.run_validator(child="<skipped/>").returncode, 1)
+
+    def test_run_completed_evidence_is_accepted(self) -> None:
+        completed = self.run_validator(execution='status="run" result="completed"')
+        self.assertEqual(completed.returncode, 0, completed.stderr)
 
     def test_absolute_machine_threshold_is_rejected(self) -> None:
         self.assertEqual(self.run_validator(absolute_threshold=True).returncode, 1)
