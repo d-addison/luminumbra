@@ -239,6 +239,8 @@ add_executable(common_tests
     common/FarEditedBake_test.cpp
     common/GameSessionHeadlessWorld_test.cpp
     common/SimBudgetTelemetry_test.cpp
+    # Deterministic work ceilings and injected negative gates (issue #396).
+    common/DeterministicWorkBudget_test.cpp
     common/HeavyComparison_test.cpp
     common/SimBudgetProfile_test.cpp
     ../src/luminumbra_server/modes/SmokeArtifact.cpp
@@ -666,6 +668,9 @@ endif()
 # default-OFF, so a headless flip is vacuous — this is the non-vacuous proof).
 add_executable(pass_context_test
     rendering/pass_context_test.cpp
+    # Evidence reuse and column-local invalidation on both scatter backends.
+    rendering/foliage_rebuild_test.cpp
+    # Includes deterministic CPU/compute work budgets, idle zero and stale results.
 )
 
 target_compile_definitions(pass_context_test PRIVATE
@@ -1894,7 +1899,14 @@ if(LUMINUMBRA_ENABLE_STATIC_PREVIEW)
     luminumbra_configure_first_party_target(viewport_protocol_test)
     gtest_discover_tests(viewport_protocol_test PROPERTIES LABELS "authoring;tools" TIMEOUT 30)
 endif()
+add_executable(frame_attribution_test rendering/frame_attribution_test.cpp
+    ../src/luminumbra_client/app/FrameAttribution.cpp)
+target_include_directories(frame_attribution_test PRIVATE ../src)
+target_link_libraries(frame_attribution_test PRIVATE gtest_main)
+luminumbra_configure_first_party_target(frame_attribution_test)
+
 set(LUMINUMBRA_GTEST_TARGETS
+    frame_attribution_test
     graphics_preset_classifier_test
     hardware_info_test
     far_volume_tile_test
@@ -2095,6 +2107,8 @@ set_tests_properties(ShieldRtSpike PROPERTIES
 
 # Simulation telemetry captures require the standard-library Python validator.
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME FrameAttributionWiringPython COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/test/rendering/test_frame_attribution_wiring.py")
 set(_common_isa_compiler_args --compiler "${CMAKE_CXX_COMPILER}")
 if(MSVC)
     list(APPEND _common_isa_compiler_args --msvc)

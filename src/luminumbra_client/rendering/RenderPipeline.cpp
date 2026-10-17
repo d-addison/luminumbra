@@ -3349,12 +3349,15 @@ void RenderPipeline::execute_stage_foliage(const Camera& camera) {
         foliage_ctx.frozen_replay = m_far_world_paired;
         begin_gpu_pass_timer(GpuTimerPass::Foliage);
         const std::size_t foliage_drawn = m_foliage_pass->execute(foliage_ctx, camera);
-        // Stats moved out of FoliagePass::execute (-T17): bump only when
-        // the pass actually drew (return > 0), so a disabled/empty no-op frame does
-        // not corrupt foliage_draws/foliage_instances_drawn.
-        if (foliage_drawn > 0) {
+        // Submission is observable even when the indirect count has no CPU readback.
+        if (foliage_drawn > 0 || (!m_foliage_pass->frame_instance_count_known() &&
+                                  m_foliage_pass->last_draw_calls() > 0)) {
             m_last_render_pass_stats.foliage_draws += m_foliage_pass->last_draw_calls();
             m_last_render_pass_stats.foliage_instances_drawn += foliage_drawn;
+            m_last_render_pass_stats.foliage_instance_capacity =
+                m_foliage_pass->instance_capacity();
+            m_last_render_pass_stats.foliage_instance_count_known =
+                m_foliage_pass->frame_instance_count_known();
         }
         end_gpu_pass_timer(GpuTimerPass::Foliage);
         glBindVertexArray(0);
@@ -5626,6 +5629,7 @@ namespace {
 
 constexpr uint32_t kLtexMagic = 0x5845544C; // 'LTEX' little-endian
 constexpr uint16_t kLtexVersion = 1;
+
 template<typename T>
 bool ReadPod(std::ifstream& in, T& value) {
     in.read(reinterpret_cast<char*>(&value), sizeof(T));

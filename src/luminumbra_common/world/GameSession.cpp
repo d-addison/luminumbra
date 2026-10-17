@@ -1111,7 +1111,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
         budget.Next(Stage::Events, [&] { return m_simulationEventBus.pending_count(); });
         m_simulationEventBus.drain(current_tick);
         // The v2 events stage measures only the ordered drain. Region scheduling
-        // has no telemetry stage or consumer work counter in this foundation.
+        // records its separate time-free work items after the timed stages.
         budget.Finish();
         RunRegionScheduler(current_tick);
         if (m_regionFault)
@@ -1540,6 +1540,13 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
             LatchRegionFault(current_tick, error.what());
         }
     }
+    using luminumbra::simulation::SimWork;
+    m_simBudgetTelemetry.RecordWork(SimWork::ActiveRegionRecords,
+                                    current_tick,
+                                    m_activeRegionsEnabled ? m_regionSchedule.ledger_records : 0);
+    m_simBudgetTelemetry.RecordWork(SimWork::ActiveRegionDue,
+                                    current_tick,
+                                    m_activeRegionsEnabled ? m_regionSchedule.due.size() : 0);
 }
 
 void GameSession::SetRegionSchedulerConfig(RegionSchedulerConfig config) {

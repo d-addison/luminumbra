@@ -41,6 +41,15 @@ inline void AppendSimBudgetArtifact(nlohmann::json& artifact,
         {"work_replay_match", replay.Enabled() && first.WorkMatches(replay)},
         {"stages", std::move(stages)},
     };
+    nlohmann::json counters = nlohmann::json::array();
+    for (std::size_t i = 0; i < kSimWorkNames.size(); ++i) {
+        nlohmann::json trace = nlohmann::json::array();
+        for (const auto& sample : first.WorkItems()[i])
+            trace.push_back({{"tick", sample.tick}, {"work", sample.work}});
+        counters.push_back({{"name", kSimWorkNames[i]}, {"work_trace", std::move(trace)}});
+    }
+    artifact["sim_budget"]["work_items"] = {{"schema", "luminumbra.sim_work.v1"},
+                                            {"counters", std::move(counters)}};
 }
 
 // Evaluates a budget profile against the collector's stage ticks. The engine emits no residency
