@@ -174,20 +174,27 @@ nlohmann::json::json_pointer GenPtr(const std::string& dotted) {
 
 bool ParseFloat(const std::string& s, float& out) {
     const char* b = s.c_str();
-    auto [p, ec] = std::from_chars(b, b + s.size(), out);
-    return ec == std::errc();
+    const char* end = b + s.size();
+    auto [p, ec] = std::from_chars(b, end, out);
+    return ec == std::errc() && p == end && std::isfinite(out);
 }
 bool ParseInt(const std::string& s, long long& out) {
+    // Match the form parser: exact integer plus an optional zero fractional suffix.
     const char* b = s.c_str();
-    auto [p, ec] = std::from_chars(b, b + s.size(), out);
-    if (ec == std::errc())
+    const char* end = b + s.size();
+    auto [p, ec] = std::from_chars(b, end, out);
+    if (ec != std::errc())
+        return false;
+    if (p == end)
         return true;
-    float f = 0.0f;
-    if (ParseFloat(s, f)) {
-        out = static_cast<long long>(f);
-        return true;
+    if (*p != '.' || ++p == end)
+        return false;
+    // Work is bounded by this one persisted override value's length.
+    for (; p != end; ++p) {
+        if (*p != '0')
+            return false;
     }
-    return false;
+    return true;
 }
 
 } // namespace
