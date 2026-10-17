@@ -86,12 +86,13 @@ void ExpectStageSamples(const SimBudgetTelemetry& trace, std::uint64_t ticks, bo
         ASSERT_EQ(samples.size(), ticks);
         for (std::size_t i = 0; i < samples.size(); ++i) {
             EXPECT_EQ(samples[i].tick, i + 1);
-            if (identity == SimBudgetStage::Wind || identity == SimBudgetStage::Weather)
+            if (identity == SimBudgetStage::Wind || identity == SimBudgetStage::Weather) {
                 EXPECT_EQ(samples[i].work, 64u * 64u);
-            else if (identity == SimBudgetStage::WindWeather)
+            } else if (identity == SimBudgetStage::WindWeather) {
                 EXPECT_EQ(samples[i].work, 2u * 64u * 64u);
-            else if (identity == SimBudgetStage::ServerPhysics)
+            } else if (identity == SimBudgetStage::ServerPhysics) {
                 EXPECT_EQ(samples[i].work, 1u);
+            }
         }
     }
 }
@@ -178,6 +179,15 @@ protected:
         }
         return result;
     }
+    static void ExpectWorkItemTicks(const SimBudgetTelemetry& trace, std::uint64_t ticks) {
+        for (std::size_t counter = 0; counter < trace.WorkItems().size(); ++counter) {
+            SCOPED_TRACE(counter);
+            const auto& samples = trace.WorkItems()[counter];
+            ASSERT_EQ(samples.size(), ticks);
+            for (std::size_t i = 0; i < samples.size(); ++i)
+                EXPECT_EQ(samples[i].tick, i + 1);
+        }
+    }
 };
 
 TEST_P(SimBudgetWorldParity, Populated3600TicksPreserveWorldHashAndReplayWork) {
@@ -218,9 +228,12 @@ TEST_P(SimBudgetWorldParity, Populated3600TicksPreserveWorldHashAndReplayWork) {
             untraced_hash = hash;
             for (const auto& samples : runner.Session()->GetSimBudgetTelemetry().SamplesByStage())
                 EXPECT_TRUE(samples.empty());
+            for (const auto& samples : runner.Session()->GetSimBudgetTelemetry().WorkItems())
+                EXPECT_TRUE(samples.empty());
         } else {
             EXPECT_EQ(hash, untraced_hash);
             const auto& trace = runner.Session()->GetSimBudgetTelemetry();
+            ASSERT_NO_FATAL_FAILURE(ExpectWorkItemTicks(trace, ticks));
             ASSERT_NO_FATAL_FAILURE(ExpectStageSamples(trace, ticks, GetParam()));
             ExpectWorkSummary(trace, ticks, GetParam());
             // Capture before the save toggle clears session telemetry.
@@ -247,7 +260,7 @@ TEST_P(SimBudgetWorldParity, Populated3600TicksPreserveWorldHashAndReplayWork) {
 INSTANTIATE_TEST_SUITE_P(ActiveRegions,
                          SimBudgetWorldParity,
                          testing::Bool(),
-                         [](const testing::TestParamInfo<bool>& info) {
-                             return info.param ? "Enabled" : "Disabled";
+                         [](const testing::TestParamInfo<bool>& parameter) {
+                             return parameter.param ? "Enabled" : "Disabled";
                          });
 } // namespace

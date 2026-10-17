@@ -14,6 +14,7 @@
 #include <luminumbra/core/Types.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <glm/glm.hpp>
 #include <memory>
@@ -40,6 +41,15 @@ public:
     void startup();
     void shutdown();
     void update(float delta_time);
+    struct WorkItems {
+        std::uint64_t bodies = 0;
+        std::uint64_t characters = 0;
+    };
+    // Input bodies for the latest scene update, plus character steps since it.
+    // Diagnostic only; static bodies count too. No solver/timing estimates.
+    [[nodiscard]] WorkItems work_items() const {
+        return m_work_items;
+    }
     bool is_started() const {
         return m_started;
     }
@@ -189,6 +199,7 @@ public:
     }
 
 private:
+    WorkItems m_work_items{};
     // Jolt core components
     std::unique_ptr<JPH::PhysicsSystem> m_jolt_system;
     std::unique_ptr<JPH::TempAllocator> m_temp_allocator;

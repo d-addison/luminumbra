@@ -41,13 +41,14 @@ BOOL WINAPI Inspect(HANDLE file, LPBY_HANDLE_FILE_INFORMATION info);
 BOOL WINAPI Close(HANDLE file);
 BOOL WINAPI Dispose(HANDLE file, FILE_INFO_BY_HANDLE_CLASS kind, LPVOID info, DWORD bytes);
 BOOL WINAPI Publish(LPCWSTR source, LPCWSTR destination, DWORD flags);
-BOOL WINAPI Retain(HANDLE process,
-                   HANDLE file,
-                   HANDLE destination_process,
-                   LPHANDLE retained,
-                   DWORD access,
-                   BOOL inherit,
-                   DWORD options);
+HANDLE WINAPI Retain(HANDLE file, DWORD access, DWORD share, DWORD flags);
+BOOL WINAPI RetainDuplicate(HANDLE process,
+                            HANDLE file,
+                            HANDLE destination_process,
+                            LPHANDLE retained,
+                            DWORD access,
+                            BOOL inherit,
+                            DWORD options);
 int OpenDescriptor(intptr_t file, int flags);
 std::FILE* OpenStream(int file, const char* mode);
 HANDLE WINAPI Open(LPCWSTR path,
@@ -62,7 +63,8 @@ HANDLE WINAPI Open(LPCWSTR path,
 #define SetFileInformationByHandle NativeRace::Dispose
 #define CreateFileW NativeRace::Open
 #define MoveFileExW NativeRace::Publish
-#define DuplicateHandle NativeRace::Retain
+#define ReOpenFile NativeRace::Retain
+#define DuplicateHandle NativeRace::RetainDuplicate
 #define _open_osfhandle NativeRace::OpenDescriptor
 #define _fdopen NativeRace::OpenStream
 #else
@@ -93,6 +95,7 @@ int InterceptRename(int from, const char* source, int to, const char* destinatio
 #undef SetFileInformationByHandle
 #undef CreateFileW
 #undef MoveFileExW
+#undef ReOpenFile
 #undef DuplicateHandle
 #undef _open_osfhandle
 #undef _fdopen
@@ -121,7 +124,9 @@ enum class Boundary : std::uint8_t {
     StreamFailure,
     RemovalDenied,
     PublicationLinkedOccupant,
-    FileCreationDenied
+    FileCreationDenied,
+    PublicationBindingDenied,
+    PublicationSourceReplaced
 };
 struct Replacement {
     std::filesystem::path target;
@@ -214,6 +219,11 @@ bool BeforePublish(const std::filesystem::path& source, const std::filesystem::p
         active->fired = true;
         std::filesystem::rename(source, active->moved);
     }
+    if (active->boundary == Boundary::PublicationSourceReplaced) {
+        active->fired = true;
+        std::filesystem::rename(source, active->moved);
+        std::filesystem::rename(active->replacement, source);
+    }
     if (active->boundary == Boundary::PublicationDenied ||
         active->boundary == Boundary::PublicationUnavailable) {
         active->fired = true;
@@ -229,13 +239,26 @@ bool BeforePublish(const std::filesystem::path& source, const std::filesystem::p
 }
 
 #if defined(_WIN32)
-BOOL WINAPI Retain(HANDLE process,
-                   HANDLE file,
-                   HANDLE destination_process,
-                   LPHANDLE retained,
-                   DWORD access,
-                   BOOL inherit,
-                   DWORD options) {
+HANDLE WINAPI Retain(HANDLE file, DWORD access, DWORD share, DWORD flags) {
+    if (Fail(Boundary::RetentionFailure)) {
+        ::SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return INVALID_HANDLE_VALUE;
+    }
+    const auto result = ::ReOpenFile(file, access, share, flags);
+    if (result != INVALID_HANDLE_VALUE)
+        HandleCapture::Observe(result);
+    return result;
+}
+
+// Keep both real retention APIs observable so reverting metadata-only retention
+// still exercises the same lifetime assertions and injected failures.
+BOOL WINAPI RetainDuplicate(HANDLE process,
+                            HANDLE file,
+                            HANDLE destination_process,
+                            LPHANDLE retained,
+                            DWORD access,
+                            BOOL inherit,
+                            DWORD options) {
     if (Fail(Boundary::RetentionFailure)) {
         ::SetLastError(ERROR_NOT_ENOUGH_MEMORY);
         return FALSE;
@@ -245,6 +268,14 @@ BOOL WINAPI Retain(HANDLE process,
     if (result)
         HandleCapture::Observe(*retained);
     return result;
+}
+
+// Also retain the path-based interception: the hard-link regression must hit
+// the real legacy API and demonstrate its same-file success when reverted.
+BOOL WINAPI Publish(LPCWSTR source, LPCWSTR destination, DWORD flags) {
+    if (!BeforePublish(source, destination))
+        return FALSE;
+    return ::MoveFileExW(source, destination, flags);
 }
 
 int OpenDescriptor(intptr_t file, int flags) {
@@ -263,12 +294,6 @@ std::FILE* OpenStream(int file, const char* mode) {
     return ::_fdopen(file, mode);
 }
 
-BOOL WINAPI Publish(LPCWSTR source, LPCWSTR destination, DWORD flags) {
-    if (!BeforePublish(source, destination))
-        return FALSE;
-    return ::MoveFileExW(source, destination, flags);
-}
-
 bool Matches(const BY_HANDLE_FILE_INFORMATION& info) {
     auto* active = Active();
     return active && info.dwVolumeSerialNumber == active->identity.dwVolumeSerialNumber &&
@@ -276,20 +301,46 @@ bool Matches(const BY_HANDLE_FILE_INFORMATION& info) {
            info.nFileIndexLow == active->identity.nFileIndexLow;
 }
 
+bool IsTarget(HANDLE file) {
+    auto* active = Active();
+    if (!active)
+        return false;
+    // Scope handle-only faults to the armed object, including long/8.3 aliases.
+    // Parent validation must not consume a fault intended for a new file.
+    const auto target = ::CreateFileW(active->target.c_str(),
+                                      FILE_READ_ATTRIBUTES,
+                                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                      nullptr,
+                                      OPEN_EXISTING,
+                                      FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                                      nullptr);
+    if (target == INVALID_HANDLE_VALUE)
+        return false;
+    BY_HANDLE_FILE_INFORMATION expected{};
+    BY_HANDLE_FILE_INFORMATION actual{};
+    const bool identified = ::GetFileInformationByHandle(target, &expected) &&
+                            ::GetFileInformationByHandle(file, &actual);
+    ::CloseHandle(target);
+    return identified && actual.dwVolumeSerialNumber == expected.dwVolumeSerialNumber &&
+           actual.nFileIndexHigh == expected.nFileIndexHigh &&
+           actual.nFileIndexLow == expected.nFileIndexLow;
+}
+
 BOOL WINAPI Inspect(HANDLE file, LPBY_HANDLE_FILE_INFORMATION info) {
     HandleCapture::Observe(file);
     auto* active = Active();
-    if (active && !active->fired && active->boundary == Boundary::IdentificationFailure) {
+    const bool target = active && !active->fired && IsTarget(file);
+    if (target && active->boundary == Boundary::IdentificationFailure) {
         active->fired = true;
         ::SetLastError(ERROR_ACCESS_DENIED);
         return FALSE;
     }
     const auto result = ::GetFileInformationByHandle(file, info);
-    if (result && active && !active->fired && active->boundary == Boundary::AfterCreation) {
+    if (result && target && active->boundary == Boundary::AfterCreation) {
         active->fired = true;
         std::filesystem::rename(active->target, active->moved);
     }
-    if (result && active && !active->fired && active->boundary == Boundary::UnknownIdentity) {
+    if (result && target && active->boundary == Boundary::UnknownIdentity) {
         active->fired = true;
         info->nFileIndexHigh = 0;
         info->nFileIndexLow = 0;
@@ -308,6 +359,17 @@ HANDLE WINAPI Open(LPCWSTR path,
                    DWORD flags,
                    HANDLE template_file) {
     auto* active = Active();
+    if (active && !active->fired && (access & DELETE) != 0 && active->target != path) {
+        // Source disappearance/replacement occurs before binding for rename.
+        // Destination collisions below occur at the rename syscall itself.
+        if (active->boundary == Boundary::PublicationSourceMissing ||
+            active->boundary == Boundary::PublicationSourceReplaced)
+            BeforePublish(path, active->target);
+        if (Fail(Boundary::PublicationBindingDenied)) {
+            ::SetLastError(ERROR_ACCESS_DENIED);
+            return INVALID_HANDLE_VALUE;
+        }
+    }
     if (active && active->target == path && disposition == CREATE_NEW &&
         Fail(Boundary::FileCreationDenied)) {
         ::SetLastError(ERROR_ACCESS_DENIED);
@@ -334,6 +396,20 @@ BOOL WINAPI Close(HANDLE file) {
 
 BOOL WINAPI Dispose(HANDLE file, FILE_INFO_BY_HANDLE_CLASS kind, LPVOID info, DWORD bytes) {
     auto* active = Active();
+    if (kind == FileRenameInfo) {
+        const auto* rename_info = static_cast<const FILE_RENAME_INFO*>(info);
+        const std::filesystem::path destination(
+            std::wstring(rename_info->FileName, rename_info->FileNameLength / sizeof(wchar_t)));
+        // Read the bound source name through its handle, never a guessed path.
+        std::vector<wchar_t> source(32768);
+        const auto length = ::GetFinalPathNameByHandleW(
+            file, source.data(), static_cast<DWORD>(source.size()), FILE_NAME_NORMALIZED);
+        if (length == 0 || length >= source.size())
+            throw std::runtime_error("Could not inspect bound publication source.");
+        if (!BeforePublish(std::filesystem::path(std::wstring(source.data(), length)), destination))
+            return FALSE;
+        return ::SetFileInformationByHandle(file, kind, info, bytes);
+    }
     BY_HANDLE_FILE_INFORMATION identity{};
     if (::GetFileInformationByHandle(file, &identity) &&
         (identity.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
@@ -593,6 +669,39 @@ TEST_F(CreatedWorldCleanup, PublicationKeepsBothNamesPinnedThroughRollbackInEith
     }
 }
 
+TEST_F(CreatedWorldCleanup, RetainedDescendantsAllowAncestorRenameWithoutLosingIdentity) {
+    for (const bool move_root : {false, true}) {
+        SCOPED_TRACE(move_root);
+        const NativeRace::HandleCapture handles;
+        CreatedWorldArtifacts artifacts;
+        const auto save = Root() / "created-world";
+        const auto directory = save / "chunks";
+        artifacts.create_root(save);
+        artifacts.create_directory(directory);
+        artifacts.write_file(directory / "empty.bin", "");
+        const auto temp = directory / "preset.tmp";
+        const auto destination = directory / "preset.json";
+        artifacts.write_file(temp, "owned bytes\n");
+        artifacts.reserve_file(destination);
+        artifacts.publish_file(temp, destination);
+        const auto original = move_root ? save : directory;
+        const auto moved = Root() / "moved-creation";
+        std::filesystem::rename(original, moved);
+        EXPECT_GE(handles.live(), 5u);
+        const auto payload = move_root ? moved / "chunks" : moved;
+        EXPECT_TRUE(std::filesystem::is_regular_file(payload / "empty.bin"));
+        EXPECT_EQ(Read(payload / "preset.json"), "owned bytes\n");
+        ASSERT_TRUE(std::filesystem::create_directory(original));
+        EXPECT_NE(artifacts.rollback().find("changed identity"), std::string::npos);
+        EXPECT_GE(handles.live(), 5u);
+        ASSERT_TRUE(std::filesystem::remove(original));
+        std::filesystem::rename(moved, original);
+        EXPECT_TRUE(artifacts.rollback().empty());
+        EXPECT_EQ(handles.live(), 0u);
+        EXPECT_FALSE(std::filesystem::exists(save));
+    }
+}
+
 TEST_F(CreatedWorldCleanup, FileRetentionAndIdentificationFailuresRefuseUncertainCleanup) {
     for (const auto boundary : {NativeRace::Boundary::RetentionFailure,
                                 NativeRace::Boundary::IdentificationFailure,
@@ -680,6 +789,40 @@ TEST_F(CreatedWorldCleanup, RefusedPublicationNeverClaimsARacingHardLinkToTheSou
 }
 
 #if defined(_WIN32)
+TEST_F(CreatedWorldCleanup, RefusedPublicationBindingPreservesEveryOwnersBytes) {
+    for (const auto boundary : {NativeRace::Boundary::PublicationBindingDenied,
+                                NativeRace::Boundary::PublicationSourceReplaced}) {
+        SCOPED_TRACE(static_cast<unsigned>(boundary));
+        const NativeRace::HandleCapture handles;
+        CreatedWorldArtifacts artifacts;
+        const auto save = Root() / "created-world";
+        const auto temp = save / "preset.tmp";
+        const auto destination = save / "preset.json";
+        artifacts.create_root(save);
+        artifacts.write_file(temp, "owned bytes\n");
+        artifacts.reserve_file(destination);
+        Write(Root() / "replacement", "other owner's bytes\n");
+        Arm(destination, boundary);
+        EXPECT_THROW(artifacts.publish_file(temp, destination), std::runtime_error);
+        ASSERT_TRUE(Race().fired);
+        EXPECT_GE(handles.live(), 3u);
+        EXPECT_FALSE(std::filesystem::exists(destination));
+        if (boundary == NativeRace::Boundary::PublicationSourceReplaced) {
+            EXPECT_EQ(Read(temp), "other owner's bytes\n");
+            EXPECT_EQ(Read(Race().moved), "owned bytes\n");
+            EXPECT_NE(artifacts.rollback().find("changed identity"), std::string::npos);
+            ASSERT_TRUE(std::filesystem::remove(temp));
+            std::filesystem::rename(Race().moved, temp);
+        }
+        EXPECT_EQ(Read(temp), "owned bytes\n");
+        EXPECT_TRUE(artifacts.rollback().empty());
+        EXPECT_EQ(handles.live(), 0u);
+        EXPECT_FALSE(std::filesystem::exists(save));
+        NativeRace::Active() = nullptr;
+        Race() = {};
+    }
+}
+
 TEST_F(CreatedWorldCleanup, FailedExclusiveCreationAbandonsOnlyItsVacantReservation) {
     const NativeRace::HandleCapture handles;
     CreatedWorldArtifacts artifacts;

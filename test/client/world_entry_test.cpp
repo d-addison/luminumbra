@@ -535,6 +535,33 @@ TEST_F(WorldEntryFilesystem, ReplacedRootWithSameSaveLayoutSurvivesRollback) {
     EXPECT_EQ(DiskBytes(moved), created_before);
 }
 
+TEST_F(WorldEntryFilesystem, DurableWriterPinsAllowAncestorRenameAndRollbackRetry) {
+    using Luminumbra::Persistence::WorldSaveService;
+    CreatedWorldArtifacts artifacts;
+    const auto save = root / "created-world";
+    artifacts.create_root(save);
+    artifacts.create_directory(save / "chunks");
+    artifacts.create_directory(save / "chunks/region");
+    std::vector<std::string> errors;
+    ASSERT_TRUE(WorldSaveService::write_file_durably(
+        save / "preset.json", "preset bytes\n", &errors, &artifacts));
+    ASSERT_TRUE(
+        WorldSaveService::write_file_durably(save / "world_info.json", "", &errors, &artifacts));
+    ASSERT_TRUE(WorldSaveService::write_file_durably(
+        save / "chunks/region/active-regions.arl", "ledger bytes\n", &errors, &artifacts));
+    ASSERT_TRUE(errors.empty());
+    const auto before = DiskBytes(save);
+    const auto moved = root / "moved-creation";
+    std::filesystem::rename(save, moved);
+    ASSERT_TRUE(std::filesystem::create_directory(save));
+    EXPECT_NE(artifacts.rollback().find("changed identity"), std::string::npos);
+    EXPECT_EQ(DiskBytes(moved), before);
+    ASSERT_TRUE(std::filesystem::remove(save));
+    std::filesystem::rename(moved, save);
+    EXPECT_TRUE(artifacts.rollback().empty());
+    EXPECT_FALSE(std::filesystem::exists(save));
+}
+
 TEST_F(WorldEntryFilesystem, UncreatedFileReservationDoesNotClaimLaterFile) {
     CreatedWorldArtifacts artifacts;
     const auto save = root / "created-world";
