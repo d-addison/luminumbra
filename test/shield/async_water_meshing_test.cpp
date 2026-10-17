@@ -979,6 +979,169 @@ TEST(AsyncWaterMeshing, GeneratorReplacementSettlesBudgetDeferredRequests) {
     CheckSynchronousSettlement(Settlement::Params);
 }
 
+TEST(AsyncWaterMeshing, TickStampedGenerationWaitsForDueAcrossExecutionBackends) {
+    for (const bool use_workers : {false, true}) {
+        for (const int step : {1, 2}) {
+            SCOPED_TRACE(use_workers);
+            SCOPED_TRACE(step);
+            JobSystem jobs;
+            if (use_workers) {
+                jobs.startup(1);
+            }
+            SHIELD_WorldSystem world(use_workers ? &jobs : nullptr,
+                                     nullptr,
+                                     Luminumbra::Test::SyntheticTerrainParams(),
+                                     1337);
+            world.begin_tick(0);
+            const IVec3 coords{0, 0, 0};
+            world.dispatch_generation_jobs(
+                std::vector<SHIELD_WorldSystem::ChunkGenerationRequest>{{coords, step}});
+            const auto chunk = world.find_streamed_chunk(coords);
+            ASSERT_NE(chunk, nullptr);
+            world.quiesce_streaming_jobs_for_save();
+            EXPECT_TRUE(chunk->pending_generation_ready.load());
+            EXPECT_EQ(chunk->get_state(), ChunkState::Loading);
+            // Empty and already-generated requests must neither replace the
+            // batch nor change the original tick-8 publication boundary.
+            world.begin_tick(1);
+            world.dispatch_generation_jobs(std::vector<IVec3>{});
+            world.dispatch_generation_jobs({coords});
+            EXPECT_EQ(world.find_streamed_chunk(coords), chunk);
+            entt::registry registry;
+            world.update(registry, std::vector<Vec3>{}, nullptr);
+            EXPECT_EQ(chunk->get_state(), ChunkState::Loading);
+            EXPECT_EQ(chunk->pending_lod.load(), -1);
+            EXPECT_EQ(world.get_last_streaming_budget_stats().scheduled_meshing, 0u);
+            world.activate_due(7);
+            EXPECT_EQ(chunk->get_state(), ChunkState::Loading);
+            world.begin_tick(8);
+            world.activate_due(8);
+            EXPECT_EQ(chunk->get_state(), ChunkState::Idle);
+            EXPECT_FALSE(chunk->pending_generation_ready.load());
+            EXPECT_EQ(chunk->mesh_version.load(), 0u);
+            // Meshing is a distinct dispatch, due eight ticks after this update.
+            world.update(registry, std::vector<Vec3>{}, nullptr);
+            world.quiesce_streaming_jobs_for_save();
+            world.activate_due(15);
+            EXPECT_EQ(chunk->mesh_version.load(), 0u);
+            world.begin_tick(16);
+            world.activate_due(16);
+            EXPECT_EQ(chunk->get_state(), ChunkState::Ready);
+            EXPECT_EQ(chunk->mesh_version.load(), 1u);
+            world.activate_due(16);
+            world.wait_for_streaming_jobs();
+            EXPECT_EQ(chunk->mesh_version.load(), 1u);
+        }
+    }
+}
+
+enum class ScheduledMeshInput : std::uint8_t {
+    Initial,
+    TerrainRemesh,
+    WaterOnly,
+    Promotion
+};
+
+TEST(AsyncWaterMeshing, TickStampedMeshesWaitForDueAcrossExecutionBackends) {
+    for (const bool use_workers : {false, true}) {
+        for (const auto input : {ScheduledMeshInput::Initial,
+                                 ScheduledMeshInput::TerrainRemesh,
+                                 ScheduledMeshInput::WaterOnly,
+                                 ScheduledMeshInput::Promotion}) {
+            SCOPED_TRACE(use_workers);
+            SCOPED_TRACE(static_cast<int>(input));
+            JobSystem jobs;
+            if (use_workers) {
+                jobs.startup(1);
+            }
+            auto params = Luminumbra::Test::SyntheticTerrainParams();
+            params.base_amplitude = 0.0f;
+            params.height_offset = 8.0f;
+            params.caves_enabled = false;
+            SHIELD_WorldSystem world(use_workers ? &jobs : nullptr, nullptr, params, 1337);
+            WaterSystem water(use_workers ? &jobs : nullptr, &world);
+            water.SetBootPaused(true);
+            world.SetWaterSystem(&water);
+            auto chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
+            FillDugPond(world, *chunk, 8);
+            if (input == ScheduledMeshInput::Promotion) {
+                chunk->material_data.clear();
+                world.GenerateChunkData(*chunk);
+            }
+            const auto expected = ReferenceMesh(world, water, *chunk);
+            ASSERT_FALSE(expected->mesh_indices.empty());
+            ASSERT_FALSE(expected->water_mesh_indices.empty());
+            if (input != ScheduledMeshInput::Initial) {
+                chunk->mesh_vertices = expected->mesh_vertices;
+                chunk->mesh_indices = expected->mesh_indices;
+                chunk->current_lod.store(input == ScheduledMeshInput::WaterOnly ? 0 : 1);
+                chunk->set_state(ChunkState::Ready);
+            }
+            if (input == ScheduledMeshInput::Promotion) {
+                chunk->sdf_data.clear();
+            }
+            ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+            world.begin_tick(0);
+            entt::registry registry;
+            world.update(registry, std::vector<Vec3>{}, nullptr);
+            EXPECT_EQ(chunk->mesh_version.load(), 0u);
+            EXPECT_EQ(chunk->water_mesh_version.load(), 0u);
+            EXPECT_EQ(chunk->pending_lod.load(), 0);
+            world.quiesce_streaming_jobs_for_save();
+            if (input == ScheduledMeshInput::Promotion) {
+                EXPECT_TRUE(chunk->sdf_data.empty());
+                EXPECT_FALSE(chunk->pending_sdf_data.empty());
+            }
+            // A completed worker or inline job still belongs to dispatch tick 0.
+            world.begin_tick(1);
+            world.update(registry, std::vector<Vec3>{}, nullptr);
+            world.activate_due(7);
+            EXPECT_EQ(chunk->mesh_version.load(), 0u);
+            EXPECT_EQ(chunk->water_mesh_version.load(), 0u);
+            EXPECT_EQ(chunk->pending_lod.load(), 0);
+            world.begin_tick(8);
+            world.activate_due(8);
+            const auto terrain_version = input == ScheduledMeshInput::WaterOnly ? 0u : 1u;
+            EXPECT_EQ(chunk->mesh_version.load(), terrain_version);
+            EXPECT_EQ(chunk->water_mesh_version.load(), 1u);
+            EXPECT_EQ(chunk->current_lod.load(), 0);
+            EXPECT_EQ(chunk->pending_lod.load(), -1);
+            EXPECT_EQ(chunk->get_state(), ChunkState::Ready);
+            ExpectVerticesEqual(chunk->mesh_vertices, expected->mesh_vertices);
+            EXPECT_EQ(chunk->mesh_indices, expected->mesh_indices);
+            ExpectVerticesEqual(chunk->water_mesh_vertices, expected->water_mesh_vertices);
+            EXPECT_EQ(chunk->water_mesh_indices, expected->water_mesh_indices);
+            world.activate_due(8);
+            world.wait_for_streaming_jobs();
+            EXPECT_EQ(chunk->mesh_version.load(), terrain_version);
+            EXPECT_EQ(chunk->water_mesh_version.load(), 1u);
+        }
+    }
+}
+
+TEST(AsyncWaterMeshing, UntickedInlineGenerationAndPromotionStillPublishOnCompletion) {
+    for (const int step : {1, 2}) {
+        SCOPED_TRACE(step);
+        SHIELD_WorldSystem world(
+            nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+        const IVec3 coords{0, 0, 0};
+        world.dispatch_generation_jobs(
+            std::vector<SHIELD_WorldSystem::ChunkGenerationRequest>{{coords, step}});
+        const auto chunk = world.find_streamed_chunk(coords);
+        ASSERT_NE(chunk, nullptr);
+        EXPECT_EQ(chunk->get_state(), ChunkState::Idle);
+        EXPECT_FALSE(chunk->pending_generation_ready.load());
+        entt::registry registry;
+        world.update(registry, std::vector<Vec3>{}, nullptr);
+        EXPECT_EQ(chunk->get_state(), ChunkState::Ready);
+        EXPECT_EQ(chunk->mesh_version.load(), 1u);
+        EXPECT_EQ(chunk->pending_lod.load(), -1);
+        EXPECT_EQ(world.promotion_dispatch_totals().chunks, step == 2 ? 1u : 0u);
+        world.activate_due(0);
+        EXPECT_EQ(chunk->mesh_version.load(), 1u);
+    }
+}
+
 TEST(AsyncWaterMeshing, WaterReplacementFencesAdmittedPromotionAndDeferredMeshes) {
     for (const bool promotion : {false, true}) {
         JobSystem jobs;

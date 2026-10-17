@@ -971,7 +971,8 @@ SHIELD_WorldSystem::dispatch_promotion_jobs(const std::vector<MeshingWorkItem>& 
         for (auto& job : normal_priority_jobs) {
             job();
         }
-        process_completed_promotion_jobs(/*force=*/true);
+        // Inline completion obeys the same activation schedule as worker completion.
+        process_completed_promotion_jobs(/*force=*/false);
     }
     return chunks_to_promote.size();
 }
@@ -5254,12 +5255,11 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(
         });
     }
 
+    // Both execution backends retain the original dispatch tick until publication.
+    batch.due_tick =
+        m_current_sim_tick >= 0 ? m_current_sim_tick + kActivationPipelineLatencyTicks : -1;
     if (m_job_system && !jobs.empty()) {
         batch.handle = m_job_system->dispatch_batch(jobs);
-        // tick-keyed activation stamp (inert until the
-        // barrier swap; -1 with no tick source = publish-when-drained).
-        batch.due_tick =
-            m_current_sim_tick >= 0 ? m_current_sim_tick + kActivationPipelineLatencyTicks : -1;
         const JobHandle handle = batch.handle;
         m_streaming_state.generation_batches.push_back(std::move(batch));
         return handle;
@@ -5269,7 +5269,7 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(
             job();
         }
         m_streaming_state.generation_batches.push_back(std::move(batch));
-        publish_completed_generation_jobs(/*force=*/true);
+        publish_completed_generation_jobs(/*force=*/false);
     }
     return {}; // inline execution, or every request was already generated
 }
@@ -5565,7 +5565,7 @@ SHIELD_WorldSystem::dispatch_meshing_jobs(std::span<const MeshingWorkItem> chunk
                          });
     batches.insert(position, std::move(mesh_batch));
     if (!m_job_system) {
-        process_completed_meshing_jobs(/*force=*/true);
+        process_completed_meshing_jobs(/*force=*/false);
     }
     const auto candidate_count = [](const std::vector<MeshingWorkItem>& items) {
         return static_cast<std::size_t>(
