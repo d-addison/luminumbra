@@ -951,7 +951,10 @@ def _replace_outputs(
     temporary_paths: list[Path] = []
     replaced: list[Path] = []
     digests: dict[Path, bytes] = {}
+    backup_digests: dict[Path, bytes] = {}
+    identities: dict[Path, tuple[Path, os.stat_result]] = {}
     published: dict[Path, bytes] = {}
+    keep_backups = False
 
     def stage(path: Path, data: bytes, mode: int | None, private: bool) -> Path:
         # A 128-bit random name plus exclusive creation prevents clobbering
@@ -965,6 +968,19 @@ def _replace_outputs(
             temporary.chmod(mode)
         return temporary
 
+    def verify_publication(path: Path) -> None:
+        target, identity = identities[path]
+        before = path.lstat()
+        if (path.resolve() != target or not stat.S_ISREG(before.st_mode)
+                or not identity.st_ino or not os.path.samestat(before, identity)):
+            raise MatrixError("output changed since publication or its identity cannot be verified")
+        fingerprint = _RefreshSnapshot._fingerprint(path)
+        after = path.lstat()
+        if (path.resolve() != target or not os.path.samestat(before, after) or fingerprint != digests[path]
+                or (before.st_mode, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+                != (after.st_mode, after.st_size, after.st_mtime_ns, after.st_ctime_ns)):
+            raise MatrixError("output changed since publication or its identity cannot be verified")
+
     try:
         for path, text in outputs:
             # --write-doc may explicitly name the standard generated document.
@@ -976,34 +992,69 @@ def _replace_outputs(
                 continue
             mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else None
             backups[path] = stage(path, original, mode, True) if original is not None else None
+            if original is not None:
+                backup_digests[path] = hashlib.sha256(original).digest()
             staged.append((stage(path, data, mode, path == private_output), path))
             digests[path] = hashlib.sha256(data).digest()
         if verify is not None:
             verify(published)
         for temporary, path in staged:
+            target, identity = path.resolve(), temporary.stat()
             if verify is not None:
                 verify(published)
             temporary.replace(path)
             replaced.append(path)
-            published[path.resolve()] = digests[path]
+            identities[path] = (target, identity)
+            published[target] = digests[path]
         if verify is not None:
             verify(published)
-    except BaseException:
+    except BaseException as failure:
+        keep_backups = True
+        conflicts = []
         for path in reversed(replaced):
-            backup = backups[path]
-            if backup is None:
-                path.unlink()
-            else:
-                os.replace(backup, path)
+            try:
+                verify_publication(path)
+                backup = backups[path]
+                if backup is None:
+                    path.unlink()
+                else:
+                    original = backup.read_bytes()
+                    if hashlib.sha256(original).digest() != backup_digests[path]:
+                        raise MatrixError(f"recovery copy changed: {backup}")
+                    # Restore from a separate closed candidate. Every backup
+                    # must survive even if a later output cannot be restored.
+                    candidate = stage(path, original, stat.S_IMODE(backup.stat().st_mode), True)
+                    # Portable rename/unlink has no compare-and-swap operation.
+                    # Recheck bytes and identity immediately before replacement;
+                    # all handles are closed so Windows can replace the file.
+                    verify_publication(path)
+                    os.replace(candidate, path)
+            except BaseException as conflict:
+                conflicts.append(f"rollback conflict for {path}: {conflict}")
+        if conflicts:
+            recovery = [f"recovery copy for {path}: {backup}"
+                        for path, backup in backups.items() if backup is not None]
+            raise MatrixError(f"{failure}\nrollback incomplete; all recovery copies retained\n"
+                              + "\n".join([*conflicts, *recovery])) from failure
+        keep_backups = False
         raise
     finally:
+        recovery_paths = {backup for backup in backups.values() if backup is not None} if keep_backups else set()
         for temporary in temporary_paths:
+            if temporary in recovery_paths:
+                continue
             try:
-                temporary.unlink(missing_ok=True)
-            except PermissionError:
-                # Windows refuses to unlink a read-only replacement candidate.
-                temporary.chmod(stat.S_IRUSR | stat.S_IWUSR)
-                temporary.unlink()
+                try:
+                    temporary.unlink(missing_ok=True)
+                except PermissionError:
+                    # Windows refuses to unlink a read-only replacement candidate.
+                    temporary.chmod(stat.S_IRUSR | stat.S_IWUSR)
+                    temporary.unlink()
+            except OSError as cleanup_error:
+                if not keep_backups:
+                    raise
+                # Cleanup must not hide the conflict and recovery-copy paths.
+                print(f"error: cannot remove temporary output {temporary}: {cleanup_error}", file=sys.stderr)
 
 
 def _check_planned(add: Any, planned: Any) -> None:

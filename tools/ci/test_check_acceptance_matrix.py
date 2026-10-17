@@ -511,8 +511,8 @@ raise SystemExit(module["main"](["--root", sys.argv[2], "--matrix", sys.argv[3],
         self.assertEqual(self.run_main(*args)[0], 0)
         self.assertEqual((doc.read_bytes(), doc.stat().st_mtime_ns), before)
 
-    def test_changed_published_output_and_unreadable_commit_input_restore_old_outputs(self) -> None:
-        for failure in ("changed-output", "changed-last-output", "unreadable", "removed", "partial"):
+    def test_changed_or_unreadable_commit_input_restores_old_outputs(self) -> None:
+        for failure in ("unreadable", "removed", "partial"):
             with self.subTest(failure=failure):
                 self.write_inventory()
                 self.prepare_refresh()
@@ -529,10 +529,7 @@ raise SystemExit(module["main"](["--root", sys.argv[2], "--matrix", sys.argv[3],
                     nonlocal replaced
                     result = replace(file, target)
                     replaced = True
-                    if failure == "changed-output" or (
-                            failure == "changed-last-output" and target == paths[1]):
-                        target.write_bytes(b"external change\n")
-                    elif failure == "removed":
+                    if failure == "removed":
                         source.unlink()
                     elif failure == "partial":
                         source.write_bytes(b"# Part")
@@ -551,6 +548,293 @@ raise SystemExit(module["main"](["--root", sys.argv[2], "--matrix", sys.argv[3],
                     self.assertEqual([path.read_bytes() for path in paths], before)
                 finally:
                     source.write_bytes(original)
+
+    def prepare_rollback(self) -> tuple[tuple[Path, ...], dict[Path, bytes]]:
+        self.write_inventory()
+        self.prepare_refresh()
+        (self.root / MODULE.CONTRACT_DOCUMENTS[1]).write_text(
+            "# Moved\nEvery requirement has evidence.\n", encoding="utf-8")
+        paths = (self.root / "docs/acceptance-matrix.md", self.matrix_path,
+                 self.root / "tools/ci/acceptance_requirements.json")
+        return paths, {path: path.read_bytes() for path in paths}
+
+    def assert_concurrent_output_edits_survive_rollback(self, changed_indices: tuple[int, ...]) -> None:
+        paths, before = self.prepare_rollback()
+        changed = {paths[index]: b"editor save: " + paths[index].name.encode("utf-8")
+                   for index in changed_indices}
+        replace = Path.replace
+        copies: dict[Path, bytes] = {}
+        def edit_after_publication(file: Path, target: Path) -> Path:
+            result = replace(file, target)
+            if target == paths[-1]:
+                copies.update({path: path.read_bytes() for path in self.tmp.rglob(".acceptance-*")})
+                for path, data in changed.items():
+                    path.write_bytes(data)
+            return result
+        with mock.patch.object(Path, "replace", edit_after_publication):
+            code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+        self.assertEqual(code, 2, err)
+        for path in paths:
+            self.assertEqual(path.read_bytes(), changed.get(path, before[path]))
+        self.assertIn("rollback incomplete", err)
+        self.assertEqual(len(copies), len(paths))
+        for path in changed:
+            self.assertIn(f"rollback conflict for {path}", err)
+        for copy, data in copies.items():
+            self.assertEqual(copy.read_bytes(), data)
+            self.assertIn(str(copy), err)
+        self.assertCountEqual(copies.values(), before.values())
+        self.assertEqual(set(self.tmp.rglob(".acceptance-*")), set(copies))
+
+    def test_rollback_preserves_concurrent_matrix_edit(self) -> None:
+        self.assert_concurrent_output_edits_survive_rollback((1,))
+
+    def test_rollback_preserves_concurrent_inventory_edit(self) -> None:
+        self.assert_concurrent_output_edits_survive_rollback((2,))
+
+    def test_rollback_preserves_concurrent_matrix_and_inventory_edits(self) -> None:
+        self.assert_concurrent_output_edits_survive_rollback((1, 2))
+
+    def test_normal_rollback_retains_all_copies_until_every_restore_completes(self) -> None:
+        paths, before = self.prepare_rollback()
+        replace, restore = Path.replace, os.replace
+        copies: dict[Path, bytes] = {}
+        recoverable: list[bool] = []
+        restored: list[Path] = []
+        def fail_after_publication(file: Path, target: Path) -> Path:
+            result = replace(file, target)
+            if target == paths[-1]:
+                copies.update({path: path.read_bytes() for path in self.tmp.rglob(".acceptance-*")})
+                (self.root / MODULE.CONTRACT_DOCUMENTS[1]).write_bytes(b"external source edit\n")
+            return result
+        def record_recovery(file: Path, target: Path) -> None:
+            if copies:
+                recoverable.append(all(copy.exists() and copy.read_bytes() == data
+                                       for copy, data in copies.items()))
+                restored.append(target)
+            restore(file, target)
+        with mock.patch.object(Path, "replace", fail_after_publication), \
+                mock.patch.object(os, "replace", record_recovery):
+            code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+        self.assertEqual(code, 2, err)
+        self.assertIn("input snapshot changed", err)
+        self.assertNotIn("rollback incomplete", err)
+        self.assertEqual(restored, list(reversed(paths)))
+        self.assertEqual(recoverable, [True] * len(paths))
+        self.assertEqual({path: path.read_bytes() for path in paths}, before)
+        self.assertEqual(list(self.tmp.rglob(".acceptance-*")), [])
+
+    def test_rollback_faults_retain_all_copies_and_continue_other_restores(self) -> None:
+        failures = ("restore", "restore-and-cleanup", "unreadable-output", "partial-output", "unreadable-final-output",
+                    "unreadable-backup", "partial-backup", "create-candidate", "partial-candidate",
+                    "candidate-mode", "unknown-identity", "removed-output", "replaced-output",
+                    "directory-output", "changed-resolution", "changed-during-read",
+                    "replaced-during-read", "changed-before-replace")
+        for failure in failures:
+            with self.subTest(failure=failure):
+                paths, before = self.prepare_rollback()
+                matrix = self.matrix_path
+                source = self.root / MODULE.CONTRACT_DOCUMENTS[1]
+                displaced = self.tmp / "displaced-matrix"
+                replace, restore, read = Path.replace, os.replace, Path.read_bytes
+                metadata, resolve, chmod, create = Path.stat, Path.resolve, Path.chmod, open
+                unlink = Path.unlink
+                verify = MODULE._RefreshSnapshot.verify
+                copies: dict[Path, bytes] = {}
+                published: dict[Path, bytes] = {}
+                active = False
+                reads = 0
+                def fail_after_publication(file: Path, target: Path) -> Path:
+                    result = replace(file, target)
+                    if target == paths[-1]:
+                        copies.update({path: read(path) for path in self.tmp.rglob(".acceptance-*")})
+                        published.update({path: read(path) for path in paths})
+                        if failure == "removed-output":
+                            matrix.unlink()
+                        elif failure in ("replaced-output", "directory-output"):
+                            matrix.rename(displaced)
+                            if failure == "directory-output":
+                                matrix.mkdir()
+                            else:
+                                matrix.write_bytes(published[matrix])
+                        source.write_bytes(b"external source edit\n")
+                    return result
+                def begin_rollback(snapshot: Any, published_outputs: dict[Path, bytes]) -> None:
+                    nonlocal active
+                    try:
+                        verify(snapshot, published_outputs)
+                    except (MODULE.MatrixError, OSError):
+                        active = True
+                        raise
+                def locked_restore(file: Path, target: Path) -> None:
+                    if active and target == matrix and failure in ("restore", "restore-and-cleanup"):
+                        raise PermissionError("restore denied")
+                    restore(file, target)
+                def failed_cleanup(file: Path, *args: Any, **kwargs: Any) -> None:
+                    if active and failure == "restore-and-cleanup" and file.parent == matrix.parent \
+                            and file.name.startswith(".acceptance-") and file not in copies and file.exists():
+                        raise PermissionError("restore candidate cleanup denied")
+                    unlink(file, *args, **kwargs)
+                def faulted_read(file: Path) -> bytes:
+                    nonlocal reads
+                    if active and file == matrix:
+                        reads += 1
+                        if failure == "unreadable-output" or (failure == "unreadable-final-output" and reads == 2):
+                            raise PermissionError("published output unreadable")
+                        if failure == "partial-output":
+                            return read(file)[:8]
+                        data = read(file)
+                        if failure == "changed-during-read":
+                            file.write_bytes(b"editor save during verification\n")
+                        elif failure == "replaced-during-read":
+                            file.rename(displaced)
+                            file.write_bytes(data)
+                        return data
+                    if active and file in copies and copies[file] == before[matrix]:
+                        if failure == "unreadable-backup":
+                            raise PermissionError("recovery copy unreadable")
+                        if failure == "partial-backup":
+                            return read(file)[:8]
+                        if failure == "changed-before-replace":
+                            matrix.write_bytes(b"editor save while preparing restore\n")
+                    return read(file)
+                def unknown_identity(file: Path, *args: Any, **kwargs: Any) -> os.stat_result:
+                    result = metadata(file, *args, **kwargs)
+                    if failure == "unknown-identity" and file.parent == matrix.parent \
+                            and file.name.startswith(".acceptance-"):
+                        values = list(result)
+                        values[1] = 0
+                        return os.stat_result(values)
+                    return result
+                def changed_resolution(file: Path, *args: Any, **kwargs: Any) -> Path:
+                    if active and file == matrix and failure == "changed-resolution":
+                        return displaced
+                    return resolve(file, *args, **kwargs)
+                def failed_mode(file: Path, mode: int, *args: Any, **kwargs: Any) -> None:
+                    if active and failure == "candidate-mode" and file.parent == matrix.parent:
+                        raise PermissionError("restore permission copy denied")
+                    chmod(file, mode, *args, **kwargs)
+                def faulted_candidate(file: Path, *args: Any, **kwargs: Any) -> Any:
+                    if active and file.parent == matrix.parent and failure == "create-candidate":
+                        raise PermissionError("restore creation denied")
+                    handle = create(file, *args, **kwargs)
+                    if active and file.parent == matrix.parent and failure == "partial-candidate":
+                        write = handle.write
+                        def partial(data: bytes) -> None:
+                            write(data[:8])
+                            raise OSError("partial restore candidate")
+                        handle.write = partial
+                    return handle
+                with mock.patch.object(Path, "replace", fail_after_publication), \
+                        mock.patch.object(MODULE._RefreshSnapshot, "verify", begin_rollback), \
+                        mock.patch.object(os, "replace", locked_restore), \
+                        mock.patch.object(Path, "read_bytes", faulted_read), \
+                        mock.patch.object(Path, "stat", unknown_identity), \
+                        mock.patch.object(Path, "resolve", changed_resolution), \
+                        mock.patch.object(Path, "chmod", failed_mode), \
+                        mock.patch.object(Path, "unlink", failed_cleanup), \
+                        mock.patch.object(MODULE, "open", faulted_candidate, create=True):
+                    code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+                self.assertEqual(code, 2, err)
+                self.assertIn(f"rollback conflict for {matrix}", err)
+                self.assertIn("rollback incomplete", err)
+                for path in (paths[0], paths[2]):
+                    self.assertEqual(path.read_bytes(), before[path])
+                if failure == "removed-output":
+                    self.assertFalse(matrix.exists())
+                elif failure == "directory-output":
+                    self.assertTrue(matrix.is_dir())
+                    matrix.rmdir()
+                elif failure in ("changed-during-read", "changed-before-replace"):
+                    self.assertTrue(matrix.read_bytes().startswith(b"editor save"))
+                else:
+                    self.assertEqual(matrix.read_bytes(), published[matrix])
+                self.assertEqual(len(copies), len(paths))
+                extra_candidates = set(self.tmp.rglob(".acceptance-*")) - set(copies)
+                self.assertEqual(len(extra_candidates), 1 if failure == "restore-and-cleanup" else 0)
+                if failure == "restore-and-cleanup":
+                    self.assertIn("cannot remove temporary output", err)
+                    self.assertIn(str(next(iter(extra_candidates))), err)
+                for candidate in extra_candidates:
+                    candidate.unlink()
+                for copy, data in copies.items():
+                    self.assertEqual(copy.read_bytes(), data)
+                    self.assertIn(str(copy), err)
+                    copy.unlink()
+                displaced.unlink(missing_ok=True)
+
+    def test_receipt_rollback_guards_existing_and_created_outputs_for_every_writer(self) -> None:
+        for refresh, existing, failure in ((refresh, existing, failure)
+                                           for refresh in (False, True) for existing in (False, True)
+                                           for failure in (("edited", "removed", "unchanged") if existing
+                                                           else ("edited", "removed", "unchanged", "unlink-denied"))):
+            with self.subTest(refresh=refresh, existing=existing, failure=failure):
+                paths, originals = self.prepare_rollback()
+                if not refresh:
+                    (self.root / MODULE.CONTRACT_DOCUMENTS[1]).write_text(
+                        "# Contract\nEvery requirement has evidence.\n", encoding="utf-8")
+                discovery, report = self.execution_inputs()
+                receipt = self.tmp / "receipt.json"
+                document = self.tmp / "additional.md"
+                receipt.unlink(missing_ok=True)
+                if existing:
+                    receipt.write_bytes(b"previous execution receipt\n")
+                document.write_bytes(b"previous additional document\n")
+                before = {document: document.read_bytes(), **(originals if refresh else {})}
+                if existing:
+                    before[receipt] = receipt.read_bytes()
+                replace, unlink = Path.replace, Path.unlink
+                copies: dict[Path, bytes] = {}
+                published = b""
+                def fail_after_receipt(file: Path, target: Path) -> Path:
+                    nonlocal published
+                    if target == document:
+                        raise PermissionError("additional document locked")
+                    result = replace(file, target)
+                    if target == receipt:
+                        published = target.read_bytes()
+                        copies.update({copy: data for copy in self.tmp.rglob(".acceptance-*")
+                                       if (data := copy.read_bytes()) in before.values()})
+                        if failure == "edited":
+                            receipt.write_bytes(b"editor receipt save\n")
+                        elif failure == "removed":
+                            receipt.unlink()
+                    return result
+                def denied_unlink(file: Path, *args: Any, **kwargs: Any) -> None:
+                    if published and file == receipt and failure == "unlink-denied":
+                        raise PermissionError("receipt removal denied")
+                    unlink(file, *args, **kwargs)
+                args = [*self.base_args(), "--write-doc", str(document), "--junit", str(report),
+                        "--discovery", str(discovery), "--execution-receipt", str(receipt)]
+                if refresh:
+                    args.append("--refresh-inventory")
+                with mock.patch.object(Path, "replace", fail_after_receipt), \
+                        mock.patch.object(Path, "unlink", denied_unlink):
+                    code, _, err = self.run_main(*args)
+                self.assertEqual(code, 2, err)
+                for path in (*paths, document):
+                    self.assertEqual(path.read_bytes(), (originals if path in originals else before)[path])
+                if failure == "unchanged":
+                    self.assertNotIn("rollback incomplete", err)
+                    if existing:
+                        self.assertEqual(receipt.read_bytes(), before[receipt])
+                    else:
+                        self.assertFalse(receipt.exists())
+                    self.assertEqual(list(self.tmp.rglob(".acceptance-*")), [])
+                else:
+                    self.assertIn(f"rollback conflict for {receipt}", err)
+                    self.assertIn("rollback incomplete", err)
+                    if failure == "removed":
+                        self.assertFalse(receipt.exists())
+                    else:
+                        self.assertEqual(receipt.read_bytes(), b"editor receipt save\n"
+                                         if failure == "edited" else published)
+                    self.assertEqual(len(copies), len(before))
+                    self.assertEqual(set(self.tmp.rglob(".acceptance-*")), set(copies))
+                    for copy, data in copies.items():
+                        self.assertEqual(copy.read_bytes(), data)
+                        self.assertIn(str(copy), err)
+                        copy.unlink()
 
     def test_refresh_moves_statement_and_clears_only_derived_inventory_error(self) -> None:
         matrix = self.prepare_refresh()
