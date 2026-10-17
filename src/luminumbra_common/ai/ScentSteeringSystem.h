@@ -15,6 +15,7 @@
 // construction (only entities carrying ScentSenseComponent are touched; the
 // canonical headless roster carries none).
 
+#include "../systems/RegionConsumerGate.h"
 #include <algorithm>
 #include <vector>
 
@@ -42,11 +43,15 @@ inline int WorldToCell(float world, float origin, float cell_size) {
     return c;
 }
 
-inline ScentSteeringStats RunScentSteeringOnTick(entt::registry& registry,
-                                                 const ScentField& field,
-                                                 float origin_x,
-                                                 float origin_z,
-                                                 float cell_size) {
+inline ScentSteeringStats
+RunScentSteeringOnTick(entt::registry& registry,
+                       const ScentField& field,
+                       float origin_x,
+                       float origin_z,
+                       float cell_size,
+                       const Luminumbra::world::RegionEntityGate& gate = {},
+                       const Luminumbra::world::RegionEntityWork& completed = {}) {
+    using namespace Luminumbra::world;
     using Luminumbra::Components::LocomotionIntentComponent;
     using Luminumbra::Components::LocomotionProfile;
     using Luminumbra::Components::ScentSenseComponent;
@@ -69,6 +74,7 @@ inline ScentSteeringStats RunScentSteeringOnTick(entt::registry& registry,
         });
     }
 
+    FilterRegionEntities(registry, agents, gate);
     for (auto e : agents) {
         ++stats.considered;
         const auto& sense = registry.get<const ScentSenseComponent>(e);
@@ -98,6 +104,8 @@ inline ScentSteeringStats RunScentSteeringOnTick(entt::registry& registry,
             intent.wish_xz.x *= s;
             intent.wish_xz.y *= s;
         }
+        if (completed)
+            completed(e);
         ++stats.steered;
     }
     return stats;

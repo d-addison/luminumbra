@@ -179,10 +179,11 @@ the legacy ordering, arithmetic, RNG stream and direct birth recipe.
 D owns brain and kinematic brain integration, both mating phases, steering and
 survival blending, thirst, scavenging, alarm, decomposition, circadian,
 territory, pack, migration, creature lifespan and the creature side of grazing.
-E still owns instinct, perception, scent and emitters; F still owns tier choice,
-the living coarse adapter, movement boundary admission and controller physics.
-D-only session regressions omit E-owned participants and do not assert complete
-Frozen protection for those later lanes. The pure C kernel remains unchanged.
+E now gates instinct, perception, scent and emitters through the same sealed
+admission. F still owns tier choice, the living coarse adapter, movement boundary
+admission and controller physics. D-only session regressions omit E-owned
+participants; E adds the complete persisted AI inventory regression without runtime
+physics controllers. The pure C kernel remains unchanged.
 
 Full genome ages advance only in mating resolve. Full mortal ages advance once
 in the real-tick lifespan lane, after foliage and before alarm/decomposition.
@@ -229,3 +230,54 @@ and entity generation reuse. The session reference supplies explicit fixed legac
 metadata, the complete expected relative-path/byte map and regular-file count,
 plus deterministic artifact and ecology bytes. It does not generate its expected
 trajectory by calling the modified D entry points.
+
+
+## Instinct, perception and field integration
+
+Every E entry point appends optional source admission and completed-work callbacks.
+Empty callbacks retain the legacy ordering, arithmetic, entity IDs and field
+recipes. The enabled session passes D's sealed Full cohort to every actor and
+recipient lane, including creatures carrying Opportunity, Sensable, FoodSource
+or FieldEmitter components. A creature cannot acquire positional permission
+through one of those optional components. Full creatures in Reduced owners,
+even when due, and Coarse creatures in Active owners remain excluded.
+
+Instinct gates before pressure growth, stimulus application, planning or optional
+ActionPlan creation. Opportunities are filtered before either inline or substrate
+gather and ordered by authored ID then shared PersistentId. The runtime
+entity-valued destination is the opportunity carrier; Opportunity.target remains
+authored text. Duplicate authored IDs resolve the winning score before applying
+the identity tie. Locomotion filters actors and neighbors before snapshotting,
+and checks the live action target before path or action progression. An admitted
+actor holds with zero intent when its target is blocked, retaining the action,
+elapsed action time and waypoint index for thaw. Blocked actors retain their
+intent bits and optional presence. Perception filters both sides before snapshot;
+admitted perceivers decay awareness normally when no signal remains.
+
+Scent deposition requires the sealed source and its existing destination-cell
+gate. Steering requires the Full cohort. Foraging filters food before nearest
+selection, orders equal food choices by shared identity and rechecks food before
+depletion. Source cell, chosen destination and common-phase border admission
+precede enabled deposits, movement, pickups and delivery counters. A sealed move
+holds the complete continuation rather than selecting a different step. Generic
+grid-only foragers and foods seal their source owners without fabricating creature
+metadata; completed work remains charged to the sealed source owner after a move.
+
+Energy emitters filter sources before collection and each destination cell before
+queuing bounded regional deposits, using shared PersistentId as deposit identity.
+The existing radius ceiling remains 31. Absent, Frozen and off-due destinations
+receive no queued deposits and do not activate. Regional energy ages, page
+persistence, scent continuation and common-phase diffusion borders retain their
+existing authority. Stored scent independently schedules continuation after the
+last emitter freezes; freezing an emitter neither deletes its trail nor authorizes
+new deposits. Frozen scent cells remain bit-exact.
+
+No persistence block, algorithm version, RNG cursor, hash slot or wire layout is
+added. Previous-release absence adoption and present-malformed refusal remain
+unchanged. The independent legacy oracle now also freezes the pre-E entry points,
+projects every secondary component explicitly and checks a nonempty trajectory
+against exact scent/energy bytes. Session regressions enumerate the complete
+flag-off save path/byte map and file count, world hash and artifact bytes; enabled
+regressions cover complete blocked inventory, real recipient wiring, restored
+persistent references and scent/energy continuation. Native execution of these
+regressions remains a separate validation step.

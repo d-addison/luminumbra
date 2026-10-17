@@ -173,7 +173,11 @@ void VisitNeighbors(const NeighborGrid& grid,
 
 } // namespace
 
-InstinctLocomotionTickStats RunInstinctLocomotionOnTick(entt::registry& registry) {
+InstinctLocomotionTickStats
+RunInstinctLocomotionOnTick(entt::registry& registry,
+                            const Luminumbra::world::RegionEntityGate& gate,
+                            const Luminumbra::world::RegionEntityWork& completed) {
+    using namespace Luminumbra::world;
     using Luminumbra::Components::ActionPlanComponent;
     using Luminumbra::Components::LocomotionIntentComponent;
     using Luminumbra::Components::LocomotionPathComponent;
@@ -196,6 +200,8 @@ InstinctLocomotionTickStats RunInstinctLocomotionOnTick(entt::registry& registry
     std::sort(agents.begin(), agents.end(), [](entt::entity lhs, entt::entity rhs) {
         return entt::to_integral(lhs) < entt::to_integral(rhs);
     });
+
+    FilterRegionEntities(registry, agents, gate);
 
     // snapshot of all locomotion agents (position + PRIOR-tick heading),
     // in deterministic id order, for the Reynolds flocking terms below
@@ -225,6 +231,8 @@ InstinctLocomotionTickStats RunInstinctLocomotionOnTick(entt::registry& registry
     std::vector<std::size_t> candidates;
 
     for (auto entity : agents) {
+        if (completed)
+            completed(entity);
         ++stats.agents_seen;
 
         auto& plan = registry.get<ActionPlanComponent>(entity);
@@ -243,7 +251,7 @@ InstinctLocomotionTickStats RunInstinctLocomotionOnTick(entt::registry& registry
 
         const Luminumbra::EntityID target = plan.plan[plan.current_action_index].target;
         if (target == entt::null || !registry.valid(target) ||
-            !registry.all_of<TransformComponent>(target)) {
+            !registry.all_of<TransformComponent>(target) || !AdmitRegionEntity(gate, target)) {
             ++stats.agents_idle;
             continue;
         }
