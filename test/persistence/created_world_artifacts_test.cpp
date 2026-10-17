@@ -1,6 +1,9 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <cerrno>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <ios>
@@ -9,6 +12,7 @@
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <vector>
 
 #include "luminumbra_common/persistence/ExclusiveRename.h"
 
@@ -23,6 +27,7 @@
 #include <windows.h>
 #else
 #include <cerrno>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
@@ -36,6 +41,15 @@ BOOL WINAPI Inspect(HANDLE file, LPBY_HANDLE_FILE_INFORMATION info);
 BOOL WINAPI Close(HANDLE file);
 BOOL WINAPI Dispose(HANDLE file, FILE_INFO_BY_HANDLE_CLASS kind, LPVOID info, DWORD bytes);
 BOOL WINAPI Publish(LPCWSTR source, LPCWSTR destination, DWORD flags);
+BOOL WINAPI Retain(HANDLE process,
+                   HANDLE file,
+                   HANDLE destination_process,
+                   LPHANDLE retained,
+                   DWORD access,
+                   BOOL inherit,
+                   DWORD options);
+int OpenDescriptor(intptr_t file, int flags);
+std::FILE* OpenStream(int file, const char* mode);
 HANDLE WINAPI Open(LPCWSTR path,
                    DWORD access,
                    DWORD share,
@@ -48,14 +62,19 @@ HANDLE WINAPI Open(LPCWSTR path,
 #define SetFileInformationByHandle NativeRace::Dispose
 #define CreateFileW NativeRace::Open
 #define MoveFileExW NativeRace::Publish
+#define DuplicateHandle NativeRace::Retain
+#define _open_osfhandle NativeRace::OpenDescriptor
+#define _fdopen NativeRace::OpenStream
 #else
 int Inspect(const char* path, struct stat* info);
 int Describe(int file, struct stat* info);
 int Unlink(int directory, const char* path, int flags);
 int Restore(int from, const char* source, int to, const char* destination);
+int Retain(int file, int command, int minimum);
 #define lstat NativeRace::Inspect
 #define fstat NativeRace::Describe
 #define unlinkat NativeRace::Unlink
+#define fcntl NativeRace::Retain
 #endif
 } // namespace NativeRace
 
@@ -74,11 +93,15 @@ int InterceptRename(int from, const char* source, int to, const char* destinatio
 #undef SetFileInformationByHandle
 #undef CreateFileW
 #undef MoveFileExW
+#undef DuplicateHandle
+#undef _open_osfhandle
+#undef _fdopen
 #else
 #undef lstat
 #undef fstat
 #undef unlinkat
 #undef RenameWithoutReplacement
+#undef fcntl
 #endif
 
 namespace NativeRace {
@@ -92,7 +115,13 @@ enum class Boundary : std::uint8_t {
     UnknownIdentity,
     PublicationSourceMissing,
     PublicationDenied,
-    PublicationUnavailable
+    PublicationUnavailable,
+    RetentionFailure,
+    DescriptorFailure,
+    StreamFailure,
+    RemovalDenied,
+    PublicationLinkedOccupant,
+    FileCreationDenied
 };
 struct Replacement {
     std::filesystem::path target;
@@ -121,12 +150,66 @@ Replacement*& Active() {
     return replacement;
 }
 
+// Observe real native handles through the existing API interception. No handle
+// is owned by this capture, so it cannot itself prevent filesystem ID reuse.
+class HandleCapture {
+public:
+    HandleCapture() {
+        current = this;
+    }
+    ~HandleCapture() {
+        current = nullptr;
+    }
+    HandleCapture(const HandleCapture&) = delete;
+    HandleCapture& operator=(const HandleCapture&) = delete;
+    static void Observe(Luminumbra::Persistence::CreatedWorldArtifacts::NativeFile file) {
+        if (!current)
+            return;
+        // The fixture has at most nine journal entries and a few inspection
+        // handles. Bound observation storage independently of implementation.
+        if (current->m_handles.size() == 128)
+            throw std::runtime_error("Handle observation fixture capacity exceeded.");
+        if (std::find(current->m_handles.begin(), current->m_handles.end(), file) ==
+            current->m_handles.end())
+            current->m_handles.push_back(file);
+    }
+    std::size_t live() const {
+        return static_cast<std::size_t>(
+            std::count_if(m_handles.begin(), m_handles.end(), [](auto file) {
+#if defined(_WIN32)
+                BY_HANDLE_FILE_INFORMATION info{};
+                return ::GetFileInformationByHandle(file, &info) != FALSE;
+#else
+                struct stat info {};
+                return ::fstat(file, &info) == 0;
+#endif
+            }));
+    }
+
+private:
+    static inline const HandleCapture* current = nullptr;
+    // Observation through native callbacks does not change capture ownership.
+    mutable std::vector<Luminumbra::Persistence::CreatedWorldArtifacts::NativeFile> m_handles;
+};
+
+bool Fail(Boundary boundary) {
+    auto* active = Active();
+    if (!active || active->fired || active->boundary != boundary)
+        return false;
+    active->fired = true;
+    return true;
+}
+
 bool BeforePublish(const std::filesystem::path& source, const std::filesystem::path& destination) {
     auto* active = Active();
     if (!active || active->fired || active->target != destination)
         return true;
     if (active->boundary == Boundary::BeforePublication)
         Replace(*active);
+    if (active->boundary == Boundary::PublicationLinkedOccupant) {
+        active->fired = true;
+        std::filesystem::create_hard_link(source, destination);
+    }
     if (active->boundary == Boundary::PublicationSourceMissing) {
         active->fired = true;
         std::filesystem::rename(source, active->moved);
@@ -146,6 +229,40 @@ bool BeforePublish(const std::filesystem::path& source, const std::filesystem::p
 }
 
 #if defined(_WIN32)
+BOOL WINAPI Retain(HANDLE process,
+                   HANDLE file,
+                   HANDLE destination_process,
+                   LPHANDLE retained,
+                   DWORD access,
+                   BOOL inherit,
+                   DWORD options) {
+    if (Fail(Boundary::RetentionFailure)) {
+        ::SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return FALSE;
+    }
+    const auto result =
+        ::DuplicateHandle(process, file, destination_process, retained, access, inherit, options);
+    if (result)
+        HandleCapture::Observe(*retained);
+    return result;
+}
+
+int OpenDescriptor(intptr_t file, int flags) {
+    if (Fail(Boundary::DescriptorFailure)) {
+        errno = EMFILE;
+        return -1;
+    }
+    return ::_open_osfhandle(file, flags);
+}
+
+std::FILE* OpenStream(int file, const char* mode) {
+    if (Fail(Boundary::StreamFailure)) {
+        errno = EMFILE;
+        return nullptr;
+    }
+    return ::_fdopen(file, mode);
+}
+
 BOOL WINAPI Publish(LPCWSTR source, LPCWSTR destination, DWORD flags) {
     if (!BeforePublish(source, destination))
         return FALSE;
@@ -160,6 +277,7 @@ bool Matches(const BY_HANDLE_FILE_INFORMATION& info) {
 }
 
 BOOL WINAPI Inspect(HANDLE file, LPBY_HANDLE_FILE_INFORMATION info) {
+    HandleCapture::Observe(file);
     auto* active = Active();
     if (active && !active->fired && active->boundary == Boundary::IdentificationFailure) {
         active->fired = true;
@@ -190,6 +308,11 @@ HANDLE WINAPI Open(LPCWSTR path,
                    DWORD flags,
                    HANDLE template_file) {
     auto* active = Active();
+    if (active && active->target == path && disposition == CREATE_NEW &&
+        Fail(Boundary::FileCreationDenied)) {
+        ::SetLastError(ERROR_ACCESS_DENIED);
+        return INVALID_HANDLE_VALUE;
+    }
     if (active && !active->fired && active->boundary == Boundary::BeforeIdentification &&
         active->target == path)
         Replace(*active);
@@ -212,12 +335,29 @@ BOOL WINAPI Close(HANDLE file) {
 BOOL WINAPI Dispose(HANDLE file, FILE_INFO_BY_HANDLE_CLASS kind, LPVOID info, DWORD bytes) {
     auto* active = Active();
     BY_HANDLE_FILE_INFORMATION identity{};
+    if (::GetFileInformationByHandle(file, &identity) &&
+        (identity.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+        Fail(Boundary::RemovalDenied)) {
+        ::SetLastError(ERROR_ACCESS_DENIED);
+        return FALSE;
+    }
     if (active && !active->fired && active->boundary == Boundary::AfterBinding &&
         ::GetFileInformationByHandle(file, &identity) && Matches(identity))
         Replace(*active);
     return ::SetFileInformationByHandle(file, kind, info, bytes);
 }
 #else
+int Retain(int file, int command, int minimum) {
+    if (Fail(Boundary::RetentionFailure)) {
+        errno = EMFILE;
+        return -1;
+    }
+    const auto retained = ::fcntl(file, command, minimum);
+    if (retained >= 0)
+        HandleCapture::Observe(retained);
+    return retained;
+}
+
 int Inspect(const char* path, struct stat* info) {
     auto* active = Active();
     if (active && !active->fired && active->target == path &&
@@ -231,6 +371,7 @@ int Inspect(const char* path, struct stat* info) {
 }
 
 int Describe(int file, struct stat* info) {
+    HandleCapture::Observe(file);
     auto* active = Active();
     if (active && !active->fired && active->boundary == Boundary::IdentificationFailure) {
         active->fired = true;
@@ -246,6 +387,10 @@ int Describe(int file, struct stat* info) {
 }
 
 int Unlink(int directory, const char* path, int flags) {
+    if (flags == AT_REMOVEDIR && std::string(path) == "artifact" && Fail(Boundary::RemovalDenied)) {
+        errno = EACCES;
+        return -1;
+    }
     auto* active = Active();
     if (active && !active->fired && active->boundary == Boundary::AfterBinding &&
         std::string(path) == "artifact")
@@ -350,6 +495,230 @@ private:
     std::filesystem::path m_root{};
     NativeRace::Replacement m_race{};
 };
+
+TEST_F(CreatedWorldCleanup, CreatingHandlesRemainOpenUntilReleaseOrDestruction) {
+    const NativeRace::HandleCapture handles;
+    const auto save = Root() / "created-world";
+    {
+        CreatedWorldArtifacts artifacts;
+        artifacts.create_root(save);
+        EXPECT_GE(handles.live(), 1u);
+        artifacts.create_directory(save / "chunks");
+        EXPECT_GE(handles.live(), 2u);
+        artifacts.write_file(save / "preset.json", "owned bytes\n");
+        EXPECT_GE(handles.live(), 3u); // The writer has already closed.
+        artifacts.release();
+        EXPECT_EQ(handles.live(), 0u);
+        EXPECT_TRUE(std::filesystem::is_directory(save / "chunks"));
+        EXPECT_EQ(Read(save / "preset.json"), "owned bytes\n");
+        artifacts.release();
+        EXPECT_TRUE(artifacts.rollback().empty());
+        artifacts.create_root(Root() / "another-world");
+        EXPECT_GE(handles.live(), 1u);
+    }
+    EXPECT_EQ(handles.live(), 0u);
+    EXPECT_TRUE(std::filesystem::is_directory(Root() / "another-world"));
+}
+
+TEST_F(CreatedWorldCleanup, RollbackRetainsHandlesOnRefusalAndClosesThemAfterRemoval) {
+    const NativeRace::HandleCapture handles;
+    CreatedWorldArtifacts artifacts;
+    const auto save = Root() / "created-world";
+    artifacts.create_root(save);
+    artifacts.create_directory(save / "chunks");
+    artifacts.write_file(save / "chunks/preset.json", "");
+    Write(save / "foreign.bin", "foreign bytes\n");
+    EXPECT_FALSE(artifacts.rollback().empty());
+    EXPECT_GE(handles.live(), 3u);
+    EXPECT_EQ(Read(save / "foreign.bin"), "foreign bytes\n");
+    ASSERT_TRUE(std::filesystem::remove(save / "foreign.bin"));
+    EXPECT_TRUE(artifacts.rollback().empty());
+    EXPECT_EQ(handles.live(), 0u);
+    EXPECT_FALSE(std::filesystem::exists(save));
+}
+
+TEST_F(CreatedWorldCleanup, UnlinkedCreationStaysPinnedAndItsReplacementSurvivesRollback) {
+    for (const bool directory : {false, true}) {
+        SCOPED_TRACE(directory);
+        const NativeRace::HandleCapture handles;
+        CreatedWorldArtifacts artifacts;
+        const auto save = Root() / (directory ? "directory-world" : "file-world");
+        const auto artifact = save / "artifact";
+        const auto moved = Root() / "unlinked-original";
+        artifacts.create_root(save);
+        if (directory)
+            artifacts.create_directory(artifact);
+        else
+            artifacts.write_file(artifact, "owned bytes\n");
+        std::filesystem::rename(artifact, moved);
+        ASSERT_TRUE(std::filesystem::remove(moved));
+        EXPECT_GE(handles.live(), 2u); // An unlink cannot free the owned ID.
+        if (directory) {
+            ASSERT_TRUE(std::filesystem::create_directory(artifact));
+        } else {
+            Write(artifact, "replacement bytes\n");
+        }
+        EXPECT_NE(artifacts.rollback().find("changed identity"), std::string::npos);
+        EXPECT_GE(handles.live(), 2u);
+        artifacts.release();
+        EXPECT_EQ(handles.live(), 0u);
+        if (directory) {
+            EXPECT_TRUE(std::filesystem::is_directory(artifact));
+        } else {
+            EXPECT_EQ(Read(artifact), "replacement bytes\n");
+        }
+    }
+}
+
+TEST_F(CreatedWorldCleanup, PublicationKeepsBothNamesPinnedThroughRollbackInEitherOrder) {
+    for (const bool destination_first : {false, true}) {
+        SCOPED_TRACE(destination_first);
+        const NativeRace::HandleCapture handles;
+        CreatedWorldArtifacts artifacts;
+        const auto save = Root() / "created-world";
+        const auto temp = save / "preset.tmp";
+        const auto destination = save / "preset.json";
+        artifacts.create_root(save);
+        if (destination_first)
+            artifacts.reserve_file(destination);
+        artifacts.write_file(temp, "owned bytes\n");
+        if (!destination_first)
+            artifacts.reserve_file(destination);
+        artifacts.publish_file(temp, destination);
+        EXPECT_GE(handles.live(), 3u);
+        EXPECT_EQ(Read(destination), "owned bytes\n");
+        EXPECT_TRUE(artifacts.rollback().empty());
+        EXPECT_EQ(handles.live(), 0u);
+        EXPECT_FALSE(std::filesystem::exists(save));
+    }
+}
+
+TEST_F(CreatedWorldCleanup, FileRetentionAndIdentificationFailuresRefuseUncertainCleanup) {
+    for (const auto boundary : {NativeRace::Boundary::RetentionFailure,
+                                NativeRace::Boundary::IdentificationFailure,
+                                NativeRace::Boundary::UnknownIdentity}) {
+        SCOPED_TRACE(static_cast<unsigned>(boundary));
+        const NativeRace::HandleCapture handles;
+        CreatedWorldArtifacts artifacts;
+        const auto save = Root() / std::to_string(static_cast<unsigned>(boundary));
+        const auto file = save / "preset.json";
+        artifacts.create_root(save);
+        Arm(file, boundary);
+        EXPECT_THROW(artifacts.write_file(file, "owned bytes\n"), std::runtime_error);
+        ASSERT_TRUE(Race().fired);
+        EXPECT_TRUE(std::filesystem::is_regular_file(file));
+        EXPECT_TRUE(Read(file).empty());
+        EXPECT_FALSE(artifacts.rollback().empty());
+        EXPECT_GE(handles.live(), boundary == NativeRace::Boundary::RetentionFailure ? 1u : 2u);
+        artifacts.release();
+        EXPECT_EQ(handles.live(), 0u);
+        EXPECT_TRUE(std::filesystem::is_regular_file(file));
+        NativeRace::Active() = nullptr;
+        Race() = {};
+    }
+}
+
+TEST_F(CreatedWorldCleanup, PublicationRetentionFailurePreservesSourceAndVacantDestination) {
+    const NativeRace::HandleCapture handles;
+    CreatedWorldArtifacts artifacts;
+    const auto save = Root() / "created-world";
+    const auto temp = save / "preset.tmp";
+    const auto destination = save / "preset.json";
+    artifacts.create_root(save);
+    artifacts.write_file(temp, "owned bytes\n");
+    artifacts.reserve_file(destination);
+    Arm(destination, NativeRace::Boundary::RetentionFailure);
+    EXPECT_THROW(artifacts.publish_file(temp, destination), std::system_error);
+    ASSERT_TRUE(Race().fired);
+    EXPECT_GE(handles.live(), 2u);
+    EXPECT_EQ(Read(temp), "owned bytes\n");
+    EXPECT_FALSE(std::filesystem::exists(destination));
+    EXPECT_TRUE(artifacts.rollback().empty());
+    EXPECT_EQ(handles.live(), 0u);
+    EXPECT_FALSE(std::filesystem::exists(save));
+}
+
+TEST_F(CreatedWorldCleanup, PartialRollbackCannotReclaimARemovedIdentityOnRetry) {
+    CreatedWorldArtifacts artifacts;
+    const auto save = Root() / "created-world";
+    const auto file = save / "preset.json";
+    const auto alias = Root() / "other-owner";
+    artifacts.create_root(save);
+    artifacts.write_file(file, "shared bytes\n");
+    std::filesystem::create_hard_link(file, alias);
+    Arm(save, NativeRace::Boundary::RemovalDenied);
+    EXPECT_FALSE(artifacts.rollback().empty());
+    ASSERT_TRUE(Race().fired);
+    EXPECT_FALSE(std::filesystem::exists(file));
+    ASSERT_TRUE(std::filesystem::is_directory(save));
+    // This new directory entry deliberately has exactly the removed object's
+    // identity, without depending on a filesystem's inode allocation policy.
+    std::filesystem::create_hard_link(alias, file);
+    EXPECT_NE(artifacts.rollback().find("changed identity"), std::string::npos);
+    EXPECT_EQ(Read(file), "shared bytes\n");
+    EXPECT_EQ(Read(alias), "shared bytes\n");
+    artifacts.release();
+}
+
+TEST_F(CreatedWorldCleanup, RefusedPublicationNeverClaimsARacingHardLinkToTheSource) {
+    CreatedWorldArtifacts artifacts;
+    const auto save = Root() / "created-world";
+    const auto temp = save / "preset.tmp";
+    const auto destination = save / "preset.json";
+    artifacts.create_root(save);
+    artifacts.write_file(temp, "owned bytes\n");
+    artifacts.reserve_file(destination);
+    Arm(destination, NativeRace::Boundary::PublicationLinkedOccupant);
+    EXPECT_THROW(artifacts.publish_file(temp, destination), std::system_error);
+    ASSERT_TRUE(Race().fired);
+    EXPECT_NE(artifacts.rollback().find("changed identity"), std::string::npos);
+    EXPECT_EQ(Read(temp), "owned bytes\n");
+    EXPECT_EQ(Read(destination), "owned bytes\n");
+    ASSERT_TRUE(std::filesystem::remove(destination));
+    EXPECT_TRUE(artifacts.rollback().empty());
+    EXPECT_FALSE(std::filesystem::exists(save));
+}
+
+#if defined(_WIN32)
+TEST_F(CreatedWorldCleanup, FailedExclusiveCreationAbandonsOnlyItsVacantReservation) {
+    const NativeRace::HandleCapture handles;
+    CreatedWorldArtifacts artifacts;
+    const auto save = Root() / "created-world";
+    const auto file = save / "preset.json";
+    artifacts.create_root(save);
+    Arm(file, NativeRace::Boundary::FileCreationDenied);
+    EXPECT_THROW(artifacts.write_file(file, "owned bytes\n"), std::runtime_error);
+    ASSERT_TRUE(Race().fired);
+    EXPECT_FALSE(std::filesystem::exists(file));
+    EXPECT_EQ(handles.live(), 1u);
+    artifacts.write_file(file, "retry bytes\n");
+    EXPECT_EQ(Read(file), "retry bytes\n");
+    EXPECT_TRUE(artifacts.rollback().empty());
+    EXPECT_EQ(handles.live(), 0u);
+    EXPECT_FALSE(std::filesystem::exists(save));
+}
+
+TEST_F(CreatedWorldCleanup, StreamBindingFailureKeepsOwnedFileAvailableForRollback) {
+    for (const auto boundary :
+         {NativeRace::Boundary::DescriptorFailure, NativeRace::Boundary::StreamFailure}) {
+        const NativeRace::HandleCapture handles;
+        CreatedWorldArtifacts artifacts;
+        const auto save = Root() / "created-world";
+        const auto file = save / "preset.json";
+        artifacts.create_root(save);
+        Arm(file, boundary);
+        EXPECT_THROW(artifacts.write_file(file, "owned bytes\n"), std::runtime_error);
+        ASSERT_TRUE(Race().fired);
+        EXPECT_GE(handles.live(), 2u);
+        EXPECT_TRUE(Read(file).empty());
+        EXPECT_TRUE(artifacts.rollback().empty());
+        EXPECT_EQ(handles.live(), 0u);
+        EXPECT_FALSE(std::filesystem::exists(save));
+        NativeRace::Active() = nullptr;
+        Race() = {};
+    }
+}
+#endif
 
 TEST_F(CreatedWorldCleanup, ExclusiveFilePublicationMovesBytesAndRetainsRollbackOwnership) {
     for (const auto* bytes : {"owned bytes\n", ""}) {

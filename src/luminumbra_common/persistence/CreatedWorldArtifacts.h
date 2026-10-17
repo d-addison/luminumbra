@@ -24,6 +24,7 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#include <fcntl.h>
 #include <io.h>
 #include <windows.h>
 #include <winternl.h>
@@ -52,7 +53,8 @@ public:
         if (m_count != 0)
             throw std::runtime_error("A new world still has uncommitted artifacts.");
         auto root = std::filesystem::canonical(path.parent_path()) / path.filename();
-        Artifact artifact{.path = std::move(root), .directory = true, .identity = {}};
+        Artifact artifact{
+            .path = std::move(root), .directory = true, .identity = {}, .retained = {}};
         if (std::filesystem::exists(std::filesystem::symlink_status(artifact.path)))
             throw std::runtime_error("Refusing to reuse an existing world save directory.");
         create_owned_directory(std::move(artifact));
@@ -74,17 +76,20 @@ public:
 #endif
 
     // Called immediately after exclusive creation, while the writer still owns
-    // the native handle. Never infer ownership by reopening the file's name.
+    // the native handle. Retain a duplicate until release or completed removal
+    // so an unlinked object's identity cannot be recycled. Windows writers
+    // must allow read/write/delete sharing for publication and rollback.
     void file_created(const std::filesystem::path& path, NativeFile file) {
         auto& artifact = find_artifact(path);
         if (artifact.directory || artifact.identity)
             throw std::runtime_error("Invalid world file creation record.");
-        artifact.identity = identity_from(file);
+        artifact.retained = duplicate_file(file);
+        artifact.identity = identity_from(artifact.retained.get());
     }
 
-    // Record identity before exclusive publication, so rollback also owns the
-    // destination if a later directory flush fails. A racing occupant is never
-    // replaced, even after validation has observed a vacant destination.
+    // Retain the source before exclusive publication. Claim the destination
+    // only after rename succeeds, before any caller's directory flush. Even a
+    // racing hard link to the source must remain unowned when rename refuses.
     void publish_file(const std::filesystem::path& temp, const std::filesystem::path& destination) {
         const auto& source = find_artifact(temp);
         auto& target = find_artifact(destination);
@@ -93,7 +98,7 @@ public:
         if (!validate(source) || !source.identity || target.directory || target.identity ||
             std::filesystem::exists(std::filesystem::symlink_status(target.path)))
             throw std::runtime_error("Refusing to replace a world artifact destination.");
-        target.identity = source.identity;
+        target.retained = duplicate_file(source.retained.get());
 #if defined(_WIN32)
         if (!::MoveFileExW(temp.c_str(), destination.c_str(), MOVEFILE_WRITE_THROUGH))
             throw std::system_error(static_cast<int>(::GetLastError()),
@@ -105,6 +110,7 @@ public:
             throw std::system_error(
                 errno, std::generic_category(), "Could not exclusively publish world artifact");
 #endif
+        target.identity = source.identity;
     }
 
     // Exclusively create a file and record its identity before the first byte.
@@ -112,8 +118,29 @@ public:
     void write_file(const std::filesystem::path& path, const std::string& bytes) {
         reserve_file(path);
 #if defined(_WIN32)
-        std::FILE* file = nullptr;
-        ::_wfopen_s(&file, path.c_str(), L"wbx");
+        ScopedFile native(::CreateFileW(path.c_str(),
+                                        GENERIC_WRITE,
+                                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                        nullptr,
+                                        CREATE_NEW,
+                                        FILE_ATTRIBUTE_NORMAL,
+                                        nullptr));
+        if (native.get() == INVALID_HANDLE_VALUE) {
+            abandon_file_reservation();
+            throw std::runtime_error("Could not exclusively create world artifact: " +
+                                     path.string());
+        }
+        file_created(path, native.get());
+        const auto descriptor =
+            ::_open_osfhandle(reinterpret_cast<intptr_t>(native.get()), _O_BINARY | _O_WRONLY);
+        if (descriptor < 0)
+            throw std::runtime_error("Could not open world artifact stream.");
+        native.release(); // The CRT descriptor now owns the creating handle.
+        auto* file = ::_fdopen(descriptor, "wb");
+        if (!file) {
+            ::_close(descriptor);
+            throw std::runtime_error("Could not open world artifact stream.");
+        }
 #else
         auto* file = std::fopen(path.c_str(), "wbx");
 #endif
@@ -124,9 +151,7 @@ public:
         }
         bool written = false;
         try {
-#if defined(_WIN32)
-            file_created(path, reinterpret_cast<HANDLE>(::_get_osfhandle(::_fileno(file))));
-#else
+#if !defined(_WIN32)
             file_created(path, ::fileno(file));
 #endif
             written = std::fwrite(bytes.data(), 1, bytes.size(), file) == bytes.size();
@@ -176,13 +201,17 @@ public:
                 }
             }
             for (std::size_t index = m_count; index != 0; --index) {
-                const auto& artifact = m_artifacts[index - 1];
+                auto& artifact = m_artifacts[index - 1];
                 // Recheck the root and every owning directory as well as the
                 // object immediately before removal, not only at preflight.
                 validate_parents(artifact);
-                if (!validate(artifact))
-                    continue;
-                remove_owned(artifact);
+                if (validate(artifact))
+                    remove_owned(artifact);
+                // Windows completes deletion when the last handle closes,
+                // before removing the owning directory. Forget the removed
+                // identity too: a retry must refuse any later occupant.
+                artifact.retained = ScopedFile{};
+                artifact.identity.reset();
             }
             release();
             return {};
@@ -259,14 +288,9 @@ private:
 #endif
     }
 
-    struct Artifact {
-        std::filesystem::path path;
-        bool directory = false;
-        std::optional<Identity> identity{};
-    };
-
     class ScopedFile {
     public:
+        ScopedFile() = default;
         explicit ScopedFile(NativeFile native_file)
             : m_file(native_file) {}
         ~ScopedFile() {
@@ -280,13 +304,59 @@ private:
         }
         ScopedFile(const ScopedFile&) = delete;
         ScopedFile& operator=(const ScopedFile&) = delete;
+        ScopedFile(ScopedFile&& other) noexcept
+            : m_file(other.release()) {}
+        ScopedFile& operator=(ScopedFile&& other) noexcept {
+            if (this != &other) {
+                ScopedFile previous(other.release());
+                std::swap(m_file, previous.m_file);
+            }
+            return *this;
+        }
         NativeFile get() const {
             return m_file;
         }
+        NativeFile release() {
+            return std::exchange(m_file, kInvalidFile);
+        }
 
     private:
-        NativeFile m_file;
+#if defined(_WIN32)
+        static inline const NativeFile kInvalidFile = INVALID_HANDLE_VALUE;
+#else
+        static constexpr NativeFile kInvalidFile = -1;
+#endif
+        NativeFile m_file = kInvalidFile;
     };
+
+    struct Artifact {
+        std::filesystem::path path;
+        bool directory = false;
+        std::optional<Identity> identity{};
+        ScopedFile retained{};
+    };
+
+    static ScopedFile duplicate_file(NativeFile file) {
+#if defined(_WIN32)
+        HANDLE retained = INVALID_HANDLE_VALUE;
+        if (!::DuplicateHandle(::GetCurrentProcess(),
+                               file,
+                               ::GetCurrentProcess(),
+                               &retained,
+                               0,
+                               FALSE,
+                               DUPLICATE_SAME_ACCESS))
+            throw std::system_error(static_cast<int>(::GetLastError()),
+                                    std::system_category(),
+                                    "Could not retain world artifact");
+#else
+        const auto retained = ::fcntl(file, F_DUPFD_CLOEXEC, 0);
+        if (retained < 0)
+            throw std::system_error(
+                errno, std::generic_category(), "Could not retain world artifact");
+#endif
+        return ScopedFile(retained);
+    }
 
     void create_owned_directory(Artifact artifact) {
 #if defined(_WIN32)
@@ -351,10 +421,10 @@ private:
         if (result < 0)
             throw std::runtime_error("Could not exclusively create world directory (status " +
                                      std::to_string(result) + ").");
-        const ScopedFile directory(handle);
         m_artifacts[m_count++] = std::move(artifact);
         auto& recorded = m_artifacts[m_count - 1];
-        recorded.identity = identity_from(directory.get());
+        recorded.retained = ScopedFile(handle);
+        recorded.identity = identity_from(recorded.retained.get());
 #else
         // POSIX mkdir has no creating descriptor. Prepare an unpredictable,
         // private (0700) staging directory, bind its descriptor and identity,
@@ -368,12 +438,12 @@ private:
         artifact.path = staging;
         m_artifacts[m_count++] = std::move(artifact);
         auto& recorded = m_artifacts[m_count - 1];
-        const ScopedFile directory(
+        recorded.retained = ScopedFile(
             ::open(recorded.path.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
-        if (directory.get() < 0)
+        if (recorded.retained.get() < 0)
             throw std::system_error(
                 errno, std::generic_category(), "Could not bind staged world directory");
-        recorded.identity = identity_from(directory.get());
+        recorded.identity = identity_from(recorded.retained.get());
         validate(recorded);
         const auto result = Detail::RenameWithoutReplacement(
             AT_FDCWD, recorded.path.c_str(), AT_FDCWD, destination.c_str());
@@ -565,7 +635,7 @@ private:
         if (!owned_parent || tracked(normalized) ||
             std::filesystem::exists(std::filesystem::symlink_status(normalized)))
             throw std::runtime_error("Refusing to claim a world artifact: " + normalized.string());
-        return {.path = normalized, .directory = directory, .identity = {}};
+        return {.path = normalized, .directory = directory, .identity = {}, .retained = {}};
     }
 
     bool tracked(const std::filesystem::path& path) const {
@@ -576,7 +646,8 @@ private:
     }
 
     // Bound initial creation by its full artifact set. Renamed temporary files
-    // retain their journal entries until release or rollback.
+    // retain their journal entries until release or rollback. At most one
+    // retained native handle per entry, including both publication names.
     static constexpr std::size_t kCreationDirectories = 3;   // Save root, chunks, region.
     static constexpr std::size_t kCreationDurableFiles = 3;  // Preset, metadata, ledger.
     static constexpr std::size_t kEntriesPerDurableFile = 2; // Destination and temporary.
