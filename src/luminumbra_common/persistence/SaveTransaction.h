@@ -14,14 +14,17 @@
 #include "../fields/EnergyFieldState.h"
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <set>
 #include <stop_token>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 namespace Luminumbra::Persistence {
@@ -133,6 +136,13 @@ enum class RecoveryOutcome : std::uint8_t {
     Failed
 };
 
+// Read-only capture preflight. The journal is admitted before parsing; every file recovery
+// can hash/read (including replacement destinations and undo payloads) is admitted before
+// recovery starts. Ordinary recovery does not use this opt-in admission seam.
+bool admit_recovery_payloads(const std::filesystem::path& save_dir,
+                             const std::function<bool(const std::filesystem::path&)>& admit_file,
+                             const std::function<bool(std::size_t)>& admit_entries);
+
 // Idempotent and crash-safe (see the protocol in specs/ds/s4-impl.md). Failed appends a diagnostic.
 RecoveryOutcome recover_pending_journal(const std::filesystem::path& save_dir,
                                         std::vector<std::string>* errors);
@@ -150,6 +160,26 @@ using MemberDigestFn = bool (*)(const std::filesystem::path& save_dir,
                                 std::string_view relative_path,
                                 MemberDigest& out,
                                 std::string& error);
+
+class EditedSourceCaptureAccess;
+// A producer-created token proves publication of the exact captured dependency set.
+// It never changes the immutable image's Prepared identity.
+class EditedSourcePublicationToken {
+public:
+    [[nodiscard]] bool committed() const {
+        return m_committed.load(std::memory_order_acquire);
+    }
+
+private:
+    friend class SaveTransaction;
+    friend class EditedSourceCaptureAccess;
+    EditedSourcePublicationToken() = default;
+    std::atomic<bool> m_committed{false};
+    // Keeps the capture allocation reservation alive while the token is inspected.
+    std::shared_ptr<const void> m_retention;
+    std::vector<SnapshotMember> m_dependencies;
+    const std::thread::id m_owner_thread = std::this_thread::get_id();
+};
 
 class SaveTransaction {
 public:
@@ -197,6 +227,10 @@ public:
     }
 
 private:
+    friend class EditedSourceCaptureAccess;
+    bool capture_open_on_owner_thread() const;
+    bool capture_member_protected(std::string_view path) const;
+    void publish_edited_sources(const SnapshotIndex& next);
     enum class State : std::uint8_t {
         Idle,
         Open,
@@ -226,6 +260,8 @@ private:
     std::vector<std::function<void()>> m_committed_actions;
     std::uint64_t m_next_undo = 0;
     bool m_registered = false;
+    const std::thread::id m_owner_thread = std::this_thread::get_id();
+    std::array<std::weak_ptr<EditedSourcePublicationToken>, 64> m_edited_sources{};
 };
 
 // Test hook: invoked at real publication sites ("journal-published", "before-replace",

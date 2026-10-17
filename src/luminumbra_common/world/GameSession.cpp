@@ -49,6 +49,7 @@
 #include "../ecs/EntitySnapshot.h"
 #include "../fields/EnergyFieldState.h"
 #include "../fields/FieldPageState.h"
+#include "../persistence/EditedSourceImage.h"
 #include "../persistence/PlantPersistence.h"
 #include "../persistence/SaveTransaction.h"
 #include "../persistence/SavedWorldCatalog.h"
@@ -56,6 +57,7 @@
 #include "../persistence/WorldSaveService.h"
 #include "../scripting/LuaState.h"
 #include "../simulation/SimBudgetTelemetry.h"
+#include "../simulation/SimulationEventBus.h"
 #include "../systems/AetherFieldSystem.h"
 #include "../systems/CropLifecycleSystem.h"
 #include "../systems/FieldEmitterSystem.h" // Gathers field-emitter deposits.
@@ -79,6 +81,7 @@
 #include "Chunk.h"
 #include "DistantPolicy.h"
 #include "GroundObjectStore.h"
+#include "RegionPopulator.h"
 #include "TerrainPresetLoader.h"
 #include "WorldStreamingState.h"
 #include "WorldgenDependencySnapshot.h"
@@ -112,6 +115,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <new>
 #include <optional>
 #include <random>
 #include <ratio>
@@ -121,6 +125,7 @@
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -3711,6 +3716,64 @@ std::filesystem::path GameSession::GetWorldSaveDir() const {
         return {};
     }
     return GetSaveRootPath() / "worlds" / "saves" / m_metadata.worldId;
+}
+
+Persistence::EditedSourceError
+GameSession::CaptureFarEditedSources(std::uint64_t expected_generation,
+                                     const Persistence::EditedSourceSelection& selection,
+                                     const Persistence::EditedSourceLimits& limits,
+                                     bool include_preview,
+                                     Persistence::EditedSourceCapture& out) {
+    using Error = Persistence::EditedSourceError;
+    if (m_editedSourceOwner != std::this_thread::get_id() || m_editedSourceCaptureActive ||
+        !m_worldSystem)
+        return Error::Ineligible;
+    const auto root =
+        m_regionDurableDirectory.empty() ? GetWorldSaveDir() : m_regionDurableDirectory;
+    if (root.empty())
+        return Error::Unavailable;
+    class CaptureGuard {
+    public:
+        explicit CaptureGuard(bool& value)
+            : active(value) {
+            active = true;
+        }
+        ~CaptureGuard() {
+            active = false;
+        }
+
+    private:
+        bool& active;
+    };
+    const CaptureGuard guard(m_editedSourceCaptureActive);
+    try {
+        m_worldSystem->quiesce_streaming_jobs_for_save();
+        const auto sampling_scope = m_worldSystem->acquire_worldgen_sample_scope();
+        Persistence::EditedSourceCapture captured;
+        auto error = Persistence::CaptureCommittedEditedSource(
+            root, expected_generation, selection, limits, captured.committed);
+        if (error != Error::None)
+            return error;
+        if (include_preview) {
+            error = Persistence::CaptureEditedSourcePreview(
+                [this](std::size_t max_records,
+                       const Persistence::EditedSourcePreviewVisitor& visitor) {
+                    return m_worldSystem->visit_edited_source_preview(max_records, visitor);
+                },
+                selection,
+                limits,
+                captured.live,
+                captured.parked);
+            if (error != Error::None)
+                return error;
+        }
+        out = std::move(captured);
+        return Error::None;
+    } catch (const std::bad_alloc&) {
+        return Error::AllocationFailure;
+    } catch (const std::exception&) {
+        return Error::Unavailable;
+    }
 }
 
 bool GameSession::SaveWorldState(WorldStateSaveReport* report, WorldStateSaveScope scope) {

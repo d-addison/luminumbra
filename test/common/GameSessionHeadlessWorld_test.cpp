@@ -1215,7 +1215,7 @@ TEST_P(SavedWorldPresetTest, NewSaveRoundTripsWithMarkerAndCanonicalIdentity) {
     EXPECT_EQ(SavedPresetTestDiskBytes(Fixture().root.path()), before);
     ASSERT_TRUE(loaded.SaveWorld());
     EXPECT_EQ(nlohmann::json::parse(ReadClockTestFile(save / "world_info.json")), metadata);
-    const auto copy = root.path() / "reopened-copy";
+    const auto copy = Fixture().root.path() / "reopened-copy";
     ASSERT_TRUE(loaded.SaveWorldStateTo(copy));
     if (GetParam()) {
         EXPECT_EQ(nlohmann::json::parse(ReadClockTestFile(copy / "preset.json")), preset);

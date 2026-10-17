@@ -38,7 +38,7 @@ RegionKey WaterOwner(const Chunk& chunk) {
 
 // Empty authoritative storage is a legitimate initialization opportunity; partial saved
 // storage is never repaired into a fresh grid. Required mirrors are checked independently.
-void ValidateWater(const Chunk& chunk) {
+void ValidateWater(const Chunk& chunk, bool allow_legacy_float = false) {
     if (!chunk.has_water_sim.load()) {
         if (!chunk.water_depth_mm.empty() || !chunk.water_bed_mm.empty() ||
             !chunk.water_edge_flux.empty() || !chunk.water_level_data.empty() ||
@@ -51,9 +51,13 @@ void ValidateWater(const Chunk& chunk) {
         RefuseWater("Regional water resolution refused");
     // Bounded resolution makes both products exact on all supported size_t widths.
     const auto cells = static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
-    if (chunk.water_depth_mm.size() != cells || chunk.water_bed_mm.size() != cells ||
-        chunk.water_edge_flux.size() != 2 * cells || chunk.water_level_data.size() != cells ||
-        chunk.water_flow_data.size() != cells || chunk.water_sim_terrain_height.size() != cells ||
+    const bool legacy_float = allow_legacy_float && chunk.water_depth_mm.empty() &&
+                              chunk.water_bed_mm.empty() && chunk.water_edge_flux.empty();
+    if ((!legacy_float &&
+         (chunk.water_depth_mm.size() != cells || chunk.water_bed_mm.size() != cells ||
+          chunk.water_edge_flux.size() != 2 * cells)) ||
+        chunk.water_level_data.size() != cells || chunk.water_flow_data.size() != cells ||
+        chunk.water_sim_terrain_height.size() != cells ||
         (!chunk.water_rest_level.empty() && chunk.water_rest_level.size() != cells))
         RefuseWater("Regional water grid shape refused");
     const auto* depth = chunk.water_depth_mm.data();
@@ -67,8 +71,8 @@ void ValidateWater(const Chunk& chunk) {
         delta < 0.0f)
         RefuseWater("Regional water continuation refused");
     for (std::size_t i = 0; i < cells; ++i) {
-        if (depth[i] < 0 || !std::isfinite(level[i]) || !std::isfinite(flow[i].x) ||
-            !std::isfinite(flow[i].y) || !std::isfinite(terrain[i]))
+        if ((!legacy_float && depth[i] < 0) || !std::isfinite(level[i]) ||
+            !std::isfinite(flow[i].x) || !std::isfinite(flow[i].y) || !std::isfinite(terrain[i]))
             RefuseWater("Regional water cell refused");
     }
 }
@@ -480,8 +484,8 @@ std::int32_t RoundedWaterMm(double value, bool depth) {
 }
 } // namespace
 
-void WaterSystem::ValidateRegionalGrid(const Chunk& chunk) {
-    ValidateWater(chunk);
+void WaterSystem::ValidateRegionalGrid(const Chunk& chunk, bool allow_legacy_float) {
+    ValidateWater(chunk, allow_legacy_float);
 }
 
 void WaterSystem::PrepareRegionalGrid(Chunk& chunk) {

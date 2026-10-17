@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
@@ -300,6 +301,61 @@ nlohmann::json ChunkToJson(const Chunk& chunk, bool sim_only = false, bool omit_
     return output;
 }
 
+// Snapshot fixtures may contain partial lattices; durable capture requires the exact size.
+constexpr std::size_t kMaxDensitySamples =
+    static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+
+bool ReadDensityValue(const nlohmann::json& value, float& out) {
+    if (value.is_number_unsigned()) {
+        out = static_cast<float>(value.get<std::uint64_t>());
+        return true;
+    }
+    if (value.is_number_integer()) {
+        out = static_cast<float>(value.get<std::int64_t>());
+        return true;
+    }
+    if (!value.is_number_float())
+        return false;
+    const auto density = value.get<double>();
+    const auto maximum = static_cast<double>((std::numeric_limits<float>::max)());
+    if (!std::isfinite(density) || density < -maximum || density > maximum)
+        return false;
+    out = static_cast<float>(density);
+    return true;
+}
+
+bool ReadMaterialValue(const nlohmann::json& value, u8& out) {
+    if (value.is_number_unsigned()) {
+        const auto material = value.get<std::uint64_t>();
+        if (material > 255u)
+            return false;
+        out = static_cast<u8>(material);
+        return true;
+    }
+    if (value.is_number_integer()) {
+        const auto material = value.get<std::int64_t>();
+        if (material < 0 || material > 255)
+            return false;
+        out = static_cast<u8>(material);
+        return true;
+    }
+    return false;
+}
+
+float DensityValueFromJson(const nlohmann::json& value) {
+    float sample = 0;
+    if (!ReadDensityValue(value, sample))
+        throw std::invalid_argument("sdf_data must contain only finite float values");
+    return sample;
+}
+
+u8 MaterialValueFromJson(const nlohmann::json& value) {
+    u8 material = 0;
+    if (!ReadMaterialValue(value, material))
+        throw std::invalid_argument("material_data must contain only integers in [0, 255]");
+    return material;
+}
+
 template<class T>
 void CheckConvertedValue(const T&) {}
 void CheckConvertedValue(float value) {
@@ -347,15 +403,31 @@ std::vector<T> ReadChunkArray(const nlohmann::json& values) {
                                         [](const auto& value) { return value.template get<T>(); });
 }
 
+template<bool Materialize>
+std::vector<float> DensityFromJson(const nlohmann::json& values) {
+    if (!values.is_array() || values.size() > kMaxDensitySamples)
+        throw std::invalid_argument("sdf_data must be an array no larger than the chunk lattice");
+    return ReadChunkArray<Materialize, float>(
+        values, [](const auto& value) { return DensityValueFromJson(value); });
+}
+
+template<bool Materialize>
+std::vector<u8> MaterialFromJson(const nlohmann::json& values) {
+    if (!values.is_array())
+        throw std::invalid_argument("material_data must be an array");
+    return ReadChunkArray<Materialize, u8>(
+        values, [](const auto& value) { return MaterialValueFromJson(value); });
+}
+
 template<bool Materialize = true>
 void ApplyChunkJson(const nlohmann::json& value, Chunk& chunk) {
     chunk.set_state(ChunkStateFromName(value.at("state").get<std::string>()));
-    chunk.sdf_data = ReadChunkArray<Materialize, float>(value.at("sdf_data"));
+    chunk.sdf_data = DensityFromJson<Materialize>(value.at("sdf_data"));
     chunk.heightmap_data = ReadChunkArray<Materialize, float>(value.at("heightmap_data"));
     // tolerant read (default empty) so old saves without the field still
     // load and the single-missing-field negative fixture is unaffected.
     chunk.material_data = value.contains("material_data")
-                              ? ReadChunkArray<Materialize, u8>(value.at("material_data"))
+                              ? MaterialFromJson<Materialize>(value.at("material_data"))
                               : std::vector<u8>{};
     chunk.mesh_vertices =
         ReadChunkArray<Materialize, VoxelVertex>(value.at("mesh_vertices"), MeshVertexFromJson);
@@ -593,6 +665,39 @@ bool ValidateCoordsObject(const nlohmann::json& value, std::vector<std::string>&
         return false;
     }
     return true;
+}
+
+void RequireDensityArray(const nlohmann::json& chunk, std::vector<std::string>& errors) {
+    if (!chunk.contains("sdf_data") || !chunk.at("sdf_data").is_array() ||
+        chunk.at("sdf_data").size() > kMaxDensitySamples) {
+        errors.push_back("sdf_data must be an array no larger than the chunk lattice");
+    } else {
+        for (const auto& value : chunk.at("sdf_data")) {
+            float sample = 0;
+            if (!ReadDensityValue(value, sample)) {
+                errors.push_back("sdf_data must contain only finite float values");
+                break;
+            }
+        }
+    }
+}
+
+void ValidateMaterialArray(const nlohmann::json& chunk, std::vector<std::string>& errors) {
+    // Missing material_data remains a supported legacy representation.
+    if (chunk.contains("material_data")) {
+        const auto& materials = chunk.at("material_data");
+        if (!materials.is_array()) {
+            errors.push_back("material_data must be an array");
+        } else {
+            for (const auto& value : materials) {
+                u8 material = 0;
+                if (!ReadMaterialValue(value, material)) {
+                    errors.push_back("material_data must contain only integers in [0, 255]");
+                    break;
+                }
+            }
+        }
+    }
 }
 
 void RequireNumberArray(const nlohmann::json& chunk,
@@ -922,7 +1027,24 @@ private:
                         values->push_back(MeshVertexFromJson(value));
                     else if constexpr (std::is_same_v<Element, Vec2>)
                         values->push_back(Vec2FromJson(value));
-                    else {
+                    else if constexpr (std::is_same_v<Element, u8>)
+                        values->push_back(MaterialValueFromJson(value));
+                    else if constexpr (std::is_same_v<Element, float>) {
+                        if (values == &arrays.sdf_data) {
+                            // Density storage is bounded by the chunk lattice, including capacity.
+                            if (values->size() >= kMaxDensitySamples)
+                                throw std::invalid_argument("sdf_data exceeds the chunk lattice");
+                            if (values->size() == values->capacity()) {
+                                const auto count = values->size();
+                                const auto growth =
+                                    std::min(count + 1u, kMaxDensitySamples - count);
+                                values->reserve(count + growth);
+                            }
+                            values->push_back(DensityValueFromJson(value));
+                        } else {
+                            values->push_back(value.get<Element>());
+                        }
+                    } else {
                         if constexpr (std::is_same_v<Element, std::int32_t>) {
                             if (m_strictWater)
                                 RequireWaterInteger(value);
@@ -1055,8 +1177,9 @@ bool ValidateChunkFormatObject(const nlohmann::json& chunk, std::vector<std::str
         errors.push_back("state_value must be an integer");
     }
 
-    for (const char* field :
-         {"sdf_data", "heightmap_data", "water_level_data", "water_sim_terrain_height"}) {
+    RequireDensityArray(chunk, errors);
+    ValidateMaterialArray(chunk, errors);
+    for (const char* field : {"heightmap_data", "water_level_data", "water_sim_terrain_height"}) {
         RequireNumberArray(chunk, field, errors);
     }
     for (const char* field : {"mesh_indices",
@@ -1332,6 +1455,8 @@ private:
 
 std::optional<ChunkValidationCache::Facts> NativeChunkFacts(const Chunk& chunk, bool strict) {
     try {
+        if (chunk.sdf_data.size() > kMaxDensitySamples)
+            return std::nullopt;
         // Serialized native scalar types already meet the loader's width rules.
         // Nonfinite floats serialize to null, so they cannot seed validation facts.
         for (const auto* values : {&chunk.sdf_data,

@@ -119,7 +119,8 @@ public:
     // A missing file is a clean miss: out is emptied, returns true.
     static bool load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapshot& out,
                                     const std::filesystem::path& save_dir,
-                                    std::vector<std::string>* errors = nullptr);
+                                    std::vector<std::string>* errors = nullptr,
+                                    bool admitted_capture = false);
 
     static std::filesystem::path creature_entities_path(const std::filesystem::path& save_dir);
     static bool save_creature_entities(const luminumbra::ai::CreatureSnapshot& snapshot,
@@ -128,7 +129,8 @@ public:
     // A previous-release snapshot may omit this member entirely: verified absence is empty.
     static bool load_creature_entities(luminumbra::ai::CreatureSnapshot& out,
                                        const std::filesystem::path& save_dir,
-                                       std::vector<std::string>* errors = nullptr);
+                                       std::vector<std::string>* errors = nullptr,
+                                       bool admitted_capture = false);
 
     // Ground object store persisted as region/ground-objects.json (SIBLING to the chunk container).
     // An EMPTY store writes NO file (and removes a stale one). Absent file: out is cleared, true.
@@ -139,14 +141,16 @@ public:
     static bool load_ground_objects(world::GroundObjectStore& out,
                                     const std::filesystem::path& save_dir,
                                     std::uint64_t next_id,
-                                    std::vector<std::string>* errors = nullptr);
+                                    std::vector<std::string>* errors = nullptr,
+                                    bool admitted_capture = false);
     // load_world refusal rules for ground objects: every object lies in a region the ledger
     // records and no object was spawned after the metadata clock. Absent file: true.
     // On success, optional validated output receives the decoded store (empty on absence).
     static bool validate_ground_objects(const std::filesystem::path& save_dir,
                                         const world::ActiveRegionLedger& ledger,
                                         std::vector<std::string>* errors,
-                                        world::GroundObjectStore* validated = nullptr);
+                                        world::GroundObjectStore* validated = nullptr,
+                                        bool admitted_capture = false);
 
     // Field pages persisted as region/field-pages.fpg (SIBLING to the chunk container). An EMPTY
     // state writes NO file (and removes a stale one). Absent file: out is cleared, true.
@@ -274,6 +278,24 @@ public:
         std::shared_ptr<Chunk> chunk;
         std::string error;
     };
+    // Owner-thread source capture. Budgets cover the entire region before decoding any chunk.
+    // The visitor borrows one validated chunk; it must copy any retained values.
+    struct EditedRegionReadLimits {
+        std::uint64_t file_bytes = 0;
+        std::uint64_t decode_bytes = 0;
+        std::uint64_t scratch_bytes = 0;
+        std::size_t records = 0;
+        std::uint64_t authoritative_samples = 0;
+    };
+    static bool
+    read_edited_source_region(const std::filesystem::path& region_file,
+                              const EditedRegionReadLimits& limits,
+                              bool strict_water,
+                              const std::function<bool(const Chunk&, std::uint64_t)>& visitor,
+                              MemberDigest& digest,
+                              std::uint64_t& decoded_bytes,
+                              std::size_t& records_read,
+                              std::vector<std::string>* errors = nullptr);
     // Reads the exact lod-0 identity only. Indexed membership is checked before decoding;
     // missing records are distinct from corrupt/unreadable expected authority.
     static ChunkReadResult read_chunk(const std::filesystem::path& save_dir,
@@ -359,6 +381,17 @@ public:
                               std::string_view relative_path,
                               MemberDigest& out,
                               std::string& error);
+    // Capture has already admitted all sibling bytes and verifies its own complete membership.
+    // This mode validates records on their merits, including unindexed adoption.
+    static bool edited_source_member_digest(const std::filesystem::path& save_dir,
+                                            std::string_view relative_path,
+                                            MemberDigest& out,
+                                            std::string& error);
+    // Uses load_world's refusal rules on the installed candidate set, never a validation cache.
+    static bool validate_authoritative_relationships(const std::filesystem::path& save_dir,
+                                                     std::vector<std::string>& errors,
+                                                     const std::stop_token& stop = {},
+                                                     bool admitted_capture = false);
     // Durable single-member writers for flag-on GameSession members (plants, energy). They join the
     // active transaction for save_dir, else run an implicit one when the directory is indexed, else
     // just replace the file durably. relative_path must satisfy member_path_allowed.
@@ -441,6 +474,11 @@ public:
                                            std::vector<std::string>* errors = nullptr) const;
 
 private:
+    static bool member_digest_impl(const std::filesystem::path& save_dir,
+                                   std::string_view relative_path,
+                                   MemberDigest& out,
+                                   std::string& error,
+                                   bool admitted_capture);
     // The single v2 write seam: serializes the given chunks into LMR1 region
     // files, merging with on-disk records, and refreshes the world manifest.
     // regions_written receives the

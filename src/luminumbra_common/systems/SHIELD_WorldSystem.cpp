@@ -6014,6 +6014,36 @@ SHIELD_WorldSystem::snapshot_authoritative_chunks() const {
     return chunks;
 }
 
+bool SHIELD_WorldSystem::visit_edited_source_preview(
+    std::size_t max_records, const std::function<bool(const Chunk&, bool parked)>& visitor) const {
+    if (!visitor || m_streaming_state.chunks.size() > max_records ||
+        m_parked.size() > max_records - m_streaming_state.chunks.size())
+        return false;
+    struct Entry {
+        ChunkID id = 0;
+        const Chunk* chunk = nullptr;
+        bool parked = false;
+    };
+    std::vector<Entry> ordered;
+    ordered.reserve(m_streaming_state.chunks.size() + m_parked.size());
+    for (const auto& [id, chunk] : m_streaming_state.chunks) {
+        if (chunk)
+            ordered.push_back({id, chunk.get(), false});
+    }
+    for (const auto& [id, parked] : m_parked) {
+        if (parked.chunk)
+            ordered.push_back({id, parked.chunk.get(), true});
+    }
+    std::sort(ordered.begin(), ordered.end(), [](const auto& a, const auto& b) {
+        return std::pair(a.parked, a.id) < std::pair(b.parked, b.id);
+    });
+    for (const auto& entry : ordered) {
+        if (entry.chunk->get_state() == ChunkState::Loading || !visitor(*entry.chunk, entry.parked))
+            return false;
+    }
+    return true;
+}
+
 void SHIELD_WorldSystem::set_durable_chunk_loader(
     std::function<std::shared_ptr<Chunk>(const IVec3&)> loader,
     std::function<void(std::string)> fault) {
