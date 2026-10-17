@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "audio/NullAudioManager.h"
+#include "luminumbra_common/core/FramePacing.h"
 #include "ui/Rml_UIManager.h"
 #include "ui/components/common/Button.h"
 #include "ui/components/common/Input.h"
@@ -717,6 +718,7 @@ TEST(UiSmokeTest, SettingsScreenRoundTripsThroughTheBridge) {
         std::string resolution = "1920x1080";
         std::string window_mode = "borderless";
         bool vsync = true;
+        int frame_cap = 120;
         bool perf_hud = true;
         int console_opens = 0;
         float fov = 45.0f;
@@ -758,6 +760,12 @@ TEST(UiSmokeTest, SettingsScreenRoundTripsThroughTheBridge) {
     };
     sb.SetVSync = [&](bool v) {
         model.vsync = v;
+    };
+    sb.GetFrameCap = [&] {
+        return model.frame_cap;
+    };
+    sb.SetFrameCap = [&](int cap) {
+        model.frame_cap = cap;
     };
     sb.GetFov = [&] {
         return model.fov;
@@ -812,6 +820,7 @@ TEST(UiSmokeTest, SettingsScreenRoundTripsThroughTheBridge) {
     EXPECT_EQ(control_value("setting_resolution"), "1920x1080");
     EXPECT_EQ(control_value("setting_window_mode"), "borderless");
     EXPECT_EQ(control_value("setting_vsync"), "on");
+    EXPECT_EQ(control_value("setting_frame_cap"), "120");
     EXPECT_EQ(std::stof(control_value("setting_fov")), 45.0f);
     EXPECT_NEAR(std::stof(control_value("setting_mouse_sensitivity")), 0.025f, 1e-4f);
 
@@ -830,8 +839,45 @@ TEST(UiSmokeTest, SettingsScreenRoundTripsThroughTheBridge) {
     change_control("setting_window_mode", "fullscreen");
     EXPECT_EQ(model.window_mode, "fullscreen");
 
+    change_control("setting_vsync", "invalid");
+    EXPECT_TRUE(model.vsync);
     change_control("setting_vsync", "off");
     EXPECT_FALSE(model.vsync);
+
+    for (const int cap : {30, 60, 120, 144, 165, 240, 0}) {
+        change_control("setting_frame_cap", std::to_string(cap));
+        EXPECT_EQ(model.frame_cap, cap);
+        EXPECT_EQ(control_value("setting_frame_cap"), std::to_string(cap));
+    }
+    change_control("setting_frame_cap", "144");
+    change_control("setting_frame_cap", "61");
+    EXPECT_EQ(model.frame_cap, 144);
+
+    // UI edits update the saved choices while each measurement mode keeps
+    // presentation uncapped. Leaving measurement uses the latest live edits.
+    using luminumbra::core::FramePacingOverrides;
+    for (const auto overrides :
+         {FramePacingOverrides{
+              .benchmark_active = true, .scenario_active = false, .profiling_active = false},
+          FramePacingOverrides{
+              .benchmark_active = false, .scenario_active = true, .profiling_active = false},
+          FramePacingOverrides{
+              .benchmark_active = false, .scenario_active = false, .profiling_active = true}}) {
+        for (const bool vsync : {true, false}) {
+            change_control("setting_vsync", vsync ? "on" : "off");
+            change_control("setting_frame_cap", "240");
+            EXPECT_EQ(model.vsync, vsync);
+            EXPECT_EQ(model.frame_cap, 240);
+            const auto pacing =
+                luminumbra::core::ResolveFramePacing(model.vsync, model.frame_cap, overrides);
+            EXPECT_FALSE(pacing.vsync);
+            EXPECT_EQ(pacing.frame_cap, 0);
+            const auto restored =
+                luminumbra::core::ResolveFramePacing(model.vsync, model.frame_cap);
+            EXPECT_EQ(restored.vsync, vsync);
+            EXPECT_EQ(restored.frame_cap, 240);
+        }
+    }
 
     change_control("setting_fov", "90");
     EXPECT_FLOAT_EQ(model.fov, 90.0f);
@@ -876,6 +922,135 @@ TEST(UiSmokeTest, SettingsScreenRoundTripsThroughTheBridge) {
     ui.RefreshDeveloperSettings();
     EXPECT_TRUE(perf_toggle->IsClassSet("on"));
 
+    ui.Shutdown();
+}
+
+TEST(UiSmokeTest, GraphicsControlsUseOneBridgeAndShowSessionValuesAndFailures) {
+    using namespace Luminumbra::Client;
+    using namespace luminumbra::core;
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Rml_UIManager ui(SourceRoot().string() + "/");
+    ui.Init(context.window(), nullptr);
+    ASSERT_NE(ui.GetContext(), nullptr);
+    GraphicsSettingsState state({}, {{"render_scale", 0.67}});
+    int edits = 0;
+    SettingsBridge bridge;
+    bridge.GetGraphics = [&] {
+        return state.Display();
+    };
+    bridge.EditGraphics = [&](const GraphicsEdit& edit) {
+        ++edits;
+        if (edit.kind == GraphicsEditKind::DetectApply) {
+            GraphicsHardwareInputs inputs;
+            inputs.renderer = "<em>unknown GPU</em>";
+            EXPECT_TRUE(state.Stage(edit, inputs));
+        } else {
+            EXPECT_TRUE(state.Stage(edit));
+        }
+        state.Applied(true, 0.0);
+    };
+    bridge.SaveGraphics = [&] {
+        state.Saved(false);
+    };
+    bridge.Save = [] {
+        return false;
+    };
+    ui.SetSettingsBridge(std::move(bridge));
+    auto* settings = LoadDocumentAndFind(ui, "settings.rml", "settings");
+    ASSERT_NE(settings, nullptr);
+    auto* scale = settings->GetElementById("graphics_render_scale");
+    ASSERT_NE(scale, nullptr);
+    ASSERT_NE(dynamic_cast<Rml::ElementFormControl*>(scale), nullptr);
+    EXPECT_NEAR(
+        std::stof(dynamic_cast<Rml::ElementFormControl*>(scale)->GetValue()), 0.67f, 0.001f);
+    EXPECT_TRUE(scale->HasAttribute("disabled"));
+    EXPECT_EQ(settings->GetElementById("graphics_render_scale_session")->GetInnerRML(),
+              " (session override)");
+
+    const auto change = [&](const char* id, const char* value) {
+        auto* element = settings->GetElementById(id);
+        ASSERT_NE(element, nullptr);
+        auto* control = dynamic_cast<Rml::ElementFormControl*>(element);
+        ASSERT_NE(control, nullptr);
+        control->SetValue(value);
+        Rml::Dictionary params;
+        element->DispatchEvent(Rml::EventId::Change, params);
+        ui.Update();
+    };
+    change("graphics_render_scale", "0.5");
+    EXPECT_EQ(edits, 0); // Session controls cannot write their effective values to saved choices.
+    change("graphics_preset", "high");
+    EXPECT_EQ(state.Settings().base_preset, GraphicsPreset::High);
+    EXPECT_TRUE(state.Settings().overrides.empty());
+    change("graphics_grass_density", "0.5");
+    EXPECT_NE(settings->GetElementById("graphics_state")->GetInnerRML().find("Custom (base: High)"),
+              std::string::npos);
+    EXPECT_DOUBLE_EQ(std::get<double>(state.Settings().overrides.at("grass_density")), 0.5);
+    change("graphics_grass_fade_start_m", "30");
+    change("graphics_grass_fade_end_m", "60");
+    change("graphics_far_terrain_radius_m", "1500");
+    change("graphics_shadow_resolution", "1024");
+    change("graphics_volumetric_quality", "0");
+    change("graphics_grass_enabled", "off");
+    change("graphics_ui_blur", "half");
+    EXPECT_EQ(state.Settings().overrides.size(), 8u);
+    EXPECT_DOUBLE_EQ(state.Display().effective.values.far_outer_clip_m, 1550.0);
+    EXPECT_EQ(state.Display().effective.values.shadow_resolution, 1024);
+    EXPECT_FALSE(state.Display().effective.values.grass_enabled);
+    EXPECT_EQ(state.Display().effective.values.ui_blur, UiBlurQuality::Half);
+    ClickAndUpdate(ui, settings->GetElementById("graphics_reset"));
+    EXPECT_EQ(state.Settings().base_preset, GraphicsPreset::High);
+    EXPECT_TRUE(state.Settings().overrides.empty());
+    ClickAndUpdate(ui, settings->GetElementById("graphics_detect"));
+    EXPECT_EQ(state.Settings().base_preset, GraphicsPreset::Low);
+    EXPECT_TRUE(state.Settings().overrides.empty());
+    EXPECT_EQ(settings->GetElementById("graphics_hardware")->QuerySelector("em"), nullptr);
+    EXPECT_NE(settings->GetElementById("graphics_hardware")->GetInnerRML().find("Recommended: Low"),
+              std::string::npos);
+    ClickAndUpdate(ui, settings->GetElementById("graphics_retry_save"));
+    EXPECT_EQ(settings->GetElementById("graphics_status")->GetInnerRML(),
+              "Save failed; graphics are active for this session");
+    EXPECT_TRUE(state.Settings().overrides.empty());
+    EXPECT_DOUBLE_EQ(state.Display().effective.values.render_scale, 0.67);
+    ClickAndUpdate(ui, settings->GetElementById("back_btn"));
+    auto* menu = FindDocumentByElementId(ui.GetContext(), "main_menu");
+    ASSERT_NE(menu, nullptr);
+    EXPECT_FALSE(menu->GetElementById("notification")->IsClassSet("hidden"));
+    EXPECT_EQ(menu->GetElementById("notification_text")->GetInnerRML(),
+              "Settings could not be saved. Reopen settings for details.");
+    ui.Shutdown();
+}
+
+TEST(UiSmokeTest, BackdropClassesFollowLiveQualityAndNewDocumentsWithoutCompounding) {
+    using namespace Luminumbra::Client;
+    using luminumbra::core::UiBlurQuality;
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Rml_UIManager ui(SourceRoot().string() + "/");
+    ui.Init(context.window(), nullptr);
+    ui.SetSavedWorldList(SavedWorldFixture);
+    for (const auto quality : {UiBlurQuality::Off,
+                               UiBlurQuality::Half,
+                               UiBlurQuality::Full,
+                               UiBlurQuality::Half,
+                               UiBlurQuality::Full}) {
+        ui.SetBackdropBlurQuality(quality);
+        for (const auto& [path, id] : {std::pair{"main_menu.rml", "main_menu"},
+                                       std::pair{"settings.rml", "settings"},
+                                       std::pair{"world_selection.rml", "world_selection"},
+                                       std::pair{"world_creation.rml", "world_creation"},
+                                       std::pair{"pause.rml", "pause"}}) {
+            auto* document = LoadDocumentAndFind(ui, path, id);
+            ASSERT_NE(document, nullptr);
+            EXPECT_EQ(document->IsClassSet("backdrop-off"), quality == UiBlurQuality::Off);
+            EXPECT_EQ(document->IsClassSet("backdrop-half"), quality == UiBlurQuality::Half);
+            ui.SetBackdropBlurQuality(UiBlurQuality::Full);
+            EXPECT_FALSE(document->IsClassSet("backdrop-off"));
+            EXPECT_FALSE(document->IsClassSet("backdrop-half"));
+            ui.SetBackdropBlurQuality(quality);
+        }
+    }
     ui.Shutdown();
 }
 

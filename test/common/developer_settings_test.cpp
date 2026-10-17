@@ -406,6 +406,9 @@ TEST_F(DeveloperPersistence, LayoutRecoveryDoesNotSwallowOverflowOutsideLayouts)
                      nlohmann::json::out_of_range);
         auto cfg = SystemConfig::Defaults();
         EXPECT_THROW(cfg.OverlayUserFromJsonString(json), nlohmann::json::out_of_range);
+        EXPECT_EQ(cfg.settings_load_report().state, luminumbra::core::SettingsLoadState::Recovery);
+        EXPECT_FALSE(cfg.SaveUserOverlay((directory / "overflow.json").string()));
+        EXPECT_FALSE(std::filesystem::exists(directory / "overflow.json"));
     }
 }
 
