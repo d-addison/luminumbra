@@ -2428,6 +2428,25 @@ endif()
 add_test(NAME ProfilerSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/test/tools/check_profiler_contract.py)
 
+# Generate from the production destructor so a shutdown reversion also changes
+# the native ordering probe. No access hooks are added to the production class.
+set(audio_shutdown_source ${CMAKE_SOURCE_DIR}/src/luminumbra_client/audio/AudioPropagationSystem.cpp)
+set(audio_shutdown_generator ${CMAKE_SOURCE_DIR}/test/tools/check_audio_shutdown_contract.py)
+set(audio_shutdown_body ${CMAKE_CURRENT_BINARY_DIR}/audio_shutdown_body.inc)
+add_custom_command(OUTPUT ${audio_shutdown_body}
+    COMMAND "${Python3_EXECUTABLE}" -I -B ${audio_shutdown_generator}
+        --emit-destructor ${audio_shutdown_body}
+    DEPENDS ${audio_shutdown_source} ${audio_shutdown_generator}
+    VERBATIM)
+add_executable(audio_shutdown_test audio/audio_shutdown_test.cpp ${audio_shutdown_body})
+target_include_directories(audio_shutdown_test PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+target_link_libraries(audio_shutdown_test PRIVATE Threads::Threads)
+luminumbra_configure_first_party_target(audio_shutdown_test)
+add_test(NAME AudioShutdownTransition COMMAND audio_shutdown_test)
+set_tests_properties(AudioShutdownTransition PROPERTIES TIMEOUT 15)
+add_test(NAME AudioShutdownSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/test/tools/check_audio_shutdown_contract.py)
+
 add_executable(render_measurement_test rendering/render_measurement_test.cpp)
 target_include_directories(render_measurement_test PRIVATE ../src)
 target_compile_definitions(render_measurement_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
