@@ -754,6 +754,80 @@ TEST(SavedFarWorldPublication, SuccessfulLoadPublishesAndFailedOpenKeepsCurrentB
               retained->tiles[0].observation->content_identity());
 }
 
+TEST(SavedFarWorldPublication, MetadataSaveEmbedsPresetAndInvalidatesOnlyAfterCommit) {
+    DurableFixture fixture(false);
+    ASSERT_TRUE(fixture.created) << fixture.error;
+    fixture.session->EnableFarWorldPersistenceSafety();
+    const auto root = fixture.session->GetWorldSaveDir();
+    const auto preset_path = root / "preset.json";
+    const auto metadata_path = root / "world_info.json";
+    const auto preset = Luminumbra::TestSupport::FarCacheRead(preset_path);
+    ASSERT_FALSE(preset.empty());
+    const std::array keys{FarTileKey{5, 0, 0}};
+    auto request = SavedPublicationRequest(keys);
+    request.incremental = true;
+    std::shared_ptr<const FarWorldPublication> publication;
+    std::string diagnostic;
+    const auto finish = [&] {
+        for (std::size_t frame = 0; frame <= keys.size(); ++frame) {
+            if (fixture.session->CaptureFarWorldPublication(request, publication, diagnostic))
+                return true;
+            if (!diagnostic.empty())
+                return false;
+        }
+        return false;
+    };
+    ASSERT_TRUE(finish()) << diagnostic;
+    const auto retained = publication;
+    const auto captures = fixture.session->FarWorldCaptureCount();
+
+    // An unmarked legacy save may lack its embedded preset until the next save.
+    auto metadata = nlohmann::json::parse(Luminumbra::TestSupport::FarCacheRead(metadata_path));
+    metadata.erase("presetFormat");
+    metadata.erase("presetIdentity");
+    using Service = Luminumbra::Persistence::WorldSaveService;
+    ASSERT_TRUE(Service::save_metadata(metadata.dump() + "\n", root));
+    ASSERT_TRUE(fs::remove(preset_path));
+    const auto legacy_metadata = Luminumbra::TestSupport::FarCacheRead(metadata_path);
+    bool staged = false;
+    EXPECT_FALSE(fixture.session->RunInSnapshotTransaction([&] {
+        staged = fixture.session->SaveWorld();
+        return false;
+    }));
+    ASSERT_TRUE(staged);
+    EXPECT_EQ(Luminumbra::TestSupport::FarCacheRead(preset_path), preset);
+    EXPECT_EQ(Luminumbra::TestSupport::FarCacheRead(metadata_path), legacy_metadata);
+    EXPECT_FALSE(finish());
+    EXPECT_TRUE(diagnostic.empty());
+    EXPECT_EQ(publication, retained);
+    EXPECT_EQ(fixture.session->FarWorldCaptureCount(), captures);
+
+    ASSERT_TRUE(
+        fixture.session->RunInSnapshotTransaction([&] { return fixture.session->SaveWorld(); }));
+    EXPECT_EQ(Luminumbra::TestSupport::FarCacheRead(preset_path), preset);
+    EXPECT_TRUE(fixture.session->SavedPresetCompatible(root));
+    ASSERT_TRUE(finish()) << diagnostic;
+    EXPECT_GT(publication->publication_serial, retained->publication_serial);
+    EXPECT_EQ(fixture.session->FarWorldCaptureCount(), captures + 1);
+
+    // A marked save refuses missing, malformed and changed presets without publication.
+    const auto committed_metadata = Luminumbra::TestSupport::FarCacheRead(metadata_path);
+    const auto committed = publication;
+    ASSERT_TRUE(fs::remove(preset_path));
+    EXPECT_FALSE(fixture.session->SaveWorld());
+    EXPECT_FALSE(fs::exists(preset_path));
+    for (const std::string& invalid : {std::string("{"), std::string("{}")}) {
+        ASSERT_TRUE(Service::write_file_durably(preset_path, invalid));
+        EXPECT_FALSE(fixture.session->SaveWorld());
+        EXPECT_EQ(Luminumbra::TestSupport::FarCacheRead(preset_path), invalid);
+    }
+    EXPECT_EQ(Luminumbra::TestSupport::FarCacheRead(metadata_path), committed_metadata);
+    EXPECT_FALSE(finish());
+    EXPECT_TRUE(diagnostic.empty());
+    EXPECT_EQ(publication, committed);
+    EXPECT_EQ(fixture.session->FarWorldCaptureCount(), captures + 1);
+}
+
 TEST(SavedFarWorldPublication, DirtyParkedPreviewAndUnparkPreserveAuthorityAndFingerprint) {
     DurableFixture fx(false);
     ASSERT_TRUE(fx.created) << fx.error;
@@ -808,8 +882,12 @@ TEST(SavedFarWorldPublication, TallDeepAndReturningKeysKeepAffectedSpansMonotone
     ASSERT_EQ(before->tiles.size(), 2u);
     ASSERT_EQ(after->tiles.size(), 2u);
     const auto affected = after->tiles[0].span.Intent();
-    ASSERT_TRUE(affected);
-    ASSERT_TRUE(affected->extra_span);
+    if (!affected.has_value()) {
+        FAIL() << "Affected tile has no span intent";
+    }
+    if (!affected->extra_span.has_value()) {
+        FAIL() << "Affected tile has no extra span";
+    }
     EXPECT_LE(affected->extra_span->min_y, -640);
     EXPECT_GE(affected->extra_span->max_y, 656);
     EXPECT_EQ(before->tiles[1].span.Intent(), after->tiles[1].span.Intent());
@@ -914,7 +992,9 @@ TEST(SavedFarWorldPublication, WaterOnlyPreviewChangesCurrencyWithoutDurableGene
     ASSERT_TRUE(fx.session->CaptureFarWorldPublication(request, wet, diagnostic)) << diagnostic;
     ASSERT_EQ(wet->tiles.size(), 1u);
     const auto water = wet->tiles[0].observation->WaterSample(0, 64, 64);
-    ASSERT_TRUE(water);
+    if (!water.has_value()) {
+        FAIL() << "Wet observation has no water sample";
+    }
     EXPECT_TRUE(water->wet);
     EXPECT_FLOAT_EQ(water->surface_height, 101);
     const auto terrain = chunk->sdf_data;
@@ -935,7 +1015,9 @@ TEST(SavedFarWorldPublication, WaterOnlyPreviewChangesCurrencyWithoutDurableGene
     ASSERT_TRUE(fx.session->CaptureFarWorldPublication(request, dry, diagnostic)) << diagnostic;
     ASSERT_EQ(dry->tiles.size(), 1u);
     const auto dry_water = dry->tiles[0].observation->WaterSample(0, 64, 64);
-    ASSERT_TRUE(dry_water);
+    if (!dry_water.has_value()) {
+        FAIL() << "Dry observation has no water sample";
+    }
     EXPECT_FALSE(dry_water->wet);
     EXPECT_NE(wet->tiles[0].observation->content_identity(),
               dry->tiles[0].observation->content_identity());
@@ -1491,8 +1573,12 @@ TEST(SavedFarWorldPublication,
                 for (std::int64_t x = -4; x <= 68; x += 4) {
                     const FarVolumePosition p{x, y, z};
                     const auto raw = original->Sample(1, p), sample = compact->Sample(1, p);
-                    ASSERT_TRUE(raw);
-                    ASSERT_TRUE(sample);
+                    if (!raw.has_value()) {
+                        FAIL() << "Original observation has no sample";
+                    }
+                    if (!sample.has_value()) {
+                        FAIL() << "Compact observation has no sample";
+                    }
                     EXPECT_FLOAT_EQ(sample->density,
                                     DequantizeFarLodSdf(QuantizeFarLodSdf(raw->density)));
                     EXPECT_EQ(sample->material, raw->material);

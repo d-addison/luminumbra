@@ -35,8 +35,7 @@ struct SyntheticSaveSpec {
     FixturePayload payload = FixturePayload::Noise;
     std::string world_id = "synthetic"; // directory name under worlds/saves
     std::string world_name = "Synthetic Fixture";
-    // If non-empty: copied byte-for-byte to preset.json. Without it the world has no embedded
-    // preset and requires the frozen revision-6 atlas preset when opened through SavedWorldCatalog.
+    // Required: copied byte-for-byte to preset.json and identified in new-format metadata.
     std::filesystem::path preset_source;
 };
 
