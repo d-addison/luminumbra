@@ -62,7 +62,7 @@ struct Cursor {
     bool ok = true;
 
     bool Remaining(std::size_t n) const {
-        return ok && pos + n <= size;
+        return ok && pos <= size && n <= size - pos;
     }
 
     bool GetU8(std::uint8_t& v) {

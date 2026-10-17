@@ -167,7 +167,7 @@ public:
     bool SaveWorld();
     // Owner-thread persistence opt-in, independent of simulation/render selection. The host
     // supplies finite immutable policy and complete supports; activation is a separate concern.
-    void SetFarEditedCachePolicy(std::shared_ptr<const World::FarEditedCachePolicy> policy);
+    void SetFarEditedCachePolicy(const std::shared_ptr<const World::FarEditedCachePolicy>& policy);
     [[nodiscard]] bool FarEditedCacheEnabled() const;
     // Owner-thread capture at a quiescent publication boundary. Committed truth comes only from
     // disk; optional live/parked layers remain separate volatile observations. Refusal preserves
@@ -182,6 +182,9 @@ public:
     // inside ONE snapshot transaction published with a single index. Otherwise just runs `body`.
     // Owner thread only; returns the body's verdict, and false when the commit fails.
     bool RunInSnapshotTransaction(const std::function<bool()>& body);
+
+    // Read-only destination preset/identity check, before any save writes or acknowledgements.
+    [[nodiscard]] bool SavedPresetCompatible(const std::filesystem::path& save_dir) const;
 
     // --- Runtime world-state persistence ---
     // Persists streamed chunk voxel state under the canonical world save dir
@@ -761,6 +764,8 @@ private:
     // Stable only in the clock slice; world-anchored pages replace this grid in C4.
     Vec3 m_ambientFieldAnchor{};
     std::string m_presetContentHash;
+    // Exact canonical preset source, independent of dependency-content identity.
+    std::string m_savedPresetJson;
     luminumbra::core::SystemConfig m_appliedSystemConfig =
         luminumbra::core::SystemConfig::Defaults();
     bool m_activeRegionsEnabled = true;
