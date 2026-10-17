@@ -76,12 +76,23 @@ def _unsuccessful(case):
             or any(child.tag in FAILURE_TAGS for child in case))
 
 
+def _unsuccessful_suite(suite):
+    # Summaries are optional, but explicit empty, unsuccessful or unknown
+    # execution metadata cannot qualify unattributed suite output.
+    tests = suite.get("tests")
+    return (_unsuccessful(suite)
+            or (tests is not None and not re.fullmatch(r"0*[1-9][0-9]*", tests))
+            or any(suite.get(key) is not None and not re.fullmatch(r"0+", suite.get(key))
+                   for key in ("failures", "errors", "skipped", "disabled")))
+
+
 def _receipts_by_source(root):
     """Return (every receipt line, receipt lines taken from a failed testcase)."""
     found = set()
     failed = set()
     attributed = set()
-    any_unsuccessful = False
+    any_unsuccessful = any(_unsuccessful_suite(element) for element in root.iter()
+                           if element.tag in ("testsuite", "testsuites"))
     for testcase in root.iter("testcase"):
         lines = _receipt_lines(testcase.get(PROPERTY_NAME) or "")
         for element in testcase.iter("property"):
@@ -96,7 +107,7 @@ def _receipts_by_source(root):
             failed.update(lines)
             any_unsuccessful = True
     # Suite-level output cannot be attributed to a testcase, so it is trusted only when no
-    # testcase in the report failed, errored or was skipped/unevaluated.
+    # testcase or suite in the report failed, errored or was skipped/unevaluated.
     unattributed = set()
     for element in root.iter("system-out"):
         if element not in attributed:

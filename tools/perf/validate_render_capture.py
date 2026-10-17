@@ -86,16 +86,27 @@ def camera_view(position, yaw, pitch):
 
 def inverse_view(view):
     """Float32 GLM mat4 inverse, including its cofactor/determinant ordering."""
+    return inverse_view_with_tolerances(view)[0]
+
+
+def inverse_view_with_tolerances(view):
+    """Inverse and componentwise bounds for different float32 evaluation orders."""
+    view = [f32(value) for value in view]
     m = [view[index:index + 4] for index in range(0, 16, 4)]
     def minor(a, b, row, other):
         return f32(f32(m[a][row] * m[b][other]) - f32(m[b][row] * m[a][other]))
 
     factors = []
+    factor_magnitudes = []
     for row, other in ((2, 3), (1, 3), (1, 2), (0, 3), (0, 2), (0, 1)):
         value = minor(2, 3, row, other)
         factors.append([value, value, minor(1, 3, row, other), minor(1, 2, row, other)])
+        magnitudes = [abs(m[a][row] * m[b][other]) + abs(m[b][row] * m[a][other])
+                      for a, b in ((2, 3), (1, 3), (1, 2))]
+        factor_magnitudes.append([magnitudes[0], *magnitudes])
     vectors = [[m[1][row], m[0][row], m[0][row], m[0][row]] for row in range(4)]
     inverse = []
+    cofactor_magnitudes = []
     for column, terms in enumerate((((1, 0), (2, 1), (3, 2)),
                                     ((0, 0), (2, 3), (3, 4)),
                                     ((0, 1), (1, 3), (3, 5)),
@@ -104,12 +115,23 @@ def inverse_view(view):
             products = [f32(vectors[v][row] * factors[f][row]) for v, f in terms]
             value = f32(f32(products[0] - products[1]) + products[2])
             inverse.append(value if (row + column) % 2 == 0 else -value)
+            cofactor_magnitudes.append(sum(abs(vectors[v][row]) * factor_magnitudes[f][row]
+                                           for v, f in terms))
     products = [f32(m[0][row] * inverse[row * 4]) for row in range(4)]
     determinant = f32(f32(products[0] + products[1]) + f32(products[2] + products[3]))
     if determinant == 0 or not math.isfinite(determinant):
         raise ValueError('singular camera view')
     reciprocal = f32(1 / determinant)
-    return [f32(value * reciprocal) for value in inverse]
+    result = [f32(value * reciprocal) for value in inverse]
+    determinant_magnitude = sum(abs(m[0][row]) * cofactor_magnitudes[row * 4] for row in range(4))
+    # Each cofactor/determinant/reciprocal path has at most 12 rounded operations.
+    # Bound two evaluations by gamma(32), with float32 unit roundoff 2**-24.
+    # Absolute term magnitudes retain cancellation error without allowing an
+    # unrelated rotation mismatch or another program's matrix to buy slack.
+    gamma = (32 * 2**-24) / (1 - 32 * 2**-24)
+    tolerances = [0.002 + gamma * (magnitude + abs(value) * determinant_magnitude) / abs(determinant)
+                  for value, magnitude in zip(result, cofactor_magnitudes)]
+    return result, tolerances
 
 
 def view_position(view):
@@ -233,6 +255,17 @@ def validate(data, args):
             program.get('view'), expected_view, position, name + ' view/report')
         source_rotation_error = max(source_rotation_error, rotation_error)
         view = program['view']
+        # lookAt writes this row exactly. Together with the rotation check it
+        # keeps the inverse well conditioned, independent of world position.
+        close([view[index] for index in (3, 7, 11, 15)], [0, 0, 0, 1], 0, name + ' affine view')
+        for row in range(3):
+            basis = [f32(view[col*4+row]) for col in range(3)]
+            expected_translation = -dot32(basis, position)
+            # Three products and two additions, for either evaluation order.
+            # Each row gets only its own float32 rounding bound.
+            magnitude = sum(abs(value * coordinate) for value, coordinate in zip(basis, position))
+            tolerance = 0.002 + (10 * 2**-24) / (1 - 10 * 2**-24) * magnitude
+            close([view[12+row]], [expected_translation], tolerance, name + ' view translation/position')
         observed_position = view_position(view)
         errors[name + '_position'] = close(observed_position, expected_position,
             translation_tolerance(position, rotation_error, 8), name + ' observed position/report')
@@ -249,6 +282,14 @@ def validate(data, args):
     errors['lighting_inverse_view'], _ = close_camera_matrix(
         lighting.get('u_inverseView'), expected_inverse, position, 'lighting inverse view/report',
         source_rotation_error, operations=16)
+    # The report-pose envelope above permits correlated source rounding only.
+    # Bind lighting to each captured source using componentwise float32 bounds;
+    # a source's observed rotation error cannot loosen these consistency checks.
+    for name in ('geometry', 'instanced_static_mesh'):
+        inverse, tolerances = inverse_view_with_tolerances(programs[name]['view'])
+        for index, (value, tolerance) in enumerate(zip(inverse, tolerances)):
+            close([lighting['u_inverseView'][index]], [value], tolerance,
+                  f'lighting inverse view/{name}[{index}]')
     sun = finite_vector(lighting.get('u_sun.direction'), 3, 'lighting sun direction')
     close([math.sqrt(dot(sun,sun))], [1.0], 1e-5, 'sun direction length')
     # Sun travel direction is normalized (sin(phase), -cos(phase), seasonal_z).

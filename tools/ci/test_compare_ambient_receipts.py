@@ -201,6 +201,70 @@ class CompareAmbientReceiptsTests(unittest.TestCase):
             code, out, err = run_main([f"asan={lane}", "--require-probe", "asan"])
             self.assertEqual(code, 0, err)
 
+    def test_suite_only_receipts_require_successful_suite_metadata(self):
+        metadata = (None, ("status", "run"), ("result", "completed"), ("tests", "1"),
+                    ("failures", "0"), ("errors", "0"), ("skipped", "0"), ("disabled", "0"),
+                    ("status", "disabled"), ("status", "notrun"), ("status", "skipped"),
+                    ("status", "unknown"), ("status", ""), ("result", "suppressed"),
+                    ("result", "skipped"), ("result", "unknown"), ("result", ""),
+                    ("tests", "0"), ("tests", "-1"), ("tests", "unknown"), ("tests", ""))
+        metadata += tuple((key, value) for key in ("failures", "errors", "skipped", "disabled")
+                          for value in ("1", "unknown", ""))
+        for carrier in ("output", "property"):
+            for wrapper in (False, True):
+                for attributes in metadata:
+                    with self.subTest(carrier=carrier, wrapper=wrapper, metadata=attributes), \
+                            tempfile.TemporaryDirectory() as directory:
+                        suite = ET.Element("testsuite")
+                        root = ET.Element("testsuites") if wrapper else suite
+                        if wrapper:
+                            root.append(suite)
+                        if attributes:
+                            root.set(*attributes)
+                        if carrier == "output":
+                            ET.SubElement(suite, "system-out").text = receipt_line()
+                        else:
+                            properties = ET.SubElement(suite, "properties")
+                            ET.SubElement(properties, "property", name="ambient_receipt", value=receipt_line())
+                        path = Path(directory) / "receipt.xml"
+                        ET.ElementTree(root).write(path, encoding="utf-8")
+                        code, out, err = run_main([f"avx2={path}"])
+                        successful = attributes in metadata[:8]
+                        self.assertEqual(code, 0 if successful else 2, out + err)
+                        if not successful:
+                            self.assertEqual(out, "")
+                            self.assertIn("unevaluated", err)
+        for body, message in (("", "cannot read"), ("<testsuite>", "cannot read"),
+                              ("<testsuite/>", "no receipt"), ("<testsuites/>", "no receipt")):
+            with self.subTest(body=body), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "receipt.xml"
+                path.write_text(body, encoding="utf-8")
+                code, out, err = run_main([f"avx2={path}"])
+                self.assertEqual(code, 2, out + err)
+                self.assertIn(message, err)
+
+    def test_suite_outcomes_and_nested_suites_cannot_qualify_unattributed_receipts(self):
+        for carrier in ("output", "property"):
+            for outcome in ("failure", "error", "skipped"):
+                for nested in (False, True):
+                    with self.subTest(carrier=carrier, outcome=outcome, nested=nested), \
+                            tempfile.TemporaryDirectory() as directory:
+                        root = ET.Element("testsuites")
+                        suite = ET.SubElement(root, "testsuite", tests="1", failures="0")
+                        if carrier == "output":
+                            ET.SubElement(suite, "system-out").text = receipt_line()
+                        else:
+                            properties = ET.SubElement(suite, "properties")
+                            ET.SubElement(properties, "property", name="ambient_receipt", value=receipt_line())
+                        if nested:
+                            suite = ET.SubElement(suite, "testsuite")
+                        ET.SubElement(suite, outcome)
+                        path = Path(directory) / "receipt.xml"
+                        ET.ElementTree(root).write(path, encoding="utf-8")
+                        code, out, err = run_main([f"avx2={path}"])
+                        self.assertEqual(code, 2, out + err)
+                        self.assertIn("unevaluated", err)
+
     def test_agree_when_lane_simd_levels_match(self):
         with tempfile.TemporaryDirectory() as directory:
             lane_a = write_junit(

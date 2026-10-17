@@ -454,6 +454,72 @@ class RenderContractTests(unittest.TestCase):
             with self.subTest(program=name), self.assertRaises(ValueError):
                 capture.validate(data, expected)
 
+    def test_rotation_rounding_cannot_hide_an_unrelated_lighting_offset(self):
+        for coordinate in (65536, -65536, 131072, -131072, 1048576, -1048576):
+            position = [coordinate, 0, 0]
+            for schema in ('luminumbra.render_benchmark.v2', contract.SCHEMA):
+                expected = args(position=position, yaw=0, pitch=0, tod=0,
+                                qualified_renderer=QUALIFIED if schema == contract.SCHEMA else None)
+                for name, field, index in (('geometry', 'view', 8),
+                                           ('instanced_static_mesh', 'view', 8),
+                                           ('lighting', 'u_inverseView', 2)):
+                    with self.subTest(coordinate=coordinate, schema=schema, program=name):
+                        data = self.report_capture(position)
+                        if schema == contract.SCHEMA:
+                            data.update(artifact())
+                        matrix = list(data['render_uniforms'][name][field])
+                        bits = struct.unpack('<I', struct.pack('<f', matrix[index]))[0]
+                        matrix[index] = struct.unpack('<f', struct.pack('<I', bits + 1))[0]
+                        data['render_uniforms'][name][field] = matrix
+                        self.assertEqual(capture.validate(data, expected)['verdict'], 'PASS')
+                        # The altered coefficient has no Y contribution. Its
+                        # rounding cannot justify an unrelated inverse Y offset.
+                        data['render_uniforms']['lighting']['u_inverseView'][13] = 0.1
+                        with self.assertRaisesRegex(ValueError, 'lighting inverse view/'):
+                            capture.validate(data, expected)
+
+        # Source rounding can change inverse translation even when inverse
+        # rotation rounds back to the reference. Keep those captures valid.
+        position = [1048576, -1048576, 1048576]
+        view = capture.camera_view(position, 137, -27)
+        bits = struct.unpack('<I', struct.pack('<f', view[6]))[0]
+        view[6] = struct.unpack('<f', struct.pack('<I', bits + 1))[0]
+        for row in range(3):
+            view[12+row] = -capture.dot32([view[col*4+row] for col in range(3)], position)
+        data = self.report_capture(position, 137, -27, view)
+        self.assertEqual(capture.validate(data, args(position=position, yaw=137, pitch=-27,
+                                                    tod=0, qualified_renderer=None))['verdict'], 'PASS')
+
+    def test_rotation_rounding_cannot_hide_an_unrelated_geometry_offset(self):
+        for coordinate in (65536, -65536, 131072, -131072, 1048576, -1048576):
+            position = [coordinate, 0, 0]
+            expected = args(position=position, yaw=0, pitch=0, tod=0, qualified_renderer=None)
+            for name in ('geometry', 'instanced_static_mesh'):
+                with self.subTest(coordinate=coordinate, program=name):
+                    data = self.report_capture(position)
+                    view = list(data['render_uniforms'][name]['view'])
+                    view[8] = 1 + 2**-23
+                    data['render_uniforms'][name]['view'] = view
+                    self.assertEqual(capture.validate(data, expected)['verdict'], 'PASS')
+                    view[13] = 0.01
+                    with self.assertRaisesRegex(ValueError, name + ' view translation/position'):
+                        capture.validate(data, expected)
+
+    def test_geometry_homogeneous_row_cannot_expand_inverse_rounding_bounds(self):
+        for position in ([0, 0, 0], [65536, 0, 0], [-65536, 0, 0]):
+            expected = args(position=position, yaw=0, pitch=0, tod=0, qualified_renderer=None)
+            for name in ('geometry', 'instanced_static_mesh'):
+                for index in (3, 7, 11, 15):
+                    with self.subTest(position=position, program=name, index=index):
+                        data = self.report_capture(position)
+                        view = list(data['render_uniforms'][name]['view'])
+                        # A tiny projective entry can make a large translated
+                        # matrix almost singular despite a valid rotation.
+                        view[index] += 2**-16
+                        data['render_uniforms'][name]['view'] = view
+                        with self.assertRaisesRegex(ValueError, name + ' affine view'):
+                            capture.validate(data, expected)
+
     def test_wrong_rotation_cannot_expand_large_position_error_budget(self):
         position = [65536, -32768, 49152]
         view = capture.camera_view(position, 137, -27)
