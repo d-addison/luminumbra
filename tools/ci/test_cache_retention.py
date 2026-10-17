@@ -399,7 +399,7 @@ class CacheRetentionTests(unittest.TestCase):
     def test_compiler_cache_caps_match_each_lane(self):
         for workflow, job, cap in (
             ("ci", "linux", "400M"),
-            ("asan", "asan", "600M"),
+            ("asan", "asan-shard", "600M"),
             ("ci", "diligent-rhi", "250M"),
             ("ci", "windows-msvc", "500M"),
             ("ci", "windows-ucrt64", "500M"),
@@ -446,6 +446,36 @@ class CacheRetentionTests(unittest.TestCase):
         self.assertIn("            perf-linux-x64-gcc-ccache-\n", preview)
         self.assertEqual(workflow.split("CCACHE_MAXSIZE: ", 1)[1].splitlines()[0], "250M")
         self.assertIn("run: ccache --cleanup", preview)
+
+    def test_asan_shards_share_the_existing_cache_with_one_writer(self):
+        workflow = (ROOT / ".github/workflows/asan.yml").read_text(encoding="utf-8")
+        shard = workflow.split("  asan-shard:\n", 1)[1].split("  asan:\n", 1)[0]
+        aggregate = workflow.split("  asan:\n", 1)[1]
+        keys = [line.strip().removeprefix("key: ") for line in shard.splitlines()
+                if line.strip().startswith("key: ")]
+        self.assertEqual(len(keys), 2)
+        expected = "linux-x64-gcc-asan-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-${{ github.sha }}"
+        self.assertEqual(keys, [expected, expected])
+        self.assertEqual(workflow.count("actions/cache/save@"), 1)
+        self.assertNotIn("actions/cache", aggregate)
+        restore = shard.split("      - name: Restore compiler cache\n", 1)[1].split("      - name:", 1)[0]
+        self.assertNotIn("matrix.shard", restore)
+        self.assertIn("            linux-x64-gcc-asan-ccache-\n", restore)
+        self.assertIn("CCACHE_MAXSIZE: 600M", shard)
+        for name in ("Clean compiler cache before saving", "Save compiler cache"):
+            step = shard.split(f"      - name: {name}\n", 1)[1].split("      - name:", 1)[0]
+            condition = step.splitlines()[0].strip()
+            self.assertTrue(condition.startswith("if: ${{ matrix.shard == 1 && always() && "))
+            self.assertIn("github.event_name == 'push'", condition)
+            self.assertIn("(github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel')", condition)
+            self.assertIn("steps.compiler-cache.outputs.cache-hit != 'true'", condition)
+            self.assertIn("continue-on-error: true", step)
+        # Both jobs restore one lane generation; cleanup's budget and grouping stay fixed.
+        self.assertEqual(self.budget, 6_000_000_000)
+        self.assertEqual(self.obsolete([
+            self.cache(1, "linux-x64-gcc-asan-ccache-oldconfig-oldsha"),
+            self.cache(2, "linux-x64-gcc-asan-ccache-newconfig-newsha"),
+        ]), [1])
 
 
 if __name__ == "__main__":
