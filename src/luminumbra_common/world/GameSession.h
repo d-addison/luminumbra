@@ -13,6 +13,7 @@
 #include "../simulation/SimulationEventBus.h"
 #include "../systems/PollinationSystem.h"
 #include "ActiveRegionLedger.h"
+#include "TerrainPresetLoader.h"
 #include "WorldClock.h"
 #include "WorldMetadata.h"
 #include "entt/entt.hpp"
@@ -102,6 +103,14 @@ public:
                      const std::string& worldType,
                      const std::string* customPresetJson,
                      Persistence::CreatedWorldArtifacts& artifacts);
+    // Replay must preserve omitted historical selectors and their identity bytes.
+    // A required content identity is checked before directory creation or live-world replacement.
+    bool CreateWorld(const std::string& name,
+                     const std::string& seed,
+                     const std::string& worldType,
+                     const std::string* customPresetJson,
+                     TerrainPresetUse presetUse,
+                     const std::string& requiredPresetContentHash = {});
     // 3-arg overload (named-preset path). Kept as a distinct overload — not a default arg — so
     // translation units compiled against the prior header still resolve a real symbol.
     bool
@@ -530,7 +539,9 @@ private:
                              const std::string& worldType,
                              const std::string* customPresetJson,
                              bool transient,
-                             Persistence::CreatedWorldArtifacts* artifacts);
+                             Persistence::CreatedWorldArtifacts* artifacts,
+                             TerrainPresetUse presetUse,
+                             const std::string& requiredPresetContentHash = {});
     // Cap catch-up to 2 ticks/frame (default is 4) so a
     // single slow frame replays at most 2 sim ticks instead of 4 — halving the worst-case
     // TickSimulation spike. Scoped HERE (not the shared SimulationClock.h constant, which

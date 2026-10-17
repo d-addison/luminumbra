@@ -192,7 +192,7 @@ deep interiors and distant mouths beyond the noise-cave cutoff, not only within
 it.
 
 Qualification must pin the cave-dense revision and identity. The packaged
-`worlds/atlas/presets/cave_dense.json` now uses revision 7; the revision-6 fixture
+`worlds/atlas/presets/cave_dense.json` now uses revision 8; the revision-6 fixture
 is frozen in `worlds/atlas/presets-rev6/cave_dense.json`. See the
 shipping preset identities under "Shipping defaults" in the [engine guide](engine-guide.md) before comparing
 captures or synchronizing the game repository's fixture and identity sidecar.
