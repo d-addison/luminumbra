@@ -371,6 +371,16 @@ and atomic replacement. Prior aggregates and selected cells' captures, verdicts,
 retained captures and receipts are set aside as `.prev-<n>`, including for cells
 that have become unready. An unevaluated cell reports no capture or adapter.
 
+`--host-record <staged-host.json>` validates Windows OS, PowerShell and GPU driver
+identity before execution, then publishes `host.json` with the aggregate under
+the same lock. A run without this option removes any previous `host.json` under
+the lock. If aggregate publication fails, the previous host is restored. Both
+staged and previous host files must be regular files, with no symlinks, and fit
+the shared 16 MiB input cap. Staged JSON must be UTF-8 (an optional BOM is accepted)
+and contain at most 64 object/array levels; invalid inputs refuse with exit 2.
+Dry runs preserve the current pair and write supplied host evidence separately
+as `host-dryrun.json`.
+
 Cell `artifact` paths, and retained `capture_path` values in process receipts, are
 relative to the output directory, such as `cells/surface-flight.quality.3840x1600.json`.
 The private process receipt still records absolute command, cwd and client paths.

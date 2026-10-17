@@ -1137,12 +1137,12 @@
       "requirements": [
         "ar.activation.050"
       ],
-      "discrepancy": "`docs/active-regions.md#activation-and-ordering` and ActiveRegionLedgerTest.ValidAnchorBoundaries agree on the half-open interval [-2^24, 2^24). The validator regression covers both axes; boundary rejection and counting through walking anchors, ground-object edits and region pins still require end-to-end evidence, tracked in issue #250.",
+      "discrepancy": "`docs/active-regions.md#activation-and-ordering` and ActiveRegionLedgerTest.ValidAnchorBoundaries agree on the half-open interval [-2^24, 2^24). The validator regression covers both axes; boundary rejection and counting through walking anchors, ground-object edits and region pins still require end-to-end evidence, tracked in issue #250. Full walking-anchor, ground-object edit and pin boundary coverage remains planned.",
       "evidence": [
         {
           "kind": "ctest",
           "ref": "ActiveRegionLedgerTest.AnchorBoundaryInputRefusals",
-          "planned": "Add a half-open-boundary regression accepting -2^24 and the adjacent interior coordinates, and rejecting and counting +2^24 and the adjacent exterior coordinates (including the next representable value below -2^24) on X and Z through walking anchors, ground-object edits and pins.; owner: ds"
+          "planned": "Add a half-open-boundary regression accepting -2^24 and the adjacent interior coordinates, and rejecting and counting +2^24 and the adjacent exterior coordinates (including the next representable value below -2^24) on X and Z through walking anchors, ground-object edits and pins.; owner: ds Cover both endpoints: accept -2^24 and reject +2^24, including the next representable float below -2^24."
         }
       ]
     },
@@ -1297,7 +1297,7 @@
     {
       "id": "contract.dw.scope.01",
       "source": "docs/distant-world.md#scope",
-      "statement": "Acceptance obligations: - The view radius is **16 km from the camera** and the world has **no fixed edge**: terrain streams procedurally in every direction. / The addressable extent is set by the packed chunk identity (`Chunk.h`, ±2^20 chunks of 16 m, about ±16,777 km on each horizontal axis; / coordinates are masked, never range checked). / World positions are 32-bit floats. / By owner decision (September 8, 2026) the contract requires qualification within 32 km of the world origin, where positions keep sub-centimetre precision; / the camera-relative (floating-origin) precision work that would qualify the full addressable extent is deliberately residual scope, not an open contract gap.",
+      "statement": "Acceptance obligations: - The view radius is **16 km from the camera** and the world has **no fixed edge**: terrain streams procedurally in every direction. / The addressable extent is set by the packed chunk identity (`Chunk.h`, \u00b12^20 chunks of 16 m, about \u00b116,777 km on each horizontal axis; / coordinates are masked, never range checked). / World positions are 32-bit floats. / By owner decision (September 8, 2026) the contract requires qualification within 32 km of the world origin, where positions keep sub-centimetre precision; / the camera-relative (floating-origin) precision work that would qualify the full addressable extent is deliberately residual scope, not an open contract gap.",
       "status": "planned",
       "requirements": [
         "dw.scope.001",
@@ -1399,7 +1399,7 @@
     {
       "id": "contract.dw.tiers.01",
       "source": "docs/distant-world.md#tier-ladder",
-      "statement": "Acceptance obligations: Far terrain is a ladder of five nested, world-origin-aligned volumetric tiers. / Each tier stores sparse 5×5×5 signed-distance bricks and is polygonised per tile with Marching Cubes; / a brick record exists where the field crosses zero. / Multi-tier residency and draw ownership are new machinery with an explicit arrival-state rule: the coarser tier is always resident and drawn beneath the finer one with a one-brick overlap; / a finer tile replaces the coarser surface inside its band only once it is built and uploaded, and until then the coarser surface stays visible, so a missing or late tile is never a hole; / ownership at the live edge is decided against the live chunks that are actually meshed and uploaded (including cave ceilings and floors), replacing today's camera-region skip;",
+      "statement": "Acceptance obligations: Far terrain is a ladder of five nested, world-origin-aligned volumetric tiers. / Each tier stores sparse 5\u00d75\u00d75 signed-distance bricks and is polygonised per tile with Marching Cubes; / a brick record exists where the field crosses zero. / Multi-tier residency and draw ownership are new machinery with an explicit arrival-state rule: the coarser tier is always resident and drawn beneath the finer one with a one-brick overlap; / a finer tile replaces the coarser surface inside its band only once it is built and uploaded, and until then the coarser surface stays visible, so a missing or late tile is never a hole; / ownership at the live edge is decided against the live chunks that are actually meshed and uploaded (including cave ceilings and floors), replacing today's camera-region skip;",
       "status": "planned",
       "requirements": [
         "dw.tiers.001",
@@ -1791,7 +1791,7 @@
     {
       "id": "contract.dw.policy.04",
       "source": "docs/distant-world.md#per-system-distant-policy",
-      "statement": "Acceptance obligations: no catch-up (this deliberately replaces the energy field's catch-up rule) | / | Existing energy layer (`aether_state.efs`) | Unchanged | Under active regions its window policy is replaced by region activation with the same no-catch-up rule; / its serializer never mutates state, the per-owner cadence and active-age metadata live in the ledger record (the EFS1 payload is unchanged), frozen pages hash as their stored bytes, and an all-zero layer writes no record while the snapshot index records the record as intentionally absent | Frozen pages kept | / | Scent and foraging | Spawn-anchored near facility; / the scent grid is historical state and is persisted with the page records so near consumers resume continuously | Not simulated at distance; / distant creatures do not use scent | — |",
+      "statement": "Acceptance obligations: no catch-up (this deliberately replaces the energy field's catch-up rule) | / | Existing energy layer (`aether_state.efs`) | Unchanged | Under active regions its window policy is replaced by region activation with the same no-catch-up rule; / its serializer never mutates state, the per-owner cadence and active-age metadata live in the ledger record (the EFS1 payload is unchanged), frozen pages hash as their stored bytes, and an all-zero layer writes no record while the snapshot index records the record as intentionally absent | Frozen pages kept | / | Scent and foraging | Spawn-anchored near facility; / the scent grid is historical state and is persisted with the page records so near consumers resume continuously | Not simulated at distance; / distant creatures do not use scent | \u2014 |",
       "status": "planned",
       "requirements": [
         "dw.policy.019",
@@ -1812,7 +1812,7 @@
     {
       "id": "contract.dw.policy.05",
       "source": "docs/distant-world.md#per-system-distant-policy",
-      "statement": "Acceptance obligations: | Ground objects | Settle, persist, despawn | Despawn deadlines are active-age counters, advancing only while the owning region is due | Nothing advances | / | Scheduled game events | Not implemented | Deferred to a later milestone | — | / Authority is server-only on the deterministic fixed tick with per-region seeded random streams; / clients render coarse results only, and delivering coarse state to remote clients is outside v0.3 (host-local evidence). / Distant water simulates only where its millimetre arrays are resident; / a simulation-only residency class is not part of this contract and would be a separate decision.",
+      "statement": "Acceptance obligations: | Ground objects | Settle, persist, despawn | Despawn deadlines are active-age counters, advancing only while the owning region is due | Nothing advances | / | Scheduled game events | Not implemented | Deferred to a later milestone | \u2014 | / Authority is server-only on the deterministic fixed tick with per-region seeded random streams; / clients render coarse results only, and delivering coarse state to remote clients is outside v0.3 (host-local evidence). / Distant water simulates only where its millimetre arrays are resident; / a simulation-only residency class is not part of this contract and would be a separate decision.",
       "status": "planned",
       "requirements": [
         "dw.policy.025",
@@ -2060,7 +2060,7 @@
     {
       "id": "contract.dw.perf.01",
       "source": "docs/distant-world.md#performance-measurement-contract",
-      "statement": "Acceptance obligations: Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840×1600 and 3440×1440. / Both profiles must meet the release floor on every workload; / the Performance profile exists to report the 120 fps target. / | Quality | 1.0 | p99 frame time at most 16.67 ms | p50 against 8.33 ms | / | Performance | 0.67 | p99 frame time at most 16.67 ms | p50 and p99 against 8.33 ms | / Workloads are settled fixed views (400 warm-up, 240 measured frames) and 60 s scripted traversals (surface flight, cave walk, edited-world tour) with pinned seeds, preset and content revisions, camera paths and speeds, expected simulation ticks and cold-cache state.",
+      "statement": "Acceptance obligations: Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840\u00d71600 and 3440\u00d71440. / Both profiles must meet the release floor on every workload; / the Performance profile exists to report the 120 fps target. / | Quality | 1.0 | p99 frame time at most 16.67 ms | p50 against 8.33 ms | / | Performance | 0.67 | p99 frame time at most 16.67 ms | p50 and p99 against 8.33 ms | / Workloads are settled fixed views (400 warm-up, 240 measured frames) and 60 s scripted traversals (surface flight, cave walk, edited-world tour) with pinned seeds, preset and content revisions, camera paths and speeds, expected simulation ticks and cold-cache state.",
       "status": "planned",
       "requirements": [
         "dw.perf.001",
@@ -3034,6 +3034,414 @@
           "kind": "ctest",
           "ref": "RenderContractPython"
         }
+      ]
+    },
+    {
+      "id": "station.architecture",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "statement": "The discovery executable is CPU-only and constructs an unstreamed read-only query world with an explicit data root; its contract and CLI smoke are ordinary CTest entries.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "StationDiscoveryCliSmoke"
+        },
+        {
+          "kind": "doc",
+          "ref": "tools/CMakeLists.txt"
+        },
+        {
+          "kind": "doc",
+          "ref": "tools/station_discovery.cpp"
+        },
+        {
+          "kind": "doc",
+          "ref": "test/CMakeLists.txt"
+        }
+      ],
+      "requirements": [
+        "dw.station.001",
+        "dw.station.002",
+        "dw.station.003",
+        "dw.station.004",
+        "dw.station.005",
+        "dw.station.090"
+      ]
+    },
+    {
+      "id": "station.arguments",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "statement": "Required single-use flags, seed/query bounds, independent search and view distances, scene pose fields and deterministic angle conventions have contract, CLI and synthetic query evidence.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "StationDiscoveryContract"
+        },
+        {
+          "kind": "ctest",
+          "ref": "StationDiscoveryCliSmoke"
+        },
+        {
+          "kind": "ctest",
+          "ref": "StationDiscovery.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "StationDiscoveryArguments.*"
+        }
+      ],
+      "requirements": [
+        "dw.station.006",
+        "dw.station.007",
+        "dw.station.008",
+        "dw.station.009",
+        "dw.station.010",
+        "dw.station.011",
+        "dw.station.012"
+      ]
+    },
+    {
+      "id": "station.document",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "statement": "Discovery emits the closed canonical UTF-8 v1 document on stdout and diagnostics on stderr; schema, identity pins and certification refusals are checked without claiming native terrain qualification.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "StationDiscoveryContract"
+        },
+        {
+          "kind": "ctest",
+          "ref": "StationDiscoveryCliSmoke"
+        },
+        {
+          "kind": "script",
+          "ref": "tools/gates/station_discovery_contract.py"
+        }
+      ],
+      "requirements": [
+        "dw.station.013",
+        "dw.station.014",
+        "dw.station.015",
+        "dw.station.016",
+        "dw.station.017",
+        "dw.station.018",
+        "dw.station.019",
+        "dw.station.020",
+        "dw.station.021",
+        "dw.station.091"
+      ]
+    },
+    {
+      "id": "station.identity",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "statement": "The build revision and exact-byte relative-name input manifest identify preset, biome, placement and piece inputs; validation precedes loading and snapshot comparison refuses observable changes. Callers supply immutable pinned files because concurrent filesystem races are outside the guarantee.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "StationDiscoveryContract"
+        },
+        {
+          "kind": "ctest",
+          "ref": "StationDiscoveryCliSmoke"
+        },
+        {
+          "kind": "doc",
+          "ref": "tools/CMakeLists.txt"
+        },
+        {
+          "kind": "doc",
+          "ref": "tools/station_discovery.cpp"
+        }
+      ],
+      "requirements": [
+        "dw.station.022",
+        "dw.station.023",
+        "dw.station.024",
+        "dw.station.025",
+        "dw.station.026",
+        "dw.station.027",
+        "dw.station.030",
+        "dw.station.031",
+        "dw.station.032",
+        "dw.station.033",
+        "dw.station.034"
+      ]
+    },
+    {
+      "id": "station.input-bytes",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "statement": "Inclusive limits bound each file to 1 MiB, snapshot contents to 8 MiB, direct input reads plus every examined directory entry (including ignored entries) to 4096 visits, and logical UTF-8 names to 1 MiB. Files are validated before retention; all biome, placement, piece and species loader reads use the captured bytes. Contract and CLI regressions cover inclusive scan bounds for structure types, pieces and species, ignored files and directories, disabled terrain features, rooted and nonportable names, and snapshot-reader failures. Aggregate-limit fixtures contain valid JSON regardless of traversal order, including exactly 8 MiB and one byte beyond it.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "StationDiscoveryCliSmoke"
+        },
+        {
+          "kind": "script",
+          "ref": "tools/gates/test_station_discovery.py"
+        },
+        {
+          "kind": "ctest",
+          "ref": "StationDiscoveryContract"
+        },
+        {
+          "kind": "ctest",
+          "ref": "TerrainPresetLoaderTest.SnapshotReaderSuppliesEveryDependencyAndRefusesPartialReads"
+        }
+      ],
+      "requirements": [
+        "dw.station.028",
+        "dw.station.029",
+        "dw.station.101",
+        "dw.station.102",
+        "dw.station.103",
+        "dw.station.104",
+        "dw.station.105"
+      ]
+    },
+    {
+      "id": "station.sampled-topology",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "statement": "Synthetic topology and placement fixtures verify sampled-portals.v1 lattice enumeration, clipping, indices, density thresholds, connected mouth exterior and arch roof/support predicates. Upper-bound portals use the same 12 m extent as anchor clipping; out-of-span binary32 samples reject individual candidates without refusing the query.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "StationDiscovery.*"
+        },
+        {
+          "kind": "doc",
+          "ref": "test/common/StationDiscovery_test.cpp"
+        }
+      ],
+      "requirements": [
+        "dw.station.035",
+        "dw.station.036",
+        "dw.station.037",
+        "dw.station.038",
+        "dw.station.039",
+        "dw.station.040",
+        "dw.station.041",
+        "dw.station.042",
+        "dw.station.043",
+        "dw.station.044",
+        "dw.station.045",
+        "dw.station.046",
+        "dw.station.047",
+        "dw.station.088"
+      ]
+    },
+    {
+      "id": "station.poses-and-ranking",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "statement": "Synthetic queries verify ordered cardinal viewing directions, eye and sightline clearance, upward millimetre rounding, nearest signed-cell ranking and stable IDs before limiting.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "StationDiscovery.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "StationDiscoveryContract"
+        }
+      ],
+      "requirements": [
+        "dw.station.048",
+        "dw.station.049",
+        "dw.station.050",
+        "dw.station.051",
+        "dw.station.052",
+        "dw.station.053",
+        "dw.station.054",
+        "dw.station.055",
+        "dw.station.056",
+        "dw.station.057"
+      ]
+    },
+    {
+      "id": "station.controls",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "statement": "Horizon and coverage controls share the origin terrain anchor, use their declared eye offsets and angles, require clearance and Y bounds, and carry distinct control IDs without coverage or settled claims.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "StationDiscovery.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "StationDiscoveryContract"
+        },
+        {
+          "kind": "ctest",
+          "ref": "StationDiscoveryCliSmoke"
+        }
+      ],
+      "requirements": [
+        "dw.station.058",
+        "dw.station.059",
+        "dw.station.060",
+        "dw.station.061",
+        "dw.station.062",
+        "dw.station.063",
+        "dw.station.064"
+      ]
+    },
+    {
+      "id": "station.refusals",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "statement": "Query domain and deterministic operation budgets refuse without partial candidates; lattice visits remain observable on refusal, empty catalogues succeed, CLI syntax and usage errors exit 2 while integer overflow and out-of-range query values exit 1, and failed stdout writes or flushes exit 1.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "StationDiscovery.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "StationDiscoveryContract"
+        },
+        {
+          "kind": "ctest",
+          "ref": "StationDiscoveryCliSmoke"
+        }
+      ],
+      "requirements": [
+        "dw.station.065",
+        "dw.station.066",
+        "dw.station.067",
+        "dw.station.068",
+        "dw.station.069",
+        "dw.station.070",
+        "dw.station.071",
+        "dw.station.072",
+        "dw.station.073",
+        "dw.station.074",
+        "dw.station.075"
+      ]
+    },
+    {
+      "id": "station.numeric-inputs",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "statement": "Discovery checks its ISA/FP environment and preset, hydro and structure integer domains before world construction while preserving existing world generation; exploratory results remain uncertified. Compile-time injected CPU profiles cover missing FMA, disabled OS AVX state and every required feature for GNU/Clang and MSVC, including optional Jolt AVX-512. The CLI smoke exercises the supported host profile. Child-process controls set each unsupported rounding mode and the independent MXCSR rounding, FTZ and DAZ states, then require refusal with empty stdout before argument parsing; a supported-state control emits a complete document.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "StationDiscoveryCliSmoke"
+        },
+        {
+          "kind": "doc",
+          "ref": "tools/station_discovery.cpp"
+        },
+        {
+          "kind": "ctest",
+          "ref": "StationDiscoveryNumericRefusals"
+        },
+        {
+          "kind": "ctest",
+          "ref": "CommonLibraryIsaContract"
+        }
+      ],
+      "requirements": [
+        "dw.station.076",
+        "dw.station.077",
+        "dw.station.078",
+        "dw.station.079",
+        "dw.station.080",
+        "dw.station.081",
+        "dw.station.082",
+        "dw.station.083",
+        "dw.station.087"
+      ]
+    },
+    {
+      "id": "station.world-epoch",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "statement": "World-backed discovery holds one shared sampling epoch across the catalogue and samples; callers must enter without holding the non-recursive scope. Shared epoch soak and query fixtures exercise the public sampling contract.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "StationDiscovery.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldgenPreviewReinitRace.*"
+        },
+        {
+          "kind": "doc",
+          "ref": "src/luminumbra_common/world/StationDiscovery.cpp"
+        }
+      ],
+      "requirements": [
+        "dw.station.084",
+        "dw.station.085"
+      ]
+    },
+    {
+      "id": "station.certification",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "statement": "Certification still requires shared canonical world generation numerics and identical real-seed GCC, MSVC and UCRT goldens; synthetic sampled topology is insufficient.",
+      "status": "planned",
+      "evidence": [
+        {
+          "kind": "doc",
+          "ref": "test/common/StationDiscovery_test.cpp",
+          "planned": "Establish matching real-seed goldens across GCC, MSVC and UCRT with canonical world generation numerics; owner: world generation"
+        }
+      ],
+      "requirements": [
+        "dw.station.086",
+        "dw.station.089"
+      ]
+    },
+    {
+      "id": "station.native-capture",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "statement": "Existing oracle negative controls retain inclusive 90-second readiness, camera-derived per-tier Uploaded/Empty coverage, sky, seam, edge, binding, span and water refusals. Integration of arbitrary discovery pose/name manifests and native receipts for every row, profile and display remains planned.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "script",
+          "ref": "tools/gates/test_far_ladder_oracle.py"
+        },
+        {
+          "kind": "doc",
+          "ref": "tools/gates/validate-engine-frontier.ps1",
+          "planned": "Integrate arbitrary discovery pose/name manifests with exact pose and world/render binding clocks, custom-manifest mismatch controls and per-row/profile/display native receipts; owner: native capture"
+        }
+      ],
+      "requirements": [
+        "dw.station.092",
+        "dw.station.093",
+        "dw.station.094",
+        "dw.station.095",
+        "dw.station.096",
+        "dw.station.097",
+        "dw.station.098"
+      ]
+    },
+    {
+      "id": "station.deep-interior",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "statement": "Deep-interior feature discovery and completion of the entire game scene set remain separate follow-up work.",
+      "status": "planned",
+      "evidence": [
+        {
+          "kind": "doc",
+          "ref": "src/luminumbra_common/world/StationDiscovery.cpp",
+          "planned": "Specify and implement deep-interior discovery before claiming the complete game scene set; owner: world generation"
+        }
+      ],
+      "requirements": [
+        "dw.station.099",
+        "dw.station.100"
       ]
     }
   ]

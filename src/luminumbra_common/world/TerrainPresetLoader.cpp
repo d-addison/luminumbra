@@ -65,7 +65,8 @@ bool ResolveDependencyManifest(TerrainPresetLoadResult& preset,
                                const std::filesystem::path& data_root,
                                nlohmann::json& manifest,
                                std::vector<std::string>& errors,
-                               const World::WorldgenFileStatusReader& read_status) {
+                               const World::WorldgenFileStatusReader& read_status,
+                               const World::WorldgenFileReader& dependency_reader) {
     // Use the generator's loaders to record their decisions and only the bytes
     // they consume. In particular, a rejected placement stops that pool before
     // any pieces are read; malformed pieces reject a pool after all piece reads.
@@ -105,7 +106,7 @@ bool ResolveDependencyManifest(TerrainPresetLoadResult& preset,
         const auto logical = logical_path(path.lexically_relative(data_root));
         if (logical.empty())
             return false;
-        if (!World::ReadWorldgenFile(path, bytes)) {
+        if (!dependency_reader(path, bytes)) {
             errors.push_back("failed to read worldgen dependency: " + logical);
             return false;
         }
@@ -143,16 +144,18 @@ bool ResolveDependencyManifest(TerrainPresetLoadResult& preset,
                 const auto& table = snapshot->biome_table;
                 if (!errors.empty())
                     return false;
-                state(logical,
-                      table.ok() && !table.empty()
-                          ? "biome-table-accepted"
-                          : "biome-table-rejected/empty:legacy-classification");
+                if (!table.ok() || table.empty()) {
+                    errors.push_back("invalid worldgen biome table: " + logical);
+                    return false;
+                }
+                state(logical, "biome-table-accepted");
             }
         }
         if (preset.params.structures_enabled) {
             const auto structures = data_root / "common/structures";
             if (!dependency_exists(structures)) {
-                state("common/structures", "structures-directory-absent");
+                errors.push_back("missing worldgen structure pools: common/structures");
+                return false;
             } else {
                 if (!std::filesystem::is_directory(structures)) {
                     errors.push_back("unreadable worldgen dependency directory: common/structures");
@@ -163,6 +166,10 @@ bool ResolveDependencyManifest(TerrainPresetLoadResult& preset,
                 for (const auto& type : std::filesystem::directory_iterator(structures)) {
                     if (type.is_directory())
                         type_dirs.push_back(type.path());
+                }
+                if (type_dirs.empty()) {
+                    errors.push_back("missing worldgen structure pools: common/structures");
+                    return false;
                 }
                 std::sort(type_dirs.begin(), type_dirs.end(), [](const auto& a, const auto& b) {
                     return Filesystem::GenericUtf8PathString(a.filename()) <
@@ -185,9 +192,13 @@ bool ResolveDependencyManifest(TerrainPresetLoadResult& preset,
                         errors.push_back("failed to read worldgen structure pool: " + logical);
                         return false;
                     }
+                    if (!pool.ok()) {
+                        errors.push_back("invalid or empty worldgen structure pool: " + logical);
+                        return false;
+                    }
                     if (!errors.empty())
                         return false;
-                    state(logical, pool.ok() ? "pool-accepted" : "pool-rejected/empty");
+                    state(logical, "pool-accepted");
                     snapshot->structure_pools.push_back(std::move(pool));
                 }
             }
@@ -364,9 +375,7 @@ void ParseBiomesBlock(const nlohmann::json& gen_params,
     biomes.enabled = !biomes.table.empty();
     if (biomes.enabled) {
         // The table path is relative to the data/ root, resolved against the
-        // explicit data_root the caller supplied (the on-disk loader derives it
-        // four parents up from the preset; the in-memory seam is handed it
-        // directly so the table resolves correctly without a temp file).
+        // explicit data_root the caller supplied, independently of save storage.
         biomes.resolved_table_path = Filesystem::GenericUtf8PathString(
             Filesystem::LexicallyNormalPath(data_root / Filesystem::PathFromUtf8(biomes.table)));
     }
@@ -463,7 +472,8 @@ TerrainPresetLoadResult
 LoadTerrainPresetFromJson(const nlohmann::json& source,
                           const std::filesystem::path& data_root,
                           const std::string& provenance,
-                          const World::WorldgenFileStatusReader& read_status) try {
+                          const World::WorldgenFileStatusReader& read_status,
+                          const World::WorldgenFileReader& dependency_reader) try {
     TerrainPresetLoadResult result;
     // Validate revision type before resolving defaults, retaining the no-throw error path.
     if (source.contains("schema_rev") && !source["schema_rev"].is_number_integer()) {
@@ -768,7 +778,8 @@ LoadTerrainPresetFromJson(const nlohmann::json& source,
                     result.warnings);
 
     nlohmann::json manifest;
-    if (!ResolveDependencyManifest(result, data_root, manifest, result.errors, read_status))
+    if (!ResolveDependencyManifest(
+            result, data_root, manifest, result.errors, read_status, dependency_reader))
         return result;
     result.preset_content_hash = HashPresetIdentity(source, manifest);
     result.ok = true;

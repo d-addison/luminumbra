@@ -1,4 +1,5 @@
 """Fault injection for publication; native compiler acceptance is a separate lane."""
+from contextlib import ExitStack
 import errno
 import json
 import os
@@ -105,7 +106,8 @@ class Locking(unittest.TestCase):
                 marker.close()
             except Exception as error:
                 errors.append(error)
-        thread = threading.Thread(target=close)
+        thread = threading.Thread(target=close, daemon=True)
+        self.addCleanup(thread.join, 5)
         thread.start()
         thread.join(timeout=5)
         self.assertFalse(thread.is_alive())
@@ -173,13 +175,23 @@ class Locking(unittest.TestCase):
                 lock.close()
             except Exception as error:
                 errors.append(error)
-        threads = [threading.Thread(target=close) for _ in range(count)]
-        for thread in threads:
-            thread.start()
-        ready.wait(timeout=5)
-        for thread in threads:
-            thread.join(timeout=5)
-            self.assertFalse(thread.is_alive())
+        threads = [threading.Thread(target=close, daemon=True) for _ in range(count)]
+        started, released = [], False
+        try:
+            for thread in threads:
+                thread.start()
+                started.append(thread)
+            ready.wait(timeout=5)
+            released = True
+        finally:
+            if not released:
+                ready.abort()
+            with ExitStack() as cleanup:
+                def join(thread):
+                    thread.join(timeout=5)
+                    self.assertFalse(thread.is_alive())
+                for thread in started:
+                    cleanup.callback(join, thread)
         self.assertEqual(errors, [])
 
     def test_cross_thread_release_and_double_close(self):
@@ -489,10 +501,12 @@ class Project(unittest.TestCase):
             self.assertEqual(workers[0].returncode, 0)
         finally:
             for worker in workers:
-                worker.stdin.close()
-                if worker.poll() is None:
-                    worker.kill()
-                worker.wait(timeout=5)
+                with ExitStack() as cleanup:
+                    if os.name == 'nt': cleanup.callback(worker._handle.Close)
+                    cleanup.callback(worker.stdin.close)
+                    cleanup.callback(worker.wait, timeout=5)
+                    if worker.poll() is None:
+                        worker.kill()
 
     def test_compile_receipt_failure_preserves_error_through_cleanup_failures(self):
         service = self.open()
@@ -589,7 +603,7 @@ class Project(unittest.TestCase):
 
         worker.stdin.close.side_effect = close_pipe
         worker.wait.side_effect = reap
-        closer = threading.Thread(target=close_service)
+        closer = threading.Thread(target=close_service, daemon=True)
         with patch.object(service_module.subprocess, "Popen", return_value=worker), \
              patch.object(service, "_save", side_effect=publish), \
              patch.object(service.executor, "shutdown", side_effect=stop_executor):
@@ -1847,6 +1861,15 @@ class Formats(unittest.TestCase):
 
 
 class Supervisor(unittest.TestCase):
+    def setUp(self):
+        # Platform simulations belong to the subject module. Mutating the
+        # shared os/sys/threading modules also changes pathlib and live workers.
+        for name in ('os', 'sys', 'signal', 'threading', 'subprocess'):
+            context = patch.object(process_module, name,
+                                   SimpleNamespace(**vars(getattr(process_module, name))))
+            context.start()
+            self.addCleanup(context.stop)
+
     def test_thread_setup_failure_closes_and_reaps_compiler_on_both_platforms(self):
         for host in ("nt", "posix"):
             for phase in ("construct", "watcher_start", "reader_start"):
@@ -1989,24 +2012,59 @@ class Supervisor(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             output = root / "result.json"
-            env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1])}
-            command = [sys.executable, "-m", "luminumbra_author", "_compiler", str(output), str(timeout),
-                       sys.executable, "-c", script]
+            ready = root / "compiler-ready"
+            fixture = ("from pathlib import Path; Path(" + repr(str(ready)) + ").touch(); " + script)
+            # Trigger TimeoutExpired only after the real compiler has entered
+            # the fixture. Startup throughput cannot consume a 100 ms budget.
+            bootstrap = """import subprocess,sys,time
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+from luminumbra_author import process
+original = subprocess.Popen
+class Child(original):
+    def wait(self, timeout=None):
+        if sys.argv[4] == 'expire' and timeout == .1:
+            until = time.monotonic()+5
+            while not Path(sys.argv[3]).exists():
+                if time.monotonic() >= until:
+                    raise AssertionError('Compiler readiness was not observed')
+                time.sleep(.005)
+            raise subprocess.TimeoutExpired(self.args, timeout)
+        return super().wait(timeout=timeout)
+process.subprocess.Popen = Child
+process.supervise([sys.executable,'-I','-B','-c',sys.argv[5]],sys.argv[2],float(sys.argv[6]))
+"""
+            command = [sys.executable, "-I", "-B", "-c", bootstrap,
+                       str(Path(__file__).resolve().parents[1]), str(output), str(ready),
+                       "expire" if timeout == .1 else "normal", fixture, str(timeout)]
             child = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                     stderr=subprocess.PIPE, env=env)
-            if cancel:
-                child.stdin.close()
+                                     stderr=subprocess.PIPE, close_fds=True)
             try:
+                if cancel:
+                    until = time.monotonic() + 5
+                    while not ready.exists():
+                        self.assertLess(time.monotonic(), until, "Compiler did not enter fixture")
+                        time.sleep(.005)
+                    child.stdin.close()
                 child.wait(timeout=10)
                 self.assertEqual(child.returncode, 0, child.stderr.read().decode())
                 return read_json(output)
             finally:
-                child.stdin.close()
-                if child.poll() is None:
-                    child.kill()
-                    child.wait()
-                child.stdout.close()
-                child.stderr.close()
+                with ExitStack() as cleanup:
+                    if os.name == 'nt': cleanup.callback(child._handle.Close)
+                    cleanup.callback(child.stderr.close)
+                    cleanup.callback(child.stdout.close)
+                    try:
+                        # EOF lets the supervisor reap its compiler before the
+                        # owner itself exits, including on an assertion failure.
+                        child.stdin.close()
+                    finally:
+                        if child.poll() is None:
+                            try:
+                                child.wait(timeout=10)
+                            except subprocess.TimeoutExpired:
+                                child.kill()
+                                child.wait(timeout=10)
 
     def test_logs_are_drained_and_bounded(self):
         result = self.run_child("print('x' * 200000)")
