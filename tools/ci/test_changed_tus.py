@@ -2021,7 +2021,7 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         self.assertEqual(paths, {self.root / name for name in (
             "src/committed.cpp", "src/unstaged.hpp", "src/staged.cpp", "src/new name \u00fc file.hpp")})
         commands = [call.args[0] for call in git.call_args_list]
-        self.assertEqual(commands[0], ["git", "merge-base", "local-base", "HEAD"])
+        self.assertEqual(commands[0], ["git", "merge-base", "--", "local-base", "HEAD"])
         self.assertTrue(any("--cached" in c for c in commands))
         self.assertTrue(any("--others" in c for c in commands))
         self.assertFalse(any("fetch" in c for c in commands))
@@ -2092,6 +2092,116 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
             self.assertEqual(len({r["command_fingerprint"] for r in reports}), 3)
         with patch.object(tus, "changed_paths", side_effect=tus.SelectionError("incomplete")):
             self.assertEqual(tus.main(["compile", "--build-dir", str(self.build)]), 1)
+
+
+class BaseRefProcessTests(unittest.TestCase):
+    def test_option_like_ref_is_refused_instead_of_selecting_head(self):
+        # Without Git's option terminator, --octopus HEAD succeeds and would
+        # silently report no work despite naming no base ref at all.
+        with tempfile.TemporaryDirectory(prefix="selector invalid ref ") as temporary:
+            build = Path(temporary).resolve()
+            (build / "compile_commands.json").write_text("[]", encoding="utf-8")
+            for command in ("compile", "tidy"):
+                for options in ([], ["--base-ref=--octopus"]):
+                    with self.subTest(command=command, options=options):
+                        environment = {name: value for name, value in os.environ.items()
+                                       if not name.startswith("GIT_")}
+                        environment["LUMINUMBRA_BASE_REF"] = "--octopus"
+                        result = subprocess.run(
+                            [sys.executable, "-I", "-B", str(ROOT / "tools/ci/changed_tus.py"),
+                             command, "--root", str(ROOT), "--build-dir", str(build),
+                             "--no-worktree", "--no-include-untracked", *options],
+                            env=environment, capture_output=True, text=True, check=False)
+                        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                        self.assertIn(str(["git", "merge-base", "--", "--octopus", "HEAD"]), result.stderr)
+                        self.assertEqual(result.stdout, "")
+
+    def test_direct_selector_accepts_local_head_without_native_work(self):
+        with tempfile.TemporaryDirectory(prefix="selector database ") as temporary:
+            build = Path(temporary).resolve()
+            (build / "compile_commands.json").write_text("[]", encoding="utf-8")
+            for command in ("compile", "tidy"):
+                for value, options in (("HEAD", []), ("unavailable-base", ["--base-ref", "HEAD"])):
+                    with self.subTest(command=command, environment=value):
+                        environment = {name: value for name, value in os.environ.items()
+                                       if not name.startswith("GIT_")}
+                        environment["LUMINUMBRA_BASE_REF"] = value
+                        result = subprocess.run(
+                            [sys.executable, "-I", "-B", str(ROOT / "tools/ci/changed_tus.py"),
+                             command, "--root", str(ROOT), "--build-dir", str(build),
+                             "--no-worktree", "--no-include-untracked", *options],
+                            env=environment, capture_output=True, text=True, check=False)
+                        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                        report = json.loads(result.stdout.splitlines()[0])
+                        self.assertEqual(report["selected"], [])
+                        self.assertEqual(report["scan_variants"], 0)
+                        self.assertIn("No native work selected.", result.stdout)
+
+    def test_direct_selector_resolves_environment_and_cli_refs_through_git(self):
+        # An empty repository makes every ref unavailable. The real Git error
+        # identifies the chosen ref before any database read or native work.
+        # No mocks cross the selector's process boundary.
+        with tempfile.TemporaryDirectory(prefix="selector refs ") as temporary:
+            root = Path(temporary).resolve()
+            environment = dict(os.environ)
+            for name in list(environment):
+                if name.startswith("GIT_") or name == "LUMINUMBRA_BASE_REF":
+                    del environment[name]
+            subprocess.run(["git", "init", "--quiet", "--template=", str(root)],
+                           env=environment, check=True, capture_output=True)
+            before = {path.relative_to(root): path.read_bytes()
+                      for path in root.rglob("*") if path.is_file()}
+            cases = (
+                (None, None, "origin/devel"),
+                ("", None, "origin/devel"),
+                ("refs/heads/local-selector-base", None, "refs/heads/local-selector-base"),
+                ("0", None, "0"),
+                (" ", None, " "),
+                (None, "explicit-base", "explicit-base"),
+                ("", "explicit-base", "explicit-base"),
+                ("environment-base", "explicit-base", "explicit-base"),
+                ("environment-base", "", ""),
+            )
+            for command in ("compile", "tidy"):
+                for value, explicit, expected in cases:
+                    with self.subTest(command=command, environment=value, explicit=explicit):
+                        child_environment = dict(environment)
+                        if value is not None:
+                            child_environment["LUMINUMBRA_BASE_REF"] = value
+                        arguments = [sys.executable, "-I", "-B", str(ROOT / "tools/ci/changed_tus.py"),
+                                     command, "--root", str(root), "--build-dir", "absent-database"]
+                        if explicit is not None:
+                            arguments += ["--base-ref", explicit]
+                        result = subprocess.run(arguments, cwd=root, env=child_environment,
+                                                capture_output=True, text=True, check=False)
+                        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                        self.assertIn(str(["git", "merge-base", "--", expected, "HEAD"]), result.stderr)
+                        self.assertEqual(result.stdout, "")
+                        self.assertNotIn("compile_commands.json", result.stderr)
+                        self.assertEqual(before, {path.relative_to(root): path.read_bytes()
+                                                  for path in root.rglob("*") if path.is_file()})
+
+    def test_imported_selector_reads_environment_at_each_invocation(self):
+        with tempfile.TemporaryDirectory(prefix="selector defaults ") as temporary:
+            root = Path(temporary).resolve()
+            (root / "compile_commands.json").write_text("[]", encoding="utf-8")
+            for command in ("compile", "tidy"):
+                for value in ("local-base", "", None, "0"):
+                    with self.subTest(command=command, environment=value), patch.dict(os.environ):
+                        os.environ.pop("LUMINUMBRA_BASE_REF", None)
+                        if value is not None:
+                            os.environ["LUMINUMBRA_BASE_REF"] = value
+                        with patch.object(tus, "changed_paths", return_value=set()) as changed, \
+                                redirect_stdout(io.StringIO()):
+                            self.assertEqual(tus.main([command, "--root", str(root),
+                                                       "--build-dir", str(root)]), 0)
+                        changed.assert_called_once_with(root, value or "origin/devel", True, True)
+
+    def test_documented_shell_default_matches_direct_selector_contract(self):
+        docs = (ROOT / "docs/ci/local-checks.md").read_text(encoding="utf-8")
+        self.assertIn('base_ref="${LUMINUMBRA_BASE_REF:-origin/devel}"', docs)
+        self.assertIn('an unset or empty variable defaults to `origin/devel`', docs)
+        self.assertIn('An explicit `--base-ref`\ntakes priority over the environment', docs)
 
 
 EXECUTE = tus.execute

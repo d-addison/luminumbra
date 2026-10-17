@@ -108,7 +108,7 @@ def changed_paths(root: Path, base_ref: str, worktree=True, include_untracked=Tr
         return subprocess.check_output(["git", *args], cwd=root,
                                        env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
 
-    base = git("merge-base", base_ref, "HEAD").decode("ascii").strip()
+    base = git("merge-base", "--", base_ref, "HEAD").decode("ascii").strip()
     if not re.fullmatch(r"[0-9a-f]{40,64}", base):
         raise SelectionError("no local merge base; provision local history and base ref")
     commands = [("diff", "--name-only", "--no-renames", "-z", base, "HEAD", "--")]
@@ -1084,7 +1084,8 @@ def main(argv=None) -> int:
     parser.add_argument("command", choices=("compile", "tidy"))
     parser.add_argument("--root", type=Path, default=ROOT)
     parser.add_argument("--build-dir", type=Path, required=True)
-    parser.add_argument("--base-ref", default="origin/devel")
+    parser.add_argument("--base-ref", default=os.environ.get("LUMINUMBRA_BASE_REF") or "origin/devel",
+                        help="override LUMINUMBRA_BASE_REF (unset or empty defaults to origin/devel)")
     parser.add_argument("--worktree", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--include-untracked", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--jobs", type=int, default=2)

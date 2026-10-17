@@ -6,7 +6,11 @@ CTest. `BUILD_TESTING=ON` exposes test translation units in the databases so
 their source can be compiled and linted without running tests. The only allowed
 unit tests in this workflow are the stdlib Python suites for the helpers.
 
-Use a local merge base, with `LUMINUMBRA_BASE_REF` overriding `origin/devel`.
+Use a local merge base. Direct `compile` and `tidy` selector invocations and the
+shell recipe below use a nonempty `LUMINUMBRA_BASE_REF` instead of `origin/devel`;
+an unset or empty variable defaults to `origin/devel`. An explicit `--base-ref`
+takes priority over the environment, including an explicit empty value (which
+Git refuses). A nonempty invalid or unavailable ref fails without falling back.
 The selector never fetches. The owner must provision that ref and enough local
 history for `git merge-base` to succeed. Committed, staged, unstaged and
 untracked files are included by default. `--no-worktree` and

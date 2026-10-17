@@ -6,14 +6,15 @@ Statuses declare the available evidence. Static validation requires a mapping fo
 
 | Status | Rows |
 | --- | ---: |
-| covered | 30 |
+| covered | 31 |
 | partial | 9 |
 | needs-native-run | 17 |
 | planned | 87 |
-| Total | 143 |
+| Total | 144 |
 
 | Row | Status | Source | Requirements | Statement | Evidence |
 | --- | --- | --- | --- | --- | --- |
+| iss.500 | covered | `issue #500` |  | Direct compile and tidy selection honors a nonempty LUMINUMBRA_BASE_REF, defaults to origin/devel when it is unset or empty, and gives explicit --base-ref priority. Unavailable or invalid refs fail without fallback or native work. The documented shell recipe uses the same environment default. | ctest: `ChangedTranslationUnitsContract`<br>doc: `docs/ci/local-checks.md` |
 | iss.482 | covered | `issue #482` |  | Synthetic v2 and v3 report-frame captures accept float rotation rounding at large camera positions with a bounded position-scaled translation allowance, and reject wrong matrices while preserving the small-position tolerance. Receipt evidence retains testcase attribution and requires successful execution metadata; software rendering evidence requires exact testcase identities. | ctest: `RenderContractPython`<br>ctest: `AmbientReceiptComparatorContract`<br>ctest: `QualificationCaptureContract`<br>ctest: `SoftwareGlEvidenceContract` |
 | perf.floor-p99 | needs-native-run | `docs/distant-world.md#performance-measurement-contract` | dw.mappings.006 | Both profiles meet p99 frame_wall of at most 16.67 ms on every workload. | ctest: `RenderContractPython`<br>script: `tools/perf/validate_render_capture.py`<br>script: `tools/perf/render_budget.py`<br>native: `tools/gates/run-render-qualification.ps1` (planned: render qualification gate (v0.3.1); owner: ac) -- command: `pwsh tools/gates/run-render-qualification.ps1 -Package <dir> -OutDir <dir>`; receipt: `luminumbra.render_qualification.v1` |
 | perf.target-report-only | covered | `docs/distant-world.md#performance-measurement-contract` | dw.mappings.007 | The Python budget evaluator reports the 8.33 ms target (p50 for Quality, p50 and p99 for Performance); its pass/fail decision uses only the floor verdict. | ctest: `RenderBudgetPython`<br>script: `tools/perf/render_budget.py` |
