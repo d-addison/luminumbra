@@ -21,6 +21,7 @@ target_compile_definitions(world_generation_test PRIVATE
 
 add_executable(preset_schema_rev_test shield/preset_schema_rev_test.cpp)
 target_include_directories(preset_schema_rev_test PRIVATE ../src)
+target_compile_definitions(preset_schema_rev_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
 target_link_libraries(preset_schema_rev_test PRIVATE luminumbra_common)
 luminumbra_configure_first_party_target(preset_schema_rev_test)
 add_test(NAME TerrainPresetSchemaRevision COMMAND preset_schema_rev_test)
@@ -179,6 +180,8 @@ target_link_libraries(net_sockets_transport_test PRIVATE gtest_main spdlog::spdl
 luminumbra_configure_first_party_target(net_sockets_transport_test)
 
 add_executable(common_tests
+    common/StationDiscoveryArguments_test.cpp
+    common/StationDiscovery_test.cpp
     common/Crc32_test.cpp
     rendering/shader_compositing_contract_test.cpp
     common/AnimationRuntime_test.cpp
@@ -235,6 +238,8 @@ add_executable(common_tests
     common/FarEditedBake_test.cpp
     common/GameSessionHeadlessWorld_test.cpp
     common/SimBudgetTelemetry_test.cpp
+    # Deterministic work ceilings and injected negative gates (issue #396).
+    common/DeterministicWorkBudget_test.cpp
     common/HeavyComparison_test.cpp
     common/SimBudgetProfile_test.cpp
     ../src/luminumbra_server/modes/SmokeArtifact.cpp
@@ -662,6 +667,9 @@ endif()
 # default-OFF, so a headless flip is vacuous — this is the non-vacuous proof).
 add_executable(pass_context_test
     rendering/pass_context_test.cpp
+    # Evidence reuse and column-local invalidation on both scatter backends.
+    rendering/foliage_rebuild_test.cpp
+    # Includes deterministic CPU/compute work budgets, idle zero and stale results.
 )
 
 target_compile_definitions(pass_context_test PRIVATE
@@ -2106,6 +2114,30 @@ add_test(NAME FrameAttributionWiringPython COMMAND "${Python3_EXECUTABLE}" -I -B
     "${CMAKE_SOURCE_DIR}/test/rendering/test_frame_attribution_wiring.py")
 add_test(NAME UploadBudgetWiringPython COMMAND "${Python3_EXECUTABLE}" -I -B
     "${CMAKE_SOURCE_DIR}/test/rendering/test_upload_budget_wiring.py")
+set(_common_isa_compiler_args --compiler "${CMAKE_CXX_COMPILER}")
+if(MSVC)
+    list(APPEND _common_isa_compiler_args --msvc)
+endif()
+add_test(NAME CommonLibraryIsaContract
+    COMMAND "${Python3_EXECUTABLE}" -I -B
+        "${CMAKE_SOURCE_DIR}/tools/gates/test_common_library_isa.py"
+        ${_common_isa_compiler_args} --cmake "${CMAKE_COMMAND}")
+set_tests_properties(CommonLibraryIsaContract PROPERTIES LABELS "world;tools" TIMEOUT 30)
+add_test(NAME StationDiscoveryContract
+    COMMAND "${Python3_EXECUTABLE}" -I -B
+        "${CMAKE_SOURCE_DIR}/tools/gates/test_station_discovery.py")
+add_test(NAME StationDiscoveryCliSmoke
+    COMMAND "${Python3_EXECUTABLE}" -I -B
+        "${CMAKE_SOURCE_DIR}/tools/gates/test_station_discovery.py"
+        --cli "$<TARGET_FILE:luminumbra_station_discovery>")
+add_test(NAME StationDiscoveryNumericRefusals
+    COMMAND "${Python3_EXECUTABLE}" -I -B
+        "${CMAKE_SOURCE_DIR}/tools/gates/test_station_discovery.py"
+        --numeric-cli "$<TARGET_FILE:station_discovery_numeric_environment>")
+set_tests_properties(StationDiscoveryNumericRefusals PROPERTIES LABELS "world;tools" TIMEOUT 120)
+set_tests_properties(StationDiscoveryContract StationDiscoveryCliSmoke
+    PROPERTIES LABELS "world;tools" TIMEOUT 120)
+
 add_test(NAME SimBudgetCaptureContract
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/perf/test_capture_sim_budget.py")
 set_tests_properties(SimBudgetCaptureContract PROPERTIES LABELS "simulation;tools" TIMEOUT 60)
@@ -2170,6 +2202,10 @@ if(CAPTURE_VALIDATION_POWERSHELL)
         COMMAND "${CAPTURE_VALIDATION_POWERSHELL}" -NoLogo -NoProfile -NonInteractive
             -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tools/gates/test-capture-artifact-validation.ps1")
     set_tests_properties(CaptureArtifactValidationContract PROPERTIES LABELS "visual;tools" TIMEOUT 60)
+    add_test(NAME RenderQualificationWrapperContract
+        COMMAND "${CAPTURE_VALIDATION_POWERSHELL}" -NoLogo -NoProfile -NonInteractive
+            -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tools/gates/test-render-qualification.ps1")
+    set_tests_properties(RenderQualificationWrapperContract PROPERTIES LABELS "visual;tools" TIMEOUT 60)
     add_test(NAME FarLadderOracleContract
         COMMAND "${CAPTURE_VALIDATION_POWERSHELL}" -NoLogo -NoProfile -NonInteractive
             -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tools/gates/test-far-ladder-oracle.ps1")
@@ -2188,6 +2224,7 @@ if(CAPTURE_VALIDATION_POWERSHELL)
 else()
     message(STATUS "PowerShell unavailable: AcceptancePreflightContract is not registered")
     message(STATUS "PowerShell unavailable: CaptureArtifactValidationContract is not registered")
+    message(STATUS "PowerShell unavailable: RenderQualificationWrapperContract is not registered")
     message(STATUS "PowerShell unavailable: FarLadderOracleContract is not registered")
     message(STATUS "PowerShell unavailable: SavedWorldRoundtripArtifactsContract is not registered")
     message(STATUS "PowerShell unavailable: LuaApiManifestSourceContract is not registered")

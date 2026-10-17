@@ -4,6 +4,7 @@
 #include "FrameScan.h"
 #include "PixelIo.h"
 #include "RenderPipeline.h"
+#include "UploadBudget.h"
 #include "WaterfallDetect.h"
 #include "core/Log.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
@@ -21,6 +22,7 @@
 #include <cmath>
 #include <fstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace Luminumbra::Rendering {

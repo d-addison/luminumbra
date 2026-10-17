@@ -2,6 +2,7 @@
 
 #include "Camera.h"
 #include "FarLodSystem.h"
+#include "UploadBudget.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 
 #include <glm/gtc/type_ptr.hpp>

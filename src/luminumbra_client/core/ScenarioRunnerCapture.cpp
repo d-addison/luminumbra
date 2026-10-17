@@ -18,6 +18,7 @@
 #include "nlohmann/json.hpp"
 #include "rendering/Camera.h"
 #include "rendering/FarLodSystem.h"
+#include "rendering/UploadBudget.h"
 #include "rendering/passes/WaterPass.h"
 
 #include <algorithm>
@@ -33,6 +34,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 // The moved code names the scenario-harness and app vocabulary unqualified,

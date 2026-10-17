@@ -32,6 +32,16 @@ class UploadBudgetWiring(unittest.TestCase):
         cls.header = read(RENDERING / "RenderPipeline.h")
         cls.main = read(ROOT / "src/luminumbra_client/main_client.cpp")
 
+    def test_wiring_regression_runs_in_ctest_and_python_ci(self):
+        registration = read(ROOT / "test/CMakeLists.txt")
+        self.assertEqual(registration.count("add_test(NAME UploadBudgetWiringPython "), 1)
+        self.assertEqual(registration.count("add_executable(upload_budget_test "), 1)
+        targets = registration.split("set(LUMINUMBRA_GTEST_TARGETS", 1)[1].split(")", 1)[0]
+        self.assertEqual(targets.split().count("upload_budget_test"), 1)
+        ci_paths = read(ROOT / "tools/ci/ci_paths.py")
+        python_tests = ci_paths.split("PYTHON_TESTS = (", 1)[1].split(")", 1)[0]
+        self.assertIn('"test/rendering/test_upload_budget_wiring.py"', python_tests)
+
     def test_both_live_backends_use_policy_and_include_preparation(self):
         self.assertIn("manage_mesh_gpu_resources<false>", self.pipeline)
         self.assertIn("manage_mesh_gpu_resources<true>", self.pipeline)
@@ -91,7 +101,11 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("record_warmup || record_measured || record_capture", self.main)
         self.assertIn("const bool record_measured = upload_warmup_complete", compact(self.main))
         self.assertIn("if (!upload_warmup_complete)", self.main)
-        self.assertIn("render_benchmark_frames + 1)", self.main)
+        self.assertIn(
+            "terrain_coverage_frames.size() < "
+            "static_cast<std::size_t>(g_app.capture.render_benchmark_warmup) + "
+            "static_cast<std::size_t>(g_app.capture.render_benchmark_frames) + 1",
+            compact(self.main))
         coverage = read(RENDERING / "TerrainCoverageCapture.cpp")
         capture = body(coverage, "bool RenderPipeline::capture_terrain_coverage(")
         self.assertIn("!render_uploads_settled()", capture)

@@ -115,6 +115,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "rendering/Shader.h"
 #include "rendering/SnowCoverModel.h" // Render-only snow cover.
 #include "rendering/TreeImpostorPolicy.h"
+#include "rendering/UploadBudget.h"
 #include "rendering/WeatherRenderBridge.h" // Live weather bridge.
 #include "rendering/WorldLoadingVisualizer.h"
 #include "rendering/passes/ParticlePass.h"     //  EmitterDescriptor + accessor type
@@ -1025,6 +1026,9 @@ static void UpdateFoliageScatter(ClientAppContext& g_app,
             // (every gate, incl. FoliageInstancing's foliage_visual_smoke)
             // KEEPS the readback so instance_hash/coverage stay exact.
             foliage->set_readback_enabled(scenario_config.active() && !g_app.capture.play_paths);
+            // Only the foliage qualification scenario consumes uploaded-input evidence.
+            foliage->set_evidence_enabled(scenario_config.foliage_visual_smoke() &&
+                                          !g_app.capture.play_paths);
             glm::vec2 wind_xz(0.0f, 0.0f);
             if (auto* wind = gameSession->GetWindFieldSystem()) {
                 const Luminumbra::Vec2 w = wind->SampleWind(Luminumbra::Vec3(
@@ -5462,8 +5466,8 @@ int main(int argc, char* argv[]) {
             if (!terrain_coverage_dir.empty() &&
                 (record_warmup || record_measured || record_capture) &&
                 terrain_coverage_frames.size() <
-                    static_cast<std::size_t>(g_app.capture.render_benchmark_warmup +
-                                             g_app.capture.render_benchmark_frames + 1)) {
+                    static_cast<std::size_t>(g_app.capture.render_benchmark_warmup) +
+                        static_cast<std::size_t>(g_app.capture.render_benchmark_frames) + 1) {
                 auto coverage = renderPipeline.terrain_coverage_diagnostics();
                 coverage["benchmark_phase"] =
                     g_app.benchmark.warmupFrames < g_app.capture.render_benchmark_warmup ? "warmup"

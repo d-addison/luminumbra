@@ -17,6 +17,7 @@
 #include "SceneRenderScale.h"
 #include "SunLightModel.h"  //  rendering: SunIrradiance (transmittance-coupled sun magnitude)
 #include "TimeOfDayModel.h" // Pure time-of-day policy helpers.
+#include "UploadBudget.h"
 #include "core/Log.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/components/LightingComponents.h"
@@ -5558,6 +5559,7 @@ namespace {
 
 constexpr uint32_t kLtexMagic = 0x5845544C; // 'LTEX' little-endian
 constexpr uint16_t kLtexVersion = 1;
+
 template<typename T>
 bool ReadPod(std::ifstream& in, T& value) {
     in.read(reinterpret_cast<char*>(&value), sizeof(T));
