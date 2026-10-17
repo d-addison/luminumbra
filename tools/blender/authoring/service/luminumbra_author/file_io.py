@@ -22,9 +22,12 @@ def require(value, message):
 def safe_path(path):
     path = Path(path).absolute()
     for part in (path, *path.parents):
-        if not part.exists() and not part.is_symlink():
+        try:
+            # Lease files are created/unlinked by the other participant. One
+            # observation avoids an exists/lstat race and still inspects links.
+            info = part.lstat()
+        except FileNotFoundError:
             continue
-        info = part.lstat()
         require(not stat.S_ISLNK(info.st_mode) and not getattr(info, 'st_file_attributes', 0) & 0x400,
                 'Reparse path')
     return path
@@ -161,8 +164,12 @@ def replace_file(temporary, path, *, durable=False, source_dir_fd=None, target_d
             'Publication requires same-directory files unless verified cross-directory staging is enabled')
     require(temporary != path, 'Publication requires distinct files in verified directories')
     require(stat.S_ISREG(temporary.lstat().st_mode), 'Publication source requires a regular file')
-    if path.exists():
-        require(stat.S_ISREG(path.lstat().st_mode), 'Publication destination requires a regular file')
+    try:
+        destination = path.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        require(stat.S_ISREG(destination.st_mode), 'Publication destination requires a regular file')
     if os.name != 'nt':
         os.replace(temporary, path)
         return

@@ -293,6 +293,16 @@ and atomic replacement. Prior aggregates and selected cells' captures, verdicts,
 retained captures and receipts are set aside as `.prev-<n>`, including for cells
 that have become unready. An unevaluated cell reports no capture or adapter.
 
+`--host-record <staged-host.json>` validates Windows OS, PowerShell and GPU driver
+identity before execution, then publishes `host.json` with the aggregate under
+the same lock. A run without this option removes any previous `host.json` under
+the lock. If aggregate publication fails, the previous host is restored. Both
+staged and previous host files must be regular files, with no symlinks, and fit
+the shared 16 MiB input cap. Staged JSON must be UTF-8 (an optional BOM is accepted)
+and contain at most 64 object/array levels; invalid inputs refuse with exit 2.
+Dry runs preserve the current pair and write supplied host evidence separately
+as `host-dryrun.json`.
+
 Cell `artifact` paths, and retained `capture_path` values in process receipts, are
 relative to the output directory, such as `cells/surface-flight.quality.3840x1600.json`.
 The private process receipt still records absolute command, cwd and client paths.
@@ -574,9 +584,13 @@ The optional profiling build uses `-DLUMINUMBRA_ENABLE_TRACY=ON` in a separate
 build directory. The client links the profiler interface in all variants; with
 the default `OFF` setting it adds no profiling definitions or dependencies.
 
-Completed GPU counts are only exposed with readback active and carry their
-source generation (which can precede this frame's rebuild); CPU fallback counts
-are available directly. Frame scans use `luminumbra.frame_scan.v2`:
+Completed GPU counts are only exposed with readback active and a matching build
+generation. Ordinary and frozen rebuilds clear the known count until that
+generation's readback completes; empty builds have a known zero count. Retained
+blade snapshots keep their own source generation for qualification. CPU fallback
+counts are available directly. Disabling readback retires its submission marker;
+re-enabling retries the snapshot even when inputs are unchanged. Frozen rebuilds
+also obey the disabled readback policy. Frame scans use `luminumbra.frame_scan.v2`:
 `foliage.instances` is a nonnegative integer when known (including zero), or
 `null` when unavailable. Readers must preserve unknown counts rather than
 coercing them to zero. `foliage.instance_capacity` is storage capacity, never a

@@ -298,6 +298,9 @@ public:
         std::size_t deferred_generation = 0;
         std::size_t meshing_candidates = 0;
         std::size_t scheduled_meshing = 0;
+        // Accepted items from this update's selected candidates, excluding
+        // promotion refusals and stage-B dispatches from earlier selections.
+        std::size_t submitted_meshing = 0;
         std::size_t deferred_meshing = 0;
         std::size_t unloaded_chunks = 0;
         bool generation_job_active = false;
@@ -330,6 +333,8 @@ public:
     };
 
     struct StreamingTelemetryStats {
+        // Queue depths include all unpublished generation/promotion/mesh items
+        // and meshing candidates not submitted in the current update.
         std::size_t peak_queue_depth = 0;
         std::size_t peak_meshing_candidates = 0;
         std::size_t cumulative_scheduled_meshing = 0;
@@ -474,6 +479,10 @@ public:
         bool shaft = false;       // true => vertical cenote shaft
     };
     SurfaceBreakInfo FindLargestSurfaceBreak(float near_x, float near_z, float scan_radius_m) const;
+    // Read-only station discovery catalogue; shares the live placement decoder.
+    SurfaceBreakInfo SurfaceBreakInCell(int cell_x, int cell_z) const;
+    float SurfaceBreakCellSize() const;
+    float SurfaceBreakMaxRadius() const;
     // Elevation-aware water surface level at a column: the local lake surface
     // inside a lake basin (held above the carved floor by its rim), or SEA_LEVEL
     // elsewhere. The WaterSystem seeds + pins its per-cell rest level from this so
@@ -662,6 +671,10 @@ public:
     const StreamingTelemetryStats& get_streaming_telemetry_stats() const {
         return m_streaming_telemetry_stats;
     }
+    // Owner-thread diagnostic: dispatched chunk items awaiting publication,
+    // including Ready remeshes and either promotion stage. Worker completion
+    // does not reduce this count; only publication or pipeline retirement does.
+    [[nodiscard]] std::size_t pending_publication_chunks() const;
     const std::vector<ChunkLOD>& get_lod_levels() const {
         return m_lod_levels;
     }
@@ -884,6 +897,11 @@ public:
     ActivationShadowReport activation_shadow_report() const;
     // Shared-ownership snapshot of every streamed chunk (save path).
     std::vector<std::shared_ptr<::Luminumbra::Chunk>> snapshot_streamed_chunks() const;
+    // Lifetime count of pointer entries copied by streamed/renderable snapshots.
+    // Const diagnostic only; relaxed atomic supports concurrent diagnostic reads.
+    [[nodiscard]] std::uint64_t snapshot_copies() const {
+        return m_snapshot_copies.load(std::memory_order_relaxed);
+    }
     // Owner-thread capture for a 32x32 chunk far region plus a one-chunk X/Z
     // halo. Only exact full SDF lattices are copied into the immutable result.
     std::shared_ptr<const FarLodSdfSnapshot> capture_far_lod_sdf_snapshot(i32 rx, i32 rz) const;
@@ -990,6 +1008,7 @@ private:
     void shadow_note_promotion_published(ChunkID id);
     void shadow_note_evicted(ChunkID id);
     StreamingBudgetFrameStats m_last_streaming_budget_stats;
+    mutable std::atomic<std::uint64_t> m_snapshot_copies{0};
     // debug_set_streaming_radius_cap: 0 = uncapped (production behaviour).
     int m_streaming_radius_cap = 0;
     DbgStreamTimings m_dbg_stream; // runtime telemetry
@@ -1028,6 +1047,9 @@ private:
     std::uint64_t m_last_activation_dirty_generation = 0;
     std::size_t m_last_activation_pending =
         0; // scheduled_generation + deferred_generation last pass
+    // Outstanding candidates survive frames between activation passes; the
+    // per-frame generation counters reset even when activation does not run.
+    std::size_t m_deferred_generation_candidates = 0;
     std::size_t m_last_chunk_count = 0;
     bool m_last_pass_drained = false; // sticky: false forces the next tick's candidate pass to run
 
@@ -1101,7 +1123,9 @@ private:
         // MAX_HIGH_PRIORITY_MESHING_JOBS_PER_DISPATCH in the.cpp).
         bool high_priority = false;
     };
-    void dispatch_meshing_jobs(const std::vector<MeshingWorkItem>& chunks_to_mesh);
+    // Return accepted items, including synchronous publication. Refusals stay
+    // candidates; this diagnostic result never changes scheduling.
+    std::size_t dispatch_meshing_jobs(const std::vector<MeshingWorkItem>& chunks_to_mesh);
     void process_completed_meshing_jobs(bool force);
     bool meshing_jobs_active() const;
     //  promotion lane (see StreamingState). dispatch_promotion_jobs
@@ -1110,7 +1134,7 @@ private:
     // thread and dispatches stage B. promotion_pipeline_pending covers the
     // whole pipeline (jobs in flight OR unpublished results OR stage B not yet
     // dispatched) for the scheduling gates that today read meshing activity.
-    void dispatch_promotion_jobs(const std::vector<MeshingWorkItem>& chunks_to_promote);
+    std::size_t dispatch_promotion_jobs(const std::vector<MeshingWorkItem>& chunks_to_promote);
     void process_completed_promotion_jobs(bool force);
     // MAIN-THREAD generation publication — flips completed
     // (pending_generation_ready) batch chunks Loading→Idle and clears the
