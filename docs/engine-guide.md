@@ -18,7 +18,7 @@ fallback, including when obsolete artifacts coexist with current region files.
 | Region container | `chunks/region/r.<rx>.<rz>.lmr`: `LMR1` magic, little-endian `u16` container version `2`, `u16` record count, record headers and LZ4 payloads |
 | World manifest | `chunks/region/world-manifest.json`: `schema: "luminumbra.persistence.world_manifest.v1"`, `container: "LMR1"`, `container_version: 2` |
 | Far-LOD record payload | `FSD2` magic, payload version `3` inside the LMR1 container |
-| Terrain preset | New presets use integer `schema_rev: 7`; revision `6` and omitted revisions retain historical missing-field semantics |
+| Terrain preset | New presets use integer `schema_rev: 8` with sampling revision `2`; revision `6` and omitted revisions retain historical missing-field semantics |
 
 The manifest schema is still v1; it is distinct from container v2, FSD2 payload
 v3, and project version 0.3.0. Lod-0 records retain the canonical
@@ -801,13 +801,21 @@ five minutes at the canonical 30 Hz clock, to avoid saving every second during
 normal play. Smoke fixtures explicitly use 30 ticks to exercise saves at ticks
 30/60/90; explicit zero suppresses autosaves, including recorder fixtures.
 
-New preset revision 7 resolves omitted island masks, surface breaks, biomes,
+Preset revisions 7 and 8 resolve omitted island masks, surface breaks, biomes,
 biome relief, cliffs, rivers, lakes, structures and hydraulic/thermal erosion on.
 The biome table is `common/biomes.json`; structures resolve under the data root.
 Revision 6 and unversioned presets retain their historical omitted-field choices.
 Explicit false and an empty biome table remain off. New saves embed resolved
 choices; neutral knobs and UI controls use the same versioned resolver. Existing
 saved presets are read without rewriting their choices.
+
+Schema 8 gates `generation_params.terrain.surface_sampling_revision: 2`
+(issue #453). New worlds and the shipping catalog select revision 2, so activation
+height samples and vertex materials use the complete heightmap shaping sequence.
+Older readers reject schema 8. Explicit sampling revision 1 is preserved;
+historical presets without the selector keep revision 1 and their original
+identity bytes. Its canonical identity remains at schema 7. Erosion continues to
+bake its historical substrate, preserving generated terrain in existing worlds.
 
 The ordinary hills world is `worlds/atlas/presets/default.json`: its island mask
 is now on, alongside its already-enabled terrain features. Amplified, archipelago,
@@ -821,11 +829,11 @@ relief and cliffs are on, and hydraulic/thermal erosion uses four iterations
 instead of eight, matching the retuned Caverns terrain. Its denser cave tuning
 is preserved: cave threshold `0.54`, surface-break density `0.55`, maximum feature
 radius `52` m. Its canonical preset identity changes from `e70158a4777ee36b`
-(frozen revision 6) to `5d081f382b2d5d0d` (shipping revision 7). The frozen copy
+(frozen revision 6) to `a9296ce03a5d9f33` (shipping revision 8). The frozen copy
 has SHA-256 `5eff891c8d9f654ada480abf27b9cf9781cc86798fec60844bf28b1a7a4ae5e0`;
 the shipping copy has SHA-256
-`4b7c31ac3354db8921aea738749488525da6cb4d122a982c556a797b4ec82a1b`.
+`416c5a8d847c31e240fe3d103ed73e769131e3488a9ef1096076f01235d67a18`.
 Existing saves without an embedded preset use the frozen copy. The game
 repository's cave-dense qualification fixture and identity sidecar must select
 the intended revision: retaining the old fixture matches the frozen bytes;
-using shipping revision 7 requires updating both the fixture and its pins.
+using shipping revision 8 requires updating both the fixture and its pins.
