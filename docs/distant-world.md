@@ -534,6 +534,161 @@ instead of bracketing the frame, pins the framebuffer to 3840×1600, and does no
 record the renderer string; present-to-present wall timing already exists but
 is not retained per frame.
 
+## Station discovery (REQ-E4)
+
+`luminumbra_station_discovery` is a CPU-only tool linked to `luminumbra_common`.
+It loads the canonical preset parser with an explicit data root, then constructs
+an unstreamed query world with no jobs or water system. Discovery reads terrain;
+it does not create a live session, edit terrain, change generation numerics or
+produce native qualification evidence.
+
+```text
+luminumbra_station_discovery --preset-json PRESET --data-root DATA --seed INTEGER
+  --kind mouth|arch|horizon|coverage --origin-mm X Z --radius-m R
+  --y-range-m MIN MAX --view-distance-m D --limit N
+```
+
+All flags are required exactly once. `DATA` names the data directory, not the
+repository root. The seed is 0 through 2147483615, R is 1 through 16384 metres,
+D is 0 through 16384 metres and N is 1 through 64. Search radius and horizontal
+camera-to-feature distance are independent. Absolute eye positions use metres,
+Y-up, and exactly the game's scene-set fields `{x,y,z,yaw,pitch}`. Angles use
+degrees: yaw zero faces +X, positive yaw faces +Z, positive pitch points upward.
+Feature orientation uses `DeterministicMath`, with yaw in [-180,180) and pitch
+clamped to [-89,89].
+
+Success writes one compact, key-sorted UTF-8 JSON document and a final LF to
+stdout; diagnostics go to stderr. `luminumbra.station-discovery.v1` includes
+`engine_revision`, `inputs_sha256`, `algorithm: "sampled-portals.v1"`,
+`numeric_profile: "canonical-worldgen.v1"`, `certified: false`, seed, the echoed
+query and candidates. Candidates contain only an ID, an integer-millimetre
+`anchor_mm: [x,y,z]` and the five-field pose. The closed JSON Schema 2020-12 is
+exported by `python3 -I -B tools/gates/station_discovery_contract.py --schema`;
+the same stdlib module validates types, bounds, IDs and ordering. Its `--input`
+mode accepts independent `--expected-engine-revision` and
+`--expected-inputs-sha256` pins; `--require-certified` currently refuses every
+result. Neither schema validation nor a discovery pose certifies native terrain
+visibility or continuous cave topology.
+
+The build revision is pinned by `LUMINUMBRA_STATION_ENGINE_REVISION` at configure
+time, defaulting to the checkout revision when Git is available. Input identity
+is SHA-256 of a compact key-sorted UTF-8 JSON manifest (non-ASCII names remain
+unescaped, no final LF), mapping logical relative names to exact-byte SHA-256
+digests. The preset is `preset.json`;
+consumed biome, structure and species inputs use `data/<relative-name>`. Structure inputs
+include optional placement files and every consumed piece in each type directory.
+Species files are captured even when biome and structure generation are disabled.
+Absolute paths, timestamps, timings and session content identities are excluded.
+Each input file is limited to 1048576 bytes and each snapshot (preset plus
+dependencies) to 8388608 bytes, checked before allocating file contents.
+Captured files and structure type directories share limits of 4096 entries and
+1048576 bytes of logical UTF-8 pathname storage, including the preset key and
+`data/` prefixes.
+Exceeding any byte, entry or pathname limit exits 1 with an `input-limit` refusal and empty stdout.
+Each file is parsed and validated as it is captured, before its bytes enter the snapshot.
+Dependency bytes and structure integer domains are validated before the preset
+loader can consume them. The loader reads only the validated captured bytes.
+Logical dependency names must be relative portable UTF-8 paths without root names,
+root directories, traversal components, backslashes, colons or NULs.
+Their names/bytes are checked again after discovery;
+observable changes refuse the whole result.
+Run against immutable pinned inputs; these checks do not promise exclusion of
+every concurrent filesystem race.
+
+`sampled-portals.v1` freezes the following sampled predicate. Enumerate all
+seeded surface-break cells whose footprints can intersect the search disk,
+using the same placement decoder as `FindLargestSurfaceBreak`. Scan global 4 m
+lattice anchors inside each accepted footprint and the query disk. Loop ranges
+are clipped to the disk row by row and to Y values that fit the 12 m stencil;
+a span with no such lattice Y returns an empty feature catalogue without visits.
+Local index still refers to the full feature bounding box over Z, X, then Y,
+including skipped lattice points. At an anchor,
+air requires density >= 0.25 and solid requires density <= -0.25. A mouth has
+an air anchor, a solid roof at Y+4, and a straight face-connected path through
+air at 4 and 8 metres along an ordered cardinal direction. The 8 m endpoint is
+exterior only when it and its Y+4/+8/+12 samples are air. An arch additionally
+requires that access on the opposite side, solid transverse supports at +/-4 m
+at anchor Y, and solid roof samples above both supports at Y+4. All stencil Y
+samples must fit within the requested span. These are sampled mouth/arch
+candidates; an accepted doline alone is insufficient to classify either.
+
+For each feature, try viewing directions +X, +Z, -X, -Z in that order, placing
+the eye D metres behind the anchor. Eye Y is the larger of anchor Y+1.8 and
+terrain height at the eye XZ+1.8. Require air at the eye and its six axis offsets
+of 0.5 m, then along the eye-to-anchor sightline at equally spaced intervals
+of at most 4 m, including the anchor. The interval count is
+`max(1, ceil((D + abs(anchor_Y - eye_Y)) / 4))`, using the cardinal path's
+length bound. Candidates without a clear sampled pose are omitted. The completed catalogue is ranked by squared integer-millimetre
+XZ anchor distance, then signed cell Z, signed cell X and local index; apply N
+after ranking. IDs encode kind and signed cells (`n` negative, `p` nonnegative)
+plus local index, so ties and negative coordinates have a stable identity.
+Mouth ranking does not select the largest opening.
+
+Sampled terrain heights used for poses and control anchors are rounded upward
+to millimetres to preserve the minimum terrain clearance.
+
+`horizon` returns up to four control views at the query origin, 1.8 m above
+terrain, with yaw 0/90/-180/-90 and pitch zero. `coverage` adds the 80 m elevated
+view, yaw 45 and pitch -20. All controls share the terrain anchor Y sampled once
+at that origin. Control IDs explicitly contain `-control-`; they do
+not discover features, and D is echoed but does not reposition them. They also
+require sampled eye clearance and the requested Y span. Neither kind claims
+that any tier is covered or settled.
+
+Refuse inverted vertical spans, spans over 512 m, horizontal coordinates or
+search/pose/stencil footprints beyond +/-2^23 metres, more than 262144 enumerated
+cells, more than 16777216 lattice visits, or more than 16777216 density samples.
+Every visited Z/X/Y anchor counts, including those rejected before sampling;
+the read-only `StationDiscoveryResult::lattice_visits` diagnostic remains available
+on refusal.
+Exceeding any budget discards all candidates. Work limits count operations, never
+elapsed time. Unsupported/nonfinite sampling also refuses. CLI usage errors
+(missing, repeated or unknown flags, invalid integer syntax, or an unknown kind)
+exit 2; integer overflow, out-of-range query values, missing/invalid input files,
+parser warnings or clamping, unsupported numerics, and budget exhaustion exit 1
+with no partial success on stdout.
+Completed empty/disabled catalogues exit 0 with `candidates: []`. Output writes
+are checked through completion; a write or flush failure exits 1.
+
+The tool currently permits exploratory results only on the existing x86-64
+AVX2 query path with IEEE binary32 and round-to-nearest; unsupported ISA or FP
+paths refuse before constructing the world. Defensive preset refusals include
+JSON nesting above 128, noninteger/out-of-range integer fields, octaves outside
+1..32, hydro iterations outside 0..512, malformed optional blocks/spline pairs,
+and enabled feature radii below the decoder's 3 m minimum. These checks apply to
+discovery only; they do not change the preset loader or terrain generation.
+Enabled hydro also requires finite nonnegative parameters, thermal/deposition/
+evaporation fractions in 0..1, and
+cell sizes at least 2^-39 m (keeping the horizontal domain within +/-2^62 erosion
+cells). Discovery checks the complete query footprint and the 64-cell region's
+iterations+8 halo before constructing the world. Structure placement integers,
+box minima/extents and resulting maxima, socket positions and byte material IDs
+are checked before the pool loader converts them. World-backed discovery holds
+one shared worldgen epoch across the catalogue snapshot and every sample;
+callers must not already hold the world's non-recursive sample scope.
+The numeric-profile name reserves
+the intended contract, while `certified: false` explicitly records that shared
+canonical worldgen numerics and identical GCC/MSVC/UCRT real-seed goldens remain
+prerequisites for certification. Existing terrain libm/noise usage is unchanged.
+Synthetic topology fixtures establish mouth/arch predicates, signed ranking,
+pose clearance/directions, budgets, controls and shared-placement parity;
+real-seed cross-platform goldens are a follow-up, not invented expectations.
+The stdlib contract tests and CPU CLI repeat/refusal smoke are ordinary CTest
+entries without manual or GPU guards.
+
+Discovery emits no `settled` or qualification claims. Native pose/name manifest
+capture integration remains required before these arbitrary poses can qualify
+through the horizon harness. Each station's clock must begin when its exact
+pose and world/render binding are applied, with readiness inclusive at 90 s.
+Recompute expected per-tier coverage independently from that camera: current
+`Uploaded` and valid `Empty` tiles cover; merely `Ready`, stale generation/binding
+or insufficient-span tiles do not. Complete coverage, sky <=2%, zero seam bands
+and zero outer edge remain separate native qualification gates, with receipts
+for every row/profile/display. Existing deadline, empty-tile, stale-generation,
+span and water refusal tests remain in force. Custom-station manifest mismatch
+controls belong to that capture integration. Deep-interior discovery is a
+separate follow-up; this tool does not complete the game's entire scene set.
+
 ## Evidence map
 
 | Contract area | Executable evidence |
