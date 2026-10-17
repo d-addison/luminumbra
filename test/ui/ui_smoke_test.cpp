@@ -225,8 +225,9 @@ void AwaitWorldCatalog(Luminumbra::Client::Rml_UIManager& ui) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
         ui.Update();
     }
-    if (document)
+    if (document) {
         EXPECT_FALSE(document->HasAttribute("data-worlds-pending"));
+    }
 }
 
 Rml::ElementDocument* LoadDocumentAndFind(Luminumbra::Client::Rml_UIManager& ui,
@@ -1196,8 +1197,9 @@ TEST(UiSmokeTest, RedesignedControlsAreFunctional) {
             jump_row = r;
     }
     ASSERT_NE(jump_row, nullptr);
-    if (auto* chip = settings->GetElementById("kb_Jump"))
+    if (auto* chip = settings->GetElementById("kb_Jump")) {
         EXPECT_EQ(chip->GetInnerRML(), "Space");
+    }
     ClickAndUpdate(ui, jump_row);
     EXPECT_EQ(last_rebind_action, "Jump");
 
