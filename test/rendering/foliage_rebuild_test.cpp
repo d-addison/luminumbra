@@ -1,4 +1,6 @@
 #include "../support/DeterministicWorkBudget.h"
+#include "luminumbra_client/rendering/Camera.h"
+#include "luminumbra_client/rendering/Shader.h"
 #include "luminumbra_client/rendering/passes/FoliagePass.h"
 
 #define GLFW_INCLUDE_NONE
@@ -439,33 +441,40 @@ TEST_F(FoliageRebuildTest, QualificationRequiresCollectedInputsAndKeepsLegacyIde
 }
 
 TEST_F(FoliageRebuildTest, PaletteReloadUsesOnlyCurrentArchetypeBytes) {
-    ScopedPass reused;
-    ASSERT_NO_FATAL_FAILURE(Initialize(reused.pass));
-    reused.pass.set_evidence_enabled(true);
-    const auto root = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT);
-    const auto full_palette = root / "data/common/foliage/scatter_set.json";
-    const auto small_palette = root / "test/rendering/fixtures/foliage_palette_small.json";
-    std::uint64_t frame_id = 1;
-    for (const std::size_t columns : {2u, 1u, 2u}) {
-        const auto& palette = columns == 1 ? small_palette : full_palette;
-        ASSERT_TRUE(reused.pass.load_scatter_set(palette));
-        const auto chunks = Chunks(columns); // Changed input forces the existing rebuild policy.
+    for (const bool gpu : {false, true}) {
+        SCOPED_TRACE(gpu);
+        ScopedPass reused;
+        ASSERT_NO_FATAL_FAILURE(Initialize(reused.pass, gpu));
+        reused.pass.set_evidence_enabled(true);
+        const auto root = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT);
+        const auto full_palette = root / "data/common/foliage/scatter_set.json";
+        const auto small_palette = root / "test/rendering/fixtures/foliage_palette_small.json";
+        const auto chunks = Chunks(2);
+        std::uint64_t frame_id = 1;
         Rebuild(reused.pass, chunks, frame_id++);
-        const auto records = GpuRecords();
-        ASSERT_FALSE(records.empty());
-        const auto hash = reused.pass.uploaded_input_hash();
-        EXPECT_EQ(hash, LegacyUploadedHash(reused.pass));
-        GLint64 palette_size = 0;
-        glGetNamedBufferParameteri64v(Binding(4), GL_BUFFER_SIZE, &palette_size);
-        EXPECT_EQ(palette_size,
-                  static_cast<GLint64>(reused.pass.archetype_count() * 8 * sizeof(float)));
-        ScopedPass fresh;
-        ASSERT_NO_FATAL_FAILURE(Initialize(fresh.pass));
-        ASSERT_TRUE(fresh.pass.load_scatter_set(palette));
-        fresh.pass.set_evidence_enabled(true);
-        Rebuild(fresh.pass, chunks, frame_id);
-        EXPECT_EQ(hash, fresh.pass.uploaded_input_hash());
-        ExpectSame(records, GpuRecords());
+        for (const auto& palette : {small_palette, full_palette}) {
+            const auto generation = reused.pass.build_generation();
+            ASSERT_TRUE(reused.pass.load_scatter_set(palette));
+            Rebuild(reused.pass, chunks, frame_id++);
+            EXPECT_EQ(reused.pass.build_generation(), generation + 1);
+            const auto records = Records(reused.pass, gpu);
+            ASSERT_FALSE(records.empty());
+            const auto hash = reused.pass.uploaded_input_hash();
+            if (gpu) {
+                EXPECT_EQ(hash, LegacyUploadedHash(reused.pass));
+                GLint64 palette_size = 0;
+                glGetNamedBufferParameteri64v(Binding(4), GL_BUFFER_SIZE, &palette_size);
+                EXPECT_EQ(palette_size,
+                          static_cast<GLint64>(reused.pass.archetype_count() * 8 * sizeof(float)));
+            }
+            ScopedPass fresh;
+            ASSERT_NO_FATAL_FAILURE(Initialize(fresh.pass, gpu));
+            ASSERT_TRUE(fresh.pass.load_scatter_set(palette));
+            fresh.pass.set_evidence_enabled(true);
+            Rebuild(fresh.pass, chunks, frame_id);
+            EXPECT_EQ(hash, fresh.pass.uploaded_input_hash());
+            ExpectSame(records, Records(fresh.pass, gpu));
+        }
     }
 }
 
@@ -876,6 +885,77 @@ TEST_F(FoliageRebuildTest, DeterministicWorkBudgetMovementEditDrainAndIdle) {
         }
         EXPECT_TRUE(CheckWork(peak, "foliage"));
     }
+}
+
+// Fixed 64x64 color storage for exercising the public draw path.
+struct ScopedDrawTarget {
+    GLuint framebuffer = 0;
+    GLuint color = 0;
+    ScopedDrawTarget() {
+        glGenRenderbuffers(1, &color);
+        glBindRenderbuffer(GL_RENDERBUFFER, color);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, 64, 64);
+        glGenFramebuffers(1, &framebuffer);
+        glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, color);
+    }
+    ~ScopedDrawTarget() {
+        glDeleteFramebuffers(1, &framebuffer);
+        glDeleteRenderbuffers(1, &color);
+    }
+};
+
+TEST_F(FoliageRebuildTest, GpuDrawsSurviveChurnBeforeFirstSnapshotAndAfterEmptySnapshot) {
+    ScopedPass scoped;
+    auto& pass = scoped.pass;
+    ASSERT_NO_FATAL_FAILURE(Initialize(pass));
+    pass.init_shader(LUMINUMBRA_SOURCE_ROOT);
+    ASSERT_TRUE(pass.shader()->IsValid());
+    pass.set_readback_enabled(true);
+    ScopedDrawTarget target;
+    ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER),
+              static_cast<GLenum>(GL_FRAMEBUFFER_COMPLETE));
+    Luminumbra::Rendering::RenderContext context;
+    context.screen_width = context.screen_height = 64;
+    context.lit_scene = Luminumbra::Rendering::FboHandle{target.framebuffer};
+    const Luminumbra::Rendering::Camera camera(kCamera);
+    auto chunks = Chunks(1);
+    // Retire each result, then invalidate it before adoption. CPU counts remain
+    // unknown while the current indirect GPU command must still be submitted.
+    for (std::uint64_t frame = 1; frame <= 4; ++frame) {
+        pass.set_wind({static_cast<float>(frame), 0});
+        Rebuild(pass, chunks, frame);
+        ASSERT_FALSE(GpuRecords().empty());
+        EXPECT_TRUE(pass.instances().empty());
+        EXPECT_FALSE(pass.frame_instance_count_known());
+        pass.execute(context, camera);
+        EXPECT_EQ(pass.last_draw_calls(), 1u);
+        glFinish();
+    }
+    // A valid zero snapshot must not prevent a later nonempty GPU draw either.
+    pass.set_density_scale(0);
+    Rebuild(pass, chunks, 5);
+    glFinish();
+    Rebuild(pass, chunks, 6);
+    ASSERT_TRUE(pass.frame_instance_count_known());
+    EXPECT_EQ(pass.frame_instance_count(), 0u);
+    pass.execute(context, camera);
+    EXPECT_EQ(pass.last_draw_calls(), 1u); // The indirect command owns the zero count.
+    pass.set_density_scale(1.6f);
+    Rebuild(pass, chunks, 7);
+    ASSERT_FALSE(GpuRecords().empty());
+    EXPECT_TRUE(pass.instances().empty());
+    pass.execute(context, camera);
+    EXPECT_EQ(pass.last_draw_calls(), 1u);
+    glFinish();
+    Rebuild(pass, chunks, 8);
+    EXPECT_FALSE(pass.instances().empty());
+    EXPECT_EQ(pass.frame_instance_count_generation(), pass.build_generation());
+    // Empty input clears the draw guard even with a previously held snapshot.
+    chunks.clear();
+    Rebuild(pass, chunks, 9);
+    pass.execute(context, camera);
+    EXPECT_EQ(pass.last_draw_calls(), 0u);
 }
 
 TEST_F(FoliageRebuildTest, OutdatedRevisionReadbackIsDiscardedBeforeAdoption) {

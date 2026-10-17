@@ -67,6 +67,12 @@ class FrameAttributionWiring(unittest.TestCase):
                          r"if \(collect_attribution\) \{ // Diagnostic[^\n]*? "
                          r"Attribution::ScatterSignature components\{\};")
 
+    def test_benchmark_does_not_enable_foliage_input_hashing(self):
+        update = compact(block(self.main, "static void UpdateFoliageScatter("))
+        self.assertIn("foliage->set_evidence_enabled(scenario_config.foliage_visual_smoke() && "
+                      "!g_app.capture.play_paths);", update)
+        self.assertNotIn("render_benchmark_path", update)
+
     def test_menu_input_ownership_and_exclusive_attribution_share_the_call(self):
         main = compact(self.main)
         self.assertRegex(main, r"RenderMenuScreens\([^;]*menuPreviewState, uiInputRouter\); "

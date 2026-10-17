@@ -123,6 +123,68 @@ TEST(DeterministicWorkBudget, ReadyPendingLodKeepsBacklogUntilRemeshPublication)
     }
 }
 
+TEST(DeterministicWorkBudget, DeferredGenerationKeepsTelemetryBackloggedBetweenActivationPasses) {
+    for (const bool at_active_cap : {false, true}) {
+        SCOPED_TRACE(at_active_cap);
+        JobSystem jobs;
+        jobs.startup(1);
+        Systems::SHIELD_WorldSystem world(&jobs, nullptr, FlatWorkBudgetTerrain(), 1337);
+        world.debug_set_streaming_radius_cap(8);
+        entt::registry registry;
+        const Vec3 anchor{8, 35, 8};
+        // Activation runs every fourth update; both public update overloads
+        // must report the same outstanding generation contract.
+        for (std::int64_t tick = 1; tick <= 3; ++tick) {
+            world.begin_tick(tick);
+            world.update(registry, anchor, nullptr);
+            EXPECT_EQ(world.get_streaming_telemetry_stats().last_queue_depth, 0u);
+        }
+        if (at_active_cap) {
+            const auto cap = world.get_last_streaming_budget_stats().max_active_chunks_budget;
+            ASSERT_GT(cap, 0u);
+            // Empty resident chunks fill the cap without generating terrain.
+            // They are outside the wanted set and evicted after budget selection.
+            for (std::size_t index = 0; index < cap; ++index) {
+                auto chunk = std::make_shared<Chunk>(IVec3(100 + static_cast<int>(index), 0, 0));
+                chunk->set_state(ChunkState::Ready);
+                ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+            }
+        }
+        world.begin_tick(4);
+        world.update(registry, std::vector<Vec3>{anchor}, nullptr);
+        const auto streaming = world.get_last_streaming_budget_stats();
+        ASSERT_GT(streaming.deferred_generation, 0u);
+        if (at_active_cap) {
+            EXPECT_EQ(streaming.scheduled_generation, 0u);
+            EXPECT_EQ(world.pending_publication_chunks(), 0u);
+        } else {
+            EXPECT_GT(streaming.scheduled_generation, 0u);
+            EXPECT_EQ(streaming.scheduled_generation,
+                      static_cast<std::size_t>(streaming.generation_budget));
+        }
+        for (std::int64_t tick = 4; tick <= 7; ++tick) {
+            if (tick > 4) {
+                world.begin_tick(tick);
+                world.update(registry, anchor, nullptr);
+                EXPECT_EQ(world.get_last_streaming_budget_stats().generation_candidates, 0u);
+            }
+            const auto& frame = world.get_last_streaming_budget_stats();
+            const auto expected = world.pending_publication_chunks() +
+                                  streaming.deferred_generation + frame.meshing_candidates -
+                                  frame.submitted_meshing;
+            EXPECT_EQ(world.get_streaming_telemetry_stats().last_queue_depth, expected);
+            EXPECT_GT(world.get_streaming_telemetry_stats().last_queue_depth, 0u);
+        }
+        // Replace the eight-sample window's initial empty frames as well.
+        for (std::int64_t tick = 8; tick <= 11; ++tick) {
+            world.begin_tick(tick);
+            world.update(registry, anchor, nullptr);
+            EXPECT_GT(world.get_streaming_telemetry_stats().last_queue_depth, 0u);
+        }
+        EXPECT_GT(world.get_streaming_telemetry_stats().settled_queue_depth, 0u);
+    }
+}
+
 TEST(DeterministicWorkBudget, InitialGenerationAndMeshingStayInBacklogUntilPublication) {
     JobSystem jobs;
     jobs.startup(1);
@@ -397,6 +459,7 @@ TEST(DeterministicWorkBudget, LiveSubsystemMovementEditAndDrainStayBounded) {
                 static_cast<std::uint64_t>(streaming.update_interval_frames)) {
                 EXPECT_EQ(streaming.scheduled_generation, 0u);
                 EXPECT_EQ(streaming.scheduled_meshing, 0u);
+                EXPECT_EQ(world.get_streaming_telemetry_stats().last_queue_depth, 0u);
                 drained = streaming.scheduled_generation == 0 && streaming.scheduled_meshing == 0;
                 break;
             }
@@ -463,11 +526,11 @@ TEST(DeterministicWorkBudget, WorkTraceIsDiagnosticAndRejectsCounterOrTickDrift)
     nlohmann::json artifact;
     Server::AppendSimBudgetArtifact(artifact, first, replay);
     const auto& work = artifact.at("sim_budget").at("work_items");
-    EXPECT_EQ(work.at("schema"), "luminumbra.sim_work.v1");
+    EXPECT_EQ(work.at("schema").get<std::string>(), "luminumbra.sim_work.v1");
     ASSERT_EQ(work.at("counters").size(), luminumbra::simulation::kSimWorkNames.size());
     for (std::size_t i = 0; i < luminumbra::simulation::kSimWorkNames.size(); ++i) {
         const auto& counter = work.at("counters").at(i);
-        EXPECT_EQ(counter.at("name"), luminumbra::simulation::kSimWorkNames[i]);
+        EXPECT_EQ(counter.at("name").get<std::string>(), luminumbra::simulation::kSimWorkNames[i]);
         EXPECT_EQ(counter.at("work_trace"), nlohmann::json::array({{{"tick", 1}, {"work", i}}}));
     }
     // Every supplemental counter participates in deterministic replay refusal.

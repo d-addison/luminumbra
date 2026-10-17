@@ -3233,9 +3233,10 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
     // Pending items leave the candidate set at dispatch, even when their
     // active mesh keeps them Ready. Count them through publication, plus
     // candidates not submitted this frame (including a backpressured lane).
-    const std::size_t queue_depth =
-        pending_publication_chunks() + (m_last_streaming_budget_stats.meshing_candidates -
-                                        m_last_streaming_budget_stats.submitted_meshing);
+    const std::size_t queue_depth = pending_publication_chunks() +
+                                    m_deferred_generation_candidates +
+                                    (m_last_streaming_budget_stats.meshing_candidates -
+                                     m_last_streaming_budget_stats.submitted_meshing);
     ++m_streaming_telemetry_stats.frames_observed;
     m_streaming_telemetry_stats.last_queue_depth = queue_depth;
     m_streaming_telemetry_stats.peak_queue_depth =
@@ -3575,6 +3576,7 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
 
     m_last_streaming_budget_stats.scheduled_generation = generate_now.size();
     m_last_streaming_budget_stats.deferred_generation = to_create.size() - generate_now.size();
+    m_deferred_generation_candidates = m_last_streaming_budget_stats.deferred_generation;
     if (!generate_now.empty()) {
         dispatch_generation_jobs(generate_now);
         for (const ChunkGenerationRequest& request : generate_now) {

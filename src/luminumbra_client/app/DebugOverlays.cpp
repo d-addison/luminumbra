@@ -1107,7 +1107,7 @@ void DrawSettingsContents(ClientAppContext& app,
     }
     if (ImGui::Button("Save settings")) {
         const std::string path = luminumbra::core::SystemConfig::DefaultUserOverlayPath();
-        const bool ok = systemConfig.SaveUserOverlay(path);
+        const bool ok = console.SavePreferences();
         LUMINUMBRA_CORE_INFO("Settings {} ({})", ok ? "saved" : "save FAILED", path);
     }
     ImGui::TextDisabled("user.* — client-only, never hashed");

@@ -1036,6 +1036,9 @@ private:
     std::uint64_t m_last_activation_dirty_generation = 0;
     std::size_t m_last_activation_pending =
         0; // scheduled_generation + deferred_generation last pass
+    // Outstanding candidates survive frames between activation passes; the
+    // per-frame generation counters reset even when activation does not run.
+    std::size_t m_deferred_generation_candidates = 0;
     std::size_t m_last_chunk_count = 0;
     bool m_last_pass_drained = false; // sticky: false forces the next tick's candidate pass to run
 

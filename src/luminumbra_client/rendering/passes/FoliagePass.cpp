@@ -541,6 +541,7 @@ bool FoliagePass::load_scatter_set(const std::filesystem::path& json_path) {
         return false;
     }
     m_enabled = true;
+    m_scatter_built = false;
     ++m_chunk_cache_gen; // archetypes changed -> invalidate the per-chunk instance cache
     LUMINUMBRA_CORE_INFO("FoliagePass: loaded {} scatter archetypes from '{}'.",
                          m_archetypes.size(),
@@ -1341,10 +1342,9 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
         // mode, so keep it empty (mirrors the prior synchronous path's else branch).
         m_instances.clear();
     }
-    // Preserve the existing draw guard, including its nonzero capacity marker
-    // without readback. Public counts come only from the completed snapshot.
-    m_draw_instance_limit =
-        m_readback_enabled ? m_instances.size() : static_cast<std::size_t>(kMaxInstances);
+    // GPU draws use the bounded indirect command, independently of whether a
+    // CPU snapshot has completed. Public counts still require validated readback.
+    m_draw_instance_limit = kMaxInstances;
     m_gpu_active = true;
     return true;
 }
@@ -1457,9 +1457,6 @@ void FoliagePass::poll_foliage_readback() {
     m_instance_generation = generation;
     m_instances_from_gpu_readback = true;
     m_instance_available_frame = m_evidence_frame;
-    // Keep the private draw guard synced with the drained set even
-    // on scatter-cache-elided frames (where rebuild_instances_gpu does not run).
-    m_draw_instance_limit = m_instances.size();
 }
 
 void FoliagePass::map_instances_for_frame() {
