@@ -1173,8 +1173,10 @@ bool GameSession::CreateWorld(const std::string& name,
                               const std::string& seed,
                               const std::string& worldType,
                               const std::string* customPresetJson,
-                              TerrainPresetUse presetUse) {
-    return CreateWorldInternal(name, seed, worldType, customPresetJson, false, presetUse);
+                              TerrainPresetUse presetUse,
+                              const std::string& requiredPresetContentHash) {
+    return CreateWorldInternal(
+        name, seed, worldType, customPresetJson, false, presetUse, requiredPresetContentHash);
 }
 
 bool GameSession::CreateTransientWorld(const std::string& name,
@@ -1188,7 +1190,8 @@ bool GameSession::CreateWorldInternal(const std::string& name,
                                       const std::string& worldType,
                                       const std::string* customPresetJson,
                                       bool transient,
-                                      TerrainPresetUse presetUse) {
+                                      TerrainPresetUse presetUse,
+                                      const std::string& requiredPresetContentHash) {
     m_worldOpenError.clear();
     if (!m_jobSystem) {
         LUMINUMBRA_CORE_ERROR("JobSystem not set before creating world");
@@ -1221,7 +1224,7 @@ bool GameSession::CreateWorldInternal(const std::string& name,
             resolved = nlohmann::json::parse(*customPresetJson);
         } else {
             std::ifstream input(validation.preset_path);
-            input >> resolved;
+            resolved = nlohmann::json::parse(input);
         }
         resolved = ResolveEffectivePreset(resolved, presetUse);
     } catch (const nlohmann::json::exception& error) {
@@ -1237,6 +1240,13 @@ bool GameSession::CreateWorldInternal(const std::string& name,
         for (const std::string& error : preset.errors) {
             LUMINUMBRA_CORE_ERROR("World preset load failed: {}", error);
         }
+        return false;
+    }
+    // Use the identity of the dependency snapshot generation will adopt. A
+    // replay preflight cannot admit dependency changes between resolution and boot.
+    if (!requiredPresetContentHash.empty() &&
+        preset.preset_content_hash != requiredPresetContentHash) {
+        m_worldOpenError = "This world's resolved preset content does not match the recording.";
         return false;
     }
     if (!transient) {

@@ -12,6 +12,7 @@
 #include "entt/entt.hpp"
 #include <array>
 #include <atomic>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -1383,6 +1384,10 @@ private:
     // so const-correctness is preserved (no world_hash-affecting state changes).
     mutable std::set<std::pair<std::int64_t, std::int64_t>> m_hydro_prefetch_inflight;
     mutable std::mutex m_hydro_prefetch_mutex;
+    mutable std::condition_variable m_hydro_prefetch_finished;
+    // Owner-thread reset/teardown drains queued bakes before taking the epoch
+    // exclusively or releasing this world. Never wait while holding the epoch.
+    void wait_for_hydro_prefetch_jobs() const;
 
 public:
     // Bake the hydraulic-erosion regions covering a disc around (cx,cz) AHEAD of

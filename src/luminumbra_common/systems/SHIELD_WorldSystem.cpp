@@ -463,6 +463,7 @@ SHIELD_WorldSystem::SHIELD_WorldSystem(JobSystem* job_system,
 }
 
 SHIELD_WorldSystem::~SHIELD_WorldSystem() {
+    wait_for_hydro_prefetch_jobs();
     wait_for_generation_jobs();
     // Drain promotion workers with RAW waits — teardown must not publish or
     // dispatch stage-B jobs, only guarantee no worker still touches chunks.
@@ -969,8 +970,14 @@ void SHIELD_WorldSystem::reinitialize_noise(const TerrainGenParams* params,
         m_seed = *seed;
     }
 
-    // Terrain height is a pure function of seed/params; drop the cached
-    // per-column surface spans whenever either changes.
+    // Lock order is epoch -> hydro. Every bake holds the shared epoch, so
+    // none can publish offsets from the old generators after this invalidation.
+    // Per-job caches retain immutable shared region ownership until they finish.
+    {
+        const std::unique_lock<std::shared_mutex> hydro_lock(m_hydro_mutex);
+        m_hydro_cache.clear();
+    }
+    // Terrain height is a pure function of seed/params; drop dependent spans too.
     m_column_surface_span_cache.clear();
 
     // FastNoise2 uses a node-based system to build complex generators.
@@ -1491,6 +1498,18 @@ void SHIELD_WorldSystem::PrefetchHydroRegions(float cx, float cz, float radius_m
         HydroFloorDiv(static_cast<std::int64_t>(std::floor(cx / cs)), kHydroRegionCells);
     const std::int64_t crz =
         HydroFloorDiv(static_cast<std::int64_t>(std::floor(cz / cs)), kHydroRegionCells);
+    struct Completion {
+        const SHIELD_WorldSystem& world;
+        std::pair<std::int64_t, std::int64_t> key;
+        bool registered = false;
+        ~Completion() {
+            if (!registered)
+                return;
+            const std::lock_guard<std::mutex> lock(world.m_hydro_prefetch_mutex);
+            world.m_hydro_prefetch_inflight.erase(key);
+            world.m_hydro_prefetch_finished.notify_all();
+        }
+    };
     std::vector<Job> jobs;
     for (std::int64_t dz = -reach; dz <= reach; ++dz) {
         for (std::int64_t dx = -reach; dx <= reach; ++dx) {
@@ -1501,26 +1520,40 @@ void SHIELD_WorldSystem::PrefetchHydroRegions(float cx, float cz, float radius_m
                     continue; // already baked
                 }
             }
+            std::shared_ptr<Completion> completion;
             {
                 std::lock_guard<std::mutex> g(m_hydro_prefetch_mutex);
-                if (!m_hydro_prefetch_inflight.insert(rkey).second) {
+                if (m_hydro_prefetch_inflight.contains(rkey)) {
                     continue; // already queued
                 }
+                // Allocate before registration so an allocation failure cannot
+                // leave a key behind that reset/teardown would wait on forever.
+                completion = std::make_shared<Completion>(*this, rkey);
+                m_hydro_prefetch_inflight.insert(rkey);
+                completion->registered = true;
             }
             const float sample_x =
                 static_cast<float>(rkey.first * kHydroRegionCells) * cs + region_m * 0.5f;
             const float sample_z =
                 static_cast<float>(rkey.second * kHydroRegionCells) * cs + region_m * 0.5f;
-            jobs.emplace_back([this, rkey, sample_x, sample_z]() {
+            // The last callable copy releases the inflight key, including when
+            // dispatch is rejected or a bake throws. Teardown waits for these
+            // owners before releasing the world they reference.
+            jobs.emplace_back([this, completion, sample_x, sample_z]() {
+                static_cast<void>(completion);
+                const auto worldgen_scope = acquire_worldgen_sample_scope();
                 SampleHydroOffsetMeters(sample_x, sample_z); // triggers + caches the region bake
-                std::lock_guard<std::mutex> g(m_hydro_prefetch_mutex);
-                m_hydro_prefetch_inflight.erase(rkey);
             });
         }
     }
     if (!jobs.empty()) {
         m_job_system->dispatch_batch(jobs); // fire-and-forget background bakes
     }
+}
+
+void SHIELD_WorldSystem::wait_for_hydro_prefetch_jobs() const {
+    std::unique_lock<std::mutex> lock(m_hydro_prefetch_mutex);
+    m_hydro_prefetch_finished.wait(lock, [this]() { return m_hydro_prefetch_inflight.empty(); });
 }
 
 float SHIELD_WorldSystem::RiverCarveAmount(float final_height, float influence) const {
@@ -5565,12 +5598,14 @@ void SHIELD_WorldSystem::set_params(const TerrainGenParams& params) {
     // GenerateChunkData concurrently, so generator state must not be mutated
     // until the whole pipeline (including stage B) has settled.
     wait_for_streaming_jobs();
+    wait_for_hydro_prefetch_jobs();
 
     reinitialize_noise(&params);
 }
 
 void SHIELD_WorldSystem::set_seed(int seed) {
     wait_for_streaming_jobs();
+    wait_for_hydro_prefetch_jobs();
 
     reinitialize_noise(nullptr, seed);
 }

@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <system_error>
 
 #include "../ServerCliOptions.h"
@@ -45,7 +46,7 @@ Luminumbra::Net::HelloMsg RuntimeHelloFrom(const ServerCliOptions& options) {
             std::ifstream input(root / "worlds/atlas/presets" / (options.preset + ".json"));
             if (!input)
                 return hello;
-            input >> source;
+            source = nlohmann::json::parse(input);
         }
         const auto preset = Luminumbra::world::LoadTerrainPresetFromJson(
             Luminumbra::world::ResolveEffectivePreset(
@@ -86,25 +87,74 @@ Luminumbra::Server::ServerWorldRunnerConfig RunnerConfigFrom(const ServerCliOpti
     return config;
 }
 
-Luminumbra::Server::ServerWorldRunnerConfig
+std::optional<Luminumbra::Server::ServerWorldRunnerConfig>
 ReplayRunnerConfigFrom(const ServerCliOptions& options,
                        const Luminumbra::Replay::ReplayHeader& header) {
+    namespace fs = std::filesystem;
+    using Luminumbra::world::TerrainPresetUse;
+    if (header.surface_radius > static_cast<std::uint32_t>(std::numeric_limits<int>::max()) ||
+        header.collision_radius > static_cast<std::uint32_t>(std::numeric_limits<int>::max()))
+        return std::nullopt;
     Luminumbra::Server::ServerWorldRunnerConfig config;
     config.root_path = options.root;
-    config.systems_config_override = options.systems_config_override;
-    config.preset_json_override = options.preset_json_override;
     config.seed = header.seed_string;
     config.preset = header.preset;
     config.world_id.clear();
     config.world_name = "Replay Playback";
-    config.preset_use = Luminumbra::world::TerrainPresetUse::Historical;
+    config.preset_use = TerrainPresetUse::Historical;
     config.surface_radius = static_cast<int>(header.surface_radius);
     config.collision_radius = static_cast<int>(header.collision_radius);
     config.test_streaming_radius_cap = options.test_streaming_radius_cap;
     config.autosave_interval_ticks = 0;
     config.region_scheduler = RunnerConfigFrom(options).region_scheduler;
-
-    return config;
+    const auto root = options.root.empty() ? fs::path(".") : fs::path(options.root);
+    auto systems_path = root / "data/common/systems.json";
+    std::error_code error;
+    if (!fs::exists(systems_path, error))
+        systems_path = fs::path("data/common/systems.json");
+    // Freeze the configuration used for identity admission and subsequent boot.
+    const auto systems_config =
+        options.systems_config_override
+            ? *options.systems_config_override
+            : luminumbra::core::SystemConfig::LoadFromFile(systems_path.string());
+    config.systems_config_override = systems_config;
+    Luminumbra::world::GameSession identity_session;
+    identity_session.ApplySystemConfig(systems_config);
+    identity_session.SetFiniteHydrologyEnabled(config.finite_hydrology);
+    if (config.region_scheduler)
+        identity_session.SetRegionSchedulerConfig(*config.region_scheduler);
+    try {
+        nlohmann::json source;
+        if (options.preset_json_override) {
+            source = nlohmann::json::parse(*options.preset_json_override);
+        } else {
+            const auto validation = Luminumbra::world::GameSession::ValidateWorldConfig(
+                options.root, header.preset, {});
+            if (!validation.ok)
+                return std::nullopt;
+            std::ifstream input(validation.preset_path);
+            if (!input)
+                return std::nullopt;
+            source = nlohmann::json::parse(input);
+        }
+        // Exactly two supported resolutions, historical first. Never substitute
+        // an arbitrary hash or rewrite an explicit selector to obtain a match.
+        for (const auto use : {TerrainPresetUse::Historical, TerrainPresetUse::NewWorld}) {
+            const auto resolved = Luminumbra::world::ResolveEffectivePreset(source, use);
+            const auto preset =
+                Luminumbra::world::LoadTerrainPresetFromJson(resolved, root / "data");
+            if (preset.ok &&
+                Luminumbra::Replay::ConfigurationMatches(
+                    header, identity_session.SystemConfigIdentity(), preset.preset_content_hash)) {
+                config.preset_json_override = resolved.dump();
+                config.required_preset_content_hash = header.preset_content_hash;
+                return config;
+            }
+        }
+    } catch (const nlohmann::json::exception&) {
+        return std::nullopt;
+    }
+    return std::nullopt;
 }
 
 std::uint32_t ExpectedNetworkClients(const ServerCliOptions& options) {

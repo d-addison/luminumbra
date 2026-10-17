@@ -181,8 +181,11 @@ int RunReplay(const ServerCliOptions& options) {
 
     // Boot the session from the header parameters (mirror ServerWorldRunnerConfig).
     auto config = ReplayRunnerConfigFrom(options, header);
-
-    Luminumbra::Server::ServerWorldRunner runner(std::move(config));
+    if (!config) {
+        LUMINUMBRA_CORE_ERROR("replay: invalid preset or incompatible configuration identity");
+        return 1;
+    }
+    Luminumbra::Server::ServerWorldRunner runner(std::move(*config));
     if (!runner.Boot()) {
         LUMINUMBRA_CORE_ERROR("replay: session failed to boot from header");
         return 1;

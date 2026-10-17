@@ -35,6 +35,8 @@ struct ServerWorldRunnerConfig {
     std::optional<std::string> preset_json_override;
     // Playback preserves historical omission; fresh worlds select current sampling.
     world::TerrainPresetUse preset_use = world::TerrainPresetUse::NewWorld;
+    // Playback rechecks dependencies before creating any save directory.
+    std::string required_preset_content_hash;
     std::string world_name = "Headless Server World";
     std::string seed = "424242";
     // World preset name (worlds/atlas/presets/<preset>.json).

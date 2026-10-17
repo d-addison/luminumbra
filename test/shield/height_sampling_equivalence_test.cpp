@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <future>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -280,6 +281,128 @@ TEST(HeightSamplingCompatibility, ErosionRetainsHistoricalSubstrate) {
         }
     }
     EXPECT_TRUE(nonzero);
+}
+
+TEST(HeightSamplingReset, ParametersAndSeedsMatchFreshInstances) {
+    const auto loaded = Luminumbra::world::LoadTerrainPreset(PresetPath("default"));
+    ASSERT_TRUE(loaded.ok);
+    for (const int revision : {1, 2}) {
+        for (const bool change_seed : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << revision << " seed=" << change_seed);
+            auto params = loaded.params;
+            params.surface_sampling_revision = revision;
+            params.hydro_enabled = true;
+            SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+            auto analytic_params = params;
+            analytic_params.hydro_enabled = false;
+            const SHIELD_WorldSystem analytic(nullptr, nullptr, analytic_params, 1337);
+            std::array<float, 64> original{};
+            bool erosion_observed = false;
+            for (std::size_t i = 0; i < original.size(); ++i) {
+                const float x = static_cast<float>(1 + (i % 8) * 7) * params.hydro_cell_size_m;
+                const float z = static_cast<float>(1 + (i / 8) * 7) * params.hydro_cell_size_m;
+                original[i] = world.GetTerrainHeightAt(x, z);
+                erosion_observed = erosion_observed ||
+                                   Bits(original[i]) != Bits(analytic.GetTerrainHeightAt(x, z));
+            }
+            ASSERT_TRUE(erosion_observed);
+            auto next_params = params;
+            const int next_seed = change_seed ? 8675309 : 1337;
+            if (change_seed)
+                world.set_seed(next_seed);
+            else {
+                next_params.hydro_max_offset = 0.0f;
+                world.set_params(next_params);
+            }
+            const SHIELD_WorldSystem fresh(nullptr, nullptr, next_params, next_seed);
+            bool changed = false;
+            for (std::size_t i = 0; i < original.size(); ++i) {
+                const float x = static_cast<float>(1 + (i % 8) * 7) * params.hydro_cell_size_m;
+                const float z = static_cast<float>(1 + (i / 8) * 7) * params.hydro_cell_size_m;
+                const float actual = world.GetTerrainHeightAt(x, z);
+                EXPECT_EQ(Bits(actual), Bits(fresh.GetTerrainHeightAt(x, z)));
+                changed = changed || Bits(actual) != Bits(original[i]);
+            }
+            EXPECT_TRUE(changed);
+            // Switching back also invalidates the new generation's offsets.
+            world.set_params(params);
+            world.set_seed(1337);
+            for (std::size_t i = 0; i < original.size(); ++i) {
+                const float x = static_cast<float>(1 + (i % 8) * 7) * params.hydro_cell_size_m;
+                const float z = static_cast<float>(1 + (i / 8) * 7) * params.hydro_cell_size_m;
+                EXPECT_EQ(Bits(world.GetTerrainHeightAt(x, z)), Bits(original[i]));
+            }
+        }
+    }
+}
+
+TEST(HeightSamplingReset, ReaderRetainsOldGenerationUntilItsEpochEnds) {
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.hydro_enabled = true;
+    params.hydro_iterations = 1;
+    SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    const float old_height = world.GetTerrainHeightAt(8.0f, 8.0f);
+    auto next_params = params;
+    next_params.hydro_max_offset = 0.0f;
+    next_params.height_offset += 64.0f;
+    std::promise<void> resetting;
+    auto started = resetting.get_future();
+    std::future<void> reset;
+    {
+        const auto scope = world.acquire_worldgen_sample_scope();
+        reset = std::async(std::launch::async, [&]() {
+            resetting.set_value();
+            world.set_params(next_params);
+        });
+        started.get();
+        // The writer cannot clear or replace the generation while this reader
+        // owns its epoch, including immutable regions retained by chunk sampling.
+        for (int i = 0; i < 4; ++i)
+            EXPECT_EQ(Bits(world.GetTerrainHeightAt(8.0f, 8.0f)), Bits(old_height));
+    }
+    reset.get();
+    const SHIELD_WorldSystem fresh(nullptr, nullptr, next_params, 1337);
+    EXPECT_EQ(Bits(world.GetTerrainHeightAt(8.0f, 8.0f)),
+              Bits(fresh.GetTerrainHeightAt(8.0f, 8.0f)));
+    EXPECT_NE(Bits(world.GetTerrainHeightAt(8.0f, 8.0f)), Bits(old_height));
+}
+
+TEST(HeightSamplingReset, QueuedPrefetchDrainsBeforeResetAndWorldDestruction) {
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.hydro_enabled = true;
+    params.hydro_iterations = 1;
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    {
+        SHIELD_WorldSystem world(&jobs, nullptr, params, 1337);
+        std::promise<void> release_worker;
+        const auto released = release_worker.get_future().share();
+        jobs.dispatch([released]() { released.wait(); });
+        // Radius zero queues exactly nine regions, all behind the blocked worker.
+        world.PrefetchHydroRegions(8.0f, 8.0f, 0.0f);
+        auto reset = std::async(std::launch::async, [&]() { world.set_seed(8675309); });
+        release_worker.set_value();
+        reset.get();
+        const SHIELD_WorldSystem fresh(nullptr, nullptr, params, 8675309);
+        EXPECT_EQ(Bits(world.GetTerrainHeightAt(8.0f, 8.0f)),
+                  Bits(fresh.GetTerrainHeightAt(8.0f, 8.0f)));
+        world.PrefetchHydroRegions(-512.0f, -512.0f, 0.0f);
+        // Destruction must settle these jobs before any member storage goes away.
+    }
+    jobs.shutdown();
+}
+
+TEST(HeightSamplingReset, RejectedPrefetchReleasesItsOutstandingOwnership) {
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.hydro_enabled = true;
+    params.hydro_iterations = 1;
+    Luminumbra::JobSystem stopped_jobs;
+    SHIELD_WorldSystem world(&stopped_jobs, nullptr, params, 1337);
+    world.PrefetchHydroRegions(8.0f, 8.0f, 0.0f);
+    world.set_seed(8675309);
+    const SHIELD_WorldSystem fresh(nullptr, nullptr, params, 8675309);
+    EXPECT_EQ(Bits(world.GetTerrainHeightAt(8.0f, 8.0f)),
+              Bits(fresh.GetTerrainHeightAt(8.0f, 8.0f)));
 }
 
 TEST(HeightSamplingCompatibility, ActivationUsesSavedRevision) {

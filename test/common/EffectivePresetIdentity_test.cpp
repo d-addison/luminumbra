@@ -13,6 +13,7 @@
 #include "luminumbra_common/world/TerrainPresetLoader.h"
 #include "luminumbra_server/ServerCliOptions.h"
 #include "luminumbra_server/modes/ModeHelpers.h"
+#include "luminumbra_server/modes/Modes.h"
 
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
@@ -21,6 +22,8 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
+#include <limits>
 #include <optional>
 #include <string>
 #include <system_error>
@@ -80,6 +83,7 @@ protected:
         const auto complete = shipping.dump();
         const std::vector<std::string> invalid_presets{"not JSON",
                                                        complete.substr(0, complete.size() / 2),
+                                                       complete + "\ntrailing data",
                                                        R"({"schema_rev":1e1000})",
                                                        R"({"schema_rev":"eight"})",
                                                        "null"};
@@ -221,8 +225,9 @@ TEST_F(EffectivePresetIdentity, ReplayBootRetainsHistoricalAndCurrentPresetIdent
             Configure(configured);
             header.system_config_identity = configured.SystemConfigIdentity();
             const auto config = ReplayRunnerConfigFrom(options, header);
-            ASSERT_EQ(config.preset_use, TerrainPresetUse::Historical);
-            Luminumbra::Server::ServerWorldRunner runner(config);
+            ASSERT_TRUE(config.has_value());
+            ASSERT_EQ(config->preset_use, TerrainPresetUse::Historical);
+            Luminumbra::Server::ServerWorldRunner runner(*config);
             ASSERT_TRUE(runner.Boot());
             auto* session = runner.Session();
             EXPECT_EQ(session->PresetContentHash(), original.preset_content_hash);
@@ -238,6 +243,9 @@ TEST_F(EffectivePresetIdentity, ReplayBootRetainsHistoricalAndCurrentPresetIdent
             ASSERT_TRUE(mismatch.ok);
             EXPECT_FALSE(Luminumbra::Replay::ConfigurationMatches(
                 header, session->SystemConfigIdentity(), mismatch.preset_content_hash));
+            auto mismatch_options = options;
+            mismatch_options.preset_json_override = different.dump();
+            EXPECT_FALSE(ReplayRunnerConfigFrom(mismatch_options, header).has_value());
             const auto saved =
                 Luminumbra::Persistence::InspectSavedWorld(root, session->GetMetadata().worldId);
             ASSERT_TRUE(saved.error.empty()) << saved.error;
@@ -251,6 +259,160 @@ TEST_F(EffectivePresetIdentity, ReplayBootRetainsHistoricalAndCurrentPresetIdent
             runner.Shutdown();
         }
     }
+}
+
+TEST_F(EffectivePresetIdentity, UnstampedRecordingReplaysItsEffectiveRevision) {
+    auto source = shipping;
+    source["schema_rev"] = 7;
+    source["generation_params"]["terrain"].erase("surface_sampling_revision");
+    source["generation_params"]["terrain"]["hydro"]["enabled"] = false;
+    WriteCatalog(source);
+    options.test_streaming_radius_cap = 1;
+    options.surface_radius = 0;
+    options.collision_radius = 0;
+    options.ticks = 30; // One real checkpoint through the shipping record/replay modes.
+    options.record_path = (root / "unstamped.lrec").string();
+    options.replay_path = options.record_path;
+    options.artifact_path = (root / "playback.json").string();
+    const auto effective = LoadTerrainPresetFromJson(
+        ResolveEffectivePreset(source, TerrainPresetUse::NewWorld), root / "data");
+    ASSERT_TRUE(effective.ok);
+    ASSERT_EQ(effective.params.surface_sampling_revision, 2);
+    for (const bool custom : {false, true}) {
+        SCOPED_TRACE(custom);
+        options.preset_json_override = custom ? std::optional(source.dump()) : std::nullopt;
+        ASSERT_EQ(RunRecord(options), 0);
+        const auto recorded = Luminumbra::Replay::ReadReplay(options.record_path);
+        if (recorded)
+            EXPECT_EQ(recorded->header.preset_content_hash, effective.preset_content_hash);
+        else
+            FAIL() << "The recorded replay must be readable";
+        ASSERT_EQ(RunReplay(options), 0);
+        std::ifstream input(options.artifact_path);
+        ASSERT_TRUE(input);
+        const auto artifact = nlohmann::json::parse(input);
+        EXPECT_EQ(artifact.at("passed"), true);
+        EXPECT_EQ(artifact.at("start_world_hash_match"), true);
+        EXPECT_EQ(artifact.at("end_hash_match"), true);
+        EXPECT_EQ(artifact.at("checkpoints_verified"), 1);
+    }
+}
+
+TEST_F(EffectivePresetIdentity, ReplayRefusesInvalidOrMismatchedIdentityBeforeCreatingDirectories) {
+    auto source = shipping;
+    source["schema_rev"] = 7;
+    source["generation_params"]["terrain"].erase("surface_sampling_revision");
+    const auto resolved = LoadTerrainPresetFromJson(
+        ResolveEffectivePreset(source, TerrainPresetUse::NewWorld), root / "data");
+    ASSERT_TRUE(resolved.ok);
+    GameSession retained;
+    Configure(retained);
+    ASSERT_TRUE(retained.CreateTransientWorld("Retained", options.seed, options.preset));
+    const auto* retained_world = retained.GetWorldSystem();
+    const auto retained_identity = retained.PresetContentHash();
+    Luminumbra::Replay::ReplayHeader header;
+    header.seed_string = options.seed;
+    header.preset = options.preset;
+    header.preset_content_hash = resolved.preset_content_hash;
+    header.system_config_identity = retained.SystemConfigIdentity();
+    const auto valid = header;
+    const auto complete = source.dump();
+    for (const bool custom : {false, true}) {
+        SCOPED_TRACE(custom);
+        for (const auto& invalid :
+             {std::string("not JSON"),
+              complete.substr(0, complete.size() / 2),
+              complete + "\ntrailing data",
+              std::string("null"),
+              std::string("{}"),
+              std::string("[]"),
+              std::string(R"({"schema_rev":999})"),
+              std::string(
+                  R"({"generation_params":{"terrain":{"surface_sampling_revision":99}}})")}) {
+            SCOPED_TRACE(invalid);
+            WriteCatalog(custom ? shipping : nlohmann::json::object());
+            if (custom) {
+                options.preset_json_override = invalid;
+            } else {
+                options.preset_json_override.reset();
+                std::ofstream output(root / "worlds/atlas/presets/default.json");
+                output << invalid;
+                ASSERT_TRUE(output.good());
+            }
+            EXPECT_FALSE(ReplayRunnerConfigFrom(options, valid).has_value());
+            EXPECT_FALSE(fs::exists(root / "worlds/saves"));
+        }
+        WriteCatalog(source);
+        options.preset_json_override = custom ? std::optional(complete) : std::nullopt;
+        for (const auto& invalid_hash :
+             {std::string{}, std::string("malformed"), std::string(16, '0')}) {
+            header = valid;
+            header.preset_content_hash = invalid_hash;
+            EXPECT_FALSE(ReplayRunnerConfigFrom(options, header).has_value());
+            header = valid;
+            header.system_config_identity = invalid_hash;
+            EXPECT_FALSE(ReplayRunnerConfigFrom(options, header).has_value());
+        }
+        header = valid;
+        header.surface_radius = std::numeric_limits<std::uint32_t>::max();
+        EXPECT_FALSE(ReplayRunnerConfigFrom(options, header).has_value());
+        header = valid;
+        header.collision_radius = std::numeric_limits<std::uint32_t>::max();
+        EXPECT_FALSE(ReplayRunnerConfigFrom(options, header).has_value());
+        header = valid;
+        ++header.version;
+        EXPECT_FALSE(ReplayRunnerConfigFrom(options, header).has_value());
+        const auto matched = ReplayRunnerConfigFrom(options, valid);
+        ASSERT_TRUE(matched.has_value());
+        // Recheck the snapshot at the last point before CreateWorld writes or
+        // replaces a live world, even if a dependency changed after preflight.
+        ASSERT_TRUE(matched->preset_json_override.has_value());
+        EXPECT_FALSE(retained.CreateWorld("Refused",
+                                          options.seed,
+                                          options.preset,
+                                          &*matched->preset_json_override,
+                                          matched->preset_use,
+                                          "different content"));
+        EXPECT_EQ(retained.GetWorldSystem(), retained_world);
+        EXPECT_EQ(retained.PresetContentHash(), retained_identity);
+        EXPECT_FALSE(fs::exists(root / "worlds/saves"));
+        const auto dependency_path = root / "data/common/biomes.json";
+        std::ifstream dependency(dependency_path, std::ios::binary);
+        ASSERT_TRUE(dependency);
+        const std::string dependency_bytes((std::istreambuf_iterator<char>(dependency)), {});
+        dependency.close();
+        {
+            std::ofstream changed(dependency_path, std::ios::binary | std::ios::app);
+            changed << '\n'; // Still valid JSON, with a different exact-byte identity.
+            ASSERT_TRUE(changed.good());
+        }
+        EXPECT_FALSE(retained.CreateWorld("Changed dependency",
+                                          options.seed,
+                                          options.preset,
+                                          &*matched->preset_json_override,
+                                          matched->preset_use,
+                                          matched->required_preset_content_hash));
+        EXPECT_EQ(retained.GetWorldSystem(), retained_world);
+        EXPECT_EQ(retained.PresetContentHash(), retained_identity);
+        EXPECT_FALSE(fs::exists(root / "worlds/saves"));
+        {
+            std::ofstream restored(dependency_path, std::ios::binary | std::ios::trunc);
+            restored << dependency_bytes;
+            ASSERT_TRUE(restored.good());
+        }
+        auto changed_source = source;
+        changed_source["generation_params"]["terrain"]["height_offset"] = 123.0f;
+        if (custom)
+            options.preset_json_override = changed_source.dump();
+        else
+            WriteCatalog(changed_source);
+        EXPECT_FALSE(ReplayRunnerConfigFrom(options, valid).has_value());
+        EXPECT_FALSE(fs::exists(root / "worlds/saves"));
+    }
+    options.preset_json_override.reset();
+    fs::remove(root / "worlds/atlas/presets/default.json");
+    EXPECT_FALSE(ReplayRunnerConfigFrom(options, valid).has_value());
+    EXPECT_FALSE(fs::exists(root / "worlds/saves"));
 }
 
 TEST_F(EffectivePresetIdentity, HistoricalCreationRefusesInvalidPresetsBeforeWriting) {
