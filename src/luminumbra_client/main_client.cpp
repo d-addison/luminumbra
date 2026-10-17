@@ -2791,6 +2791,11 @@ int main(int argc, char* argv[]) {
                     if (newType != worldType) {
                         std::error_code ec;
                         std::filesystem::remove(src, ec);
+                        if (ec) {
+                            LUMINUMBRA_CORE_ERROR(
+                                "Could not remove renamed preset {}: {}", worldType, ec.message());
+                            return "";
+                        }
                     }
                     LUMINUMBRA_CORE_INFO("Renamed user preset {} -> {}", worldType, newType);
                     return newType;
@@ -2937,7 +2942,7 @@ int main(int argc, char* argv[]) {
                                                    ? g_playerController->SavedSpawnAnchor()
                                                    : g_camera->Position);
                 // Synchronous main-thread save; shutdown cannot overlap this callback.
-                if (!gameSession->SaveWorldState() || !gameSession->SaveWorld()) {
+                if (!gameSession->SaveWorldState()) {
                     if (g_uiManager)
                         g_uiManager->ShowMessage("Could not save this world. Check available disk "
                                                  "space and permissions before leaving.");

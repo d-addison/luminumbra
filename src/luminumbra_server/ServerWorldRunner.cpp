@@ -1076,21 +1076,7 @@ std::size_t ServerWorldRunner::SaveFullSnapshot() {
         state.insert_chunk(chunk);
     }
 
-    Persistence::WorldSaveService service;
-    std::vector<std::string> errors;
-    if (!service.save_world(state, save_dir, &errors)) {
-        for (const std::string& error : errors) {
-            LUMINUMBRA_CORE_ERROR("SaveFullSnapshot failed: {}", error);
-        }
-        return 0;
-    }
-    // refresh world_info.json alongside the chunk snapshot so world-level
-    // sim state captured there (the water sim-window cursor) reflects THIS save
-    // moment, not world creation. Without this a loaded session resimulates from a
-    // stale cursor and the water evolution diverges from the original's.
-    // Save metadata before the state writer can acknowledge chunk edits. Every
-    // region mode must also persist plants and energy before reporting success.
-    if (!m_session->SaveWorld() || !m_session->SaveWorldState())
+    if (!m_session->SaveWorldStateTo(save_dir, nullptr, /*full_snapshot=*/true))
         return 0;
     return state.size();
 }

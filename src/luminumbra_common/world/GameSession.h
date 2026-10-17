@@ -116,13 +116,16 @@ public:
     // --- Runtime world-state persistence ---
     // Persists streamed chunk voxel state under the canonical world save dir
     // (worlds/saves/<world_id>). Only dirty chunks trigger chunk snapshot writes;
-    // plants and energy persist independently, including when no chunks are dirty.
+    // plants, energy and metadata persist even when no chunks are dirty.
     // The first chunk write emits a full snapshot; later writes flush through
     // WorldSaveService::save_dirty_chunks. Dirty chunks are acknowledged only after
-    // every required writer succeeds, so a failed composite save remains retryable.
+    // every required writer succeeds and the staged directory is published, so
+    // a failed save preserves the previous complete save and remains retryable.
+    // Explicit full snapshots and save-as destinations include every streamed chunk.
     bool SaveWorldState(WorldStateSaveReport* report = nullptr);
     bool SaveWorldStateTo(const std::filesystem::path& save_dir,
-                          WorldStateSaveReport* report = nullptr);
+                          WorldStateSaveReport* report = nullptr,
+                          bool full_snapshot = false);
 
     // Loads a previously saved snapshot into the live streaming state. Must be
     // called AFTER the world systems initialize but BEFORE chunk streaming
@@ -482,7 +485,7 @@ private:
     bool m_transientWorld = false;
     void ResetWorldSystems();
     void RestoreWorldClock(const WorldClock& clock);
-    bool SaveWorldMetadataTo(const std::filesystem::path& save_dir);
+    bool SaveWorldMetadataTo(const std::filesystem::path& save_dir) const;
     bool ClockConfigurationCompatible(const std::filesystem::path& save_dir) const;
     WorldClock m_worldClock;
     void AttachRegionEditObserver();

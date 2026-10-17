@@ -1,7 +1,11 @@
 #include "UIHotReload.h"
 #include "core/Log.h"
-#include <algorithm>
+#include <chrono>
 #include <filesystem>
+#include <string>
+#include <system_error>
+#include <unordered_set>
+#include <vector>
 
 namespace Luminumbra::Client::UI {
 
@@ -22,7 +26,6 @@ void UIHotReload::WatchFile(const std::string& filePath) {
     WatchedFile watchedFile;
     watchedFile.path = filePath;
     watchedFile.lastWriteTime = GetFileWriteTime(filePath);
-    watchedFile.isDirectory = false;
 
     m_watchedFiles[filePath] = watchedFile;
 
@@ -30,21 +33,14 @@ void UIHotReload::WatchFile(const std::string& filePath) {
 }
 
 void UIHotReload::WatchDirectory(const std::string& directoryPath, const std::string& extension) {
-    if (!std::filesystem::exists(directoryPath) || !std::filesystem::is_directory(directoryPath)) {
+    std::error_code error;
+    if (!std::filesystem::is_directory(directoryPath, error)) {
         LUMINUMBRA_CORE_WARN("[UI HotReload] Directory does not exist: {}", directoryPath);
         return;
     }
-
-    WatchedFile watchedDir;
-    watchedDir.path = directoryPath;
-    watchedDir.lastWriteTime = GetFileWriteTime(directoryPath);
-    watchedDir.isDirectory = true;
-    watchedDir.extension = extension;
-
-    m_watchedFiles[directoryPath] = watchedDir;
-
-    // Also watch existing files in the directory
-    ScanDirectory(directoryPath, extension);
+    auto& extensions = m_watchedDirectories[directoryPath];
+    extensions.insert(extension);
+    ScanDirectory(directoryPath, extensions);
 
     LUMINUMBRA_CORE_INFO("[UI HotReload] Watching directory: {} (extension: {})",
                          directoryPath,
@@ -52,20 +48,19 @@ void UIHotReload::WatchDirectory(const std::string& directoryPath, const std::st
 }
 
 void UIHotReload::StopWatching(const std::string& path) {
-    auto it = m_watchedFiles.find(path);
-    if (it != m_watchedFiles.end()) {
-        m_watchedFiles.erase(it);
-        LUMINUMBRA_CORE_INFO("[UI HotReload] Stopped watching: {}", path);
-    }
+    m_watchedFiles.erase(path);
+    m_watchedDirectories.erase(path);
+    LUMINUMBRA_CORE_INFO("[UI HotReload] Stopped watching: {}", path);
 }
 
 void UIHotReload::ClearAllWatches() {
     m_watchedFiles.clear();
+    m_watchedDirectories.clear();
     LUMINUMBRA_CORE_INFO("[UI HotReload] Cleared all watches");
 }
 
 void UIHotReload::Update() {
-    if (!m_enabled || m_watchedFiles.empty()) {
+    if (!m_enabled || (m_watchedFiles.empty() && m_watchedDirectories.empty())) {
         return;
     }
 
@@ -76,19 +71,14 @@ void UIHotReload::Update() {
 
     m_lastCheck = now;
 
-    // Check all watched files/directories
     std::vector<std::string> changedFiles;
-
+    // Scan separately: discovering files can rehash the file map. Scanning each
+    // directory also discovers nested additions whose parent timestamp is unchanged.
+    for (const auto& [path, extensions] : m_watchedDirectories)
+        ScanDirectory(path, extensions, &changedFiles);
     for (auto& [path, watchedFile] : m_watchedFiles) {
-        if (CheckFileChanged(watchedFile)) {
-            if (watchedFile.isDirectory) {
-                // For directories, scan for changed files
-                ScanDirectory(path, watchedFile.extension);
-            } else {
-                // File directly changed
-                changedFiles.push_back(path);
-            }
-        }
+        if (CheckFileChanged(watchedFile))
+            changedFiles.push_back(path);
     }
 
     // Trigger reloads for changed files
@@ -126,37 +116,24 @@ bool UIHotReload::CheckFileChanged(WatchedFile& watchedFile) {
     return false;
 }
 
-void UIHotReload::ScanDirectory(const std::string& directoryPath, const std::string& extension) {
+void UIHotReload::ScanDirectory(const std::string& directoryPath,
+                                const std::unordered_set<std::string>& extensions,
+                                std::vector<std::string>* added) {
     try {
         for (const auto& entry : std::filesystem::recursive_directory_iterator(directoryPath)) {
-            if (entry.is_regular_file()) {
-                std::string filePath = entry.path().string();
-
-                // Filter by extension if specified
-                if (!extension.empty()) {
-                    std::string fileExt = entry.path().extension().string();
-                    if (fileExt != extension && fileExt != ("." + extension)) {
-                        continue;
-                    }
-                }
-
-                // Check if we're already watching this file individually
-                auto it = m_watchedFiles.find(filePath);
-                if (it == m_watchedFiles.end()) {
-                    // Add to watch list
-                    WatchedFile watchedFile;
-                    watchedFile.path = filePath;
-                    watchedFile.lastWriteTime = GetFileWriteTime(filePath);
-                    watchedFile.isDirectory = false;
-
-                    m_watchedFiles[filePath] = watchedFile;
-                } else {
-                    // Check if existing watched file changed
-                    if (CheckFileChanged(it->second)) {
-                        TriggerReload(filePath);
-                    }
-                }
-            }
+            if (!entry.is_regular_file())
+                continue;
+            const auto extension = entry.path().extension().string();
+            const auto bare = extension.empty() ? extension : extension.substr(1);
+            if (!extensions.contains("") && !extensions.contains(extension) &&
+                !extensions.contains(bare))
+                continue;
+            const auto path = entry.path().string();
+            if (m_watchedFiles.contains(path))
+                continue;
+            m_watchedFiles.emplace(path, WatchedFile{path, GetFileWriteTime(path)});
+            if (added)
+                added->push_back(path);
         }
     } catch (const std::filesystem::filesystem_error& e) {
         LUMINUMBRA_CORE_ERROR(
@@ -173,7 +150,8 @@ std::filesystem::file_time_type UIHotReload::GetFileWriteTime(const std::string&
 }
 
 bool UIHotReload::FileExists(const std::string& filePath) {
-    return std::filesystem::exists(filePath);
+    std::error_code error;
+    return std::filesystem::exists(filePath, error);
 }
 
 } // namespace Luminumbra::Client::UI

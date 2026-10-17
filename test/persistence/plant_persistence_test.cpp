@@ -18,7 +18,9 @@
 #include "luminumbra_common/persistence/PlantPersistence.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 
+#include "support/UniqueTempPath.h"
 #include <filesystem>
+#include <fstream>
 
 namespace {
 
@@ -172,3 +174,49 @@ TEST(PlantPersistence, EmptyRosterWritesNoFile) {
 }
 
 } // namespace
+
+TEST(PlantPersistence, EmptyRosterRemovalErrorIsReportedAndCanRetry) {
+    namespace SS = ::Luminumbra::Persistence;
+    namespace fs = std::filesystem;
+    const auto dir = Luminumbra::TestSupport::CreateUniqueTempDirectory("plant_remove_error_");
+    const auto path = SS::WorldSaveService::plant_entities_path(dir);
+    entt::registry plants;
+    barePlant(plants, 1.0f, 0, 5);
+    const auto snapshot = F::BuildPlantEntitySnapshot(plants);
+    ASSERT_TRUE(SS::WorldSaveService::save_plant_entities(snapshot, dir));
+    const auto file_permissions = fs::status(path).permissions();
+    const auto parent_permissions = fs::status(path.parent_path()).permissions();
+    // Windows refuses deletion of a read-only file; POSIX checks the parent.
+    // Both still permit the validation reader to read the existing valid roster.
+    fs::permissions(path, fs::perms::owner_read | fs::perms::group_read | fs::perms::others_read);
+    fs::permissions(path.parent_path(),
+                    fs::perms::owner_read | fs::perms::owner_exec | fs::perms::group_read |
+                        fs::perms::group_exec | fs::perms::others_read | fs::perms::others_exec);
+    const E::EntityRegistrySnapshot empty;
+    std::vector<std::string> errors;
+    const bool removed = SS::WorldSaveService::save_plant_entities(empty, dir, &errors);
+    fs::permissions(path.parent_path(), parent_permissions);
+    fs::permissions(path, file_permissions);
+    EXPECT_FALSE(removed);
+    ASSERT_FALSE(errors.empty());
+    EXPECT_NE(errors.front().find("failed to remove plant entities file"), std::string::npos);
+    EXPECT_TRUE(fs::exists(path));
+    errors.clear();
+    ASSERT_TRUE(SS::WorldSaveService::save_plant_entities(empty, dir, &errors));
+    EXPECT_FALSE(fs::exists(path));
+    // Invalid occupied directories must also fail without deleting their contents.
+    fs::create_directories(path);
+    {
+        std::ofstream keep(path / "keep");
+        keep << "occupied";
+    }
+    EXPECT_FALSE(SS::WorldSaveService::save_plant_entities(empty, dir, &errors));
+    ASSERT_FALSE(errors.empty());
+    EXPECT_TRUE(fs::exists(path / "keep"));
+    fs::remove_all(path);
+    errors.clear();
+    EXPECT_TRUE(SS::WorldSaveService::save_plant_entities(empty, dir, &errors));
+    EXPECT_TRUE(errors.empty());
+    EXPECT_FALSE(fs::exists(path));
+    fs::remove_all(dir);
+}

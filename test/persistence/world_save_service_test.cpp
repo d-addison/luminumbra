@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <nlohmann/json.hpp>
@@ -497,4 +498,80 @@ TEST(WorldSaveServiceTest, PublicRegionDigestRejectsUnsupportedKeysBeforeDurable
                   expected_digest);
     }
     EXPECT_FALSE(std::filesystem::exists(missing_save));
+}
+
+TEST(WorldSaveTransaction, StagingAndPublicationFailuresLeavePreviousFilesLoadable) {
+    namespace fs = std::filesystem;
+    using Luminumbra::Persistence::WorldSaveTransaction;
+    const TempSaveDir root("transaction_failure");
+    const auto destination = root.path / "world";
+    fs::create_directory(destination);
+    ASSERT_TRUE(WorldSaveService::write_file_durably(destination / "state", "previous"));
+    for (const int failure : {0, 1, 2}) {
+        SCOPED_TRACE(failure);
+        WorldSaveTransaction transaction(destination);
+        std::vector<std::string> errors;
+        ASSERT_TRUE(transaction.prepare(&errors));
+        const auto pending = transaction.directory();
+        ASSERT_TRUE(WorldSaveService::write_file_durably(pending / "state", "next"));
+        if (failure == 0) {
+            fs::create_directory(pending.parent_path() / "previous");
+            std::ofstream keep(pending.parent_path() / "previous/keep");
+            keep << "occupied";
+        } else if (failure == 1) {
+            fs::remove_all(pending);
+        } else {
+            // A missing source must also fail for a brand-new destination.
+            fs::remove(destination / "state");
+            fs::remove(destination);
+            fs::remove_all(pending);
+        }
+        EXPECT_FALSE(transaction.commit(&errors));
+        EXPECT_FALSE(errors.empty());
+        if (failure == 2) {
+            EXPECT_FALSE(fs::exists(destination));
+            fs::create_directory(destination);
+            ASSERT_TRUE(WorldSaveService::write_file_durably(destination / "state", "previous"));
+        }
+        std::ifstream input(destination / "state");
+        EXPECT_EQ(std::string((std::istreambuf_iterator<char>(input)), {}), "previous");
+    }
+    const auto blocker = root.path / "blocker";
+    ASSERT_TRUE(WorldSaveService::write_file_durably(blocker, "unchanged"));
+    WorldSaveTransaction rejected(blocker / "save");
+    std::vector<std::string> errors;
+    EXPECT_FALSE(rejected.prepare(&errors));
+    EXPECT_FALSE(errors.empty());
+}
+
+TEST(WorldSaveTransaction, CommitReplacesFilesAndRetiresDeletedMembers) {
+    using Luminumbra::Persistence::WorldSaveTransaction;
+    namespace fs = std::filesystem;
+    const TempSaveDir root("transaction_success");
+    const auto destination = root.path / "world";
+    fs::create_directory(destination);
+    ASSERT_TRUE(WorldSaveService::write_file_durably(destination / "keep", "old"));
+    ASSERT_TRUE(WorldSaveService::write_file_durably(destination / "retire", "deleted"));
+    WorldSaveTransaction transaction(destination);
+    std::vector<std::string> errors;
+    ASSERT_TRUE(transaction.prepare(&errors));
+    ASSERT_TRUE(WorldSaveService::write_file_durably(transaction.directory() / "keep", "new"));
+    ASSERT_TRUE(fs::remove(transaction.directory() / "retire"));
+    ASSERT_TRUE(fs::exists(destination / "retire"));
+#if !defined(_WIN32)
+    WorldSaveService::set_directory_flush_failure_for_testing(0);
+    EXPECT_FALSE(transaction.commit(&errors));
+    WorldSaveService::set_directory_flush_failure_for_testing(-1);
+    EXPECT_FALSE(errors.empty());
+    EXPECT_TRUE(fs::exists(destination / "retire"));
+    std::ifstream previous(destination / "keep");
+    EXPECT_EQ(std::string((std::istreambuf_iterator<char>(previous)), {}), "old");
+    previous.close();
+    errors.clear();
+#endif
+    ASSERT_TRUE(transaction.commit(&errors));
+    EXPECT_TRUE(errors.empty());
+    std::ifstream input(destination / "keep");
+    EXPECT_EQ(std::string((std::istreambuf_iterator<char>(input)), {}), "new");
+    EXPECT_FALSE(fs::exists(destination / "retire"));
 }

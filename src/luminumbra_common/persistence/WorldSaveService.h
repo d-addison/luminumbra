@@ -19,6 +19,29 @@ struct EntityRegistrySnapshot;
 
 namespace Luminumbra::Persistence {
 
+// Host-thread save transaction. Existing files are linked into an isolated directory;
+// writers must replace files atomically (never truncate a linked file). Publication
+// happens only after every writer succeeds. All handles must be closed before commit
+// so directory renames have the same semantics on Windows and POSIX.
+class WorldSaveTransaction {
+public:
+    explicit WorldSaveTransaction(const std::filesystem::path& destination);
+    ~WorldSaveTransaction();
+    WorldSaveTransaction(const WorldSaveTransaction&) = delete;
+    WorldSaveTransaction& operator=(const WorldSaveTransaction&) = delete;
+    bool prepare(std::vector<std::string>* errors);
+    const std::filesystem::path& directory() const {
+        return m_pending;
+    }
+    bool commit(std::vector<std::string>* errors);
+
+private:
+    std::filesystem::path m_destination;
+    std::filesystem::path m_workspace;
+    std::filesystem::path m_pending;
+    bool m_keepBackup = false;
+};
+
 // Counters describing one incremental save pass over the streaming state.
 struct WorldSaveDirtyReport {
     std::size_t chunks_total = 0;
@@ -119,8 +142,8 @@ public:
     static bool save_metadata(const std::string& bytes,
                               const std::filesystem::path& save_dir,
                               std::vector<std::string>* errors = nullptr);
-    // Prevalidate the incoming pair and keep the installed ledger tick <= clock tick
-    // between replacements, including when an explicit snapshot rewinds the clock.
+    // Stage the incoming pair together, including when a snapshot rewinds the clock.
+    // Required writer failures preserve both installed files and the in-memory ledger.
     // Host-thread-only, synchronous and non-reentrant across sessions. Production
     // callers own one save destination; debug builds assert if pair saves overlap.
     static bool save_metadata_and_active_regions(const std::string& bytes,

@@ -1604,7 +1604,9 @@ void GameSession::RestoreWorldClock(const WorldClock& clock) {
 }
 
 bool GameSession::SaveWorld() {
-    return SaveWorldMetadataTo(GetWorldSaveDir());
+    if (m_transientWorld || m_metadata.worldId.empty())
+        return false;
+    return SaveWorldState();
 }
 
 bool GameSession::SavedPresetCompatible(const fs::path& save_dir) const {
@@ -1657,7 +1659,7 @@ bool PersistSavedPreset(const fs::path& save_dir, const std::string& canonical) 
 }
 } // namespace
 
-bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
+bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) const {
     if (!IsSimulationTickBoundary() || save_dir.empty() ||
         !ClockConfigurationCompatible(save_dir) || m_transientWorld || m_metadata.worldId.empty() ||
         !m_worldOpenError.empty() || !SavedPresetCompatible(save_dir))
@@ -1703,10 +1705,10 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
         // All production callers save synchronously on the host thread: client
         // world creation/quit/shutdown and server autosave/snapshot/shutdown.
         // Do not dispatch this pair to workers; the writer asserts non-overlap.
+        auto ledger = m_activeRegionLedger;
         if (!Persistence::WorldSaveService::save_metadata_and_active_regions(
-                metadata_json.dump(4) + "\n", m_activeRegionLedger, save_dir))
+                metadata_json.dump(4) + "\n", ledger, save_dir))
             return false;
-        m_regionDurableDirectory = save_dir;
     } else if (!Persistence::WorldSaveService::save_metadata(metadata_json.dump(4) + "\n",
                                                              save_dir)) {
         return false;
@@ -1738,7 +1740,9 @@ bool GameSession::SaveWorldState(WorldStateSaveReport* report) {
 }
 
 bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
-                                   WorldStateSaveReport* report) {
+                                   WorldStateSaveReport* report,
+                                   bool full_snapshot) {
+    full_snapshot = full_snapshot || (!m_transientWorld && save_dir != GetWorldSaveDir());
     WorldStateSaveReport result;
     if (report) {
         *report = result;
@@ -1756,15 +1760,6 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
     // including the chunk-free plant/energy path and saves with active regions disabled.
     if (!SavedPresetCompatible(save_dir))
         return false;
-
-    // Clock snapshots can contain energy or metadata without any chunk/plant writer
-    // creating the destination. Create it only after every refusal check passes.
-    if (m_activeRegionsEnabled) {
-        std::error_code error;
-        fs::create_directories(save_dir, error);
-        if (error)
-            return false;
-    }
 
     // Quiesce in-flight generation/promotion/meshing so chunk data is stable
     // on disk — WITHOUT publishing: a save must never be an
@@ -1790,83 +1785,63 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
 
     const std::vector<ChunkID> dirty_ids = state.dirty_chunk_ids();
     result.chunks_dirty = dirty_ids.size();
-    if (dirty_ids.empty()) {
-        // No dirty CHUNKS. Without an existing snapshot this keeps a save-less, no-plant world
-        // byte-for-byte (no chunks/ dir created); a planted world still persists its plants here.
-        const bool plants_ok =
-            Persistence::WorldSaveService::save_plant_entities(plant_snapshot, save_dir, nullptr);
-        const bool energy_ok = SaveEnergyFieldRecord(save_dir);
-        if (!plants_ok || !energy_ok)
-            return false;
-        if (report) {
-            *report = result;
-        }
-        return !m_activeRegionsEnabled || SaveWorldMetadataTo(save_dir);
-    }
+    if (report)
+        *report = result;
 
-    Persistence::WorldSaveService service;
+    Persistence::WorldSaveTransaction transaction(save_dir);
     std::vector<std::string> errors;
-    // Subsequent saves rewrite the edited regions of a supported container.
-    const bool has_snapshot = m_activeRegionsEnabled
-                                  ? Persistence::WorldSaveService::has_chunk_snapshot(save_dir)
-                                  : Persistence::WorldSaveService::has_world_save(save_dir);
-
-    bool ok = false;
-    if (!has_snapshot) {
-        // First save writes the full snapshot. Keep edits pending until all writers succeed.
-        ok = service.save_world(state, save_dir, &errors);
-    } else {
-        const Persistence::WorldSaveDirtyReport dirty_report =
-            service.save_dirty_chunks(state, save_dir, &errors, /*acknowledge_dirty=*/false);
-        ok = dirty_report.saved;
+    if (!transaction.prepare(&errors)) {
+        for (const auto& error : errors)
+            LUMINUMBRA_CORE_ERROR("World state save failed: {}", error);
+        return false;
     }
+    const auto& pending = transaction.directory();
+    const Persistence::WorldSaveService service;
+    bool ok = true;
+    const bool write_chunks = full_snapshot || !dirty_ids.empty();
+    if (write_chunks) {
+        if (full_snapshot || !Persistence::WorldSaveService::has_chunk_snapshot(pending))
+            ok = service.save_world(state, pending, &errors);
+        else
+            ok = service
+                     .save_dirty_chunks(state,
+                                        pending,
+                                        &errors,
+                                        /*acknowledge_dirty=*/false)
+                     .saved;
+    }
+    if (ok)
+        ok = Persistence::WorldSaveService::save_plant_entities(plant_snapshot, pending, &errors);
+    if (ok)
+        ok = SaveEnergyFieldRecord(pending);
+    // Legacy transient imports preserve opaque metadata. Every persistent save,
+    // including regions-disabled saves, commits metadata only after required state.
+    const bool write_metadata = !m_transientWorld;
+    if (ok && write_metadata)
+        ok = SaveWorldMetadataTo(pending);
+    if (ok)
+        ok = transaction.commit(&errors);
+    for (const auto& error : errors)
+        LUMINUMBRA_CORE_ERROR("World state save failed: {}", error);
+    if (!ok)
+        return false;
 
-    // A multi-region save can commit an early atomic LMR1 replacement and then
-    // report failure on a later region. Conservatively invalidate every dirty
-    // chunk's affected far regions after any Phase-A attempt: this rejects a
-    // worker that read an older container even across a partial-save result.
-    // An extra rebuild when nothing committed is safe; missing a partial commit
-    // would allow old derived bytes to integrate as current.
+    if (write_metadata && m_activeRegionsEnabled) {
+        m_activeRegionLedger.mark_saved(m_worldClock);
+        m_regionDurableDirectory = save_dir;
+    }
+    // Publish authority and acknowledge edits only after the complete save is installed.
     for (const ChunkID id : dirty_ids) {
         if (const auto chunk = state.find_chunk(id)) {
             m_worldSystem->notify_far_lod_authority_durable(chunk->get_coords());
+            chunk->clear_voxel_data_dirty();
         }
     }
-
-    //  persist plants alongside the chunk write (empty roster -> no file -> byte-identical).
-    if (!Persistence::WorldSaveService::save_plant_entities(plant_snapshot, save_dir, &errors)) {
-        ok = false;
-    }
-
-    // persist the stateful energy layer alongside (null/
-    // all-zero layer -> no file -> byte-identical; the plant discipline).
-    const bool energy_ok = SaveEnergyFieldRecord(save_dir);
-    if (!energy_ok)
-        ok = false;
-
-    for (const std::string& error : errors) {
-        LUMINUMBRA_CORE_ERROR("World state save failed: {}", error);
-    }
-    if (ok && m_activeRegionsEnabled)
-        ok = SaveWorldMetadataTo(save_dir);
-    if (ok) {
-        // Chunk persistence alone is insufficient: retry every edit if any sibling writer failed.
-        for (const ChunkID id : dirty_ids) {
-            if (const auto chunk = state.find_chunk(id)) {
-                chunk->clear_voxel_data_dirty();
-            }
-        }
-        result.saved = true;
-        result.chunks_saved = result.chunks_total; // whole-snapshot layout
-        LUMINUMBRA_CORE_INFO("World state saved: {} chunks ({} dirty) -> {}",
-                             result.chunks_total,
-                             result.chunks_dirty,
-                             save_dir.string());
-    }
-    if (report) {
+    result.saved = write_chunks;
+    result.chunks_saved = write_chunks ? result.chunks_total : 0;
+    if (report)
         *report = result;
-    }
-    return ok;
+    return true;
 }
 
 bool GameSession::LoadWorldState() {
@@ -2188,12 +2163,13 @@ bool GameSession::SaveEnergyFieldRecord(const std::filesystem::path& save_dir) {
     if (!m_energyFieldState || save_dir.empty())
         return true;
     if (m_energyFieldState->page_count() == 0) {
-        if (!m_activeRegionsEnabled)
-            return true; // Preserve legacy empty-layer save behavior.
         const auto tick = GetSimulationTickCount();
-        const auto aligned_next = tick + (luminumbra::fields::kEnergyCadenceTicks -
-                                          tick % luminumbra::fields::kEnergyCadenceTicks);
-        if (m_energyFieldState->next_fire_tick() == aligned_next) {
+        const auto absent_remaining = m_activeRegionsEnabled
+                                          ? luminumbra::fields::kEnergyCadenceTicks -
+                                                tick % luminumbra::fields::kEnergyCadenceTicks
+                                          : luminumbra::fields::kEnergyCadenceTicks;
+        const auto next_fire = m_energyFieldState->next_fire_tick();
+        if (next_fire > tick && next_fire - tick == absent_remaining) {
             // Absence reconstructs this phase. Retire any stale nonempty record.
             std::error_code error;
             fs::remove(save_dir / "aether_state.efs", error);
@@ -2203,14 +2179,7 @@ bool GameSession::SaveEnergyFieldRecord(const std::filesystem::path& save_dir) {
         // The existing header alone preserves it without adding zero pages.
     }
     const std::string record = m_energyFieldState->SerializeRecord(GetSimulationTickCount());
-    std::ofstream file(save_dir / "aether_state.efs", std::ios::trunc);
-    if (!file.is_open()) {
-        LUMINUMBRA_CORE_ERROR("Failed to write aether state record under {}", save_dir.string());
-        return false;
-    }
-    file << record;
-    file.flush();
-    return file.good();
+    return Persistence::WorldSaveService::write_file_durably(save_dir / "aether_state.efs", record);
 }
 
 std::string GameSession::ComputeAetherStateSubHash() const {

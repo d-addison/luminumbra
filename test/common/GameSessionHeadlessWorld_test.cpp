@@ -1079,12 +1079,14 @@ public:
 
     void Rewrite(const char* changed) const {
         SCOPED_TRACE(directory.generic_string());
-        if (std::string(changed) != "identity")
+        if (std::string(changed) != "identity") {
             ASSERT_NO_FATAL_FAILURE(
                 WriteSavedPresetTestJson(directory / "preset.json", other_preset));
-        if (std::string(changed) != "preset")
+        }
+        if (std::string(changed) != "preset") {
             ASSERT_NO_FATAL_FAILURE(
                 WriteSavedPresetTestJson(directory / "world_info.json", other_metadata));
+        }
     }
 
     void Restore() const {
@@ -1625,7 +1627,7 @@ TEST(GameSessionHeadlessWorldTest,
     ASSERT_TRUE(session.SaveWorldState());
     EXPECT_TRUE(P::WorldSaveService::validate_save(save));
 
-    // A failure between the two rewind replacements still leaves a readable pair.
+    // A failed rewind leaves the complete newer pair unchanged.
     ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
     ASSERT_TRUE(session.SaveWorld());
     ASSERT_TRUE(session.LoadWorldStateFrom(alternate));
@@ -1636,7 +1638,10 @@ TEST(GameSessionHeadlessWorldTest,
     ASSERT_TRUE(P::WorldSaveService::validate_save(save));
     EXPECT_EQ(P::InspectSavedWorld(root.path(), session.GetMetadata().worldId).clock.tick(), 2u);
     ASSERT_TRUE(P::WorldSaveService::load_active_regions(saved_ledger, save));
-    EXPECT_EQ(saved_ledger.tick(), 1u);
+    EXPECT_EQ(saved_ledger.tick(), 2u);
+    // Legacy saves can still contain partial pairs. Exercise their recovery explicitly.
+    std::ofstream(P::WorldSaveService::active_regions_path(save), std::ios::binary)
+        << ReadClockTestFile(P::WorldSaveService::active_regions_path(alternate));
     ASSERT_NO_FATAL_FAILURE(
         CheckPartialPairReloadAndSave(root, jobs, session.GetMetadata().worldId, save));
     ASSERT_TRUE(session.SaveWorld());
@@ -1657,11 +1662,22 @@ TEST(GameSessionHeadlessWorldTest, FailedForwardLedgerWriteReloadsAndSavesImmedi
     ASSERT_TRUE(session.CreateWorld("Forward failure", "1337", "default"));
     ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
     ASSERT_TRUE(session.SaveWorld());
+    const auto directory = session.GetWorldSaveDir();
+    const auto previous_metadata = ReadClockTestFile(directory / "world_info.json");
+    const auto previous_ledger =
+        ReadClockTestFile(P::WorldSaveService::active_regions_path(directory));
     ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
     P::WorldSaveService::set_before_active_regions_replace_for_testing([] { return false; });
     const bool saved = session.SaveWorld();
     P::WorldSaveService::set_before_active_regions_replace_for_testing(nullptr);
     ASSERT_FALSE(saved);
+    EXPECT_EQ(ReadClockTestFile(directory / "world_info.json"), previous_metadata);
+    EXPECT_EQ(ReadClockTestFile(P::WorldSaveService::active_regions_path(directory)),
+              previous_ledger);
+    // Retain explicit coverage for reading legacy partial pairs.
+    auto partial_metadata = nlohmann::json::parse(previous_metadata);
+    partial_metadata["simulationTick"] = session.GetSimulationTickCount();
+    std::ofstream(directory / "world_info.json", std::ios::binary) << partial_metadata.dump();
     ASSERT_NO_FATAL_FAILURE(CheckPartialPairReloadAndSave(
         root, jobs, session.GetMetadata().worldId, session.GetWorldSaveDir()));
 }
@@ -1694,14 +1710,21 @@ TEST(GameSessionHeadlessWorldDeathTest, TerminatedLedgerStagingLeavesLoadableAnd
         },
         testing::ExitedWithCode(73),
         "");
-    const auto save = fs::directory_iterator(root.path() / "worlds/saves")->path();
+    const auto catalog = P::EnumerateSavedWorlds(root.path());
+    ASSERT_TRUE(catalog.error.empty()) << catalog.error;
+    ASSERT_EQ(catalog.worlds.size(), 1u);
+    const auto save = root.path() / "worlds/saves" / catalog.worlds.front().metadata.worldId;
     std::vector<fs::path> debris;
-    for (const auto& entry : fs::recursive_directory_iterator(save)) {
+    for (const auto& entry : fs::recursive_directory_iterator(save.parent_path().parent_path())) {
         if (entry.path().filename().string().find("active-regions.arl.tmp.") == 0)
             debris.push_back(entry.path());
     }
     ASSERT_EQ(debris.size(), 1u);
-    EXPECT_EQ(debris.front().parent_path(), save);
+    EXPECT_NE(debris.front().parent_path(), save);
+    EXPECT_EQ(debris.front().parent_path().filename(), "pending");
+    EXPECT_EQ(
+        nlohmann::json::parse(ReadClockTestFile(save / "world_info.json")).at("simulationTick"),
+        1u);
     Luminumbra::world::ActiveRegionLedger staged;
     std::string error;
     ASSERT_TRUE(Luminumbra::world::ActiveRegionLedger::decode(
@@ -1711,13 +1734,17 @@ TEST(GameSessionHeadlessWorldDeathTest, TerminatedLedgerStagingLeavesLoadableAnd
     ASSERT_TRUE(P::WorldSaveService::validate_save(save));
     JobSystem jobs;
     jobs.startup(1);
+    // The abandoned transaction never advanced the live pair. Also preserve the
+    // compatibility check for partial pairs produced by older writers.
+    std::ofstream(save / "world_info.json", std::ios::binary)
+        << ReadClockTestFile(debris.front().parent_path() / "world_info.json");
     ASSERT_NO_FATAL_FAILURE(
         CheckPartialPairReloadAndSave(root, jobs, save.filename().string(), save));
     // Recovery never depends on cleaning the staging file up, but the next
     // successful save must reclaim it. Otherwise every interruption leaks a full
     // ledger copy and repeated crashes exhaust the volume.
     std::size_t remaining = 0;
-    for (const auto& entry : fs::recursive_directory_iterator(save))
+    for (const auto& entry : fs::recursive_directory_iterator(save.parent_path().parent_path()))
         if (entry.path().filename().string().find("active-regions.arl.tmp.") == 0)
             ++remaining;
     EXPECT_EQ(remaining, 0u);
@@ -2089,7 +2116,8 @@ TEST(GameSessionHeadlessWorldTest, ExplicitlyDisabledCallbacksKeepLegacySavesLoa
         EXPECT_TRUE(session.SaveWorld());
         EXPECT_TRUE(session.SaveWorldState());
         EXPECT_TRUE(session.SaveWorldStateTo(root.path() / "legacy-explicit"));
-        EXPECT_FALSE(fs::exists(root.path() / "legacy-explicit"));
+        EXPECT_EQ(ReadClockTestFile(root.path() / "legacy-explicit/world_info.json"), before);
+        EXPECT_TRUE(P::WorldSaveService::validate_save(root.path() / "legacy-explicit"));
         EXPECT_TRUE(session.LoadWorldState());
         EXPECT_TRUE(session.LoadWorldStateFrom(save));
         EXPECT_EQ(session.TickSimulation(dt), 1u);
@@ -3282,9 +3310,9 @@ void RunSchedulerFaultCase(std::uint64_t k, std::uint64_t start) {
 } // namespace
 
 TEST(GameSessionHeadlessWorldTest, SchedulerFaultStopsTheFrameAndLeavesASavableConsistentSession) {
-    for (const auto [k, start] : {std::pair<std::uint64_t, std::uint64_t>{3, 3},
-                                  std::pair<std::uint64_t, std::uint64_t>{3, 2},
-                                  std::pair<std::uint64_t, std::uint64_t>{4, 4}}) {
+    for (const auto& [k, start] : {std::pair<std::uint64_t, std::uint64_t>{3, 3},
+                                   std::pair<std::uint64_t, std::uint64_t>{3, 2},
+                                   std::pair<std::uint64_t, std::uint64_t>{4, 4}}) {
         ASSERT_NO_FATAL_FAILURE(RunSchedulerFaultCase(k, start));
     }
 }

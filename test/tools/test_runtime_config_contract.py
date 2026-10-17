@@ -46,6 +46,30 @@ class RuntimeConfigSourceContract(unittest.TestCase):
             self.assertNotIn('uiHotReload.WatchDirectory("data/ui","' + extension + '");',
                              self.client)
 
+    def test_preset_rename_refuses_removal_errors_before_reporting_success(self):
+        start = self.client.index("g_uiManager->SetWorldPresetRenamer(")
+        end = self.client.index('LUMINUMBRA_CORE_INFO("Renameduserpreset', start)
+        rename = self.client[start:end]
+        removal = rename.index("std::filesystem::remove(src,ec);")
+        checked = rename[removal:]
+        self.assertIn("if(ec){", checked)
+        self.assertIn('return"";', checked[checked.index("if(ec){"):])
+
+    def test_new_fixture_publishes_metadata_after_required_state(self):
+        fixture = compact_cpp((ROOT / "src/luminumbra_common/persistence/SyntheticSaveFixture.cpp")
+                              .read_text(encoding="utf-8"))
+        self.assertLess(fixture.index("WorldSaveService{}.save_world("),
+                        fixture.index("WorldSaveService::save_metadata("))
+
+    def test_empty_plant_roster_checks_removal_error(self):
+        service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
+                              .read_text(encoding="utf-8"))
+        start = service.index("if(snapshot.entities.empty()){")
+        end = service.index("returntrue;", start)
+        empty_roster = service[start:end]
+        self.assertIn("std::filesystem::remove(path,ec);if(ec){", empty_roster)
+        self.assertIn("returnfalse;", empty_roster)
+
 
 if __name__ == "__main__":
     unittest.main()

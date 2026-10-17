@@ -5,6 +5,8 @@
 #include <functional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 namespace Luminumbra::Client::UI {
 
@@ -49,12 +51,11 @@ private:
     struct WatchedFile {
         std::string path;
         std::filesystem::file_time_type lastWriteTime;
-        bool isDirectory;
-        std::string extension; // For directory watches
     };
 
     bool m_enabled = false;
     std::unordered_map<std::string, WatchedFile> m_watchedFiles;
+    std::unordered_map<std::string, std::unordered_set<std::string>> m_watchedDirectories;
     ReloadCallback m_reloadCallback;
 
     std::chrono::steady_clock::time_point m_lastCheck;
@@ -62,7 +63,9 @@ private:
 
     // Internal methods
     bool CheckFileChanged(WatchedFile& watchedFile);
-    void ScanDirectory(const std::string& directoryPath, const std::string& extension);
+    void ScanDirectory(const std::string& directoryPath,
+                       const std::unordered_set<std::string>& extensions,
+                       std::vector<std::string>* added = nullptr);
     std::filesystem::file_time_type GetFileWriteTime(const std::string& filePath);
     bool FileExists(const std::string& filePath);
 };
