@@ -323,7 +323,7 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertIn("inline constinit bool shader_first_use_collection_enabled = false;",
                       self.header)
         for method in ("PhaseFrameScope::PhaseFrameScope(", "PhaseFrameScope::~PhaseFrameScope()"):
-            self.assertIn("shader_first_use_collection_enabled = current_phases != nullptr;",
+            self.assertIn("shader_first_use_collection_enabled = current_phases() != nullptr;",
                           block(self.collector, method))
         preview = read(ROOT / "tools/static_preview/CMakeLists.txt")
         self.assertIn('"${STATIC_PREVIEW_ROOT}/src/luminumbra_client/app/FrameAttribution.cpp"',
@@ -357,7 +357,7 @@ class FrameAttributionWiring(unittest.TestCase):
 
     def test_nested_phase_scopes_exclude_children_and_foliage(self):
         constructor = compact(block(self.collector, "PhaseScope::PhaseScope("))
-        self.assertTrue(constructor.startswith("if (!enabled || !current_phases) return;"))
+        self.assertTrue(constructor.startswith("if (!enabled || !current_phases()) return;"))
         destructor = compact(block(self.collector, "PhaseScope::~PhaseScope()"))
         self.assertTrue(destructor.startswith("if (!m_totals) return;"))
         self.assertIn("m_totals->add(m_phase, elapsed, m_children_ms, foliage - m_child_foliage_ms)",
@@ -366,6 +366,49 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertIn("m_parent->m_child_foliage_ms += foliage;", destructor)
         rebuild = block(self.foliage, "~RebuildAttributionScope()")
         self.assertIn("Attribution::phase_total_ms() - m_phases_before", rebuild)
+
+    def test_collectors_borrow_mutable_storage_through_thread_local_accessors(self):
+        # Check the live accessors and every consumer, so an unused TLS helper
+        # cannot hide a process-global pointer or a stale restoration path.
+        for signature, declaration, result in (
+            ("FoliageFrame*& current_foliage_frame()",
+             "thread_local FoliageFrame* frame = nullptr;", "frame"),
+            ("PhaseTotals*& current_phases()",
+             "thread_local PhaseTotals* totals = nullptr;", "totals"),
+            ("const PhaseScope*& current_phase_scope()",
+             "thread_local const PhaseScope* scope = nullptr;", "scope"),
+        ):
+            self.assertIn(signature, self.collector)
+            self.assertEqual(compact(block(self.collector, signature)),
+                             f"{declaration} return {result};")
+        self.assertEqual(len(re.findall(r"\bthread_local\b", self.collector)), 3)
+        self.assertNotRegex(self.collector,
+                            r"\b(?:current_phases|current_phase_scope)\b(?!\s*\()")
+        for owner, storage in (("FoliageFrameScope", "FoliageFrame m_frame{};"),
+                               ("PhaseFrameScope", "PhaseTotals m_totals{};")):
+            self.assertIn("mutable " + storage, block(self.header, "class " + owner))
+        self.assertNotIn("const_cast", self.collector + self.header)
+        for marker, fragments in (
+            ("PhaseFrameScope::PhaseFrameScope(",
+             ("current_phases() = enabled ? &m_totals : nullptr;",)),
+            ("PhaseFrameScope::~PhaseFrameScope()",
+             ("current_phases() = m_previous;",)),
+            ("bool PhaseFrameScope::is_current() const",
+             ("return current_phases() == &m_totals;",)),
+            ("double phase_total_ms()",
+             ("const auto* totals = current_phases();", "return totals ? totals->sum() : 0;")),
+            ("PhaseScope::PhaseScope(",
+             ("m_totals = current_phases();", "m_parent = current_phase_scope();",
+              "current_phase_scope() = this;")),
+            ("PhaseScope::~PhaseScope()",
+             ("m_parent->m_totals == m_totals", "current_phase_scope() = m_parent;")),
+            ("bool PhaseScope::is_current() const",
+             ("m_totals == current_phases() && current_phase_scope() == this",)),
+        ):
+            body = compact(block(self.collector, marker))
+            for fragment in fragments:
+                self.assertIn(fragment, body)
+        self.assertIn(": m_previous(current_phases())", self.collector)
 
     def test_menu_cache_captures_before_ui_and_bypasses_render_on_reuse(self):
         menu = block(read(CLIENT / "app/MenuScreens.cpp"), "void RenderMenuScreens(")

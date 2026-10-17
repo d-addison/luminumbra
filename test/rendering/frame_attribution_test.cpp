@@ -303,6 +303,87 @@ TEST(FrameAttribution, DisabledCollectionDoesNotPublishOrChangeStageTotals) {
     EXPECT_FALSE(foliage_frame_active());
 }
 
+TEST(FrameAttribution, ConstCollectorsOwnMutableTotalsAndResetTheNextFrame) {
+    {
+        const FoliageFrameScope foliage(true);
+        const PhaseFrameScope phases(true);
+        {
+            const PhaseScope scene(Phase::MenuScene);
+            record_foliage_rebuild({}, 0, 262144, std::nullopt, 0);
+            EXPECT_TRUE(scene.is_current());
+        }
+        EXPECT_EQ(phases.snapshot().completed_scopes(Phase::MenuScene), 1u);
+        EXPECT_EQ(foliage.snapshot().rebuild.rebuild_calls, 1u);
+        EXPECT_EQ(foliage.snapshot().capacity, 262144u);
+        EXPECT_FALSE(foliage.snapshot().count_known);
+        EXPECT_EQ(foliage.snapshot().generated_count, 0u);
+        EXPECT_EQ(foliage.snapshot().count_generation, 0u);
+    }
+    EXPECT_FALSE(foliage_frame_active());
+    EXPECT_DOUBLE_EQ(phase_total_ms(), 0);
+    const FoliageFrameScope next_foliage(true);
+    const PhaseFrameScope next_phases(true);
+    EXPECT_EQ(next_foliage.snapshot().rebuild.rebuild_calls, 0u);
+    EXPECT_EQ(next_phases.snapshot().completed_scopes(Phase::MenuScene), 0u);
+}
+
+TEST(FrameAttribution, PhaseCollectorsAreIsolatedAcrossThreads) {
+    const PhaseFrameScope frame(true);
+    const PhaseScope parent(Phase::MenuScene);
+    bool worker_saw_parent = false;
+    bool worker_scope_active = false;
+    bool worker_frame_active = false;
+    bool worker_disabled_active = false;
+    bool worker_restored = false;
+    bool worker_finally_saw_parent = false;
+    double worker_initial_total = -1;
+    double worker_final_total = -1;
+    PhaseTotals worker_totals;
+    // The parent stays idle until join: shared-state mutations fail without
+    // concurrent reads/writes or assumptions about scheduler/clock precision.
+    std::thread worker([&] {
+        worker_saw_parent = parent.is_current();
+        worker_initial_total = phase_total_ms();
+        {
+            const PhaseFrameScope worker_frame(true);
+            worker_frame_active = worker_frame.is_current();
+            {
+                const PhaseScope ui(Phase::UiUpdate);
+                worker_scope_active = ui.is_current();
+                {
+                    const PhaseFrameScope disabled(false);
+                    const PhaseScope ignored(Phase::UiFilters);
+                    worker_disabled_active = disabled.is_current() || ignored.is_current();
+                }
+                worker_restored = worker_frame.is_current() && ui.is_current();
+            }
+            worker_totals = worker_frame.snapshot();
+        }
+        worker_finally_saw_parent = parent.is_current();
+        worker_final_total = phase_total_ms();
+    });
+    worker.join();
+    EXPECT_FALSE(worker_saw_parent);
+    EXPECT_DOUBLE_EQ(worker_initial_total, 0);
+    EXPECT_TRUE(worker_frame_active);
+    EXPECT_TRUE(worker_scope_active);
+    EXPECT_FALSE(worker_disabled_active);
+    EXPECT_TRUE(worker_restored);
+    EXPECT_FALSE(worker_finally_saw_parent);
+    EXPECT_DOUBLE_EQ(worker_final_total, 0);
+    EXPECT_EQ(worker_totals.completed_scopes(Phase::UiUpdate), 1u);
+    EXPECT_EQ(worker_totals.completed_scopes(Phase::UiFilters), 0u);
+    EXPECT_EQ(frame.snapshot().completed_scopes(Phase::UiUpdate), 0u);
+    EXPECT_TRUE(frame.is_current());
+    EXPECT_TRUE(parent.is_current());
+    {
+        const PhaseScope ui(Phase::UiUpdate);
+        EXPECT_TRUE(ui.is_current());
+    }
+    EXPECT_TRUE(parent.is_current());
+    EXPECT_EQ(frame.snapshot().completed_scopes(Phase::UiUpdate), 1u);
+}
+
 // A bounded sink that accepts a prefix, then reports a write error on every
 // platform. It exercises the same row writer and status used by FrameRecorder.
 class FailingBuffer : public std::streambuf {

@@ -141,8 +141,16 @@ double exclusive_parent_ms(double parent_ms, double nested_before_ms, double nes
     return parent_ms - (nested_after_ms - nested_before_ms);
 }
 namespace {
-thread_local PhaseTotals* current_phases = nullptr;
-thread_local const PhaseScope* current_phase_scope = nullptr;
+// Frame guards own the totals; each thread only borrows its active guard's
+// mutable storage. Keep the stack pointers local to their accessors, like foliage.
+PhaseTotals*& current_phases() {
+    thread_local PhaseTotals* totals = nullptr;
+    return totals;
+}
+const PhaseScope*& current_phase_scope() {
+    thread_local const PhaseScope* scope = nullptr;
+    return scope;
+}
 double foliage_ms() {
     const auto* frame = current_foliage_frame();
     return frame ? frame->rebuild_ms : 0;
@@ -174,27 +182,28 @@ void PhaseTotals::add(Phase phase, double inclusive_ms, double child_ms, double 
     m_inclusive_ms.at(static_cast<std::size_t>(phase)) += inclusive_ms;
 }
 PhaseFrameScope::PhaseFrameScope(bool enabled)
-    : m_previous(current_phases) {
-    current_phases = enabled ? &m_totals : nullptr;
-    shader_first_use_collection_enabled = current_phases != nullptr;
+    : m_previous(current_phases()) {
+    current_phases() = enabled ? &m_totals : nullptr;
+    shader_first_use_collection_enabled = current_phases() != nullptr;
 }
 PhaseFrameScope::~PhaseFrameScope() {
-    current_phases = m_previous;
-    shader_first_use_collection_enabled = current_phases != nullptr;
+    current_phases() = m_previous;
+    shader_first_use_collection_enabled = current_phases() != nullptr;
 }
 bool PhaseFrameScope::is_current() const {
-    return current_phases == &m_totals;
+    return current_phases() == &m_totals;
 }
 double phase_total_ms() {
-    return current_phases ? current_phases->sum() : 0;
+    const auto* totals = current_phases();
+    return totals ? totals->sum() : 0;
 }
 PhaseScope::PhaseScope(Phase phase, bool enabled)
     : m_phase(phase) {
-    if (!enabled || !current_phases)
+    if (!enabled || !current_phases())
         return;
-    m_totals = current_phases;
-    m_parent = current_phase_scope;
-    current_phase_scope = this;
+    m_totals = current_phases();
+    m_parent = current_phase_scope();
+    current_phase_scope() = this;
     m_foliage_before = foliage_ms();
     m_start = std::chrono::steady_clock::now();
 }
@@ -210,10 +219,10 @@ PhaseScope::~PhaseScope() {
         m_parent->m_children_ms += elapsed;
         m_parent->m_child_foliage_ms += foliage;
     }
-    current_phase_scope = m_parent;
+    current_phase_scope() = m_parent;
 }
 bool PhaseScope::is_current() const {
-    return m_totals && m_totals == current_phases && current_phase_scope == this;
+    return m_totals && m_totals == current_phases() && current_phase_scope() == this;
 }
 double FrameBuckets::sum() const {
     return sim + stream + render + present + foliage + scatter + rebake + poll + menu + ui;

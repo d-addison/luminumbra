@@ -110,7 +110,8 @@ public:
     }
 
 private:
-    FoliageFrame m_frame{};
+    // Rebuilds update the owned storage even when the RAII guard is const.
+    mutable FoliageFrame m_frame{};
     FoliageFrame* m_previous = nullptr;
 };
 bool foliage_frame_active();
@@ -205,7 +206,8 @@ public:
     bool is_current() const;
 
 private:
-    PhaseTotals m_totals{};
+    // Completed phases update the owned storage even when the RAII guard is const.
+    mutable PhaseTotals m_totals{};
     PhaseTotals* m_previous = nullptr;
 };
 // The client and static-preview host each have one owning render thread/context.
