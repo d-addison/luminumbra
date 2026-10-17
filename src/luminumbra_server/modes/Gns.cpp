@@ -1,6 +1,8 @@
 #include "ModeHelpers.h"
 #include "Modes.h"
 
+#include <utility>
+
 namespace fs = std::filesystem;
 
 #ifdef LUMINUMBRA_ENABLE_GNS
@@ -47,8 +49,12 @@ int RunGnsHost(const ServerCliOptions& options) {
         return 1;
     }
 
-    Luminumbra::Net::ReplicationServer server;
     std::vector<std::unique_ptr<Luminumbra::Net::GnsTransport>> transports;
+    std::vector<std::unique_ptr<Luminumbra::Net::AdmittedReplicationTransport>> admitted;
+    Luminumbra::Net::ReplicationServer server;
+    auto host_identity = RuntimeHelloFrom(options, runner.Session());
+    host_identity.client_id = 0;
+    admitted.reserve(expected_clients);
     std::vector<std::uint32_t> client_ids;
     transports.reserve(expected_clients);
     client_ids.reserve(expected_clients);
@@ -91,24 +97,17 @@ int RunGnsHost(const ServerCliOptions& options) {
             Luminumbra::Net::GnsLink::Shutdown();
             return 1;
         }
-        auto expected_hello = RuntimeHelloFrom(options, runner.Session());
-        RuntimeHelloAdmission admission = RuntimeHelloAdmission::Pending;
-        while (std::chrono::steady_clock::now() < deadline) {
-            Luminumbra::Net::GnsLink::RunCallbacks();
-            admission = PollRuntimeHello(*transport, expected_hello, client_id);
-            if (admission != RuntimeHelloAdmission::Pending)
-                break;
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        }
-        if (admission != RuntimeHelloAdmission::Accepted) {
-            LUMINUMBRA_CORE_ERROR("gns-host: missing or incompatible Hello");
+        auto gate = std::make_unique<Luminumbra::Net::AdmittedReplicationTransport>(
+            *transport, Luminumbra::Net::ReplicationAdmissionRole::Host, host_identity, client_id);
+        if (!AwaitReplicationAdmission(*gate, &Luminumbra::Net::GnsLink::RunCallbacks)) {
             transport->Close();
             for (auto& accepted : transports)
                 accepted->Close();
             Luminumbra::Net::GnsLink::Shutdown();
             return 1;
         }
-        server.AddClient(client_id, transport.get());
+        server.AddClient(client_id, gate.get());
+        admitted.push_back(std::move(gate));
         client_ids.push_back(client_id);
         transports.push_back(std::move(transport));
     }
@@ -147,8 +146,8 @@ int RunGnsHost(const ServerCliOptions& options) {
         const auto states = Luminumbra::World::BuildAvatarReplStates(runner.Avatars());
         server.BroadcastSnapshot(executed, states);
         std::size_t connected_count = 0;
-        for (const auto& transport : transports) {
-            if (transport->IsPeerConnected()) {
+        for (const auto& gate : admitted) {
+            if (gate->IsPeerConnected()) {
                 ++connected_count;
             }
         }
@@ -221,15 +220,16 @@ int RunGnsJoin(const ServerCliOptions& options) {
     }
     LUMINUMBRA_CORE_INFO("gns-join: player {} connected over UDP.", player_id);
 
-    auto hello = RuntimeHelloFrom(options);
-    hello.client_id = player_id;
-    if (!transport.SendFrame(Luminumbra::Net::EncodeHello(hello))) {
+    auto local_identity = RuntimeHelloFrom(options);
+    local_identity.client_id = player_id;
+    Luminumbra::Net::AdmittedReplicationTransport admitted(
+        transport, Luminumbra::Net::ReplicationAdmissionRole::Joiner, std::move(local_identity), 0);
+    if (!AwaitReplicationAdmission(admitted, &Luminumbra::Net::GnsLink::RunCallbacks)) {
         transport.Close();
         Luminumbra::Net::GnsLink::Shutdown();
         return 1;
     }
-
-    Luminumbra::Net::ReplicationClient client(player_id, &transport);
+    Luminumbra::Net::ReplicationClient client(player_id, &admitted);
     std::uint32_t last_seq = 0;
     std::size_t max_entities = 0;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
@@ -249,7 +249,7 @@ int RunGnsJoin(const ServerCliOptions& options) {
         }
         if (last_seq >= options.ticks)
             break;
-        if (!transport.IsPeerConnected() && last_seq > 0)
+        if (!admitted.IsPeerConnected())
             break;
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }

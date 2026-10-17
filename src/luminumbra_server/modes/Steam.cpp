@@ -1,6 +1,8 @@
 #include "ModeHelpers.h"
 #include "Modes.h"
 
+#include <utility>
+
 namespace fs = std::filesystem;
 
 #ifdef LUMINUMBRA_ENABLE_STEAM
@@ -37,6 +39,9 @@ int RunSteamHost(const ServerCliOptions& options) {
         return 1;
     }
 
+    auto host_identity = RuntimeHelloFrom(options, runner.Session());
+    host_identity.client_id = 0;
+
     Luminumbra::Net::SteamNetworkingTransport transport;
     if (!transport.Listen(options.port)) {
         LUMINUMBRA_CORE_ERROR("steam-host: CreateListenSocketIP failed on port {}", options.port);
@@ -54,23 +59,15 @@ int RunSteamHost(const ServerCliOptions& options) {
     }
     LUMINUMBRA_CORE_INFO("steam-host: peer connected over Steam UDP.");
 
-    Luminumbra::Net::ReplicationServer server;
-    auto expected_hello = RuntimeHelloFrom(options, runner.Session());
-    RuntimeHelloAdmission admission = RuntimeHelloAdmission::Pending;
-    while (std::chrono::steady_clock::now() < deadline) {
-        Luminumbra::Net::SteamLink::RunCallbacks();
-        admission = PollRuntimeHello(transport, expected_hello, 1u);
-        if (admission != RuntimeHelloAdmission::Pending)
-            break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    if (admission != RuntimeHelloAdmission::Accepted) {
-        LUMINUMBRA_CORE_ERROR("steam-host: missing or incompatible Hello");
+    Luminumbra::Net::AdmittedReplicationTransport admitted(
+        transport, Luminumbra::Net::ReplicationAdmissionRole::Host, std::move(host_identity), 1);
+    if (!AwaitReplicationAdmission(admitted, &Luminumbra::Net::SteamLink::RunCallbacks)) {
         transport.Close();
         Luminumbra::Net::SteamLink::Shutdown();
         return 1;
     }
-    server.AddClient(1, &transport);
+    Luminumbra::Net::ReplicationServer server;
+    server.AddClient(1, &admitted);
     server.SetAoiChunkRadius(3, Luminumbra::CHUNK_SIZE_X * 1000);
     const std::uint32_t controlled = runner.Avatars().size() > 1 ? 1u : 0u;
     const float initial_x =
@@ -93,7 +90,7 @@ int RunSteamHost(const ServerCliOptions& options) {
         }
         const auto states = Luminumbra::World::BuildAvatarReplStates(runner.Avatars());
         server.BroadcastSnapshot(executed, states);
-        if (!transport.IsPeerConnected()) {
+        if (!admitted.IsPeerConnected()) {
             LUMINUMBRA_CORE_WARN("steam-host: peer left at tick {}", executed);
             break;
         }
@@ -138,15 +135,16 @@ int RunSteamJoin(const ServerCliOptions& options) {
     }
     LUMINUMBRA_CORE_INFO("steam-join: connected over Steam UDP.");
 
-    auto hello = RuntimeHelloFrom(options);
-    hello.client_id = 1u;
-    if (!transport.SendFrame(Luminumbra::Net::EncodeHello(hello))) {
+    auto local_identity = RuntimeHelloFrom(options);
+    local_identity.client_id = 1;
+    Luminumbra::Net::AdmittedReplicationTransport admitted(
+        transport, Luminumbra::Net::ReplicationAdmissionRole::Joiner, std::move(local_identity), 0);
+    if (!AwaitReplicationAdmission(admitted, &Luminumbra::Net::SteamLink::RunCallbacks)) {
         transport.Close();
         Luminumbra::Net::SteamLink::Shutdown();
         return 1;
     }
-
-    Luminumbra::Net::ReplicationClient client(1, &transport);
+    Luminumbra::Net::ReplicationClient client(1, &admitted);
     std::uint32_t last_seq = 0;
     std::size_t max_entities = 0;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
@@ -166,7 +164,7 @@ int RunSteamJoin(const ServerCliOptions& options) {
         }
         if (last_seq >= options.ticks)
             break;
-        if (!transport.IsPeerConnected() && last_seq > 0)
+        if (!admitted.IsPeerConnected())
             break;
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }

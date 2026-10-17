@@ -152,8 +152,9 @@ imply host migration, matchmaking or private Steam relay availability.
 Software releases remain source-only; art packs are separately versioned game
 content. Preset revision 7 retains revision 6 omission compatibility. LMR1 v2,
 FSD2 payload v3, canonical in-memory serialization and terrain-quality assertions
-remain the format contracts. Lockstep protocol and LREC1 replay layout are version 3;
-older layouts cannot bind resolved content and are refused.
+remain the format contracts. Lockstep protocol is version 4 and binds captured
+simulation content; LREC1 replay layout is version 3 and binds resolved preset content.
+Older layouts cannot bind their required content identities and are refused.
 Every shipping feature is enabled by default;
 obsolete-world migration and legacy save loading are not supported.
 
@@ -197,7 +198,7 @@ verification.
 
 ### v0.3.1 — Planned continuation and qualification
 
-- [issue #77 — Provide typed commands, console help/history and bounded logs](https://github.com/d-addison/luminumbra/issues/77) — Planned for v0.3.1.
+- [issue #77 — Provide typed commands, console help/history and bounded logs](https://github.com/d-addison/luminumbra/issues/77) — Implemented — typed developer commands, generated help, session history and bounded attached logs.
 
 Indexed authority durability/rehydration, durable completed work and ground-object
 continuation, durable regional fields/weather/scent/energy, and regional foliage/water
@@ -240,6 +241,14 @@ Performance work to ship regional continuation on by default is planned for v0.4
 - [issue #74 — Export an installed SDK and build an independent consumer](https://github.com/d-addison/luminumbra/issues/74)
 - [issue #75 — Register configuration, content and authoritative state through engine interfaces](https://github.com/d-addison/luminumbra/issues/75)
 - [issue #76 — Establish shared UI focus, capture, cursor and navigation services](https://github.com/d-addison/luminumbra/issues/76)
+
+  The v0.3.1 client delivers the developer-console subset of the UI and command foundations:
+  centralized callback routing, explicit developer/RmlUi focus, held-key release
+  quarantine and cursor ownership; typed developer commands, generated help,
+  session history and bounded attached logs. These are client presentation services.
+  General engine-wide navigation/module APIs, scripting and arbitrary simulation
+  setters remain outside this delivered subset. See [Developer console](developer-console.md).
+
 - [issue #78 — Register inspection panels, truthful profiling and local capture bundles](https://github.com/d-addison/luminumbra/issues/78)
 - [issue #79 — Enforce game-free engine targets, headers, content and startup in CI](https://github.com/d-addison/luminumbra/issues/79)
 - [issue #104 — Provide optional channel-neutral field simulation services](https://github.com/d-addison/luminumbra/issues/104)

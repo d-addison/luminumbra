@@ -6,11 +6,21 @@
 #include "world/TerrainPresetLoader.h"
 #include "world/WorldgenFileReader.h"
 
+#include "../world/WorldClock.h"
 #include <algorithm>
 #include <cmath>
-#include <fstream>
+#include <cstddef>
+#include <ctime>
+#include <exception>
+#include <filesystem>
+#include <functional>
+#include <luminumbra/core/Types.h>
 #include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
+#include <stop_token>
+#include <string>
 #include <utility>
+#include <vector>
 
 namespace Luminumbra::Persistence {
 namespace {
@@ -105,11 +115,11 @@ SavedWorld InspectSavedWorld(const fs::path& root,
             result.pending_recovery = true;
             result.error.clear();
             try {
-                std::error_code size_ec;
+                std::string bytes;
                 if (fs::is_regular_file(metadata_path) &&
-                    fs::file_size(metadata_path, size_ec) <= 1024 * 1024 && !size_ec) {
-                    std::ifstream pending_input(metadata_path);
-                    const auto pending_json = nlohmann::json::parse(pending_input);
+                    read_bounded_save_file(
+                        metadata_path, bytes, kMaxSaveMetadataBytes, nullptr, stop)) {
+                    const auto pending_json = nlohmann::json::parse(bytes);
                     if (pending_json.is_object()) {
                         if (pending_json.contains("name") && pending_json.at("name").is_string())
                             result.metadata.name = pending_json.at("name").get<std::string>();
@@ -118,20 +128,19 @@ SavedWorld InspectSavedWorld(const fs::path& root,
                     }
                 }
             } catch (const std::exception&) {
-                // Best effort only.
+                // Best effort only; the recovery refusal remains authoritative.
+                return result;
             }
             return result;
         }
         if (!fs::is_regular_file(metadata_path))
             return result;
-        if (fs::file_size(metadata_path) > 1024 * 1024) {
-            result.error = "Corrupt world metadata: exceeds the 1 MiB limit.";
+        std::string bytes;
+        if (!read_bounded_save_file(metadata_path, bytes, kMaxSaveMetadataBytes, nullptr, stop)) {
+            result.error = "Corrupt world metadata: unreadable or exceeds the 1 MiB limit.";
             return result;
         }
-        std::ifstream input(metadata_path);
-        if (!input)
-            return result;
-        const auto json = nlohmann::json::parse(input);
+        const auto json = nlohmann::json::parse(bytes);
         if (json.is_object() && json.contains("name") && json.at("name").is_string())
             result.metadata.name = json.at("name").get<std::string>();
         // Preserve the persistence service's exact obsolete/future/corrupt diagnostics.

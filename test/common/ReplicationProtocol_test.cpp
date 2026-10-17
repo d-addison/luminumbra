@@ -33,6 +33,52 @@ TEST(ReplicationProtocol, UsercmdRoundTrip) {
     EXPECT_EQ(in, out);
 }
 
+TEST(ReplicationProtocol, UsercmdHasExactly19PayloadBytes) {
+    UsercmdMsg command;
+    command.tick = 0x315054534cULL; // LSTP1 must remain a legal command tick.
+    command.player_id = 7;
+    command.move_x = -1;
+    command.move_z = 2;
+    command.yaw_mrad = 3;
+    command.action_bits = 4;
+    const auto frame = EncodeUsercmd(command);
+    const std::vector<std::uint8_t> expected{1, 19, 0, 0, 0, 'L', 'S', 'T', 'P', '1', 0, 0,
+                                             0, 7,  0, 0, 0, 255, 255, 2,   0,   3,   0, 4};
+    EXPECT_EQ(frame, expected);
+    EXPECT_EQ(frame.size(), 5 + kUsercmdPayloadBytes);
+    UsercmdMsg decoded;
+    ASSERT_TRUE(DecodeUsercmd(frame, decoded));
+    EXPECT_EQ(decoded, command);
+    for (std::size_t size = 0; size < frame.size(); ++size) {
+        auto truncated = frame;
+        truncated.resize(size);
+        EXPECT_FALSE(DecodeUsercmd(truncated, decoded)) << size;
+    }
+    for (const bool update_length : {false, true}) {
+        auto extended = frame;
+        extended.push_back(0);
+        if (update_length)
+            ++extended[1];
+        EXPECT_FALSE(DecodeUsercmd(extended, decoded));
+    }
+}
+
+TEST(ReplicationProtocol, HelloIsNeverAUsercmdAndLegacyHelloDecoderRemainsPermissive) {
+    HelloMsg hello;
+    hello.system_config_identity = "config";
+    hello.preset_content_hash = "content";
+    auto frame = EncodeHello(hello);
+    UsercmdMsg command;
+    EXPECT_FALSE(DecodeUsercmd(frame, command));
+    frame.push_back(0);
+    HelloMsg decoded;
+    EXPECT_TRUE(DecodeHello(frame, decoded)); // Strictness is scoped to admission.
+    EXPECT_FALSE(DecodeUsercmd(frame, command));
+    ++frame[1];
+    EXPECT_TRUE(DecodeHello(frame, decoded));
+    EXPECT_FALSE(DecodeUsercmd(frame, command));
+}
+
 TEST(ReplicationProtocol, AckRoundTrip) {
     AckMsg in;
     in.snapshot_seq = 999;

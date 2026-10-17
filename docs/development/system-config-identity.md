@@ -105,13 +105,17 @@ Preserving an override on an absent-ledger load can change nondefault scheduling
 derived world/replay hashes compared with the previous default-substitution bug; no pins
 for that incorrect behavior are retained or introduced.
 
-Lockstep protocol and LREC1 layout versions are 3. Hello and replay headers carry
-length-prefixed configuration identity and `preset_content_hash` strings. Versions 1
-and 2 are explicitly rejected because they cannot bind resolved preset content.
+Lockstep protocol is version 4; LREC1 replay layout is version 3. Hello and replay
+headers carry length-prefixed configuration identity and `preset_content_hash` strings.
+Hello also carries the captured simulation-content identity, bounded to 40 bytes, or
+the explicit inactive identity when active regions are disabled. Earlier Hello versions
+are rejected because they cannot bind captured simulation content; replay versions 1
+and 2 are rejected because they cannot bind resolved preset content.
 Desync replay dumps include both identities captured at handshake. TCP (including
 runtime/soak modes) hosts validate the same Hello compatibility fields before adding a
-replication client. TCP joiners send Hello before user commands. TCP lockstep and replay
-enforce both identities before simulation starts.
+replication client. TCP joiners send Hello before user commands. TCP lockstep enforces
+all three identities before simulation starts; replay enforces the configuration and
+resolved preset-content identities.
 
 Runtime and soak TCP client slots allow 10 seconds from accept completion (when the
 host begins awaiting Hello) for a complete matching Hello frame. A monotonic
@@ -129,7 +133,11 @@ Entries for files carry their exact-byte hash and, for biome tables, the loader 
 Directory and absent-file entries carry explicit state markers instead of file hashes.
 The manifest sorts entries by logical `data_root`-relative path, normalizes dot components
 and uses UTF-8 with `/` separators. Each file hash covers the exact bytes read in binary mode,
-including whitespace; absolute or escaping dependency paths are refused.
+including whitespace; absolute or escaping dependency paths are refused. Logical
+names must be well-formed UTF-8 before entering the manifest or species registry;
+invalid species filenames fail the scan before any reads. Resolver exceptions,
+including JSON serialization failures, return diagnostics without publishing an
+identity or dependency snapshot, leaving an existing live world unchanged.
 Runtime-resolved absolute asset paths and diagnostic provenance are excluded.
 FNV-1a-64 for both the envelope and each dependency file uses offset
 `14695981039346656037`, prime `1099511628211`, modulo-2^64 arithmetic and exactly 16
@@ -167,23 +175,128 @@ refuses loading without publishing an identity; it never becomes an absence mark
 Biome material names resolve to compiled material IDs, and neither biome nor structure JSON recursively references other files.
 Procedural shaping, hydro, caves, rivers, lakes, cliffs and surface breaks use preset
 parameters and compiled algorithms, without additional disk inputs. Runtime species
-definitions are loaded separately by GameSession for creature behavior, not terrain
-generation; they are outside this worldgen manifest.
+definitions drive GameSession creature behavior rather than terrain generation.
+The fix for issue #338 extends the same dependency manifest to bind that session
+content too: every immediate regular `*.json` under
+`data/common/creatures/species`, regardless of biome/structure feature flags.
+The logical paths are `common/creatures/species/<filename>`, converted with
+`Filesystem::GenericUtf8PathString` and sorted with the other dependency records.
+Each record uses the same exact-byte FNV-1a-64 file hash, including whitespace and
+malformed JSON. A present directory contributes `species-directory-present`;
+an absent directory contributes no records and resolves an empty registry.
+Nested files and other extensions are not consumed. Species JSON references no
+additional files; `brain` and `genome_ranges` are inline blocks.
 
-The same string continues through protocol-v3 Hello, replay-header-v3, server modes and
-NetworkedSessionDriver; their wire layout is unchanged. Earlier JSON-only identities
-will mismatch the expanded identity and refuse admission/verification.
+The species loader parses the bytes supplied by the manifest reader. Its immutable
+registry is retained in `WorldgenDependencySnapshot` and adopted by GameSession
+on both create and load, without reopening the files. Invalid JSON warns and skips
+that entry, preserving compiled fallback behavior while still binding its bytes.
+A present unreadable species input, non-directory species path or enumeration
+failure refuses resolution without publishing an identity. The runtime world is
+not replaced on this refusal. The registry reports directory-open, entry-status and
+iteration errors through diagnostics and its I/O failure flag; a failed scan reads
+no files and leaves existing entries unchanged. Loader exceptions are contained
+within the registry, including for client metadata callers. Registry order uses
+the same generic UTF-8 filename order, including when native UTF-16 path order
+would differ.
+
+The same resolved preset-content string continues through protocol-v4 Hello,
+replay-header-v3, server modes and NetworkedSessionDriver. Earlier JSON-only identities
+will mismatch the expanded identity and refuse admission/verification. The existing
+content-mismatch diagnostics apply; lockstep and replay explicitly identify
+`preset/species` content. Hello v4 separately binds the captured simulation-content
+identity, including strict policy and both species inventories.
 The older numeric replay `preset_hash` remains name
 provenance only; admission and verification require `preset_content_hash` as well.
 
-The GNS and Steam transports are optional and disabled by default. They do not yet
-exchange or check the SystemConfig identity. Identity admission for these transports is
-tracked for the next release. Their SDK declarations and mode implementations remain
-guarded when their CMake options are off.
+The GNS and Steam transports are optional and disabled by default. Both use the
+unconditionally compiled `Luminumbra::Net` replication admission gate from issue #278.
+A connected joiner sends the v4 Hello reliably. The host checks its assigned
+client ID and `HelloMatches` compatibility (protocol, seed, preset, tick rate, nonempty
+SystemConfig identity, resolved preset content hash and captured simulation-content
+identity). Hosts use `RuntimeHelloFrom(options, runner.Session())` to retain all three
+identities from the booted session; joiners resolve their local content before admission.
+GNS retains its port-to-client-slot mapping; Steam retains one remote slot, client ID 1.
+
+The host's reliable Hello with `client_id = 0` is the admission acknowledgement.
+Successful enqueueing admits the host slot and permits `AddClient`; the joiner admits
+only after validating the acknowledgement. Until then the adapter suppresses command
+and snapshot-ack sends and discards snapshots without updating reconstruction history.
+Commands arriving before Hello are discarded without disconnecting or extending the
+deadline. Unreliable Hello or acknowledgement frames are rejected. Repeated compatible
+Hello frames are consumed as control and may resend the acknowledgement without
+registering another client. Malformed control, incompatible identity, send failure,
+disconnect and deadline expiry close with specific diagnostic reasons. Received delivery
+flags are retained before releasing each sockets message.
+
+`kAdmissionTimeoutTicks = 150` uses elapsed `steady_clock` time at the local 30 Hz
+handshake cadence: 150 ticks / approximately 5 seconds, independent of simulation
+progress and callback or replication loop iteration counts. The host starts at
+connection establishment; the joiner starts when its Hello is successfully enqueued.
+Expiry is at elapsed tick `>= 150`. Each admission pump drains at most 32 frames, so
+continuous traffic cannot postpone deadline checks. The connection-establishment limit
+remains separately 30 seconds. Runtime TCP slots instead use
+`RuntimeTcpClientSlot::kHelloTimeout`, ten seconds from accept completion (issue #315).
+This optional-transport gate does not alter TCP admission or add a TCP acknowledgement.
+
+Hello and user commands share tag `0x01`. Admission validates the complete outer frame
+length first: exactly `kUsercmdPayloadBytes = 19` payload bytes (24 total) identifies a
+command, even when its tick starts with `LSTP1`. Other frames with this tag must carry
+the Hello magic and satisfy `DecodeHello(frame, hello) && EncodeHello(hello) == frame`.
+Failed Hello decoding never falls back to command decoding. The general Hello decoder
+keeps its existing permissive TCP/lockstep behavior. `DecodeUsercmd` now rejects trailing
+extensions, including those whose outer length was adjusted to include the extra bytes.
+Command encoding remains replication protocol 1, and LREC1 layout remains version 3.
+Hello uses lockstep protocol 4 with captured simulation-content identity; Hello
+versions 1 through 3 are rejected. Older optional joiners cannot admit through commands;
+new joiners discard older hosts' snapshots until acknowledgement timeout.
+
+The command-length compatibility audit found one production command encoder,
+`EncodeUsercmd`, writing exactly `u64 tick + u32 player_id + 3 * i16 + u8 = 19` bytes,
+with no extension path. `ReplicationClient::SendUsercmd` sends those bytes unchanged;
+`ReplicationServer::PumpInbound` is the production replication decoder. TCP replication
+uses these same endpoints. TCP lockstep instead encodes `InputMsg` through
+`EncodeInput`/`DecodeInput` with a separately length-prefixed opaque blob. Desync dumps
+write those merged blobs through `ReplayWriter::RecordInput`; replay streams use
+`RecordInput`/`ReadReplay`, never `DecodeUsercmd`. Headless recordings use empty input
+blobs. Replay regression fixtures generate empty or arbitrary opaque blobs with those
+replay APIs; smoke artifact fixtures contain options and result/hash metadata, not encoded
+replication commands. No checked-in binary replay/command stream or alternate command
+encoder was found. Thus no existing valid command stream requires trailing bytes; opaque
+lockstep/replay blobs keep their existing independent length contracts.
+
+Admission regressions run in `common_tests` with both SDKs disabled, using explicit
+ticks and scripted paired transports that preserve delivery flags and can suppress a
+reliable acknowledgement. Ordinary `NetworkSim` packet loss does not drop reliable
+frames and cannot exercise that timeout. The GNS compile probe builds both
+`luminumbra_common` and `luminumbra_server_app`, and checks the shared sockets and GNS
+mode objects. No CI job enables Steam; its guarded modes still require an SDK-equipped
+Windows preview build. SDK declarations and mode implementations remain guarded when
+their CMake options are off.
 
 Saves carry no simulation identity. Loading applies the loading process's gates and
 tuning; an active-region ledger also persists its own scheduler configuration and cadence
 state. With no explicit scheduler override, a loaded ledger's settings become effective.
+
+For v0.3.0-era artifacts, replay headers that recorded a preset-only content hash
+are refused before playback when the runtime resolves species records, just like
+the earlier expansion from JSON-only to biome/structure dependencies. This is
+symmetric: older engines also refuse the expanded hash. Versions 1/2 remain
+unsupported. A dependency-free installation with no species directory has no
+additional records and retains its former identity. Existing v0.3.0-format saves
+adopt the loading installation's species definitions, as they already adopt
+current biome/structure dependencies; they do not store this session content hash.
+The optional historical `presetIdentity` metadata check remains a distinct frozen
+preset JSON check and is unchanged. No save migration or container-version change
+is introduced; pre-v0.3.0 format refusals remain unchanged.
+
+Identity coverage regressions define the expected five simulation gates and every
+applied tuning parameter from the configuration/application contract, independently
+of the encoder. Tuning-only flag changes at default values are neutral by contract.
+Every expected variant and public-setter mutation is returned and asserted to
+change identity; the helper never discards an unchanged result. An omitted input
+therefore fails coverage, handshake and replay regressions instead of disappearing.
+
 An explicit `SetRegionSchedulerConfig` override (including an explicit default, or
 `--sim-budget-profile` scheduler settings) must match all three persisted fields; a
 conflict refuses world loading with `Incompatible configuration: persisted region
@@ -209,7 +322,8 @@ JSON override and `--preset-json <path>` for a validated new-world terrain prese
 Paths are relative to the working directory. Missing or invalid overrides fail before
 world creation. Server smoke, recording, replay, and lockstep share the resolved
 configuration; the client networked smoke also supplies it to its host authority.
-Replay and Hello identities still come from `GameSession::SystemConfigIdentity()`.
+Replay and Hello configuration identities come from `GameSession::SystemConfigIdentity()`;
+their content identities come from `GameSession::PresetContentHash()`, including species.
 Record and replay must receive the same overrides.
 
 Historical determinism pins use `test/fixtures/historical-defaults-off.json` together
