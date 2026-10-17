@@ -131,8 +131,8 @@ TEST_F(SyntheticSaveFixture, WritesCatalogValidWorld) {
                   nlohmann::json::parse(Read(report.save_dir / "preset.json")).dump()));
     EXPECT_EQ(Read(report.save_dir / "preset.json"), Read(spec.preset_source));
 
-    const auto inspected = Persistence::InspectSavedWorld(
-        root, fs::path(LUMINUMBRA_SOURCE_ROOT) / "data", spec.world_id);
+    const auto inspected =
+        Persistence::InspectSavedWorld(root, fs::path(LUMINUMBRA_SOURCE_ROOT), spec.world_id);
     EXPECT_EQ(inspected.error, "");
     EXPECT_TRUE(WorldSaveService::validate_save(report.save_dir));
     EXPECT_TRUE(fs::exists(WorldSaveService::world_manifest_path(report.save_dir)));

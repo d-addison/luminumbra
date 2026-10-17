@@ -181,7 +181,9 @@ PLACEHOLDER_BINDINGS = {workload: placeholder_script(workload)
 @contextlib.contextmanager
 def placeholder_bindings():
     """Bind the blocked traversals to placeholder scripts for the duration of the block."""
-    with mock.patch.dict(rq.BOUND_TRAVERSAL_SCRIPTS, PLACEHOLDER_BINDINGS):
+    with mock.patch.dict(rq.BOUND_TRAVERSAL_SCRIPTS, PLACEHOLDER_BINDINGS), \
+            mock.patch.dict(rq.BOUND_TRAVERSAL_SHA256,
+                            {workload: 'b' * 64 for workload in PLACEHOLDER_BINDINGS}):
         yield
 
 
@@ -203,6 +205,9 @@ def passing_results(matrix, renderer=RENDERER):
             'script': script, 'state': 'pass', 'reason': None, 'adapter': adapter(renderer),
             'artifact': f"cells/{cell['id']}.json", 'verdict': verdict(), 'checker_canonical': True,
             'matrix_canonical': True,
+            'traversal': None if script is None else {
+                'sha256': rq.BOUND_TRAVERSAL_SHA256.get(cell['workload'], 'b' * 64),
+                'verified': True},
             'client': {'kind': 'native', 'native_build': True, 'sha256_verified': True,
                         'sha256': 'a' * 64, 'build_manifest_client_sha256': 'a' * 64,
                         'reason': None}})
@@ -353,6 +358,10 @@ class FullMatrixTests(RunnerTestBase):
                 config_arg = command[command.index('--systems-config') + 1]
                 self.assertTrue(Path(config_arg).is_absolute())
                 self.assertEqual(config_arg, str(systems_config))
+                self.assertEqual(command.count('--declare-render-overrides'), 1)
+                declaration = Path(command[command.index('--declare-render-overrides') + 1])
+                self.assertEqual(json.loads(declaration.read_text(encoding='utf-8')),
+                                 {'cli:--systems-config': config_arg})
                 self.assertEqual(receipt['systems_config'],
                                  {'path': str(systems_config),
                                   'sha256': rq.runner.file_sha256(systems_config),
@@ -367,6 +376,122 @@ class FullMatrixTests(RunnerTestBase):
 
 
 class SelectionTests(RunnerTestBase):
+    def test_missing_expected_traversal_digest_exits_2_without_launch(self):
+        matrix = matrix_lib.load_matrix(self.matrix_path)
+        entry = next(entry for entry in matrix['workloads'] if entry['id'] == 'surface-flight')
+        del entry['script_sha256']
+        self.matrix_path.write_text(json.dumps(matrix), encoding='utf-8')
+        with mock.patch.object(rq.runner, 'run_process') as launch, \
+                mock.patch.object(rq.subprocess, 'run') as checker:
+            code, _, error = self.run_main(self.argv('--only', SURFACE_CELL))
+        self.assertEqual(code, 2)
+        self.assertIn('script_sha256', error)
+        self.assertFalse(self.out.exists())
+        launch.assert_not_called()
+        checker.assert_not_called()
+
+    def test_tampered_traversal_fixture_exits_1_without_launch(self):
+        source = self.tmp / 'tampered.traversal'
+        source.write_bytes((planner.ROOT / rq.CANONICAL_SURFACE_SCRIPT).read_bytes() + b'\n')
+        matrix = matrix_lib.load_matrix(self.matrix_path)
+        entry = next(entry for entry in matrix['workloads'] if entry['id'] == 'surface-flight')
+        entry['script'] = str(source)
+        self.matrix_path.write_text(json.dumps(matrix), encoding='utf-8')
+        with mock.patch.object(rq.runner, 'run_process') as launch, \
+                mock.patch.object(rq.subprocess, 'run') as checker:
+            code, _, _ = self.run_main(self.argv('--only', SURFACE_CELL))
+        self.assertEqual(code, 1)
+        document = self.load_qualification()
+        cell = self.cell_of(document, SURFACE_CELL)
+        self.assertEqual((cell['state'], cell['reason']),
+                         ('invalid', 'traversal SHA-256 mismatch'))
+        self.assertFalse(cell['traversal']['verified'])
+        self.assertIsNone(cell['artifact'])
+        self.assertFalse(document['render_floor_qualified'])
+        self.assertFalse((self.out / 'work' / SURFACE_CELL / 'workload.traversal').exists())
+        launch.assert_not_called()
+        checker.assert_not_called()
+
+    def test_diagnostic_traversal_uses_its_matrix_digest(self):
+        source = self.tmp / 'diagnostic.traversal'
+        source.write_bytes((planner.ROOT / rq.CANONICAL_SURFACE_SCRIPT).read_bytes() + b'\n')
+        matrix = matrix_lib.load_matrix(self.matrix_path)
+        entry = next(entry for entry in matrix['workloads'] if entry['id'] == 'surface-flight')
+        entry['script'] = str(source)
+        entry['script_sha256'] = rq.runner.file_sha256(source)
+        self.matrix_path.write_text(json.dumps(matrix), encoding='utf-8')
+        code, _, _ = self.run_main(self.argv('--only', SURFACE_CELL))
+        self.assertEqual(code, 0)
+        document = self.load_qualification()
+        cell = self.cell_of(document, SURFACE_CELL)
+        self.assertEqual(cell['state'], 'pass')
+        self.assertEqual(cell['traversal'], {'sha256': entry['script_sha256'], 'verified': True})
+        self.assertFalse(document['render_floor_qualified'])
+
+    def test_traversal_snapshot_binds_content_and_survives_source_edits(self):
+        source = self.tmp / rq.CANONICAL_SURFACE_SCRIPT
+        source.parent.mkdir(parents=True, exist_ok=True)
+        original = (planner.ROOT / rq.CANONICAL_SURFACE_SCRIPT).read_bytes()
+        source.write_bytes(original)
+        launch = rq.runner.run_process
+        spawn = subprocess.run
+        checked_scripts = []
+
+        def run(command, **kwargs):
+            if '--verdict-out' in command:
+                snapshot = Path(command[command.index('--traversal') + 1])
+                self.assertNotEqual(snapshot, source)
+                self.assertEqual(snapshot.read_bytes(), original)
+                checked_scripts.append(snapshot)
+            return spawn(command, **kwargs)
+
+        def run_process(command, **kwargs):
+            snapshot = Path(command[command.index('--traversal') + 1])
+            self.assertNotEqual(snapshot, source)
+            self.assertEqual(snapshot.read_bytes(), original)
+            source.write_bytes(original + b'\n')
+            return launch(command, **kwargs)
+
+        with mock.patch.object(rq.runner, 'run_process', side_effect=run_process), \
+                mock.patch.object(rq.subprocess, 'run', side_effect=run):
+            cell = rq.run_cells(matrix_lib.load_matrix(self.matrix_path),
+                                client=self.fake_client, out_dir=self.out, root=self.tmp,
+                                only=[SURFACE_CELL], checker=self.fake_checker,
+                                matrix_canonical=True)[0]
+        self.assertEqual(cell['state'], 'pass')
+        self.assertEqual(cell['traversal'], {
+            'sha256': rq.BOUND_TRAVERSAL_SHA256['surface-flight'], 'verified': True})
+        self.assertEqual(source.read_bytes(), original + b'\n')
+        self.assertEqual(checked_scripts, [self.out.resolve() / 'work' / SURFACE_CELL /
+                                           'workload.traversal'])
+        self.assertTrue(rq.canonical_record(cell))
+        changed = rq.run_cells(matrix_lib.load_matrix(self.matrix_path),
+                               client=self.fake_client, out_dir=self.out, root=self.tmp,
+                               only=[SURFACE_CELL], checker=self.fake_checker,
+                               matrix_canonical=True)[0]
+        self.assertEqual((changed['state'], changed['reason']),
+                         ('invalid', 'traversal SHA-256 mismatch'))
+        self.assertFalse(rq.canonical_record(changed))
+
+    def test_changed_traversal_snapshot_is_refused(self):
+        source = self.tmp / rq.CANONICAL_SURFACE_SCRIPT
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes((planner.ROOT / rq.CANONICAL_SURFACE_SCRIPT).read_bytes())
+        launch = rq.runner.run_process
+
+        def run_process(command, **kwargs):
+            completed = launch(command, **kwargs)
+            Path(command[command.index('--traversal') + 1]).write_bytes(b'changed')
+            return completed
+
+        with mock.patch.object(rq.runner, 'run_process', side_effect=run_process):
+            cell = rq.run_cells(matrix_lib.load_matrix(self.matrix_path),
+                                client=self.fake_client, out_dir=self.out, root=self.tmp,
+                                only=[SURFACE_CELL], checker=self.fake_checker)[0]
+        self.assertEqual((cell['state'], cell['reason']),
+                         ('invalid', 'traversal changed during execution'))
+        self.assertFalse(cell['traversal']['verified'])
+
     def test_client_and_checker_do_not_leak_resolved_windows_prefixes(self):
         windows = types.SimpleNamespace(**vars(os))
         windows.name = 'nt'
@@ -824,7 +949,8 @@ class DirectoryLockTests(RunnerTestBase):
 
     def test_held_lock_refuses_without_touching_any_run_files(self):
         self.assertEqual(self.run_main(self.argv('--only', SURFACE_CELL))[0], 0)
-        lock = self.out / rq.LOCK_NAME
+        # Exercise resolved diagnostics even when the temp root has no short-name alias.
+        lock = self.out / '..' / self.out.name / rq.LOCK_NAME
         lock.write_text('held by another worker', encoding='utf-8')
         before = {path: path.read_bytes() for path in self.out.rglob('*') if path.is_file()}
         with mock.patch.object(rq, 'run_cells') as launch:
@@ -832,7 +958,7 @@ class DirectoryLockTests(RunnerTestBase):
                                                    out=self.out / '..' / self.out.name))
         self.assertEqual(code, 2)
         launch.assert_not_called()
-        self.assertIn(str(lock), err)
+        self.assertIn(str(lock.resolve()), err)
         self.assertIn('no automatic stale-lock reclaim', err)
         self.assertEqual(before, {path: path.read_bytes() for path in self.out.rglob('*')
                                   if path.is_file()})
@@ -1334,13 +1460,14 @@ class RuntimeRootTests(RunnerTestBase):
     def test_explicit_runtime_root_is_used_without_ancestor_fallback(self):
         runtime = self.tmp / 'explicit-runtime'
         self.make_runtime(runtime)
-        code, _, _ = self.run_main(self.argv('--only', SURFACE_CELL,
-                                              '--runtime-root', str(runtime)))
-        self.assertEqual(code, 0)
-        receipt = rq.read_json_object(self.out / 'cells' / f'{SURFACE_CELL}.process.json')
-        self.assertEqual(receipt['runtime_root'], str(runtime.resolve()))
-        self.assertEqual(receipt['systems_config']['path'],
-                         str(runtime.resolve() / 'data/common/systems.json'))
+        for option in (['--runtime-root', str(runtime)], [f'--runtime-root={runtime}']):
+            with self.subTest(option=option):
+                code, _, _ = self.run_main(self.argv('--only', SURFACE_CELL, *option))
+                self.assertEqual(code, 0)
+                receipt = rq.read_json_object(self.out / 'cells' / f'{SURFACE_CELL}.process.json')
+                self.assertEqual(receipt['runtime_root'], str(runtime.resolve()))
+                self.assertEqual(receipt['systems_config']['path'],
+                                 str(runtime.resolve() / 'data/common/systems.json'))
         for root in (Path('relative'), self.tmp / 'missing-runtime', self.tmp / 'incomplete'):
             with self.subTest(root=root), \
                     mock.patch.object(rq.runner, 'run_process') as launch:
@@ -1896,6 +2023,16 @@ class BuildManifestTests(RealCheckerTests):
 
 
 class AggregateTests(unittest.TestCase):
+    def test_changed_or_unverified_traversal_bytes_never_qualify(self):
+        with placeholder_bindings():
+            for evidence in (None, {'sha256': '0' * 64, 'verified': True},
+                             {'sha256': rq.BOUND_TRAVERSAL_SHA256['surface-flight'],
+                              'verified': False}):
+                with self.subTest(evidence=evidence):
+                    results = self.baseline()
+                    results[index_of(results, SURFACE_CELL)]['traversal'] = evidence
+                    self.assertFalse(self.aggregate(results)['render_floor_qualified'])
+
     def setUp(self):
         self.matrix = matrix_lib.load_matrix(MATRIX_PATH)
         self.declared = {'3440x1440': 60}

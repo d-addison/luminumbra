@@ -322,6 +322,9 @@ override in `src/luminumbra_client/main_client.cpp`. Each process receipt record
 `systems_config.path`, `systems_config.sha256` and `systems_config.sha256_verified`.
 A missing/unreadable configuration prevents launch; changed or unreadable bytes
 after execution fail the cell before the checker runs.
+The runner writes a per-cell `render-overrides.json` declaring the exact
+`cli:--systems-config` argument. Runtime and save roots select file locations and
+are excluded from render overrides.
 
 Every launched cell receives an absolute `--runtime-root`. The runner resolves
 the selected client executable before launch and searches only its directory and
@@ -340,6 +343,22 @@ runtime roots missing required files, and save roots that cannot be created.
 `GameSession` uses the save-root override for world creation, loading, saving and
 catalog inspection; runtime assets still come from the runtime root. Ordinary
 client launches without either option retain discovery and runtime-root storage.
+Embedded presets resolve biome and structure dependencies from the runtime's
+`data/` directory. Legacy saves without an embedded preset use the runtime's
+frozen or named atlas preset, even when storage is separate.
+
+Traversal qualification binds both the script path and its expected SHA-256.
+Every traversal entry in `tools/perf/qualification/matrix.json` requires
+`script_sha256`: 64 lowercase hexadecimal digits for the exact script bytes,
+or null for a blocked traversal whose `script` is null. A missing or malformed
+digest is a matrix input error (exit 2). Before launching a traversal, the runner
+compares the fixture bytes with that expected digest; a mismatch records an
+invalid cell and exits 1 without launching the client or checker.
+The runner snapshots each manifest into `work/<cell-id>/workload.traversal`
+(at most 64 KiB) and passes that same file to the client and checker. It verifies
+the snapshot after each process and records its digest and verification status
+in the cell's `traversal` object. Editing the source fixture changes its digest
+and prevents qualification; edits after snapshot creation cannot change that run.
 
 The supplied manifest uses the existing `luminumbra.performance_build.v1` schema:
 compiler (`id`, `version`, `target`), configuration (the existing build options
@@ -457,7 +476,26 @@ diagnostics localize a future wait; they do not establish the cause of the UCRT
 timeouts or a fix for the original `0xCFFFFFFF` incident.
 
 Shipping rendering enables vsync, TAAU and tier-1 volumetrics. Benchmark startup
-continues to force vsync off. Spatial parity, upscale seam and terrain AOV captures
+forces vsync off and the frame cap to unlimited, regardless of saved settings.
+The same presentation override applies throughout `--scenario` and `--profile-fly`
+runs, including live settings edits; it does not modify the saved choices.
+Players can set `user.video.vsync` (boolean, existing default on) and
+`user.video.frame_cap` (integer: 0 for unlimited, 30, 60, 120, 144, 165 or 240; default 0)
+through the settings screen. Invalid fields retain their previous/default values.
+The client limiter uses `steady_clock` and sleeps before spinning to its deadline.
+Windows prefers a high-resolution waitable timer. If unavailable or a wait fails,
+the fallback requests 1 millisecond timer resolution and releases the request at
+shutdown. If that request fails, it uses the queried system timer tick (or a
+15.625 millisecond default). It sleeps in whole coarse quanta that fit before the
+deadline and yields for the final sub-tick remainder. A failed high-resolution
+wait switches to this policy in the same frame. Other platforms and the
+high-resolution timer reserve 200 microseconds. Deterministic virtual-clock tests
+qualify the pacing policy only; native `SteadyFrameTiming` timer and sleep behavior
+remains unqualified until measured on Windows. Its wait runs
+before the frame work timers and is excluded from CPU/work buckets; benchmark
+wall timing has no cap wait because measurement always runs uncapped.
+
+Spatial parity, upscale seam and terrain AOV captures
 explicitly disable TAAU and record zero jitter; normal-default captures retain the
 temporal path. Validators accept preset revisions 6 and 7. The shipping hills
 traversal now declares revision 7; its pinned identities need recapture from CI

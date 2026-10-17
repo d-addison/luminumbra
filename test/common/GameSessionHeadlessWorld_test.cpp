@@ -715,6 +715,17 @@ TEST(GameSessionHeadlessWorldTest, SessionRequiredAssetListFailsCreateWorldWhenM
     jobs.shutdown();
 }
 
+void ExpectRuntimePresetIdentity(const GameSession& session, const fs::path& runtime_root) {
+    const auto saved = session.GetWorldSaveDir() / "preset.json";
+    const auto expected = Luminumbra::world::LoadTerrainPreset(saved, runtime_root / "data");
+    const auto without_runtime = Luminumbra::world::LoadTerrainPreset(saved);
+    ASSERT_TRUE(expected.ok);
+    ASSERT_FALSE(without_runtime.ok);
+    EXPECT_FALSE(without_runtime.errors.empty());
+    EXPECT_TRUE(without_runtime.preset_content_hash.empty());
+    EXPECT_EQ(session.PresetContentHash(), expected.preset_content_hash);
+}
+
 TEST(GameSessionHeadlessWorldTest, SaveRootOverrideRoutesCreateLoadSaveAndCatalog) {
     const HeadlessRoot assets;
     const HeadlessRoot storage;
@@ -750,6 +761,7 @@ TEST(GameSessionHeadlessWorldTest, SaveRootOverrideRoutesCreateLoadSaveAndCatalo
                   content_identity);
         EXPECT_TRUE(session.GetWorldSystem()->biomes_enabled());
         EXPECT_TRUE(session.GetWorldSystem()->structures_enabled());
+        ExpectRuntimePresetIdentity(session, assets.path());
         world_id = session.GetMetadata().worldId;
         const auto expected = storage.path() / "worlds/saves" / world_id;
         EXPECT_EQ(session.GetWorldSaveDir(), expected);
@@ -757,8 +769,8 @@ TEST(GameSessionHeadlessWorldTest, SaveRootOverrideRoutesCreateLoadSaveAndCatalo
         ASSERT_TRUE(session.SaveWorld());
         ASSERT_TRUE(session.SaveWorldState());
         EXPECT_TRUE(fs::is_regular_file(expected / "world_info.json"));
-        const auto catalog = Luminumbra::Persistence::EnumerateSavedWorlds(
-            session.GetSaveRootPath(), assets.path() / "data");
+        const auto catalog =
+            Luminumbra::Persistence::EnumerateSavedWorlds(session.GetSaveRootPath(), assets.path());
         EXPECT_TRUE(catalog.error.empty());
         ASSERT_EQ(catalog.worlds.size(), 1u);
         EXPECT_EQ(catalog.worlds.front().metadata.worldId, world_id);
@@ -777,6 +789,7 @@ TEST(GameSessionHeadlessWorldTest, SaveRootOverrideRoutesCreateLoadSaveAndCatalo
                   content_identity);
         EXPECT_TRUE(session.GetWorldSystem()->biomes_enabled());
         EXPECT_TRUE(session.GetWorldSystem()->structures_enabled());
+        ExpectRuntimePresetIdentity(session, assets.path());
         EXPECT_EQ(session.GetMetadata().name, "PrivateWorld");
         ASSERT_TRUE(session.SaveWorld());
         EXPECT_FALSE(fs::exists(assets.path() / "worlds/saves"));
@@ -867,11 +880,11 @@ TEST(GameSessionHeadlessWorldTest, MissingRuntimeDependenciesRefuseCreateReloadA
         EXPECT_FALSE(session.LoadWorld(world_id));
         EXPECT_FALSE(session.GetWorldOpenError().empty());
         EXPECT_EQ(session.GetWorldSystem(), nullptr);
-        const auto saved = Luminumbra::Persistence::InspectSavedWorld(
-            storage.path(), assets.path() / "data", world_id);
+        const auto saved =
+            Luminumbra::Persistence::InspectSavedWorld(storage.path(), assets.path(), world_id);
         EXPECT_FALSE(saved.error.empty());
         const auto catalog =
-            Luminumbra::Persistence::EnumerateSavedWorlds(storage.path(), assets.path() / "data");
+            Luminumbra::Persistence::EnumerateSavedWorlds(storage.path(), assets.path());
         ASSERT_EQ(catalog.worlds.size(), 1u);
         EXPECT_FALSE(catalog.worlds.front().error.empty());
         fs::remove_all(dependency);
@@ -912,11 +925,11 @@ TEST(GameSessionHeadlessWorldTest, MissingBiomeTableUsesLegacyFallbackForCreateR
         EXPECT_FALSE(session.GetWorldSystem()->biomes_enabled());
         EXPECT_TRUE(session.GetWorldSystem()->biome_table().empty());
     }
-    const auto saved = Luminumbra::Persistence::InspectSavedWorld(
-        storage.path(), assets.path() / "data", world_id);
+    const auto saved =
+        Luminumbra::Persistence::InspectSavedWorld(storage.path(), assets.path(), world_id);
     EXPECT_TRUE(saved.error.empty()) << saved.error;
     const auto catalog =
-        Luminumbra::Persistence::EnumerateSavedWorlds(storage.path(), assets.path() / "data");
+        Luminumbra::Persistence::EnumerateSavedWorlds(storage.path(), assets.path());
     ASSERT_EQ(catalog.worlds.size(), 1u);
     EXPECT_EQ(catalog.worlds.front().metadata.worldId, world_id);
     EXPECT_TRUE(catalog.worlds.front().error.empty()) << catalog.worlds.front().error;
@@ -947,11 +960,11 @@ TEST(GameSessionHeadlessWorldTest, CatalogResolvesPackagedPresetsUnderRuntimeRoo
         ASSERT_TRUE(document.contains("presetFormat"));
         ASSERT_TRUE(document.contains("presetIdentity"));
         ASSERT_TRUE(fs::remove(session.GetWorldSaveDir() / "preset.json"));
-        const auto refused = Luminumbra::Persistence::InspectSavedWorld(
-            storage.path(), assets.path() / "data", world_id);
+        const auto refused =
+            Luminumbra::Persistence::InspectSavedWorld(storage.path(), assets.path(), world_id);
         EXPECT_NE(refused.error.find("required embedded preset.json"), std::string::npos);
         const auto refused_catalog =
-            Luminumbra::Persistence::EnumerateSavedWorlds(storage.path(), assets.path() / "data");
+            Luminumbra::Persistence::EnumerateSavedWorlds(storage.path(), assets.path());
         ASSERT_EQ(refused_catalog.worlds.size(), 1u);
         EXPECT_EQ(refused_catalog.worlds.front().error, refused.error);
         // Historical saves predate the format marker, embedded preset and checksum.
@@ -961,8 +974,8 @@ TEST(GameSessionHeadlessWorldTest, CatalogResolvesPackagedPresetsUnderRuntimeRoo
             std::ofstream output(metadata);
             output << document.dump();
         }
-        const auto saved = Luminumbra::Persistence::InspectSavedWorld(
-            storage.path(), assets.path() / "data", world_id);
+        const auto saved =
+            Luminumbra::Persistence::InspectSavedWorld(storage.path(), assets.path(), world_id);
         EXPECT_TRUE(saved.error.empty()) << saved.error;
         EXPECT_EQ(saved.preset_path, assets.path() / "worlds/atlas/presets-rev6/default.json");
         ASSERT_TRUE(session.LoadWorld(world_id)) << session.GetWorldOpenError();

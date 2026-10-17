@@ -1337,8 +1337,8 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     if (!IsSimulationTickBoundary())
         return false;
     m_lastLoadedChunkCount = 0;
-    const auto saved = Persistence::InspectSavedWorld(
-        GetSaveRootPath(), RuntimeRoot(m_rootPath) / "data", worldId);
+    const auto saved =
+        Persistence::InspectSavedWorld(GetSaveRootPath(), RuntimeRoot(m_rootPath), worldId);
     m_worldOpenError = saved.error;
     if (m_worldOpenError.empty() && saved.requires_active_regions && !m_activeRegionsEnabled)
         m_worldOpenError = "Incompatible configuration: this world requires sim.active_regions.";

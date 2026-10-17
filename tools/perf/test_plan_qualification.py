@@ -2,6 +2,7 @@
 """Tests for the qualification matrix, planner CLI and parametrised process runner."""
 import contextlib
 import copy
+import hashlib
 import io
 import json
 import math
@@ -105,6 +106,21 @@ class MatrixTestBase(unittest.TestCase):
 
 
 class CommittedMatrixTests(MatrixTestBase):
+    def test_committed_traversal_digests_match_fixture_bytes(self):
+        matrix = committed()
+        qm.validate_matrix(matrix)
+        traversals = [workload for workload in matrix['workloads']
+                      if workload['kind'] == 'traversal']
+        self.assertTrue(any(workload['script'] is not None for workload in traversals))
+        for workload in traversals:
+            with self.subTest(workload=workload['id']):
+                expected = (None if workload['script'] is None else hashlib.sha256(
+                    (ROOT / workload['script']).read_bytes()).hexdigest())
+                self.assertEqual(workload['script_sha256'], expected)
+                for cell in qm.cells(matrix):
+                    if cell['workload'] == workload['id']:
+                        self.assertEqual(cell['script_sha256'], expected)
+
     def test_committed_matrix_has_36_unique_cells_in_order(self):
         cells = qm.cells(committed())
         ids = [cell['id'] for cell in cells]
@@ -226,7 +242,8 @@ class CommandGoldenTests(MatrixTestBase):
                 continue
             with self.subTest(cell=cell['id']):
                 command = qm.checker_command(cell, artifact='capture.json',
-                                             verdict='verdict.json', qualified_renderer=RENDERER,
+                                             verdict='verdict.json',
+                                             qualified_renderer=RENDERER,
                                              root=ROOT, python=sys.executable)
                 self.assertEqual(command.count('--require-geometry'), 1)
                 self.assertEqual(command.count('--require-settled'), 1)
@@ -320,7 +337,8 @@ class CheckerEvidenceTests(MatrixTestBase):
         cell.update(pose=dict.fromkeys(POSE, 0.0), width=1280, height=720,
                     warmup_frames=2, measured_frames=4)
         argv = qm.checker_command(cell, artifact=self.tmp / 'fixed.json',
-                                  verdict=self.tmp / 'verdict.json', qualified_renderer=RENDERER, root=ROOT,
+                                  verdict=self.tmp / 'verdict.json',
+                                  qualified_renderer=RENDERER, root=ROOT,
                                   python=sys.executable)
         data = self.fixed_capture()
         code, verdict = self.run_checker(data, argv=argv)
@@ -431,6 +449,32 @@ class CheckerEvidenceTests(MatrixTestBase):
 
 
 class MatrixValidationTests(MatrixTestBase):
+    def test_missing_traversal_digest_refused(self):
+        for workload in committed()['workloads']:
+            if workload['kind'] != 'traversal':
+                continue
+            with self.subTest(workload=workload['id']):
+                matrix = copy.deepcopy(committed())
+                entry = next(entry for entry in matrix['workloads']
+                             if entry['id'] == workload['id'])
+                del entry['script_sha256']
+                self.assert_refused(json.dumps(matrix), 'script_sha256')
+
+    def test_invalid_traversal_digest_refused(self):
+        for digest in (None, '', 'a' * 63, 'a' * 65, 'A' * 64, 'g' * 64, 0, True):
+            with self.subTest(digest=digest):
+                matrix = copy.deepcopy(committed())
+                entry = next(entry for entry in matrix['workloads']
+                             if entry['id'] == 'surface-flight')
+                entry['script_sha256'] = digest
+                self.assert_refused(json.dumps(matrix), 'script_sha256')
+
+    def test_blocked_traversal_digest_must_be_null(self):
+        matrix = copy.deepcopy(committed())
+        entry = next(entry for entry in matrix['workloads'] if entry['id'] == 'cave-walk')
+        entry['script_sha256'] = 'a' * 64
+        self.assert_refused(json.dumps(matrix), 'script_sha256 must be null')
+
     def test_null_renderer_refused(self):
         matrix = copy.deepcopy(committed())
         matrix['qualified_renderer'] = None
@@ -1020,7 +1064,7 @@ class ProcessRunnerTests(MatrixTestBase):
 
         def path_stat(path, *args, **kwargs):
             metadata = original_stat(path, *args, **kwargs)
-            if Path(path) == executable:
+            if not isinstance(path, int) and Path(path) == executable:
                 # Path and descriptor stat can report different ctime values
                 # for the same unchanged executable on Windows.
                 values = {name: getattr(metadata, name) for name in (
@@ -1036,6 +1080,30 @@ class ProcessRunnerTests(MatrixTestBase):
         self.assertEqual(identity, (runner._executable_metadata(metadata),
                                     runner._executable_metadata(path_stat(executable))))
         self.assertEqual(digest, runner.file_sha256(executable))
+
+    def test_executable_path_replaced_with_pipe_is_refused(self):
+        reader, writer = os.pipe()
+        system = types.SimpleNamespace(**vars(os))
+        system.O_NONBLOCK = 1 << 29
+        opens = 0
+
+        def replace_on_reopen(path, flags):
+            nonlocal opens
+            opens += 1
+            self.assertTrue(flags & system.O_NONBLOCK)
+            if opens == 1:
+                return os.open(path, flags & ~system.O_NONBLOCK)
+            return os.dup(pipe.fileno())
+
+        system.open = replace_on_reopen
+        try:
+            with os.fdopen(reader, 'rb') as pipe, \
+                    mock.patch.object(runner, 'os', system), \
+                    self.assertRaisesRegex(OSError, 'executable changed while hashing'):
+                runner._binary_identity(sys.executable)
+            self.assertEqual(opens, 2)
+        finally:
+            os.close(writer)
 
     def test_executable_changes_fail_closed_and_clear_unverified_hash(self):
         executable = self.tmp / Path(sys.executable).name
