@@ -654,6 +654,72 @@ TEST(StationDiscovery, RoundedSamplesOutsideSpanRejectCandidatesWithoutRefusingQ
     }
 }
 
+TEST(StationDiscovery, FiniteTerrainOutsideIntegerDomainRejectsOnlyAffectedCandidates) {
+    for (auto kind :
+         {StationKind::Mouth, StationKind::Arch, StationKind::Horizon, StationKind::Coverage}) {
+        for (const float height : {std::numeric_limits<float>::max(),
+                                   -std::numeric_limits<float>::max(),
+                                   2147483648.0f,
+                                   -2147483648.0f}) {
+            SCOPED_TRACE(static_cast<int>(kind));
+            SCOPED_TRACE(height);
+            auto source = Portal();
+            source.height = [height](float, float) {
+                return height;
+            };
+            const auto result = DiscoverStations(source, Query(kind));
+            ASSERT_TRUE(result.ok) << result.error;
+            const bool feature = kind == StationKind::Mouth || kind == StationKind::Arch;
+            EXPECT_EQ(result.candidates.size(), feature && height < 0 ? 1u : 0u);
+            if (!feature) {
+                EXPECT_EQ(result.density_samples, 0u);
+            }
+        }
+    }
+}
+
+TEST(StationDiscovery, MinimumIntegerAnchorDoesNotRefuseQuery) {
+    for (auto kind :
+         {StationKind::Mouth, StationKind::Arch, StationKind::Horizon, StationKind::Coverage}) {
+        auto query = Query(kind);
+        query.y_range_m = {std::numeric_limits<int>::min(), std::numeric_limits<int>::min() + 15};
+        auto source = Portal();
+        source.height = [](float, float) {
+            return -2147483648.0f;
+        };
+        source.density = [](const Vec3&) {
+            return 1.0f;
+        };
+        const auto result = DiscoverStations(source, query);
+        ASSERT_TRUE(result.ok) << result.error;
+        const bool control = kind == StationKind::Horizon || kind == StationKind::Coverage;
+        EXPECT_EQ(result.candidates.size(), control ? 4u : 0u);
+        EXPECT_GT(result.density_samples, 0u);
+        for (const auto& candidate : result.candidates) {
+            EXPECT_EQ(candidate.anchor_mm[1],
+                      static_cast<std::int64_t>(std::numeric_limits<int>::min()) * 1000);
+        }
+    }
+}
+
+TEST(StationDiscovery, NonfiniteTerrainStillRefusesQuery) {
+    for (auto kind :
+         {StationKind::Mouth, StationKind::Arch, StationKind::Horizon, StationKind::Coverage}) {
+        for (const float height : {std::numeric_limits<float>::infinity(),
+                                   -std::numeric_limits<float>::infinity(),
+                                   std::numeric_limits<float>::quiet_NaN()}) {
+            auto source = Portal();
+            source.height = [height](float, float) {
+                return height;
+            };
+            const auto result = DiscoverStations(source, Query(kind));
+            EXPECT_FALSE(result.ok);
+            EXPECT_EQ(result.error, "nonfinite height");
+            EXPECT_TRUE(result.candidates.empty());
+        }
+    }
+}
+
 TEST(StationDiscovery, OutOfSpanEyeDirectionDoesNotRefusePortal) {
     constexpr int terrain = 33554432;
     constexpr int base_y = terrain - 32;

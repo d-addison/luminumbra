@@ -43,7 +43,7 @@ class ContractTests(unittest.TestCase):
         source = (HERE.parent / "station_discovery.cpp").read_text(encoding="utf-8")
         capture = source[source.index("Snapshot CaptureInputs("):
                          source.index("std::string InputIdentity(")]
-        reserve = source[source.index("std::string ReserveInputPath("):
+        reserve = source[source.index("void ReserveInputEntry("):
                          source.index("using Snapshot =")]
         self.assertIn("kInputEntryLimit = 4096", source)
         self.assertIn("kInputPathByteLimit =", source)
@@ -51,6 +51,7 @@ class ContractTests(unittest.TestCase):
         self.assertIn("budget.remaining_path_bytes", reserve)
         self.assertIn("IsValidDependencyPathUtf8(name)", reserve)
         self.assertIn("dependency pathname must be portable UTF-8", reserve)
+        self.assertLess(capture.index("ReserveInputEntry("), capture.index("ReadBytes("))
         self.assertLess(capture.index("ReserveInputPath("), capture.index("ReadBytes("))
         self.assertLess(capture.index("StrictJson(bytes)"), capture.index("files.emplace("))
         self.assertLess(capture.index("CheckStructureInput(data, true)"),
@@ -623,6 +624,62 @@ class NativeSmoke(unittest.TestCase):
             self.assertEqual(result.returncode, 1, result.stderr)
             self.assertEqual(result.stdout, b"")
             self.assertIn(b"input-limit: entry limit exceeded", result.stderr)
+
+    def test_ignored_entries_cannot_evade_scan_limit(self):
+        # Exercise every scan, with ignored files and ignored subdirectories.
+        for scan, entry_kinds in (("structure-types", (False,)),
+                                  ("structure-pieces", (False, True)),
+                                  ("species", (False, True))):
+            for directories in entry_kinds:
+                with self.subTest(scan=scan, directories=directories), \
+                        tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    data = root / "data"
+                    fields = self.flat_preset()
+                    if scan == "species":
+                        scanned = data / "common/creatures/species"
+                        reserved = 1  # The directly read preset.
+                    else:
+                        fields["generation_params"]["features"]["structures_enabled"] = True
+                        scanned = data / "common/structures"
+                        pool = scanned / "fixture"
+                        pool.mkdir(parents=True)
+                        (pool / "piece.json").write_bytes(contract.canonical({
+                            "name": "fixture", "boxes": [
+                                {"min": [0, 0, 0], "size": [1, 1, 1], "material": 1}]}))
+                        reserved = 3  # The preset, structure type, and valid piece.
+                        if scan == "structure-pieces":
+                            scanned = pool
+                    scanned.mkdir(parents=True, exist_ok=True)
+                    preset = root / "flat.json"
+                    preset.write_bytes(contract.canonical(fields))
+                    command = [self.cli, "--preset-json", str(preset), "--data-root", str(data),
+                               "--seed", "17", "--kind", "mouth", "--origin-mm", "0", "0",
+                               "--radius-m", "1", "--y-range-m", "0", "100",
+                               "--view-distance-m", "0", "--limit", "64"]
+
+                    def check(code):
+                        result = subprocess.run(command, capture_output=True, check=False)
+                        self.assertEqual(result.returncode, code, result.stderr)
+                        if code:
+                            self.assertEqual(result.stdout, b"")
+                            self.assertIn(b"input-limit: entry limit exceeded", result.stderr)
+                        else:
+                            contract.validate(contract.loads(result.stdout))
+
+                    def ignored(index):
+                        path = scanned / ("%04d.txt" % index)
+                        if directories:
+                            path.mkdir()
+                        else:
+                            path.write_bytes(b"{")  # Refused if accidentally parsed.
+
+                    check(0)  # No ignored entries remains valid.
+                    for index in range(4096 - reserved):
+                        ignored(index)
+                    check(0)  # Exactly the inclusive shared visit limit.
+                    ignored(4096 - reserved)
+                    check(1)
 
     def test_rooted_biome_paths_are_refused_before_capture(self):
         with tempfile.TemporaryDirectory() as temporary:

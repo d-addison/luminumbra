@@ -178,8 +178,8 @@ Options ParseOptions(int argc, ArgumentChar** argv) {
 // Two simultaneous snapshots plus the initial preset retain at most 17 MiB of bytes.
 constexpr std::size_t kInputFileByteLimit = std::size_t{1024} * 1024;
 constexpr std::size_t kInputSnapshotByteLimit = 8 * kInputFileByteLimit;
-// Bound snapshot nodes and the loader's directory catalogues, including empty
-// structure types: at most 4096 files/types and 1 MiB of logical UTF-8 names.
+// Bound direct input reads and every examined directory entry, including ignored
+// entries: at most 4096 visits and 1 MiB of retained logical UTF-8 names.
 constexpr std::size_t kInputEntryLimit = 4096;
 constexpr std::size_t kInputPathByteLimit = std::size_t{1024} * 1024;
 struct InputByteBudget {
@@ -508,12 +508,16 @@ fs::path DependencyPath(const fs::path& root, const fs::path& relative) {
     return path;
 }
 
-std::string ReserveInputPath(const fs::path& relative,
-                             InputByteBudget& budget,
-                             std::string_view prefix = "data/") {
+void ReserveInputEntry(InputByteBudget& budget) {
     if (budget.remaining_entries == 0) {
         throw InputLimitError("entry limit exceeded (4096 files/directories)");
     }
+    --budget.remaining_entries;
+}
+
+std::string ReserveInputPath(const fs::path& relative,
+                             InputByteBudget& budget,
+                             std::string_view prefix = "data/") {
     // Bound the conversion temporary before allocating it (UTF-16 needs at most
     // three UTF-8 bytes per code unit; POSIX paths retain their native bytes).
     if (relative.native().size() > kInputPathByteLimit / 3) {
@@ -528,7 +532,6 @@ std::string ReserveInputPath(const fs::path& relative,
         name.size() > budget.remaining_path_bytes - prefix.size()) {
         throw InputLimitError("pathname byte limit exceeded (1048576 bytes)");
     }
-    --budget.remaining_entries;
     budget.remaining_path_bytes -= prefix.size() + name.size();
     // Check both lengths before addition and allocation of the retained key.
     std::string key;
@@ -544,8 +547,11 @@ using Snapshot = std::map<std::string, std::string>;
 Snapshot CaptureInputs(const Options& options, const json& resolved_preset) {
     InputByteBudget budget;
     Snapshot files;
-    const auto capture = [&files, &options, &budget](const fs::path& relative,
-                                                     bool preset = false) {
+    const auto capture = [&files, &options, &budget](
+                             const fs::path& relative, bool preset = false, bool examined = false) {
+        if (!examined) {
+            ReserveInputEntry(budget);
+        }
         auto name = ReserveInputPath(relative, budget, preset ? "" : "data/");
         auto bytes = ReadBytes(
             preset ? options.preset : DependencyPath(options.data_root, relative), budget);
@@ -576,6 +582,7 @@ Snapshot CaptureInputs(const Options& options, const json& resolved_preset) {
             throw std::runtime_error("missing structure directory");
         }
         for (const auto& type : fs::directory_iterator(root)) {
+            ReserveInputEntry(budget);
             if (type.is_symlink()) {
                 throw std::runtime_error("structure symlink refused");
             }
@@ -591,9 +598,10 @@ Snapshot CaptureInputs(const Options& options, const json& resolved_preset) {
                 capture(placement.lexically_relative(options.data_root));
             }
             for (const auto& piece : fs::directory_iterator(type.path())) {
+                ReserveInputEntry(budget);
                 if (piece.is_regular_file() && piece.path().extension() == ".json" &&
                     piece.path().filename() != "placement.json") {
-                    capture(piece.path().lexically_relative(options.data_root));
+                    capture(piece.path().lexically_relative(options.data_root), false, true);
                 }
             }
         }
@@ -606,8 +614,9 @@ Snapshot CaptureInputs(const Options& options, const json& resolved_preset) {
             throw std::runtime_error("species path must be a directory");
         }
         for (const auto& entry : fs::directory_iterator(species)) {
+            ReserveInputEntry(budget);
             if (entry.is_regular_file() && entry.path().extension() == ".json") {
-                capture(entry.path().lexically_relative(options.data_root));
+                capture(entry.path().lexically_relative(options.data_root), false, true);
             }
         }
     }

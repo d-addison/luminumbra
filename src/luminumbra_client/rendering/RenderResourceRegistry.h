@@ -3,6 +3,7 @@
 #include "RenderResourceHandles.h"
 #include "rhi/RhiResource.h"
 
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -92,6 +93,16 @@ struct FboDesc {
 
 class RenderResourceRegistry {
 public:
+    struct TargetExtent {
+        std::string_view name;
+        u32 width;
+        u32 height;
+    };
+    // Render-thread transaction, bounded to 32 attachments. All referencing FBOs
+    // must be wholly contained in this group. Failure retains every old object;
+    // success publishes complete replacements before retiring the old storage.
+    // Callers refresh cached handles immediately, before issuing any draw.
+    bool replace_targets(std::span<const TargetExtent> extents);
     // --- Owned path ----------------------------------------------------------
     // Allocate a registry-OWNED texture / FBO from a full-fidelity descriptor.
     // Returns an invalid handle on GL failure or name collision with an
@@ -163,6 +174,11 @@ public:
         }
         auto it = m_textures.find(std::string(name));
         return it == m_textures.end() ? TextureHandle{} : it->second;
+    }
+    RenderbufferHandle renderbuffer(std::string_view name) const {
+        const auto owned = m_owned_renderbuffers.find(std::string(name));
+        return owned == m_owned_renderbuffers.end() ? RenderbufferHandle{}
+                                                    : RenderbufferHandle{owned->second.gl_id};
     }
 
     bool has_fbo(std::string_view name) const {

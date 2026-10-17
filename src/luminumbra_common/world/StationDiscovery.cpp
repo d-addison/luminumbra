@@ -26,7 +26,8 @@ constexpr std::int64_t kStepMm = static_cast<std::int64_t>(kStep) * 1000;
 constexpr std::array<std::array<int, 2>, 4> kDirections{{{1, 0}, {0, 1}, {-1, 0}, {0, -1}}};
 
 std::int64_t Millimetres(double metres) {
-    if (!std::isfinite(metres) || std::abs(metres) > 2147483647.0) {
+    if (!std::isfinite(metres) || metres < std::numeric_limits<int>::min() ||
+        metres > std::numeric_limits<int>::max()) {
         throw std::runtime_error("nonfinite or unrepresentable world coordinate");
     }
     // Nearest millimetre, halves away from zero; no locale or libm orientation.
@@ -129,9 +130,9 @@ public:
         if (!std::isfinite(h)) {
             throw std::runtime_error("nonfinite height");
         }
-        if (std::abs(static_cast<double>(h)) > 2147483647.0) {
-            throw std::runtime_error("nonfinite or unrepresentable world coordinate");
-        }
+        // A finite binary32 height may round beyond the query's integer span.
+        // Keep it in double until the candidate's span checks reject it, before
+        // any conversion to an integer anchor or sightline step count.
         // Round upward so millimetre anchors never lower the eye below its
         // minimum terrain clearance, including at negative terrain heights.
         return std::ceil(static_cast<double>(h) * 1000.0) / 1000.0;

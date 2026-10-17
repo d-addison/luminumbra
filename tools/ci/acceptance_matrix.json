@@ -3053,7 +3053,7 @@
     {
       "id": "station.input-bytes",
       "source": "docs/distant-world.md#station-discovery-req-e4",
-      "statement": "Inclusive limits bound each file to 1 MiB, snapshot contents to 8 MiB, captured files and structure directories to 4096 entries, and logical UTF-8 names to 1 MiB. Files are validated before retention; all biome, placement, piece and species loader reads use the captured bytes. Contract and CLI regressions cover bounds, disabled terrain features, rooted and nonportable names, and snapshot-reader failures. Aggregate-limit fixtures contain valid JSON regardless of traversal order, including exactly 8 MiB and one byte beyond it.",
+      "statement": "Inclusive limits bound each file to 1 MiB, snapshot contents to 8 MiB, direct input reads plus every examined directory entry (including ignored entries) to 4096 visits, and logical UTF-8 names to 1 MiB. Files are validated before retention; all biome, placement, piece and species loader reads use the captured bytes. Contract and CLI regressions cover inclusive scan bounds for structure types, pieces and species, ignored files and directories, disabled terrain features, rooted and nonportable names, and snapshot-reader failures. Aggregate-limit fixtures contain valid JSON regardless of traversal order, including exactly 8 MiB and one byte beyond it.",
       "status": "covered",
       "evidence": [
         {
@@ -3322,6 +3322,26 @@
       "requirements": [
         "dw.station.099",
         "dw.station.100"
+      ]
+    },
+    {
+      "id": "graphics.horizon-authority",
+      "source": "docs/engine-guide.md#world-generation-and-streaming",
+      "statement": "Legacy graphics horizon changes preserve edited chunk authority and reject stale captures through the chunk voxel revision even when world/region publication revisions are unchanged. This row covers the owner-thread snapshot and admission regression, not native rendering qualification.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GraphicsRuntimePure.ShrinkingAndGrowingHorizonRetainsEditedAuthorityAndRejectsStaleCapture"
+        },
+        {
+          "kind": "ctest",
+          "ref": "StreamingHardening.FarLodSnapshotOwnsBytesAndRejectsStaleLiveData"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarLodWorker.AuthoritativeCaptureBuildsPersistsAndStales"
+        }
       ]
     }
   ]
