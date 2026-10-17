@@ -14,11 +14,19 @@
 // the no-plant save path stays byte-identical.
 
 #include <algorithm>
+#include <array>
 #include <bit>
+#include <cstddef>
 #include <cstdint>
+#include <exception>
+#include <stdexcept>
+#include <string_view>
+#include <utility>
 #include <vector>
 
+#include <entt/entity/fwd.hpp>
 #include <entt/entt.hpp>
+#include <nlohmann/json_fwd.hpp>
 
 #include "../components/CombustionComponents.h"
 #include "../components/CoreComponents.h"
@@ -32,7 +40,9 @@
 #include "../components/SoilComponents.h"
 #include "../core/WaterComponents.h"
 #include "../ecs/EntitySnapshot.h"
+#include "../world/ActiveRegionLedger.h"
 #include "../world/GroundObjectStore.h"
+#include "SaveTransaction.h"
 #include <cmath>
 #include <set>
 
@@ -42,7 +52,7 @@ namespace pp_detail {
 inline nlohmann::json
 GenesToJson(const std::array<float, ::Luminumbra::Components::kPlantGeneCount>& g) {
     nlohmann::json a = nlohmann::json::array();
-    for (float v : g)
+    for (const float v : g)
         a.push_back(v);
     return a;
 }
@@ -162,6 +172,106 @@ BuildPlantEntitySnapshot(const entt::registry& reg, bool persistent_identity = f
 inline void ApplyPlantEntitySnapshot(entt::registry& reg,
                                      const ::Luminumbra::Ecs::EntityRegistrySnapshot& snap);
 
+namespace pp_detail {
+inline bool ConsumePlantBytes(std::size_t amount, std::size_t& remaining) {
+    if (amount > remaining)
+        return false;
+    remaining -= amount;
+    return true;
+}
+inline bool PlantStringFits(std::string_view text, std::size_t& remaining) {
+    if (!ConsumePlantBytes(2, remaining) || text.size() > remaining)
+        return false;
+    for (const auto ch : text) {
+        const auto byte = static_cast<unsigned char>(ch);
+        // JSON escapes control bytes using at most six bytes; other UTF-8 bytes
+        // remain literal. Using six also covers the shorter named escapes.
+        const std::size_t width = byte < 32 ? 6 : ch == '"' || ch == '\\' ? 2 : 1;
+        if (!ConsumePlantBytes(width, remaining))
+            return false;
+    }
+    return true;
+}
+inline bool PlantValueFits(const nlohmann::json& value, std::size_t depth, std::size_t& remaining) {
+    struct Frame {
+        const nlohmann::json* data = nullptr;
+        nlohmann::json::const_iterator next{};
+        nlohmann::json::const_iterator end{};
+        std::size_t indentation = 0;
+        bool entered = false;
+    };
+    // A fixed 17-frame stack refuses unknown nested metadata without recursion.
+    // Generated plant components need at most three nested containers.
+    std::array<Frame, 17> frames{};
+    frames[0].data = &value;
+    frames[0].indentation = depth;
+    std::size_t count = 1;
+    while (count != 0) {
+        auto& frame = frames[count - 1];
+        const auto& item = *frame.data;
+        if (!frame.entered) {
+            if (frame.indentation > 16 || item.is_binary() || item.is_discarded())
+                return false;
+            if (item.is_primitive()) {
+                // Every JSON numeric primitive fits in 32 bytes, including float exponents.
+                if (!(item.is_string()
+                          ? PlantStringFits(item.get_ref<const std::string&>(), remaining)
+                          : ConsumePlantBytes(item.is_number()    ? 32
+                                              : item.is_boolean() ? 5
+                                                                  : 4,
+                                              remaining)))
+                    return false;
+                --count;
+                continue;
+            }
+            if (!ConsumePlantBytes(2, remaining))
+                return false;
+            if (item.empty()) {
+                --count;
+                continue;
+            }
+            frame.next = item.begin();
+            frame.end = item.end();
+            frame.entered = true;
+        }
+        if (frame.next == frame.end) {
+            if (!ConsumePlantBytes(1 + 4 * frame.indentation, remaining))
+                return false;
+            --count;
+            continue;
+        }
+        // Newline, indentation, and a possible comma for this element.
+        if (!ConsumePlantBytes(2 + 4 * (frame.indentation + 1), remaining) ||
+            (item.is_object() &&
+             (!PlantStringFits(frame.next.key(), remaining) || !ConsumePlantBytes(2, remaining))) ||
+            count == frames.size())
+            return false;
+        Frame child;
+        child.data = &frame.next.value();
+        child.indentation = frame.indentation + 1;
+        ++frame.next;
+        frames[count++] = std::move(child);
+    }
+    return true;
+}
+} // namespace pp_detail
+
+// Conservatively bound canonical JSON before copying/serializing a record.
+// The 8 KiB budget includes a 512-byte single-record envelope and 100 bytes of
+// wrapper/indentation per component; component data starts at indentation depth 5.
+inline bool PlantRecordFits(const ::Luminumbra::Ecs::EntitySnapshotRecord& record) {
+    std::size_t remaining = ::Luminumbra::Persistence::kMaxSavePlantRecordBytes - 512;
+    if (!pp_detail::PlantStringFits(record.name, remaining))
+        return false;
+    for (const auto& component : record.components) {
+        if (!pp_detail::ConsumePlantBytes(100, remaining) ||
+            !pp_detail::PlantStringFits(component.type, remaining) ||
+            !pp_detail::PlantValueFits(component.data, 5, remaining))
+            return false;
+    }
+    return true;
+}
+
 // Validate enabled authority before creating any entities. Never assign new IDs to
 // loaded records: a missing identity/owner is corruption, not fresh admission.
 inline bool ValidatePlantEntitySnapshot(const ::Luminumbra::Ecs::EntityRegistrySnapshot& snap,
@@ -169,12 +279,16 @@ inline bool ValidatePlantEntitySnapshot(const ::Luminumbra::Ecs::EntityRegistryS
                                         const ::Luminumbra::world::GroundObjectStore& ground,
                                         std::string& error) {
     try {
+        if (snap.entities.size() > ::Luminumbra::Persistence::kMaxSavePlants)
+            throw std::invalid_argument("plant population exceeds save limit");
         if (!snap.entities.empty() && !snap.persistent_identity)
             throw std::invalid_argument("plant identity mode missing");
         std::set<std::uint64_t> ids;
         for (const auto& [id, object] : ground.objects())
             ids.insert(id);
         for (const auto& rec : snap.entities) {
+            if (!PlantRecordFits(rec))
+                throw std::invalid_argument("plant record exceeds save limit");
             if (rec.name != "plant" || !rec.entity_id ||
                 rec.entity_id >= ledger.next_persistent_id() || !ids.insert(rec.entity_id).second)
                 throw std::invalid_argument("duplicate or invalid shared plant ID");
