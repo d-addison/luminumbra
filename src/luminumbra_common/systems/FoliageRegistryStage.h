@@ -15,6 +15,7 @@
 #include "../fields/FieldPageState.h"
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <entt/entt.hpp>
 #include <map>
@@ -27,6 +28,10 @@ namespace luminumbra::foliage {
 namespace stage_detail {
 namespace C = ::Luminumbra::Components;
 inline std::atomic<std::uint64_t>& RegistryStageCount() {
+    static std::atomic<std::uint64_t> count{0};
+    return count;
+}
+inline std::atomic<std::uint64_t>& RegistryStagedEntityCount() {
     static std::atomic<std::uint64_t> count{0};
     return count;
 }
@@ -150,11 +155,14 @@ inline bool HasRegionalFoliageWindowWork(const entt::registry& registry,
 // Probe only the positive page edges: an interior cell cannot cross a region
 // boundary. This reads at most 32 edges per page, bounded by kMaxPages (4096),
 // without expanding or copying pages. Validated page coordinates fit x/z * 16.
+namespace stage_detail {
+template<class Visitor>
 inline bool
-HasRegionalFoliageBorderWork(const ::Luminumbra::world::FieldPageState& pages,
-                             const std::map<::Luminumbra::world::RegionKey,
-                                            ::Luminumbra::world::ActiveRegionRecord>& records,
-                             std::uint64_t tick) {
+VisitRegionalFoliageBorderPages(const ::Luminumbra::world::FieldPageState& pages,
+                                const std::map<::Luminumbra::world::RegionKey,
+                                               ::Luminumbra::world::ActiveRegionRecord>& records,
+                                std::uint64_t tick,
+                                Visitor&& visit) {
     using ::Luminumbra::world::FieldPageState;
     const auto& irrigation = pages.irrigation();
     for (const auto& [key, page] : irrigation.pages()) {
@@ -167,20 +175,54 @@ HasRegionalFoliageBorderWork(const ::Luminumbra::world::FieldPageState& pages,
         if (!along_x && !along_z)
             continue;
         for (int offset = 0; offset < 16; ++offset) {
-            if ((along_x && irrigation.initialized({x + 15, z + offset}) &&
-                 irrigation.initialized({x + 16, z + offset})) ||
-                (along_z && irrigation.initialized({x + offset, z + 15}) &&
-                 irrigation.initialized({x + offset, z + 16})))
+            if (along_x && irrigation.initialized({x + 15, z + offset}) &&
+                irrigation.initialized({x + 16, z + offset}) &&
+                visit(key, ::Luminumbra::world::FieldPageKey{key.x + 1, key.z}))
+                return true;
+            if (along_z && irrigation.initialized({x + offset, z + 15}) &&
+                irrigation.initialized({x + offset, z + 16}) &&
+                visit(key, ::Luminumbra::world::FieldPageKey{key.x, key.z + 1}))
                 return true;
         }
     }
     return false;
+}
+} // namespace stage_detail
+
+inline bool
+HasRegionalFoliageBorderWork(const ::Luminumbra::world::FieldPageState& pages,
+                             const std::map<::Luminumbra::world::RegionKey,
+                                            ::Luminumbra::world::ActiveRegionRecord>& records,
+                             std::uint64_t tick) {
+    return stage_detail::VisitRegionalFoliageBorderPages(
+        pages, records, tick, [](auto, auto) { return true; });
+}
+
+inline std::set<::Luminumbra::world::FieldPageKey>
+BuildRegionalFoliageBorderPages(const ::Luminumbra::world::FieldPageState& pages,
+                                const std::map<::Luminumbra::world::RegionKey,
+                                               ::Luminumbra::world::ActiveRegionRecord>& records,
+                                std::uint64_t tick) {
+    // Both endpoints already exist: the set is bounded by kMaxPages (4096).
+    std::set<::Luminumbra::world::FieldPageKey> result;
+    stage_detail::VisitRegionalFoliageBorderPages(pages, records, tick, [&result](auto a, auto b) {
+        result.insert(a);
+        result.insert(b);
+        return false;
+    });
+    return result;
 }
 
 // Read-only diagnostic: number of registry staging attempts in this process.
 // It is observational only and never enters simulation or persistence state.
 inline std::uint64_t FoliageRegistryStageCount() {
     return stage_detail::RegistryStageCount().load(std::memory_order_relaxed);
+}
+
+// Read-only diagnostic: cumulative entities copied into foliage snapshots.
+// Like the attempt count, this never enters simulation or persistence state.
+inline std::uint64_t FoliageRegistryStagedEntityCount() {
+    return stage_detail::RegistryStagedEntityCount().load(std::memory_order_relaxed);
 }
 
 // Staging preserves existing handles. Fresh births receive live handles only at
@@ -204,6 +246,69 @@ inline entt::registry StageFoliageRegistry(const entt::registry& original,
             throw std::runtime_error("Foliage handle staging refused");
         stage_detail::CopyFoliage(original, e, stage, e);
         retained.insert(e);
+        stage_detail::RegistryStagedEntityCount().fetch_add(1, std::memory_order_relaxed);
+    }
+    return stage;
+}
+
+// Snapshot only the due participants; the live registry remains the rollback
+// source. Component views avoid walking unrelated transformed entities. Keep the
+// original transform-storage order so retained component traversal is unchanged.
+inline entt::registry
+StageFoliageRegistry(const entt::registry& original,
+                     std::set<entt::entity>& retained,
+                     const RegionalFoliageWindows& windows,
+                     const std::set<::Luminumbra::world::FieldPageKey>& border_pages) {
+    using ::Luminumbra::world::ActiveRegionLedger;
+    namespace C = ::Luminumbra::Components;
+    stage_detail::RegistryStageCount().fetch_add(1, std::memory_order_relaxed);
+    const auto collect = [&]<class T>() {
+        for (auto e : original.view<const T>()) {
+            if (retained.contains(e))
+                continue;
+            const auto* transform = original.try_get<const C::TransformComponent>(e);
+            if (!transform)
+                continue;
+            const auto& position = transform->position;
+            // Plant stamps use durable ownership, including zero-length windows.
+            const auto* owner = original.try_get<const C::PlantRegionComponent>(e);
+            bool participates = original.all_of<C::PlantTag>(e) && owner &&
+                                windows.elapsed.contains({owner->owner_x, owner->owner_z});
+            if (!participates && ActiveRegionLedger::valid_anchor(position)) {
+                const auto window = windows.elapsed.find(ActiveRegionLedger::region_at(position));
+                participates = window != windows.elapsed.end() && window->second != 0;
+                if (!participates && !border_pages.empty()) {
+                    // Valid anchors bound page coordinates to [-1048576, 1048576).
+                    const ::Luminumbra::world::FieldPageKey page{
+                        static_cast<std::int32_t>(
+                            std::floor(static_cast<double>(position.x) / 16.0)),
+                        static_cast<std::int32_t>(
+                            std::floor(static_cast<double>(position.z) / 16.0))};
+                    participates = border_pages.contains(page);
+                }
+            }
+            if (participates)
+                retained.insert(e);
+        }
+    };
+    collect.template operator()<C::PlantTag>();
+    collect.template operator()<C::CombustibleComponent>();
+    collect.template operator()<C::IgnitionSourceComponent>();
+    collect.template operator()<C::WaterSourceComponent>();
+    collect.template operator()<C::GrazeableComponent>();
+    collect.template operator()<C::MortalComponent>();
+    collect.template operator()<C::CreatureComponent>();
+    std::vector<entt::entity> ordered(retained.begin(), retained.end());
+    const auto* transforms = original.storage<C::TransformComponent>();
+    std::sort(ordered.begin(), ordered.end(), [transforms](auto a, auto b) {
+        return transforms->index(a) > transforms->index(b);
+    });
+    entt::registry stage;
+    for (auto e : ordered) {
+        if (stage.create(e) != e)
+            throw std::runtime_error("Foliage handle staging refused");
+        stage_detail::CopyFoliage(original, e, stage, e);
+        stage_detail::RegistryStagedEntityCount().fetch_add(1, std::memory_order_relaxed);
     }
     return stage;
 }

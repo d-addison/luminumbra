@@ -1894,10 +1894,11 @@ void GameSession::RunRegionalFoliageTick(
     budget.Next(Stage::Plants, [] { return 0u; });
     const auto windows = fol::BuildRegionalFoliageWindows(
         m_activeRegionLedger, SortedDueRegions(), m_foliagePreviousTicks, m_worldClock, tick);
+    const auto border_pages =
+        fol::BuildRegionalFoliageBorderPages(m_fieldPages, m_activeRegionLedger.records(), tick);
     // A zero-length resume still publishes stamps and acknowledges its token.
     // Border work can be due independently of the interior windows.
-    if (!fol::HasRegionalFoliageWindowWork(m_registry, windows, tick) &&
-        !fol::HasRegionalFoliageBorderWork(m_fieldPages, m_activeRegionLedger.records(), tick)) {
+    if (!fol::HasRegionalFoliageWindowWork(m_registry, windows, tick) && border_pages.empty()) {
         budget.Next(Stage::Plants, [] { return 0u; });
         budget.Next(Stage::Irrigation, [] { return 0u; });
         budget.Next(Stage::Plants, [] { return 0u; });
@@ -1907,7 +1908,7 @@ void GameSession::RunRegionalFoliageTick(
     auto pages = m_fieldPages.foliage_snapshot();
     auto work = m_regionCompletedWork;
     std::set<entt::entity> retained;
-    auto staged = luminumbra::foliage::StageFoliageRegistry(m_registry, retained);
+    auto staged = fol::StageFoliageRegistry(m_registry, retained, windows, border_pages);
     auto original = std::move(m_registry);
     m_registry = std::move(staged);
     try {
