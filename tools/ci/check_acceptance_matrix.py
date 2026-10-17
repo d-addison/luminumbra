@@ -1080,7 +1080,9 @@ class _RefreshSnapshot:
 
 
 # Recovery has at most five destinations (three defaults, document, receipt),
-# a 64 KiB journal and 16 MiB per file. No directory scan or retry loop is used.
+# a 64 KiB journal and 16 MiB per file. At most three files per destination
+# (backup, publication, restoration) are retained. No directory scan or retry
+# loop is used.
 _TRANSACTION_OUTPUTS = 5
 _TRANSACTION_BYTES = 16 * 1024 * 1024
 _JOURNAL_BYTES = 64 * 1024
@@ -1161,25 +1163,60 @@ def _read_transaction_file(path: Path, limit: int) -> tuple[bytes, os.stat_resul
     return data, before
 
 
-def _transaction_record(path: Path) -> dict[str, Any]:
-    data, metadata = _read_transaction_file(path, _TRANSACTION_BYTES)
+def _transaction_record(path: Path, limit: int | None = None) -> dict[str, Any]:
+    data, metadata = _read_transaction_file(path, _TRANSACTION_BYTES if limit is None else limit)
     return {"path": str(path), "device": metadata.st_dev, "inode": metadata.st_ino,
             "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
 
 
-def _verify_transaction_file(record: dict[str, Any]) -> Path:
+def _verify_transaction_file(record: dict[str, Any], limit: int | None = None) -> Path:
     path = Path(record["path"])
-    actual = _transaction_record(path)
+    actual = _transaction_record(path, limit)
     if actual != record:
         raise MatrixError(f"recovery file identity or content changed: {path}")
     return path
 
 
-def _write_transaction(journal: Path, entries: list[dict[str, Any]], *, committed: bool) -> None:
+def _remove_transaction_file(record: dict[str, Any], limit: int | None = None) -> None:
+    artifact = _verify_transaction_file(record, limit)
+    try:
+        artifact.unlink()
+    except PermissionError:
+        # Windows read-only candidates cannot be unlinked directly. Recheck
+        # the retained identity and bytes before both chmod and removal.
+        _verify_transaction_file(record, limit).chmod(stat.S_IRUSR | stat.S_IWUSR)
+        _verify_transaction_file(record, limit).unlink()
+
+
+def _written_transaction_prefix(
+    path: Path, data: bytes, identity: os.stat_result, limit: int | None = None,
+) -> dict[str, Any]:
+    # Failed flush/close can leave any prefix, including an empty file. Read at
+    # most the 16 MiB file bound, and recognize only bytes this call supplied
+    # through its retained identity; an external edit is never adopted.
+    written, actual = _read_transaction_file(path, _TRANSACTION_BYTES if limit is None else limit)
+    if (not identity.st_ino or not os.path.samestat(actual, identity)
+            or len(written) > len(data) or written != memoryview(data)[:len(written)]):
+        raise MatrixError(f"temporary output identity or content changed: {path}")
+    return {"path": str(path), "device": identity.st_dev, "inode": identity.st_ino,
+            "size": len(written), "sha256": hashlib.sha256(written).hexdigest()}
+
+
+def _write_transaction(
+    journal: Path, entries: list[dict[str, Any]], *, committed: bool,
+    publications: list[dict[str, Any]] | None = None,
+    restorations: list[dict[str, Any] | None] | None = None,
+) -> None:
     if not 1 <= len(entries) <= _TRANSACTION_OUTPUTS:
         raise MatrixError("recovery transaction exceeds its bound")
-    data = json.dumps({"version": 1, "committed": committed, "outputs": entries},
-                      sort_keys=True).encode("utf-8")
+    transaction: dict[str, Any] = {"version": 1, "committed": committed, "outputs": entries}
+    if restorations is not None:
+        if len(restorations) != len(entries):
+            raise MatrixError("invalid restoration count")
+        # Version 1 remains readable. Version 2 binds independent restore
+        # candidates so a restart never consumes the retained original copies.
+        transaction.update(version=2, restorations=restorations)
+    data = json.dumps(transaction, sort_keys=True).encode("utf-8")
     if len(data) > _JOURNAL_BYTES:
         raise MatrixError("recovery transaction exceeds its bound")
     candidate = journal.with_suffix(".pending")
@@ -1205,10 +1242,47 @@ def _write_transaction(journal: Path, entries: list[dict[str, Any]], *, committe
                 raise OSError("incomplete recovery journal write")
             handle.flush()
             os.fsync(handle.fileno())
+        record = _transaction_record(candidate, _JOURNAL_BYTES)
+        if (not _same_transaction_identity(candidate, metadata)
+                or (record["device"], record["inode"]) != (metadata.st_dev, metadata.st_ino)
+                or record["sha256"] != hashlib.sha256(data).hexdigest()):
+            raise MatrixError("recovery journal candidate changed")
+        if publications is not None:
+            # Retain the source identity before the native operation: it may
+            # succeed and then deliver a signal without returning to Python.
+            publications.append(dict(record, path=str(journal)))
+        _verify_transaction_file(record, _JOURNAL_BYTES)
         os.replace(candidate, journal)
     finally:
         if created and metadata is not None and candidate.exists() and _same_transaction_identity(candidate, metadata):
-            candidate.unlink()
+            _remove_transaction_file(_written_transaction_prefix(candidate, data, metadata, _JOURNAL_BYTES),
+                                     _JOURNAL_BYTES)
+
+
+def _stage_recovery_copy(backup: dict[str, Any]) -> dict[str, Any]:
+    source = _verify_transaction_file(backup)
+    data, mode = _read_transaction_file(source, _TRANSACTION_BYTES)
+    candidate = source.parent / (".acceptance-" + secrets.token_hex(16))
+    metadata = None
+    record = None
+    try:
+        with open(candidate, "xb", opener=lambda name, flags: os.open(name, flags, 0o600)) as handle:
+            metadata = _transaction_metadata(handle)
+            record = {"path": str(candidate), "device": metadata.st_dev, "inode": metadata.st_ino,
+                      "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+            if handle.write(data) != len(data):
+                raise OSError("incomplete recovery candidate write")
+            handle.flush()
+            os.fsync(handle.fileno())
+        _verify_transaction_file(backup)
+        if record is None or record["sha256"] != backup["sha256"] or not metadata.st_ino:
+            raise MatrixError("recovery candidate identity or content changed")
+        _verify_transaction_file(record).chmod(stat.S_IMODE(mode.st_mode))
+        return record
+    except BaseException:
+        if metadata is not None:
+            _remove_transaction_file(_written_transaction_prefix(candidate, data, metadata))
+        raise
 
 
 def _recover_outputs(journal: Path | None) -> None:
@@ -1217,17 +1291,24 @@ def _recover_outputs(journal: Path | None) -> None:
     if _same_path(journal, journal.with_suffix(".lock")):
         raise MatrixError("recovery journal aliases refresh lock")
     raw, journal_identity = _read_transaction_file(journal, _JOURNAL_BYTES)
+    journal_record = {"path": str(journal), "device": journal_identity.st_dev, "inode": journal_identity.st_ino,
+                      "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
     try:
         transaction = json.loads(raw)
-        if (not isinstance(transaction, dict) or set(transaction) != {"version", "committed", "outputs"}
-                or type(transaction["version"]) is not int or transaction["version"] != 1
+        if (not isinstance(transaction, dict) or type(transaction.get("version")) is not int
+                or transaction["version"] not in (1, 2)
+                or set(transaction) != ({"version", "committed", "outputs"}
+                                       | ({"restorations"} if transaction["version"] == 2 else set()))
                 or type(transaction["committed"]) is not bool):
             raise ValueError("unknown transaction metadata")
         entries = transaction["outputs"]
         if not isinstance(entries, list) or not 1 <= len(entries) <= _TRANSACTION_OUTPUTS:
             raise ValueError("invalid output count")
+        restorations = transaction.get("restorations", [None] * len(entries))
+        if not isinstance(restorations, list) or len(restorations) != len(entries):
+            raise ValueError("invalid restoration count")
         names: set[Path] = {journal, journal.with_suffix(".pending")}
-        for entry in entries:
+        for index, entry in enumerate(entries):
             if not isinstance(entry, dict) or set(entry) != {"path", "old", "backup", "new"}:
                 raise ValueError("invalid output metadata")
             path = Path(entry["path"])
@@ -1241,7 +1322,7 @@ def _recover_outputs(journal: Path | None) -> None:
                 raise ValueError("invalid backup metadata")
             if not isinstance(entry["new"], dict):
                 raise ValueError("missing publication metadata")
-            for record in (entry["new"], entry["backup"]):
+            for record in (entry["new"], entry["backup"], restorations[index]):
                 if record is None:
                     continue
                 if not isinstance(record, dict) or set(record) != {"path", "device", "inode", "size", "sha256"}:
@@ -1258,13 +1339,16 @@ def _recover_outputs(journal: Path | None) -> None:
                 names.add(artifact)
             if entry["backup"] is not None and entry["backup"]["sha256"] != old:
                 raise ValueError("backup digest differs from original")
+            if restorations[index] is not None and restorations[index]["sha256"] != old:
+                raise ValueError("restoration digest differs from original")
     except (ValueError, TypeError, KeyError) as exc:
         raise MatrixError(f"invalid recovery journal: {exc}") from exc
 
-    restore: list[dict[str, Any]] = []
+    restore: list[int] = []
     # Validate the entire bounded transaction before restoring any destination.
-    for entry in entries:
-        for record in (entry["new"], entry["backup"]):
+    _verify_transaction_file(journal_record, _JOURNAL_BYTES)
+    for index, entry in enumerate(entries):
+        for record in (entry["new"], entry["backup"], restorations[index]):
             if record is not None and Path(record["path"]).exists():
                 _verify_transaction_file(record)
         if transaction["committed"]:
@@ -1281,31 +1365,49 @@ def _recover_outputs(journal: Path | None) -> None:
             raise MatrixError(f"recovery output changed; recovery copies retained: {path}")
         if entry["backup"] is not None:
             _verify_transaction_file(entry["backup"])
-        restore.append(entry)
-    for entry in reversed(restore):
+        restore.append(index)
+    for index in reversed(restore):
+        entry = entries[index]
         path = Path(entry["path"])
         _verify_transaction_file(dict(entry["new"], path=str(path)))
         if entry["backup"] is None:
             # Recheck identity at removal; only remove our published candidate.
             path.unlink()
         else:
-            backup = _verify_transaction_file(entry["backup"])
-            _verify_transaction_file(dict(entry["new"], path=str(path)))
-            os.replace(backup, path)  # Closed handles on Windows; restartable.
-    for entry in entries:
-        for record in (entry["new"], entry["backup"]):
-            if record is not None and Path(record["path"]).exists():
-                artifact = _verify_transaction_file(record)
+            record = restorations[index]
+            if record is None or not Path(record["path"]).exists():
+                record = _stage_recovery_copy(entry["backup"])
+                restorations[index] = record
+                publications: list[dict[str, Any]] = []
                 try:
-                    artifact.unlink()
-                except PermissionError:
-                    # Windows read-only candidates cannot be unlinked directly.
-                    artifact = _verify_transaction_file(record)
-                    artifact.chmod(stat.S_IRUSR | stat.S_IWUSR)
-                    _verify_transaction_file(record).unlink()
-    if not _same_transaction_identity(journal, journal_identity):
-        raise MatrixError("recovery journal identity changed")
-    journal.unlink()
+                    _verify_transaction_file(journal_record, _JOURNAL_BYTES)
+                    _write_transaction(journal, entries, committed=False,
+                                       restorations=restorations, publications=publications)
+                except BaseException:
+                    # A completed journal rename owns the candidate even when
+                    # its call was interrupted. Otherwise only this call's
+                    # verified, unpublished copy may be removed.
+                    if not publications or _transaction_record(journal, _JOURNAL_BYTES) != publications[-1]:
+                        _remove_transaction_file(record)
+                    raise
+                journal_record = publications[-1]
+            candidate = _verify_transaction_file(record)
+            _verify_transaction_file(dict(entry["new"], path=str(path)))
+            os.replace(candidate, path)  # Closed handles on Windows; restartable.
+    if not transaction["committed"]:
+        for entry in entries:
+            try:
+                current = _transaction_record(Path(entry["path"]))["sha256"]
+            except FileNotFoundError:
+                current = None
+            if current != entry["old"]:
+                raise MatrixError("recovery output changed; recovery copies retained")
+    _verify_transaction_file(journal_record, _JOURNAL_BYTES)
+    for index, entry in enumerate(entries):
+        for record in (entry["new"], entry["backup"], restorations[index]):
+            if record is not None and Path(record["path"]).exists():
+                _remove_transaction_file(record)
+    _verify_transaction_file(journal_record, _JOURNAL_BYTES).unlink()
 
 
 def _replace_outputs(
@@ -1318,27 +1420,41 @@ def _replace_outputs(
     backups: dict[Path, Path | None] = {}
     temporary_paths: list[Path] = []
     temporary_identities: dict[Path, os.stat_result] = {}
-    replaced: list[Path] = []
+    temporary_records: dict[Path, dict[str, Any]] = {}
     digests: dict[Path, bytes] = {}
     backup_digests: dict[Path, bytes] = {}
     identities: dict[Path, tuple[Path, os.stat_result]] = {}
+    originals: dict[Path, dict[str, Any] | None] = {}
+    candidates: dict[Path, dict[str, Any]] = {}
+    restorations: dict[Path, dict[str, Any] | None] = {}
     published: dict[Path, bytes] = {}
     keep_backups = False
     transaction: list[dict[str, Any]] = []
-    journal_published = False
+    journal_publications: list[dict[str, Any]] = []
 
     def stage(path: Path, data: bytes, mode: int | None, private: bool) -> Path:
         # A 128-bit random name plus exclusive creation prevents clobbering
         # another file. Register it for cleanup only after creation succeeds.
         temporary = path.parent / (".acceptance-" + secrets.token_hex(16))
         creation_mode = 0o600 if mode is not None or private else 0o666
-        with open(temporary, "xb", opener=lambda name, flags: os.open(name, flags, creation_mode)) as handle:
-            temporary_paths.append(temporary)
-            temporary_identities[temporary] = _transaction_metadata(handle)
-            if handle.write(data) != len(data):
-                raise OSError("incomplete staged output write")
-            handle.flush()
-            os.fsync(handle.fileno())
+        metadata = None
+        try:
+            with open(temporary, "xb", opener=lambda name, flags: os.open(name, flags, creation_mode)) as handle:
+                temporary_paths.append(temporary)
+                metadata = _transaction_metadata(handle)
+                temporary_identities[temporary] = metadata
+                temporary_records[temporary] = {
+                    "path": str(temporary), "device": metadata.st_dev, "inode": metadata.st_ino,
+                    "size": len(data), "sha256": hashlib.sha256(data).hexdigest(),
+                }
+                if handle.write(data) != len(data):
+                    raise OSError("incomplete staged output write")
+                handle.flush()
+                os.fsync(handle.fileno())
+        except BaseException:
+            if metadata is not None:
+                temporary_records[temporary] = _written_transaction_prefix(temporary, data, metadata)
+            raise
         if mode is not None:
             temporary.chmod(mode)
         return temporary
@@ -1349,6 +1465,15 @@ def _replace_outputs(
         if (expected is None or not expected.st_ino or not stat.S_ISREG(actual.st_mode)
                 or not _same_transaction_identity(path, expected)):
             raise MatrixError(f"temporary output identity changed: {path}")
+
+    def bound_temporary(path: Path, digest: bytes) -> dict[str, Any]:
+        verify_temporary(path)
+        record = _transaction_record(path)
+        expected = temporary_identities[path]
+        if ((record["device"], record["inode"]) != (expected.st_dev, expected.st_ino)
+                or record["sha256"] != digest.hex()):
+            raise MatrixError(f"temporary output identity or content changed: {path}")
+        return record
 
     def verify_publication(path: Path) -> None:
         target, identity = identities[path]
@@ -1362,6 +1487,22 @@ def _replace_outputs(
                 or (before.st_mode, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
                 != (after.st_mode, after.st_size, after.st_mtime_ns, after.st_ctime_ns)):
             raise MatrixError("output changed since publication or its identity cannot be verified")
+        _verify_transaction_file(dict(candidates[path], path=str(path)))
+
+    def restored(path: Path) -> bool:
+        try:
+            current = _transaction_record(path)
+        except FileNotFoundError:
+            current = None
+        original = originals[path]
+        if current == original:
+            # Absence alone cannot prove that an interrupted publication did
+            # not happen: the source must still be ours, or removal attempted.
+            if current is not None or path in restorations:
+                return True
+            _verify_transaction_file(candidates[path])
+            return True
+        return path in restorations and current == restorations[path]
 
     try:
         if len(outputs) > _TRANSACTION_OUTPUTS:
@@ -1384,6 +1525,10 @@ def _replace_outputs(
                 mode = stat.S_IMODE(original_metadata.st_mode)
             except FileNotFoundError:
                 original, mode = None, None
+            originals[path] = (dict(path=str(path), device=original_metadata.st_dev,
+                                    inode=original_metadata.st_ino, size=len(original),
+                                    sha256=hashlib.sha256(original).hexdigest())
+                               if original is not None else None)
             if original == data:
                 continue
             backups[path] = stage(path, original, mode, True) if original is not None else None
@@ -1393,50 +1538,94 @@ def _replace_outputs(
             digests[path] = hashlib.sha256(data).digest()
         if verify is not None:
             verify(published)
-        if journal is not None and staged:
-            transaction = [{"path": str(path),
-                            "old": backup_digests[path].hex() if path in backup_digests else None,
-                            "backup": _transaction_record(backups[path]) if backups[path] is not None else None,
-                            "new": _transaction_record(temporary)} for temporary, path in staged]
-            _write_transaction(journal, transaction, committed=False)
-            journal_published = True
+        for temporary, path in staged:
+            candidates[path] = bound_temporary(temporary, digests[path])
+        transaction = [{"path": str(path),
+                        "old": backup_digests[path].hex() if path in backup_digests else None,
+                        "backup": bound_temporary(backups[path], backup_digests[path])
+                                  if backups[path] is not None else None,
+                        "new": candidates[path]} for temporary, path in staged]
+        if journal is not None and transaction:
+            _write_transaction(journal, transaction, committed=False, publications=journal_publications)
         for temporary, path in staged:
             target, identity = path.resolve(), temporary.stat()
+            identities[path] = (target, identity)
             if verify is not None:
                 verify(published)
+            try:
+                current = _transaction_record(path)
+            except FileNotFoundError:
+                current = None
+            if current != originals[path]:
+                raise MatrixError(f"output changed before publication: {path}")
+            verify_temporary(temporary)
+            _verify_transaction_file(candidates[path])
             temporary.replace(path)
-            replaced.append(path)
-            identities[path] = (target, identity)
+            _verify_transaction_file(dict(candidates[path], path=str(path)))
             published[target] = digests[path]
             if verify is not None:
                 verify(published)
         if verify is not None:
             verify(published)
-        if journal_published:
-            _write_transaction(journal, transaction, committed=True)
+        if journal is not None and transaction:
+            _write_transaction(journal, transaction, committed=True, publications=journal_publications)
     except BaseException as failure:
         keep_backups = True
         conflicts = []
-        for path in reversed(replaced):
+        # A commit rename can also finish before reporting interruption. Put a
+        # verified journal back in rollback state before changing destinations;
+        # if that fails, leave the complete publication and its copies intact.
+        if len(journal_publications) == 2 and journal is not None and journal.exists():
             try:
+                if _transaction_record(journal, _JOURNAL_BYTES) == journal_publications[-1]:
+                    _write_transaction(journal, transaction, committed=False, publications=journal_publications)
+            except BaseException as conflict:
+                raise MatrixError(f"{failure}\nrollback journal unavailable; all recovery copies retained: {conflict}") from failure
+        for temporary, path in reversed(staged):
+            try:
+                # No operation has been attempted until its source is bound.
+                # Check every staged destination, including a native success
+                # whose Python bookkeeping was interrupted.
+                if path not in candidates or restored(path):
+                    continue
                 verify_publication(path)
                 backup = backups[path]
                 if backup is None:
+                    restorations[path] = None
+                    verify_publication(path)
                     path.unlink()
                 else:
+                    bound_temporary(backup, backup_digests[path])
                     original, backup_metadata = _read_transaction_file(backup, _TRANSACTION_BYTES)
                     if hashlib.sha256(original).digest() != backup_digests[path]:
                         raise MatrixError(f"recovery copy changed: {backup}")
                     # Restore from a separate closed candidate. Every backup
                     # must survive even if a later output cannot be restored.
                     candidate = stage(path, original, stat.S_IMODE(backup_metadata.st_mode), True)
+                    restoration = bound_temporary(candidate, backup_digests[path])
+                    restorations[path] = dict(restoration, path=str(path))
                     # Portable rename/unlink has no compare-and-swap operation.
                     # Recheck bytes and identity immediately before replacement;
                     # all handles are closed so Windows can replace the file.
                     verify_publication(path)
+                    _verify_transaction_file(restoration)
                     os.replace(candidate, path)
             except BaseException as conflict:
+                try:
+                    if path in restorations and restored(path):
+                        continue
+                except BaseException:
+                    pass
                 conflicts.append(f"rollback conflict for {path}: {conflict}")
+        # Keep every backup until the entire set, including earlier restores,
+        # has been checked again. Never infer restoration from a pathname.
+        for temporary, path in staged:
+            if path in candidates:
+                try:
+                    if not restored(path):
+                        raise MatrixError("restored output changed")
+                except BaseException as conflict:
+                    conflicts.append(f"rollback conflict for {path}: {conflict}")
         if conflicts:
             recovery = [f"recovery copy for {path}: {backup}"
                         for path, backup in backups.items() if backup is not None]
@@ -1445,6 +1634,14 @@ def _replace_outputs(
         keep_backups = False
         raise
     finally:
+        journal_record = None
+        if journal_publications and not keep_backups and journal is not None and journal.exists():
+            journal_record = _transaction_record(journal, _JOURNAL_BYTES)
+            if journal_record not in journal_publications:
+                # Check before discarding recovery copies, then check this same
+                # retained identity again at unlink instead of adopting a path.
+                keep_backups = True
+                raise MatrixError("recovery journal identity or content changed")
         recovery_paths = {backup for backup in backups.values() if backup is not None} if keep_backups else set()
         for temporary in temporary_paths:
             if temporary in recovery_paths:
@@ -1454,21 +1651,17 @@ def _replace_outputs(
                     verify_temporary(temporary)
                 except FileNotFoundError:
                     continue
-                try:
-                    temporary.unlink()
-                except PermissionError:
-                    # Windows refuses to unlink a read-only replacement candidate.
-                    verify_temporary(temporary)
-                    temporary.chmod(stat.S_IRUSR | stat.S_IWUSR)
-                    verify_temporary(temporary)
-                    temporary.unlink()
+                record = temporary_records.get(temporary)
+                if record is None:
+                    raise MatrixError(f"temporary output content cannot be verified: {temporary}")
+                _remove_transaction_file(record)
             except (MatrixError, OSError) as cleanup_error:
                 if not keep_backups:
                     raise
                 # Cleanup must not hide the conflict and recovery-copy paths.
                 print(f"error: cannot remove temporary output {temporary}: {cleanup_error}", file=sys.stderr)
-        if journal_published and not keep_backups:
-            journal.unlink()
+        if journal_record is not None:
+            _verify_transaction_file(journal_record, _JOURNAL_BYTES).unlink()
 
 
 def _check_planned(add: Any, planned: Any) -> None:

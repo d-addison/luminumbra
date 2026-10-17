@@ -433,6 +433,582 @@ raise SystemExit(module["main"](sys.argv[3:]))
 
 
 class AcceptanceMatrixTests(AcceptanceFixture):
+    def test_native_publication_then_interrupt_restores_every_staged_destination(self) -> None:
+        for journaled in (False, True):
+            for existing in (False, True):
+                for boundary in (1, 2, 3):
+                    with self.subTest(journaled=journaled, existing=existing, boundary=boundary), \
+                            tempfile.TemporaryDirectory() as directory:
+                        base = Path(directory).resolve()
+                        paths = [base / str(index) for index in range(3)]
+                        before = {path: (b"original " + path.name.encode()) if existing else None for path in paths}
+                        for path, data in before.items():
+                            if data is not None:
+                                path.write_bytes(data)
+                                path.chmod(0o640)
+                        modes = {path: stat.S_IMODE(path.stat().st_mode) for path in paths if path.exists()}
+                        journal = base / "refresh.transaction" if journaled else None
+                        replace = Path.replace
+                        count = 0
+                        def interrupted(source: Path, target: Path) -> Path:
+                            nonlocal count
+                            result = replace(source, target)
+                            count += 1
+                            if count == boundary:
+                                raise KeyboardInterrupt("publication completed")
+                            return result
+                        with mock.patch.object(Path, "replace", interrupted), self.assertRaises(KeyboardInterrupt):
+                            MODULE._replace_outputs([(path, "candidate " + path.name) for path in paths],
+                                                    journal=journal, private_output=paths[0])
+                        self.assertEqual({path: path.read_bytes() if path.exists() else None for path in paths}, before)
+                        self.assertEqual({path: stat.S_IMODE(path.stat().st_mode) for path in modes}, modes)
+                        self.assertEqual(list(base.glob(".acceptance-*")), [])
+                        if journal is not None:
+                            self.assertFalse(journal.exists())
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            output, journal = base / "output", base / "refresh.transaction"
+            output.write_bytes(b"original")
+            metadata = output.stat()
+            with mock.patch.object(Path, "replace") as publish:
+                MODULE._replace_outputs([], journal=journal)
+                MODULE._replace_outputs([(output, "original")] * 2, journal=journal)
+                publish.assert_not_called()
+            self.assertTrue(os.path.samestat(metadata, output.stat()))
+            self.assertEqual(metadata.st_mtime_ns, output.stat().st_mtime_ns)
+            replace = Path.replace
+            with mock.patch.object(Path, "replace", autospec=True, side_effect=replace) as publish:
+                MODULE._replace_outputs([(output, "candidate")] * 2, journal=journal)
+                self.assertEqual(publish.call_count, 1)
+            self.assertEqual(output.read_bytes(), b"candidate")
+            self.assertFalse(journal.exists())
+            self.assertEqual(list(base.glob(".acceptance-*")), [])
+
+    def test_interrupt_reconciliation_preserves_external_output_and_source_occupants(self) -> None:
+        for journaled in (False, True):
+            for occupant in ("output", "source"):
+                for contents in (b"candidate", b"original", b"external bytes"):
+                    with self.subTest(journaled=journaled, occupant=occupant, contents=contents), \
+                            tempfile.TemporaryDirectory() as directory:
+                        base = Path(directory).resolve()
+                        first, second, displaced = (base / name for name in ("first", "second", "displaced"))
+                        first.write_bytes(b"first original")
+                        second.write_bytes(b"original")
+                        journal = base / "refresh.transaction" if journaled else None
+                        replace = Path.replace
+                        def interrupted(source: Path, target: Path) -> Path:
+                            if target != second:
+                                return replace(source, target)
+                            if occupant == "source":
+                                source.rename(displaced)
+                                source.write_bytes(contents)
+                            result = replace(source, target)
+                            if occupant == "output":
+                                target.rename(displaced)
+                                target.write_bytes(contents)
+                            raise KeyboardInterrupt("external occupant after native publication")
+                        with mock.patch.object(Path, "replace", interrupted), \
+                                self.assertRaisesRegex(MODULE.MatrixError, "rollback incomplete"):
+                            MODULE._replace_outputs([(first, "first candidate"), (second, "candidate")], journal=journal)
+                        self.assertEqual(first.read_bytes(), b"first original")
+                        self.assertEqual(second.read_bytes(), contents)
+                        self.assertCountEqual([path.read_bytes() for path in base.glob(".acceptance-*")],
+                                              [b"first original", b"original"])
+                        if journal is not None:
+                            self.assertTrue(journal.exists())
+
+    def test_interrupted_native_restore_and_removal_are_reconciled_before_cleanup(self) -> None:
+        for journaled in (False, True):
+            for existing in (False, True):
+                with self.subTest(journaled=journaled, existing=existing), tempfile.TemporaryDirectory() as directory:
+                    base = Path(directory).resolve()
+                    paths = [base / str(index) for index in range(3)]
+                    if existing:
+                        for path in paths:
+                            path.write_bytes(b"original " + path.name.encode())
+                    journal = base / "refresh.transaction" if journaled else None
+                    replace, restore, unlink = Path.replace, os.replace, Path.unlink
+                    restores = []
+                    active = False
+                    def publish(source: Path, target: Path) -> Path:
+                        nonlocal active
+                        result = replace(source, target)
+                        if target == paths[-1]:
+                            active = True
+                            raise KeyboardInterrupt("publication completed")
+                        return result
+                    def interrupted_restore(source: Any, target: Any) -> None:
+                        restore(source, target)
+                        if active and Path(target) in paths:
+                            restores.append(Path(target))
+                            raise KeyboardInterrupt("restore completed")
+                    def interrupted_removal(path: Path, *args: Any, **kwargs: Any) -> None:
+                        unlink(path, *args, **kwargs)
+                        if active and path in paths:
+                            restores.append(path)
+                            raise KeyboardInterrupt("removal completed")
+                    with mock.patch.object(Path, "replace", publish), \
+                            mock.patch.object(os, "replace", interrupted_restore), \
+                            mock.patch.object(Path, "unlink", interrupted_removal), self.assertRaises(KeyboardInterrupt):
+                        MODULE._replace_outputs([(path, "candidate") for path in paths], journal=journal)
+                    self.assertEqual(restores, list(reversed(paths)))
+                    self.assertEqual([path.read_bytes() if path.exists() else None for path in paths],
+                                     [b"original " + path.name.encode() if existing else None for path in paths])
+                    self.assertEqual(list(base.glob(".acceptance-*")), [])
+                    if journal is not None:
+                        self.assertFalse(journal.exists())
+
+    def test_restore_interrupt_before_native_operation_retains_copies_for_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            first, second, journal = (base / name for name in ("first", "second", "refresh.transaction"))
+            for path in (first, second):
+                path.write_bytes(b"original " + path.name.encode())
+            replace, restore = Path.replace, os.replace
+            active = False
+            def publish(source: Path, target: Path) -> Path:
+                nonlocal active
+                result = replace(source, target)
+                if target == second:
+                    active = True
+                    raise KeyboardInterrupt("publication completed")
+                return result
+            def interrupted(source: Any, target: Any) -> None:
+                if active and Path(target) == second:
+                    raise KeyboardInterrupt("restore not performed")
+                restore(source, target)
+            with mock.patch.object(Path, "replace", publish), mock.patch.object(os, "replace", interrupted), \
+                    self.assertRaisesRegex(MODULE.MatrixError, "rollback incomplete"):
+                MODULE._replace_outputs([(first, "candidate"), (second, "candidate")], journal=journal)
+            self.assertEqual(first.read_bytes(), b"original first")
+            self.assertEqual(second.read_bytes(), b"candidate")
+            self.assertCountEqual([path.read_bytes() for path in base.glob(".acceptance-*")],
+                                  [b"original first", b"original second"])
+            self.assertTrue(journal.exists())
+            MODULE._recover_outputs(journal)
+            self.assertEqual(second.read_bytes(), b"original second")
+            self.assertFalse(journal.exists())
+            self.assertEqual(list(base.glob(".acceptance-*")), [])
+
+    def test_restored_set_is_reverified_before_discarding_any_recovery_copy(self) -> None:
+        for replacement in (False, True):
+            with self.subTest(replacement=replacement), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory).resolve()
+                paths = [base / str(index) for index in range(3)]
+                for path in paths:
+                    path.write_bytes(b"original " + path.name.encode())
+                replace, restore = Path.replace, os.replace
+                active = False
+                def publish(source: Path, target: Path) -> Path:
+                    nonlocal active
+                    result = replace(source, target)
+                    if target == paths[-1]:
+                        active = True
+                        raise KeyboardInterrupt("publication completed")
+                    return result
+                def change_restored(source: Any, target: Any) -> None:
+                    restore(source, target)
+                    if active and Path(target) == paths[1]:
+                        if replacement:
+                            paths[-1].rename(base / "displaced")
+                        paths[-1].write_bytes(b"external edit")
+                with mock.patch.object(Path, "replace", publish), mock.patch.object(os, "replace", change_restored), \
+                        self.assertRaisesRegex(MODULE.MatrixError, "rollback incomplete"):
+                    MODULE._replace_outputs([(path, "candidate") for path in paths])
+                self.assertEqual(paths[-1].read_bytes(), b"external edit")
+                self.assertCountEqual([path.read_bytes() for path in base.glob(".acceptance-*")],
+                                      [b"original " + path.name.encode() for path in paths])
+
+    def test_restore_candidate_substitution_is_never_adopted_after_native_success(self) -> None:
+        for contents in (b"original", b"external"):
+            with self.subTest(contents=contents), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory).resolve()
+                output, displaced = base / "output", base / "displaced"
+                output.write_bytes(b"original")
+                replace, restore = Path.replace, os.replace
+                active = False
+                def publish(source: Path, target: Path) -> Path:
+                    nonlocal active
+                    replace(source, target)
+                    active = True
+                    raise KeyboardInterrupt("publication completed")
+                def substitute(source: Any, target: Any) -> None:
+                    if not active:
+                        restore(source, target)
+                        return
+                    Path(source).rename(displaced)
+                    Path(source).write_bytes(contents)
+                    restore(source, target)
+                    raise KeyboardInterrupt("foreign restore completed")
+                with mock.patch.object(Path, "replace", publish), mock.patch.object(os, "replace", substitute), \
+                        self.assertRaisesRegex(MODULE.MatrixError, "rollback incomplete"):
+                    MODULE._replace_outputs([(output, "candidate")])
+                self.assertEqual(output.read_bytes(), contents)
+                self.assertEqual(displaced.read_bytes(), b"original")
+                self.assertEqual([path.read_bytes() for path in base.glob(".acceptance-*")], [b"original"])
+
+    def test_journal_native_publication_interrupt_covers_prepare_commit_and_rollback_marker(self) -> None:
+        for boundary, completed in ((1, True), (2, True), (3, False), (3, True)):
+            with self.subTest(boundary=boundary, completed=completed), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory).resolve()
+                output, journal = base / "output", base / "refresh.transaction"
+                output.write_bytes(b"original")
+                replace = os.replace
+                count = 0
+                def interrupted(source: Any, target: Any) -> None:
+                    nonlocal count
+                    if Path(target) == journal:
+                        count += 1
+                        if count == boundary and not completed:
+                            raise KeyboardInterrupt("journal not published")
+                    replace(source, target)
+                    if Path(target) == journal and (count == boundary or (boundary == 3 and count == 2)):
+                        raise KeyboardInterrupt("journal publication completed")
+                with mock.patch.object(os, "replace", interrupted):
+                    if boundary == 3:
+                        with self.assertRaisesRegex(MODULE.MatrixError, "rollback journal unavailable"):
+                            MODULE._replace_outputs([(output, "candidate")], journal=journal)
+                    else:
+                        with self.assertRaises(KeyboardInterrupt):
+                            MODULE._replace_outputs([(output, "candidate")], journal=journal)
+                if boundary == 3:
+                    self.assertEqual(output.read_bytes(), b"candidate")
+                    self.assertTrue(journal.exists())
+                    self.assertEqual([path.read_bytes() for path in base.glob(".acceptance-*")], [b"original"])
+                    MODULE._recover_outputs(journal)
+                self.assertEqual(output.read_bytes(), b"candidate" if boundary == 3 and not completed else b"original")
+                self.assertFalse(journal.exists())
+                self.assertEqual(list(base.glob(".acceptance-*")), [])
+
+        for committed in (False, True):
+            with self.subTest(committed=committed), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory).resolve()
+                first, second, journal = (base / name for name in ("first", "second", "refresh.transaction"))
+                first.write_bytes(b"first original")
+                second.write_bytes(b"second original")
+                replace, unlink = Path.replace, Path.unlink
+                removed = False
+                def publish(source: Path, target: Path) -> Path:
+                    result = replace(source, target)
+                    if target == second and not committed:
+                        raise KeyboardInterrupt("publication completed")
+                    return result
+                def interrupted_cleanup(path: Path, *args: Any, **kwargs: Any) -> None:
+                    nonlocal removed
+                    unlink(path, *args, **kwargs)
+                    if path.name.startswith(".acceptance-") and not removed:
+                        removed = True
+                        raise KeyboardInterrupt("cleanup completed")
+                with mock.patch.object(Path, "replace", publish), mock.patch.object(Path, "unlink", interrupted_cleanup), \
+                        self.assertRaises(KeyboardInterrupt):
+                    MODULE._replace_outputs([(first, "first candidate"), (second, "second candidate")], journal=journal)
+                self.assertTrue(removed)
+                self.assertTrue(journal.exists())
+                MODULE._recover_outputs(journal)
+                self.assertEqual(first.read_bytes(), b"first candidate" if committed else b"first original")
+                self.assertEqual(second.read_bytes(), b"second candidate" if committed else b"second original")
+                self.assertFalse(journal.exists())
+                self.assertEqual(list(base.glob(".acceptance-*")), [])
+
+    def test_in_place_candidate_edits_are_preserved_during_refusal_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            output = base / "output"
+            output.write_bytes(b"original")
+            changed = []
+            def refuse(published: Any) -> None:
+                for path in base.glob(".acceptance-*"):
+                    if path.read_bytes() == b"candidate":
+                        path.write_bytes(b"external candidate edit")
+                        changed.append(path)
+                raise OSError("input changed")
+            with self.assertRaisesRegex(MODULE.MatrixError, "identity or content changed"):
+                MODULE._replace_outputs([(output, "candidate")], verify=refuse)
+            self.assertEqual(output.read_bytes(), b"original")
+            self.assertEqual(len(changed), 1)
+            self.assertEqual(changed[0].read_bytes(), b"external candidate edit")
+
+        for operation in ("write", "flush", "sync"):
+            for stage in (1, 2):
+                with self.subTest(operation=operation, stage=stage), tempfile.TemporaryDirectory() as directory:
+                    base = Path(directory).resolve()
+                    output = base / "output"
+                    output.write_bytes(b"original")
+                    opened = 0
+                    create, sync = open, os.fsync
+                    def interrupted_open(*args: Any, **kwargs: Any) -> Any:
+                        nonlocal opened
+                        handle = create(*args, **kwargs)
+                        opened += 1
+                        if opened == stage and operation != "sync":
+                            original = getattr(handle, operation)
+                            def interrupted(*values: Any) -> Any:
+                                original(*values)
+                                raise KeyboardInterrupt("staging operation completed")
+                            setattr(handle, operation, interrupted)
+                        return handle
+                    def interrupted_sync(descriptor: int) -> None:
+                        sync(descriptor)
+                        if opened == stage and operation == "sync":
+                            raise KeyboardInterrupt("sync completed")
+                    with mock.patch.object(MODULE, "open", interrupted_open, create=True), \
+                            mock.patch.object(os, "fsync", interrupted_sync), self.assertRaises(KeyboardInterrupt):
+                        MODULE._replace_outputs([(output, "candidate")])
+                    self.assertEqual(output.read_bytes(), b"original")
+                    self.assertEqual(list(base.glob(".acceptance-*")), [])
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            output, journal = base / "output", base / "refresh.transaction"
+            output.write_bytes(b"original")
+            candidate = journal.with_suffix(".pending")
+            replace = os.replace
+            def edited_pending(source: Any, target: Any) -> None:
+                if Path(target) == journal:
+                    Path(source).write_bytes(b"external journal candidate edit")
+                    raise KeyboardInterrupt("journal publication refused")
+                replace(source, target)
+            with mock.patch.object(os, "replace", edited_pending), \
+                    self.assertRaisesRegex(MODULE.MatrixError, "identity or content changed"):
+                MODULE._replace_outputs([(output, "candidate")], journal=journal)
+            self.assertEqual(candidate.read_bytes(), b"external journal candidate edit")
+            self.assertEqual(output.read_bytes(), b"original")
+            self.assertFalse(journal.exists())
+            self.assertEqual(list(base.glob(".acceptance-*")), [])
+
+    def test_direct_publication_refuses_external_destination_changes_before_replace(self) -> None:
+        for existing in (False, True):
+            with self.subTest(existing=existing), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory).resolve()
+                output = base / "output"
+                if existing:
+                    output.write_bytes(b"original")
+                changed = False
+                def edit(published: Any) -> None:
+                    nonlocal changed
+                    if not changed:
+                        changed = True
+                        if output.exists():
+                            output.rename(base / "displaced")
+                        output.write_bytes(b"external bytes")
+                with mock.patch.object(Path, "replace") as publish, \
+                        self.assertRaisesRegex(MODULE.MatrixError, "rollback incomplete"):
+                    MODULE._replace_outputs([(output, "candidate")], verify=edit)
+                publish.assert_not_called()
+                self.assertEqual(output.read_bytes(), b"external bytes")
+                self.assertEqual([path.read_bytes() for path in base.glob(".acceptance-*")],
+                                 [b"original"] if existing else [])
+
+    @contextlib.contextmanager
+    def recovery_transaction(self) -> Any:
+        # Two tiny files exercise the production journal reader and restorer
+        # without materializing or indexing a synthetic source repository.
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            paths = [base / str(index) for index in range(2)]
+            entries, backups = [], []
+            for index, path in enumerate(paths):
+                path.write_bytes(b"original " + path.name.encode())
+                backup, candidate = [base / (".acceptance-" + f"{2 * index + offset:032x}")
+                                     for offset in (0, 1)]
+                backup.write_bytes(path.read_bytes())
+                candidate.write_bytes(b"candidate " + path.name.encode())
+                backups.append(backup)
+                entries.append({"path": str(path), "old": MODULE._transaction_record(backup)["sha256"],
+                                "backup": MODULE._transaction_record(backup),
+                                "new": MODULE._transaction_record(candidate)})
+            journal = base / "refresh.transaction"
+            MODULE._write_transaction(journal, entries, committed=False)
+            for entry in entries:
+                Path(entry["new"]["path"]).replace(entry["path"])
+            yield base, paths, backups, journal
+
+    def test_native_recovery_interrupt_keeps_independent_original_copies_until_verification(self) -> None:
+        with self.recovery_transaction() as (base, paths, backups, journal):
+            replace = os.replace
+            def interrupted(source: Any, target: Any) -> None:
+                replace(source, target)
+                if Path(target) in paths:
+                    self.assertTrue(all(backup.exists() for backup in backups))
+                    raise KeyboardInterrupt("recovery restore completed")
+            with mock.patch.object(os, "replace", interrupted), self.assertRaises(KeyboardInterrupt):
+                MODULE._recover_outputs(journal)
+            self.assertEqual(json.loads(journal.read_bytes())["version"], 2)
+            self.assertEqual([backup.read_bytes() for backup in backups], [b"original 0", b"original 1"])
+            # A missing already-used source is expected after native success.
+            MODULE._recover_outputs(journal)
+            self.assertEqual([path.read_bytes() for path in paths], [b"original 0", b"original 1"])
+            self.assertFalse(journal.exists())
+            self.assertEqual(list(base.glob(".acceptance-*")), [])
+
+        for completed in (False, True):
+            with self.subTest(journal_completed=completed), self.recovery_transaction() as (base, paths, backups, journal):
+                replace = os.replace
+                def interrupted_marker(source: Any, target: Any) -> None:
+                    if Path(target) == journal and not completed:
+                        raise KeyboardInterrupt("recovery journal not published")
+                    replace(source, target)
+                    if Path(target) == journal:
+                        raise KeyboardInterrupt("recovery journal completed")
+                with mock.patch.object(os, "replace", interrupted_marker), self.assertRaises(KeyboardInterrupt):
+                    MODULE._recover_outputs(journal)
+                self.assertEqual([path.read_bytes() for path in paths], [b"candidate 0", b"candidate 1"])
+                self.assertEqual([backup.read_bytes() for backup in backups], [b"original 0", b"original 1"])
+                self.assertEqual(len(list(base.glob(".acceptance-*"))), 3 if completed else 2)
+                MODULE._recover_outputs(journal)
+                self.assertEqual([path.read_bytes() for path in paths], [b"original 0", b"original 1"])
+                self.assertFalse(journal.exists())
+                self.assertEqual(list(base.glob(".acceptance-*")), [])
+
+    def test_restart_recovery_verifies_the_entire_restored_set_before_cleanup(self) -> None:
+        with self.recovery_transaction() as (_, paths, backups, journal):
+            replace = os.replace
+            def external_edit(source: Any, target: Any) -> None:
+                replace(source, target)
+                if Path(target) == paths[0]:
+                    paths[-1].write_bytes(b"external edit after restore")
+            with mock.patch.object(os, "replace", external_edit), \
+                    self.assertRaisesRegex(MODULE.MatrixError, "recovery copies retained"):
+                MODULE._recover_outputs(journal)
+            self.assertEqual(paths[-1].read_bytes(), b"external edit after restore")
+            self.assertEqual([backup.read_bytes() for backup in backups], [b"original 0", b"original 1"])
+            self.assertTrue(journal.exists())
+
+    def test_restoration_journal_rejects_invalid_records_and_unreadable_or_partial_candidates(self) -> None:
+        with self.recovery_transaction() as (base, paths, backups, journal):
+            write = MODULE._write_transaction
+            def interrupted(*args: Any, **kwargs: Any) -> None:
+                write(*args, **kwargs)
+                raise KeyboardInterrupt("recovery journal completed")
+            with mock.patch.object(MODULE, "_write_transaction", interrupted), self.assertRaises(KeyboardInterrupt):
+                MODULE._recover_outputs(journal)
+            baseline = json.loads(journal.read_bytes())
+            self.assertEqual(baseline["version"], 2)
+            unchanged = journal.read_bytes()
+            with self.assertRaisesRegex(MODULE.MatrixError, "invalid restoration count"):
+                MODULE._write_transaction(journal, baseline["outputs"], committed=False, restorations=[])
+            self.assertEqual(journal.read_bytes(), unchanged)
+            changes = (
+                lambda value: value.update(restorations=[]),
+                lambda value: value.update(restorations={}),
+                lambda value: value["restorations"].__setitem__(1, value["outputs"][1]["backup"]),
+                lambda value: value["restorations"][1].update(sha256="0" * 64),
+                lambda value: value["restorations"][1].update(inode=0),
+                lambda value: value["restorations"][1].update(size=MODULE._TRANSACTION_BYTES + 1),
+            )
+            for index, change in enumerate(changes):
+                with self.subTest(mutation=index):
+                    value = copy.deepcopy(baseline)
+                    change(value)
+                    raw = json.dumps(value).encode()
+                    journal.write_bytes(raw)
+                    with self.assertRaises(MODULE.MatrixError), mock.patch.object(os, "replace") as replace:
+                        MODULE._recover_outputs(journal)
+                    replace.assert_not_called()
+                    self.assertEqual(journal.read_bytes(), raw)
+                    self.assertEqual([path.read_bytes() for path in paths], [b"candidate 0", b"candidate 1"])
+                    self.assertTrue(all(backup.exists() for backup in backups))
+            journal.write_text(json.dumps(baseline), encoding="utf-8")
+            candidate = Path(baseline["restorations"][1]["path"])
+            read = MODULE._read_transaction_file
+            for failure in ("unreadable", "partial", "unknown"):
+                with self.subTest(failure=failure):
+                    def damaged(path: Path, limit: int) -> Any:
+                        if path == candidate and failure == "unreadable":
+                            raise PermissionError("restore candidate unreadable")
+                        data, metadata = read(path, limit)
+                        if path == candidate:
+                            if failure == "partial":
+                                data = data[:1]
+                            elif failure == "unknown":
+                                fields = list(metadata)
+                                fields[1] = 0
+                                metadata = os.stat_result(fields)
+                        return data, metadata
+                    with mock.patch.object(MODULE, "_read_transaction_file", damaged), \
+                            self.assertRaises((MODULE.MatrixError, OSError)), mock.patch.object(os, "replace") as replace:
+                        MODULE._recover_outputs(journal)
+                    replace.assert_not_called()
+                    self.assertTrue(journal.exists())
+                    self.assertTrue(all(backup.exists() for backup in backups))
+            MODULE._recover_outputs(journal)
+            self.assertEqual([path.read_bytes() for path in paths], [b"original 0", b"original 1"])
+            self.assertEqual(list(base.glob(".acceptance-*")), [])
+
+    def test_private_receipt_native_publication_interrupt_rolls_back_before_accounting(self) -> None:
+        self.prepare_refresh()
+        discovery, report = self.execution_inputs()
+        receipt = self.tmp / "receipt.json"
+        replace = Path.replace
+        observed = []
+        def interrupted(source: Path, target: Path) -> Path:
+            result = replace(source, target)
+            if target == receipt:
+                observed.append(stat.S_IMODE(target.stat().st_mode))
+                raise KeyboardInterrupt("receipt publication completed")
+            return result
+        with mock.patch.object(Path, "replace", interrupted), self.assertRaises(KeyboardInterrupt):
+            self.run_main(*self.base_args(), "--junit", str(report), "--discovery", str(discovery),
+                          "--execution-receipt", str(receipt))
+        self.assertEqual(len(observed), 1)
+        if os.name != "nt":
+            self.assertEqual(observed, [0o600])
+        self.assertFalse(receipt.exists())
+        self.assertEqual(list(self.tmp.rglob(".acceptance-*")), [])
+        self.assertFalse(MODULE._refresh_lock_path(self.root).with_suffix(".transaction").exists())
+
+    def test_recovery_candidate_failures_keep_original_copies_and_publication_unchanged(self) -> None:
+        for failure in ("create", "partial", "flush", "sync", "mode", "unknown"):
+            with self.subTest(failure=failure), self.recovery_transaction() as (base, paths, backups, journal):
+                create, sync, chmod = open, os.fsync, Path.chmod
+                metadata = MODULE._transaction_metadata
+                def opened(*args: Any, **kwargs: Any) -> Any:
+                    if failure == "create":
+                        raise PermissionError("recovery creation denied")
+                    handle = create(*args, **kwargs)
+                    if failure == "partial":
+                        write = handle.write
+                        def partial(data: bytes) -> int:
+                            write(data[:1])
+                            return 1
+                        handle.write = partial
+                    elif failure == "flush":
+                        handle.flush = mock.Mock(side_effect=OSError("recovery flush denied"))
+                    return handle
+                def denied_sync(descriptor: int) -> None:
+                    if failure == "sync":
+                        raise OSError("recovery sync denied")
+                    sync(descriptor)
+                def interrupted_mode(path: Path, mode: int) -> None:
+                    chmod(path, mode)
+                    if failure == "mode" and path.name.startswith(".acceptance-"):
+                        raise OSError("recovery mode copy interrupted")
+                def unknown(handle: Any) -> Any:
+                    result = metadata(handle)
+                    if failure == "unknown" and isinstance(handle.name, str):
+                        fields = list(result)
+                        fields[1] = 0
+                        return os.stat_result(fields)
+                    return result
+                with mock.patch.object(MODULE, "open", opened, create=True), \
+                        mock.patch.object(os, "fsync", denied_sync), \
+                        mock.patch.object(Path, "chmod", interrupted_mode), \
+                        mock.patch.object(MODULE, "_transaction_metadata", unknown), \
+                        self.assertRaises((MODULE.MatrixError, OSError)):
+                    MODULE._recover_outputs(journal)
+                self.assertEqual([path.read_bytes() for path in paths], [b"candidate 0", b"candidate 1"])
+                self.assertEqual([backup.read_bytes() for backup in backups], [b"original 0", b"original 1"])
+                self.assertTrue(journal.exists())
+                extras = set(base.glob(".acceptance-*")) - set(backups)
+                self.assertEqual(len(extras), 1 if failure == "unknown" else 0)
+                for extra in extras:
+                    extra.unlink()
+                MODULE._recover_outputs(journal)
+                self.assertEqual([path.read_bytes() for path in paths], [b"original 0", b"original 1"])
+                self.assertFalse(journal.exists())
+                self.assertEqual(list(base.glob(".acceptance-*")), [])
+
     def test_cmake_scans_visit_tokens_and_preserve_mutated_source_branches(self) -> None:
         path = self.root / "tools/token-scan.cmake"
         original = ("set(padding " + "x" * 70000 + ")\n"
@@ -450,12 +1026,12 @@ class AcceptanceMatrixTests(AcceptanceFixture):
         def observed(file: Path) -> str:
             text = read(file)
             return ObservedText(text) if file == path else text
-        path.write_text(original, encoding="utf-8")
+        path.write_bytes(original.encode("utf-8"))
         try:
             for active in (False, True):
                 with self.subTest(active=active):
                     text = original.replace("\nif(FALSE)", "\nif(TRUE )") if active else original
-                    path.write_text(text, encoding="utf-8")
+                    path.write_bytes(text.encode("utf-8"))
                     reads.clear()
                     with mock.patch.object(MODULE, "_read_text", observed), \
                             mock.patch.object(MODULE, "CMAKE_FLOW_RE", wraps=flow) as matched:
@@ -467,12 +1043,12 @@ class AcceptanceMatrixTests(AcceptanceFixture):
                     self.assertLess(len(reads), 256)
             for text in ("", '#[=[ unterminated\nadd_test(NAME CommentGhost COMMAND x)',
                          'message("unterminated\n'):
-                path.write_text(text, encoding="utf-8")
+                path.write_bytes(text.encode("utf-8"))
                 index = MODULE.index_tests(self.root)
                 self.assertNotIn("CommentGhost", index.ctest_names)
                 self.assertNotIn("TokenLive", index.ctest_names)
         finally:
-            path.write_text(original, encoding="utf-8")
+            path.write_bytes(original.encode("utf-8"))
         self.assertEqual(path.read_bytes(), original.encode("utf-8"))
 
     def test_source_index_shares_only_immutable_parses_and_reads_current_bytes(self) -> None:
@@ -486,7 +1062,7 @@ class AcceptanceMatrixTests(AcceptanceFixture):
         ):
             with self.subTest(source=relative):
                 path = self.root / relative
-                path.write_text(original, encoding="utf-8")
+                path.write_bytes(original.encode("utf-8"))
                 metadata = path.stat()
                 parse, read = getattr(MODULE, parser), MODULE._read_text
                 def names() -> Any:
@@ -500,18 +1076,18 @@ class AcceptanceMatrixTests(AcceptanceFixture):
                     try:
                         # Size and timestamps alone cannot bind a parse result.
                         self.assertEqual(len(original), len(changed))
-                        path.write_text(changed, encoding="utf-8")
+                        path.write_bytes(changed.encode("utf-8"))
                         os.utime(path, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
                         self.assertIn(second, names())
                         self.assertNotIn(first, names())
                         # Same-byte rebinding must still be read, without link privileges.
                         replacement = self.tmp / "replacement-source"
-                        replacement.write_text(original, encoding="utf-8")
+                        replacement.write_bytes(original.encode("utf-8"))
                         replacement.replace(path)
                         self.assertIn(first, names())
                         self.assertNotIn(second, names())
                     finally:
-                        path.write_text(original, encoding="utf-8")
+                        path.write_bytes(original.encode("utf-8"))
                     self.assertEqual(path.read_bytes(), original.encode("utf-8"))
                     self.assertEqual(sum(call.args == (changed,) for call in parsed.call_args_list), 1)
                     self.assertEqual(sum(call.args == (path,) for call in reads.call_args_list), 7)
@@ -521,8 +1097,8 @@ class AcceptanceMatrixTests(AcceptanceFixture):
         cpp = self.root / "test/cache-bound.cpp"
         text = ("add_test(NAME CacheBound COMMAND x)\n// TEST(CacheBound, Case) {}\n"
                 "TEST(CacheLive, Case) {}\n")
-        cmake.write_text(text, encoding="utf-8")
-        cpp.write_text(text, encoding="utf-8")
+        cmake.write_bytes(text.encode("utf-8"))
+        cpp.write_bytes(text.encode("utf-8"))
         parse = MODULE._strip_cmake
         with mock.patch.object(MODULE, "_strip_cmake", wraps=parse) as parsed:
             self.assertIn("CacheBound", MODULE.index_tests(self.root).ctest_names)
@@ -532,7 +1108,7 @@ class AcceptanceMatrixTests(AcceptanceFixture):
             # Oversized sources still receive every check, without retaining keys.
             large = text + "# padding\n" * 7000
             try:
-                cmake.write_text(large, encoding="utf-8")
+                cmake.write_bytes(large.encode("utf-8"))
                 for _ in range(2):
                     self.assertIn("CacheBound", MODULE.index_tests(self.root).ctest_names)
                 self.assertEqual(sum(call.args == (large,) for call in parsed.call_args_list), 2)
@@ -540,7 +1116,7 @@ class AcceptanceMatrixTests(AcceptanceFixture):
                 self.assertNotIn("CacheBound", MODULE.index_tests(self.root).ctest_names)
                 cmake.unlink()
                 self.assertNotIn("CacheBound", MODULE.index_tests(self.root).ctest_names)
-                cmake.write_text(text, encoding="utf-8")
+                cmake.write_bytes(text.encode("utf-8"))
                 read = MODULE._read_text
                 def denied(path: Path) -> str:
                     if path == cmake:
@@ -550,29 +1126,29 @@ class AcceptanceMatrixTests(AcceptanceFixture):
                     with self.assertRaisesRegex(PermissionError, "source parse denied"):
                         MODULE.index_tests(self.root)
             finally:
-                cmake.write_text(text, encoding="utf-8")
+                cmake.write_bytes(text.encode("utf-8"))
             self.assertEqual(cmake.read_bytes(), text.encode("utf-8"))
         large_cpp = text + "// padding\n" * 7000 + "TEST(CacheLarge, Case) {}\n"
         try:
-            cpp.write_text(large_cpp, encoding="utf-8")
+            cpp.write_bytes(large_cpp.encode("utf-8"))
             with mock.patch.object(MODULE, "_strip_c", wraps=MODULE._strip_c) as parsed:
                 for _ in range(2):
                     self.assertIn(("CacheLarge", "Case"), MODULE.index_tests(self.root).gtest_cases)
                 self.assertEqual(sum(call.args == (large_cpp,) for call in parsed.call_args_list), 2)
         finally:
-            cpp.write_text(text, encoding="utf-8")
+            cpp.write_bytes(text.encode("utf-8"))
         self.assertEqual(cpp.read_bytes(), text.encode("utf-8"))
         try:
             # Feed actual source versions through discovery, exceeding the entry cap.
             for number in range(257):
-                cmake.write_text(f"add_test(NAME CacheVersion{number} COMMAND x)\n", encoding="utf-8")
+                cmake.write_bytes(f"add_test(NAME CacheVersion{number} COMMAND x)\n".encode("utf-8"))
                 self.assertIn(f"CacheVersion{number}", MODULE.index_tests(self.root).ctest_names)
-            cmake.write_text(text, encoding="utf-8")
+            cmake.write_bytes(text.encode("utf-8"))
             with mock.patch.object(MODULE, "_strip_cmake", wraps=parse) as parsed:
                 self.assertIn("CacheBound", MODULE.index_tests(self.root).ctest_names)
                 self.assertEqual(sum(call.args == (text,) for call in parsed.call_args_list), 1)
         finally:
-            cmake.write_text(text, encoding="utf-8")
+            cmake.write_bytes(text.encode("utf-8"))
         self.assertEqual(cmake.read_bytes(), text.encode("utf-8"))
 
     def test_evidence_checks_resolve_the_validation_root_once_and_recheck_edits(self) -> None:
