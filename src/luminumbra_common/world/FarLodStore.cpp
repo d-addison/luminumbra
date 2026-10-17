@@ -11,7 +11,9 @@
 #include <bit>
 #include <cmath>
 #include <cstring>
+#include <exception>
 #include <limits>
+#include <mutex>
 #include <type_traits>
 #include <utility>
 
@@ -531,8 +533,16 @@ bool FarLodStore::save_tile(const FarLodTile& tile, std::vector<std::string>* er
     }
     const std::size_t count = tile.sample_count();
     const std::size_t samples_per_brick = FarLodSdfBrickSampleCount(tile.tier);
-    if (tile.sdf_bricks.size() > std::numeric_limits<u32>::max()) {
-        PushError(errors, "far-LOD tile has too many SDF brick descriptors to serialize");
+    constexpr std::size_t kHeaderBytes = 72;
+    // Match the LMR1 decoder's maximum uncompressed record size.
+    constexpr std::size_t kMaxPayloadBytes = std::size_t{64} * 1024 * 1024;
+    const std::size_t per_brick_bytes = 16 + samples_per_brick * 3;
+    const std::size_t base_bytes = kHeaderBytes + count * 4;
+    if (tile.sdf_bricks.size() > std::numeric_limits<u32>::max() ||
+        tile.sdf_density_q.size() > std::numeric_limits<u32>::max() / sizeof(i16) ||
+        tile.sdf_material.size() > std::numeric_limits<u32>::max() ||
+        tile.sdf_bricks.size() > (kMaxPayloadBytes - base_bytes) / per_brick_bytes) {
+        PushError(errors, "far-LOD tile exceeds the serializable payload limit");
         return false;
     }
 
@@ -542,7 +552,7 @@ bool FarLodStore::save_tile(const FarLodTile& tile, std::vector<std::string>* er
     record.flags = tile.edited ? kTileRecordFlagEdited : 0u;
 
     std::string& payload = record.payload;
-    payload.reserve(64 + count * 4 + tile.sdf_bricks.size() * (16 + samples_per_brick * 3));
+    payload.reserve(base_bytes + tile.sdf_bricks.size() * per_brick_bytes);
     AppendBytes(payload, kFarLodPayloadMagic, sizeof(kFarLodPayloadMagic));
     AppendValue(payload, kFarLodPayloadVersion);
     AppendValue(payload, static_cast<u8>(tile.tier));
@@ -754,6 +764,79 @@ bool FarLodStore::load_tile(FarLodTier tier,
         return true;
     }
     return false; // clean miss
+}
+
+AsyncFarLodStore::AsyncFarLodStore()
+    : m_worker(&AsyncFarLodStore::run, this) {}
+
+AsyncFarLodStore::~AsyncFarLodStore() {
+    close();
+}
+
+bool AsyncFarLodStore::enqueue(const std::filesystem::path& save_dir, FarLodTile&& tile) {
+    const std::lock_guard<std::mutex> lock(m_mutex);
+    if (m_closing || save_dir.empty() || m_diagnostics.pending >= kMaxPendingSaves)
+        return false;
+    m_queue.push_back(Save{.save_dir = save_dir, .tile = std::move(tile)});
+    ++m_diagnostics.pending;
+    m_ready.notify_one();
+    return true;
+}
+
+void AsyncFarLodStore::flush() {
+    std::unique_lock<std::mutex> lock(m_mutex);
+    m_drained.wait(lock, [this] { return m_diagnostics.pending == 0; });
+}
+
+void AsyncFarLodStore::close() {
+    {
+        const std::lock_guard<std::mutex> lock(m_mutex);
+        m_closing = true;
+    }
+    m_ready.notify_one();
+    if (m_worker.joinable())
+        m_worker.join();
+}
+
+AsyncFarLodStore::Diagnostics AsyncFarLodStore::diagnostics() const {
+    const std::lock_guard<std::mutex> lock(m_mutex);
+    return m_diagnostics;
+}
+
+void AsyncFarLodStore::run() {
+    for (;;) {
+        Save save;
+        {
+            std::unique_lock<std::mutex> lock(m_mutex);
+            m_ready.wait(lock, [this] { return m_closing || !m_queue.empty(); });
+            if (m_queue.empty()) {
+                m_diagnostics.closed = true;
+                return;
+            }
+            save = std::move(m_queue.front());
+            m_queue.pop_front();
+        }
+        bool saved = false;
+        try {
+            saved = FarLodStore(save.save_dir).save_tile(save.tile);
+        } catch (const std::exception&) {
+            // Derived bytes are a cache. Failure never invalidates live geometry
+            // or escapes the worker; shutdown still drains all accepted work.
+            saved = false;
+        }
+        // Release the payload before advertising the drain boundary.
+        save = {};
+        {
+            const std::lock_guard<std::mutex> lock(m_mutex);
+            if (saved)
+                ++m_diagnostics.saved;
+            else
+                ++m_diagnostics.failed;
+            --m_diagnostics.pending;
+            if (m_diagnostics.pending == 0)
+                m_drained.notify_all();
+        }
+    }
 }
 
 } // namespace Luminumbra::World

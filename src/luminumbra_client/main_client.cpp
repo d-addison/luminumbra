@@ -3093,7 +3093,9 @@ int main(int argc, char* argv[]) {
                     gameSession->SetSpawnPoint(g_playerController
                                                    ? g_playerController->SavedSpawnAnchor()
                                                    : g_camera->Position);
-                // Synchronous main-thread save; shutdown cannot overlap this callback.
+                // Synchronous main-thread save. Far-cache validation may still
+                // run: sibling readers close under shared publication locks,
+                // and authoritative replace/delete takes those locks exclusively.
                 if (!gameSession->SaveWorldState() || !gameSession->SaveWorld()) {
                     if (g_uiManager)
                         g_uiManager->ShowMessage("Could not save this world. Check available disk "

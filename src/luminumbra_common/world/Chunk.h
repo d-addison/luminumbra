@@ -3,12 +3,18 @@
 #include "../../../include/luminumbra/core/Types.h"
 #include "core/Log.h"
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <vector>
 
 namespace Luminumbra {
+
+namespace World {
+struct FarLodSdfSnapshot;
+}
 
 enum class ChunkState : u8 {
     Unloaded,
@@ -57,6 +63,11 @@ public:
         std::lock_guard<std::mutex> lock(m_state_mutex);
         m_state = new_state;
     }
+
+    // Owner-thread capture at streaming publication. Reuses immutable bytes for
+    // identical input; mutation creates a new value while workers retain the old.
+    std::shared_ptr<const World::FarLodSdfSnapshot>
+    capture_far_lod_sdf(std::size_t& bytes_copied) const;
 
     // --- Voxel edit tracking ---
     // True when sdf/heightmap voxel data was mutated AFTER generation and has
@@ -212,6 +223,7 @@ public:
     bool try_set_state(ChunkState expected_state, ChunkState new_state);
 
 private:
+    mutable std::shared_ptr<const World::FarLodSdfSnapshot> m_far_lod_snapshot;
     const IVec3 m_coords;
     const ChunkID m_id;
     ChunkState m_state;

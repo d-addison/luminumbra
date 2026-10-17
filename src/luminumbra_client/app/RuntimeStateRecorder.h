@@ -61,7 +61,7 @@ bool MemoryWatermarkExceeded(const RuntimeScenarioConfig& config,
 class RuntimeStateRecorder {
 public:
     RuntimeStateRecorder(RuntimeScenarioConfig config,
-                         std::unique_ptr<Luminumbra::Rendering::Camera>& g_camera);
+                         std::unique_ptr<Luminumbra::Rendering::Camera>& camera);
 
     const std::filesystem::path& artifact_dir() const;
     const std::filesystem::path& crash_dir() const;
@@ -147,6 +147,10 @@ struct RuntimeScenarioFrameSample {
     std::size_t water_stale_upload_candidates = 0;
     std::size_t water_stale_uploads_deferred = 0;
     std::size_t water_deferred_nearer_than_selected = 0;
+    uint64_t far_tiles_saved_async = 0;
+    std::size_t far_pending_saves = 0;
+    std::size_t far_snapshot_bytes_copied = 0;
+    std::size_t far_integration_uploads_deferred = 0;
     uint64_t gl_debug_errors = 0;
 };
 
@@ -155,7 +159,7 @@ public:
     RuntimeScenarioFrameRecorder(bool enabled,
                                  int coverage_radius,
                                  std::filesystem::path output_dir,
-                                 std::unique_ptr<Luminumbra::Rendering::Camera>& g_camera);
+                                 std::unique_ptr<Luminumbra::Rendering::Camera>& camera);
 
     bool enabled() const;
 

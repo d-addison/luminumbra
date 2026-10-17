@@ -973,6 +973,7 @@ add_executable(particle_determinism_test
 
 add_executable(far_lod_worker_test
     rendering/far_lod_worker_test.cpp
+    rendering/far_lod_persistence_test.cpp
     rendering/terrain_culling_test.cpp
     rendering/loading_overlay_test.cpp
     rendering/texture_file_test.cpp

@@ -5583,11 +5583,9 @@ SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(i32 rx, i32 rz) const {
     snapshot->params_hash = World::ComputeTerrainParamsHash(m_params, m_seed);
     snapshot->authority_revision = m_far_lod_authority_revision.load(std::memory_order_acquire);
     snapshot->region_authority_revision = far_lod_region_authority_revision(rx, rz);
-    snapshot->entries.reserve(m_streaming_state.chunks.size());
 
-    // This capture runs after the owner thread's normal streaming publication
-    // point. Copying here is the ownership boundary: workers receive only the
-    // owned value vectors below, never a Chunk or a borrowed vector span.
+    // Capture after streaming publication. Each chunk retains one immutable
+    // payload; overlapping regions and unchanged captures share those bytes.
     for (const auto& [id, chunk] : m_streaming_state.chunks) {
         (void)id;
         if (!chunk || chunk->sdf_data.size() != kFullSdfLatticeSize ||
@@ -5605,8 +5603,7 @@ SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(i32 rx, i32 rz) const {
         entry.provenance = chunk->sdf_provenance();
         entry.voxel_revision = chunk->voxel_revision();
         entry.authority_durable = !chunk->is_voxel_data_dirty();
-        entry.sdf_data = chunk->sdf_data;
-        entry.material_data = chunk->material_data;
+        entry.payload = chunk->capture_far_lod_sdf(snapshot->bytes_copied);
         snapshot->entries.push_back(std::move(entry));
     }
 

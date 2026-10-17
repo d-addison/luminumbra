@@ -636,8 +636,8 @@ TEST(StreamingHardening, FarLodSnapshotOwnsBytesAndRejectsStaleLiveData) {
     ASSERT_TRUE(captured);
     ASSERT_EQ(captured->entries.size(), 1u);
     const auto& entry = captured->entries.front();
-    EXPECT_EQ(entry.sdf_data.front(), -1.0f);
-    EXPECT_EQ(entry.material_data.front(), 7u);
+    EXPECT_EQ(entry.payload->sdf_data.front(), -1.0f);
+    EXPECT_EQ(entry.payload->material_data.front(), 7u);
     EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*captured));
 
     // The worker's copy is independent from the mutable live lattice. The
@@ -645,8 +645,8 @@ TEST(StreamingHardening, FarLodSnapshotOwnsBytesAndRejectsStaleLiveData) {
     chunk->sdf_data.front() = 3.0f;
     chunk->material_data.front() = 2u;
     chunk->mark_voxel_data_dirty();
-    EXPECT_EQ(entry.sdf_data.front(), -1.0f);
-    EXPECT_EQ(entry.material_data.front(), 7u);
+    EXPECT_EQ(entry.payload->sdf_data.front(), -1.0f);
+    EXPECT_EQ(entry.payload->material_data.front(), 7u);
     EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(*captured));
 }
 
@@ -742,8 +742,8 @@ TEST(StreamingHardening, FarLodSnapshotFiltersAndOrdersNegativeRegionWithHalo) {
     EXPECT_EQ(snapshot->entries[1].coords, IVec3(-32, -1, -32));
     EXPECT_EQ(snapshot->entries[2].coords, IVec3(-32, 1, -32));
     EXPECT_EQ(snapshot->entries[3].coords, IVec3(0, 0, 0));
-    EXPECT_TRUE(snapshot->entries[2].material_data.empty());
-    EXPECT_EQ(snapshot->entries[1].material_data.size(), full_lattice);
+    EXPECT_TRUE(snapshot->entries[2].payload->material_data.empty());
+    EXPECT_EQ(snapshot->entries[1].payload->material_data.size(), full_lattice);
 }
 
 TEST(StreamingHardening, PristineTileBuildIsDeterministic) {
