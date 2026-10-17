@@ -87,6 +87,28 @@ class CTestSkipAuditTests(unittest.TestCase):
             else:
                 self.assertIn("2 tests; 0 approved skips", output.getvalue())
 
+    def test_unevaluated_status_or_result_fails_audit(self):
+        for field, value in (("status", "disabled"), ("status", "notrun"),
+                             ("status", "skipped"), ("status", "unknown"), ("status", ""),
+                             ("result", "suppressed"), ("result", "skipped"),
+                             ("result", "unknown"), ("result", "")):
+            with self.subTest(field=field, value=value), tempfile.TemporaryDirectory() as directory:
+                root = ET.Element("testsuite")
+                case = ET.SubElement(root, "testcase", name="Required.Case")
+                case.set(field, value)
+                report = Path(directory) / "ctest.junit.xml"
+                ET.ElementTree(root).write(report, encoding="utf-8")
+                with mock.patch.object(sys, "argv", [str(MODULE_PATH), str(report), "--require-test", "Required.Case"]), contextlib.redirect_stderr(io.StringIO()) as errors:
+                    self.assertEqual(MODULE.main(), 1)
+                self.assertIn("Unexpected unevaluated tests", errors.getvalue())
+
+    def test_run_completed_metadata_passes_audit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "ctest.junit.xml"
+            report.write_text('<testsuite><testcase name="Case" status="run" result="completed"/></testsuite>', encoding="utf-8")
+            with mock.patch.object(sys, "argv", [str(MODULE_PATH), str(report)]), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(MODULE.main(), 0)
+
     def test_allow_list_is_empty(self):
         # Every previously allow-listed test now genuinely runs. Guard against a
         # skip quietly being re-admitted here without justification.
