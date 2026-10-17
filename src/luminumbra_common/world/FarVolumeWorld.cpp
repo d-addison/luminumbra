@@ -2,9 +2,15 @@
 
 #include "FarFrozenObservation.h"
 
+#include "luminumbra/core/Types.h"
 #include "systems/SHIELD_WorldSystem.h"
+#include "world/FarVolumeMemory.h"
+#include "world/FarVolumeMesher.h"
+#include "world/FarVolumeTile.h"
 
+#include <cstdint>
 #include <functional>
+#include <memory>
 #include <new>
 
 namespace Luminumbra::World {
@@ -14,7 +20,7 @@ CaptureWorldFarVolumeObservation(const Systems::SHIELD_WorldSystem& world,
                                  const FarVolumeRequest& request,
                                  const FarFrozenCaptureSource& source,
                                  const FarFrozenCaptureLimits& limits,
-                                 std::shared_ptr<FarVolumeMemoryPool> pool,
+                                 const std::shared_ptr<FarVolumeMemoryPool>& pool,
                                  std::shared_ptr<const FarFrozenObservation>& output) {
     try {
         const auto scope = world.acquire_worldgen_sample_scope();
@@ -58,7 +64,7 @@ CaptureWorldFarVolumeObservation(const Systems::SHIELD_WorldSystem& world,
         borrow(production.live_water, source.live_water);
         // All borrows end with this synchronous call; the frozen image retains
         // only scalar identities and sampled values, never these callbacks.
-        return CaptureFarVolumeObservation(request, production, limits, std::move(pool), output);
+        return CaptureFarVolumeObservation(request, production, limits, pool, output);
     } catch (const std::bad_alloc&) {
         return FarFrozenCaptureError::AllocationFailure;
     } catch (...) {

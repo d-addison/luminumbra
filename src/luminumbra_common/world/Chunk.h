@@ -297,6 +297,8 @@ public:
     std::atomic<bool> pending_generation_ready{false};
     std::atomic<u32> mesh_version{0};
     std::atomic<u32> water_mesh_version{0};
+    // Worker result only; the host acknowledges the captured water revision at publication.
+    std::atomic<bool> pending_water_mesh_generated{false};
 
     // --- Water Simulation Data ---
     std::vector<f32> water_level_data;

@@ -124,8 +124,12 @@ publication, catalog currency and renderer scheduling are separate consumers.
 authoritative paths retain their class. The only derived paths are canonical
 `far/v<tier>.<tx>.<tz>.lmr` names within codec bounds and `far/catalog.json`.
 Index encoding and decoding reject a class that disagrees with the path. Existing
-member and journal encodings retain their bytes. Derived files never enter an
-authoritative fingerprint, world hash or simulation policy.
+member and journal entry encodings retain their bytes. Authoritative-only
+documents retain their v1 schemas; documents containing derived paths emit
+`luminumbra.snapshot.v2` or `luminumbra.journal.v2`, so readers without derived
+support refuse them as unsupported schemas. Readers also accept existing v1
+documents, including derived paths, for recovery compatibility. Derived files never
+enter an authoritative fingerprint, world hash or simulation policy.
 
 `SaveTransaction::BeginDerivedGroup` declares disjoint, bounded paths and durably
 publishes undo copies and the journal before returning a handle. Derived writes
