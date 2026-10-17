@@ -1189,7 +1189,7 @@ GameSession::ValidateWorldConfig(const std::string& root_path,
     }
 
     if (result.ok) {
-        const TerrainPresetLoadResult preset = LoadTerrainPreset(result.preset_path);
+        const TerrainPresetLoadResult preset = LoadTerrainPreset(result.preset_path, root / "data");
         if (!preset.ok) {
             for (const std::string& error : preset.errors) {
                 AddValidationError(result, error);
@@ -1242,7 +1242,7 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     metadata.worldId = transient ? std::string{} : GenerateWorldId();
     metadata.creationTime = std::time(nullptr);
     metadata.spawnPoint = Vec3(0, 100, 0);
-    const auto worldPath = RuntimeRoot(m_rootPath) / "worlds/saves" / metadata.worldId;
+    const auto worldPath = GetSaveRootPath() / "worlds/saves" / metadata.worldId;
     if (!transient) {
         try {
             fs::create_directories(worldPath);
@@ -1288,7 +1288,8 @@ bool GameSession::CreateWorldInternal(const std::string& name,
         preset_to_load = world_preset;
     }
 
-    const TerrainPresetLoadResult preset = LoadTerrainPreset(preset_to_load);
+    const TerrainPresetLoadResult preset =
+        LoadTerrainPreset(preset_to_load, RuntimeRoot(m_rootPath) / "data");
     if (!preset.ok) {
         m_worldOpenError = preset.errors.empty() ? "Invalid world preset." : preset.errors.front();
         for (const std::string& error : preset.errors) {
@@ -1402,7 +1403,8 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     if (!IsSimulationTickBoundary())
         return false;
     m_lastLoadedChunkCount = 0;
-    const auto saved = Persistence::InspectSavedWorld(RuntimeRoot(m_rootPath), worldId);
+    const auto saved =
+        Persistence::InspectSavedWorld(GetSaveRootPath(), RuntimeRoot(m_rootPath), worldId);
     m_worldOpenError = saved.error;
     if (m_worldOpenError.empty() && saved.requires_active_regions && !m_activeRegionsEnabled)
         m_worldOpenError = "Incompatible configuration: this world requires sim.active_regions.";
@@ -1420,7 +1422,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
             return false;
         }
     }
-    const std::string worldPath = (RuntimeRoot(m_rootPath) / "worlds/saves" / worldId).string();
+    const std::string worldPath = (GetSaveRootPath() / "worlds/saves" / worldId).string();
     // Generate from the same canonical bytes whose saved identity was verified.
     const TerrainPresetLoadResult preset = LoadTerrainPresetFromJson(
         nlohmann::json::parse(saved.preset_json), RuntimeRoot(m_rootPath) / "data");
@@ -1777,11 +1779,15 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
     return true;
 }
 
+std::filesystem::path GameSession::GetSaveRootPath() const {
+    return m_saveRootPath.empty() ? RuntimeRoot(m_rootPath) : m_saveRootPath;
+}
+
 std::filesystem::path GameSession::GetWorldSaveDir() const {
     if (m_transientWorld || m_metadata.worldId.empty()) {
         return {};
     }
-    return RuntimeRoot(m_rootPath) / "worlds/saves" / m_metadata.worldId;
+    return GetSaveRootPath() / "worlds/saves" / m_metadata.worldId;
 }
 
 bool GameSession::SaveWorldState(WorldStateSaveReport* report) {

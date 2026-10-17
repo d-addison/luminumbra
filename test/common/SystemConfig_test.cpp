@@ -6,19 +6,28 @@
 #include "../support/UniqueTempPath.h"
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
 
+#include <cstddef>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <utility>
 
-#include <glm/glm.hpp>
+#include <glm/ext/vector_float3.hpp>
 #include <iomanip>
 
+#include "luminumbra_client/rendering/FarWorldCaveSelection.h"
 #include "luminumbra_client/rendering/FarWorldRenderer.h"
+#include "luminumbra_client/rendering/FarWorldSelection.h"
+#include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/SystemConfig.h"
+#include "luminumbra_common/core/SystemConfigRegistry.gen.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h" // StableChecksum
+#include "luminumbra_common/world/FarVolume.h"
+#include "luminumbra_common/world/GameSession.h"
 
 using luminumbra::core::SysKey;
 using luminumbra::core::SysParam;
@@ -436,6 +445,68 @@ TEST(SystemConfig, UserVideoDefaults) {
     const auto& u = config.user();
     EXPECT_FLOAT_EQ(u.mouse_sensitivity, 0.025f);
     EXPECT_TRUE(u.vsync);
+    EXPECT_EQ(u.frame_cap, 0);
+}
+
+TEST(SystemConfig, FramePacingPersistsEverySupportedChoice) {
+    for (const int cap : {0, 30, 60, 120, 144, 165, 240}) {
+        for (const bool vsync : {false, true}) {
+            SCOPED_TRACE(cap);
+            SCOPED_TRACE(vsync);
+            const Luminumbra::TestSupport::ScopedTempFile file("frame_pacing_", ".json");
+            const nlohmann::json document = {
+                {"user", {{"video", {{"vsync", vsync}, {"frame_cap", cap}}}}}};
+            const auto config = SystemConfig::FromJsonString(document.dump());
+            EXPECT_EQ(config.user().vsync, vsync);
+            EXPECT_EQ(config.user().frame_cap, cap);
+            ASSERT_TRUE(config.SaveUserOverlay(file.Path().string()));
+            const auto reloaded = SystemConfig::LoadLayered("", file.Path().string());
+            EXPECT_EQ(reloaded.user().vsync, vsync);
+            EXPECT_EQ(reloaded.user().frame_cap, cap);
+            EXPECT_EQ(reloaded.ComputeConfigSubHash(),
+                      SystemConfig::Defaults().ComputeConfigSubHash());
+        }
+    }
+}
+
+TEST(SystemConfig, InvalidFramePacingValuesKeepDefaultsOrPreviousOverlay) {
+    const auto invalid_caps = nlohmann::json::parse(
+        R"([null,true,false,"30","60","165","unlimited",30.0,60.0,60.5,165.0,
+            -1,1,29,31,61,164,166,300,[],{},4294967326,4294967356,4294967461,
+            18446744073709551615,-9223372036854775808])");
+    for (const auto& cap : invalid_caps) {
+        SCOPED_TRACE(cap.dump());
+        const nlohmann::json document = {{"user", {{"video", {{"frame_cap", cap}}}}}};
+        EXPECT_EQ(SystemConfig::FromJsonString(document.dump()).user().frame_cap, 0);
+        auto config = SystemConfig::Defaults();
+        config.OverlayUserFromJsonString(R"({"user":{"video":{"frame_cap":144}}})");
+        config.OverlayUserFromJsonString(document.dump());
+        EXPECT_EQ(config.user().frame_cap, 144);
+    }
+    const auto invalid_vsync = nlohmann::json::parse(R"([null,0,1,"on","off",[],{}])");
+    for (const auto& vsync : invalid_vsync) {
+        SCOPED_TRACE(vsync.dump());
+        const nlohmann::json document = {{"user", {{"video", {{"vsync", vsync}}}}}};
+        EXPECT_TRUE(SystemConfig::FromJsonString(document.dump()).user().vsync);
+        auto config = SystemConfig::Defaults();
+        config.OverlayUserFromJsonString(R"({"user":{"video":{"vsync":false}}})");
+        config.OverlayUserFromJsonString(document.dump());
+        EXPECT_FALSE(config.user().vsync);
+    }
+    auto config = SystemConfig::Defaults();
+    config.OverlayUserFromJsonString(R"({"user":{"video":{"vsync":false,"frame_cap":240}}})");
+    config.OverlayUserFromJsonString(R"({"user":{"video":{"unknown_setting":120}}})");
+    config.OverlayUserFromJsonString(R"({"user":{"video":{}}})");
+    EXPECT_FALSE(config.user().vsync);
+    EXPECT_EQ(config.user().frame_cap, 240);
+}
+
+TEST(SystemConfig, InvalidInMemoryFrameCapSavesAsUnlimited) {
+    const Luminumbra::TestSupport::ScopedTempFile file("frame_pacing_", ".json");
+    auto config = SystemConfig::Defaults();
+    config.user().frame_cap = 61;
+    ASSERT_TRUE(config.SaveUserOverlay(file.Path().string()));
+    EXPECT_EQ(SystemConfig::LoadFromFile(file.Path().string()).user().frame_cap, 0);
 }
 
 // -105 — keybind map resolves action->key; missing action -> fallback.
@@ -467,7 +538,7 @@ TEST(SystemConfig, UserOverlaySaveReload) {
     std::filesystem::remove_all(dir, rm_ec); // non-throwing pre-clean
     const std::filesystem::path path = dir / "settings.json";
 
-    SystemConfig cfg = SystemConfig::FromJsonString(R"({
+    const SystemConfig cfg = SystemConfig::FromJsonString(R"({
       "sim": { "erosion": { "enabled": true } },
       "user": { "video": { "fov": 95.0, "window_mode": "windowed" },
                 "controls": { "Sprint": 340 } }
@@ -478,7 +549,7 @@ TEST(SystemConfig, UserOverlaySaveReload) {
     // its handle is closed before cleanup (Windows can't delete an open file).
     std::string text;
     {
-        std::ifstream in(path);
+        const std::ifstream in(path);
         std::ostringstream ss;
         ss << in.rdbuf();
         text = ss.str();
@@ -529,7 +600,7 @@ TEST(SystemConfig, EnabledMissingTrueFalseAndMalformed) {
                               "{\"enabled\":null}",
                               "false"}) {
         auto json = nlohmann::json::parse(entry);
-        nlohmann::json document = {{"sim", {{"erosion", json}}}};
+        const nlohmann::json document = {{"sim", {{"erosion", json}}}};
         const auto cfg = SystemConfig::FromJsonString(document.dump());
         const bool expected = !(json.is_object() && json.contains("enabled") &&
                                 json["enabled"].is_boolean() && !json["enabled"].get<bool>());
@@ -546,7 +617,7 @@ TEST(SystemConfig, PackagedFlagsAgreeWithCompiledDefaults) {
 #define CHECK_PACKAGED_FLAG(name, section, json_section, json_name, residency)                     \
     EXPECT_EQ(document.at(json_section).at(json_name).at("enabled").get<bool>(),                   \
               SystemConfig::Defaults().enabled(SysKey::name))                                      \
-        << json_name;
+        << (json_name);
     LUMIN_CONFIG_KEY_TABLE(CHECK_PACKAGED_FLAG)
 #undef CHECK_PACKAGED_FLAG
     const auto packaged = SystemConfig::LoadFromFile(path.string());
