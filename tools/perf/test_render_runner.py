@@ -13,15 +13,11 @@ import tempfile
 import time
 import unittest
 
+# Resolve sibling modules for direct execution with isolated Python.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 import render_contract as contract
-
-
-def _file_sha256(path):
-    digest = hashlib.sha256()
-    with path.open('rb') as source:
-        for block in iter(lambda: source.read(1024 * 1024), b''):
-            digest.update(block)
-    return digest.hexdigest()
+import render_runner_process as process_runner
 
 
 def _atomic_write(path, payload):
@@ -124,15 +120,17 @@ def _run_process(command, *, cwd, environment, log, artifact, retained, receipt_
                    return_code=None, capture_status='missing', capture_path=None,
                    capture_sha256=None, evidence_errors=[])
     try:
-        receipt['binary_sha256'] = _file_sha256(Path(command[0]))
-        with log.open('wb') as output:
-            started = time.monotonic()
+        executable = process_runner.resolve_executable(command[0], cwd, environment)
+        command = [str(executable), *command[1:]]
+        receipt.update(command=command, binary_path=command[0])
+        with process_runner.verified_binary(receipt), log.open('wb') as output:
+            started = time.perf_counter()
             try:
                 result = subprocess.run(command, cwd=cwd, env=environment,
                                         stdout=output, stderr=subprocess.STDOUT,
                                         timeout=180, check=False)
             finally:
-                receipt['elapsed_seconds'] = time.monotonic() - started
+                receipt['elapsed_seconds'] = time.perf_counter() - started
             receipt.update(outcome='returned', return_code=result.returncode)
     except (subprocess.TimeoutExpired, OSError) as error:
         receipt.update(outcome='timed_out' if isinstance(error, subprocess.TimeoutExpired)
@@ -249,21 +247,40 @@ class RenderRunnerTests(unittest.TestCase):
         saved = saves[0]
         metadata = json.loads((saved / 'world_info.json').read_text(encoding="utf-8"))
         self.assertEqual(metadata['worldType'], 'default')
-        preset = json.loads((self.root / 'worlds/atlas/presets/default.json').read_text(encoding="utf-8"))
+        loaded = self.run_client('loaded', ['--load-world', saved.name,
+                                            '--render-benchmark-frames', '4'])
+        for data in (original, loaded):
+            contract.validate(data, data['adapter']['renderer'])
+        for key in ('preset', 'preset_revision', 'preset_identity', 'content_identity'):
+            self.assertEqual(loaded['workload'][key], original['workload'][key])
+
+        manifest = dict(original['workload'])
+        manifest['preset_identity'] = f"{int(manifest['preset_identity'], 16) ^ 1:016x}"
+        manifest['content_identity'] = str(int(manifest['content_identity']) ^ 1)
+        for key in ('preset_identity', 'content_identity'):
+            with self.assertRaisesRegex(ValueError, f'workload manifest does not match: {key}'):
+                contract.validate(original, original['adapter']['renderer'],
+                                  workload={key: manifest[key]})
+
+        preset = json.loads((saved / 'preset.json').read_text(encoding="utf-8"))
         preset['generation_params']['terrain']['height_offset'] += 1
         (saved / 'preset.json').write_text(json.dumps(preset), encoding="utf-8")
-        altered = self.run_client('altered', ['--load-world', saved.name, '--render-benchmark-frames', '4'])
-        self.assertEqual(altered['workload']['preset'], original['workload']['preset'])
-        for key in ('preset_identity', 'content_identity'):
-            self.assertNotEqual(altered['workload'][key], original['workload'][key])
-            with self.assertRaisesRegex(ValueError, 'workload manifest'):
-                contract.validate(altered, altered['adapter']['renderer'],
-                                  workload={key: original['workload'][key]})
-        log = self.run_client('refused', ['--load-world', saved.name, '--traversal', str(self.script)], expected_exit=2)
-        self.assertIn('content identity mismatch', log)
-        self.assertNotRegex(log, r'Loading [0-9]+ chunks')
-        self.assertNotIn('World state loaded:', log)
-        self.assertNotIn('EnsureSurfaceReadyNear:', log)
+
+        def save_bytes():
+            return {path.relative_to(saved): None if path.is_dir() else path.read_bytes()
+                    for path in saved.rglob('*')}
+
+        before = save_bytes()
+        for name, extra in (('altered', ['--render-benchmark-frames', '4']),
+                            ('refused', ['--traversal', str(self.script)])):
+            with self.subTest(name=name):
+                log = self.run_client(name, ['--load-world', saved.name, *extra], expected_exit=2)
+                self.assertIn('World open refused: Incompatible world preset: '
+                              'saved preset identity does not match.', log)
+                self.assertNotRegex(log, r'Loading [0-9]+ chunks')
+                self.assertNotIn('World state loaded:', log)
+                self.assertNotIn('EnsureSurfaceReadyNear:', log)
+                self.assertEqual(save_bytes(), before)
 
 
 if __name__ == '__main__':

@@ -193,6 +193,9 @@ public:
     // Owner thread only; returns the body's verdict, and false when the commit fails.
     bool RunInSnapshotTransaction(const std::function<bool()>& body);
 
+    // Read-only destination preset/identity check, before any save writes or acknowledgements.
+    [[nodiscard]] bool SavedPresetCompatible(const std::filesystem::path& save_dir) const;
+
     // --- Runtime world-state persistence ---
     // Persists streamed chunk voxel state under the canonical world save dir
     // (worlds/saves/<world_id>). Incremental contract: nothing is written when
@@ -876,6 +879,8 @@ private:
     // Stable only in the clock slice; world-anchored pages replace this grid in C4.
     Vec3 m_ambientFieldAnchor{};
     std::string m_presetContentHash;
+    // Exact canonical preset source, independent of dependency-content identity.
+    std::string m_savedPresetJson;
     luminumbra::core::SystemConfig m_appliedSystemConfig =
         luminumbra::core::SystemConfig::Defaults();
     bool m_activeRegionsEnabled = true;

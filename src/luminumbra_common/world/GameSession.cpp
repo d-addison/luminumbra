@@ -1334,6 +1334,7 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     }
 
     fs::path preset_to_load = validation.preset_path;
+    std::string saved_preset_json;
     if (!transient) {
         nlohmann::json resolved;
         try {
@@ -1365,11 +1366,10 @@ bool GameSession::CreateWorldInternal(const std::string& name,
         resolved = ResolveTerrainPresetDefaults(resolved);
         // Materialize historical choices before upgrading the revision.
         resolved["schema_rev"] = kTerrainPresetSchemaRevision;
+        saved_preset_json = resolved.dump();
         const fs::path world_preset = worldPath / "preset.json";
-        std::ofstream pf(world_preset, std::ios::binary);
-        pf << resolved.dump(2) << '\n';
-        pf.close();
-        if (!pf.good()) {
+        if (!Persistence::WorldSaveService::write_file_durably(world_preset,
+                                                               saved_preset_json + "\n")) {
             m_worldOpenError = "Could not save this world's resolved preset.";
             return false;
         }
@@ -1391,6 +1391,7 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     if (m_activeRegionsEnabled && !LoadSpeciesDefinitions(std::move(content)))
         return false;
     m_presetContentHash = preset.preset_content_hash;
+    m_savedPresetJson = std::move(saved_preset_json);
     m_metadata = std::move(metadata);
     m_transientWorld = transient;
     m_physicsSystem = std::make_unique<Systems::PhysicsSystem>();
@@ -1541,6 +1542,7 @@ bool GameSession::LoadWorldChecked(const std::string& worldId,
     ResetWorldSystems();
     m_chunkValidationCache.swap(candidate.m_chunkValidationCache);
     m_presetContentHash = std::move(candidate.m_presetContentHash);
+    m_savedPresetJson = std::move(candidate.m_savedPresetJson);
     m_registry = std::move(candidate.m_registry);
     m_simulationEventBus = std::move(candidate.m_simulationEventBus);
     m_metadata = std::move(candidate.m_metadata);
@@ -1691,6 +1693,7 @@ bool GameSession::LoadWorldInternal(const std::string& worldId,
     if (m_activeRegionsEnabled && !LoadSpeciesDefinitions(std::move(content)))
         return false;
     m_presetContentHash = preset.preset_content_hash;
+    m_savedPresetJson = saved.preset_source_json;
     m_metadata = saved.metadata;
     if (m_activeRegionsEnabled) {
         m_worldClock = saved.clock;
@@ -3683,10 +3686,61 @@ bool GameSession::SaveWorld() {
     return SaveWorldMetadataTo(GetWorldSaveDir());
 }
 
+bool GameSession::SavedPresetCompatible(const fs::path& save_dir) const {
+    const auto& canonical = m_savedPresetJson;
+    try {
+        const auto preset_path = save_dir / "preset.json";
+        const bool has_preset = fs::exists(preset_path);
+        const auto metadata_path = save_dir / "world_info.json";
+        if (fs::exists(metadata_path)) {
+            std::ifstream input(metadata_path);
+            const auto metadata = nlohmann::json::parse(input);
+            if (!metadata.is_object())
+                return false;
+            if (metadata.contains("presetFormat") &&
+                (!metadata.at("presetFormat").is_number_integer() ||
+                 metadata.at("presetFormat") != Persistence::kSavedPresetFormat || !has_preset ||
+                 !metadata.contains("presetIdentity")))
+                return false;
+            if (metadata.contains("presetIdentity") &&
+                (canonical.empty() || !metadata.at("presetIdentity").is_string() ||
+                 metadata.at("presetIdentity").get<std::string>() !=
+                     Persistence::StableChecksum(canonical)))
+                return false;
+        }
+        if (has_preset) {
+            std::ifstream input(preset_path);
+            return !canonical.empty() && nlohmann::json::parse(input).dump() == canonical;
+        }
+        // Unmarked legacy saves and new destinations may embed the session's preset later.
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+namespace {
+bool PersistSavedPreset(const fs::path& save_dir, const std::string& canonical) {
+    if (canonical.empty())
+        return false;
+    try {
+        const auto path = save_dir / "preset.json";
+        if (fs::exists(path)) {
+            std::ifstream input(path);
+            return nlohmann::json::parse(input).dump() == canonical;
+        }
+        return Persistence::WorldSaveService::write_file_durably(path, canonical + "\n");
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+} // namespace
+
 bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
     const Persistence::ChunkValidationCache::Scope validation_scope(*m_chunkValidationCache);
     if (!CanSaveWorldNow() || save_dir.empty() || !ClockConfigurationCompatible(save_dir) ||
-        m_transientWorld || m_metadata.worldId.empty() || !m_worldOpenError.empty())
+        m_transientWorld || m_metadata.worldId.empty() || !m_worldOpenError.empty() ||
+        !SavedPresetCompatible(save_dir))
         return false;
     std::optional<Ecs::EntityRegistrySnapshot> plants;
     std::optional<luminumbra::ai::CreatureSnapshot> creatures;
@@ -3725,9 +3779,13 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
         if (!outer)
             return false;
     }
+    if (!PersistSavedPreset(save_dir, m_savedPresetJson))
+        return false;
     // Using nlohmann::json for robust saving
     nlohmann::json metadata_json = {
         {"container_version", Persistence::WorldSaveService::kContainerVersion},
+        {"presetFormat", Persistence::kSavedPresetFormat},
+        {"presetIdentity", Persistence::StableChecksum(m_savedPresetJson)},
         {"name", m_metadata.name},
         {"seed", m_metadata.seed},
         {"worldType", m_metadata.worldType},
@@ -3864,6 +3922,11 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
         (m_activeRegionsEnabled && (m_transientWorld || m_metadata.worldId.empty()))) {
         return false;
     }
+
+    // Refuse before foliage preparation, transaction writes or dirty acknowledgement,
+    // including chunk-free saves and saves with active regions disabled.
+    if (!SavedPresetCompatible(save_dir))
+        return false;
 
     if (m_activeRegionsEnabled && !m_regionFault) {
         try {
