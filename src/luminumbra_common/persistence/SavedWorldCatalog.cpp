@@ -23,10 +23,59 @@ bool HasFrozenPreset(const std::string& name) {
            name == "caverns" || name == "default" || name == "flat_lands" || name == "mountains" ||
            name == "temperate_forest";
 }
+
+bool ResolveSavedPreset(const fs::path& runtime_root,
+                        const fs::path& save,
+                        const nlohmann::json& metadata,
+                        SavedWorld& result) {
+    const bool requires_embedded = metadata.contains("presetFormat");
+    if (requires_embedded && (!metadata.at("presetFormat").is_number_integer() ||
+                              metadata.at("presetFormat") != kSavedPresetFormat)) {
+        result.error = "Unsupported or corrupt saved preset format.";
+        return false;
+    }
+    const auto embedded = save / "preset.json";
+    const bool has_embedded = fs::exists(embedded);
+    if (requires_embedded && !has_embedded) {
+        result.error = "World preset is unavailable: required embedded preset.json is missing.";
+        return false;
+    }
+    if (requires_embedded && !metadata.contains("presetIdentity")) {
+        result.error = "Corrupt world metadata: required preset identity is missing.";
+        return false;
+    }
+    // Only unmarked saves without embedded content may resolve packaged presets.
+    const auto presets = HasFrozenPreset(result.metadata.worldType) ? "worlds/atlas/presets-rev6"
+                                                                    : "worlds/atlas/presets";
+    result.preset_path =
+        has_embedded ? embedded : runtime_root / presets / (result.metadata.worldType + ".json");
+    const auto preset = world::LoadTerrainPreset(result.preset_path, runtime_root / "data");
+    if (!preset.ok) {
+        result.error =
+            preset.errors.empty() ? "World preset is unavailable." : preset.errors.front();
+        return false;
+    }
+    std::ifstream input(result.preset_path);
+    result.preset_json = nlohmann::json::parse(input).dump();
+    if (metadata.contains("presetIdentity") &&
+        (!metadata.at("presetIdentity").is_string() ||
+         metadata.at("presetIdentity").get<std::string>() != StableChecksum(result.preset_json))) {
+        result.error = "Incompatible world preset: saved preset identity does not match.";
+        return false;
+    }
+    return true;
+}
 } // namespace
 
 SavedWorld
 InspectSavedWorld(const fs::path& root, const std::string& world_id, const std::stop_token& stop) {
+    return InspectSavedWorld(root, root, world_id, stop);
+}
+
+SavedWorld InspectSavedWorld(const fs::path& root,
+                             const fs::path& runtime_root,
+                             const std::string& world_id,
+                             const std::stop_token& stop) {
     SavedWorld result;
     result.metadata.worldId = world_id;
     result.metadata.name = world_id;
@@ -90,32 +139,8 @@ InspectSavedWorld(const fs::path& root, const std::string& world_id, const std::
             result.error = "Corrupt world metadata: invalid world type.";
             return result;
         }
-        const auto embedded = save / "preset.json";
-        // Changed packaged presets have frozen revision-6 copies.
-        // Additional named presets retain their original resolution path.
-        const auto presets = HasFrozenPreset(result.metadata.worldType)
-                                 ? "worlds/atlas/presets-rev6"
-                                 : "worlds/atlas/presets";
-        result.preset_path = fs::exists(embedded)
-                                 ? embedded
-                                 : root / presets / (result.metadata.worldType + ".json");
-        const auto preset = world::LoadTerrainPreset(result.preset_path);
-        if (!preset.ok) {
-            result.error =
-                preset.errors.empty() ? "World preset is unavailable." : preset.errors.front();
+        if (!ResolveSavedPreset(runtime_root, save, json, result))
             return result;
-        }
-        // Within the frozen-preset compatibility scope, older metadata may omit an identity.
-        // When present, it is the FNV-1a checksum of the canonical preset JSON.
-        if (HasFrozenPreset(result.metadata.worldType) && json.contains("presetIdentity")) {
-            std::ifstream preset_input(result.preset_path);
-            const auto source = nlohmann::json::parse(preset_input);
-            if (!json.at("presetIdentity").is_string() ||
-                json.at("presetIdentity").get<std::string>() != StableChecksum(source.dump())) {
-                result.error = "Incompatible world preset: saved preset identity does not match.";
-                return result;
-            }
-        }
         result.error.clear();
     } catch (const nlohmann::json::exception& e) {
         result.error = std::string("Corrupt world metadata: ") + e.what();
@@ -126,6 +151,12 @@ InspectSavedWorld(const fs::path& root, const std::string& world_id, const std::
 }
 
 SavedWorldCatalog EnumerateSavedWorlds(const fs::path& root, const std::stop_token& stop) {
+    return EnumerateSavedWorlds(root, root, stop);
+}
+
+SavedWorldCatalog EnumerateSavedWorlds(const fs::path& root,
+                                       const fs::path& runtime_root,
+                                       const std::stop_token& stop) {
     SavedWorldCatalog result;
     if (stop.stop_requested()) {
         result.error = "Saved-world validation cancelled.";
@@ -143,7 +174,7 @@ SavedWorldCatalog EnumerateSavedWorlds(const fs::path& root, const std::stop_tok
             }
             if (entry.is_directory() || entry.is_symlink())
                 result.worlds.push_back(
-                    InspectSavedWorld(root, entry.path().filename().string(), stop));
+                    InspectSavedWorld(root, runtime_root, entry.path().filename().string(), stop));
         }
         std::sort(result.worlds.begin(), result.worlds.end(), [](const auto& a, const auto& b) {
             if (a.metadata.creationTime != b.metadata.creationTime)

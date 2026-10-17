@@ -18,18 +18,26 @@
 #include <map>
 #include <span>
 #include <sstream>
+#include <stdexcept>
 #include <string>
+#include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 
 #include "luminumbra_client/rendering/TimeOfDayModel.h"
 #include "luminumbra_common/ai/CircadianSystem.h"
+#include "luminumbra_common/ai/CreatureSpeciesRegistry.h"
 #include "luminumbra_common/ai/EcologyHash.h"
 #include "luminumbra_common/ai/MigrationSystem.h"
 #include "luminumbra_common/ai/StimulusChannels.h"
 #include "luminumbra_common/components/InstinctComponents.h"
+#include "luminumbra_common/core/FilesystemPath.h"
+#include "luminumbra_common/net/LockstepSession.h"
 #include "luminumbra_common/persistence/SavedWorldCatalog.h"
+#include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/replay/RegionScheduleTrace.h"
+#include "luminumbra_common/replay/ReplayStream.h"
 #include "luminumbra_common/systems/AetherFieldSystem.h"
 #include "luminumbra_common/systems/PlantGrowthSystem.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
@@ -97,6 +105,567 @@ private:
     fs::path root_;
 };
 
+// Fault injection exercises scan errors on every platform and under elevated users.
+// No permission-dependent fixture or skipped assertion is needed.
+enum class SpeciesScanFailure {
+    Open,
+    Metadata,
+    Increment
+};
+
+template<SpeciesScanFailure Failure>
+class FailingSpeciesDirectoryIterator {
+public:
+    FailingSpeciesDirectoryIterator() = default;
+    FailingSpeciesDirectoryIterator(const fs::path& dir, std::error_code& ec) {
+        entry_.file = dir / "deer.json";
+        if constexpr (Failure == SpeciesScanFailure::Open) {
+            ec = std::make_error_code(std::errc::permission_denied);
+        } else {
+            active_ = true;
+            ec.clear();
+        }
+    }
+    struct Entry {
+        fs::path file;
+        bool is_regular_file(std::error_code& ec) const {
+            if constexpr (Failure == SpeciesScanFailure::Metadata)
+                ec = std::make_error_code(std::errc::io_error);
+            else
+                ec.clear();
+            return !ec;
+        }
+        const fs::path& path() const {
+            return file;
+        }
+    };
+    const Entry& operator*() const {
+        return entry_;
+    }
+    bool operator!=(const FailingSpeciesDirectoryIterator& other) const {
+        return active_ != other.active_;
+    }
+    void increment(std::error_code& ec) {
+        ec = std::make_error_code(std::errc::io_error);
+        active_ = false;
+    }
+
+private:
+    Entry entry_;
+    bool active_ = false;
+};
+
+template<SpeciesScanFailure Failure>
+void CheckSpeciesScanFailure(const fs::path& directory, const std::string& diagnostic) {
+    luminumbra::ai::CreatureSpeciesRegistry registry;
+    std::string parse_error;
+    ASSERT_TRUE(registry.AddFromJsonText(R"({"id":"retained"})", parse_error));
+    std::vector<std::string> errors{"previous diagnostic"};
+    bool io_failed = false;
+    std::size_t reads = 0;
+    const Luminumbra::World::WorldgenFileReader reader = [&](const fs::path&, std::string&) {
+        ++reads;
+        return false;
+    };
+    std::size_t loaded = 1;
+    EXPECT_NO_THROW(loaded = registry.LoadFromDirectory<FailingSpeciesDirectoryIterator<Failure>>(
+                        directory, errors, reader, &io_failed));
+    EXPECT_EQ(loaded, 0u);
+    EXPECT_TRUE(io_failed);
+    ASSERT_EQ(errors.size(), 2u);
+    EXPECT_EQ(errors.front(), "previous diagnostic");
+    EXPECT_NE(errors.back().find(diagnostic), std::string::npos);
+    EXPECT_EQ(reads, 0u);
+    ASSERT_EQ(registry.size(), 1u);
+    EXPECT_NE(registry.FindByName("retained"), nullptr);
+    // Client/HUD callers omit io_failed and still receive a controlled diagnostic.
+    errors.clear();
+    EXPECT_NO_THROW(loaded = registry.LoadFromDirectory<FailingSpeciesDirectoryIterator<Failure>>(
+                        directory, errors, reader));
+    EXPECT_EQ(loaded, 0u);
+    ASSERT_EQ(errors.size(), 1u);
+    EXPECT_NE(errors.front().find(diagnostic), std::string::npos);
+    EXPECT_EQ(reads, 0u);
+    EXPECT_EQ(registry.size(), 1u);
+}
+
+TEST(GameSessionHeadlessWorldTest, SpeciesScanFailuresAreContainedBeforeAnyReads) {
+    const Luminumbra::TestSupport::SpeciesIdentityFixture fixture;
+    CheckSpeciesScanFailure<SpeciesScanFailure::Open>(fixture.Directory(), "cannot enumerate");
+    CheckSpeciesScanFailure<SpeciesScanFailure::Metadata>(fixture.Directory(), "cannot inspect");
+    CheckSpeciesScanFailure<SpeciesScanFailure::Increment>(fixture.Directory(), "cannot advance");
+}
+
+TEST(GameSessionHeadlessWorldTest, SpeciesEnumerationFailurePublishesNoIdentity) {
+    using Luminumbra::TestSupport::SpeciesIdentityFixture;
+    const SpeciesIdentityFixture fixture;
+    ASSERT_TRUE(fixture.Resolve().ok);
+    unsigned species_status_queries = 0;
+    const Luminumbra::World::WorldgenFileStatusReader remove_after_status =
+        [&](const fs::path& path, std::error_code& ec) {
+            const auto status = fs::symlink_status(path, ec);
+            if (path == fixture.Directory() && ++species_status_queries == 2) {
+                // The registry has valid directory metadata, but its subsequent
+                // iterator open must fail. This works without POSIX permission bits.
+                EXPECT_FALSE(ec);
+                EXPECT_TRUE(fs::is_directory(status));
+                fs::remove_all(path);
+            }
+            return status;
+        };
+    const auto refused = Luminumbra::world::LoadTerrainPresetFromJson(
+        SpeciesIdentityFixture::Preset(), fixture.Root() / "data", "<memory>", remove_after_status);
+    EXPECT_EQ(species_status_queries, 2u);
+    EXPECT_FALSE(refused.ok);
+    EXPECT_TRUE(refused.preset_content_hash.empty());
+    EXPECT_EQ(refused.params.worldgen_dependencies, nullptr);
+    ASSERT_EQ(refused.errors.size(), 2u);
+    EXPECT_NE(refused.errors.front().find("species dependencies"), std::string::npos);
+    EXPECT_NE(refused.errors.back().find("cannot enumerate creature species directory"),
+              std::string::npos);
+}
+
+TEST(GameSessionHeadlessWorldTest, SpeciesReaderExceptionsAreContainedAndRolledBack) {
+    const Luminumbra::TestSupport::SpeciesIdentityFixture fixture;
+    fixture.Write("a.json", R"({"id":"discarded"})");
+    for (const bool standard_exception : {true, false}) {
+        luminumbra::ai::CreatureSpeciesRegistry registry;
+        std::string parse_error;
+        ASSERT_TRUE(registry.AddFromJsonText(R"({"id":"retained"})", parse_error));
+        std::vector<std::string> errors;
+        bool io_failed = false;
+        unsigned reads = 0;
+        const Luminumbra::World::WorldgenFileReader throw_read = [&](const fs::path& path,
+                                                                     std::string& bytes) {
+            if (++reads == 2) {
+                if (standard_exception)
+                    throw fs::filesystem_error(
+                        "read failure", path, std::make_error_code(std::errc::io_error));
+                throw 1;
+            }
+            return Luminumbra::World::ReadWorldgenFile(path, bytes);
+        };
+        std::size_t loaded = 1;
+        EXPECT_NO_THROW(loaded = registry.LoadFromDirectory(
+                            fixture.Directory(), errors, throw_read, &io_failed));
+        EXPECT_EQ(loaded, 0u);
+        EXPECT_TRUE(io_failed);
+        EXPECT_EQ(reads, 2u);
+        ASSERT_EQ(errors.size(), 1u);
+        EXPECT_NE(errors.front().find("directory load failed"), std::string::npos);
+        ASSERT_EQ(registry.size(), 1u);
+        EXPECT_NE(registry.FindByName("retained"), nullptr);
+        EXPECT_EQ(registry.FindByName("discarded"), nullptr);
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, DependencyPathUtf8ValidationIsBoundedAndPortable) {
+    using Luminumbra::World::IsValidDependencyPathUtf8;
+    // Deliberately not null-terminated: even a one-byte input must stay in bounds.
+    const std::array<char, 1> single_byte{'0'};
+    EXPECT_TRUE(
+        IsValidDependencyPathUtf8(std::string_view(single_byte.data(), single_byte.size())));
+    const std::array<char, 1> truncated_lead{'\xc2'};
+    EXPECT_FALSE(
+        IsValidDependencyPathUtf8(std::string_view(truncated_lead.data(), truncated_lead.size())));
+    for (const std::string_view valid : {"",
+                                         "common/creatures/species/deer.json",
+                                         "\x7f",
+                                         "\xc2\x80",
+                                         "\xdf\xbf",
+                                         "\xe0\xa0\x80",
+                                         "\xed\x9f\xbf",
+                                         "\xee\x80\x80",
+                                         "\xef\xbf\xbf",
+                                         "\xf0\x90\x80\x80",
+                                         "\xf4\x8f\xbf\xbf",
+                                         "e\xcc\x81.json"}) {
+        EXPECT_TRUE(IsValidDependencyPathUtf8(valid));
+    }
+    for (const std::string_view invalid : {"\xff.json",
+                                           "\x80",
+                                           "\xbf",
+                                           "\xc0\x80",
+                                           "\xc1\xbf",
+                                           "\xc2",
+                                           "\xdf",
+                                           "\xe0",
+                                           "\xe0\xa0",
+                                           "\xf0",
+                                           "\xf0\x90",
+                                           "\xf0\x90\x80",
+                                           "\xc2/",
+                                           "\xe0\xa0/",
+                                           "\xf0\x90\x80/",
+                                           "\xe0\x9f\xbf",
+                                           "\xed\xa0\x80",
+                                           "\xed\xbf\xbf",
+                                           "\xf0\x8f\xbf\xbf",
+                                           "\xf4\x90\x80\x80",
+                                           "\xf5\x80\x80\x80",
+                                           "\xfe"}) {
+        EXPECT_FALSE(IsValidDependencyPathUtf8(invalid));
+        EXPECT_FALSE(IsValidDependencyPathUtf8(std::string("common/creatures/species/") +
+                                               std::string(invalid)));
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, PresetSerializationFailuresPublishNoIdentity) {
+    using Luminumbra::TestSupport::SpeciesIdentityFixture;
+    const SpeciesIdentityFixture fixture;
+    for (const bool invalid_key : {false, true}) {
+        auto preset = SpeciesIdentityFixture::Preset();
+        if (invalid_key)
+            preset["\xff"] = "unknown field";
+        else
+            preset["description"] = "\xff";
+        Luminumbra::world::TerrainPresetLoadResult refused;
+        EXPECT_NO_THROW(refused = Luminumbra::world::LoadTerrainPresetFromJson(
+                            preset, fixture.Root() / "data"));
+        EXPECT_FALSE(refused.ok);
+        EXPECT_TRUE(refused.preset_content_hash.empty());
+        EXPECT_EQ(refused.params.worldgen_dependencies, nullptr);
+        ASSERT_FALSE(refused.errors.empty());
+        EXPECT_NE(refused.errors.back().find("failed to resolve world preset"), std::string::npos);
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, InvalidLogicalDependencyPathPublishesNoIdentity) {
+    using Luminumbra::TestSupport::SpeciesIdentityFixture;
+    const SpeciesIdentityFixture fixture;
+    auto preset = SpeciesIdentityFixture::Preset();
+    preset["generation_params"]["biomes"]["table"] = "common/\xff.json";
+    Luminumbra::world::TerrainPresetLoadResult refused;
+    EXPECT_NO_THROW(
+        refused = Luminumbra::world::LoadTerrainPresetFromJson(preset, fixture.Root() / "data"));
+    EXPECT_FALSE(refused.ok);
+    EXPECT_TRUE(refused.preset_content_hash.empty());
+    EXPECT_EQ(refused.params.worldgen_dependencies, nullptr);
+    EXPECT_FALSE(refused.errors.empty());
+}
+
+TEST(GameSessionHeadlessWorldTest, ResolverExceptionsPublishNoIdentity) {
+    using Luminumbra::TestSupport::SpeciesIdentityFixture;
+    const SpeciesIdentityFixture fixture;
+    for (const bool standard_exception : {true, false}) {
+        const Luminumbra::World::WorldgenFileStatusReader throw_status =
+            [standard_exception](const fs::path&, std::error_code&) -> fs::file_status {
+            if (standard_exception)
+                throw std::runtime_error("dependency status failed");
+            throw 1;
+        };
+        Luminumbra::world::TerrainPresetLoadResult refused;
+        EXPECT_NO_THROW(
+            refused = Luminumbra::world::LoadTerrainPresetFromJson(SpeciesIdentityFixture::Preset(),
+                                                                   fixture.Root() / "data",
+                                                                   "<memory>",
+                                                                   throw_status));
+        EXPECT_FALSE(refused.ok);
+        EXPECT_TRUE(refused.preset_content_hash.empty());
+        EXPECT_EQ(refused.params.worldgen_dependencies, nullptr);
+        ASSERT_EQ(refused.errors.size(), 1u);
+        EXPECT_NE(refused.errors.front().find(standard_exception ? "dependency status failed"
+                                                                 : "unknown exception"),
+                  std::string::npos);
+    }
+}
+
+#ifndef _WIN32
+// Native raw-byte filenames are POSIX-only; the validation and resolver seams above
+// exercise the same refusals portably without constructing an invalid native path.
+TEST(GameSessionHeadlessWorldTest, InvalidSpeciesFilenameRefusesBeforeRegistryAndWorldAdoption) {
+    using Luminumbra::TestSupport::SpeciesIdentityFixture;
+    const SpeciesIdentityFixture fixture;
+    const auto baseline = fixture.Resolve();
+    ASSERT_TRUE(baseline.ok);
+    JobSystem jobs;
+    jobs.startup(1);
+    {
+        GameSession session;
+        session.SetJobSystem(&jobs);
+        session.SetRootPath(Luminumbra::Filesystem::GenericUtf8PathString(fixture.Root()));
+        ASSERT_TRUE(session.CreateWorld("Retained world", "777", "default"));
+        const auto world_id = session.GetMetadata().worldId;
+        const auto* world = session.GetWorldSystem();
+        const auto* table = session.GetSpeciesTable();
+        const auto tick = session.GetSimulationTickCount();
+        const auto identity = session.PresetContentHash();
+        fixture.Write(fs::path("\xff.json"), R"({"id":"invalid_filename"})");
+
+        luminumbra::ai::CreatureSpeciesRegistry registry;
+        std::string parse_error;
+        ASSERT_TRUE(registry.AddFromJsonText(R"({"id":"retained"})", parse_error));
+        std::vector<std::string> errors;
+        bool io_failed = false;
+        unsigned reads = 0;
+        const Luminumbra::World::WorldgenFileReader reader = [&](const fs::path& file,
+                                                                 std::string& bytes) {
+            ++reads;
+            return Luminumbra::World::ReadWorldgenFile(file, bytes);
+        };
+        std::size_t count = 1;
+        EXPECT_NO_THROW(
+            count = registry.LoadFromDirectory(fixture.Directory(), errors, reader, &io_failed));
+        EXPECT_EQ(count, 0u);
+        EXPECT_TRUE(io_failed);
+        EXPECT_EQ(reads, 0u);
+        ASSERT_EQ(registry.size(), 1u);
+        EXPECT_NE(registry.FindByName("retained"), nullptr);
+        ASSERT_FALSE(errors.empty());
+        EXPECT_NE(errors.front().find("not valid UTF-8"), std::string::npos);
+
+        Luminumbra::world::TerrainPresetLoadResult refused;
+        EXPECT_NO_THROW(refused = fixture.Resolve());
+        EXPECT_FALSE(refused.ok);
+        EXPECT_TRUE(refused.preset_content_hash.empty());
+        EXPECT_EQ(refused.params.worldgen_dependencies, nullptr);
+        ASSERT_FALSE(refused.errors.empty());
+        EXPECT_NE(refused.errors.back().find("not valid UTF-8"), std::string::npos);
+        const auto expect_unchanged = [&] {
+            EXPECT_EQ(session.GetWorldSystem(), world);
+            EXPECT_EQ(session.GetSpeciesTable(), table);
+            EXPECT_EQ(session.PresetContentHash(), identity);
+            EXPECT_EQ(session.GetMetadata().worldId, world_id);
+            EXPECT_EQ(session.GetSimulationTickCount(), tick);
+            EXPECT_NE(session.GetWorldOpenError().find("species"), std::string::npos);
+        };
+        bool opened = true;
+        EXPECT_NO_THROW(opened = session.CreateWorld("Refused world", "888", "default"));
+        EXPECT_FALSE(opened);
+        expect_unchanged();
+        EXPECT_NO_THROW(opened = session.LoadWorld(world_id));
+        EXPECT_FALSE(opened);
+        expect_unchanged();
+        GameSession fresh;
+        fresh.SetJobSystem(&jobs);
+        fresh.SetRootPath(Luminumbra::Filesystem::GenericUtf8PathString(fixture.Root()));
+        EXPECT_NO_THROW(opened = fresh.CreateWorld("Refused fresh world", "999", "default"));
+        EXPECT_FALSE(opened);
+        EXPECT_TRUE(fresh.PresetContentHash().empty());
+        EXPECT_EQ(fresh.GetWorldSystem(), nullptr);
+        EXPECT_EQ(fresh.GetSpeciesTable(), nullptr);
+        fs::remove(fixture.Directory() / fs::path("\xff.json"));
+        const auto recovered = fixture.Resolve();
+        ASSERT_TRUE(recovered.ok);
+        EXPECT_EQ(recovered.preset_content_hash, baseline.preset_content_hash);
+    }
+    jobs.shutdown();
+}
+#endif
+
+TEST(GameSessionHeadlessWorldTest, SpeciesSnapshotBindsExactBytesAndPortableOrder) {
+    using Luminumbra::TestSupport::SpeciesIdentityFixture;
+    const SpeciesIdentityFixture first, second;
+    // UTF-8 order differs from UTF-16 native order for these two filenames.
+    const fs::path earlier(u8"\ue000.json"), later(u8"\U00010000.json");
+    const std::string earlier_bytes = R"({"id":"first","brain":{"wander_weight":0.4}})";
+    const std::string later_bytes = R"({"id":"last","brain":{"wander_weight":0.7}})";
+    first.Write(later, later_bytes);
+    first.Write(earlier, earlier_bytes);
+    second.Write(earlier, earlier_bytes);
+    second.Write(later, later_bytes);
+    first.Write("nested/ignored.json", R"({"id":"ignored"})");
+    first.Write("ignored.txt", "not a species input");
+    const auto a = first.Resolve(), b = second.Resolve();
+    ASSERT_TRUE(a.ok);
+    ASSERT_TRUE(b.ok);
+    EXPECT_EQ(a.preset_content_hash, b.preset_content_hash);
+    const auto snapshot = a.params.worldgen_dependencies;
+    ASSERT_NE(snapshot, nullptr);
+    EXPECT_EQ(snapshot->manifest, b.params.worldgen_dependencies->manifest);
+    ASSERT_EQ(snapshot->manifest.size(), 4u);
+    // Exact-byte FNV-1a-64 of SpeciesIdentityFixture::OriginalBytes(), using
+    // the manifest's offset basis 14695981039346656037.
+    EXPECT_EQ(snapshot->manifest[1],
+              (std::vector<std::string>{"common/creatures/species/deer.json", "f730450646ea14a9"}));
+    EXPECT_EQ(snapshot->manifest[2][0],
+              "common/creatures/species/" + Luminumbra::Filesystem::GenericUtf8PathString(earlier));
+    EXPECT_EQ(snapshot->manifest[3][0],
+              "common/creatures/species/" + Luminumbra::Filesystem::GenericUtf8PathString(later));
+    ASSERT_NE(snapshot->species_table, nullptr);
+    ASSERT_EQ(snapshot->species_table->size(), 3u);
+    EXPECT_EQ(snapshot->species_table->all()[1].id, "first");
+    EXPECT_EQ(snapshot->species_table->all()[2].id, "last");
+    // Reopening changed bytes changes identity, but never the captured registry.
+    first.Write("deer.json", R"({"id":"deer","brain":{"wander_weight":0.9}})");
+    const auto changed = first.Resolve();
+    ASSERT_TRUE(changed.ok);
+    EXPECT_NE(changed.preset_content_hash, a.preset_content_hash);
+    const auto* changed_deer =
+        changed.params.worldgen_dependencies->species_table->FindByName("deer");
+    ASSERT_NE(changed_deer, nullptr);
+    EXPECT_FLOAT_EQ(changed_deer->brain.wander_weight, 0.9f);
+    const auto* deer = snapshot->species_table->FindByName("deer");
+    ASSERT_NE(deer, nullptr);
+    EXPECT_FLOAT_EQ(deer->brain.wander_weight, 0.25f);
+    EXPECT_FLOAT_EQ(deer->genome_ranges.core[0].lo, 1.0f);
+    EXPECT_FLOAT_EQ(deer->genome_ranges.core[0].hi, 2.0f);
+}
+
+TEST(GameSessionHeadlessWorldTest, SpeciesChangesRefuseLockstepAndReplayBeforeTicks) {
+    namespace net = Luminumbra::Net;
+    namespace replay = Luminumbra::Replay;
+    using Luminumbra::TestSupport::SpeciesIdentityFixture;
+    const SpeciesIdentityFixture fixture;
+    const auto baseline = fixture.Resolve();
+    ASSERT_TRUE(baseline.ok);
+    const auto& content_hash = baseline.preset_content_hash;
+    std::vector<std::pair<std::string, std::string>> variants;
+    const auto capture = [&](const std::string& name) {
+        const auto resolved = fixture.Resolve();
+        EXPECT_TRUE(resolved.ok);
+        EXPECT_NE(resolved.preset_content_hash, content_hash) << name;
+        variants.emplace_back(name, resolved.preset_content_hash);
+    };
+    auto species = nlohmann::json::parse(SpeciesIdentityFixture::OriginalBytes());
+    species["brain"]["wander_weight"] = 0.9;
+    fixture.Write("deer.json", species.dump());
+    capture("brain override");
+    species = nlohmann::json::parse(SpeciesIdentityFixture::OriginalBytes());
+    species["genome_ranges"]["move_speed"] = {2, 3};
+    fixture.Write("deer.json", species.dump());
+    capture("genome bounds");
+    fixture.Write("deer.json", SpeciesIdentityFixture::OriginalBytes() + "\n");
+    capture("exact bytes including whitespace");
+    fixture.Write("deer.json", "{invalid");
+    capture("rejected JSON bytes");
+    const auto rejected = fixture.Resolve();
+    ASSERT_TRUE(rejected.ok);
+    EXPECT_FALSE(rejected.warnings.empty());
+    EXPECT_EQ(rejected.params.worldgen_dependencies->species_table->size(), 0u);
+    fixture.Write("deer.json", SpeciesIdentityFixture::OriginalBytes());
+    fs::rename(fixture.Directory() / "deer.json", fixture.Directory() / "renamed.json");
+    capture("logical path");
+    fs::rename(fixture.Directory() / "renamed.json", fixture.Directory() / "deer.json");
+    fixture.Write("added.json", R"({"id":"added"})");
+    capture("added species");
+    fs::remove(fixture.Directory() / "added.json");
+    fs::remove(fixture.Directory() / "deer.json");
+    capture("removed species, empty directory");
+    fs::remove(fixture.Directory());
+    capture("absent species directory, older preset-only identity");
+    EXPECT_EQ(variants.back().second,
+              Luminumbra::world::TerrainPresetContentHash(SpeciesIdentityFixture::Preset()));
+
+    replay::ReplayHeader header;
+    header.seed = 424242;
+    header.preset = "default";
+    header.system_config_identity = GameSession{}.SystemConfigIdentity();
+    header.preset_content_hash = content_hash;
+    const Luminumbra::TestSupport::ScopedTempFile stream("species-replay-", ".lrec1");
+    const auto path = Luminumbra::Filesystem::GenericUtf8PathString(stream.Path());
+    replay::ReplayWriter writer;
+    ASSERT_TRUE(writer.Open(path, header));
+    ASSERT_TRUE(writer.Finalize(0));
+    const auto contents = replay::ReadReplay(path);
+    ASSERT_TRUE(contents.has_value());
+    if (!contents.has_value())
+        return;
+    ASSERT_FALSE(contents->truncated);
+    ASSERT_TRUE(contents->trailer_present);
+    EXPECT_EQ(contents->header.preset_content_hash, content_hash);
+    variants.emplace_back("identical species", content_hash);
+    for (const auto& [name, peer_hash] : variants) {
+        SCOPED_TRACE(name);
+        const bool equal = name == "identical species";
+        EXPECT_EQ(replay::ConfigurationMatches(
+                      contents->header, header.system_config_identity, peer_hash),
+                  equal);
+        auto reverse = contents->header;
+        reverse.preset_content_hash = peer_hash;
+        EXPECT_EQ(
+            replay::ConfigurationMatches(reverse, header.system_config_identity, content_hash),
+            equal);
+
+        auto [host_transport, peer_transport] = net::MakeLoopbackPair();
+        net::LockstepConfig config;
+        config.seed = header.seed;
+        config.preset = header.preset;
+        config.system_config_identity = header.system_config_identity;
+        config.preset_content_hash = content_hash;
+        net::HelloMsg hello;
+        hello.seed = config.seed;
+        hello.preset = config.preset;
+        hello.client_id = 1;
+        hello.system_config_identity = config.system_config_identity;
+        hello.preset_content_hash = peer_hash;
+        ASSERT_TRUE(peer_transport->SendFrame(net::EncodeHello(hello)));
+        std::uint64_t ticks = 0;
+        net::LockstepHooks hooks;
+        hooks.user = &ticks;
+        hooks.apply_and_step = [](std::uint64_t, const std::vector<std::uint8_t>&, void* user) {
+            ++*static_cast<std::uint64_t*>(user);
+            return true;
+        };
+        net::LockstepSession host(config, host_transport.get(), hooks);
+        EXPECT_EQ(host.Handshake(), equal);
+        EXPECT_EQ(host.Status().handshaken, equal);
+        EXPECT_EQ(ticks, 0u);
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, SpeciesIdentityIsAdoptedOnCreateLoadAndIoRefusal) {
+    using Luminumbra::TestSupport::SpeciesIdentityFixture;
+    const SpeciesIdentityFixture fixture;
+    const auto baseline = fixture.Resolve();
+    ASSERT_TRUE(baseline.ok);
+    // Reader failure coverage is independent of OS privilege/permission bits.
+    luminumbra::ai::CreatureSpeciesRegistry incomplete;
+    std::vector<std::string> errors;
+    bool io_failed = false;
+    const Luminumbra::World::WorldgenFileReader fail_read = [](const fs::path&, std::string&) {
+        return false;
+    };
+    EXPECT_EQ(incomplete.LoadFromDirectory(fixture.Directory(), errors, fail_read, &io_failed), 0u);
+    EXPECT_TRUE(io_failed);
+    EXPECT_FALSE(errors.empty());
+    JobSystem jobs;
+    jobs.startup(1);
+    {
+        GameSession created, loaded;
+        for (auto* session : {&created, &loaded}) {
+            session->SetJobSystem(&jobs);
+            session->SetRootPath(Luminumbra::Filesystem::GenericUtf8PathString(fixture.Root()));
+        }
+        ASSERT_TRUE(created.CreateWorld("Species identity", "777", "default"));
+        EXPECT_EQ(created.PresetContentHash(), baseline.preset_content_hash);
+        const auto id = created.GetMetadata().worldId;
+        ASSERT_TRUE(loaded.LoadWorld(id));
+        EXPECT_EQ(loaded.PresetContentHash(), created.PresetContentHash());
+        ASSERT_NE(created.GetSpeciesTable(), nullptr);
+        const auto* deer = created.GetSpeciesTable()->FindByName("deer");
+        ASSERT_NE(deer, nullptr);
+        EXPECT_FLOAT_EQ(deer->brain.wander_weight, 0.25f);
+        fixture.Write("deer.json", R"({"id":"deer","brain":{"wander_weight":0.9}})");
+        ASSERT_TRUE(loaded.LoadWorld(id));
+        EXPECT_NE(loaded.PresetContentHash(), created.PresetContentHash());
+        EXPECT_EQ(created.PresetContentHash(), baseline.preset_content_hash);
+        EXPECT_FLOAT_EQ(deer->brain.wander_weight, 0.25f);
+        // Saves adopt current content, like preset dependencies: no content hash
+        // is persisted in world metadata. A present unreadable input refuses
+        // before replacing the live world or publishing another identity.
+        const auto adopted = loaded.PresetContentHash();
+        const auto* world = loaded.GetWorldSystem();
+        const auto* table = loaded.GetSpeciesTable();
+        fs::remove_all(fixture.Directory());
+        {
+            std::ofstream blocker(fixture.Directory(), std::ios::binary);
+            blocker << "not a directory";
+        }
+        const auto refused = fixture.Resolve();
+        EXPECT_FALSE(refused.ok);
+        EXPECT_TRUE(refused.preset_content_hash.empty());
+        ASSERT_FALSE(refused.errors.empty());
+        EXPECT_NE(refused.errors.front().find("species"), std::string::npos);
+        EXPECT_FALSE(loaded.LoadWorld(id));
+        EXPECT_NE(loaded.GetWorldOpenError().find("species"), std::string::npos);
+        EXPECT_EQ(loaded.GetWorldSystem(), world);
+        EXPECT_EQ(loaded.GetSpeciesTable(), table);
+        EXPECT_EQ(loaded.PresetContentHash(), adopted);
+    }
+    jobs.shutdown();
+}
+
 TEST(GameSessionHeadlessWorldTest, ValidateWorldConfigIsSimulationOnlyByDefault) {
     const HeadlessRoot root;
     ASSERT_FALSE(fs::exists(root.path() / "res"));
@@ -139,6 +708,61 @@ TEST(GameSessionHeadlessWorldTest, SessionRequiredAssetListFailsCreateWorldWhenM
         session.SetRootPath(root.root_string());
         session.SetRequiredClientAssets({fs::path("res") / "shaders" / "basic.vert"});
         EXPECT_FALSE(session.CreateWorld("ClientAssetMissing", "12345", "default"));
+    }
+    jobs.shutdown();
+}
+
+void ExpectRuntimePresetIdentity(const GameSession& session, const fs::path& runtime_root) {
+    const auto saved = session.GetWorldSaveDir() / "preset.json";
+    const auto expected = Luminumbra::world::LoadTerrainPreset(saved, runtime_root / "data");
+    const auto without_runtime = Luminumbra::world::LoadTerrainPreset(saved);
+    ASSERT_TRUE(expected.ok);
+    ASSERT_TRUE(without_runtime.ok);
+    EXPECT_NE(expected.preset_content_hash, without_runtime.preset_content_hash);
+    EXPECT_EQ(session.PresetContentHash(), expected.preset_content_hash);
+}
+
+TEST(GameSessionHeadlessWorldTest, SaveRootOverrideRoutesCreateLoadSaveAndCatalog) {
+    const HeadlessRoot assets;
+    const HeadlessRoot storage;
+    Luminumbra::TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, assets.path());
+    JobSystem jobs;
+    jobs.startup(1);
+    std::string world_id;
+    {
+        GameSession session;
+        session.SetJobSystem(&jobs);
+        session.SetRootPath(assets.root_string());
+        EXPECT_EQ(session.GetSaveRootPath(), fs::path(assets.root_string()));
+        session.SetSaveRootPath(storage.path());
+        EXPECT_EQ(session.GetSaveRootPath(), storage.path());
+        EXPECT_TRUE(session.GetWorldSaveDir().empty());
+        ASSERT_TRUE(session.CreateWorld("PrivateWorld", "12345", "default"));
+        ExpectRuntimePresetIdentity(session, assets.path());
+        world_id = session.GetMetadata().worldId;
+        const auto expected = storage.path() / "worlds/saves" / world_id;
+        EXPECT_EQ(session.GetWorldSaveDir(), expected);
+        EXPECT_TRUE(fs::is_regular_file(expected / "preset.json"));
+        ASSERT_TRUE(session.SaveWorld());
+        ASSERT_TRUE(session.SaveWorldState());
+        EXPECT_TRUE(fs::is_regular_file(expected / "world_info.json"));
+        const auto catalog =
+            Luminumbra::Persistence::EnumerateSavedWorlds(session.GetSaveRootPath(), assets.path());
+        EXPECT_TRUE(catalog.error.empty());
+        ASSERT_EQ(catalog.worlds.size(), 1u);
+        EXPECT_EQ(catalog.worlds.front().metadata.worldId, world_id);
+        EXPECT_FALSE(fs::exists(assets.path() / "worlds/saves"));
+    }
+    {
+        GameSession session;
+        session.SetJobSystem(&jobs);
+        session.SetRootPath(assets.root_string());
+        session.SetSaveRootPath(storage.path());
+        ASSERT_TRUE(session.LoadWorld(world_id)) << session.GetWorldOpenError();
+        ExpectRuntimePresetIdentity(session, assets.path());
+        EXPECT_EQ(session.GetMetadata().name, "PrivateWorld");
+        ASSERT_TRUE(session.SaveWorld());
+        EXPECT_FALSE(fs::exists(assets.path() / "worlds/saves"));
     }
     jobs.shutdown();
 }
@@ -331,6 +955,376 @@ std::string ReadClockTestFile(const fs::path& path) {
     bytes << input.rdbuf();
     return bytes.str();
 }
+
+void WriteSavedPresetTestJson(const fs::path& path, const nlohmann::json& json) {
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    output << json.dump(2) << '\n';
+    ASSERT_TRUE(output.good());
+}
+
+std::map<std::string, std::string> SavedPresetTestDiskBytes(const fs::path& root) {
+    std::map<std::string, std::string> result;
+    for (const auto& entry : fs::recursive_directory_iterator(root)) {
+        result.emplace(entry.path().lexically_relative(root).generic_string(),
+                       entry.is_directory() ? "<directory>" : ReadClockTestFile(entry.path()));
+    }
+    return result;
+}
+
+struct PendingSnapshotState;
+
+class SavedWorldPresetTest : public testing::TestWithParam<bool> {
+protected:
+    HeadlessRoot root;
+    JobSystem jobs;
+
+    void SetUp() override {
+        jobs.startup(1);
+    }
+    void TearDown() override {
+        jobs.shutdown();
+    }
+    void Configure(GameSession& session) {
+        session.SetRootPath(root.root_string());
+        session.SetJobSystem(&jobs);
+        session.SetActiveRegionsEnabled(GetParam());
+    }
+    void CreateSnapshotSession(GameSession& session) {
+        SCOPED_TRACE("create snapshot session");
+        Configure(session);
+        session.SetAetherStateEnabled(true);
+        ASSERT_TRUE(session.CreateWorld("Snapshot preset identity", "1337", "default"));
+    }
+    void ExpectSnapshotReloaded(const PendingSnapshotState& pending,
+                                const Luminumbra::Chunk& chunk,
+                                const fs::path& save,
+                                const std::string& world_id);
+    void ExpectRefusedWithoutWrites(const std::string& id, const std::string& reason) {
+        const auto before = SavedPresetTestDiskBytes(root.path());
+        const auto inspected = P::InspectSavedWorld(root.path(), id);
+        EXPECT_NE(inspected.error.find(reason), std::string::npos) << inspected.error;
+        GameSession loaded;
+        Configure(loaded);
+        EXPECT_FALSE(loaded.LoadWorld(id));
+        EXPECT_NE(loaded.GetWorldOpenError().find(reason), std::string::npos);
+        EXPECT_EQ(loaded.GetWorldSystem(), nullptr);
+        EXPECT_FALSE(loaded.SaveWorld());
+        EXPECT_FALSE(loaded.SaveWorldState());
+        EXPECT_EQ(SavedPresetTestDiskBytes(root.path()), before);
+    }
+};
+
+TEST_P(SavedWorldPresetTest, NewSaveRoundTripsWithMarkerAndCanonicalIdentity) {
+    GameSession created;
+    Configure(created);
+    ASSERT_TRUE(created.CreateWorld("Preset identity", "1337", "default"));
+    const auto save = created.GetWorldSaveDir();
+    const auto metadata = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
+    const auto preset = nlohmann::json::parse(ReadClockTestFile(save / "preset.json"));
+    EXPECT_EQ(metadata.at("presetFormat"), 1);
+    EXPECT_EQ(metadata.at("presetIdentity"), P::StableChecksum(preset.dump()));
+    EXPECT_TRUE(preset.at("generation_params").at("terrain").at("island_mask_enabled").get<bool>());
+    // Formatting does not change the canonical identity, and no packaged copy is needed.
+    ASSERT_TRUE(P::WorldSaveService::write_file_durably(save / "preset.json", preset.dump(4)));
+    ASSERT_TRUE(fs::remove(root.path() / "worlds/atlas/presets/default.json"));
+    const auto before = SavedPresetTestDiskBytes(root.path());
+    const auto inspected = P::InspectSavedWorld(root.path(), created.GetMetadata().worldId);
+    ASSERT_TRUE(inspected.error.empty()) << inspected.error;
+    EXPECT_EQ(inspected.preset_path, save / "preset.json");
+    GameSession loaded;
+    Configure(loaded);
+    ASSERT_TRUE(loaded.LoadWorld(created.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    EXPECT_EQ(loaded.PresetContentHash(), created.PresetContentHash());
+    EXPECT_EQ(SavedPresetTestDiskBytes(root.path()), before);
+    ASSERT_TRUE(loaded.SaveWorld());
+    EXPECT_EQ(nlohmann::json::parse(ReadClockTestFile(save / "world_info.json")), metadata);
+}
+
+TEST_P(SavedWorldPresetTest, CustomAdditionalNamedPresetCarriesItsExactIdentity) {
+    const auto named = root.path() / "worlds/atlas/presets/other.json";
+    fs::copy_file(SourcePresetPath(), named);
+    auto custom = nlohmann::json::parse(ReadClockTestFile(named));
+    custom["generation_params"]["terrain"]["height_offset"] = 123.0;
+    const auto text = custom.dump();
+    GameSession created;
+    Configure(created);
+    ASSERT_TRUE(created.CreateWorld("Custom identity", "1337", "other", &text));
+    const auto save = created.GetWorldSaveDir();
+    const auto metadata = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
+    const auto embedded = nlohmann::json::parse(ReadClockTestFile(save / "preset.json"));
+    EXPECT_EQ(metadata.at("presetFormat"), 1);
+    EXPECT_EQ(metadata.at("presetIdentity"), P::StableChecksum(embedded.dump()));
+    GameSession loaded;
+    Configure(loaded);
+    ASSERT_TRUE(loaded.LoadWorld(created.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    EXPECT_FLOAT_EQ(loaded.GetWorldSystem()->get_params().height_offset, 123.0f);
+
+    auto tampered = embedded;
+    tampered["generation_params"]["terrain"]["height_offset"] = 124.0;
+    WriteSavedPresetTestJson(save / "preset.json", tampered);
+    ExpectRefusedWithoutWrites(created.GetMetadata().worldId, "identity");
+}
+
+class SnapshotPresetFiles {
+public:
+    explicit SnapshotPresetFiles(const fs::path& destination)
+        : directory(destination)
+        , preset_bytes(ReadClockTestFile(directory / "preset.json"))
+        , metadata_bytes(ReadClockTestFile(directory / "world_info.json"))
+        , other_preset(nlohmann::json::parse(preset_bytes))
+        , other_metadata(nlohmann::json::parse(metadata_bytes)) {
+        other_preset["generation_params"]["terrain"]["height_offset"] = 123.0;
+        other_metadata["presetIdentity"] = P::StableChecksum(other_preset.dump());
+    }
+
+    void Rewrite(const char* changed) const {
+        SCOPED_TRACE(directory.generic_string());
+        if (std::string(changed) != "identity")
+            ASSERT_NO_FATAL_FAILURE(
+                WriteSavedPresetTestJson(directory / "preset.json", other_preset));
+        if (std::string(changed) != "preset")
+            ASSERT_NO_FATAL_FAILURE(
+                WriteSavedPresetTestJson(directory / "world_info.json", other_metadata));
+    }
+
+    void Restore() const {
+        SCOPED_TRACE(directory.generic_string());
+        ASSERT_TRUE(
+            P::WorldSaveService::write_file_durably(directory / "preset.json", preset_bytes));
+        ASSERT_TRUE(
+            P::WorldSaveService::write_file_durably(directory / "world_info.json", metadata_bytes));
+    }
+
+private:
+    fs::path directory;
+    std::string preset_bytes;
+    std::string metadata_bytes;
+    nlohmann::json other_preset;
+    nlohmann::json other_metadata;
+};
+
+class SnapshotDestinationBytes {
+public:
+    explicit SnapshotDestinationBytes(const fs::path& destination)
+        : directory(destination)
+        , bytes(SavedPresetTestDiskBytes(directory)) {}
+
+    void ExpectUnchanged() const {
+        SCOPED_TRACE(directory.generic_string());
+        EXPECT_EQ(SavedPresetTestDiskBytes(directory), bytes);
+    }
+
+private:
+    fs::path directory;
+    std::map<std::string, std::string> bytes;
+};
+
+void PreparePendingSnapshot(GameSession& session,
+                            std::shared_ptr<Luminumbra::Chunk>& chunk,
+                            bool existing_snapshot) {
+    SCOPED_TRACE("prepare pending snapshot");
+    chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+    chunk->set_state(Luminumbra::ChunkState::Idle);
+    chunk->heightmap_data = {8.0f, 9.0f, 10.0f};
+    chunk->mark_voxel_data_dirty();
+    ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    auto& registry = session.GetRegistry();
+    const auto plant = registry.create();
+    registry.emplace<C::PlantTag>(plant);
+    registry.emplace<C::PlantGenomeComponent>(plant).genes.fill(0.5f);
+    registry.emplace<C::PlantGrowthComponent>(plant);
+    registry.emplace<C::TransformComponent>(plant).position = session.GetMetadata().spawnPoint;
+    auto* energy = session.GetEnergyFieldState();
+    ASSERT_NE(energy, nullptr);
+    energy->SetAnchorCell(0, 0);
+    energy->QueueDeposit(1, 0, 0, 0, 60000);
+    energy->Tick(0);
+    if (existing_snapshot) {
+        ASSERT_TRUE(session.SaveWorldState());
+        ASSERT_FALSE(chunk->is_voxel_data_dirty());
+    }
+
+    chunk->heightmap_data.front() = 42.0f;
+    chunk->mark_voxel_data_dirty();
+    registry.get<C::PlantGrowthComponent>(plant).growth_points = 123;
+    energy->QueueDeposit(2, 0, 0, 0, 1000);
+    energy->Tick(0);
+}
+
+struct PendingSnapshotState {
+    explicit PendingSnapshotState(const GameSession& session)
+        : plant_hash(session.ComputePlantSubHash())
+        , energy_bytes(session.GetEnergyFieldState()->CanonicalBytes()) {}
+
+    void ExpectUnchanged(const GameSession& session, const Luminumbra::Chunk& chunk) const {
+        SCOPED_TRACE("pending snapshot state");
+        EXPECT_TRUE(chunk.is_voxel_data_dirty());
+        EXPECT_FLOAT_EQ(chunk.heightmap_data.front(), 42.0f);
+        EXPECT_EQ(session.ComputePlantSubHash(), plant_hash);
+        EXPECT_EQ(session.GetEnergyFieldState()->CanonicalBytes(), energy_bytes);
+    }
+
+    std::string plant_hash;
+    std::string energy_bytes;
+};
+
+void SavedWorldPresetTest::ExpectSnapshotReloaded(const PendingSnapshotState& pending,
+                                                  const Luminumbra::Chunk& chunk,
+                                                  const fs::path& save,
+                                                  const std::string& world_id) {
+    SCOPED_TRACE(world_id);
+    EXPECT_NE(ReadClockTestFile(P::WorldSaveService::plant_entities_path(save)), "");
+    EXPECT_NE(ReadClockTestFile(save / "aether_state.efs"), "");
+    GameSession loaded;
+    Configure(loaded);
+    loaded.SetAetherStateEnabled(true);
+    ASSERT_TRUE(loaded.LoadWorld(world_id)) << loaded.GetWorldOpenError();
+    EXPECT_EQ(loaded.ComputePlantSubHash(), pending.plant_hash);
+    ASSERT_NE(loaded.GetEnergyFieldState(), nullptr);
+    EXPECT_EQ(loaded.GetEnergyFieldState()->CanonicalBytes(), pending.energy_bytes);
+    Luminumbra::WorldStreamingState restored;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(P::WorldSaveService{}.load_world(restored, save, errors));
+    const auto restored_chunk = restored.find_chunk(chunk.get_id());
+    ASSERT_NE(restored_chunk, nullptr);
+    EXPECT_EQ(restored_chunk->heightmap_data, chunk.heightmap_data);
+}
+
+TEST_P(SavedWorldPresetTest, OpenSessionPresetChangeRefusesBeforeSnapshotWritesAndAcknowledgement) {
+    for (const bool existing_snapshot : {false, true}) {
+        SCOPED_TRACE(existing_snapshot);
+        GameSession session;
+        CreateSnapshotSession(session);
+        if (HasFatalFailure())
+            return;
+        const auto save = session.GetWorldSaveDir();
+        const SnapshotPresetFiles preset_files(save);
+
+        std::shared_ptr<Luminumbra::Chunk> chunk;
+        PreparePendingSnapshot(session, chunk, existing_snapshot);
+        if (HasFatalFailure())
+            return;
+        const PendingSnapshotState pending(session);
+
+        for (const auto* changed : {"preset", "identity", "both"}) {
+            SCOPED_TRACE(changed);
+            preset_files.Rewrite(changed);
+            if (HasFatalFailure())
+                return;
+            const SnapshotDestinationBytes before(save);
+            EXPECT_FALSE(session.SaveWorldStateTo(save));
+            before.ExpectUnchanged();
+            pending.ExpectUnchanged(session, *chunk);
+            EXPECT_FALSE(session.SaveWorldState());
+            before.ExpectUnchanged();
+            pending.ExpectUnchanged(session, *chunk);
+            EXPECT_FALSE(session.SaveWorld());
+            before.ExpectUnchanged();
+            pending.ExpectUnchanged(session, *chunk);
+            preset_files.Restore();
+            if (HasFatalFailure())
+                return;
+        }
+
+        ASSERT_TRUE(session.SaveWorldState());
+        EXPECT_FALSE(chunk->is_voxel_data_dirty());
+        ExpectSnapshotReloaded(pending, *chunk, save, session.GetMetadata().worldId);
+        if (HasFatalFailure())
+            return;
+    }
+}
+
+TEST_P(SavedWorldPresetTest, MissingEmbeddedPresetRefusesWithoutWrites) {
+    GameSession created;
+    Configure(created);
+    ASSERT_TRUE(created.CreateWorld("Missing preset", "1337", "default"));
+    fs::create_directories(root.path() / "worlds/atlas/presets-rev6");
+    fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets-rev6/default.json",
+                  root.path() / "worlds/atlas/presets-rev6/default.json");
+    ASSERT_TRUE(fs::remove(created.GetWorldSaveDir() / "preset.json"));
+    ExpectRefusedWithoutWrites(created.GetMetadata().worldId, "required embedded preset.json");
+}
+
+TEST_P(SavedWorldPresetTest, MissingOrInvalidIdentityRefusesWithoutWrites) {
+    GameSession created;
+    Configure(created);
+    ASSERT_TRUE(created.CreateWorld("Missing identity", "1337", "default"));
+    const auto path = created.GetWorldSaveDir() / "world_info.json";
+    auto metadata = nlohmann::json::parse(ReadClockTestFile(path));
+    metadata.erase("presetIdentity");
+    WriteSavedPresetTestJson(path, metadata);
+    ExpectRefusedWithoutWrites(created.GetMetadata().worldId, "identity");
+    for (const auto& identity : {nlohmann::json(nullptr),
+                                 nlohmann::json(123),
+                                 nlohmann::json(""),
+                                 nlohmann::json("wrong")}) {
+        SCOPED_TRACE(identity.dump());
+        metadata["presetIdentity"] = identity;
+        WriteSavedPresetTestJson(path, metadata);
+        ExpectRefusedWithoutWrites(created.GetMetadata().worldId, "identity");
+    }
+}
+
+TEST_P(SavedWorldPresetTest, TamperedEmbeddedPresetRefusesOnIdentityWithoutWrites) {
+    GameSession created;
+    Configure(created);
+    ASSERT_TRUE(created.CreateWorld("Tampered preset", "1337", "default"));
+    const auto path = created.GetWorldSaveDir() / "preset.json";
+    auto preset = nlohmann::json::parse(ReadClockTestFile(path));
+    preset["generation_params"]["terrain"]["island_mask_enabled"] = false;
+    WriteSavedPresetTestJson(path, preset);
+    ExpectRefusedWithoutWrites(created.GetMetadata().worldId, "identity");
+}
+
+TEST_P(SavedWorldPresetTest, InvalidFormatNeverFallsBack) {
+    GameSession created;
+    Configure(created);
+    ASSERT_TRUE(created.CreateWorld("Invalid format", "1337", "default"));
+    const auto save = created.GetWorldSaveDir();
+    auto metadata = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
+    ASSERT_TRUE(fs::remove(save / "preset.json"));
+    for (const auto& format : {nlohmann::json(nullptr),
+                               nlohmann::json(false),
+                               nlohmann::json(0),
+                               nlohmann::json(2),
+                               nlohmann::json("1")}) {
+        SCOPED_TRACE(format.dump());
+        metadata["presetFormat"] = format;
+        WriteSavedPresetTestJson(save / "world_info.json", metadata);
+        ExpectRefusedWithoutWrites(created.GetMetadata().worldId, "preset format");
+    }
+}
+
+TEST_P(SavedWorldPresetTest, UnmarkedLegacySaveUsesFrozenPresetAndEmbedsItOnResave) {
+    const auto historical = root.path() / "worlds/atlas/presets-rev6/default.json";
+    fs::create_directories(historical.parent_path());
+    fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets-rev6/default.json",
+                  historical);
+    const auto save = root.path() / "worlds/saves/legacy";
+    fs::create_directories(save);
+    WriteSavedPresetTestJson(save / "world_info.json",
+                             {{"container_version", 2}, {"worldType", "default"}});
+    const auto before = SavedPresetTestDiskBytes(root.path());
+    const auto inspected = P::InspectSavedWorld(root.path(), "legacy");
+    ASSERT_TRUE(inspected.error.empty()) << inspected.error;
+    EXPECT_EQ(inspected.preset_path, historical);
+    GameSession loaded;
+    Configure(loaded);
+    ASSERT_TRUE(loaded.LoadWorld("legacy")) << loaded.GetWorldOpenError();
+    EXPECT_FALSE(loaded.GetWorldSystem()->get_params().island_mask_enabled);
+    EXPECT_EQ(SavedPresetTestDiskBytes(root.path()), before);
+    ASSERT_TRUE(loaded.SaveWorld());
+    const auto metadata = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
+    EXPECT_EQ(metadata.at("presetFormat"), 1);
+    EXPECT_EQ(metadata.at("presetIdentity"),
+              P::StableChecksum(nlohmann::json::parse(ReadClockTestFile(historical)).dump()));
+    EXPECT_EQ(nlohmann::json::parse(ReadClockTestFile(save / "preset.json")),
+              nlohmann::json::parse(ReadClockTestFile(historical)));
+    ASSERT_TRUE(fs::remove(historical));
+    EXPECT_TRUE(P::InspectSavedWorld(root.path(), "legacy").error.empty());
+}
+
+INSTANTIATE_TEST_SUITE_P(ActiveRegionsEnabledAndDisabled, SavedWorldPresetTest, testing::Bool());
 
 // Reads a record that production writes through a text-mode stream, so its bytes
 // carry the host's line endings: the energy record (GameSession writes
@@ -587,6 +1581,12 @@ TEST(GameSessionHeadlessWorldTest,
     const auto alternate = root.path() / "explicit-snapshot";
     ASSERT_TRUE(session.SaveWorldStateTo(alternate));
     const auto metadata = nlohmann::json::parse(ReadClockTestFile(alternate / "world_info.json"));
+    EXPECT_EQ(metadata.at("presetFormat"), 1);
+    EXPECT_EQ(metadata.at("presetIdentity"),
+              P::StableChecksum(
+                  nlohmann::json::parse(ReadClockTestFile(alternate / "preset.json")).dump()));
+    EXPECT_EQ(nlohmann::json::parse(ReadClockTestFile(alternate / "preset.json")),
+              nlohmann::json::parse(ReadClockTestFile(session.GetWorldSaveDir() / "preset.json")));
     EXPECT_EQ(metadata.at("simulationTick"), 1u);
     EXPECT_TRUE(fs::exists(P::WorldSaveService::active_regions_path(alternate)));
     ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
@@ -1166,8 +2166,14 @@ TEST(GameSessionHeadlessWorldTest, ExplicitlyDisabledKeepsLegacyMetadataBytesAnd
     const auto path = session.GetWorldSaveDir() / "world_info.json";
     const auto before = ReadClockTestFile(path);
     const auto& m = session.GetMetadata();
+    // Clock keys remain absent; the preset marker and identity apply to every new world.
     const nlohmann::json legacy = {
         {"container_version", 2},
+        {"presetFormat", 1},
+        {"presetIdentity",
+         P::StableChecksum(
+             nlohmann::json::parse(ReadClockTestFile(session.GetWorldSaveDir() / "preset.json"))
+                 .dump())},
         {"name", m.name},
         {"seed", m.seed},
         {"worldType", m.worldType},

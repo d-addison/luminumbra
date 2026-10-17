@@ -41,11 +41,18 @@ Hydraulic/thermal relief defaults on in revision 7; explicit
 Biome tables, climate frequencies and biome relief retain their controls. The
 [SDF contract](shield/sdf-contract.md) describes their sampling semantics.
 
-Current-format saves without embedded presets that name one of the eight packaged
-presets resolve to frozen revision-6 copies in
-`worlds/atlas/presets-rev6/`; new saves embed resolved choices. Other named presets
-retain their previous resolution and validation. This is preset fallback within
-the current save format, not obsolete-world migration.
+New saves embed resolved choices in `preset.json` and write `presetFormat: 1`
+and `presetIdentity` in `world_info.json`. The identity is `StableChecksum` (FNV-1a)
+of the canonical preset JSON (`nlohmann::json::parse(...).dump()`), independent of
+whitespace and distinct from the runtime identity that includes dependencies.
+A marked save refuses a missing embedded preset, a missing or mismatched identity,
+or an unsupported preset format; it never substitutes packaged content. Refusal
+does not modify files. Only legacy saves without the marker and embedded preset
+may fall back: the eight packaged names resolve to frozen revision-6 copies in
+`worlds/atlas/presets-rev6/`, and other names retain their original atlas path.
+Any recorded legacy identity is still verified. Resaving an opened legacy world
+embeds its exact preset and records the marker and identity. This is preset
+fallback within the current container format, not obsolete-world migration.
 
 Failures are deliberately distinct. Recognized older versions receive the refusal
 above. Higher versions report `unsupported future LMR1 container version`,
@@ -158,6 +165,9 @@ continuation are planned for v0.3.1. Five-minute dedicated-server autosave does
 not implement those persistence slices. LMR1 v2,
 world_manifest.v1, FSD2 v3, and existing canonical chunk and entity serialization
 are unchanged; preset revision 7 retains revision 6 omission compatibility.
+The additive metadata contract `presetFormat: 1` requires an embedded preset
+and its canonical-JSON checksum. It changes neither the container version nor
+the existing `StableChecksum` algorithm or runtime dependency-content hash.
 
 An absent energy record restores an empty layer with its next firing on the
 next absolute eight-tick boundary. A legacy import may carry a different
@@ -228,6 +238,13 @@ sampling, chunk generation, streaming, and terrain edits. Near terrain uses
 resident chunk data; far terrain uses region tiles and reduced SDF authority.
 The [SHIELD SDF contract](shield/sdf-contract.md) defines sign convention,
 sample ownership, shared borders, and LOD behavior.
+
+Legacy far snapshots track world/region authority publication separately from
+each captured chunk's voxel revision and provenance. A direct edit to a resident
+chunk's SDF followed by `mark_voxel_data_dirty()` advances the chunk revision and
+stales an earlier capture without advancing the publication counters. Shrinking
+or growing the graphics horizon changes derived mesh admission, preserving
+edited authority and rejection of stale captures.
 
 Generation and meshing may execute through `JobSystem`, which has high and
 normal priority lanes plus starvation protection. Completion timing is not
@@ -416,6 +433,44 @@ for the config example and qualification gates. Saved-world far production
 authority remains fixture-only until FW S8 (v0.3.1); the renderer reports an
 explicit unavailable/refusal diagnostic.
 
+### Developer console
+
+The ordinary and QA clients provide the same developer console in Release and
+other configurations. F1 opens its searchable widget hub by default; ordinary
+Settings provides console access and the default-on performance HUD switch.
+Visibility, resolved shortcuts and interactive panel layouts persist under
+`user.developer` without changing simulation hashes. The Controls settings section
+links to the hub for developer rebinding and hotkey help. Generated help includes
+current developer and gameplay bindings. Interactive panels share input/cursor
+ownership; passive HUDs do not capture gameplay. Opening the console does not
+pause simulation.
+
+| Default hotkey | Module / action |
+|---|---|
+| F1 | Open or close the developer hub |
+| F3 | GPU profiler panel |
+| F5 | Reload all shaders (`shader.reload`, no panel) |
+| F6 | Cycle debug views (`render.debug-cycle`) |
+| F7 | World generation preview panel |
+| F8 | Client settings panel |
+| F9 | Toggle wireframe effect (`render.wireframe-toggle`) |
+| F10 | Shader panel |
+| `[` | Slow time (`time.slower`) |
+| `]` | Speed up time (`time.faster`) |
+| `\` | Reset time scale (`time.reset`) |
+
+The hub shows every module's description and current hotkeys, including unbound
+panels and passive overlays. Debug-view, wireframe and time-control panel visibility
+is separate from their effect hotkeys. Photo mode uses `[` and `]` for aperture.
+Developer actions and rebound panel keys work while a panel owns input; focused
+text fields block them. `--no-ui`, automated captures and scenario runs suppress
+developer overlays and shortcuts without modifying saved preferences.
+
+See [Developer console](developer-console.md) for the complete inventory,
+registration API, typed commands, focus rules, save retries and capture overrides.
+The generation inspector edits an independent preview; only its explicit
+**Apply & Regenerate** button can apply changes to an ordinary local world.
+
 ### Environment controls
 
 These are the `LUMIN_*` controls read by the current client/render source. Set
@@ -546,13 +601,65 @@ zero constant rain/evaporation rates. Explicit false water resolution selects
 Medium; lower-level session setters can retain disabled compatibility workloads.
 Diagnostic rosters and telemetry remain opt-in.
 
+TCP Hello admission, the lockstep handshake and replay playback compare the same
+`GameSession::PresetContentHash()` alongside the effective configuration identity.
+The content hash binds the resolved preset and its biome/structure dependencies,
+plus every immediate regular `data/common/creatures/species/*.json` file, including
+inline `brain` and `genome_ranges` overrides (issue #338). Species apply even with
+biomes and structures disabled. All dependencies use one manifest: sorted generic
+UTF-8 logical paths with `/` separators and exact-byte FNV-1a-64 file hashes, folded
+with the canonical preset JSON. Absolute runtime roots and clocks are excluded.
+The loader captures the species registry from those same bytes and GameSession
+adopts it on create/load; it never rereads species after computing the hash.
+Malformed JSON warns and skips the entry while its bytes remain bound; present
+unreadable files/directories refuse resolution without replacing a running world.
+Directory-open, entry-status and iteration failures are reported by the registry
+without escaping to client metadata callers; a failed scan adds no species. Logical
+dependency names must be well-formed UTF-8, and an invalid species filename refuses
+the scan before any reads. Resolver exceptions, including JSON serialization
+failures, return diagnostics without publishing an identity or dependency snapshot;
+failed create/load leaves the live world unchanged.
+
+Protocol-v3 Hello and LREC1-v3 headers retain their layouts. A species mismatch
+refuses TCP admission, lockstep handshake and replay verification before simulation
+advances. Existing content-mismatch diagnostics apply; lockstep and replay name
+`preset/species` content. Older v0.3.0-era preset-only replay hashes mismatch when
+species records are present, in either engine direction, following the existing
+preset dependency compatibility rule. With no species directory, no new records
+are added. Current-format saves store no session content identity and adopt the
+loading installation's species content; the optional historical `presetIdentity`
+check still checks frozen preset JSON only. Older world-format refusals and save
+container versions are unchanged. See the full
+[identity contract](development/system-config-identity.md).
+
 Playback, vsync, TAAU, tier-1 froxel volumetrics, cave AO, scent decals and aether
 material gain 1 are on. `--no-audio`, `--volumetric-quality 0`, `LUMIN_CAVE_AO=0`,
 `LUMIN_SCENT_DECAL=0`, explicit config values and renderer setters remain available.
-User overlays still contain only `user.*`: saved false vsync and saved volumes
-win over defaults without a settings version bump. Locations are
+User overlays contain only `user.*` plus `settings_schema_version` (currently 1,
+independent of world, save and protocol formats). Saved false vsync and saved
+volumes win over defaults. `user.graphics` owns presentation settings: a
+`base_preset`, its `preset_revision`, explicit `overrides` and optional detection
+metadata. A file without a schema version migrates to Ultra plus its explicit
+values, including `user.video.render_scale`. A malformed, unreadable or future
+version file is reported as Recovery: defaults apply for the session and saves
+are refused so the original file is never overwritten. Locations are
 `%APPDATA%/Luminumbra/settings.json`, `$XDG_CONFIG_HOME/luminumbra/settings.json`,
 or `$HOME/.config/luminumbra/settings.json`.
+
+Settings → Graphics offers Low, Medium, High and Ultra, with Custom displayed when
+overrides differ from the retained base. Reset overrides restores that base;
+selecting a preset clears overrides. Controls show session-only CLI/environment
+values and identify and disable those overridden controls. They never save those
+temporary values. Graphics edits apply together on the render thread, invalidate
+temporal history, and save after a 500 ms debounce. Save failures remain visible;
+Save graphics retries, and leaving settings or exiting flushes pending changes.
+
+Detect & Apply recollects the active GPU, logical CPU threads and available
+dedicated VRAM, displays the recommendation, and applies it with overrides cleared.
+`--detect-and-apply-graphics` performs the same explicit action at startup. Only
+a first launch automatically selects and saves a recommendation. Existing and
+migrated selections remain intact across GPU/driver changes. Recovery continues
+to protect malformed or unsupported overlays from writes, including explicit saves.
 
 Replication defaults to acknowledged deltas and radius-3 chunk AOI with a 16,000 mm
 chunk edge. Millimeter AOI is an alternative: disable chunk AOI before selecting it.
