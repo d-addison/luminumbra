@@ -6,6 +6,7 @@
 #include <thread>
 #include <vector>
 
+#include "../support/SystemConfigVariants.h"
 #include "luminumbra_server/modes/ModeHelpers.h"
 
 namespace {
@@ -166,6 +167,47 @@ TEST_F(RuntimeTcpHelloTest, MismatchedIdentityBeforeDeadlineStillReleasesSlot) {
         return slot.transport == nullptr;
     }));
     ExpectReleased();
+}
+
+TEST_F(RuntimeTcpHelloTest, SpeciesBrainMismatchRefusesAdmissionAndClosesPeer) {
+    const Luminumbra::TestSupport::SpeciesIdentityFixture content;
+    const auto baseline = content.Resolve();
+    ASSERT_TRUE(baseline.ok);
+    expected.preset_content_hash = baseline.preset_content_hash;
+    content.Write("deer.json", R"({"id":"deer","brain":{"wander_weight":0.9}})");
+    const auto changed = content.Resolve();
+    ASSERT_TRUE(changed.ok);
+    ASSERT_NE(changed.preset_content_hash, expected.preset_content_hash);
+    auto hello = expected;
+    hello.preset_content_hash = changed.preset_content_hash;
+    ASSERT_TRUE(peer.SendFrame(EncodeHello(hello)));
+    ASSERT_TRUE(WaitUntil([&]() {
+        EXPECT_FALSE(PollRuntimeTcpAccept(slot, expected, accepted_at + 1s));
+        return slot.transport == nullptr;
+    }));
+    ExpectReleased();
+    ASSERT_TRUE(WaitUntil([&]() {
+        std::vector<std::uint8_t> frame;
+        (void)peer.TryReceiveFrame(frame);
+        return !peer.IsPeerConnected();
+    }));
+}
+
+TEST_F(RuntimeTcpHelloTest, IdenticalSpeciesBytesFromAnotherRootAreAdmitted) {
+    const Luminumbra::TestSupport::SpeciesIdentityFixture host_content, peer_content;
+    const auto host_identity = host_content.Resolve(), peer_identity = peer_content.Resolve();
+    ASSERT_TRUE(host_identity.ok);
+    ASSERT_TRUE(peer_identity.ok);
+    ASSERT_EQ(host_identity.preset_content_hash, peer_identity.preset_content_hash);
+    expected.preset_content_hash = host_identity.preset_content_hash;
+    auto hello = expected;
+    hello.preset_content_hash = peer_identity.preset_content_hash;
+    ASSERT_TRUE(peer.SendFrame(EncodeHello(hello)));
+    ASSERT_TRUE(WaitUntil(
+        [&]() { return PollRuntimeTcpAccept(slot, expected, slot.hello_deadline - 1ms); }));
+    EXPECT_TRUE(slot.accepted);
+    EXPECT_TRUE(slot.connected);
+    EXPECT_FALSE(slot.awaiting_hello);
 }
 
 TEST_F(RuntimeTcpHelloTest, WrongClientIdBeforeDeadlineStillReleasesSlot) {

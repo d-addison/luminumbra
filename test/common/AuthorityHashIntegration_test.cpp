@@ -40,7 +40,10 @@ namespace AuthorityIntegrationModes {
 } // namespace AuthorityIntegrationModes
 
 namespace Luminumbra::Server {
-thread_local int capture_refusal_stage = 0;
+int& CaptureRefusalStage() {
+    static thread_local int stage = 0;
+    return stage;
+}
 class CaptureRefusalRunner : public ServerWorldRunner {
 public:
     using ServerWorldRunner::ServerWorldRunner;
@@ -52,14 +55,14 @@ public:
     }
     std::string ComputeWorldHash() {
         ++world_captures;
-        if ((capture_refusal_stage == 1 && world_captures == 1) ||
-            (capture_refusal_stage == 3 && world_captures == 2))
+        if ((CaptureRefusalStage() == 1 && world_captures == 1) ||
+            (CaptureRefusalStage() == 3 && world_captures == 2))
             Corrupt();
         return ServerWorldRunner::ComputeWorldHash();
     }
     void ComputeWorldHashAndSubHashes(std::string& hash,
                                       Persistence::WorldStreamingStateSubHashes& sub) {
-        if (capture_refusal_stage == 2)
+        if (CaptureRefusalStage() == 2)
             Corrupt();
         ServerWorldRunner::ComputeWorldHashAndSubHashes(hash, sub);
     }
@@ -174,22 +177,15 @@ void Same(const P::WorldStreamingStateSubHashes& a, const P::WorldStreamingState
     EXPECT_EQ(a.plants, b.plants);
 }
 
-TEST_F(AuthorityHashIntegration, AllHashEntryPointsUseSameAuthorityCapture) {
-    auto config = RunnerConfigFrom(Options());
-    config.avatar_count = 1;
-    config.ecology_roster = true;
-    config.planted_roster = true;
-    S::ServerWorldRunner runner(config);
-    ASSERT_TRUE(runner.Boot());
-    ASSERT_EQ(runner.RunFixedTicks(3).ticks_executed, 3u);
-    auto* session = runner.Session();
-    ASSERT_TRUE(session);
-    const auto avatars = Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(
-        Luminumbra::World::BuildAvatarEntitySnapshot(runner.Avatars()));
+void CheckAuthorityCaptureEntryPoints(S::ServerWorldRunner& runner,
+                                      W::GameSession* session,
+                                      const std::string& avatars,
+                                      std::string& world,
+                                      P::WorldStreamingStateSubHashes& sub) {
     const auto capture = session->CaptureAuthorityState(avatars);
     ASSERT_TRUE(capture.state) << capture.error;
-    std::string world;
-    P::WorldStreamingStateSubHashes sub;
+    if (!capture.state)
+        return;
     runner.ComputeWorldHashAndSubHashes(world, sub);
     ASSERT_FALSE(world.empty());
     ASSERT_GT(runner.CreatureCount(), 0u);
@@ -218,8 +214,27 @@ TEST_F(AuthorityHashIntegration, AllHashEntryPointsUseSameAuthorityCapture) {
     EXPECT_EQ(sub.ecology,
               capture.state->FoldEcology(
                   luminumbra::ai::ComputeEcologySubHash(session->GetRegistry(), true)));
+}
+
+TEST_F(AuthorityHashIntegration, AllHashEntryPointsUseSameAuthorityCapture) {
+    auto config = RunnerConfigFrom(Options());
+    config.avatar_count = 1;
+    config.ecology_roster = true;
+    config.planted_roster = true;
+    S::ServerWorldRunner runner(config);
+    ASSERT_TRUE(runner.Boot());
+    ASSERT_EQ(runner.RunFixedTicks(3).ticks_executed, 3u);
+    auto* session = runner.Session();
+    ASSERT_TRUE(session);
+    const auto avatars = Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(
+        Luminumbra::World::BuildAvatarEntitySnapshot(runner.Avatars()));
+    std::string world;
+    P::WorldStreamingStateSubHashes sub;
+    ASSERT_NO_FATAL_FAILURE(CheckAuthorityCaptureEntryPoints(runner, session, avatars, world, sub));
     const auto checkpoint = AuthorityIntegrationModes::CaptureCheckpoint(3, runner);
     ASSERT_TRUE(checkpoint);
+    if (!checkpoint)
+        return;
     EXPECT_EQ(checkpoint->world_hash, world);
     AuthorityIntegrationModes::LockstepPeerContext context{&runner, 0, 0};
     N::HashMsg network;
@@ -292,7 +307,7 @@ TEST_F(AuthorityHashIntegration, AllHashEntryPointsUseSameAuthorityCapture) {
     // Initial, checkpoint and final capture refusals preserve existing successful output.
     struct ResetRefusal {
         ~ResetRefusal() {
-            S::capture_refusal_stage = 0;
+            S::CaptureRefusalStage() = 0;
         }
     } reset_refusal;
     for (const int stage : {1, 2, 3}) {
@@ -301,7 +316,7 @@ TEST_F(AuthorityHashIntegration, AllHashEntryPointsUseSameAuthorityCapture) {
         options.ticks = stage == 2 ? 30 : 1;
         Write(options.record_path, "existing recording");
         Write(options.record_path + ".regions.json", "existing sidecar");
-        S::capture_refusal_stage = stage;
+        S::CaptureRefusalStage() = stage;
         EXPECT_EQ(AuthorityCaptureRefusalModes::RunRecord(options), 1);
         EXPECT_EQ(Read(options.record_path), "existing recording");
         EXPECT_EQ(Read(options.record_path + ".regions.json"), "existing sidecar");
@@ -309,7 +324,7 @@ TEST_F(AuthorityHashIntegration, AllHashEntryPointsUseSameAuthorityCapture) {
     auto final_options = Options();
     final_options.ticks = 1;
     Write(final_options.artifact_path, "existing lockstep artifact");
-    S::capture_refusal_stage = 1;
+    S::CaptureRefusalStage() = 1;
     EXPECT_EQ(AuthorityCaptureRefusalModes::RunLockstepLoopback(final_options), 1);
     EXPECT_EQ(Read(final_options.artifact_path), "existing lockstep artifact");
 }
@@ -390,6 +405,7 @@ TEST_F(AuthorityHashIntegration, NetworkCheckpointPeersShareEffectiveConfigurati
     jobs.startup(1);
     W::GameSession client;
     client.SetRootPath(Path(root) + "/");
+    client.SetSaveRootPath(root / "storage");
     client.SetJobSystem(&jobs);
     client.ConfigureSimulation(configuration);
     ASSERT_TRUE(client.CreateWorld("Network client", "1337", "default"));
@@ -407,6 +423,9 @@ TEST_F(AuthorityHashIntegration, NetworkCheckpointPeersShareEffectiveConfigurati
         << failure_reason;
     auto& host = network.host_session;
     ASSERT_TRUE(host);
+    EXPECT_EQ(host->GetSaveRootPath(), client.GetSaveRootPath());
+    EXPECT_EQ(host->GetWorldSaveDir().parent_path(), root / "storage/worlds/saves");
+    EXPECT_FALSE(fs::exists(root / "worlds/saves"));
     EXPECT_TRUE(failure_reason.empty());
     ASSERT_EQ(client.GetSimulationConfiguration(), configuration);
     // Begin uses this complete construction path, including configuration forwarding
@@ -524,6 +543,105 @@ TEST_F(AuthorityHashIntegration, NetworkCheckpointPeersShareEffectiveConfigurati
     EXPECT_EQ(client_checkpoint_frames, 3u);
 }
 
+// Keep the direct host-factory contract independent of driver setup and pumping.
+TEST_F(AuthorityHashIntegration, NetworkHostFactorySharesEffectiveConfiguration) {
+    using Config = luminumbra::core::SystemConfig;
+    const auto configuration = std::make_shared<const Config>(Config::FromJsonString(R"({
+        "sim": {
+            "active_regions":{"enabled":true}, "aether_state":{"enabled":true},
+            "water_high_res":{"enabled":true}, "hydrology_weather":{"enabled":true},
+            "weather_events":{"enabled":true},
+            "ecology":{"enabled":true,"params":{"energy_drain_per_second":0.25}},
+            "thirst":{"enabled":true,"params":{"rise_rate_per_second":0.125}},
+            "wildlife_foliage":{"enabled":true,"params":{"graze_radius":1.25}},
+            "scavenging":{"enabled":true,"params":{"feed_radius":2.25}},
+            "foraging":{"enabled":true,"params":{"deposit":1.25}},
+            "reproduction":{"enabled":true,"params":{"maturity_ticks":42}},
+            "plant_growth":{"enabled":true,"params":{"mutation_rate":0.0625}}
+        }})"));
+    // Every override must be parsed, including tunings without a session getter.
+    using Param = luminumbra::core::SysParam;
+    EXPECT_FLOAT_EQ(configuration->param(Param::EcoEnergyDrain, -1.0f), 0.25f);
+    EXPECT_FLOAT_EQ(configuration->param(Param::ThirstRiseRate, -1.0f), 0.125f);
+    EXPECT_FLOAT_EQ(configuration->param(Param::WfGrazeRadius, -1.0f), 1.25f);
+    EXPECT_FLOAT_EQ(configuration->param(Param::ScavFeedRadius, -1.0f), 2.25f);
+    EXPECT_FLOAT_EQ(configuration->param(Param::ForagingDeposit, -1.0f), 1.25f);
+    EXPECT_FLOAT_EQ(configuration->param(Param::ReproMaturityTicks, -1.0f), 42.0f);
+    EXPECT_FLOAT_EQ(configuration->param(Param::PlantMutationRate, -1.0f), 0.0625f);
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    W::GameSession client;
+    client.SetRootPath(Path(root) + "/");
+    client.SetSaveRootPath(root / "storage");
+    client.SetJobSystem(&jobs);
+    client.ConfigureSimulation(configuration);
+    ASSERT_TRUE(client.CreateWorld("Network client", "1337", "default"));
+    ASSERT_TRUE(client.LoadWorldState());
+    ASSERT_TRUE(client.GetWorldSystem());
+    ASSERT_TRUE(client.GetPhysicsSystem());
+    ASSERT_TRUE(client.GetWorldSystem()->EnsureSurfaceReadyNear(
+        client.GetMetadata().spawnPoint, client.GetPhysicsSystem(), 1, 1));
+    const W::GameSession::NetworkHostConfig host_config{Path(root) + "/", "1337", "default", 1, 1};
+    std::string failure_reason = "previous failure";
+    auto host = W::GameSession::CreateNetworkHost(client, jobs, host_config, failure_reason);
+    ASSERT_TRUE(host) << failure_reason;
+    EXPECT_EQ(host->GetSaveRootPath(), client.GetSaveRootPath());
+    EXPECT_EQ(host->GetWorldSaveDir().parent_path(), root / "storage/worlds/saves");
+    EXPECT_FALSE(fs::exists(root / "worlds/saves"));
+    EXPECT_TRUE(failure_reason.empty());
+    ASSERT_EQ(client.GetSimulationConfiguration(), configuration);
+    // Removing the factory's configuration forwarding fails this assertion and the enabled
+    // checkpoint capture below. Begin uses this same complete host-construction function.
+    ASSERT_EQ(host->GetSimulationConfiguration(), client.GetSimulationConfiguration());
+    ASSERT_TRUE(host->ActiveRegionsEnabled());
+    ASSERT_TRUE(client.ActiveRegionsEnabled());
+    ASSERT_TRUE(host->GetEnergyFieldState());
+    ASSERT_TRUE(client.GetEnergyFieldState());
+    EXPECT_FLOAT_EQ(host->GetEcologyTuning().energy_drain_per_second, 0.25f);
+    EXPECT_THROW(host->ConfigureSimulationFromPeer(client), std::logic_error);
+    EXPECT_EQ(host->GetSimulationConfiguration(), configuration);
+    EXPECT_THROW(host->ConfigureSimulation(nullptr), std::logic_error);
+    EXPECT_THROW(client.ConfigureSimulation(std::make_shared<const Config>(Config::Defaults())),
+                 std::logic_error);
+    const auto disabled_configuration =
+        Config::FromJsonString(R"({"sim":{"active_regions":{"enabled":false}}})");
+    ASSERT_FALSE(disabled_configuration.enabled(luminumbra::core::SysKey::SimActiveRegions));
+    for (std::uint64_t tick = 0; tick <= 3; ++tick) {
+        SCOPED_TRACE(tick);
+        if (tick != 0) {
+            for (auto* session : {host.get(), &client}) {
+                session->SetReplicatedSimulationAnchors({});
+                ASSERT_EQ(session->TickSimulation(1.0 / 30.0), 1u);
+                ASSERT_FALSE(session->GetRegionSchedulerFault());
+            }
+        }
+        ASSERT_EQ(host->GetSimulationTickCount(), tick);
+        ASSERT_EQ(client.GetSimulationTickCount(), tick);
+        std::string host_hash, client_hash;
+        P::WorldStreamingStateSubHashes host_sub, client_sub;
+        // Use the shipping checkpoint recipe without replacement lockstep hooks.
+        ASSERT_TRUE(host->ComputeNetworkWorldHashes(*configuration, host_hash, host_sub));
+        ASSERT_TRUE(client.ComputeNetworkWorldHashes(*configuration, client_hash, client_sub));
+        ASSERT_FALSE(host_hash.empty());
+        ASSERT_TRUE(host_sub.active_regions);
+        EXPECT_EQ(host_hash, client_hash);
+        Same(host_sub, client_sub);
+        std::string authority_hash;
+        P::WorldStreamingStateSubHashes authority_sub;
+        ASSERT_TRUE(host->ComputeAuthorityWorldHashes(authority_hash, authority_sub));
+        EXPECT_EQ(host_hash, authority_hash);
+        Same(host_sub, authority_sub);
+        // A contradictory shared recipe refuses rather than silently selecting local state.
+        EXPECT_FALSE(host->ComputeNetworkWorldHashes(disabled_configuration, host_hash, host_sub));
+        EXPECT_TRUE(host_hash.empty());
+        EXPECT_TRUE(host_sub.regions.empty());
+        EXPECT_TRUE(host_sub.terrain.empty());
+        ASSERT_TRUE(host->ComputeNetworkWorldHashes(*configuration, host_hash, host_sub));
+        EXPECT_EQ(host_hash, client_hash);
+        EXPECT_FALSE(host->GetRegionSchedulerFault());
+    }
+}
+
 TEST_F(AuthorityHashIntegration, NetworkPeerConfigurationRefusesMissingSnapshot) {
     W::GameSession host, unconfigured_peer;
     using Config = luminumbra::core::SystemConfig;
@@ -634,10 +752,11 @@ TEST_F(AuthorityHashIntegration, NamedHashDomainMutationMatrix) {
         EXPECT_NE(before, after);
         for (std::size_t i = 0; i < domains.size(); ++i) {
             SCOPED_TRACE(i);
-            if (i == changed)
+            if (i == changed) {
                 EXPECT_NE(first.*domains[i], second.*domains[i]);
-            else
+            } else {
                 EXPECT_EQ(first.*domains[i], second.*domains[i]);
+            }
         }
     };
     check(0, [&] { session.GetSimulationEventBus().publish(100, "future", "payload", -2); });
@@ -657,10 +776,14 @@ TEST_F(AuthorityHashIntegration, NamedHashDomainMutationMatrix) {
     // Diagnostic reads preserve complete immutable authority.
     const auto first = session.CaptureAuthorityState();
     ASSERT_TRUE(first.state);
+    if (!first.state)
+        return;
     const auto empty_avatars =
         session.CaptureAuthorityState(Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(
             Luminumbra::Ecs::EntityRegistrySnapshot{}));
     ASSERT_TRUE(empty_avatars.state);
+    if (!empty_avatars.state)
+        return;
     EXPECT_EQ(empty_avatars.state->chunk_hash(), first.state->chunk_hash());
     EXPECT_EQ(empty_avatars.state->sub_hashes().entities, first.state->sub_hashes().entities);
     std::string hash;
@@ -668,6 +791,8 @@ TEST_F(AuthorityHashIntegration, NamedHashDomainMutationMatrix) {
     ASSERT_TRUE(session.ComputeAuthorityWorldHashes(hash, sub));
     const auto second = session.CaptureAuthorityState();
     ASSERT_TRUE(second.state);
+    if (!second.state)
+        return;
     EXPECT_EQ(first.state->authority_bytes(), second.state->authority_bytes());
     ASSERT_TRUE(session.SaveWorldState());
     W::GameSession restored;
@@ -689,6 +814,8 @@ TEST_F(AuthorityHashIntegration, RecordReplayAndLockstepEnabledHashIdentity) {
     ASSERT_EQ(AuthorityIntegrationModes::RunRecord(options), 0);
     const auto contents = R::ReadReplay(options.record_path);
     ASSERT_TRUE(contents);
+    if (!contents)
+        return;
     ASSERT_EQ(contents->checkpoints.size(), 1u);
     options.replay_path = options.record_path;
     ASSERT_EQ(AuthorityIntegrationModes::RunReplay(options), 0);
@@ -732,6 +859,8 @@ TEST_F(AuthorityHashIntegration, FrameGroupingPreservesCheckpointHashes) {
         ASSERT_TRUE(writer.Finalize(30));
         const auto decoded = R::ReadReplay(path);
         ASSERT_TRUE(decoded);
+        if (!decoded)
+            return;
         ASSERT_EQ(decoded->checkpoints.size(), 5u);
         std::vector<std::string> hashes;
         for (const auto& checkpoint : decoded->checkpoints)
@@ -739,8 +868,9 @@ TEST_F(AuthorityHashIntegration, FrameGroupingPreservesCheckpointHashes) {
                              checkpoint.entities);
         if (group == 1)
             reference = hashes;
-        else
+        else {
             EXPECT_EQ(hashes, reference);
+        }
     }
 }
 

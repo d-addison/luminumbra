@@ -318,7 +318,7 @@ TEST(SpeciesBehaviorOverrides, MalformedOverrideEntriesKeepDefaults) {
 }
 
 // The SHIPPED species roster carries no behaviour overrides, so the world-load table
-// (GameSession::LoadSpeciesDefinitions reads this same directory) resolves behaviour blocks
+// (the preset dependency snapshot reads this same directory) resolves behaviour blocks
 // byte-identical to the compiled constants — the absent-JSON byte-identity proof at the
 // content level.
 TEST(SpeciesBehaviorOverrides, ShippedSpeciesFilesCarryNoOverrides) {
