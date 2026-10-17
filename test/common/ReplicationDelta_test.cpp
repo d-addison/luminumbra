@@ -3,8 +3,11 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cstdint>
+#include <utility>
 #include <vector>
 
+#include "net/LockstepSession.h"
 #include "net/NetworkSim.h"
 #include "net/ReplicationDelta.h"
 #include "net/ReplicationProtocol.h"
@@ -87,6 +90,35 @@ TEST(ReplicationDelta, SurvivesWireThroughNetworkSim) {
     SnapshotMsg decoded;
     ASSERT_TRUE(DecodeSnapshot(out, decoded));
     EXPECT_EQ(sortedEntities(ApplySnapshotDelta(base, decoded)), sortedEntities(cur));
+}
+
+TEST(ReplicationDelta, BoundedReconstructionChecksCountsBeforeRetainingTheResult) {
+    using Luminumbra::Net::TryApplySnapshotDelta;
+    const SnapshotMsg base = snap(1, {ent(1, 100), ent(2, 200)});
+    SnapshotMsg delta = snap(2, {ent(3, 300)});
+    EXPECT_FALSE(TryApplySnapshotDelta(base, delta, 83).has_value());
+    EXPECT_FALSE(TryApplySnapshotDelta(base, delta, 36).has_value());
+    EXPECT_FALSE(TryApplySnapshotDelta(base, delta, 60).has_value());
+
+    // Duplicate ids and overwrites consume no new slots at the exact bound.
+    delta = snap(2, {ent(2, 250), ent(2, 260)});
+    const auto overwritten = TryApplySnapshotDelta(base, delta, 83);
+    ASSERT_TRUE(overwritten.has_value());
+    EXPECT_EQ(sortedEntities(overwritten.value_or(SnapshotMsg{})),
+              sortedEntities(snap(2, {ent(1, 100), ent(2, 260)})));
+
+    // Removal metadata consumes bytes even when its id was never in the baseline.
+    delta = snap(2, {});
+    delta.removed_ids = {99};
+    EXPECT_FALSE(TryApplySnapshotDelta(base, delta, 83).has_value());
+    EXPECT_FALSE(TryApplySnapshotDelta(snap(1, {}), delta, 37).has_value());
+    delta.removed_ids = {1, 2};
+    const auto empty = TryApplySnapshotDelta(base, delta, 83);
+    ASSERT_TRUE(empty.has_value());
+    const auto cleared = empty.value_or(SnapshotMsg{});
+    EXPECT_TRUE(cleared.entities.empty());
+    EXPECT_EQ(cleared.removed_ids, delta.removed_ids);
+    EXPECT_TRUE(TryApplySnapshotDelta(snap(1, {}), snap(2, {}), 37).has_value());
 }
 
 } // namespace
