@@ -91,8 +91,34 @@ u32 ChunkGeometryPool::add_block(u32 min_vertices, u32 min_indices, const char* 
     std::size_t checked_bytes = 0;
     if (!mesh_upload_bytes(
             block.vertex_capacity, sizeof(VoxelVertex), block.index_capacity, checked_bytes) ||
-        m_blocks.size() >= kMaxBlocks || checked_bytes > kMaxStorageBytes - m_storage_bytes)
+        checked_bytes > kMaxStorageBytes)
         return kInvalid;
+
+    // At most kMaxBlocks candidates. Empty blocks may be replaced in place;
+    // never compact the vector or change another allocation's block index.
+    u32 block_index = static_cast<u32>(m_blocks.size());
+    std::size_t reclaimable_bytes = 0;
+    for (u32 index = 0; index < m_blocks.size(); ++index) {
+        const Block& candidate = m_blocks[index];
+        if (candidate.allocation_count != 0)
+            continue;
+        if (block_index == m_blocks.size())
+            block_index = index;
+        reclaimable_bytes +=
+            static_cast<std::size_t>(candidate.vertex_capacity) * sizeof(VoxelVertex) +
+            static_cast<std::size_t>(candidate.index_capacity) * sizeof(u32);
+    }
+    if ((block_index == m_blocks.size() && m_blocks.size() >= kMaxBlocks) ||
+        checked_bytes > kMaxStorageBytes - m_storage_bytes + reclaimable_bytes)
+        return kInvalid;
+    if (block_index < m_blocks.size())
+        release_block(m_blocks[block_index]);
+    for (Block& candidate : m_blocks) {
+        if (checked_bytes <= kMaxStorageBytes - m_storage_bytes)
+            break;
+        if (candidate.allocation_count == 0)
+            release_block(candidate);
+    }
 
     const GLbitfield storage_flags = GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT;
     const GLbitfield map_flags = GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT;
@@ -172,7 +198,6 @@ u32 ChunkGeometryPool::add_block(u32 min_vertices, u32 min_indices, const char* 
         return kInvalid;
     }
 
-    const u32 block_index = static_cast<u32>(m_blocks.size());
     if (label_seed != nullptr) {
         const std::string base =
             std::string("terrain.pool.") + label_seed + "." + std::to_string(block_index);
@@ -181,7 +206,10 @@ u32 ChunkGeometryPool::add_block(u32 min_vertices, u32 min_indices, const char* 
         label_gl_object(GL_BUFFER, block.ebo, base + ".ebo");
     }
 
-    m_blocks.push_back(block);
+    if (block_index == m_blocks.size())
+        m_blocks.push_back(std::move(block));
+    else
+        m_blocks[block_index] = std::move(block);
     m_storage_bytes += checked_bytes;
     return block_index;
 }
@@ -196,14 +224,16 @@ bool ChunkGeometryPool::reserve_in_block(Block& block,
     const u32 want_v = round_up_pool(vertex_count);
     const u32 want_i = round_up_pool(index_count);
 
-    auto take_slice = [](std::vector<std::pair<u32, u32>>& free_slices,
+    auto find_slice = [](const std::vector<std::pair<u32, u32>>& free_slices,
                          u32 high_water,
                          u32 capacity,
                          u32 want,
                          u32& out_offset,
-                         u32& out_slot) -> bool {
-        // Best-fit over the free list first.
-        std::size_t best = free_slices.size();
+                         u32& out_slot,
+                         std::size_t& best) -> bool {
+        // Best-fit over at most kMaxAllocations returned slots. Plan both
+        // reservations before changing either list/frontier.
+        best = free_slices.size();
         for (std::size_t i = 0; i < free_slices.size(); ++i) {
             if (free_slices[i].second >= want &&
                 (best == free_slices.size() || free_slices[i].second < free_slices[best].second)) {
@@ -213,8 +243,6 @@ bool ChunkGeometryPool::reserve_in_block(Block& block,
         if (best != free_slices.size()) {
             out_offset = free_slices[best].first;
             out_slot = free_slices[best].second; // reuse the whole freed slot
-            free_slices[best] = free_slices.back();
-            free_slices.pop_back();
             return true;
         }
         // Otherwise bump-allocate from the frontier.
@@ -227,32 +255,39 @@ bool ChunkGeometryPool::reserve_in_block(Block& block,
     };
 
     u32 v_off = 0, v_slot = 0, i_off = 0, i_slot = 0;
-    if (!take_slice(block.free_vertex_slices,
+    std::size_t vertex_slice = 0, index_slice = 0;
+    if (!find_slice(block.free_vertex_slices,
                     block.vertex_high_water,
                     block.vertex_capacity,
                     want_v,
                     v_off,
-                    v_slot)) {
+                    v_slot,
+                    vertex_slice)) {
         return false;
     }
-    if (!take_slice(block.free_index_slices,
+    if (!find_slice(block.free_index_slices,
                     block.index_high_water,
                     block.index_capacity,
                     want_i,
                     i_off,
-                    i_slot)) {
-        // Return the vertex reservation to the free list. A bump reservation
-        // must advance the frontier so larger later slices cannot overlap it.
-        if (v_off == block.vertex_high_water)
-            block.vertex_high_water += v_slot;
-        block.free_vertex_slices.emplace_back(v_off, v_slot);
+                    i_slot,
+                    index_slice)) {
         return false;
     }
-    // Commit any bump-frontier advances now that both slices succeeded.
-    if (v_off == block.vertex_high_water)
+    // Commit only after both reservations succeeded; refusal leaves the block
+    // unchanged, including a completely reclaimed block's empty frontier.
+    if (vertex_slice < block.free_vertex_slices.size()) {
+        block.free_vertex_slices[vertex_slice] = block.free_vertex_slices.back();
+        block.free_vertex_slices.pop_back();
+    } else {
         block.vertex_high_water += v_slot;
-    if (i_off == block.index_high_water)
+    }
+    if (index_slice < block.free_index_slices.size()) {
+        block.free_index_slices[index_slice] = block.free_index_slices.back();
+        block.free_index_slices.pop_back();
+    } else {
         block.index_high_water += i_slot;
+    }
 
     vertex_offset = v_off;
     vertex_slot = v_slot;
@@ -325,6 +360,7 @@ u32 ChunkGeometryPool::allocate(const VoxelVertex* vertices,
     alloc.index_count = index_count;
     alloc.index_slot = index_slot;
     alloc.live = true;
+    ++block.allocation_count;
     ++m_live_count;
     return handle;
 }
@@ -371,25 +407,53 @@ void ChunkGeometryPool::mark_submitted(u32 block_index) {
 void ChunkGeometryPool::reclaim() {
     // <= eight zero-time polls per upload attempt, charged to its existing
     // preparation/work budget; no wait, world scan or unbounded retirement pass.
-    for (std::size_t count = 0; count < kTerrainUploadLimits.count && !m_retired.empty(); ++count) {
+    const auto visits = std::min(kTerrainUploadLimits.count, m_retired.size());
+    for (std::size_t count = 0; count < visits; ++count) {
         const auto retired = m_retired.front();
-        if (!retired.completion)
-            break;
+        m_retired.pop_front();
+        if (!retired.completion) {
+            m_retired.push_back(retired);
+            continue;
+        }
         const GLenum status = glClientWaitSync(retired.completion, GL_SYNC_FLUSH_COMMANDS_BIT, 0);
-        if (status != GL_ALREADY_SIGNALED && status != GL_CONDITION_SATISFIED)
-            break;
+        if (status != GL_ALREADY_SIGNALED && status != GL_CONDITION_SATISFIED) {
+            m_retired.push_back(retired);
+            continue;
+        }
         glDeleteSync(retired.completion);
         recycle(retired.handle);
-        m_retired.pop_front();
     }
 }
 
 void ChunkGeometryPool::recycle(u32 handle) {
     const Allocation& alloc = m_allocations[handle];
     Block& block = m_blocks[alloc.block_index];
-    block.free_vertex_slices.emplace_back(alloc.vertex_offset, alloc.vertex_slot);
-    block.free_index_slices.emplace_back(alloc.index_offset, alloc.index_slot);
+    if (--block.allocation_count == 0) {
+        block.vertex_high_water = 0;
+        block.index_high_water = 0;
+        block.free_vertex_slices.clear();
+        block.free_index_slices.clear();
+    } else {
+        block.free_vertex_slices.emplace_back(alloc.vertex_offset, alloc.vertex_slot);
+        block.free_index_slices.emplace_back(alloc.index_offset, alloc.index_slot);
+    }
     release_handle(handle);
+}
+
+void ChunkGeometryPool::release_block(Block& block) {
+    // Reuse requires zero allocations, including quarantined retirements.
+    // Final teardown instead relies on GL retaining queued backing stores.
+    // Keep the vector slot for stable indices.
+    m_storage_bytes -= static_cast<std::size_t>(block.vertex_capacity) * sizeof(VoxelVertex) +
+                       static_cast<std::size_t>(block.index_capacity) * sizeof(u32);
+    glBindVertexArray(0);
+    if (block.vao)
+        glDeleteVertexArrays(1, &block.vao);
+    if (block.vbo)
+        glDeleteBuffers(1, &block.vbo);
+    if (block.ebo)
+        glDeleteBuffers(1, &block.ebo);
+    block = Block{};
 }
 
 void ChunkGeometryPool::resident_capacity(std::size_t& vertices, std::size_t& indices) const {
@@ -416,15 +480,8 @@ void ChunkGeometryPool::destroy() {
     m_retired.clear();
     // Delete objects without writing their mappings. GL retains backing stores
     // referenced by queued draws; world swaps never recycle those stores.
-    for (Block& block : m_blocks) {
-        glBindVertexArray(0);
-        if (block.vao)
-            glDeleteVertexArrays(1, &block.vao);
-        if (block.vbo)
-            glDeleteBuffers(1, &block.vbo);
-        if (block.ebo)
-            glDeleteBuffers(1, &block.ebo);
-    }
+    for (Block& block : m_blocks)
+        release_block(block);
     glBindVertexArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     m_blocks.clear();

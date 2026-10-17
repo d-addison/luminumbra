@@ -60,6 +60,9 @@ public:
         u32 index_capacity = 0;    // indices
         u32 vertex_high_water = 0; // bump allocator frontier
         u32 index_high_water = 0;
+        // Includes live, pending and quarantined allocations. Only zero permits
+        // resetting frontiers or replacing this block's GL storage.
+        std::size_t allocation_count = 0;
         bool submitted = false; // a draw may still consume this block
         // Free slices returned by freed chunks, reused best-fit before bumping.
         std::vector<std::pair<u32, u32>> free_vertex_slices; // {offset, size}
@@ -90,12 +93,17 @@ public:
     // Call immediately after every draw consuming this block, including replay
     // and shadow draws. Retirement fences cover all earlier commands in context.
     void mark_submitted(u32 block_index);
-    // Poll at most one upload lane's count limit, with zero timeout. Failed or
-    // missing fences quarantine slices until destroy; no speculative reuse.
+    // Visit at most one upload lane's count limit, with zero-time polls. Rotate
+    // incomplete entries so failed/missing fences cannot pin healthy storage.
+    // Their slices remain quarantined until completion or final destruction.
     void reclaim();
     // Const diagnostics for storage/retirement pressure.
     std::size_t retired_count() const {
         return m_retired.size();
+    }
+    // All allocated GL backing storage, including pending/quarantined bytes.
+    std::size_t storage_bytes() const {
+        return m_storage_bytes;
     }
 
     bool valid_allocation(u32 handle, u32 indices) const {
@@ -139,13 +147,14 @@ private:
                           u32& index_offset,
                           u32& index_slot);
     u32 add_block(u32 min_vertices, u32 min_indices, const char* label_seed);
+    void release_block(Block& block);
 
     struct Retired {
         u32 handle = kInvalid;
         GLsync completion = nullptr;
     };
     void recycle(u32 handle);
-    std::deque<Retired> m_retired; // <= kMaxAllocations; FIFO, never front-erased
+    std::deque<Retired> m_retired; // <= kMaxAllocations; bounded round-robin visits
     std::size_t m_storage_bytes = 0;
     std::vector<Block> m_blocks;
     std::vector<Allocation> m_allocations;

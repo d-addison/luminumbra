@@ -14,6 +14,7 @@
 #include <gtest/gtest.h>
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <filesystem>
@@ -851,6 +852,418 @@ TEST_F(FarWorldWaterGl, MissingFenceQuarantinesStorageAndRetirementPollingIsBoun
     const auto fresh = pool.allocate(vertices.data(), 3, indices.data(), 3, nullptr);
     EXPECT_NE(fresh, ChunkGeometryPool::kInvalid);
     pool.destroy();
+}
+
+// Keep a real queued GL consumer in these completion-controlled fixtures. Read
+// it back before reporting any scripted healthy completion to the allocator.
+class PoolVertexReadback {
+public:
+    PoolVertexReadback(const ChunkGeometryPool::Block& block, u32 offset) {
+        glGenBuffers(1, &buffer_);
+        glBindBuffer(GL_COPY_WRITE_BUFFER, buffer_);
+        glBufferData(GL_COPY_WRITE_BUFFER, sizeof(VoxelVertex) * 3, nullptr, GL_STREAM_READ);
+        glBindBuffer(GL_COPY_READ_BUFFER, block.vbo);
+        glCopyBufferSubData(
+            GL_COPY_READ_BUFFER,
+            GL_COPY_WRITE_BUFFER,
+            static_cast<GLintptr>(static_cast<std::size_t>(offset) * sizeof(VoxelVertex)),
+            0,
+            sizeof(VoxelVertex) * 3);
+    }
+    ~PoolVertexReadback() {
+        glDeleteBuffers(1, &buffer_);
+    }
+    glm::vec3 Read() const {
+        std::array<VoxelVertex, 3> observed{};
+        glBindBuffer(GL_COPY_READ_BUFFER, buffer_);
+        glGetBufferSubData(GL_COPY_READ_BUFFER, 0, sizeof(observed), observed.data());
+        return observed[0].position;
+    }
+
+private:
+    GLuint buffer_ = 0;
+};
+
+class SelectivePoolCompletion {
+public:
+    SelectivePoolCompletion(bool missing, GLenum status)
+        : missing_(missing)
+        , status_(status) {
+        active_ = this;
+        glClientWaitSync = Wait;
+        glFenceSync = Fence;
+    }
+    ~SelectivePoolCompletion() {
+        glClientWaitSync = original_wait_;
+        glFenceSync = original_fence_;
+        active_ = nullptr;
+    }
+    std::size_t polls = 0;
+
+private:
+    PFNGLCLIENTWAITSYNCPROC original_wait_ = glClientWaitSync;
+    PFNGLFENCESYNCPROC original_fence_ = glFenceSync;
+    bool missing_;
+    GLenum status_;
+    bool first_ = true;
+    GLsync blocked_ = nullptr;
+    static inline SelectivePoolCompletion* active_ = nullptr;
+    static GLenum APIENTRY Wait(GLsync sync, GLbitfield flags, GLuint64 timeout) {
+        EXPECT_EQ(flags, static_cast<GLbitfield>(GL_SYNC_FLUSH_COMMANDS_BIT));
+        EXPECT_EQ(timeout, 0u);
+        ++active_->polls;
+        return sync == active_->blocked_ ? active_->status_ : GL_ALREADY_SIGNALED;
+    }
+    static GLsync APIENTRY Fence(GLenum condition, GLbitfield flags) {
+        if (!active_->first_)
+            return active_->original_fence_(condition, flags);
+        active_->first_ = false;
+        active_->blocked_ =
+            active_->missing_ ? nullptr : active_->original_fence_(condition, flags);
+        return active_->blocked_;
+    }
+};
+
+void CheckHealthyRetirementBehindBlockedFront(bool missing, GLenum status) {
+    ChunkGeometryPool pool;
+    std::array<VoxelVertex, 3> vertices{};
+    vertices[0].position = {1, 2, 3};
+    const std::array<u32, 3> indices{0, 1, 2};
+    // Eleven records force two bounded passes, including a blocked front.
+    std::array<u32, 11> handles{};
+    for (auto& handle : handles) {
+        handle = pool.allocate(vertices.data(), 3, indices.data(), 3, nullptr);
+        ASSERT_NE(handle, ChunkGeometryPool::kInvalid);
+    }
+    const auto blocked = pool.allocation(handles.front());
+    const auto healthy = pool.allocation(handles.back());
+    PoolVertexReadback consumer(pool.blocks()[healthy.block_index], healthy.vertex_offset);
+    pool.mark_submitted(blocked.block_index);
+    SelectivePoolCompletion completion(missing, status);
+    for (const auto handle : handles)
+        pool.free(handle);
+    EXPECT_EQ(consumer.Read(), glm::vec3(1, 2, 3));
+    pool.reclaim();
+    EXPECT_EQ(completion.polls, kTerrainUploadLimits.count - (missing ? 1u : 0u));
+    EXPECT_EQ(pool.retired_count(), 4u);
+    EXPECT_EQ(pool.blocks()[blocked.block_index].allocation_count, 4u);
+    const auto polls_before_upload = completion.polls;
+    vertices[0].position = {4, 5, 6};
+    const auto replacement = pool.allocate(vertices.data(), 3, indices.data(), 3, nullptr);
+    ASSERT_NE(replacement, ChunkGeometryPool::kInvalid);
+    EXPECT_EQ(completion.polls - polls_before_upload, missing ? 3u : 4u);
+    EXPECT_LE(completion.polls - polls_before_upload, kTerrainUploadLimits.count);
+    EXPECT_EQ(pool.retired_count(), 1u);
+    EXPECT_EQ(pool.blocks()[blocked.block_index].allocation_count, 2u);
+    EXPECT_NE(replacement, handles.front());
+    EXPECT_NE(pool.allocation(replacement).vertex_offset, blocked.vertex_offset);
+    EXPECT_NE(pool.allocation(replacement).index_offset, blocked.index_offset);
+    EXPECT_EQ(pool.blocks()[blocked.block_index].vertex_ptr[blocked.vertex_offset].position,
+              glm::vec3(1, 2, 3));
+    const auto polls_before_singleton = completion.polls;
+    pool.reclaim();
+    EXPECT_EQ(completion.polls - polls_before_singleton, missing ? 0u : 1u);
+    EXPECT_EQ(pool.retired_count(), 1u);
+    pool.free(handles.front());
+    EXPECT_EQ(pool.retired_count(), 1u);
+    pool.destroy();
+    EXPECT_EQ(pool.storage_bytes(), 0u);
+    EXPECT_EQ(pool.retired_count(), 0u);
+}
+
+TEST_F(FarWorldWaterGl, FailedOrIncompleteFrontDoesNotBlockHealthyRetirement) {
+    for (const auto status : {GL_TIMEOUT_EXPIRED, GL_WAIT_FAILED})
+        CheckHealthyRetirementBehindBlockedFront(false, static_cast<GLenum>(status));
+}
+
+TEST_F(FarWorldWaterGl, NullFrontDoesNotBlockHealthyRetirement) {
+    CheckHealthyRetirementBehindBlockedFront(true, GL_TIMEOUT_EXPIRED);
+}
+
+TEST_F(FarWorldWaterGl, FullyReclaimedFragmentedWorldAdmitsLargerMeshInSameBlock) {
+    ChunkGeometryPool pool;
+    const std::array<VoxelVertex, 3> seed{};
+    const std::array<u32, 3> triangle{0, 1, 2};
+    const auto first = pool.allocate(seed.data(), 3, triangle.data(), 3, nullptr);
+    ASSERT_NE(first, ChunkGeometryPool::kInvalid);
+    auto original = pool.blocks().front();
+    pool.destroy();
+    // Scratch is bounded by one block; four slots fragment both entire buffers.
+    std::vector<VoxelVertex> vertices(original.vertex_capacity);
+    const std::vector<u32> indices(original.index_capacity);
+    for (unsigned slot = 0; slot < 4; ++slot) {
+        ASSERT_NE(pool.allocate(vertices.data(),
+                                original.vertex_capacity / 4,
+                                indices.data(),
+                                original.index_capacity / 4,
+                                nullptr),
+                  ChunkGeometryPool::kInvalid);
+    }
+    ASSERT_EQ(pool.block_count(), 1u);
+    original = pool.blocks().front();
+    EXPECT_EQ(pool.blocks().front().vertex_high_water, original.vertex_capacity);
+    EXPECT_EQ(pool.blocks().front().index_high_water, original.index_capacity);
+    const auto bytes = pool.storage_bytes();
+    pool.clear();
+    pool.clear();
+    EXPECT_EQ(pool.live_allocation_count(), 0u);
+    EXPECT_EQ(pool.retired_count(), 0u);
+    EXPECT_EQ(pool.blocks().front().allocation_count, 0u);
+    EXPECT_EQ(pool.blocks().front().vertex_high_water, 0u);
+    EXPECT_EQ(pool.blocks().front().index_high_water, 0u);
+    EXPECT_TRUE(pool.blocks().front().free_vertex_slices.empty());
+    EXPECT_TRUE(pool.blocks().front().free_index_slices.empty());
+    const auto larger = pool.allocate(vertices.data(),
+                                      original.vertex_capacity,
+                                      indices.data(),
+                                      original.index_capacity,
+                                      nullptr);
+    ASSERT_NE(larger, ChunkGeometryPool::kInvalid);
+    EXPECT_EQ(pool.block_count(), 1u);
+    EXPECT_EQ(pool.storage_bytes(), bytes);
+    EXPECT_EQ(pool.allocation(larger).block_index, 0u);
+    EXPECT_EQ(pool.allocation(larger).vertex_offset, 0u);
+    EXPECT_EQ(pool.allocation(larger).index_offset, 0u);
+    EXPECT_EQ(pool.blocks().front().vao, original.vao);
+    EXPECT_EQ(pool.blocks().front().vbo, original.vbo);
+    EXPECT_EQ(pool.blocks().front().ebo, original.ebo);
+    pool.destroy();
+}
+
+TEST_F(FarWorldWaterGl, FailedReservationLeavesReclaimedFrontiersUnchanged) {
+    ChunkGeometryPool pool;
+    const std::array<VoxelVertex, 3> seed{};
+    const std::array<u32, 3> triangle{0, 1, 2};
+    const auto first = pool.allocate(seed.data(), 3, triangle.data(), 3, nullptr);
+    ASSERT_NE(first, ChunkGeometryPool::kInvalid);
+    const auto original = pool.blocks().front();
+    pool.free(first);
+    // Valid source buffers, bounded by one block plus one aligned index slot.
+    const std::vector<VoxelVertex> vertices(original.vertex_capacity);
+    const std::vector<u32> indices(original.index_capacity + 64);
+    {
+        FailedPoolBlock failure(GL_ELEMENT_ARRAY_BUFFER, false);
+        EXPECT_EQ(pool.allocate(
+                      vertices.data(), 3, indices.data(), original.index_capacity + 64, nullptr),
+                  ChunkGeometryPool::kInvalid);
+        EXPECT_EQ(failure.failures, 1u);
+    }
+    EXPECT_EQ(pool.block_count(), 1u);
+    EXPECT_EQ(pool.blocks().front().vertex_high_water, 0u);
+    EXPECT_EQ(pool.blocks().front().index_high_water, 0u);
+    EXPECT_TRUE(pool.blocks().front().free_vertex_slices.empty());
+    EXPECT_TRUE(pool.blocks().front().free_index_slices.empty());
+    const auto full = pool.allocate(vertices.data(),
+                                    original.vertex_capacity,
+                                    indices.data(),
+                                    original.index_capacity,
+                                    nullptr);
+    ASSERT_NE(full, ChunkGeometryPool::kInvalid);
+    EXPECT_EQ(pool.block_count(), 1u);
+    EXPECT_EQ(pool.allocation(full).vertex_offset, 0u);
+    EXPECT_EQ(pool.allocation(full).index_offset, 0u);
+    pool.destroy();
+}
+
+TEST_F(FarWorldWaterGl, PendingWorldSwapRetainsStorageAndBytesUntilCompletion) {
+    ChunkGeometryPool pool;
+    std::array<VoxelVertex, 3> seed{};
+    const std::array<u32, 3> triangle{0, 1, 2};
+    const auto first = pool.allocate(seed.data(), 3, triangle.data(), 3, nullptr);
+    ASSERT_NE(first, ChunkGeometryPool::kInvalid);
+    auto original = pool.blocks().front();
+    pool.destroy();
+    std::vector<VoxelVertex> vertices(original.vertex_capacity);
+    vertices[0].position = {1, 2, 3};
+    const std::vector<u32> indices(original.index_capacity);
+    for (unsigned slot = 0; slot < 4; ++slot) {
+        ASSERT_NE(pool.allocate(vertices.data(),
+                                original.vertex_capacity / 4,
+                                indices.data(),
+                                original.index_capacity / 4,
+                                nullptr),
+                  ChunkGeometryPool::kInvalid);
+    }
+    ASSERT_EQ(pool.block_count(), 1u);
+    original = pool.blocks().front();
+    PoolVertexReadback consumer(pool.blocks().front(), 0);
+    pool.mark_submitted(0);
+    DelayedPoolConsumer delayed;
+    const auto bytes = pool.storage_bytes();
+    pool.clear();
+    pool.clear();
+    EXPECT_EQ(pool.retired_count(), 4u);
+    EXPECT_EQ(pool.storage_bytes(), bytes);
+    EXPECT_EQ(pool.blocks().front().allocation_count, 4u);
+    EXPECT_EQ(pool.blocks().front().vertex_high_water, original.vertex_capacity);
+    EXPECT_EQ(pool.blocks().front().index_high_water, original.index_capacity);
+    seed[0].position = {4, 5, 6};
+    const auto next = pool.allocate(seed.data(), 3, triangle.data(), 3, nullptr);
+    ASSERT_NE(next, ChunkGeometryPool::kInvalid);
+    EXPECT_EQ(delayed.polls, 4u);
+    EXPECT_NE(pool.allocation(next).block_index, 0u);
+    EXPECT_EQ(pool.block_count(), 2u);
+    EXPECT_EQ(pool.storage_bytes(), bytes * 2);
+    EXPECT_EQ(pool.blocks().front().vbo, original.vbo);
+    EXPECT_EQ(original.vertex_ptr[0].position, glm::vec3(1, 2, 3));
+    EXPECT_EQ(glIsBuffer(original.vbo), GL_TRUE);
+    EXPECT_EQ(glIsBuffer(original.ebo), GL_TRUE);
+    EXPECT_EQ(glIsVertexArray(original.vao), GL_TRUE);
+    EXPECT_EQ(consumer.Read(), glm::vec3(1, 2, 3));
+    delayed.result = GL_CONDITION_SATISFIED;
+    pool.reclaim();
+    EXPECT_EQ(delayed.polls, 8u);
+    EXPECT_EQ(pool.retired_count(), 0u);
+    EXPECT_EQ(pool.blocks().front().allocation_count, 0u);
+    EXPECT_EQ(pool.blocks().front().vertex_high_water, 0u);
+    EXPECT_EQ(pool.blocks().front().index_high_water, 0u);
+    const auto larger = pool.allocate(vertices.data(),
+                                      original.vertex_capacity,
+                                      indices.data(),
+                                      original.index_capacity,
+                                      nullptr);
+    ASSERT_NE(larger, ChunkGeometryPool::kInvalid);
+    EXPECT_EQ(pool.allocation(larger).block_index, 0u);
+    EXPECT_EQ(pool.block_count(), 2u);
+    EXPECT_EQ(pool.storage_bytes(), bytes * 2);
+    EXPECT_TRUE(pool.valid_allocation(next, 3));
+    pool.destroy();
+    EXPECT_EQ(pool.storage_bytes(), 0u);
+}
+
+TEST_F(FarWorldWaterGl, EmptyBlockReplacementPreservesQuarantinedAndLiveBlockIndices) {
+    ChunkGeometryPool pool;
+    std::array<VoxelVertex, 3> seed{};
+    seed[0].position = {1, 2, 3};
+    const std::array<u32, 3> indices{0, 1, 2};
+    const auto first = pool.allocate(seed.data(), 3, indices.data(), 3, nullptr);
+    ASSERT_NE(first, ChunkGeometryPool::kInvalid);
+    const auto capacity = pool.blocks().front().vertex_capacity;
+    pool.destroy();
+    // At most one block plus one aligned slot of host scratch.
+    const std::vector<VoxelVertex> vertices(capacity + 64);
+    const auto quarantined = pool.allocate(vertices.data(), capacity, indices.data(), 3, nullptr);
+    const auto empty = pool.allocate(vertices.data(), capacity, indices.data(), 3, nullptr);
+    const auto live = pool.allocate(seed.data(), 3, indices.data(), 3, nullptr);
+    ASSERT_NE(quarantined, ChunkGeometryPool::kInvalid);
+    ASSERT_NE(empty, ChunkGeometryPool::kInvalid);
+    ASSERT_NE(live, ChunkGeometryPool::kInvalid);
+    const auto held = pool.allocation(quarantined);
+    const auto empty_index = pool.allocation(empty).block_index;
+    const auto stable = pool.allocation(live);
+    ASSERT_EQ(held.block_index, 0u);
+    ASSERT_EQ(empty_index, 1u);
+    ASSERT_EQ(stable.block_index, 2u);
+    const auto live_block = pool.blocks()[stable.block_index];
+    const auto bytes = pool.storage_bytes();
+    pool.mark_submitted(held.block_index);
+    DelayedPoolConsumer delayed;
+    delayed.fail_fence = true;
+    pool.free(quarantined);
+    pool.free(empty);
+    EXPECT_EQ(pool.retired_count(), 1u);
+    EXPECT_EQ(pool.blocks()[held.block_index].allocation_count, 1u);
+    const auto old_block = pool.blocks()[empty_index];
+    {
+        FailedPoolBlock failure(GL_ELEMENT_ARRAY_BUFFER, false);
+        EXPECT_EQ(pool.allocate(vertices.data(), capacity + 64, indices.data(), 3, nullptr),
+                  ChunkGeometryPool::kInvalid);
+        EXPECT_EQ(failure.failures, 1u);
+    }
+    EXPECT_EQ(pool.block_count(), 3u);
+    EXPECT_EQ(pool.storage_bytes(),
+              bytes - (static_cast<std::size_t>(old_block.vertex_capacity) * sizeof(VoxelVertex) +
+                       static_cast<std::size_t>(old_block.index_capacity) * sizeof(u32)));
+    EXPECT_EQ(pool.blocks()[empty_index].vao, 0u);
+    EXPECT_EQ(glIsBuffer(old_block.vbo), GL_FALSE);
+    EXPECT_EQ(glIsBuffer(old_block.ebo), GL_FALSE);
+    EXPECT_EQ(glIsVertexArray(old_block.vao), GL_FALSE);
+    const auto larger = pool.allocate(vertices.data(), capacity + 64, indices.data(), 3, nullptr);
+    ASSERT_NE(larger, ChunkGeometryPool::kInvalid);
+    EXPECT_EQ(pool.allocation(larger).block_index, empty_index);
+    EXPECT_EQ(pool.block_count(), 3u);
+    EXPECT_EQ(pool.storage_bytes(), bytes + 64 * sizeof(VoxelVertex));
+    EXPECT_LE(pool.storage_bytes(), ChunkGeometryPool::kMaxStorageBytes);
+    EXPECT_LE(pool.block_count(), ChunkGeometryPool::kMaxBlocks);
+    EXPECT_EQ(pool.retired_count(), 1u);
+    EXPECT_EQ(delayed.polls, 0u);
+    EXPECT_TRUE(pool.valid_allocation(live, 3));
+    EXPECT_EQ(pool.allocation(live).block_index, stable.block_index);
+    EXPECT_EQ(pool.allocation(live).vertex_offset, stable.vertex_offset);
+    EXPECT_EQ(pool.allocation(live).index_offset, stable.index_offset);
+    EXPECT_EQ(pool.blocks()[stable.block_index].vao, live_block.vao);
+    EXPECT_EQ(pool.blocks()[stable.block_index].vbo, live_block.vbo);
+    EXPECT_EQ(pool.blocks()[stable.block_index].ebo, live_block.ebo);
+    PoolVertexReadback consumer(pool.blocks()[stable.block_index], stable.vertex_offset);
+    EXPECT_EQ(consumer.Read(), glm::vec3(1, 2, 3));
+    pool.destroy();
+    EXPECT_EQ(pool.storage_bytes(), 0u);
+}
+
+TEST_F(FarWorldWaterGl, StorageCapIncludesPendingWorldsAndReleasesOnlyCompletedEmptyBlocks) {
+    ChunkGeometryPool pool;
+    const std::array<VoxelVertex, 3> seed{};
+    const std::array<u32, 3> indices{0, 1, 2};
+    const auto first = pool.allocate(seed.data(), 3, indices.data(), 3, nullptr);
+    ASSERT_NE(first, ChunkGeometryPool::kInvalid);
+    const auto capacity = pool.blocks().front().vertex_capacity;
+    const auto block_bytes = pool.storage_bytes();
+    const auto count = ChunkGeometryPool::kMaxStorageBytes / block_bytes;
+    ASSERT_LE(count, ChunkGeometryPool::kMaxBlocks);
+    ASSERT_GE(count, 2u);
+    pool.destroy();
+    // Fixed pool cap bounds GPU storage; host scratch is two vertex blocks.
+    std::vector<VoxelVertex> vertices(capacity * 2);
+    vertices[0].position = {1, 2, 3};
+    for (std::size_t index = 0; index < count; ++index) {
+        ASSERT_NE(pool.allocate(vertices.data(), capacity, indices.data(), 3, nullptr),
+                  ChunkGeometryPool::kInvalid);
+    }
+    ASSERT_EQ(pool.block_count(), count);
+    const auto bytes = pool.storage_bytes();
+    EXPECT_EQ(bytes, count * block_bytes);
+    EXPECT_LE(bytes, ChunkGeometryPool::kMaxStorageBytes);
+    PoolVertexReadback consumer(pool.blocks().front(), 0);
+    for (u32 index = 0; index < pool.block_count(); ++index)
+        pool.mark_submitted(index);
+    DelayedPoolConsumer delayed;
+    pool.clear();
+    pool.clear();
+    EXPECT_EQ(pool.retired_count(), count);
+    EXPECT_EQ(pool.live_allocation_count(), 0u);
+    EXPECT_EQ(pool.allocate(vertices.data(), capacity, indices.data(), 3, nullptr),
+              ChunkGeometryPool::kInvalid);
+    EXPECT_EQ(delayed.polls, kTerrainUploadLimits.count);
+    EXPECT_EQ(pool.retired_count(), count);
+    EXPECT_EQ(pool.storage_bytes(), bytes);
+    EXPECT_EQ(pool.block_count(), count);
+    EXPECT_EQ(consumer.Read(), glm::vec3(1, 2, 3));
+    delayed.result = GL_ALREADY_SIGNALED;
+    // Each pass is bounded independently, including the last partial pass.
+    for (std::size_t index = 0; index < count; index += kTerrainUploadLimits.count) {
+        const auto before = delayed.polls;
+        pool.reclaim();
+        EXPECT_EQ(delayed.polls - before, std::min(kTerrainUploadLimits.count, count - index));
+    }
+    EXPECT_EQ(pool.retired_count(), 0u);
+    const auto larger = pool.allocate(vertices.data(), capacity * 2, indices.data(), 3, nullptr);
+    ASSERT_NE(larger, ChunkGeometryPool::kInvalid);
+    EXPECT_EQ(pool.allocation(larger).block_index, 0u);
+    EXPECT_EQ(pool.block_count(), count);
+    const auto replacement_bytes =
+        static_cast<std::size_t>(pool.blocks().front().vertex_capacity) * sizeof(VoxelVertex) +
+        static_cast<std::size_t>(pool.blocks().front().index_capacity) * sizeof(u32);
+    const auto released_blocks =
+        (replacement_bytes - (ChunkGeometryPool::kMaxStorageBytes - bytes) + block_bytes - 1) /
+        block_bytes;
+    for (std::size_t index = 1; index < released_blocks; ++index) {
+        EXPECT_EQ(pool.blocks()[index].vao, 0u);
+        EXPECT_EQ(pool.blocks()[index].allocation_count, 0u);
+    }
+    EXPECT_EQ(pool.storage_bytes(), bytes - released_blocks * block_bytes + replacement_bytes);
+    EXPECT_LE(pool.storage_bytes(), ChunkGeometryPool::kMaxStorageBytes);
+    pool.destroy();
+    EXPECT_EQ(pool.storage_bytes(), 0u);
 }
 
 TEST_F(FarWorldWaterGl, DeferredTerrainSnapshotKeepsPresentedOwnershipBeyondInnerSphere) {
