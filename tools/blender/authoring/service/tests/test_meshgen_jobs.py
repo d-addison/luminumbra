@@ -539,10 +539,12 @@ class BrokerTests(RuleAssertions, unittest.TestCase):
                 raise hook_errors[0]
         finally:
             release.set()
-            broker.executor.shutdown(wait=True)
-            completed_result(broker.futures[record["job_id"]], "submission drain after release")
-            if cancelling is not None:
-                join_worker(cancelling)
+            try:
+                broker.executor.shutdown(wait=True)
+                completed_result(broker.futures[record["job_id"]], "submission drain after release")
+            finally:
+                if cancelling is not None:
+                    join_worker(cancelling)
         self.assertFalse(cancelling.is_alive())
         broker.on_eof()
         self.assertEqual(set(cancelled), {digest(self.request["request_id"].encode())[:32]})

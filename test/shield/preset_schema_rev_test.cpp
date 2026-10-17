@@ -1,6 +1,7 @@
 #include "../../src/luminumbra_common/world/TerrainPresetLoader.h"
 
 #include <cstdint>
+#include <filesystem>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -32,8 +33,8 @@ bool Contains(const std::vector<std::string>& messages, const std::string& text)
 }
 
 bool Accepts(std::int64_t revision, const char* provenance) {
-    const auto result =
-        Luminumbra::world::LoadTerrainPresetFromJson(ValidPreset(revision), {}, provenance);
+    const auto result = Luminumbra::world::LoadTerrainPresetFromJson(
+        ValidPreset(revision), std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) / "data", provenance);
     return result.ok && result.errors.empty();
 }
 
