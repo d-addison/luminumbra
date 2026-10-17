@@ -239,7 +239,8 @@ class PathGateTests(unittest.TestCase):
             ("ci", "diligent-rhi", "ready-native"),
             ("ci", "tidy-shard", "ready-native"),
             ("ci", "tidy", "aggregate"),
-            ("asan", "asan", "guarded-native"),
+            ("asan", "asan-shard", "guarded-native"),
+            ("asan", "asan", "required-aggregate"),
             ("performance", "preview-frame", "guarded-native"),
         )
         for workflow, job, route in routes:
@@ -252,8 +253,10 @@ class PathGateTests(unittest.TestCase):
                     for cpp in ("true", "false", ""):
                         for cancelled in (False, True):
                             ready = event != "pull_request" or draft is False
-                            if route == "aggregate":
-                                expected = ready
+                            if route == "required-aggregate":
+                                expected = not cancelled
+                            elif route == "aggregate":
+                                expected = not cancelled and ready
                             elif route == "guarded-python":
                                 expected = not cancelled
                             elif route == "guarded-native":
@@ -268,6 +271,9 @@ class PathGateTests(unittest.TestCase):
                                 "always()", "True"
                             ).replace("github.event_name", repr(event)).replace(
                                 "github.event.pull_request.draft", repr(draft)
+                            ).replace("needs.changes.result", repr("success")).replace(
+                                "needs.asan-shard.result", repr("success")
+                            ).replace("needs.tidy-shard.result", repr("success")
                             ).replace("needs.changes.outputs.needs_cpp", repr(cpp)).replace(
                                 "== false", "== False"
                             ).replace("!= false", "!= False").replace("&&", "and").replace("||", "or")
