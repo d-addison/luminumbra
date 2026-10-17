@@ -264,4 +264,12 @@ if(BUILD_TESTING)
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_slowest_tests.py")
     set_tests_properties(SlowestTestsScriptContract
         PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME ChangedTranslationUnitsContract
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_changed_tus.py")
+    add_test(
+        NAME OfflineDependenciesContract
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_offline_deps.py")
+    set_tests_properties(ChangedTranslationUnitsContract OfflineDependenciesContract
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
 endif()

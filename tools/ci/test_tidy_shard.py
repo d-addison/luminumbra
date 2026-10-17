@@ -87,11 +87,15 @@ class ShardShellTests(unittest.TestCase):
         stub.write_text(
             f"#!{sys.executable}\nimport json, os, sys\n"
             "with open(os.environ['STUB_LOG'], 'a', encoding='utf-8') as log:\n"
-            "    log.write(json.dumps(sys.argv[1:]) + '\\n')\n", encoding="utf-8",
+            "    log.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+            "sys.exit(int(os.environ.get('STUB_EXIT', '0')))\n", encoding="utf-8",
         )
         stub.chmod(0o755)
         self.log = self.root / "calls.jsonl"
-        self.env = dict(os.environ, PATH=str(self.bin) + os.pathsep + os.environ["PATH"],
+        # A closed PATH guarantees that fallback tests cannot execute a real analyzer.
+        for command in ("bash", "nproc", "dirname", "python3", "sort", "xargs", "date", "git"):
+            (self.bin / command).symlink_to(shutil.which(command))
+        self.env = dict(os.environ, PATH=str(self.bin),
                         STUB_LOG=str(self.log))
         self.files = ["src/luminumbra_client/core/RuntimeScenarioConfig.cpp",
                       "src/luminumbra_common/net/GnsTransport.cpp",
@@ -191,6 +195,73 @@ class ShardShellTests(unittest.TestCase):
         result, calls = self.run_gate("--shard", "2/3")
         self.assertEqual(result.returncode, 7, result.stderr)
         self.assertEqual(calls, [])
+
+
+    def selection_file(self, data):
+        manifest = self.root / "selected.files0"
+        manifest.write_bytes(data)
+        return str(manifest)
+
+    def test_files0_preserves_unusual_names_relative_db_paths_and_tracked_config(self):
+        unusual = "test/hash # dollar $ newline\nname.cpp"
+        (self.root / unusual).write_text("fixture")
+        build = self.root / "build/tidy"
+        database = build / "compile_commands.json"
+        entries = json.loads(database.read_text())
+        entries.append({"file": "../../" + unusual, "directory": str(build)})
+        database.write_text(json.dumps(entries))
+        chosen = [self.files[0], unusual]
+        manifest = self.selection_file(b"\0".join(os.fsencode(p) for p in chosen + chosen) + b"\0")
+        result, calls = self.run_gate("--files0-from", manifest)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_selected(calls, chosen)
+        self.assertTrue(all("-quiet" in call and "-p" in call for call in calls))
+
+    def test_files0_empty_is_explicit_success_and_missing_or_malformed_input_fails(self):
+        result, calls = self.run_gate("--files0-from", self.selection_file(b""))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls, [])
+        for data in (b"src/regular.cpp", b"src/regular.cpp\0\0", b"\0",
+                     b"src/missing.cpp\0", b"../outside.cpp\0", b"vendor/external.cpp\0",
+                     b"src/luminumbra_client/ui/gl3/vendor.cpp\0"):
+            with self.subTest(data=data):
+                result, calls = self.run_gate("--files0-from", self.selection_file(data))
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(calls, [])
+        result, calls = self.run_gate("--files0-from", str(self.root / "absent.files0"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(calls, [])
+
+    def test_files0_refuses_missing_database_entries_and_malformed_database(self):
+        manifest = self.selection_file(os.fsencode(self.root / "src/regular.cpp") + b"\0")
+        db = self.root / "build/tidy/compile_commands.json"
+        for data in ("[]", "not json", '[{"directory": null}]'):
+            db.write_text(data)
+            result, calls = self.run_gate("--files0-from", manifest)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(calls, [])
+
+    def test_files0_argument_refusals_happen_before_tidy(self):
+        manifest = self.selection_file(b"src/regular.cpp\0")
+        for args in (("--files0-from",), ("--files0-from", ""),
+                     ("--files0-from", manifest, "--changed-from", "HEAD"),
+                     ("--jobs", "0"), ("--jobs", "00"), ("--jobs", "-1")):
+            result, calls = self.run_gate(*args)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertEqual(calls, [])
+
+    def test_files0_tidy_failure_propagates_and_fallback_binary_is_supported(self):
+        manifest = self.selection_file(b"src/regular.cpp\0")
+        self.env["STUB_EXIT"] = "7"
+        result, calls = self.run_gate("--files0-from", manifest)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assert_selected(calls, ["src/regular.cpp"])
+        self.env.pop("STUB_EXIT")
+        (self.bin / "clang-tidy-18").rename(self.bin / "clang-tidy")
+        result, calls = self.run_gate("--files0-from", manifest)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("binary clang-tidy", result.stdout)
+        self.assert_selected(calls, ["src/regular.cpp"])
 
 
 class ShardWorkflowTests(unittest.TestCase):
