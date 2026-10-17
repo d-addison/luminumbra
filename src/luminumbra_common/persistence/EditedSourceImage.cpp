@@ -1,18 +1,39 @@
 #include "EditedSourceImage.h"
 
 #include "WorldSaveService.h"
+#include "luminumbra/core/Types.h"
 #include "nlohmann/json.hpp"
+#include "persistence/SaveTransaction.h"
 #include "systems/WaterSystem.h"
 #include "world/Chunk.h"
+#include "world/FarEditedBake.h"
+#include "world/FarTierTable.h"
 #include "world/FarVolume.h"
+#include "world/FarVolumeMemory.h"
+#include "world/FarVolumeTile.h"
+#include "world/GroundObjectStore.h"
+#include "world/WorldClock.h"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <exception>
+#include <filesystem>
 #include <fstream>
+#include <functional>
+#include <ios>
+#include <memory>
 #include <new>
+#include <nlohmann/json_fwd.hpp>
+#include <span>
+#include <string>
+#include <string_view>
+#include <thread>
 #include <utility>
+#include <vector>
 
 namespace Luminumbra::Persistence {
 namespace {
@@ -25,9 +46,6 @@ constexpr std::int64_t kCoordinateLimit = World::kFarVolumeExactCoordinateLimitM
 constexpr std::uint64_t kPathBytes = 128;
 
 struct Reservation {
-    explicit Reservation(std::shared_ptr<World::FarVolumeMemoryPool> pool)
-        : memory(std::move(pool))
-        , lease(*memory) {}
     std::shared_ptr<World::FarVolumeMemoryPool> memory;
     World::FarVolumeMemoryLease lease;
 };
@@ -208,7 +226,7 @@ Error ValidateSingletons(const std::filesystem::path& root,
     }
     // The shared file hasher uses a fixed block; the ground-object reader has a fixed
     // input buffer. Ownership validators may retain several sibling projections together.
-    std::uint64_t fixed_scratch = 1024 * 1024;
+    std::uint64_t fixed_scratch = 1024ull * 1024;
     if (std::filesystem::exists(WorldSaveService::ground_objects_path(root)))
         fixed_scratch += world::GroundObjectStore::kMaxFileBytes + 1;
     if (fixed_scratch > limits.max_scratch_bytes / 4 ||
@@ -294,7 +312,7 @@ Error ValidateHeaders(const std::filesystem::path& root, const EditedSourceLimit
 }
 Error PreflightRecovery(const std::filesystem::path& root, const EditedSourceLimits& limits) {
     if (limits.max_directory_entries > limits.max_scratch_bytes / 512 ||
-        (journal_pending(root) && limits.max_scratch_bytes < 4u * 1024u * 1024u))
+        (journal_pending(root) && limits.max_scratch_bytes < 4ull * 1024u * 1024u))
         return Error::ByteLimit;
     std::size_t visited = 0;
     if (std::filesystem::exists(root)) {
@@ -305,7 +323,7 @@ Error PreflightRecovery(const std::filesystem::path& root, const EditedSourceLim
                 return Error::Unavailable;
         }
     }
-    const std::uint64_t fixed_scratch = 1024 * 1024 + visited * 512;
+    const std::uint64_t fixed_scratch = 1024ull * 1024 + visited * 512;
     if (fixed_scratch > limits.max_scratch_bytes / 2)
         return Error::ByteLimit;
     const auto payload_capacity = (limits.max_scratch_bytes / 2 - fixed_scratch) / 256;
@@ -329,7 +347,7 @@ Error PreflightRecovery(const std::filesystem::path& root, const EditedSourceLim
         },
         [&](std::size_t entries) {
             if (entries > limits.max_members || entries > limits.max_records ||
-                entries > limits.max_scratch_bytes / (2 * 1024)) {
+                entries > limits.max_scratch_bytes / (2ull * 1024)) {
                 admission_error = Error::WorkLimit;
                 return false;
             }
@@ -380,8 +398,8 @@ Error AllocateData(const EditedSourceSelection& selection,
     if (!admission.TryCharge(limits.max_image_bytes))
         return Error::ByteLimit;
     auto data = std::make_shared<EditedSourceData>();
-    data->reservation = std::make_shared<Reservation>(limits.memory);
-    data->reservation->lease = std::move(admission);
+    data->reservation =
+        std::make_shared<Reservation>(Reservation{limits.memory, std::move(admission)});
     data->used_bytes = controls;
     data->payloads.reserve(limits.max_records);
     data->lattices.reserve(limits.max_records);
@@ -760,8 +778,7 @@ Error EditedSourceCaptureAccess::Publish(const std::shared_ptr<const EditedSourc
         World::FarVolumeMemoryLease admission(*memory);
         if (!admission.TryCharge(512))
             return Error::ByteLimit;
-        auto reservation = std::make_shared<Reservation>(memory);
-        reservation->lease = std::move(admission);
+        auto reservation = std::make_shared<Reservation>(Reservation{memory, std::move(admission)});
         auto identity = prepared->m_identity;
         identity.state = World::FarEditedImageState::Committed;
         auto result = std::shared_ptr<const EditedSourceImage>(new EditedSourceImage(

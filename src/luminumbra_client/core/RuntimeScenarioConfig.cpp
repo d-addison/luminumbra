@@ -1,12 +1,14 @@
 #include "core/RuntimeScenarioConfig.h"
 #include "core/Log.h"
 #include "luminumbra_common/core/Environment.h"
+#include "luminumbra_common/core/FilesystemPath.h"
 #include <algorithm>
 #include <cstdlib>
 #include <ctime>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
+#include <stdexcept>
 
 namespace Luminumbra::Client::ScenarioHarness {
 
@@ -130,6 +132,42 @@ static bool ParseResolution(const std::string& value, int& out_width, int& out_h
     } catch (...) {
         return false;
     }
+}
+
+RuntimePathOptions ParseRuntimePathOptions(int argc, char* argv[]) {
+    RuntimePathOptions options;
+    for (const char* flag : {"--runtime-root", "--save-root"}) {
+        std::filesystem::path& path =
+            std::string(flag) == "--runtime-root" ? options.runtime_root : options.save_root;
+        bool seen = false;
+        const std::string prefix = std::string(flag) + "=";
+        for (int i = 1; i < argc; ++i) {
+            const std::string argument = argv[i];
+            if (argument != flag && argument.rfind(prefix, 0) != 0)
+                continue;
+            if (seen)
+                throw std::invalid_argument(std::string(flag) + " may only be supplied once");
+            seen = true;
+            std::string value;
+            if (argument == flag) {
+                if (i + 1 < argc)
+                    value = argv[++i];
+            } else {
+                value = argument.substr(prefix.size());
+            }
+            path = std::filesystem::path(value);
+            if (path.empty() || !Filesystem::IsAbsolutePath(path))
+                throw std::invalid_argument(std::string(flag) + " requires an absolute directory");
+        }
+    }
+    if (!options.save_root.empty()) {
+        std::error_code error;
+        std::filesystem::create_directories(options.save_root, error);
+        if (error || !std::filesystem::is_directory(options.save_root, error) || error)
+            throw std::invalid_argument("--save-root cannot be created: " +
+                                        options.save_root.string());
+    }
+    return options;
 }
 
 RuntimeScenarioConfig

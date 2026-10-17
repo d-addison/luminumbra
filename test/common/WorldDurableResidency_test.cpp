@@ -11,15 +11,19 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <memory>
 #include <set>
 #include <string>
+#include <system_error>
 #include <utility>
 #include <vector>
 
+#include "luminumbra/core/Types.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/WaterComponents.h"
@@ -27,7 +31,9 @@
 #include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/systems/WaterSystem.h"
+#include "luminumbra_common/world/ActiveRegionLedger.h"
 #include "luminumbra_common/world/Chunk.h"
+#include "luminumbra_common/world/FarEditedCache.h"
 #include "luminumbra_common/world/GameSession.h"
 
 namespace fs = std::filesystem;
@@ -134,7 +140,18 @@ constexpr int kReturnIterations = kSettleIterations;
 // One headless world per TEST. Member order: root outlives the session, the job
 // system outlives the session, and the destructor tears the session down before
 // shutting the job system down.
-class DurableFixture {
+struct DurableFixtureState {
+    HeadlessRoot root;
+    JobSystem jobs;
+    std::unique_ptr<GameSession> session;
+    SHIELD_WorldSystem* world = nullptr;
+    Luminumbra::Systems::PhysicsSystem* physics = nullptr;
+    Vec3 spawn{};
+    bool created = false;
+    std::string error;
+};
+
+class DurableFixture : public DurableFixtureState {
 public:
     explicit DurableFixture(bool durable, bool active_regions = false) {
         // CTest runs cases in separate processes; bound each small fixture's worker pool.
@@ -208,15 +225,6 @@ public:
             return nullptr;
         return ResidentLoadedChunk();
     }
-
-    HeadlessRoot root;
-    JobSystem jobs;
-    std::unique_ptr<GameSession> session;
-    SHIELD_WorldSystem* world = nullptr;
-    Luminumbra::Systems::PhysicsSystem* physics = nullptr;
-    Vec3 spawn{};
-    bool created = false;
-    std::string error;
 };
 
 bool Contains(const std::vector<std::shared_ptr<Chunk>>& chunks, const Chunk* target) {

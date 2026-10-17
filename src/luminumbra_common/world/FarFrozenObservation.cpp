@@ -1,44 +1,66 @@
 #include "FarFrozenObservation.h"
+#include "world/FarEditedBake.h"
+#include "world/FarTierTable.h"
+#include "world/FarVolume.h"
+#include "world/FarVolumeMemory.h"
+#include "world/FarVolumeTile.h"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <initializer_list>
 #include <limits>
+#include <memory>
+#include <new>
+#include <optional>
+#include <span>
 #include <tuple>
+#include <utility>
 
 namespace Luminumbra::World {
 namespace {
 using Error = FarFrozenCaptureError;
 
 template<class T>
-struct PoolAllocator {
+class PoolAllocator {
+    std::shared_ptr<FarVolumeMemoryPool> pool_;
+    std::uint64_t cap_;
+
+public:
     using value_type = T;
-    std::shared_ptr<FarVolumeMemoryPool> pool;
-    std::uint64_t cap;
     PoolAllocator(std::shared_ptr<FarVolumeMemoryPool> p, std::uint64_t c)
-        : pool(std::move(p))
-        , cap(c) {}
+        : pool_(std::move(p))
+        , cap_(c) {}
     template<class U>
     PoolAllocator(const PoolAllocator<U>& other)
-        : pool(other.pool)
-        , cap(other.cap) {}
+        : pool_(other.pool())
+        , cap_(other.cap()) {}
+    const std::shared_ptr<FarVolumeMemoryPool>& pool() const noexcept {
+        return pool_;
+    }
+    std::uint64_t cap() const noexcept {
+        return cap_;
+    }
     T* allocate(std::size_t n) {
-        if (n > cap / sizeof(T) || !pool->TryReserve(n * sizeof(T)))
+        if (n > cap_ / sizeof(T) || !pool_->TryReserve(n * sizeof(T)))
             throw FarVolumeMemoryRefused();
         try {
             return static_cast<T*>(::operator new(n * sizeof(T)));
         } catch (...) {
-            pool->Release(n * sizeof(T));
+            pool_->Release(n * sizeof(T));
             throw;
         }
     }
     void deallocate(T* p, std::size_t n) noexcept {
         ::operator delete(p);
-        pool->Release(n * sizeof(T));
+        pool_->Release(n * sizeof(T));
     }
     template<class U>
     bool operator==(const PoolAllocator<U>& other) const noexcept {
-        return pool == other.pool && cap == other.cap;
+        return pool_ == other.pool() && cap_ == other.cap();
     }
 };
 
@@ -127,7 +149,7 @@ FarFrozenCaptureError
 CaptureFarVolumeObservation(const FarVolumeRequest& request,
                             const FarFrozenCaptureSource& source,
                             const FarFrozenCaptureLimits& limits,
-                            std::shared_ptr<FarVolumeMemoryPool> pool,
+                            const std::shared_ptr<FarVolumeMemoryPool>& pool,
                             std::shared_ptr<const FarFrozenObservation>& output) {
     const auto tier = FarTierAt(request.key.tier);
     if (!tier || request.span.min_y >= request.span.max_y ||
@@ -145,7 +167,7 @@ CaptureFarVolumeObservation(const FarVolumeRequest& request,
         static_cast<std::uint8_t>(request.key.tier),
         {{request.key.x * edge, request.span.min_y, request.key.z * edge},
          {(request.key.x + 1) * edge, request.span.max_y, (request.key.z + 1) * edge}}};
-    return CaptureFarFrozenObservation({&region, 1}, source, limits, std::move(pool), output);
+    return CaptureFarFrozenObservation({&region, 1}, source, limits, pool, output);
 }
 
 FarFrozenObservation::FarFrozenObservation(CaptureToken,
@@ -164,9 +186,10 @@ FarFrozenCaptureError
 CaptureFarFrozenObservation(std::span<const FarFrozenRegion> regions,
                             const FarFrozenCaptureSource& source,
                             const FarFrozenCaptureLimits& limits,
-                            std::shared_ptr<FarVolumeMemoryPool> pool,
+                            const std::shared_ptr<FarVolumeMemoryPool>& pool,
                             std::shared_ptr<const FarFrozenObservation>& output) {
-    if (!pool || !source.pristine.height || !source.pristine.density || !source.water ||
+    if (!pool || !source.pristine.height || !source.pristine.density || !source.committed ||
+        !source.water ||
         (source.use != FarFrozenUse::Committed && source.use != FarFrozenUse::Preview) ||
         (source.durable.state != FarEditedImageState::Committed &&
          source.durable.state != FarEditedImageState::Prepared) ||
@@ -181,14 +204,14 @@ CaptureFarFrozenObservation(std::span<const FarFrozenRegion> regions,
         return Error::IdentityMismatch;
     if (regions.empty() || regions.size() > limits.max_regions)
         return Error::WorkLimit;
-    std::uint64_t columns = 0, samples = 0, bytes = 0;
-    const auto terrain_calls = std::uint64_t(
-        1 + bool(source.committed) +
-        (source.use == FarFrozenUse::Preview ? bool(source.live) + bool(source.parked) : 0));
+    std::uint64_t columns = 0, samples = 0, water_samples = 0, bytes = 0;
+    const auto terrain_calls =
+        std::uint64_t{1} + bool(source.committed) +
+        (source.use == FarFrozenUse::Preview ? bool(source.live) + bool(source.parked) : 0);
     const auto water_calls =
-        std::uint64_t(1 + (source.use == FarFrozenUse::Preview
-                               ? bool(source.live_water) + bool(source.parked_water)
-                               : 0));
+        std::uint64_t{1} + (source.use == FarFrozenUse::Preview
+                                ? bool(source.live_water) + bool(source.parked_water)
+                                : 0);
     for (const auto& region : regions) {
         std::array<std::size_t, 3> side{};
         const auto error = Dimensions(region, side);
@@ -206,10 +229,15 @@ CaptureFarFrozenObservation(std::span<const FarFrozenRegion> regions,
             return Error::WorkLimit;
         if (!Add(side[0], side[2], limits.max_height_samples, columns))
             return Error::WorkLimit;
+        // Bound aggregate water callbacks across all regions and enabled layers,
+        // including overlapping halos, before allocating or observing the source.
+        if (!Add(std::uint64_t(side[0]) * side[2],
+                 water_calls,
+                 limits.max_water_samples,
+                 water_samples))
+            return Error::WorkLimit;
     }
     const auto density_count = samples / terrain_calls;
-    if (columns > limits.max_water_samples / water_calls)
-        return Error::WorkLimit;
     if (!Add(regions.size(), sizeof(FarFrozenObservation::Grid), limits.max_bytes, bytes) ||
         !Add(columns, sizeof(float) + sizeof(FarFrozenWaterSample), limits.max_bytes, bytes) ||
         !Add(density_count, 2 * sizeof(FarVolumeSample), limits.max_bytes, bytes) ||
@@ -237,8 +265,13 @@ CaptureFarFrozenObservation(std::span<const FarFrozenRegion> regions,
         for (const auto& region : regions) {
             FarFrozenObservation::Grid grid;
             grid.region = region;
-            Dimensions(region, grid.side);
-            const auto step = std::int64_t(FarTierAt(region.tier)->sample_spacing_meters);
+            const auto error = Dimensions(region, grid.side);
+            if (error != Error::None)
+                return error;
+            const auto tier = FarTierAt(region.tier);
+            if (!tier)
+                return Error::InvalidRegion;
+            const auto step = std::int64_t(tier->sample_spacing_meters);
             grid.origin = {region.support.min.x - step,
                            region.support.min.y - step,
                            region.support.min.z - step};
@@ -248,7 +281,10 @@ CaptureFarFrozenObservation(std::span<const FarFrozenRegion> regions,
             return Before(a.region, b.region);
         });
         for (auto& grid : image->grids_) {
-            const auto step = FarTierAt(grid.region.tier)->sample_spacing_meters;
+            const auto tier = FarTierAt(grid.region.tier);
+            if (!tier)
+                return Error::InvalidRegion;
+            const auto step = tier->sample_spacing_meters;
             grid.column_offset = image->heights_.size();
             grid.sample_offset = image->pristine_.size();
             grid.water_bound = {
@@ -373,10 +409,13 @@ std::optional<FarFrozenRegion> FarFrozenObservation::Region(std::size_t region) 
 }
 std::optional<float>
 FarFrozenObservation::Height(std::uint8_t tier, std::int64_t x, std::int64_t z) const {
+    const auto dimensions = FarTierAt(tier);
+    if (!dimensions)
+        return std::nullopt;
     for (const auto& grid : grids_) {
         if (grid.region.tier != tier)
             continue;
-        const auto step = FarTierAt(tier)->sample_spacing_meters;
+        const auto step = dimensions->sample_spacing_meters;
         const auto ix = AxisIndex(x, grid.origin.x, grid.side[0], step);
         const auto iz = AxisIndex(z, grid.origin.z, grid.side[2], step);
         if (ix && iz)
@@ -386,10 +425,13 @@ FarFrozenObservation::Height(std::uint8_t tier, std::int64_t x, std::int64_t z) 
 }
 std::optional<FarVolumeSample>
 FarFrozenObservation::Sample(std::uint8_t tier, const FarVolumePosition& p, bool pristine) const {
+    const auto dimensions = FarTierAt(tier);
+    if (!dimensions)
+        return std::nullopt;
     for (const auto& grid : grids_) {
         if (grid.region.tier != tier)
             continue;
-        const auto step = FarTierAt(tier)->sample_spacing_meters;
+        const auto step = dimensions->sample_spacing_meters;
         const auto x = AxisIndex(p.x, grid.origin.x, grid.side[0], step);
         const auto y = AxisIndex(p.y, grid.origin.y, grid.side[1], step);
         const auto z = AxisIndex(p.z, grid.origin.z, grid.side[2], step);
@@ -415,7 +457,10 @@ FarFrozenObservation::WaterSample(std::size_t region, std::int64_t x, std::int64
     if (region >= grids_.size())
         return std::nullopt;
     const auto& grid = grids_[region];
-    const auto step = FarTierAt(grid.region.tier)->sample_spacing_meters;
+    const auto tier = FarTierAt(grid.region.tier);
+    if (!tier)
+        return std::nullopt;
+    const auto step = tier->sample_spacing_meters;
     const auto ix = AxisIndex(x, grid.origin.x, grid.side[0], step);
     const auto iz = AxisIndex(z, grid.origin.z, grid.side[2], step);
     if (!ix || !iz)
