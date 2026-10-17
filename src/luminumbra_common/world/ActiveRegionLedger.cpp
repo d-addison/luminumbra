@@ -311,57 +311,11 @@ void ActiveRegionLedger::visit(const Vec3& anchor,
             record.last_proximity = clock.tick();
         }
 }
-void ActiveRegionLedger::evict_idle(const WorldClock& clock, const OwnershipProbe& owned) {
-    if (!owned)
-        return;
-    std::set<RegionKey> pending_owners;
-    for (const auto& [delivery, activation] : m_pendingActivations) {
-        (void)delivery;
-        pending_owners.insert(activation.key);
-    }
-    for (auto it = m_records.begin(); it != m_records.end();) {
-        const auto& r = it->second;
-        // Cheap record conditions first so the probe runs only for evictable records.
-        const bool idle = clock.tick() >= r.last_proximity &&
-                          clock.tick() - r.last_proximity >= kIdleEvictionTicks;
-        if (!r.pinned && !r.edited && !r.populated && r.water_cursor == 0 && idle &&
-            !m_completedWork.contains(it->first) && !m_energyAges.contains(it->first) &&
-            !m_waterDebts.contains(it->first) && !m_activationIntents.contains(it->first) &&
-            !pending_owners.contains(it->first) && !owned(it->first)) {
-            m_legacyFrozenDigests.erase(it->first);
-            it = m_records.erase(it);
-        } else
-            ++it;
-    }
-}
-RegionSchedule ActiveRegionLedger::schedule(const WorldClock& clock,
-                                            std::optional<std::span<const Vec3>> replicated_anchors,
-                                            std::span<const RegionWork> work,
-                                            const DurableDigest& durable_digest,
-                                            const OwnershipProbe& owned,
-                                            RegionScheduleScratch* scratch) {
-    RegionScheduleScratch local;
-    auto& storage = scratch ? *scratch : local;
-    auto next = *this;
-    auto& combined = storage.combined;
-    combined.assign(work.begin(), work.end());
-    // Restored clock gaps expire stale work only after this schedule commits successfully.
-    if (m_tick + 1 == clock.tick())
-        for (const auto& [key, total] : m_completedWork)
-            combined.push_back(RegionWork{key, total, 0, 0, 0});
-    auto result =
-        next.schedule_in_place(clock, replicated_anchors, combined, durable_digest, owned, storage);
-    next.m_completedWork.clear();
-    next.validate_envelope();
-    *this = std::move(next);
-    return result;
-}
 RegionSchedule
 ActiveRegionLedger::schedule_in_place(const WorldClock& clock,
                                       std::optional<std::span<const Vec3>> replicated_anchors,
                                       std::span<const RegionWork> work,
                                       const DurableDigest& durable_digest,
-                                      const OwnershipProbe& owned,
                                       RegionScheduleScratch& scratch) {
     // The ceiling, not the canonical tick, is the latest world time this ledger
     // knows about. After reconciling an interrupted save the canonical tick is
@@ -522,11 +476,6 @@ ActiveRegionLedger::schedule_in_place(const WorldClock& clock,
         Append(trace, result.rejected.capacity, 4);
     }
     result.digest = Persistence::StableChecksum(trace);
-    // Retention runs after the digest so the digest and trace describe the pre-eviction state.
-    evict_idle(clock, owned);
-    // Consumers may create authority and publish work only for surviving records.
-    std::erase_if(result.due, [this](RegionKey key) { return !m_records.contains(key); });
-    result.ledger_records = m_records.size();
     return result;
 }
 

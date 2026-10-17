@@ -40,7 +40,7 @@ def read_json(path: Path) -> Any:
     except OSError as exc:
         raise ValueError(f"cannot read {path.name}: {exc.strerror or exc}") from exc
     try:
-        return json.loads(text)
+        return json.loads(text, object_pairs_hook=capture_sim_budget.unique_object)
     except ValueError as exc:
         raise ValueError(f"invalid JSON in {path.name}: {exc}") from exc
 
@@ -61,6 +61,8 @@ def summarize_stages(stages: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 
 def validate_manifest(manifest: dict[str, Any]) -> None:
     """Check the manifest keys capture_sim_budget.py writes; refuse null or mistyped values."""
+    if "regions_required" in manifest and type(manifest["regions_required"]) is not bool:
+        raise ValueError("capture.json has an invalid regions_required flag")
     revision = manifest["revision"]
     if not isinstance(revision, str) or not revision:
         raise ValueError("capture.json has an invalid revision")
@@ -103,7 +105,8 @@ def load_capture(directory: Path) -> dict[str, Any]:
         if not isinstance(data, dict):
             raise ValueError(f"{artifact} is not a JSON object")
         try:
-            capture_sim_budget.validate_artifact(data, preset, manifest["seed"], ticks)
+            capture_sim_budget.validate_artifact(
+                data, preset, manifest["seed"], ticks, manifest.get("regions_required", False))
         except (TypeError, KeyError, AttributeError) as exc:
             raise ValueError(f"{artifact} is malformed: {exc}") from exc
         presets[preset] = {"stages": summarize_stages(data["sim_budget"]["stages"])}

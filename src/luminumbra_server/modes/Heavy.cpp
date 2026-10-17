@@ -1,4 +1,5 @@
 #include "../HeavyComparison.h"
+#include "../SimBudgetArtifact.h"
 #include "ModeHelpers.h"
 #include "Modes.h"
 
@@ -181,6 +182,10 @@ int RunHeavy(const ServerCliOptions& options) try {
     }
 
     // --- : resimulate M further ticks on BOTH sessions. ---
+    if (enabled && options.sim_budget) {
+        original.Session()->SetSimBudgetTelemetryEnabled(true);
+        loaded.Session()->SetSimBudgetTelemetryEnabled(true);
+    }
     const auto orig_resim = original.RunFixedTicks(options.heavy_resim);
     const auto loaded_resim = loaded.RunFixedTicks(options.heavy_resim);
     const HeavyHashes orig_final = CaptureHashes(original);
@@ -274,8 +279,16 @@ int RunHeavy(const ServerCliOptions& options) try {
     const auto& settle_loaded = loaded.GetBootSettleStats();
     const bool settle_ok = settle_orig.contract_ok() && settle_loaded.contract_ok() &&
                            settle_loaded.water_settle_skipped;
-    const bool passed = save_unchanged && roundtrip_ok && resim_ok && settle_ok &&
-                        pre_save_ticks.ticks_executed == options.ticks &&
+    const auto original_budget = enabled && options.sim_budget
+                                     ? original.Session()->CaptureSimBudgetTelemetry()
+                                     : luminumbra::simulation::SimBudgetTelemetry{};
+    const auto loaded_budget = enabled && options.sim_budget
+                                   ? loaded.Session()->CaptureSimBudgetTelemetry()
+                                   : luminumbra::simulation::SimBudgetTelemetry{};
+    const bool regional_work_match =
+        !original_budget.Enabled() || original_budget.WorkMatches(loaded_budget);
+    const bool passed = regional_work_match && save_unchanged && roundtrip_ok && resim_ok &&
+                        settle_ok && pre_save_ticks.ticks_executed == options.ticks &&
                         orig_resim.ticks_executed == options.heavy_resim &&
                         loaded_resim.ticks_executed == options.heavy_resim;
 
@@ -354,6 +367,8 @@ int RunHeavy(const ServerCliOptions& options) try {
                                                                     "independent_reference"});
         artifact["mesh_excluded_reason"] = "derived render geometry; world_hash excludes mesh";
     }
+
+    Luminumbra::Server::AppendSimBudgetArtifact(artifact, original_budget, loaded_budget);
 
     // Tear down both and clean up the throwaway save directory.
     original.Shutdown();

@@ -71,6 +71,7 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/persistence/SimulationPendingState.cpp
     ${CMAKE_CURRENT_LIST_DIR}/simulation/SimulationEventBus.cpp
     ${CMAKE_CURRENT_LIST_DIR}/simulation/SimBudgetProfile.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/simulation/RegionTelemetry.cpp
 
     # Shield
 

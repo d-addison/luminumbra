@@ -987,6 +987,10 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                 m_activeRegionLedger.publish_completed_work(m_regionCompletedWork);
                 m_regionCompletedWork.clear();
                 m_worldSystem->sync_water_authority();
+                ObserveRegionActivity();
+                if (m_simBudgetTelemetry.Regions().Enabled())
+                    m_simBudgetTelemetry.Regions().ObserveParkedBytes(
+                        m_worldSystem ? m_worldSystem->parked_byte_count() : 0u);
             }
         } catch (const std::exception& error) {
             if (!m_activeRegionsEnabled)
@@ -1115,6 +1119,14 @@ void GameSession::RunRegionalWaterTick() {
     const auto resident = m_worldSystem->resident_streamed_chunks();
     m_waterSystem->UpdateRegional(
         m_registry, resident, m_activeRegionLedger, m_regionSchedule, m_regionCompletedWork);
+    if (m_simBudgetTelemetry.Regions().Enabled()) {
+        const auto& work = m_waterSystem->regional_work();
+        m_simBudgetTelemetry.Regions().RecordWater(work.border_windows + work.allocated_windows,
+                                                   work.border_windows + work.used_windows,
+                                                   work.unused_windows,
+                                                   work.unallocated_windows,
+                                                   work.total_cells);
+    }
 }
 
 void GameSession::RunFoliageTick(luminumbra::simulation::SimBudgetTelemetry::TickScope& budget,
@@ -2552,6 +2564,57 @@ void GameSession::PopulateActiveRegions() {
         }
     }
 }
+luminumbra::simulation::RegionTelemetry::Activities GameSession::RegionActivityValues() const {
+    const auto& activity = m_creatureActivity;
+    return {activity.promotions,
+            activity.demotions,
+            activity.full_updates,
+            activity.coarse_updates,
+            activity.births,
+            activity.deaths,
+            activity.removals,
+            activity.parked_travel,
+            activity.controllers_created,
+            activity.controllers_removed,
+            activity.stale_handles,
+            m_populationActivity.successes,
+            m_populationActivity.failures};
+}
+void GameSession::ResetRegionTelemetry() {
+    auto& telemetry = m_simBudgetTelemetry.Regions();
+    telemetry.SetEnabled(m_activeRegionsEnabled && m_simBudgetTelemetry.Enabled());
+    if (telemetry.Enabled()) {
+        telemetry.SetActivityBaseline(RegionActivityValues());
+        m_simBudgetTelemetry.SetRegionCaptureObserver(
+            this, [](const void* context, luminumbra::simulation::RegionTelemetry& captured) {
+                static_cast<const GameSession*>(context)->ObserveRegionCapture(captured);
+            });
+    } else {
+        m_simBudgetTelemetry.SetRegionCaptureObserver(nullptr, nullptr);
+    }
+}
+void GameSession::ObserveRegionActivity() {
+    auto& telemetry = m_simBudgetTelemetry.Regions();
+    if (telemetry.Enabled())
+        telemetry.ObserveActivity(RegionActivityValues());
+}
+void GameSession::ObserveRegionCapture(luminumbra::simulation::RegionTelemetry& telemetry) const {
+    if (telemetry.Enabled()) {
+        const auto activity = GetCreatureActivity();
+        telemetry.ObserveGauges(activity.full,
+                                activity.coarse,
+                                activity.frozen,
+                                GetPopulationActivity().pending_activations,
+                                m_worldSystem ? m_worldSystem->parked_byte_count() : 0u);
+        // This export read does not append a tick or a deterministic trace event.
+        if (m_regionFault)
+            telemetry.RecordFault(m_regionFault->tick, m_regionFault->message);
+    }
+}
+luminumbra::simulation::SimBudgetTelemetry GameSession::CaptureSimBudgetTelemetry() const {
+    return m_simBudgetTelemetry.Capture();
+}
+
 void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
     if (m_activeRegionsEnabled && !m_regionFault && m_worldSystem) {
         // Water divergence becomes LoadedOrEdited authority BEFORE any digest or ownership
@@ -2564,77 +2627,117 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                 : std::nullopt;
         // Built lazily on the first probe call of this tick.
         std::optional<std::set<RegionKey>> owned_regions;
+        auto& telemetry = m_simBudgetTelemetry.Regions();
+        luminumbra::simulation::RegionTelemetry::SchedulerObservation observation;
+        std::chrono::steady_clock::time_point start{};
+        if (telemetry.Enabled())
+            start = std::chrono::steady_clock::now();
         try {
-            m_regionSchedule = m_activeRegionLedger.schedule(
-                m_worldClock,
-                anchors,
-                m_regionWork,
-                [this](RegionKey key) {
-                    return CaptureRegionAuthorityDigest(
-                        AuthorityHashInputs{
-                            .directory = m_regionDurableDirectory.empty()
-                                             ? GetWorldSaveDir()
-                                             : m_regionDurableDirectory,
-                            .chunks = {.live = m_worldSystem->snapshot_streamed_chunks(),
-                                       .parked = m_worldSystem->snapshot_parked_chunks(),
-                                       .durable = m_worldSystem->durable_chunk_inventory(),
-                                       .ground_object_bytes = {},
-                                       .field_page_bytes = {},
-                                       .creature_bytes = {}},
-                            .registry = m_registry,
-                            .ledger = m_activeRegionLedger,
-                            .ground = m_groundObjects,
-                            .fields = m_fieldPages,
-                            .energy = m_energyFieldState.get(),
-                            .clock_bytes = {},
-                            .identity_bytes = {},
-                            .avatar_bytes = {}},
-                        key);
-                },
-                // Plants, foliage pages and water debt retain their owners alongside fields,
-                // ground objects, pending work and authoritative chunks.
-                [this, &owned_regions](RegionKey key) {
-                    if (m_activeRegionLedger.water_debts().contains(key))
-                        return true;
-                    if (m_groundObjects.owns_region(key))
-                        return true;
-                    if (m_fieldPages.owns_region(key))
-                        return true;
-                    if (m_activeRegionLedger.energy_ages().contains(key) ||
-                        (m_energyFieldState && m_energyFieldState->OwnsRegion(key)))
-                        return true;
-                    if (!owned_regions) {
-                        owned_regions.emplace();
-                        for (auto e : m_registry.view<const Components::PlantRegionComponent>()) {
-                            const auto& owner =
-                                m_registry.get<const Components::PlantRegionComponent>(e);
-                            owned_regions.value().insert({owner.owner_x, owner.owner_z});
+            const auto run_schedule = [&](auto&& observe) {
+                return m_activeRegionLedger.schedule(
+                    m_worldClock,
+                    anchors,
+                    m_regionWork,
+                    [this](RegionKey key) {
+                        return CaptureRegionAuthorityDigest(
+                            AuthorityHashInputs{
+                                .directory = m_regionDurableDirectory.empty()
+                                                 ? GetWorldSaveDir()
+                                                 : m_regionDurableDirectory,
+                                .chunks = {.live = m_worldSystem->snapshot_streamed_chunks(),
+                                           .parked = m_worldSystem->snapshot_parked_chunks(),
+                                           .durable = m_worldSystem->durable_chunk_inventory(),
+                                           .ground_object_bytes = {},
+                                           .field_page_bytes = {},
+                                           .creature_bytes = {}},
+                                .registry = m_registry,
+                                .ledger = m_activeRegionLedger,
+                                .ground = m_groundObjects,
+                                .fields = m_fieldPages,
+                                .energy = m_energyFieldState.get(),
+                                .clock_bytes = {},
+                                .identity_bytes = {},
+                                .avatar_bytes = {}},
+                            key);
+                    },
+                    // Plants, foliage pages and water debt retain their owners alongside fields,
+                    // ground objects, pending work and authoritative chunks.
+                    [this, &owned_regions](RegionKey key) {
+                        if (m_activeRegionLedger.water_debts().contains(key))
+                            return true;
+                        if (m_groundObjects.owns_region(key))
+                            return true;
+                        if (m_fieldPages.owns_region(key))
+                            return true;
+                        if (m_activeRegionLedger.energy_ages().contains(key) ||
+                            (m_energyFieldState && m_energyFieldState->OwnsRegion(key)))
+                            return true;
+                        if (!owned_regions) {
+                            owned_regions.emplace();
+                            for (auto e :
+                                 m_registry.view<const Components::PlantRegionComponent>()) {
+                                const auto& owner =
+                                    m_registry.get<const Components::PlantRegionComponent>(e);
+                                owned_regions.value().insert({owner.owner_x, owner.owner_z});
+                            }
+                            for (auto e :
+                                 m_registry.view<const Components::CreatureRegionComponent>()) {
+                                const auto& owner =
+                                    m_registry.get<Components::CreatureRegionComponent>(e);
+                                owned_regions.value().insert({owner.owner_x, owner.owner_z});
+                            }
+                            for (const auto& entry : m_regionWork)
+                                owned_regions.value().insert(entry.key);
+                            for (const auto& coords : m_worldSystem->durable_chunk_inventory()) {
+                                int rx = 0, rz = 0;
+                                Persistence::WorldSaveService::region_coords_for_chunk(
+                                    coords, rx, rz);
+                                owned_regions.value().insert(RegionKey{rx, rz});
+                            }
+                            for (const auto& chunk :
+                                 m_worldSystem->snapshot_authoritative_chunks()) {
+                                if (!chunk)
+                                    continue;
+                                int rx = 0, rz = 0;
+                                Persistence::WorldSaveService::region_coords_for_chunk(
+                                    chunk->get_coords(), rx, rz);
+                                owned_regions.value().insert(RegionKey{rx, rz});
+                            }
                         }
-                        for (auto e :
-                             m_registry.view<const Components::CreatureRegionComponent>()) {
-                            const auto& owner =
-                                m_registry.get<Components::CreatureRegionComponent>(e);
-                            owned_regions.value().insert({owner.owner_x, owner.owner_z});
-                        }
-                        for (const auto& entry : m_regionWork)
-                            owned_regions.value().insert(entry.key);
-                        for (const auto& coords : m_worldSystem->durable_chunk_inventory()) {
-                            int rx = 0, rz = 0;
-                            Persistence::WorldSaveService::region_coords_for_chunk(coords, rx, rz);
-                            owned_regions.value().insert(RegionKey{rx, rz});
-                        }
-                        for (const auto& chunk : m_worldSystem->snapshot_authoritative_chunks()) {
-                            if (!chunk)
-                                continue;
-                            int rx = 0, rz = 0;
-                            Persistence::WorldSaveService::region_coords_for_chunk(
-                                chunk->get_coords(), rx, rz);
-                            owned_regions.value().insert(RegionKey{rx, rz});
-                        }
-                    }
-                    return owned_regions.value().contains(key);
-                },
-                &m_regionScheduleScratch);
+                        return owned_regions.value().contains(key);
+                    },
+                    observe,
+                    &m_regionScheduleScratch);
+            };
+            if (telemetry.Enabled())
+                m_regionSchedule = run_schedule([&observation](const ActiveRegionRecord& record) {
+                    ++observation.ledger_records;
+                    if (record.state == RegionState::Active)
+                        ++observation.active;
+                    else if (record.state == RegionState::Reduced)
+                        ++observation.reduced;
+                    else
+                        ++observation.frozen;
+                    observation.pressure = std::max(observation.pressure, record.pressure);
+                });
+            else
+                m_regionSchedule = run_schedule([](const ActiveRegionRecord&) {});
+
+            if (telemetry.Enabled()) {
+                const double elapsed = std::chrono::duration<double, std::milli>(
+                                           std::chrono::steady_clock::now() - start)
+                                           .count();
+                telemetry.RecordScheduler(current_tick,
+                                          elapsed,
+                                          observation,
+                                          m_regionSchedule.due.size(),
+                                          m_regionSchedule.work,
+                                          m_activeRegionLedger.config().work_limit,
+                                          m_regionSchedule.rejected.anchors,
+                                          m_regionSchedule.rejected.work,
+                                          m_regionSchedule.rejected.capacity,
+                                          m_regionSchedule.digest);
+            }
             m_regionWork.clear();
         } catch (const std::exception& error) {
             LatchRegionFault(current_tick, error.what());
@@ -2966,6 +3069,8 @@ void GameSession::ReplaceActiveRegionLedger(ActiveRegionLedger ledger) {
 void GameSession::LatchRegionFault(std::uint64_t tick, std::string message) {
     if (m_regionFault)
         return; // first fault wins
+    ObserveRegionActivity();
+    m_simBudgetTelemetry.Regions().RecordFault(tick, message);
     m_regionFault = RegionSchedulerFault{tick, message};
     m_simulationClock.reset(tick);
     m_activeRegionLedger.acknowledge_world_clock(m_worldClock);
@@ -3260,6 +3365,7 @@ void GameSession::SetParkedBytesLimit(std::size_t bytes) {
 void GameSession::RecordPersistenceSaveOutcome(bool ok, double elapsed_ms) {
     if (!m_activeRegionsEnabled)
         return;
+    m_simBudgetTelemetry.Regions().RecordSave(ok, elapsed_ms);
     if (m_worldSystem)
         m_worldSystem->note_persistence_outcome(ok);
     const auto tick = static_cast<std::int64_t>(GetSimulationTickCount());
@@ -4450,6 +4556,8 @@ bool GameSession::AdoptWorldState(const std::filesystem::path& save_dir,
         m_regionCompletedWork.clear();
         m_regionFault.reset();
         m_creatureActivity = {};
+        m_populationActivity = {};
+        m_simBudgetTelemetry.Clear();
         m_creatureTickAdmission = {};
         m_replicatedSimulationAnchors.reset();
         RestoreWorldClock(saved_clock);
