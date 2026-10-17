@@ -236,18 +236,19 @@ jobs:
           fi
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Reject cancelled workflow
+        if: ${{ cancelled() }}
+        run: |
+          echo "ASan workflow was cancelled" >&2
+          exit 1
       - name: Require all ASan shards to pass
         if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
         env:
           ASAN_SHARD_RESULT: ${{ needs.asan-shard.result }}
           CI_PATHS_RESULT: ${{ needs.changes.result }}
           NEEDS_CPP: ${{ needs.changes.outputs.needs_cpp }}
-          ASAN_CANCELLED: ${{ cancelled() }}
         run: |
-          if [[ "$ASAN_CANCELLED" != 'false' ]]; then
-            echo "ASan workflow was cancelled or cancellation status is missing" >&2
-            exit 1
-          elif [[ "$CI_PATHS_RESULT" == 'success' && "$NEEDS_CPP" == 'false' && "$ASAN_SHARD_RESULT" == 'skipped' ]]; then
+          if [[ "$CI_PATHS_RESULT" == 'success' && "$NEEDS_CPP" == 'false' && "$ASAN_SHARD_RESULT" == 'skipped' ]]; then
             message="route: skipped (ASan not needed by Classify changed paths)"
             echo "$message"
             echo "$message" >> "$GITHUB_STEP_SUMMARY"

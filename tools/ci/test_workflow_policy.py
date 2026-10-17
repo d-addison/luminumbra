@@ -78,6 +78,74 @@ def guarded_jobs(workflows):
            jobs(workflows["asan.yml"])["asan-shard"])
 
 
+def status_function_violations(workflow):
+    """Find status expressions outside if values in our indented YAML layout."""
+    if_values = []
+    scalar_key, scalar_indent, scalar_start = None, -1, 0
+    offset = 0
+    for line in workflow.splitlines(keepends=True):
+        indent = len(line) - len(line.lstrip(" "))
+        if line.strip() and not line.lstrip().startswith("#"):
+            if scalar_key is not None and indent <= scalar_indent:
+                if scalar_key == "if":
+                    if_values.append((scalar_start, offset))
+                scalar_key = None
+            if scalar_key is None:
+                header = re.match(r" *(?:- +)?(?P<key>[\w-]+|'[^']+'|\"[^\"]+\"): *(?P<value>.*)", line)
+                if header and (header["key"].strip("'\"") == "if" or
+                               (header["value"].strip() and not header["value"].startswith("#"))):
+                    scalar_key = header["key"].strip("'\"")
+                    scalar_indent = header.start("key")
+                    scalar_start = offset + header.start("value")
+        offset += len(line)
+    if scalar_key == "if":
+        if_values.append((scalar_start, offset))
+
+    violations = []
+    for expression in re.finditer(r"\$\{\{(?:'(?:[^']|'')*'|(?!\}\}).)*\}\}", workflow, re.DOTALL):
+        if re.search(r"\b(?:success|failure|cancelled|always)\s*\(", expression[0], re.IGNORECASE):
+            if not any(start <= expression.start() and expression.end() <= end
+                       for start, end in if_values):
+                violations.append(workflow.count("\n", 0, expression.start()) + 1)
+    return violations
+
+
+class WorkflowExpressionPolicyTests(unittest.TestCase):
+    def test_status_functions_are_only_used_in_if_values(self):
+        paths = sorted(path for path in (ROOT / ".github/workflows").rglob("*")
+                       if path.suffix in (".yml", ".yaml"))
+        self.assertTrue(paths)
+        for path in paths:
+            with self.subTest(workflow=path.name):
+                self.assertEqual(status_function_violations(path.read_text(encoding="utf-8")), [],
+                                 "Status functions are only valid in if values")
+
+    def test_status_expression_contexts(self):
+        for function in ("success", "failure", "cancelled", "always"):
+            expression = "${{ " + function + "() }}"
+            for key in ("name", "env", "with", "run", "outputs"):
+                for scalar in (expression, "|\n  " + expression,
+                               ">-\n  ${{\n    " + function + "()\n  }}"):
+                    with self.subTest(function=function, key=key, scalar=scalar):
+                        self.assertTrue(status_function_violations(key + ": " + scalar + "\n"))
+            for condition in ("if: " + expression, "- if: " + expression,
+                              "'if': " + expression, '"if": ' + expression,
+                              "if:\n  " + expression,
+                              "if: >-\n  " + expression,
+                              "if: ${{\n  " + function + "()\n  }}"):
+                with self.subTest(condition=condition):
+                    self.assertEqual(status_function_violations(condition + "\n"), [])
+        # Script text that looks like an if key must not grant an exemption.
+        self.assertEqual(status_function_violations("run: |\n  if: ${{ always() }}\n"), [2])
+        self.assertEqual(status_function_violations(
+            "if: ${{ always() }}\nenv:\n  BAD: ${{ cancelled() }}\n"), [3])
+        self.assertEqual(status_function_violations("name: ${{ ALWAYS () }}\n"), [1])
+        self.assertEqual(status_function_violations("name: ${{ '}}' || cancelled() }}\n"), [1])
+        self.assertEqual(status_function_violations("if: ${{ '}}' || cancelled() }}\n"), [])
+        self.assertEqual(status_function_violations("name: ${{ github.workflow }}\n"), [])
+        self.assertEqual(status_function_violations(""), [])
+
+
 class WorkflowDraftPolicyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -153,6 +221,10 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             for step in steps(job)[1:]:
                 with self.subTest(workflow=filename, job=job_id, step=step.splitlines()[0]):
                     condition = value(step, "if", 8) or ""
+                    if job_id == "asan" and step.startswith("      - name: Reject cancelled workflow\n"):
+                        self.assertEqual(condition, "${{ cancelled() }}")
+                        self.assertIsNone(value(step, "continue-on-error", 8))
+                        continue
                     # Ordinary steps implicitly require success(). Evidence steps
                     # using always() must explicitly exclude drafts or be manual-only.
                     if "always()" in condition:
@@ -463,30 +535,40 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         self.assertEqual(value(step, "ASAN_SHARD_RESULT", 10), "${{ needs.asan-shard.result }}")
         self.assertEqual(value(step, "CI_PATHS_RESULT", 10), "${{ needs.changes.result }}")
         self.assertEqual(value(step, "NEEDS_CPP", 10), "${{ needs.changes.outputs.needs_cpp }}")
-        self.assertEqual(value(step, "ASAN_CANCELLED", 10), "${{ cancelled() }}")
+        self.assertIsNone(value(step, "ASAN_CANCELLED", 10))
         self.assertEqual(value(step, "if", 8), "always() && (" + READY + ")")
         self.assertIsNone(value(step, "continue-on-error", 8))
         self.check_asan_aggregate_results(value(step, "run", 8))
 
     def check_asan_aggregate_results(self, script):
+        aggregate = jobs(self.workflows["asan.yml"])["asan"]
+        refusal = next(step for step in steps(aggregate)
+                       if step.startswith("      - name: Reject cancelled workflow\n"))
+        self.assertEqual(value(refusal, "if", 8), "${{ cancelled() }}")
+        self.assertIsNone(value(refusal, "continue-on-error", 8))
+        refusal_script = value(refusal, "run", 8)
+        self.assertIsNotNone(refusal_script)
         with tempfile.TemporaryDirectory() as directory:
-            for cancelled in ("false", "true", ""):
+            for cancelled in (False, True):
                 for classification in ("success", "failure", "cancelled", "skipped", "", "unknown"):
                     for cpp in ("true", "false", ""):
                         for result in ("success", "failure", "cancelled", "skipped", "", "unknown"):
                             with self.subTest(cancelled=cancelled, classification=classification,
                                               cpp=cpp, result=result):
                                 process = subprocess.run(
-                                    ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script],
+                                    ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c",
+                                     (refusal_script + "\n" if cancelled else "") + script],
                                     env=dict(os.environ, NEEDS_CPP=cpp, ASAN_SHARD_RESULT=result,
-                                             ASAN_CANCELLED=cancelled, CI_PATHS_RESULT=classification,
+                                             CI_PATHS_RESULT=classification,
                                              GITHUB_STEP_SUMMARY=str(Path(directory) / "summary")),
                                     capture_output=True, text=True, timeout=10,
                                 )
-                                accepted = cancelled == "false" and (
+                                accepted = not cancelled and (
                                     result == "success" or (classification == "success" and
                                                             cpp == "false" and result == "skipped"))
                                 self.assertEqual(process.returncode == 0, accepted, process.stdout + process.stderr)
+                                if cancelled:
+                                    self.assertIn("ASan workflow was cancelled", process.stderr)
 
     def test_ucrt_route_seeds_devel_and_preserves_other_event_and_path_guards(self):
         job = jobs(self.workflows["ci.yml"])["windows-ucrt64"]
