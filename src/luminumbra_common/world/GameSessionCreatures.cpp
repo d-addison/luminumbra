@@ -1,19 +1,39 @@
+#include "../ai/CreatureBrainSystem.h"
 #include "../ai/CreatureCoarse.h"
+#include "../ai/CreatureGenome.h"
 #include "../ai/CreaturePersistence.h"
+#include "../ai/CreatureReproductionSystem.h"
 #include "../ai/CreatureSpeciesRegistry.h"
 #include "../ai/DecompositionSystem.h"
-#include "../ai/ThirstSystem.h"
+#include "../components/AlarmComponents.h"
+#include "../components/CircadianComponents.h"
 #include "../components/CoreComponents.h"
+#include "../components/CreatureComponents.h"
+#include "../components/ForagingComponents.h"
 #include "../components/InstinctComponents.h"
 #include "../components/MortalComponents.h"
+#include "../components/ThirstComponents.h"
+#include "../core/DeterministicRng.h"
 #include "../persistence/PlantPersistence.h"
 #include "../systems/FoliageRegistryStage.h"
 #include "../systems/PhysicsSystem.h"
+#include "ActiveRegionLedger.h"
+#include "DistantPolicy.h"
 #include "GameSession.h"
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <entt/entity/entity.hpp>
+#include <entt/entity/fwd.hpp>
+#include <entt/entity/registry.hpp>
 #include <limits>
+#include <luminumbra/core/Types.h>
+#include <map>
 #include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace Luminumbra::world {
 namespace {
@@ -190,8 +210,8 @@ bool GameSession::AdmitCreature(entt::entity e, bool physics_controlled) {
             e, C::CreatureRegionComponent{id, key.x, key.z, m_worldClock.tick()});
         m_registry.emplace<C::CreatureCoarseComponent>(e);
         m_registry.emplace<C::CreatureControllerComponent>(e, physics_controlled);
-        if (physics_controlled)
-            m_registry.get_or_emplace<C::CreatureLocomotionStateComponent>(e);
+        if (physics_controlled && !had_locomotion)
+            m_registry.emplace<C::CreatureLocomotionStateComponent>(e);
         CaptureFullCreature(e);
         const auto snapshot = A::BuildCreatureSnapshot(m_registry);
         const auto plants = luminumbra::foliage::BuildPlantEntitySnapshot(m_registry, true);
