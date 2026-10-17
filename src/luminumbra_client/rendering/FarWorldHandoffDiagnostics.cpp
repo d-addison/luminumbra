@@ -15,7 +15,7 @@ void CaptureFarWorldHandoffDiagnostic(FarVolumeHandoff& owner,
                                       const FarVolumeFrameResult& upload,
                                       FarWorldHandoffDiagnosticSnapshot& out) {
     const auto frame_upload = upload;
-    out = {};
+    out.Reset();
     out.captured = true;
     out.frame = frame;
     out.state = owner.State();

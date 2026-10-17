@@ -10,6 +10,7 @@
 #include "world/FarFrozenObservation.h"
 #include "world/FarTierTable.h"
 #include "world/FarVolume.h"
+#include "world/FarVolumeMemory.h"
 #include "world/FarVolumeRuntime.h"
 #include "world/FarVolumeTierMemory.h"
 #include "world/FarVolumeTile.h"
@@ -24,6 +25,7 @@
 #include <functional>
 #include <gtest/gtest.h>
 #include <latch>
+#include <limits>
 #include <memory>
 #include <memory_resource>
 #include <new>
@@ -1041,6 +1043,156 @@ TEST(FarVolumeHandoff, PreviewUseWithCommittedIdentityIsRefusedTransactionally) 
     }
 }
 
+TEST(FarVolumeHandoff, NewPublicationCannotRegressCommittedGenerationWithinEpoch) {
+    for (unsigned phase = 0; phase < 3; ++phase) {
+        SCOPED_TRACE(phase);
+        JobSystem jobs;
+        jobs.startup(1);
+        auto memory = std::make_shared<FarVolumeTierMemory>(Budgets());
+        FarVolumeHandoff owner(jobs, *memory, Limits());
+        const FarTileKey key{5, -1, 0};
+        const std::array current{HandoffInput(memory, key, 2, false)};
+        ASSERT_TRUE(owner.StageTarget(HandoffManifest(2, current)));
+        std::size_t calls = 0;
+        if (phase > 0) {
+            ASSERT_TRUE(HandoffSettle(owner, current, Backend(calls)));
+            ASSERT_TRUE(owner.TryPromote());
+        }
+        const std::array newer{HandoffInput(memory, key, 3, false)};
+        if (phase == 2) {
+            ASSERT_TRUE(owner.StageTarget(HandoffManifest(3, newer)));
+        }
+        // Also refuse a generation equal to serving but older than staged.
+        for (std::uint64_t generation = 0; generation < (phase == 2 ? 3u : 2u); ++generation) {
+            const std::array stale{HandoffInput(memory, key, generation, false)};
+            const auto before = owner.Memory();
+            const auto state = owner.State();
+            auto manifest = HandoffManifest(10, stale);
+            manifest.committed_generation = generation;
+            EXPECT_FALSE(owner.StageTarget(manifest));
+            EXPECT_EQ(owner.State().target_serial, state.target_serial);
+            EXPECT_EQ(owner.State().serving_serial, state.serving_serial);
+            EXPECT_EQ(owner.State().committed_generation, state.committed_generation);
+            EXPECT_EQ(owner.State().serving_committed_generation,
+                      state.serving_committed_generation);
+            const auto retained = HandoffObserve(owner, key);
+            ASSERT_TRUE(retained.target);
+            if (retained.target) {
+                EXPECT_EQ(retained.target->identity,
+                          phase == 2 ? newer[0].wanted.identity : current[0].wanted.identity);
+            }
+            const auto after = owner.Memory();
+            for (std::size_t i = 0; i < before.size(); ++i) {
+                EXPECT_EQ(after[i].bytes_cpu, before[i].bytes_cpu);
+                EXPECT_EQ(after[i].bytes_gpu, before[i].bytes_gpu);
+            }
+        }
+        // A newer serial at the current generation remains admissible.
+        auto same_generation = HandoffManifest(11, phase == 2 ? newer : current);
+        same_generation.committed_generation = phase == 2 ? 3 : 2;
+        ASSERT_TRUE(owner.StageTarget(same_generation));
+        EXPECT_EQ(owner.State().target_serial, 11u);
+        // Explicit drain permits a new epoch to start at the legacy base.
+        owner.CancelAndDrain();
+        auto base = std::array{HandoffInput(memory, key, 0, false)};
+        base[0].wanted.identity.world_epoch = 2;
+        auto next_world = HandoffManifest(1, base);
+        next_world.world_epoch = 2;
+        next_world.committed_generation = 0;
+        ASSERT_TRUE(owner.StageTarget(next_world));
+        EXPECT_EQ(owner.State().world_epoch, 2u);
+        EXPECT_EQ(owner.State().committed_generation, 0u);
+    }
+}
+
+TEST(FarVolumeHandoff, IndexBoundsAndAdmissionRefusalsReleaseAllControlCharges) {
+    JobSystem jobs;
+    auto memory = std::make_shared<FarVolumeTierMemory>(Budgets());
+    for (unsigned failure = 0; failure < 4; ++failure) {
+        auto limits = Limits();
+        if (failure == 0)
+            limits.entry_slots[0] = 0;
+        else if (failure == 1)
+            limits.entry_slots[0] = limits.queues[0].descriptor_slots + 1;
+        else if (failure == 2)
+            limits.queues[0].result_slots = 0;
+        else {
+            limits.entry_slots[0] = std::numeric_limits<std::size_t>::max();
+            limits.queues[0].descriptor_slots = limits.entry_slots[0];
+        }
+        if (failure < 3) {
+            EXPECT_THROW(FarVolumeHandoff(jobs, *memory, limits), std::invalid_argument);
+        } else {
+            EXPECT_THROW(FarVolumeHandoff(jobs, *memory, limits), FarVolumeMemoryRefused);
+        }
+        for (std::size_t tier = 1; tier <= kFarTierCount; ++tier)
+            EXPECT_EQ(memory->Pool(tier)->used(), 0u);
+    }
+    auto tiny = Budgets();
+    tiny.bytes[0] = 1;
+    auto refused = std::make_shared<FarVolumeTierMemory>(tiny);
+    EXPECT_THROW(FarVolumeHandoff(jobs, *refused, Limits()), FarVolumeMemoryRefused);
+    for (std::size_t tier = 1; tier <= kFarTierCount; ++tier)
+        EXPECT_EQ(refused->Pool(tier)->used(), 0u);
+}
+
+TEST(FarVolumeHandoff, ObservationVisitsMatchIndexedQueriesAcrossRemovalAndDrain) {
+    JobSystem jobs;
+    auto memory = std::make_shared<FarVolumeTierMemory>(Budgets());
+    FarVolumeHandoff owner(jobs, *memory, Limits());
+    std::vector<FarHandoffTileInput> inputs;
+    // Fill every retained slot, with negative keys and several hash collisions.
+    for (std::int64_t coordinate = -3; coordinate < 3; ++coordinate)
+        inputs.push_back(HandoffInput(memory, {5, coordinate, coordinate}, 1, false));
+    const auto check = [](FarVolumeHandoff& handoff, std::size_t expected) {
+        struct Context {
+            FarVolumeHandoff& owner;
+            std::size_t count = 0;
+        } context{handoff};
+        handoff.VisitObservations(
+            [](void* opaque, const FarTileKey& key, const FarHandoffTileObservation& value) {
+                auto& c = *static_cast<Context*>(opaque);
+                const auto queried = c.owner.Observe(key);
+                ASSERT_TRUE(queried);
+                if (!queried)
+                    return;
+                ASSERT_TRUE(value.target);
+                ASSERT_TRUE(queried->target);
+                if (value.target && queried->target) {
+                    EXPECT_EQ(queried->target->identity, value.target->identity);
+                    EXPECT_EQ(queried->target->intent, value.target->intent);
+                }
+                EXPECT_EQ(queried->target_eligibility, value.target_eligibility);
+                EXPECT_EQ(queried->target_source_payload_bytes, value.target_source_payload_bytes);
+                EXPECT_FALSE(c.owner.CoarseMayYield(key, FarHandoffCoverageView::Target));
+                ++c.count;
+            },
+            &context);
+        EXPECT_EQ(context.count, expected);
+    };
+    check(owner, 0);
+    ASSERT_TRUE(owner.StageTarget(HandoffManifest(1, inputs)));
+    check(owner, inputs.size());
+    EXPECT_FALSE(owner.Observe({0, 0, 0}));
+    EXPECT_FALSE(owner.Observe({6, 0, 0}));
+    EXPECT_FALSE(owner.Observe({5, 500, -500}));
+    EXPECT_EQ(owner.VisitServingDraws(nullptr, nullptr), 0u);
+    owner.VisitObservations(nullptr, nullptr);
+    auto subset = HandoffManifest(2, std::span(inputs).last(1));
+    subset.committed_generation = 1;
+    ASSERT_TRUE(owner.StageTarget(subset));
+    check(owner, 1);
+    EXPECT_FALSE(owner.Observe(inputs[0].wanted.identity.key));
+    owner.CancelAndDrain();
+    check(owner, 0);
+    for (const auto& input : inputs)
+        EXPECT_FALSE(owner.Observe(input.wanted.identity.key));
+    // Rebind fills the same index with a different insertion order.
+    std::reverse(inputs.begin(), inputs.end());
+    ASSERT_TRUE(owner.StageTarget(HandoffManifest(1, inputs)));
+    check(owner, inputs.size());
+}
+
 TEST(FarVolumeHandoff, FailedUploadDebitsOnceAndRetainsServingCoverage) {
     JobSystem jobs;
     jobs.startup(1);
@@ -1449,6 +1601,24 @@ TEST(FarVolumeHandoff, SpanHistorySurvivesRangeRemovalAndRefusesRegression) {
     EXPECT_EQ(memory->Pool(5)->used(), used);
 }
 
+TEST(FarVolumeHandoff, ExpiredFrozenObserverRetainsControlChargeUntilItsOwnRelease) {
+    auto memory = std::make_shared<FarVolumeTierMemory>(Budgets());
+    auto input = HandoffInput(memory, {5, 0, 0}, 1, false);
+    ASSERT_TRUE(input.observation);
+    if (!input.observation)
+        return;
+    const auto payload = input.observation->payload_bytes();
+    const auto used = memory->Pool(5)->used();
+    std::weak_ptr<const FarFrozenObservation> observer = input.observation;
+    input = {};
+    EXPECT_TRUE(observer.expired());
+    EXPECT_GT(memory->Pool(5)->used(), 0u);
+    EXPECT_LT(memory->Pool(5)->used(), used - payload);
+    observer.reset();
+    for (std::size_t tier = 1; tier <= kFarTierCount; ++tier)
+        EXPECT_EQ(memory->Pool(tier)->used(), 0u);
+}
+
 TEST(FarVolumeHandoff, WorldSwapDrainsServingStagedAndHeldAuthorityExactlyOnce) {
     JobSystem jobs;
     jobs.startup(2);
@@ -1486,7 +1656,7 @@ TEST(FarVolumeHandoff, WorldSwapDrainsServingStagedAndHeldAuthorityExactlyOnce) 
     ASSERT_TRUE(owner->TryPromote());
     auto b = std::array{HandoffInput(memory, {5, 0, 0}, 2, true),
                         HandoffInput(memory, {5, 1, 0}, 2, true)};
-    std::weak_ptr<const FarFrozenObservation> const held = b[0].observation;
+    std::weak_ptr<const FarFrozenObservation> held = b[0].observation;
     ASSERT_TRUE(owner->StageTarget(HandoffManifest(2, b)));
     gate.Arm();
     owner->AdvanceFrame(0, 0, {1, 0, 0}, {});
@@ -1506,6 +1676,9 @@ TEST(FarVolumeHandoff, WorldSwapDrainsServingStagedAndHeldAuthorityExactlyOnce) 
     EXPECT_EQ(owner->State().target_serial, 0u);
     EXPECT_TRUE(HandoffDraws(*owner).empty());
     owner.reset();
+    // The expired observer still owns the charged shared control allocation.
+    // Release it only after checking that drain destroyed the image itself.
+    held.reset();
     for (std::size_t i = 1; i <= kFarTierCount; ++i)
         EXPECT_EQ(memory->Pool(i)->used(), 0u);
 }

@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <gtest/gtest.h>
 #include <limits>
+#include <memory>
 #include <nlohmann/json.hpp>
 #include <nlohmann/json_fwd.hpp>
 #include <type_traits>
@@ -407,6 +408,67 @@ TEST(FarWorldDiagnostics, CavePolicyRefusalsKeepTheirNamesInSerializedDiagnostic
     }
 }
 } // namespace
+
+TEST(FarWorldHandoffDiagnostics, ResetClearsAllSlotsAndReleasesOwnedValuesInPlace) {
+    auto snapshot = std::make_unique<FarWorldHandoffDiagnosticSnapshot>();
+    auto water = std::make_shared<const FarWorldConstantWaterObservation>(42, false, 0);
+    std::weak_ptr<const FarWorldWaterObservation> const weak = water;
+    snapshot->captured = true;
+    snapshot->complete = false;
+    snapshot->frame = 7;
+    snapshot->state.target_serial = 4;
+    snapshot->upload.upload_attempts = 3;
+    snapshot->submission.draws = 2;
+    snapshot->memory.back().bytes_total = 1;
+    snapshot->tile_count = snapshot->tiles.size();
+    snapshot->draw_count = snapshot->draws.size();
+    for (auto& tile : snapshot->tiles) {
+        tile.key = {5, -1, -2};
+        tile.observation.target.emplace().water = water;
+        tile.serving_arrival = tile.target_arrival = true;
+    }
+    for (auto& draw : snapshot->draws) {
+        draw.submitted = draw.arrival.eligible = true;
+        draw.child_identities.back().content_hash = 42;
+    }
+    water.reset();
+    snapshot->Reset();
+    EXPECT_TRUE(weak.expired());
+    const auto empty = std::make_unique<FarWorldHandoffDiagnosticSnapshot>();
+    EXPECT_EQ(FarWorldHandoffDiagnosticJson(*snapshot), FarWorldHandoffDiagnosticJson(*empty));
+    for (const auto& tile : snapshot->tiles) {
+        EXPECT_FALSE(tile.observation.target);
+        EXPECT_EQ(tile.key, FarTileKey{});
+        EXPECT_FALSE(tile.serving_arrival);
+        EXPECT_FALSE(tile.target_arrival);
+    }
+    for (const auto& draw : snapshot->draws) {
+        EXPECT_FALSE(draw.submitted);
+        EXPECT_FALSE(draw.arrival.eligible);
+        EXPECT_EQ(draw.child_identities.back().content_hash, 0u);
+    }
+    snapshot->Reset();
+    EXPECT_EQ(snapshot->tile_count, 0u);
+    EXPECT_EQ(snapshot->draw_count, 0u);
+}
+
+TEST(FarWorldDiagnostics, ResetRestoresDefaultsIncludingUnusedTileSlots) {
+    auto snapshot = std::make_unique<FarWorldDiagnosticSnapshot>();
+    snapshot->captured = snapshot->advanced = true;
+    snapshot->complete = false;
+    snapshot->world_epoch = 5;
+    snapshot->far_plane = 1;
+    snapshot->bound_cave_policy = FarCaveMode::BandLimited;
+    snapshot->tiles.back().desired.content_hash = 42;
+    snapshot->tiles.back().water_complete = true;
+    snapshot->tiers.back().indices = 7;
+    snapshot->Reset();
+    const auto empty = std::make_unique<FarWorldDiagnosticSnapshot>();
+    EXPECT_EQ(FarWorldDiagnosticJson(*snapshot), FarWorldDiagnosticJson(*empty));
+    EXPECT_FALSE(snapshot->tiles.back().water_complete);
+    EXPECT_EQ(snapshot->tiles.back().desired.content_hash, 0u);
+    EXPECT_EQ(snapshot->tiers.back().indices, 0u);
+}
 
 TEST(FarWorldHandoffDiagnostics, ServingContinuityCannotQualifyLatestTarget) {
     FarWorldHandoffDiagnosticSnapshot snapshot;

@@ -111,6 +111,7 @@ private:
         double distance = 0;
     };
     struct Tier {
+        static std::size_t IndexSize(std::size_t, const FarVolumeQueueLimits&);
         Tier(JobSystem&,
              World::FarVolumeMemoryPool&,
              std::size_t,
@@ -119,6 +120,9 @@ private:
         World::FarVolumeMemoryLease charge;
         World::FarVolumeChargedResource resource;
         std::pmr::vector<Entry> entries;
+        // At most entry_slots keys; twice as many buckets keep load at most 1/2.
+        // Entry history is retained until drain, so no tombstones are needed.
+        std::pmr::vector<std::size_t> key_index;
         std::pmr::vector<std::size_t> order;
         std::pmr::vector<World::FarVolumeRequest> validation;
         FarVolumeBuildQueue queue;
@@ -136,6 +140,7 @@ private:
                        const Tier&,
                        World::FarVolumeRequest&,
                        bool duplicate) const;
+    FarHandoffTileObservation ObserveEntry(const Entry&) const;
     void Reject(Entry&, FarVolumeFrameResult&);
     World::FarVolumeTierMemory& memory_;
     World::FarVolumeMemoryLease control_;

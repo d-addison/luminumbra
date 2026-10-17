@@ -6,11 +6,11 @@ Statuses declare the available evidence. Static validation requires a mapping fo
 
 | Status | Rows |
 | --- | ---: |
-| covered | 18 |
+| covered | 19 |
 | partial | 8 |
 | needs-native-run | 17 |
 | planned | 85 |
-| Total | 128 |
+| Total | 129 |
 
 | Row | Status | Source | Requirements | Statement | Evidence |
 | --- | --- | --- | --- | --- | --- |
@@ -142,3 +142,4 @@ Statuses declare the available evidence. Static validation requires a mapping fo
 | contract.region-retention | planned | `docs/active-regions.md#activation-and-ordering` | ar.activation.061, ar.activation.062, ar.activation.063, ar.activation.064 | Idle retention must preserve scheduling history for pending work and all resident chunks, then release consumed work on the next tick. | doc: `docs/active-regions.md` (planned: map discriminating regression and qualification evidence for the updated contract; owner: ac) |
 | contract.ledger-extensions | planned | `docs/active-regions.md#file-and-compatibility` | ar.file.095, ar.file.096, ar.file.097, ar.file.098, ar.file.099, ar.file.100, ar.file.101, ar.file.102, ar.file.103, ar.file.104, ar.file.105, ar.file.106, ar.file.107, ar.file.108, ar.file.109, ar.file.110, ar.file.111, ar.file.112, ar.file.113, ar.file.114, ar.file.115, ar.file.116, ar.file.117, ar.file.118 | Version 2 extensions, legacy digest preservation and authoritative frozen-content selection require dedicated acceptance evidence review. | doc: `docs/active-regions.md` (planned: map discriminating regression and qualification evidence for the updated contract; owner: ac) |
 | render.committed-residency-handoff | covered | `docs/far-volume-memory.md#serving-and-target-handoff` |  | The handoff fixture accepts committed frozen terrain/water captures and refuses preview-use captures with committed durable identities. Replacement publication preserves serving coverage until every wanted fallback covers; serving child masks and spans remain tied to the published manifest. Controller, renderer and diagnostic regressions cover overlap admission, supersession, upload failure and drain ownership. | ctest: `FarVolumeHandoff.*`<br>ctest: `FarVolumeHandoffArrivalTest.*`<br>ctest: `FarWorldHandoffRenderer.*`<br>ctest: `FarWorldHandoffDiagnostics.*` |
+| graphics.horizon-authority | covered | `docs/engine-guide.md#world-generation-and-streaming` |  | Legacy graphics horizon changes preserve edited chunk authority and reject stale captures through the chunk voxel revision even when world/region publication revisions are unchanged. This row covers the owner-thread snapshot and admission regression, not native rendering qualification. | ctest: `GraphicsRuntimePure.ShrinkingAndGrowingHorizonRetainsEditedAuthorityAndRejectsStaleCapture`<br>ctest: `StreamingHardening.FarLodSnapshotOwnsBytesAndRejectsStaleLiveData`<br>ctest: `FarLodWorker.AuthoritativeCaptureBuildsPersistsAndStales` |

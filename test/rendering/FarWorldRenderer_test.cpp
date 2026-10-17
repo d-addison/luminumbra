@@ -1902,8 +1902,67 @@ TEST(FarWorldHandoffRenderer, SameFrameOwnershipAndSubmitExceptionRestoreBinding
     EXPECT_EQ(fake->vao(), 37u);
     renderer.PrepareWorldSwap();
     EXPECT_EQ(state.live, 0u);
+    EXPECT_FALSE(renderer.Diagnostic().captured);
+    EXPECT_EQ(renderer.Diagnostic().tile_count, 0u);
+    EXPECT_EQ(renderer.Diagnostic().draw_count, 0u);
+    EXPECT_EQ(renderer.Diagnostic().state.target_serial, 0u);
+    EXPECT_EQ(renderer.Diagnostic().submission.draws, 0u);
     state.fixture_released = true;
     renderer.Shutdown();
+}
+
+TEST(FarWorldHandoffRenderer, RepeatedBackendInstallAndEmptySwapUseBoundedStack) {
+    DriverState state;
+    state.fixture_released = true;
+    FarWorldHandoffRenderer renderer;
+    renderer.InstallBackend(std::make_unique<Driver>(state));
+    renderer.InstallBackend(std::make_unique<Driver>(state));
+    renderer.PrepareWorldSwap();
+    EXPECT_FALSE(renderer.Diagnostic().captured);
+    EXPECT_TRUE(renderer.Diagnostic().complete);
+    EXPECT_EQ(renderer.Diagnostic().tile_count, 0u);
+    EXPECT_EQ(renderer.Diagnostic().draw_count, 0u);
+    renderer.Shutdown();
+}
+
+TEST(FarWorldHandoffRenderer, SubmissionDiagnosticsKeepOrderAcrossRefusedAndRepeatedDraws) {
+    JobSystem jobs;
+    jobs.startup(2);
+    DriverState state;
+    state.fixture_released = true;
+    FarWorldHandoffRenderer renderer;
+    renderer.InstallBackend(std::make_unique<Driver>(state));
+    ASSERT_TRUE(renderer.Bind(jobs,
+                              1,
+                              FarCaveMode::BandLimited,
+                              FarVolumeNumericProfile::RawFloat,
+                              RendererHandoffBudgets(),
+                              RendererHandoffLimits()));
+    const auto inputs = std::array{RendererHandoffInput(renderer, {5, -1, 0}, 1, true),
+                                   RendererHandoffInput(renderer, {5, 0, 0}, 1, true)};
+    ASSERT_TRUE(renderer.StageTarget(RendererHandoffManifest(1, inputs)));
+    std::uint64_t frame = 0;
+    ASSERT_TRUE(RendererHandoffWait([&] {
+        renderer.AdvanceFrame(++frame, {0, 0, 0}, {2, 2, 16ULL * 1024 * 1024});
+        return renderer.Handoff()->State().serving_serial == 1;
+    }));
+    renderer.BeginLiveOwnership(frame);
+    ASSERT_TRUE(renderer.FinishLiveOwnership());
+    ASSERT_EQ(renderer.Diagnostic().draw_count, 2u);
+    std::size_t prepares = 0;
+    const auto partial = renderer.Submit({0, 0, 0}, [&](const auto&) { return ++prepares == 2; });
+    EXPECT_EQ(partial.draws, 1u);
+    EXPECT_EQ(partial.refused, 1u);
+    EXPECT_FALSE(renderer.Diagnostic().draws[0].submitted);
+    EXPECT_TRUE(renderer.Diagnostic().draws[1].submitted);
+    const auto refused = renderer.Submit({0, 0, 0}, [](const auto&) { return false; });
+    EXPECT_EQ(refused.draws, 0u);
+    EXPECT_EQ(refused.refused, 2u);
+    EXPECT_FALSE(renderer.Diagnostic().draws[0].submitted);
+    EXPECT_FALSE(renderer.Diagnostic().draws[1].submitted);
+    EXPECT_EQ(renderer.Submit({0, 0, 0}, [](const auto&) { return true; }).draws, 2u);
+    EXPECT_TRUE(renderer.Diagnostic().draws[0].submitted);
+    EXPECT_TRUE(renderer.Diagnostic().draws[1].submitted);
 }
 
 TEST(FarWorldHandoffRenderer, WorldSwapUnbindsBeforeJoiningAndReleasesBothGenerations) {

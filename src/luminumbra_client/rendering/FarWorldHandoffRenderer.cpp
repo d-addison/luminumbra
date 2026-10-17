@@ -238,10 +238,14 @@ FarWorldSubmitStats FarWorldHandoffRenderer::Submit(const std::array<double, 3>&
         const std::array<double, 3>& camera;
         const FarWorldPrepareDraw& prepare;
         FarWorldSubmitStats& stats;
+        std::size_t next_diagnostic = 0;
     } context{*this, camera, prepare, stats};
     handoff_->VisitServingDraws(
         [](void* opaque, const FarVolumeDrawRecord& record) {
             auto& c = *static_cast<Context*>(opaque);
+            // Capture and submission visit the same stable serving order. Advance
+            // the cursor even when this draw is refused, without rescanning tiles.
+            const auto diagnostic_index = c.next_diagnostic++;
             const auto* allocation = dynamic_cast<const FarVolumeGlAllocation*>(record.resource);
             FarWorldDrawCommand command;
             if (!allocation ||
@@ -255,9 +259,11 @@ FarWorldSubmitStats FarWorldHandoffRenderer::Submit(const std::array<double, 3>&
                 return;
             }
             ++c.stats.draws;
-            for (std::size_t i = 0; i < c.owner.diagnostic_.draw_count; ++i)
-                if (c.owner.diagnostic_.draws[i].identity == record.identity)
-                    c.owner.diagnostic_.draws[i].submitted = true;
+            if (diagnostic_index < c.owner.diagnostic_.draw_count) {
+                auto& diagnostic = c.owner.diagnostic_.draws[diagnostic_index];
+                if (diagnostic.identity == record.identity)
+                    diagnostic.submitted = true;
+            }
             c.stats.indices += static_cast<std::size_t>(command.index_count);
             c.stats.water_indices += record.water_indices;
         },
@@ -285,7 +291,7 @@ void FarWorldHandoffRenderer::Drain() {
         driver_->ReleaseLiveOwnership();
     ownership_charge_.reset();
     ownership_.Begin(0);
-    diagnostic_ = {};
+    diagnostic_.Reset();
     charge_.reset();
     memory_.reset();
     frame_.reset();

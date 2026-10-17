@@ -94,6 +94,18 @@ public:
 private:
     std::shared_ptr<World::FarVolumeMemoryPool> pool_;
 };
+constexpr auto kEmptyIndex = std::numeric_limits<std::size_t>::max();
+std::size_t KeyHash(const World::FarTileKey& key) noexcept {
+    // Mix signed coordinates as unsigned bits, including negative child keys.
+    const auto mix = [](std::uint64_t value) {
+        value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
+        value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
+        return value ^ (value >> 31);
+    };
+    return static_cast<std::size_t>(
+        mix(static_cast<std::uint64_t>(key.tx)) ^
+        mix(static_cast<std::uint64_t>(key.tz) + 0x9e3779b97f4a7c15ULL));
+}
 bool Same(const FarVolumeWantedRequest& a, const FarVolumeWantedRequest& b) {
     return a.identity == b.identity && a.intent == b.intent &&
            a.build_headroom_bytes == b.build_headroom_bytes && a.water_bound == b.water_bound;
@@ -140,6 +152,16 @@ public:
 private:
     FarVolumeHandoff& owner_;
 };
+std::size_t FarVolumeHandoff::Tier::IndexSize(std::size_t count,
+                                              const FarVolumeQueueLimits& limits) {
+    if (count == 0 || count > limits.descriptor_slots || limits.result_slots == 0)
+        throw std::invalid_argument("Far-volume handoff needs bounded entries/results");
+    constexpr auto bytes_per_entry =
+        std::max({sizeof(Entry), sizeof(World::FarVolumeRequest), 2 * sizeof(std::size_t)});
+    if (count > std::numeric_limits<std::size_t>::max() / bytes_per_entry)
+        throw World::FarVolumeMemoryRefused();
+    return count * 2;
+}
 FarVolumeHandoff::Tier::Tier(JobSystem& jobs,
                              World::FarVolumeMemoryPool& pool,
                              std::size_t count,
@@ -148,13 +170,12 @@ FarVolumeHandoff::Tier::Tier(JobSystem& jobs,
     : charge(pool)
     , resource(charge, upstream)
     , entries(&resource)
+    , key_index(IndexSize(count, limits), kEmptyIndex, &resource)
     , order(&resource)
     , validation(&resource)
     , queue(jobs, pool, limits, upstream)
     , completion_slots(limits.result_slots)
     , authority_limits(limits.compilation.authority) {
-    if (count == 0 || count > limits.descriptor_slots || limits.result_slots == 0)
-        throw std::invalid_argument("Far-volume handoff needs bounded entries/results");
     entries.resize(count);
     order.reserve(count);
     validation.resize(count);
@@ -198,9 +219,13 @@ const FarVolumeHandoff::Entry* FarVolumeHandoff::Find(const World::FarTileKey& k
     const auto& tier = tiers_[key.tier - 1];
     if (!tier)
         return nullptr;
-    for (const auto& entry : tier->entries)
+    auto bucket = KeyHash(key) % tier->key_index.size();
+    while (tier->key_index[bucket] != kEmptyIndex) {
+        const auto& entry = tier->entries[tier->key_index[bucket]];
         if (entry.key == key)
             return &entry;
+        bucket = (bucket + 1) % tier->key_index.size();
+    }
     return nullptr;
 }
 FarVolumeHandoff::Entry* FarVolumeHandoff::Find(const World::FarTileKey& key) {
@@ -323,7 +348,8 @@ bool FarVolumeHandoff::StageTarget(const FarHandoffManifest& manifest) {
          manifest.numeric != World::FarVolumeNumericProfile::LegacySigned16) ||
         (state_.world_epoch && (manifest.world_epoch != state_.world_epoch ||
                                 manifest.caves != caves_ || manifest.numeric != numeric_)) ||
-        manifest.publication_serial < state_.target_serial)
+        manifest.publication_serial < state_.target_serial ||
+        manifest.committed_generation < state_.committed_generation)
         return false;
     const bool duplicate = manifest.publication_serial == state_.target_serial;
     if (duplicate && manifest.committed_generation != state_.committed_generation)
@@ -410,6 +436,10 @@ bool FarVolumeHandoff::StageTarget(const FarHandoffManifest& manifest) {
             if (free == tier.entries.end())
                 throw std::logic_error("Far-volume handoff missing admitted entry");
             entry = &*free;
+            auto bucket = KeyHash(wanted.identity.key) % tier.key_index.size();
+            while (tier.key_index[bucket] != kEmptyIndex)
+                bucket = (bucket + 1) % tier.key_index.size();
+            tier.key_index[bucket] = static_cast<std::size_t>(free - tier.entries.begin());
         }
         const bool same = entry->target && Same(entry->target->wanted, wanted);
         if (!same) {
@@ -664,20 +694,23 @@ FarVolumeHandoff::Observe(const World::FarTileKey& key) const {
     const auto* entry = Find(key);
     if (!entry || (!entry->serving && !entry->target))
         return {};
+    return ObserveEntry(*entry);
+}
+FarHandoffTileObservation FarVolumeHandoff::ObserveEntry(const Entry& entry) const {
     FarHandoffTileObservation result;
-    result.serving = entry->serving;
-    if (entry->target)
-        result.target = entry->target->wanted;
+    result.serving = entry.serving;
+    if (entry.target)
+        result.target = entry.target->wanted;
     // Diagnostics are values, never additional immutable authority owners.
     if (result.serving)
         result.serving->water.reset();
     if (result.target)
         result.target->water.reset();
-    result.target_eligibility = entry->eligibility;
-    result.target_build_failure = entry->build_failure;
-    result.target_upload_failure = entry->upload_failure;
+    result.target_eligibility = entry.eligibility;
+    result.target_build_failure = entry.build_failure;
+    result.target_upload_failure = entry.upload_failure;
     for (const auto view : {FarHandoffCoverageView::Serving, FarHandoffCoverageView::Target}) {
-        const auto* pair = Pair(*entry, view);
+        const auto* pair = Pair(entry, view);
         const auto& wanted =
             view == FarHandoffCoverageView::Serving ? result.serving : result.target;
         if (!wanted || !pair)
@@ -700,19 +733,19 @@ FarVolumeHandoff::Observe(const World::FarTileKey& key) const {
             result.target_water_indices = pair->water_indices();
         }
     }
-    result.serving_gpu_bytes = entry->serving_pair.gpu_bytes();
-    result.staged_gpu_bytes = entry->staged_pair.gpu_bytes();
-    if (entry->serving) {
-        const auto* water = dynamic_cast<const HandoffWater*>(entry->serving->water.get());
+    result.serving_gpu_bytes = entry.serving_pair.gpu_bytes();
+    result.staged_gpu_bytes = entry.staged_pair.gpu_bytes();
+    if (entry.serving) {
+        const auto* water = dynamic_cast<const HandoffWater*>(entry.serving->water.get());
         if (water)
             result.serving_source_payload_bytes = water->observation()->payload_bytes();
     }
-    if (entry->target)
-        result.target_source_payload_bytes = entry->target->observation->payload_bytes();
-    if (entry->completion) {
-        result.target_built = entry->completion->mesh().request;
-        result.ready_cpu_bytes = entry->completion->retained_bytes();
-        result.ready_upload_bytes = UploadBytes(*entry->completion);
+    if (entry.target)
+        result.target_source_payload_bytes = entry.target->observation->payload_bytes();
+    if (entry.completion) {
+        result.target_built = entry.completion->mesh().request;
+        result.ready_cpu_bytes = entry.completion->retained_bytes();
+        result.ready_upload_bytes = UploadBytes(*entry.completion);
     }
     return result;
 }
@@ -782,9 +815,8 @@ void FarVolumeHandoff::VisitObservations(FarHandoffObservationVisitor visitor, v
             if (!tier)
                 throw std::logic_error("Far-volume handoff missing tier");
             for (const auto& entry : tier->entries)
-                if (entry.key)
-                    if (const auto value = Observe(*entry.key))
-                        visitor(context, *entry.key, *value);
+                if (entry.key && (entry.serving || entry.target))
+                    visitor(context, *entry.key, ObserveEntry(entry));
         }
     }
 }
@@ -838,6 +870,7 @@ void FarVolumeHandoff::CancelAndDrain() {
             entry.history.reset();
             entry = Entry{};
         }
+        std::fill(tier->key_index.begin(), tier->key_index.end(), kEmptyIndex);
     }
     state_ = {};
 }
