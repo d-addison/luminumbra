@@ -19,6 +19,7 @@
 #include <iomanip>
 
 #include "luminumbra_client/rendering/FarWorldRenderer.h"
+#include "luminumbra_common/core/FramePacing.h"
 #include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h" // StableChecksum
 
@@ -159,8 +160,9 @@ TEST(SystemConfig, ExplicitOverrideLoadsHistoricalConfiguration) {
     ASSERT_TRUE(SystemConfig::TryLoadFromFile(path.string(), config, error)) << error;
     EXPECT_TRUE(error.empty());
 #define EXPECT_HISTORICAL_KEY(ENUM, SECTION, JSON_SECTION, JSON_NAME, RESIDENCY)                   \
-    if (std::string(JSON_SECTION) == "sim")                                                        \
-        EXPECT_FALSE(config.enabled(SysKey::ENUM)) << JSON_NAME;
+    if (std::string(JSON_SECTION) == "sim") {                                                      \
+        EXPECT_FALSE(config.enabled(SysKey::ENUM)) << JSON_NAME;                                   \
+    }
     LUMIN_CONFIG_KEY_TABLE(EXPECT_HISTORICAL_KEY)
 #undef EXPECT_HISTORICAL_KEY
     EXPECT_TRUE(config.ComputeConfigSubHash().empty());
@@ -472,6 +474,68 @@ TEST(SystemConfig, UserVideoDefaults) {
     const auto& u = config.user();
     EXPECT_FLOAT_EQ(u.mouse_sensitivity, 0.025f);
     EXPECT_TRUE(u.vsync);
+    EXPECT_EQ(u.frame_cap, 0);
+}
+
+TEST(SystemConfig, FramePacingPersistsEverySupportedChoice) {
+    for (const int cap : {0, 30, 60, 120, 144, 165, 240}) {
+        for (const bool vsync : {false, true}) {
+            SCOPED_TRACE(cap);
+            SCOPED_TRACE(vsync);
+            const Luminumbra::TestSupport::ScopedTempFile file("frame_pacing_", ".json");
+            const nlohmann::json document = {
+                {"user", {{"video", {{"vsync", vsync}, {"frame_cap", cap}}}}}};
+            const auto config = SystemConfig::FromJsonString(document.dump());
+            EXPECT_EQ(config.user().vsync, vsync);
+            EXPECT_EQ(config.user().frame_cap, cap);
+            ASSERT_TRUE(config.SaveUserOverlay(file.Path().string()));
+            const auto reloaded = SystemConfig::LoadLayered("", file.Path().string());
+            EXPECT_EQ(reloaded.user().vsync, vsync);
+            EXPECT_EQ(reloaded.user().frame_cap, cap);
+            EXPECT_EQ(reloaded.ComputeConfigSubHash(),
+                      SystemConfig::Defaults().ComputeConfigSubHash());
+        }
+    }
+}
+
+TEST(SystemConfig, InvalidFramePacingValuesKeepDefaultsOrPreviousOverlay) {
+    const auto invalid_caps = nlohmann::json::parse(
+        R"([null,true,false,"30","60","165","unlimited",30.0,60.0,60.5,165.0,
+            -1,1,29,31,61,164,166,300,[],{},4294967326,4294967356,4294967461,
+            18446744073709551615,-9223372036854775808])");
+    for (const auto& cap : invalid_caps) {
+        SCOPED_TRACE(cap.dump());
+        const nlohmann::json document = {{"user", {{"video", {{"frame_cap", cap}}}}}};
+        EXPECT_EQ(SystemConfig::FromJsonString(document.dump()).user().frame_cap, 0);
+        auto config = SystemConfig::Defaults();
+        config.OverlayUserFromJsonString(R"({"user":{"video":{"frame_cap":144}}})");
+        config.OverlayUserFromJsonString(document.dump());
+        EXPECT_EQ(config.user().frame_cap, 144);
+    }
+    const auto invalid_vsync = nlohmann::json::parse(R"([null,0,1,"on","off",[],{}])");
+    for (const auto& vsync : invalid_vsync) {
+        SCOPED_TRACE(vsync.dump());
+        const nlohmann::json document = {{"user", {{"video", {{"vsync", vsync}}}}}};
+        EXPECT_TRUE(SystemConfig::FromJsonString(document.dump()).user().vsync);
+        auto config = SystemConfig::Defaults();
+        config.OverlayUserFromJsonString(R"({"user":{"video":{"vsync":false}}})");
+        config.OverlayUserFromJsonString(document.dump());
+        EXPECT_FALSE(config.user().vsync);
+    }
+    auto config = SystemConfig::Defaults();
+    config.OverlayUserFromJsonString(R"({"user":{"video":{"vsync":false,"frame_cap":240}}})");
+    config.OverlayUserFromJsonString(R"({"user":{"video":{"unknown_setting":120}}})");
+    config.OverlayUserFromJsonString(R"({"user":{"video":{}}})");
+    EXPECT_FALSE(config.user().vsync);
+    EXPECT_EQ(config.user().frame_cap, 240);
+}
+
+TEST(SystemConfig, InvalidInMemoryFrameCapSavesAsUnlimited) {
+    const Luminumbra::TestSupport::ScopedTempFile file("frame_pacing_", ".json");
+    auto config = SystemConfig::Defaults();
+    config.user().frame_cap = 61;
+    ASSERT_TRUE(config.SaveUserOverlay(file.Path().string()));
+    EXPECT_EQ(SystemConfig::LoadFromFile(file.Path().string()).user().frame_cap, 0);
 }
 
 // -105 — keybind map resolves action->key; missing action -> fallback.
@@ -696,14 +760,15 @@ TEST(SystemConfig, CaveFieldIsRenderOnlyAndIgnoredByUserOverlay) {
             EXPECT_EQ(cfg.ComputeConfigSubHash(), sim.ComputeConfigSubHash());
             cfg.OverlayUserFromJsonString(R"({"render":{"far_world_ladder":{
                 "enabled":true,"params":{"cave_field":1}}}})");
-            if (std::string(code) == "0")
+            if (std::string(code) == "0") {
                 EXPECT_EQ(ResolveFarWorldCaveField(cfg.param(SysParam::FarWorldCaveField, -1)),
                           FarCaveMode::BandLimited);
-            else if (std::string(code) == "1")
+            } else if (std::string(code) == "1") {
                 EXPECT_EQ(ResolveFarWorldCaveField(cfg.param(SysParam::FarWorldCaveField, -1)),
                           FarCaveMode::BoxFiltered);
-            else
+            } else {
                 EXPECT_FALSE(ResolveFarWorldCaveField(cfg.param(SysParam::FarWorldCaveField, -1)));
+            }
             EXPECT_EQ(cfg.enabled(SysKey::RenderFarWorldLadder), std::string(enabled) == "true");
         }
     }

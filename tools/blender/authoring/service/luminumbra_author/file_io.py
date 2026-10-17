@@ -126,7 +126,8 @@ def file_identity(path):
         return reader_identity(stream)
 
 
-def replace_file(temporary, path, *, durable=False):
+def replace_file(temporary, path, *, durable=False, source_dir_fd=None, target_dir_fd=None,
+                 allow_cross_directory=False):
     """Publish a complete record while shared readers retain the old file.
 
     Windows MoveFileExW (os.replace) does not supply POSIX replacement semantics.
@@ -136,9 +137,29 @@ def replace_file(temporary, path, *, durable=False):
     Callers must still fsync complete temporary bytes before publication and
     fsync the containing directory afterwards on POSIX. Default callers retain
     their existing access rights and publication behavior.
+
+    Descriptor-relative POSIX publication and Windows cross-directory staging
+    require the caller to retain and verify every ancestor until durability is
+    complete. These options support staging outside a candidate's seal.
     """
+    if source_dir_fd is not None or target_dir_fd is not None:
+        require(os.name == 'posix' and source_dir_fd is not None and target_dir_fd is not None
+                and Path(temporary).name == str(temporary) and Path(path).name == str(path),
+                'Relative publication requires two retained directories and leaf names')
+        require(stat.S_ISREG(os.stat(temporary, dir_fd=source_dir_fd, follow_symlinks=False).st_mode),
+                'Publication source requires a regular file')
+        try:
+            destination = os.stat(path, dir_fd=target_dir_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            require(stat.S_ISREG(destination.st_mode), 'Publication destination requires a regular file')
+        os.replace(temporary, path, src_dir_fd=source_dir_fd, dst_dir_fd=target_dir_fd)
+        return
     temporary, path = safe_path(temporary), safe_path(path)
-    require(temporary.parent == path.parent and temporary != path, 'Publication requires distinct same-directory files')
+    require(allow_cross_directory or temporary.parent == path.parent,
+            'Publication requires same-directory files unless verified cross-directory staging is enabled')
+    require(temporary != path, 'Publication requires distinct files in verified directories')
     require(stat.S_ISREG(temporary.lstat().st_mode), 'Publication source requires a regular file')
     if path.exists():
         require(stat.S_ISREG(path.lstat().st_mode), 'Publication destination requires a regular file')

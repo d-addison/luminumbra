@@ -24,6 +24,7 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/core/EngineVersion.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/EventBus.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/FilesystemPath.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/GraphicsPresetClassifier.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/JobSystem.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/Log.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/BoundedConsoleSink.cpp
@@ -36,6 +37,7 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/net/LockstepSession.cpp
     #  authoritative-server state-replication wire protocol.
     ${CMAKE_CURRENT_LIST_DIR}/net/ReplicationProtocol.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/net/ReplicationAdmission.cpp
     #  server/client replication endpoints over ILockstepTransport.
     ${CMAKE_CURRENT_LIST_DIR}/net/ReplicationEndpoint.cpp
     # Steamworks ISteamNetworkingSockets transport (body guarded by
@@ -99,6 +101,8 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/world/FarVolumeTierMemory.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/FarWantedSet.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/FarAuthorityOverlay.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/world/FarEditedBake.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/world/FarFrozenObservation.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/ActiveRegionLedger.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/AuthorityHashState.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/RegionPopulator.cpp
