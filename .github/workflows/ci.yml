@@ -95,10 +95,11 @@ jobs:
     # satisfy GitHub branch protection before the ready run finishes.
     needs: changes
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.LUM_SELF_HOSTED == 'true' && (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != '' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","Linux","X64","lum-vq1"]') || 'ubuntu-24.04' }}
     timeout-minutes: 60
     env:
       CCACHE_COMPILERCHECK: content
+      CCACHE_DIR: ${{ github.workspace }}/.cache/ccache
       CCACHE_MAXSIZE: 400M
     outputs:
       route: ${{ steps.route.outputs.route }}
@@ -115,6 +116,10 @@ jobs:
           fi
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Prepare and verify self-hosted runner
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        run: bash tools/ci/prepare_self_hosted.sh
       - name: Report validation route
         id: route
         shell: bash
@@ -132,7 +137,7 @@ jobs:
           echo "$message" >> "$GITHUB_STEP_SUMMARY"
           echo "route=$route" >> "$GITHUB_OUTPUT"
       - name: Install standalone Python test dependencies
-        if: ${{ needs.changes.outputs.needs_cpp == 'false' || needs.changes.outputs.needs_python != 'false' }}
+        if: ${{ runner.environment == 'github-hosted' && (needs.changes.outputs.needs_cpp == 'false' || needs.changes.outputs.needs_python != 'false') }}
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends python3-numpy python3-pil python3-jsonschema
@@ -144,7 +149,7 @@ jobs:
         if: ${{ needs.changes.outputs.needs_cpp != 'false' && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
         run: python tools/ci/qualification_capture.py preflight --lane linux-gcc --expected-sha "$QUALIFICATION_EXPECTED_SHA"
       - name: Install build and test dependencies
-        if: ${{ needs.changes.outputs.needs_cpp != 'false' }}
+        if: ${{ runner.environment == 'github-hosted' && (needs.changes.outputs.needs_cpp != 'false') }}
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -160,11 +165,11 @@ jobs:
         if: ${{ needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'workflow_dispatch' || inputs.qualification_capture != true) }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.cache/ccache
-          key: linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-${{ github.sha }}
+          path: .cache/ccache
+          key: linux-x64-gcc-ccache-checkout-v2-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-${{ github.sha }}
           restore-keys: |
-            linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-
-            linux-x64-gcc-ccache-
+            linux-x64-gcc-ccache-checkout-v2-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-
+            linux-x64-gcc-ccache-checkout-v2-
       - name: Configure
         if: ${{ needs.changes.outputs.needs_cpp != 'false' }}
         id: configure
@@ -193,8 +198,8 @@ jobs:
         continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.cache/ccache
-          key: linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-${{ github.sha }}
+          path: .cache/ccache
+          key: linux-x64-gcc-ccache-checkout-v2-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-${{ github.sha }}
       - name: Test
         if: ${{ needs.changes.outputs.needs_cpp != 'false' }}
         id: tests
@@ -901,14 +906,19 @@ jobs:
 
   lint:
     name: Format changed files
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.LUM_SELF_HOSTED == 'true' && (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != '' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","Linux","X64","lum-vq1"]') || 'ubuntu-24.04' }}
     timeout-minutes: 15
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+      - name: Prepare and verify self-hosted runner
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        run: bash tools/ci/prepare_self_hosted.sh
       - name: Install formatting tool
+        if: runner.environment == 'github-hosted'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends clang-format
@@ -919,9 +929,9 @@ jobs:
     name: Static analysis / clang-tidy shard ${{ matrix.shard }}/3
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.LUM_SELF_HOSTED == 'true' && (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != '' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","Linux","X64","lum-vq1"]') || 'ubuntu-24.04' }}
     # The gate analyses 458 translation units across src/, test/ and tools/ plus
-    # their first-party headers. Three standard hosted runners partition that
+    # their first-party headers. Three Linux runners partition that
     # full scope by path hash so every merged tip gets complete analysis within
     # the unchanged 60-minute timeout; pushes still never skip cached units.
     timeout-minutes: 60
@@ -932,7 +942,12 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Prepare and verify self-hosted runner
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        run: bash tools/ci/prepare_self_hosted.sh
       - name: Install analysis dependencies
+        if: runner.environment == 'github-hosted'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -999,17 +1014,22 @@ jobs:
 
   public-tree:
     name: Public tree / inventory honesty
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.LUM_SELF_HOSTED == 'true' && (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != '' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","Linux","X64","lum-vq1"]') || 'ubuntu-24.04' }}
     timeout-minutes: 10
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Prepare and verify self-hosted runner
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        run: bash tools/ci/prepare_self_hosted.sh
       - name: Validate publishable tree
         run: |
           python3 tools/ci/test_validate_public_tree.py
           python3 tools/ci/test_check_docs.py
           python3 tools/ci/test_check_ctest_junit.py
           python3 tools/ci/test_workflow_policy.py
+          python3 tools/ci/test_self_hosted_runner.py
           python3 tools/ci/test_check_acceptance_matrix.py
           python3 tools/ci/check_acceptance_matrix.py --check-doc docs/acceptance-matrix.md
           python3 tools/ci/test_tidy_cache.py

@@ -20,6 +20,7 @@ GUARDED = {
     "asan.yml": ("asan", "Linux / GCC ASan"),
     "performance.yml": ("preview-frame", "Preview frame / software OpenGL"),
 }
+SELF_HOSTED_RUNS_ON = '${{ vars.LUM_SELF_HOSTED == \'true\' && (github.event_name == \'push\' || (github.event_name == \'pull_request\' && github.event.pull_request.head.repo.full_name != \'\' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON(\'["self-hosted","Linux","X64","lum-vq1"]\') || \'ubuntu-24.04\' }}'
 READY = "github.event_name != 'pull_request' || github.event.pull_request.draft == false"
 UCRT_ROUTE = (
     "github.event_name == 'pull_request' || github.ref_name == 'main' || "
@@ -86,7 +87,8 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             with self.subTest(workflow=filename):
                 job = jobs(self.workflows[filename])[job_id]
                 self.assertEqual(value(job, "name", 4), check_name)
-                self.assertEqual(value(job, "runs-on", 4), "ubuntu-24.04")
+                self.assertEqual(value(job, "runs-on", 4),
+                                 "ubuntu-24.04" if filename == "performance.yml" else SELF_HOSTED_RUNS_ON)
                 self.assertEqual(value(job, "needs", 4), "changes")
                 condition = "!cancelled()"
                 if filename != "ci.yml":

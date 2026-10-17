@@ -14,6 +14,7 @@ import sys
 # an explicit coverage decision; directory membership never grants an exemption.
 PYTHON_TESTS = (
     "tools/ci/test_ci_paths.py",
+    "tools/ci/test_self_hosted_runner.py",
     "tools/ci/test_cache_retention.py",
     "tools/ci/test_check_docs.py",
     "tools/ci/test_check_ctest_junit.py",
@@ -43,6 +44,7 @@ PYTHON_TESTS = (
     "tools/rendering/acceptance/test_scene_matrix.py",
 )
 PYTHON_MODULES = {
+    "tools/ci/self_hosted_job_hook.py",
     "tools/ci/ci_paths.py", "tools/ci/check_docs.py",
     "tools/ci/check_ctest_junit.py", "tools/ci/slowest_tests.py",
     "tools/ci/validate_performance_measurement.py",

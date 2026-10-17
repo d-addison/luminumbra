@@ -11,7 +11,11 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import ci_paths as gate
+import importlib.util
+
+SPEC = importlib.util.spec_from_file_location("ci_paths", Path(__file__).with_name("ci_paths.py"))
+gate = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(gate)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -202,7 +206,7 @@ class PathGateTests(unittest.TestCase):
                                                ("", "", True)):
                     actual = expression.replace("needs.changes.outputs.needs_cpp", repr(cpp)).replace(
                         "needs.changes.outputs.needs_python", repr(python)
-                    ).replace("||", "or").replace("&&", "and")
+                    ).replace("runner.environment", repr("github-hosted")).replace("||", "or").replace("&&", "and")
                     with self.subTest(job=job, step=step, cpp=cpp, python=python):
                         self.assertEqual(eval(actual, {"__builtins__": {}}), expected)
             self.assertIn("route: ${{ steps.route.outputs.route }}", body)

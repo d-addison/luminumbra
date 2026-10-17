@@ -76,8 +76,8 @@ increases add 0.15 + 0.35 GB and the newly seeded UCRT64 cache adds up to 0.5 GB
 about 2.55 GB per branch, or 5.1 GB across main/devel, leaving about 0.9 GB of the
 6 GB budget for other caches. At all seven lanes' configured caps, one generation
 per branch totals 2.75 GB, or 5.5 GB across both branches, leaving 0.5 GB for
-package and analysis caches. These lanes use standard runners and the existing
-cache actions, with no paid cache service.
+package and analysis caches. These lanes use the existing cache actions, with no
+paid cache service.
 
 All Actions caches, including performance, clang-tidy results, and MSYS2 packages,
 are saved only on `push` events to `refs/heads/main` or `refs/heads/devel`; PRs,
@@ -129,7 +129,7 @@ Compiler and analysis caches can be restored on eligible PR and manual runs.
 The MSYS2 package cache is an exception: its setup action enables both restore
 and save together, so package caching is disabled outside main/devel pushes.
 
-Blocking clang-tidy analysis runs in three path-hash shards on standard Ubuntu
+Blocking clang-tidy analysis runs in three path-hash shards on Linux
 runners, each with a 60-minute timeout. Together they analyse every configured
 first-party translation unit and its headers on every executed merged-tip run;
 pushes use `writeonly` caching and never skip analysis. PRs restore only their
@@ -290,8 +290,124 @@ after merge. Attribution also runs weekly on Sunday at 04:43 UTC on the default
 branch and supports manual dispatch. Other scheduled and release routing stays
 unchanged.
 
-All runners remain standard hosted runners; no paid actions, larger/GPU runners,
-or repository visibility changes are introduced.
+The repository variable `LUM_SELF_HOSTED` is an opt-in and kill switch. Leave it
+unset until the host operator has installed the external admission hook and
+confirmed a fork denial test before any checkout or repository script runs.
+Unset or `false` keeps `ubuntu-24.04`. When it equals `true`, only `linux`,
+`tidy-shard` (all three shards), `lint`, and `public-tree` in `ci.yml`, and `asan`
+in `asan.yml` can select `[self-hosted, Linux, X64, lum-vq1]`. These routing
+expressions select pushes and PRs whose nonempty head repository matches this
+repository. Manual dispatches (including qualification captures), schedules,
+`workflow_run`, and other events stay hosted. The routing expression is a
+scheduling preference: a fork can change its YAML and request the labels directly.
+The external host hook is the admission boundary for every job on these runners.
+Required check names, job conditions, timeouts and shard parallelism are unchanged.
+
+This public repository belongs to a User account, so organization runner groups
+and their workflow restrictions are unavailable. The repository settings require
+approval from `all_external_contributors`, a read-only default `GITHUB_TOKEN`, and
+SHA-pinned actions. Maintainers must never approve an external contributor's run
+that changes `.github/` or `tools/ci/`. Approval alone cannot protect a persistent
+host from a modified workflow; keep the variable unset until host enforcement is
+confirmed. This change does not install a hook or change repository settings.
+
+For each dedicated Linux runner instance, the host operator must install
+`tools/ci/self_hosted_job_hook.sh` and `tools/ci/self_hosted_job_hook.py` in a
+root-owned directory outside every checkout, work directory and temporary
+directory, for example `/etc/luminumbra-runner/runner-1/`. All ancestor directories,
+both files, and the adjacent `self_hosted_job_hook.json` must be root-owned and
+unwritable by the job user or any of its groups (directories 0755, scripts 0755,
+configuration 0644). Review and copy these files from a trusted revision; never
+source or execute the checkout copy as the admission hook. The configuration has
+exactly these fields, with the instance's real non-root UID and work directory:
+
+```json
+{
+  "work_root": "/srv/luminumbra/runner-1/_work",
+  "runner_uid": 1001,
+  "metadata_verified": false
+}
+```
+
+Set `ACTIONS_RUNNER_HOOK_JOB_STARTED` in the runner's host-managed `.env` to the
+absolute installed shell path and restart that runner service. Protect the `.env`,
+runner installation, service configuration, hook files and their parent
+directories from job writes; install the runner with automatic self-update
+disabled and let the operator update it. The job account must have no sudo or
+other way to modify this configuration. Give each of the three instances a
+separate non-root account, runner installation, work directory and `RUNNER_TEMP`.
+Jobs may write instance work, temporary and diagnostic data, but must never be
+able to replace runner executables or configuration. Precreate the runner-owned
+`_work/luminumbra/luminumbra` checkout and `_work/_temp` directories. The host
+configuration accepts only a dedicated `_work` below `/srv` or `/var`, and the
+exact checkout and temporary paths under it; it never accepts an arbitrary
+`GITHUB_WORKSPACE` as a deletion target.
+
+Before setting `metadata_verified` to true, the operator must verify the installed
+runner version against GitHub's [job hook documentation](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/run-scripts)
+and [default environment variables](https://docs.github.com/en/actions/reference/variables-reference#default-environment-variables).
+Verify that the job-start hook receives runner-supplied `GITHUB_REPOSITORY`,
+`GITHUB_EVENT_NAME`, `GITHUB_WORKSPACE`, `RUNNER_TEMP` and a readable actual event
+at `GITHUB_EVENT_PATH` before any job step, including checkout. For this layout the
+event path must be `_work/_temp/_github_workflow/event.json`. Verify also that
+PR-authored job/step environment, inputs and workflow expressions cannot replace
+those values at the hook, disable the hook, or inject startup code through
+`BASH_ENV`, `ENV`, `PATH` or a replacement shell. Documentation alone does not certify this runner
+version's payload timing or provenance. If these properties cannot be established,
+leave `metadata_verified` false and the runner disabled. Missing metadata or an
+unavailable event at hook time always denies; no API fallback or workflow-provided
+trust flag is accepted. A failing hook must fail the job before its first step.
+
+The operator's confirmation must include same-repository PR admission and fork PR
+denial, including a fork workflow that requests the labels directly and attempts
+to forge the metadata through YAML environment or inputs. Confirm wrong-repository,
+malformed, absent and unreadable event denial too, with a first-step sentinel that
+never executes for denied jobs. Then confirm that jobs cannot modify the hook or
+its configuration. Only after these checks may a maintainer enable the variable.
+
+The hook requires `GITHUB_REPOSITORY` to equal `d-addison/luminumbra` exactly, and
+requires matching event repository identity for every supported event. PRs also
+require matching base and head repositories, a PR number and head revision. Pushes
+require a branch/tag ref and revision; schedules require a schedule string;
+`workflow_run` requires run identity and revision plus matching repository and
+head repository. Unknown events, including manual dispatch and
+`pull_request_target`, deny. JSON reads are bounded to 1 MiB and reject malformed,
+duplicate-key, non-regular and symlink payloads. After admission, the hook removes
+only contents of the configured runner-owned checkout through directory handles,
+without following symlinks or crossing filesystems. Cleanup is bounded to 100,000
+entries and depth 64; an ownership, race or cleanup error fails the job. Cleanup
+may leave a partially cleaned checkout on failure; it never proceeds to job steps.
+It does not clean `_temp`, `_actions`, another instance, host tools or protected
+directories. Metadata denial performs no checkout cleanup.
+
+`prepare_self_hosted.sh` runs after checkout and verifies the complete package and
+executable inventory before cleaning checkout leftovers with `git clean -ffdx`.
+It requires the checkout root, working directory, runner ownership and instance
+temporary directory to agree. Every job gets a private home, runtime and temporary
+directory under `RUNNER_TEMP`; the runner handles its temporary directory cleanup.
+The private formatter and Python links select preinstalled `clang-format-18` and
+`python3`. `HOME`, XDG directories, `TMPDIR`, `TMP`, `TEMP` and ccache configuration
+use the private directories, and Python user packages are disabled. No selected
+job installs pip or system packages on the self-hosted host.
+
+Linux/GCC and ASan restore and save `.cache/ccache` relative to the checkout;
+`CCACHE_DIR` points to that exact stable location on both hosted and self-hosted
+runners. Preparation clears it before restore on self-hosted runners, preventing
+local PR cache contents from carrying into push saves. The new
+`ccache-checkout-v2-` key namespace avoids archives with the former home-relative
+layout, retains the existing lane prefixes for retention, and keeps the 400M/600M
+caps. PRs only restore Actions caches; push restores cannot read PR-scoped caches.
+The repository retention budget stays 6 GB below the 10 GB cap. Existing
+`xvfb-run -a` display allocation and OS-assigned loopback ports support concurrent
+instances without killing another job's display or reserving shared ports.
+
+All performance jobs, other Linux lanes, Windows, macOS, documentation deploy,
+release, game-assets, Blender and UCRT attribution stay hosted. No paid actions,
+larger/GPU runners, cache cap increase or visibility change is introduced.
+`test_self_hosted_runner.py` covers routing, admission, payload refusal, bounded
+cleanup and preparation; it is registered in CTest, the standalone Python plan
+and the public-tree workflow. Its shell fixtures use Git for Windows Bash and
+convert native paths there, without requiring Windows symlink privileges.
 
 CTest produces JUnit and runtime artifacts. CI verifies a minimum discovered-test
 count so an empty or severely truncated suite cannot report success. Once a
