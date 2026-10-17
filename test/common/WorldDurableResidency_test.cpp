@@ -1,3 +1,13 @@
+#include "persistence/SaveTransaction.h"
+#include "world/FarFrozenObservation.h"
+#include "world/FarVolume.h"
+#include "world/FarVolumeMemory.h"
+#include "world/FarVolumeTile.h"
+#include "world/FarWantedSet.h"
+#include <array>
+#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
+#include <span>
 // Durable residency (S3): with set_durable_residency(true), an edited (LoadedOrEdited)
 // chunk that streams out of the radius is PARKED as normalized sim truth instead of
 // being erased, and returns byte-identically when the anchor comes back. Pristine
@@ -11,16 +21,20 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <limits>
 #include <memory>
 #include <set>
 #include <string>
+#include <system_error>
 #include <utility>
 #include <vector>
 
+#include "luminumbra/core/Types.h"
 #include "luminumbra_common/ai/ScentField.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/components/InstinctComponents.h"
@@ -30,8 +44,10 @@
 #include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/systems/WaterSystem.h"
+#include "luminumbra_common/world/ActiveRegionLedger.h"
 #include "luminumbra_common/world/Chunk.h"
 #include "luminumbra_common/world/FarDensityQuantization.h"
+#include "luminumbra_common/world/FarEditedCache.h"
 #include "luminumbra_common/world/GameSession.h"
 
 namespace fs = std::filesystem;
@@ -138,9 +154,22 @@ constexpr int kReturnIterations = kSettleIterations;
 // One headless world per TEST. Member order: root outlives the session, the job
 // system outlives the session, and the destructor tears the session down before
 // shutting the job system down.
-class DurableFixture {
+struct DurableFixtureState {
+    HeadlessRoot root;
+    JobSystem jobs;
+    std::unique_ptr<GameSession> session;
+    SHIELD_WorldSystem* world = nullptr;
+    Luminumbra::Systems::PhysicsSystem* physics = nullptr;
+    Vec3 spawn{};
+    bool created = false;
+    std::string error;
+};
+
+class DurableFixture : public DurableFixtureState {
 public:
-    explicit DurableFixture(bool durable, bool active_regions = false) {
+    explicit DurableFixture(bool durable,
+                            bool active_regions = false,
+                            const fs::path& save_root = {}) {
         // CTest runs cases in separate processes; bound each small fixture's worker pool.
         jobs.startup(2);
         session = std::make_unique<GameSession>();
@@ -150,6 +179,7 @@ public:
         session->SetWeatherRainEnabled(false);
         session->SetJobSystem(&jobs);
         session->SetRootPath(root.root_string());
+        session->SetSaveRootPath(save_root);
         created = session->CreateWorld("DurableResidency", "12345", "durable");
         if (!created) {
             error = "CreateWorld failed";
@@ -212,15 +242,6 @@ public:
             return nullptr;
         return ResidentLoadedChunk();
     }
-
-    HeadlessRoot root;
-    JobSystem jobs;
-    std::unique_ptr<GameSession> session;
-    SHIELD_WorldSystem* world = nullptr;
-    Luminumbra::Systems::PhysicsSystem* physics = nullptr;
-    Vec3 spawn{};
-    bool created = false;
-    std::string error;
 };
 
 bool Contains(const std::vector<std::shared_ptr<Chunk>>& chunks, const Chunk* target) {
@@ -710,8 +731,8 @@ FarWorldPublicationRequest SavedPublicationRequest(std::span<const FarTileKey> k
 
 std::shared_ptr<Chunk> AdoptPublicationEdit(DurableFixture& fixture, IVec3 coordinates) {
     auto chunk = std::make_shared<Chunk>(coordinates);
-    chunk->sdf_data.assign(17 * 17 * 17, -3.0f);
-    chunk->material_data.assign(17 * 17 * 17, 7);
+    chunk->sdf_data.assign(Luminumbra::TestSupport::kCacheLatticeSamples, -3.0f);
+    chunk->material_data.assign(Luminumbra::TestSupport::kCacheLatticeSamples, 7);
     chunk->mark_sdf_loaded_or_edited();
     chunk->mark_voxel_data_dirty();
     chunk->set_state(ChunkState::Idle);
@@ -752,6 +773,38 @@ TEST(SavedFarWorldPublication, SuccessfulLoadPublishesAndFailedOpenKeepsCurrentB
     ASSERT_EQ(publication->tiles.size(), retained->tiles.size());
     EXPECT_EQ(publication->tiles[0].observation->content_identity(),
               retained->tiles[0].observation->content_identity());
+}
+
+TEST(SavedFarWorldPublication, SeparateSaveRootSurvivesCandidateLoadAndRefusal) {
+    const HeadlessRoot storage;
+    DurableFixture fixture(false, false, storage.root_string());
+    ASSERT_TRUE(fixture.created) << fixture.error;
+    fixture.session->EnableFarWorldPersistenceSafety();
+    ASSERT_TRUE(fixture.session->SaveWorldState());
+    const auto id = fixture.session->GetMetadata().worldId;
+    const auto destination = fs::path(storage.root_string()) / "worlds" / "saves" / id;
+    ASSERT_EQ(fixture.session->GetWorldSaveDir(), destination);
+    std::size_t replacements = 0;
+    fixture.session->SetBeforeWorldReplacement([&] { ++replacements; });
+    ASSERT_TRUE(fixture.session->LoadWorld(id)) << fixture.session->GetWorldOpenError();
+    EXPECT_EQ(replacements, 1u);
+    EXPECT_EQ(fixture.session->GetFarWorldSaveRoot(), destination);
+    EXPECT_FALSE(fixture.session->ActiveRegionsEnabled());
+    const std::array keys{FarTileKey{5, 0, 0}};
+    auto request = SavedPublicationRequest(keys);
+    std::shared_ptr<const FarWorldPublication> publication;
+    std::string diagnostic;
+    ASSERT_TRUE(fixture.session->CaptureFarWorldPublication(request, publication, diagnostic))
+        << diagnostic;
+    ASSERT_TRUE(publication);
+    EXPECT_EQ(publication->save_root, destination);
+    auto* const world = fixture.session->GetWorldSystem();
+    EXPECT_FALSE(fixture.session->LoadWorld("missing_saved_world"));
+    EXPECT_EQ(fixture.session->GetWorldSystem(), world);
+    EXPECT_EQ(fixture.session->GetMetadata().worldId, id);
+    EXPECT_EQ(fixture.session->GetFarWorldSaveRoot(), destination);
+    EXPECT_EQ(replacements, 1u);
+    EXPECT_TRUE(fixture.session->SaveWorld());
 }
 
 TEST(SavedFarWorldPublication, MetadataSaveEmbedsPresetAndInvalidatesOnlyAfterCommit) {
@@ -1543,6 +1596,10 @@ TEST(SavedFarWorldPublication,
     using namespace Luminumbra::World;
     for (const bool striped_material : {false, true}) {
         FarFrozenCaptureSource source;
+        // This fixture has no committed terrain override.
+        source.committed = [](std::uint8_t, const FarVolumePosition&) {
+            return FarFrozenOverride<FarVolumeSample>{};
+        };
         source.use = FarFrozenUse::Preview;
         source.pristine.numeric = FarVolumeNumericProfile::LegacySigned16;
         source.pristine.height = [](std::int64_t, std::int64_t) {

@@ -1,10 +1,32 @@
 #include "FarEditedCache.h"
 
+#include "FarAuthorityOverlay.h"
+#include "FarEditedBake.h"
+#include "FarEditedCatalog.h"
+#include "FarFrozenObservation.h"
+#include "FarTierTable.h"
+#include "FarVolume.h"
+#include "FarVolumeMemory.h"
+#include "FarVolumeTile.h"
 #include "core/FilesystemPath.h"
+#include "persistence/EditedSourceImage.h"
+#include "persistence/SaveTransaction.h"
 #include "persistence/WorldSaveService.h"
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <filesystem>
 #include <limits>
+#include <memory>
+#include <new>
+#include <optional>
+#include <span>
+#include <string>
+#include <string_view>
 #include <tuple>
+#include <utility>
+#include <vector>
 
 namespace Luminumbra::World {
 class FarEditedCacheCatalogAccess {
@@ -430,8 +452,10 @@ Error UpdateCatalog(FarEditedCatalog& catalog,
             baked.tiles.begin(), baked.tiles.end(), due.key, [](const auto& t, const auto& k) {
                 return t.overlay.key < k;
             });
-        if (tile == baked.tiles.end() || tile->overlay.key != due.key ||
-            !tile->edited_span.has_value())
+        if (tile == baked.tiles.end() || tile->overlay.key != due.key)
+            return Error::BakeFailure;
+        const auto edited_span = tile->edited_span;
+        if (!edited_span.has_value())
             return Error::BakeFailure;
         FarCatalogReceipt receipt;
         receipt.key = due.key;
@@ -443,7 +467,7 @@ Error UpdateCatalog(FarEditedCatalog& catalog,
         receipt.content_identity = limits.content_identity;
         receipt.numeric = limits.numeric;
         receipt.caves = limits.caves;
-        receipt.edited_span = *tile->edited_span;
+        receipt.edited_span = *edited_span;
         if (due.previous_span.has_value()) {
             receipt.edited_span.min_y =
                 std::min(receipt.edited_span.min_y, due.previous_span->min_y);
@@ -570,13 +594,14 @@ bool Publish(SaveTransaction& transaction,
         report.refusal = Error::PublicationFailure;
         return legacy.empty(); // Adoption cannot stamp unchecked legacy generation claims.
     }
+    const auto& handle = *group;
     if (!legacy.empty() &&
-        !transaction.RequireDerivedGroupForCommit(*group, &WorldSaveService::member_digest)) {
+        !transaction.RequireDerivedGroupForCommit(handle, &WorldSaveService::member_digest)) {
         report.refusal = Error::PublicationFailure;
         return false;
     }
     if (publication)
-        *publication = *group;
+        *publication = handle;
     bool written = true, evicted = false;
     try {
         for (const auto& due : plan.due) {
@@ -586,7 +611,7 @@ bool Publish(SaveTransaction& transaction,
                 });
             if (tile == baked.tiles.end() || tile->overlay.key != due.key ||
                 !transaction.WriteDerivedMember(
-                    *group,
+                    handle,
                     Filesystem::GenericPathString(FarOverlayPath({}, due.key)),
                     tile->bytes)) {
                 written = false;
@@ -594,7 +619,7 @@ bool Publish(SaveTransaction& transaction,
             }
         }
         if (written)
-            written = transaction.WriteDerivedMember(*group, "far/catalog.json", bytes);
+            written = transaction.WriteDerivedMember(handle, "far/catalog.json", bytes);
         for (const auto& path : legacy) {
             if (!written)
                 break;
@@ -602,7 +627,7 @@ bool Publish(SaveTransaction& transaction,
                 std::none_of(plan.due.begin(), plan.due.end(), [&](const auto& due) {
                     return Filesystem::GenericPathString(FarOverlayPath({}, due.key)) == path;
                 })) {
-                written = transaction.RemoveDerivedMember(*group, path);
+                written = transaction.RemoveDerivedMember(handle, path);
                 evicted = true;
             }
         }
@@ -610,7 +635,7 @@ bool Publish(SaveTransaction& transaction,
         written = false;
     }
     if (!written) {
-        if (!transaction.RollbackDerivedGroup(*group)) {
+        if (!transaction.RollbackDerivedGroup(handle)) {
             report.refusal = Error::RollbackFailure;
             return false;
         }

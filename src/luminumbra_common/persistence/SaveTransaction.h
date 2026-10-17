@@ -11,6 +11,8 @@
 // All functions here are owner-thread only. They never run unless a save directory is indexed or a
 // flag-on GameSession save opens a transaction, so flag-off saves are untouched.
 
+#include "../fields/EnergyFieldState.h"
+
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -21,6 +23,7 @@
 #include <memory>
 #include <optional>
 #include <set>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -53,8 +56,46 @@ struct SnapshotIndex {
 
 inline constexpr const char* kSnapshotIndexSchema = "luminumbra.snapshot.v1";
 inline constexpr const char* kJournalSchema = "luminumbra.journal.v1";
+// Derived paths require an explicit schema that authoritative-only readers refuse.
+inline constexpr const char* kDerivedSnapshotIndexSchema = "luminumbra.snapshot.v2";
+inline constexpr const char* kDerivedJournalSchema = "luminumbra.journal.v2";
 inline constexpr std::size_t kMaxSnapshotMembers = 1'048'576;
 inline constexpr std::size_t kMaxSnapshotIndexBytes = 16u * 1024u * 1024u;
+// Recovery/open allocation limits: journal JSON 16 MiB, at most 65536 entries, and
+// each journal string at most 64 bytes. Binary region members are at most 256 MiB;
+// metadata is 1 MiB, manifests 64 KiB, and undo copies use the original member format cap.
+inline constexpr std::size_t kMaxJournalBytes = std::size_t{16} * 1024u * 1024u;
+inline constexpr std::size_t kMaxJournalEntries = 65'536;
+inline constexpr std::size_t kMaxJournalStringBytes = 64;
+inline constexpr std::size_t kMaxSaveMemberBytes = std::size_t{256} * 1024u * 1024u;
+inline constexpr std::size_t kMaxSaveMetadataBytes = std::size_t{1024} * 1024u;
+inline constexpr std::size_t kMaxSaveManifestBytes = std::size_t{64} * 1024u;
+// Plants: 65536 admitted records, at most 8 KiB each (all numeric optional
+// components included), plus 64 KiB of JSON envelope/format margin.
+inline constexpr std::size_t kMaxSavePlants = 65'536;
+inline constexpr std::size_t kMaxSavePlantRecordBytes = 8192;
+inline constexpr std::size_t kMaxSaveEntityBytes =
+    kMaxSavePlants * kMaxSavePlantRecordBytes + 64u * 1024u;
+// Legacy energy: 64 MiB decoded uint16 values, at most 12 text bytes/value
+// (space + five index digits + colon + five value digits), 32/page, 64 header.
+inline constexpr std::size_t kMaxSaveEnergyBytes =
+    luminumbra::fields::EnergyFieldState::kMaxLegacyRecordBytes;
+
+// Format-specific bounds also apply to hashes and undo copies.
+std::size_t save_member_byte_limit(std::string_view path);
+
+// Checks the opened stream's size before allocation, enforces it on the actual read,
+// and rejects short reads or growth. Shared Windows/POSIX semantics; no pathname size race.
+bool read_bounded_save_file(const std::filesystem::path& path,
+                            std::string& bytes,
+                            std::size_t limit,
+                            std::vector<std::string>* errors,
+                            const std::stop_token& stop = {});
+
+// Const owner-thread diagnostic for the most recent recovery attempt, including rejected input.
+// Counts bytes fetched from the journal handle (including at most 64 KiB of read-ahead).
+std::size_t recovery_journal_bytes_read();
+
 inline constexpr const char* kSnapshotIndexRelativePath = "chunks/region/snapshot.json";
 
 // <save>/chunks/region/snapshot.json
@@ -85,12 +126,14 @@ bool snapshot_index_exists(const std::filesystem::path& save_dir);
 
 // FNV-1a 64 over raw bytes (shared by the index and the journal).
 std::uint64_t fnv1a64_bytes(const void* data, std::size_t size);
-// Whole-file size + FNV-1a 64. A missing file returns false with exists=false.
+// Bounded regular-file size + FNV-1a 64; missing returns true, exists=false.
+// The explicit limit applies through the opened handle, including an EOF growth probe.
 bool hash_file(const std::filesystem::path& path,
                std::uint64_t& bytes,
                std::uint64_t& fnv64,
                bool& exists,
-               std::vector<std::string>* errors);
+               std::vector<std::string>* errors,
+               std::size_t limit);
 
 // True when <save>/journal exists. Read-only; used by the catalog.
 bool journal_pending(const std::filesystem::path& save_dir);
@@ -159,12 +202,14 @@ private:
 };
 
 class SaveTransaction {
-public:
-    class DerivedGroup {
-        friend class SaveTransaction;
-        const SaveTransaction* m_owner = nullptr;
-        std::size_t m_index = 0;
+    struct GroupIdentity {
+        const SaveTransaction* owner = nullptr;
+        std::size_t index = 0;
     };
+
+public:
+    // Opaque immutable identity; only the exact issued handle admits group mutation.
+    using DerivedGroup = std::shared_ptr<const GroupIdentity>;
     using Finalizer = std::function<bool(SaveTransaction&, std::vector<std::string>*)>;
     // Opens the thread_local "active transaction" slot for save_dir. Only one may be active per
     // thread.
@@ -207,10 +252,11 @@ public:
     // member validator must enforce DerivedGroupsAllowCommit during index assembly.
     bool RequireDerivedGroupForCommit(const DerivedGroup& group, MemberDigestFn validator) {
         if (!owner_thread() || m_state != State::Open || !validator || m_digest_fn != validator ||
-            group.m_owner != this || group.m_index >= m_derived_groups.size() ||
-            m_derived_groups[group.m_index].rolled_back)
+            !group || group->owner != this || group->index >= m_derived_groups.size() ||
+            m_derived_groups[group->index].identity != group ||
+            m_derived_groups[group->index].rolled_back)
             return false;
-        m_derived_groups[group.m_index].commit_required = true;
+        m_derived_groups[group->index].commit_required = true;
         return true;
     }
     // The member validator checks this during index assembly, after derived preparation.
@@ -224,9 +270,10 @@ public:
     }
     // Commit observers use the final outcome, including a safe validation rollback.
     [[nodiscard]] bool DerivedGroupCommitted(const DerivedGroup& group) const {
-        return owner_thread() && m_state == State::Committed && group.m_owner == this &&
-               group.m_index < m_derived_groups.size() &&
-               !m_derived_groups[group.m_index].rolled_back;
+        return owner_thread() && m_state == State::Committed && group && group->owner == this &&
+               group->index < m_derived_groups.size() &&
+               m_derived_groups[group->index].identity == group &&
+               !m_derived_groups[group->index].rolled_back;
     }
     // First registration wins. Runs in registration order, after staging and before indexing.
     bool AddFinalizerOnce(std::string key, Finalizer callback);
@@ -290,6 +337,7 @@ private:
                          bool allow_derived);
     bool owner_thread() const;
     struct GroupState {
+        DerivedGroup identity;
         std::vector<std::string> paths;
         MemberDigestFn catalog_digest = nullptr;
         bool rolled_back = false;
@@ -329,7 +377,7 @@ private:
 
 // Test hook: invoked at real publication sites ("journal-published", "before-replace",
 // "after-replace", "before-delete", "after-delete", "commit-point", "journal-unlinked",
-// "rollback-entry").
+// "rollback-entry", "hash-opened").
 using SnapshotStepHook = void (*)(const char* step, const std::filesystem::path& path);
 void set_snapshot_step_hook_for_testing(SnapshotStepHook hook);
 void report_snapshot_step(const char* step, const std::filesystem::path& path);

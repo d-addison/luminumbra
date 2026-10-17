@@ -287,6 +287,35 @@ TEST(CrashReportTest, DifferentTargetPreservesExistingEvidenceAndHasBoundedReten
 
 #if !defined(_WIN32)
 
+void CheckRepeatedSameThreadReinstallPreservesAlternateStackStorage() {
+    ScopedDirectory scratch(UniqueScratchDir("alternate-stack"));
+    ASSERT_TRUE(luminumbra::crash::InstallCrashCapture(scratch.path, "original"));
+    stack_t original{};
+    ASSERT_EQ(::sigaltstack(nullptr, &original), 0);
+    ASSERT_EQ(original.ss_flags & SS_DISABLE, 0);
+    ASSERT_NE(original.ss_sp, nullptr);
+    ASSERT_GT(original.ss_size, 0u);
+    auto* storage = static_cast<char*>(original.ss_sp);
+    storage[0] = 'a';
+    storage[original.ss_size - 1] = 'z';
+    for (int iteration = 0; iteration < 64; ++iteration) {
+        ASSERT_TRUE(luminumbra::crash::InstallCrashCapture(scratch.path, "reinstalled"));
+        stack_t current{};
+        ASSERT_EQ(::sigaltstack(nullptr, &current), 0);
+        EXPECT_EQ(current.ss_flags & SS_DISABLE, 0);
+        ASSERT_EQ(current.ss_sp, original.ss_sp);
+        ASSERT_EQ(current.ss_size, original.ss_size);
+        EXPECT_EQ(storage[0], 'a');
+        EXPECT_EQ(storage[original.ss_size - 1], 'z');
+    }
+}
+
+TEST(CrashReportTest, RepeatedSameThreadReinstallPreservesAlternateStackStorage) {
+    ASSERT_EXIT(RunCaptureChecks(&CheckRepeatedSameThreadReinstallPreservesAlternateStackStorage),
+                ::testing::ExitedWithCode(EXIT_SUCCESS),
+                "");
+}
+
 void CheckCrossThreadReinstallIsRejectedWithoutReplacingReport() {
     ScopedDirectory scratch(UniqueScratchDir("cross-thread"));
     ASSERT_TRUE(luminumbra::crash::InstallCrashCapture(scratch.path, "original_thread"));

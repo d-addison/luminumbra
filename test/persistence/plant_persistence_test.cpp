@@ -5,20 +5,27 @@
 
 #include <algorithm>
 #include <bit>
+#include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
+#include <entt/entity/fwd.hpp>
 #include <entt/entt.hpp>
 
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/components/CropLifecycleComponents.h"
 #include "luminumbra_common/components/DiseaseComponents.h"
+#include "luminumbra_common/components/IrrigationComponents.h"
 #include "luminumbra_common/components/PlantComponents.h"
 #include "luminumbra_common/components/PollinationComponents.h"
 #include "luminumbra_common/components/SoilComponents.h"
+#include "luminumbra_common/core/WaterComponents.h"
 #include "luminumbra_common/ecs/EntitySnapshot.h"
 #include "luminumbra_common/persistence/PlantPersistence.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
+#include "luminumbra_common/world/ActiveRegionLedger.h"
+#include "luminumbra_common/world/GroundObjectStore.h"
 
 #include <filesystem>
 
@@ -49,7 +56,7 @@ entt::entity barePlant(entt::registry& r, float x, std::uint8_t stage, std::uint
 }
 
 TEST(PlantPersistence, EmptyRosterIsEmptySnapshot) {
-    entt::registry r;
+    const entt::registry r;
     EXPECT_TRUE(F::BuildPlantEntitySnapshot(r).entities.empty());
 }
 
@@ -209,7 +216,7 @@ TEST(PlantPersistence, EmptyRosterWritesNoFile) {
     const fs::path dir = fs::temp_directory_path() / "lumin_plant_persist_empty";
     fs::remove_all(dir);
     std::vector<std::string> errs;
-    E::EntityRegistrySnapshot empty;
+    const E::EntityRegistrySnapshot empty;
     ASSERT_TRUE(SS::WorldSaveService::save_plant_entities(empty, dir, &errs));
     EXPECT_FALSE(fs::exists(SS::WorldSaveService::plant_entities_path(dir)))
         << "no-plant save writes no plant-entities.json";

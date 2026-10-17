@@ -1748,9 +1748,9 @@ private:
         glm::vec3 max;
 
         AABB() = default;
-        AABB(const glm::vec3& min, const glm::vec3& max)
-            : min(min)
-            , max(max) {}
+        AABB(const glm::vec3& minimum, const glm::vec3& maximum)
+            : min(minimum)
+            , max(maximum) {}
     };
 
     struct ChunkCullEntry {
@@ -1766,8 +1766,8 @@ private:
         bool is_leaf = true;
 
         CullingNode() = default;
-        CullingNode(const AABB& bounds)
-            : bounds(bounds) {}
+        CullingNode(const AABB& node_bounds)
+            : bounds(node_bounds) {}
     };
 
     class HierarchicalCuller {

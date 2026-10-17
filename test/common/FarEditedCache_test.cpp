@@ -1,10 +1,33 @@
 #include "../support/FarEditedCacheFixture.h"
+#include "../support/UniqueTempPath.h"
 #include "core/Crc32.h"
 #include "core/FilesystemPath.h"
 #include "nlohmann/json.hpp"
+#include "persistence/EditedSourceImage.h"
+#include "persistence/SaveTransaction.h"
+#include "persistence/WorldSaveService.h"
+#include "world/FarAuthorityOverlay.h"
+#include "world/FarEditedCache.h"
+#include "world/FarEditedCatalog.h"
+#include "world/FarVolumeMemory.h"
+#include "world/FarVolumeTile.h"
+#include "world/FarWantedSet.h"
+#include "world/WorldStreamingState.h"
 #include "gtest/gtest.h"
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <filesystem>
+#include <functional>
+#include <initializer_list>
 #include <map>
+#include <memory>
+#include <nlohmann/json_fwd.hpp>
 #include <stdexcept>
+#include <string>
+#include <system_error>
+#include <utility>
+#include <vector>
 
 namespace {
 using namespace Luminumbra;
@@ -13,7 +36,14 @@ using namespace Luminumbra::Persistence;
 using namespace Luminumbra::TestSupport;
 namespace fs = std::filesystem;
 
-class FarEditedCacheTest : public testing::Test {
+struct FarEditedCacheTestState {
+    fs::path root, destination;
+    std::shared_ptr<FarEditedCachePolicy> policy;
+    WorldStreamingState state;
+    std::vector<FarCacheReport> reports;
+};
+
+class FarEditedCacheTest : public testing::Test, protected FarEditedCacheTestState {
 protected:
     void SetUp() override {
         root = CreateUniqueTempDirectory("far_cache_");
@@ -36,7 +66,7 @@ protected:
             fs::remove_all(destination, ec);
     }
     bool Save() {
-        FarEditedCacheSaveScope scope(root, policy);
+        const FarEditedCacheSaveScope scope(root, policy);
         return WorldSaveService{}.save_dirty_chunks(state, root).saved;
     }
     FarCacheError Acquire(std::uint64_t generation, std::shared_ptr<const FarCommittedCache>& out) {
@@ -49,10 +79,6 @@ protected:
                   FarCatalogError::None);
         return catalog;
     }
-    fs::path root, destination;
-    std::shared_ptr<FarEditedCachePolicy> policy;
-    WorldStreamingState state;
-    std::vector<FarCacheReport> reports;
 };
 
 TEST_F(FarEditedCacheTest, FirstIncrementalAndZeroDirtySaveRetainUnchangedReceipts) {
@@ -84,7 +110,7 @@ TEST_F(FarEditedCacheTest, FirstIncrementalAndZeroDirtySaveRetainUnchangedReceip
 }
 TEST_F(FarEditedCacheTest, OneFinalizerAcrossNestedWritersAndMetadataOnlySave) {
     auto chunk = FarCacheEditedChunk(state);
-    FarEditedCacheSaveScope scope(root, policy);
+    const FarEditedCacheSaveScope scope(root, policy);
     SaveTransaction transaction(root, 0, {}, &WorldSaveService::member_digest);
     ASSERT_TRUE(transaction.begin(nullptr));
     ASSERT_TRUE(WorldSaveService{}.save_world(state, root));
@@ -106,7 +132,7 @@ TEST_F(FarEditedCacheTest, NestedWritersReuseFinalizerAtPoolCapacity) {
     auto chunk = FarCacheEditedChunk(state);
     ASSERT_TRUE(Save());
     reports.clear();
-    FarEditedCacheSaveScope scope(root, policy);
+    const FarEditedCacheSaveScope scope(root, policy);
     SaveTransaction transaction(root, 0, {}, &WorldSaveService::member_digest);
     ASSERT_TRUE(transaction.begin(nullptr));
     ASSERT_TRUE(RegisterFarEditedCacheFinalizer(transaction, policy));
@@ -181,7 +207,7 @@ TEST_F(FarEditedCacheTest, ExplicitDestinationAndSaveAsUseDestinationGenerationA
     const auto source_catalog = FarCacheRead(root / "far/catalog.json");
     destination = CreateUniqueTempDirectory("far_cache_destination_");
     {
-        FarEditedCacheSaveScope scope(destination, policy);
+        const FarEditedCacheSaveScope scope(destination, policy);
         ASSERT_TRUE(WorldSaveService{}.save_world(state, destination));
     }
     FarEditedCatalog copied;
@@ -250,7 +276,7 @@ TEST_F(FarEditedCacheTest, LastEditRemovalClearsObsoleteOverridesAndRetainsSpans
     const auto before = Catalog();
     state.clear();
     {
-        FarEditedCacheSaveScope scope(root, policy);
+        const FarEditedCacheSaveScope scope(root, policy);
         SaveTransaction transaction(root, 0, {}, &WorldSaveService::member_digest);
         ASSERT_TRUE(transaction.begin(nullptr));
         ASSERT_TRUE(RegisterFarEditedCacheFinalizer(transaction, policy));
@@ -299,8 +325,9 @@ TEST_F(FarEditedCacheTest, MissingStaleAndUnreceiptedValidCacheReconstructWithou
         EXPECT_TRUE(cache->report.derived_due);
         EXPECT_GT(cache->report.rebuilt_tiles, 0u);
         EXPECT_EQ(FarCacheRead(path), before);
-        if (mode == 2)
+        if (mode == 2) {
             EXPECT_TRUE(cache->source->LegacyAuthority());
+        }
     }
 }
 TEST_F(FarEditedCacheTest, StaleCorruptionAndFutureCatalogOrOverlayRefuseOpen) {
@@ -375,7 +402,8 @@ void OverlayCrc(std::string& bytes) {
 TEST_F(FarEditedCacheTest, EveryOverlayCodecRefusalPropagatesThroughOpen) {
     FarOverlayTile tile;
     tile.key = {1, 0, 0};
-    FarOverlayBrick a, b;
+    const FarOverlayBrick a;
+    FarOverlayBrick b;
     b.by = 1;
     tile.bricks = {a, b};
     std::string bytes;
@@ -664,7 +692,7 @@ TEST_F(FarEditedCacheTest, OverlayCatalogAndIndexCrashImagesRecoverAndRollbackIs
             plan.member = root / member;
             plan.step = step;
             {
-                CacheCrashScope hook(plan);
+                const CacheCrashScope hook(plan);
                 ASSERT_TRUE(Save());
             }
             ASSERT_TRUE(plan.hit);
@@ -676,7 +704,7 @@ TEST_F(FarEditedCacheTest, OverlayCatalogAndIndexCrashImagesRecoverAndRollbackIs
                 rollback.member = snapshot_index_path(interrupted);
                 rollback.interrupt_rollback = true;
                 {
-                    CacheCrashScope hook(rollback);
+                    const CacheCrashScope hook(rollback);
                     EXPECT_EQ(recover_pending_journal(interrupted, nullptr),
                               RecoveryOutcome::Failed);
                 }
@@ -695,7 +723,7 @@ TEST_F(FarEditedCacheTest, OverlayCatalogAndIndexCrashImagesRecoverAndRollbackIs
 }
 TEST_F(FarEditedCacheTest, AbortDoesNotNotifyAcknowledgeOrPublishPreparedAuthority) {
     auto chunk = FarCacheEditedChunk(state);
-    FarEditedCacheSaveScope scope(root, policy);
+    const FarEditedCacheSaveScope scope(root, policy);
     SaveTransaction tx(root, 0, {}, &WorldSaveService::member_digest);
     ASSERT_TRUE(tx.begin(nullptr));
     ASSERT_TRUE(WorldSaveService{}.save_dirty_chunks(state, root).saved);

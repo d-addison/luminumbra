@@ -1,7 +1,25 @@
-#include "../support/FarEditedCacheFixture.h"
+#include "../support/UniqueTempPath.h"
 #include "nlohmann/json.hpp"
+#include "persistence/SaveTransaction.h"
+#include "persistence/WorldSaveService.h"
+#include "world/Chunk.h"
+#include "world/FarAuthorityOverlay.h"
+#include "world/FarEditedCatalog.h"
+#include "world/WorldStreamingState.h"
 #include "gtest/gtest.h"
+#include <cstddef>
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <functional>
+#include <initializer_list>
+#include <ios>
 #include <limits>
+#include <nlohmann/json_fwd.hpp>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 namespace {
 using namespace Luminumbra;
@@ -126,6 +144,39 @@ TEST(FarEditedCatalog, EveryCodecRefusalPreservesPreviousOutput) {
     ASSERT_EQ(output.tiles.size(), 1u);
     EXPECT_EQ(output.tiles[0].source_generation, 4u);
     EXPECT_FALSE(WorldSaveService::validate_save(root));
+    std::filesystem::remove_all(root);
+}
+void ReplaceCatalogAtHashOpen(const char* step, const std::filesystem::path& path) {
+    if (std::string_view(step) != "hash-opened" || path.filename() != "catalog.json")
+        return;
+    // A second-open fingerprint would consume different bytes from the validated document.
+    const auto size = std::filesystem::file_size(path);
+    ASSERT_LT(size, 256u);
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    output << std::string(static_cast<std::size_t>(size), 'x');
+    output.flush();
+    ASSERT_TRUE(output.good());
+}
+TEST(FarEditedCatalog, BothDigestModesFingerprintOnlyTheValidatedBytes) {
+    const auto root = TestSupport::CreateUniqueTempDirectory("far_catalog_digest_");
+    const std::string bytes = R"({"schema":"luminumbra.far_catalog.v1","tiles":[]})";
+    struct ResetHook {
+        ~ResetHook() {
+            set_snapshot_step_hook_for_testing(nullptr);
+        }
+    };
+    const ResetHook reset;
+    for (const auto digest : {&FarEditedCatalogDigest, &InspectFarEditedCatalogDigest}) {
+        ASSERT_TRUE(WorldSaveService::durable_write_file(root / "far/catalog.json", bytes));
+        set_snapshot_step_hook_for_testing(&ReplaceCatalogAtHashOpen);
+        MemberDigest actual;
+        std::string error;
+        EXPECT_TRUE(digest(root, "far/catalog.json", actual, error)) << error;
+        EXPECT_TRUE(actual.present);
+        EXPECT_EQ(actual.bytes, bytes.size());
+        EXPECT_EQ(actual.fnv64, fnv1a64_bytes(bytes.data(), bytes.size()));
+        set_snapshot_step_hook_for_testing(nullptr);
+    }
     std::filesystem::remove_all(root);
 }
 TEST(FarEditedCatalog, AbsenceDoesNotFabricateContentAndReadOnlyInspectionReportsRecovery) {

@@ -1,14 +1,30 @@
 #include "FarEditedCatalog.h"
 
 #include "Chunk.h"
+#include "FarAuthorityOverlay.h"
+#include "FarEditedBake.h"
+#include "FarTierTable.h"
+#include "FarVolume.h"
+#include "FarVolumeTile.h"
+#include "luminumbra/core/Types.h"
 #include "nlohmann/json.hpp"
+#include "persistence/SaveTransaction.h"
 #include "persistence/WorldSaveService.h"
 #include <algorithm>
-#include <fstream>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <filesystem>
+#include <initializer_list>
 #include <limits>
+#include <nlohmann/json_fwd.hpp>
 #include <set>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <tuple>
+#include <utility>
+#include <vector>
 
 namespace Luminumbra::World {
 namespace {
@@ -284,9 +300,13 @@ FarCatalogError DecodeFarEditedCatalog(std::string_view bytes,
         return Error::Malformed;
     }
 }
-FarCatalogError ReadFarEditedCatalog(const std::filesystem::path& root,
-                                     const FarCatalogLimits& limits,
-                                     FarEditedCatalog& out) {
+namespace {
+FarCatalogError ReadCatalog(const std::filesystem::path& root,
+                            const FarCatalogLimits& limits,
+                            FarEditedCatalog& out,
+                            Persistence::MemberDigest* digest = nullptr) {
+    if (digest)
+        *digest = {};
     try {
         const auto path = root / "far/catalog.json";
         if (!std::filesystem::exists(path)) {
@@ -298,17 +318,25 @@ FarCatalogError ReadFarEditedCatalog(const std::filesystem::path& root,
         const auto size = std::filesystem::file_size(path);
         if (size > std::min(limits.max_bytes, Persistence::kMaxSnapshotIndexBytes))
             return Error::LimitExceeded;
-        std::string bytes(static_cast<std::size_t>(size), '\0');
-        std::ifstream input(path, std::ios::binary);
-        if (!input.read(bytes.data(), static_cast<std::streamsize>(bytes.size())) ||
-            input.peek() != EOF)
+        // At most 16 MiB; validate and fingerprint the exact bytes from one regular handle.
+        std::string bytes;
+        if (!Persistence::read_bounded_save_file(
+                path,
+                bytes,
+                std::min(limits.max_bytes, Persistence::kMaxSnapshotIndexBytes),
+                nullptr))
             return Error::IoError;
-        return DecodeFarEditedCatalog(bytes, limits, out);
+        const auto result = DecodeFarEditedCatalog(bytes, limits, out);
+        if (result == Error::None && digest) {
+            digest->bytes = bytes.size();
+            digest->fnv64 = Persistence::fnv1a64_bytes(bytes.data(), bytes.size());
+            digest->present = true;
+        }
+        return result;
     } catch (const std::exception&) {
         return Error::IoError;
     }
 }
-namespace {
 bool CatalogDigest(const std::filesystem::path& root,
                    std::string_view path,
                    Persistence::MemberDigest& out,
@@ -319,7 +347,8 @@ bool CatalogDigest(const std::filesystem::path& root,
         return false;
     }
     FarEditedCatalog catalog;
-    if (ReadFarEditedCatalog(root, {}, catalog) != Error::None) {
+    Persistence::MemberDigest digest;
+    if (ReadCatalog(root, {}, catalog, &digest) != Error::None) {
         error = "invalid far catalog";
         return false;
     }
@@ -337,19 +366,15 @@ bool CatalogDigest(const std::filesystem::path& root,
             return false;
         }
     }
-    bool present = false;
-    out = {};
-    if (!catalog.present)
-        return true;
-    if (!Persistence::hash_file(root / std::string(path), out.bytes, out.fnv64, present, nullptr) ||
-        !present) {
-        error = "unreadable far catalog";
-        return false;
-    }
-    out.present = true;
+    out = digest;
     return true;
 }
 } // namespace
+FarCatalogError ReadFarEditedCatalog(const std::filesystem::path& root,
+                                     const FarCatalogLimits& limits,
+                                     FarEditedCatalog& out) {
+    return ReadCatalog(root, limits, out);
+}
 bool FarEditedCatalogDigest(const std::filesystem::path& root,
                             std::string_view path,
                             Persistence::MemberDigest& out,
