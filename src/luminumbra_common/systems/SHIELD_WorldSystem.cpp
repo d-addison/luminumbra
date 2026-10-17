@@ -3864,36 +3864,6 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
         return false;
     }
 
-    // Diagnostic breadcrumbs ( implementation note): EnsureSurfaceReadyNear blocks on
-    // three unbounded job waits during the interactive "CONSTRUCTING WORLD GEOMETRY"
-    // load. If one wedges (the intermittent freeze), the LAST line printed names the
-    // exact phase that hung. Render-only logging; no world_hash impact. Cheap: this
-    // runs at world-load/teleport, not per-frame.
-    const auto _esrn_t0 = std::chrono::steady_clock::now();
-    // ALL THREE unbounded waits in this function run under the
-    // opt-in LUMINUMBRA_JOB_WATCHDOG named-phase reporter (previously only the
-    // collision-build batch below was wrapped, so a generation/meshing wedge still
-    // hung silently). Observability only — hash-neutral, OFF in determinism gates.
-    const bool job_watchdog = Luminumbra::Core::JobWatchdogEnabled();
-    LUMINUMBRA_CORE_INFO("EnsureSurfaceReadyNear: draining generation jobs (near {:.0f},{:.0f})...",
-                         world_pos.x,
-                         world_pos.z);
-    Luminumbra::Core::WaitWithJobWatchdog(job_watchdog,
-                                          "EnsureSurfaceReadyNear/generation-drain",
-                                          [this]() { wait_for_generation_jobs(); });
-    LUMINUMBRA_CORE_INFO("EnsureSurfaceReadyNear: draining meshing jobs...");
-    Luminumbra::Core::WaitWithJobWatchdog(job_watchdog,
-                                          "EnsureSurfaceReadyNear/meshing-drain",
-                                          [this]() { wait_for_meshing_jobs(); });
-    // settle the two-stage promotion pipeline too (publish staged
-    // sim truth, dispatch + drain the stage-B render meshes) so the surface
-    // band below observes fully settled chunks, exactly as before the split.
-    Luminumbra::Core::WaitWithJobWatchdog(
-        job_watchdog, "EnsureSurfaceReadyNear/promotion-drain", [this]() {
-            wait_for_promotion_jobs();
-            wait_for_meshing_jobs();
-        });
-
     const IVec3 center_chunk = world_to_chunk_coords(world_pos);
     // Preflight the exact vertical work before allocating or changing chunks.
     // At most 625 columns and 8192 chunks, including both vertical margins.
@@ -3934,6 +3904,37 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
         return false;
     if (surface_capacity > chunks_to_consider_for_collision.max_size())
         return false;
+
+    // Diagnostic breadcrumbs ( implementation note): EnsureSurfaceReadyNear blocks on
+    // three unbounded job waits during the interactive "CONSTRUCTING WORLD GEOMETRY"
+    // load. If one wedges (the intermittent freeze), the LAST line printed names the
+    // exact phase that hung. Render-only logging; no world_hash impact. Cheap: this
+    // runs at world-load/teleport, not per-frame.
+    const auto _esrn_t0 = std::chrono::steady_clock::now();
+    // ALL THREE unbounded waits in this function run under the
+    // opt-in LUMINUMBRA_JOB_WATCHDOG named-phase reporter (previously only the
+    // collision-build batch below was wrapped, so a generation/meshing wedge still
+    // hung silently). Observability only — hash-neutral, OFF in determinism gates.
+    const bool job_watchdog = Luminumbra::Core::JobWatchdogEnabled();
+    LUMINUMBRA_CORE_INFO("EnsureSurfaceReadyNear: draining generation jobs (near {:.0f},{:.0f})...",
+                         world_pos.x,
+                         world_pos.z);
+    Luminumbra::Core::WaitWithJobWatchdog(job_watchdog,
+                                          "EnsureSurfaceReadyNear/generation-drain",
+                                          [this]() { wait_for_generation_jobs(); });
+    LUMINUMBRA_CORE_INFO("EnsureSurfaceReadyNear: draining meshing jobs...");
+    Luminumbra::Core::WaitWithJobWatchdog(job_watchdog,
+                                          "EnsureSurfaceReadyNear/meshing-drain",
+                                          [this]() { wait_for_meshing_jobs(); });
+    // settle the two-stage promotion pipeline too (publish staged
+    // sim truth, dispatch + drain the stage-B render meshes) so the surface
+    // band below observes fully settled chunks, exactly as before the split.
+    Luminumbra::Core::WaitWithJobWatchdog(
+        job_watchdog, "EnsureSurfaceReadyNear/promotion-drain", [this]() {
+            wait_for_promotion_jobs();
+            wait_for_meshing_jobs();
+        });
+
     chunks_to_build.reserve(surface_capacity);
     chunks_to_consider_for_collision.reserve(surface_capacity);
 
