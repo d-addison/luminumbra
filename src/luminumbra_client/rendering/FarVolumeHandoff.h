@@ -59,8 +59,10 @@ using FarHandoffObservationVisitor = void (*)(void*,
 
 // Owner-thread companion; the fixture residency controller is independent.
 // One queue/result allowance and memory domain per tier serves both generations.
-// entry_slots bounds retained key history (including removed keys), their union
-// and every manifest. Exhaustion refuses staging until an explicit drain/rebind.
+// entry_slots bounds the serving/target union, every manifest and key history.
+// Idle history survives range removal until space is needed for another key;
+// descriptor reuse starts a new residency for that safely retired key. Global
+// epoch/publication/generation checks survive every descriptor reuse.
 // Capture inputs in this domain: use shared pool aliases whose owner outlives
 // the controller and all external observation aliases. Water bridges and their
 // shared control blocks must also be admitted by the producer before allocation.
@@ -112,6 +114,7 @@ private:
     };
     struct Tier {
         static std::size_t IndexSize(std::size_t, const FarVolumeQueueLimits&);
+        void RebuildIndex();
         Tier(JobSystem&,
              World::FarVolumeMemoryPool&,
              std::size_t,
@@ -121,8 +124,9 @@ private:
         World::FarVolumeChargedResource resource;
         std::pmr::vector<Entry> entries;
         // At most entry_slots keys; twice as many buckets keep load at most 1/2.
-        // Entry history is retained until drain, so no tombstones are needed.
+        // Rebuild after retirement reclaims history; no tombstones accumulate.
         std::pmr::vector<std::size_t> key_index;
+        // Also marks incoming entries during transactional manifest validation.
         std::pmr::vector<std::size_t> order;
         std::pmr::vector<World::FarVolumeRequest> validation;
         FarVolumeBuildQueue queue;

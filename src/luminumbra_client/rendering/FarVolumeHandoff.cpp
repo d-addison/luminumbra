@@ -180,6 +180,20 @@ FarVolumeHandoff::Tier::Tier(JobSystem& jobs,
     order.reserve(count);
     validation.resize(count);
 }
+void FarVolumeHandoff::Tier::RebuildIndex() {
+    std::fill(key_index.begin(), key_index.end(), kEmptyIndex);
+    // Staging only: at most entry_slots insertions into 2 * entry_slots buckets.
+    // Rebuilding preserves collision chains without retaining deleted buckets.
+    for (std::size_t index = 0; index < entries.size(); ++index) {
+        const auto& key = entries[index].key;
+        if (!key)
+            continue;
+        auto bucket = KeyHash(*key) % key_index.size();
+        while (key_index[bucket] != kEmptyIndex)
+            bucket = (bucket + 1) % key_index.size();
+        key_index[bucket] = index;
+    }
+}
 FarVolumeHandoff::FarVolumeHandoff(JobSystem& jobs,
                                    World::FarVolumeTierMemory& memory,
                                    const FarVolumeResidencyLimits& limits,
@@ -356,9 +370,10 @@ bool FarVolumeHandoff::StageTarget(const FarHandoffManifest& manifest) {
         return false;
     std::array<std::size_t, World::kFarTierCount> counts{}, new_keys{};
     std::size_t fallbacks = 0, old_count = 0;
-    for (const auto& tier : tiers_) {
+    for (auto& tier : tiers_) {
         if (!tier)
             throw std::logic_error("Far-volume handoff missing tier");
+        tier->order.assign(tier->entries.size(), 0);
         for (const auto& entry : tier->entries)
             old_count += entry.target.has_value();
     }
@@ -384,7 +399,9 @@ bool FarVolumeHandoff::StageTarget(const FarHandoffManifest& manifest) {
         if (++counts[key.tier - 1] > tier.entries.size())
             return false;
         fallbacks += key.tier == World::kFarTierCount;
-        if (!Find(key))
+        if (const auto* existing = Find(key))
+            tier.order[static_cast<std::size_t>(existing - tier.entries.data())] = 1;
+        else
             ++new_keys[key.tier - 1];
         if (!ValidateInput(
                 manifest, input, tier, tier.validation.at(counts[key.tier - 1] - 1), duplicate))
@@ -397,8 +414,12 @@ bool FarVolumeHandoff::StageTarget(const FarHandoffManifest& manifest) {
         if (!tier)
             throw std::logic_error("Far-volume handoff missing tier");
         std::size_t free = 0;
-        for (const auto& entry : tier->entries)
-            free += !entry.key;
+        for (std::size_t index = 0; index < tier->entries.size(); ++index) {
+            const auto& entry = tier->entries[index];
+            // Omitted target-only entries retire at commit. Serving entries and
+            // every incoming key retain their descriptors and span history.
+            free += !entry.key || (!entry.serving && tier->order[index] == 0);
+        }
         if (new_keys[i] > free)
             return false;
     }
@@ -421,6 +442,29 @@ bool FarVolumeHandoff::StageTarget(const FarHandoffManifest& manifest) {
                 entry.target.reset();
             }
         }
+    }
+    for (std::size_t i = 0; i < tiers_.size(); ++i) {
+        auto& slot = tiers_[i];
+        if (!slot)
+            throw std::logic_error("Far-volume handoff missing tier");
+        auto& tier = *slot;
+        auto free = static_cast<std::size_t>(
+            std::count_if(tier.entries.begin(), tier.entries.end(), [](const auto& entry) {
+                return !entry.key;
+            }));
+        bool reclaimed = false;
+        // Only enough idle history to admit the validated manifest is replaced,
+        // in stable slot order. Work and storage are bounded by entry_slots.
+        for (std::size_t index = 0; free < new_keys[i] && index < tier.entries.size(); ++index) {
+            auto& entry = tier.entries[index];
+            if (!entry.key || entry.serving || entry.target || tier.order[index] != 0)
+                continue;
+            entry = Entry{};
+            ++free;
+            reclaimed = true;
+        }
+        if (reclaimed)
+            tier.RebuildIndex();
     }
     counts = {};
     for (const auto& input : manifest.tiles) {

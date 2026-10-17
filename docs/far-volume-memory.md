@@ -97,9 +97,15 @@ One set of per-tier queues shares one memory domain across serving and staged
 generations. Entry descriptors, retained key/span history, validation/order and
 retirement scratch, queue controls, worker scratch, CPU completions, and both
 GPU generations count against the existing limits. `entry_slots` bounds retained
-key history and the union of serving/target keys, including removed keys, until
-an explicit drain/rebind. History exhaustion refuses staging. Admission refuses
-work when overlap cannot fit; serving fallback is never sold to finance a target.
+key history and the union of serving/target keys. Removed keys retain their
+identity and span history while their descriptors are idle. When a validated
+manifest needs space, only keys absent from both serving and the incoming target
+are reclaimed, in stable slot order and only as many as needed. An evicted key
+starts a new residency if revisited; epoch, publication serial and committed
+generation checks remain global until explicit drain/rebind. Retained keys keep
+all identity and span checks, including keys returning in the incoming manifest.
+Admission refuses work when the serving/target union cannot fit; serving fallback
+is never sold to finance a target.
 No second result allowance or budget is introduced.
 
 Replacement uploads write staged pairs. Every wanted V5 prerequisite must cover

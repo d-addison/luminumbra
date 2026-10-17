@@ -1661,7 +1661,7 @@ TEST(FarVolumeHandoff, DistinctValidKeysExceedPerTierManifestCapacityTransaction
     }
 }
 
-TEST(FarVolumeHandoff, RetainedHistoryAndServingTargetUnionExhaustionAreTransactional) {
+TEST(FarVolumeHandoff, ServingTargetUnionExhaustionIsTransactional) {
     for (const bool retire_old_serving : {false, true}) {
         SCOPED_TRACE(retire_old_serving);
         JobSystem jobs;
@@ -1672,7 +1672,8 @@ TEST(FarVolumeHandoff, RetainedHistoryAndServingTargetUnionExhaustionAreTransact
         FarVolumeHandoff owner(jobs, *memory, limits);
         const std::array a{HandoffInput(memory, {5, 0, 0}, 1, true)};
         const std::array b{HandoffInput(memory, {5, 1, 0}, 2, true)};
-        const std::array c{HandoffInput(memory, {5, 2, 0}, 3, false)};
+        const std::array c{HandoffInput(memory, {5, 2, 0}, 3, false),
+                           HandoffInput(memory, {5, 3, 0}, 3, false)};
         {
             FarVolumeHandoff probe(jobs, *memory, limits);
             ASSERT_TRUE(probe.StageTarget(HandoffManifest(3, c)));
@@ -1699,6 +1700,7 @@ TEST(FarVolumeHandoff, RetainedHistoryAndServingTargetUnionExhaustionAreTransact
         EXPECT_EQ(owner.State().serving_serial, serving_serial);
         EXPECT_EQ(owner.State().committed_generation, 2u);
         EXPECT_FALSE(owner.Observe({5, 2, 0}));
+        EXPECT_FALSE(owner.Observe({5, 3, 0}));
         const auto retained = HandoffObserve(owner, {5, 1, 0});
         ASSERT_TRUE(retained.target);
         if (!retained.target)
@@ -1720,6 +1722,167 @@ TEST(FarVolumeHandoff, RetainedHistoryAndServingTargetUnionExhaustionAreTransact
             EXPECT_EQ(after[i].bytes_total, before[i].bytes_total);
         }
     }
+}
+
+class FarVolumeHandoffTraversal : public ::testing::TestWithParam<std::tuple<std::uint8_t, bool>> {
+};
+TEST_P(FarVolumeHandoffTraversal, ReusesRetiredSlotsBeyondCapacityWithoutResettingPublication) {
+    const auto [tier, publish] = GetParam();
+    JobSystem jobs;
+    jobs.startup(1);
+    auto memory = std::make_shared<FarVolumeTierMemory>(Budgets());
+    auto limits = Limits();
+    limits.entry_slots.fill(2);
+    FarVolumeHandoff owner(jobs, *memory, limits);
+    std::size_t calls = 0;
+    const auto fallback = HandoffInput(memory, {5, 0, 0}, 1, false);
+    // Each tier traverses four times its descriptor capacity, including negative
+    // keys and repeated reuse of hash buckets. Captures stay at one generation.
+    for (std::uint64_t serial = 1; serial <= 8; ++serial) {
+        const FarTileKey key{tier, static_cast<std::int64_t>(serial) - 4, 0};
+        const auto current = HandoffInput(memory, key, 1, false);
+        const std::array inputs{current, fallback};
+        auto manifest = HandoffManifest(serial, std::span(inputs).first(tier == 5 ? 1 : 2));
+        manifest.committed_generation = 1;
+        const auto previous = owner.State();
+        if (serial > 1) {
+            // Refusals when reclamation is needed must not retire old entries.
+            auto missing = inputs;
+            missing[0].observation.reset();
+            auto invalid = manifest;
+            invalid.tiles = std::span(missing).first(manifest.tiles.size());
+            EXPECT_FALSE(owner.StageTarget(invalid));
+            invalid.tiles = {};
+            EXPECT_FALSE(owner.StageTarget(invalid));
+            invalid = manifest;
+            invalid.publication_serial = serial - 2;
+            EXPECT_FALSE(owner.StageTarget(invalid));
+            invalid = manifest;
+            invalid.committed_generation = 0;
+            EXPECT_FALSE(owner.StageTarget(invalid));
+            EXPECT_EQ(owner.State().target_serial, previous.target_serial);
+            EXPECT_EQ(owner.State().serving_serial, previous.serving_serial);
+            const auto retained = HandoffObserve(owner, {tier, key.tx - 1, 0});
+            ASSERT_TRUE(retained.target);
+            if (retained.target) {
+                EXPECT_EQ(retained.target->identity.key.tx, key.tx - 1);
+            }
+        }
+        ASSERT_TRUE(owner.StageTarget(manifest));
+        ASSERT_TRUE(owner.StageTarget(manifest));
+        EXPECT_EQ(owner.State().target_serial, serial);
+        EXPECT_EQ(owner.State().committed_generation, 1u);
+        const auto observed = HandoffObserve(owner, key);
+        ASSERT_TRUE(observed.target);
+        if (observed.target) {
+            EXPECT_EQ(observed.target->identity, current.wanted.identity);
+        }
+        if (publish) {
+            ASSERT_TRUE(HandoffSettle(owner, manifest.tiles, Backend(calls)));
+            ASSERT_TRUE(owner.TryPromote());
+            EXPECT_EQ(owner.State().serving_serial, serial);
+            EXPECT_TRUE(IsFarTileCovering(HandoffObserve(owner, key).serving_coverage));
+        }
+        for (const auto& stats : owner.Memory())
+            EXPECT_LE(stats.bytes_total, stats.limit);
+    }
+    EXPECT_EQ(calls, 0u);
+    owner.CancelAndDrain();
+    EXPECT_EQ(owner.State().target_serial, 0u);
+    auto rebound = HandoffManifest(1, std::span(&fallback, 1));
+    ASSERT_TRUE(owner.StageTarget(rebound));
+}
+INSTANTIATE_TEST_SUITE_P(AllTiers,
+                         FarVolumeHandoffTraversal,
+                         ::testing::Combine(::testing::Values(std::uint8_t{1},
+                                                              std::uint8_t{2},
+                                                              std::uint8_t{3},
+                                                              std::uint8_t{4},
+                                                              std::uint8_t{5}),
+                                            ::testing::Bool()));
+
+TEST(FarVolumeHandoff, ReclamationPreservesCollidingIncomingKeysAndRetainedSpanHistory) {
+    JobSystem jobs;
+    jobs.startup(1);
+    auto memory = std::make_shared<FarVolumeTierMemory>(Budgets());
+    auto limits = Limits();
+    limits.entry_slots.fill(2);
+    FarVolumeHandoff owner(jobs, *memory, limits);
+    // These keys share a bucket in the four-bucket table. Removing the first
+    // must leave the second reachable, even before its incoming turn is staged.
+    const std::array original{HandoffInput(memory, {5, 0, 0}, 1, false),
+                              HandoffInput(memory, {5, 3, 0}, 1, false, -512, 512)};
+    auto initial = HandoffManifest(1, original);
+    ASSERT_TRUE(owner.StageTarget(initial));
+    const std::array incoming{HandoffInput(memory, {5, 4, 0}, 1, false), original[1]};
+    auto replacement = HandoffManifest(2, incoming);
+    replacement.committed_generation = 1;
+    ASSERT_TRUE(owner.StageTarget(replacement));
+    ASSERT_TRUE(owner.StageTarget(replacement));
+    EXPECT_FALSE(owner.Observe({5, 0, 0}));
+    auto retained = HandoffObserve(owner, {5, 3, 0});
+    ASSERT_TRUE(retained.target);
+    if (retained.target) {
+        EXPECT_EQ(retained.target->intent, original[1].wanted.intent);
+    }
+    // Removing a key does not discard its history while a descriptor is idle.
+    replacement.publication_serial = 3;
+    replacement.tiles = std::span(incoming).first(1);
+    ASSERT_TRUE(owner.StageTarget(replacement));
+    const std::array narrower{HandoffInput(memory, {5, 3, 0}, 2, false)};
+    auto regression = HandoffManifest(4, narrower);
+    regression.committed_generation = 2;
+    const auto used = memory->Pool(5)->used();
+    EXPECT_FALSE(owner.StageTarget(regression));
+    EXPECT_EQ(owner.State().target_serial, 3u);
+    EXPECT_EQ(memory->Pool(5)->used(), used);
+    // Retained history also forbids changed metadata under an equal identity.
+    auto changed = original;
+    changed[1].wanted.build_headroom_bytes = 1;
+    regression.tiles = std::span(changed).last(1);
+    regression.committed_generation = 1;
+    EXPECT_FALSE(owner.StageTarget(regression));
+    EXPECT_EQ(owner.State().target_serial, 3u);
+    regression.tiles = std::span(original).last(1);
+    ASSERT_TRUE(owner.StageTarget(regression));
+    retained = HandoffObserve(owner, {5, 3, 0});
+    ASSERT_TRUE(retained.target);
+    if (retained.target) {
+        EXPECT_EQ(retained.target->intent, original[1].wanted.intent);
+    }
+}
+
+TEST(FarVolumeHandoff, ReclaimedDescriptorCannotIntegrateCancelledWorkerFromPreviousKey) {
+    JobSystem jobs;
+    jobs.startup(1);
+    auto memory = std::make_shared<FarVolumeTierMemory>(Budgets());
+    HandoffWorkerGate gate;
+    auto limits = Limits();
+    limits.entry_slots.fill(1);
+    FarVolumeHandoff owner(jobs, *memory, limits, &gate);
+    HandoffGateRelease const release{gate};
+    auto original = std::array{HandoffInput(memory, {5, -1, 0}, 1, true)};
+    std::weak_ptr<const FarFrozenObservation> const held = original[0].observation;
+    ASSERT_TRUE(owner.StageTarget(HandoffManifest(1, original)));
+    gate.Arm();
+    owner.AdvanceFrame(0, 0, {1, 0, 0}, {});
+    ASSERT_TRUE(HandoffWait([&] { return gate.Entered(); }));
+    const std::array replacement{HandoffInput(memory, {5, 1, 0}, 2, false)};
+    ASSERT_TRUE(owner.StageTarget(HandoffManifest(2, replacement)));
+    original = {};
+    EXPECT_FALSE(held.expired());
+    EXPECT_FALSE(owner.Observe({5, -1, 0}));
+    EXPECT_FALSE(owner.TryPromote());
+    gate.Release();
+    std::size_t calls = 0;
+    ASSERT_TRUE(HandoffSettle(owner, replacement, Backend(calls)));
+    EXPECT_TRUE(held.expired());
+    ASSERT_TRUE(owner.TryPromote());
+    EXPECT_EQ(calls, 0u);
+    EXPECT_EQ(owner.Memory()[4].bytes_gpu, 0u);
+    EXPECT_TRUE(HandoffDraws(owner).empty());
+    EXPECT_FALSE(owner.Observe({5, -1, 0}));
+    EXPECT_TRUE(IsFarTileCovering(HandoffObserve(owner, {5, 1, 0}).serving_coverage));
 }
 
 TEST(FarVolumeHandoff, SpanHistorySurvivesRangeRemovalAndRefusesRegression) {
