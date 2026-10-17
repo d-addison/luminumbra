@@ -228,6 +228,18 @@ def check_zones():
     client = read("src/luminumbra_client/main_client.cpp")
     require('LUMIN_PROFILE_ZONE_N("Client frame")' in client
             and 'LUMIN_PROFILE_FRAME_N("Client")' in client, "Missing scoped client frame and marks")
+    require(re.search(r'frame_limiter\.pace\(pacing\.frame_cap, frame_timing\);\s*'
+                      r'LUMIN_PROFILE_ZONE_N\("Client frame"\);\s*'
+                      r'const auto _frameStart', client),
+            "Frame pacing must precede both the scoped profile zone and work timers")
+    # Every presentation path, including capture and scenario paths, must keep
+    # its wait zone when live settings update the swap interval.
+    for source in (ROOT / "src/luminumbra_client").rglob("*.cpp"):
+        text = source.read_text(encoding="utf-8")
+        for call in re.finditer(r"\bglfwSwapBuffers\(window\)", text):
+            require(text[:call.start()].rstrip().endswith(
+                'LUMIN_PROFILE_WAIT("Client present wait",'),
+                f"Missing presentation wait zone: {source.relative_to(ROOT)}")
     jobs = read("src/luminumbra_common/core/JobSystem.cpp")
     for name in ("Worker job execution", "Job queue delay (ms)", "Job queue lock wait",
                  "Job completion lock wait", "Job condition wait", "Worker condition wait"):
@@ -268,6 +280,13 @@ def check_zones():
     require('LUMIN_PROFILE_ZONE_N("File preset load")' in preset
             and 'LUMIN_PROFILE_ZONE_N("File preset override load")' in preset,
             "Missing preset load sibling zones")
+    loader = function_body(preset, "LoadTerrainPreset(const std::filesystem::path& preset_path,")
+    require(loader.lstrip().startswith('LUMIN_PROFILE_ZONE_N("File preset load");'),
+            "Explicit runtime-root loads must share the file-load zone")
+    wrapper = function_body(preset, "LoadTerrainPreset(const std::filesystem::path& preset_path)")
+    require("return LoadTerrainPreset(preset_path," in wrapper
+            and "LUMIN_PROFILE_" not in wrapper,
+            "Inferred-root loads must delegate without duplicating the file-load zone")
 
 
 if __name__ == "__main__":

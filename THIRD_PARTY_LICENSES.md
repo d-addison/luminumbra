@@ -56,9 +56,10 @@ The fetched source, filtering arithmetic and SIMD paths are retained.
 
 ### Tracy v0.13.1
 
-The optional profile variant pins Tracy to the v0.13.1 release; the exact
-upstream revision is recorded in `cmake/tracy.cmake`. Its upstream `LICENSE` is
-reproduced verbatim below; retain this notice when redistributing Tracy-enabled binaries.
+The optional profile variant uses the official upstream tag `v0.13.1`, pinned to
+commit `05cceee0df3b8d7c6fa87e9638af311dbabc63cb` in `cmake/tracy.cmake`. Its
+upstream `LICENSE` is reproduced verbatim below; retain this notice when
+redistributing Tracy-enabled binaries.
 
 ```text
 Tracy Profiler (https://github.com/wolfpld/tracy) is licensed under the

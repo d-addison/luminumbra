@@ -20,6 +20,7 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/app/WindowModeControls.cpp
 
     # Core
+    ${CMAKE_CURRENT_LIST_DIR}/core/HardwareInfo.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/RuntimeScenarioConfig.cpp
 
     # Audio

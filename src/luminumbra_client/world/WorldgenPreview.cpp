@@ -382,9 +382,6 @@ void WorldgenPreview::rebuild_foliage_if_needed(Rendering::RenderPipeline& pipel
     if (m_world == nullptr) {
         return;
     }
-    if (m_last_foliage_generation == m_rebuild_generation) {
-        return; // already built for this world rebuild
-    }
     Rendering::FoliagePass* foliage = pipeline.foliage();
     if (foliage == nullptr) {
         m_last_foliage_generation = m_rebuild_generation; // no pass -> nothing to do, don't retry
@@ -396,11 +393,20 @@ void WorldgenPreview::rebuild_foliage_if_needed(Rendering::RenderPipeline& pipel
     // common/foliage/. If we never received a data root (pure set_params caller),
     // skip the load — the pass stays disabled and renders no foliage.
     if (!m_foliage_loaded && !m_data_root.empty()) {
-        if (foliage->load_scatter_set(m_data_root / "common/foliage/scatter_set.json")) {
-            foliage->set_fade_distances(kFoliageFadeStartM, kFoliageFadeEndM);
-            foliage->set_density_scale(kFoliagePreviewDensityScale);
-        }
+        foliage->load_scatter_set(m_data_root / "common/foliage/scatter_set.json");
         m_foliage_loaded = true; // attempt once; on failure the pass stays empty
+    }
+
+    // Both preview render paths retain the same look after re-entry or a live
+    // preset change. Equal setters are no-ops, so unchanged frames keep caches.
+    // The host restores resolved gameplay values before rendering another view.
+    if (m_foliage_loaded && foliage->archetype_count() != 0) {
+        foliage->set_enabled(true);
+        foliage->set_fade_distances(kFoliageFadeStartM, kFoliageFadeEndM);
+        foliage->set_density_scale(kFoliagePreviewDensityScale);
+    }
+    if (m_last_foliage_generation == m_rebuild_generation) {
+        return; // already built for this world rebuild
     }
 
     // Build the per-chunk scatter inputs from the live world's renderable chunks —

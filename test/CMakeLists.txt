@@ -111,6 +111,23 @@ target_link_libraries(morph_asset_test PRIVATE gtest_main nlohmann_json meshopti
 luminumbra_configure_first_party_target(morph_asset_test)
 luminumbra_pin_fp_determinism(morph_asset_test)
 
+# The preset classifier has no client, GL or world-service dependency.
+add_executable(graphics_preset_classifier_test
+    common/GraphicsPresetClassifier_test.cpp
+    ../src/luminumbra_common/core/GraphicsPresetClassifier.cpp)
+target_include_directories(graphics_preset_classifier_test PRIVATE ../src)
+target_link_libraries(graphics_preset_classifier_test PRIVATE gtest_main)
+luminumbra_configure_first_party_target(graphics_preset_classifier_test)
+
+# Exercise the production collector with deterministic GL/GLFW responses, without a GPU.
+add_executable(hardware_info_test
+    client/HardwareInfo_test.cpp
+    ../src/luminumbra_client/core/HardwareInfo.cpp
+    ../src/luminumbra_common/core/GraphicsPresetClassifier.cpp)
+target_include_directories(hardware_info_test PRIVATE support/hardware_info ../src)
+target_link_libraries(hardware_info_test PRIVATE gtest_main)
+luminumbra_configure_first_party_target(hardware_info_test)
+
 # Table-driven volume generation has no client, GL or world-service dependency.
 add_executable(far_volume_tile_test
     common/FarVolumeTile_test.cpp
@@ -169,6 +186,9 @@ add_executable(common_tests
     common/BiomeReverb_test.cpp
     common/DeterministicMath_test.cpp
     common/SystemConfig_test.cpp
+    common/GraphicsPresets_test.cpp
+    ui/graphics_settings_state_test.cpp
+    common/FrameLimiter_test.cpp
     common/PlantProcgen_test.cpp
     common/NetworkSim_test.cpp
     common/ReplicationDelta_test.cpp
@@ -177,6 +197,7 @@ add_executable(common_tests
     common/ResidencyContract_test.cpp
     common/FarLodStore_test.cpp
     common/FarVolumeWorld_test.cpp
+    common/FarFrozenObservation_test.cpp
     common/FarVolumeRuntime_test.cpp
     common/FarVolumeTierMemory_test.cpp
     rendering/FarWorldWaterMesh_test.cpp
@@ -320,6 +341,11 @@ target_link_libraries(common_tests PRIVATE
     luminumbra_common
     luminumbra_save_fixture_support
 )
+
+# Frozen-water rendering exercises the client bridge and mesh implementation.
+add_executable(far_frozen_water_mesh_test rendering/FarFrozenWaterMesh_test.cpp)
+target_link_libraries(far_frozen_water_mesh_test PRIVATE gtest_main luminumbra_client)
+luminumbra_configure_first_party_target(far_frozen_water_mesh_test)
 
 # File-only path contracts run without a GL context or the common-library graph.
 add_executable(filesystem_path_test
@@ -942,6 +968,7 @@ add_executable(far_lod_worker_test
     rendering/loading_overlay_test.cpp
     rendering/texture_file_test.cpp
     rendering/render_clock_test.cpp
+    rendering/graphics_runtime_test.cpp
 )
 
 target_include_directories(far_lod_worker_test PRIVATE
@@ -1841,6 +1868,18 @@ add_test(
 # timeout" during the post-build gtest_discover_tests step (no test actually ran).
 # 120 s is generous headroom; it only affects the one-time list-tests probe.
 include(GoogleTest)
+if(UNIX)
+    # Isolate allocation replacement used to observe alternate-stack release.
+    add_executable(crash_report_teardown_test
+        common/crash_report_teardown_test.cpp
+        ../src/luminumbra_common/core/CrashReport.cpp)
+    target_include_directories(crash_report_teardown_test PRIVATE
+        ../src
+        ../src/luminumbra_common)
+    target_link_libraries(crash_report_teardown_test PRIVATE gtest_main Threads::Threads)
+    luminumbra_configure_first_party_target(crash_report_teardown_test)
+    gtest_discover_tests(crash_report_teardown_test)
+endif()
 if(LUMINUMBRA_ENABLE_STATIC_PREVIEW)
     add_executable(viewport_protocol_test static_preview/viewport_protocol_test.cpp
         ../tools/static_preview/ViewportProtocol.cpp)
@@ -1857,10 +1896,13 @@ luminumbra_configure_first_party_target(frame_attribution_test)
 
 set(LUMINUMBRA_GTEST_TARGETS
     frame_attribution_test
+    graphics_preset_classifier_test
+    hardware_info_test
     far_volume_tile_test
     far_volume_mesher_test
     far_volume_facade_test
     far_pristine_field_test
+    far_frozen_water_mesh_test
     world_generation_test
     worldgen_layer_snapshot_test
     asset_processor_round_trip_test
@@ -2358,6 +2400,10 @@ endif()
 add_test(NAME RenderContractPython COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_render_contract.py)
 add_test(NAME SystemConfigIdentityPython COMMAND "${Python3_EXECUTABLE}" -B
     ${CMAKE_SOURCE_DIR}/test/tools/test_system_config_identity.py)
+add_test(NAME FramePacingSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/test/tools/test_frame_pacing_contract.py)
+add_test(NAME GraphicsUiSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/test/tools/test_graphics_ui_contract.py)
 add_test(NAME RenderRunnerEvidencePython COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_render_runner_evidence.py)
 set_tests_properties(RenderRunnerEvidencePython PROPERTIES TIMEOUT 60)
 add_test(NAME RenderSceneMatrixPython COMMAND "${Python3_EXECUTABLE}" -B ${CMAKE_SOURCE_DIR}/tools/rendering/acceptance/test_scene_matrix.py)
