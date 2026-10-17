@@ -1764,6 +1764,23 @@ float SHIELD_WorldSystem::SamplePristineFarDensity(const Vec3& wp,
     return std::max(filtered, analytic);
 }
 
+float SHIELD_WorldSystem::SurfaceBreakCellSize() const {
+    return m_params.surface_breaks_enabled ? m_params.feature_cell_size : 0.0f;
+}
+
+float SHIELD_WorldSystem::SurfaceBreakMaxRadius() const {
+    return m_params.surface_breaks_enabled ? m_params.max_feature_radius : 0.0f;
+}
+
+SHIELD_WorldSystem::SurfaceBreakInfo SHIELD_WorldSystem::SurfaceBreakInCell(int cell_x,
+                                                                            int cell_z) const {
+    if (!m_params.surface_breaks_enabled || m_params.feature_cell_size <= 0.0f) {
+        return {};
+    }
+    const SurfaceBreakFeature f = DecodeSurfaceBreakCell(m_seed, cell_x, cell_z, m_params);
+    return {f.valid, f.center_x, f.center_z, f.radius, f.depth, f.shaft};
+}
+
 SHIELD_WorldSystem::SurfaceBreakInfo
 SHIELD_WorldSystem::FindLargestSurfaceBreak(float near_x, float near_z, float scan_radius_m) const {
     SurfaceBreakInfo best;
