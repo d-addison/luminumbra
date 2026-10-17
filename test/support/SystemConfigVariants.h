@@ -144,6 +144,7 @@ inline std::vector<std::pair<std::string, std::string>> EffectiveIdentityMismatc
     ecology.herd_weight = 0.9f;
     session.SetEcologyTuning(ecology);
     variants.emplace_back("historical authority rules", "60ab3c242d54ce89");
+    variants.emplace_back("previous authority rules", "49f2cb57730f3caf");
     variants.emplace_back("ecology setter", session.SystemConfigIdentity());
     session.ApplySystemConfig(luminumbra::core::SystemConfig::Defaults());
     session.SetCircadianAmplitude(0.5f);

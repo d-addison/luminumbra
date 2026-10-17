@@ -3009,7 +3009,7 @@
     {
       "id": "contract.water-authority",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "statement": "Fixed-tick water uses a camera-independent natural horizon, active-region edited authority and explicit sources. Admission restores durable state; initialization uses canonical inputs, including sampled authoritative heightmaps for pending edited water. Departures freeze and returns resume integer state. Sorted admission, initialization, resizing, restored cursors and activity-cache pruning have headless regressions; production qualification remains pending.",
+      "statement": "Fixed-tick water uses a camera-independent natural horizon, active-region edited authority and explicit sources. Generated water has sticky ownership independent of terrain provenance; admission restores durable state; initialization uses canonical inputs, including sampled authoritative heightmaps for pending edited water. Departures freeze and returns resume integer state. Sorted admission, initialization, resizing, restored cursors and activity-cache pruning have headless regressions; production qualification remains pending.",
       "status": "partial",
       "requirements": [
         "ar.file.125",
@@ -3031,9 +3031,18 @@
         "ar.file.150",
         "ar.file.177",
         "ar.file.178",
-        "ar.file.179"
+        "ar.file.179",
+        "ar.file.202"
       ],
       "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.GeneratedWaterAuthoritySurvivesAcknowledgementAndEviction"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.WaterAuthorityMetadataRefusesUnknownAndPartialValues"
+        },
         {
           "kind": "ctest",
           "ref": "GameSessionHeadlessWorldTest.BoundaryWaterAndFreezeIgnoreCameraFramesAndRestore"
@@ -3064,7 +3073,7 @@
     {
       "id": "contract.simulation-collision",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "statement": "Simulation admission installs colliders from complete canonical heightmaps in chunk-id order before creature and server-avatar physics. Rendering cannot allocate or invalidate active-mode terrain bodies; the registry removes bodies outside simulation ownership. Submerged terrain and partial-heightmap regressions are landed; production qualification remains pending.",
+      "statement": "Simulation admission installs colliders from complete canonical heightmaps in chunk-id order before client entry checks, creature and server-avatar physics. Rendering cannot allocate or invalidate active-mode terrain bodies; the registry removes bodies outside simulation ownership. Creature body horizons, submerged terrain and partial-heightmap regressions are landed; production qualification remains pending.",
       "status": "partial",
       "requirements": [
         "ar.file.127",
@@ -3077,6 +3086,10 @@
         "ar.file.149"
       ],
       "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.StartupAdmissionReadiesCollisionBeforeTheFirstTick"
+        },
         {
           "kind": "ctest",
           "ref": "GameSessionHeadlessWorldTest.SubmergedTerrainCollisionIgnoresRenderSchedule"
@@ -3270,7 +3283,7 @@
     {
       "id": "contract.authority-oracle",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "statement": "The shared production oracle merges complete resident authority over durable edited records in stable region/chunk order, decoding one durable chunk at a time. Versioned authority, terrain and water scopes include integer solver state and exclude rendering; availability uses fixed-tick participants. The runner hash regression is landed; client lockstep and replay qualification remain pending.",
+      "statement": "Active-region hashes cache per-chunk terrain and water contributions from durable authority, replace bounded resident contributions without durable reads, and compose a versioned aggregate identical to full recomputation. Camera and lifecycle data are excluded; legacy hashes are unchanged. Cold-scan, mutation, eviction, reload and copy regressions are landed; production qualification remains pending.",
       "status": "partial",
       "requirements": [
         "ar.file.183",
@@ -3283,9 +3296,16 @@
         "ar.file.193",
         "ar.file.194",
         "ar.file.195",
-        "ar.file.196"
+        "ar.file.196",
+        "ar.file.203",
+        "ar.file.204",
+        "ar.file.205"
       ],
       "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.CachedAuthorityHashMatchesFullRecomputeWithoutDurableReads"
+        },
         {
           "kind": "ctest",
           "ref": "WorldOpenRefusal.ProductionChunkOracleIgnoresCameraAndDurableWaterResidency"
@@ -3304,7 +3324,7 @@
     {
       "id": "contract.authority-rule-identity",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "statement": "Negotiated configuration identity v4 includes authority-rules revision 1 without changing the Hello protocol version, refusing older rules before simulation. Identity regressions are landed; mixed-executable native qualification remains pending.",
+      "statement": "Negotiated configuration identity v4 includes authority-rules revision 2 without changing the Hello protocol version, refusing older rules before simulation. Identity regressions are landed; mixed-executable native qualification remains pending.",
       "status": "partial",
       "requirements": [
         "ar.file.188",

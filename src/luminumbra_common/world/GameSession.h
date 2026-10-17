@@ -181,6 +181,9 @@ public:
     // Owner-thread simulation preparation. Call after publishing anchors and before
     // external avatar physics; TickSimulation also calls this before creature physics.
     void PrepareSimulationCollisions();
+    // Owner-thread entry barrier: admit collision before building the visible
+    // spawn horizon. Returns false on missing systems or an admission fault.
+    bool EnsureWorldEntryReady(int horizon_radius, int collision_radius);
 
     Systems::PhysicsSystem* GetPhysicsSystem() {
         return m_physicsSystem.get();

@@ -23,6 +23,7 @@ struct EntityRegistrySnapshot;
 namespace Luminumbra::Persistence {
 
 class RegionContentHasher;
+class AuthorityHashCache;
 struct WorldAuthorityHashes;
 
 // Counters describing one incremental save pass over the streaming state.
@@ -179,6 +180,8 @@ public:
         std::vector<Record> records;
         std::size_t next = 0;
     };
+    // Cold scan only, at load or after replacement of the durable authority root.
+    static AuthorityHashCache load_authority_hash_cache(const std::filesystem::path& save_dir);
     static bool open_region_authority(const std::filesystem::path& region_file,
                                       AuthorityReader& reader);
     static std::shared_ptr<Chunk> read_next_authority(AuthorityReader& reader);

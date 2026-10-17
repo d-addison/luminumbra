@@ -232,7 +232,7 @@ nlohmann::json ChunkToJson(const Chunk& chunk, bool sim_only = false) {
         return build();
     };
     const ChunkState state = chunk.get_state();
-    return nlohmann::json{
+    nlohmann::json result{
         {"coords", IVec3ToJson(chunk.get_coords())},
         {"chunk_id", chunk.get_id()},
         {"state", ChunkStateName(state)},
@@ -304,9 +304,24 @@ nlohmann::json ChunkToJson(const Chunk& chunk, bool sim_only = false) {
         {"ticks_below_threshold", chunk.ticks_below_threshold},
         {"water_mesh_dirty_ticks", chunk.water_mesh_dirty_ticks},
         {"water_state", WaterStateToJson(chunk)}};
+    // Optional ownership metadata leaves legacy and pristine snapshot bytes intact.
+    if (chunk.has_water_authority())
+        result["water_authority"] =
+            chunk.sdf_provenance() == ChunkSdfProvenance::GeneratedCurrentParams ? "generated"
+                                                                                 : "edited";
+    return result;
 }
 
 void ApplyChunkJson(const nlohmann::json& value, Chunk& chunk) {
+    if (value.contains("water_authority")) {
+        const auto ownership = value.at("water_authority").get<std::string>();
+        if (ownership != "generated" && ownership != "edited")
+            throw std::invalid_argument("Unknown water authority provenance");
+        chunk.mark_water_data_dirty();
+        chunk.clear_voxel_data_dirty();
+        if (ownership == "edited")
+            chunk.mark_sdf_loaded_or_edited();
+    }
     chunk.set_state(ChunkStateFromName(value.at("state").get<std::string>()));
     chunk.sdf_data = value.at("sdf_data").get<std::vector<float>>();
     chunk.heightmap_data = value.at("heightmap_data").get<std::vector<float>>();
@@ -692,6 +707,10 @@ bool ValidateChunkFormatObject(const nlohmann::json& chunk, std::vector<std::str
         }
     }
     ValidateWaterStateObject(chunk, errors);
+    if (chunk.contains("water_authority") &&
+        (!chunk.at("water_authority").is_string() ||
+         (chunk.at("water_authority") != "generated" && chunk.at("water_authority") != "edited")))
+        errors.push_back("unknown water authority provenance");
 
     if (coords_valid && chunk.contains("chunk_id") && IsJsonInteger(chunk.at("chunk_id"))) {
         const IVec3 coords = IVec3FromJson(chunk.at("coords"));
@@ -922,7 +941,7 @@ void RegionContentHasher::feed(std::string_view bytes) {
 }
 
 void RegionContentHasher::append(const Chunk& chunk) {
-    if (chunk.sdf_provenance() != ChunkSdfProvenance::LoadedOrEdited)
+    if (!chunk.has_simulation_authority())
         return;
     if (m_hasChunks && chunk.get_id() <= m_lastId)
         throw std::invalid_argument("Region content chunks must have increasing ids");
@@ -986,6 +1005,32 @@ void RegionContentHasher::append(const Chunk& chunk) {
         feed("        ");
         begin = end + 1;
     }
+}
+
+void AuthorityHashCache::update(const Chunk& chunk) {
+    if (!chunk.has_simulation_authority())
+        return;
+    RegionContentHasher hasher;
+    hasher.append(chunk);
+    auto& previous = m_chunks[chunk.get_id()];
+    m_terrain -= previous.terrain;
+    m_water -= previous.water;
+    previous = {.terrain = hasher.terrain_value(), .water = hasher.water_value()};
+    m_terrain += previous.terrain;
+    m_water += previous.water;
+}
+
+WorldAuthorityHashes AuthorityHashCache::hashes() const {
+    const auto count = std::to_string(m_chunks.size());
+    WorldAuthorityHashes result;
+    result.sub.terrain =
+        StableChecksum("simulation_terrain_v4:" + count + ":" + std::to_string(m_terrain));
+    result.sub.water =
+        StableChecksum("simulation_water_v4:" + count + ":" + std::to_string(m_water));
+    result.sub.mesh = StableChecksum("simulation_mesh_excluded_v4");
+    result.world = StableChecksum("simulation_authority_v4|terrain:" + result.sub.terrain +
+                                  "|water:" + result.sub.water);
+    return result;
 }
 
 std::uint64_t RegionContentHasher::value() const {

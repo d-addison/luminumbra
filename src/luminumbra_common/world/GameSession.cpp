@@ -289,6 +289,15 @@ void GameSession::PrepareSimulationCollisions() {
     }
 }
 
+bool GameSession::EnsureWorldEntryReady(int horizon_radius, int collision_radius) {
+    if (!m_worldSystem || !m_physicsSystem)
+        return false;
+    PrepareSimulationCollisions();
+    return !m_regionFault &&
+           m_worldSystem->EnsureSurfaceReadyNear(
+               m_metadata.spawnPoint, m_physicsSystem.get(), horizon_radius, collision_radius);
+}
+
 std::string GameSession::SystemConfigIdentity() const {
     using luminumbra::core::SysKey;
     using luminumbra::core::SysParam;

@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace Luminumbra::Persistence {
@@ -174,6 +175,24 @@ struct WorldStreamingStateSubHashes {
 struct WorldAuthorityHashes {
     std::string world;
     WorldStreamingStateSubHashes sub;
+};
+
+// Owner-thread cache of small per-chunk identities, never chunk payloads. Modular
+// sums permit constant-time replacement; ids are included in each contribution.
+// The cold durable scan and the incremental path use exactly this projection.
+class AuthorityHashCache {
+public:
+    void update(const Chunk& chunk);
+    [[nodiscard]] WorldAuthorityHashes hashes() const;
+
+private:
+    struct Contribution {
+        std::uint64_t terrain = 0;
+        std::uint64_t water = 0;
+    };
+    std::unordered_map<ChunkID, Contribution> m_chunks;
+    std::uint64_t m_terrain = 0;
+    std::uint64_t m_water = 0;
 };
 
 // Computes the chunk-derived per-system sub-hashes (terrain/mesh/water). Pure

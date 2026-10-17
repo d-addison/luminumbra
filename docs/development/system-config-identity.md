@@ -33,8 +33,8 @@ parameter emits its `SysParam` id as u8, then a scalar type tag and little-endia
 After the registry slots, v4 appends these fixed-width little-endian values without
 padding: finite hydrology (u8, 0 or 1), rain scale (i32, modulo-2^32 representation), region
 work limit (u64), hold ticks (u32), reduced cadence shift (u8) and authority-rules
-revision (u32, currently 1). All six values are included even when their associated feature is disabled. No float conversion loses
-adjacent integer values. The defaults append `0119000000ffffffffffffffff1e0000000101000000`.
+revision (u32, currently 2). All six values are included even when their associated feature is disabled. No float conversion loses
+adjacent integer values. The defaults append `0119000000ffffffffffffffff1e0000000102000000`.
 The domain version changes so older identities cannot be mistaken for this encoding.
 This configuration encoding is independent of the resolved preset hash below.
 
@@ -43,7 +43,7 @@ and reproduction integers would lose adjacent values if converted to binary32. S
 zeros remain distinct. FNV-1a uses offset
 14695981039346656037 and prime 1099511628211, with unsigned 64-bit wraparound. The result
 is 16 lowercase hex digits emitted without locale formatting. Shipped defaults serialize
-to **301 bytes → `49f2cb57730f3caf`**. The independent stdlib computation in
+to **301 bytes → `6a02c73e706e06fc`**. The independent stdlib computation in
 `test/tools/test_system_config_identity.py` resolves JSON inputs through binary32 as
 SystemConfig does, applies effective fallback/clamping/count conversion, encodes with
 `struct.pack('<f' / '<d' / '<I', value)`, and folds each byte as
@@ -78,12 +78,12 @@ Deliberate exclusions from the setter audit:
   simulation rule value. Worldgen content is bound separately by the preset identity below.
 
 The shipping pins in the C++ tests and independent Python encoder now include
-revision 1 of the simulation authority rules. The previous shipping identity
-`60ab3c242d54ce89` is explicitly refused by admission regressions. Shared identity
+revision 2 of the simulation authority rules. The previous shipping identity
+`60ab3c242d54ce89` and previous authority identity `49f2cb57730f3caf` are explicitly refused by admission regressions. Shared identity
 validation covers loopback, TCP replication, TCP lockstep and replay; the Hello
 protocol version and wire layout are unchanged. Hardening codec fixtures use
 arbitrary matching identity strings and retain their existing literal values.
-The historical-defaults-off configuration now has identity `0d077b1b4452b7c0`.
+The historical-defaults-off configuration now has identity `ecf77f3446f3ed73`.
 
 The scheduler load correction changes no identity pins: compiled/default schedulers
 still encode the same bytes, and setter-only nondefault identities already encode their

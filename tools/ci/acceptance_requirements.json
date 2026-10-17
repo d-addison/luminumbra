@@ -69,8 +69,8 @@
     {
       "id": "dw.scope.002",
       "source": "docs/distant-world.md#scope",
-      "quote": "The addressable extent is set by the packed chunk identity (`Chunk.h`, \u00b12^20 chunks of 16 m, about \u00b116,777 km on each horizontal axis;",
-      "text": "The addressable extent is set by the packed chunk identity (`Chunk.h`, \u00b12^20 chunks of 16 m, about \u00b116,777 km on each horizontal axis;"
+      "quote": "The addressable extent is set by the packed chunk identity (`Chunk.h`, ±2^20 chunks of 16 m, about ±16,777 km on each horizontal axis;",
+      "text": "The addressable extent is set by the packed chunk identity (`Chunk.h`, ±2^20 chunks of 16 m, about ±16,777 km on each horizontal axis;"
     },
     {
       "id": "dw.scope.003",
@@ -225,8 +225,8 @@
     {
       "id": "dw.tiers.002",
       "source": "docs/distant-world.md#tier-ladder",
-      "quote": "Each tier stores sparse 5\u00d75\u00d75 signed-distance bricks and is polygonised per tile with Marching Cubes;",
-      "text": "Each tier stores sparse 5\u00d75\u00d75 signed-distance bricks and is polygonised per tile with Marching Cubes;"
+      "quote": "Each tier stores sparse 5×5×5 signed-distance bricks and is polygonised per tile with Marching Cubes;",
+      "text": "Each tier stores sparse 5×5×5 signed-distance bricks and is polygonised per tile with Marching Cubes;"
     },
     {
       "id": "dw.tiers.003",
@@ -957,8 +957,8 @@
     {
       "id": "dw.policy.024",
       "source": "docs/distant-world.md#per-system-distant-policy",
-      "quote": "distant creatures do not use scent | \u2014 |",
-      "text": "distant creatures do not use scent | \u2014 |"
+      "quote": "distant creatures do not use scent | — |",
+      "text": "distant creatures do not use scent | — |"
     },
     {
       "id": "dw.policy.025",
@@ -969,8 +969,8 @@
     {
       "id": "dw.policy.026",
       "source": "docs/distant-world.md#per-system-distant-policy",
-      "quote": "| Scheduled game events | Not implemented | Deferred to a later milestone | \u2014 |",
-      "text": "| Scheduled game events | Not implemented | Deferred to a later milestone | \u2014 |"
+      "quote": "| Scheduled game events | Not implemented | Deferred to a later milestone | — |",
+      "text": "| Scheduled game events | Not implemented | Deferred to a later milestone | — |"
     },
     {
       "id": "dw.policy.027",
@@ -1083,8 +1083,8 @@
     {
       "id": "dw.calendar.013",
       "source": "docs/distant-world.md#simulation-clock-and-calendar",
-      "quote": "`dayLengthTicks` must be an integer in [1, 2^31), `daysPerYear` an integer in [1, 366], `simulationTick` an unsigned integer below 2^62, and the products day \u00d7 year and tick + catch-up clamp are overflow-checked;",
-      "text": "`dayLengthTicks` must be an integer in [1, 2^31), `daysPerYear` an integer in [1, 366], `simulationTick` an unsigned integer below 2^62, and the products day \u00d7 year and tick + catch-up clamp are overflow-checked;"
+      "quote": "`dayLengthTicks` must be an integer in [1, 2^31), `daysPerYear` an integer in [1, 366], `simulationTick` an unsigned integer below 2^62, and the products day × year and tick + catch-up clamp are overflow-checked;",
+      "text": "`dayLengthTicks` must be an integer in [1, 2^31), `daysPerYear` an integer in [1, 366], `simulationTick` an unsigned integer below 2^62, and the products day × year and tick + catch-up clamp are overflow-checked;"
     },
     {
       "id": "dw.calendar.014",
@@ -1437,8 +1437,8 @@
     {
       "id": "dw.perf.001",
       "source": "docs/distant-world.md#performance-measurement-contract",
-      "quote": "Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840\u00d71600 and 3440\u00d71440.",
-      "text": "Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840\u00d71600 and 3440\u00d71440."
+      "quote": "Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840×1600 and 3440×1440.",
+      "text": "Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840×1600 and 3440×1440."
     },
     {
       "id": "dw.perf.002",
@@ -2535,8 +2535,8 @@
     {
       "id": "ar.file.090",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Frozen content is supplied at the transition by merging authoritative chunks by id, with complete resident authority taking precedence over durable region records carrying the sticky edited flag.",
-      "text": "Frozen content is supplied at the transition by merging authoritative chunks by id, with complete resident authority taking precedence over durable region records carrying the sticky edited flag."
+      "quote": "Frozen content is supplied at the transition by merging authoritative chunks by id, with complete resident authority taking precedence over durable region records carrying the sticky authority flag.",
+      "text": "Frozen content is supplied at the transition by merging authoritative chunks by id, with complete resident authority taking precedence over durable region records carrying the sticky authority flag."
     },
     {
       "id": "ar.file.091",
@@ -3603,8 +3603,8 @@
     {
       "id": "ar.file.120",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "With active regions enabled, render eviction atomically persists a complete `LoadedOrEdited` chunk through the existing LMR1 durable replacement path before releasing it.",
-      "text": "With active regions enabled, render eviction atomically persists a complete `LoadedOrEdited` chunk through the existing LMR1 durable replacement path before releasing it."
+      "quote": "With active regions enabled, render eviction atomically persists a complete chunk with edited terrain or simulated water authority through the existing LMR1 durable replacement path before releasing it.",
+      "text": "With active regions enabled, render eviction atomically persists a complete chunk with edited terrain or simulated water authority through the existing LMR1 durable replacement path before releasing it."
     },
     {
       "id": "ar.file.121",
@@ -3741,8 +3741,8 @@
     {
       "id": "ar.file.143",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Before creature or server-avatar physics, the owner thread admits the same simulation horizon and installs terrain colliders synchronously for chunks with complete canonical heightmaps, in chunk-id order.",
-      "text": "Before creature or server-avatar physics, the owner thread admits the same simulation horizon and installs terrain colliders synchronously for chunks with complete canonical heightmaps, in chunk-id order."
+      "quote": "Before creature or server-avatar physics and client entry readiness checks, the owner thread admits the simulation horizon around every advancing creature body as well as each simulation anchor, and installs terrain colliders synchronously for chunks with complete canonical heightmaps, in chunk-id order.",
+      "text": "Before creature or server-avatar physics and client entry readiness checks, the owner thread admits the simulation horizon around every advancing creature body as well as each simulation anchor, and installs terrain colliders synchronously for chunks with complete canonical heightmaps, in chunk-id order."
     },
     {
       "id": "ar.file.144",
@@ -3777,8 +3777,8 @@
     {
       "id": "ar.file.149",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Render-only colliders therefore cannot affect authoritative creatures beyond the horizon.",
-      "text": "Render-only colliders therefore cannot affect authoritative creatures beyond the horizon."
+      "quote": "Render-only colliders therefore cannot affect authoritative creatures beyond their admitted horizons.",
+      "text": "Render-only colliders therefore cannot affect authoritative creatures beyond their admitted horizons."
     },
     {
       "id": "ar.file.150",
@@ -3987,14 +3987,14 @@
     {
       "id": "ar.file.184",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "It merges complete resident authority over durable edited records, in region-coordinate and chunk-id order.",
-      "text": "It merges complete resident authority over durable edited records, in region-coordinate and chunk-id order."
+      "quote": "It merges complete resident authority over durable terrain and water authority using per-chunk terrain and water contributions.",
+      "text": "It merges complete resident authority over durable terrain and water authority using per-chunk terrain and water contributions."
     },
     {
       "id": "ar.file.185",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "It decodes one durable chunk at a time, so evicted water remains represented without rebuilding a second resident world.",
-      "text": "It decodes one durable chunk at a time, so evicted water remains represented without rebuilding a second resident world."
+      "quote": "A cold scan decodes one durable chunk at a time and caches only its two integer contributions;",
+      "text": "A cold scan decodes one durable chunk at a time and caches only its two integer contributions;"
     },
     {
       "id": "ar.file.186",
@@ -4011,8 +4011,8 @@
     {
       "id": "ar.file.188",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "The negotiated system configuration identity includes authority-rules revision 1 in its v4 encoding, so earlier executables are refused before simulation rather than reaching a hash mismatch.",
-      "text": "The negotiated system configuration identity includes authority-rules revision 1 in its v4 encoding, so earlier executables are refused before simulation rather than reaching a hash mismatch."
+      "quote": "The negotiated system configuration identity includes authority-rules revision 2 in its v4 encoding, so earlier executables are refused before simulation rather than reaching a hash mismatch.",
+      "text": "The negotiated system configuration identity includes authority-rules revision 2 in its v4 encoding, so earlier executables are refused before simulation rather than reaching a hash mismatch."
     },
     {
       "id": "ar.file.189",
@@ -4023,8 +4023,8 @@
     {
       "id": "ar.file.190",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "The changed hash meanings have explicit `simulation_authority_v3`, `simulation_terrain_v3` and `simulation_water_v3` scope prefixes, following the versioned content-projection convention.",
-      "text": "The changed hash meanings have explicit `simulation_authority_v3`, `simulation_terrain_v3` and `simulation_water_v3` scope prefixes, following the versioned content-projection convention."
+      "quote": "The changed hash meanings have explicit `simulation_authority_v4`, `simulation_terrain_v4` and `simulation_water_v4` scope prefixes, following the versioned content-projection convention.",
+      "text": "The changed hash meanings have explicit `simulation_authority_v4`, `simulation_terrain_v4` and `simulation_water_v4` scope prefixes, following the versioned content-projection convention."
     },
     {
       "id": "ar.file.191",
@@ -4041,8 +4041,8 @@
     {
       "id": "ar.file.193",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "LMR1 stores complete content, not these oracle values, so its format and saved-record compatibility are unchanged.",
-      "text": "LMR1 stores complete content, not these oracle values, so its format and saved-record compatibility are unchanged."
+      "quote": "LMR1 stores complete content, not these oracle values, and retains its container format;",
+      "text": "LMR1 stores complete content, not these oracle values, and retains its container format;"
     },
     {
       "id": "ar.file.194",
@@ -4091,6 +4091,30 @@
       "source": "docs/active-regions.md#file-and-compatibility",
       "quote": "This content contributes even in `Loading` state during a render rebuild.",
       "text": "This content contributes even in `Loading` state during a render rebuild."
+    },
+    {
+      "id": "ar.file.202",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "text": "Optional `water_authority` snapshot metadata records generated or edited terrain provenance, and unknown values refuse loading.",
+      "quote": "Optional `water_authority` snapshot metadata records generated or edited terrain provenance, and unknown values refuse loading."
+    },
+    {
+      "id": "ar.file.203",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "text": "later captures replace contributions from the bounded resident set without reading durable records.",
+      "quote": "later captures replace contributions from the bounded resident set without reading durable records."
+    },
+    {
+      "id": "ar.file.204",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "text": "Unsigned modular sums and the chunk count compose the same result as a full recompute, with chunk identity included in every contribution.",
+      "quote": "Unsigned modular sums and the chunk count compose the same result as a full recompute, with chunk identity included in every contribution."
+    },
+    {
+      "id": "ar.file.205",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "text": "water ownership uses optional chunk metadata with legacy omission compatibility.",
+      "quote": "water ownership uses optional chunk metadata with legacy omission compatibility."
     }
   ],
   "exclusions": [
@@ -4249,8 +4273,8 @@
     {
       "id": "dw.perf.018",
       "source": "docs/distant-world.md#performance-measurement-contract",
-      "quote": "Current behaviour: the benchmark records means only, sums eleven pass timers instead of bracketing the frame, pins the framebuffer to 3840\u00d71600, and does not record the renderer string;",
-      "text": "Current behaviour: the benchmark records means only, sums eleven pass timers instead of bracketing the frame, pins the framebuffer to 3840\u00d71600, and does not record the renderer string;",
+      "quote": "Current behaviour: the benchmark records means only, sums eleven pass timers instead of bracketing the frame, pins the framebuffer to 3840×1600, and does not record the renderer string;",
+      "text": "Current behaviour: the benchmark records means only, sums eleven pass timers instead of bracketing the frame, pins the framebuffer to 3840×1600, and does not record the renderer string;",
       "reason": "Descriptive Current behaviour paragraph contrasts shipped behaviour with the accepted future contract; it is not an acceptance requirement.",
       "category": "current-behaviour"
     },

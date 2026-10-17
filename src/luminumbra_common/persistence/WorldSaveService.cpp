@@ -808,9 +808,9 @@ std::shared_ptr<Chunk> DecodeChunkRecord(const RegionRecord& record,
     }
     // Save-dirty is transient, but the container's sticky edited flag is the
     // durable authority bit. Pristine cached chunks stay regenerable.
-    if ((record.flags & kRecordFlagEdited) != 0u) {
+    if ((record.flags & kRecordFlagEdited) != 0u && !chunks.front()->has_water_authority()) {
         chunks.front()->mark_sdf_loaded_or_edited();
-    } else {
+    } else if (!chunks.front()->has_water_authority()) {
         chunks.front()->mark_sdf_generated_current_params();
     }
     return chunks.front();
@@ -821,8 +821,7 @@ std::uint8_t ChunkRecordFlags(const Chunk& chunk, std::uint8_t previous_flags) {
     // Edited/authoritative is sticky: once a chunk record was persisted with
     // post-generation edits it stays authoritative even after the in-memory
     // dirty flag is cleared by the save.
-    if (chunk.sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited ||
-        (previous_flags & kRecordFlagEdited) != 0) {
+    if (chunk.has_simulation_authority() || (previous_flags & kRecordFlagEdited) != 0) {
         flags |= kRecordFlagEdited;
     }
     if (chunk.has_water_sim.load(std::memory_order_acquire) || !chunk.water_mesh_vertices.empty()) {
@@ -1295,7 +1294,7 @@ RegionContentHasher WorldSaveService::region_content_hasher(const std::filesyste
     // durable edits. Complete retained authority is independent of render lifecycle.
     // insert_chunk preserves the first record per id.
     const auto qualifies = [&key](const std::shared_ptr<Chunk>& chunk) {
-        if (!chunk || chunk->sdf_provenance() != ChunkSdfProvenance::LoadedOrEdited)
+        if (!chunk || !chunk->has_simulation_authority())
             return false;
         int rx = 0, rz = 0;
         region_coords_for_chunk(chunk->get_coords(), rx, rz);
@@ -1521,41 +1520,30 @@ bool WorldSaveService::read_authoritative_region_chunks(
 WorldAuthorityHashes
 WorldSaveService::authority_hashes(const std::filesystem::path& save_dir,
                                    const std::vector<std::shared_ptr<Chunk>>& live_chunks) {
-    std::map<std::pair<int, int>, std::vector<std::shared_ptr<Chunk>>> regions;
-    for (const auto& chunk : live_chunks) {
-        if (!chunk || chunk->sdf_provenance() != ChunkSdfProvenance::LoadedOrEdited)
-            continue;
-        int rx = 0, rz = 0;
-        region_coords_for_chunk(chunk->get_coords(), rx, rz);
-        regions[{rx, rz}].push_back(chunk);
-    }
+    auto cache = load_authority_hash_cache(save_dir);
+    for (const auto& chunk : live_chunks)
+        if (chunk)
+            cache.update(*chunk);
+    return cache.hashes();
+}
+
+AuthorityHashCache
+WorldSaveService::load_authority_hash_cache(const std::filesystem::path& save_dir) {
+    AuthorityHashCache cache;
     const auto directory = region_directory(save_dir);
-    if (!save_dir.empty() && std::filesystem::exists(directory)) {
-        for (const auto& entry : std::filesystem::directory_iterator(directory)) {
-            int rx = 0, rz = 0;
-            if (entry.is_regular_file() && ParseRegionFileName(entry.path(), rx, rz))
-                regions.try_emplace({rx, rz});
-        }
+    if (save_dir.empty() || !std::filesystem::exists(directory))
+        return cache;
+    for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+        int rx = 0, rz = 0;
+        if (!entry.is_regular_file() || !ParseRegionFileName(entry.path(), rx, rz))
+            continue;
+        AuthorityReader reader;
+        if (!open_region_authority(entry.path(), reader))
+            throw std::runtime_error("Cannot read durable authority for hashing");
+        while (auto chunk = read_next_authority(reader))
+            cache.update(*chunk);
     }
-    // Only small per-region identities are accumulated. Full payloads are
-    // decoded singly by the shared freeze-digest merge, including disk-only edits.
-    nlohmann::json terrain = nlohmann::json::array();
-    nlohmann::json water = nlohmann::json::array();
-    for (const auto& [key, live] : regions) {
-        const auto hasher = region_content_hasher(
-            save_dir, {key.first, key.second}, RegionDigestInputs{live, {}, true});
-        if (hasher.empty())
-            continue; // durable pristine/render caches cannot add empty region identities
-        terrain.push_back({key.first, key.second, hasher.terrain_value()});
-        water.push_back({key.first, key.second, hasher.water_value()});
-    }
-    WorldAuthorityHashes result;
-    result.sub.terrain = StableChecksum("simulation_terrain_v3:" + terrain.dump());
-    result.sub.water = StableChecksum("simulation_water_v3:" + water.dump());
-    result.sub.mesh = StableChecksum("simulation_mesh_excluded_v3");
-    result.world = StableChecksum("simulation_authority_v3|terrain:" + result.sub.terrain +
-                                  "|water:" + result.sub.water);
-    return result;
+    return cache;
 }
 
 bool WorldSaveService::open_region_authority(const std::filesystem::path& region_file,

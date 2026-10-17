@@ -2379,14 +2379,8 @@ int main(int argc, char* argv[]) {
             (scenario_config.active() && scenario_config.auto_enter_world);
         if (bypass_loading_ui) {
             LUMINUMBRA_CORE_INFO("Runtime scenario mode: entered world without loading UI.");
-            bool horizon_ready = true;
-            if (gameSession->GetWorldSystem() && gameSession->GetPhysicsSystem()) {
-                horizon_ready = gameSession->GetWorldSystem()->EnsureSurfaceReadyNear(
-                    gameSession->GetMetadata().spawnPoint,
-                    gameSession->GetPhysicsSystem(),
-                    scenario_config.horizon_radius,
-                    scenario_config.collision_radius);
-            }
+            const bool horizon_ready = gameSession->EnsureWorldEntryReady(
+                scenario_config.horizon_radius, scenario_config.collision_radius);
             g_camera = std::make_unique<Luminumbra::Rendering::Camera>(
                 gameSession->GetMetadata().spawnPoint);
             g_camera->MouseSensitivity =
@@ -3804,13 +3798,7 @@ int main(int argc, char* argv[]) {
 
                 if (static_cast<size_t>(g_app.loading.generation_dispatch_index) >=
                     g_app.loading.initial_chunks_to_load.size()) {
-                    if (gameSession->GetWorldSystem() && gameSession->GetPhysicsSystem()) {
-                        gameSession->GetWorldSystem()->EnsureSurfaceReadyNear(
-                            gameSession->GetMetadata().spawnPoint,
-                            gameSession->GetPhysicsSystem(),
-                            12,
-                            4);
-                    }
+                    const bool horizon_ready = gameSession->EnsureWorldEntryReady(12, 4);
                     LUMINUMBRA_CORE_INFO("World generation phase complete. Entering world.");
                     g_camera = std::make_unique<Luminumbra::Rendering::Camera>(
                         gameSession->GetMetadata().spawnPoint);
@@ -3871,7 +3859,7 @@ int main(int argc, char* argv[]) {
                     if (scenario_config.active()) {
                         last_readiness_report =
                             EvaluateReadiness(scenario_config, gameSession.get());
-                        if (!last_readiness_report.ready) {
+                        if (!horizon_ready || !last_readiness_report.ready) {
                             scenario_failed = true;
                             scenario_failure_reason = "world_readiness_failed";
                             runtime_state_recorder.capture("world_readiness_failed",

@@ -77,14 +77,22 @@ public:
         m_voxel_data_dirty.store(false, std::memory_order_release);
     }
     // Water shares the durable chunk record but does not change voxel geometry
-    // or invalidate SDF/render revisions. The owner must already hold authority.
+    // or invalidate SDF/render revisions. Water ownership is sticky after saving.
     void mark_water_data_dirty() {
+        m_water_authority.store(true, std::memory_order_release);
         m_voxel_data_dirty.store(true, std::memory_order_release);
+    }
+    bool has_water_authority() const {
+        return m_water_authority.load(std::memory_order_acquire);
+    }
+    bool has_simulation_authority() const {
+        return has_water_authority() || sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited;
     }
     bool is_voxel_data_dirty() const {
         return m_voxel_data_dirty.load(std::memory_order_acquire);
     }
     void mark_sdf_generated_current_params() {
+        m_water_authority.store(false, std::memory_order_release);
         m_sdf_provenance.store(static_cast<u8>(ChunkSdfProvenance::GeneratedCurrentParams),
                                std::memory_order_release);
         m_voxel_revision.store(0u, std::memory_order_release);
@@ -224,6 +232,7 @@ private:
     std::atomic<bool> m_voxel_data_dirty{false};
     std::atomic<u8> m_sdf_provenance{static_cast<u8>(ChunkSdfProvenance::GeneratedCurrentParams)};
     std::atomic<u32> m_voxel_revision{0};
+    std::atomic<bool> m_water_authority{false};
 };
 
 } // namespace Luminumbra

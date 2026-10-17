@@ -30,7 +30,8 @@
 
 namespace Luminumbra::Persistence {
 struct WorldAuthorityHashes;
-}
+class AuthorityHashCache;
+} // namespace Luminumbra::Persistence
 
 namespace Luminumbra::Systems {
 
@@ -885,9 +886,9 @@ public:
     ActivationShadowReport activation_shadow_report() const;
     // Shared-ownership snapshot of every streamed chunk (save path).
     std::vector<std::shared_ptr<::Luminumbra::Chunk>> snapshot_streamed_chunks() const;
-    // Resident edited content for a region, including simulation owners outside
+    // Resident terrain/water authority, including simulation owners outside
     // rendering's wanted set. Persistence merges durable-only records separately.
-    // Generated caches are excluded; lifecycle is render bookkeeping.
+    // Pristine generated caches are excluded; lifecycle is render bookkeeping.
     std::vector<std::shared_ptr<::Luminumbra::Chunk>> snapshot_region_authority(i32 rx,
                                                                                 i32 rz) const;
     // Const diagnostic: simulation ownership aliases the shared resident budget.
@@ -909,7 +910,7 @@ public:
                                   const std::set<std::pair<i32, i32>>& regions,
                                   const std::vector<Vec3>& anchors,
                                   PhysicsSystem* physics_system);
-    // Fixed-tick consumer; authority outside these deterministic regions stays frozen.
+    // Fixed-tick consumer; regions and advancing bodies determine the horizons.
     void simulate_region_authority(entt::registry& registry,
                                    const std::set<std::pair<i32, i32>>& regions,
                                    const std::vector<Vec3>& anchors,
@@ -917,7 +918,8 @@ public:
     // Owner-thread capture for a 32x32 chunk far region plus a one-chunk X/Z
     // halo. Only exact full SDF lattices are copied into the immutable result.
     std::shared_ptr<const FarLodSdfSnapshot> capture_far_lod_sdf_snapshot(i32 rx, i32 rz) const;
-    // Canonical production oracle: complete live authority merged with durable records.
+    // Cached authority projection; scans durable records once per load, then only
+    // bounded resident authority. Water and voxel mutation are observed exactly.
     Persistence::WorldAuthorityHashes compute_chunk_hashes() const;
     // Const diagnostic: sorted fixed-tick participants, independent of render lifecycle.
     std::vector<ChunkID> simulation_chunk_ids() const;
@@ -950,6 +952,7 @@ private:
     std::filesystem::path m_authorityDirectory;
     std::filesystem::path m_temporaryAuthorityDirectory;
     std::optional<std::string> m_authorityFault;
+    mutable std::unique_ptr<Persistence::AuthorityHashCache> m_authorityHashCache;
     // Rebuilt once per fixed tick; at most 8,192 ids, consumed from the back.
     std::vector<ChunkID> m_authorityEvictionCandidates;
     std::size_t resident_chunk_count() const;

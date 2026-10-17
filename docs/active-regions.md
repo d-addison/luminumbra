@@ -248,11 +248,13 @@ read from an unrecorded machine-local budget.
 
 Frozen content is supplied at the transition by merging authoritative chunks
 by id, with complete resident authority taking precedence over durable
-region records carrying the sticky edited flag. With active regions enabled,
-render eviction atomically persists a complete `LoadedOrEdited` chunk through
+region records carrying the sticky authority flag. With active regions enabled,
+render eviction atomically persists a complete chunk with edited terrain or
+simulated water authority through
 the existing LMR1 durable replacement path before releasing it. This includes
 clean chunks whose dirty flags were acknowledged by an earlier save: later
-water state must also be durable. A failed replacement keeps the complete
+water state must also be durable. Optional `water_authority` snapshot metadata
+records generated or edited terrain provenance, and unknown values refuse loading. A failed replacement keeps the complete
 in-memory owner and latches the session's existing fail-stop fault at the next
 tick boundary. Both streaming generation and synchronous surface loading restore
 that durable authority before considering generation. Transient replay and
@@ -287,8 +289,9 @@ is introduced. Pending edited-water initialization and resolution changes select
 chunk ids in order. Snapshot loads preserve the simulation-window cursor and
 pending resizes, and discard derived activity scores.
 
-Before creature or server-avatar physics, the owner thread admits the same
-simulation horizon and installs terrain colliders synchronously for chunks with
+Before creature or server-avatar physics and client entry readiness checks, the
+owner thread admits the simulation horizon around every advancing creature body
+as well as each simulation anchor, and installs terrain colliders synchronously for chunks with
 complete canonical heightmaps, in chunk-id order. Partial heightmaps do not install
 terrain colliders. Active-mode rendering never allocates terrain bodies,
 so body allocation and contacts follow only the simulation schedule. Admission
@@ -296,7 +299,7 @@ replaces stale render colliders immediately;
 render remeshing cannot invalidate simulation collision readiness. Before physics,
 the physics registry also removes every terrain body outside the deterministic
 simulation set, even if its renderer chunk has already been evicted. Render-only
-colliders therefore cannot affect authoritative creatures beyond the horizon. Water
+colliders therefore cannot affect authoritative creatures beyond their admitted horizons. Water
 still advances in its existing fixed-tick slot after weather. The zero-avatar server
 runner publishes its spawn, moving or wet-walk workload anchor before physics and
 simulation; that anchor is a pure function of the workload tick.
@@ -338,23 +341,26 @@ use the same rule.
 
 The server's three production hash captures and the client's lockstep chunk
 capture use a shared authority oracle with active regions enabled. It merges
-complete resident authority over durable edited records, in region-coordinate
-and chunk-id order. It decodes one durable chunk at a time, so evicted water
-remains represented without rebuilding a second resident world. Render caches,
+complete resident authority over durable terrain and water authority using
+per-chunk terrain and water contributions. A cold scan decodes one durable chunk
+at a time and caches only its two integer contributions; later captures replace
+contributions from the bounded resident set without reading durable records.
+Unsigned modular sums and the chunk count compose the same result as a full
+recompute, with chunk identity included in every contribution. Render caches,
 meshes and lifecycle flags cannot affect this oracle. The server availability
 digest likewise uses sorted fixed-tick simulation participants in this mode.
 
-The negotiated system configuration identity includes authority-rules revision 1
+The negotiated system configuration identity includes authority-rules revision 2
 in its v4 encoding, so earlier executables are refused before simulation rather
 than reaching a hash mismatch. This does not change the Hello protocol version.
 
-The changed hash meanings have explicit `simulation_authority_v3`,
-`simulation_terrain_v3` and `simulation_water_v3` scope prefixes, following the
+The changed hash meanings have explicit `simulation_authority_v4`,
+`simulation_terrain_v4` and `simulation_water_v4` scope prefixes, following the
 versioned content-projection convention. The water scope includes chunk identity,
 integer bed/depth/flux, initialization, resolution, sleep and threshold fields.
 Legacy snapshot hashes remain unchanged with active regions disabled. LMR1 stores
-complete content, not these oracle values, so its format and saved-record
-compatibility are unchanged. Replay headers/checkpoints do store oracle values;
+complete content, not these oracle values, and retains its container format;
+water ownership uses optional chunk metadata with legacy omission compatibility. Replay headers/checkpoints do store oracle values;
 older active-region captures fail the existing start-hash/checkpoint comparison
 instead of being silently accepted under the changed water rules. Captures made
 under the new scopes must be compared with captures under those same scopes.

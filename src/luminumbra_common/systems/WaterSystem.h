@@ -74,7 +74,8 @@ public:
 
      * @param registry The main ECS registry.
 
-     * @param active_chunks A map of currently loaded chunks from the SHIELD system.
+     * @param active_chunks The admitted simulation chunks, or loaded chunks in legacy mode.
+     * @param deterministic_authority Selects ordered admission and resize processing.
 
      */
 
