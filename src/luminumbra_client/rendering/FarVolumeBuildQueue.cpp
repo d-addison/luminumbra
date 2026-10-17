@@ -409,7 +409,10 @@ void FarVolumeBuildQueue::Cancel(const World::FarTileKey& key) {
     const auto index = Find(key);
     if (!index)
         return;
-    auto& descriptor = descriptors_[*index];
+    CancelAt(*index);
+}
+void FarVolumeBuildQueue::CancelAt(std::size_t index) {
+    auto& descriptor = descriptors_[index];
     descriptor.pending = false;
     if (descriptor.slot) {
         auto& slot = slots_[*descriptor.slot];
@@ -423,11 +426,14 @@ void FarVolumeBuildQueue::Forget(const World::FarTileKey& key) {
     const auto index = Find(key);
     if (!index)
         return;
-    descriptors_[*index].forget = true;
-    Cancel(key);
-    if (!descriptors_[*index].slot) {
-        descriptors_[*index].desired.reset();
-        descriptors_[*index].forget = false;
+    ForgetAt(*index);
+}
+void FarVolumeBuildQueue::ForgetAt(std::size_t index) {
+    descriptors_[index].forget = true;
+    CancelAt(index);
+    if (!descriptors_[index].slot) {
+        descriptors_[index].desired.reset();
+        descriptors_[index].forget = false;
     }
 }
 bool FarVolumeBuildQueue::Retry(const World::FarTileKey& key) {

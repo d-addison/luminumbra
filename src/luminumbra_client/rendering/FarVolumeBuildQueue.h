@@ -8,6 +8,7 @@
 #include <memory_resource>
 #include <span>
 #include <thread>
+#include <utility>
 
 namespace Luminumbra::Rendering {
 
@@ -144,6 +145,21 @@ public:
     std::size_t ResultCapacity(std::size_t retained_results = 0) const;
     void Cancel(const World::FarTileKey& key);
     void Forget(const World::FarTileKey& key);
+    // Visit each descriptor once for a transactional owner's retirement pass.
+    // The nonthrowing predicate borrows a key; it must not mutate/reenter this
+    // queue. No allocation, per-key descriptor search, or worker wait occurs.
+    // Returns visited descriptors for owner-thread work diagnostics.
+    template<class Predicate>
+    std::size_t ForgetMatching(const Predicate& predicate) {
+        static_assert(noexcept(predicate(std::declval<const World::FarTileKey&>())));
+        CheckOwner();
+        for (std::size_t index = 0; index < descriptors_.size(); ++index) {
+            const auto& desired = descriptors_[index].desired;
+            if (desired && predicate(desired->identity.key))
+                ForgetAt(index);
+        }
+        return descriptors_.size();
+    }
     // Explicit retry after wanted-set/budget change; duplicates never auto-retry.
     bool Retry(const World::FarTileKey& key);
     std::optional<FarVolumeQueueCompletion>
@@ -178,6 +194,8 @@ private:
     void CheckOwner() const;
     void Reap();
     void ClearSlot(std::size_t index);
+    void CancelAt(std::size_t index);
+    void ForgetAt(std::size_t index);
     std::optional<std::size_t> Find(const World::FarTileKey& key) const;
 
     JobSystem& jobs_;

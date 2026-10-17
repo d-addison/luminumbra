@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -2297,4 +2298,272 @@ TEST(FarVolumeHandoff, EmptyTerrainWithWetWaterCoversOnlyAsCombinedUploadedPair)
     EXPECT_EQ(owner.Memory()[4].bytes_gpu, 0u);
     EXPECT_TRUE(HandoffObserve(owner, {5, 0, 0}).serving_water_known_dry);
     EXPECT_TRUE(HandoffDraws(owner).empty());
+}
+
+namespace {
+// Capacities below are stress inputs within the existing 512-entry renderer
+// contract. Image/pool limits and the established capture helpers stay intact.
+FarVolumeResidencyLimits AdmissionLimits(std::size_t count) {
+    auto limits = Limits();
+    limits.entry_slots.fill(count);
+    for (auto& queue : limits.queues)
+        queue.descriptor_slots = count;
+    return limits;
+}
+void CheckAdmissionWork(const FarVolumeAdmissionWork& work, std::size_t count) {
+    // A deterministic comparison envelope, not a time or production work limit.
+    // Pairwise validation/retirement at 512 keys exceeds this envelope.
+    const auto levels = std::bit_width(count) + 1;
+    EXPECT_LE(work.key_comparisons, 12 * count * levels);
+    EXPECT_LE(work.descriptor_visits, 12 * count);
+}
+class AdmissionAllocationObserver final : public std::pmr::memory_resource {
+public:
+    std::size_t Allocations() const noexcept {
+        return allocations_;
+    }
+
+private:
+    std::size_t allocations_ = 0;
+    void* do_allocate(std::size_t bytes, std::size_t alignment) override {
+        ++allocations_;
+        return std::pmr::new_delete_resource()->allocate(bytes, alignment);
+    }
+    void do_deallocate(void* pointer, std::size_t bytes, std::size_t alignment) override {
+        std::pmr::new_delete_resource()->deallocate(pointer, bytes, alignment);
+    }
+    bool do_is_equal(const std::pmr::memory_resource& other) const noexcept override {
+        return this == &other;
+    }
+};
+std::vector<FarTileKey> HandoffTargetOrder(FarVolumeHandoff& owner) {
+    std::vector<FarTileKey> keys;
+    owner.VisitObservations(
+        [](void* context, const FarTileKey& key, const FarHandoffTileObservation& observation) {
+            if (observation.target)
+                static_cast<std::vector<FarTileKey>*>(context)->push_back(key);
+        },
+        &keys);
+    return keys;
+}
+std::vector<FarTileKey> AdmissionCollisionKeys() {
+    const auto mix = [](std::uint64_t value) {
+        value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
+        value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
+        return value ^ (value >> 31);
+    };
+    std::vector<FarTileKey> keys;
+    // Fixed candidate bound; all 16 keys collide in the former 16-bucket
+    // eight-entry index. Coordinates include both signs and remain exact.
+    for (std::int64_t candidate = 0; candidate < 2048 && keys.size() < 16; ++candidate) {
+        const auto x = candidate % 32 - 16, z = candidate / 32 - 32;
+        if (((mix(static_cast<std::uint64_t>(x)) ^
+              mix(static_cast<std::uint64_t>(z) + 0x9e3779b97f4a7c15ULL)) %
+             16) == 0)
+            keys.push_back({5, x, z});
+    }
+    return keys;
+}
+} // namespace
+
+TEST(FarVolumeResidency, AdmissionScalePreservesOrderIdentityAndRefusalWithoutScratchGrowth) {
+    for (const std::size_t count : {32u, 128u, 512u}) {
+        SCOPED_TRACE(count);
+        JobSystem jobs;
+        FarVolumeTierMemory memory(Budgets());
+        AdmissionAllocationObserver allocator;
+        FarVolumeResidency owner(jobs, memory, AdmissionLimits(count), &allocator);
+        EXPECT_FALSE(owner.Observe({0, 0, 0}));
+        EXPECT_FALSE(owner.Observe({6, 0, 0}));
+        EXPECT_FALSE(owner.Observe({5, 0, 0}));
+        std::vector<FarVolumeWantedRequest> requests;
+        for (std::uint8_t tier = 1; tier <= kFarTierCount; ++tier)
+            for (std::size_t i = 0; i < count; ++i)
+                requests.push_back(Wanted({tier, static_cast<std::int64_t>(i) - 256, -1}));
+        const auto allocations = allocator.Allocations();
+        ASSERT_TRUE(owner.ReplaceWanted(requests));
+        CheckAdmissionWork(owner.AdmissionWork(), requests.size());
+        for (const auto& request : requests)
+            EXPECT_EQ(Observation(owner, request.identity.key).desired, request.identity);
+        std::reverse(requests.begin(), requests.end());
+        ASSERT_TRUE(owner.ReplaceWanted(requests));
+        CheckAdmissionWork(owner.AdmissionWork(), requests.size());
+        const auto before = owner.Snapshot();
+        auto bad = requests;
+        bad.back() = bad.front();
+        EXPECT_FALSE(owner.ReplaceWanted(bad));
+        CheckAdmissionWork(owner.AdmissionWork(), requests.size());
+        bad = requests;
+        bad.back().identity.key.tier = 0;
+        EXPECT_FALSE(owner.ReplaceWanted(bad));
+        bad = requests;
+        bad.back().build_headroom_bytes = 1;
+        EXPECT_FALSE(owner.ReplaceWanted(bad));
+        for (std::size_t i = 0; i < before.size(); ++i) {
+            const auto after = owner.Snapshot()[i];
+            EXPECT_EQ(after.wanted, before[i].wanted);
+            EXPECT_EQ(after.memory.bytes_total, before[i].memory.bytes_total);
+        }
+        for (auto& request : requests) {
+            request.identity.key.tz = 1;
+            request.intent.key.z = 1;
+            ++request.identity.bake_generation;
+        }
+        ASSERT_TRUE(owner.ReplaceWanted(requests));
+        CheckAdmissionWork(owner.AdmissionWork(), requests.size());
+        for (const auto& request : requests) {
+            EXPECT_EQ(Observation(owner, request.identity.key).desired, request.identity);
+            auto absent = request.identity.key;
+            absent.tz = -1;
+            EXPECT_FALSE(owner.Observe(absent));
+        }
+        EXPECT_EQ(allocator.Allocations(), allocations);
+        ASSERT_TRUE(owner.ReplaceWanted({}));
+        EXPECT_FALSE(owner.Observe(requests.front().identity.key));
+        owner.CancelAndDrain();
+        EXPECT_FALSE(owner.Observe(requests.back().identity.key));
+        ASSERT_TRUE(owner.ReplaceWanted(requests));
+        CheckAdmissionWork(owner.AdmissionWork(), requests.size());
+        EXPECT_EQ(allocator.Allocations(), allocations);
+    }
+}
+
+TEST(FarVolumeResidency, AdmissionIndexSizeRefusalsUnwindBeforeAnyTierStorageEscapes) {
+    JobSystem jobs;
+    for (unsigned failure = 0; failure < 4; ++failure) {
+        auto limits = AdmissionLimits(1);
+        if (failure == 0)
+            limits.entry_slots[0] = 0;
+        else if (failure == 1)
+            limits.queues[0].descriptor_slots = 0;
+        else if (failure == 2)
+            limits.queues[0].result_slots = 0;
+        else {
+            limits.entry_slots[0] = std::numeric_limits<std::size_t>::max();
+            limits.queues[0].descriptor_slots = limits.entry_slots[0];
+        }
+        FarVolumeTierMemory memory(Budgets());
+        if (failure < 3) {
+            EXPECT_THROW(FarVolumeResidency(jobs, memory, limits), std::invalid_argument);
+        } else {
+            EXPECT_THROW(FarVolumeResidency(jobs, memory, limits), FarVolumeMemoryRefused);
+        }
+        for (std::size_t tier = 1; tier <= kFarTierCount; ++tier)
+            EXPECT_EQ(memory.Pool(tier)->used(), 0u);
+    }
+}
+
+TEST(FarVolumeHandoff, AdmissionCollisionSupersessionKeepsSlotsAndIdempotenceWithoutScratchGrowth) {
+    JobSystem jobs;
+    auto memory = std::make_shared<FarVolumeTierMemory>(Budgets());
+    auto limits = AdmissionLimits(8);
+    AdmissionAllocationObserver allocator;
+    FarVolumeHandoff owner(jobs, *memory, limits, &allocator);
+    EXPECT_FALSE(owner.Observe({0, 0, 0}));
+    EXPECT_FALSE(owner.Observe({6, 0, 0}));
+    EXPECT_FALSE(owner.Observe({5, 0, 0}));
+    const auto keys = AdmissionCollisionKeys();
+    ASSERT_EQ(keys.size(), 16u);
+    std::vector<FarHandoffTileInput> original, replacement;
+    for (std::size_t i = 0; i < 8; ++i) {
+        original.push_back(HandoffInput(memory, keys[i], 1, false));
+        replacement.push_back(HandoffInput(memory, keys[i + 8], 1, false));
+        ASSERT_TRUE(original.back().observation);
+        ASSERT_TRUE(replacement.back().observation);
+    }
+    const auto allocations = allocator.Allocations();
+    ASSERT_TRUE(owner.StageTarget(HandoffManifest(1, original)));
+    CheckAdmissionWork(owner.AdmissionWork(), std::size_t{5} * 8);
+    const auto order = HandoffTargetOrder(owner);
+    ASSERT_EQ(order.size(), original.size());
+    for (std::size_t i = 0; i < order.size(); ++i)
+        EXPECT_EQ(order[i], original[i].wanted.identity.key);
+    std::reverse(original.begin(), original.end());
+    const auto before = owner.Memory();
+    ASSERT_TRUE(owner.StageTarget(HandoffManifest(1, original)));
+    EXPECT_EQ(HandoffTargetOrder(owner), order);
+    EXPECT_EQ(owner.State().target_serial, 1u);
+    auto bad = replacement;
+    bad.back().observation.reset();
+    auto next = HandoffManifest(2, bad);
+    next.committed_generation = 1;
+    EXPECT_FALSE(owner.StageTarget(next));
+    EXPECT_EQ(HandoffTargetOrder(owner), order);
+    bad = replacement;
+    bad.back() = bad.front();
+    next.tiles = bad;
+    EXPECT_FALSE(owner.StageTarget(next));
+    EXPECT_EQ(HandoffTargetOrder(owner), order);
+    for (std::size_t i = 0; i < before.size(); ++i)
+        EXPECT_EQ(owner.Memory()[i].bytes_total, before[i].bytes_total);
+    std::rotate(replacement.begin(), replacement.begin() + 3, replacement.end());
+    next.tiles = replacement;
+    ASSERT_TRUE(owner.StageTarget(next));
+    CheckAdmissionWork(owner.AdmissionWork(), std::size_t{5} * 8);
+    EXPECT_EQ(owner.State().target_serial, 2u);
+    const auto replaced_order = HandoffTargetOrder(owner);
+    ASSERT_EQ(replaced_order.size(), replacement.size());
+    for (std::size_t i = 0; i < replaced_order.size(); ++i)
+        EXPECT_EQ(replaced_order[i], replacement[i].wanted.identity.key);
+    for (const auto& input : original)
+        EXPECT_FALSE(owner.Observe(input.wanted.identity.key));
+    std::reverse(replacement.begin(), replacement.end());
+    next.tiles = replacement;
+    ASSERT_TRUE(owner.StageTarget(next));
+    EXPECT_EQ(HandoffTargetOrder(owner), replaced_order);
+    next.publication_serial = 1;
+    EXPECT_FALSE(owner.StageTarget(next));
+    EXPECT_EQ(HandoffTargetOrder(owner), replaced_order);
+    next.publication_serial = 3;
+    next.tiles = {};
+    EXPECT_FALSE(owner.StageTarget(next));
+    EXPECT_EQ(owner.State().target_serial, 2u);
+    EXPECT_EQ(allocator.Allocations(), allocations);
+    owner.CancelAndDrain();
+    EXPECT_TRUE(HandoffTargetOrder(owner).empty());
+    EXPECT_FALSE(owner.Observe(keys.front()));
+    ASSERT_TRUE(owner.StageTarget(HandoffManifest(1, replacement)));
+    EXPECT_EQ(allocator.Allocations(), allocations);
+}
+
+TEST(FarVolumeHandoff, AdmissionScaleLateDuplicatesAndInvalidSupportLeavePublishedTargetUntouched) {
+    for (const std::size_t count : {8u, 64u, 512u}) {
+        SCOPED_TRACE(count);
+        JobSystem jobs;
+        auto memory = std::make_shared<FarVolumeTierMemory>(Budgets());
+        FarVolumeHandoff owner(jobs, *memory, AdmissionLimits(count));
+        const std::array original{HandoffInput(memory, {5, 0, 0}, 1, false)};
+        ASSERT_TRUE(owner.StageTarget(HandoffManifest(1, original)));
+        std::vector<FarHandoffTileInput> inputs(count, original[0]);
+        // Only one captured image is retained. Incompatible support is refused;
+        // the duplicate pass must still be bounded before authority admission.
+        for (std::size_t i = 0; i < count; ++i) {
+            const auto x = static_cast<std::int64_t>((i * 17) % count) - 256;
+            inputs[i].wanted.identity.key.tx = x;
+            inputs[i].wanted.intent.key.x = x;
+        }
+        const auto used = owner.Memory()[4].bytes_total;
+        auto manifest = HandoffManifest(2, inputs);
+        manifest.committed_generation = 1;
+        EXPECT_FALSE(owner.StageTarget(manifest));
+        CheckAdmissionWork(owner.AdmissionWork(), 5 * count);
+        inputs.back() = inputs.front();
+        EXPECT_FALSE(owner.StageTarget(manifest));
+        EXPECT_GE(owner.AdmissionWork().key_comparisons, count - 1);
+        EXPECT_LE(owner.AdmissionWork().key_comparisons, 12 * count * (std::bit_width(count) + 1));
+        CheckAdmissionWork(owner.AdmissionWork(), 5 * count);
+        EXPECT_EQ(owner.State().target_serial, 1u);
+        EXPECT_EQ(owner.Memory()[4].bytes_total, used);
+        const auto retained = HandoffObserve(owner, {5, 0, 0});
+        ASSERT_TRUE(retained.target);
+        if (retained.target) {
+            EXPECT_EQ(retained.target->identity, original[0].wanted.identity);
+        }
+        inputs.push_back(original[0]);
+        manifest.tiles = inputs;
+        EXPECT_FALSE(owner.StageTarget(manifest));
+        EXPECT_EQ(owner.State().target_serial, 1u);
+        EXPECT_EQ(owner.Memory()[4].bytes_total, used);
+        ASSERT_TRUE(owner.StageTarget(HandoffManifest(1, original)));
+    }
 }

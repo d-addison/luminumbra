@@ -616,3 +616,110 @@ TEST(FarVolumeBuildQueue, DispatchUsesNormalLaneBehindBlockedHighWorker) {
         return;
     EXPECT_EQ(result->status(), FarVolumeBuildStatus::ReadyEmpty);
 }
+
+TEST(FarVolumeBuildQueue, BatchForgetVisitsDescriptorsOnceAndPreservesUnselectedPendingWork) {
+    JobSystem jobs;
+    FarVolumeMemoryPool pool(64ULL * 1024 * 1024);
+    AllocationObserver allocator;
+    FarVolumeBuildQueue queue(jobs, pool, QueueLimits(), &allocator);
+    const auto allocations = allocator.Allocations();
+    std::size_t calls = 0;
+    EXPECT_EQ(queue.ForgetMatching([&](const FarTileKey&) noexcept {
+        ++calls;
+        return true;
+    }),
+              2u);
+    EXPECT_EQ(calls, 0u);
+    const auto first = AirRequest(-1), second = AirRequest(1);
+    ASSERT_EQ(queue.Submit(first), FarVolumeSubmitStatus::Queued);
+    ASSERT_EQ(queue.Submit(second), FarVolumeSubmitStatus::Queued);
+    EXPECT_EQ(queue.ForgetMatching([](const FarTileKey&) noexcept { return false; }), 2u);
+    EXPECT_EQ(queue.Stats().pending, 2u);
+    EXPECT_EQ(queue.ForgetMatching([](const FarTileKey& key) noexcept { return key.tx < 0; }), 2u);
+    EXPECT_EQ(queue.Stats().descriptors, 1u);
+    EXPECT_EQ(queue.Stats().pending, 1u);
+    EXPECT_EQ(queue.Submit(second), FarVolumeSubmitStatus::Duplicate);
+    EXPECT_EQ(queue.Submit(first), FarVolumeSubmitStatus::Queued);
+    EXPECT_EQ(allocator.Allocations(), allocations);
+    EXPECT_EQ(queue.ForgetMatching([](const FarTileKey&) noexcept { return true; }), 2u);
+    EXPECT_EQ(queue.Stats().descriptors, 0u);
+    EXPECT_EQ(queue.Stats().pending, 0u);
+    EXPECT_EQ(allocator.Allocations(), allocations);
+}
+
+TEST(FarVolumeBuildQueue, BatchForgetRunningWorkRetainsInputsUntilDrainAndStartsOnlySurvivor) {
+    JobSystem jobs;
+    jobs.startup(1);
+    FarVolumeMemoryPool pool(64ULL * 1024 * 1024);
+    FarVolumeBuildQueue queue(jobs, pool, QueueLimits());
+    auto barrier = std::make_shared<Barrier>();
+    ReleaseOnExit const release(barrier);
+    auto first = AirRequest(-1);
+    first.authority.height = [barrier](std::int64_t, std::int64_t) {
+        barrier->Enter();
+        return 0.0f;
+    };
+    const auto second = AirRequest(1);
+    ASSERT_EQ(queue.Submit(first), FarVolumeSubmitStatus::Queued);
+    ASSERT_EQ(queue.Submit(second), FarVolumeSubmitStatus::Queued);
+    ASSERT_EQ(queue.Pump(1), 1u);
+    ASSERT_TRUE(barrier->WaitEntered());
+    const auto retained = pool.used();
+    EXPECT_EQ(queue.ForgetMatching([](const FarTileKey& key) noexcept { return key.tx < 0; }), 2u);
+    EXPECT_EQ(pool.used(), retained);
+    EXPECT_EQ(queue.Stats().running, 1u);
+    EXPECT_FALSE(queue.TakeCompleted(first.identity, first.intent));
+    barrier->Release();
+    const auto result = WaitResult(queue, second);
+    ASSERT_TRUE(result);
+    if (result) {
+        EXPECT_EQ(result->identity(), second.identity);
+    }
+    EXPECT_EQ(queue.Stats().descriptors, 1u);
+    EXPECT_FALSE(queue.TakeCompleted(first.identity, first.intent));
+}
+
+TEST(FarVolumeBuildQueue, BatchForgetCannotReleaseTakenResultOrItsReservation) {
+    JobSystem jobs;
+    jobs.startup(1);
+    FarVolumeMemoryPool pool(64ULL * 1024 * 1024);
+    FarVolumeBuildQueue queue(jobs, pool, QueueLimits());
+    const auto request = PlaneRequest();
+    ASSERT_EQ(queue.Submit(request), FarVolumeSubmitStatus::Queued);
+    auto completion = WaitResult(queue, request);
+    ASSERT_TRUE(completion);
+    if (!completion)
+        return;
+    const auto retained = completion->retained_bytes();
+    EXPECT_GT(retained, 0u);
+    EXPECT_EQ(queue.ForgetMatching([](const FarTileKey&) noexcept { return true; }), 2u);
+    EXPECT_EQ(queue.Stats().descriptors, 0u);
+    EXPECT_GE(pool.used(), retained);
+    EXPECT_EQ(completion->identity(), request.identity);
+    EXPECT_EQ(queue.ResultCapacity(1), 0u);
+    EXPECT_EQ(queue.Submit(AirRequest(1)), FarVolumeSubmitStatus::Queued);
+    EXPECT_EQ(queue.Pump(1, {}, 1), 0u);
+    completion.reset();
+    EXPECT_EQ(queue.ResultCapacity(), 1u);
+}
+
+TEST(FarVolumeBuildQueue, BatchForgetReleasesReadyUntakenResultAfterWorkerCompletion) {
+    JobSystem jobs;
+    jobs.startup(1);
+    FarVolumeMemoryPool pool(64ULL * 1024 * 1024);
+    FarVolumeBuildQueue queue(jobs, pool, QueueLimits());
+    const auto request = PlaneRequest();
+    ASSERT_EQ(queue.Submit(request), FarVolumeSubmitStatus::Queued);
+    ASSERT_EQ(queue.Pump(1), 1u);
+    // Join provides a deterministic completion boundary without polling time.
+    jobs.shutdown();
+    queue.Pump(0);
+    ASSERT_EQ(queue.Stats().ready, 1u);
+    const auto retained = pool.used();
+    EXPECT_EQ(queue.ForgetMatching([](const FarTileKey&) noexcept { return true; }), 2u);
+    EXPECT_EQ(queue.Stats().ready, 0u);
+    EXPECT_EQ(queue.Stats().descriptors, 0u);
+    EXPECT_EQ(queue.ResultCapacity(), 1u);
+    EXPECT_LT(pool.used(), retained);
+    EXPECT_FALSE(queue.TakeCompleted(request.identity, request.intent));
+}

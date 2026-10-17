@@ -95,17 +95,6 @@ private:
     std::shared_ptr<World::FarVolumeMemoryPool> pool_;
 };
 constexpr auto kEmptyIndex = std::numeric_limits<std::size_t>::max();
-std::size_t KeyHash(const World::FarTileKey& key) noexcept {
-    // Mix signed coordinates as unsigned bits, including negative child keys.
-    const auto mix = [](std::uint64_t value) {
-        value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
-        value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
-        return value ^ (value >> 31);
-    };
-    return static_cast<std::size_t>(
-        mix(static_cast<std::uint64_t>(key.tx)) ^
-        mix(static_cast<std::uint64_t>(key.tz) + 0x9e3779b97f4a7c15ULL));
-}
 bool Same(const FarVolumeWantedRequest& a, const FarVolumeWantedRequest& b) {
     return a.identity == b.identity && a.intent == b.intent &&
            a.build_headroom_bytes == b.build_headroom_bytes && a.water_bound == b.water_bound;
@@ -180,19 +169,21 @@ FarVolumeHandoff::Tier::Tier(JobSystem& jobs,
     order.reserve(count);
     validation.resize(count);
 }
-void FarVolumeHandoff::Tier::RebuildIndex() {
-    std::fill(key_index.begin(), key_index.end(), kEmptyIndex);
-    // Staging only: at most entry_slots insertions into 2 * entry_slots buckets.
-    // Rebuilding preserves collision chains without retaining deleted buckets.
+void FarVolumeHandoff::Tier::RebuildIndex(FarVolumeAdmissionWork& work) {
+    index_count = 0;
+    // At most entry_slots descriptors and O(entry_slots * log(entry_slots))
+    // comparisons, independent of coordinates or hash collisions. No allocation.
     for (std::size_t index = 0; index < entries.size(); ++index) {
-        const auto& key = entries[index].key;
-        if (!key)
-            continue;
-        auto bucket = KeyHash(*key) % key_index.size();
-        while (key_index[bucket] != kEmptyIndex)
-            bucket = (bucket + 1) % key_index.size();
-        key_index[bucket] = index;
+        ++work.descriptor_visits;
+        if (entries[index].key)
+            key_index[index_count++] = index;
     }
+    std::sort(key_index.begin(),
+              key_index.begin() + static_cast<std::ptrdiff_t>(index_count),
+              [&](std::size_t a, std::size_t b) {
+                  ++work.key_comparisons;
+                  return *entries[a].key < *entries[b].key;
+              });
 }
 FarVolumeHandoff::FarVolumeHandoff(JobSystem& jobs,
                                    World::FarVolumeTierMemory& memory,
@@ -227,23 +218,35 @@ void FarVolumeHandoff::CheckOwner() const {
     if (std::this_thread::get_id() != owner_)
         throw std::logic_error("Far-volume handoff outside owner thread");
 }
-const FarVolumeHandoff::Entry* FarVolumeHandoff::Find(const World::FarTileKey& key) const {
+const FarVolumeHandoff::Entry* FarVolumeHandoff::Find(const World::FarTileKey& key,
+                                                      FarVolumeAdmissionWork* work) const {
     if (key.tier == 0 || key.tier > tiers_.size())
         return nullptr;
     const auto& tier = tiers_[key.tier - 1];
     if (!tier)
         return nullptr;
-    auto bucket = KeyHash(key) % tier->key_index.size();
-    while (tier->key_index[bucket] != kEmptyIndex) {
-        const auto& entry = tier->entries[tier->key_index[bucket]];
-        if (entry.key == key)
-            return &entry;
-        bucket = (bucket + 1) % tier->key_index.size();
-    }
-    return nullptr;
+    const auto end = tier->key_index.begin() + static_cast<std::ptrdiff_t>(tier->index_count);
+    const auto found = std::lower_bound(
+        tier->key_index.begin(), end, key, [&](std::size_t index, const World::FarTileKey& sought) {
+            if (work)
+                ++work->key_comparisons;
+            const auto& entry = tier->entries[index];
+            return *entry.key < sought;
+        });
+    if (found == end)
+        return nullptr;
+    if (work)
+        ++work->key_comparisons;
+    const auto& entry = tier->entries[*found];
+    return entry.key == key ? &entry : nullptr;
 }
-FarVolumeHandoff::Entry* FarVolumeHandoff::Find(const World::FarTileKey& key) {
-    return const_cast<Entry*>(std::as_const(*this).Find(key));
+FarVolumeHandoff::Entry* FarVolumeHandoff::Find(const World::FarTileKey& key,
+                                                FarVolumeAdmissionWork* work) {
+    return const_cast<Entry*>(std::as_const(*this).Find(key, work));
+}
+FarVolumeAdmissionWork FarVolumeHandoff::AdmissionWork() const {
+    CheckOwner();
+    return admission_work_;
 }
 const FarVolumeUploadedTile* FarVolumeHandoff::Pair(const Entry& entry,
                                                     FarHandoffCoverageView view) const {
@@ -276,7 +279,8 @@ bool FarVolumeHandoff::ValidateInput(const FarHandoffManifest& manifest,
                                      const FarHandoffTileInput& input,
                                      const Tier& tier,
                                      World::FarVolumeRequest& resolved,
-                                     bool duplicate) const {
+                                     bool duplicate,
+                                     const Entry* old) const {
     if (!input.observation)
         return false;
     const auto& wanted = input.wanted;
@@ -294,7 +298,6 @@ bool FarVolumeHandoff::ValidateInput(const FarHandoffManifest& manifest,
         water->WaterCapability() == FarWorldWaterCapability::Unavailable ||
         water->WaterBound(key) != wanted.water_bound)
         return false;
-    const auto* old = Find(key);
     if (duplicate && (!old || !old->target || !Same(old->target->wanted, wanted)))
         return false;
     if (old && old->history && old->history->identity == identity && !Same(*old->history, wanted))
@@ -355,6 +358,8 @@ bool FarVolumeHandoff::ValidateInput(const FarHandoffManifest& manifest,
 }
 bool FarVolumeHandoff::StageTarget(const FarHandoffManifest& manifest) {
     Guard const guard(*this);
+    admission_work_ = {};
+    auto& work = admission_work_;
     if (manifest.world_epoch == 0 || manifest.publication_serial == 0 ||
         (manifest.caves != World::FarCaveMode::BandLimited &&
          manifest.caves != World::FarCaveMode::BoxFiltered) ||
@@ -368,18 +373,21 @@ bool FarVolumeHandoff::StageTarget(const FarHandoffManifest& manifest) {
     const bool duplicate = manifest.publication_serial == state_.target_serial;
     if (duplicate && manifest.committed_generation != state_.committed_generation)
         return false;
-    std::array<std::size_t, World::kFarTierCount> counts{}, new_keys{};
+    std::array<std::size_t, World::kFarTierCount> counts{}, new_keys{}, next_free{};
     std::size_t fallbacks = 0, old_count = 0;
     for (auto& tier : tiers_) {
         if (!tier)
             throw std::logic_error("Far-volume handoff missing tier");
         tier->order.assign(tier->entries.size(), 0);
-        for (const auto& entry : tier->entries)
+        for (const auto& entry : tier->entries) {
+            ++work.descriptor_visits;
             old_count += entry.target.has_value();
+        }
     }
     if (duplicate && old_count != manifest.tiles.size())
         return false;
-    // Only charged, preallocated validation scratch changes before commit.
+    // Bound each tier before sorting or resolving authority. Only charged,
+    // preallocated scratch changes before the whole manifest validates.
     for (std::size_t index = 0; index < manifest.tiles.size(); ++index) {
         const auto& input = manifest.tiles[index];
         const auto& wanted = input.wanted;
@@ -389,73 +397,104 @@ bool FarVolumeHandoff::StageTarget(const FarHandoffManifest& manifest) {
             identity.world_epoch != manifest.world_epoch ||
             identity.cave_policy != static_cast<std::uint8_t>(manifest.caves) || !input.observation)
             return false;
-        for (std::size_t j = 0; j < index; ++j)
-            if (manifest.tiles[j].wanted.identity.key == key)
-                return false;
-        auto& slot = tiers_[key.tier - 1];
-        if (!slot)
-            throw std::logic_error("Far-volume handoff missing tier");
-        auto& tier = *slot;
-        if (++counts[key.tier - 1] > tier.entries.size())
+        auto& tier = *tiers_[key.tier - 1];
+        auto& count = counts[key.tier - 1];
+        if (count == tier.entries.size())
             return false;
+        tier.key_index[tier.entries.size() + count++] = index;
         fallbacks += key.tier == World::kFarTierCount;
-        if (const auto* existing = Find(key))
-            tier.order[static_cast<std::size_t>(existing - tier.entries.data())] = 1;
-        else
-            ++new_keys[key.tier - 1];
-        if (!ValidateInput(
-                manifest, input, tier, tier.validation.at(counts[key.tier - 1] - 1), duplicate))
-            return false;
     }
     if (fallbacks == 0)
         return false;
     for (std::size_t i = 0; i < tiers_.size(); ++i) {
-        const auto& tier = tiers_[i];
-        if (!tier)
-            throw std::logic_error("Far-volume handoff missing tier");
+        auto& tier = *tiers_[i];
+        auto incoming = std::span(tier.key_index).subspan(tier.entries.size(), counts[i]);
+        std::sort(incoming.begin(), incoming.end(), [&](std::size_t a, std::size_t b) {
+            ++work.key_comparisons;
+            return manifest.tiles[a].wanted.identity.key < manifest.tiles[b].wanted.identity.key;
+        });
+        for (std::size_t j = 1; j < incoming.size(); ++j) {
+            ++work.key_comparisons;
+            if (manifest.tiles[incoming[j - 1]].wanted.identity.key ==
+                manifest.tiles[incoming[j]].wanted.identity.key)
+                return false;
+        }
+    }
+    std::array<std::size_t, World::kFarTierCount> validated{};
+    for (const auto& input : manifest.tiles) {
+        const auto& key = input.wanted.identity.key;
+        auto& tier = *tiers_[key.tier - 1];
+        const auto* existing = Find(key, &work);
+        if (existing)
+            tier.order[static_cast<std::size_t>(existing - tier.entries.data())] = 1;
+        else
+            ++new_keys[key.tier - 1];
+        if (!ValidateInput(manifest,
+                           input,
+                           tier,
+                           tier.validation[validated[key.tier - 1]++],
+                           duplicate,
+                           existing))
+            return false;
+    }
+    for (std::size_t i = 0; i < tiers_.size(); ++i) {
+        const auto& tier = *tiers_[i];
         std::size_t free = 0;
-        for (std::size_t index = 0; index < tier->entries.size(); ++index) {
-            const auto& entry = tier->entries[index];
+        for (std::size_t index = 0; index < tier.entries.size(); ++index) {
+            ++work.descriptor_visits;
+            const auto& entry = tier.entries[index];
             // Omitted target-only entries retire at commit. Serving entries and
             // every incoming key retain their descriptors and span history.
-            free += !entry.key || (!entry.serving && tier->order[index] == 0);
+            free += !entry.key || (!entry.serving && tier.order[index] == 0);
         }
         if (new_keys[i] > free)
             return false;
     }
     if (duplicate)
         return true;
-    // Accept descriptors only after the entire bounded manifest validates.
-    for (auto& tier : tiers_) {
-        if (!tier)
-            throw std::logic_error("Far-volume handoff missing tier");
-        for (auto& entry : tier->entries) {
-            if (!entry.target)
-                continue;
-            const auto key = entry.target->wanted.identity.key;
-            if (std::none_of(manifest.tiles.begin(), manifest.tiles.end(), [&](const auto& input) {
-                    return input.wanted.identity.key == key;
-                })) {
-                tier->queue.Forget(key);
+    // Validate first, then retire queue work in one descriptor pass per tier.
+    // Binary searches over sorted input positions avoid per-key queue scans.
+    for (std::size_t i = 0; i < tiers_.size(); ++i) {
+        auto& tier = *tiers_[i];
+        const auto incoming = std::span(tier.key_index).subspan(tier.entries.size(), counts[i]);
+        work.descriptor_visits +=
+            tier.queue.ForgetMatching([&](const World::FarTileKey& key) noexcept {
+                const auto found =
+                    std::lower_bound(incoming.begin(),
+                                     incoming.end(),
+                                     key,
+                                     [&](std::size_t index, const World::FarTileKey& sought) {
+                                         ++work.key_comparisons;
+                                         return manifest.tiles[index].wanted.identity.key < sought;
+                                     });
+                if (found == incoming.end())
+                    return true;
+                ++work.key_comparisons;
+                const auto& input = manifest.tiles[*found];
+                if (input.wanted.identity.key != key)
+                    return true;
+                const auto* entry = Find(key, &work);
+                return !entry || !entry->target || !Same(entry->target->wanted, input.wanted) ||
+                       entry->eligibility == FarVolumeEligibility::RequestRejected;
+            });
+        for (std::size_t index = 0; index < tier.entries.size(); ++index) {
+            ++work.descriptor_visits;
+            auto& entry = tier.entries[index];
+            if (entry.target && tier.order[index] == 0) {
                 entry.completion.reset();
                 entry.staged_pair = {};
                 entry.target.reset();
             }
         }
-    }
-    for (std::size_t i = 0; i < tiers_.size(); ++i) {
-        auto& slot = tiers_[i];
-        if (!slot)
-            throw std::logic_error("Far-volume handoff missing tier");
-        auto& tier = *slot;
-        auto free = static_cast<std::size_t>(
-            std::count_if(tier.entries.begin(), tier.entries.end(), [](const auto& entry) {
-                return !entry.key;
-            }));
+        std::size_t free = 0;
+        for (const auto& entry : tier.entries) {
+            ++work.descriptor_visits;
+            free += !entry.key;
+        }
         bool reclaimed = false;
-        // Only enough idle history to admit the validated manifest is replaced,
-        // in stable slot order. Work and storage are bounded by entry_slots.
+        // Reclaim only enough idle history, in stable slot order.
         for (std::size_t index = 0; free < new_keys[i] && index < tier.entries.size(); ++index) {
+            ++work.descriptor_visits;
             auto& entry = tier.entries[index];
             if (!entry.key || entry.serving || entry.target || tier.order[index] != 0)
                 continue;
@@ -464,48 +503,49 @@ bool FarVolumeHandoff::StageTarget(const FarHandoffManifest& manifest) {
             reclaimed = true;
         }
         if (reclaimed)
-            tier.RebuildIndex();
+            tier.RebuildIndex(work);
     }
-    counts = {};
+    validated = {};
     for (const auto& input : manifest.tiles) {
         const auto& wanted = input.wanted;
-        auto& slot = tiers_[wanted.identity.key.tier - 1];
-        if (!slot)
-            throw std::logic_error("Far-volume handoff missing tier");
-        auto& tier = *slot;
-        auto* entry = Find(wanted.identity.key);
+        const auto number = std::size_t(wanted.identity.key.tier - 1);
+        auto& tier = *tiers_[number];
+        auto* entry = Find(wanted.identity.key, &work);
         if (!entry) {
-            const auto free = std::find_if(
-                tier.entries.begin(), tier.entries.end(), [](const auto& e) { return !e.key; });
-            if (free == tier.entries.end())
+            // Each slot is examined at most once across all incoming new keys.
+            auto& cursor = next_free[number];
+            while (cursor < tier.entries.size()) {
+                ++work.descriptor_visits;
+                if (!tier.entries[cursor].key)
+                    break;
+                ++cursor;
+            }
+            if (cursor == tier.entries.size())
                 throw std::logic_error("Far-volume handoff missing admitted entry");
-            entry = &*free;
-            auto bucket = KeyHash(wanted.identity.key) % tier.key_index.size();
-            while (tier.key_index[bucket] != kEmptyIndex)
-                bucket = (bucket + 1) % tier.key_index.size();
-            tier.key_index[bucket] = static_cast<std::size_t>(free - tier.entries.begin());
+            entry = &tier.entries[cursor++];
         }
         const bool same = entry->target && Same(entry->target->wanted, wanted);
         if (!same) {
-            tier.queue.Forget(wanted.identity.key);
             entry->completion.reset();
             entry->staged_pair = {};
         }
         if (!same || entry->eligibility == FarVolumeEligibility::RequestRejected) {
-            tier.queue.Forget(wanted.identity.key);
             entry->eligibility = FarVolumeEligibility::Wanted;
             entry->build_failure.reset();
             entry->upload_failure.reset();
         }
         entry->key = wanted.identity.key;
         entry->target = input;
-        entry->resolved = tier.validation[counts[wanted.identity.key.tier - 1]++];
+        entry->resolved = tier.validation[validated[number]++];
         auto& history = entry->history.emplace(wanted);
         history.water.reset();
         entry->history_span = entry->resolved;
         if (Covers(*entry, FarHandoffCoverageView::Target))
             entry->eligibility = FarVolumeEligibility::Settled;
     }
+    for (std::size_t i = 0; i < tiers_.size(); ++i)
+        if (new_keys[i] != 0)
+            tiers_[i]->RebuildIndex(work);
     state_.world_epoch = manifest.world_epoch;
     state_.committed_generation = manifest.committed_generation;
     state_.target_serial = manifest.publication_serial;
@@ -920,7 +960,7 @@ void FarVolumeHandoff::CancelAndDrain() {
             entry.history.reset();
             entry = Entry{};
         }
-        std::fill(tier->key_index.begin(), tier->key_index.end(), kEmptyIndex);
+        tier->index_count = 0;
     }
     state_ = {};
 }

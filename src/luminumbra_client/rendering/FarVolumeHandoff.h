@@ -85,6 +85,7 @@ public:
     FarVolumeHandoff(const FarVolumeHandoff&) = delete;
     FarVolumeHandoff& operator=(const FarVolumeHandoff&) = delete;
     bool StageTarget(const FarHandoffManifest&);
+    FarVolumeAdmissionWork AdmissionWork() const;
     FarVolumeFrameResult AdvanceFrame(double camera_x,
                                       double camera_z,
                                       const FarVolumeFrameLimits&,
@@ -114,7 +115,7 @@ private:
     };
     struct Tier {
         static std::size_t IndexSize(std::size_t, const FarVolumeQueueLimits&);
-        void RebuildIndex();
+        void RebuildIndex(FarVolumeAdmissionWork&);
         Tier(JobSystem&,
              World::FarVolumeMemoryPool&,
              std::size_t,
@@ -123,9 +124,10 @@ private:
         World::FarVolumeMemoryLease charge;
         World::FarVolumeChargedResource resource;
         std::pmr::vector<Entry> entries;
-        // At most entry_slots keys; twice as many buckets keep load at most 1/2.
-        // Rebuild after retirement reclaims history; no tombstones accumulate.
+        // First entry_slots indices are sorted live descriptors; the second half
+        // holds at most entry_slots incoming positions during admission.
         std::pmr::vector<std::size_t> key_index;
+        std::size_t index_count = 0;
         // Also marks incoming entries during transactional manifest validation.
         std::pmr::vector<std::size_t> order;
         std::pmr::vector<World::FarVolumeRequest> validation;
@@ -135,15 +137,16 @@ private:
     };
     class Guard;
     void CheckOwner() const;
-    Entry* Find(const World::FarTileKey&);
-    const Entry* Find(const World::FarTileKey&) const;
+    Entry* Find(const World::FarTileKey&, FarVolumeAdmissionWork* = nullptr);
+    const Entry* Find(const World::FarTileKey&, FarVolumeAdmissionWork* = nullptr) const;
     const FarVolumeUploadedTile* Pair(const Entry&, FarHandoffCoverageView) const;
     bool Covers(const Entry&, FarHandoffCoverageView) const;
     bool ValidateInput(const FarHandoffManifest&,
                        const FarHandoffTileInput&,
                        const Tier&,
                        World::FarVolumeRequest&,
-                       bool duplicate) const;
+                       bool duplicate,
+                       const Entry* old) const;
     FarHandoffTileObservation ObserveEntry(const Entry&) const;
     void Reject(Entry&, FarVolumeFrameResult&);
     World::FarVolumeTierMemory& memory_;
@@ -151,6 +154,7 @@ private:
     const std::thread::id owner_ = std::this_thread::get_id();
     bool active_ = false;
     FarHandoffState state_;
+    FarVolumeAdmissionWork admission_work_;
     World::FarCaveMode caves_ = World::FarCaveMode::BandLimited;
     World::FarVolumeNumericProfile numeric_ = World::FarVolumeNumericProfile::RawFloat;
     std::array<std::optional<Tier>, World::kFarTierCount> tiers_;
