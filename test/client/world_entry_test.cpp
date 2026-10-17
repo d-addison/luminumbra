@@ -1,5 +1,6 @@
 #include "../support/WorldgenTestData.h"
 #include "luminumbra_client/world/WorldEntry.h"
+#include "luminumbra_common/core/FilesystemPath.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/persistence/CreatedWorldArtifacts.h"
 #include "luminumbra_common/persistence/SyntheticSaveFixture.h"
@@ -285,7 +286,8 @@ protected:
     static std::map<std::string, std::string> DiskBytes(const std::filesystem::path& directory) {
         std::map<std::string, std::string> result;
         for (const auto& item : std::filesystem::recursive_directory_iterator(directory))
-            result.emplace(item.path().lexically_relative(directory).generic_string(),
+            result.emplace(Luminumbra::Filesystem::GenericUtf8PathString(
+                               item.path().lexically_relative(directory)),
                            item.is_directory() ? "<directory>" : Read(item.path()));
         return result;
     }
@@ -317,6 +319,35 @@ TEST_F(WorldEntryFilesystem, CreatesWorldWithActiveRegionsAndFullArtifactJournal
     jobs.shutdown();
     EXPECT_TRUE(artifacts.rollback().empty());
     EXPECT_FALSE(std::filesystem::exists(save));
+}
+
+TEST_F(WorldEntryFilesystem, UnicodeSaveRootCreatesAndReloadsTheExactPresetAndSave) {
+    InstallPresets();
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    CreatedWorldArtifacts artifacts;
+    {
+        Luminumbra::world::GameSession session;
+        session.SetRootPath(root.generic_string() + "/");
+        const auto save_root = root / std::filesystem::path(u8"世界-é");
+        session.SetSaveRootPath(save_root);
+        session.SetJobSystem(&jobs);
+        ASSERT_TRUE(session.CreateWorld("New world", "1337", "default", nullptr, artifacts))
+            << session.GetWorldOpenError();
+        const auto id = session.GetMetadata().worldId;
+        const auto preset = session.PresetContentHash();
+        const auto save = save_root / "worlds/saves" / id;
+        const auto before = DiskBytes(save);
+        ASSERT_EQ(before.size(), 5u);
+        ASSERT_FALSE(preset.empty());
+        artifacts.release();
+        ASSERT_TRUE(session.LoadWorld(id)) << session.GetWorldOpenError();
+        EXPECT_EQ(session.PresetContentHash(), preset);
+        EXPECT_EQ(session.GetSaveRootPath(), save_root);
+        EXPECT_EQ(session.GetMetadata().worldId, id);
+        EXPECT_EQ(DiskBytes(save), before);
+    }
+    jobs.shutdown();
 }
 
 TEST_F(WorldEntryFilesystem, WorldRevisionDistinguishesRefusalFromPartialReplacement) {
@@ -584,6 +615,69 @@ TEST_F(WorldEntryFilesystem, DurablePresetWriterPublishesOwnedFileAndRollsBack) 
     EXPECT_TRUE(errors.empty());
     EXPECT_EQ(Read(save / "preset.json"), "preset bytes\n");
     EXPECT_EQ(DiskBytes(save).size(), 1u);
+    EXPECT_TRUE(artifacts.rollback().empty());
+    EXPECT_FALSE(std::filesystem::exists(save));
+}
+
+TEST_F(WorldEntryFilesystem, UnicodeNativePublicationRetainsEveryWriterAndRollbackIdentity) {
+    using Luminumbra::Filesystem::PathFromUtf8;
+    using Luminumbra::Persistence::WorldSaveService;
+    CreatedWorldArtifacts artifacts;
+    const auto save = root / std::filesystem::path(u8"世界-é");
+    artifacts.create_root(save);
+    artifacts.create_directory(save / "chunks");
+    artifacts.create_directory(save / "chunks/region");
+    const std::array<std::filesystem::path, 3> names{std::filesystem::path(u8"预设.json"),
+                                                     "world_info.json",
+                                                     "chunks/region/active-regions.arl"};
+    std::vector<std::string> errors;
+    for (const auto& name : names) {
+        // Exercise generic caller spelling as well as native UTF-16 names.
+        const auto path = PathFromUtf8(Luminumbra::Filesystem::GenericUtf8PathString(save / name));
+        ASSERT_TRUE(
+            WorldSaveService::write_file_durably(path, "owned bytes\n", &errors, &artifacts));
+        EXPECT_EQ(Read(path), "owned bytes\n");
+    }
+    EXPECT_TRUE(errors.empty());
+    const auto before = DiskBytes(save);
+    EXPECT_EQ(before.size(), 5u);
+    const auto foreign = save / std::filesystem::path(u8"未知.bin");
+    Write(foreign, "protected bytes\n");
+    EXPECT_NE(artifacts.rollback().find("Untracked world artifact"), std::string::npos);
+    EXPECT_EQ(Read(foreign), "protected bytes\n");
+    ASSERT_TRUE(std::filesystem::remove(foreign));
+    const auto moved = root / std::filesystem::path(u8"移动世界");
+    std::filesystem::rename(save, moved);
+    ASSERT_TRUE(std::filesystem::create_directory(save));
+    EXPECT_NE(artifacts.rollback().find("changed identity"), std::string::npos);
+    EXPECT_EQ(DiskBytes(moved), before);
+    ASSERT_TRUE(std::filesystem::remove(save));
+    std::filesystem::rename(moved, save);
+    EXPECT_TRUE(artifacts.rollback().empty());
+    EXPECT_FALSE(std::filesystem::exists(save));
+}
+
+TEST_F(WorldEntryFilesystem, UnicodeDurableWriterFailureReportsThePathAndRetainsOwnedStage) {
+    using Luminumbra::Persistence::WorldSaveService;
+    CreatedWorldArtifacts artifacts;
+    const auto save = root / std::filesystem::path(u8"世界-é");
+    const auto file = save / std::filesystem::path(u8"预设.json");
+    artifacts.create_root(save);
+    WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
+    struct ResetInterruption {
+        ~ResetInterruption() {
+            WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
+        }
+    } reset;
+    std::vector<std::string> errors;
+    EXPECT_FALSE(WorldSaveService::write_file_durably(file, "owned bytes\n", &errors, &artifacts));
+    ASSERT_EQ(errors.size(), 1u);
+    EXPECT_NE(errors.front().find(Luminumbra::Filesystem::GenericUtf8PathString(file)),
+              std::string::npos);
+    EXPECT_FALSE(std::filesystem::exists(file));
+    const auto stages = DiskBytes(save);
+    ASSERT_EQ(stages.size(), 1u);
+    EXPECT_EQ(stages.begin()->second, "owned bytes\n");
     EXPECT_TRUE(artifacts.rollback().empty());
     EXPECT_FALSE(std::filesystem::exists(save));
 }
