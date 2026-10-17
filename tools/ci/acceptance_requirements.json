@@ -3459,8 +3459,8 @@
     {
       "id": "dw.vertical.010",
       "source": "docs/distant-world.md#vertical-coverage-and-the-cave-field",
-      "quote": "The packaged `worlds/atlas/presets/cave_dense.json` now uses revision 7;",
-      "text": "The packaged `worlds/atlas/presets/cave_dense.json` now uses revision 7;"
+      "quote": "The packaged `worlds/atlas/presets/cave_dense.json` now uses revision 8;",
+      "text": "The packaged `worlds/atlas/presets/cave_dense.json` now uses revision 8;"
     },
     {
       "id": "dw.vertical.011",
@@ -3549,8 +3549,8 @@
     {
       "id": "ar.file.119",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Presets now use revision 7 with revision-6 omission compatibility and frozen packaged-preset fallback.",
-      "text": "Presets now use revision 7 with revision-6 omission compatibility and frozen packaged-preset fallback."
+      "quote": "Presets now use revision 8 with revision-6 omission compatibility and frozen packaged-preset fallback.",
+      "text": "Presets now use revision 8 with revision-6 omission compatibility and frozen packaged-preset fallback."
     },
     {
       "id": "dw.persistence.061",

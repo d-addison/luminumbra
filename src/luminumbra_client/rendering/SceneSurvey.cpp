@@ -279,7 +279,10 @@ bool RunSceneSurvey(GLFWwindow* window,
         const Luminumbra::Vec3 anchor(cam);
         // Stream the new region in (the chunks here are not loaded yet).
         w->update(session.GetRegistry(), anchor, phys);
-        w->EnsureSurfaceReadyNear(anchor, phys, 12, 4);
+        if (!w->EnsureSurfaceReadyNear(anchor, phys, 12, 4)) {
+            LUMINUMBRA_CORE_ERROR("SceneSurvey '{}': surface preparation refused", t.label);
+            return false;
+        }
         w->wait_for_streaming_jobs();
         // Settle: render frames so foliage/water/atmosphere + mesh uploads catch up. Longer for
         // water (a river needs ticks to source-fill + flow + the surface mesh to regenerate).
