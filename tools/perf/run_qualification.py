@@ -78,7 +78,7 @@ CANONICAL_SURFACE_SCRIPT = 'tools/perf/fixtures/surface-flight.traversal'
 # AC8 commits their scripts and binds them here.
 BOUND_TRAVERSAL_SCRIPTS = {'surface-flight': CANONICAL_SURFACE_SCRIPT}
 BOUND_TRAVERSAL_SHA256 = {
-    'surface-flight': '029e54d693c993472d84d7a9a38b2c3bbf513f129a1922534906c0f91b479e4e',
+    'surface-flight': '99d5ec201f0ac19118b05d6b5cebef9c7db9943aeaa3ca299339b85131393868',
 }
 TRAVERSAL_MAX_BYTES = 64 * 1024  # Traversal manifests are bounded to 64 KiB.
 
