@@ -374,7 +374,8 @@ void RenderMenuScreens(ClientAppContext& app,
                              .volumetric_quality = renderPipeline.volumetric_quality(),
                              .taau = renderPipeline.taau_enabled(),
                              .sky_lut_gpu = renderPipeline.sky_lut_gpu_enabled(),
-                             .metered_exposure = renderPipeline.auto_exposure_metered()},
+                             .metered_exposure = renderPipeline.auto_exposure_metered(),
+                             .graphics = renderPipeline.graphics_runtime_config()},
                 .preview_active = previewActive,
                 .wireframe = app.overlay.wireframe_mode};
             // The camera phase advances with all elapsed menu time, including

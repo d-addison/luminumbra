@@ -1,5 +1,8 @@
 #pragma once
 
+#include "BackdropBlurQuality.h"
+#include "GraphicsSettingsState.h"
+
 #include "Rml_Interfaces.h"         // The one true source for interface definitions
 #include "gl3/RmlUi_Renderer_GL3.h" // RmlUi 6.1 reference backend: real blur/box-shadow/layers
 #include "persistence/AsyncSavedWorldCatalog.h"
@@ -60,6 +63,10 @@ using PauseActionCallback = std::function<void(const std::string&)>;
 // pushes live changes via the setters, and persists via Save. Every field is optional —
 // any null callback is simply skipped, so the screen degrades gracefully if unwired.
 struct SettingsBridge {
+    // Graphics requests are queued by the host and applied together on the render thread.
+    std::function<GraphicsSettingsDisplay()> GetGraphics;
+    std::function<void(const GraphicsEdit&)> EditGraphics;
+    std::function<void()> SaveGraphics;
     // Video
     std::function<std::string()> GetResolution; // "" = native/default, else "WxH"
     std::function<void(const std::string&)> SetResolution;
@@ -67,6 +74,8 @@ struct SettingsBridge {
     std::function<void(const std::string&)> SetWindowMode;
     std::function<bool()> GetVSync;
     std::function<void(bool)> SetVSync;
+    std::function<int()> GetFrameCap; // 0 = unlimited; choices in core::kFrameCaps.
+    std::function<void(int)> SetFrameCap;
     std::function<float()> GetFov;
     std::function<void(float)> SetFov;
     std::function<float()> GetMouseSensitivity;
@@ -99,6 +108,11 @@ public:
     // which have closed the old document. Menu images must not cross that boundary.
     std::uint64_t document_generation() const {
         return m_documentGeneration;
+    }
+    void SetBackdropBlurQuality(luminumbra::core::UiBlurQuality quality);
+    void RefreshGraphicsSettings();
+    const BackdropBlurQuality& GetBackdropBlurQuality() const {
+        return m_backdropBlur;
     }
     Rml_UIManager(const std::string& asset_root_path);
     ~Rml_UIManager();
@@ -223,6 +237,7 @@ public:
 private:
     // This is now a public function on the manager, called by Update.
     void ProcessDocumentLoadRequest();
+    void AddClickSoundListener(Rml::Element* element, std::function<void(Rml::Event&)> callback);
     void BindEventListeners(Rml::ElementDocument* document);
     void LoadDocument(const std::string& rml_path);
     void StartWorldScan(Rml::ElementDocument* document);
@@ -237,6 +252,8 @@ private:
     // each thumbnail loaded from data/ui/captures/cap_<N>.tga written at shutter time.
     void PopulateGallery(Rml::ElementDocument* document);
     void PopulateSettingsForm(Rml::ElementDocument* document);
+    void PopulateGraphicsForm(Rml::ElementDocument* document);
+    void ApplyBackdropClass(Rml::ElementDocument* document);
     void ApplySettingFromElement(Rml::Element* element);
     void BindSettingsListeners(Rml::ElementDocument* document);
 
@@ -262,6 +279,7 @@ private:
     // must already be initialised when the manager is constructed (main_client: glad at the
     // GLFW context, manager constructed right after).
     RenderInterface_GL3 m_renderInterface;
+    BackdropBlurQuality m_backdropBlur;
 
     Rml::Context* m_context = nullptr;
     GLFWwindow* m_window = nullptr;
@@ -279,6 +297,8 @@ private:
     WorldPresetRenamer m_worldPresetRenamer;
     LoadWorldCallback m_loadWorldCallback;
     SettingsBridge m_settingsBridge;
+    bool m_populatingGraphics = false;
+    bool m_settingsSaveFailed = false;
     bool m_developerDebuggerVisible = false;
     PauseActionCallback m_pauseActionCallback;
 

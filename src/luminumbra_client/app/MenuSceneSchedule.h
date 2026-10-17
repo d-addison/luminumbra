@@ -1,5 +1,7 @@
 #pragma once
 
+#include "luminumbra_client/rendering/GraphicsRuntimeConfig.h"
+
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -20,6 +22,7 @@ struct MenuRenderSettings {
     bool taau = false;
     bool sky_lut_gpu = false;
     bool metered_exposure = false;
+    Luminumbra::Rendering::GraphicsRuntimeConfig graphics{};
     bool operator==(const MenuRenderSettings&) const = default;
 };
 

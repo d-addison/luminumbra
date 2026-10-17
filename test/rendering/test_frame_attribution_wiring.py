@@ -346,11 +346,17 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertIn("worldgenPreview->rebuild_generation()", menu)
         self.assertIn(".renderer_target = renderPipeline.resize_generation()", compact(menu))
         pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
-        for method in ("void RenderPipeline::on_resize(", "void RenderPipeline::set_render_scale("):
+        setter = block(pipeline, "void RenderPipeline::set_render_scale(")
+        self.assertIn("resize_graphics_targets(scale, m_shadow_pass->shadow_map().resolution)", setter)
+        resize = block(pipeline, "bool RenderPipeline::resize_graphics_targets(")
+        self.assertIn("return ApplySceneRenderScale(", resize)
+        self.assertLess(resize.index("if (!m_render_registry.replace_targets("),
+                        resize.index("++m_resize_generation;"))
+        for method in ("void RenderPipeline::on_resize(", "bool RenderPipeline::resize_graphics_targets("):
             self.assertIn("++m_resize_generation;", block(pipeline, method))
         for getter in ("render_scale", "get_exposure_override", "get_cloud_quality",
                        "get_ssao_quality", "volumetric_quality", "taau_enabled",
-                       "sky_lut_gpu_enabled", "auto_exposure_metered"):
+                       "sky_lut_gpu_enabled", "auto_exposure_metered", "graphics_runtime_config"):
             self.assertIn(f"renderPipeline.{getter}()", menu)
         self.assertLess(menu.index("camera_revision.observe(camera_state())"),
                         menu.index("camera->Yaw = 95.0f"))

@@ -149,7 +149,7 @@ TEST(MenuPresentation, ResizeCommitInvalidatesAnImageCapturedDuringDebounce) {
 }
 
 TEST(MenuPresentation, RenderScaleAndEveryPresetInputInvalidateWithinTheSameSlot) {
-    for (int change = 0; change < 9; ++change) {
+    for (int change = 0; change < 19; ++change) {
         MenuSceneSchedule schedule;
         ASSERT_TRUE(schedule.update(nanoseconds{0}, kScenery));
         schedule.rendered();
@@ -182,6 +182,36 @@ TEST(MenuPresentation, RenderScaleAndEveryPresetInputInvalidateWithinTheSameSlot
             case 8:
                 key.settings.metered_exposure = true;
                 break;
+            case 9:
+                key.settings.graphics.render_scale = 0.75f;
+                break;
+            case 10:
+                key.settings.graphics.grass_density = 0.5f;
+                break;
+            case 11:
+                key.settings.graphics.grass_fade_start_m = 32;
+                break;
+            case 12:
+                key.settings.graphics.grass_fade_end_m = 64;
+                break;
+            case 13:
+                key.settings.graphics.far_radius_m = 1500;
+                break;
+            case 14:
+                key.settings.graphics.far_outer_clip_m = 1550;
+                break;
+            case 15:
+                key.settings.graphics.shadow_resolution = 1024;
+                break;
+            case 16:
+                key.settings.graphics.volumetric_quality = 0;
+                break;
+            case 17:
+                key.settings.graphics.grass_enabled = false;
+                break;
+            case 18:
+                key.settings.graphics.ui_blur = luminumbra::core::UiBlurQuality::Off;
+                break;
             default:
                 FAIL() << "Unknown graphics setting";
         }
@@ -189,6 +219,8 @@ TEST(MenuPresentation, RenderScaleAndEveryPresetInputInvalidateWithinTheSameSlot
         EXPECT_FALSE(schedule.valid());
         schedule.rendered();
         EXPECT_FALSE(schedule.update(milliseconds{2}, key));
+        EXPECT_TRUE(schedule.update(milliseconds{3}, kScenery));
+        EXPECT_FALSE(schedule.valid());
     }
 }
 

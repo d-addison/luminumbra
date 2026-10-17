@@ -1544,19 +1544,17 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system,
     std::vector<Wanted> wanted;
     const int camera_rx = static_cast<int>(std::floor(stream_pos.x / kRegionSize));
     const int camera_rz = static_cast<int>(std::floor(stream_pos.z / kRegionSize));
-    const int scan_radius = static_cast<int>(std::ceil(kF2OuterRangeMeters / kRegionSize)) + 1;
+    const int scan_radius = static_cast<int>(std::ceil(m_wanted_radius_m / kRegionSize)) + 1;
     for (int rz = camera_rz - scan_radius; rz <= camera_rz + scan_radius; ++rz) {
         for (int rx = camera_rx - scan_radius; rx <= camera_rx + scan_radius; ++rx) {
-            const float nearest = region_nearest_distance(rx, rz, stream_pos);
-            if (nearest > kF2OuterRangeMeters) {
+            const auto admission = region_admission(rx, rz, stream_pos);
+            if (!admission.wanted) {
                 continue;
             }
             // Retain far coverage beneath the live ring too. A camera above
             // the surface can outlive/cull its live terrain; horizontal ring
             // ownership alone must not leave an unrendered square below it.
-            const World::FarLodTier tier =
-                nearest < kF1OuterRangeMeters ? World::FarLodTier::F1 : World::FarLodTier::F2;
-            wanted.push_back({rx, rz, tier, nearest});
+            wanted.push_back({rx, rz, admission.tier, admission.nearest_m});
         }
     }
     // Nearest-first build order.
@@ -1792,6 +1790,28 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system,
     m_stats.pending_depth = m_pending.size();
 }
 
+void FarLodSystem::set_horizon(float radius_m, float outer_clip_m) {
+    // Independently narrowed double inputs can differ by one float ULP when
+    // radius and clip straddle a power of two; retain the resolver's 50 m pair.
+    if (!std::isfinite(radius_m) || radius_m < kF1OuterRangeMeters ||
+        radius_m > kF2OuterRangeMeters || !std::isfinite(outer_clip_m) ||
+        std::abs(outer_clip_m - (radius_m + 50.0f)) > 0.001f)
+        return;
+    m_wanted_radius_m = radius_m;
+    m_outer_clip_m = outer_clip_m;
+    // update() recomputes admission each frame, keeps revisions on retained
+    // tiles and evicts only derived meshes outside the new wanted set. Growing
+    // the horizon uses the same authoritative snapshot/revision checks.
+}
+
+FarLodSystem::RegionAdmission
+FarLodSystem::region_admission(int rx, int rz, const glm::vec3& anchor) const {
+    const float nearest = region_nearest_distance(rx, rz, anchor);
+    return {.nearest_m = nearest,
+            .tier = nearest < kF1OuterRangeMeters ? World::FarLodTier::F1 : World::FarLodTier::F2,
+            .wanted = nearest <= m_wanted_radius_m};
+}
+
 void FarLodSystem::draw_gbuffer(Shader& geometry_shader,
                                 const glm::mat4& view,
                                 const glm::vec4 frustum_planes[6],
@@ -1821,7 +1841,7 @@ void FarLodSystem::draw_gbuffer(Shader& geometry_shader,
     // geometry. Their readiness remains the live streaming path's responsibility.
     glEnable(GL_CLIP_DISTANCE0);
     geometry_shader.setFloat("u_farClipNearRadius", kFarClipInnerRadiusMeters);
-    geometry_shader.setFloat("u_farClipFarRadius", kFarClipOuterRadiusMeters);
+    geometry_shader.setFloat("u_farClipFarRadius", m_outer_clip_m);
     // Worldgen-preview far-field: for the external orbit camera the camera-
     // relative inner discard (u_farClipInnerRadius) + near radial clip would carve
     // a moving void disc around the camera, and the camera-region skip would drop

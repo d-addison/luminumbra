@@ -221,8 +221,11 @@ public:
 
     // --- Distance fade (gate: no foliage beyond the live ring). ---
     void set_fade_distances(float start_m, float end_m) {
+        if (m_fade_start_m == start_m && m_fade_end_m == end_m)
+            return;
         m_fade_start_m = start_m;
         m_fade_end_m = end_m;
+        m_scatter_built = false;
     }
     float fade_start_m() const {
         return m_fade_start_m;
@@ -242,6 +245,7 @@ public:
         if (m_density_scale != effective) {
             m_density_scale = effective;
             ++m_chunk_cache_gen;
+            m_scatter_built = false;
         }
     }
     float density_scale() const {
@@ -391,6 +395,8 @@ public:
 private:
     Client::Attribution::FoliageRebuild m_rebuild_attribution{};
     Client::Attribution::ScatterSignature m_attributed_signature{};
+    // Cache invalidation by live settings must retain diagnostic build history.
+    bool m_attributed_signature_valid = false;
     Client::Attribution::FallbackReason m_last_fallback =
         Client::Attribution::FallbackReason::GpuDisabled;
     void map_instances_for_frame();

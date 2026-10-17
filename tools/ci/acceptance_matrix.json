@@ -1137,12 +1137,12 @@
       "requirements": [
         "ar.activation.050"
       ],
-      "discrepancy": "ActiveRegionLedgerTest.ValidAnchorBoundaries covers the half-open interval on both axes. An integrated boundary regression for walking anchors, ground-object edits and region pins remains planned.",
+      "discrepancy": "The contract and ledger specify [-2^24, 2^24). ActiveRegionLedgerTest.ValidAnchorBoundaries covers the ledger predicate; exact endpoint coverage across walking anchors, ground-object edits and pins remains tracked in issue #250.",
       "evidence": [
         {
           "kind": "ctest",
           "ref": "ActiveRegionLedgerTest.SymmetricAnchorBoundaries",
-          "planned": "Add an integrated boundary regression accepting -2^24 and rejecting +2^24 on X and Z for walking anchors, ground-object edits and pins, while checking the adjacent interior and exterior coordinates.; owner: ds"
+          "planned": "Cover both X and Z endpoints for walking anchors, ground-object edits and pins: accept -2^24 and the adjacent interior coordinates, and reject +2^24 and the adjacent exterior coordinates.; owner: ds"
         }
       ]
     },
@@ -2913,6 +2913,26 @@
           "kind": "doc",
           "ref": "docs/active-regions.md",
           "planned": "map discriminating regression and qualification evidence for the updated contract; owner: ac"
+        }
+      ]
+    },
+    {
+      "id": "graphics.horizon-authority",
+      "source": "docs/engine-guide.md#world-generation-and-streaming",
+      "statement": "Legacy graphics horizon changes preserve edited chunk authority and reject stale captures through the chunk voxel revision even when world/region publication revisions are unchanged. This row covers the owner-thread snapshot and admission regression, not native rendering qualification.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GraphicsRuntimePure.ShrinkingAndGrowingHorizonRetainsEditedAuthorityAndRejectsStaleCapture"
+        },
+        {
+          "kind": "ctest",
+          "ref": "StreamingHardening.FarLodSnapshotOwnsBytesAndRejectsStaleLiveData"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarLodWorker.AuthoritativeCaptureBuildsPersistsAndStales"
         }
       ]
     }
