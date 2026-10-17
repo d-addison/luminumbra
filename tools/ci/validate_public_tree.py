@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 from dataclasses import asdict, dataclass
+from functools import lru_cache
 from pathlib import Path, PurePosixPath
 
 
@@ -92,6 +93,31 @@ TEXT_RULES = (
     ("private-key", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----")),
 )
 
+# These are necessary literal fragments, not replacement validation rules.
+TEXT_RULE_HINTS = {
+    "unfinished-marker": ("\x74odo", "\x66ixme", "\x77ip", "\x74bd", "\x78xx"),
+    "internal-spec-reference": ("spec",),
+    "internal-task-reference": ("task",),
+    "internal-wave-reference": ("wave",),
+    "numbered-pr-reference": ("pr", "pull"),
+    "implementation-history-reference": ("iteration", "rank", "item", "critique", "phase", "track", "slice"),
+    "internal-document-reference": (".md",),
+    "private-posix-path": ("/home/", "/mnt/"),
+    "private-unc-path": ("wsl",),
+    "private-windows-path": (":\\",),
+    "github-token": ("gh", "github_pat_"),
+    "aws-access-key": ("akia", "asia"),
+    "private-key": ("private key",),
+}
+TEXT_RULE_STARTS = {
+    "internal-requirement-id": re.compile(
+        r"\b(?:T-|FR-|AC-|P\d|A-T|AUDIO-|AETHER-|ATMO-|FOLIAGE-|GPU-|"
+        r"INSTINCT-|NET-|OPS-|RENDER-|SHIELD-|WATER-|UI-)"),
+    "internal-project-id": re.compile(r"\b(?:[ITP]\d|WS-|OQ-|NFR-|KDD-|FFF-|RD-|KD-)"),
+    "internal-short-label": re.compile(
+        r"\([ABCEFGIMNOPW]\d|\b(?:defect|[A-Z][a-z]{4})\s+[A-Z]\d|\b(?:T\d+-|0\d{2}-)|-0\d{2}"),
+}
+
 TEXT_EXCLUDED_PREFIXES = ("vendor/",)
 
 # Provenance can appear in documentation, source comments or script literals.
@@ -107,11 +133,53 @@ AGENT_NAME_DIGESTS = frozenset({
     "c857d09db23e6822e3600bc06ad8d58f92ed62bc8efd81c753f77048662cb97d",
     "41418a61d982be103ecc30f2e00ca90bb4c4d1b2e107b9bca93f52ea0d10c6b3",
 })
-AGENT_NAME = r"([A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*?)"
+# Every name is followed by punctuation or whitespace. Check that boundary
+# before attempting the longer context alternatives for each word prefix.
+AGENT_NAME = r"([A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*?)(?![A-Za-z0-9])"
+ATTRIBUTION_WORD = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*", re.IGNORECASE)
 
 
 def name_digest(token: str) -> str:
     return hashlib.sha256(token.lower().encode("utf-8")).hexdigest()
+
+
+@lru_cache(maxsize=8192)
+def _word_may_name_attribution(word: str, digests: frozenset[str]) -> bool:
+    # Consider every possible name at hyphen boundaries. Bound this prefilter
+    # to four components per word; longer compounds use the full matcher.
+    # Retain at most 8192 word/vocabulary pairs across files.
+    parts = word.split("-", 4)
+    if len(parts) > 4:
+        return True
+    return any(name_digest("-".join(parts[start:end])) in digests
+               for start in range(len(parts)) for end in range(start + 1, len(parts) + 1))
+
+
+def _may_name_attribution(text: str, folded: str | None = None) -> bool:
+    if folded is None:
+        folded = text.casefold().replace("\u0131", "i").replace("i\u0307", "i")
+    # Necessary fragments for all seven name-bearing alternatives below:
+    # tiers; name before context; verbs; numbered references (searched below);
+    # context before name; signatures; adapters. An alternative without a
+    # necessary trigger must bypass this gate and run the full matcher.
+    contexts = (
+        "/low", "/medium", "/high", "/xhigh", "/max", "/ultra",
+        "review", "audit", "verif", "analysis", "model", "agent", "sign", "authoritative", "finding", "critique",
+        "accept", "approv", "reject", "found", "correct",
+        "—", "--", "adapter",
+    )
+    if not any(context in folded for context in contexts) and not re.search(r"\br\d+|#\s*\d", text, re.IGNORECASE):
+        return False
+    digests = frozenset(AGENT_NAME_DIGESTS)
+    seen: set[str] = set()
+    for match in ATTRIBUTION_WORD.finditer(text):
+        word = match[0].lower()
+        if word in seen:
+            continue
+        seen.add(word)
+        if _word_may_name_attribution(word, digests):
+            return True
+    return False
 
 
 PROVENANCE_HASH = r"(?<![\w#])[`'\"]?[0-9a-f]{7,40}\b[`'\"]?"
@@ -160,6 +228,10 @@ PROVENANCE_TEXT_RULES = (
         re.IGNORECASE,
     )),
 )
+PROVENANCE_RULE_HINTS = {
+    "private-provenance": ("private",),
+    "private-process-provenance": ("pid", "operator"),
+}
 
 
 def inspect_path(path: str) -> list[Finding]:
@@ -178,12 +250,19 @@ def inspect_path(path: str) -> list[Finding]:
     return findings
 
 
+CODE_TOKEN_START = re.compile(r"['\"/#<@`R\[]")
+CPP_TOKEN_START = re.compile(r"['\"/#<@`R\[]|(?<!\w)[0-9]")
+CPP_NUMBER = re.compile(r"[0-9][\w'.]*")
+
+
 def code_mask(text: str, powershell: bool, *, comments_only: bool = False,
               hash_comments: bool = False, triple_quotes: bool = False,
               cmake: bool = False, cpp: bool = False, yaml: bool = False) -> str:
     """Preserve offsets in code, or retain only comments for prose inspection."""
-    masked = list(text if not comments_only else re.sub(r"[^\n]", " ", text))
+    masked = list(text if not comments_only else re.sub(
+        r"[^\n]+", lambda match: " " * len(match[0]), text))
     index, size = 0, len(text)
+    token_start = CPP_TOKEN_START if cpp else CODE_TOKEN_START
     yaml_plain = False
     yaml_flow_depth = 0
 
@@ -193,6 +272,13 @@ def code_mask(text: str, powershell: bool, *, comments_only: bool = False,
                 masked[offset] = " "
 
     while index < size:
+        # Ordinary code cannot open a comment or literal. YAML also tracks
+        # scalar boundaries, so it must continue examining every character.
+        if not yaml:
+            token = token_start.search(text, index)
+            if token is None:
+                break
+            index = token.start()
         start = index
         is_comment = False
         if yaml and text[index] == "\n":
@@ -200,8 +286,8 @@ def code_mask(text: str, powershell: bool, *, comments_only: bool = False,
         # Separators belong to C++ numeric tokens, including hex digits. Consume
         # the entire token so its apostrophes cannot start character literals.
         if cpp and text[index].isdigit() and (index == 0 or not re.match(r"\w", text[index - 1])):
-            number = re.match(r"[0-9][\w'.]*", text[index:])
-            index += number.end()
+            number = CPP_NUMBER.match(text, index)
+            index = number.end()
             continue
         # YAML quotes only open at the start of a scalar. Once a plain scalar
         # starts, embedded quotes are ordinary characters until the line ends.
@@ -376,9 +462,13 @@ def code_token_exemptions(path: str, text: str) -> set[tuple[int, int]]:
     suffix = PurePosixPath(path).suffix.lower()
     if suffix in {".cpp", ".cc", ".cxx", ".h", ".hpp"}:
         pattern, powershell = CPP_INDEX, False
+        token = "phase"
     elif suffix in {".ps1", ".psm1"}:
         pattern, powershell = PS_TUPLE_MEMBER, True
+        token = "Item"
     else:
+        return set()
+    if token not in text:
         return set()
     return {match.span("token") for match in pattern.finditer(
         code_mask(text, powershell, cpp=not powershell))}
@@ -388,14 +478,24 @@ def inspect_text(path: str, text: str) -> list[Finding]:
     if path.startswith(TEXT_EXCLUDED_PREFIXES):
         return []
     findings: list[Finding] = []
+    # Include the extra Unicode letters recognized by case-insensitive ASCII
+    # regexes. Extra candidates from case folding still use the exact rules.
+    folded = text.casefold().replace("\u0131", "i").replace("i\u0307", "i")
     # Blank comment leaders without changing offsets, allowing prose to wrap
     # across C/C++, CMake, Python, PowerShell and YAML comment lines.
     prose = re.sub(r"(?m)^[ \t]*(?://+|#+|/\*+|\*|<#)[ \t]*",
                    lambda match: " " * len(match.group(0)), text)
-    hash_prose = candidate_prose(path, text)
-    hash_prose = re.sub(r"(?m)^[ \t]*(?://+|#+|/\*+|\*|<#)[ \t]*",
-                        lambda match: " " * len(match.group(0)), hash_prose)
+    hash_prose = ""
+    # Masking code is only needed when a contiguous hash could be present.
+    if re.search(r"[0-9a-fA-F]{7}", text):
+        hash_prose = candidate_prose(path, text)
+        hash_prose = re.sub(r"(?m)^[ \t]*(?://+|#+|/\*+|\*|<#)[ \t]*",
+                            lambda match: " " * len(match.group(0)), hash_prose)
     for rule, pattern in PROVENANCE_TEXT_RULES:
+        if rule in PROVENANCE_RULE_HINTS and not any(hint in folded for hint in PROVENANCE_RULE_HINTS[rule]):
+            continue
+        if rule == "internal-reviewer-provenance" and pattern.groups and not _may_name_attribution(prose, folded):
+            continue
         context = hash_prose if rule == "candidate-provenance" else prose
         for match in pattern.finditer(context):
             if rule == "internal-reviewer-provenance":
@@ -411,11 +511,20 @@ def inspect_text(path: str, text: str) -> list[Finding]:
                     continue
             findings.append(Finding(rule, path, text[match.start():match.end()],
                                     text.count("\n", 0, match.start()) + 1))
+    # A multiline search is a conservative prefilter for the line rules:
+    # cross-line matches may do extra work, but no matching line is omitted.
+    line_text = re.sub(r"\r\n?|[\v\f\x1c-\x1e\x85\u2028\u2029]", "\n", text)
+    active_rules = [(rule, pattern) for rule, pattern in TEXT_RULES
+                    if (rule not in TEXT_RULE_HINTS or any(hint in folded for hint in TEXT_RULE_HINTS[rule]))
+                    and (rule not in TEXT_RULE_STARTS or TEXT_RULE_STARTS[rule].search(text))
+                    and re.search(pattern.pattern, line_text, pattern.flags | re.MULTILINE)]
+    if not active_rules:
+        return findings
     exemptions = code_token_exemptions(path, text)
     offset = 0
     for line_number, full_line in enumerate(text.splitlines(keepends=True), 1):
         line = full_line.rstrip("\r\n")
-        for rule, pattern in TEXT_RULES:
+        for rule, pattern in active_rules:
             for match in pattern.finditer(line):
                 span = (offset + match.start(), offset + match.end())
                 if rule == "implementation-history-reference" and span in exemptions:
@@ -442,12 +551,17 @@ def validate(root: Path) -> list[Finding]:
     findings: list[Finding] = []
     for relative in tracked_paths(root):
         findings.extend(inspect_path(relative))
+        if relative.startswith(TEXT_EXCLUDED_PREFIXES):
+            continue
         path = root / relative
         try:
-            data = path.read_bytes()
+            with path.open("rb") as handle:
+                # Binary classification examines at most the first 8192 bytes.
+                prefix = handle.read(8192)
+                if b"\0" in prefix:
+                    continue
+                data = prefix + handle.read()
         except OSError:
-            continue
-        if b"\0" in data[:8192]:
             continue
         try:
             text = data.decode("utf-8")

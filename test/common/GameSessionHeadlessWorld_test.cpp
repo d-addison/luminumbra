@@ -49,6 +49,7 @@
 #include "luminumbra_common/components/InstinctComponents.h"
 #include "luminumbra_common/persistence/PlantPersistence.h"
 #include "luminumbra_common/persistence/SavedWorldCatalog.h"
+#include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/replay/RegionScheduleTrace.h"
 #include "luminumbra_common/systems/AetherFieldSystem.h"
 #include "luminumbra_common/systems/CropLifecycleSystem.h"
@@ -371,6 +372,382 @@ std::string ReadClockTestFile(const fs::path& path) {
     return bytes.str();
 }
 
+void WriteSavedPresetTestJson(const fs::path& path, const nlohmann::json& json) {
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    output << json.dump(2) << '\n';
+    ASSERT_TRUE(output.good());
+}
+
+std::map<std::string, std::string> SavedPresetTestDiskBytes(const fs::path& root) {
+    std::map<std::string, std::string> result;
+    for (const auto& entry : fs::recursive_directory_iterator(root)) {
+        result.emplace(entry.path().lexically_relative(root).generic_string(),
+                       entry.is_directory() ? "<directory>" : ReadClockTestFile(entry.path()));
+    }
+    return result;
+}
+
+struct PendingSnapshotState;
+
+class SavedWorldPresetTest : public testing::TestWithParam<bool> {
+protected:
+    HeadlessRoot root;
+    JobSystem jobs;
+
+    void SetUp() override {
+        jobs.startup(1);
+    }
+    void TearDown() override {
+        jobs.shutdown();
+    }
+    void Configure(GameSession& session) {
+        session.SetRootPath(root.root_string());
+        session.SetJobSystem(&jobs);
+        session.SetActiveRegionsEnabled(GetParam());
+    }
+    void CreateSnapshotSession(GameSession& session) {
+        SCOPED_TRACE("create snapshot session");
+        Configure(session);
+        session.SetAetherStateEnabled(true);
+        ASSERT_TRUE(session.CreateWorld("Snapshot preset identity", "1337", "default"));
+    }
+    void ExpectSnapshotReloaded(const PendingSnapshotState& pending,
+                                const Luminumbra::Chunk& chunk,
+                                const fs::path& save,
+                                const std::string& world_id);
+    void ExpectRefusedWithoutWrites(const std::string& id, const std::string& reason) {
+        const auto before = SavedPresetTestDiskBytes(root.path());
+        const auto inspected = P::InspectSavedWorld(root.path(), id);
+        EXPECT_NE(inspected.error.find(reason), std::string::npos) << inspected.error;
+        GameSession loaded;
+        Configure(loaded);
+        EXPECT_FALSE(loaded.LoadWorld(id));
+        EXPECT_NE(loaded.GetWorldOpenError().find(reason), std::string::npos);
+        EXPECT_EQ(loaded.GetWorldSystem(), nullptr);
+        EXPECT_FALSE(loaded.SaveWorld());
+        EXPECT_FALSE(loaded.SaveWorldState());
+        EXPECT_EQ(SavedPresetTestDiskBytes(root.path()), before);
+    }
+};
+
+TEST_P(SavedWorldPresetTest, NewSaveRoundTripsWithMarkerAndCanonicalIdentity) {
+    GameSession created;
+    Configure(created);
+    ASSERT_TRUE(created.CreateWorld("Preset identity", "1337", "default"));
+    const auto save = created.GetWorldSaveDir();
+    const auto metadata = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
+    const auto preset = nlohmann::json::parse(ReadClockTestFile(save / "preset.json"));
+    EXPECT_EQ(metadata.at("presetFormat"), 1);
+    EXPECT_EQ(metadata.at("presetIdentity"), P::StableChecksum(preset.dump()));
+    EXPECT_TRUE(preset.at("generation_params").at("terrain").at("island_mask_enabled").get<bool>());
+    // Formatting does not change the canonical identity, and no packaged copy is needed.
+    ASSERT_TRUE(P::WorldSaveService::write_file_durably(save / "preset.json", preset.dump(4)));
+    ASSERT_TRUE(fs::remove(root.path() / "worlds/atlas/presets/default.json"));
+    const auto before = SavedPresetTestDiskBytes(root.path());
+    const auto inspected = P::InspectSavedWorld(root.path(), created.GetMetadata().worldId);
+    ASSERT_TRUE(inspected.error.empty()) << inspected.error;
+    EXPECT_EQ(inspected.preset_path, save / "preset.json");
+    GameSession loaded;
+    Configure(loaded);
+    ASSERT_TRUE(loaded.LoadWorld(created.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    EXPECT_EQ(loaded.PresetContentHash(), created.PresetContentHash());
+    EXPECT_EQ(SavedPresetTestDiskBytes(root.path()), before);
+    ASSERT_TRUE(loaded.SaveWorld());
+    EXPECT_EQ(nlohmann::json::parse(ReadClockTestFile(save / "world_info.json")), metadata);
+    const auto copy = root.path() / "reopened-copy";
+    ASSERT_TRUE(loaded.SaveWorldStateTo(copy));
+    if (GetParam()) {
+        EXPECT_EQ(nlohmann::json::parse(ReadClockTestFile(copy / "preset.json")), preset);
+        EXPECT_EQ(nlohmann::json::parse(ReadClockTestFile(copy / "world_info.json")), metadata);
+    }
+}
+
+TEST_P(SavedWorldPresetTest, CustomAdditionalNamedPresetCarriesItsExactIdentity) {
+    const auto named = root.path() / "worlds/atlas/presets/other.json";
+    fs::copy_file(SourcePresetPath(), named);
+    auto custom = nlohmann::json::parse(ReadClockTestFile(named));
+    custom["generation_params"]["terrain"]["height_offset"] = 123.0;
+    const auto text = custom.dump();
+    GameSession created;
+    Configure(created);
+    ASSERT_TRUE(created.CreateWorld("Custom identity", "1337", "other", &text));
+    const auto save = created.GetWorldSaveDir();
+    const auto metadata = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
+    const auto embedded = nlohmann::json::parse(ReadClockTestFile(save / "preset.json"));
+    EXPECT_EQ(metadata.at("presetFormat"), 1);
+    EXPECT_EQ(metadata.at("presetIdentity"), P::StableChecksum(embedded.dump()));
+    GameSession loaded;
+    Configure(loaded);
+    ASSERT_TRUE(loaded.LoadWorld(created.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    EXPECT_FLOAT_EQ(loaded.GetWorldSystem()->get_params().height_offset, 123.0f);
+
+    auto tampered = embedded;
+    tampered["generation_params"]["terrain"]["height_offset"] = 124.0;
+    WriteSavedPresetTestJson(save / "preset.json", tampered);
+    ExpectRefusedWithoutWrites(created.GetMetadata().worldId, "identity");
+}
+
+class SnapshotPresetFiles {
+public:
+    explicit SnapshotPresetFiles(const fs::path& destination)
+        : directory(destination)
+        , preset_bytes(ReadClockTestFile(directory / "preset.json"))
+        , metadata_bytes(ReadClockTestFile(directory / "world_info.json"))
+        , other_preset(nlohmann::json::parse(preset_bytes))
+        , other_metadata(nlohmann::json::parse(metadata_bytes)) {
+        other_preset["generation_params"]["terrain"]["height_offset"] = 123.0;
+        other_metadata["presetIdentity"] = P::StableChecksum(other_preset.dump());
+    }
+
+    void Rewrite(const char* changed) const {
+        SCOPED_TRACE(directory.generic_string());
+        if (std::string(changed) != "identity")
+            ASSERT_NO_FATAL_FAILURE(
+                WriteSavedPresetTestJson(directory / "preset.json", other_preset));
+        if (std::string(changed) != "preset")
+            ASSERT_NO_FATAL_FAILURE(
+                WriteSavedPresetTestJson(directory / "world_info.json", other_metadata));
+    }
+
+    void Restore() const {
+        SCOPED_TRACE(directory.generic_string());
+        ASSERT_TRUE(
+            P::WorldSaveService::write_file_durably(directory / "preset.json", preset_bytes));
+        ASSERT_TRUE(
+            P::WorldSaveService::write_file_durably(directory / "world_info.json", metadata_bytes));
+    }
+
+private:
+    fs::path directory;
+    std::string preset_bytes;
+    std::string metadata_bytes;
+    nlohmann::json other_preset;
+    nlohmann::json other_metadata;
+};
+
+class SnapshotDestinationBytes {
+public:
+    explicit SnapshotDestinationBytes(const fs::path& destination)
+        : directory(destination)
+        , bytes(SavedPresetTestDiskBytes(directory)) {}
+
+    void ExpectUnchanged() const {
+        SCOPED_TRACE(directory.generic_string());
+        EXPECT_EQ(SavedPresetTestDiskBytes(directory), bytes);
+    }
+
+private:
+    fs::path directory;
+    std::map<std::string, std::string> bytes;
+};
+
+void PreparePendingSnapshot(GameSession& session,
+                            std::shared_ptr<Luminumbra::Chunk>& chunk,
+                            bool existing_snapshot) {
+    SCOPED_TRACE("prepare pending snapshot");
+    chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+    chunk->set_state(Luminumbra::ChunkState::Idle);
+    chunk->heightmap_data = {8.0f, 9.0f, 10.0f};
+    chunk->mark_voxel_data_dirty();
+    ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    auto& registry = session.GetRegistry();
+    const auto plant = registry.create();
+    registry.emplace<C::PlantTag>(plant);
+    registry.emplace<C::PlantGenomeComponent>(plant).genes.fill(0.5f);
+    registry.emplace<C::PlantGrowthComponent>(plant);
+    registry.emplace<C::TransformComponent>(plant).position = session.GetMetadata().spawnPoint;
+    auto* energy = session.GetEnergyFieldState();
+    ASSERT_NE(energy, nullptr);
+    energy->SetAnchorCell(0, 0);
+    energy->QueueDeposit(1, 0, 0, 0, 60000);
+    energy->Tick(0);
+    if (existing_snapshot) {
+        ASSERT_TRUE(session.SaveWorldState());
+        ASSERT_FALSE(chunk->is_voxel_data_dirty());
+    }
+
+    chunk->heightmap_data.front() = 42.0f;
+    chunk->mark_voxel_data_dirty();
+    registry.get<C::PlantGrowthComponent>(plant).growth_points = 123;
+    energy->QueueDeposit(2, 0, 0, 0, 1000);
+    energy->Tick(0);
+}
+
+struct PendingSnapshotState {
+    explicit PendingSnapshotState(const GameSession& session)
+        : plant_hash(session.ComputePlantSubHash())
+        , energy_bytes(session.GetEnergyFieldState()->CanonicalBytes()) {}
+
+    void ExpectUnchanged(const GameSession& session, const Luminumbra::Chunk& chunk) const {
+        SCOPED_TRACE("pending snapshot state");
+        EXPECT_TRUE(chunk.is_voxel_data_dirty());
+        EXPECT_FLOAT_EQ(chunk.heightmap_data.front(), 42.0f);
+        EXPECT_EQ(session.ComputePlantSubHash(), plant_hash);
+        EXPECT_EQ(session.GetEnergyFieldState()->CanonicalBytes(), energy_bytes);
+    }
+
+    std::string plant_hash;
+    std::string energy_bytes;
+};
+
+void SavedWorldPresetTest::ExpectSnapshotReloaded(const PendingSnapshotState& pending,
+                                                  const Luminumbra::Chunk& chunk,
+                                                  const fs::path& save,
+                                                  const std::string& world_id) {
+    SCOPED_TRACE(world_id);
+    EXPECT_NE(ReadClockTestFile(P::WorldSaveService::plant_entities_path(save)), "");
+    EXPECT_NE(ReadClockTestFile(save / "aether_state.efs"), "");
+    GameSession loaded;
+    Configure(loaded);
+    loaded.SetAetherStateEnabled(true);
+    ASSERT_TRUE(loaded.LoadWorld(world_id)) << loaded.GetWorldOpenError();
+    EXPECT_EQ(loaded.ComputePlantSubHash(), pending.plant_hash);
+    ASSERT_NE(loaded.GetEnergyFieldState(), nullptr);
+    EXPECT_EQ(loaded.GetEnergyFieldState()->CanonicalBytes(), pending.energy_bytes);
+    Luminumbra::WorldStreamingState restored;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(P::WorldSaveService{}.load_world(restored, save, errors));
+    const auto restored_chunk = restored.find_chunk(chunk.get_id());
+    ASSERT_NE(restored_chunk, nullptr);
+    EXPECT_EQ(restored_chunk->heightmap_data, chunk.heightmap_data);
+}
+
+TEST_P(SavedWorldPresetTest, OpenSessionPresetChangeRefusesBeforeSnapshotWritesAndAcknowledgement) {
+    for (const bool existing_snapshot : {false, true}) {
+        SCOPED_TRACE(existing_snapshot);
+        GameSession session;
+        CreateSnapshotSession(session);
+        if (HasFatalFailure())
+            return;
+        const auto save = session.GetWorldSaveDir();
+        const SnapshotPresetFiles preset_files(save);
+
+        std::shared_ptr<Luminumbra::Chunk> chunk;
+        PreparePendingSnapshot(session, chunk, existing_snapshot);
+        if (HasFatalFailure())
+            return;
+        const PendingSnapshotState pending(session);
+
+        for (const auto* changed : {"preset", "identity", "both"}) {
+            SCOPED_TRACE(changed);
+            preset_files.Rewrite(changed);
+            if (HasFatalFailure())
+                return;
+            const SnapshotDestinationBytes before(save);
+            EXPECT_FALSE(session.SaveWorldStateTo(save));
+            before.ExpectUnchanged();
+            pending.ExpectUnchanged(session, *chunk);
+            EXPECT_FALSE(session.SaveWorldState());
+            before.ExpectUnchanged();
+            pending.ExpectUnchanged(session, *chunk);
+            EXPECT_FALSE(session.SaveWorld());
+            before.ExpectUnchanged();
+            pending.ExpectUnchanged(session, *chunk);
+            preset_files.Restore();
+            if (HasFatalFailure())
+                return;
+        }
+
+        ASSERT_TRUE(session.SaveWorldState());
+        EXPECT_FALSE(chunk->is_voxel_data_dirty());
+        ExpectSnapshotReloaded(pending, *chunk, save, session.GetMetadata().worldId);
+        if (HasFatalFailure())
+            return;
+    }
+}
+
+TEST_P(SavedWorldPresetTest, MissingEmbeddedPresetRefusesWithoutWrites) {
+    GameSession created;
+    Configure(created);
+    ASSERT_TRUE(created.CreateWorld("Missing preset", "1337", "default"));
+    fs::create_directories(root.path() / "worlds/atlas/presets-rev6");
+    fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets-rev6/default.json",
+                  root.path() / "worlds/atlas/presets-rev6/default.json");
+    ASSERT_TRUE(fs::remove(created.GetWorldSaveDir() / "preset.json"));
+    ExpectRefusedWithoutWrites(created.GetMetadata().worldId, "required embedded preset.json");
+}
+
+TEST_P(SavedWorldPresetTest, MissingOrInvalidIdentityRefusesWithoutWrites) {
+    GameSession created;
+    Configure(created);
+    ASSERT_TRUE(created.CreateWorld("Missing identity", "1337", "default"));
+    const auto path = created.GetWorldSaveDir() / "world_info.json";
+    auto metadata = nlohmann::json::parse(ReadClockTestFile(path));
+    metadata.erase("presetIdentity");
+    WriteSavedPresetTestJson(path, metadata);
+    ExpectRefusedWithoutWrites(created.GetMetadata().worldId, "identity");
+    for (const auto& identity : {nlohmann::json(nullptr),
+                                 nlohmann::json(123),
+                                 nlohmann::json(""),
+                                 nlohmann::json("wrong")}) {
+        SCOPED_TRACE(identity.dump());
+        metadata["presetIdentity"] = identity;
+        WriteSavedPresetTestJson(path, metadata);
+        ExpectRefusedWithoutWrites(created.GetMetadata().worldId, "identity");
+    }
+}
+
+TEST_P(SavedWorldPresetTest, TamperedEmbeddedPresetRefusesOnIdentityWithoutWrites) {
+    GameSession created;
+    Configure(created);
+    ASSERT_TRUE(created.CreateWorld("Tampered preset", "1337", "default"));
+    const auto path = created.GetWorldSaveDir() / "preset.json";
+    auto preset = nlohmann::json::parse(ReadClockTestFile(path));
+    preset["generation_params"]["terrain"]["island_mask_enabled"] = false;
+    WriteSavedPresetTestJson(path, preset);
+    ExpectRefusedWithoutWrites(created.GetMetadata().worldId, "identity");
+}
+
+TEST_P(SavedWorldPresetTest, InvalidFormatNeverFallsBack) {
+    GameSession created;
+    Configure(created);
+    ASSERT_TRUE(created.CreateWorld("Invalid format", "1337", "default"));
+    const auto save = created.GetWorldSaveDir();
+    auto metadata = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
+    ASSERT_TRUE(fs::remove(save / "preset.json"));
+    for (const auto& format : {nlohmann::json(nullptr),
+                               nlohmann::json(false),
+                               nlohmann::json(0),
+                               nlohmann::json(2),
+                               nlohmann::json("1")}) {
+        SCOPED_TRACE(format.dump());
+        metadata["presetFormat"] = format;
+        WriteSavedPresetTestJson(save / "world_info.json", metadata);
+        ExpectRefusedWithoutWrites(created.GetMetadata().worldId, "preset format");
+    }
+}
+
+TEST_P(SavedWorldPresetTest, UnmarkedLegacySaveUsesFrozenPresetAndEmbedsItOnResave) {
+    const auto historical = root.path() / "worlds/atlas/presets-rev6/default.json";
+    fs::create_directories(historical.parent_path());
+    fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets-rev6/default.json",
+                  historical);
+    const auto save = root.path() / "worlds/saves/legacy";
+    fs::create_directories(save);
+    WriteSavedPresetTestJson(save / "world_info.json",
+                             {{"container_version", 2}, {"worldType", "default"}});
+    const auto before = SavedPresetTestDiskBytes(root.path());
+    const auto inspected = P::InspectSavedWorld(root.path(), "legacy");
+    ASSERT_TRUE(inspected.error.empty()) << inspected.error;
+    EXPECT_EQ(inspected.preset_path, historical);
+    GameSession loaded;
+    Configure(loaded);
+    ASSERT_TRUE(loaded.LoadWorld("legacy")) << loaded.GetWorldOpenError();
+    EXPECT_FALSE(loaded.GetWorldSystem()->get_params().island_mask_enabled);
+    EXPECT_EQ(SavedPresetTestDiskBytes(root.path()), before);
+    ASSERT_TRUE(loaded.SaveWorld());
+    const auto metadata = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
+    EXPECT_EQ(metadata.at("presetFormat"), 1);
+    EXPECT_EQ(metadata.at("presetIdentity"),
+              P::StableChecksum(nlohmann::json::parse(ReadClockTestFile(historical)).dump()));
+    EXPECT_EQ(nlohmann::json::parse(ReadClockTestFile(save / "preset.json")),
+              nlohmann::json::parse(ReadClockTestFile(historical)));
+    ASSERT_TRUE(fs::remove(historical));
+    EXPECT_TRUE(P::InspectSavedWorld(root.path(), "legacy").error.empty());
+}
+
+INSTANTIATE_TEST_SUITE_P(ActiveRegionsEnabledAndDisabled, SavedWorldPresetTest, testing::Bool());
+
 // Reads a record that production writes through a text-mode stream, so its bytes
 // carry the host's line endings: the energy record (GameSession writes
 // aether_state.efs with a default-mode ofstream) is LF on Linux and CRLF on
@@ -660,6 +1037,12 @@ TEST(GameSessionHeadlessWorldTest,
     const auto alternate = root.path() / "explicit-snapshot";
     ASSERT_TRUE(session.SaveWorldStateTo(alternate));
     const auto metadata = nlohmann::json::parse(ReadClockTestFile(alternate / "world_info.json"));
+    EXPECT_EQ(metadata.at("presetFormat"), 1);
+    EXPECT_EQ(metadata.at("presetIdentity"),
+              P::StableChecksum(
+                  nlohmann::json::parse(ReadClockTestFile(alternate / "preset.json")).dump()));
+    EXPECT_EQ(nlohmann::json::parse(ReadClockTestFile(alternate / "preset.json")),
+              nlohmann::json::parse(ReadClockTestFile(session.GetWorldSaveDir() / "preset.json")));
     EXPECT_EQ(metadata.at("simulationTick"), 1u);
     EXPECT_TRUE(fs::exists(P::WorldSaveService::active_regions_path(alternate)));
     ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
@@ -1437,8 +1820,14 @@ TEST(GameSessionHeadlessWorldTest, ExplicitlyDisabledKeepsLegacyMetadataBytesAnd
     const auto path = session.GetWorldSaveDir() / "world_info.json";
     const auto before = ReadClockTestFile(path);
     const auto& m = session.GetMetadata();
+    // Clock keys remain absent; the preset marker and identity apply to every new world.
     const nlohmann::json legacy = {
         {"container_version", 2},
+        {"presetFormat", 1},
+        {"presetIdentity",
+         P::StableChecksum(
+             nlohmann::json::parse(ReadClockTestFile(session.GetWorldSaveDir() / "preset.json"))
+                 .dump())},
         {"name", m.name},
         {"seed", m.seed},
         {"worldType", m.worldType},
@@ -7432,8 +7821,8 @@ TEST(GameSessionHeadlessWorldTest, S8DGrazeableCreatureRecipientsRequireSealedFu
             live.SetEcologyTuning(tuning);
             auto& actual = live.GetRegistry();
             const auto coarse = S8FindCreature(live, 1), full = S8FindCreature(live, 2);
-            ASSERT_NE(coarse, entt::null);
-            ASSERT_NE(full, entt::null);
+            ASSERT_NE(coarse, static_cast<entt::entity>(entt::null));
+            ASSERT_NE(full, static_cast<entt::entity>(entt::null));
             const auto held = S8ExpectedFields(live, 1, 101);
             const std::uint64_t stamp = 101;
             ASSERT_NO_FATAL_FAILURE(TickOnce(live));
@@ -7481,8 +7870,8 @@ TEST(GameSessionHeadlessWorldTest, S8DFireCreatureSourcesAndRecipientsRequireSea
         live.SetReplicatedSimulationAnchors({{4650.0f, 0.0f, -1500.0f}});
         auto& actual = live.GetRegistry();
         const auto coarse = S8FindCreature(live, 1), full = S8FindCreature(live, 2);
-        ASSERT_NE(coarse, entt::null);
-        ASSERT_NE(full, entt::null);
+        ASSERT_NE(coarse, static_cast<entt::entity>(entt::null));
+        ASSERT_NE(full, static_cast<entt::entity>(entt::null));
         const auto held = S8ExpectedFields(live, 1, 101);
         const std::uint64_t stamp = 101;
         ASSERT_NO_FATAL_FAILURE(TickOnce(live));
@@ -7613,7 +8002,7 @@ TEST(GameSessionHeadlessWorldTest, S8DNewbornDoesNotParticipateAgainInItsBirthTi
     EXPECT_EQ(r.view<C::CreatureComponent>().size(), 3u);
     // ID 3 belongs to the plant; the session birth uses the shared allocator.
     const auto child = S8FindCreature(session, 4);
-    ASSERT_NE(child, entt::null);
+    ASSERT_NE(child, static_cast<entt::entity>(entt::null));
     EXPECT_EQ(r.get<C::CreatureRegionComponent>(child).region_stamp, 1u);
     EXPECT_EQ(r.get<C::CreatureGenomeComponent>(child).age_ticks, 0u);
     EXPECT_EQ(r.get<C::CreatureGenomeComponent>(child).reproduce_cooldown, tuning.cooldown_ticks);
@@ -7669,19 +8058,21 @@ void CheckLegacyCreatureSessionOracle() {
     S8O::MakeRoster(expected, false);
     const auto initial = actual.view<C::CreatureComponent>().size();
     const auto save = session.GetWorldSaveDir();
+    auto expected_preset = Luminumbra::world::ResolveTerrainPresetDefaults(
+        nlohmann::json::parse(ReadClockTestFile(SourcePresetPath())));
+    expected_preset["schema_rev"] = Luminumbra::world::kTerrainPresetSchemaRevision;
     const nlohmann::json expected_metadata = {
         {"container_version", 2},
+        {"presetFormat", P::kSavedPresetFormat},
+        {"presetIdentity", P::StableChecksum(expected_preset.dump())},
         {"name", "Legacy creature trajectory"},
         {"seed", "1337"},
         {"worldType", "default"},
         {"creationTime", 123456789},
         {"spawnPoint", {{"x", 8.0f}, {"y", 100.0f}, {"z", 8.0f}}},
         {"waterSimCursor", std::size_t{0}}};
-    auto expected_preset = Luminumbra::world::ResolveTerrainPresetDefaults(
-        nlohmann::json::parse(ReadClockTestFile(SourcePresetPath())));
-    expected_preset["schema_rev"] = Luminumbra::world::kTerrainPresetSchemaRevision;
     const std::map<std::string, std::string> expected_files{
-        {"preset.json", expected_preset.dump(2) + "\n"},
+        {"preset.json", expected_preset.dump() + "\n"},
         {"world_info.json", expected_metadata.dump(4) + "\n"}};
     for (std::uint64_t tick = 1; tick <= 100; ++tick) {
         SCOPED_TRACE(tick);
@@ -7939,17 +8330,19 @@ TEST(GameSessionHeadlessWorldTest, S8EFlagOffPreservesSaveFileCountHashAndArtifa
     luminumbra::ai::ScentField scent(128, 128, 4);
     luminumbra::fields::EnergyFieldState energy(2);
     energy.SetAnchorCell(0, 0);
+    auto expected_preset = Luminumbra::world::ResolveTerrainPresetDefaults(
+        nlohmann::json::parse(ReadClockTestFile(SourcePresetPath())));
+    expected_preset["schema_rev"] = Luminumbra::world::kTerrainPresetSchemaRevision;
     const nlohmann::json expected_metadata = {
         {"container_version", 2},
+        {"presetFormat", P::kSavedPresetFormat},
+        {"presetIdentity", P::StableChecksum(expected_preset.dump())},
         {"name", "Legacy secondary trajectory"},
         {"seed", "1337"},
         {"worldType", "default"},
         {"creationTime", 123456789},
         {"spawnPoint", {{"x", 8.0f}, {"y", 100.0f}, {"z", 8.0f}}},
         {"waterSimCursor", std::size_t{0}}};
-    auto expected_preset = Luminumbra::world::ResolveTerrainPresetDefaults(
-        nlohmann::json::parse(ReadClockTestFile(SourcePresetPath())));
-    expected_preset["schema_rev"] = Luminumbra::world::kTerrainPresetSchemaRevision;
     for (std::uint64_t tick = 1; tick <= 12; ++tick) {
         SCOPED_TRACE(tick);
         luminumbra::ai::StimulusContext context;
@@ -8007,7 +8400,7 @@ TEST(GameSessionHeadlessWorldTest, S8EFlagOffPreservesSaveFileCountHashAndArtifa
                 disk_record += c;
             }
             const std::map<std::string, std::string> files{
-                {"preset.json", expected_preset.dump(2) + "\n"},
+                {"preset.json", expected_preset.dump() + "\n"},
                 {"world_info.json", expected_metadata.dump(4) + "\n"},
                 {"aether_state.efs", disk_record}};
             ASSERT_TRUE(session.SaveWorld());
@@ -8167,7 +8560,7 @@ TEST(GameSessionHeadlessWorldTest, S8FFullCreatureWaterSourcesDepositOnlyOnRealR
     EnableSnapshotSession(live, root, jobs);
     ASSERT_TRUE(live.LoadWorld(base.GetMetadata().worldId)) << live.GetWorldOpenError();
     const auto source = S8FindCreature(live, 1);
-    ASSERT_NE(source, entt::null);
+    ASSERT_NE(source, static_cast<entt::entity>(entt::null));
     live.GetRegistry().emplace<C::WaterSourceComponent>(source).output = 65535;
     live.GetRegistry().get<C::CreatureComponent>(source).move_speed = 0.0f;
     live.SetReplicatedSimulationAnchors({position});
@@ -8216,7 +8609,7 @@ TEST(GameSessionHeadlessWorldTest, S8FSpeciesCadenceCapsAndResumeCapsAreApplied)
     ASSERT_TRUE(live.LoadWorld(base.GetMetadata().worldId)) << live.GetWorldOpenError();
     live.SetReplicatedSimulationAnchors({});
     const auto e = S7FindPlant(live, 1);
-    ASSERT_NE(e, entt::null);
+    ASSERT_NE(e, static_cast<entt::entity>(entt::null));
     ASSERT_NE(cadence_tick & 15u, ActiveRegionLedger::phase(kFarGroundRegion, 4));
     const auto stage_count = SF::FoliageRegistryStageCount();
     TickOnce(live);
@@ -8269,7 +8662,7 @@ TEST(GameSessionHeadlessWorldTest, S8FZeroResumeCapIsAcknowledgedOnceAcrossResta
     live.SetReplicatedSimulationAnchors({});
     live.PinActiveRegion(kFarGroundRegion, true);
     const auto e = S7FindPlant(live, 1);
-    ASSERT_NE(e, entt::null);
+    ASSERT_NE(e, static_cast<entt::entity>(entt::null));
     const auto points = live.GetRegistry().get<C::PlantGrowthComponent>(e).growth_points;
     const auto absorbed = live.GetRegistry().get<C::SoilFeederComponent>(e).absorbed;
     const auto soil = live.SoilNutrientAt(position);
@@ -8571,6 +8964,41 @@ TEST(GameSessionHeadlessWorldTest, S8GSuccessfulHandlerSavePreservesNextTickWork
     EXPECT_TRUE(transitioned);
     EXPECT_EQ(replays, 1u);
 }
+TEST(GameSessionHeadlessWorldTest, ActivationHandlerRefusesChangedPresetWithoutWrites) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    PreparePopulationWorld(session, root, jobs);
+    const auto save = session.GetWorldSaveDir();
+    const SnapshotPresetFiles files(save);
+    unsigned deliveries = 0;
+    session.GetSimulationEventBus().subscribe([&](const auto& event) {
+        if (!event.activation)
+            return;
+        ++deliveries;
+        const auto ledger = session.GetActiveRegionLedger().canonical_bytes();
+        const auto creatures = PopulationCreatureBytes(session);
+        for (const auto* changed : {"preset", "identity", "both"}) {
+            SCOPED_TRACE(changed);
+            ASSERT_NO_FATAL_FAILURE(files.Rewrite(changed));
+            const SnapshotDestinationBytes before(save);
+            EXPECT_FALSE(session.SaveWorld());
+            before.ExpectUnchanged();
+            EXPECT_FALSE(session.SaveWorldState());
+            before.ExpectUnchanged();
+            EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(), ledger);
+            EXPECT_EQ(PopulationCreatureBytes(session), creatures);
+            ASSERT_NO_FATAL_FAILURE(files.Restore());
+        }
+        ASSERT_TRUE(session.SaveWorld());
+    });
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_GT(deliveries, 0u);
+    EXPECT_TRUE(session.GetActiveRegionLedger().pending_activations().empty());
+}
+
 TEST(GameSessionHeadlessWorldTest, S8GExplicitLoadEnqueueFailurePreservesLiveAuthority) {
     for (const bool allocation_failure : {false, true}) {
         const HeadlessRoot root;
@@ -9765,49 +10193,63 @@ TEST(GameSessionHeadlessWorldTest,
 }
 
 TEST(GameSessionHeadlessWorldTest, CatalogPresetCompatibilityUsesCapturedSource) {
-    const HeadlessRoot root;
-    JobSystem jobs;
-    jobs.startup(1);
-    GameSession owner;
-    owner.SetRootPath(root.root_string());
-    owner.SetJobSystem(&jobs);
-    owner.SetActiveRegionsEnabled(false);
-    ASSERT_TRUE(owner.CreateWorld("Captured preset compatibility", "1337", "default"));
-    const auto save_dir = owner.GetWorldSaveDir();
-    const auto preset_path = save_dir / "preset.json";
-    const auto first_source = nlohmann::json::parse(ReadClockTestFile(preset_path));
-    auto second_source = first_source;
-    second_source["generation_params"]["terrain"]["height_offset"] = 42.0f;
-    const auto metadata_path = save_dir / "world_info.json";
-    auto metadata = nlohmann::json::parse(ReadClockTestFile(metadata_path));
-    metadata["presetIdentity"] = P::StableChecksum(first_source.dump());
-    {
-        std::ofstream output(metadata_path, std::ios::binary | std::ios::trunc);
-        output << metadata.dump();
-        output.close();
-        ASSERT_TRUE(output.good());
-    }
-    std::size_t mutations = 0;
-    const Luminumbra::World::WorldgenFileStatusReader read_status = [&](const fs::path& path,
-                                                                        std::error_code& ec) {
-        if (path == root.path() / "data/common/structures") {
-            ++mutations;
-            std::ofstream output(preset_path, std::ios::binary | std::ios::trunc);
-            output << second_source.dump();
+    for (const bool decode_chunks : {false, true}) {
+        const HeadlessRoot root;
+        JobSystem jobs;
+        jobs.startup(1);
+        GameSession owner;
+        owner.SetRootPath(root.root_string());
+        owner.SetJobSystem(&jobs);
+        owner.SetActiveRegionsEnabled(false);
+        ASSERT_TRUE(owner.CreateWorld("Captured preset compatibility", "1337", "default"));
+        const auto save_dir = owner.GetWorldSaveDir();
+        const auto preset_path = save_dir / "preset.json";
+        const auto first_source = nlohmann::json::parse(ReadClockTestFile(preset_path));
+        auto second_source = first_source;
+        second_source["generation_params"]["terrain"]["height_offset"] = 42.0f;
+        const auto metadata_path = save_dir / "world_info.json";
+        auto metadata = nlohmann::json::parse(ReadClockTestFile(metadata_path));
+        metadata["presetIdentity"] = P::StableChecksum(first_source.dump());
+        {
+            std::ofstream output(metadata_path, std::ios::binary | std::ios::trunc);
+            output << metadata.dump();
             output.close();
-            EXPECT_TRUE(output.good());
+            ASSERT_TRUE(output.good());
         }
-        return Luminumbra::World::ReadWorldgenSymlinkStatus(path, ec);
-    };
-    const auto saved = P::InspectSavedWorld(
-        root.path(), owner.GetMetadata().worldId, {}, nullptr, {}, read_status);
-    EXPECT_EQ(mutations, 1u);
-    EXPECT_TRUE(saved.error.empty()) << saved.error;
-    EXPECT_EQ(saved.preset_source_json, first_source.dump());
-    EXPECT_EQ(ReadClockTestFile(preset_path), second_source.dump());
-    // A separate inspection sees the later source and enforces the original compatibility check.
-    const auto changed = P::InspectSavedWorld(root.path(), owner.GetMetadata().worldId);
-    EXPECT_EQ(changed.error, "Incompatible world preset: saved preset identity does not match.");
+        std::size_t mutations = 0;
+        const Luminumbra::World::WorldgenFileStatusReader read_status = [&](const fs::path& path,
+                                                                            std::error_code& ec) {
+            if (path == root.path() / "data/common/structures") {
+                ++mutations;
+                std::ofstream output(preset_path, std::ios::binary | std::ios::trunc);
+                output << second_source.dump();
+                output.close();
+                EXPECT_TRUE(output.good());
+            }
+            return Luminumbra::World::ReadWorldgenSymlinkStatus(path, ec);
+        };
+        P::WorldSaveAdmission admission;
+        const auto saved = P::InspectSavedWorld(root.path(),
+                                                owner.GetMetadata().worldId,
+                                                {},
+                                                decode_chunks ? &admission : nullptr,
+                                                {},
+                                                read_status);
+        EXPECT_EQ(mutations, 1u);
+        EXPECT_TRUE(saved.error.empty()) << saved.error;
+        EXPECT_EQ(saved.preset_source_json, first_source.dump());
+        if (decode_chunks) {
+            ASSERT_TRUE(admission.preset.ok);
+            EXPECT_EQ(admission.preset.source_json, saved.preset_source_json);
+            EXPECT_EQ(admission.preset.preset_content_hash, saved.preset_content_hash);
+        }
+        EXPECT_EQ(ReadClockTestFile(preset_path), second_source.dump());
+        // A separate inspection sees the later source and enforces the original compatibility
+        // check.
+        const auto changed = P::InspectSavedWorld(root.path(), owner.GetMetadata().worldId);
+        EXPECT_EQ(changed.error,
+                  "Incompatible world preset: saved preset identity does not match.");
+    }
 }
 
 TEST(GameSessionHeadlessWorldTest, AutomaticSavesRetainWaterAndEditsWithoutWritingGeneratedCache) {
