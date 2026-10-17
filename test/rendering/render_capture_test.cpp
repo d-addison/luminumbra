@@ -1,4 +1,5 @@
 #include "../fixtures/TerrainFixtureParams.h"
+#include "luminumbra_client/app/RenderBenchmarkReport.h"
 #include "gtest/gtest.h"
 
 #define GLFW_INCLUDE_NONE
@@ -44,6 +45,43 @@
 #include "rendering/OitModel.h"           // Weighted blended OIT model.
 #include "rendering/RenderGraph.h"
 #include "rendering/SnowCoverModel.h" // Render-only snow cover.
+
+TEST(RenderBenchmarkOverrides, RuntimeLocationsLeaveSystemsConfigurationDeclared) {
+    for (const bool assigned_runtime : {false, true}) {
+        for (const bool assigned_save : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << "assigned runtime: " << assigned_runtime
+                                              << ", assigned save: " << assigned_save);
+            std::vector<std::string> arguments = {"client"};
+            arguments.push_back(assigned_runtime ? "--runtime-root=runtime" : "--runtime-root");
+            if (!assigned_runtime)
+                arguments.push_back("runtime");
+            // A following positional override must not be consumed by an assigned root.
+            arguments.push_back("runtime-successor");
+            arguments.push_back(assigned_save ? "--save-root=storage" : "--save-root");
+            if (!assigned_save)
+                arguments.push_back("storage");
+            arguments.insert(
+                arguments.end(),
+                {"save-successor", "--systems-config", "systems.json", "--render-scale", "0.5"});
+            std::vector<char*> argv(arguments.size());
+            std::transform(arguments.begin(),
+                           arguments.end(),
+                           argv.begin(),
+                           [](std::string& value) { return value.data(); });
+            const auto active = Luminumbra::Client::Measurement::render_overrides(
+                static_cast<int>(argv.size()), argv.data());
+            nlohmann::json cli = nlohmann::json::object();
+            for (const auto& item : active.items())
+                if (item.key().rfind("cli:", 0) == 0)
+                    cli[item.key()] = item.value();
+            const nlohmann::json expected = {{"cli:runtime-successor", "true"},
+                                             {"cli:save-successor", "true"},
+                                             {"cli:--systems-config", "systems.json"},
+                                             {"cli:--render-scale", "0.5"}};
+            EXPECT_EQ(cli, expected);
+        }
+    }
+}
 
 namespace fs = std::filesystem;
 

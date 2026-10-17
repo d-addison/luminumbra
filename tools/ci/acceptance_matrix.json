@@ -1165,12 +1165,12 @@
       "requirements": [
         "ar.activation.050"
       ],
-      "discrepancy": "docs/active-regions.md now agrees with the asymmetric interval [-2^24, 2^24) implemented by src/luminumbra_common/world/ActiveRegionLedger.cpp and tested for ledger anchors by test/common/ActiveRegionLedger_test.cpp. A discriminating boundary regression through every host entry point, including ground-object edits and pins, remains outstanding for issue #250.",
+      "discrepancy": "docs/active-regions.md now agrees with the asymmetric interval [-2^24, 2^24). ActiveRegionLedgerTest.ValidAnchorBoundaries in test/common/ActiveRegionLedger_test.cpp covers the ledger predicate; exact endpoint coverage across walking anchors, ground-object edits and pins remains tracked in issue #250.",
       "evidence": [
         {
           "kind": "ctest",
           "ref": "GameSessionHeadlessWorldTest.HalfOpenHostInputBoundaries",
-          "planned": "Add a host-boundary regression accepting -2^24 and rejecting +2^24 on X and Z for walking anchors and ground-object edits, and the corresponding signed region-pin bounds, including adjacent interior coordinates and rejection counters.; owner: ds"
+          "planned": "Add a host-boundary regression for walking anchors, ground-object edits and pins: accept -2^24 and the adjacent interior coordinates, and reject +2^24 and the adjacent exterior coordinates on both X and Z for walking anchors and ground-object edits, with the corresponding signed region-pin bounds and rejection counters.; owner: ds"
         }
       ]
     },
@@ -3144,6 +3144,26 @@
           "kind": "doc",
           "ref": "docs/distant-world.md",
           "planned": "Add an input-dispatch regression for pause, doubling, halving and the 16 times cap, and qualify actual tick batching and day duration in the live client.; owner: ac"
+        }
+      ]
+    },
+    {
+      "id": "graphics.horizon-authority",
+      "source": "docs/engine-guide.md#world-generation-and-streaming",
+      "statement": "Legacy graphics horizon changes preserve edited chunk authority and reject stale captures through the chunk voxel revision even when world/region publication revisions are unchanged. This row covers the owner-thread snapshot and admission regression, not native rendering qualification.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GraphicsRuntimePure.ShrinkingAndGrowingHorizonRetainsEditedAuthorityAndRejectsStaleCapture"
+        },
+        {
+          "kind": "ctest",
+          "ref": "StreamingHardening.FarLodSnapshotOwnsBytesAndRejectsStaleLiveData"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarLodWorker.AuthoritativeCaptureBuildsPersistsAndStales"
         }
       ]
     }

@@ -768,10 +768,10 @@ TEST(GraphicsPresetClassifierTest, AmbiguousMultiModelIdentityUsesLowestKnownTie
 }
 
 TEST(GraphicsPresetClassifierTest, SuppliesStableDisplayNames) {
-    EXPECT_EQ(GraphicsPresetName(GraphicsPreset::Low), "Low");
-    EXPECT_EQ(GraphicsPresetName(GraphicsPreset::Medium), "Medium");
-    EXPECT_EQ(GraphicsPresetName(GraphicsPreset::High), "High");
-    EXPECT_EQ(GraphicsPresetName(GraphicsPreset::Ultra), "Ultra");
+    EXPECT_EQ(GraphicsPresetDisplayName(GraphicsPreset::Low), "Low");
+    EXPECT_EQ(GraphicsPresetDisplayName(GraphicsPreset::Medium), "Medium");
+    EXPECT_EQ(GraphicsPresetDisplayName(GraphicsPreset::High), "High");
+    EXPECT_EQ(GraphicsPresetDisplayName(GraphicsPreset::Ultra), "Ultra");
     EXPECT_EQ(GraphicsIdentityRuleName(GraphicsIdentityRule::MissingIdentity), "missing_identity");
     EXPECT_EQ(GraphicsIdentityRuleName(GraphicsIdentityRule::SoftwareOrGeneric),
               "software_or_generic");
