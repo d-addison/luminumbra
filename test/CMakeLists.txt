@@ -197,6 +197,7 @@ add_executable(common_tests
     common/ResidencyContract_test.cpp
     common/FarLodStore_test.cpp
     common/FarVolumeWorld_test.cpp
+    common/FarFrozenObservation_test.cpp
     common/FarVolumeRuntime_test.cpp
     common/FarVolumeTierMemory_test.cpp
     rendering/FarWorldWaterMesh_test.cpp
@@ -340,6 +341,11 @@ target_link_libraries(common_tests PRIVATE
     luminumbra_common
     luminumbra_save_fixture_support
 )
+
+# Frozen-water rendering exercises the client bridge and mesh implementation.
+add_executable(far_frozen_water_mesh_test rendering/FarFrozenWaterMesh_test.cpp)
+target_link_libraries(far_frozen_water_mesh_test PRIVATE gtest_main luminumbra_client)
+luminumbra_configure_first_party_target(far_frozen_water_mesh_test)
 
 # File-only path contracts run without a GL context or the common-library graph.
 add_executable(filesystem_path_test
@@ -1889,6 +1895,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     far_volume_mesher_test
     far_volume_facade_test
     far_pristine_field_test
+    far_frozen_water_mesh_test
     world_generation_test
     worldgen_layer_snapshot_test
     asset_processor_round_trip_test
