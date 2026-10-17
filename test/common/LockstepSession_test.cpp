@@ -1262,7 +1262,7 @@ TEST(LockstepSessionTest, DesyncDetectedAndDumpEmitted) {
     ASSERT_TRUE(a.Handshake());
     ASSERT_TRUE(b.Handshake());
 
-    DriveBoth(a, b, 90);
+    const auto r = DriveBoth(a, b, 90);
     // At least one side must report the desync (the one that holds both hashes at tick 30).
     const bool a_desync = a.Status().desynced;
     const bool b_desync = b.Status().desynced;
