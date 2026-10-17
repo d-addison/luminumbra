@@ -2067,6 +2067,11 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
             chunk->set_state(has_mesh ? ChunkState::Ready : ChunkState::Idle);
         }
 
+        // Older saves lack the ownership marker. Their initialized water is
+        // already simulation truth; migrate it before admission or re-saving.
+        if (m_activeRegionsEnabled && chunk->has_water_sim.load(std::memory_order_acquire) &&
+            !chunk->has_water_authority())
+            chunk->mark_water_data_dirty();
         if (m_worldSystem->adopt_streamed_chunk(chunk)) {
             ++adopted;
         }

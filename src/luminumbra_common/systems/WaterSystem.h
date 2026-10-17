@@ -133,7 +133,10 @@ public:
     // TERRAFORM the water bed: adjust water_bed_mm by delta_mm (dig<0 / dam>0) for
     // cells within radius_m of world_pos + wake them; the fixed-point solver then drains/pools for
     // free. Deterministic (replicate as a command for host==peer). Returns cells edited.
-    int EditTerrainBed(const Vec3& world_pos, std::int32_t delta_mm, float radius_m);
+    int EditTerrainBed(const Vec3& world_pos,
+                       std::int32_t delta_mm,
+                       float radius_m,
+                       const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>* chunks = nullptr);
 
     //  FINITE HYDROLOGY: configure the conserved-water cycle. finite=true removes the perpetual
     // river source (water becomes finite/drainable); rain_mm_per_tick adds uniform rainfall (the

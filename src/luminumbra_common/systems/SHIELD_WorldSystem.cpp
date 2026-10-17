@@ -3894,7 +3894,9 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
                 SurfaceHorizonChunk surface_chunk{
                     chunk, IVec2(dx, dz), std::abs(chunk_y - span.center_y), lod, step};
                 if (chunk->has_simulation_authority() && chunk->sdf_data.empty()) {
-                    if (chunk->heightmap_data.empty())
+                    constexpr std::size_t kHeightSamples =
+                        static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Z + 1);
+                    if (chunk->heightmap_data.size() != kHeightSamples)
                         return false;
                     surface_chunk.lod = std::max(surface_chunk.lod, 1);
                     surface_chunk.step = get_lod_step_for_level(surface_chunk.lod);
@@ -4349,11 +4351,80 @@ Vec3 SHIELD_WorldSystem::debug_deepest_water_pos(std::int64_t* depth_mm_out) con
     return best_pos;
 }
 
+bool SHIELD_WorldSystem::admit_water_edit(const Vec3& world_pos, float radius_m) {
+    if (!std::isfinite(radius_m) || radius_m <= 0.0f ||
+        !world::ActiveRegionLedger::valid_anchor(world_pos - Vec3(radius_m)) ||
+        !world::ActiveRegionLedger::valid_anchor(world_pos + Vec3(radius_m)) ||
+        world_pos.y - radius_m < static_cast<float>(Chunk::kPackedMinY) * CHUNK_SIZE_Y ||
+        world_pos.y + radius_m >= (static_cast<float>(Chunk::kPackedMaxY) + 1.0f) * CHUNK_SIZE_Y)
+        return false;
+    const auto lo = world_to_chunk_coords(world_pos - Vec3(radius_m));
+    const auto hi = world_to_chunk_coords(world_pos + Vec3(radius_m));
+    const auto width = static_cast<std::size_t>(hi.x - lo.x) + 1u;
+    const auto depth = static_cast<std::size_t>(hi.z - lo.z) + 1u;
+    // A single edit can admit at most the shared 8,192-chunk resident budget.
+    if (width > kActiveChunkBudget / depth)
+        return false;
+    if (!m_retainRegionAuthority)
+        return true;
+    if (m_authorityFault || m_streaming_state.chunks.empty())
+        return false;
+    std::set<ChunkID> required;
+    for (int z = lo.z; z <= hi.z; ++z)
+        for (int x = lo.x; x <= hi.x; ++x)
+            required.insert(Chunk::calculate_id(IVec3(x, 0, z)));
+    auto protected_chunks = required;
+    for (const auto& [id, chunk] : m_streaming_state.chunks) {
+        const auto coords = chunk->get_coords();
+        if (coords.x >= lo.x && coords.x <= hi.x && coords.y >= lo.y && coords.y <= hi.y &&
+            coords.z >= lo.z && coords.z <= hi.z)
+            protected_chunks.insert(id);
+    }
+    prepare_authority_eviction(protected_chunks);
+    AuthorityRestoreBatch restore_batch;
+    for (const auto id : required) {
+        if (m_simulationWaterChunks.contains(id))
+            continue;
+        const auto coords = Chunk::decode_id(id);
+        if (!m_streaming_state.chunks.contains(id) && !make_authority_room(nullptr))
+            return false;
+        auto chunk = restore_authority(coords, restore_batch);
+        if (m_authorityFault)
+            return false;
+        if (!chunk) {
+            const auto resident = find_streamed_chunk(coords);
+            // A completed full terrain lattice is the edit's target. Retain
+            // that owner and its identity; an in-flight generation owner is
+            // replaced so its worker cannot race the edit.
+            if (resident && resident->get_state() != ChunkState::Loading &&
+                resident->sdf_data.size() == kFullSdfLattice)
+                chunk = resident;
+            else {
+                chunk = std::make_shared<Chunk>(coords);
+                GenerateChunkData(*chunk);
+            }
+        }
+        if (!chunk->has_water_sim.load() && m_water_system)
+            m_water_system->InitializeGeneratedWater(*chunk);
+        chunk->set_state(ChunkState::Idle);
+        m_streaming_state.chunks.insert_or_assign(id, chunk);
+        m_simulationChunks.insert_or_assign(id, chunk);
+        m_simulationWaterChunks.insert_or_assign(id, chunk);
+    }
+    return true;
+}
+
 //  terraform the water bed (dig/dam) — delegates to the WaterSystem.
 int SHIELD_WorldSystem::EditTerrainBed(const Vec3& world_pos,
                                        std::int32_t delta_mm,
                                        float radius_m) {
-    return m_water_system ? m_water_system->EditTerrainBed(world_pos, delta_mm, radius_m) : 0;
+    if (!m_water_system || delta_mm == 0 || !admit_water_edit(world_pos, radius_m))
+        return 0;
+    return m_water_system->EditTerrainBed(world_pos,
+                                          delta_mm,
+                                          radius_m,
+                                          m_retainRegionAuthority ? &m_simulationWaterChunks
+                                                                  : nullptr);
 }
 
 // configure the finite-hydrology cycle (no perpetual source + rain + evaporation).
@@ -4499,7 +4570,7 @@ int SHIELD_WorldSystem::EditTerrainVoxel(const Vec3& world_pos,
                                          float radius_m,
                                          bool fill,
                                          PhysicsSystem* physics_system) {
-    if (radius_m <= 0.0f)
+    if (!std::isfinite(radius_m) || radius_m <= 0.0f || !admit_water_edit(world_pos, radius_m))
         return 0;
     constexpr int size_x = CHUNK_SIZE_X + 1;
     constexpr int size_y = CHUNK_SIZE_Y + 1;
@@ -4563,14 +4634,15 @@ int SHIELD_WorldSystem::EditTerrainVoxel(const Vec3& world_pos,
                 }
             }
     if (edited > 0) {
-        // Remesh + rebuild colliders for the edited band (rings in chunk units).
-        const int rings = static_cast<int>(radius_m / static_cast<float>(CHUNK_SIZE_X)) + 2;
-        EnsureSurfaceReadyNear(world_pos, physics_system, rings, rings);
         // Couple the water: a dig lowers the bed (drain), a fill raises it (dam). The bed
         // delta tracks the carve depth at the sphere center (~radius below the surface).
         const std::int32_t delta_mm =
             static_cast<std::int32_t>((fill ? 1.0f : -1.0f) * radius_m * 1000.0f);
         EditTerrainBed(world_pos, delta_mm, radius_m);
+        // Rebuild only after both simulation edits are complete. A render
+        // preparation refusal must not leave the water bed behind the terrain.
+        const int rings = static_cast<int>(radius_m / static_cast<float>(CHUNK_SIZE_X)) + 2;
+        EnsureSurfaceReadyNear(world_pos, physics_system, rings, rings);
     }
     return edited;
 }
@@ -5251,7 +5323,11 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
         const bool needs_sim_truth = work_item.terrain_mesh_required && step <= 1 &&
                                      work_item.chunk->sdf_data.size() != kFullSdfLattice;
         if (work_item.chunk->has_simulation_authority()) {
-            if (has_malformed_sdf)
+            constexpr std::size_t kHeightSamples =
+                static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Z + 1);
+            if (has_malformed_sdf ||
+                (work_item.terrain_mesh_required && work_item.chunk->sdf_data.empty() &&
+                 work_item.chunk->heightmap_data.size() != kHeightSamples))
                 continue;
             auto render_item = work_item;
             if (needs_sim_truth)
@@ -5376,104 +5452,116 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
             add_face_if_neighbor_is_finer(
                 0, 1, Luminumbra::World::MarchingCubes::TransitionFaceMaxZ);
         }
-        mesh_batch.chunks.push_back({chunk, terrain_mesh_required, transition_faces});
+        mesh_batch.chunks.push_back(
+            {chunk, terrain_mesh_required, transition_faces, chunk->authority_hash_revision()});
 
         auto& lane_jobs = work_item.high_priority ? high_priority_jobs : normal_priority_jobs;
-        lane_jobs.emplace_back([this, chunk, step, transition_faces, terrain_mesh_required]() {
-            try {
-                const auto worldgen_scope = acquire_worldgen_sample_scope(); //
-                Luminumbra::Chunk scratch(chunk->get_coords());
-                scratch.water_depth_mm = chunk->water_depth_mm;
-                scratch.water_level_data = chunk->water_level_data;
-                scratch.water_flow_data = chunk->water_flow_data;
-                scratch.water_sim_terrain_height = chunk->water_sim_terrain_height;
-                scratch.has_water_sim.store(chunk->has_water_sim.load(std::memory_order_acquire),
-                                            std::memory_order_release);
-                scratch.water_mesh_generated.store(false, std::memory_order_release);
-                scratch.current_water_resolution.store(
-                    chunk->current_water_resolution.load(std::memory_order_acquire),
-                    std::memory_order_release);
+        // Copy before dispatch: simulation ticks may mutate these fields while
+        // workers mesh. Water inputs have at most 32*32 cells; other water
+        // arrays are unused by meshing and stay on the simulation owner.
+        auto input = std::make_shared<Chunk>(chunk->get_coords());
+        const int resolution = chunk->current_water_resolution.load(std::memory_order_acquire);
+        if (resolution > 1 && resolution <= 32) {
+            const auto cells =
+                static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
+            if (chunk->water_level_data.size() >= cells)
+                input->water_level_data.assign(chunk->water_level_data.begin(),
+                                               chunk->water_level_data.begin() +
+                                                   static_cast<std::ptrdiff_t>(cells));
+            if (chunk->water_depth_mm.size() == cells)
+                input->water_depth_mm = chunk->water_depth_mm;
+        }
+        input->has_water_sim.store(chunk->has_water_sim.load(std::memory_order_acquire),
+                                   std::memory_order_release);
+        input->water_mesh_generated.store(false, std::memory_order_release);
+        input->current_water_resolution.store(
+            chunk->current_water_resolution.load(std::memory_order_acquire),
+            std::memory_order_release);
+        if (terrain_mesh_required) {
+            // Complete fixed lattices bound the per-item terrain snapshot.
+            if (chunk->sdf_data.size() == kFullSdfLattice)
+                input->sdf_data = chunk->sdf_data;
+            constexpr std::size_t kHeightSamples =
+                static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Z + 1);
+            if (chunk->heightmap_data.size() == kHeightSamples)
+                input->heightmap_data = chunk->heightmap_data;
+            if (chunk->material_data.size() == kFullSdfLattice)
+                input->material_data = chunk->material_data;
+        }
+        lane_jobs.emplace_back(
+            [this, chunk, input, step, transition_faces, terrain_mesh_required]() {
+                try {
+                    const auto worldgen_scope = acquire_worldgen_sample_scope(); //
+                    Chunk& scratch = *input;
+                    if (terrain_mesh_required) {
+                        if (step <= 1 && scratch.sdf_data.size() != kFullSdfLattice) {
+                            //  tripwire: meshing NEVER generates sim
+                            // truth. A unit-step item without a full live voxel
+                            // field must have been routed through the promotion
+                            // lane at dispatch — reaching here is a regression of
+                            // the activation queue decoupling, not a recoverable state.
+                            LUMINUMBRA_CORE_ERROR(
+                                "MESHING JOB: chunk ({},{},{}) reached the render-only meshing "
+                                "lane without full sim truth (sdf size {} != {}) — the  "
+                                "promotion routing is broken; failing the mesh",
+                                chunk->get_coords().x,
+                                chunk->get_coords().y,
+                                chunk->get_coords().z,
+                                scratch.sdf_data.size(),
+                                kFullSdfLattice);
+                            chunk->pending_mesh_failed.store(true, std::memory_order_release);
+                            return;
+                        }
 
-                if (terrain_mesh_required) {
-                    if (step <= 1 && chunk->sdf_data.size() != kFullSdfLattice) {
-                        //  tripwire: meshing NEVER generates sim
-                        // truth. A unit-step item without a full live voxel
-                        // field must have been routed through the promotion
-                        // lane at dispatch — reaching here is a regression of
-                        // the activation queue decoupling, not a recoverable state.
-                        LUMINUMBRA_CORE_ERROR(
-                            "MESHING JOB: chunk ({},{},{}) reached the render-only meshing "
-                            "lane without full sim truth (sdf size {} != {}) — the  "
-                            "promotion routing is broken; failing the mesh",
-                            chunk->get_coords().x,
-                            chunk->get_coords().y,
-                            chunk->get_coords().z,
-                            chunk->sdf_data.size(),
-                            kFullSdfLattice);
-                        chunk->pending_mesh_failed.store(true, std::memory_order_release);
-                        return;
+                        // 1. Generate the terrain mesh from the SDF data into a scratch chunk.
+                        Luminumbra::World::MarchingCubes::PolygoniseTerrain(
+                            *this, scratch, 0.0f, step);
+                        Luminumbra::World::MarchingCubes::AddBoundaryTransitionSkirts(
+                            scratch, step, transition_faces);
                     }
-                    scratch.sdf_data = chunk->sdf_data;
-                    scratch.heightmap_data = chunk->heightmap_data;
-                    // carry the live material channel so stage-B
-                    // promotion meshes classify authored structure voxels
-                    // exactly as the old fused backfill+mesh job did (its
-                    // scratch had materials stamped by GenerateChunkData).
-                    // Also fixes the latent authored-material loss on plain
-                    // remeshes, which copied only sdf+heightmap. Mesh bytes
-                    // are world_hash-excluded either way (empty -> empty,
-                    //  lazy alloc preserved).
-                    scratch.material_data = chunk->material_data;
 
-                    // 1. Generate the terrain mesh from the SDF data into a scratch chunk.
-                    Luminumbra::World::MarchingCubes::PolygoniseTerrain(*this, scratch, 0.0f, step);
-                    Luminumbra::World::MarchingCubes::AddBoundaryTransitionSkirts(
-                        scratch, step, transition_faces);
-                }
+                    // Terrain mesh generation debug logging removed to prevent segfault
 
-                // Terrain mesh generation debug logging removed to prevent segfault
-
-                // 2. Generate the water surface mesh if the water system exists
-                if (m_water_system) {
-                    // Column water remains visible even when the terrain is coarse or empty.
-                    if (m_retainRegionAuthority || step <= 1) {
-                        Luminumbra::World::MarchingCubes::GenerateWaterMesh(
-                            *m_water_system, *this, scratch);
-                    } else {
-                        scratch.water_mesh_vertices.clear();
-                        scratch.water_mesh_indices.clear();
-                        scratch.water_mesh_generated.store(false, std::memory_order_release);
+                    // 2. Generate the water surface mesh if the water system exists
+                    if (m_water_system) {
+                        // Column water remains visible even when the terrain is coarse or empty.
+                        if (m_retainRegionAuthority || step <= 1) {
+                            Luminumbra::World::MarchingCubes::GenerateWaterMesh(
+                                *m_water_system, *this, scratch);
+                        } else {
+                            scratch.water_mesh_vertices.clear();
+                            scratch.water_mesh_indices.clear();
+                            scratch.water_mesh_generated.store(false, std::memory_order_release);
+                        }
                     }
-                }
 
-                if (terrain_mesh_required) {
-                    chunk->pending_mesh_vertices = std::move(scratch.mesh_vertices);
-                    chunk->pending_mesh_indices = std::move(scratch.mesh_indices);
-                }
-                chunk->pending_water_mesh_vertices = std::move(scratch.water_mesh_vertices);
-                chunk->pending_water_mesh_indices = std::move(scratch.water_mesh_indices);
-                chunk->water_mesh_generated.store(
-                    scratch.water_mesh_generated.load(std::memory_order_acquire),
-                    std::memory_order_release);
-                chunk->pending_mesh_ready.store(true, std::memory_order_release);
+                    if (terrain_mesh_required) {
+                        chunk->pending_mesh_vertices = std::move(scratch.mesh_vertices);
+                        chunk->pending_mesh_indices = std::move(scratch.mesh_indices);
+                    }
+                    chunk->pending_water_mesh_vertices = std::move(scratch.water_mesh_vertices);
+                    chunk->pending_water_mesh_indices = std::move(scratch.water_mesh_indices);
+                    chunk->pending_water_mesh_generated.store(scratch.water_mesh_generated.load(),
+                                                              std::memory_order_release);
+                    chunk->pending_mesh_ready.store(true, std::memory_order_release);
 
-                // Job completion debug logging removed to prevent segfault
-            } catch (const std::exception& e) {
-                LUMINUMBRA_CORE_ERROR("MESHING JOB CRASH: Chunk ({},{},{}) failed: {}",
-                                      chunk->get_coords().x,
-                                      chunk->get_coords().y,
-                                      chunk->get_coords().z,
-                                      e.what());
-                chunk->pending_mesh_failed.store(true, std::memory_order_release);
-            } catch (...) {
-                LUMINUMBRA_CORE_ERROR(
-                    "MESHING JOB CRASH: Chunk ({},{},{}) failed with unknown exception",
-                    chunk->get_coords().x,
-                    chunk->get_coords().y,
-                    chunk->get_coords().z);
-                chunk->pending_mesh_failed.store(true, std::memory_order_release);
-            }
-        });
+                    // Job completion debug logging removed to prevent segfault
+                } catch (const std::exception& e) {
+                    LUMINUMBRA_CORE_ERROR("MESHING JOB CRASH: Chunk ({},{},{}) failed: {}",
+                                          chunk->get_coords().x,
+                                          chunk->get_coords().y,
+                                          chunk->get_coords().z,
+                                          e.what());
+                    chunk->pending_mesh_failed.store(true, std::memory_order_release);
+                } catch (...) {
+                    LUMINUMBRA_CORE_ERROR(
+                        "MESHING JOB CRASH: Chunk ({},{},{}) failed with unknown exception",
+                        chunk->get_coords().x,
+                        chunk->get_coords().y,
+                        chunk->get_coords().z);
+                    chunk->pending_mesh_failed.store(true, std::memory_order_release);
+                }
+            });
     }
     if (m_job_system && (!high_priority_jobs.empty() || !normal_priority_jobs.empty())) {
         if (!high_priority_jobs.empty()) {
@@ -5521,6 +5609,10 @@ bool SHIELD_WorldSystem::publish_front_meshing_batch(bool force) {
             continue;
         }
 
+        const auto resident = m_streaming_state.chunks.find(chunk->get_id());
+        if (resident == m_streaming_state.chunks.end() || resident->second != chunk)
+            continue;
+
         const int completed_lod = chunk->pending_lod.load(std::memory_order_acquire);
         const bool mesh_ready = chunk->pending_mesh_ready.load(std::memory_order_acquire);
         const bool mesh_failed = chunk->pending_mesh_failed.load(std::memory_order_acquire);
@@ -5546,7 +5638,13 @@ bool SHIELD_WorldSystem::publish_front_meshing_batch(bool force) {
             chunk->water_mesh_vertices = std::move(chunk->pending_water_mesh_vertices);
             chunk->water_mesh_indices = std::move(chunk->pending_water_mesh_indices);
             chunk->water_mesh_version++;
-            chunk->water_mesh_dirty_ticks = 0;
+            if (chunk->authority_hash_revision() == job_chunk.authority_revision) {
+                chunk->water_mesh_generated.store(chunk->pending_water_mesh_generated.load(),
+                                                  std::memory_order_release);
+                chunk->water_mesh_dirty_ticks = 0;
+            } else {
+                chunk->water_mesh_generated.store(false, std::memory_order_release);
+            }
             chunk->set_state(Luminumbra::ChunkState::Ready);
         } else if (!HasRenderableGeometry(*chunk)) {
             chunk->set_state(Luminumbra::ChunkState::Idle);
@@ -5713,13 +5811,12 @@ Persistence::WorldAuthorityHashes SHIELD_WorldSystem::compute_chunk_hashes() con
         if (!m_authorityHashCache)
             m_authorityHashCache = std::make_unique<Persistence::AuthorityHashCache>(
                 Persistence::WorldSaveService::load_authority_hash_cache(m_authorityDirectory));
-        // Public chunk data can change without a voxel revision (water, in
-        // particular). Reproject the bounded residents instead of relying on an
-        // incomplete dirty/revision signal; durable-only contributions stay cached.
+        // Each resident needs only a revision/owner check. Unchanged voxel and
+        // water contributions, including durable-only chunks, stay cached.
         for (const auto& [id, chunk] : m_streaming_state.chunks) {
             (void)id;
             if (chunk)
-                m_authorityHashCache->update(*chunk);
+                m_authorityHashCache->update(chunk);
         }
         return m_authorityHashCache->hashes();
     }
@@ -5784,12 +5881,11 @@ std::size_t SHIELD_WorldSystem::resident_chunk_count() const {
 bool SHIELD_WorldSystem::persist_authority(const std::shared_ptr<Chunk>& chunk) {
     if (m_authorityFault)
         return false;
-    quiesce_streaming_jobs_for_save();
     try {
         if (Persistence::WorldSaveService::persist_chunk_authority(m_authorityDirectory, chunk)) {
             notify_far_lod_authority_durable(chunk->get_coords());
             if (m_authorityHashCache)
-                m_authorityHashCache->update(*chunk);
+                m_authorityHashCache->update(chunk);
             return true;
         }
     } catch (const std::exception&) {
@@ -5875,8 +5971,8 @@ void SHIELD_WorldSystem::prepare_region_authority(entt::registry& registry,
         return std::pair<i32, i32>{rx, rz};
     };
     bool render_changed = false;
-    // No streaming jobs may be reading water mirrors during the fixed tick.
-    quiesce_streaming_jobs_for_save();
+    // Mesh workers own immutable input copies; generation and promotion workers
+    // cannot write a simulation owner. Unrelated render/prefetch jobs stay asynchronous.
     // The natural-water simulation horizon is the 3x3 surface columns around
     // each replicated/walking anchor. This fixed one-chunk ring is simulation
     // policy, independent of render distance, LOD and asynchronous load timing.
@@ -6061,11 +6157,10 @@ void SHIELD_WorldSystem::simulate_region_authority(entt::registry& registry,
         m_water_system->SetBootPaused(false);
         m_water_system->SetBootSettleMode(false);
         m_water_system->update(registry, m_simulationWaterChunks, true);
-        // Initialization, flux, depth and sleep counters are all authority.
-        // A metadata/chunk save must never acknowledge newer water implicitly.
+        // Water writers advance their hash revisions, including initialization,
+        // flux, depth, wake/sleep state, resizing and out-of-tick edits.
         for (const auto& [id, chunk] : m_simulationWaterChunks) {
             (void)id;
-            chunk->mark_water_data_dirty();
             render_changed |= !chunk->water_mesh_generated.load(std::memory_order_acquire);
         }
     }
@@ -6233,7 +6328,7 @@ bool SHIELD_WorldSystem::adopt_streamed_chunk(const std::shared_ptr<Luminumbra::
         chunk->set_state(Luminumbra::ChunkState::Idle);
     }
     if (m_retainRegionAuthority && m_water_system && chunk->get_coords().y == 0 &&
-        !chunk->has_simulation_authority() &&
+        !chunk->has_simulation_authority() && !chunk->has_water_sim.load() &&
         (!chunk->sdf_data.empty() || !chunk->heightmap_data.empty()))
         m_water_system->InitializeGeneratedWater(*chunk);
     const bool adopted = m_streaming_state.chunks.emplace(chunk->get_id(), chunk).second;

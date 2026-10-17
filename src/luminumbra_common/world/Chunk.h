@@ -71,6 +71,7 @@ public:
                !m_voxel_revision.compare_exchange_weak(
                    revision, revision + 1u, std::memory_order_acq_rel, std::memory_order_acquire)) {
         }
+        m_hash_revision.fetch_add(1u, std::memory_order_acq_rel);
         m_voxel_data_dirty.store(true, std::memory_order_release);
     }
     void clear_voxel_data_dirty() {
@@ -80,7 +81,12 @@ public:
     // or invalidate SDF/render revisions. Water ownership is sticky after saving.
     void mark_water_data_dirty() {
         m_water_authority.store(true, std::memory_order_release);
+        m_hash_revision.fetch_add(1u, std::memory_order_acq_rel);
         m_voxel_data_dirty.store(true, std::memory_order_release);
+    }
+    // Changes to authoritative voxel or water fields must mark the corresponding dirty data.
+    u64 authority_hash_revision() const {
+        return m_hash_revision.load(std::memory_order_acquire);
     }
     bool has_water_authority() const {
         return m_water_authority.load(std::memory_order_acquire);
@@ -117,6 +123,7 @@ public:
     void reset_pending_jobs() {
         pending_lod.store(-1, std::memory_order_release);
         pending_mesh_ready.store(false, std::memory_order_release);
+        pending_water_mesh_generated.store(false, std::memory_order_release);
         pending_mesh_failed.store(false, std::memory_order_release);
         pending_promotion_ready.store(false, std::memory_order_release);
         pending_promotion_failed.store(false, std::memory_order_release);
@@ -180,6 +187,7 @@ public:
     // LOD seam cracks) without scanning mesh vertices per frame.
     std::atomic<u8> applied_transition_faces{0};
     std::atomic<bool> pending_mesh_ready{false};
+    std::atomic<bool> pending_water_mesh_generated{false};
     std::atomic<bool> pending_mesh_failed{false};
     //  ( step 1): completion signals for the sim-truth
     // PROMOTION lane. A promotion generation job stages the full LOD0 voxel
@@ -249,6 +257,7 @@ private:
     mutable std::mutex m_state_mutex; // mutable for use in const getter
     std::atomic<bool> m_voxel_data_dirty{false};
     std::atomic<u8> m_sdf_provenance{static_cast<u8>(ChunkSdfProvenance::GeneratedCurrentParams)};
+    std::atomic<u64> m_hash_revision{0};
     std::atomic<u32> m_voxel_revision{0};
     std::atomic<bool> m_water_authority{false};
 };

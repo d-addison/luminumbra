@@ -1056,9 +1056,31 @@ bool OpenAuthorityIndex(const std::filesystem::path& region_file, RegionIndex& r
     int expected_x = 0, expected_z = 0;
     if (!ParseRegionFileName(region_file, expected_x, expected_z))
         return false;
-    std::erase_if(reader.records, [](const auto& record) {
-        return record.lod_level != 0 || (record.flags & kRecordFlagEdited) == 0;
+    // Old saves have no water-authority marker. Their initialized simulation
+    // grids are durable input too; a water mesh alone is only a render cache.
+    // This cold index pass is bounded by LMR1's 65,535 records per region.
+    bool valid = true;
+    std::erase_if(reader.records, [&](const auto& entry) {
+        if (entry.lod_level != 0)
+            return true;
+        if ((entry.flags & kRecordFlagEdited) != 0)
+            return false;
+        if ((entry.flags & kRecordFlagWaterPresent) == 0)
+            return true;
+        RegionRecord raw;
+        if (!ReadIndexedRecord(reader, entry, raw, nullptr)) {
+            valid = false;
+            return true;
+        }
+        const auto chunk = DecodeChunkRecord(raw, reader.path, nullptr);
+        if (!chunk) {
+            valid = false;
+            return true;
+        }
+        return !chunk->has_water_sim.load(std::memory_order_acquire);
     });
+    if (!valid)
+        return false;
     for (const auto& record : reader.records) {
         int actual_x = 0, actual_z = 0;
         WorldSaveService::region_coords_for_chunk(Chunk::decode_id(record.id), actual_x, actual_z);
@@ -1594,7 +1616,7 @@ WorldSaveService::authority_hashes(const std::filesystem::path& save_dir,
     auto cache = load_authority_hash_cache(save_dir);
     for (const auto& chunk : live_chunks)
         if (chunk)
-            cache.update(*chunk);
+            cache.update(chunk);
     return cache.hashes();
 }
 
@@ -1612,7 +1634,7 @@ WorldSaveService::load_authority_hash_cache(const std::filesystem::path& save_di
         if (!open_region_authority(entry.path(), reader))
             throw std::runtime_error("Cannot read durable authority for hashing");
         while (auto chunk = read_next_authority(reader))
-            cache.update(*chunk);
+            cache.update(chunk);
     }
     return cache;
 }
@@ -1662,6 +1684,8 @@ std::shared_ptr<Chunk> WorldSaveService::AuthorityReader::read(u64 id) {
     auto chunk = DecodeChunkRecord(raw, index.path, nullptr);
     if (!chunk)
         throw std::runtime_error("Cannot decode durable chunk authority");
+    if (chunk->has_water_sim.load(std::memory_order_acquire) && !chunk->has_water_authority())
+        chunk->mark_water_data_dirty();
     // Runtime jobs and collider handles belong to the previous process.
     chunk->reset_pending_jobs();
     chunk->has_collision.store(false, std::memory_order_release);
@@ -1693,8 +1717,10 @@ bool WorldSaveService::persist_chunk_authority(const std::filesystem::path& save
         return false;
     int rx = 0, rz = 0;
     region_coords_for_chunk(chunk->get_coords(), rx, rz);
-    const ContainerRecord record{
-        chunk->get_id(), 0, ChunkRecordFlags(*chunk, 0), SerializeSingleChunkSnapshot(chunk)};
+    const ContainerRecord record{chunk->get_id(),
+                                 0,
+                                 ChunkRecordFlags(*chunk, 0),
+                                 SerializeChunkAuthoritySnapshotJson(*chunk)};
     if (!upsert_container_records(region_file_path(save_dir, rx, rz), {record}))
         return false;
     chunk->clear_voxel_data_dirty();

@@ -2400,7 +2400,8 @@ int main(int argc, char* argv[]) {
             g_uiManager->ShowMessage(error);
         g_app.menu.menu_backdrop_active = false;
         g_playerController.reset();
-        scenario_failed = benchmark_v3 || scenario_config.active() ||
+        scenario_failed = benchmark_v3 || runtime_boot_recorder.enabled() ||
+                          scenario_config.active() ||
                           HasCommandLineFlag(argc, argv, "--load-world") ||
                           HasCommandLineFlag(argc, argv, "--auto-create-world");
         scenario_failure_reason = error;
@@ -2462,6 +2463,10 @@ int main(int argc, char* argv[]) {
             LUMINUMBRA_CORE_INFO("Runtime scenario mode: entered world without loading UI.");
             const bool horizon_ready = gameSession->EnsureWorldEntryReady(
                 scenario_config.horizon_radius, scenario_config.collision_radius);
+            if (!horizon_ready) {
+                refuse_world_entry("World collision horizon could not be prepared.", false);
+                return;
+            }
             g_camera = std::make_unique<Luminumbra::Rendering::Camera>(
                 gameSession->GetMetadata().spawnPoint);
             g_camera->MouseSensitivity =
@@ -3937,6 +3942,11 @@ int main(int argc, char* argv[]) {
                 if (static_cast<size_t>(g_app.loading.generation_dispatch_index) >=
                     g_app.loading.initial_chunks_to_load.size()) {
                     const bool horizon_ready = gameSession->EnsureWorldEntryReady(12, 4);
+                    if (!horizon_ready) {
+                        refuse_world_entry("World collision horizon could not be prepared.", false);
+                        SetGameState(window, gameStateManager, GameState::MAIN_MENU);
+                        break;
+                    }
                     LUMINUMBRA_CORE_INFO("World generation phase complete. Entering world.");
                     g_camera = std::make_unique<Luminumbra::Rendering::Camera>(
                         gameSession->GetMetadata().spawnPoint);

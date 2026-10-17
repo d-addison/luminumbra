@@ -224,3 +224,18 @@ TEST(SurfaceQuery, TerrainMaterialMatchesSurfaceVertexMaterial) {
 
     physics.shutdown();
 }
+
+TEST(SurfaceQuery, IncompleteHeightmapsNeverCreateCollision) {
+    PhysicsSystem physics;
+    physics.startup();
+    constexpr std::size_t side = Luminumbra::CHUNK_SIZE_X + 1;
+    for (const auto count : {std::size_t{0}, std::size_t{1}, side * side - 1, side * side + 1}) {
+        auto chunk = MakeFlatFloorChunk(IVec3(0, 0, 0), 8.0f);
+        chunk->heightmap_data.resize(count, 8.0f);
+        physics.add_chunk_collision(*chunk);
+        EXPECT_FALSE(physics.audio_raycast({8, 12, 8}, {8, 4, 8}).hit);
+    }
+    auto complete = MakeFlatFloorChunk(IVec3(0, 0, 0), 8.0f);
+    physics.add_chunk_collision(*complete);
+    EXPECT_TRUE(physics.audio_raycast({8, 12, 8}, {8, 4, 8}).hit);
+}

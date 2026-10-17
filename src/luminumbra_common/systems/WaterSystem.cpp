@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstddef>
 #include <glm/gtx/compatibility.hpp>
+#include <limits>
 #include <numeric>
 #include <span>
 
@@ -154,8 +155,13 @@ constexpr std::int32_t EVAP_MM = 1; // cull <1mm films on non-source cells (dete
 namespace {
 
 constexpr std::size_t DeriveSimWindowChunks(std::size_t cells_per_chunk) {
+    if (cells_per_chunk == 0)
+        return 1;
     return std::max<std::size_t>(std::size_t{1}, MAX_WATER_CELLS_PER_TICK / cells_per_chunk);
 }
+
+static_assert(DeriveSimWindowChunks(0) == 1);
+static_assert(DeriveSimWindowChunks(MAX_WATER_CELLS_PER_TICK + 1) == 1);
 
 std::uint64_t WaterActivityScore(const Chunk& chunk) {
     std::uint64_t activity = 0;
@@ -776,6 +782,8 @@ void WaterSystem::update(entt::registry& registry,
         const auto threshold_ticks = cp->ticks_below_threshold;
         const auto last_delta = cp->max_water_delta_last_tick;
         InitializeGeneratedWater(*cp, terrain);
+        if (deterministic_authority)
+            cp->mark_water_data_dirty();
         if (!deterministic_authority) {
             // Legacy initialization never reset existing sleep bookkeeping.
             cp->is_water_sleeping.store(sleeping);
@@ -873,6 +881,8 @@ void WaterSystem::update(entt::registry& registry,
                                            chunk.water_depth_mm[index]) /
                         1000.0f;
                 }
+                if (deterministic_authority || chunk.has_water_authority())
+                    chunk.mark_water_data_dirty();
                 // WAKE UP: An internal event occurred in this chunk.
                 chunk.is_water_sleeping.store(false, std::memory_order_relaxed);
                 m_water_activity_cache.erase(chunk.get_id());
@@ -938,6 +948,8 @@ void WaterSystem::update(entt::registry& registry,
         }
     }
     for (Chunk* chunk : chunks_to_wake) {
+        if (deterministic_authority || chunk->has_water_authority())
+            chunk->mark_water_data_dirty();
         chunk->is_water_sleeping.store(false, std::memory_order_relaxed);
     }
 
@@ -1190,6 +1202,8 @@ void WaterSystem::update(entt::registry& registry,
     const float SLEEP_THRESHOLD = 0.0001f; // The max water level change to be considered "calm"
 
     for (Chunk* chunk : chunks_to_sim) {
+        if (deterministic_authority || chunk->has_water_authority())
+            chunk->mark_water_data_dirty();
         if (chunk->max_water_delta_last_tick < SLEEP_THRESHOLD) {
             chunk->ticks_below_threshold++;
             if (chunk->ticks_below_threshold >= TICKS_TO_SLEEP) {
@@ -1212,6 +1226,8 @@ void WaterSystem::InitializeGeneratedWater(Chunk& chunk, std::span<const float> 
     auto* cp = &chunk;
     //  init directly at the fixed camera-independent sim resolution (no later
     // camera-driven resize -> the hashed grid is uniform + stable on every peer).
+    if (chunk.has_water_authority())
+        chunk.mark_water_data_dirty();
     const int initial_resolution = m_sim_resolution;
     cp->current_water_resolution.store(initial_resolution);
     // The private resolution is a validated divisor of the 16x16 chunk:
@@ -1435,6 +1451,8 @@ void WaterSystem::apply_displacement(const Vec3& world_pos, f32 volume) {
                         target_chunk.water_level_data[index] =
                             static_cast<float>(target_chunk.water_bed_mm[index] + d) / 1000.0f;
                     }
+                    if (target_chunk.has_water_authority())
+                        target_chunk.mark_water_data_dirty();
                     // WAKE UP: An external event disturbed this chunk.
                     target_chunk.is_water_sleeping.store(false, std::memory_order_relaxed);
                     m_water_activity_cache.erase(target_chunk.get_id());
@@ -1451,18 +1469,24 @@ void WaterSystem::apply_displacement(const Vec3& world_pos, f32 volume) {
 // drain path. The edit is deterministic (integer delta, applied in the sim tick; replicate the edit
 // as a command for host==peer). The VOXEL/SDF terrain + its render mesh are a separate concern;
 // this couples WATER to a bed change. Returns the number of cells edited.
-int WaterSystem::EditTerrainBed(const Vec3& world_pos, std::int32_t delta_mm, float radius_m) {
-    if (!m_active_chunks || delta_mm == 0)
+int WaterSystem::EditTerrainBed(const Vec3& world_pos,
+                                std::int32_t delta_mm,
+                                float radius_m,
+                                const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>* chunks) {
+    const auto* owners = chunks ? chunks : m_active_chunks;
+    if (!owners || delta_mm == 0 || !std::isfinite(radius_m) || radius_m <= 0.0f ||
+        !std::isfinite(world_pos.x) || !std::isfinite(world_pos.z))
         return 0;
     const float r2 = radius_m * radius_m;
     int edited_total = 0;
-    for (const auto& kv : *m_active_chunks) {
+    for (const auto& kv : *owners) {
         const std::shared_ptr<Chunk>& cptr = kv.second;
         if (!cptr)
             continue;
         Chunk& c = *cptr;
         const int res = GetWaterResolution(c);
-        if (res <= 1 || res > 32 || static_cast<int>(c.water_bed_mm.size()) != res * res)
+        if (res <= 1 || res > 32 ||
+            c.water_bed_mm.size() != static_cast<std::size_t>(res) * static_cast<std::size_t>(res))
             continue;
         const IVec3 cc = c.get_coords();
         const float cw_x = static_cast<float>(CHUNK_SIZE_X) / static_cast<float>(res);
@@ -1475,13 +1499,22 @@ int WaterSystem::EditTerrainBed(const Vec3& world_pos, std::int32_t delta_mm, fl
                 const float dx = wx - world_pos.x;
                 const float dz = wz - world_pos.z;
                 if (dx * dx + dz * dz <= r2) {
-                    c.water_bed_mm[z * res + x] += delta_mm;
-                    edited = true;
-                    ++edited_total;
+                    auto& bed = c.water_bed_mm[z * res + x];
+                    const auto next = static_cast<std::int32_t>(
+                        std::clamp<std::int64_t>(static_cast<std::int64_t>(bed) + delta_mm,
+                                                 std::numeric_limits<std::int32_t>::min(),
+                                                 std::numeric_limits<std::int32_t>::max()));
+                    if (next != bed) {
+                        bed = next;
+                        edited = true;
+                        ++edited_total;
+                    }
                 }
             }
         }
         if (edited) {
+            if (chunks || c.has_water_authority())
+                c.mark_water_data_dirty();
             c.is_water_sleeping.store(false, std::memory_order_relaxed);
             c.water_mesh_generated.store(false);
             c.water_mesh_dirty_ticks = 0;
@@ -1557,6 +1590,8 @@ void WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
     }
 
     m_water_activity_cache.erase(chunk.get_id());
+    if (chunk.has_water_authority())
+        chunk.mark_water_data_dirty();
 
     if (new_resolution <= 0) { // Disable simulation
         chunk.water_level_data.clear();

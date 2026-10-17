@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
@@ -215,12 +216,15 @@ nlohmann::json WaterStateToJson(const Chunk& chunk) {
         {"water_mesh_dirty_ticks", chunk.water_mesh_dirty_ticks}};
 }
 
-nlohmann::json ChunkToJson(const Chunk& chunk, bool sim_only = false) {
+nlohmann::json ChunkToJson(const Chunk& chunk, bool sim_only = false, bool omit_pending = false) {
     // The v0.3.0 cave router produces more render geometry. Hashing must not
     // materialize that geometry only to discard it in the residency projection.
     // Keep every key for the coverage audit; skipped arrays are erased below.
     // Snapshot callers retain the complete canonical representation.
-    const auto array_field = [sim_only](const char* field, const auto& build) -> nlohmann::json {
+    const auto array_field = [sim_only, omit_pending](const char* field,
+                                                      const auto& build) -> nlohmann::json {
+        if (omit_pending && std::string_view(field).starts_with("pending_"))
+            return nlohmann::json::array();
         if (sim_only) {
             for (const auto& entry : luminumbra::core::kChunkFieldResidency) {
                 if (std::string_view(field) == entry.field &&
@@ -777,6 +781,16 @@ std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& 
     return StableDump(snapshot);
 }
 
+std::string SerializeChunkAuthoritySnapshotJson(const Chunk& chunk) {
+    const nlohmann::json snapshot = {
+        {"schema", kSnapshotSchema},
+        {"order_contract", kOrderContract},
+        {"chunk_count", 1},
+        {"persisted_fields", PersistedFields()},
+        {"chunks", nlohmann::json::array({ChunkToJson(chunk, false, true)})}};
+    return StableDump(snapshot);
+}
+
 bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
                                          WorldStreamingState& out_state,
                                          std::vector<std::string>& errors) {
@@ -940,6 +954,41 @@ void RegionContentHasher::feed(std::string_view bytes) {
     }
 }
 
+namespace {
+nlohmann::json TerrainAuthorityJson(const Chunk& chunk) {
+    return {{"chunk_id", chunk.get_id()},
+            {"coords", IVec3ToJson(chunk.get_coords())},
+            {"sdf_data", chunk.sdf_data},
+            {"heightmap_data", chunk.heightmap_data},
+            {"material_data", chunk.material_data}};
+}
+nlohmann::json WaterAuthorityJson(const Chunk& chunk) {
+    return {{"chunk_id", chunk.get_id()},
+            {"water_depth_mm", chunk.water_depth_mm},
+            {"water_bed_mm", chunk.water_bed_mm},
+            {"water_edge_flux", chunk.water_edge_flux},
+            {"has_water_sim", chunk.has_water_sim.load(std::memory_order_acquire)},
+            {"current_water_resolution",
+             chunk.current_water_resolution.load(std::memory_order_acquire)},
+            {"is_water_sleeping", chunk.is_water_sleeping.load(std::memory_order_acquire)},
+            {"max_water_delta_last_tick", chunk.max_water_delta_last_tick},
+            {"ticks_below_threshold", chunk.ticks_below_threshold}};
+}
+void HashAuthorityBytes(std::uint64_t& hash, std::string_view bytes) {
+    for (const unsigned char byte : bytes) {
+        hash ^= static_cast<std::uint64_t>(byte);
+        hash *= 1099511628211ull;
+    }
+}
+void HashTerrainFields(std::uint64_t& hash, const nlohmann::json& terrain) {
+    for (const char* field :
+         {"chunk_id", "coords", "sdf_data", "heightmap_data", "material_data"}) {
+        HashAuthorityBytes(hash, terrain.at(field).dump());
+        HashAuthorityBytes(hash, "|");
+    }
+}
+} // namespace
+
 void RegionContentHasher::append(const Chunk& chunk) {
     if (!chunk.has_simulation_authority())
         return;
@@ -948,48 +997,11 @@ void RegionContentHasher::append(const Chunk& chunk) {
     feed(m_hasChunks ? ",\n" : "\n");
     m_lastId = chunk.get_id();
     m_hasChunks = true;
-    const nlohmann::json content = {
-        {"chunk_id", chunk.get_id()},
-        {"coords", IVec3ToJson(chunk.get_coords())},
-        {"sdf_data", chunk.sdf_data},
-        {"heightmap_data", chunk.heightmap_data},
-        {"material_data", chunk.material_data},
-        {"water_depth_mm", chunk.water_depth_mm},
-        {"water_bed_mm", chunk.water_bed_mm},
-        {"water_edge_flux", chunk.water_edge_flux},
-        {"has_water_sim", chunk.has_water_sim.load(std::memory_order_acquire)},
-        {"current_water_resolution",
-         chunk.current_water_resolution.load(std::memory_order_acquire)},
-        {"is_water_sleeping", chunk.is_water_sleeping.load(std::memory_order_acquire)},
-        {"max_water_delta_last_tick", chunk.max_water_delta_last_tick},
-        {"ticks_below_threshold", chunk.ticks_below_threshold}};
-    // Fixed field order and JSON delimiters make each terrain row unambiguous,
-    // without copying the full voxel arrays into a second JSON object.
-    for (const char* field :
-         {"chunk_id", "coords", "sdf_data", "heightmap_data", "material_data"}) {
-        for (const unsigned char byte : content.at(field).dump()) {
-            m_terrainHash ^= static_cast<std::uint64_t>(byte);
-            m_terrainHash *= 1099511628211ull;
-        }
-        m_terrainHash ^= static_cast<std::uint64_t>('|');
-        m_terrainHash *= 1099511628211ull;
-    }
-    nlohmann::json water;
-    for (const char* field : {"chunk_id",
-                              "water_depth_mm",
-                              "water_bed_mm",
-                              "water_edge_flux",
-                              "has_water_sim",
-                              "current_water_resolution",
-                              "is_water_sleeping",
-                              "max_water_delta_last_tick",
-                              "ticks_below_threshold"})
-        water[field] = content.at(field);
-    // Separate versioned water projection, independent of voxel/render residency.
-    for (const unsigned char byte : water.dump()) {
-        m_waterHash ^= static_cast<std::uint64_t>(byte);
-        m_waterHash *= 1099511628211ull;
-    }
+    auto content = TerrainAuthorityJson(chunk);
+    const auto water = WaterAuthorityJson(chunk);
+    HashTerrainFields(m_terrainHash, content);
+    HashAuthorityBytes(m_waterHash, water.dump());
+    content.update(water);
     // Match StableDump's four-space layout, at the array's eight-space depth.
     // The byte protocol stays identical without retaining the whole region JSON.
     const auto bytes = content.dump(4);
@@ -1007,15 +1019,33 @@ void RegionContentHasher::append(const Chunk& chunk) {
     }
 }
 
-void AuthorityHashCache::update(const Chunk& chunk) {
-    if (!chunk.has_simulation_authority())
+void AuthorityHashCache::update(const std::shared_ptr<Chunk>& chunk) {
+    if (!chunk || !chunk->has_simulation_authority())
         return;
-    RegionContentHasher hasher;
-    hasher.append(chunk);
-    auto& previous = m_chunks[chunk.get_id()];
+    const auto revision = chunk->authority_hash_revision();
+    const auto found = m_chunks.find(chunk->get_id());
+    if (found != m_chunks.end() && found->second.owner.lock() == chunk &&
+        found->second.revision == revision)
+        return;
+    const bool same_owner = found != m_chunks.end() && found->second.owner.lock() == chunk;
+    const auto terrain_revision = chunk->voxel_revision();
+    std::uint64_t terrain = 14695981039346656037ull;
+    if (same_owner && found->second.terrain_revision == terrain_revision &&
+        terrain_revision != std::numeric_limits<u32>::max())
+        terrain = found->second.terrain;
+    else
+        HashTerrainFields(terrain, TerrainAuthorityJson(*chunk));
+    std::uint64_t water = 14695981039346656037ull;
+    HashAuthorityBytes(water, WaterAuthorityJson(*chunk).dump());
+    ++m_projections;
+    auto& previous = m_chunks[chunk->get_id()];
     m_terrain -= previous.terrain;
     m_water -= previous.water;
-    previous = {.terrain = hasher.terrain_value(), .water = hasher.water_value()};
+    previous = {.owner = chunk,
+                .revision = revision,
+                .terrain_revision = terrain_revision,
+                .terrain = terrain,
+                .water = water};
     m_terrain += previous.terrain;
     m_water += previous.water;
 }

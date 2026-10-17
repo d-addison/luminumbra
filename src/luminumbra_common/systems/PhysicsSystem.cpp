@@ -220,12 +220,13 @@ void PhysicsSystem::add_chunk_collision(Chunk& chunk) {
     if (m_chunk_bodies.find(chunk.get_id()) != m_chunk_bodies.end())
         return;
 
-    if (chunk.heightmap_data.empty()) {
-        LUMINUMBRA_CORE_WARN(
-            "Attempted to add chunk collision for chunk ({}, {}, {}) with no heightmap data.",
-            chunk.get_coords().x,
-            chunk.get_coords().y,
-            chunk.get_coords().z);
+    constexpr std::size_t kHeightmapSide = CHUNK_SIZE_X + 1;
+    if (chunk.heightmap_data.size() != kHeightmapSide * kHeightmapSide) {
+        LUMINUMBRA_CORE_WARN("Attempted to add chunk collision for chunk ({}, {}, {}) with "
+                             "incomplete heightmap data.",
+                             chunk.get_coords().x,
+                             chunk.get_coords().y,
+                             chunk.get_coords().z);
         return;
     }
 

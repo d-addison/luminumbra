@@ -961,6 +961,7 @@ private:
     std::size_t resident_chunk_count() const;
     void prepare_authority_eviction(const std::set<ChunkID>& required);
     bool make_authority_room(PhysicsSystem* physics_system = nullptr);
+    bool admit_water_edit(const Vec3& world_pos, float radius_m);
     bool persist_authority(const std::shared_ptr<::Luminumbra::Chunk>& chunk);
     struct AuthorityRestoreBatch;
     std::shared_ptr<::Luminumbra::Chunk> restore_authority(const IVec3& coords,
@@ -997,6 +998,7 @@ private:
             std::shared_ptr<::Luminumbra::Chunk> chunk;
             bool terrain_mesh_required = true;
             u8 transition_faces = 0;
+            u64 authority_revision = 0;
         };
         struct MeshingBatch {
             JobHandle handle;      // Normal lane

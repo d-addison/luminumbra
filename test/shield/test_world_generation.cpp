@@ -2,6 +2,7 @@
 #include "gtest/gtest.h"
 #include <chrono> // For performance testing
 #include <functional>
+#include <future>
 #include <iostream> // For printing benchmark results
 #include <limits>
 #include <memory>  // For std::unique_ptr
@@ -123,6 +124,36 @@ TEST_F(WorldGenerationTest, UpdateSkipsMeshingChunksStillLoading) {
     EXPECT_EQ(chunk->get_state(), ChunkState::Loading);
     EXPECT_TRUE(chunk->mesh_vertices.empty());
     EXPECT_TRUE(chunk->mesh_indices.empty());
+}
+
+TEST_F(WorldGenerationTest, SimulationPreparationDoesNotDrainUnrelatedGeneration) {
+    JobSystem jobs;
+    jobs.startup(1);
+    SHIELD_WorldSystem world(&jobs, nullptr, params_guaranteed_surface, 1337, true);
+    world.set_authority_directory({});
+    entt::registry registry;
+    std::promise<void> release;
+    const auto released = release.get_future().share();
+    std::promise<void> started;
+    const auto blocker = jobs.dispatch_batch({[&started, released] {
+        started.set_value();
+        released.wait();
+    }});
+    started.get_future().wait();
+    const auto generation = world.dispatch_generation_jobs(std::vector<IVec3>{{200, 0, 200}});
+    auto preparation = std::async(
+        std::launch::async, [&] { world.prepare_region_authority(registry, {}, {}, nullptr); });
+    // Bounded failure cleanup releases the worker even if preparation wrongly
+    // waits for the render generation lane. No timing enters simulation state.
+    const auto completed = preparation.wait_for(std::chrono::seconds(5));
+    const bool queued = generation.counter && generation.counter->load() > 0;
+    release.set_value();
+    preparation.get();
+    jobs.wait(blocker);
+    world.wait_for_streaming_jobs();
+    EXPECT_EQ(completed, std::future_status::ready);
+    EXPECT_TRUE(queued);
+    EXPECT_EQ(world.simulation_chunk_count(), 0u);
 }
 
 TEST_F(WorldGenerationTest, SurfaceIsGeneratedAtCorrectHeight) {

@@ -80,6 +80,9 @@ const char* WorldHashAlgorithm();
 const char* EntitySnapshotArtifactSchema();
 
 std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& state);
+// Owner-thread eviction snapshot. Omits worker-owned staging arrays, which are
+// discarded on admission; live simulation and render fields remain intact.
+std::string SerializeChunkAuthoritySnapshotJson(const Chunk& chunk);
 bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
                                          WorldStreamingState& out_state,
                                          std::vector<std::string>& errors);
@@ -182,15 +185,23 @@ struct WorldAuthorityHashes {
 // The cold durable scan and the incremental path use exactly this projection.
 class AuthorityHashCache {
 public:
-    void update(const Chunk& chunk);
+    void update(const std::shared_ptr<Chunk>& chunk);
     [[nodiscard]] WorldAuthorityHashes hashes() const;
+    // Number of chunk projections, for checking incremental capture work.
+    [[nodiscard]] std::uint64_t projection_count() const {
+        return m_projections;
+    }
 
 private:
     struct Contribution {
+        std::weak_ptr<Chunk> owner;
+        std::uint64_t revision = 0;
+        u32 terrain_revision = 0;
         std::uint64_t terrain = 0;
         std::uint64_t water = 0;
     };
     std::unordered_map<ChunkID, Contribution> m_chunks;
+    std::uint64_t m_projections = 0;
     std::uint64_t m_terrain = 0;
     std::uint64_t m_water = 0;
 };
