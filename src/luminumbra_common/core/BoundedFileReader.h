@@ -19,7 +19,15 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
+// A prior non-lean Windows include can already have pulled in winspool.h.
+// Do not let its ANSI/Unicode alias rename Jolt's job-system methods.
+#ifdef AddJob
+#undef AddJob
+#endif
 #else
 #include <fcntl.h>
 #include <sys/stat.h>

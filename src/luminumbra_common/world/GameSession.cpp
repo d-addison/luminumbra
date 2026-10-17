@@ -1220,9 +1220,9 @@ GameSession::ValidateWorldConfig(const std::string& root_path,
         AddValidationError(result, "missing world preset: " + result.preset_path.string());
     }
 
-    // simulation needs only the preset. Any further runtime assets
-    // are caller-supplied (the client registers shaders/RML/fonts; a headless
-    // host registers none).
+    // Preset loading below validates simulation dependencies. Further runtime
+    // assets are caller-supplied (the client registers shaders/RML/fonts; a
+    // headless host registers none).
     for (const fs::path& relative : required_assets) {
         const fs::path path = root / relative;
         if (!fs::exists(path)) {

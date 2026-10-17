@@ -34,6 +34,7 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/core/BoundedConsoleSink.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/SimulationClock.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/SystemConfig.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/GraphicsPresets.cpp
 
     # Net
     # delay-based lockstep transport (engine-generic; LoopbackTransport
