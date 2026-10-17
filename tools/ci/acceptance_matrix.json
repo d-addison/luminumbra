@@ -1165,12 +1165,12 @@
       "requirements": [
         "ar.activation.050"
       ],
-      "discrepancy": "docs/active-regions.md now agrees with the asymmetric interval [-2^24, 2^24). ActiveRegionLedgerTest.ValidAnchorBoundaries in test/common/ActiveRegionLedger_test.cpp covers the ledger predicate; exact endpoint coverage across walking anchors, ground-object edits and pins remains tracked in issue #250.",
+      "discrepancy": "docs/active-regions.md now agrees with the asymmetric interval [-2^24, 2^24). ActiveRegionLedgerTest.ValidAnchorBoundaries in test/common/ActiveRegionLedger_test.cpp covers the ledger predicate; full walking-anchor, ground-object edit and pin boundary coverage remains planned under issue #250.",
       "evidence": [
         {
           "kind": "ctest",
           "ref": "GameSessionHeadlessWorldTest.HalfOpenHostInputBoundaries",
-          "planned": "Add a host-boundary regression for walking anchors, ground-object edits and pins: accept -2^24 and the adjacent interior coordinates, and reject +2^24 and the adjacent exterior coordinates on both X and Z for walking anchors and ground-object edits, with the corresponding signed region-pin bounds and rejection counters.; owner: ds"
+          "planned": "Add a host-boundary regression for walking anchors, ground-object edits and pins: accept -2^24 and the adjacent interior coordinates, and reject +2^24 and the adjacent exterior coordinates on both X and Z for walking anchors and ground-object edits, including the next representable float below -2^24, with the corresponding signed region-pin bounds and rejection counters.; owner: ds"
         }
       ]
     },

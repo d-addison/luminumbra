@@ -5,6 +5,7 @@ from pathlib import Path
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 
@@ -17,6 +18,9 @@ class _Windows:
         self.kernel = ctypes.WinDLL('kernel32', use_last_error=True)
         self.advapi = ctypes.WinDLL('advapi32', use_last_error=True)
         self.bind(self.kernel, 'CloseHandle', w.BOOL, [w.HANDLE])
+        self.bind(self.kernel, 'TerminateJobObject', w.BOOL, [w.HANDLE, w.UINT])
+        self.bind(self.kernel, 'QueryInformationJobObject', w.BOOL,
+                  [w.HANDLE, ctypes.c_int, w.LPVOID, w.DWORD, w.LPVOID])
         self.bind(self.kernel, 'GetCurrentProcess', w.HANDLE, [])
         self.bind(self.kernel, 'LocalFree', w.HLOCAL, [w.HLOCAL])
         self.bind(self.advapi, 'OpenProcessToken', w.BOOL, [w.HANDLE, w.DWORD, ctypes.POINTER(w.HANDLE)])
@@ -186,13 +190,51 @@ class OwnedProcess:
             self.child.wait(timeout=2)
             self.closed = True
             return
-        if self.job:
-            self.api.kernel.CloseHandle(self.job)
-            self.job = None
-        if self.handle:
-            result = self.api.kernel.WaitForSingleObject(self.handle, 2000)
-            self.api.kernel.CloseHandle(self.handle)
-            self.handle = None
-            if result != 0:
-                raise TimeoutError('Owned Windows broker did not terminate')
-        self.closed = True
+        # Job termination is asynchronous. The broker's exit alone says
+        # nothing about descendants that can still hold files or pipe handles.
+        until = time.monotonic() + 2
+        error = None
+        try:
+            if self.job:
+                self.api.check(self.api.kernel.TerminateJobObject(self.job, 1))
+                from ctypes import wintypes as w
+                class Accounting(ctypes.Structure):
+                    _fields_ = [('user', ctypes.c_int64), ('kernel', ctypes.c_int64),
+                                ('period_user', ctypes.c_int64), ('period_kernel', ctypes.c_int64),
+                                ('faults', w.DWORD), ('total', w.DWORD),
+                                ('active', w.DWORD), ('terminated', w.DWORD)]
+                while True:
+                    info = Accounting()
+                    self.api.check(self.api.kernel.QueryInformationJobObject(
+                        self.job, 1, ctypes.byref(info), ctypes.sizeof(info), None))
+                    if not info.active:
+                        break
+                    remaining = until - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError('Owned Windows descendants did not terminate')
+                    threading.Event().wait(min(.005, remaining))
+        except BaseException as failure:
+            error = failure
+        finally:
+            # Closing the Job still requests termination if an explicit stop
+            # or accounting query failed. Always wait/release the root handle.
+            try:
+                if self.job:
+                    self.api.kernel.CloseHandle(self.job)
+                    self.job = None
+            finally:
+                try:
+                    if self.handle:
+                        try:
+                            remaining = max(0, int((until - time.monotonic()) * 1000))
+                            if self.api.kernel.WaitForSingleObject(self.handle, remaining) != 0:
+                                raise TimeoutError('Owned Windows broker did not terminate')
+                        except BaseException as failure:
+                            error = error or failure
+                        finally:
+                            self.api.kernel.CloseHandle(self.handle)
+                            self.handle = None
+                finally:
+                    self.closed = True
+        if error is not None:
+            raise error
