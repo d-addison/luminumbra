@@ -1431,8 +1431,9 @@ TEST(ActiveRegionLedgerTest, ContentIdentityIsImmutableAndHasAnExactVersionedWir
     EXPECT_FALSE(ledger.canonical_bytes().empty());
     EXPECT_EQ(Version(ledger.encode()), 2u);
     const auto restored = Reload(ledger);
-    ASSERT_TRUE(restored.content_identity());
-    EXPECT_EQ(*restored.content_identity(), identity);
+    const auto restored_identity = restored.content_identity();
+    ASSERT_TRUE(restored_identity.has_value());
+    EXPECT_EQ(restored_identity, std::optional{identity});
     EXPECT_EQ(restored.encode(), ledger.encode());
     auto changed = identity;
     ++changed.population_digest;

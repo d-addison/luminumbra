@@ -110,6 +110,12 @@ if(BUILD_TESTING)
     set_tests_properties(QualificationPlanPython
         PROPERTIES LABELS "perf;tools" TIMEOUT 60)
     add_test(
+        NAME QualificationRunnerPython
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/perf/test_run_qualification.py")
+    set_tests_properties(QualificationRunnerPython
+        PROPERTIES LABELS "perf;tools" TIMEOUT 120)
+    add_test(
         NAME PerformanceMeasurementValidatorContract
         COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_validate_performance_measurement.py")
