@@ -115,7 +115,7 @@ sys.exit(0)
 
 
 def assert_tree_timeout(case, launch, error_type=subprocess.TimeoutExpired, *, driver_exits=False,
-                        interrupt=False):
+                        interrupt=False, ready_event=None):
     """Exercise a real driver and grandchild, and reap the fixture on failure."""
     with tempfile.TemporaryDirectory(prefix="process-tree-") as temporary:
         directory = Path(temporary)
@@ -168,6 +168,9 @@ def assert_tree_timeout(case, launch, error_type=subprocess.TimeoutExpired, *, d
                         handle = kernel.OpenProcess(0x100001, False, grandchild)
                         case.assertTrue(handle)
                     started.set()
+                    if ready_event is not None:
+                        ready_event.set()
+                        return communicate(input, timeout=timeout)
                     # Start the actual timeout only after the descendant exists.
                     return communicate(input, timeout=0.05)
                 return communicate(input)
@@ -201,6 +204,7 @@ def assert_tree_timeout(case, launch, error_type=subprocess.TimeoutExpired, *, d
                 return start(command, **kwargs) if command[0] == sys.executable else popen(command, **kwargs)
 
             future_result = concurrent.futures.Future.result
+            futures_wait = concurrent.futures.wait
 
             def interrupt_result(future, *args, **kwargs):
                 deadline = time.monotonic() + 5
@@ -213,10 +217,20 @@ def assert_tree_timeout(case, launch, error_type=subprocess.TimeoutExpired, *, d
                     started.wait(0.001)
                 raise KeyboardInterrupt()
 
+            def interrupt_wait(futures, *args, **kwargs):
+                deadline = time.monotonic() + 5
+                while not started.is_set():
+                    if all(future.done() for future in futures):
+                        return futures_wait(futures, *args, **kwargs)
+                    case.assertLess(time.monotonic(), deadline, "worker did not start")
+                    started.wait(0.001)
+                raise KeyboardInterrupt()
+
             with contextlib.ExitStack() as stack:
                 stack.enter_context(patch.object(subprocess, "Popen", side_effect=driver_only))
                 if interrupt:
                     stack.enter_context(patch.object(concurrent.futures.Future, "result", interrupt_result))
+                    stack.enter_context(patch.object(concurrent.futures, "wait", interrupt_wait))
                 with case.assertRaises(error_type):
                     launch([sys.executable, "-I", "-B", str(script), str(ready)], directory)
             case.assertIsNotNone(grandchild)
@@ -241,6 +255,246 @@ def assert_tree_timeout(case, launch, error_type=subprocess.TimeoutExpired, *, d
                 kernel.CloseHandle(handle)
             if subreaper is not None:
                 case.assertEqual(libc.prctl(36, subreaper.value, 0, 0, 0), 0)
+
+
+def assert_parallel_failure(case, module, failure, *, collect_errors=(), active_error=None,
+                            parallel=None, slow=None, ready=None):
+    """Hold publication and joining apart to inspect the worker failure boundary."""
+    submitted, published, joining = (threading.Event() for _ in range(3))
+    active = threading.Barrier(3, timeout=5)
+    futures, visited, contexts, boundary, slow_cancelled, shutdowns, tool_errors, publication_joined = (
+        [] for _ in range(8))
+    shared = []
+    executor = module.concurrent.futures.ThreadPoolExecutor
+    futures_wait = module.concurrent.futures.wait
+
+    class ObservedExecutor(executor):
+        def submit(self, function, item):
+            def observe():
+                try:
+                    return function(item)
+                finally:
+                    contexts.append(hasattr(module._PROCESS_CONTEXT, "cancelled"))
+
+            future = super().submit(observe)
+            futures.append(future)
+            if item == 1:
+                def failure_published(completed):
+                    boundary.append(shared[0].is_set())
+                    published.set()
+                    if slow is not None:
+                        # Rescue the real fixture on a broken implementation,
+                        # only after recording the required boundary state.
+                        shared[0].set()
+                    publication_joined.append(joining.wait(5))
+
+                future.add_done_callback(failure_published)
+            if item == 7:
+                submitted.set()
+            return future
+
+        def shutdown(self, wait=True, *, cancel_futures=False):
+            shutdowns.append((wait, cancel_futures))
+            # Keep the failing worker in its callback until the coordinator
+            # has cancelled the queue, so actual Future cancellation is tested.
+            super().shutdown(wait=False, cancel_futures=cancel_futures)
+            joining.set()
+            super().shutdown(wait=wait)
+
+    def work(item):
+        visited.append(item)
+        cancelled = module._PROCESS_CONTEXT.cancelled
+        if item == 0:
+            shared.append(cancelled)
+        if item < 3:
+            active.wait()
+        if item == 0:
+            if slow is not None:
+                try:
+                    return slow()
+                except BaseException as error:
+                    tool_errors.append(type(error))
+                    if boundary and boundary[0]:
+                        case.assertTrue(joining.wait(5), "coordinator did not join")
+                    raise
+            case.assertTrue(published.wait(5), "failure was not published")
+            slow_cancelled.append(cancelled.is_set())
+            if boundary[0]:
+                case.assertTrue(joining.wait(5), "coordinator did not join")
+            raise concurrent.futures.CancelledError()
+        if item == 1:
+            case.assertTrue(submitted.wait(5), "queue was not submitted")
+            if ready is not None:
+                case.assertTrue(ready.wait(5), "owned process did not start")
+            raise failure
+        if item == 2:
+            case.assertTrue(published.wait(5), "failure was not published")
+            if boundary[0]:
+                case.assertTrue(joining.wait(5), "coordinator did not join")
+            if active_error is not None:
+                raise active_error
+            return None
+        case.fail("queued function ran after failure")
+
+    def observe_completion(*args, **kwargs):
+        case.assertTrue(published.wait(5), "failure was not published")
+        return futures_wait(*args, **kwargs)
+
+    caught = None
+    with patch.object(module.concurrent.futures, "ThreadPoolExecutor", ObservedExecutor), \
+            patch.object(module.concurrent.futures, "wait", side_effect=observe_completion):
+        try:
+            if parallel is None:
+                module.parallel_map(work, range(8), 3, collect_errors=collect_errors)
+            else:
+                parallel(work, range(8), 3)
+        except BaseException as error:
+            caught = error
+    case.assertEqual(boundary, [True], "cancellation was late at exception publication")
+    case.assertEqual(sorted(visited), [0, 1, 2])
+    case.assertEqual(shutdowns, [(True, True)])
+    case.assertEqual(publication_joined, [True], "coordinator did not join")
+    case.assertTrue(all(future.done() for future in futures))
+    case.assertTrue(all(future.cancelled() for future in futures[3:]))
+    case.assertTrue(contexts)
+    case.assertFalse(any(contexts), "worker retained process cancellation context")
+    if slow is None:
+        case.assertEqual(slow_cancelled, [True])
+    else:
+        case.assertEqual(tool_errors, [concurrent.futures.CancelledError])
+    case.assertIsNotNone(caught, "parallel failure was lost")
+    return caught
+
+
+class ParallelMapTests(unittest.TestCase):
+    def test_later_failure_cancels_slow_first_and_queue_before_publication(self):
+        failure = RuntimeError("later failure")
+        self.assertIs(assert_parallel_failure(self, MODULE, failure), failure)
+
+    def test_collected_active_errors_remain_in_input_order(self):
+        error = assert_parallel_failure(self, MODULE, PermissionError("later refusal"),
+                                        collect_errors=(OSError, ValueError),
+                                        active_error=ValueError("active refusal"))
+        self.assertIs(type(error), ValueError)
+        self.assertEqual(str(error), "later refusal\nactive refusal")
+
+    def test_unexpected_active_cleanup_error_is_not_replaced_by_collected_error(self):
+        failure = RuntimeError("cleanup failed")
+        self.assertIs(assert_parallel_failure(self, MODULE, ValueError("later refusal"),
+                                              collect_errors=(ValueError,), active_error=failure), failure)
+
+    def test_unexpected_cancellation_is_propagated(self):
+        failure = concurrent.futures.CancelledError("unexpected cancellation")
+        self.assertIs(assert_parallel_failure(self, MODULE, failure), failure)
+
+    def test_workers_refuse_queue_before_coordinator_observes_failure(self):
+        submitted, drained = threading.Event(), threading.Event()
+        lock = threading.Lock()
+        visited, finished = [], []
+        failure = RuntimeError("worker failed")
+        executor = MODULE.concurrent.futures.ThreadPoolExecutor
+        futures_wait = MODULE.concurrent.futures.wait
+
+        class ObservedExecutor(executor):
+            def submit(self, function, item):
+                future = super().submit(function, item)
+
+                def done(result):
+                    with lock:
+                        finished.append(item)
+                        if len(finished) == 5:
+                            drained.set()
+
+                future.add_done_callback(done)
+                if item == 4:
+                    submitted.set()
+                return future
+
+        def work(item):
+            visited.append(item)
+            if item == 0:
+                self.assertTrue(submitted.wait(5))
+                raise failure
+            return item
+
+        def observe_completion(*args, **kwargs):
+            # Workers must refuse queued calls even while the coordinator is
+            # held away from completion observation and queue cancellation.
+            self.assertTrue(drained.wait(5))
+            return futures_wait(*args, **kwargs)
+
+        with patch.object(MODULE.concurrent.futures, "ThreadPoolExecutor", ObservedExecutor), \
+                patch.object(MODULE.concurrent.futures, "wait", side_effect=observe_completion), \
+                self.assertRaises(RuntimeError) as raised:
+            MODULE.parallel_map(work, range(5), 1)
+        self.assertIs(raised.exception, failure)
+        self.assertEqual(visited, [0])
+        self.assertEqual(finished, list(range(5)))
+
+    def test_submission_failure_cancels_and_joins_already_started_work(self):
+        started, cleaned = threading.Event(), threading.Event()
+        failure = PermissionError("cannot read remaining inputs")
+        contexts = []
+        executor = MODULE.concurrent.futures.ThreadPoolExecutor
+
+        class ObservedExecutor(executor):
+            def submit(self, function, item):
+                def observe():
+                    try:
+                        return function(item)
+                    finally:
+                        contexts.append(hasattr(MODULE._PROCESS_CONTEXT, "cancelled"))
+                return super().submit(observe)
+
+        def items():
+            yield 0
+            self.assertTrue(started.wait(5))
+            raise failure
+
+        def work(item):
+            cancelled = MODULE._PROCESS_CONTEXT.cancelled
+            started.set()
+            try:
+                self.assertTrue(cancelled.wait(5))
+            finally:
+                cleaned.set()
+
+        with patch.object(MODULE.concurrent.futures, "ThreadPoolExecutor", ObservedExecutor), \
+                self.assertRaises(PermissionError) as raised:
+            MODULE.parallel_map(work, items(), 1)
+        self.assertIs(raised.exception, failure)
+        self.assertTrue(cleaned.is_set())
+        self.assertEqual(contexts, [False])
+
+    def test_successes_keep_input_order_despite_reverse_completion(self):
+        submitted = threading.Event()
+        completed = [threading.Event() for _ in range(3)]
+        executor = MODULE.concurrent.futures.ThreadPoolExecutor
+        order = []
+
+        class ObservedExecutor(executor):
+            def submit(self, function, item):
+                future = super().submit(function, item)
+
+                def done(result):
+                    order.append(item)
+                    completed[item].set()
+
+                future.add_done_callback(done)
+                if item == 2:
+                    submitted.set()
+                return future
+
+        def work(item):
+            self.assertTrue(submitted.wait(5))
+            if item < 2:
+                self.assertTrue(completed[item + 1].wait(5))
+            return [None, "middle", 42][item]
+
+        with patch.object(MODULE.concurrent.futures, "ThreadPoolExecutor", ObservedExecutor):
+            self.assertEqual(MODULE.parallel_map(work, range(3), 3), [None, "middle", 42])
+        self.assertEqual(order, [2, 1, 0])
+        self.assertFalse(hasattr(MODULE._PROCESS_CONTEXT, "cancelled"))
 
 
 class ProcessRunnerContractTests(unittest.TestCase):
@@ -517,6 +771,23 @@ class WindowsJobTests(unittest.TestCase):
 
 
 class ProcessTreeTests(unittest.TestCase):
+    def test_later_failure_cancels_and_reaps_owned_driver_and_descendant(self):
+        for driver_exits in (False, True):
+            with self.subTest(driver_exits=driver_exits):
+                ready = threading.Event()
+                failure = RuntimeError("later failure")
+
+                def launch(command, directory):
+                    error = assert_parallel_failure(
+                        self, MODULE, failure, ready=ready,
+                        slow=lambda: MODULE.run_process(command, cwd=directory, capture_output=True,
+                                                        timeout=MODULE.DEPS_TIMEOUT_SECONDS))
+                    self.assertIs(error, failure)
+                    raise error
+
+                assert_tree_timeout(self, launch, RuntimeError, driver_exits=driver_exits,
+                                    ready_event=ready)
+
     def test_cache_command_interrupt_cleans_up_preparation_and_analysis(self):
         for phase in ("prepare", "analyze"):
             with self.subTest(phase=phase):
@@ -656,6 +927,80 @@ class TidyCacheTests(unittest.TestCase):
     def assertRan(self, result, expected_total_runs):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.tidy_runs(), expected_total_runs, result.stdout + result.stderr)
+
+    def test_analysis_failures_cancel_queued_units_without_writing_records(self):
+        sources = [self.main, *(self.src / f"unit{index}.cpp" for index in range(3))]
+        for source in sources:
+            source.write_text("int value; // TIDY_FAIL\n", encoding="utf-8")
+        self.entries = [self.entry([], source) for source in sources]
+        self.write_db()
+        original_run = MODULE.run_process
+        for failure in (None, PermissionError("cannot launch"),
+                        subprocess.TimeoutExpired("tidy", MODULE.TIDY_TIMEOUT_SECONDS)):
+            with self.subTest(failure=failure):
+                launches = []
+                cancellation_at_flush = []
+
+                class ObservedOutput(io.StringIO):
+                    def flush(self):
+                        cancelled = getattr(MODULE._PROCESS_CONTEXT, "cancelled", None)
+                        if cancelled is not None:
+                            cancellation_at_flush.append(cancelled.is_set())
+                        super().flush()
+
+                def run_tool(command, **kwargs):
+                    if "-quiet" in command:
+                        launches.append(command[-1])
+                        if failure is not None:
+                            raise failure
+                    return original_run(command, **kwargs)
+
+                # A single worker makes every following analysis queued when
+                # the first one fails, independently of scheduler timing.
+                parallel = MODULE.parallel_map
+
+                def serial(function, items, jobs, **kwargs):
+                    return parallel(function, items, 1, **kwargs)
+
+                with patch.object(MODULE, "run_process", side_effect=run_tool), \
+                        patch.object(MODULE, "parallel_map", side_effect=serial), \
+                        patch.object(io, "StringIO", ObservedOutput):
+                    result = self.run_cache(sources)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertEqual(launches, [str(self.main)])
+                self.assertEqual(cancellation_at_flush, [True])
+                self.assertIn("analyzed 1, recorded 0, failed 1", result.stdout)
+                self.assertIn("clang-tidy failed on " + str(self.main), result.stderr)
+                self.assertEqual(list(self.cache.rglob("*.json")), [])
+
+    def test_analysis_flush_failure_preserves_cancellation_and_exception_without_records(self):
+        other = self.src / "other.cpp"
+        for source in (self.main, other):
+            source.write_text("int value; // TIDY_FAIL\n", encoding="utf-8")
+        self.entries = [self.entry([], source) for source in (self.main, other)]
+        self.write_db()
+        failure = OSError("diagnostic flush failed")
+        cancellation_at_flush = []
+        parallel = MODULE.parallel_map
+
+        class FailingOutput(io.StringIO):
+            def flush(self):
+                cancelled = getattr(MODULE._PROCESS_CONTEXT, "cancelled", None)
+                if cancelled is not None:
+                    cancellation_at_flush.append(cancelled.is_set())
+                    raise failure
+                super().flush()
+
+        def serial(function, items, jobs, **kwargs):
+            return parallel(function, items, 1, **kwargs)
+
+        with patch.object(MODULE, "parallel_map", side_effect=serial), \
+                patch.object(io, "StringIO", FailingOutput), self.assertRaises(OSError) as raised:
+            self.run_cache([self.main, other])
+        self.assertIs(raised.exception, failure)
+        self.assertEqual(cancellation_at_flush, [True])
+        self.assertEqual(self.tidy_runs(), 1)
+        self.assertEqual(list(self.cache.rglob("*.json")), [])
 
     def test_second_identical_run_is_a_hit(self):
         self.assertRan(self.run_cache(), 1)

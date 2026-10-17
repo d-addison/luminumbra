@@ -179,30 +179,35 @@ _PROCESS_CONTEXT = threading.local()
 
 
 def parallel_map(function, items, jobs, *, collect_errors=()):
-    """Cancel queued work and interrupt active tool trees before joining workers."""
+    """Fail fast, drain owned tools, then report errors in input order."""
     cancelled = threading.Event()
+    skipped = object()
 
     def invoke(item):
         _PROCESS_CONTEXT.cancelled = cancelled
         try:
             if cancelled.is_set():
-                raise concurrent.futures.CancelledError()
-            return function(item)
+                return skipped
+            try:
+                return function(item)
+            except concurrent.futures.CancelledError:
+                if cancelled.is_set():
+                    # An owned tool interrupted by another worker's failure
+                    # must not hide that failure with a cancellation error.
+                    return skipped
+                raise
+        except BaseException:
+            # Publish cancellation before this worker can take another item,
+            # even if the coordinator is still submitting or awaiting work.
+            cancelled.set()
+            raise
         finally:
             del _PROCESS_CONTEXT.cancelled
 
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, jobs))
     try:
         futures = [pool.submit(invoke, item) for item in items]
-        results, errors = [], []
-        for future in futures:
-            try:
-                results.append(future.result())
-            except collect_errors as error:
-                errors.append(str(error))
-        if errors:
-            raise ValueError("\n".join(errors))
-        return results
+        concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_EXCEPTION)
     except BaseException:
         cancelled.set()
         raise
@@ -210,6 +215,22 @@ def parallel_map(function, items, jobs, *, collect_errors=()):
         # Do this before waiting: workers observe cancellation within 100ms,
         # terminate their own group/job and drain/reap their driver as usual.
         pool.shutdown(wait=True, cancel_futures=cancelled.is_set())
+
+    # Shutdown has drained every active worker. Preserve input order for both
+    # successful values and collected diagnostics, ignoring only cancelled work.
+    results, errors = [], []
+    for future in futures:
+        if future.cancelled():
+            continue
+        try:
+            result = future.result()
+            if result is not skipped:
+                results.append(result)
+        except collect_errors as error:
+            errors.append(str(error))
+    if errors:
+        raise ValueError("\n".join(errors))
+    return results
 
 
 def run_process(command, *, timeout, capture_output=False, check=False, **kwargs):
@@ -766,11 +787,12 @@ def run_command(args: argparse.Namespace) -> int:
     print(f"tidy cache: {len(hits)} hit(s), {len(misses)} to analyze ({args.mode}, {len(files)} unit(s))")
 
     failures: list[str] = []
+    analyzed = 0
     recorded = 0
     output_lock = threading.Lock()
 
     def analyze(item: tuple[str, str | None, bool]) -> None:
-        nonlocal recorded
+        nonlocal analyzed, recorded
         tu, key, _ = item
         command = [args.clang_tidy, "-p", args.build_dir, "-quiet", f"--config={args.config}", tu]
         try:
@@ -787,7 +809,12 @@ def run_command(args: argparse.Namespace) -> int:
         except (OSError, subprocess.SubprocessError) as error:
             status = -1
             output = f"clang-tidy did not complete: {error}\n"
+        if status != 0:
+            # Signal before acquiring the output lock or flushing diagnostics:
+            # either can block while another worker is ready to take more work.
+            _PROCESS_CONTEXT.cancelled.set()
         with output_lock:
+            analyzed += 1
             if output.strip():
                 sys.stdout.write(output)
                 sys.stdout.flush()
@@ -816,7 +843,7 @@ def run_command(args: argparse.Namespace) -> int:
 
     parallel_map(analyze, misses, args.jobs)
 
-    print(f"tidy cache: analyzed {len(misses)}, recorded {recorded}, failed {len(failures)}")
+    print(f"tidy cache: analyzed {analyzed}, recorded {recorded}, failed {len(failures)}")
     for tu in failures:
         print(f"tidy cache: clang-tidy failed on {tu}", file=sys.stderr)
     return 1 if failures else 0

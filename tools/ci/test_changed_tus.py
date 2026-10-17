@@ -2210,6 +2210,45 @@ COMPILER_HEADER_ROOTS = tus.compiler_header_roots
 
 
 class ProcessTimeoutTests(unittest.TestCase):
+    def test_collected_later_failure_cancels_and_reaps_owned_processes(self):
+        spec = importlib.util.spec_from_file_location("collected_tree_tests", ROOT / "tools/ci/test_tidy_cache.py")
+        fixtures = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fixtures)
+        for driver_exits in (False, True):
+            with self.subTest(driver_exits=driver_exits):
+                ready = fixtures.threading.Event()
+
+                def launch(command, directory):
+                    error = fixtures.assert_parallel_failure(
+                        self, tus._DEPS, tus.SelectionError("later command failed"),
+                        parallel=tus.parallel, ready=ready,
+                        slow=lambda: EXECUTE(command, directory))
+                    self.assertIs(type(error), tus.SelectionError)
+                    self.assertEqual(str(error), "later command failed")
+                    raise error
+
+                fixtures.assert_tree_timeout(self, launch, tus.SelectionError,
+                                             driver_exits=driver_exits, ready_event=ready)
+
+    def test_collected_parallel_refusals_cancel_before_publication_and_preserve_diagnostics(self):
+        spec = importlib.util.spec_from_file_location("parallel_failure_tests", ROOT / "tools/ci/test_tidy_cache.py")
+        fixtures = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fixtures)
+        error = fixtures.assert_parallel_failure(
+            self, tus._DEPS, PermissionError("unreadable command"), parallel=tus.parallel,
+            active_error=ValueError("partial dependency output"))
+        self.assertIs(type(error), tus.SelectionError)
+        self.assertEqual(str(error), "unreadable command\npartial dependency output")
+
+    def test_unexpected_parallel_error_is_not_wrapped_as_selection_refusal(self):
+        spec = importlib.util.spec_from_file_location("unexpected_failure_tests", ROOT / "tools/ci/test_tidy_cache.py")
+        fixtures = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fixtures)
+        failure = RuntimeError("cleanup failed")
+        self.assertIs(fixtures.assert_parallel_failure(
+            self, tus._DEPS, ValueError("dependency refusal"), parallel=tus.parallel,
+            active_error=failure), failure)
+
     def test_parallel_interrupt_cancels_queue_and_reaps_descendants(self):
         spec = importlib.util.spec_from_file_location("tree_interrupt_tests", ROOT / "tools/ci/test_tidy_cache.py")
         fixtures = importlib.util.module_from_spec(spec)
