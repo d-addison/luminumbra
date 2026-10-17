@@ -75,6 +75,20 @@ struct WorldSaveAdmission {
 // Obsolete disk formats are refused; migration is not supported.
 class WorldSaveService {
 public:
+    enum class LegacyEnergyReadStatus {
+        Missing,
+        Loaded,
+        Unreadable,
+        Invalid
+    };
+    static constexpr const char* kLegacyEnergyUnreadable = "Unreadable legacy energy record.";
+    static constexpr const char* kLegacyEnergyInvalid = "Corrupt legacy energy record.";
+    // Only a missing directory entry is neutral. Refusals are typed and leave state unchanged.
+    static LegacyEnergyReadStatus load_legacy_energy(luminumbra::fields::EnergyFieldState& state,
+                                                     const std::filesystem::path& save_dir,
+                                                     std::uint64_t tick,
+                                                     std::vector<std::string>* errors = nullptr);
+
     // Also recorded in world_info.json, including before the first chunk save.
     static constexpr std::uint16_t kContainerVersion = 2;
     static constexpr const char* kObsoleteWorldMessage =

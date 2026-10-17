@@ -1,4 +1,5 @@
 #include "SHIELD_WorldSystem.h"
+#include "../../../include/luminumbra/core/Types.h"
 #include "../core/FilesystemPath.h"
 #include "../core/JobWatchdog.h" // opt-in named-phase wedge reporter for unbounded waits
 #include "../core/Log.h"
@@ -5386,7 +5387,45 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
     mesh_batch.due_tick =
         m_current_sim_tick >= 0 ? m_current_sim_tick + kActivationPipelineLatencyTicks : -1;
     mesh_batch.chunks.reserve(mesh_items.size());
-    for (const MeshingWorkItem& work_item : mesh_items) {
+    struct WaterMeshInput {
+        std::vector<f32> levels;
+        std::vector<Vec2> flows;
+        std::vector<f32> terrain;
+        bool initialized;
+        int resolution;
+    };
+    // Prepare the entire batch before changing any chunk's pending state.
+    std::vector<std::shared_ptr<const WaterMeshInput>> water_inputs;
+    water_inputs.reserve(mesh_items.size());
+    for (const auto& work_item : mesh_items) {
+        const auto& chunk = work_item.chunk;
+        // Water is host-owned between solver calls. Capture before either job lane
+        // starts: regional publication and legacy initialization may replace these
+        // vectors while this batch remains in flight across simulation ticks.
+        const int water_resolution = chunk->current_water_resolution.load();
+        // All supported water grids are at most 32 by 32 cells. Validate before
+        // multiplication or copying so each retained payload has a fixed bound.
+        if (water_resolution < 0 || water_resolution > 32)
+            throw std::runtime_error("Water mesh snapshot resolution refused");
+        const auto water_side = static_cast<std::size_t>(water_resolution);
+        const auto water_cells = water_side * water_side;
+        const auto valid_water_size = [water_cells](std::size_t size) {
+            return size == 0 || size == water_cells;
+        };
+        if (!valid_water_size(chunk->water_level_data.size()) ||
+            !valid_water_size(chunk->water_flow_data.size()) ||
+            !valid_water_size(chunk->water_sim_terrain_height.size()))
+            throw std::runtime_error("Water mesh snapshot grid size refused");
+        water_inputs.push_back(
+            std::make_shared<const WaterMeshInput>(WaterMeshInput{chunk->water_level_data,
+                                                                  chunk->water_flow_data,
+                                                                  chunk->water_sim_terrain_height,
+                                                                  chunk->has_water_sim.load(),
+                                                                  water_resolution}));
+    }
+    for (std::size_t mesh_index = 0; mesh_index < mesh_items.size(); ++mesh_index) {
+        const auto& work_item = mesh_items[mesh_index];
+        const auto& water_input = water_inputs[mesh_index];
         auto& chunk = work_item.chunk;
         const int lod_level = work_item.lod_level;
         const bool terrain_mesh_required = work_item.terrain_mesh_required;
@@ -5403,6 +5442,7 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
         chunk->pending_water_mesh_indices.clear();
         chunk->pending_mesh_ready.store(false, std::memory_order_release);
         chunk->pending_mesh_failed.store(false, std::memory_order_release);
+        chunk->pending_water_mesh_generated.store(false, std::memory_order_release);
         chunk->pending_lod.store(lod_level, std::memory_order_release);
 
         auto transition_faces = Luminumbra::World::MarchingCubes::kNoTransitionFaces;
@@ -5437,103 +5477,105 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
             add_face_if_neighbor_is_finer(
                 0, 1, Luminumbra::World::MarchingCubes::TransitionFaceMaxZ);
         }
-        mesh_batch.chunks.push_back({chunk, terrain_mesh_required, transition_faces});
+        mesh_batch.chunks.push_back(
+            {chunk, terrain_mesh_required, transition_faces, chunk->water_revision()});
 
         auto& lane_jobs = work_item.high_priority ? high_priority_jobs : normal_priority_jobs;
-        lane_jobs.emplace_back([this, chunk, step, transition_faces, terrain_mesh_required]() {
-            try {
-                const auto worldgen_scope = acquire_worldgen_sample_scope(); //
-                Luminumbra::Chunk scratch(chunk->get_coords());
-                scratch.water_level_data = chunk->water_level_data;
-                scratch.water_flow_data = chunk->water_flow_data;
-                scratch.water_sim_terrain_height = chunk->water_sim_terrain_height;
-                scratch.has_water_sim.store(chunk->has_water_sim.load(std::memory_order_acquire),
-                                            std::memory_order_release);
-                scratch.water_mesh_generated.store(false, std::memory_order_release);
-                scratch.current_water_resolution.store(
-                    chunk->current_water_resolution.load(std::memory_order_acquire),
-                    std::memory_order_release);
+        lane_jobs.emplace_back(
+            [this, chunk, step, transition_faces, terrain_mesh_required, water_input]() {
+                try {
+                    const auto worldgen_scope = acquire_worldgen_sample_scope(); //
+                    Luminumbra::Chunk scratch(chunk->get_coords());
+                    scratch.water_level_data = water_input->levels;
+                    scratch.water_flow_data = water_input->flows;
+                    scratch.water_sim_terrain_height = water_input->terrain;
+                    scratch.has_water_sim.store(water_input->initialized,
+                                                std::memory_order_release);
+                    scratch.water_mesh_generated.store(false, std::memory_order_release);
+                    scratch.current_water_resolution.store(water_input->resolution,
+                                                           std::memory_order_release);
 
-                if (terrain_mesh_required) {
-                    if (step <= 1 && chunk->sdf_data.size() != kFullSdfLattice) {
-                        //  tripwire: meshing NEVER generates sim
-                        // truth. A unit-step item without a full live voxel
-                        // field must have been routed through the promotion
-                        // lane at dispatch — reaching here is a regression of
-                        // the activation queue decoupling, not a recoverable state.
-                        LUMINUMBRA_CORE_ERROR(
-                            "MESHING JOB: chunk ({},{},{}) reached the render-only meshing "
-                            "lane without full sim truth (sdf size {} != {}) — the  "
-                            "promotion routing is broken; failing the mesh",
-                            chunk->get_coords().x,
-                            chunk->get_coords().y,
-                            chunk->get_coords().z,
-                            chunk->sdf_data.size(),
-                            kFullSdfLattice);
-                        chunk->pending_mesh_failed.store(true, std::memory_order_release);
-                        return;
+                    if (terrain_mesh_required) {
+                        if (step <= 1 && chunk->sdf_data.size() != kFullSdfLattice) {
+                            //  tripwire: meshing NEVER generates sim
+                            // truth. A unit-step item without a full live voxel
+                            // field must have been routed through the promotion
+                            // lane at dispatch — reaching here is a regression of
+                            // the activation queue decoupling, not a recoverable state.
+                            LUMINUMBRA_CORE_ERROR(
+                                "MESHING JOB: chunk ({},{},{}) reached the render-only meshing "
+                                "lane without full sim truth (sdf size {} != {}) — the  "
+                                "promotion routing is broken; failing the mesh",
+                                chunk->get_coords().x,
+                                chunk->get_coords().y,
+                                chunk->get_coords().z,
+                                chunk->sdf_data.size(),
+                                kFullSdfLattice);
+                            chunk->pending_mesh_failed.store(true, std::memory_order_release);
+                            return;
+                        }
+                        scratch.sdf_data = chunk->sdf_data;
+                        scratch.heightmap_data = chunk->heightmap_data;
+                        // carry the live material channel so stage-B
+                        // promotion meshes classify authored structure voxels
+                        // exactly as the old fused backfill+mesh job did (its
+                        // scratch had materials stamped by GenerateChunkData).
+                        // Also fixes the latent authored-material loss on plain
+                        // remeshes, which copied only sdf+heightmap. Mesh bytes
+                        // are world_hash-excluded either way (empty -> empty,
+                        //  lazy alloc preserved).
+                        scratch.material_data = chunk->material_data;
+
+                        // 1. Generate the terrain mesh from the SDF data into a scratch chunk.
+                        Luminumbra::World::MarchingCubes::PolygoniseTerrain(
+                            *this, scratch, 0.0f, step);
+                        Luminumbra::World::MarchingCubes::AddBoundaryTransitionSkirts(
+                            scratch, step, transition_faces);
                     }
-                    scratch.sdf_data = chunk->sdf_data;
-                    scratch.heightmap_data = chunk->heightmap_data;
-                    // carry the live material channel so stage-B
-                    // promotion meshes classify authored structure voxels
-                    // exactly as the old fused backfill+mesh job did (its
-                    // scratch had materials stamped by GenerateChunkData).
-                    // Also fixes the latent authored-material loss on plain
-                    // remeshes, which copied only sdf+heightmap. Mesh bytes
-                    // are world_hash-excluded either way (empty -> empty,
-                    //  lazy alloc preserved).
-                    scratch.material_data = chunk->material_data;
 
-                    // 1. Generate the terrain mesh from the SDF data into a scratch chunk.
-                    Luminumbra::World::MarchingCubes::PolygoniseTerrain(*this, scratch, 0.0f, step);
-                    Luminumbra::World::MarchingCubes::AddBoundaryTransitionSkirts(
-                        scratch, step, transition_faces);
-                }
+                    // Terrain mesh generation debug logging removed to prevent segfault
 
-                // Terrain mesh generation debug logging removed to prevent segfault
-
-                // 2. Generate the water surface mesh if the water system exists
-                if (m_water_system) {
-                    // Only generate high-detail water mesh for highest LOD terrain
-                    if (step <= 1) {
-                        Luminumbra::World::MarchingCubes::GenerateWaterMesh(
-                            *m_water_system, *this, scratch);
-                    } else {
-                        scratch.water_mesh_vertices.clear();
-                        scratch.water_mesh_indices.clear();
-                        scratch.water_mesh_generated.store(false, std::memory_order_release);
+                    // 2. Generate the water surface mesh if the water system exists
+                    if (m_water_system) {
+                        // Only generate high-detail water mesh for highest LOD terrain
+                        if (step <= 1) {
+                            Luminumbra::World::MarchingCubes::GenerateWaterMesh(
+                                *m_water_system, *this, scratch);
+                        } else {
+                            scratch.water_mesh_vertices.clear();
+                            scratch.water_mesh_indices.clear();
+                            scratch.water_mesh_generated.store(false, std::memory_order_release);
+                        }
                     }
-                }
 
-                if (terrain_mesh_required) {
-                    chunk->pending_mesh_vertices = std::move(scratch.mesh_vertices);
-                    chunk->pending_mesh_indices = std::move(scratch.mesh_indices);
-                }
-                chunk->pending_water_mesh_vertices = std::move(scratch.water_mesh_vertices);
-                chunk->pending_water_mesh_indices = std::move(scratch.water_mesh_indices);
-                chunk->water_mesh_generated.store(
-                    scratch.water_mesh_generated.load(std::memory_order_acquire),
-                    std::memory_order_release);
-                chunk->pending_mesh_ready.store(true, std::memory_order_release);
+                    if (terrain_mesh_required) {
+                        chunk->pending_mesh_vertices = std::move(scratch.mesh_vertices);
+                        chunk->pending_mesh_indices = std::move(scratch.mesh_indices);
+                    }
+                    chunk->pending_water_mesh_vertices = std::move(scratch.water_mesh_vertices);
+                    chunk->pending_water_mesh_indices = std::move(scratch.water_mesh_indices);
+                    chunk->pending_water_mesh_generated.store(
+                        scratch.water_mesh_generated.load(std::memory_order_acquire),
+                        std::memory_order_release);
+                    chunk->pending_mesh_ready.store(true, std::memory_order_release);
 
-                // Job completion debug logging removed to prevent segfault
-            } catch (const std::exception& e) {
-                LUMINUMBRA_CORE_ERROR("MESHING JOB CRASH: Chunk ({},{},{}) failed: {}",
-                                      chunk->get_coords().x,
-                                      chunk->get_coords().y,
-                                      chunk->get_coords().z,
-                                      e.what());
-                chunk->pending_mesh_failed.store(true, std::memory_order_release);
-            } catch (...) {
-                LUMINUMBRA_CORE_ERROR(
-                    "MESHING JOB CRASH: Chunk ({},{},{}) failed with unknown exception",
-                    chunk->get_coords().x,
-                    chunk->get_coords().y,
-                    chunk->get_coords().z);
-                chunk->pending_mesh_failed.store(true, std::memory_order_release);
-            }
-        });
+                    // Job completion debug logging removed to prevent segfault
+                } catch (const std::exception& e) {
+                    LUMINUMBRA_CORE_ERROR("MESHING JOB CRASH: Chunk ({},{},{}) failed: {}",
+                                          chunk->get_coords().x,
+                                          chunk->get_coords().y,
+                                          chunk->get_coords().z,
+                                          e.what());
+                    chunk->pending_mesh_failed.store(true, std::memory_order_release);
+                } catch (...) {
+                    LUMINUMBRA_CORE_ERROR(
+                        "MESHING JOB CRASH: Chunk ({},{},{}) failed with unknown exception",
+                        chunk->get_coords().x,
+                        chunk->get_coords().y,
+                        chunk->get_coords().z);
+                    chunk->pending_mesh_failed.store(true, std::memory_order_release);
+                }
+            });
     }
     if (m_job_system && (!high_priority_jobs.empty() || !normal_priority_jobs.empty())) {
         if (!high_priority_jobs.empty()) {
@@ -5605,7 +5647,15 @@ bool SHIELD_WorldSystem::publish_front_meshing_batch(bool force) {
             chunk->water_mesh_vertices = std::move(chunk->pending_water_mesh_vertices);
             chunk->water_mesh_indices = std::move(chunk->pending_water_mesh_indices);
             chunk->water_mesh_version++;
-            chunk->water_mesh_dirty_ticks = 0;
+            // A completed older snapshot must not acknowledge newer water. Only
+            // the host publishes this flag; workers write pending results alone.
+            const bool water_current = chunk->water_revision() == job_chunk.water_revision;
+            chunk->water_mesh_generated.store(
+                water_current &&
+                    chunk->pending_water_mesh_generated.load(std::memory_order_acquire),
+                std::memory_order_release);
+            if (water_current)
+                chunk->water_mesh_dirty_ticks = 0;
             chunk->set_state(Luminumbra::ChunkState::Ready);
         } else if (chunk->mesh_vertices.empty() || chunk->mesh_indices.empty()) {
             chunk->set_state(Luminumbra::ChunkState::Idle);

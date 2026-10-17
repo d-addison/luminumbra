@@ -1,8 +1,7 @@
 #pragma once
 
-#include <array>
+#include "../core/BoundedFileReader.h"
 #include <filesystem>
-#include <fstream>
 #include <functional>
 #include <string>
 #include <system_error>
@@ -22,6 +21,9 @@ inline std::filesystem::file_status ReadWorldgenSymlinkStatus(const std::filesys
     return std::filesystem::symlink_status(path, ec);
 }
 
+// Presets and each referenced worldgen dependency are at most 16 MiB on disk.
+inline constexpr std::size_t kMaxWorldgenFileBytes = std::size_t{16} * 1024u * 1024u;
+
 inline bool ReadWorldgenFileWithStatus(const std::filesystem::path& path,
                                        std::string& bytes,
                                        const WorldgenFileStatusReader& read_status) {
@@ -29,15 +31,12 @@ inline bool ReadWorldgenFileWithStatus(const std::filesystem::path& path,
     std::error_code ec;
     if (!std::filesystem::is_regular_file(read_status(path, ec)) || ec)
         return false;
-    std::ifstream file(path, std::ios::binary);
-    if (!file.is_open())
+    try {
+        return Filesystem::ReadBoundedFile(path, bytes, kMaxWorldgenFileBytes);
+    } catch (const std::exception&) {
+        bytes.clear();
         return false;
-    std::array<char, 8192> buffer;
-    while (file.read(buffer.data(), static_cast<std::streamsize>(buffer.size())) ||
-           file.gcount() > 0) {
-        bytes.append(buffer.data(), static_cast<std::size_t>(file.gcount()));
     }
-    return !file.bad() && file.eof();
 }
 
 inline bool ReadWorldgenFile(const std::filesystem::path& path, std::string& bytes) {

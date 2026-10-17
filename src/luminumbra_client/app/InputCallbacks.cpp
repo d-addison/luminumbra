@@ -2,7 +2,9 @@
 #include <GLFW/glfw3.h>
 #include <glad/glad.h>
 
+#include "app/DeveloperKeyDispatch.h"
 #include "app/FarmDropSeedInput.h"
+#include "app/GameplayBindingCapture.h"
 #include "app/InputCallbacks.h"
 
 #include "core/Log.h"
@@ -10,11 +12,11 @@
 #include "luminumbra_common/core/SystemConfig.h"
 #include "player/PlayerController.h"
 #include "rendering/Camera.h"
-#include "ui/KeyboardCapture.h"
 #include "ui/Rml_UIManager.h"
 
 #include <algorithm>
 #include <atomic>
+#include <backends/imgui_impl_glfw.h>
 #include <imgui.h>
 
 namespace Luminumbra::Client::App {
@@ -38,6 +40,18 @@ struct FarmDropSeedRuntimeInput {
     bool WindowFocused() const {
         return glfwGetWindowAttrib(window, GLFW_FOCUSED) == GLFW_TRUE;
     }
+    bool GameplayKeyAllowed() const {
+        const auto& bindings = CallbackBindings(window);
+        const auto action = InputAction::FarmDropSeed;
+        const int key = player ? player->key(action)
+                               : kInputActionDefs[static_cast<std::size_t>(action)].default_key;
+        return !bindings.router || bindings.router->GameplayKeyAllowed(key);
+    }
+    bool DeveloperPanelVisible(const char* id) const {
+        const auto& bindings = CallbackBindings(window);
+        auto* console = bindings.developerConsole;
+        return DeveloperUiAllowed(*bindings.app) && console && console->Widgets().Visible(id);
+    }
     bool PlayerPhotoModeActive() const {
         return player && player->photo_mode_active();
     }
@@ -59,11 +73,86 @@ bool FarmDropSeedInputAllowed(GLFWwindow* window) {
     return FarmDropSeedInputAllowed(app, FarmDropSeedRuntimeInput{window, player, ui});
 }
 
+void InstallInputCallbacks(GLFWwindow* window) {
+    glfwSetKeyCallback(window, key_callback);
+    glfwSetCharCallback(window, char_callback);
+    glfwSetMouseButtonCallback(window, mouse_button_callback);
+    glfwSetCursorPosCallback(window, mouse_callback);
+    glfwSetScrollCallback(window, scroll_callback);
+    glfwSetWindowFocusCallback(window, window_focus_callback);
+    glfwSetCursorEnterCallback(window, cursor_enter_callback);
+}
+
+void RefreshInputOwnership(GLFWwindow* window) {
+    auto& b = CallbackBindings(window);
+    auto& app = *b.app;
+    if (!b.router)
+        return;
+    const bool ui_enabled = DeveloperUiAllowed(app);
+    const bool imgui = ui_enabled && ImGui::GetCurrentContext();
+    const auto* ui = b.uiManager->get();
+    UiInputOwnership ownership;
+    ownership.in_world = b.in_world;
+    ownership.window_focused = b.window_focused;
+    ownership.binding_capture =
+        app.hud.rebindCaptureAction >= 0 ||
+        (ui_enabled && b.developerConsole && b.developerConsole->IsCapturing());
+    ownership.console_open = ui_enabled && b.developerConsole && b.developerConsole->IsOpen();
+    ownership.interactive_panel = ui_enabled && b.developerConsole &&
+                                  b.developerConsole->Widgets().HasInteractivePanel("ui.debugger");
+    ownership.rml_debugger = ui_enabled && ui && ui->DeveloperDebuggerVisible();
+    ownership.rml_interaction = ownership.rml_debugger || app.hud.paused || app.hud.codexOpen ||
+                                (ui && ui->HasInputInteraction());
+    ownership.rml_text_input = ui && ui->HasTextInputFocus();
+    ownership.imgui_text_input = imgui && ImGui::GetIO().WantTextInput;
+    ownership.imgui_keyboard = imgui && ImGui::GetIO().WantCaptureKeyboard;
+    ownership.imgui_mouse = imgui && ImGui::GetIO().WantCaptureMouse;
+    if (b.router->SetOwnership(ownership)) {
+        app.interactions = {};
+        if (auto* player = b.playerController->get())
+            player->ClearQueuedLiveInput();
+    }
+    const int cursor = b.router->CursorCaptured() ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL;
+    if (glfwGetInputMode(window, GLFW_CURSOR) != cursor) {
+        glfwSetInputMode(window, GLFW_CURSOR, cursor);
+        app.input.firstMouse = true;
+    }
+}
+
+void char_callback(GLFWwindow* window, unsigned int codepoint) {
+    auto& b = CallbackBindings(window);
+    RefreshInputOwnership(window);
+    if (codepoint > 0x10ffff || (codepoint >= 0xd800 && codepoint <= 0xdfff))
+        return;
+    const auto owner = b.router ? b.router->Character(codepoint) : InputOwner::Developer;
+    if (owner == InputOwner::Unfocused)
+        return;
+    if (b.app->overlay.imgui_enabled && ImGui::GetCurrentContext())
+        ImGui_ImplGlfw_CharCallback(window, codepoint);
+    if (owner == InputOwner::RmlUi)
+        Luminumbra::Client::Rml_UIManager::CharCallback(window, codepoint);
+}
+void mouse_button_callback(GLFWwindow* window, int button, int action, int mods) {
+    auto& b = CallbackBindings(window);
+    if (b.app->overlay.imgui_enabled && ImGui::GetCurrentContext())
+        ImGui_ImplGlfw_MouseButtonCallback(window, button, action, mods);
+    RefreshInputOwnership(window);
+    if (b.router && (b.router->Owner() == InputOwner::RmlUi || action == GLFW_RELEASE))
+        Luminumbra::Client::Rml_UIManager::MouseButtonCallback(window, button, action, mods);
+    RefreshInputOwnership(window);
+}
 void window_focus_callback(GLFWwindow* window, int focused) {
-    auto& bindings = CallbackBindings(window);
-    bindings.app->interactions.farmDropSeed.Invalidate();
-    if (bindings.previousWindowFocusCallback)
-        bindings.previousWindowFocusCallback(window, focused);
+    auto& b = CallbackBindings(window);
+    b.app->interactions.farmDropSeed.Invalidate();
+    if (b.app->overlay.imgui_enabled && ImGui::GetCurrentContext())
+        ImGui_ImplGlfw_WindowFocusCallback(window, focused);
+    b.window_focused = focused != 0;
+    RefreshInputOwnership(window);
+}
+void cursor_enter_callback(GLFWwindow* window, int entered) {
+    auto& b = CallbackBindings(window);
+    if (b.app->overlay.imgui_enabled && ImGui::GetCurrentContext())
+        ImGui_ImplGlfw_CursorEnterCallback(window, entered);
 }
 
 void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods) {
@@ -73,166 +162,138 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
     WindowState& windowState = *bindings.windowState;
     Luminumbra::Client::PlayerController* playerController = bindings.playerController->get();
     Luminumbra::Client::Rml_UIManager* uiManager = bindings.uiManager->get();
+    if (app.overlay.imgui_enabled && ImGui::GetCurrentContext())
+        ImGui_ImplGlfw_KeyCallback(window, key, scancode, action, mods);
+    RefreshInputOwnership(window);
     if (!FarmDropSeedInputAllowed(window))
         app.interactions.farmDropSeed.Invalidate();
-    // Rebind capture: while waiting for a key for some action, the next key press becomes
-    // its binding (Escape cancels). Intercept first so any key — even F-keys — can be bound.
-    if (app.hud.rebindCaptureAction >= 0 && action == GLFW_PRESS) {
-        if (key != GLFW_KEY_ESCAPE &&
-            app.hud.rebindCaptureAction < static_cast<int>(Luminumbra::Client::kInputActionCount)) {
-            const char* name =
-                Luminumbra::Client::kInputActionDefs[app.hud.rebindCaptureAction].name;
-            systemConfig.user().keybinds[name] = key;
-            if (playerController)
-                playerController->ApplyKeyBindings(systemConfig);
-        }
-        app.hud.rebindCaptureAction = -1;
+    auto* console = DeveloperUiAllowed(app) ? bindings.developerConsole : nullptr;
+    const bool photo = playerController && playerController->photo_mode_active();
+    const bool worldShortcuts =
+        bindings.router ? bindings.router->WorldShortcutsAllowed() : bindings.in_world;
+    const unsigned scope =
+        worldShortcuts ? (photo ? Debug::Photo : Debug::Gameplay) : Debug::Global;
+    const auto route = DispatchDeveloperKey(console, bindings.router, key, action, mods, scope);
+    if (action == GLFW_RELEASE) {
+        if (uiManager)
+            uiManager->KeyCallback(window, key, scancode, action, mods);
         return;
     }
-    // Escape: toggle the in-game pause overlay (only in a world, and not while the  panel is up).
-    if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS && playerController &&
-        !app.hud.show_settings) {
+    if (route == KeyRoute::Capture && console && console->IsCapturing()) {
+        if (action == GLFW_PRESS)
+            console->CaptureKey(key, mods);
+        RefreshInputOwnership(window);
+        return;
+    }
+    if (route == KeyRoute::ConsoleToggle) {
+        if (console)
+            console->InvokeAction("console.toggle");
+        RefreshInputOwnership(window);
+        return;
+    }
+    if (route == KeyRoute::DeveloperEscape) {
+        if (console && console->CloseTopInteraction()) {
+            RefreshInputOwnership(window);
+            return;
+        }
+        RefreshInputOwnership(window);
+        return;
+    }
+    if (route == KeyRoute::DeveloperShortcut) {
+        RefreshInputOwnership(window);
+        return;
+    }
+    if (route != KeyRoute::Capture &&
+        (!bindings.router || bindings.router->Owner() != InputOwner::Unfocused)) {
+        // Alt+Enter: runtime windowed <-> borderless toggle.
+        if (key == GLFW_KEY_ENTER && action == GLFW_PRESS && (mods & GLFW_MOD_ALT)) {
+            ToggleWindowedBorderless(window, windowState);
+            RefreshInputOwnership(window);
+            return;
+        }
+        if (key == GLFW_KEY_F11 && action == GLFW_PRESS) {
+            ToggleFullscreen(window, windowState);
+            RefreshInputOwnership(window);
+            return;
+        }
+    }
+    if (route == KeyRoute::RmlUi) {
+        if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS && app.hud.paused)
+            SetGamePaused(window, false);
+        else if (app.hud.codexOpen && playerController && action == GLFW_PRESS &&
+                 (key == playerController->key(Luminumbra::Client::InputAction::ToggleCodex) ||
+                  key == GLFW_KEY_ESCAPE)) {
+            // Closing a gameplay screen belongs to that UI, without releasing gameplay actions.
+            app.hud.codexOpen = false;
+            app.hud.photoModeUiShown = false;
+            if (uiManager)
+                uiManager->RequestLoadDocument("hud.rml");
+        } else if (uiManager)
+            uiManager->KeyCallback(window, key, scancode, action, mods);
+        RefreshInputOwnership(window);
+        return;
+    }
+    if (route == KeyRoute::Ignore)
+        return;
+    // Rebind capture: while waiting for a key for some action, the next key press becomes
+    // its binding (Escape cancels). Intercept first so any key — even F-keys — can be bound.
+    if (app.hud.rebindCaptureAction >= 0) {
+        const auto captured = CaptureGameplayBinding(app.hud.rebindCaptureAction, key, action);
+        if (captured &&
+            captured->actionIndex < static_cast<int>(Luminumbra::Client::kInputActionCount)) {
+            const char* name = Luminumbra::Client::kInputActionDefs[captured->actionIndex].name;
+            bool conflict = false;
+            if (console) {
+                const auto actionDef =
+                    Luminumbra::Client::kInputActionDefs[captured->actionIndex].action;
+                const bool photoOnly =
+                    actionDef >= Luminumbra::Client::InputAction::Shutter &&
+                    actionDef <= Luminumbra::Client::InputAction::PhotoWeatherCycle;
+                const unsigned scopes = photoOnly ? Debug::Photo : Debug::Gameplay | Debug::Photo;
+                for (const auto& def : console->Bindings().List()) {
+                    const auto chord = console->Bindings().Get(def.id);
+                    if (chord && chord->key == captured->key && (def.scopes & scopes)) {
+                        conflict = true;
+                        break;
+                    }
+                }
+            }
+            if (conflict)
+                LUMINUMBRA_CORE_WARN("Gameplay binding conflicts with a developer action");
+            else {
+                systemConfig.user().keybinds[name] = captured->key;
+                if (playerController)
+                    playerController->ApplyKeyBindings(systemConfig);
+                if (console)
+                    console->RefreshAvailability();
+                if (uiManager)
+                    uiManager->RefreshDeveloperSettings();
+            }
+        }
+        RefreshInputOwnership(window);
+        return;
+    }
+    // Developer Escape was routed above; gameplay Escape toggles the pause overlay.
+    if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS && playerController) {
         SetGamePaused(window, !app.hud.paused);
         return;
     }
-    // toggle the live per-pass GPU profiler overlay.
-    if (key == GLFW_KEY_F3 && action == GLFW_PRESS) {
-        app.interactions.farmDropSeed.Invalidate();
-        app.overlay.show_gpu_profiler = !app.overlay.show_gpu_profiler;
-        return;
-    }
-    // crawl — hot-reload every live shader from res/shaders/ next
-    // frame (rollback-safe per shader; a broken edit keeps the prior program).
-    if (key == GLFW_KEY_F5 && action == GLFW_PRESS) {
-        app.overlay.request_shader_reload = true;
-        return;
-    }
-    // walk — the dev shader panel (per-shader reload, auto-reload
-    // watcher toggle, live uniform editing).
-    if (key == GLFW_KEY_F10 && action == GLFW_PRESS) {
-        app.interactions.farmDropSeed.Invalidate();
-        app.overlay.show_shader_panel = !app.overlay.show_shader_panel;
-        if (app.overlay.show_shader_panel) {
-            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-        } else if (playerController) {
-            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-        }
-        return;
-    }
-    // cycle the render-only G-buffer debug view (off -> albedo -> normal -> depth ->
-    // material -> position -> off). Diagnostic only; never affects sim/world_hash. The main
-    // loop pushes app.overlay.debug_view_mode into the pipeline each frame.
-    if (key == GLFW_KEY_F6 && action == GLFW_PRESS) {
-        app.overlay.debug_view_mode = (app.overlay.debug_view_mode + 1) % 6; // 0..5
-        return;
-    }
-    // toggle the settings menu and free/restore the cursor so the panel is usable.
-    if (key == GLFW_KEY_F8 && action == GLFW_PRESS) {
-        app.interactions.farmDropSeed.Invalidate();
-        app.hud.show_settings = !app.hud.show_settings;
-        app.hud.rebindCaptureAction = -1;
-        if (app.hud.show_settings) {
-            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-        } else if (playerController) { // in a world -> resume mouse-look
-            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-            app.input.firstMouse = true; // avoid a camera jump when mouse-look resumes
-        }
-        return;
-    }
-    // Engine time scale (host_timescale-style): [ slower, ] faster, \ reset to 1x.
-    if (action == GLFW_PRESS && (key == GLFW_KEY_LEFT_BRACKET || key == GLFW_KEY_RIGHT_BRACKET ||
-                                 key == GLFW_KEY_BACKSLASH)) {
-        if (key == GLFW_KEY_LEFT_BRACKET)
-            app.capture.timeScale = (app.capture.timeScale <= 0.125f)
-                                        ? 0.0f
-                                        : app.capture.timeScale * 0.5f; //...down to pause
-        else if (key == GLFW_KEY_RIGHT_BRACKET)
-            app.capture.timeScale = (app.capture.timeScale < 0.125f)
-                                        ? 0.125f
-                                        : std::min(app.capture.timeScale * 2.0f, 16.0f);
-        else
-            app.capture.timeScale = 1.0f; // reset
-        LUMINUMBRA_CORE_INFO("Engine time scale: {:.3f}x", app.capture.timeScale);
-        return;
-    }
-    if (key == GLFW_KEY_F7 && action == GLFW_PRESS) {
-        app.interactions.farmDropSeed.Invalidate();
-        app.overlay.show_worldgen_viewer = !app.overlay.show_worldgen_viewer;
-        if (app.overlay.show_worldgen_viewer) {
-            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-        }
-        return;
-    }
-    // Alt+Enter: runtime windowed <-> borderless toggle.
-    if (key == GLFW_KEY_ENTER && action == GLFW_PRESS && (mods & GLFW_MOD_ALT)) {
-        ToggleWindowedBorderless(window, windowState);
-        return;
-    }
-    if (key == GLFW_KEY_F11 && action == GLFW_PRESS) {
-        ToggleFullscreen(window, windowState);
-        return;
-    }
-    if (key == GLFW_KEY_F9 && action == GLFW_PRESS) {
-        app.overlay.wireframe_mode = !app.overlay.wireframe_mode;
-        return;
-    }
-
     if (playerController) {
         if (action == GLFW_PRESS && (key == playerController->key(InputAction::TogglePhotoMode) ||
                                      key == playerController->key(InputAction::ToggleCodex)))
             app.interactions.farmDropSeed.Invalidate();
         playerController->ProcessKeyInput(key, action);
     }
-
-    if (app.overlay.imgui_enabled && ImGui::GetCurrentContext()) {
-        ImGuiIO& io = ImGui::GetIO();
-        if (io.WantCaptureKeyboard) {
-            return;
-        }
-    }
-
-    // Always give RmlUi a chance to process key events.
-    if (uiManager) {
-        uiManager->KeyCallback(window, key, scancode, action, mods);
-        // If RmlUi has a focused input element, it should consume the event.
-        if (uiManager->GetContext() &&
-            FocusedElementCapturesKeyboard(uiManager->GetContext()->GetFocusElement())) {
-            return;
-        }
-    }
 }
 
 void SetGameState(GLFWwindow* window, GameStateManager& gameStateManager, GameState newState) {
     InputCallbackBindings& bindings = CallbackBindings(window);
-    ClientAppContext& app = *bindings.app;
-    Luminumbra::Client::Rml_UIManager* uiManager = bindings.uiManager->get();
     gameStateManager.SetState(newState);
-    app.interactions.farmDropSeed.Invalidate();
-    bool cursorDisabled = (newState == GameState::IN_GAME);
-
-    if (cursorDisabled) {
-        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-        // Set game-related callbacks
-        glfwSetCursorPosCallback(window, mouse_callback);
-        glfwSetScrollCallback(window, scroll_callback);
-        // Mouse buttons could be set here for game actions if needed
-        glfwSetMouseButtonCallback(window, nullptr);
-        app.input.firstMouse = true;
-    } else {
-        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-        if (uiManager) {
-            // Set UI-related callbacks
-            glfwSetCursorPosCallback(window, Luminumbra::Client::Rml_UIManager::CursorPosCallback);
-            glfwSetScrollCallback(window,
-                                  menu_scroll_callback); // RmlUi + create-world preview zoom
-            glfwSetMouseButtonCallback(window,
-                                       Luminumbra::Client::Rml_UIManager::MouseButtonCallback);
-        } else {
-            glfwSetCursorPosCallback(window, nullptr);
-            glfwSetScrollCallback(window, nullptr);
-            glfwSetMouseButtonCallback(window, nullptr);
-        }
-    }
+    bindings.app->interactions.farmDropSeed.Invalidate();
+    bindings.in_world = newState == GameState::IN_GAME;
+    if (bindings.developerConsole)
+        bindings.developerConsole->RefreshAvailability();
+    RefreshInputOwnership(window);
 }
 
 void SetGamePaused(GLFWwindow* window, bool paused) {
@@ -241,34 +302,25 @@ void SetGamePaused(GLFWwindow* window, bool paused) {
     Luminumbra::Client::Rml_UIManager* uiManager = bindings.uiManager->get();
     app.hud.paused = paused;
     app.interactions.farmDropSeed.Invalidate();
-    if (paused) {
-        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-        if (uiManager) {
-            glfwSetCursorPosCallback(window, Luminumbra::Client::Rml_UIManager::CursorPosCallback);
-            glfwSetMouseButtonCallback(window,
-                                       Luminumbra::Client::Rml_UIManager::MouseButtonCallback);
-            glfwSetScrollCallback(window, Luminumbra::Client::Rml_UIManager::ScrollCallback);
-            uiManager->RequestLoadDocument("pause.rml");
-        }
-    } else {
-        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-        glfwSetCursorPosCallback(window, mouse_callback);
-        glfwSetScrollCallback(window, scroll_callback);
-        glfwSetMouseButtonCallback(window, nullptr);
-        app.input.firstMouse = true;
-        app.hud.photoModeUiShown = false; // re-sync the in-game overlay next frame
-        if (uiManager)
-            uiManager->RequestLoadDocument("hud.rml");
-    }
+    app.hud.photoModeUiShown = false;
+    if (uiManager)
+        uiManager->RequestLoadDocument(paused ? "pause.rml" : "hud.rml");
+    RefreshInputOwnership(window);
 }
 
 void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
     InputCallbackBindings& bindings = CallbackBindings(window);
     ClientAppContext& app = *bindings.app;
     Luminumbra::Rendering::Camera* camera = bindings.camera->get();
-    (void)window;
-    if (app.hud.show_settings || app.hud.paused)
-        return; // settings/pause open (cursor freed) -> don't swing the camera
+    if (app.overlay.imgui_enabled && ImGui::GetCurrentContext())
+        ImGui_ImplGlfw_CursorPosCallback(window, xpos, ypos);
+    RefreshInputOwnership(window);
+    if (bindings.router && bindings.router->Owner() == InputOwner::RmlUi) {
+        Luminumbra::Client::Rml_UIManager::CursorPosCallback(window, xpos, ypos);
+        return;
+    }
+    if (bindings.router && !bindings.router->GameplayMouseAllowed())
+        return;
     if (app.input.firstMouse) {
         app.input.lastX = (float)xpos;
         app.input.lastY = (float)ypos;
@@ -288,13 +340,20 @@ void scroll_callback(GLFWwindow* window, double xoffset, double yoffset) {
     Luminumbra::Rendering::Camera* camera = bindings.camera->get();
     Luminumbra::Client::PlayerController* playerController = bindings.playerController->get();
     Luminumbra::Client::Rml_UIManager* uiManager = bindings.uiManager->get();
-    (void)window;
-    (void)xoffset;
-    const bool imgui_wants_mouse =
-        app.overlay.imgui_enabled && ImGui::GetCurrentContext() && ImGui::GetIO().WantCaptureMouse;
-    if (imgui_wants_mouse || (uiManager && uiManager->GetContext()->GetHoverElement() != nullptr)) {
+    if (app.overlay.imgui_enabled && ImGui::GetCurrentContext())
+        ImGui_ImplGlfw_ScrollCallback(window, xoffset, yoffset);
+    RefreshInputOwnership(window);
+    if (bindings.router && bindings.router->Owner() == InputOwner::RmlUi) {
+        if (bindings.in_world)
+            Luminumbra::Client::Rml_UIManager::ScrollCallback(window, xoffset, yoffset);
+        else
+            menu_scroll_callback(window, xoffset, yoffset);
         return;
     }
+    if (bindings.router && !bindings.router->GameplayMouseAllowed())
+        return;
+    if (uiManager && uiManager->GetContext() && uiManager->GetContext()->GetHoverElement())
+        return;
     if (camera)
         camera->ProcessMouseScroll((float)yoffset);
     if (playerController)

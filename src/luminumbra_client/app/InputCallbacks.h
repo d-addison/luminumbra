@@ -1,16 +1,14 @@
 #pragma once
 
-// The GLFW input callbacks and game-state/cursor transitions extracted
-// verbatim from main_client.cpp: key/mouse/scroll/menu-scroll and
-// framebuffer-size callbacks, SetGameState/SetGamePaused, plus the GLFW error
-// and GL debug-message callbacks. The callbacks reach their state through the
-// window user pointer, which main() points at an InputCallbackBindings once
-// at window setup: the app context plus the core singletons that stayed
-// file-scope globals in main_client.cpp (held as pointers here, not externs).
+// Application-owned GLFW callbacks feed UI backends once, then route through
+// explicit ownership. The bindings hold addresses of current-service owners so
+// callbacks remain valid across world transitions.
 
 #include "app/ClientAppContext.h"
+#include "app/UiInputRouter.h"
 #include "app/WindowModeControls.h"
 #include "core/GameState.h"
+#include "debug/DeveloperConsole.h"
 
 #include <memory>
 
@@ -34,17 +32,25 @@ namespace Luminumbra::Client::App {
 // (menu backdrop -> real world); the callbacks always see the live object.
 struct InputCallbackBindings {
     ClientAppContext* app = nullptr;
+    UiInputRouter* router = nullptr;
+    Debug::DeveloperConsole* developerConsole = nullptr;
+    bool in_world = false;
+    bool window_focused = true;
     luminumbra::core::SystemConfig* systemConfig = nullptr;
     WindowState* windowState = nullptr;
     std::unique_ptr<Luminumbra::Rendering::Camera>* camera = nullptr;
     std::unique_ptr<Luminumbra::Client::PlayerController>* playerController = nullptr;
     std::unique_ptr<Luminumbra::Client::Rml_UIManager>* uiManager = nullptr;
-    void (*previousWindowFocusCallback)(GLFWwindow*, int) = nullptr;
 };
 
+void InstallInputCallbacks(GLFWwindow* window);
+void RefreshInputOwnership(GLFWwindow* window);
+void char_callback(GLFWwindow* window, unsigned int codepoint);
+void mouse_button_callback(GLFWwindow* window, int button, int action, int mods);
+void window_focus_callback(GLFWwindow* window, int focused);
+void cursor_enter_callback(GLFWwindow* window, int entered);
 void framebuffer_size_callback(GLFWwindow* window, int width, int height);
 void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods);
-void window_focus_callback(GLFWwindow* window, int focused);
 bool FarmDropSeedInputAllowed(GLFWwindow* window);
 void mouse_callback(GLFWwindow* window, double xpos, double ypos);
 void scroll_callback(GLFWwindow* window, double xoffset, double yoffset);

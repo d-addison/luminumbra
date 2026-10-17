@@ -45,6 +45,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -151,21 +152,58 @@ enum class FrameDelivery {
     Reliable
 };
 
+// Wire-protocol maximum for a single frame payload, enforced on send and receive.
+inline constexpr std::size_t kMaxFramePayloadBytes = 64u * 1024u * 1024u;
+
+// Remote receive queues admit only below this payload budget, so each direction holds
+// less than 256 KiB + one maximum frame. Cap entries too, including empty frames.
+inline constexpr std::size_t kReceiveQueueByteBudget = 256u * 1024u;
+inline constexpr std::size_t kReceiveQueueFrameLimit = 1024;
+static_assert(kMaxFramePayloadBytes <=
+              (std::numeric_limits<std::size_t>::max)() - kReceiveQueueByteBudget);
+
+[[nodiscard]] inline bool HasReceiveQueueCapacity(std::size_t queued_bytes,
+                                                  std::size_t queued_frames) {
+    return queued_bytes < kReceiveQueueByteBudget && queued_frames < kReceiveQueueFrameLimit;
+}
+
 class ILockstepTransport {
 public:
     virtual ~ILockstepTransport() = default;
 
-    // Sends one complete message frame. Returns false if the peer is gone.
+    // Sends one complete message frame. Refusal classes:
+    // - Oversized for this transport: terminal, rejected before writing any bytes.
+    // - Permanent backend failure or disconnection: terminal; closes after draining.
+    // - Temporary capacity: transient, accepts no bytes; retry the same bytes.
+    // After false, check min(kMaxFramePayloadBytes, MaxFramePayloadBytes()), drain
+    // received frames, then check IsPeerConnected(): an in-limit frame with a still
+    // connected peer can be retried unchanged. In-process transports never refuse
+    // for capacity. Buffered received frames precede closure reporting.
     // NOTE: named SendFrame (not SendMessage) deliberately -- <windows.h> #defines
     // SendMessage to SendMessageA/W, which would rename this virtual under the macro.
     // `delivery` defaults to Reliable so existing callers (lockstep) are unchanged.
     virtual bool SendFrame(const std::vector<std::uint8_t>& frame,
                            FrameDelivery delivery = FrameDelivery::Reliable) = 0;
 
+    [[nodiscard]] virtual std::size_t MaxFramePayloadBytes() const {
+        return kMaxFramePayloadBytes;
+    }
+
     // Non-blocking: pops ONE complete framed message into `out` and returns true, or
     // returns false if none is available right now. A clean peer close is reported via
     // IsPeerConnected==false (NOT via a thrown error / hang).
     virtual bool TryReceiveFrame(std::vector<std::uint8_t>& out) = 0;
+
+    // Always-reliable transports retain compatibility with the original receive seam.
+    virtual bool TryReceiveFrameWithDelivery(std::vector<std::uint8_t>& out,
+                                             FrameDelivery& delivery) {
+        delivery = FrameDelivery::Reliable;
+        return TryReceiveFrame(out);
+    }
+
+    virtual void CloseWithReason(const std::string&) {
+        Close();
+    }
 
     // True while the peer end is still attached. A clean disconnect flips this false.
     [[nodiscard]] virtual bool IsPeerConnected() const = 0;
@@ -197,6 +235,8 @@ public:
 class LoopbackTransport final : public ILockstepTransport {
 public:
     struct Channel {
+        // Both ends are in-process, so no untrusted peer can enqueue frames here.
+        // Remote receive bounds do not apply to this queue.
         std::deque<std::vector<std::uint8_t>> queue; // complete framed messages
         bool open = true;
     };
@@ -298,6 +338,19 @@ public:
     // `sock` is invalid. `sock` is a native SOCKET cast to intptr_t (-1 = none).
     static std::unique_ptr<TcpTransport> FromAcceptedSocket(std::intptr_t sock);
 
+    // Diagnostics only: read-only buffer accounting, with no polling or I/O.
+    // receive_bytes includes the consumed prefix until compaction or full drain.
+    struct BufferDiagnostics {
+        std::size_t receive_bytes;
+        std::size_t receive_capacity;
+        std::size_t consumed_receive_bytes;
+        std::size_t pending_send_bytes;
+    };
+    [[nodiscard]] BufferDiagnostics GetBufferDiagnostics() const {
+        return {
+            m_recv_buffer.size(), m_recv_buffer.capacity(), m_recv_offset, m_send_q.PendingBytes()};
+    }
+
     bool SendFrame(const std::vector<std::uint8_t>& frame,
                    FrameDelivery delivery = FrameDelivery::Reliable) override;
     bool TryReceiveFrame(std::vector<std::uint8_t>& out) override;
@@ -305,13 +358,16 @@ public:
     void Close() override;
 
 private:
-    bool PumpRecv(); // pulls available bytes into m_recv_buffer; sets m_peer_closed on EOF
-    int FlushSendNonBlocking(); // drains m_send_q via non-blocking send; -1 = fatal/peer-gone
+    std::size_t ReceiveBytesNeeded(); // validates the prefix; closes on an oversized frame
+    void CompactReceiveBuffer();      // discard consumed bytes only before another socket read
+    bool PumpRecv();                  // bounded read-ahead; stops at a complete frame or EOF/error
+    int FlushSendNonBlocking();       // drains m_send_q via non-blocking send; -1 = fatal/peer-gone
 
     std::intptr_t m_socket = -1; // SOCKET (winsock) / fd; -1 = none
     std::intptr_t m_listen_socket = -1;
     bool m_peer_closed = false;
-    std::vector<std::uint8_t> m_recv_buffer; // accumulates partial frames
+    std::vector<std::uint8_t> m_recv_buffer; // accumulates partial frames and bounded read-ahead
+    std::size_t m_recv_offset = 0;           // first unread byte; consuming a frame moves no bytes
     OutboundByteQueue m_send_q;              // bounded outbound queue; no busy-spin
 };
 
@@ -401,7 +457,7 @@ struct TickResult {
     std::uint64_t tick = 0; // the tick this result concerns
     std::vector<std::uint8_t>
         local_inputs; // inputs to APPLY for this tick (local + peer merged opaque set)
-    bool ran_hash_exchange = false; // a HashMsg was sent/compared at this tick
+    bool ran_hash_exchange = false; // a HashMsg was sent/queued at this tick
 };
 
 // Snapshot of session status (telemetry only -- none of this feeds the hash).
@@ -463,15 +519,20 @@ public:
     bool Handshake();
 
     // Advances the session by AT MOST one tick. Drains pending peer messages first, then:
-    //  - if a clean Bye/close was seen -> PeerDisconnected (clean end);
-    //  - if a peer hash mismatched the local one at a cadence tick -> Desync (HALT + dump);
+    //  - if an available peer hash mismatched an executed cadence tick -> Desync (HALT + dump);
+    //  - otherwise, if a clean Bye was seen, or a closed transport has no buffered
+    //    input for the wanted tick -> PeerDisconnected (sticky clean end);
     //  - if the peer's input for the wanted tick is present -> Advanced (world stepped,
     //    hashes exchanged at the cadence);
     //  - else -> WaitingForPeer (horizon grows; caller pumps again after sending/recving).
-    // `budget_ticks` is the total tick count to run; returns Finished once reached.
+    // Input/hash transient refusals retain the encoded bytes in a bounded FIFO;
+    // each pump retries them before newer sends. Terminal refusals or a full FIFO
+    // disconnect. Bye follows a final FIFO flush; a still-pending FIFO closes instead.
+    // `budget_ticks` is the total tick count to run; returns Finished once reached
+    // and all pending outbound frames have been accepted.
     TickResult PumpTick(std::uint64_t budget_ticks);
 
-    // Sends a clean Bye at the current tick and closes the local transport end. Idempotent.
+    // Flushes pending frames, sends Bye only if drained, then closes. Idempotent.
     void Disconnect();
 
     [[nodiscard]] LockstepStatus Status() const {
@@ -496,8 +557,19 @@ private:
     // at the same cadence tick). Returns false if a fatal (desync/disconnect) state was set.
     bool DrainPeerMessages();
 
+    // Compares a peer hash once its executed tick has a local cadence hash.
+    bool ComparePeerHash(const HashMsg& peer);
+
     // Schedules + sends the local input for `tick` (collect hook), buffering it locally.
-    void ScheduleLocalInput(std::uint64_t tick);
+    bool ScheduleLocalInput(std::uint64_t tick);
+
+    // True means accepted by the transport or retained for ordered retry.
+    bool SendOrQueueFrame(std::vector<std::uint8_t> frame);
+    // Stops at the first transient refusal; false means a terminal disconnect.
+    bool FlushPendingOutbound();
+
+    // Compares available peer hashes before closing and recording a sticky disconnect.
+    void TransportDisconnected();
 
     // Emits the LREC1 desync dump of the local session up to `divergence_tick`.
     void EmitDesyncDump(std::uint64_t divergence_tick, const std::string& section);
@@ -508,8 +580,14 @@ private:
 
     std::uint32_t m_horizon = 3;
     std::uint64_t m_agreed_tick = 0;                   // last tick run (0 = none yet)
-    std::uint64_t m_local_input_scheduled_through = 0; // highest tick we've sent local input for
+    std::uint64_t m_local_input_scheduled_through = 0; // highest tick with sent/queued local input
     std::uint32_t m_consecutive_slack_ticks = 0;
+
+    // At most 1024 frames and 64 MiB of encoded bytes, including framing overhead.
+    static constexpr std::size_t kPendingOutboundFrameLimit = 1024;
+    static constexpr std::size_t kPendingOutboundByteLimit = kMaxFramePayloadBytes;
+    std::deque<std::vector<std::uint8_t>> m_pending_outbound;
+    std::size_t m_pending_outbound_bytes = 0;
 
     // Buffered inputs keyed by tick: each tick holds the local + peer opaque blobs by
     // client id (ordered map => deterministic merge order). std::map (ORDERED) is used

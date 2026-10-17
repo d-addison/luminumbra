@@ -71,6 +71,7 @@
 #include "../systems/WindFieldSystem.h"
 #include "TerrainPresetLoader.h"
 #include "WorldStreamingState.h"
+#include "WorldgenFileReader.h"
 #include "nlohmann/json.hpp" // For parsing JSON
 #include <array>
 #include <bit>
@@ -221,7 +222,7 @@ void GameSession::ResetWorldSystems(bool keep_admitted_chunk_facts) {
     m_lastSaveFailureTick = -1;
 }
 
-// load the per-world species definition table at world create/load.
+// The preset dependency snapshot captures the per-world species table at create/load.
 // DETERMINISM: CreatureSpeciesRegistry::LoadFromDirectory sorts the *.json entries by
 // filename before parsing, so the table is a pure function of the files' CONTENT — never of
 // filesystem iteration order. A missing/empty directory yields an EMPTY table, and every
@@ -385,19 +386,6 @@ void GameSession::ApplyWaterResolutionWiring() {
                                                               ? Systems::WaterDetailLevel::High
                                                               : Systems::WaterDetailLevel::Medium));
     LUMINUMBRA_CORE_INFO("Water resolution wired: {}", m_waterHighResEnabled ? "High" : "Medium");
-}
-
-void GameSession::LoadSpeciesDefinitions() {
-    m_speciesTable = std::make_unique<luminumbra::ai::CreatureSpeciesRegistry>();
-    const fs::path dir = RuntimeRoot(m_rootPath) / "data" / "common" / "creatures" / "species";
-    std::vector<std::string> errors;
-    const std::size_t loaded = m_speciesTable->LoadFromDirectory(dir, errors);
-    for (const std::string& err : errors) {
-        // Content problems are warnings, not failures: a bad species file must never brick a
-        // world load (the affected species just keeps its compiled-default behaviour/absence).
-        LUMINUMBRA_CORE_WARN("Species definition load: {}", err);
-    }
-    LUMINUMBRA_CORE_INFO("Species definitions loaded: {} from {}", loaded, dir.string());
 }
 
 std::uint32_t GameSession::TickSimulation(double frame_dt) {
@@ -1311,6 +1299,8 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     const WorldConfigValidationResult validation =
         ValidateWorldConfig(m_rootPath, worldType, m_requiredClientAssets);
     if (!validation.ok) {
+        open_error =
+            validation.errors.empty() ? "Invalid world configuration." : validation.errors.front();
         for (const std::string& error : validation.errors) {
             LUMINUMBRA_CORE_ERROR("World config validation failed: {}", error);
         }
@@ -1340,14 +1330,19 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     }
 
     fs::path preset_to_load = validation.preset_path;
+    std::string saved_preset_json;
     if (!transient) {
         nlohmann::json resolved;
         try {
             if (customPresetJson) {
                 resolved = nlohmann::json::parse(*customPresetJson);
             } else {
-                std::ifstream input(preset_to_load);
-                input >> resolved;
+                std::string bytes;
+                if (!World::ReadWorldgenFile(preset_to_load, bytes)) {
+                    open_error = "Could not read this world's preset within its size limit.";
+                    return false;
+                }
+                resolved = nlohmann::json::parse(bytes);
             }
         } catch (const nlohmann::json::exception& error) {
             open_error = "Could not parse this world's preset: " + std::string(error.what());
@@ -1363,11 +1358,10 @@ bool GameSession::CreateWorldInternal(const std::string& name,
         resolved = ResolveTerrainPresetDefaults(resolved);
         // Materialize historical choices before upgrading the revision.
         resolved["schema_rev"] = kTerrainPresetSchemaRevision;
+        saved_preset_json = resolved.dump();
         const fs::path world_preset = worldPath / "preset.json";
-        std::ofstream pf(world_preset, std::ios::binary);
-        pf << resolved.dump(2) << '\n';
-        pf.close();
-        if (!pf.good()) {
+        if (!Persistence::WorldSaveService::write_file_durably(world_preset,
+                                                               saved_preset_json + "\n")) {
             open_error = "Could not save this world's resolved preset.";
             return false;
         }
@@ -1376,6 +1370,7 @@ bool GameSession::CreateWorldInternal(const std::string& name,
 
     const TerrainPresetLoadResult preset = LoadTerrainPreset(preset_to_load);
     if (!preset.ok) {
+        open_error = preset.errors.empty() ? "Invalid world preset." : preset.errors.front();
         for (const std::string& error : preset.errors) {
             LUMINUMBRA_CORE_ERROR("World preset load failed: {}", error);
         }
@@ -1388,6 +1383,7 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     m_worldOpenError.clear();
     ResetWorldSystems();
     m_presetContentHash = preset.preset_content_hash;
+    m_savedPresetJson = std::move(saved_preset_json);
     m_metadata = std::move(metadata);
     m_itemCatalogue = std::move(items);
     m_transientWorld = transient;
@@ -1459,8 +1455,8 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     AttachRegionEditObserver();
     InitializeScentField(m_metadata.spawnPoint);
 
-    // species definitions load once at world create (content-pure; see the helper).
-    LoadSpeciesDefinitions();
+    // Adopt the registry parsed from the bytes bound into the session identity.
+    m_speciesTable = preset.params.worldgen_dependencies->species_table;
 
     // wire weather-driven rain into the water solver when the
     // owner opted in (sim.hydrology_weather via SetWeatherRainEnabled). Explicit OFF =
@@ -1590,7 +1586,11 @@ bool GameSession::LoadWorldChecked(const std::string& worldId,
     const fs::path worldPath = RuntimeRoot(m_rootPath) / "worlds" / "saves" / worldId;
     const auto& preset = admission.preset;
     if (!preset.ok) {
-        open_error = "World preset admission is unavailable.";
+        open_error = preset.errors.empty() ? "World preset admission is unavailable."
+                                           : preset.errors.front();
+        for (const std::string& error : preset.errors) {
+            LUMINUMBRA_CORE_ERROR("World preset load failed: {}", error);
+        }
         return false;
     }
     // The planner, generator and advertised identity all use the catalog's one load.
@@ -1609,6 +1609,7 @@ bool GameSession::LoadWorldChecked(const std::string& worldId,
     m_presetContentHash = preset.preset_content_hash;
     m_itemCatalogue = std::move(items);
     m_farmingController.seeds = restored_seeds;
+    m_savedPresetJson = saved.preset_source_json;
     m_metadata = saved.metadata;
     if (m_activeRegionsEnabled) {
         m_worldClock = saved.clock;
@@ -1650,21 +1651,9 @@ bool GameSession::LoadWorldChecked(const std::string& worldId,
     // restores it (epoch-rebased onto the session clock); an absent
     // record is all-zeros by contract. OFF -> null -> byte-identical.
     InitializeEnergyFieldState();
-    if (m_energyFieldState && !m_activeRegionsEnabled) {
-        const fs::path recordPath = worldPath / "aether_state.efs";
-        std::ifstream recordFile(recordPath, std::ios::binary);
-        if (recordFile) {
-            std::ostringstream recordBytes;
-            recordBytes << recordFile.rdbuf();
-            if (m_energyFieldState->DeserializeRecord(recordBytes.str(),
-                                                      GetSimulationTickCount())) {
-                LUMINUMBRA_CORE_INFO("Aether state record restored ({} pages).",
-                                     m_energyFieldState->page_count());
-            } else {
-                LUMINUMBRA_CORE_WARN("Aether state record UNREADABLE at {} - starting all-zero.",
-                                     recordPath.string());
-            }
-        }
+    if (!RestoreLegacyEnergyRecord(worldPath)) {
+        m_worldSystem->clear_world(m_physicsSystem.get());
+        return false;
     }
 
     // Legacy saves without a persisted spawnPoint: derive it from terrain
@@ -1677,9 +1666,8 @@ bool GameSession::LoadWorldChecked(const std::string& worldId,
     }
     InitializeScentField(m_metadata.spawnPoint);
 
-    // species definitions load once at world load, exactly as CreateWorld does
-    // (content-pure; a loaded world resolves the same table as the created one).
-    LoadSpeciesDefinitions();
+    // Saved worlds adopt the same captured session content as new worlds.
+    m_speciesTable = preset.params.worldgen_dependencies->species_table;
 
     // restore the rotating water sim-window cursor so the loaded session
     // resimulates the exact windows the original would from the same water state.
@@ -1793,6 +1781,9 @@ bool GameSession::AdmitPlantAt(entt::entity entity, std::uint64_t fresh_stamp) {
                 return false;
             return true;
         }
+        const auto* owners = std::as_const(m_registry).storage<C::PlantRegionComponent>();
+        if (owners && owners->size() >= Persistence::kMaxSavePlants)
+            return false;
         // Fresh ECS admission only; enabled snapshots require identities before Apply.
         if (fresh_stamp > m_worldClock.tick() || growth.planted_tick > fresh_stamp ||
             growth.last_tick > m_worldClock.tick() || growth.planted_tick > growth.last_tick ||
@@ -3129,11 +3120,66 @@ bool GameSession::SaveWorld() {
     return SaveWorldMetadataTo(GetWorldSaveDir());
 }
 
+bool GameSession::SavedPresetCompatible(const fs::path& save_dir) const {
+    const auto& canonical = m_savedPresetJson;
+    try {
+        const auto preset_path = save_dir / "preset.json";
+        const bool has_preset = fs::exists(preset_path);
+        const auto metadata_path = save_dir / "world_info.json";
+        if (fs::exists(metadata_path)) {
+            std::string bytes;
+            if (!Persistence::read_bounded_save_file(
+                    metadata_path, bytes, Persistence::kMaxSaveMetadataBytes, nullptr))
+                return false;
+            const auto metadata = nlohmann::json::parse(bytes);
+            if (!metadata.is_object())
+                return false;
+            if (metadata.contains("presetFormat") &&
+                (!metadata.at("presetFormat").is_number_integer() ||
+                 metadata.at("presetFormat") != Persistence::kSavedPresetFormat || !has_preset ||
+                 !metadata.contains("presetIdentity")))
+                return false;
+            if (metadata.contains("presetIdentity") &&
+                (canonical.empty() || !metadata.at("presetIdentity").is_string() ||
+                 metadata.at("presetIdentity").get<std::string>() !=
+                     Persistence::StableChecksum(canonical)))
+                return false;
+        }
+        if (has_preset) {
+            std::string bytes;
+            return !canonical.empty() && World::ReadWorldgenFile(preset_path, bytes) &&
+                   nlohmann::json::parse(bytes).dump() == canonical;
+        }
+        // Unmarked legacy saves and new destinations may embed the session's preset later.
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+namespace {
+bool PersistSavedPreset(const fs::path& save_dir, const std::string& canonical) {
+    if (canonical.empty())
+        return false;
+    try {
+        const auto path = save_dir / "preset.json";
+        if (fs::exists(path)) {
+            std::string bytes;
+            return World::ReadWorldgenFile(path, bytes) &&
+                   nlohmann::json::parse(bytes).dump() == canonical;
+        }
+        return Persistence::WorldSaveService::write_file_durably(path, canonical + "\n");
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+} // namespace
+
 bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
     const Persistence::ChunkValidationCache::Scope validation_scope(m_chunkValidationCache);
     if (!IsSimulationTickBoundary() || save_dir.empty() ||
         !ClockConfigurationCompatible(save_dir) || m_transientWorld || m_metadata.worldId.empty() ||
-        !m_worldOpenError.empty())
+        !m_worldOpenError.empty() || !SavedPresetCompatible(save_dir))
         return false;
     std::optional<Ecs::EntityRegistrySnapshot> plants;
     if (m_activeRegionsEnabled) {
@@ -3158,9 +3204,13 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
         if (!outer)
             return false;
     }
+    if (!PersistSavedPreset(save_dir, m_savedPresetJson))
+        return false;
     // Using nlohmann::json for robust saving
     nlohmann::json metadata_json = {
         {"container_version", Persistence::WorldSaveService::kContainerVersion},
+        {"presetFormat", Persistence::kSavedPresetFormat},
+        {"presetIdentity", Persistence::StableChecksum(m_savedPresetJson)},
         {"name", m_metadata.name},
         {"seed", m_metadata.seed},
         {"worldType", m_metadata.worldType},
@@ -3281,6 +3331,11 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
         (m_activeRegionsEnabled && (m_transientWorld || m_metadata.worldId.empty()))) {
         return false;
     }
+
+    // Refuse before foliage preparation, transaction writes or dirty acknowledgement,
+    // including chunk-free saves and saves with active regions disabled.
+    if (!SavedPresetCompatible(save_dir))
+        return false;
 
     if (m_activeRegionsEnabled && !m_regionFault) {
         try {
@@ -3414,7 +3469,7 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
         const bool plants_ok =
             Persistence::WorldSaveService::save_plant_entities(plant_snapshot, save_dir, nullptr);
         const bool energy_ok = SaveEnergyFieldRecord(save_dir);
-        if (m_activeRegionsEnabled && (!plants_ok || !energy_ok)) {
+        if (!plants_ok || !energy_ok) {
             RecordPersistenceSaveOutcome(false, elapsed_ms());
             return false;
         }
@@ -3486,7 +3541,7 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
     // persist the stateful energy layer alongside (null/
     // all-zero layer -> no file -> byte-identical; the plant discipline).
     const bool energy_ok = SaveEnergyFieldRecord(save_dir);
-    if (m_activeRegionsEnabled && !energy_ok)
+    if (!energy_ok)
         ok = false;
 
     for (const std::string& error : errors) {
@@ -3671,14 +3726,13 @@ bool GameSession::AdoptWorldState(const std::filesystem::path& save_dir,
             energy.emplace(m_energyFieldState->channels());
             bool valid = true;
             if (has_energy) {
-                const auto length = fs::file_size(energy_path, energy_ec);
-                valid = !energy_ec &&
-                        length <= luminumbra::fields::EnergyFieldState::kMaxRegionalRecordBytes;
-                if (valid) {
-                    std::ifstream input(energy_path, std::ios::binary);
-                    const std::string bytes(std::istreambuf_iterator<char>{input}, {});
-                    valid = input.good() && energy->DeserializeRegionalRecord(bytes);
-                }
+                std::string bytes;
+                valid = Persistence::read_bounded_save_file(
+                            energy_path,
+                            bytes,
+                            luminumbra::fields::EnergyFieldState::kMaxRegionalRecordBytes,
+                            nullptr) &&
+                        energy->DeserializeRegionalRecord(bytes);
             }
             valid = valid && energy->ValidateRegionalOwners(ledger.records(), ledger.energy_ages());
             if (!valid) {
@@ -3802,21 +3856,9 @@ bool GameSession::AdoptWorldState(const std::filesystem::path& save_dir,
     // restore the stateful energy layer's record (a
     // missing file is a clean miss == all zeros by contract). Epoch-rebased
     // onto the loaded session's tick stream (-4).
-    if (m_energyFieldState && !m_activeRegionsEnabled) {
-        const fs::path recordPath = save_dir / "aether_state.efs";
-        std::ifstream recordFile(recordPath, std::ios::binary);
-        if (recordFile) {
-            std::ostringstream recordBytes;
-            recordBytes << recordFile.rdbuf();
-            if (m_energyFieldState->DeserializeRecord(recordBytes.str(),
-                                                      GetSimulationTickCount())) {
-                LUMINUMBRA_CORE_INFO("Aether state record restored ({} pages).",
-                                     m_energyFieldState->page_count());
-            } else {
-                LUMINUMBRA_CORE_WARN("Aether state record UNREADABLE at {} - starting all-zero.",
-                                     recordPath.string());
-            }
-        }
+    if (!RestoreLegacyEnergyRecord(save_dir)) {
+        m_worldSystem->clear_world(m_physicsSystem.get());
+        return false;
     }
 
     m_lastLoadedChunkCount = adopted;
@@ -4167,6 +4209,22 @@ void GameSession::InitializeEnergyFieldState() {
     LUMINUMBRA_CORE_INFO("Energy field state layer initialized (sim.aether_state ON, 2 channels).");
 }
 
+bool GameSession::RestoreLegacyEnergyRecord(const fs::path& save_dir) {
+    if (!m_energyFieldState || m_activeRegionsEnabled)
+        return true;
+    using Service = Persistence::WorldSaveService;
+    const auto status =
+        Service::load_legacy_energy(*m_energyFieldState, save_dir, GetSimulationTickCount());
+    if (status == Service::LegacyEnergyReadStatus::Unreadable ||
+        status == Service::LegacyEnergyReadStatus::Invalid) {
+        m_worldOpenError = status == Service::LegacyEnergyReadStatus::Unreadable
+                               ? Service::kLegacyEnergyUnreadable
+                               : Service::kLegacyEnergyInvalid;
+        return false;
+    }
+    return true;
+}
+
 bool GameSession::SaveEnergyFieldRecord(const std::filesystem::path& save_dir) {
     if (!m_worldOpenError.empty())
         return false;
@@ -4201,7 +4259,13 @@ bool GameSession::SaveEnergyFieldRecord(const std::filesystem::path& save_dir) {
         // A legacy import can retain a different phase after its last unit decays.
         // The existing header alone preserves it without adding zero pages.
     }
-    const std::string record = m_energyFieldState->SerializeRecord(GetSimulationTickCount());
+    std::string record;
+    try {
+        record = m_energyFieldState->SerializeRecord(GetSimulationTickCount());
+    } catch (const std::length_error& error) {
+        LUMINUMBRA_CORE_ERROR("Failed to save legacy energy: {}", error.what());
+        return false;
+    }
     if (m_activeRegionsEnabled || Persistence::SaveTransaction::active_for(save_dir) ||
         Persistence::snapshot_index_exists(save_dir)) {
         // Flag-on (or indexed-directory) lane: durable binary replace inside the save transaction.

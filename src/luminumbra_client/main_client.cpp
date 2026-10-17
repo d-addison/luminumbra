@@ -24,6 +24,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "app/InputCallbacks.h"
 #include "app/MenuScreens.h"
 #include "app/ProcgenPalettes.h"
+#include "app/RegisterDeveloperWidgets.h"
 #include "app/RenderBenchmarkReport.h"
 #include "app/RuntimeRoot.h"
 #include "app/RuntimeStateRecorder.h"
@@ -37,13 +38,19 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "core/BenchmarkPose.h"
 #include "core/Debug.h"
 #include "core/GameState.h"
+#include "core/HardwareInfo.h"
 #include "core/IsolationConfig.h" // ScenarioHarness::ParseIsolationConfig (render-only layer isolation)
 #include "core/Log.h"
 #include "core/NvmlSampler.h" //  optional GPU power/clock sampling
 #include "core/RuntimeScenarioConfig.h"
 #include "core/ScenarioRunner.h"
 #include "debug/DebugCamera.h" // deterministic feature locator (--debug-goto cave|doline)
+#include "debug/DeveloperConsole.h"
+#include "debug/DeveloperLogAttachment.h"
 #include "debug/WorldGenViewer.h"
+#include "debug/widgets/DeveloperWidgetUi.h"
+#include "debug/widgets/PassiveDeveloperWidgets.h"
+#include "debug/widgets/RenderControlWidgets.h"
 #include "luminumbra_common/ai/CreatureSpeciesRegistry.h" // species id -> display name for the codex/discovery HUD
 #include "luminumbra_common/ai/EcologyTuningConfig.h" //  resolve sim.ecology brain tuning
 #include "luminumbra_common/ai/SimTuningConfig.h" // full-control: resolve per-system creature tuning
@@ -111,6 +118,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "rendering/passes/PlantProcgenPass.h" //  render-only procedural plant bake (flag-gated)
 #include "rendering/passes/WaterPass.h"
 #include "ui/Rml_UIManager.h"
+#include "ui/core/UIDataStream.h"
 #include "ui/core/UIHotReload.h"
 #include "world/WorldgenOverride.h"
 #include "world/WorldgenPreview.h"
@@ -292,14 +300,6 @@ struct ClientRuntimeState {
 constexpr double kResizeDebounceSeconds = 0.12;
 
 using Luminumbra::Client::ScenarioHarness::WindowMode;
-
-// Exit code for a `--scenario` request against a binary compiled WITHOUT the
-// QA harness (the shipping luminumbra_client_app). Distinct from the scenario
-// exit codes the harness itself uses (2 = scenario failed, 3 = memory
-// watermark exceeded, 4 = readiness timeout, 5 = window closed before the
-// timed run completed) so a gate script pointed at the wrong binary fails
-// loudly and unambiguously. Scenario runs belong to luminumbra_client_qa_app.
-constexpr int kExitScenarioUnavailable = 6;
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 static void ConsumeWorldDressing(ClientAppContext& g_app,
@@ -1152,7 +1152,10 @@ static void HandlePlayerVerbs(ClientAppContext& g_app,
                               Luminumbra::world::GameSession* gameSession,
                               Luminumbra::Rendering::RenderPipeline& renderPipeline,
                               ProcgenPlantState& g_procgen,
-                              bool seedDropPressed) {
+                              bool seedDropPressed,
+                              const UiInputRouter& inputRouter) {
+    if (!inputRouter.GameplayAllowed())
+        return;
     if (g_playerController && gameSession && gameSession->ItemConsumerEnabled()) {
         if (seedDropPressed && currentState == GameState::IN_GAME && !scenario_config.active() &&
             FarmDropSeedInputAllowed(window) && g_camera) {
@@ -1184,7 +1187,8 @@ static void HandlePlayerVerbs(ClientAppContext& g_app,
         }
         // V cycles the selected species to plant (data-driven; oak/wheat/...).
         {
-            const bool fv_now = glfwGetKey(window, GLFW_KEY_V) == GLFW_PRESS;
+            const bool fv_now = inputRouter.GameplayKeyAllowed(GLFW_KEY_V) &&
+                                glfwGetKey(window, GLFW_KEY_V) == GLFW_PRESS;
             const std::size_t n = g_app.hud.farmSpecies.all().size();
             if (fv_now && !g_app.interactions.farmCycleSpecies && n > 0) {
                 g_app.hud.farmSelectedSpecies =
@@ -1197,7 +1201,8 @@ static void HandlePlayerVerbs(ClientAppContext& g_app,
             g_app.interactions.farmCycleSpecies = fv_now;
         }
         auto farmEdge = [&](Luminumbra::Client::InputAction a, bool& prev) {
-            const bool now = glfwGetKey(window, g_playerController->key(a)) == GLFW_PRESS;
+            const bool now = inputRouter.GameplayKeyAllowed(g_playerController->key(a)) &&
+                             glfwGetKey(window, g_playerController->key(a)) == GLFW_PRESS;
             const bool fired = now && !prev;
             prev = now;
             return fired;
@@ -1286,8 +1291,10 @@ static void HandlePlayerVerbs(ClientAppContext& g_app,
     // unaffected (gates never press R/T).
     if (g_playerController && currentState == GameState::IN_GAME && !scenario_config.active() &&
         !g_app.hud.paused && gameSession && g_camera && gameSession->GetWorldSystem()) {
-        const bool dig_now = glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS;
-        const bool fill_now = glfwGetKey(window, GLFW_KEY_T) == GLFW_PRESS;
+        const bool dig_now = inputRouter.GameplayKeyAllowed(GLFW_KEY_R) &&
+                             glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS;
+        const bool fill_now = inputRouter.GameplayKeyAllowed(GLFW_KEY_T) &&
+                              glfwGetKey(window, GLFW_KEY_T) == GLFW_PRESS;
         const bool dig_fired = dig_now && !g_app.interactions.terraformDig;
         g_app.interactions.terraformDig = dig_now;
         const bool fill_fired = fill_now && !g_app.interactions.terraformFill;
@@ -1370,6 +1377,10 @@ int main(int argc, char* argv[]) {
     auto& g_windowState = runtime.windowState;
 
     Log::Init();
+    Luminumbra::Client::Debug::DeveloperConsole developerConsole;
+    Luminumbra::Client::Debug::DeveloperLogAttachment developerLogAttachment(
+        developerConsole.Log());
+    UiInputRouter uiInputRouter;
     std::filesystem::path root_dir = ResolveRuntimeRoot(argc > 0 ? argv[0] : nullptr);
     std::string root_path_str = RuntimeRootString(root_dir);
     LUMINUMBRA_CORE_INFO("Runtime root: {}", root_path_str);
@@ -1399,6 +1410,13 @@ int main(int argc, char* argv[]) {
         scenario_config.preset_json_override = std::move(json_text);
     }
 #if !defined(LUMINUMBRA_QA_RUNNER)
+    // Exit code for a `--scenario` request against a binary compiled WITHOUT the
+    // QA harness (the shipping luminumbra_client_app). Distinct from the scenario
+    // exit codes the harness itself uses (2 = scenario failed, 3 = memory
+    // watermark exceeded, 4 = readiness timeout, 5 = window closed before the
+    // timed run completed) so a gate script pointed at the wrong binary fails
+    // loudly and unambiguously. Scenario runs belong to luminumbra_client_qa_app.
+    constexpr int kExitScenarioUnavailable = 6;
     // The shipping client does not compile the QA scenario harness (no
     // CreateScenarioRunner is linked). Refuse `--scenario` up front, before any
     // window/GL work, with the dedicated availability exit code.
@@ -1436,6 +1454,7 @@ int main(int argc, char* argv[]) {
             scenario_config.crash_dir.string());
     }
     g_app.overlay.imgui_enabled = !scenario_config.no_ui;
+    g_app.scenario_active = scenario_config.active();
     runtime_state_recorder.capture("startup_requested", nullptr, nullptr, nullptr, 0, {});
 
     if (scenario_config.forced_crash()) {
@@ -2026,11 +2045,19 @@ int main(int argc, char* argv[]) {
     [[maybe_unused]] const int status = gladLoadGLLoader((GLADloadproc)glfwGetProcAddress);
     LUMINUMBRA_ASSERT(status, "Failed to initialize GLAD!");
 
+    g_app.hardwareInfo = Luminumbra::Client::DetectHardwareInfo(window);
+    if (const auto diagnostics = Luminumbra::Client::FormatHardwareDiagnostics(
+            *g_app.hardwareInfo, HasCommandLineFlag(argc, argv, "--hardware-diagnostics"));
+        !diagnostics.empty()) {
+        LUMINUMBRA_CORE_INFO("{}", diagnostics);
+    }
+
     if (g_app.overlay.imgui_enabled) {
         IMGUI_CHECKVERSION();
         ImGui::CreateContext();
+        ImGui::GetIO().IniFilename = nullptr; // Layouts persist only through user.developer.
         ImGui::StyleColorsDark();
-        ImGui_ImplGlfw_InitForOpenGL(window, true);
+        ImGui_ImplGlfw_InitForOpenGL(window, false);
         ImGui_ImplOpenGL3_Init("#version 450");
     }
 
@@ -2256,6 +2283,8 @@ int main(int argc, char* argv[]) {
     // stayed file-scope globals. Set once here, at window setup.
     InputCallbackBindings inputCallbackBindings;
     inputCallbackBindings.app = &g_app;
+    inputCallbackBindings.router = &uiInputRouter;
+    inputCallbackBindings.developerConsole = &developerConsole;
     inputCallbackBindings.systemConfig = &g_systemConfig;
     inputCallbackBindings.windowState = &g_windowState;
     inputCallbackBindings.camera = &g_camera;
@@ -2833,6 +2862,21 @@ int main(int argc, char* argv[]) {
         sb.SetWindowMode = [&](const std::string& v) {
             g_systemConfig.user().window_mode = v;
         };
+        sb.GetPerfHud = [&] {
+            return developerConsole.Widgets().Visible("perf.hud");
+        };
+        sb.SetPerfHud = [&](bool value) {
+            developerConsole.Widgets().SetVisible("perf.hud", value);
+        };
+        sb.OpenDeveloperConsole = [&] {
+            if (DeveloperUiAllowed(g_app)) {
+                developerConsole.SetOpen(true);
+                RefreshInputOwnership(window);
+            }
+        };
+        sb.GetDeveloperHelp = [&] {
+            return developerConsole.HelpText();
+        };
         sb.GetVSync = [&] {
             return g_systemConfig.user().vsync;
         };
@@ -2912,8 +2956,7 @@ int main(int argc, char* argv[]) {
             }
         };
         sb.Save = [&] {
-            return g_systemConfig.SaveUserOverlay(
-                luminumbra::core::SystemConfig::DefaultUserOverlayPath());
+            return developerConsole.SavePreferences();
         };
         g_uiManager->SetSettingsBridge(std::move(sb));
         // Apply the PERSISTED UI/HUD scale to the freshly-created RmlUi context so the HUD
@@ -2954,9 +2997,279 @@ int main(int argc, char* argv[]) {
         });
     }
 
-    glfwSetKeyCallback(window, key_callback);
-    inputCallbackBindings.previousWindowFocusCallback =
-        glfwSetWindowFocusCallback(window, window_focus_callback);
+    std::unique_ptr<Luminumbra::Client::WorldGenViewer> worldGenViewer;
+    const bool worldgenGraphAtBoot = HasCommandLineFlag(argc, argv, "--worldgen-graph");
+    double observedFrameSeconds = 0.0;
+    // Explicit registrations and current-service callbacks; no player/world pointers retained.
+    namespace Developer = Luminumbra::Client::Debug;
+    std::vector<std::string> developerShaderReloads;
+    Developer::DeveloperHost developerHost;
+    developerHost.renderer_available = [&] {
+        const bool available = gameStateManager.GetCurrentState() == GameState::IN_GAME &&
+                               g_app.capture.timelapse_frames == 0;
+        return Developer::Availability{available,
+                                       available ? "" : "Renderer tools require ordinary play"};
+    };
+    developerHost.shader_names = [&] {
+        std::vector<std::string> names{"all"};
+        renderPipeline.enumerate_shaders(
+            [&](const char* name, Luminumbra::Rendering::Shader* shader) {
+                if (shader)
+                    names.emplace_back(name);
+            });
+        return names;
+    };
+    developerHost.execute = [&](const std::string& name, const Developer::CommandArguments& args) {
+        if (name == "shader reload") {
+            if (developerShaderReloads.size() >= 128)
+                return Developer::CommandResult{false, "Shader request queue full"};
+            developerShaderReloads.push_back(args.empty() ? "all" : std::get<std::string>(args[0]));
+        } else if (name == "shader watch")
+            g_app.overlay.shader_auto_reload = std::get<bool>(args[0]);
+        else if (name == "render debug") {
+            const std::vector<std::string> modes{
+                "off", "albedo", "normal", "depth", "material", "position"};
+            g_app.overlay.debug_view_mode = static_cast<int>(
+                std::find(modes.begin(), modes.end(), std::get<std::string>(args[0])) -
+                modes.begin());
+        } else if (name == "render debug-cycle")
+            g_app.overlay.debug_view_mode = (g_app.overlay.debug_view_mode + 1) % 6;
+        else if (name == "render wireframe")
+            g_app.overlay.wireframe_mode = std::get<bool>(args[0]);
+        else if (name == "render wireframe-toggle")
+            g_app.overlay.wireframe_mode = !g_app.overlay.wireframe_mode;
+        else if (name == "time scale")
+            g_app.capture.timeScale = std::get<float>(args[0]);
+        else if (name == "time slower")
+            g_app.capture.timeScale =
+                g_app.capture.timeScale <= 0.125f ? 0.0f : g_app.capture.timeScale * 0.5f;
+        else if (name == "time faster")
+            g_app.capture.timeScale = g_app.capture.timeScale < 0.125f
+                                          ? 0.125f
+                                          : std::min(g_app.capture.timeScale * 2.0f, 16.0f);
+        else if (name == "time reset")
+            g_app.capture.timeScale = 1.0f;
+        else
+            return Developer::CommandResult{false, "Client operation unavailable"};
+        return Developer::CommandResult{};
+    };
+    developerHost.save = [&] {
+        auto& preferences = g_systemConfig.user().developer;
+        for (const auto& def : developerConsole.Widgets().List()) {
+            if (def.presentation == Developer::Presentation::ActionOnly)
+                continue;
+            preferences.widgets[def.persistence_key] = developerConsole.Widgets().Visible(def.id);
+            if (const auto layout = developerConsole.Widgets().Layout(def.id))
+                preferences.layouts[def.persistence_key] = *layout;
+        }
+        if (const auto layout = developerConsole.Layout())
+            preferences.layouts["console.toggle"] = *layout;
+        for (const auto& def : developerConsole.Bindings().List()) {
+            const auto chord = developerConsole.Bindings().Get(def.id);
+            preferences.bindings[def.id] = {chord ? chord->key : -1, chord ? chord->mods : 0};
+        }
+        if (g_uiManager)
+            g_uiManager->RefreshDeveloperSettings();
+        return g_systemConfig.SaveUserOverlay(
+            luminumbra::core::SystemConfig::DefaultUserOverlayPath());
+    };
+    developerHost.gameplay_help = [&] {
+        std::string help = "Gameplay and lifecycle presentation bindings:\n";
+        for (const auto& def : Luminumbra::Client::kInputActionDefs)
+            help += std::string(def.name) + " = " +
+                    Developer::FormatKeyChord(
+                        Developer::KeyChord{g_systemConfig.keybind(def.name, def.default_key), 0}) +
+                    "\n";
+        return help + "Loading presentation follows world loading; Escape pauses; F11 fullscreen; "
+                      "Alt+Enter window mode.\n";
+    };
+    DeveloperWidgetServices widgetServices;
+    const auto worldAvailable = [&] {
+        const bool available =
+            gameStateManager.GetCurrentState() == GameState::IN_GAME && gameSession;
+        return Developer::Availability{available, available ? "" : "Requires a loaded world"};
+    };
+    const auto playerAvailable = [&] {
+        const bool available =
+            gameStateManager.GetCurrentState() == GameState::IN_GAME && g_playerController;
+        return Developer::Availability{available, available ? "" : "Requires a current player"};
+    };
+    widgetServices["perf.hud"] = {
+        {}, [&](Developer::DeveloperFrameAdapter&) {
+            Developer::PerfHudSample sample;
+            sample.frame_seconds = observedFrameSeconds;
+            if (g_uiManager)
+                sample.ui_submit_ms = g_uiManager->GetLastUiFrameMs();
+            if (gameStateManager.GetCurrentState() == GameState::IN_GAME)
+                sample.terrain_draws = renderPipeline.get_last_render_pass_stats().terrain_draws;
+            Developer::DrawPerfHudContents(sample);
+        }};
+    widgetServices["perf.gpu"] = {worldAvailable, [&](Developer::DeveloperFrameAdapter&) {
+                                      DrawGpuProfilerContents(renderPipeline, g_uiManager.get());
+                                  }};
+    widgetServices["render.shaders"] = {worldAvailable, [&](Developer::DeveloperFrameAdapter&) {
+                                            DrawShaderContents(
+                                                g_app, renderPipeline, developerConsole);
+                                        }};
+    widgetServices["render.debug_views"] = {
+        worldAvailable, [&](Developer::DeveloperFrameAdapter&) {
+            Developer::DrawDebugViewContents(developerConsole, g_app.overlay.debug_view_mode);
+        }};
+    widgetServices["render.wireframe"] = {worldAvailable, [&](Developer::DeveloperFrameAdapter&) {
+                                              Developer::DrawWireframeContents(
+                                                  developerConsole, g_app.overlay.wireframe_mode);
+                                          }};
+    widgetServices["world.generation"] = {
+        {}, [&](Developer::DeveloperFrameAdapter&) {
+            if (!worldGenViewer) {
+                worldGenViewer = std::make_unique<Luminumbra::Client::WorldGenViewer>();
+                worldGenViewer->SetGraphEnabled(worldgenGraphAtBoot);
+            }
+            // Menu backdrop and automated/networked scenarios must never be live application
+            // targets.
+            auto* liveWorld =
+                worldAvailable().available && !scenario_config.active() && DeveloperUiAllowed(g_app)
+                    ? gameSession->GetWorldSystem()
+                    : nullptr;
+            worldGenViewer->DrawContents(liveWorld);
+        }};
+    widgetServices["client.settings"] = {playerAvailable,
+                                         [&](Developer::DeveloperFrameAdapter&) {
+                                             DrawSettingsContents(g_app,
+                                                                  window,
+                                                                  g_camera.get(),
+                                                                  audioManager.get(),
+                                                                  g_systemConfig,
+                                                                  g_windowState,
+                                                                  developerConsole);
+                                         },
+                                         [&](bool visible) {
+                                             if (!visible)
+                                                 g_app.hud.rebindCaptureAction = -1;
+                                         }};
+    widgetServices["runtime.time"] = {{}, [&](Developer::DeveloperFrameAdapter&) {
+                                          Developer::DrawTimeControlContents(
+                                              developerConsole, g_app.capture.timeScale);
+                                      }};
+    widgetServices["runtime.time_indicator"] = {
+        [&] {
+            return Developer::Availability{g_app.capture.timeScale != 1.0f,
+                                           "Time scale is real-time"};
+        },
+        [&](Developer::DeveloperFrameAdapter&) {
+            Developer::DrawTimeIndicatorContents(
+                g_app.capture.timeScale,
+                Developer::FormatKeyChord(developerConsole.Bindings().Get("time.reset")));
+        }};
+    widgetServices["player.state"] = {playerAvailable, [&](Developer::DeveloperFrameAdapter&) {
+                                          g_playerController->DrawDebugContents();
+                                      }};
+    widgetServices["farm.debug"] = {worldAvailable, [&](Developer::DeveloperFrameAdapter&) {
+                                        DrawFarmDiagnosticsContents(g_app);
+                                    }};
+    widgetServices["world.creature_labels"] = {
+        worldAvailable, [&](Developer::DeveloperFrameAdapter&) {
+            DrawCreatureNameplates(g_app, window, g_camera.get(), gameSession.get());
+        }};
+    widgetServices["ui.data_stream"] = {
+        {}, [](Developer::DeveloperFrameAdapter&) {
+            Luminumbra::Client::UI::UIDataStreamManager::GetInstance().DrawDebugContents();
+        }};
+    widgetServices["ui.debugger"] = {
+        [&] {
+            const bool available = g_uiManager && g_uiManager->GetContext();
+            return Developer::Availability{available, available ? "" : "RmlUi context unavailable"};
+        },
+        [&](Developer::DeveloperFrameAdapter&) { g_uiManager->DrawDeveloperDebuggerContents(); },
+        [&](bool visible) {
+            if (g_uiManager)
+                g_uiManager->SetDeveloperDebuggerVisible(visible && DeveloperUiAllowed(g_app));
+        }};
+    developerConsole.Initialize(std::move(developerHost), RegisterDeveloperWidgets(widgetServices));
+    // Overlapping scope reservations include currently resolved gameplay controls.
+    auto& developerBindings = developerConsole.Bindings();
+    for (const int key : {GLFW_KEY_ESCAPE,
+                          GLFW_KEY_TAB,
+                          GLFW_KEY_ENTER,
+                          GLFW_KEY_BACKSPACE,
+                          GLFW_KEY_DELETE,
+                          GLFW_KEY_RIGHT,
+                          GLFW_KEY_LEFT,
+                          GLFW_KEY_DOWN,
+                          GLFW_KEY_UP,
+                          GLFW_KEY_HOME,
+                          GLFW_KEY_END,
+                          GLFW_KEY_PAGE_UP,
+                          GLFW_KEY_PAGE_DOWN,
+                          GLFW_KEY_F11})
+        developerBindings.Reserve({key, 0},
+                                  Developer::Global | Developer::Gameplay | Developer::Photo,
+                                  "window/navigation");
+    developerBindings.Reserve({GLFW_KEY_ENTER, GLFW_MOD_ALT},
+                              Developer::Global | Developer::Gameplay | Developer::Photo,
+                              "window mode");
+    developerBindings.external_conflict = [&](Developer::KeyChord chord, unsigned scopes) {
+        const std::vector<int> navigation{GLFW_KEY_ESCAPE,
+                                          GLFW_KEY_TAB,
+                                          GLFW_KEY_ENTER,
+                                          GLFW_KEY_BACKSPACE,
+                                          GLFW_KEY_DELETE,
+                                          GLFW_KEY_RIGHT,
+                                          GLFW_KEY_LEFT,
+                                          GLFW_KEY_DOWN,
+                                          GLFW_KEY_UP,
+                                          GLFW_KEY_HOME,
+                                          GLFW_KEY_END,
+                                          GLFW_KEY_PAGE_UP,
+                                          GLFW_KEY_PAGE_DOWN,
+                                          GLFW_KEY_F11};
+        if (std::find(navigation.begin(), navigation.end(), chord.key) != navigation.end())
+            return std::string("Reserved window/navigation key");
+        for (const auto& def : Luminumbra::Client::kInputActionDefs) {
+            const bool photo_only =
+                def.action >= Luminumbra::Client::InputAction::Shutter &&
+                def.action <= Luminumbra::Client::InputAction::PhotoWeatherCycle;
+            const unsigned active =
+                photo_only ? Developer::Photo : Developer::Gameplay | Developer::Photo;
+            if ((active & scopes) && chord.key == g_systemConfig.keybind(def.name, def.default_key))
+                return std::string("Conflicts with gameplay: ") + def.name;
+        }
+        if ((scopes & (Developer::Gameplay | Developer::Photo)) &&
+            (chord.key == GLFW_KEY_R || chord.key == GLFW_KEY_T || chord.key == GLFW_KEY_V))
+            return std::string("Conflicts with world interaction");
+        return std::string{};
+    };
+    developerBindings.conflict_reported = [](const std::string& message) {
+        // The attached dispatcher delivers this warning to the console as well.
+        LUMINUMBRA_CORE_WARN("{}", message);
+    };
+    // Resolve saved recognized records independently, leaving bounded unknown records in
+    // SystemConfig.
+    auto visibilityChanged = std::move(developerConsole.Widgets().changed);
+    auto bindingChanged = std::move(developerBindings.changed);
+    developerConsole.Widgets().changed = {};
+    developerBindings.changed = {};
+    const auto& preferences = g_systemConfig.user().developer;
+    for (const auto& def : developerConsole.Widgets().List()) {
+        if (def.presentation == Developer::Presentation::ActionOnly)
+            continue;
+        const auto layout = preferences.layouts.find(def.persistence_key);
+        const bool has_layout = layout != preferences.layouts.end() &&
+                                def.presentation == Developer::Presentation::ConsolePanel;
+        developerConsole.Widgets().SetVisible(
+            def.id,
+            has_layout ? layout->second.open
+                       : preferences.WidgetVisible(def.persistence_key, def.default_visible));
+        if (has_layout)
+            developerConsole.Widgets().SetLayout(def.id, layout->second);
+    }
+    if (const auto layout = preferences.layouts.find("console.toggle");
+        layout != preferences.layouts.end())
+        developerConsole.RestoreLayout(layout->second);
+    developerBindings.ApplySaved(preferences.bindings);
+    developerConsole.Widgets().changed = std::move(visibilityChanged);
+    developerBindings.changed = std::move(bindingChanged);
+    InstallInputCallbacks(window);
     SetGameState(window, gameStateManager, GameState::MAIN_MENU);
     audioManager->PlayMusic("music_main_menu");
     if (g_uiManager) {
@@ -3007,19 +3320,8 @@ int main(int argc, char* argv[]) {
                              {});
     }
 
-    std::unique_ptr<Luminumbra::Client::WorldGenViewer> worldGenViewer;
-    if (g_app.overlay.imgui_enabled) {
-        worldGenViewer = std::make_unique<Luminumbra::Client::WorldGenViewer>();
-        //  --worldgen-graph turns on the constrained layer-graph
-        // authoring panel inside the inspector (a flagged INTERNAL dev tool, NOT
-        // the shipping RmlUi create surface) and opens the inspector at boot.
-        if (HasCommandLineFlag(argc, argv, "--worldgen-graph")) {
-            worldGenViewer->SetGraphEnabled(true);
-            g_app.overlay.show_worldgen_viewer = true;
-            LUMINUMBRA_CORE_INFO("--worldgen-graph: constrained layer-graph authoring panel "
-                                 "enabled ( toggles the inspector)");
-        }
-    }
+    if (DeveloperUiAllowed(g_app) && worldgenGraphAtBoot)
+        developerConsole.Widgets().SetVisible("world.generation", true);
 
     //  the create-world LIVE WORLD-PREVIEW DIORAMA controller.
     // Owns a bounded candidate world + an offscreen FBO + an orbit camera; the
@@ -3132,6 +3434,7 @@ int main(int argc, char* argv[]) {
 
     int exit_code = 0;
     float lastFrame = 0.0f;
+    double previousObservedFrame = glfwGetTime();
     // Scenario driving/capture seam (core/ScenarioRunner.h): the runner is
     // created ONLY for `--scenario` runs (scenario_config.active()); a null
     // runner leaves the frame loop on exactly the non-scenario branches it
@@ -3198,7 +3501,10 @@ int main(int argc, char* argv[]) {
     }
     while (!glfwWindowShouldClose(window)) {
         MainLoopHeartbeat().fetch_add(1, std::memory_order_relaxed);
-        float currentFrame = (float)glfwGetTime();
+        const double observedFrame = glfwGetTime();
+        observedFrameSeconds = observedFrame - previousObservedFrame;
+        previousObservedFrame = observedFrame;
+        float currentFrame = (float)observedFrame;
         float deltaTime = currentFrame - lastFrame;
         lastFrame = currentFrame;
         deltaTime = std::min(deltaTime, 1.0f / 20.0f);
@@ -3283,11 +3589,13 @@ int main(int argc, char* argv[]) {
         }
 
         const auto _rb_poll_t0 = std::chrono::steady_clock::now(); // always-on (runtime telemetry)
+        RefreshInputOwnership(window);
         // Preserve an ineligible interval even if this batch closes the overlay/unpauses.
         if (gameStateManager.GetCurrentState() != GameState::IN_GAME ||
             !FarmDropSeedInputAllowed(window))
             g_app.interactions.farmDropSeed.Invalidate();
         glfwPollEvents();
+        RefreshInputOwnership(window);
         rb_poll_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
                                                                _rb_poll_t0)
                          .count();
@@ -3488,6 +3796,7 @@ int main(int argc, char* argv[]) {
             ImGui_ImplOpenGL3_NewFrame();
             ImGui_ImplGlfw_NewFrame();
             ImGui::NewFrame();
+            RefreshInputOwnership(window);
         }
 
         switch (currentState) {
@@ -3672,8 +3981,10 @@ int main(int argc, char* argv[]) {
                     if (elapsed > g_app.capture.profile_fly_seconds)
                         glfwSetWindowShouldClose(window, true);
                 } else if (scenario_drive == ScenarioRunner::InGameDrive::kFallThrough &&
-                           g_playerController && !g_app.hud.show_settings) {
-                    g_playerController->Update(deltaTime); // movement paused while the menu is open
+                           g_playerController) {
+                    g_playerController->SetLiveInputGate(
+                        [&](int key) { return uiInputRouter.GameplayKeyAllowed(key); });
+                    g_playerController->Update(deltaTime); // live input uses current ownership
                 }
                 if (g_app.capture.timelapse_frames > 0 && g_camera && gameSession) {
                     // FIXED timelapse camera: elevated, looking down at the grove around spawn.
@@ -4644,7 +4955,8 @@ int main(int argc, char* argv[]) {
                                       gameSession.get(),
                                       renderPipeline,
                                       g_procgen,
-                                      seedDropPressed);
+                                      seedDropPressed,
+                                      uiInputRouter);
                     // Photo-mode capture loop + codex/objectives/farming HUD
                     // (app/DebugOverlays.cpp). Render-side, read-only observer.
                     UpdatePhotoModeAndHud(g_app,
@@ -4692,19 +5004,15 @@ int main(int argc, char* argv[]) {
                                   renderPipeline,
                                   g_uiManager.get(),
                                   worldgenPreview.get(),
-                                  menuPreviewState);
+                                  menuPreviewState,
+                                  uiInputRouter);
             }
         }
 
         if (currentState == GameState::IN_GAME) {
-            // Floating creature ID nameplates for the ecology demo capture
-            // (app/DebugOverlays.cpp).
-            DrawCreatureNameplates(g_app, window, g_camera.get(), gameSession.get());
-            // Player debug UI, time-scale indicator, and the minimal crop HUD
-            // (app/DebugOverlays.cpp).
-            DrawFrameStatusOverlays(g_app, currentState, scenario_config, g_playerController.get());
-            // Live per-pass GPU profiler overlay (app/DebugOverlays.cpp).
-            DrawGpuProfilerOverlay(g_app, currentState, renderPipeline, g_uiManager.get());
+            // Ecology capture retains its explicit label override independently of preferences.
+            if (g_app.capture.timelapse_creatures)
+                DrawCreatureNameplates(g_app, window, g_camera.get(), gameSession.get());
             // --debug-glass-pane one-time capture subject (app/DebugOverlays.cpp).
             SpawnDebugGlassPanes(g_app, currentState, gameSession.get(), renderPipeline);
             // push the metering opt-in (idempotent per frame).
@@ -4713,16 +5021,20 @@ int main(int argc, char* argv[]) {
             renderPipeline.set_volumetric_quality(g_app.overlay.volumetric_quality);
             // Live shader authoring: reload requests, the opt-in mtime watcher,
             // and the dev shader panel (app/DebugOverlays.cpp).
-            UpdateShaderTools(g_app, currentState, renderPipeline);
-            // Settings menu (app/DebugOverlays.cpp). Render-only; user.* is
-            // never hashed.
-            DrawSettingsWindow(
-                g_app, window, g_camera.get(), audioManager.get(), g_systemConfig, g_windowState);
-            if (g_app.overlay.imgui_enabled && g_app.overlay.show_worldgen_viewer &&
-                worldGenViewer) {
-                worldGenViewer->UpdateAndRender(g_app.overlay.show_worldgen_viewer,
-                                                gameSession->GetWorldSystem());
+            if (currentState == GameState::IN_GAME && g_app.capture.timelapse_frames == 0) {
+                for (const auto& requested : developerShaderReloads) {
+                    if (requested == "all")
+                        g_app.overlay.request_shader_reload = true;
+                    else
+                        renderPipeline.enumerate_shaders(
+                            [&](const char* name, Luminumbra::Rendering::Shader* shader) {
+                                if (shader && requested == name)
+                                    shader->Reload();
+                            });
+                }
+                developerShaderReloads.clear();
             }
+            UpdateShaderTools(g_app, currentState, renderPipeline);
         }
 
         //  render the RmlUi overlay in-game too (HUD / photo-mode / pause), over the scene and
@@ -4734,6 +5046,16 @@ int main(int argc, char* argv[]) {
         }
 
         if (g_app.overlay.imgui_enabled) {
+            if (DeveloperUiAllowed(g_app)) {
+                Developer::DeveloperFrameAdapter developerFrame;
+                developerFrame.draw = [&](const Developer::WidgetDef& def,
+                                          const Developer::DrawFn& contents) {
+                    Developer::DrawDeveloperWidget(
+                        developerConsole.Widgets(), developerFrame, def, contents);
+                };
+                developerConsole.Draw(developerFrame);
+            }
+            RefreshInputOwnership(window);
             ImGui::Render();
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         }
@@ -5377,6 +5699,16 @@ int main(int argc, char* argv[]) {
     mark_shutdown("audio_shutdown");
     renderPipeline.shutdown();
     mark_shutdown("renderer_shutdown");
+    developerLogAttachment.Detach();
+    developerConsole.Shutdown();
+    worldGenViewer.reset();
+    glfwSetKeyCallback(window, nullptr);
+    glfwSetCharCallback(window, nullptr);
+    glfwSetMouseButtonCallback(window, nullptr);
+    glfwSetCursorPosCallback(window, nullptr);
+    glfwSetScrollCallback(window, nullptr);
+    glfwSetWindowFocusCallback(window, nullptr);
+    glfwSetCursorEnterCallback(window, nullptr);
     if (g_app.overlay.imgui_enabled) {
         ImGui_ImplOpenGL3_Shutdown();
         ImGui_ImplGlfw_Shutdown();

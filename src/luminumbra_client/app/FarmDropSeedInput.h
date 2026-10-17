@@ -8,10 +8,12 @@ namespace Luminumbra::Client::App {
 // Runtime queries stay lazy so blocked HUD/overlay states never query UI capture.
 template<typename App, typename Input>
 bool FarmDropSeedInputAllowed(const App& app, const Input& input) {
-    return input.WindowFocused() && !app.hud.paused && !app.hud.show_settings &&
-           app.hud.rebindCaptureAction < 0 && !app.hud.codexOpen && !app.hud.photoModeUiShown &&
-           !app.overlay.show_gpu_profiler && !app.overlay.show_shader_panel &&
-           !app.overlay.show_worldgen_viewer && !input.PlayerPhotoModeActive() &&
+    return input.WindowFocused() && input.GameplayKeyAllowed() && !app.hud.paused &&
+           !input.DeveloperPanelVisible("client.settings") && app.hud.rebindCaptureAction < 0 &&
+           !app.hud.codexOpen && !app.hud.photoModeUiShown &&
+           !input.DeveloperPanelVisible("perf.gpu") &&
+           !input.DeveloperPanelVisible("render.shaders") &&
+           !input.DeveloperPanelVisible("world.generation") && !input.PlayerPhotoModeActive() &&
            !input.ImGuiCapturesKeyboard() &&
            !FocusedElementCapturesKeyboard(input.GetFocusElement());
 }

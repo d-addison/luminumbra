@@ -6,14 +6,18 @@
 #include <gtest/gtest.h>
 
 #include "FocusedUiElement.h"
+#include "app/DeveloperUiPolicy.h"
 #include "app/FarmDropSeedInput.h"
+#include "app/UiInputRouter.h"
 #include "core/BenchmarkPose.h"
+#include "luminumbra_common/game/ItemDrop.h"
 #include "player/SaveAnchor.h"
 #include "rendering/TreeImpostorPolicy.h"
 
 #include <fstream>
 #include <iterator>
 #include <optional>
+#include <set>
 #include <string>
 
 using namespace Luminumbra::Client::Player;
@@ -137,16 +141,10 @@ using Luminumbra::Client::Test::FocusedUiElement;
 struct InputGateApp {
     struct Hud {
         bool paused = false;
-        bool show_settings = false;
         int rebindCaptureAction = -1;
         bool codexOpen = false;
         bool photoModeUiShown = false;
     } hud;
-    struct Overlay {
-        bool show_gpu_profiler = false;
-        bool show_shader_panel = false;
-        bool show_worldgen_viewer = false;
-    } overlay;
 };
 
 struct InputGateRuntime {
@@ -154,6 +152,18 @@ struct InputGateRuntime {
     bool playerPhotoMode = false;
     bool imguiCapture = false;
     const FocusedUiElement* focused = nullptr;
+    const Luminumbra::Client::App::UiInputRouter* router = nullptr;
+    int seedKey = 66;
+    std::set<std::string> visiblePanels;
+    Luminumbra::Client::App::DeveloperUiPolicy developerPolicy;
+
+    bool GameplayKeyAllowed() const {
+        return !router || router->GameplayKeyAllowed(seedKey);
+    }
+    bool DeveloperPanelVisible(const char* id) const {
+        return Luminumbra::Client::App::DeveloperUiAllowed(developerPolicy) &&
+               visiblePanels.contains(id);
+    }
 
     bool WindowFocused() const {
         return windowFocused;
@@ -222,7 +232,6 @@ TEST(FarmDropSeedInput, EveryWindowHudOverlayAndExternalCaptureGuardBlocksGamepl
     input.focused = &hud;
     ASSERT_TRUE(FarmDropSeedInputAllowed(app, input));
     for (auto member : {&InputGateApp::Hud::paused,
-                        &InputGateApp::Hud::show_settings,
                         &InputGateApp::Hud::codexOpen,
                         &InputGateApp::Hud::photoModeUiShown}) {
         app.hud.*member = true;
@@ -232,12 +241,10 @@ TEST(FarmDropSeedInput, EveryWindowHudOverlayAndExternalCaptureGuardBlocksGamepl
     app.hud.rebindCaptureAction = 0;
     EXPECT_FALSE(FarmDropSeedInputAllowed(app, input));
     app.hud.rebindCaptureAction = -1;
-    for (auto member : {&InputGateApp::Overlay::show_gpu_profiler,
-                        &InputGateApp::Overlay::show_shader_panel,
-                        &InputGateApp::Overlay::show_worldgen_viewer}) {
-        app.overlay.*member = true;
-        EXPECT_FALSE(FarmDropSeedInputAllowed(app, input));
-        app.overlay.*member = false;
+    for (const char* id : {"client.settings", "perf.gpu", "render.shaders", "world.generation"}) {
+        input.visiblePanels.insert(id);
+        EXPECT_FALSE(FarmDropSeedInputAllowed(app, input)) << id;
+        input.visiblePanels.erase(id);
     }
     input.windowFocused = false;
     EXPECT_FALSE(FarmDropSeedInputAllowed(app, input));
@@ -267,4 +274,109 @@ TEST(FarmDropSeedInput, GlfwAdapterDelegatesToTheTestedProductionGate) {
                            "FarmDropSeedRuntimeInput{window, player, ui});"),
               std::string::npos);
     EXPECT_EQ(adapter.find("GetFocusElement"), std::string::npos);
+}
+
+TEST(FarmDropSeedInput, RoutedCaptureRequiresReleaseBeforeDefaultAndReboundSeedDrops) {
+    using namespace Luminumbra::Client::App;
+    const InputGateApp app;
+    for (const int key : {66, 90}) {
+        for (int capture = 0; capture < 11; ++capture) {
+            SCOPED_TRACE(key);
+            SCOPED_TRACE(capture);
+            UiInputRouter router;
+            UiInputOwnership ownership;
+            ownership.in_world = true;
+            router.SetOwnership(ownership);
+            InputGateRuntime input;
+            input.router = &router;
+            input.seedKey = key;
+            luminumbra::game::FarmDropSeedEdge edge;
+            ASSERT_TRUE(FarmDropSeedInputAllowed(app, input));
+            EXPECT_FALSE(luminumbra::game::FarmDropSeedPressed(false, true, true, edge));
+            auto captured = ownership;
+            switch (capture) {
+                case 0:
+                    captured.console_open = true;
+                    break;
+                case 1:
+                    captured.interactive_panel = true;
+                    break;
+                case 2:
+                    captured.binding_capture = true;
+                    break;
+                case 3:
+                    captured.rml_interaction = true;
+                    break;
+                case 4:
+                    captured.rml_text_input = true;
+                    break;
+                case 5:
+                    captured.imgui_text_input = true;
+                    break;
+                case 6:
+                    captured.imgui_keyboard = true;
+                    break;
+                case 7:
+                    captured.imgui_mouse = true;
+                    break;
+                case 8:
+                    captured.window_focused = false;
+                    break;
+                case 9:
+                    captured.in_world = false;
+                    break;
+                case 10:
+                    captured.rml_debugger = true;
+                    captured.rml_interaction = true;
+                    break;
+            }
+            router.SetOwnership(captured);
+            router.Key(key, 1, false, false);
+            EXPECT_FALSE(FarmDropSeedInputAllowed(app, input));
+            EXPECT_FALSE(luminumbra::game::FarmDropSeedPressed(
+                true, true, FarmDropSeedInputAllowed(app, input), edge));
+            router.SetOwnership(ownership);
+            EXPECT_FALSE(FarmDropSeedInputAllowed(app, input));
+            EXPECT_FALSE(luminumbra::game::FarmDropSeedPressed(
+                true, true, FarmDropSeedInputAllowed(app, input), edge));
+            router.Key(key, 0, false, false);
+            ASSERT_TRUE(FarmDropSeedInputAllowed(app, input));
+            EXPECT_FALSE(luminumbra::game::FarmDropSeedPressed(
+                false, true, FarmDropSeedInputAllowed(app, input), edge));
+            router.Key(key, 1, false, false);
+            EXPECT_TRUE(luminumbra::game::FarmDropSeedPressed(
+                true, true, FarmDropSeedInputAllowed(app, input), edge));
+            EXPECT_FALSE(luminumbra::game::FarmDropSeedPressed(
+                true, true, FarmDropSeedInputAllowed(app, input), edge));
+        }
+    }
+}
+
+TEST(FarmDropSeedInput, SuppressedDeveloperPanelsLeaveGameplayAvailable) {
+    using Luminumbra::Client::App::DeveloperUiPolicy;
+    const InputGateApp app;
+    for (const char* id : {"client.settings", "perf.gpu", "render.shaders", "world.generation"}) {
+        SCOPED_TRACE(id);
+        InputGateRuntime input;
+        input.visiblePanels.insert(id);
+        ASSERT_FALSE(FarmDropSeedInputAllowed(app, input));
+        input.developerPolicy.imgui_enabled = false;
+        EXPECT_TRUE(FarmDropSeedInputAllowed(app, input));
+        input.developerPolicy.imgui_enabled = true;
+        for (auto member : {&DeveloperUiPolicy::scenario_active,
+                            &DeveloperUiPolicy::timelapse,
+                            &DeveloperUiPolicy::scene,
+                            &DeveloperUiPolicy::frame_scan,
+                            &DeveloperUiPolicy::render_parity,
+                            &DeveloperUiPolicy::render_benchmark,
+                            &DeveloperUiPolicy::survey,
+                            &DeveloperUiPolicy::bake_impostor,
+                            &DeveloperUiPolicy::ui_screenshot,
+                            &DeveloperUiPolicy::ui_thumbnails}) {
+            input.developerPolicy.*member = true;
+            EXPECT_TRUE(FarmDropSeedInputAllowed(app, input));
+            input.developerPolicy.*member = false;
+            EXPECT_FALSE(FarmDropSeedInputAllowed(app, input));
+        }
+    }
 }
