@@ -1292,6 +1292,8 @@ class _OutputPreparation:
         if self.uncertain:
             raise MatrixError(f"uncertain recovery preparation; bytes retained: {self.path}")
         if self.identity is not None:
+            if self.path.lstat().st_nlink != 1:
+                raise MatrixError("recovery preparation link count changed; bytes retained")
             _remove_transaction_file(_written_transaction_prefix(
                 self.path, self.data, self.identity, _JOURNAL_BYTES), _JOURNAL_BYTES)
             self.identity = None
@@ -1382,6 +1384,49 @@ def _write_transaction(
                                      _JOURNAL_BYTES)
 
 
+class _ArtifactCreation:
+    """Track one exclusive create without adopting an unknown occupant."""
+    def __init__(self, mode: int) -> None:
+        self.mode = mode
+        self.attempted = False
+        self.failed = False
+
+    def __call__(self, name: str, flags: int) -> int:
+        self.attempted = True
+        path = Path(name)
+        try:
+            before = path.lstat()
+        except FileNotFoundError:
+            before = None
+        try:
+            return os.open(name, flags, self.mode)
+        except OSError as failure:
+            # An error alone cannot prove failure: a signal handler can raise
+            # after native creation. Use at most two lstat calls, never open or
+            # remove an occupant. Inaccessible/unknown identities fail closed.
+            if failure.errno is None or failure.errno == errno.EINTR:
+                raise
+            try:
+                after = path.lstat()
+            except FileNotFoundError:
+                # Under the cooperating-writer model, no artifact was left by
+                # this failed call. This releases only its live owned marker;
+                # absence never grants ownership of an artifact or old marker.
+                self.failed = before is None
+            except OSError:
+                pass
+            else:
+                # A genuine exclusive-create collision leaves the pre-existing
+                # occupant untouched. A newly created/replaced file is uncertain.
+                self.failed = (failure.errno == errno.EEXIST and before is not None
+                               and bool(before.st_ino) and os.path.samestat(before, after)
+                               and (before.st_mode, before.st_size, before.st_mtime_ns,
+                                    before.st_ctime_ns, before.st_nlink)
+                               == (after.st_mode, after.st_size, after.st_mtime_ns,
+                                   after.st_ctime_ns, after.st_nlink))
+            raise
+
+
 def _stage_recovery_copy(
     backup: dict[str, Any], preparation: _OutputPreparation, destination: Path,
 ) -> dict[str, Any]:
@@ -1390,14 +1435,10 @@ def _stage_recovery_copy(
     candidate = source.parent / (".acceptance-" + secrets.token_hex(16))
     metadata = None
     record = None
-    attempted = False
-    def create(name: str, flags: int) -> int:
-        nonlocal attempted
-        attempted = True
-        return os.open(name, flags, 0o600)
+    creation = _ArtifactCreation(0o600)
     preparation.intend(candidate, destination, data)
     try:
-        with open(candidate, "xb", opener=create) as handle:
+        with open(candidate, "xb", opener=creation) as handle:
             metadata = _transaction_metadata(handle)
             record = {"path": str(candidate), "device": metadata.st_dev, "inode": metadata.st_ino,
                       "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
@@ -1411,14 +1452,14 @@ def _stage_recovery_copy(
         _verify_transaction_file(record).chmod(stat.S_IMODE(mode.st_mode))
         preparation.bind(record)
         return record
-    except BaseException as failure:
+    except BaseException:
         if metadata is not None:
             try:
                 _remove_transaction_file(_written_transaction_prefix(candidate, data, metadata))
             except BaseException:
                 preparation.uncertain = True
                 raise
-        elif attempted and not isinstance(failure, FileExistsError):
+        elif creation.attempted and not creation.failed:
             preparation.uncertain = True
         raise
 
@@ -1588,14 +1629,10 @@ def _replace_outputs(
         temporary = path.parent / (".acceptance-" + secrets.token_hex(16))
         creation_mode = 0o600 if mode is not None or private else 0o666
         metadata = None
-        attempted = False
-        def create(name: str, flags: int) -> int:
-            nonlocal attempted
-            attempted = True
-            return os.open(name, flags, creation_mode)
+        creation = _ArtifactCreation(creation_mode)
         preparation.intend(temporary, path, data)
         try:
-            with open(temporary, "xb", opener=create) as handle:
+            with open(temporary, "xb", opener=creation) as handle:
                 temporary_paths.append(temporary)
                 metadata = _transaction_metadata(handle)
                 temporary_identities[temporary] = metadata
@@ -1607,10 +1644,10 @@ def _replace_outputs(
                     raise OSError("incomplete staged output write")
                 handle.flush()
                 os.fsync(handle.fileno())
-        except BaseException as failure:
+        except BaseException:
             if metadata is not None:
                 temporary_records[temporary] = _written_transaction_prefix(temporary, data, metadata)
-            elif attempted and not isinstance(failure, FileExistsError):
+            elif creation.attempted and not creation.failed:
                 preparation.uncertain = True
             raise
         if mode is not None:

@@ -6495,6 +6495,278 @@ def contract_suite(number: int) -> unittest.TestSuite:
 
 
 class AcceptanceSelectionTests(_PhaseCase):
+    def setUp(self) -> None:
+        super().setUp()
+        # Extend the registered preparation owner without changing selection IDs
+        # or its existing assertions. These controls use the actual openers.
+        if self._testMethodName == "test_preparation_bound_is_checked_before_creating_an_artifact":
+            self.assert_native_creation_retries()
+            self.assert_native_creation_refusals()
+
+    def assert_native_creation_retries(self) -> None:
+        for journaled in (False, True):
+            for failure in ("missing-parent", "backup-denied", "payload-denied"):
+                with self.subTest(staging=failure, journaled=journaled), tempfile.TemporaryDirectory() as directory:
+                    base = Path(directory).resolve()
+                    output, extra = base / "output", base / "missing" / "extra"
+                    output.write_bytes(b"original\r\n")
+                    journal = base / "refresh.transaction" if journaled else None
+                    outputs = [(output, "candidate\r\n")]
+                    if failure == "missing-parent":
+                        outputs.append((extra, "extra\r\n"))
+                    system_open = os.open
+                    attempts, errors = [], []
+                    def opened(name: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+                        path = Path(name)
+                        if path.name.startswith(".acceptance-") and flags & os.O_CREAT:
+                            attempts.append(path)
+                            if failure != "missing-parent" and len(attempts) == (
+                                    1 if failure == "backup-denied" else 2):
+                                errors.append(errno.EACCES)
+                                raise PermissionError(errno.EACCES, "native creation denied", str(path))
+                            try:
+                                return system_open(name, flags, *args, **kwargs)
+                            except OSError as error:
+                                errors.append(error.errno)
+                                raise
+                        return system_open(name, flags, *args, **kwargs)
+                    with mock.patch.object(os, "open", opened), self.assertRaises(OSError):
+                        MODULE._replace_outputs(outputs, journal=journal)
+                    self.assertEqual(errors, [errno.ENOENT if failure == "missing-parent" else errno.EACCES])
+                    self.assertEqual(len(attempts), {"missing-parent": 3, "backup-denied": 1,
+                                                     "payload-denied": 2}[failure])
+                    self.assertEqual(output.read_bytes(), b"original\r\n")
+                    self.assertFalse(extra.exists())
+                    self.assertEqual(set(base.iterdir()), {output})
+                    extra.parent.mkdir()
+                    MODULE._recover_outputs(journal)
+                    MODULE._replace_outputs(outputs, journal=journal)
+                    self.assertEqual(output.read_bytes(), b"candidate\r\n")
+                    if failure == "missing-parent":
+                        self.assertEqual(extra.read_bytes(), b"extra\r\n")
+                    self.assertEqual(list(base.rglob(".acceptance-*")), [])
+                    self.assertFalse((base / ".refresh-preparation").exists())
+                    if journal is not None:
+                        self.assertFalse(journal.exists())
+                        self.assertFalse(MODULE._preparation_pending(journal))
+
+        for failure in ("missing-parent", "denied"):
+            with self.subTest(recovery=failure), AcceptanceMatrixTests.recovery_transaction(self) as fixture:
+                base, paths, backups, old_journal = fixture
+                metadata = base / "metadata"
+                metadata.mkdir()
+                journal = metadata / old_journal.name
+                old_journal.replace(journal)
+                original_journal = journal.read_bytes()
+                displaced = base / "displaced"
+                system_open = os.open
+                attempts, errors = [], []
+                def opened(name: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+                    path = Path(name)
+                    if path.name.startswith(".acceptance-") and flags & os.O_CREAT:
+                        attempts.append(path)
+                        if failure == "denied":
+                            errors.append(errno.EACCES)
+                            raise PermissionError(errno.EACCES, "native recovery creation denied", str(path))
+                        # Move only the payload directory; keep the live marker
+                        # parent available so its retained identity can be checked.
+                        payload.rename(displaced)
+                        try:
+                            return system_open(name, flags, *args, **kwargs)
+                        except OSError as error:
+                            errors.append(error.errno)
+                            raise
+                    return system_open(name, flags, *args, **kwargs)
+                payload = base / "payload"
+                payload.mkdir()
+                transaction = json.loads(original_journal)
+                for index, backup in enumerate(backups):
+                    target_output = payload / paths[index].name
+                    paths[index].replace(target_output)
+                    paths[index] = target_output
+                    transaction["outputs"][index]["path"] = str(target_output)
+                    new = transaction["outputs"][index]["new"]
+                    new["path"] = str(payload / Path(new["path"]).name)
+                    target = payload / backup.name
+                    backup.replace(target)
+                    backups[index] = target
+                    transaction["outputs"][index]["backup"] = MODULE._transaction_record(target)
+                MODULE._write_transaction(journal, transaction["outputs"], committed=False)
+                original_journal = journal.read_bytes()
+                try:
+                    with mock.patch.object(os, "open", opened), self.assertRaises(OSError):
+                        MODULE._recover_outputs(journal)
+                finally:
+                    if displaced.exists():
+                        displaced.rename(payload)
+                self.assertEqual(len(attempts), 1)
+                self.assertEqual(errors, [errno.ENOENT if failure == "missing-parent" else errno.EACCES])
+                self.assertEqual([path.read_bytes() for path in paths], [b"candidate 0", b"candidate 1"])
+                self.assertEqual([path.read_bytes() for path in backups], [b"original 0", b"original 1"])
+                self.assertEqual(journal.read_bytes(), original_journal)
+                self.assertFalse(MODULE._preparation_pending(journal))
+                self.assertEqual(set(payload.iterdir()), set(backups) | set(paths))
+                MODULE._recover_outputs(journal)
+                self.assertEqual([path.read_bytes() for path in paths], [b"original 0", b"original 1"])
+                self.assertFalse(journal.exists())
+                self.assertEqual(list(base.rglob(".acceptance-*")), [])
+
+        fixture = AcceptanceMatrixTests("runTest")
+        try:
+            fixture._create_fixture()
+            matrix = fixture.prepare_refresh()
+            document = fixture.tmp / "missing" / "acceptance.md"
+            before = {path: path.read_bytes() for path in fixture.tmp.rglob("*") if path.is_file()}
+            code, _, error = fixture.run_main(*fixture.base_args(), "--write-doc", str(document))
+            self.assertEqual(code, 2, error)
+            self.assertIn("cannot replace output", error)
+            self.assertEqual({path: path.read_bytes() for path in fixture.tmp.rglob("*") if path.is_file()}, before)
+            document.parent.mkdir()
+            self.assertEqual(fixture.run_main(*fixture.base_args())[0], 0)
+            code, _, error = fixture.run_main(*fixture.base_args(), "--write-doc", str(document))
+            self.assertEqual(code, 0, error)
+            self.assertEqual(document.read_bytes(), MODULE.render_doc(matrix).encode("utf-8"))
+            self.assertEqual(fixture.run_main(*fixture.base_args(), "--check-doc", str(document))[0], 0)
+        finally:
+            fixture.doCleanups()
+
+    def assert_native_creation_refusals(self) -> None:
+        failures = ("before-opener", "created-enoent", "created-denied", "created-exists", "created-interrupt",
+                    "created-runtime", "handle-after-create", "interrupted-absent", "unknown-error",
+                    "stat-before", "stat-after", "stat-after-runtime", "collision", "collision-replaced",
+                    "collision-content", "collision-link", "collision-unknown", "collision-after-unknown",
+                    "collision-removed", "marker-replaced", "marker-content", "marker-link", "marker-stat")
+        for recovery in (False, True):
+            for failure in failures:
+                with self.subTest(recovery=recovery, creation=failure), \
+                        AcceptanceMatrixTests.recovery_transaction(self) as fixture:
+                    base, paths, backups, journal = fixture
+                    if not recovery:
+                        # This fixture's pre-existing journal belongs to the
+                        # recovery case only; direct staging owns a fresh marker.
+                        journal.unlink()
+                    marker = journal.with_suffix(".preparation")
+                    candidate = base / (".acceptance-" + "a" * 32)
+                    displaced, alias = base / "displaced", base / "alias"
+                    if failure.startswith("collision"):
+                        candidate.write_bytes(b"foreign\r\n")
+                    original_outputs = [path.read_bytes() for path in paths]
+                    original_backups = [path.read_bytes() for path in backups]
+                    original_journal = journal.read_bytes() if recovery else None
+                    system_open, builtin_open, lstat = os.open, open, Path.lstat
+                    native, stats, identities, marker_bytes = [], [], {}, []
+                    def checked_stat(path: Path, *args: Any, **kwargs: Any) -> Any:
+                        if path == marker and failure == "marker-stat" and native:
+                            raise PermissionError(errno.EACCES, "marker identity unavailable")
+                        if path == candidate:
+                            stats.append(path)
+                            if failure == "stat-before" or (failure == "stat-after" and len(stats) == 2):
+                                raise PermissionError(errno.EACCES, "candidate identity unavailable")
+                            if failure == "stat-after-runtime" and len(stats) == 2:
+                                raise RuntimeError("candidate identity interrupted")
+                            if failure == "collision-unknown" or (failure == "collision-after-unknown" and len(stats) == 2):
+                                fields = list(lstat(path, *args, **kwargs))
+                                fields[1] = 0
+                                return os.stat_result(fields)
+                        return lstat(path, *args, **kwargs)
+                    def opened(name: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+                        if Path(name) != candidate or not flags & os.O_CREAT:
+                            return system_open(name, flags, *args, **kwargs)
+                        native.append(flags)
+                        marker_bytes.append(marker.read_bytes())
+                        if failure in ("stat-after", "stat-after-runtime", "unknown-error", "interrupted-absent") \
+                                or failure.startswith("marker-"):
+                            if failure == "marker-replaced":
+                                marker.rename(displaced)
+                                marker.write_bytes(b"foreign marker\r\n")
+                            elif failure == "marker-content":
+                                marker.write_bytes(b"foreign marker\r\n")
+                            elif failure == "marker-link":
+                                os.link(marker, alias)
+                            if failure.startswith("marker-"):
+                                identities[marker] = lstat(marker)
+                            if failure == "unknown-error":
+                                raise OSError("native error without status")
+                            if failure == "interrupted-absent":
+                                raise InterruptedError(errno.EINTR, "native create interrupted")
+                            raise PermissionError(errno.EACCES, "native create denied")
+                        if failure == "collision-removed":
+                            candidate.rename(displaced)
+                            identities[displaced] = lstat(displaced)
+                            raise FileExistsError(errno.EEXIST, "collision disappeared during native create")
+                        if failure == "collision-replaced":
+                            candidate.rename(displaced)
+                            candidate.write_bytes(b"replacement\r\n")
+                        elif failure == "collision-content":
+                            candidate.write_bytes(b"changed foreign content\r\n")
+                        elif failure == "collision-link":
+                            os.link(candidate, alias)
+                        if failure.startswith("collision"):
+                            identities[candidate] = lstat(candidate)
+                            return system_open(name, flags, *args, **kwargs)
+                        descriptor = system_open(name, flags, *args, **kwargs)
+                        identities[candidate] = lstat(candidate)
+                        if failure == "handle-after-create":
+                            return descriptor
+                        os.close(descriptor)
+                        if failure == "created-enoent":
+                            raise FileNotFoundError(errno.ENOENT, "signal after native create")
+                        if failure == "created-denied":
+                            raise PermissionError(errno.EACCES, "signal after native create")
+                        if failure == "created-exists":
+                            raise FileExistsError(errno.EEXIST, "signal after native create")
+                        if failure == "created-interrupt":
+                            raise KeyboardInterrupt("signal after native create")
+                        raise RuntimeError("signal after native create")
+                    def handled(name: Any, *args: Any, **kwargs: Any) -> Any:
+                        if Path(name) == candidate:
+                            if failure == "before-opener":
+                                raise PermissionError(errno.EACCES, "before native opener")
+                            handle = builtin_open(name, *args, **kwargs)
+                            if failure == "handle-after-create":
+                                handle.close()
+                                raise OSError(errno.EIO, "handle construction interrupted")
+                            return handle
+                        return builtin_open(name, *args, **kwargs)
+                    with mock.patch.object(MODULE.secrets, "token_hex", return_value="a" * 32), \
+                            mock.patch.object(os, "open", opened), mock.patch.object(Path, "lstat", checked_stat), \
+                            mock.patch.object(MODULE, "open", handled, create=True), \
+                            self.assertRaises((MODULE.MatrixError, OSError, RuntimeError, KeyboardInterrupt)):
+                        if recovery:
+                            MODULE._recover_outputs(journal)
+                        else:
+                            MODULE._replace_outputs([(paths[0], "new\r\n")], journal=journal)
+                    self.assertEqual(len(native), 0 if failure in ("before-opener", "stat-before") else 1)
+                    self.assertEqual([path.read_bytes() for path in paths], original_outputs)
+                    self.assertEqual([path.read_bytes() for path in backups], original_backups)
+                    if recovery:
+                        self.assertEqual(journal.read_bytes(), original_journal)
+                    if failure in ("before-opener", "collision"):
+                        self.assertFalse(marker.exists())
+                        MODULE._recover_outputs(journal)
+                        MODULE._replace_outputs([(paths[0], "retry\r\n")], journal=journal)
+                        self.assertEqual(paths[0].read_bytes(), b"retry\r\n")
+                    else:
+                        self.assertTrue(marker.exists())
+                        retained = marker.read_bytes()
+                        if failure not in ("stat-before", "marker-replaced", "marker-content"):
+                            self.assertEqual(retained, marker_bytes[0])
+                        with self.assertRaisesRegex(MODULE.MatrixError, "uncertain recovery preparation"), \
+                                mock.patch.object(MODULE, "open", side_effect=AssertionError("unknown marker opened"),
+                                                  create=True):
+                            MODULE._recover_outputs(journal)
+                        self.assertEqual(marker.read_bytes(), retained)
+                    for path, identity in identities.items():
+                        self.assertTrue(os.path.samestat(identity, path.lstat()))
+                        if path == candidate:
+                            self.assertEqual(path.read_bytes(), b"changed foreign content\r\n" if failure == "collision-content"
+                                             else b"replacement\r\n" if failure == "collision-replaced"
+                                             else b"foreign\r\n" if failure.startswith("collision") else b"")
+                    if failure in ("collision-replaced", "collision-removed"):
+                        self.assertEqual(displaced.read_bytes(), b"foreign\r\n")
+                    if failure in ("collision-link", "marker-link"):
+                        self.assertEqual(alias.read_bytes(), (candidate if failure == "collision-link" else marker).read_bytes())
+
     def assert_phase_contract(self) -> None:
         source = Path(__file__).read_text(encoding="utf-8")
         prefix = source.split("\nimport contextlib\n", 1)[0]
