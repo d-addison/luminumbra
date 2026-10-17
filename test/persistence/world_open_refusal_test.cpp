@@ -1,3 +1,4 @@
+#include "../support/WorldgenTestData.h"
 #include <gtest/gtest.h>
 
 #include "luminumbra_common/components/CoreComponents.h"
@@ -109,6 +110,7 @@ protected:
         fs::create_directories(root / "worlds/atlas/presets");
         fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets/default.json",
                       root / "worlds/atlas/presets/default.json");
+        TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, root);
         fs::copy(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets-rev6",
                  root / "worlds/atlas/presets-rev6",
                  fs::copy_options::recursive);
@@ -808,8 +810,9 @@ TEST_F(WorldOpenRefusal, NonEmbeddedRevisionSixHillsPreservesTerrainIdentity) {
     const fs::path source = LUMINUMBRA_SOURCE_ROOT;
     Write(save / "world_info.json",
           Read(source / "test/fixtures/saves/revision6-hills/world_info.json"));
-    fs::create_directories(root / "data");
-    fs::copy(source / "data/common", root / "data/common", fs::copy_options::recursive);
+    // SetUp provisions the runtime data once through CopyWorldgenTestData.
+    ASSERT_TRUE(fs::is_regular_file(root / "data/common/biomes.json"));
+    ASSERT_TRUE(fs::is_directory(root / "data/common/structures"));
     ASSERT_FALSE(fs::exists(save / "preset.json"));
     const auto before = DiskBytes(root);
     const auto historical =
