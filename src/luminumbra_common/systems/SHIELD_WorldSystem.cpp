@@ -2,6 +2,7 @@
 #include "../core/FilesystemPath.h"
 #include "../core/JobWatchdog.h" // opt-in named-phase wedge reporter for unbounded waits
 #include "../core/Log.h"
+#include "../core/WaterSeedInputs.h"
 #include "../world/FarLodStore.h"
 #include "../world/HydraulicErosion.h" //
 #include "../world/MarchingCubes.h"
@@ -962,6 +963,12 @@ void SHIELD_WorldSystem::reinitialize_noise(const TerrainGenParams* params,
         }
     } writer_intent_reset{m_worldgen_writer_pending};
     std::unique_lock<std::shared_mutex> worldgen_epoch(m_worldgen_epoch_mutex);
+    // All seed payloads from the previous generator set become unusable. Never
+    // wrap the key: at saturation consumers conservatively use inline sampling.
+    const auto seed_generation = m_water_seed_terrain_generation.load(std::memory_order_relaxed);
+    if (seed_generation != std::numeric_limits<std::uint64_t>::max()) {
+        m_water_seed_terrain_generation.store(seed_generation + 1, std::memory_order_release);
+    }
     // Publish parameters and seed under the same epoch as their generators.
     // Preview readers must retain the previous complete world until they release it.
     if (params) {
@@ -3978,7 +3985,8 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
     std::vector<Luminumbra::Job> build_jobs;
     build_jobs.reserve(chunks_to_build.size());
     for (const SurfaceHorizonChunk& build_chunk : chunks_to_build) {
-        build_jobs.emplace_back([this, build_chunk]() {
+        const auto seed_inputs = request_water_seed_inputs(*build_chunk.chunk);
+        build_jobs.emplace_back([this, build_chunk, seed_inputs]() {
             const auto worldgen_scope = acquire_worldgen_sample_scope(); //
             const auto& chunk = build_chunk.chunk;
             const bool needs_full_sdf = build_chunk.step <= 1;
@@ -4022,6 +4030,9 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
                 // the heightfield mesher and seam fallback never
                 // read interior SDF.
                 GenerateChunkData(*chunk, build_chunk.step);
+            }
+            if (seed_inputs && seed_inputs->generation.terrain == water_seed_terrain_generation()) {
+                ComputeHighWaterSeedInputs(*seed_inputs, chunk->get_coords(), *this);
             }
             chunk->set_state(ChunkState::Meshing);
             Luminumbra::World::MarchingCubes::PolygoniseTerrain(
@@ -5209,6 +5220,18 @@ void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk, int target_
     chunk.clear_voxel_data_dirty();
 }
 
+std::shared_ptr<HighWaterSeedInputs>
+SHIELD_WorldSystem::request_water_seed_inputs(Chunk& chunk) const {
+    if (!m_water_system || m_water_system->sim_resolution() != HighWaterSeedInputs::kResolution ||
+        chunk.has_water_sim.load(std::memory_order_acquire)) {
+        return {};
+    }
+    auto inputs = std::make_shared<HighWaterSeedInputs>();
+    inputs->generation = {water_seed_terrain_generation(), chunk.water_seed_edit_generation()};
+    chunk.stage_water_seed_inputs(inputs);
+    return inputs;
+}
+
 JobHandle
 SHIELD_WorldSystem::dispatch_generation_jobs(const std::vector<IVec3>& chunks_to_generate) {
     // Coordinate-only callers (initial world load, regeneration, tests,
@@ -5251,9 +5274,13 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(
         const int target_step = request.target_step;
         chunk->pending_generation_ready.store(false, std::memory_order_release);
         batch.chunks.push_back(chunk);
-        jobs.emplace_back([this, chunk, target_step]() {
+        const auto seed_inputs = request_water_seed_inputs(*chunk);
+        jobs.emplace_back([this, chunk, target_step, seed_inputs]() {
             const auto worldgen_scope = acquire_worldgen_sample_scope(); //
             GenerateChunkData(*chunk, target_step);
+            if (seed_inputs && seed_inputs->generation.terrain == water_seed_terrain_generation()) {
+                ComputeHighWaterSeedInputs(*seed_inputs, chunk->get_coords(), *this);
+            }
             // stage completion only — the MAIN thread flips
             // Loading→Idle in publish_completed_generation_jobs, so chunk
             // lifecycle is never a worker-timing side effect.
@@ -5867,6 +5894,11 @@ bool SHIELD_WorldSystem::adopt_streamed_chunk(const std::shared_ptr<Luminumbra::
         chunk->set_state(Luminumbra::ChunkState::Idle);
     }
     const bool adopted = m_streaming_state.chunks.emplace(chunk->get_id(), chunk).second;
+    if (adopted) {
+        // Derived payloads belong to the producing world, never to a saved or
+        // externally adopted chunk (world-local generation numbers can coincide).
+        chunk->stage_water_seed_inputs({});
+    }
     if (adopted && chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited) {
         bump_far_lod_authority_revision(chunk->get_coords());
     }

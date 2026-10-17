@@ -1,4 +1,5 @@
 #include "FrameAttribution.h"
+#include "luminumbra_common/core/WaterAttribution.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -147,7 +148,10 @@ void write_csv_header(std::ostream& out) {
            "rebuild_calls,reason_mask,admitted_columns,surface_misses,deferred_columns,copied_"
            "bytes,"
            "hashed_bytes,uploaded_bytes,scratch_bytes,backlog,path,fallback,"
-           "instance_capacity,generated_count,count_generation\n";
+           "instance_capacity,generated_count,count_generation,water_selection_ms,"
+           "water_seed_inputs_ms,water_initialization_ms,water_sim_ms,water_seam_ms,"
+           "water_bookkeeping_ms,water_precomputed_columns,water_fallback_columns,"
+           "water_stale_columns\n";
 }
 bool write_csv_row(std::ostream& out,
                    std::uint64_t frame,
@@ -157,7 +161,8 @@ bool write_csv_row(std::ostream& out,
                    std::uint64_t capacity,
                    bool count_known,
                    std::uint64_t generated_count,
-                   std::uint64_t count_generation) {
+                   std::uint64_t count_generation,
+                   const WaterAttribution::Frame& water) {
     if (!out.good())
         return false;
     out << std::fixed << std::setprecision(6) << frame << ',' << frame_ms << ',' << buckets.sim
@@ -178,7 +183,10 @@ bool write_csv_row(std::ostream& out,
     out << ',';
     if (count_known)
         out << count_generation;
-    out << '\n';
+    out << ',' << water.selection_ms << ',' << water.seed_inputs_ms << ','
+        << water.initialization_ms << ',' << water.sim_ms << ',' << water.seam_ms << ','
+        << water.bookkeeping_ms << ',' << water.precomputed_columns << ',' << water.fallback_columns
+        << ',' << water.stale_columns << '\n';
     return out.good();
 }
 bool finalize_csv(std::ofstream& out) {
@@ -213,7 +221,8 @@ bool FrameRecorder::record(std::uint64_t frame,
                            std::uint64_t capacity,
                            bool count_known,
                            std::uint64_t generated_count,
-                           std::uint64_t count_generation) {
+                           std::uint64_t count_generation,
+                           const WaterAttribution::Frame& water) {
     if (!active())
         return false;
     return write_csv_row(m_out,
@@ -224,6 +233,7 @@ bool FrameRecorder::record(std::uint64_t frame,
                          capacity,
                          count_known,
                          generated_count,
-                         count_generation);
+                         count_generation,
+                         water);
 }
 } // namespace Luminumbra::Client::Attribution

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "luminumbra_common/core/WaterAttribution.h"
+
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -179,7 +181,8 @@ bool write_csv_row(std::ostream& out,
                    std::uint64_t capacity,
                    bool count_known,
                    std::uint64_t generated_count,
-                   std::uint64_t count_generation);
+                   std::uint64_t count_generation,
+                   const WaterAttribution::Frame& water = {});
 
 // Flush and close an open CSV file, preserving write, flush, and close failures.
 // Uses the default non-throwing stream exception mask, as do the CSV writers.
@@ -201,7 +204,8 @@ public:
                 std::uint64_t capacity,
                 bool count_known,
                 std::uint64_t generated_count,
-                std::uint64_t count_generation);
+                std::uint64_t count_generation,
+                const WaterAttribution::Frame& water = {});
 
 private:
     // Fixed 64 KiB stream buffer; frames stream to disk without a retained history.

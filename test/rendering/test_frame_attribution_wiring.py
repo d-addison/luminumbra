@@ -100,6 +100,17 @@ class FrameAttributionWiring(unittest.TestCase):
         for arguments in timers:
             self.assertTrue(compact(arguments).endswith(", collect_attribution"))
 
+    def test_water_subzones_share_the_opt_in_frame_and_csv(self):
+        main = compact(self.main)
+        self.assertIn("WaterAttribution::FrameScope water_scope(frame_attribution_enabled);", main)
+        self.assertIn("foliage_frame.count_generation, water_scope.snapshot())", main)
+        self.assertRegex(main, r'if \(frame_attribution_enabled\) \{ '
+                              r'const auto& water = water_scope.snapshot\(\); '
+                              r'LUMINUMBRA_CORE_WARN\( " water-split:')
+        for column in ("water_seed_inputs_ms", "water_initialization_ms", "water_sim_ms",
+                       "water_seam_ms", "water_bookkeeping_ms", "water_fallback_columns"):
+            self.assertIn(column, self.collector)
+
     def test_both_frozen_entry_points_are_counted_once(self):
         rebuild = block(self.foliage, "void FoliagePass::rebuild_instances(")
         qualification = block(self.foliage, "bool FoliagePass::begin_qualification()")
@@ -162,7 +173,8 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertIn('capacity (count unavailable)', overlay)
         main = compact(self.main)
         self.assertIn("foliage_frame.capacity, foliage_frame.count_known, "
-                      "foliage_frame.generated_count, foliage_frame.count_generation)", main)
+                      "foliage_frame.generated_count, foliage_frame.count_generation, "
+                      "water_scope.snapshot())", main)
         scope = compact(block(self.foliage, "~RebuildAttributionScope()"))
         self.assertIn("m_pass.frame_instance_count_known() ? "
                       "std::optional<std::size_t>(m_pass.frame_instance_count()) : std::nullopt", scope)

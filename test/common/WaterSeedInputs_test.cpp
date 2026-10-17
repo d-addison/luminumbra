@@ -1,0 +1,437 @@
+#include "../fixtures/TerrainFixtureParams.h"
+#include "luminumbra/core/Types.h"
+#include "luminumbra_common/core/JobSystem.h"
+#include "luminumbra_common/core/WaterAttribution.h"
+#include "luminumbra_common/core/WaterSeedInputs.h"
+#include "luminumbra_common/systems/PhysicsSystem.h"
+#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
+#include "luminumbra_common/systems/WaterSystem.h"
+#include "luminumbra_common/world/Chunk.h"
+#include <entt/entity/registry.hpp>
+
+#include <algorithm>
+#include <atomic>
+#include <bit>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <gtest/gtest.h>
+#include <memory>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+namespace {
+using namespace Luminumbra;
+using Systems::SHIELD_WorldSystem;
+using Systems::WaterSystem;
+
+Systems::TerrainGenParams SeedParams() {
+    auto params = Test::SyntheticTerrainParams();
+    params.lakes_enabled = true;
+    params.height_offset = -12.0f;
+    return params;
+}
+
+// A fixed resident fixture: no streaming, clock, rendering or filesystem work.
+class SeedFixture {
+private:
+    SHIELD_WorldSystem m_world{nullptr, nullptr, SeedParams(), 777};
+    WaterSystem m_water{nullptr, &m_world};
+    entt::basic_registry<> m_registry;
+    std::unordered_map<ChunkID, std::shared_ptr<Chunk>> m_chunks;
+
+public:
+    explicit SeedFixture(int count = 1) {
+        for (int i = 0; i < count; ++i) {
+            auto chunk = std::make_shared<Chunk>(IVec3(i - 4, 0, -2));
+            EXPECT_TRUE(m_world.adopt_streamed_chunk(chunk));
+            m_chunks.emplace(chunk->get_id(), std::move(chunk));
+        }
+    }
+
+    SHIELD_WorldSystem& world() {
+        return m_world;
+    }
+    const SHIELD_WorldSystem& world() const {
+        return m_world;
+    }
+    WaterSystem& water() {
+        return m_water;
+    }
+    const auto& chunks() const {
+        return m_chunks;
+    }
+
+    void prepare(Chunk& chunk, bool ready = true) {
+        auto inputs = std::make_shared<HighWaterSeedInputs>();
+        inputs->generation = {m_world.water_seed_terrain_generation(),
+                              chunk.water_seed_edit_generation()};
+        if (ready) {
+            const auto scope = m_world.acquire_worldgen_sample_scope();
+            ComputeHighWaterSeedInputs(*inputs, chunk.get_coords(), m_world);
+        } else {
+            // Unpublished storage must never be consumed, even if it contains data.
+            inputs->terrain.fill(10000.0f);
+            inputs->rest.fill(-10000.0f);
+        }
+        chunk.stage_water_seed_inputs(std::move(inputs));
+    }
+
+    void tick() {
+        m_water.update(m_registry, m_chunks);
+    }
+};
+
+void ExpectSameWater(const SeedFixture& a, const SeedFixture& b) {
+    EXPECT_EQ(a.world().debug_water_state_hash().hash, b.world().debug_water_state_hash().hash);
+    EXPECT_EQ(a.world().debug_water_state_hash().water_chunks,
+              b.world().debug_water_state_hash().water_chunks);
+    for (const auto& [id, chunk] : a.chunks()) {
+        const auto& other = *b.chunks().at(id);
+        EXPECT_EQ(chunk->has_water_sim.load(), other.has_water_sim.load());
+        EXPECT_EQ(chunk->water_bed_mm, other.water_bed_mm);
+        EXPECT_EQ(chunk->water_depth_mm, other.water_depth_mm);
+        EXPECT_EQ(chunk->water_edge_flux, other.water_edge_flux);
+        ASSERT_EQ(chunk->water_rest_level.size(), other.water_rest_level.size());
+        ASSERT_EQ(chunk->water_sim_terrain_height.size(), other.water_sim_terrain_height.size());
+        for (std::size_t i = 0; i < chunk->water_rest_level.size(); ++i) {
+            EXPECT_EQ(std::bit_cast<std::uint32_t>(chunk->water_rest_level[i]),
+                      std::bit_cast<std::uint32_t>(other.water_rest_level[i]));
+            EXPECT_EQ(std::bit_cast<std::uint32_t>(chunk->water_sim_terrain_height[i]),
+                      std::bit_cast<std::uint32_t>(other.water_sim_terrain_height[i]));
+        }
+    }
+}
+
+TEST(WaterSeedInputs, HighCellsMatchOriginalInlineBitsIncludingEditedTerrain) {
+    SeedFixture fixture;
+    auto& chunk = *fixture.chunks().begin()->second;
+    // Match saved/edited terrain provenance. High's historical inline sampler
+    // remains analytic even when the voxel/heightmap payload has been edited.
+    fixture.world().GenerateChunkData(chunk, 1);
+    ASSERT_FALSE(chunk.heightmap_data.empty());
+    ASSERT_FALSE(chunk.sdf_data.empty());
+    for (int edit = 0; edit < 2; ++edit) {
+        if (edit != 0) {
+            constexpr std::size_t center = 8 + 8 * 17 + 8 * 17 * 17;
+            const bool fill = chunk.sdf_data[center] >= 0;
+            const auto coords = chunk.get_coords();
+            const Vec3 center_pos(static_cast<float>(coords.x * CHUNK_SIZE_X + 8),
+                                  8.0f,
+                                  static_cast<float>(coords.z * CHUNK_SIZE_Z + 8));
+            ASSERT_EQ(fixture.world().EditTerrainVoxel(center_pos, 2.0f, fill, nullptr), 1);
+        }
+        fixture.prepare(chunk);
+        const auto& inputs = *chunk.water_seed_inputs();
+        ASSERT_TRUE(inputs.ready.load(std::memory_order_acquire));
+        EXPECT_EQ(inputs.generation.edit, chunk.water_seed_edit_generation());
+        const auto coords = chunk.get_coords();
+        // Independent oracle: the pre-change inline arithmetic, in cell order.
+        for (int z = 0; z < 16; ++z) {
+            for (int x = 0; x < 16; ++x) {
+                const float wx = static_cast<float>(coords.x * CHUNK_SIZE_X) +
+                                 (static_cast<float>(x) + 0.5f) * (CHUNK_SIZE_X / 16.0f);
+                const float wz = static_cast<float>(coords.z * CHUNK_SIZE_Z) +
+                                 (static_cast<float>(z) + 0.5f) * (CHUNK_SIZE_Z / 16.0f);
+                const auto cell = static_cast<std::size_t>(z) * 16 + static_cast<std::size_t>(x);
+                EXPECT_EQ(std::bit_cast<std::uint32_t>(inputs.rest[cell]),
+                          std::bit_cast<std::uint32_t>(fixture.world().WaterLevelAt(wx, wz)));
+                EXPECT_EQ(std::bit_cast<std::uint32_t>(inputs.terrain[cell]),
+                          std::bit_cast<std::uint32_t>(fixture.world().GetTerrainHeightAt(wx, wz)));
+            }
+        }
+    }
+}
+
+TEST(WaterSeedInputs, ScalarQueriesKeepZMajorXMinorAndRestBeforeTerrainOrder) {
+    struct Query {
+        float x;
+        float z;
+        bool terrain;
+    };
+    class RecordingSampler {
+        mutable std::vector<Query> m_queries;
+
+    public:
+        const auto& queries() const {
+            return m_queries;
+        }
+        float WaterLevelAt(float x, float z) const {
+            m_queries.push_back({x, z, false});
+            return 0;
+        }
+        float GetTerrainHeightAt(float x, float z) const {
+            m_queries.push_back({x, z, true});
+            return -1;
+        }
+    };
+    const RecordingSampler sampler;
+    HighWaterSeedInputs inputs;
+    ComputeHighWaterSeedInputs(inputs, IVec3(-2, 0, 3), sampler);
+    ASSERT_EQ(sampler.queries().size(), 512u);
+    for (std::size_t cell = 0; cell < 256; ++cell) {
+        const float x = -32.0f + (static_cast<float>(cell % 16) + 0.5f);
+        const auto row = cell / 16;
+        const float z = 48.0f + (static_cast<float>(row) + 0.5f);
+        EXPECT_FLOAT_EQ(sampler.queries()[2 * cell].x, x);
+        EXPECT_FLOAT_EQ(sampler.queries()[2 * cell].z, z);
+        EXPECT_FALSE(sampler.queries()[2 * cell].terrain);
+        EXPECT_FLOAT_EQ(sampler.queries()[2 * cell + 1].x, x);
+        EXPECT_FLOAT_EQ(sampler.queries()[2 * cell + 1].z, z);
+        EXPECT_TRUE(sampler.queries()[2 * cell + 1].terrain);
+    }
+}
+
+TEST(WaterSeedInputs, StaleEditAndTerrainGenerationsAreDiscarded) {
+    for (int mutation = 0; mutation < 4; ++mutation) {
+        SeedFixture prepared;
+        SeedFixture fallback;
+        auto& chunk = *prepared.chunks().begin()->second;
+        if (mutation == 0) {
+            prepared.world().GenerateChunkData(chunk, 1);
+            fallback.world().GenerateChunkData(*fallback.chunks().begin()->second, 1);
+        }
+        prepared.prepare(chunk);
+        // Poison a completed old-generation result: accepting it must fail loudly.
+        auto stale_inputs = chunk.take_water_seed_inputs();
+        stale_inputs->terrain.fill(10000.0f);
+        chunk.stage_water_seed_inputs(std::move(stale_inputs));
+        if (mutation == 0) {
+            constexpr std::size_t center = 8 + 8 * 17 + 8 * 17 * 17;
+            const bool fill = chunk.sdf_data[center] >= 0;
+            const auto coords = chunk.get_coords();
+            const Vec3 center_pos(static_cast<float>(coords.x * CHUNK_SIZE_X + 8),
+                                  8.0f,
+                                  static_cast<float>(coords.z * CHUNK_SIZE_Z + 8));
+            ASSERT_EQ(prepared.world().EditTerrainVoxel(center_pos, 2.0f, fill, nullptr), 1);
+            ASSERT_EQ(fallback.world().EditTerrainVoxel(center_pos, 2.0f, fill, nullptr), 1);
+        } else if (mutation == 3) {
+            chunk.mark_voxel_data_dirty();
+            fallback.chunks().begin()->second->mark_voxel_data_dirty();
+            // Regeneration resets the far-LOD voxel revision, but must not
+            // revive a water payload produced before the intervening edit.
+            chunk.mark_sdf_generated_current_params();
+            fallback.chunks().begin()->second->mark_sdf_generated_current_params();
+            EXPECT_EQ(chunk.voxel_revision(), 0u);
+        } else if (mutation == 1) {
+            auto params = SeedParams();
+            params.height_offset += 5.0f;
+            prepared.world().set_params(params);
+            fallback.world().set_params(params);
+        } else {
+            prepared.world().set_seed(778);
+            fallback.world().set_seed(778);
+        }
+        prepared.tick();
+        fallback.tick();
+        EXPECT_EQ(prepared.water().dbg_seed_attribution().stale_columns, 1u);
+        EXPECT_EQ(prepared.water().dbg_seed_attribution().fallback_columns, 1u);
+        EXPECT_EQ(prepared.water().dbg_seed_attribution().precomputed_columns, 0u);
+        EXPECT_FALSE(chunk.water_seed_inputs());
+        ExpectSameWater(prepared, fallback);
+    }
+}
+
+TEST(WaterSeedInputs, HighInitializationPreservesInlineRoundingAndCellLayout) {
+    for (const bool precompute : {false, true}) {
+        SeedFixture fixture;
+        auto& chunk = *fixture.chunks().begin()->second;
+        chunk.mark_voxel_data_dirty();
+        chunk.is_water_sleeping.store(true);
+        if (precompute)
+            fixture.prepare(chunk);
+        fixture.tick();
+        ASSERT_EQ(chunk.water_bed_mm.size(), 256u);
+        ASSERT_EQ(chunk.water_rest_level.size(), 256u);
+        ASSERT_EQ(chunk.water_sim_terrain_height.size(), 256u);
+        ASSERT_EQ(chunk.water_level_data.size(), 256u);
+        ASSERT_EQ(chunk.water_flow_data.size(), 256u);
+        EXPECT_EQ(fixture.water().cells_stepped_last_update(), 0u);
+        std::vector<std::int32_t> beds;
+        std::vector<std::int32_t> depths;
+        const auto coords = chunk.get_coords();
+        for (int z = 0; z < 16; ++z) {
+            for (int x = 0; x < 16; ++x) {
+                const float wx = static_cast<float>(coords.x * CHUNK_SIZE_X) +
+                                 (static_cast<float>(x) + 0.5f) * (CHUNK_SIZE_X / 16.0f);
+                const float wz = static_cast<float>(coords.z * CHUNK_SIZE_Z) +
+                                 (static_cast<float>(z) + 0.5f) * (CHUNK_SIZE_Z / 16.0f);
+                const float rest = fixture.world().WaterLevelAt(wx, wz);
+                const float terrain = fixture.world().GetTerrainHeightAt(wx, wz);
+                const auto cell = static_cast<std::size_t>(z) * 16 + static_cast<std::size_t>(x);
+                beds.push_back(static_cast<std::int32_t>(std::lround(terrain * 1000)));
+                const long depth = std::lround(static_cast<double>(rest - terrain) * 1000);
+                depths.push_back(static_cast<std::int32_t>(depth > 0 ? depth : 0));
+                EXPECT_EQ(std::bit_cast<std::uint32_t>(chunk.water_rest_level[cell]),
+                          std::bit_cast<std::uint32_t>(rest));
+                EXPECT_EQ(std::bit_cast<std::uint32_t>(chunk.water_level_data[cell]),
+                          std::bit_cast<std::uint32_t>(rest));
+                EXPECT_FLOAT_EQ(chunk.water_flow_data[cell].x, 0.0f);
+                EXPECT_FLOAT_EQ(chunk.water_flow_data[cell].y, 0.0f);
+                EXPECT_EQ(std::bit_cast<std::uint32_t>(chunk.water_sim_terrain_height[cell]),
+                          std::bit_cast<std::uint32_t>(terrain));
+            }
+        }
+        EXPECT_EQ(chunk.water_bed_mm, beds);
+        EXPECT_EQ(chunk.water_depth_mm, depths);
+        std::uint64_t expected_hash = 1469598103934665603ull;
+        const auto mix = [&expected_hash](std::uint64_t value) {
+            expected_hash ^= value;
+            expected_hash *= 1099511628211ull;
+        };
+        mix(static_cast<std::uint64_t>(chunk.get_id()));
+        for (const auto depth : depths)
+            mix(static_cast<std::uint32_t>(depth));
+        for (const auto bed : beds)
+            mix(static_cast<std::uint32_t>(bed));
+        EXPECT_EQ(fixture.world().debug_water_state_hash().hash, expected_hash);
+    }
+}
+
+TEST(WaterSeedInputs, NotReadyFallbackAndLateCompletionAreIdentical) {
+    SeedFixture pending;
+    SeedFixture ready;
+    auto& pending_chunk = *pending.chunks().begin()->second;
+    pending.prepare(pending_chunk, false);
+    const auto late = pending_chunk.take_water_seed_inputs();
+    pending_chunk.stage_water_seed_inputs(late);
+    ready.prepare(*ready.chunks().begin()->second);
+    const WaterAttribution::FrameScope attribution(true);
+    pending.tick();
+    ready.tick();
+    EXPECT_EQ(attribution.snapshot().fallback_columns, 1u);
+    EXPECT_EQ(attribution.snapshot().precomputed_columns, 1u);
+    EXPECT_EQ(pending.water().dbg_seed_attribution().fallback_columns, 1u);
+    EXPECT_EQ(ready.water().dbg_seed_attribution().precomputed_columns, 1u);
+    EXPECT_FALSE(pending_chunk.water_seed_inputs());
+    ExpectSameWater(pending, ready);
+    ComputeHighWaterSeedInputs(*late, pending_chunk.get_coords(), pending.world());
+    pending.tick();
+    ready.tick();
+    EXPECT_FALSE(pending_chunk.water_seed_inputs());
+    EXPECT_EQ(pending.water().dbg_seed_attribution().fallback_columns, 0u);
+    ExpectSameWater(pending, ready);
+}
+
+TEST(WaterSeedInputs, MixedReadinessPreservesHashedStateAndInitializationOrder) {
+    SeedFixture prepared(13);
+    SeedFixture fallback(13);
+    SeedFixture mixed(13);
+    std::vector<ChunkID> original_order;
+    std::size_t index = 0;
+    for (const auto& [id, chunk] : prepared.chunks()) {
+        original_order.push_back(id);
+        auto& other = *mixed.chunks().at(id);
+        // Exercise the edited-terrain path in the same hash comparison.
+        chunk->mark_voxel_data_dirty();
+        fallback.chunks().at(id)->mark_voxel_data_dirty();
+        other.mark_voxel_data_dirty();
+        prepared.prepare(*chunk);
+        mixed.prepare(other, index % 2 == 0);
+        ++index;
+    }
+    for (std::size_t tick = 0; tick < 4; ++tick) {
+        prepared.tick();
+        fallback.tick();
+        mixed.tick();
+        const auto initialized = std::min((tick + 1) * 6, original_order.size());
+        for (std::size_t i = 0; i < original_order.size(); ++i) {
+            EXPECT_EQ(prepared.chunks().at(original_order[i])->has_water_sim.load(),
+                      i < initialized);
+        }
+        EXPECT_EQ(prepared.world().debug_water_state_hash().water_chunks, initialized);
+        ExpectSameWater(prepared, fallback);
+        ExpectSameWater(prepared, mixed);
+        if (tick < 2) {
+            EXPECT_EQ(prepared.water().dbg_seed_attribution().precomputed_columns, 6u);
+            EXPECT_EQ(fallback.water().dbg_seed_attribution().fallback_columns, 6u);
+            EXPECT_EQ(mixed.water().dbg_seed_attribution().precomputed_columns, 3u);
+            EXPECT_EQ(mixed.water().dbg_seed_attribution().fallback_columns, 3u);
+        }
+    }
+    // Subsequent real water-bed edits also preserve the three hash trajectories.
+    const Vec3 edit(-48.0f, 0.0f, -24.0f);
+    EXPECT_GT(prepared.water().EditTerrainBed(edit, -4000, 8.0f), 0);
+    fallback.water().EditTerrainBed(edit, -4000, 8.0f);
+    mixed.water().EditTerrainBed(edit, -4000, 8.0f);
+    prepared.tick();
+    fallback.tick();
+    mixed.tick();
+    ExpectSameWater(prepared, fallback);
+    ExpectSameWater(prepared, mixed);
+}
+
+TEST(WaterSeedInputs, ExistingGenerationWorkersPrepareBeforeActivation) {
+    JobSystem jobs;
+    jobs.startup(1);
+    {
+        SHIELD_WorldSystem world(&jobs, nullptr, SeedParams(), 777);
+        WaterSystem water(&jobs, &world);
+        world.SetWaterSystem(&water);
+        const IVec3 coords(-4, 0, -2);
+        world.dispatch_generation_jobs(std::vector<IVec3>{coords});
+        world.wait_for_streaming_jobs();
+        const auto chunk = world.find_streamed_chunk(coords);
+        ASSERT_TRUE(chunk);
+        ASSERT_TRUE(chunk->water_seed_inputs());
+        ASSERT_TRUE(chunk->water_seed_inputs()->ready.load(std::memory_order_acquire));
+        EXPECT_FALSE(chunk->has_water_sim.load());
+        entt::basic_registry<> registry;
+        const std::unordered_map<ChunkID, std::shared_ptr<Chunk>> chunks{{chunk->get_id(), chunk}};
+        water.update(registry, chunks);
+        EXPECT_TRUE(chunk->has_water_sim.load());
+        EXPECT_EQ(water.dbg_seed_attribution().precomputed_columns, 1u);
+        EXPECT_EQ(water.dbg_seed_attribution().fallback_columns, 0u);
+        SeedFixture inline_path;
+        inline_path.tick();
+        const auto& inline_chunk = *inline_path.chunks().begin()->second;
+        EXPECT_EQ(world.debug_water_state_hash().hash,
+                  inline_path.world().debug_water_state_hash().hash);
+        ASSERT_EQ(chunk->water_rest_level.size(), inline_chunk.water_rest_level.size());
+        ASSERT_EQ(chunk->water_sim_terrain_height.size(),
+                  inline_chunk.water_sim_terrain_height.size());
+        for (std::size_t cell = 0; cell < chunk->water_rest_level.size(); ++cell) {
+            EXPECT_EQ(std::bit_cast<std::uint32_t>(chunk->water_rest_level[cell]),
+                      std::bit_cast<std::uint32_t>(inline_chunk.water_rest_level[cell]));
+            EXPECT_EQ(std::bit_cast<std::uint32_t>(chunk->water_sim_terrain_height[cell]),
+                      std::bit_cast<std::uint32_t>(inline_chunk.water_sim_terrain_height[cell]));
+        }
+    }
+    jobs.shutdown();
+}
+
+TEST(WaterSeedInputs, BootSurfaceJobsPrepareHighInputsAndMediumKeepsExistingPath) {
+    for (const int resolution : {8, 16}) {
+        SHIELD_WorldSystem world(nullptr, nullptr, SeedParams(), 777);
+        WaterSystem water(nullptr, &world);
+        Systems::PhysicsSystem physics;
+        water.SetSimResolution(resolution);
+        world.SetWaterSystem(&water);
+        ASSERT_TRUE(world.EnsureSurfaceReadyNear(Vec3(-48.0f, 0.0f, -32.0f), &physics, 0, 0));
+        const auto chunks = world.snapshot_streamed_chunks();
+        ASSERT_FALSE(chunks.empty());
+        for (const auto& chunk : chunks) {
+            ASSERT_TRUE(chunk);
+            EXPECT_FALSE(chunk->has_water_sim.load());
+            if (resolution == 16) {
+                ASSERT_TRUE(chunk->water_seed_inputs());
+                EXPECT_TRUE(chunk->water_seed_inputs()->ready.load(std::memory_order_acquire));
+            } else {
+                EXPECT_FALSE(chunk->water_seed_inputs());
+            }
+        }
+    }
+}
+
+TEST(WaterSeedInputs, AdoptionDropsInputsFromTheProducingWorld) {
+    SeedFixture source;
+    auto chunk = source.chunks().begin()->second;
+    source.prepare(*chunk);
+    SHIELD_WorldSystem destination(nullptr, nullptr, SeedParams(), 778);
+    EXPECT_EQ(source.world().water_seed_terrain_generation(),
+              destination.water_seed_terrain_generation());
+    ASSERT_TRUE(destination.adopt_streamed_chunk(chunk));
+    EXPECT_FALSE(chunk->water_seed_inputs());
+}
+} // namespace
