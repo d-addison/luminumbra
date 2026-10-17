@@ -4,32 +4,25 @@ from pathlib import Path
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import importlib.util
 
 SPEC = importlib.util.spec_from_file_location("ci_paths", Path(__file__).with_name("ci_paths.py"))
 gate = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(gate)
+from ci_shell import bash_executable
 
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def bash_executable() -> str:
-    # Prefer Git Bash over the Windows WSL launcher. CI's shell: bash uses
-    # this same Git installation; native paths work with its MSYS tools.
-    git = shutil.which("git")
-    if git:
-        bash = Path(git).resolve().parent.parent / "bin/bash.exe"
-        if bash.is_file():
-            return str(bash)
-    return "bash"
+BASH = bash_executable()
 
 
 def run_block(workflow: str, step: str) -> str:
@@ -135,7 +128,7 @@ class PathGateTests(unittest.TestCase):
 
     def test_ci_changes_override_allowlist_and_force_full_native_matrix(self):
         for path in (
-            "tools/ci/ci_paths.py", "tools/ci/test_ci_paths.py", "tools/ci/check_docs.py",
+            "tools/ci/ci_paths.py", "tools/ci/ci_shell.py", "tools/ci/test_ci_paths.py", "tools/ci/check_docs.py",
             "tools/ci/README.md", "tools/ci/nested/new_file.txt",
             ".github/workflows/ci.yml", ".github/workflows/new.yml",
             "scripts/tidy_cache.py", "scripts/README.md",
@@ -189,7 +182,7 @@ class PathGateTests(unittest.TestCase):
                                FAKE_BASE_SCRIPT=base.as_posix(), FAKE_PYTHON=Path(sys.executable).as_posix(),
                                FAKE_SENSITIVE=str(sensitive).lower(),
                                FAKE_MISSING=str(missing).lower(), FAKE_FAILED=str(failed).lower())
-                    subprocess.run([bash_executable(), "-e", "-o", "pipefail", "-c", fixtures + script], env=env, check=True,
+                    subprocess.run([BASH, "-e", "-o", "pipefail", "-c", fixtures + script], env=env, check=True,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                     self.assertFalse(marker.exists())
                     expected = "needs_cpp=true\nneeds_python=true\n" if sensitive or missing or failed else "needs_cpp=false\nneeds_python=true\n"
@@ -229,7 +222,7 @@ class PathGateTests(unittest.TestCase):
                     root = Path(directory)
                     env = dict(os.environ, NEEDS_CPP=cpp, GITHUB_OUTPUT=(root / "output").as_posix(),
                                GITHUB_STEP_SUMMARY=(root / "summary").as_posix())
-                    result = subprocess.run([bash_executable(), "-e", "-c", script], env=env, check=True,
+                    result = subprocess.run([BASH, "-e", "-c", script], env=env, check=True,
                                             stdout=subprocess.PIPE, text=True)
                     self.assertEqual((root / "output").read_text(encoding="utf-8"), f"route={route}\n")
                     self.assertEqual((root / "summary").read_text(encoding="utf-8"), result.stdout)

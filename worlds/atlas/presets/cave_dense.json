@@ -1,9 +1,10 @@
 {
   "name": "Cave Dense",
   "description": "A karst highland with denser caves and more surface openings than Caverns, for distant-world cave qualification",
-  "schema_rev": 7,
+  "schema_rev": 8,
   "generation_params": {
     "terrain": {
+      "surface_sampling_revision": 2,
       "base_frequency": 0.009,
       "base_amplitude": 58.0,
       "octaves": 6,
