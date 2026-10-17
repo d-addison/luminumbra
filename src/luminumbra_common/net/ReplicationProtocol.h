@@ -29,6 +29,7 @@ namespace Luminumbra::Net {
 
 inline constexpr char kReplMagic[5] = {'R', 'E', 'P', 'L', '1'};
 inline constexpr std::uint16_t kReplProtocolVersion = 1;
+inline constexpr std::size_t kUsercmdPayloadBytes = 19;
 
 // Fixed-point quantization scales (encode = round(value * scale)).
 inline constexpr float kReplPosScale = 1000.0f;   // metres -> millimetres

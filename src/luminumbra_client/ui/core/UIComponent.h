@@ -49,7 +49,7 @@ public:
 
     // Component lifecycle
     virtual void Initialize(Rml::ElementDocument* document);
-    virtual void Update(float deltaTime) {}
+    virtual void Update(float) {}
     virtual void Destroy();
 
     // Element access
@@ -156,7 +156,7 @@ void UIComponent::BindProperty(const std::string& attribute, Property<T>& proper
     }
 
     // Subscribe to changes
-    auto binding = [this, attribute](const T& oldValue, const T& newValue) {
+    auto binding = [this, attribute](const T&, const T& newValue) {
         if (m_element) {
             if constexpr (std::is_arithmetic_v<T>) {
                 m_element->SetAttribute(attribute, std::to_string(newValue));
@@ -182,7 +182,7 @@ void UIComponent::BindText(Property<T>& property) {
     }
 
     // Subscribe to changes
-    auto binding = [this](const T& oldValue, const T& newValue) {
+    auto binding = [this](const T&, const T& newValue) {
         if (m_element) {
             if constexpr (std::is_arithmetic_v<T>) {
                 m_element->SetInnerRML(std::to_string(newValue));
@@ -208,7 +208,7 @@ void UIComponent::BindValue(Property<T>& property) {
     }
 
     // Subscribe to property changes
-    auto propertyBinding = [this](const T& oldValue, const T& newValue) {
+    auto propertyBinding = [this](const T&, const T& newValue) {
         if (m_element) {
             if constexpr (std::is_arithmetic_v<T>) {
                 m_element->SetAttribute("value", std::to_string(newValue));
@@ -240,13 +240,13 @@ void UIComponent::BindVisibility(Property<T>& property, Predicate&& visibilityFu
     std::function<bool(const T&)> predicate(std::forward<Predicate>(visibilityFunc));
 
     // Set initial visibility
-    bool visible = predicate(property.Get());
-    m_element->SetProperty("display", visible ? "block" : "none");
+    const bool initial_visible = predicate(property.Get());
+    m_element->SetProperty("display", initial_visible ? "block" : "none");
 
     // Subscribe to changes
-    auto binding = [this, predicate = std::move(predicate)](const T& oldValue, const T& newValue) {
+    auto binding = [this, predicate = std::move(predicate)](const T&, const T& newValue) {
         if (m_element) {
-            bool visible = predicate(newValue);
+            const bool visible = predicate(newValue);
             m_element->SetProperty("display", visible ? "block" : "none");
         }
     };

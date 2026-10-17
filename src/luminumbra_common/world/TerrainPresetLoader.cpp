@@ -1,18 +1,31 @@
 #include "TerrainPresetLoader.h"
 
 #include <algorithm>
-#include <fstream>
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <filesystem>
 #include <initializer_list>
 #include <map>
-#include <sstream>
+#include <memory>
+#include <nlohmann/json_fwd.hpp>
+#include <string>
 #include <string_view>
+#include <system_error>
+#include <utility>
+#include <vector>
 
 #include "nlohmann/json.hpp"
 
+#include "../ai/CreatureSpeciesRegistry.h"
 #include "../core/FilesystemPath.h"
 #include "../core/Log.h"
+#include "../systems/SHIELD_WorldSystem.h"
 #include "BiomeTable.h"
 #include "StructurePlacement.h"
+#include "WorldgenDependencySnapshot.h"
+#include "WorldgenFileReader.h"
 
 namespace Luminumbra::world {
 namespace {
@@ -21,7 +34,7 @@ constexpr std::uint64_t kFnvOffsetBasis = 14695981039346656037ull;
 constexpr std::uint64_t kFnvPrime = 1099511628211ull;
 
 void HashBytes(std::uint64_t& hash, std::string_view bytes) {
-    for (unsigned char byte : bytes) {
+    for (const unsigned char byte : bytes) {
         hash ^= byte;
         hash *= kFnvPrime;
     }
@@ -73,7 +86,12 @@ bool ResolveDependencyManifest(TerrainPresetLoadResult& preset,
                 return std::string();
             }
         }
-        return Filesystem::GenericUtf8PathString(logical);
+        auto text = Filesystem::GenericUtf8PathString(logical);
+        if (!World::IsValidDependencyPathUtf8(text)) {
+            errors.push_back("worldgen dependency logical path is not valid UTF-8");
+            return std::string();
+        }
+        return text;
     };
     const auto state = [&](const std::string& logical, const char* outcome) {
         auto& entry = entries[logical];
@@ -174,6 +192,31 @@ bool ResolveDependencyManifest(TerrainPresetLoadResult& preset,
                 }
             }
         }
+        // Species are session inputs even when biome/structure generation is off.
+        // Parse through the manifest reader, then retain that exact registry so
+        // GameSession cannot reopen different bytes after identity construction.
+        auto species = std::make_shared<luminumbra::ai::CreatureSpeciesRegistry>();
+        const auto species_dir = data_root / "common/creatures/species";
+        if (dependency_exists(species_dir)) {
+            state("common/creatures/species", "species-directory-present");
+            std::vector<std::string> species_errors;
+            bool species_io_failed = false;
+            species->LoadFromDirectory(
+                species_dir, species_errors, read_file, &species_io_failed, read_status);
+            if (species_io_failed) {
+                errors.push_back("failed to read session species dependencies");
+                for (const auto& message : species_errors)
+                    errors.push_back("Species definition load: " + message);
+                return false;
+            }
+            if (!errors.empty())
+                return false;
+            for (const auto& message : species_errors) {
+                preset.warnings.push_back("Species definition load: " + message);
+                LUMINUMBRA_CORE_WARN("Species definition load: {}", message);
+            }
+        }
+        snapshot->species_table = std::move(species);
         manifest = nlohmann::json::array();
         for (const auto& [logical, entry] : entries) {
             manifest.push_back(entry);
@@ -389,23 +432,24 @@ std::string TerrainPresetContentHash(const nlohmann::json& preset) {
 
 TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path,
                                           const World::WorldgenFileStatusReader& read_status) {
+    std::error_code ec;
+    const auto preset_dir = Filesystem::AbsolutePath(preset_path, ec).parent_path();
+    return LoadTerrainPreset(
+        preset_path, preset_dir.parent_path().parent_path().parent_path() / "data", read_status);
+}
+
+TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path,
+                                          const std::filesystem::path& data_root,
+                                          const World::WorldgenFileStatusReader& read_status) {
     TerrainPresetLoadResult result;
 
-    std::ifstream file(preset_path, std::ios::binary);
-    if (!file.is_open()) {
+    std::string bytes;
+    if (!World::ReadWorldgenFile(preset_path, bytes)) {
         result.errors.push_back("failed to open world preset: " +
                                 Filesystem::GenericUtf8PathString(preset_path));
         return result;
     }
 
-    std::ostringstream buffer;
-    buffer << file.rdbuf();
-    if (file.bad() || buffer.bad()) {
-        result.errors.push_back("failed to read world preset: " +
-                                Filesystem::GenericUtf8PathString(preset_path));
-        return result;
-    }
-    const auto bytes = buffer.str();
     if (bytes.find('\0') != std::string::npos) {
         result.errors.push_back("failed to parse world preset JSON '" +
                                 Filesystem::GenericUtf8PathString(preset_path) +
@@ -421,15 +465,6 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
         return result;
     }
 
-    // The table/structure paths are relative to the data/ root. Presets live at
-    // <root>/worlds/atlas/presets/<name>.json, so the data root is four parents
-    // up from the preset file. Derive it here and hand it to the in-memory parse
-    // so on-disk loads are byte-identical to before.
-    std::error_code ec;
-    const std::filesystem::path preset_dir =
-        Filesystem::AbsolutePath(preset_path, ec).parent_path();
-    const std::filesystem::path data_root =
-        preset_dir.parent_path().parent_path().parent_path() / "data";
     return LoadTerrainPresetFromJson(
         data, data_root, Filesystem::GenericUtf8PathString(preset_path), read_status);
 }
@@ -438,7 +473,7 @@ TerrainPresetLoadResult
 LoadTerrainPresetFromJson(const nlohmann::json& source,
                           const std::filesystem::path& data_root,
                           const std::string& provenance,
-                          const World::WorldgenFileStatusReader& read_status) {
+                          const World::WorldgenFileStatusReader& read_status) try {
     TerrainPresetLoadResult result;
     // Validate revision type before resolving defaults, retaining the no-throw error path.
     if (source.contains("schema_rev") && !source["schema_rev"].is_number_integer()) {
@@ -748,24 +783,27 @@ LoadTerrainPresetFromJson(const nlohmann::json& source,
     result.source_json = source.dump();
     result.ok = true;
     return result;
+} catch (const std::exception& error) {
+    // Include serialization/hashing in the resolver boundary. Discard any captured
+    // snapshot as well as the identity so callers cannot adopt a partial result.
+    TerrainPresetLoadResult refused;
+    refused.errors.push_back("failed to resolve world preset: " + std::string(error.what()));
+    return refused;
+} catch (...) {
+    TerrainPresetLoadResult refused;
+    refused.errors.push_back("failed to resolve world preset: unknown exception");
+    return refused;
 }
 
 bool LoadTerrainPresetOverride(const std::filesystem::path& preset_path,
                                const std::filesystem::path& data_root,
                                std::string& json_text,
                                std::string& error) {
-    std::ifstream file(preset_path, std::ios::binary);
-    if (!file) {
+    std::string bytes;
+    if (!World::ReadWorldgenFile(preset_path, bytes)) {
         error = "cannot read preset override: " + Filesystem::GenericUtf8PathString(preset_path);
         return false;
     }
-    std::ostringstream buffer;
-    buffer << file.rdbuf();
-    if (file.bad() || buffer.bad()) {
-        error = "cannot read preset override: " + Filesystem::GenericUtf8PathString(preset_path);
-        return false;
-    }
-    const auto bytes = buffer.str();
     if (bytes.find('\0') != std::string::npos) {
         error = "invalid preset override: " + Filesystem::GenericUtf8PathString(preset_path) +
                 ": raw NUL in content";

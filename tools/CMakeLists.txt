@@ -30,6 +30,13 @@ endif()
 
 if(BUILD_TESTING)
     add_test(
+        NAME NetworkingImportedFilesContract
+        COMMAND "${CMAKE_COMMAND}"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_networking_imported_files.cmake")
+    set_tests_properties(NetworkingImportedFilesContract
+        PROPERTIES LABELS "ci;tools;net" TIMEOUT 30)
+
+    add_test(
         NAME NetworkingRuntimeContract
         COMMAND "${CMAKE_COMMAND}"
                 "-DNETWORK_TEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/networking-runtime-contract"
@@ -102,6 +109,12 @@ if(BUILD_TESTING)
                 "${CMAKE_CURRENT_SOURCE_DIR}/perf/test_plan_qualification.py")
     set_tests_properties(QualificationPlanPython
         PROPERTIES LABELS "perf;tools" TIMEOUT 60)
+    add_test(
+        NAME QualificationRunnerPython
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/perf/test_run_qualification.py")
+    set_tests_properties(QualificationRunnerPython
+        PROPERTIES LABELS "perf;tools" TIMEOUT 120)
     add_test(
         NAME PerformanceMeasurementValidatorContract
         COMMAND "${Python3_EXECUTABLE}"
