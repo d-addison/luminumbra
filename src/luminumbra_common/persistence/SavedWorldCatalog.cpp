@@ -4,6 +4,7 @@
 #include "WorldPersistenceRoundtrip.h"
 #include "WorldSaveService.h"
 #include "world/TerrainPresetLoader.h"
+#include "world/WorldgenFileReader.h"
 
 #include <algorithm>
 #include <cmath>
@@ -24,6 +25,50 @@ bool HasFrozenPreset(const std::string& name) {
     return name == "amplified" || name == "archipelago" || name == "cave_dense" ||
            name == "caverns" || name == "default" || name == "flat_lands" || name == "mountains" ||
            name == "temperate_forest";
+}
+
+bool ResolveSavedPreset(const fs::path& root,
+                        const fs::path& save,
+                        const nlohmann::json& metadata,
+                        SavedWorld& result,
+                        world::TerrainPresetLoadResult& preset,
+                        const World::WorldgenFileStatusReader& read_status) {
+    const bool requires_embedded = metadata.contains("presetFormat");
+    if (requires_embedded && (!metadata.at("presetFormat").is_number_integer() ||
+                              metadata.at("presetFormat") != kSavedPresetFormat)) {
+        result.error = "Unsupported or corrupt saved preset format.";
+        return false;
+    }
+    const auto embedded = save / "preset.json";
+    const bool has_embedded = fs::exists(embedded);
+    if (requires_embedded && !has_embedded) {
+        result.error = "World preset is unavailable: required embedded preset.json is missing.";
+        return false;
+    }
+    if (requires_embedded && !metadata.contains("presetIdentity")) {
+        result.error = "Corrupt world metadata: required preset identity is missing.";
+        return false;
+    }
+    // Only unmarked saves without embedded content may resolve packaged presets.
+    const auto presets = HasFrozenPreset(result.metadata.worldType) ? "worlds/atlas/presets-rev6"
+                                                                    : "worlds/atlas/presets";
+    result.preset_path =
+        has_embedded ? embedded : root / presets / (result.metadata.worldType + ".json");
+    preset = world::LoadTerrainPreset(result.preset_path, read_status);
+    if (!preset.ok) {
+        result.error =
+            preset.errors.empty() ? "World preset is unavailable." : preset.errors.front();
+        return false;
+    }
+    result.preset_source_json = preset.source_json;
+    result.preset_content_hash = preset.preset_content_hash;
+    if (metadata.contains("presetIdentity") && (!metadata.at("presetIdentity").is_string() ||
+                                                metadata.at("presetIdentity").get<std::string>() !=
+                                                    StableChecksum(result.preset_source_json))) {
+        result.error = "Incompatible world preset: saved preset identity does not match.";
+        return false;
+    }
+    return true;
 }
 } // namespace
 
@@ -123,33 +168,9 @@ SavedWorld InspectSavedWorld(const fs::path& root,
             result.error = "Corrupt world metadata: invalid world type.";
             return result;
         }
-        const auto embedded = save / "preset.json";
-        // Changed packaged presets have frozen revision-6 copies.
-        // Additional named presets retain their original resolution path.
-        const auto presets = HasFrozenPreset(result.metadata.worldType)
-                                 ? "worlds/atlas/presets-rev6"
-                                 : "worlds/atlas/presets";
-        result.preset_path = fs::exists(embedded)
-                                 ? embedded
-                                 : root / presets / (result.metadata.worldType + ".json");
-        auto preset = world::LoadTerrainPreset(result.preset_path, read_status);
-        if (!preset.ok) {
-            result.error =
-                preset.errors.empty() ? "World preset is unavailable." : preset.errors.front();
+        world::TerrainPresetLoadResult preset;
+        if (!ResolveSavedPreset(root, save, json, result, preset, read_status))
             return result;
-        }
-        // Within the frozen-preset compatibility scope, older metadata may omit an identity.
-        // When present, it is the FNV-1a checksum of the canonical preset JSON.
-        if (HasFrozenPreset(result.metadata.worldType) && json.contains("presetIdentity")) {
-            if (!json.at("presetIdentity").is_string() ||
-                json.at("presetIdentity").get<std::string>() !=
-                    StableChecksum(preset.source_json)) {
-                result.error = "Incompatible world preset: saved preset identity does not match.";
-                return result;
-            }
-        }
-        result.preset_source_json = preset.source_json;
-        result.preset_content_hash = preset.preset_content_hash;
         result.error.clear();
         if (check) {
             result.error = check(result, preset.params);
