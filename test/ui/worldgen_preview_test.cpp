@@ -201,6 +201,76 @@ struct PreviewFixture {
 
 } // namespace
 
+namespace {
+
+Luminumbra::Systems::TerrainGenParams OverBudgetCandidate() {
+    auto params = FixedCandidate();
+    params.base_amplitude = 10000000.0f;
+    params.base_frequency = 0.1f;
+    params.surface_sampling_revision = Luminumbra::Systems::kSurfaceSamplingRevision;
+    return params;
+}
+
+bool PumpRefusal(Luminumbra::Client::WorldgenPreview& preview,
+                 Luminumbra::Rendering::RenderPipeline& pipeline) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < deadline) {
+        preview.render(pipeline, 1.0f / 60.0f);
+        if (preview.last_build_failed())
+            return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return preview.last_build_failed();
+}
+
+} // namespace
+
+TEST(WorldgenPreviewTest, RefusedFirstSurfaceKeepsWorldEmptyAndAcceptsNextCandidate) {
+    const HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Luminumbra::Rendering::RenderPipeline pipeline;
+    ASSERT_TRUE(pipeline.startup(kPreviewW, kPreviewH, SourceRoot()));
+    Luminumbra::Client::WorldgenPreview preview;
+    preview.set_active(true);
+    preview.ensure_target(kPreviewW, kPreviewH);
+    preview.set_params(OverBudgetCandidate(), 4242);
+    ASSERT_TRUE(preview.tick(1.0f));
+    ASSERT_TRUE(PumpRefusal(preview, pipeline));
+    EXPECT_FALSE(preview.world_ready());
+    EXPECT_EQ(preview.rebuild_generation(), 0u);
+    EXPECT_FALSE(preview.last_error().empty());
+    EXPECT_FALSE(preview.render(pipeline, 1.0f / 60.0f));
+    EXPECT_FALSE(preview.tick(1.0f));
+    preview.set_params(FixedCandidate(), 4242);
+    ASSERT_TRUE(preview.tick(1.0f));
+    ASSERT_TRUE(PumpRebuild(preview, pipeline, 1u));
+    EXPECT_EQ(preview.rebuild_generation(), 1u);
+    EXPECT_FALSE(preview.last_build_failed());
+    EXPECT_TRUE(preview.last_error().empty());
+}
+
+TEST(WorldgenPreviewTest, RefusedSurfaceRetainsLiveWorldAndAllowsRecovery) {
+    const HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    PreviewFixture fixture;
+    ASSERT_TRUE(fixture.ok);
+    ASSERT_TRUE(fixture.preview.world_ready());
+    const auto generation = fixture.preview.rebuild_generation();
+    fixture.preview.set_params(OverBudgetCandidate(), 4242);
+    ASSERT_TRUE(fixture.preview.tick(1.0f));
+    ASSERT_TRUE(PumpRefusal(fixture.preview, fixture.pipeline));
+    EXPECT_TRUE(fixture.preview.world_ready());
+    EXPECT_EQ(fixture.preview.rebuild_generation(), generation);
+    EXPECT_FALSE(fixture.preview.last_error().empty());
+    EXPECT_TRUE(fixture.preview.render(fixture.pipeline, 1.0f / 60.0f));
+    fixture.preview.set_params(FixedCandidate(), 4242);
+    ASSERT_TRUE(fixture.preview.tick(1.0f));
+    ASSERT_TRUE(PumpRebuild(fixture.preview, fixture.pipeline, generation + 1u));
+    EXPECT_EQ(fixture.preview.rebuild_generation(), generation + 1u);
+    EXPECT_FALSE(fixture.preview.last_build_failed());
+    EXPECT_TRUE(fixture.preview.last_error().empty());
+}
+
 TEST(WorldgenPreviewTest, RendersCandidateDioramaToTargetWithoutCrashing) {
     HiddenGlContext ctx;
     if (!ctx.ready())

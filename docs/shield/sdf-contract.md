@@ -4,13 +4,29 @@ This contract defines the Signed Distance Field (SDF) data shape consumed by
 SHIELD terrain generation, meshing, collision generation, and GPU generation
 callbacks.
 
+Synchronous surface preparation admits surface and collision radii from 0 to 12
+chunks, retaining the interactive 12/4 horizon, the server 4/2 default and the
+preview 4/0 slice. This bounds horizontal work to 625 columns. Before allocating
+surface work or changing chunks, it counts every column's vertical surface span
+including both margins and refuses totals above the existing 8,192 active-chunk
+streaming budget. Far terrain uses the separate asynchronous LOD path.
+Replay headers, recording, server boot and
+client scenario options reject unsupported radii before creating a world or
+writing output. The direct surface API preserves negative-to-zero normalization
+and render-radius clamping. These admission checks change no accepted preset
+identity or replay encoding. Terrain edits require a finite positive radius of
+at most 160 metres so their subsequent synchronous remesh fits the radius bound;
+they preflight the same vertical work budget before changing SDF data. A refused
+preview candidate retains the live world and generation, reports the failure,
+and releases the worker so another candidate can be submitted.
+
 ## v0.3.0 Format Boundary
 
 > This world predates the v0.3.0 format and cannot be opened. Create a new world; migration is not supported.
 
 Current durable storage uses LMR1 container v2, the
 `luminumbra.persistence.world_manifest.v1` manifest with `container_version: 2`,
-and FSD2 far-LOD payload v3. New presets use `schema_rev: 7`; revision 6 and omitted revisions
+and FSD2 far-LOD payload v3. New presets use `schema_rev: 8` with sampling revision 2; revision 6 and omitted revisions
 retain historical missing-field choices. Older worlds have no migration path. Unknown future versions
 and corrupt data produce separate failures; see the
 [persistence contract](../engine-guide.md).

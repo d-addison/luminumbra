@@ -29,6 +29,7 @@ add_test(NAME TerrainPresetSchemaRevision COMMAND preset_schema_rev_test)
 add_executable(worldgen_layer_snapshot_test
     shield/test_worldgen_layer_snapshots.cpp
     shield/worldgen_layers_hardening_test.cpp
+    shield/height_sampling_equivalence_test.cpp
 )
 
 target_compile_definitions(worldgen_layer_snapshot_test PRIVATE
@@ -1549,15 +1550,35 @@ target_link_libraries(frontier_gates_test PRIVATE
 add_executable(world_open_refusal_test
     persistence/world_open_refusal_test.cpp
     common/SimBudgetWorldParity_test.cpp
+    common/EffectivePresetIdentity_test.cpp
+    common/SurfaceWorkBudget_test.cpp
+    ../src/luminumbra_client/world/WorldgenOverride.cpp
     persistence/async_saved_world_catalog_test.cpp
     persistence/saved_world_catalog_responsiveness_test.cpp
     persistence/host_scheduler_fault_test.cpp
     ../src/luminumbra_server/ServerWorldRunner.cpp
     ../src/luminumbra_server/modes/ModeHelpers.cpp
+    ../src/luminumbra_server/modes/Replay.cpp
 )
-target_include_directories(world_open_refusal_test PRIVATE ../src ../src/luminumbra_common)
+target_include_directories(world_open_refusal_test PRIVATE ../src ../src/luminumbra_common ../src/luminumbra_client)
 target_compile_definitions(world_open_refusal_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
 target_link_libraries(world_open_refusal_test PRIVATE gtest_main luminumbra_common luminumbra_save_fixture_support)
+
+# Surface admission exercises both shipping launch parsers without a device.
+add_executable(runtime_surface_options_test
+    client/runtime_surface_options_test.cpp
+    ../src/luminumbra_client/core/RuntimeScenarioConfig.cpp
+)
+target_include_directories(runtime_surface_options_test PRIVATE
+    ../src
+    ../src/luminumbra_client
+)
+target_link_libraries(runtime_surface_options_test PRIVATE
+    gtest_main
+    luminumbra_common
+    nlohmann_json
+    glm
+)
 
 # Second-class adversarial pass: Jolt tunneling / penetration test. A fast
 # dynamic sphere fired at a thin static heightfield floor must not pass through it.
@@ -1962,6 +1983,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     runtime_world_visual_validation_test
     frontier_gates_test
     world_open_refusal_test
+    runtime_surface_options_test
     jolt_tunneling_test
     surface_query_test
     audio_occlusion_test
@@ -2433,6 +2455,8 @@ add_test(NAME FramePacingSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/test/tools/test_frame_pacing_contract.py)
 add_test(NAME GraphicsUiSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/test/tools/test_graphics_ui_contract.py)
+add_test(NAME ReplaySourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/tools/ci/test_replay_source_contract.py)
 add_test(NAME RenderRunnerEvidencePython COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_render_runner_evidence.py)
 set_tests_properties(RenderRunnerEvidencePython PROPERTIES TIMEOUT 60)
 add_test(NAME RenderSceneMatrixPython COMMAND "${Python3_EXECUTABLE}" -B ${CMAKE_SOURCE_DIR}/tools/rendering/acceptance/test_scene_matrix.py)

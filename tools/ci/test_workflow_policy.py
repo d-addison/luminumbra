@@ -3,15 +3,27 @@
 
 Read the workflows' indented job/step blocks using only the standard library.
 This is deliberately scoped to their current YAML layout, not a YAML parser.
+
+The 72-case baseline launched 772 subprocesses on POSIX; aggregate cancellation,
+ASan admission and Bash syntax cases accounted for 340, 210 and 79 launches.
+Windows qualification exhausted the suite's 30-second CTest deadline without
+per-case timings. Eight disjoint registrations isolate those workloads and keep
+each 30-second deadline. Each selected case reports elapsed time so a slow case
+remains visible. Native per-case qualification is still required; local timings
+do not establish that every Windows case fits its deadline. Direct invocation
+and unittest discovery retain the complete suite.
 """
 
+import argparse
 import fnmatch
+import io
 import os
 import re
 import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -1757,5 +1769,338 @@ class WorkflowAttributionPolicyTests(unittest.TestCase):
         self.assertIn('"| checked out sha | $env:MERGE_SHA |"', script)
 
 
+# Keep launch-heavy cases separate without changing any case or subtest.
+# Selection scans the finite unittest roster once; no subprocess is started here.
+POLICY_PARTITIONS = tuple(str(index) for index in range(8))
+POLICY_CASE_PARTITIONS = {
+    "WorkflowDraftPolicyTests.test_aggregates_cancel_at_each_phase_and_fail_invalid_dependencies": "1",
+    "WorkflowDraftPolicyTests.test_asan_aggregate_accepts_only_success_or_the_original_path_skip": "2",
+    "WorkflowDraftPolicyTests.test_ci_and_asan_bash_scripts_parse_without_executing_native_commands": "3",
+    "WorkflowShellDiagnosticTests.test_actual_windows_probe_accepts_legacy_msys_and_documented_cygwin": "6",
+    "WorkflowShellDiagnosticTests.test_actual_windows_probe_refuses_other_identities_despite_msystem": "7",
+}
+POLICY_CLASS_PARTITIONS = {
+    "WorkflowDraftPolicyTests": "0",
+    "WorkflowExpressionPolicyTests": "0",
+    "WorkflowCacheCleanupPolicyTests": "0",
+    "WorkflowAttributionPolicyTests": "0",
+    "WorkflowPartitionSelectionTests": "0",
+    "WorkflowShellTests": "4",
+    "WorkflowShellDiagnosticTests": "5",
+}
+
+
+def policy_cases(suite):
+    for item in suite:
+        if isinstance(item, unittest.TestSuite):
+            yield from policy_cases(item)
+        else:
+            yield item
+
+
+def policy_partition_suite(loader, module, partition):
+    if partition not in POLICY_PARTITIONS:
+        raise ValueError("unknown policy partition")
+    cases = list(policy_cases(loader.loadTestsFromModule(module)))
+    seen = set()
+    selected = []
+    for case in cases:
+        key = f"{type(case).__name__}.{case._testMethodName}"
+        if key in seen:
+            raise ValueError("duplicate policy case: " + key)
+        seen.add(key)
+        class_partition = POLICY_CLASS_PARTITIONS.get(type(case).__name__)
+        if class_partition is None:
+            raise ValueError("unregistered policy class: " + type(case).__name__)
+        if POLICY_CASE_PARTITIONS.get(key, class_partition) == partition:
+            selected.append(case)
+    if not POLICY_CASE_PARTITIONS.keys() <= seen:
+        raise ValueError("missing dedicated policy case")
+    if not selected:
+        raise ValueError("empty policy partition")
+    return unittest.TestSuite(selected)
+
+
+class PolicyTimingResult(unittest.TextTestResult):
+    def startTest(self, test):
+        self.case_started = time.perf_counter()
+        super().startTest(test)
+
+    def stopTest(self, test):
+        super().stopTest(test)
+        self.stream.writeln(f"  {test.id()}: {time.perf_counter() - self.case_started:.3f}s")
+
+
+def policy_main(argv=None):
+    # With no partition, retain unittest's complete CLI and discovery semantics.
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    parser.add_argument("--partition", choices=POLICY_PARTITIONS, action="append")
+    parser.add_argument("--list-tests", action="store_true")
+    args, remaining = parser.parse_known_args(argv)
+    if args.partition is None:
+        if args.list_tests:
+            parser.error("--list-tests requires --partition")
+        unittest.main(argv=[sys.argv[0], *remaining])
+        return 0
+    if len(args.partition) != 1 or remaining:
+        parser.error("one partition is required, without unittest selectors")
+    try:
+        suite = policy_partition_suite(unittest.defaultTestLoader, sys.modules[__name__], args.partition[0])
+    except ValueError as error:
+        parser.error(str(error))
+    if args.list_tests:
+        for case in policy_cases(suite):
+            print(case.id())
+        return 0
+    result = unittest.TextTestRunner(verbosity=2, resultclass=PolicyTimingResult).run(suite)
+    return int(not result.wasSuccessful())
+
+
+class WorkflowPartitionSelectionTests(unittest.TestCase):
+    def test_existing_roster_is_retained(self):
+        expected = {
+            "WorkflowShellTests": (
+                "test_windows_candidates_prefer_git_over_wsl_for_all_git_layouts",
+                "test_active_msys_keeps_its_path_shell_and_deduplicates_git_siblings",
+                "test_lookup_excludes_empty_and_relative_path_entries_and_cwd_results",
+                "test_native_windows_resolution_uses_absolute_git_path_as_one_argument",
+                "test_windows_rejects_wsl_collision_and_tries_git_siblings",
+                "test_posix_lookup_preserves_path_selection_and_does_not_query_git",
+                "test_overrides_require_absolute_regular_executable_files_without_fallback",
+                "test_probe_refuses_partial_output_wsl_errors_deadline_and_unusable_binaries",
+                "test_probe_does_not_run_inherited_shell_startup_hooks",
+                "test_resolved_bash_executes_literal_arguments_cwd_crlf_and_exit_status",
+            ),
+            "WorkflowShellDiagnosticTests": (
+                "test_failure_reports_actual_absolute_discovery_and_allowlisted_platform_context",
+                "test_nested_discovery_keeps_failure_observations_isolated",
+                "test_windows_failure_retains_discovery_order_drive_paths_and_probe_budget",
+                "test_validation_failures_name_the_last_stage_without_extra_checks_or_fallback",
+                "test_validation_exceptions_report_stage_and_codes_without_exception_payload",
+                "test_probe_refusals_preserve_raw_bytes_returncode_and_resolved_path",
+                "test_launch_and_deadline_failures_report_codes_and_available_partial_bytes",
+                "test_failure_bounds_apply_before_formatting_all_context_candidates_and_output",
+                "test_success_stays_silent_after_failed_probe_and_keeps_exact_success_contract",
+                "test_actual_probe_distinguishes_empty_bash_version_on_both_platform_branches",
+                "test_actual_windows_guard_reports_empty_and_non_msys_intrinsics",
+                "test_actual_refusal_observes_changed_decoded_quotes_without_evaluating_command",
+                "test_actual_probe_success_retains_only_exact_magic_on_both_platform_branches",
+                "test_actual_windows_probe_accepts_legacy_msys_and_documented_cygwin",
+                "test_actual_windows_probe_refuses_other_identities_despite_msystem",
+                "test_actual_documented_cygwin_identity_still_refuses_empty_bash_version",
+                "test_actual_abort_without_guard_observations_leaves_body_stage_unknown",
+                "test_actual_guard_observation_write_failures_never_reach_success_magic",
+                "test_actual_guard_observations_filter_hooks_and_do_not_dump_environment",
+                "test_actual_guard_observations_bound_intrinsics_and_decoded_command_and_escape_controls",
+                "test_byte_observation_keeps_display_bound_before_formatting_and_retains_command_tail",
+                "test_refusal_observations_cannot_make_unknown_output_or_guard_status_successful",
+            ),
+            "WorkflowExpressionPolicyTests": (
+                "test_status_functions_are_only_used_in_if_values",
+                "test_status_expression_contexts",
+            ),
+            "WorkflowDraftPolicyTests": (
+                "test_ready_and_draft_transitions_trigger_existing_pr_routes",
+                "test_guard_runs_first_under_existing_check_name_without_draft_job_skip",
+                "test_actual_guard_script_rejects_drafts_but_allows_ready_and_non_pr_events",
+                "test_failed_guard_cannot_be_bypassed_by_build_or_evidence_steps",
+                "test_unconditional_always_on_shard_build_fails_draft_policy",
+                "test_other_heavy_jobs_still_skip_drafts_and_keep_routed_skips",
+                "test_asan_matrix_and_aggregate_preserve_limits_coverage_and_evidence",
+                "test_native_matrices_aggregates_limits_and_full_qualification_route",
+                "test_native_cache_writers_and_attempt_specific_retained_evidence",
+                "test_gcc_preserves_prefab_netsoak_packaging_and_diagnostics",
+                "test_acceptance_execution_uses_verified_union_and_retains_networking_evidence",
+                "test_ci_and_asan_bash_scripts_parse_without_executing_native_commands",
+                "test_asan_aggregate_requires_inventory_floor_after_merge",
+                "test_asan_aggregate_accepts_stronger_inventory_checks_after_merge",
+                "test_asan_aggregate_rejects_removed_or_replaced_required_tests",
+                "test_asan_aggregate_rejects_invalid_inventory_and_coverage_commands",
+                "test_asan_aggregate_only_rerun_downloads_both_original_shards",
+                "test_asan_single_shard_rerun_downloads_latest_and_unchanged_shards",
+                "test_asan_rerun_evidence_retained_for_full_30_day_window",
+                "test_aggregate_status_conditions_use_valid_contexts",
+                "test_aggregates_cancel_at_each_phase_and_fail_invalid_dependencies",
+                "test_required_aggregates_cancel_running_jobs_but_fail_cancelled_dependencies",
+                "test_required_aggregate_graph_rejects_cancellation_regressions",
+                "test_asan_aggregate_accepts_only_success_or_the_original_path_skip",
+                "test_native_aggregates_refuse_invalid_dependencies_before_the_route_gate",
+                "test_ucrt_route_seeds_devel_and_preserves_other_event_and_path_guards",
+                "test_ucrt_cache_guards_keep_saves_on_trusted_pushes_and_bypass_captures",
+                "test_concurrency_keeps_pr_cancellation_and_batches_only_devel_pushes",
+                "test_policy_suite_is_part_of_cheap_inventory_check",
+                "test_freeze_audit_comment_is_identical_in_every_workflow",
+            ),
+            "WorkflowCacheCleanupPolicyTests": (
+                "test_only_cache_writer_completions_trigger_serialized_cleanup",
+                "test_completion_list_covers_every_cache_saving_workflow",
+                "test_cleanup_filter_accepts_only_main_and_devel_push_completions",
+            ),
+            "WorkflowAttributionPolicyTests": (
+                "test_only_input_changes_trigger_devel_pull_requests",
+                "test_devel_pushes_also_cover_probe_build_definitions",
+                "test_weekly_schedule_and_manual_dispatch_remain_available",
+                "test_concurrency_separates_schedules_pushes_and_manual_runs",
+                "test_revision_recording_handles_missing_pull_request_metadata",
+            ),
+        }
+        module = sys.modules[__name__]
+        for name, methods in expected.items():
+            with self.subTest(test_class=name):
+                self.assertLessEqual(set(methods), set(unittest.defaultTestLoader.getTestCaseNames(getattr(module, name))))
+        self.assertEqual(sum(map(len, expected.values())), 72)
+
+    def test_partitions_cover_discovered_old_and_new_cases_exactly_once(self):
+        module = sys.modules[__name__]
+        loader = unittest.TestLoader()
+        complete = [case.id() for case in policy_cases(loader.loadTestsFromModule(module))]
+        selected = []
+        for partition in POLICY_PARTITIONS:
+            cases = list(policy_cases(policy_partition_suite(loader, module, partition)))
+            self.assertTrue(cases)
+            selected.extend(case.id() for case in cases)
+        self.assertEqual(len(selected), len(set(selected)))
+        self.assertCountEqual(selected, complete)
+        self.assertTrue(any("WorkflowPartitionSelectionTests." in name for name in selected))
+        # New methods in known classes enter the same exhaustive selection.
+        class Extended(WorkflowShellTests):
+            def test_added_case(self):
+                pass
+        Extended.__name__ = "WorkflowShellTests"
+        extra = Extended("test_added_case")
+        augmented = unittest.TestSuite([loader.loadTestsFromModule(module), extra])
+        with patch.object(loader, "loadTestsFromModule", return_value=augmented):
+            cases = list(policy_cases(policy_partition_suite(loader, module, "4")))
+        self.assertIn(extra, cases)
+
+    def test_selection_refuses_invalid_empty_duplicate_missing_and_unknown_rosters(self):
+        module = sys.modules[__name__]
+        loader = unittest.TestLoader()
+        for invalid in ("", "-1", "8", "01", "0/8", None, 0):
+            with self.subTest(partition=invalid), self.assertRaises(ValueError):
+                policy_partition_suite(loader, module, invalid)
+        complete = list(policy_cases(loader.loadTestsFromModule(module)))
+        dedicated = next(case for case in complete if type(case).__name__ + "." + case._testMethodName in POLICY_CASE_PARTITIONS)
+        class Unknown(unittest.TestCase):
+            def test_unknown(self):
+                pass
+        for cases, partition, message in (
+            ([], "0", "missing dedicated"),
+            ([*complete, complete[0]], "0", "duplicate"),
+            ([case for case in complete if case is not dedicated], "0", "missing dedicated"),
+            ([*complete, Unknown("test_unknown")], "0", "unregistered"),
+            ([case for case in complete if type(case).__name__ != "WorkflowShellTests"], "4", "empty"),
+        ):
+            with self.subTest(message=message), patch.object(loader, "loadTestsFromModule", return_value=unittest.TestSuite(cases)):
+                with self.assertRaisesRegex(ValueError, message):
+                    policy_partition_suite(loader, module, partition)
+
+    def test_launch_heavy_cases_keep_individual_partitions(self):
+        module = sys.modules[__name__]
+        for partition, method in (
+            ("1", "test_aggregates_cancel_at_each_phase_and_fail_invalid_dependencies"),
+            ("2", "test_asan_aggregate_accepts_only_success_or_the_original_path_skip"),
+            ("3", "test_ci_and_asan_bash_scripts_parse_without_executing_native_commands"),
+            ("6", "test_actual_windows_probe_accepts_legacy_msys_and_documented_cygwin"),
+            ("7", "test_actual_windows_probe_refuses_other_identities_despite_msystem"),
+        ):
+            with self.subTest(partition=partition):
+                cases = list(policy_cases(policy_partition_suite(unittest.TestLoader(), module, partition)))
+                self.assertEqual([case._testMethodName for case in cases], [method])
+
+    def test_cmake_registers_every_partition_once_with_unchanged_deadlines(self):
+        cmake = (ROOT / "tools/CMakeLists.txt").read_text(encoding="utf-8")
+        registrations = re.findall(r"add_test\(\s*NAME ([\w]+)\s+COMMAND ([^)]*)\)", cmake)
+        actual = [(name, " ".join(command.split())) for name, command in registrations
+                  if "ci/test_workflow_policy.py" in command]
+        expected = []
+        for partition in POLICY_PARTITIONS:
+            name = "WorkflowPolicyContract" + ("" if partition == "0" else "Part" + partition)
+            expected.append((name, '\"${Python3_EXECUTABLE}\" -I -B '
+                             '\"${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py\" --partition ' + partition))
+            properties = re.findall(r"set_tests_properties\(" + name + r"\s+PROPERTIES ([^)]*)\)", cmake)
+            self.assertEqual([" ".join(item.split()) for item in properties], ['LABELS "ci;tools" TIMEOUT 30'])
+        self.assertCountEqual(actual, expected)
+        self.assertEqual(len(actual), len(set(actual)))
+
+    def test_direct_workflow_discovery_and_path_routes_keep_complete_suite(self):
+        import ci_paths
+        self.assertEqual(ci_paths.PYTHON_TESTS.count("tools/ci/test_workflow_policy.py"), 1)
+        commands = ci_paths.python_test_commands(ROOT)
+        self.assertEqual(commands.count(("tools/ci/test_workflow_policy.py",)), 1)
+        self.assertIn(("tools/ci/test_replay_source_contract.py",), commands)
+        for path in ("tools/ci/test_workflow_policy.py", "tools/CMakeLists.txt"):
+            self.assertTrue(ci_paths.needs_cpp(path))
+        self.assertTrue(ci_paths.needs_python("tools/ci/test_workflow_policy.py"))
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        inventory = jobs(workflow)["public-tree"]
+        self.assertRegex(inventory, r"(?m)^          python3 tools/ci/test_workflow_policy.py$")
+        self.assertNotRegex(inventory, r"test_workflow_policy.py[^\n]*--partition")
+        discovered = unittest.TestLoader().discover(str(ROOT / "tools/ci"), pattern="test_workflow_policy.py")
+        expected = unittest.TestLoader().loadTestsFromModule(sys.modules[__name__])
+        discovered_cases = list(policy_cases(discovered))
+        expected_cases = list(policy_cases(expected))
+        def roster(cases):
+            return [(type(case).__name__, case._testMethodName) for case in cases]
+        self.assertCountEqual(roster(discovered_cases), roster(expected_cases))
+        # Package imports can add several module components to unittest IDs.
+        with patch.object(expected_cases[0], "id", return_value="qualified." + expected_cases[0].id()):
+            self.assertCountEqual(roster(discovered_cases), roster(expected_cases))
+
+    def test_cli_listing_and_refusals_use_actual_selection(self):
+        for partition in ("0", "7"):
+            with self.subTest(partition=partition), patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                self.assertEqual(policy_main(["--partition", partition, "--list-tests"]), 0)
+                expected = policy_partition_suite(unittest.TestLoader(), sys.modules[__name__], partition)
+                self.assertEqual(output.getvalue().splitlines(), [case.id() for case in policy_cases(expected)])
+        for argv in (["--partition"], ["--partition", "8"], ["--partition", "01"],
+                     ["--partition", "0", "--partition", "1"], ["--list-tests"],
+                     ["--partition", "0", "WorkflowShellTests"], ["--partition", "0", "--unknown"]):
+            with self.subTest(argv=argv), patch.object(sys, "stderr", new_callable=io.StringIO), self.assertRaises(SystemExit) as error:
+                policy_main(argv)
+            self.assertEqual(error.exception.code, 2)
+        with patch.object(unittest, "main") as run:
+            self.assertEqual(policy_main([]), 0)
+            run.assert_called_once_with(argv=[sys.argv[0]])
+
+    def test_partition_runner_propagates_case_failure_and_reports_duration(self):
+        class Fails(unittest.TestCase):
+            def test_failure(self):
+                self.fail("partition failure")
+        suite = unittest.TestSuite([Fails("test_failure")])
+        with patch.dict(os.environ, {}), patch.object(sys, "stderr", new_callable=io.StringIO) as output, patch.object(
+                sys.modules[__name__], "policy_partition_suite", return_value=suite):
+            self.assertEqual(policy_main(["--partition", "0"]), 1)
+        self.assertIn("partition failure", output.getvalue())
+        self.assertRegex(output.getvalue(), r"test_failure: [0-9]+\.[0-9]{3}s")
+        timing = PolicyTimingResult(io.StringIO(), True, 2)
+        with patch.object(time, "perf_counter", side_effect=OSError("timer unavailable")):
+            with self.assertRaisesRegex(OSError, "timer unavailable"):
+                timing.startTest(Fails("test_failure"))
+        self.assertEqual(timing.testsRun, 0)
+
+    def test_qualified_import_keeps_complete_partition_roster_and_listing(self):
+        import importlib.util
+        name = "policy_selection.qualified"
+        spec = importlib.util.spec_from_file_location(name, Path(__file__))
+        module = importlib.util.module_from_spec(spec)
+        # Reuse the already vetted shell; this checks module/selection semantics.
+        with patch.dict(sys.modules, {name: module}), patch.object(shell, "bash_executable", return_value=BASH):
+            spec.loader.exec_module(module)
+            complete = list(module.policy_cases(unittest.TestLoader().loadTestsFromModule(module)))
+            selected = []
+            for partition in module.POLICY_PARTITIONS:
+                selected.extend(module.policy_cases(module.policy_partition_suite(unittest.TestLoader(), module, partition)))
+            self.assertEqual(len(selected), len({case.id() for case in selected}))
+            self.assertCountEqual([case.id() for case in selected], [case.id() for case in complete])
+            expected = policy_cases(unittest.TestLoader().loadTestsFromModule(sys.modules[__name__]))
+            self.assertCountEqual([(type(case).__name__, case._testMethodName) for case in complete],
+                                  [(type(case).__name__, case._testMethodName) for case in expected])
+            with patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                self.assertEqual(module.policy_main(["--partition", "0", "--list-tests"]), 0)
+            part_zero = module.policy_partition_suite(unittest.TestLoader(), module, "0")
+            self.assertEqual(output.getvalue().splitlines(), [case.id() for case in module.policy_cases(part_zero)])
+
+
 if __name__ == "__main__":
-    unittest.main()
+    raise SystemExit(policy_main())

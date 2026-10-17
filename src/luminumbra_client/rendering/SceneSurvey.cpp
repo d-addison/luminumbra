@@ -65,7 +65,7 @@ frame_target(const std::string& label, glm::vec3 poi, float back, float up, floa
 
 } // namespace
 
-void RunSceneSurvey(GLFWwindow* window,
+bool RunSceneSurvey(GLFWwindow* window,
                     world::GameSession& session,
                     RenderPipeline& pipeline,
                     Camera& camera,
@@ -76,7 +76,7 @@ void RunSceneSurvey(GLFWwindow* window,
     Systems::PhysicsSystem* phys = session.GetPhysicsSystem();
     if (w == nullptr || phys == nullptr) {
         LUMINUMBRA_CORE_ERROR("SceneSurvey: no world/physics");
-        return;
+        return false;
     }
     const glm::vec3 spawn(session.GetMetadata().spawnPoint);
     // Mid-angle sun (NOT near-zenith): a high sun grazes vertical rock/waterfall faces (they read
@@ -270,7 +270,10 @@ void RunSceneSurvey(GLFWwindow* window,
         const Luminumbra::Vec3 anchor(cam);
         // Stream the new region in (the chunks here are not loaded yet).
         w->update(session.GetRegistry(), anchor, phys);
-        w->EnsureSurfaceReadyNear(anchor, phys, 12, 4);
+        if (!w->EnsureSurfaceReadyNear(anchor, phys, 12, 4)) {
+            LUMINUMBRA_CORE_ERROR("SceneSurvey '{}': surface preparation refused", t.label);
+            return false;
+        }
         w->wait_for_streaming_jobs();
         // Settle: render frames so foliage/water/atmosphere + mesh uploads catch up. Longer for
         // water (a river needs ticks to source-fill + flow + the surface mesh to regenerate).
@@ -315,6 +318,7 @@ void RunSceneSurvey(GLFWwindow* window,
     std::ofstream(out_dir / "survey.json") << index.dump(2) << "\n";
     LUMINUMBRA_CORE_INFO(
         "SceneSurvey: wrote {} POI captures -> {}", targets.size(), out_dir.string());
+    return true;
 }
 
 } // namespace Luminumbra::Rendering
