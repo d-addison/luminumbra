@@ -98,6 +98,74 @@ def guarded_jobs(workflows):
         yield "ci.yml", job_id, name, ci[job_id]
 
 
+def status_function_violations(workflow):
+    """Find status expressions outside if values in our indented YAML layout."""
+    if_values = []
+    scalar_key, scalar_indent, scalar_start = None, -1, 0
+    offset = 0
+    for line in workflow.splitlines(keepends=True):
+        indent = len(line) - len(line.lstrip(" "))
+        if line.strip() and not line.lstrip().startswith("#"):
+            if scalar_key is not None and indent <= scalar_indent:
+                if scalar_key == "if":
+                    if_values.append((scalar_start, offset))
+                scalar_key = None
+            if scalar_key is None:
+                header = re.match(r" *(?:- +)?(?P<key>[\w-]+|'[^']+'|\"[^\"]+\"): *(?P<value>.*)", line)
+                if header and (header["key"].strip("'\"") == "if" or
+                               (header["value"].strip() and not header["value"].startswith("#"))):
+                    scalar_key = header["key"].strip("'\"")
+                    scalar_indent = header.start("key")
+                    scalar_start = offset + header.start("value")
+        offset += len(line)
+    if scalar_key == "if":
+        if_values.append((scalar_start, offset))
+
+    violations = []
+    for expression in re.finditer(r"\$\{\{(?:'(?:[^']|'')*'|(?!\}\}).)*\}\}", workflow, re.DOTALL):
+        if re.search(r"\b(?:success|failure|cancelled|always)\s*\(", expression[0], re.IGNORECASE):
+            if not any(start <= expression.start() and expression.end() <= end
+                       for start, end in if_values):
+                violations.append(workflow.count("\n", 0, expression.start()) + 1)
+    return violations
+
+
+class WorkflowExpressionPolicyTests(unittest.TestCase):
+    def test_status_functions_are_only_used_in_if_values(self):
+        paths = sorted(path for path in (ROOT / ".github/workflows").rglob("*")
+                       if path.suffix in (".yml", ".yaml"))
+        self.assertTrue(paths)
+        for path in paths:
+            with self.subTest(workflow=path.name):
+                self.assertEqual(status_function_violations(path.read_text(encoding="utf-8")), [],
+                                 "Status functions are only valid in if values")
+
+    def test_status_expression_contexts(self):
+        for function in ("success", "failure", "cancelled", "always"):
+            expression = "${{ " + function + "() }}"
+            for key in ("name", "env", "with", "run", "outputs"):
+                for scalar in (expression, "|\n  " + expression,
+                               ">-\n  ${{\n    " + function + "()\n  }}"):
+                    with self.subTest(function=function, key=key, scalar=scalar):
+                        self.assertTrue(status_function_violations(key + ": " + scalar + "\n"))
+            for condition in ("if: " + expression, "- if: " + expression,
+                              "'if': " + expression, '"if": ' + expression,
+                              "if:\n  " + expression,
+                              "if: >-\n  " + expression,
+                              "if: ${{\n  " + function + "()\n  }}"):
+                with self.subTest(condition=condition):
+                    self.assertEqual(status_function_violations(condition + "\n"), [])
+        # Script text that looks like an if key must not grant an exemption.
+        self.assertEqual(status_function_violations("run: |\n  if: ${{ always() }}\n"), [2])
+        self.assertEqual(status_function_violations(
+            "if: ${{ always() }}\nenv:\n  BAD: ${{ cancelled() }}\n"), [3])
+        self.assertEqual(status_function_violations("name: ${{ ALWAYS () }}\n"), [1])
+        self.assertEqual(status_function_violations("name: ${{ '}}' || cancelled() }}\n"), [1])
+        self.assertEqual(status_function_violations("if: ${{ '}}' || cancelled() }}\n"), [])
+        self.assertEqual(status_function_violations("name: ${{ github.workflow }}\n"), [])
+        self.assertEqual(status_function_violations(""), [])
+
+
 class WorkflowDraftPolicyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -186,6 +254,10 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             for step in steps(job)[1:]:
                 with self.subTest(workflow=filename, job=job_id, step=step.splitlines()[0]):
                     condition = value(step, "if", 8) or ""
+                    if (job_id == "asan" or job_id.endswith("-result")) and step.startswith("      - name: Reject cancelled workflow\n"):
+                        self.assertEqual(condition, "${{ cancelled() }}")
+                        self.assertIsNone(value(step, "continue-on-error", 8))
+                        continue
                     # Ordinary steps implicitly require success(). Evidence steps
                     # using always() must explicitly exclude drafts or be manual-only.
                     if "always()" in condition:
@@ -348,10 +420,12 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                 gate = next(step for step in steps(aggregate) if "name: Require expected producers and route\n" in step)
                 self.assertEqual(value(gate, "SHARD_RESULT", 10), "${{ needs." + job_id + ".result }}")
                 for key, expression in (("NEEDS_CPP", "needs.changes.outputs.needs_cpp"),
-                                        ("CI_CANCELLED", "cancelled()"), ("CI_EVENT", "github.event_name"),
+                                        ("CI_EVENT", "github.event_name"),
                                         ("CI_DRAFT", "github.event.pull_request.draft")):
                     self.assertEqual(value(gate, key, 10), "${{ " + expression + " }}")
+                self.assertIsNone(value(gate, "CI_CANCELLED", 10))
                 self.assertIn('ctest_shards.py gate --result "$SHARD_RESULT" --cpp "$NEEDS_CPP"', gate)
+                self.assertIn('--cancelled false --event "$CI_EVENT" --draft "$CI_DRAFT"', gate)
                 merge = next(step for step in steps(aggregate) if "name: Merge shard JUnit and check inventory\n" in step)
                 self.assertIn(f"ctest_shards.py merge --profile {profile}", merge)
                 self.assertIn('--needs-heavy "$CI_NEEDS_HEAVY" --reason "$CI_HEAVY_REASON"', merge)
@@ -816,6 +890,58 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             with self.subTest(job=job):
                 self.assert_aggregate_schedules(ci[job])
 
+    def test_native_aggregates_refuse_cancellation_and_preserve_route_checks(self):
+        cases = [
+            (result, cpp, "pull_request", "false", "false", "true", result == "success")
+            for result in ("success", "failure", "cancelled", "skipped", "", "unknown")
+            for cpp in ("true", "false", "")
+        ]
+        cases.extend([
+            ("success", "true", "pull_request", "true", "false", "true", False),
+            ("success", "true", "pull_request", "", "false", "true", False),
+            ("success", "true", "pull_request", "unknown", "false", "true", False),
+            ("success", "true", "push", "", "false", "true", True),
+            ("success", "true", "workflow_dispatch", "", "true", "true", True),
+            ("success", "false", "workflow_dispatch", "", "true", "true", False),
+            ("skipped", "false", "push", "", "false", "false", True),
+            ("success", "true", "push", "", "false", "false", False),
+            ("", "false", "push", "", "false", "false", False),
+            ("unknown", "false", "push", "", "false", "false", False),
+        ])
+        ci = jobs(self.workflows["ci.yml"])
+        with tempfile.TemporaryDirectory() as directory:
+            for job in ("linux-result", "windows-msvc-result", "windows-ucrt64-result"):
+                aggregate_steps = steps(ci[job])
+                refusal, gate = aggregate_steps[2:4]
+                self.assertTrue(refusal.startswith("      - name: Reject cancelled workflow\n"))
+                self.assertEqual(value(refusal, "if", 8), "${{ cancelled() }}")
+                self.assertIsNone(value(refusal, "continue-on-error", 8))
+                self.assertTrue(gate.startswith("      - name: Require expected producers and route\n"))
+                self.assertIsNone(value(gate, "if", 8))
+                self.assertIsNone(value(gate, "continue-on-error", 8))
+                refusal_script, gate_script = value(refusal, "run", 8), value(gate, "run", 8)
+                self.assertIsNotNone(refusal_script)
+                self.assertIsNotNone(gate_script)
+                for cancelled in (False, True):
+                    for result, cpp, event, draft, qualification, enabled, accepted in cases:
+                        with self.subTest(job=job, cancelled=cancelled, result=result, cpp=cpp,
+                                          event=event, draft=draft, qualification=qualification, enabled=enabled):
+                            script = 'python3() { "$POLICY_PYTHON" -I -B "$@"; }\n'
+                            script += (refusal_script + "\n" if cancelled else "") + gate_script
+                            process = subprocess.run(
+                                [bash_executable(), "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script],
+                                cwd=ROOT,
+                                env=dict(os.environ, POLICY_PYTHON=Path(sys.executable).as_posix(),
+                                         SHARD_RESULT=result, NEEDS_CPP=cpp, CI_EVENT=event, CI_DRAFT=draft,
+                                         CI_QUALIFICATION=qualification, CI_ENABLED=enabled,
+                                         GITHUB_STEP_SUMMARY=(Path(directory) / "summary").as_posix()),
+                                capture_output=True, text=True, timeout=10,
+                            )
+                            self.assertEqual(process.returncode == 0, accepted and not cancelled,
+                                             process.stdout + process.stderr)
+                            if cancelled:
+                                self.assertIn("Native test workflow was cancelled", process.stderr)
+
     def assert_aggregate_schedules(self, aggregate):
         expression = value(aggregate, "if", 4).removeprefix("${{ ").removesuffix(" }}")
         # Evaluate the workflow's status-only condition, including Actions'
@@ -840,30 +966,40 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         self.assertEqual(value(step, "ASAN_SHARD_RESULT", 10), "${{ needs.asan-shard.result }}")
         self.assertEqual(value(step, "CI_PATHS_RESULT", 10), "${{ needs.changes.result }}")
         self.assertEqual(value(step, "NEEDS_CPP", 10), "${{ needs.changes.outputs.needs_cpp }}")
-        self.assertEqual(value(step, "ASAN_CANCELLED", 10), "${{ cancelled() }}")
+        self.assertIsNone(value(step, "ASAN_CANCELLED", 10))
         self.assertEqual(value(step, "if", 8), "always() && (" + READY + ")")
         self.assertIsNone(value(step, "continue-on-error", 8))
         self.check_asan_aggregate_results(value(step, "run", 8))
 
     def check_asan_aggregate_results(self, script):
+        aggregate = jobs(self.workflows["asan.yml"])["asan"]
+        refusal = next(step for step in steps(aggregate)
+                       if step.startswith("      - name: Reject cancelled workflow\n"))
+        self.assertEqual(value(refusal, "if", 8), "${{ cancelled() }}")
+        self.assertIsNone(value(refusal, "continue-on-error", 8))
+        refusal_script = value(refusal, "run", 8)
+        self.assertIsNotNone(refusal_script)
         with tempfile.TemporaryDirectory() as directory:
-            for cancelled in ("false", "true", ""):
+            for cancelled in (False, True):
                 for classification in ("success", "failure", "cancelled", "skipped", "", "unknown"):
                     for cpp in ("true", "false", ""):
                         for result in ("success", "failure", "cancelled", "skipped", "", "unknown"):
                             with self.subTest(cancelled=cancelled, classification=classification,
                                               cpp=cpp, result=result):
                                 process = subprocess.run(
-                                    [bash_executable(), "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script],
+                                    [bash_executable(), "--noprofile", "--norc", "-e", "-o", "pipefail", "-c",
+                                     (refusal_script + "\n" if cancelled else "") + script],
                                     env=dict(os.environ, NEEDS_CPP=cpp, ASAN_SHARD_RESULT=result,
-                                             ASAN_CANCELLED=cancelled, CI_PATHS_RESULT=classification,
+                                             CI_PATHS_RESULT=classification,
                                              GITHUB_STEP_SUMMARY=(Path(directory) / "summary").as_posix()),
                                     capture_output=True, text=True, timeout=10,
                                 )
-                                accepted = cancelled == "false" and (
+                                accepted = not cancelled and (
                                     result == "success" or (classification == "success" and
                                                             cpp == "false" and result == "skipped"))
                                 self.assertEqual(process.returncode == 0, accepted, process.stdout + process.stderr)
+                                if cancelled:
+                                    self.assertIn("ASan workflow was cancelled", process.stderr)
 
     def test_ucrt_route_seeds_devel_and_preserves_other_event_and_path_guards(self):
         ci = jobs(self.workflows["ci.yml"])
