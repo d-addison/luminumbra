@@ -6,6 +6,7 @@
 #include "FarVolumeGlBackend.h"
 #include "FarWorldReplay.h"
 #include "FarWorldReplayGl.h"
+#include "GraphicsRuntimeConfig.h"
 #include "ImpostorBake.h"  //  far-field tree impostor atlas (opt-in)
 #include "InProcessFlip.h" // Deterministic in-process FLIP image comparison.
 #include "Mesh.h"
@@ -13,6 +14,7 @@
 #include "RenderGraph.h"   // Declarative frame graph validated against the trace.
 #include "RenderSystem.h"
 #include "RenderingDefaults.h"
+#include "SceneRenderScale.h"
 #include "SunLightModel.h"  //  rendering: SunIrradiance (transmittance-coupled sun magnitude)
 #include "TimeOfDayModel.h" // Pure time-of-day policy helpers.
 #include "core/Log.h"
@@ -20,6 +22,7 @@
 #include "luminumbra_common/components/LightingComponents.h"
 #include "luminumbra_common/core/DeterministicMath.h"
 #include "luminumbra_common/core/Environment.h"
+#include "luminumbra_common/core/GraphicsPresets.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/Chunk.h"
 #include "passes/AerialPass.h"
@@ -283,8 +286,8 @@ bool RenderPipeline::startup(u32 screen_width,
     m_started = false;
     m_screen_width = screen_width;
     m_screen_height = screen_height;
-    // render-scale knob. m_render_scale defaults to user.render_scale (wired via
-    // set_render_scale before startup); LUMIN_RENDER_SCALE overrides for an A/B. Clamped to
+    // render-scale knob. m_render_scale is seeded from resolved graphics before
+    // startup; LUMIN_RENDER_SCALE overrides for an A/B. Clamped to
     // [0.5, 1.0] -- 1.0 is byte-identical (internal==output); < 1.0 renders the scene at the
     // internal extent and the taau/final-blit sampler upscales to output.
     if (const auto value = Core::ReadEnvironment("LUMIN_RENDER_SCALE"); value && !value->empty()) {
@@ -299,7 +302,7 @@ bool RenderPipeline::startup(u32 screen_width,
     m_internal_width = static_cast<u32>(std::lround(m_screen_width * m_render_scale));
     m_internal_height = static_cast<u32>(std::lround(m_screen_height * m_render_scale));
     // log the resolved scale so the active render resolution is observable (which of
-    // user.render_scale / LUMIN_RENDER_SCALE won, and the internal extent the scene renders at).
+    // resolved graphics / LUMIN_RENDER_SCALE won, and the internal extent the scene renders at).
     LUMINUMBRA_CORE_INFO(" render_scale {} -> internal {}x{} (output {}x{})",
                          m_render_scale,
                          m_internal_width,
@@ -319,7 +322,10 @@ bool RenderPipeline::startup(u32 screen_width,
         // SCALED intermediates render at internal res (== output at scale 1.0).
         m_lighting_pass->init_lighting_fbo(m_render_registry, m_internal_width, m_internal_height);
         m_gbuffer_pass->init_gbuffer(m_render_registry, m_internal_width, m_internal_height);
-        m_shadow_pass->init_shadow_map(m_render_registry);
+        if (!m_shadow_pass->init_shadow_map(m_render_registry)) {
+            cleanup_gpu_resources();
+            return false;
+        }
         m_ssao_pass->init_ssao(m_render_registry, m_internal_width, m_internal_height);
         init_screen_quad();
         m_taau_pass->init(m_render_registry,
@@ -3607,6 +3613,19 @@ void RenderPipeline::on_resize(u32 new_width, u32 new_height) {
 }
 
 void RenderPipeline::set_render_scale(float scale) {
+    resize_graphics_targets(scale, m_shadow_pass->shadow_map().resolution);
+}
+
+bool RenderPipeline::resize_graphics_targets(float scale, u32 shadow_resolution) {
+    if (!std::isfinite(scale) ||
+        (shadow_resolution != 1024 && shadow_resolution != 1536 && shadow_resolution != 2048))
+        return false;
+    // Before startup there is no storage. A shadow-only change owns its own
+    // transaction; simultaneous scene/shadow changes publish one complete group.
+    if (!m_started || std::clamp(scale, 0.5f, 1.0f) == m_render_scale) {
+        if (!m_shadow_pass->set_resolution(m_render_registry, shadow_resolution))
+            return false;
+    }
     // config-driven internal render scale. Clamp to the SAME [0.5, 1.0]
     // band startup's LUMIN_RENDER_SCALE env knob uses. BEFORE startup (m_started == false)
     // this only seeds m_render_scale -- startup then sizes m_internal_* from it, and its env
@@ -3614,32 +3633,136 @@ void RenderPipeline::set_render_scale(float scale) {
     // reallocates the scaled intermediates exactly as on_resize does (the output-res
     // TAAU/backbuffer targets are untouched -- only the internal extent moved). At scale 1.0
     // this is a no-op (internal==output), byte-identical.
-    const float clamped = std::clamp(scale, 0.5f, 1.0f);
-    if (clamped == m_render_scale)
-        return;
-    m_render_scale = clamped;
-    if (!m_started)
-        return; // startup() will size the internal extent from m_render_scale
-    m_internal_width = static_cast<u32>(std::lround(m_screen_width * m_render_scale));
-    m_internal_height = static_cast<u32>(std::lround(m_screen_height * m_render_scale));
-    m_glass_oit_pass->destroy(); // color targets and shared depth must use the new internal extent
-    m_lighting_pass->destroy_lighting_fbo(m_render_registry);
-    m_lighting_pass->init_lighting_fbo(m_render_registry, m_internal_width, m_internal_height);
-    m_gbuffer_pass->destroy_gbuffer(m_render_registry);
-    m_gbuffer_pass->init_gbuffer(m_render_registry, m_internal_width, m_internal_height);
-    m_ssao_pass->destroy_ssao(m_render_registry);
-    m_ssao_pass->init_ssao(m_render_registry, m_internal_width, m_internal_height);
-    // The output-res TAAU history buffers keep their size (output is unchanged), but their
-    // CONTENT is now stale -- it was resolved at the previous internal scale, so its motion
-    // vectors / reprojection no longer match. Invalidate it so the next resolve restarts fresh
-    // instead of blending the previous scale's history after a runtime scale change.
-    m_taau_pass->invalidate_history();
-    m_frustumCache.valid = false;
-    ++m_resize_generation;
-    LUMINUMBRA_CORE_INFO("RenderPipeline render_scale -> {} (internal {}x{})",
-                         m_render_scale,
-                         m_internal_width,
-                         m_internal_height);
+    return ApplySceneRenderScale(
+        m_render_scale,
+        scale,
+        m_started,
+        [this, shadow_resolution](float clamped) {
+            // Check before rounding/narrowing, including platforms with 32-bit long.
+            constexpr auto max_extent = static_cast<u32>(std::numeric_limits<GLsizei>::max());
+            if (m_screen_width == 0 || m_screen_height == 0 || m_screen_width > max_extent ||
+                m_screen_height > max_extent)
+                return false;
+            const auto width =
+                static_cast<u32>(std::lround(static_cast<double>(m_screen_width) * clamped));
+            const auto height =
+                static_cast<u32>(std::lround(static_cast<double>(m_screen_height) * clamped));
+            const u32 half_width = std::max(1u, width / 2u);
+            const u32 half_height = std::max(1u, height / 2u);
+            using Extent = RenderResourceRegistry::TargetExtent;
+            // Twelve scene attachments, optional authored data and two shadow arrays.
+            std::array extents{Extent{"gbuffer_position", width, height},
+                               Extent{"gbuffer_normal", width, height},
+                               Extent{"gbuffer_albedo", width, height},
+                               Extent{"gbuffer_material", width, height},
+                               Extent{"gbuffer_motion", width, height},
+                               Extent{"gbuffer_depth", width, height},
+                               Extent{"lighting_color", width, height},
+                               Extent{"lighting_opaque_color", width, height},
+                               Extent{"lighting_depth", width, height},
+                               Extent{"ssao_raw", width, height},
+                               Extent{"ssao_blur", width, height},
+                               Extent{"ssao_half", half_width, half_height},
+                               Extent{},
+                               Extent{},
+                               Extent{}};
+            auto& gbuffer = m_gbuffer_pass->gbuffer();
+            std::size_t extent_count = 12;
+            if (gbuffer.authored_texture)
+                extents[extent_count++] = {"gbuffer_authored", width, height};
+            const bool shadow_changed = shadow_resolution != m_shadow_pass->shadow_map().resolution;
+            if (shadow_changed) {
+                extents[extent_count++] = {
+                    "shadow_depth_cascades", shadow_resolution, shadow_resolution};
+                extents[extent_count++] = {
+                    "shadow_tint_cascades", shadow_resolution, shadow_resolution};
+            }
+            // OIT borrows lighting depth outside the registry. Detach it before
+            // the transaction can retire depth, including failure/rollback
+            // cleanup. The next glass frame lazily recreates its targets.
+            m_glass_oit_pass->destroy();
+            if (!m_render_registry.replace_targets(std::span(extents).first(extent_count))) {
+                LUMINUMBRA_CORE_ERROR(
+                    "Render scale target allocation failed; keeping previous scale");
+                return false;
+            }
+            // Publish cached handles before any pass can run. Noise/kernel and shaders
+            // are independent of the extent and retain their exact previous contents.
+            gbuffer.fbo_id = m_render_registry.fbo("gbuffer_fbo").id;
+            gbuffer.position_texture = m_render_registry.texture("gbuffer_position").id;
+            gbuffer.normal_texture = m_render_registry.texture("gbuffer_normal").id;
+            gbuffer.albedo_texture = m_render_registry.texture("gbuffer_albedo").id;
+            gbuffer.material_texture = m_render_registry.texture("gbuffer_material").id;
+            gbuffer.motion_vector_texture = m_render_registry.texture("gbuffer_motion").id;
+            gbuffer.depth_texture = m_render_registry.texture("gbuffer_depth").id;
+            if (gbuffer.authored_texture)
+                gbuffer.authored_texture = m_render_registry.texture("gbuffer_authored").id;
+            auto& lighting = m_lighting_pass->lighting_fbo();
+            lighting.fbo_id = m_render_registry.fbo("lighting_fbo").id;
+            lighting.color_texture = m_render_registry.texture("lighting_color").id;
+            lighting.opaque_color_texture = m_render_registry.texture("lighting_opaque_color").id;
+            lighting.depth_texture = m_render_registry.renderbuffer("lighting_depth").id;
+            auto& ao = m_ssao_pass->ssao();
+            ao.fbo = m_render_registry.fbo("ssao_fbo").id;
+            ao.blurFBO = m_render_registry.fbo("ssao_blur_fbo").id;
+            ao.halfFBO = m_render_registry.fbo("ssao_half_fbo").id;
+            ao.ssaoColorBuffer = m_render_registry.texture("ssao_raw").id;
+            ao.ssaoColorBufferBlur = m_render_registry.texture("ssao_blur").id;
+            ao.halfTex = m_render_registry.texture("ssao_half").id;
+            ao.halfW = half_width;
+            ao.halfH = half_height;
+            if (shadow_changed)
+                m_shadow_pass->set_resolution(m_render_registry, shadow_resolution);
+            m_internal_width = width;
+            m_internal_height = height;
+            return true;
+        },
+        [this] {
+            // The output-res TAAU history buffers keep their size (output is unchanged), but their
+            // CONTENT is now stale -- it was resolved at the previous internal scale, so its motion
+            // vectors / reprojection no longer match. Invalidate it so the next resolve restarts
+            // fresh instead of blending the previous scale's history after a runtime scale change.
+            m_taau_pass->invalidate_history();
+            m_frustumCache.valid = false;
+            ++m_resize_generation;
+            LUMINUMBRA_CORE_INFO("RenderPipeline render_scale -> {} (internal {}x{})",
+                                 m_render_scale,
+                                 m_internal_width,
+                                 m_internal_height);
+        });
+}
+
+bool RenderPipeline::apply_graphics(const luminumbra::core::ResolvedGraphics& resolved) {
+    const auto config = GraphicsRuntimeValues(resolved);
+    const auto previous = graphics_runtime_config();
+    if (!resize_graphics_targets(config.render_scale, static_cast<u32>(config.shadow_resolution)))
+        return false;
+    m_foliage_pass->set_enabled(config.grass_enabled);
+    m_foliage_pass->set_density_scale(config.grass_density);
+    m_foliage_pass->set_fade_distances(config.grass_fade_start_m, config.grass_fade_end_m);
+    m_farlod->set_horizon(config.far_radius_m, config.far_outer_clip_m);
+    set_volumetric_quality(config.volumetric_quality);
+    m_ui_blur = config.ui_blur;
+    // Scale changes already reset history during target publication. Other presentation
+    // changes also invalidate the accumulated image, even with unchanged target extents.
+    if (config != previous && config.render_scale == previous.render_scale) {
+        m_taau_pass->invalidate_history();
+        m_frustumCache.valid = false;
+    }
+    return true;
+}
+
+GraphicsRuntimeConfig RenderPipeline::graphics_runtime_config() const {
+    return {.render_scale = m_render_scale,
+            .grass_density = m_foliage_pass->density_scale(),
+            .grass_fade_start_m = m_foliage_pass->fade_start_m(),
+            .grass_fade_end_m = m_foliage_pass->fade_end_m(),
+            .far_radius_m = m_farlod->wanted_radius_m(),
+            .far_outer_clip_m = m_farlod->outer_clip_m(),
+            .shadow_resolution = static_cast<int>(m_shadow_pass->shadow_map().resolution),
+            .volumetric_quality = m_volumetric_quality,
+            .grass_enabled = m_foliage_pass->enabled(),
+            .ui_blur = m_ui_blur};
 }
 
 void RenderPipeline::set_offscreen_target(u32 fbo, u32 fbo_w, u32 fbo_h) {
@@ -5435,7 +5558,6 @@ namespace {
 
 constexpr uint32_t kLtexMagic = 0x5845544C; // 'LTEX' little-endian
 constexpr uint16_t kLtexVersion = 1;
-
 template<typename T>
 bool ReadPod(std::ifstream& in, T& value) {
     in.read(reinterpret_cast<char*>(&value), sizeof(T));

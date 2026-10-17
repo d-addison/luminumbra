@@ -5,6 +5,7 @@
 #include "GBufferPass.h"
 #include "LightingPass.h"
 #include "PassGlHelpers.h"
+#include "app/FrameAttribution.h"
 #include "core/Log.h"
 #include "core/Profiler.h"
 #include "rendering/Camera.h"
@@ -275,6 +276,7 @@ void FoliagePass::clear_ground_meshes() {
     m_gpu_generated_count.reset();
     m_gpu_active = false;
     m_scatter_built = false;
+    m_attributed_signature_valid = false;
     m_foliage_build_backlog = false;
     ++m_ground_revision;
     m_instance_generation = 0;
@@ -621,9 +623,17 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
             config_mix(static_cast<std::uint64_t>(std::llround(m_density_scale * 100.0f)));
             components.config = config_sig;
             components.scatter_chunks = chunk_acc;
-            m_rebuild_attribution.reasons = Attribution::classify_rebuild(
-                m_attributed_signature, components, m_scatter_built, m_foliage_build_backlog);
+            m_rebuild_attribution.reasons =
+                Attribution::classify_rebuild(m_attributed_signature,
+                                              components,
+                                              m_attributed_signature_valid,
+                                              m_foliage_build_backlog);
+            // Settings setters also invalidate changes smaller than the quantized
+            // signature. Attribute those rebuilds even when its hash is unchanged.
+            if (m_attributed_signature_valid && !m_scatter_built)
+                m_rebuild_attribution.reasons |= Attribution::Config;
             m_attributed_signature = components;
+            m_attributed_signature_valid = true;
         }
         if (m_scatter_built && sig == m_last_scatter_sig && !m_foliage_build_backlog) {
             // A busy ring may have refused the first submission for this build.
