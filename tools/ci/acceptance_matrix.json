@@ -1160,13 +1160,25 @@
     {
       "id": "contract.region-symmetric-boundary",
       "source": "docs/active-regions.md#activation-and-ordering",
-      "statement": "Non-finite or out-of-range (outside -2^24 <= x,z < 2^24) walking anchors, ground-object edit positions and region pins are ignored and counted.",
-      "status": "planned",
+      "statement": "Non-finite or out-of-range (outside -2^24 <= x,z < 2^24) walking anchors, ground-object edit positions and region pins are ignored and counted (observational, never hashed or saved).",
+      "status": "partial",
       "requirements": [
         "ar.activation.050"
       ],
       "discrepancy": "docs/active-regions.md and the ledger specify [-2^24, 2^24). ActiveRegionLedgerTest.ValidAnchorBoundaries covers the half-open interval on both axes; an integrated boundary regression for walking anchors, ground-object edits and region pins with full endpoint coverage remains planned under issue #250.",
       "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedgerTest.ValidAnchorBoundaries"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedgerTest.InvalidSchedulerInputsAreSkippedAndCounted"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.InvalidHostInputsNeverThrowAndAreCounted"
+        },
         {
           "kind": "ctest",
           "ref": "ActiveRegionLedgerTest.SymmetricAnchorBoundaries",
@@ -2083,13 +2095,15 @@
     {
       "id": "contract.dw.persistence.10",
       "source": "docs/distant-world.md#persistence-and-format-contract",
-      "statement": "Acceptance obligations: The existing periodic hash exchange is state-divergence detection, not admission: qualified sessions must run with checkpoint exchange enabled, and a mismatch ends the session at the first exchange after it arises. / Preset revision 7 retains revision 6 omission compatibility; / current-format saves without embedded packaged presets use frozen revision-6 copies. / Lockstep protocol and LREC1 replay layout are version 3 and bind effective configuration plus resolved preset/dependency content; / older layouts are refused. / See the [identity contract](development/system-config-identity.md).",
+      "statement": "Acceptance obligations: The existing periodic hash exchange is state-divergence detection, not admission: qualified sessions must run with checkpoint exchange enabled, and a mismatch ends the session at the first exchange after it arises. / Preset revision 7 retains revision 6 omission compatibility; / current-format saves without embedded packaged presets use frozen revision-6 copies. / Lockstep Hello is version 4; / LREC1 uses version 3 for complete streams and version 4 for diagnostic suffixes with an elided prefix. / Both replay versions bind effective configuration plus resolved preset/dependency content; / older layouts are refused. / See the [identity contract](development/system-config-identity.md).",
       "status": "planned",
       "requirements": [
         "dw.persistence.055",
         "dw.persistence.056",
         "dw.persistence.057",
         "dw.persistence.058",
+        "dw.persistence.061",
+        "dw.persistence.062",
         "dw.persistence.059",
         "dw.persistence.060"
       ],
@@ -4043,6 +4057,124 @@
         {
           "kind": "ctest",
           "ref": "GameSessionHeadlessWorldTest.ColumnWaterMigrationAtCapacityRetiresOnlyWaterOnlySources"
+        }
+      ]
+    },
+    {
+      "id": "net.receive-work",
+      "source": "docs/engine-guide.md#persistence-replay-and-networking",
+      "statement": "Each lockstep session entry point shares at most 1024 receive polls and a 256 KiB payload threshold plus one transport-bounded frame across nested drains. Saturation preserves pending messages and late checkpoint diagnostics; finite closure drains finish before storage release. Native regressions are registered; execution remains pending. Complete LREC1 streams remain version 3; diagnostic suffixes with an elided prefix use version 4.",
+      "status": "covered",
+      "requirements": [],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "LockstepSessionTest.ReplenishedReceiveQueueYieldsAndStillAdvancesDeterministically"
+        },
+        {
+          "kind": "ctest",
+          "ref": "LockstepSessionTest.ReceiveByteBudgetYieldsBeforeTheNextLargeFrame"
+        },
+        {
+          "kind": "ctest",
+          "ref": "LockstepSessionTest.HandshakeSchedulingRefusalsShareTheHelloReceiveBudget"
+        },
+        {
+          "kind": "ctest",
+          "ref": "LockstepSessionTest.ReceiveBudgetIsSharedWithInputHashAndRetryRefusalDrains"
+        },
+        {
+          "kind": "ctest",
+          "ref": "LockstepSessionTest.ClosureAcrossReceiveBatchesPreservesQueuedLateDesync"
+        },
+        {
+          "kind": "ctest",
+          "ref": "LockstepSessionTest.SaturatedLocalDisconnectFinishesOnAnEmptyPollWithoutAnotherStep"
+        },
+        {
+          "kind": "ctest",
+          "ref": "LockstepSessionTest.ClosedTransportDeliversInputsBeyondAReceiveBatchBeforeReleasingStorage"
+        },
+        {
+          "kind": "ctest",
+          "ref": "LockstepSessionTest.LateDesyncAfterSendRefusalSurvivesAnExhaustedReceiveBudget"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/engine-guide.md"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/development/system-config-identity.md"
+        }
+      ]
+    },
+    {
+      "id": "net.replication-receive-work",
+      "source": "docs/engine-guide.md#persistence-replay-and-networking",
+      "statement": "Replication public calls share at most 1024 receive polls and a 256 KiB payload threshold plus one bounded frame across clients, admission control and nested refusals. Control-batch yields preserve closing links until commands, ACKs and authoritative snapshots drain. Send and receive capacities remain distinct and enforced. Clean-disconnect artifacts require terminal, non-desynced sessions. Native regressions are registered; execution and qualification remain pending.",
+      "status": "covered",
+      "requirements": [],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "ReplicationEndpoint.ContinuousReceiveSourcesYieldAndOtherClientsProgress"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ReplicationEndpoint.ReceiveBytesBoundMalformedFramesAndPreserveQueuedMessages"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ReplicationEndpoint.SnapshotRefusalsRetainClosingLinksUntilCommandsAndAcksDrain"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ReplicationEndpoint.ContinuousTerminalRefusalsRetainTransportContinuation"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ReplicationEndpoint.UsercmdAndNestedAckRefusalsShareReceiveBudgetAndKeepFinalSnapshot"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ReplicationEndpoint.TransientBroadcastRefusalsShareBudgetAcrossClients"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ReplicationEndpoint.BackpressureDeadlineRetainsRefillingLinkUntilFinalCommandsDrain"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ReplicationEndpoint.ReceiveCapacityIsIndependentAndStillRejectsOversizedSnapshots"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ReplicationEndpoint.TransportUsercmdAndAckLimitsAreTerminalBeforeSending"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ReplicationAdmission.ForwardsDirectionalReceiveLimitBeforeAndAfterAdmission"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ReplicationAdmission.ControlBatchYieldPreservesClosingClientAndFinalSnapshot"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ReplicationAdmission.ControlFramesShareTheEndpointByteBudget"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ReplicationAdmission.BoundedEndpointReceiveRetainsAdmissionRefusals"
+        },
+        {
+          "kind": "ctest",
+          "ref": "NetworkedSessionDriverTest.MissingOrFailedSessionsCannotAdvertiseCleanDisconnect"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/engine-guide.md"
         }
       ]
     }

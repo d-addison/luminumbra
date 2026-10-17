@@ -289,10 +289,140 @@ resolved preset-content identities before admitting state or stepping ticks. The
 content identity binds canonical preset JSON and a sorted manifest of exact biome
 and structure dependency bytes; generation uses that immutable snapshot. Runtime
 and soak TCP slots release peers that fail to complete a matching Hello within
-10 seconds (issue #315). Lockstep protocol and LREC1 replay layout are version 3;
-versions 1 and 2 are refused. See the
+10 seconds (issue #315). The shared networking Hello is version 4; LREC1 replay
+uses version 3 for complete streams and version 4 for diagnostic suffixes with
+an elided prefix. Readers accept both; older Hello layouts are refused. See the
 [identity contract](development/system-config-identity.md) for the effective
 SystemConfig/presentation split, refusal rules and dependency encoding.
+
+Lockstep is a direct two-peer protocol: Hello must match the configured remote
+client slot, and a peer can submit only its own inputs. Hello exchanges start,
+minimum and maximum horizons, checkpoint cadence, transport frame size, and
+retention budget settings. Local and received settings must satisfy
+`0 < horizon_min <= horizon_start <= horizon_max` before any input scheduling.
+Both sides must use identical horizon, cadence and budget settings; incompatibility
+fails before input scheduling with an explicit `handshake_error`. The frame size is the minimum of both transports and each side's
+`max_frame_payload_bytes` setting; callbacks can inspect the result through the
+const `AdmissionStatus().frame_limit` diagnostic.
+Inputs must be newer than the consumed tick and no more than twice the maximum
+configured horizon ahead. Hashes must be cadence checkpoints within that lookahead
+and newer than the contiguous confirmed checkpoint prefix; delayed hashes for executed ticks still participate in desync detection.
+
+Retention is derived, rather than dropping reliable messages when a container
+fills. Let `L = 2 * horizon_max`, `C = ceil(L / cadence)` and
+`W = kReceiveQueueFrameLimit + C + 1` (with no hash slots when cadence is zero).
+The sender pauses simulation after `W` unconfirmed checkpoints while continuing
+to receive; only the oldest unconfirmed tick advances the confirmation prefix.
+The receiver reserves `L` input slots and `W + C` hash slots, including remote
+lead and the next checkpoint needed for confirmation regardless of arrival order.
+Multiplying these slots by the negotiated maximum frame size gives the encoded
+byte bound; overflow is rejected before scheduling. The single remote's per-peer
+and aggregate bounds are identical. Zero `peer_retained_byte_limit` and
+`peer_retained_message_limit` select these derived bounds; explicit budgets must
+fit all negotiated traffic or handshake fails. A tick within the negotiated
+window is never discarded for capacity. Invalid slot, stale/future, malformed,
+conflicting or oversized messages are dropped and counted in session status.
+These rules apply above Loopback, TCP (Windows/POSIX), GNS and Steam transports.
+
+Each `Handshake`, `PumpTick` or `Disconnect` call owns one receive-work budget,
+shared with nested input/hash sends, retry refusals and closure drains. It permits
+at most 1024 receive polls, including empty or malformed frames and unsuccessful
+polls, and stops polling once delivered payload bytes reach 256 KiB. One final
+frame can cross the byte threshold; its payload is bounded by the existing
+64 MiB transport maximum. Transport queues and read-ahead retain their existing
+bounds. Saturation leaves subsequent frames queued and allows an available
+agreed tick to advance; it does not change input bytes, ordering or hashes.
+`Finished` waits for an empty receive poll. A saturated local disconnect stops
+simulation immediately and defers transport close and storage release; its owner
+keeps the session and transport alive and calls `Disconnect` or `PumpTick` again
+until status becomes terminal. A finite backlog drains over successive calls.
+A continuously refilling peer can prolong draining, but cannot monopolize one
+call or grow retained storage beyond the negotiated bounds.
+
+Replication server/client public receive and send calls share the same 1024-poll
+and 256 KiB threshold, including nested refusal and close drains. Admission
+control frames consume that budget; a control-batch yield is distinguished from
+an empty source. Closing links and transports stay alive until draining finishes,
+so queued commands, ACKs and authoritative snapshots precede terminal close.
+Server receive pumping rotates its first client after each call. Transport send
+and receive capacities may differ; receive validation and snapshot reconstruction
+use the receive capacity, and adapters forward both caps without raising either.
+The loopback scenario driver uses fixed default horizons of 3–10 ticks and empty
+input payloads, with no configurable backlog injection. Its clean-disconnect
+artifact requires both session ends to be terminal and free of desync, including
+checkpoints processed during disconnect. Registered regressions require native
+execution before qualification is claimed.
+
+On `Bye(T)`, the survivor compares queued hashes and drains buffered inputs only
+through the sender's final executed tick T. Pre-scheduled inputs after T are
+then discarded. Pending outbound retries cannot cut this drain short; closure
+is reported before retained input/hash storage is released.
+
+Consumed inputs and confirmed peer hashes are pruned. An out-of-order hash that
+already matches its local checkpoint releases all peer strings and retains only
+a confirmation marker. Local hashes retain only
+unconfirmed checkpoints plus the latest `kReceiveQueueFrameLimit` diagnostic
+ticks. Applied input diagnostics retain at most `kReceiveQueueFrameLimit` ticks
+and `kMaxFramePayloadBytes` payload bytes, using a deque. Storage therefore depends
+on the negotiated limits rather than session duration. The only internal history
+consumer is desync export; save-game state does not consume this history.
+Every `LockstepSession` automatically streams merged inputs and local checkpoints
+to a `QueuedReplayRecorder` backed by `BoundedReplayRecorder`, including the
+server lockstep mode, client network driver, and scenario/test drivers. No hook
+installation is required. Handshake performs recorder setup and starts one
+worker through the existing `JobSystem`. Each tick only enqueues shared references
+to immutable, already-encoded merged inputs and local checkpoint strings; it
+performs no recorder I/O, replay encoding, or digest scans. A single ordered
+consumer performs those operations, including segment rotation and pruning.
+Recording uses buffered disk segments beside the dump destination; no per-tick
+flush is performed. Segments hold at most 1024 ticks or 64 MiB, with a larger individual
+tick occupying its own segment. Confirmed segments rotate once the retained
+suffix exceeds 1024 ticks or 64 MiB. All unconfirmed ticks remain pinned, so even
+a delayed mismatch retains the divergent tick and its input bytes. Each segment
+is closed before deletion, including on Windows. Destruction or completed clean
+disconnection removes the working segments; an in-sync session emits no dump.
+
+Outstanding recorder work, including the active tick, is limited to 4096 ticks
+and `max(64 MiB, T)` bytes, plus count-bounded queue metadata. Byte accounting
+charges retained input/string capacities as well as encoded sizes. Queue admission
+reuses preallocated ring slots, takes constant time, and does not wait for the sink.
+On overload it latches the first
+failure and stops accepting further ticks. Accepted ticks still drain in order;
+the recorder never silently drops or resumes a gapped recording. Desync
+finalization returns failure and writes `<dump destination>.incomplete` with the
+first failed tick and a clear reason. Sink failures use the same policy. Recorder
+progress and failure never change simulation outcomes, input scheduling, hashes,
+or session pacing. `LockstepStatus::replay_error` reports a detected recorder
+failure without performing tick-path logging. `FlushReplayRecorder` is an explicit blocking persistence
+barrier; it is not part of `PumpTick`. Desync finalization and shutdown drain all
+accepted work before finalizing or removing working files. Complete artifacts
+keep the existing paths, wire bytes, checkpoint cutoff, and incremental FNV-1a
+prefix digest. Clean shutdown publishes no dump or incomplete companion.
+
+The disk bound is checked at handshake with overflow-safe arithmetic. With
+negotiated maximum frame size `F`, maximum horizon `H`, checkpoint cadence `D`,
+and the checkpoint window `W` above, define `T = 3F + 46` (maximum encoded tick),
+`U = WD + 2H + D` (zero when hashes are disabled), and
+`M = max(64 MiB, T)`. Working segments retain at most `B = UT + 3M` bytes,
+independent of session duration. Actual usage follows retained record sizes;
+the bound is not preallocated. Finalization streams through a fixed 64 KiB
+buffer. The final artifact is bounded by `B + 64 MiB + T + 53` bytes including
+the header, prefix metadata, and trailer; temporary disk usage while finalizing
+is at most `2B + 64 MiB + T + 53`. I/O failures are logged and never change
+simulation or hash results; a failed artifact is never reported as successful.
+
+On desync, the recorder finalizes LREC1 at the configured dump destination and
+populates the existing `LockstepStatus::dump_path` (the server's peer destination
+still appends `.peer`). It keeps every retained input and the local checkpoints
+through the divergence. When the prefix has rotated away, the header is version 4 and an `ElidedPrefix`
+record contains its last tick and a rolling FNV-1a digest of its exact encoded
+record bytes. `ReadReplay` exposes `elided_through_tick` and
+`elided_prefix_digest`; these artifacts support diagnostics, and `--replay`
+explicitly refuses to replay them from the seed. Recordings with no elided
+prefix keep the byte-identical version-3 LREC1 contents. The optional
+`LockstepHooks::record_replay_tick` remains available for additional bounded,
+caller-owned recording; the buffering `ReplayWriter` must not be used as an
+unbounded full-session sink.
 
 The shared `NetSocketsTransport` implements reliable and unreliable delivery for
 both GNS and Steam sockets. Loopback and TCP always deliver reliably and ignore
@@ -620,9 +750,11 @@ the scan before any reads. Resolver exceptions, including JSON serialization
 failures, return diagnostics without publishing an identity or dependency snapshot;
 failed create/load leaves the live world unchanged.
 
-Protocol-v3 Hello and LREC1-v3 headers retain their layouts. A species mismatch
-refuses TCP admission, lockstep handshake and replay verification before simulation
-advances. Existing content-mismatch diagnostics apply; lockstep and replay name
+Hello v4 carries negotiated lockstep admission limits; complete LREC1 streams use
+version 3 and elided diagnostic suffixes use version 4. Binding species does not
+change those layouts. A species mismatch refuses TCP admission, lockstep handshake
+and replay verification before simulation advances. Existing content-mismatch
+diagnostics apply; lockstep and replay name
 `preset/species` content. Older v0.3.0-era preset-only replay hashes mismatch when
 species records are present, in either engine direction, following the existing
 preset dependency compatibility rule. With no species directory, no new records

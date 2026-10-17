@@ -327,9 +327,9 @@ TEST_P(WorldOpenRefusal, RefusesBeforeGenerationAndPreservesAllDiskBytes) {
         EXPECT_FALSE(session.LoadWorldStateFrom(save));
     }
     ASSERT_FALSE(error.empty());
-    if (obsolete)
+    if (obsolete) {
         EXPECT_EQ(error, WorldSaveService::kObsoleteWorldMessage);
-    else if (future)
+    } else if (future)
         EXPECT_NE(error.find("future"), std::string::npos);
     else {
         EXPECT_NE(error, WorldSaveService::kObsoleteWorldMessage);
@@ -793,9 +793,9 @@ TEST_F(WorldOpenRefusal, EveryFrozenPresetResolvesHistoricalBytesAndChecksIdenti
             const auto before = DiskBytes(root);
             const auto inspected = Persistence::InspectSavedWorld(root, "fixture");
             EXPECT_EQ(inspected.preset_path, historical);
-            if (saved_metadata.value("presetIdentity", identity) == identity)
+            if (saved_metadata.value("presetIdentity", identity) == identity) {
                 EXPECT_TRUE(inspected.error.empty()) << inspected.error;
-            else
+            } else
                 EXPECT_NE(inspected.error.find("identity"), std::string::npos);
             EXPECT_EQ(DiskBytes(root), before);
         }
