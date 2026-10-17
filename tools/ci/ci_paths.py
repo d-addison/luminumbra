@@ -18,6 +18,7 @@ PYTHON_TESTS = (
     "tools/ci/test_asan_shards.py",
     "tools/ci/test_ctest_shards.py",
     "tools/ci/test_workflow_policy.py",
+    "tools/ci/test_replay_source_contract.py",
     "tools/ci/test_cache_retention.py",
     "tools/ci/test_check_docs.py",
     "tools/ci/test_check_ctest_junit.py",
