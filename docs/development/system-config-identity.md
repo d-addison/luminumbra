@@ -234,7 +234,8 @@ length first: exactly `kUsercmdPayloadBytes = 19` payload bytes (24 total) ident
 command, even when its tick starts with `LSTP1`. Other frames with this tag must carry
 the Hello magic and satisfy `DecodeHello(frame, hello) && EncodeHello(hello) == frame`.
 Failed Hello decoding never falls back to command decoding. The shared Hello decoder
-requires the complete v4 identity and admission fields and rejects trailing bytes.
+requires the complete v4 identity and admission fields; replication admission's
+exact re-encoding check rejects trailing bytes.
 `DecodeUsercmd` rejects trailing extensions, including those whose outer length was
 adjusted to include the extra bytes. Replication protocol 1 and complete LREC1 layout 3
 remain unchanged; Hello v4 and diagnostic LREC1 suffix version 4 follow the version

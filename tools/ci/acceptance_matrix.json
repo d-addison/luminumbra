@@ -3382,6 +3382,55 @@
           "ref": "FarLodWorker.AuthoritativeCaptureBuildsPersistsAndStales"
         }
       ]
+    },
+    {
+      "id": "net.receive-work",
+      "source": "docs/engine-guide.md#persistence-replay-and-networking",
+      "statement": "Each lockstep session entry point shares at most 1024 receive polls and a 256 KiB payload threshold plus one transport-bounded frame across nested drains. Saturation preserves pending messages and late checkpoint diagnostics; finite closure drains finish before storage release. Native regressions are registered; execution remains pending. Complete LREC1 streams remain version 3; diagnostic suffixes with an elided prefix use version 4.",
+      "status": "covered",
+      "requirements": [],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "LockstepSessionTest.ReplenishedReceiveQueueYieldsAndStillAdvancesDeterministically"
+        },
+        {
+          "kind": "ctest",
+          "ref": "LockstepSessionTest.ReceiveByteBudgetYieldsBeforeTheNextLargeFrame"
+        },
+        {
+          "kind": "ctest",
+          "ref": "LockstepSessionTest.HandshakeSchedulingRefusalsShareTheHelloReceiveBudget"
+        },
+        {
+          "kind": "ctest",
+          "ref": "LockstepSessionTest.ReceiveBudgetIsSharedWithInputHashAndRetryRefusalDrains"
+        },
+        {
+          "kind": "ctest",
+          "ref": "LockstepSessionTest.ClosureAcrossReceiveBatchesPreservesQueuedLateDesync"
+        },
+        {
+          "kind": "ctest",
+          "ref": "LockstepSessionTest.SaturatedLocalDisconnectFinishesOnAnEmptyPollWithoutAnotherStep"
+        },
+        {
+          "kind": "ctest",
+          "ref": "LockstepSessionTest.ClosedTransportDeliversInputsBeyondAReceiveBatchBeforeReleasingStorage"
+        },
+        {
+          "kind": "ctest",
+          "ref": "LockstepSessionTest.LateDesyncAfterSendRefusalSurvivesAnExhaustedReceiveBudget"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/engine-guide.md"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/development/system-config-identity.md"
+        }
+      ]
     }
   ]
 }

@@ -472,10 +472,10 @@ HelloMsg MakeLockstepHello(const LockstepConfig& config,
 // Outcome of a tick-advance attempt.
 enum class TickOutcome {
     Advanced,         // a tick ran (all peer inputs present); world advanced by one tick
-    WaitingForPeer,   // peer input for the wanted tick not yet present -- caller pumps again
+    WaitingForPeer,   // input, receive work or closure is pending -- caller pumps again
     Desync,           // a hash mismatch was detected -- session HALTED, dump emitted
     PeerDisconnected, // a clean Bye/close -- session ENDED cleanly (not a desync)
-    Finished,         // the configured tick budget was reached
+    Finished,         // tick budget reached, pending sends accepted and receive drain empty
 };
 
 // The result the host/driver acts on each pump.
@@ -587,7 +587,10 @@ public:
     // the host typically Handshakes both sides in the gate's single-process driver.
     bool Handshake();
 
-    // Advances the session by AT MOST one tick. Drains pending peer messages first, then:
+    // Advances the session by AT MOST one tick. Receives at most
+    // kReceiveQueueFrameLimit frames/polls and less than kReceiveQueueByteBudget
+    // plus one maximum frame's payload per call, shared by all nested drains.
+    // Pending messages stay in the transport for later calls. Then:
     //  - if an available peer hash mismatched an executed cadence tick -> Desync (HALT + dump);
     //  - otherwise, after draining through Bye's executed tick, or when a closed
     //    transport has no buffered input for the wanted tick -> PeerDisconnected;
@@ -598,10 +601,13 @@ public:
     // each pump retries them before newer sends. Terminal refusals or a full FIFO
     // disconnect. Bye follows a final FIFO flush; a still-pending FIFO closes instead.
     // `budget_ticks` is the total tick count to run; returns Finished once reached
-    // and all pending outbound frames have been accepted.
+    // and all pending outbound frames have been accepted, after an empty receive poll.
     TickResult PumpTick(std::uint64_t budget_ticks);
 
-    // Flushes pending frames, sends Bye only if drained, then closes. Idempotent.
+    // Flushes pending sends, sends Bye only if flushed, then drains before closing.
+    // Shares PumpTick's receive bounds. If saturated, keep the session/transport
+    // alive and call Disconnect or PumpTick again until Status is terminal.
+    // No further simulation runs after a local close request. Idempotent.
     void Disconnect();
 
     // Blocking recording barrier for explicit persistence/lifecycle boundaries.
@@ -628,9 +634,20 @@ public:
     void SetDumpPath(const std::string& path);
 
 private:
-    // Drains all currently-available peer messages into the input/hash buffers, flips
-    // disconnect/desync flags. Hash compare happens here (against the local hash captured
-    // at the same cadence tick). Returns false if a fatal (desync/disconnect) state was set.
+    // Public Handshake/PumpTick/Disconnect own one receive budget; nested send
+    // refusals and closure never replenish it. Charge even empty/malformed frames
+    // and failed polls. Byte overshoot is at most one transport-bounded frame.
+    struct ReceiveWork {
+        std::size_t polls_left = kReceiveQueueFrameLimit;
+        std::size_t payload_bytes = 0;
+    };
+    ReceiveWork m_receive_work;
+    bool m_receive_drain_pending = false;
+    bool m_disconnect_pending = false;
+
+    // Drains within the caller's remaining budget. A quota yield is not EOF:
+    // closure and storage release wait for an actual empty poll (or desync).
+    // Returns false only for a fatal state, not for saturation.
     bool DrainPeerMessages();
 
     struct PeerCheckpoint {
@@ -659,7 +676,7 @@ private:
     bool FlushPendingOutbound();
 
     // Compares available peer hashes before closing and recording a sticky disconnect.
-    void TransportDisconnected();
+    void TransportDisconnected(std::optional<std::uint64_t> stop_tick = std::nullopt);
 
     // Emits the LREC1 desync dump of the local session up to `divergence_tick`.
     void EmitDesyncDump(std::uint64_t divergence_tick, const std::string& section);

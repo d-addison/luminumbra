@@ -1136,6 +1136,7 @@ LockstepAdmissionStatus LockstepSession::AdmissionStatus() const {
 }
 
 bool LockstepSession::Handshake() {
+    m_receive_work = {};
     // Send our Hello, then drain until the peer's Hello arrives (loopback: the peer's
     // Hello must already be queued by the single-process driver). A mismatched
     // protocol/version/seed/preset/tick-rate/config identity is rejected loudly.
@@ -1161,8 +1162,10 @@ bool LockstepSession::Handshake() {
     std::vector<std::uint8_t> frame;
     bool got_peer = false;
     HelloMsg peer;
-    // Bounded drain: pull whatever is currently available.
-    while (m_transport->TryReceiveFrame(frame)) {
+    // Exactly one Hello poll, charged to the same budget as scheduling refusals.
+    --m_receive_work.polls_left;
+    if (m_transport->TryReceiveFrame(frame)) {
+        m_receive_work.payload_bytes += frame.size();
         MessageType type;
         if (!PeekMessageType(frame, type) || type != MessageType::Hello) {
             LUMINUMBRA_CORE_ERROR("lockstep[{}]: expected Hello first, got type {}",
@@ -1177,7 +1180,6 @@ bool LockstepSession::Handshake() {
             return false;
         }
         got_peer = true;
-        break;
     }
     if (!got_peer) {
         LUMINUMBRA_CORE_ERROR("lockstep[{}]: peer never sent Hello", m_config.local_client_id);
@@ -1255,23 +1257,32 @@ bool LockstepSession::Handshake() {
     return true;
 }
 
-void LockstepSession::TransportDisconnected() {
+void LockstepSession::TransportDisconnected(std::optional<std::uint64_t> stop_tick) {
+    if (!m_disconnect_pending) {
+        m_disconnect_pending = true;
+        m_status.disconnect_tick = stop_tick.value_or(m_agreed_tick);
+        // Do not open new admission slots while a local close drains in batches.
+        if (!m_transport_close_admission_tick)
+            m_transport_close_admission_tick = m_agreed_tick;
+    }
     // Closing can discard queued frames. Compare all available hashes for executed
     // ticks first, even when the final send (including Bye) was rejected.
     if (!m_status.desynced) {
         // A peer hash may have been buffered before its local tick was executed.
         // The local cadence hash is now captured before any post-step send.
-        for (auto& entry : m_peer_hashes) {
-            if (!ComparePeerHash(entry.second))
-                break;
-        }
+        // Earlier executed checkpoints compared on receipt or immediately after
+        // their step. Only this tick can have been captured just before a send
+        // failed; do not rescan the retained lookahead on every closure batch.
+        const auto checkpoint = m_peer_hashes.find(m_agreed_tick);
+        if (checkpoint != m_peer_hashes.end())
+            ComparePeerHash(checkpoint->second);
         if (!m_status.desynced)
             DrainPeerMessages();
     }
+    if (!m_status.desynced && m_receive_drain_pending)
+        return;
     m_transport->Close();
     m_disconnected = true;
-    if (!m_status.peer_disconnected)
-        m_status.disconnect_tick = m_agreed_tick;
     m_status.peer_disconnected = true;
     m_pending_outbound.clear();
     m_pending_outbound_bytes = 0;
@@ -1559,9 +1570,19 @@ void LockstepSession::ReleaseRetainedMessages() {
 
 bool LockstepSession::DrainPeerMessages() {
     std::vector<std::uint8_t> frame;
+    m_receive_drain_pending = true;
     // Bye limits input execution and late hash comparison to its executed tick.
     // The original admission window remains fixed while buffered inputs drain.
-    while (!m_status.desynced && m_transport->TryReceiveFrame(frame)) {
+    while (!m_status.desynced && m_receive_work.polls_left != 0 &&
+           m_receive_work.payload_bytes < kReceiveQueueByteBudget) {
+        --m_receive_work.polls_left;
+        if (!m_transport->TryReceiveFrame(frame)) {
+            m_receive_drain_pending = false;
+            break;
+        }
+        // Transports enforce kMaxFramePayloadBytes before allocating. The byte
+        // budget is checked before each poll, so this sum cannot overflow.
+        m_receive_work.payload_bytes += frame.size();
         MessageType type;
         if (!PeekMessageType(frame, type))
             continue;
@@ -1660,10 +1681,15 @@ bool LockstepSession::DrainPeerMessages() {
 }
 
 TickResult LockstepSession::PumpTick(std::uint64_t budget_ticks) {
+    m_receive_work = {};
     TickResult result;
     const auto terminal_result = [&] {
-        result.outcome = m_status.desynced ? TickOutcome::Desync : TickOutcome::PeerDisconnected;
-        result.tick = m_status.desynced ? m_status.desync_tick : m_status.disconnect_tick;
+        result.outcome = m_status.desynced            ? TickOutcome::Desync
+                         : m_status.peer_disconnected ? TickOutcome::PeerDisconnected
+                                                      : TickOutcome::WaitingForPeer;
+        result.tick = m_status.desynced            ? m_status.desync_tick
+                      : m_status.peer_disconnected ? m_status.disconnect_tick
+                                                   : m_agreed_tick;
         return result;
     };
     if (m_status.desynced || m_status.peer_disconnected)
@@ -1671,20 +1697,23 @@ TickResult LockstepSession::PumpTick(std::uint64_t budget_ticks) {
     // 1) Drain peer messages (inputs, hash compares, disconnect). A fatal state stops here.
     if (!DrainPeerMessages())
         return terminal_result();
+    if (m_disconnect_pending) {
+        TransportDisconnected();
+        return terminal_result();
+    }
     if (!FlushPendingOutbound())
         return terminal_result();
     // Peers pre-schedule inputs beyond their final executed tick. Bye limits
     // execution even if those later inputs are buffered. The receive drain above
     // and TransportDisconnected still compare queued hashes through the stop tick.
     if (m_received_bye_tick && m_agreed_tick >= *m_received_bye_tick) {
-        m_status.peer_disconnected = true;
-        m_status.disconnect_tick = *m_received_bye_tick;
-        TransportDisconnected();
+        TransportDisconnected(m_received_bye_tick);
         return terminal_result();
     }
     if (m_agreed_tick >= budget_ticks) {
-        result.outcome =
-            m_pending_outbound.empty() ? TickOutcome::Finished : TickOutcome::WaitingForPeer;
+        result.outcome = m_pending_outbound.empty() && !m_receive_drain_pending
+                             ? TickOutcome::Finished
+                             : TickOutcome::WaitingForPeer;
         result.tick = m_agreed_tick;
         return result;
     }
@@ -1712,11 +1741,13 @@ TickResult LockstepSession::PumpTick(std::uint64_t budget_ticks) {
 
     if (!have_peer && (m_received_bye_tick || m_transport_close_admission_tick ||
                        !m_transport->IsPeerConnected())) {
-        if (m_received_bye_tick) {
-            m_status.peer_disconnected = true;
-            m_status.disconnect_tick = m_received_bye_tick.value();
+        // The wanted input or an executed tick's late hash may be behind this
+        // batch. A quota yield must not turn a queued input into a disconnect.
+        if (m_receive_drain_pending) {
+            result.outcome = TickOutcome::WaitingForPeer;
+            return result;
         }
-        TransportDisconnected();
+        TransportDisconnected(m_received_bye_tick);
         return terminal_result();
     }
 
@@ -1885,9 +1916,10 @@ TickResult LockstepSession::PumpTick(std::uint64_t budget_ticks) {
     if (send_failed)
         return terminal_result();
 
-    result.outcome = (m_agreed_tick >= budget_ticks && m_pending_outbound.empty())
-                         ? TickOutcome::Finished
-                         : TickOutcome::Advanced;
+    result.outcome =
+        (m_agreed_tick >= budget_ticks && m_pending_outbound.empty() && !m_receive_drain_pending)
+            ? TickOutcome::Finished
+            : TickOutcome::Advanced;
     return result;
 }
 
@@ -1977,8 +2009,13 @@ void LockstepSession::EmitDesyncDump(std::uint64_t divergence_tick, const std::s
 }
 
 void LockstepSession::Disconnect() {
+    m_receive_work = {};
     if (m_disconnected)
         return;
+    if (m_disconnect_pending) {
+        TransportDisconnected();
+        return;
+    }
     if (!FlushPendingOutbound())
         return;
     if (!m_pending_outbound.empty()) {

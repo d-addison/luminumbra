@@ -324,6 +324,21 @@ window is never discarded for capacity. Invalid slot, stale/future, malformed,
 conflicting or oversized messages are dropped and counted in session status.
 These rules apply above Loopback, TCP (Windows/POSIX), GNS and Steam transports.
 
+Each `Handshake`, `PumpTick` or `Disconnect` call owns one receive-work budget,
+shared with nested input/hash sends, retry refusals and closure drains. It permits
+at most 1024 receive polls, including empty or malformed frames and unsuccessful
+polls, and stops polling once delivered payload bytes reach 256 KiB. One final
+frame can cross the byte threshold; its payload is bounded by the existing
+64 MiB transport maximum. Transport queues and read-ahead retain their existing
+bounds. Saturation leaves subsequent frames queued and allows an available
+agreed tick to advance; it does not change input bytes, ordering or hashes.
+`Finished` waits for an empty receive poll. A saturated local disconnect stops
+simulation immediately and defers transport close and storage release; its owner
+keeps the session and transport alive and calls `Disconnect` or `PumpTick` again
+until status becomes terminal. A finite backlog drains over successive calls.
+A continuously refilling peer can prolong draining, but cannot monopolize one
+call or grow retained storage beyond the negotiated bounds.
+
 On `Bye(T)`, the survivor compares queued hashes and drains buffered inputs only
 through the sender's final executed tick T. Pre-scheduled inputs after T are
 then discarded. Pending outbound retries cannot cut this drain short; closure

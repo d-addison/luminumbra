@@ -6,11 +6,11 @@ Statuses declare the available evidence. Static validation requires a mapping fo
 
 | Status | Rows |
 | --- | ---: |
-| covered | 30 |
+| covered | 31 |
 | partial | 10 |
 | needs-native-run | 17 |
 | planned | 86 |
-| Total | 143 |
+| Total | 144 |
 
 | Row | Status | Source | Requirements | Statement | Evidence |
 | --- | --- | --- | --- | --- | --- |
@@ -157,3 +157,4 @@ Statuses declare the available evidence. Static validation requires a mapping fo
 | station.native-capture | partial | `docs/distant-world.md#station-discovery-req-e4` | dw.station.092, dw.station.093, dw.station.094, dw.station.095, dw.station.096, dw.station.097, dw.station.098 | Existing oracle negative controls retain inclusive 90-second readiness, camera-derived per-tier Uploaded/Empty coverage, sky, seam, edge, binding, span and water refusals. Integration of arbitrary discovery pose/name manifests and native receipts for every row, profile and display remains planned. | script: `tools/gates/test_far_ladder_oracle.py`<br>doc: `tools/gates/validate-engine-frontier.ps1` (planned: Integrate arbitrary discovery pose/name manifests with exact pose and world/render binding clocks, custom-manifest mismatch controls and per-row/profile/display native receipts; owner: native capture) |
 | station.deep-interior | planned | `docs/distant-world.md#station-discovery-req-e4` | dw.station.099, dw.station.100 | Deep-interior feature discovery and completion of the entire game scene set remain separate follow-up work. | doc: `src/luminumbra_common/world/StationDiscovery.cpp` (planned: Specify and implement deep-interior discovery before claiming the complete game scene set; owner: world generation) |
 | graphics.horizon-authority | covered | `docs/engine-guide.md#world-generation-and-streaming` |  | Legacy graphics horizon changes preserve edited chunk authority and reject stale captures through the chunk voxel revision even when world/region publication revisions are unchanged. This row covers the owner-thread snapshot and admission regression, not native rendering qualification. | ctest: `GraphicsRuntimePure.ShrinkingAndGrowingHorizonRetainsEditedAuthorityAndRejectsStaleCapture`<br>ctest: `StreamingHardening.FarLodSnapshotOwnsBytesAndRejectsStaleLiveData`<br>ctest: `FarLodWorker.AuthoritativeCaptureBuildsPersistsAndStales` |
+| net.receive-work | covered | `docs/engine-guide.md#persistence-replay-and-networking` |  | Each lockstep session entry point shares at most 1024 receive polls and a 256 KiB payload threshold plus one transport-bounded frame across nested drains. Saturation preserves pending messages and late checkpoint diagnostics; finite closure drains finish before storage release. Native regressions are registered; execution remains pending. Complete LREC1 streams remain version 3; diagnostic suffixes with an elided prefix use version 4. | ctest: `LockstepSessionTest.ReplenishedReceiveQueueYieldsAndStillAdvancesDeterministically`<br>ctest: `LockstepSessionTest.ReceiveByteBudgetYieldsBeforeTheNextLargeFrame`<br>ctest: `LockstepSessionTest.HandshakeSchedulingRefusalsShareTheHelloReceiveBudget`<br>ctest: `LockstepSessionTest.ReceiveBudgetIsSharedWithInputHashAndRetryRefusalDrains`<br>ctest: `LockstepSessionTest.ClosureAcrossReceiveBatchesPreservesQueuedLateDesync`<br>ctest: `LockstepSessionTest.SaturatedLocalDisconnectFinishesOnAnEmptyPollWithoutAnotherStep`<br>ctest: `LockstepSessionTest.ClosedTransportDeliversInputsBeyondAReceiveBatchBeforeReleasingStorage`<br>ctest: `LockstepSessionTest.LateDesyncAfterSendRefusalSurvivesAnExhaustedReceiveBudget`<br>doc: `docs/engine-guide.md`<br>doc: `docs/development/system-config-identity.md` |
