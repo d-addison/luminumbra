@@ -5,12 +5,14 @@
 #include <nlohmann/json_fwd.hpp>
 
 #include "luminumbra_common/components/PlantComponents.h"
+#include "luminumbra_common/persistence/ChunkValidationCache.h"
 #include "luminumbra_common/persistence/SaveTransaction.h"
 #include "luminumbra_common/simulation/SimBudgetTelemetry.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_server/ServerWorldRunner.h"
 
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -68,6 +70,108 @@ private:
     Clock::time_point m_start = Clock::now();
     Stats m_previous;
 };
+
+// Keep the replay oracle explicit: a new stage must be reviewed before it is covered.
+constexpr std::array kWorkComparedStages = {
+    SimBudgetStage::ServerPhysics,
+    SimBudgetStage::Animation,
+    SimBudgetStage::Instinct,
+    SimBudgetStage::Perception,
+    SimBudgetStage::Scent,
+    SimBudgetStage::Locomotion,
+    SimBudgetStage::Creatures,
+    SimBudgetStage::Wind,
+    SimBudgetStage::Weather,
+    SimBudgetStage::WindWeather,
+    SimBudgetStage::Aether,
+    SimBudgetStage::Energy,
+    SimBudgetStage::Irrigation,
+    SimBudgetStage::Soil,
+    SimBudgetStage::Plants,
+    SimBudgetStage::Pollination,
+    SimBudgetStage::Disease,
+    SimBudgetStage::Crops,
+    SimBudgetStage::Fire,
+    SimBudgetStage::Grazing,
+    SimBudgetStage::Lifespan,
+    SimBudgetStage::Alarm,
+    SimBudgetStage::Decay,
+    SimBudgetStage::Circadian,
+    SimBudgetStage::Territory,
+    SimBudgetStage::Packs,
+    SimBudgetStage::Migration,
+    SimBudgetStage::Events,
+    SimBudgetStage::ServerStreaming,
+    SimBudgetStage::ServerWater,
+};
+static_assert(
+    [] {
+        if (kWorkComparedStages.size() != static_cast<std::size_t>(SimBudgetStage::Count))
+            return false;
+        for (std::size_t stage = 0; stage < kWorkComparedStages.size(); ++stage)
+            if (static_cast<std::size_t>(kWorkComparedStages[stage]) != stage)
+                return false;
+        return true;
+    }(),
+    "Compare every simulation budget stage exactly once in enum order");
+
+void ExpectStageSamples(const SimBudgetTelemetry& trace, std::uint64_t ticks, bool active_regions) {
+    for (std::size_t stage = 0; stage < trace.SamplesByStage().size(); ++stage) {
+        SCOPED_TRACE(std::string(luminumbra::simulation::kSimBudgetStageNames[stage]));
+        const auto& samples = trace.SamplesByStage()[stage];
+        const auto identity = static_cast<SimBudgetStage>(stage);
+        const bool unexecuted =
+            active_regions ? identity == SimBudgetStage::Wind || identity == SimBudgetStage::Weather
+                           : identity == SimBudgetStage::WindWeather;
+        if (unexecuted) {
+            EXPECT_TRUE(samples.empty());
+            continue;
+        }
+        ASSERT_EQ(samples.size(), ticks);
+        for (std::size_t i = 0; i < samples.size(); ++i) {
+            EXPECT_EQ(samples[i].tick, i + 1);
+            if (identity == SimBudgetStage::Wind || identity == SimBudgetStage::Weather) {
+                EXPECT_EQ(samples[i].work, 64u * 64u);
+            } else if (identity == SimBudgetStage::WindWeather) {
+                EXPECT_EQ(samples[i].work, 2u * 64u * 64u);
+            } else if (identity == SimBudgetStage::ServerPhysics) {
+                EXPECT_EQ(samples[i].work, 1u);
+            }
+        }
+    }
+}
+
+// Call after ExpectStageSamples succeeds so the first plant and creature samples exist.
+void ExpectWorkSummary(const SimBudgetTelemetry& trace, std::uint64_t ticks, bool active_regions) {
+    EXPECT_GT(trace.Summarize(SimBudgetStage::Creatures).work_total, 0u);
+    EXPECT_GT(trace.Summarize(SimBudgetStage::Plants).work_total, 0u);
+    EXPECT_GT(trace.Summarize(SimBudgetStage::Scent).work_total, 0u);
+    EXPECT_EQ(trace.Summarize(SimBudgetStage::Wind).work_total,
+              active_regions ? 0u : ticks * 64u * 64u);
+    EXPECT_EQ(trace.Summarize(SimBudgetStage::Weather).work_total,
+              active_regions ? 0u : ticks * 64u * 64u);
+    EXPECT_EQ(trace.Summarize(SimBudgetStage::WindWeather).work_total,
+              active_regions ? ticks * 2u * 64u * 64u : 0u);
+    EXPECT_EQ(trace.SamplesByStage()[static_cast<std::size_t>(SimBudgetStage::Plants)][0].work, 6u);
+    EXPECT_EQ(trace.SamplesByStage()[static_cast<std::size_t>(SimBudgetStage::Creatures)][0].work,
+              8u);
+}
+
+void ExpectMatchingWork(const SimBudgetTelemetry& first, const SimBudgetTelemetry& repeated) {
+    for (const auto identity : kWorkComparedStages) {
+        const auto stage = static_cast<std::size_t>(identity);
+        SCOPED_TRACE(std::string(luminumbra::simulation::kSimBudgetStageNames[stage]));
+        const auto& expected = first.SamplesByStage()[stage];
+        const auto& actual = repeated.SamplesByStage()[stage];
+        ASSERT_EQ(actual.size(), expected.size());
+        // Compare individual ticks and work, including dynamic work invisible to hashes.
+        // Duration is observational wall-clock data and must not match across runs.
+        for (std::size_t sample = 0; sample < expected.size(); ++sample) {
+            EXPECT_EQ(actual[sample].tick, expected[sample].tick) << "sample=" << sample;
+            EXPECT_EQ(actual[sample].work, expected[sample].work) << "sample=" << sample;
+        }
+    }
+}
 
 class SimBudgetWorldParity : public testing::TestWithParam<bool> {
 private:
@@ -164,7 +268,12 @@ protected:
                 }
             } else {
                 bool exists = false;
-                EXPECT_TRUE(P::hash_file(entry.path(), bytes, hash, exists, nullptr));
+                EXPECT_TRUE(P::hash_file(entry.path(),
+                                         bytes,
+                                         hash,
+                                         exists,
+                                         nullptr,
+                                         P::save_member_byte_limit(relative)));
                 EXPECT_TRUE(exists);
                 replay_fingerprint =
                     relative == "world_info.json" ? replay_metadata : Fingerprint{bytes, hash};
@@ -226,43 +335,8 @@ void SimBudgetWorldParity::RunPopulatedPass(bool telemetry,
         // Preserve the complete trace before the save toggle clears session samples.
         if (captured_trace)
             *captured_trace = trace;
-        for (std::size_t stage = 0; stage < trace.SamplesByStage().size(); ++stage) {
-            const auto& samples = trace.SamplesByStage()[stage];
-            const auto identity = static_cast<SimBudgetStage>(stage);
-            const bool unexecuted =
-                GetParam() ? identity == SimBudgetStage::Wind || identity == SimBudgetStage::Weather
-                           : identity == SimBudgetStage::WindWeather;
-            if (unexecuted) {
-                EXPECT_TRUE(samples.empty());
-                continue;
-            }
-            ASSERT_EQ(samples.size(), kTicks);
-            for (std::size_t i = 0; i < samples.size(); ++i) {
-                EXPECT_EQ(samples[i].tick, i + 1);
-                // Exact per-tick identities are stronger than field totals alone:
-                // a missing cell at one tick cannot cancel an extra cell at another.
-                if (identity == SimBudgetStage::Wind || identity == SimBudgetStage::Weather)
-                    EXPECT_EQ(samples[i].work, 64u * 64u);
-                else if (identity == SimBudgetStage::WindWeather)
-                    EXPECT_EQ(samples[i].work, 2u * 64u * 64u);
-                else if (identity == SimBudgetStage::ServerPhysics)
-                    EXPECT_EQ(samples[i].work, 1u);
-            }
-        }
-        EXPECT_GT(trace.Summarize(SimBudgetStage::Creatures).work_total, 0u);
-        EXPECT_GT(trace.Summarize(SimBudgetStage::Plants).work_total, 0u);
-        EXPECT_GT(trace.Summarize(SimBudgetStage::Scent).work_total, 0u);
-        EXPECT_EQ(trace.Summarize(SimBudgetStage::Wind).work_total,
-                  GetParam() ? 0u : kTicks * 64u * 64u);
-        EXPECT_EQ(trace.Summarize(SimBudgetStage::Weather).work_total,
-                  GetParam() ? 0u : kTicks * 64u * 64u);
-        EXPECT_EQ(trace.Summarize(SimBudgetStage::WindWeather).work_total,
-                  GetParam() ? kTicks * 2u * 64u * 64u : 0u);
-        EXPECT_EQ(trace.SamplesByStage()[static_cast<std::size_t>(SimBudgetStage::Plants)][0].work,
-                  6u);
-        EXPECT_EQ(
-            trace.SamplesByStage()[static_cast<std::size_t>(SimBudgetStage::Creatures)][0].work,
-            8u);
+        ASSERT_NO_FATAL_FAILURE(ExpectStageSamples(trace, kTicks, GetParam()));
+        ExpectWorkSummary(trace, kTicks, GetParam());
     }
 
     phases.Report("trace_assertions", runner.Session()->GetChunkValidationCacheStats());
@@ -299,6 +373,7 @@ TEST_P(SimBudgetWorldParity, Populated3600TicksPreserveWorldHashAndWorkCounts) {
     ASSERT_NO_FATAL_FAILURE(RunPopulatedPass(true, first_hash, first_save, &first_trace));
     ASSERT_NO_FATAL_FAILURE(RunPopulatedPass(true, repeated_hash, repeated_save, &repeated_trace));
     EXPECT_TRUE(first_trace.WorkMatches(repeated_trace));
+    ASSERT_NO_FATAL_FAILURE(ExpectMatchingWork(first_trace, repeated_trace));
     EXPECT_EQ(first_hash, repeated_hash);
     EXPECT_EQ(first_save, repeated_save);
     ASSERT_NO_FATAL_FAILURE(RunPopulatedPass(false, untraced_hash, untraced_save));
@@ -308,7 +383,7 @@ TEST_P(SimBudgetWorldParity, Populated3600TicksPreserveWorldHashAndWorkCounts) {
 INSTANTIATE_TEST_SUITE_P(ActiveRegions,
                          SimBudgetWorldParity,
                          testing::Bool(),
-                         [](const testing::TestParamInfo<bool>& info) {
-                             return info.param ? "Enabled" : "Disabled";
+                         [](const testing::TestParamInfo<bool>& case_data) {
+                             return case_data.param ? "Enabled" : "Disabled";
                          });
 } // namespace

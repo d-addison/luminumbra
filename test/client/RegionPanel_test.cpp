@@ -50,11 +50,14 @@ namespace R = Luminumbra::Replay;
 namespace fs = std::filesystem;
 using RawAuthority = Luminumbra::Server::HeavyAuthorityReference;
 
-thread_local std::array<int, static_cast<std::size_t>(GLFW_KEY_LAST) + 1> polled_keys{};
+auto& PolledKeys() {
+    static thread_local std::array<int, static_cast<std::size_t>(GLFW_KEY_LAST) + 1> keys{};
+    return keys;
+}
 int ReadPolledKey(GLFWwindow*, int key_code) {
     if (key_code < 0 || key_code > GLFW_KEY_LAST)
         return GLFW_RELEASE;
-    return polled_keys[static_cast<std::size_t>(key_code)];
+    return PolledKeys()[static_cast<std::size_t>(key_code)];
 }
 
 std::string Path(const fs::path& path) {
@@ -81,13 +84,16 @@ std::map<std::string, std::string> Tree(const fs::path& directory) {
             files.emplace(Path(entry.path().lexically_relative(directory)), Read(entry.path()));
     return files;
 }
-thread_local std::size_t panel_region_reads = 0;
+std::size_t& PanelRegionReads() {
+    static thread_local std::size_t reads = 0;
+    return reads;
+}
 class ObservePanelReads {
 public:
     ObservePanelReads() {
-        panel_region_reads = 0;
+        PanelRegionReads() = 0;
         P::WorldSaveService::set_region_read_hook_for_testing(
-            [](const fs::path&) { ++panel_region_reads; });
+            [](const fs::path&) { ++PanelRegionReads(); });
     }
     ~ObservePanelReads() {
         P::WorldSaveService::set_region_read_hook_for_testing(nullptr);
@@ -241,7 +247,7 @@ protected:
         const std::string text = context->LogBuffer.c_str();
         ImGui::LogFinish();
         ImGui::Render();
-        EXPECT_EQ(panel_region_reads, 0u);
+        EXPECT_EQ(PanelRegionReads(), 0u);
         return text;
     }
     void ExpectSameHashes(W::GameSession& session,
@@ -286,7 +292,8 @@ TEST_F(ProductionRegionPanel, ProductionPanelOpenClosedAuthorityIdentity) {
     const auto files = Tree(root);
     const auto raw = RawAuthority::Capture(session);
     const auto canonical = session.CaptureAuthorityState();
-    ASSERT_TRUE(canonical.state) << canonical.error;
+    if (!canonical.state)
+        FAIL() << canonical.error;
     const auto allocator = session.GetActiveRegionLedger().next_persistent_id();
     std::string hash;
     P::WorldStreamingStateSubHashes hashes;
@@ -362,7 +369,8 @@ TEST_F(ProductionRegionPanel, ProductionPanelOpenClosedAuthorityIdentity) {
     EXPECT_EQ(session.GetCachedRegionHashes(), cached);
     EXPECT_EQ(RawAuthority::Capture(session), raw);
     const auto after = session.CaptureAuthorityState();
-    ASSERT_TRUE(after.state) << after.error;
+    if (!after.state)
+        FAIL() << after.error;
     EXPECT_EQ(after.state->authority_bytes(), canonical.state->authority_bytes());
     EXPECT_EQ(session.GetActiveRegionLedger().next_persistent_id(), allocator);
     EXPECT_EQ(Tree(root), files);
@@ -450,7 +458,8 @@ TEST_F(ProductionRegionPanel, ProductionPanelReplayAndFrameGroupingIdentity) {
                 checkpoint.entities = sub.entities;
                 writer.RecordCheckpoint(checkpoint);
                 const auto capture = session.CaptureAuthorityState();
-                ASSERT_TRUE(capture.state) << capture.error;
+                if (!capture.state)
+                    FAIL() << capture.error;
                 const auto raw = RawAuthority::Capture(session);
                 if (!recording) {
                     references.push_back(raw);
@@ -474,7 +483,8 @@ TEST_F(ProductionRegionPanel, ProductionPanelReplayAndFrameGroupingIdentity) {
             ASSERT_EQ(checkpoint_index, 4u);
             ASSERT_TRUE(writer.Finalize(24));
             const auto decoded = R::ReadReplay(Path(replay_path));
-            ASSERT_TRUE(decoded);
+            if (!decoded)
+                FAIL() << "Replay decode failed";
             ASSERT_FALSE(decoded->truncated);
             ASSERT_TRUE(decoded->trailer_present);
             ASSERT_EQ(decoded->inputs.size(), 24u);
@@ -693,8 +703,8 @@ TEST_F(ProductionRegionPanel, ProductionPanelPolledGameplayInputsAreBlocked) {
     const auto player_frame = attached.player->CaptureReplaySnapshot().frame;
     const auto allocator = session.GetActiveRegionLedger().next_persistent_id();
     A::UpdateGameplayPlayer(app.overlay.region_panel, *attached.player, 1.0f / 30.0f);
-    polled_keys.fill(GLFW_RELEASE);
-    polled_keys[GLFW_KEY_R] = GLFW_PRESS;
+    PolledKeys().fill(GLFW_RELEASE);
+    PolledKeys()[GLFW_KEY_R] = GLFW_PRESS;
     EXPECT_FALSE(
         A::PollPlayerVerbPresses(app, attached.input.window, *attached.player, ReadPolledKey)
             .terraformDig);
@@ -711,7 +721,7 @@ TEST_F(ProductionRegionPanel, ProductionPanelPolledGameplayInputsAreBlocked) {
     EXPECT_FALSE(
         A::PollPlayerVerbPresses(app, attached.input.window, *attached.player, ReadPolledKey)
             .terraformDig);
-    polled_keys[GLFW_KEY_R] = GLFW_RELEASE;
+    PolledKeys()[GLFW_KEY_R] = GLFW_RELEASE;
     EXPECT_FALSE(
         A::PollPlayerVerbPresses(app, attached.input.window, *attached.player, ReadPolledKey)
             .terraformDig);
@@ -863,12 +873,12 @@ TEST_F(ProductionRegionPanel, ProductionPanelCapturedActionHeldAcrossCloseRequir
         // Exercise both an intervening frame and a press/close in one event batch.
         for (const bool poll_while_open : {true, false}) {
             SCOPED_TRACE(poll_while_open);
-            polled_keys.fill(GLFW_RELEASE);
+            PolledKeys().fill(GLFW_RELEASE);
             poll();
             ASSERT_FALSE(app.interactions.*(verb.previous));
             A::key_callback(attached.input.window, GLFW_KEY_F4, 0, GLFW_PRESS, 0);
             ASSERT_TRUE(app.overlay.region_panel.open);
-            auto& physical = polled_keys[static_cast<std::size_t>(verb.key_code)];
+            auto& physical = PolledKeys()[static_cast<std::size_t>(verb.key_code)];
             physical = GLFW_PRESS;
             A::key_callback(attached.input.window, verb.key_code, 0, GLFW_PRESS, 0);
             if (poll_while_open) {
@@ -991,6 +1001,95 @@ TEST_F(ProductionRegionPanel, ProductionPanelEveryCloseReconcilesHeldAndQueuedIn
     }
 }
 
+TEST_F(ProductionRegionPanel, RoutedPanelRestoresEveryInputExitAndQuarantinesHeldActions) {
+    A::ClientAppContext app;
+    A::UiInputRouter router;
+    AttachedPanelInput attached(app);
+    ASSERT_NE(attached.input.window, nullptr);
+    attached.bindings.router = &router;
+    A::RefreshInputOwnership(attached.input.window);
+    Luminumbra::Rendering::Camera camera;
+    attached.player = std::make_unique<Luminumbra::Client::PlayerController>(
+        attached.input.window, &camera, nullptr);
+    attached.player->SetLiveInputGate(&router);
+    const int dig_key = GLFW_KEY_R;
+    const auto poll = [&] {
+        return A::PollPlayerVerbPresses(
+            app, attached.input.window, *attached.player, ReadPolledKey);
+    };
+    // F4, title close, world transition, lost focus, disabled UI and lost context.
+    for (int exit_path = 0; exit_path < 6; ++exit_path) {
+        SCOPED_TRACE(exit_path);
+        app.overlay.imgui_enabled = true;
+        attached.bindings.window_focused = true;
+        ImGui::SetCurrentContext(context);
+        A::SetGameState(attached.input.window, attached.game_state, GameState::IN_GAME);
+        attached.InstallCallbacks();
+        PolledKeys().fill(GLFW_RELEASE);
+        poll();
+        A::key_callback(attached.input.window, dig_key, 0, GLFW_RELEASE, 0);
+        A::key_callback(attached.input.window, GLFW_KEY_F4, 0, GLFW_PRESS, 0);
+        ASSERT_TRUE(app.overlay.region_panel.open);
+        EXPECT_EQ(router.Owner(), A::InputOwner::Developer);
+        EXPECT_FALSE(router.GameplayKeyAllowed(dig_key));
+        PolledKeys()[dig_key] = GLFW_PRESS;
+        A::key_callback(attached.input.window, dig_key, 0, GLFW_PRESS, 0);
+        EXPECT_FALSE(poll().terraformDig);
+        EXPECT_TRUE(app.interactions.terraformDig);
+        A::key_callback(attached.input.window, GLFW_KEY_F4, 0, GLFW_RELEASE, 0);
+        if (exit_path == 0) {
+            A::key_callback(attached.input.window, GLFW_KEY_F4, 0, GLFW_PRESS, 0);
+        } else if (exit_path == 1) {
+            app.overlay.region_panel.open = false;
+            A::CloseRegionPanelInput(attached.input.window);
+        } else if (exit_path == 2) {
+            A::SetGameState(attached.input.window, attached.game_state, GameState::MAIN_MENU);
+        } else if (exit_path == 3) {
+            A::window_focus_callback(attached.input.window, GLFW_FALSE);
+        } else if (exit_path == 4) {
+            app.overlay.imgui_enabled = false;
+            A::RefreshInputOwnership(attached.input.window);
+        } else {
+            ImGui::SetCurrentContext(nullptr);
+            A::RefreshInputOwnership(attached.input.window);
+            ImGui::SetCurrentContext(context);
+        }
+        EXPECT_FALSE(app.overlay.region_panel.open);
+        EXPECT_FALSE(app.overlay.region_panel_input_attached);
+        EXPECT_EQ(glfwSetMouseButtonCallback(attached.input.window, AttachedPanelInput::Button),
+                  AttachedPanelInput::Button);
+        EXPECT_EQ(glfwSetCursorPosCallback(attached.input.window, AttachedPanelInput::Cursor),
+                  AttachedPanelInput::Cursor);
+        EXPECT_EQ(glfwSetScrollCallback(attached.input.window, AttachedPanelInput::Scroll),
+                  AttachedPanelInput::Scroll);
+        EXPECT_TRUE(app.interactions.terraformDig); // Ownership never resets physical edges.
+        app.overlay.imgui_enabled = true;
+        attached.bindings.window_focused = true;
+        A::SetGameState(attached.input.window, attached.game_state, GameState::IN_GAME);
+        A::key_callback(attached.input.window, dig_key, 0, GLFW_REPEAT, 0);
+        EXPECT_FALSE(router.GameplayKeyAllowed(dig_key));
+        EXPECT_FALSE(poll().terraformDig);
+        PolledKeys()[dig_key] = GLFW_RELEASE;
+        A::key_callback(attached.input.window, dig_key, 0, GLFW_RELEASE, 0);
+        EXPECT_FALSE(poll().terraformDig);
+        EXPECT_FALSE(app.interactions.terraformDig);
+        EXPECT_TRUE(router.GameplayKeyAllowed(dig_key));
+        PolledKeys()[dig_key] = GLFW_PRESS;
+        A::key_callback(attached.input.window, dig_key, 0, GLFW_PRESS, 0);
+        EXPECT_TRUE(poll().terraformDig);
+        PolledKeys()[dig_key] = GLFW_RELEASE;
+        A::key_callback(attached.input.window, dig_key, 0, GLFW_RELEASE, 0);
+        EXPECT_FALSE(poll().terraformDig);
+        A::key_callback(attached.input.window, GLFW_KEY_F4, 0, GLFW_RELEASE, 0);
+    }
+    // Rebinding retains first refusal of function keys, including F4.
+    app.hud.rebindCaptureAction = static_cast<int>(Luminumbra::Client::InputAction::FarmPlant);
+    A::key_callback(attached.input.window, GLFW_KEY_F4, 0, GLFW_PRESS, 0);
+    EXPECT_FALSE(app.overlay.region_panel.open);
+    EXPECT_EQ(app.hud.rebindCaptureAction, -1);
+    EXPECT_EQ(attached.player->key(Luminumbra::Client::InputAction::FarmPlant), GLFW_KEY_F4);
+}
+
 TEST_F(ProductionRegionPanel, PanelWaterCountersIncludeBordersAndPreparation) {
     W::GameSession session;
     Configure(session);
@@ -1079,7 +1178,8 @@ TEST_F(ProductionRegionPanel, PanelShowsUnknownWaterBoundAndCachedHashAge) {
     ASSERT_EQ(session.TickSimulation(3.0 / 30.0 + 1e-12), 3u);
     const auto snapshot = W::BuildRegionPanelSnapshot(session);
     EXPECT_FALSE(snapshot.water_bound_ticks);
-    ASSERT_TRUE(snapshot.hash_age_ticks);
+    if (!snapshot.hash_age_ticks)
+        FAIL() << "Cached hash age is missing";
     EXPECT_EQ(*snapshot.hash_age_ticks, 3u);
     EXPECT_EQ(snapshot.hashes, cached);
     const auto raw = RawAuthority::Capture(session);
@@ -1107,8 +1207,10 @@ TEST_F(ProductionRegionPanel, PanelShowsUnknownWaterBoundAndCachedHashAge) {
     EXPECT_FALSE(session.ComputeAuthorityWorldHashes(refused_hash, refused));
     EXPECT_TRUE(refused_hash.empty());
     EXPECT_FALSE(session.GetCachedRegionHashes().valid);
-    ASSERT_TRUE(session.GetRegionSchedulerFault());
-    const auto fault = *session.GetRegionSchedulerFault();
+    const auto captured_fault = session.GetRegionSchedulerFault();
+    if (!captured_fault)
+        FAIL() << "Expected authority capture fault";
+    const auto fault = *captured_fault;
     const auto fault_ledger = session.GetActiveRegionLedger().canonical_bytes();
     const auto fault_allocator = session.GetActiveRegionLedger().next_persistent_id();
     const auto fault_text = Draw(session, app);
@@ -1116,9 +1218,11 @@ TEST_F(ProductionRegionPanel, PanelShowsUnknownWaterBoundAndCachedHashAge) {
     EXPECT_NE(fault_text.find("Fault at tick"), std::string::npos);
     EXPECT_LE(W::BuildRegionPanelSnapshot(session).fault.size(),
               W::RegionPanelSnapshot::kMaxFaultText);
-    ASSERT_TRUE(session.GetRegionSchedulerFault());
-    EXPECT_EQ(session.GetRegionSchedulerFault()->tick, fault.tick);
-    EXPECT_EQ(session.GetRegionSchedulerFault()->message, fault.message);
+    const auto observed_fault = session.GetRegionSchedulerFault();
+    if (!observed_fault)
+        FAIL() << "Expected preserved authority capture fault";
+    EXPECT_EQ(observed_fault->tick, fault.tick);
+    EXPECT_EQ(observed_fault->message, fault.message);
     EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(), fault_ledger);
     EXPECT_EQ(session.GetActiveRegionLedger().next_persistent_id(), fault_allocator);
     EXPECT_EQ(Tree(root), before_files);

@@ -38,7 +38,9 @@ void RenderMenuScreens(ClientAppContext& app,
                        Luminumbra::Rendering::RenderPipeline& renderPipeline,
                        Luminumbra::Client::Rml_UIManager* uiManager,
                        Luminumbra::Client::WorldgenPreview* worldgenPreview,
-                       MenuPreviewState& previewState) {
+                       MenuPreviewState& previewState,
+                       const UiInputRouter& inputRouter) {
+    const bool previewMouseAllowed = previewState.UpdateInputOwnership(inputRouter);
     if (app.capture.ui_thumbs > 0 && app.menu.menu_backdrop_active && camera && gameSession &&
         gameSession->GetWorldSystem() && app.capture.ui_thumbs_index < app.capture.ui_thumbs) {
         // capture N clean landscape thumbnails (no UI) at varied yaw + time-of-day.
@@ -195,11 +197,14 @@ void RenderMenuScreens(ClientAppContext& app,
                 // hovered element; the bare backdrop is the document body
                 // (id "world_creation"), so a null/body hover == over the world.
                 double cx = 0.0, cy = 0.0;
-                glfwGetCursorPos(window, &cx, &cy);
-                const bool lmb = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+                if (previewMouseAllowed)
+                    glfwGetCursorPos(window, &cx, &cy);
+                const bool lmb = previewMouseAllowed &&
+                                 glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
                 Rml::Element* hover =
                     uiManager->GetContext() ? uiManager->GetContext()->GetHoverElement() : nullptr;
-                const bool overWorld = (hover == nullptr) || (hover->GetId() == "world_creation");
+                const bool overWorld = previewMouseAllowed &&
+                                       ((hover == nullptr) || (hover->GetId() == "world_creation"));
                 if (lmb && overWorld && !previewState.dragging) {
                     previewState.dragging = true;
                     previewState.lastCursorX = cx;

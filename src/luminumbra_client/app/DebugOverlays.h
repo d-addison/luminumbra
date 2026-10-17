@@ -1,17 +1,14 @@
 #pragma once
 
-// The frame loop's overlay regions extracted verbatim from main_client.cpp:
-// the photo-mode capture loop with its codex/objectives/farming HUD, the
-// creature ID nameplates, the ImGui debug windows (time-scale indicator, crop
-// HUD, settings), the live per-pass GPU profiler, the shader-authoring tools
-// (reload requests, mtime watcher, dev panel), and the one-time glass-pane
-// capture subject. All render-side, read-only observers of sim state; main()
-// calls each function at the exact point the inline region ran.
+// Gameplay/capture presentation and registered developer widget contents.
+// The registry owns widget windows, visibility and focus. Shader watching and
+// queued reload servicing remain independent render-thread operations.
 
 #include "app/ClientAppContext.h"
 #include "app/WindowModeControls.h"
 #include "core/GameState.h"
 #include "core/RuntimeScenarioConfig.h"
+#include "debug/DeveloperConsole.h"
 
 struct GLFWwindow;
 
@@ -55,18 +52,16 @@ void DrawCreatureNameplates(ClientAppContext& app,
                             Luminumbra::Rendering::Camera* camera,
                             Luminumbra::world::GameSession* gameSession);
 
-// Player debug UI, the always-on time-scale indicator, and the minimal crop
-// HUD.
+// Gameplay status entry point retained for callers without a session.
 void DrawFrameStatusOverlays(ClientAppContext& app,
                              GameState currentState,
                              const ScenarioHarness::RuntimeScenarioConfig& scenario_config,
                              Luminumbra::Client::PlayerController* playerController);
 
-// Live per-pass GPU profiler overlay (GL_TIMESTAMP timer ring readout).
-void DrawGpuProfilerOverlay(ClientAppContext& app,
-                            GameState currentState,
-                            Luminumbra::Rendering::RenderPipeline& renderPipeline,
-                            Luminumbra::Client::Rml_UIManager* uiManager);
+// Registered widget contents; visibility/window ownership belongs to the registry.
+void DrawFarmDiagnosticsContents(ClientAppContext& app);
+void DrawGpuProfilerContents(Luminumbra::Rendering::RenderPipeline& renderPipeline,
+                             Luminumbra::Client::Rml_UIManager* uiManager);
 
 // --debug-glass-pane: stage the three stained-glass panes near spawn once.
 void SpawnDebugGlassPanes(ClientAppContext& app,
@@ -74,18 +69,22 @@ void SpawnDebugGlassPanes(ClientAppContext& app,
                           Luminumbra::world::GameSession* gameSession,
                           Luminumbra::Rendering::RenderPipeline& renderPipeline);
 
-// Live shader authoring: reload-all requests, the opt-in once/sec mtime
-// watcher, and the dev shader panel with live uniform editing.
+// Render-thread reload requests and the independent opt-in shader watcher.
 void UpdateShaderTools(ClientAppContext& app,
                        GameState currentState,
                        Luminumbra::Rendering::RenderPipeline& renderPipeline);
 
-// The ImGui settings menu (render-only; user.* is never hashed).
-void DrawSettingsWindow(ClientAppContext& app,
-                        GLFWwindow* window,
-                        Luminumbra::Rendering::Camera* camera,
-                        Luminumbra::Client::IAudioManager* audioManager,
-                        luminumbra::core::SystemConfig& systemConfig,
-                        WindowState& windowState);
+void DrawShaderContents(ClientAppContext& app,
+                        Luminumbra::Rendering::RenderPipeline& renderPipeline,
+                        Debug::DeveloperConsole& console);
+
+// Settings contents (render-only; user.* is never hashed).
+void DrawSettingsContents(ClientAppContext& app,
+                          GLFWwindow* window,
+                          Luminumbra::Rendering::Camera* camera,
+                          Luminumbra::Client::IAudioManager* audioManager,
+                          luminumbra::core::SystemConfig& systemConfig,
+                          WindowState& windowState,
+                          Debug::DeveloperConsole& console);
 
 } // namespace Luminumbra::Client::App

@@ -1,5 +1,20 @@
 #include "WorldSaveService.h"
+#include "../components/CoreComponents.h"
+#include "../components/IrrigationComponents.h"
+#include "../components/PlantComponents.h"
+#include "../components/SoilComponents.h"
+#include "../fields/FieldCellTypes.h"
+#include "../fields/FieldPageState.h"
+#include "../world/ActiveRegionLedger.h"
+#include "../world/Chunk.h"
+#include "../world/GroundObjectStore.h"
+#include "../world/WorldClock.h"
+#include "../world/WorldStreamingState.h"
 #include "ai/CreaturePersistence.h"
+#include <entt/entity/fwd.hpp>
+#include <entt/entt.hpp>
+#include <luminumbra/core/Types.h>
+#include <nlohmann/json_fwd.hpp>
 
 #include "ChunkValidationCache.h"
 
@@ -25,19 +40,25 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <exception>
+#include <filesystem>
 #include <fstream>
 #include <functional>
-#include <iomanip>
+#include <initializer_list>
+#include <ios>
 #include <limits>
 #include <map>
 #include <memory>
 #include <new>
+#include <optional>
 #include <set>
-#include <sstream>
 #include <stdexcept>
+#include <stop_token>
+#include <string>
 #include <string_view>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -49,6 +70,7 @@
 #include <windows.h>
 #else
 #include <fcntl.h>
+#include <sys/types.h>
 #include <unistd.h>
 #endif
 
@@ -62,9 +84,18 @@ constexpr const char* kRegionDirectoryName = "region";
 constexpr const char* kWorldManifestFileName = "world-manifest.json";
 constexpr const char* kWorldManifestSchema = "luminumbra.persistence.world_manifest.v1";
 constexpr const char* kRegionFileExtension = ".lmr";
-std::atomic<std::uint64_t> LedgerLoadCount{0};
-std::atomic<std::uint64_t> PendingReaderCount{0};
-std::atomic<std::uint64_t> PendingProbeCount{0};
+std::atomic<std::uint64_t>& LedgerLoadCount() {
+    static std::atomic<std::uint64_t> count{0};
+    return count;
+}
+std::atomic<std::uint64_t>& PendingReaderCount() {
+    static std::atomic<std::uint64_t> count{0};
+    return count;
+}
+std::atomic<std::uint64_t>& PendingProbeCount() {
+    static std::atomic<std::uint64_t> count{0};
+    return count;
+}
 
 // Container constants (the deterministic runtime contract section 3).
 constexpr char kRegionMagic[4] = {'L', 'M', 'R', '1'};
@@ -307,7 +338,7 @@ std::size_t ReclaimAbandonedStaging(const std::filesystem::path& destination) {
     const auto directory = destination.parent_path();
     const auto prefix = destination.filename().string() + ".tmp.";
     std::size_t reclaimed = 0;
-    std::filesystem::directory_iterator it(directory, list_error);
+    const std::filesystem::directory_iterator it(directory, list_error);
     if (list_error)
         return 0;
     for (const auto& entry : it) {
@@ -668,26 +699,9 @@ bool ReadRegionFile(const std::filesystem::path& path,
 
     if (const auto hook = RegionReadHookForTesting())
         hook(path);
-    std::ifstream input(path, std::ios::binary);
-    if (!input.is_open()) {
-        AddError(errors, "failed to open region file for reading: " + path.string());
+    std::string bytes;
+    if (!read_bounded_save_file(path, bytes, kMaxSaveMemberBytes, errors, stop))
         return false;
-    }
-    std::ostringstream buffer;
-    char read_buffer[64 * 1024];
-    while (input) {
-        if (stop.stop_requested()) {
-            AddError(errors, "Saved-world validation cancelled.");
-            return false;
-        }
-        input.read(read_buffer, sizeof(read_buffer));
-        buffer.write(read_buffer, input.gcount());
-    }
-    if (input.bad()) {
-        AddError(errors, "failed to read region file: " + path.string());
-        return false;
-    }
-    const std::string bytes = std::move(buffer).str();
 
     if (bytes.size() < kRegionFileHeaderSize ||
         std::memcmp(bytes.data(), kRegionMagic, sizeof(kRegionMagic)) != 0) {
@@ -782,6 +796,10 @@ bool WriteRegionFile(const std::filesystem::path& path,
         }
         payload_bytes += record.compressed_payload.size();
     }
+    if (header_bytes > kMaxSaveMemberBytes || payload_bytes > kMaxSaveMemberBytes - header_bytes) {
+        AddError(errors, "region file exceeds size cap: " + path.string());
+        return false;
+    }
     bytes.reserve(header_bytes + payload_bytes);
 
     bytes.append(kRegionMagic, sizeof(kRegionMagic));
@@ -843,6 +861,7 @@ void SeedChunkRecord(const RegionRecord& record,
     }
 } catch (const std::exception&) {
     // Seeding is optional; a speculative strict refusal cannot reject a save.
+    return;
 }
 
 bool CompressChunkSnapshot(const std::shared_ptr<Chunk>& chunk,
@@ -931,6 +950,7 @@ std::optional<ValidatedChunkRecord> ValidateChunkRecord(const RegionRecord& reco
         } catch (const std::bad_alloc&) {
             // Reuse is optional. Cache allocation failure must not turn a
             // successfully validated record into a persistence refusal.
+            return ValidatedChunkRecord{facts, std::move(chunk)};
         }
     }
     return ValidatedChunkRecord{facts, std::move(chunk)};
@@ -1032,8 +1052,10 @@ std::string CheckMetadataFile(const std::filesystem::path& save_dir,
     const auto metadata_path = save_dir / "world_info.json";
     if (!std::filesystem::exists(metadata_path))
         return {};
-    std::ifstream input(metadata_path, std::ios::binary);
-    const auto metadata = nlohmann::json::parse(input);
+    std::string bytes;
+    if (!read_bounded_save_file(metadata_path, bytes, kMaxSaveMetadataBytes, nullptr))
+        return "corrupt world metadata: unreadable or exceeds size cap";
+    const auto metadata = nlohmann::json::parse(bytes);
     if (!metadata.is_object())
         return "corrupt world metadata: expected an object";
     // Old worlds can contain only metadata: no chunk container exists yet
@@ -1071,8 +1093,10 @@ std::string CheckMetadataFile(const std::filesystem::path& save_dir,
 std::string CheckManifestFile(const std::filesystem::path& manifest_path) {
     if (!std::filesystem::exists(manifest_path))
         return {};
-    std::ifstream input(manifest_path, std::ios::binary);
-    const auto manifest = nlohmann::json::parse(input);
+    std::string bytes;
+    if (!read_bounded_save_file(manifest_path, bytes, kMaxSaveManifestBytes, nullptr))
+        return "corrupt world manifest: unreadable or exceeds size cap";
+    const auto manifest = nlohmann::json::parse(bytes);
     if (manifest.is_object() && manifest.contains("schema") && manifest.at("schema").is_string()) {
         const auto schema = manifest.at("schema").get<std::string>();
         const std::string prefix = "luminumbra.persistence.world_manifest.v";
@@ -1262,8 +1286,13 @@ std::string VerifySnapshotIndex(const std::filesystem::path& save_dir,
             std::uint64_t fnv64 = 0;
             bool exists = false;
             if (member.path == SimulationPendingState::kMember)
-                PendingProbeCount.fetch_add(1, std::memory_order_relaxed);
-            if (!hash_file(save_dir / member.path, bytes, fnv64, exists, nullptr))
+                PendingProbeCount().fetch_add(1, std::memory_order_relaxed);
+            if (!hash_file(save_dir / member.path,
+                           bytes,
+                           fnv64,
+                           exists,
+                           nullptr,
+                           save_member_byte_limit(member.path)))
                 return member.path;
             actual.present = exists;
             actual.bytes = bytes;
@@ -1290,7 +1319,7 @@ std::string VerifySnapshotIndex(const std::filesystem::path& save_dir,
             continue;
         std::error_code ec;
         if (single == SimulationPendingState::kMember)
-            PendingProbeCount.fetch_add(1, std::memory_order_relaxed);
+            PendingProbeCount().fetch_add(1, std::memory_order_relaxed);
         if (std::filesystem::exists(save_dir / single, ec))
             return single;
     }
@@ -1480,8 +1509,10 @@ bool WorldSaveService::read_clock_metadata(const std::filesystem::path& save_dir
         const auto path = save_dir / "world_info.json";
         if (!std::filesystem::exists(path))
             return true;
-        std::ifstream input(path, std::ios::binary);
-        const auto metadata = nlohmann::json::parse(input);
+        std::string bytes;
+        if (!read_bounded_save_file(path, bytes, kMaxSaveMetadataBytes, errors))
+            return false;
+        const auto metadata = nlohmann::json::parse(bytes);
         std::string error;
         std::optional<Vec3> anchor;
         if (!world::WorldClock::from_metadata(metadata, clock, error) ||
@@ -1518,6 +1549,31 @@ std::filesystem::path WorldSaveService::world_manifest_path(const std::filesyste
     return region_directory(save_dir) / kWorldManifestFileName;
 }
 
+WorldSaveService::LegacyEnergyReadStatus
+WorldSaveService::load_legacy_energy(luminumbra::fields::EnergyFieldState& state,
+                                     const std::filesystem::path& save_dir,
+                                     std::uint64_t tick,
+                                     std::vector<std::string>* errors) {
+    const auto path = save_dir / "aether_state.efs";
+    std::error_code ec;
+    const auto status = std::filesystem::symlink_status(path, ec);
+    if (status.type() == std::filesystem::file_type::not_found &&
+        (!ec || ec == std::errc::no_such_file_or_directory)) {
+        state.ResetEmptyAtTick(tick);
+        return LegacyEnergyReadStatus::Missing;
+    }
+    std::string bytes;
+    if (ec || !read_bounded_save_file(path, bytes, kMaxSaveEnergyBytes, errors)) {
+        AddError(errors, kLegacyEnergyUnreadable);
+        return LegacyEnergyReadStatus::Unreadable;
+    }
+    if (!state.DeserializeRecord(bytes, tick)) {
+        AddError(errors, kLegacyEnergyInvalid);
+        return LegacyEnergyReadStatus::Invalid;
+    }
+    return LegacyEnergyReadStatus::Loaded;
+}
+
 std::filesystem::path WorldSaveService::plant_entities_path(const std::filesystem::path& save_dir) {
     return region_directory(save_dir) / "plant-entities.json";
 }
@@ -1525,6 +1581,21 @@ std::filesystem::path WorldSaveService::plant_entities_path(const std::filesyste
 bool WorldSaveService::save_plant_entities(const Luminumbra::Ecs::EntityRegistrySnapshot& snapshot,
                                            const std::filesystem::path& save_dir,
                                            std::vector<std::string>* errors) {
+    if (snapshot.entities.size() > kMaxSavePlants) {
+        AddError(errors, "plant population exceeds save limit");
+        return false;
+    }
+    for (const auto& entity : snapshot.entities) {
+        if (!luminumbra::foliage::PlantRecordFits(entity)) {
+            AddError(errors, "plant record exceeds save limit");
+            return false;
+        }
+    }
+    const auto serialized = Ecs::SerializeEntityRegistrySnapshotJson(snapshot);
+    if (serialized.size() > kMaxSaveEntityBytes) {
+        AddError(errors, "plant snapshot exceeds save limit");
+        return false;
+    }
     TransactionScope scope(save_dir, {"chunks/region/plant-entities.json"}, errors);
     if (!scope.ok())
         return false;
@@ -1542,16 +1613,14 @@ bool WorldSaveService::save_plant_entities(const Luminumbra::Ecs::EntityRegistry
     std::filesystem::create_directories(path.parent_path(), ec);
     if (scope.engaged()) {
         // Transactional lane: durable binary replace instead of a truncating stream.
-        return durable_write_file(
-                   path, Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(snapshot), errors) &&
-               scope.commit(errors);
+        return durable_write_file(path, serialized, errors) && scope.commit(errors);
     }
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
     if (!output.is_open()) {
         AddError(errors, "failed to open plant entities file for writing: " + path.string());
         return false;
     }
-    output << Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(snapshot);
+    output << serialized;
     output.flush();
     if (!output.good()) {
         AddError(errors, "failed to write plant entities file: " + path.string());
@@ -1581,7 +1650,7 @@ bool WorldSaveService::load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapsh
             });
         std::uint64_t size = 0, fnv = 0;
         bool exists = false;
-        if (!hash_file(path, size, fnv, exists, errors))
+        if (!hash_file(path, size, fnv, exists, errors, kMaxSaveEntityBytes))
             return false;
         if ((member == index.members.end() && exists) ||
             (member != index.members.end() &&
@@ -1594,22 +1663,24 @@ bool WorldSaveService::load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapsh
     if (!present) {
         return true; // clean miss: a fresh / no-plant world
     }
-    std::ifstream in(path, std::ios::binary);
-    if (!in) {
-        AddError(errors, "failed to open plant entities file: " + path.string());
+    std::string bytes;
+    if (!read_bounded_save_file(path, bytes, kMaxSaveEntityBytes, errors))
         return false;
-    }
-    std::ostringstream ss;
-    ss << in.rdbuf();
     std::vector<std::string> load_errors;
-    if (!Luminumbra::Ecs::LoadEntityRegistrySnapshotJson(ss.str(), out, load_errors)) {
+    if (!Luminumbra::Ecs::LoadEntityRegistrySnapshotJson(bytes, out, load_errors)) {
         for (const auto& e : load_errors)
             AddError(errors, e);
         return false;
     }
+    if (out.entities.size() > kMaxSavePlants ||
+        !std::all_of(
+            out.entities.begin(), out.entities.end(), luminumbra::foliage::PlantRecordFits)) {
+        AddError(errors, "plant population or record exceeds save limit");
+        return false;
+    }
     if (out.persistent_identity &&
         ((!SaveTransaction::active_for(save_dir) && !snapshot_index_exists(save_dir)) ||
-         Ecs::SerializeEntityRegistrySnapshotJson(out) != ss.str())) {
+         Ecs::SerializeEntityRegistrySnapshotJson(out) != bytes)) {
         AddError(errors, "corrupt or unindexed persistent plant snapshot");
         return false;
     }
@@ -1668,7 +1739,8 @@ bool WorldSaveService::load_creature_entities(luminumbra::ai::CreatureSnapshot& 
                 });
             std::uint64_t bytes = 0, fnv = 0;
             bool exists = false;
-            if (!hash_file(path, bytes, fnv, exists, errors))
+            if (!hash_file(
+                    path, bytes, fnv, exists, errors, luminumbra::ai::kMaxStampedCreatureBytes))
                 return false;
             if ((member == index.members.end() && exists) ||
                 (member != index.members.end() &&
@@ -1687,20 +1759,8 @@ bool WorldSaveService::load_creature_entities(luminumbra::ai::CreatureSnapshot& 
         return true;
     }
     // Allocation is bounded by 64 MiB plus one 63-byte controller stamp per allowed record.
-    const auto size = std::filesystem::file_size(path, ec);
-    if (ec || size > luminumbra::ai::kMaxStampedCreatureBytes) {
-        AddError(errors, "unreadable or oversized creature authority");
-        return false;
-    }
-    std::ifstream input(path, std::ios::binary);
-    if (!input) {
-        AddError(errors, "failed to open creature authority");
-        return false;
-    }
-    std::string bytes(static_cast<std::size_t>(size), '\0');
-    input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-    if (!input || input.peek() != std::char_traits<char>::eof()) {
-        AddError(errors, "failed to read creature authority");
+    std::string bytes;
+    if (!read_bounded_save_file(path, bytes, luminumbra::ai::kMaxStampedCreatureBytes, errors)) {
         return false;
     }
     luminumbra::ai::CreatureSnapshot candidate;
@@ -1777,7 +1837,8 @@ bool WorldSaveService::load_ground_objects(world::GroundObjectStore& out,
                 });
             std::uint64_t bytes = 0, fnv = 0;
             bool exists = false;
-            if (!hash_file(path, bytes, fnv, exists, errors))
+            if (!hash_file(
+                    path, bytes, fnv, exists, errors, world::GroundObjectStore::kMaxFileBytes))
                 return false;
             if ((member == index.members.end() && exists) ||
                 (member != index.members.end() &&
@@ -1807,19 +1868,9 @@ bool WorldSaveService::load_ground_objects(world::GroundObjectStore& out,
         out.clear();
         return true; // A verified absent member is a clean miss.
     }
-    std::ifstream in(path, std::ios::binary);
-    if (!in) {
-        AddError(errors, "failed to open ground objects file: " + path.string());
+    std::string bytes;
+    if (!read_bounded_save_file(path, bytes, world::GroundObjectStore::kMaxFileBytes, errors))
         return false;
-    }
-    // One byte past the cap so an oversized file is refused by parse rather than truncated.
-    std::string bytes(world::GroundObjectStore::kMaxFileBytes + 1, '\0');
-    in.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-    if (in.bad()) {
-        AddError(errors, "failed to read ground objects file: " + path.string());
-        return false;
-    }
-    bytes.resize(static_cast<std::size_t>(in.gcount()));
     world::GroundObjectStore parsed;
     std::string error;
     GroundObjectDecodeCounter().fetch_add(1, std::memory_order_relaxed);
@@ -1946,28 +1997,9 @@ bool WorldSaveService::load_field_pages(world::FieldPageState& out,
         out.clear();
         return true; // clean miss: a world without field pages
     }
-    std::ifstream in(path, std::ios::binary);
-    if (!in) {
-        AddError(errors, "failed to open field pages file: " + path.string());
+    std::string bytes;
+    if (!read_bounded_save_file(path, bytes, world::FieldPageState::kMaxFileBytes, errors))
         return false;
-    }
-    const std::uintmax_t length = std::filesystem::file_size(path, ec);
-    if (ec) {
-        AddError(errors, "failed to inspect field pages file: " + ec.message());
-        return false;
-    }
-    if (length > world::FieldPageState::kMaxFileBytes) {
-        AddError(errors, "Field pages load failed: file exceeds size cap");
-        return false;
-    }
-    // One spare byte so a file that grew since the stat is parsed whole and refused as malformed.
-    std::string bytes(static_cast<std::size_t>(length) + 1, '\0');
-    in.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-    if (in.bad()) {
-        AddError(errors, "failed to read field pages file: " + path.string());
-        return false;
-    }
-    bytes.resize(static_cast<std::size_t>(in.gcount()));
     world::FieldPageState parsed;
     std::string error;
     FieldPageDecodeCounter().fetch_add(1, std::memory_order_relaxed);
@@ -2134,10 +2166,10 @@ bool ReadPendingStateFile(SimulationPendingState& out,
                           const std::filesystem::path& save_dir,
                           std::vector<std::string>* errors,
                           MemberDigest* digest = nullptr) {
-    PendingReaderCount.fetch_add(1, std::memory_order_relaxed);
+    PendingReaderCount().fetch_add(1, std::memory_order_relaxed);
     const auto path = save_dir / SimulationPendingState::kMember;
     std::error_code ec;
-    PendingProbeCount.fetch_add(1, std::memory_order_relaxed);
+    PendingProbeCount().fetch_add(1, std::memory_order_relaxed);
     const bool exists = std::filesystem::exists(path, ec);
     if (ec) {
         AddError(errors, "Cannot inspect simulation pending state: " + ec.message());
@@ -2147,19 +2179,9 @@ bool ReadPendingStateFile(SimulationPendingState& out,
     if (digest)
         *digest = {};
     if (exists) {
-        const auto size = std::filesystem::file_size(path, ec);
-        if (ec || size > SimulationPendingState::kMaxFileBytes) {
-            AddError(errors, "Simulation pending state exceeds size cap or is unreadable");
+        std::string bytes;
+        if (!read_bounded_save_file(path, bytes, SimulationPendingState::kMaxFileBytes, errors))
             return false;
-        }
-        std::ifstream input(path, std::ios::binary);
-        std::string bytes(static_cast<std::size_t>(size) + 1, '\0');
-        input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-        if (input.bad() || !input.eof()) {
-            AddError(errors, "Cannot read simulation pending state");
-            return false;
-        }
-        bytes.resize(static_cast<std::size_t>(input.gcount()));
         std::string error;
         if (!SimulationPendingState::decode(bytes, candidate, error)) {
             AddError(errors, "Corrupt simulation pending state: " + error);
@@ -2193,7 +2215,8 @@ bool WorldSaveService::load_active_regions(world::ActiveRegionLedger& ledger,
                            actual.bytes,
                            actual.fnv64,
                            actual.present,
-                           errors))
+                           errors,
+                           world::ActiveRegionLedger::kMaxFileBytes))
                 return false;
             if (actual.present && actual.bytes == facts->m_ledger_digest.bytes &&
                 actual.fnv64 == facts->m_ledger_digest.fnv64) {
@@ -2207,18 +2230,12 @@ bool WorldSaveService::load_active_regions(world::ActiveRegionLedger& ledger,
             ledger = world::ActiveRegionLedger(ledger.config(), absent_clock);
             return true;
         }
-        const auto length = std::filesystem::file_size(path);
-        if (length > world::ActiveRegionLedger::kMaxFileBytes) {
-            AddError(errors, world::ActiveRegionLedger::kCorruptMessage);
+        std::string bytes;
+        if (!read_bounded_save_file(path, bytes, world::ActiveRegionLedger::kMaxFileBytes, errors))
             return false;
-        }
-        std::ifstream input(path, std::ios::binary);
-        LedgerLoadCount.fetch_add(1, std::memory_order_relaxed);
-        std::string bytes(static_cast<std::size_t>(length), '\0');
-        input.read(bytes.data(), static_cast<std::streamsize>(length));
+        LedgerLoadCount().fetch_add(1, std::memory_order_relaxed);
         std::string error;
-        if (!input || input.peek() != std::char_traits<char>::eof() || input.bad() ||
-            !world::ActiveRegionLedger::decode(bytes, ledger, error)) {
+        if (!world::ActiveRegionLedger::decode(bytes, ledger, error)) {
             AddError(errors, error.empty() ? world::ActiveRegionLedger::kCorruptMessage : error);
             return false;
         }
@@ -2786,13 +2803,13 @@ std::uint64_t WorldSaveService::decode_count_for_testing() {
     return DecodeCounter().load(std::memory_order_acquire);
 }
 std::uint64_t WorldSaveService::ledger_load_count_for_testing() {
-    return LedgerLoadCount.load(std::memory_order_relaxed);
+    return LedgerLoadCount().load(std::memory_order_relaxed);
 }
 std::uint64_t WorldSaveService::pending_reader_count_for_testing() {
-    return PendingReaderCount.load(std::memory_order_relaxed);
+    return PendingReaderCount().load(std::memory_order_relaxed);
 }
 std::uint64_t WorldSaveService::pending_probe_count_for_testing() {
-    return PendingProbeCount.load(std::memory_order_relaxed);
+    return PendingProbeCount().load(std::memory_order_relaxed);
 }
 
 std::uint64_t WorldSaveService::field_page_decode_count_for_testing() {
@@ -2956,7 +2973,7 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
         if (relative == SimulationPendingState::kMember) {
             if (facts && !facts->m_pending_enabled)
                 return true;
-            PendingProbeCount.fetch_add(1, std::memory_order_relaxed);
+            PendingProbeCount().fetch_add(1, std::memory_order_relaxed);
         }
         const std::filesystem::path path = save_dir / relative;
         std::error_code ec;
@@ -2970,7 +2987,12 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
 
         if (relative == SimulationPendingState::kMember) {
             MemberDigest actual;
-            if (!hash_file(path, actual.bytes, actual.fnv64, actual.present, &diagnostics)) {
+            if (!hash_file(path,
+                           actual.bytes,
+                           actual.fnv64,
+                           actual.present,
+                           &diagnostics,
+                           SimulationPendingState::kMaxFileBytes)) {
                 error = first_error("Cannot fingerprint simulation pending state");
                 return false;
             }
@@ -2983,7 +3005,8 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
                 pending = facts->m_pending_activations.get();
             } else {
                 bool present = false;
-                if (!ReadPendingStateFile(decoded, present, save_dir, &diagnostics) || !present) {
+                if (!ReadPendingStateFile(decoded, present, save_dir, &diagnostics, &actual) ||
+                    !present) {
                     error = first_error("Corrupt simulation pending state");
                     return false;
                 }
@@ -3106,38 +3129,19 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
                 return false;
             }
         } else if (relative == "aether_state.efs") {
-            constexpr std::uintmax_t kMaxEnergyBytes = 16u * 1024u * 1024u;
-            if (std::filesystem::file_size(path) > kMaxEnergyBytes) {
-                error = "corrupt energy field record: size limit";
-                return false;
-            }
-            std::ifstream input(path, std::ios::binary);
-            const std::string bytes(std::istreambuf_iterator<char>{input}, {});
-            std::istringstream header(bytes);
-            std::string magic;
-            int channels = 0;
-            // Bound channel allocation before invoking the legacy decoder. Indexed writers
-            // emit canonical EFS1; re-encoding also refuses duplicate pages/cells and junk.
-            if (!input || !(header >> magic >> channels) || magic != "EFS1" || channels < 1 ||
-                channels > 64) {
-                error = "corrupt energy field record";
-                return false;
-            }
-            std::string line;
-            std::size_t pages = 0;
-            std::getline(header, line);
-            while (std::getline(header, line))
-                if (!line.empty() &&
-                    ++pages > (64u * 1024u * 1024u) / (256u * sizeof(std::uint16_t) *
-                                                       static_cast<std::size_t>(channels))) {
-                    error = "corrupt energy field record: decoded size limit";
-                    return false;
-                }
             luminumbra::fields::EnergyFieldState energy;
             world::WorldClock clock;
             bool regional = false;
             if (!read_clock_metadata(save_dir, clock, regional, &diagnostics)) {
                 error = first_error("corrupt world metadata");
+                return false;
+            }
+            std::string bytes;
+            const auto limit = regional
+                                   ? luminumbra::fields::EnergyFieldState::kMaxRegionalRecordBytes
+                                   : kMaxSaveEnergyBytes;
+            if (!read_bounded_save_file(path, bytes, limit, &diagnostics)) {
+                error = "corrupt energy field record: unreadable or size limit";
                 return false;
             }
             if (regional) {
@@ -3186,7 +3190,12 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
 
         std::vector<std::string> hash_errors;
         bool exists = false;
-        if (!hash_file(path, out.bytes, out.fnv64, exists, &hash_errors)) {
+        if (!hash_file(path,
+                       out.bytes,
+                       out.fnv64,
+                       exists,
+                       &hash_errors,
+                       save_member_byte_limit(relative))) {
             error = hash_errors.empty() ? std::string("unreadable member") : hash_errors.front();
             return false;
         }
@@ -3205,6 +3214,10 @@ bool WorldSaveService::write_member_bytes(const std::filesystem::path& save_dir,
                                           std::vector<std::string>* errors) {
     if (!member_path_allowed(relative_path)) {
         AddError(errors, "member path is not allowed: " + std::string(relative_path));
+        return false;
+    }
+    if (bytes.size() > save_member_byte_limit(relative_path)) {
+        AddError(errors, "member exceeds save size cap: " + std::string(relative_path));
         return false;
     }
     const std::string relative(relative_path);
@@ -3246,8 +3259,10 @@ bool WorldSaveService::forget_snapshot_index_for_testing(const std::filesystem::
     try {
         nlohmann::json metadata;
         {
-            std::ifstream input(metadata_path, std::ios::binary);
-            metadata = nlohmann::json::parse(input);
+            std::string bytes;
+            if (!read_bounded_save_file(metadata_path, bytes, kMaxSaveMetadataBytes, nullptr))
+                return false;
+            metadata = nlohmann::json::parse(bytes);
         }
         if (!metadata.is_object() || !metadata.contains("snapshotFormat"))
             return true;

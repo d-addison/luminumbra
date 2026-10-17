@@ -3,7 +3,6 @@
 #define GLFW_INCLUDE_NONE
 #include "InputActions.h"
 #include "SaveAnchor.h"
-#include "imgui.h"
 #include <GLFW/glfw3.h>
 #include <array>
 #include <cstddef>
@@ -21,6 +20,10 @@ class PhysicsSystem;
 
 namespace luminumbra::core {
 class SystemConfig;
+}
+
+namespace Luminumbra::Client::App {
+class UiInputRouter;
 }
 
 namespace Luminumbra::Client {
@@ -57,6 +60,9 @@ public:
                      std::optional<glm::vec3> restored_walking_feet = std::nullopt);
 
     void Update(float deltaTime);
+    // Non-owning; the application router outlives this controller.
+    void SetLiveInputGate(const App::UiInputRouter* router);
+    void ClearQueuedLiveInput();
     void ApplyReplayInput(float deltaTime, const PlayerReplayInputFrame& inputFrame);
     PlayerReplaySnapshot CaptureReplaySnapshot() const;
     void ResetReplayFrameCounter(std::uint64_t frame = 0);
@@ -85,7 +91,7 @@ public:
         UpdateNoclip(deltaTime, wishDir, false);
     }
     void ProcessMouseScroll(double yoffset);
-    void RenderDebugUI();
+    void DrawDebugContents();
 
     // Resolve all key bindings from SystemConfig user.controls.* (action name -> key),
     // falling back to the compiled defaults (kInputActionDefs). Call after construction
@@ -154,6 +160,7 @@ public:
     }
 
 private:
+    const App::UiInputRouter* m_liveInputGate = nullptr;
     PlayerReplayInputFrame ReadLiveInputFrame() const;
     void UpdateWalking(float deltaTime,
                        const glm::vec3& wishDir,

@@ -2,6 +2,7 @@
 #include "../support/UniqueTempPath.h"
 #include "luminumbra_common/components/CreatureComponents.h"
 #include "luminumbra_common/components/InstinctComponents.h"
+#include "luminumbra_common/core/BoundedFileReader.h"
 #include "luminumbra_common/core/FilesystemPath.h"
 #include "luminumbra_common/fields/EnergyFieldState.h"
 #include "luminumbra_common/persistence/PlantPersistence.h"
@@ -18,6 +19,7 @@
 #include <functional>
 #include <gtest/gtest.h>
 #include <iterator>
+#include <limits>
 #include <lz4.h>
 #include <map>
 #include <memory>
@@ -126,7 +128,8 @@ TEST_F(HeavyReference, HeavySaveDoesNotChangeAuthority) {
     ASSERT_GT(runner.CreatureCount(), 0u);
     ASSERT_EQ(session->GetRegistry().view<const C::PlantTag>().size(), 6u);
     const auto before = HeavyReferenceMode::CaptureHashes(runner);
-    ASSERT_TRUE(before.reference);
+    if (!before.reference)
+        FAIL() << "Expected independent raw reference";
     EXPECT_EQ(before.reference->domains.size(), 11u);
     const auto repeated = HeavyReferenceMode::CaptureHashes(runner);
     EXPECT_TRUE(S::AuthoritativeStateEqual(before, repeated));
@@ -135,7 +138,8 @@ TEST_F(HeavyReference, HeavySaveDoesNotChangeAuthority) {
     // The offline observations do not introduce work inside an ordinary save.
     EXPECT_LE(P::WorldSaveService::decode_count_for_testing() - decodes, 1u);
     const auto after = HeavyReferenceMode::CaptureHashes(runner);
-    ASSERT_TRUE(after.reference);
+    if (!after.reference)
+        FAIL() << "Expected independent raw reference";
     EXPECT_EQ(*before.reference, *after.reference);
     EXPECT_TRUE(S::AuthoritativeStateEqual(before, after));
     EXPECT_EQ(before.world_hash, after.world_hash);
@@ -275,11 +279,13 @@ struct RawAuthority {
 void ExpectIndependentDetection(const S::HeavyHashes& before,
                                 const RawAuthority& changed,
                                 std::string_view domain) {
-    ASSERT_TRUE(before.reference);
+    if (!before.reference)
+        FAIL() << "Expected independent raw reference";
     ASSERT_TRUE(S::AuthoritativeStateEqual(before, before));
     auto omitted_projection = before;
     omitted_projection.reference = HeavyAuthorityReference::Capture(changed.Inputs());
-    ASSERT_TRUE(omitted_projection.reference);
+    if (!omitted_projection.reference)
+        FAIL() << "Expected independent raw reference";
     EXPECT_EQ(before.world_hash, omitted_projection.world_hash);
     EXPECT_EQ(before.sub.creatures, omitted_projection.sub.creatures);
     EXPECT_NE(before.reference->domains.at(std::string(domain)),
@@ -353,7 +359,7 @@ TEST(HeavyReference, ReferenceDetectsProductionProjectionOmissions) {
         RawAuthority raw;
         const auto before = raw.Capture();
         mutation.apply(raw);
-        ExpectIndependentDetection(before, raw, mutation.domain);
+        ASSERT_NO_FATAL_FAILURE(ExpectIndependentDetection(before, raw, mutation.domain));
         const auto production = raw.Capture();
         EXPECT_NE(before.world_hash, production.world_hash);
     }
@@ -368,7 +374,7 @@ TEST(HeavyReference, ReferenceDetectsProductionProjectionOmissions) {
             raw.ambient_anchor.y = 1.0f;
         else
             raw.ambient_anchor.z = -24.0f;
-        ExpectIndependentDetection(before, raw, "clock");
+        ASSERT_NO_FATAL_FAILURE(ExpectIndependentDetection(before, raw, "clock"));
     }
     // Recreating the registry in another allocation order preserves persistent references.
     RawAuthority first;
@@ -408,18 +414,20 @@ TEST(HeavyReference, ReferenceDetectsOptionalPresenceTravelAndControllerDifferen
         RawAuthority raw;
         const auto before = raw.Capture();
         mutation.apply(raw);
-        ExpectIndependentDetection(before, raw, "creatures");
+        ASSERT_NO_FATAL_FAILURE(ExpectIndependentDetection(before, raw, "creatures"));
         EXPECT_NE(before.world_hash, raw.Capture().world_hash);
     }
     RawAuthority raw;
     raw.registry.emplace<C::SensesComponent>(raw.creature).nearest_food_source = raw.plant;
     const auto before = raw.Capture();
+    if (!before.reference)
+        FAIL() << "Expected independent raw reference";
     // Changing a target identity is visible; runtime entity slots are never reference identity.
     raw.registry.get<C::SensesComponent>(raw.creature).nearest_food_source = raw.creature;
-    ExpectIndependentDetection(before, raw, "creatures");
+    ASSERT_NO_FATAL_FAILURE(ExpectIndependentDetection(before, raw, "creatures"));
     const auto dangling = raw.registry.create();
     raw.registry.get<C::SensesComponent>(raw.creature).nearest_food_source = dangling;
-    EXPECT_THROW(HeavyAuthorityReference::Capture(raw.Inputs()), std::runtime_error);
+    EXPECT_THROW((void)HeavyAuthorityReference::Capture(raw.Inputs()), std::runtime_error);
     EXPECT_EQ(raw.registry.get<C::SensesComponent>(raw.creature).nearest_food_source, dangling);
     raw.registry.get<C::SensesComponent>(raw.creature).nearest_food_source = raw.creature;
     EXPECT_EQ(before.reference->domains.at("regions"),
@@ -448,7 +456,7 @@ TEST_F(HeavyReference, HeavyIncludesDiskOnlyAndDormantAuthority) {
     disk->mark_voxel_data_dirty();
     ASSERT_TRUE(save());
     ASSERT_TRUE(raw.live.empty());
-    ExpectIndependentDetection(before, raw, "chunks");
+    ASSERT_NO_FATAL_FAILURE(ExpectIndependentDetection(before, raw, "chunks"));
     const auto stored = raw.Capture();
     // A Loading or pristine resident must not hide the durable record.
     auto shadow = std::make_shared<Luminumbra::Chunk>(disk->get_coords());
@@ -458,7 +466,7 @@ TEST_F(HeavyReference, HeavyIncludesDiskOnlyAndDormantAuthority) {
     EXPECT_EQ(stored.reference, raw.Capture().reference);
     raw.live.clear();
     ASSERT_TRUE(raw.fields.activate_region({100, -100}, 1337, 0));
-    ExpectIndependentDetection(stored, raw, "pages");
+    ASSERT_NO_FATAL_FAILURE(ExpectIndependentDetection(stored, raw, "pages"));
     auto& records =
         const_cast<std::map<W::RegionKey, W::ActiveRegionRecord>&>(raw.ledger.records());
     ASSERT_TRUE(raw.energy.QueueRegionalDeposit(7, 2134, -2133, 0, 1000));
@@ -470,7 +478,7 @@ TEST_F(HeavyReference, HeavyIncludesDiskOnlyAndDormantAuthority) {
     records.at({100, -100}).state = W::RegionState::Frozen;
     const auto dormant = raw.Capture();
     ASSERT_TRUE(raw.fields.set_soil({51208, -51192}, 1234));
-    ExpectIndependentDetection(dormant, raw, "pages");
+    ASSERT_NO_FATAL_FAILURE(ExpectIndependentDetection(dormant, raw, "pages"));
     const auto soil = raw.Capture();
     // Move the near window elsewhere: stored dormant values still participate.
     raw.energy.SetAnchorCell(0, 0);
@@ -481,23 +489,23 @@ TEST_F(HeavyReference, HeavyIncludesDiskOnlyAndDormantAuthority) {
     ASSERT_TRUE(changed_energy.TickRegional(1, raw.ledger.records(), due, {}, energy_result));
     records.at({100, -100}).state = W::RegionState::Frozen;
     raw.energy = std::move(changed_energy);
-    ExpectIndependentDetection(soil, raw, "energy");
+    ASSERT_NO_FATAL_FAILURE(ExpectIndependentDetection(soil, raw, "energy"));
     const auto energy_before_pending = raw.Capture();
     ASSERT_TRUE(raw.energy.QueueRegionalDeposit(7, 2133, -2133, 0, 90));
-    ExpectIndependentDetection(energy_before_pending, raw, "energy");
+    ASSERT_NO_FATAL_FAILURE(ExpectIndependentDetection(energy_before_pending, raw, "energy"));
     const auto region_file = P::WorldSaveService::region_file_path(raw.directory, 100, -100);
     const auto committed_bytes = Read(region_file);
     const auto intact = HeavyAuthorityReference::Capture(raw.Inputs());
     Write(region_file, "0");
-    EXPECT_THROW(HeavyAuthorityReference::Capture(raw.Inputs()), std::runtime_error);
+    EXPECT_THROW((void)HeavyAuthorityReference::Capture(raw.Inputs()), std::runtime_error);
     EXPECT_EQ(Read(region_file), "0");
     Write(region_file, committed_bytes);
     EXPECT_EQ(intact, HeavyAuthorityReference::Capture(raw.Inputs()));
     auto inputs = raw.Inputs();
     inputs.chunks.durable = {{3201, 0, -3200}};
-    EXPECT_THROW(HeavyAuthorityReference::Capture(inputs), std::runtime_error);
+    EXPECT_THROW((void)HeavyAuthorityReference::Capture(inputs), std::runtime_error);
     ASSERT_TRUE(fs::remove(P::WorldSaveService::region_file_path(raw.directory, 100, -100)));
-    EXPECT_THROW(HeavyAuthorityReference::Capture(inputs), std::runtime_error);
+    EXPECT_THROW((void)HeavyAuthorityReference::Capture(inputs), std::runtime_error);
 }
 
 // Independent durable fixture: no production snapshot writer, reader or member validator.
@@ -603,12 +611,12 @@ TEST_F(HeavyReference, ReferenceDurableDecodeIsIndependentOfProductionSerializer
     EXPECT_EQ(before.reference, HeavyAuthorityReference::Capture(raw.Inputs()));
     record["chunks"][0]["heightmap_data"][0] = 9.0f;
     WriteRawReferenceRecord(raw.directory, record.dump());
-    ExpectIndependentDetection(before, raw, "chunks");
+    ASSERT_NO_FATAL_FAILURE(ExpectIndependentDetection(before, raw, "chunks"));
     // A serializer dropping a required authoritative field must cause refusal, not normalize
     // the omission by round-tripping through that same serializer.
     record["chunks"][0].erase("water_edge_flux");
     WriteRawReferenceRecord(raw.directory, record.dump());
-    EXPECT_THROW(HeavyAuthorityReference::Capture(raw.Inputs()), std::runtime_error);
+    EXPECT_THROW((void)HeavyAuthorityReference::Capture(raw.Inputs()), std::runtime_error);
 }
 
 TEST_F(HeavyReference, ReferenceRefusesDecodeLimitsBeforeDomOrFieldAllocation) {
@@ -626,7 +634,8 @@ TEST_F(HeavyReference, ReferenceRefusesDecodeLimitsBeforeDomOrFieldAllocation) {
     const auto index_path = raw.directory / "chunks/region/snapshot.json";
     Write(index_path, "0");
     fs::resize_file(index_path, S::HeavyReferenceDecodeLimits::kIndexBytes + 1u);
-    expect_refusal("Heavy file byte limit"); // file_size gate precedes allocating a read buffer
+    expect_refusal(
+        "Heavy file byte limit"); // same-handle size gate precedes allocating a read buffer
     fs::remove(index_path);
     std::string nested(S::HeavyReferenceDecodeLimits::kJsonDepth + 1u, '[');
     nested += '0';
@@ -660,7 +669,7 @@ TEST_F(HeavyReference, ReferenceRefusesDecodeLimitsBeforeDomOrFieldAllocation) {
     EXPECT_EQ(raw.registry.get<C::CreatureComponent>(raw.creature).energy, before);
     // A one-byte scalar is rejected without indexing past its end.
     WriteRawReferenceRecord(raw.directory, "0");
-    EXPECT_THROW(HeavyAuthorityReference::Capture(raw.Inputs()), std::runtime_error);
+    EXPECT_THROW((void)HeavyAuthorityReference::Capture(raw.Inputs()), std::runtime_error);
     // A pending transaction is never recovered or modified by an observation.
     fs::create_directory(raw.directory / "journal");
     expect_refusal("Heavy requires committed authority");
@@ -687,12 +696,12 @@ TEST_F(HeavyReference, ReferenceRefusesMalformedCommittedInventoryWithoutMutatio
         auto record = valid;
         mutate(record);
         WriteRawReferenceRecord(raw.directory, record.dump());
-        EXPECT_THROW(HeavyAuthorityReference::Capture(raw.Inputs()), std::runtime_error);
+        EXPECT_THROW((void)HeavyAuthorityReference::Capture(raw.Inputs()), std::runtime_error);
         EXPECT_EQ(raw.registry.get<C::CreatureComponent>(raw.creature).energy, original_energy);
     }
     for (const auto payload : {R"({"a":0,"a":1})", "[0}", "[0", "0"}) {
         WriteRawReferenceRecord(raw.directory, payload);
-        EXPECT_THROW(HeavyAuthorityReference::Capture(raw.Inputs()), std::runtime_error);
+        EXPECT_THROW((void)HeavyAuthorityReference::Capture(raw.Inputs()), std::runtime_error);
     }
     const auto index_path = raw.directory / "chunks/region/snapshot.json";
     const std::array<std::function<void(nlohmann::json&)>, 4> index_mutations{{
@@ -707,7 +716,7 @@ TEST_F(HeavyReference, ReferenceRefusesMalformedCommittedInventoryWithoutMutatio
         mutate(index);
         const auto corrupt = index.dump();
         Write(index_path, corrupt);
-        EXPECT_THROW(HeavyAuthorityReference::Capture(raw.Inputs()), std::runtime_error);
+        EXPECT_THROW((void)HeavyAuthorityReference::Capture(raw.Inputs()), std::runtime_error);
         EXPECT_EQ(Read(index_path), corrupt);
     }
     WriteRawReferenceRecord(raw.directory, valid.dump());
@@ -730,6 +739,113 @@ TEST_F(HeavyReference, ReferenceRefusesMalformedCommittedInventoryWithoutMutatio
             WriteRawReferenceRecord(raw.directory, boundary.dump(), boundary_id);
             EXPECT_NO_THROW((void)HeavyAuthorityReference::Capture(raw.Inputs()));
         }
+    }
+}
+
+TEST_F(HeavyReference, RegularFileHandleSeeksWithinAdmittedBytes) {
+    const auto path = root / Luminumbra::Filesystem::PathFromUtf8("handle-\xc3\xa9.bin");
+    Write(path, "abcdef");
+    {
+        Luminumbra::Filesystem::RegularFileHandle file(path);
+        std::array<char, 2> bytes{};
+        ASSERT_EQ(file.size(), 6u);
+        file.seek(4);
+        ASSERT_EQ(file.read(bytes.data(), bytes.size()), bytes.size());
+        EXPECT_EQ(std::string(bytes.data(), bytes.size()), "ef");
+        file.seek(6);
+        EXPECT_EQ(file.read(bytes.data(), bytes.size()), 0u);
+        EXPECT_THROW(file.seek(7), std::runtime_error);
+        EXPECT_THROW(file.seek(std::numeric_limits<std::uint64_t>::max()), std::runtime_error);
+        EXPECT_EQ(file.read(bytes.data(), bytes.size()), 0u);
+        file.seek(0);
+        ASSERT_EQ(file.read(bytes.data(), bytes.size()), bytes.size());
+        EXPECT_EQ(std::string(bytes.data(), bytes.size()), "ab");
+    }
+    Write(path, "");
+    {
+        Luminumbra::Filesystem::RegularFileHandle file(path);
+        char byte = 0;
+        file.seek(0);
+        EXPECT_EQ(file.read(&byte, 1), 0u);
+        EXPECT_THROW(file.seek(1), std::runtime_error);
+    }
+    EXPECT_THROW((void)Luminumbra::Filesystem::RegularFileHandle(root), std::runtime_error);
+    EXPECT_THROW((void)Luminumbra::Filesystem::RegularFileHandle(root / "missing"),
+                 std::runtime_error);
+}
+
+void ExpectLinkedReferenceRefusal(const RawAuthority& raw,
+                                  const fs::path& member,
+                                  const fs::path& target,
+                                  const std::string& bytes) {
+    std::error_code error;
+    fs::create_symlink(target, member, error);
+    if (error) {
+#ifdef _WIN32
+        // An unprivileged runner must report denial rather than silently skip the case.
+        EXPECT_TRUE(error.value() == ERROR_PRIVILEGE_NOT_HELD ||
+                    error.value() == ERROR_ACCESS_DENIED)
+            << error.message();
+#else
+        FAIL() << error.message();
+#endif
+    } else {
+        EXPECT_THROW((void)HeavyAuthorityReference::Capture(raw.Inputs()), std::runtime_error);
+        EXPECT_TRUE(fs::is_symlink(fs::symlink_status(member)));
+        EXPECT_EQ(Read(target), bytes);
+        ASSERT_TRUE(fs::remove(target));
+        EXPECT_THROW((void)HeavyAuthorityReference::Capture(raw.Inputs()), std::runtime_error);
+        EXPECT_TRUE(fs::is_symlink(fs::symlink_status(member)));
+        ASSERT_TRUE(fs::remove(member));
+    }
+}
+
+TEST_F(HeavyReference, ReferenceRefusesLinkedAndNonRegularDurableMembers) {
+    RawAuthority raw;
+    raw.directory = root / "linked-members";
+    const auto id = Luminumbra::Chunk::calculate_id({0, 0, 0});
+    WriteRawReferenceRecord(raw.directory, RawReferenceChunkRecord(id).dump());
+    const auto baseline = HeavyAuthorityReference::Capture(raw.Inputs());
+    for (const auto* name : {"snapshot.json", "r.0.0.lmr"}) {
+        SCOPED_TRACE(name);
+        const auto member = raw.directory / "chunks/region" / name;
+        const auto bytes = Read(member);
+        const auto target = root / (std::string("target-") + name);
+        Write(target, bytes);
+        ASSERT_TRUE(fs::remove(member));
+        ASSERT_NO_FATAL_FAILURE(ExpectLinkedReferenceRefusal(raw, member, target, bytes));
+        ASSERT_TRUE(fs::create_directory(member));
+        EXPECT_THROW((void)HeavyAuthorityReference::Capture(raw.Inputs()), std::runtime_error);
+        EXPECT_TRUE(fs::is_directory(member));
+        ASSERT_TRUE(fs::remove(member));
+#ifndef _WIN32
+        ASSERT_EQ(::mkfifo(member.c_str(), 0600), 0);
+        EXPECT_THROW((void)HeavyAuthorityReference::Capture(raw.Inputs()), std::runtime_error);
+        EXPECT_TRUE(fs::is_fifo(fs::symlink_status(member)));
+        ASSERT_TRUE(fs::remove(member));
+#endif
+        Write(member, bytes);
+        EXPECT_EQ(HeavyAuthorityReference::Capture(raw.Inputs()), baseline);
+    }
+    // Dangling links cannot masquerade as absent optional members or absent journals.
+    for (const auto* name : {"world_info.json", "journal"}) {
+        const auto member = raw.directory / name;
+        std::error_code error;
+        fs::create_symlink(root / "missing-target", member, error);
+        if (error) {
+#ifdef _WIN32
+            EXPECT_TRUE(error.value() == ERROR_PRIVILEGE_NOT_HELD ||
+                        error.value() == ERROR_ACCESS_DENIED)
+                << error.message();
+#else
+            FAIL() << error.message();
+#endif
+        } else {
+            EXPECT_THROW((void)HeavyAuthorityReference::Capture(raw.Inputs()), std::runtime_error);
+            EXPECT_TRUE(fs::is_symlink(fs::symlink_status(member)));
+            ASSERT_TRUE(fs::remove(member));
+        }
+        EXPECT_EQ(HeavyAuthorityReference::Capture(raw.Inputs()), baseline);
     }
 }
 

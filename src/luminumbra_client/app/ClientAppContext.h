@@ -10,8 +10,11 @@
 // byte for byte, and none of the member types logs from a destructor (the
 // teardown contract that moved the UI hot-reload watcher into main() scope).
 
+#include "app/DeveloperUiPolicy.h"
+
 #include "../../../include/luminumbra/core/Types.h"
 #include "app/RegionPanel.h"
+#include "core/HardwareInfo.h"
 #include "luminumbra_common/ai/CreatureSpeciesRegistry.h"
 #include "luminumbra_common/animation/AnimationRuntime.h"
 #include "luminumbra_common/core/JobSystem.h"
@@ -32,6 +35,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -100,7 +104,6 @@ struct HudState {
     // Settings menu — frees the cursor so the ImGui panel is clickable. While
     // rebindCaptureAction >= 0 the next key press is captured as that action's
     // binding.
-    bool show_settings = false;
     bool paused = false; //  in-game pause overlay active
     int rebindCaptureAction = -1;
     //  player farming state. The controller holds the seed/harvest inventory;
@@ -115,8 +118,8 @@ struct HudState {
     int farmSelectedSpecies = 0;
 };
 
-// Debug/dev overlay toggles: GPU profiler, shader panel + watcher, G-buffer
-// debug view, glass-pane capture subject, volumetrics tier, wireframe.
+// Developer runtime rendering effects and watcher state. Widget visibility
+// belongs exclusively to the developer registry.
 struct OverlayState {
     RegionPanelState region_panel;
     bool region_panel_available = false;
@@ -127,10 +130,7 @@ struct OverlayState {
     void (*region_panel_previous_mouse_button)(GLFWwindow*, int, int, int) = nullptr;
     void (*region_panel_previous_cursor)(GLFWwindow*, double, double) = nullptr;
     void (*region_panel_previous_scroll)(GLFWwindow*, double, double) = nullptr;
-    bool show_gpu_profiler = false; // Live per-pass GPU profiler overlay.
-    //  (live shader authoring):  = reload-all next frame (GL-thread safe);
-    //  = the dev shader panel; the watcher is the opt-in once/sec mtime poll.
-    bool show_shader_panel = false;
+    // Shader reload runs on the render thread; watching is independent of panel visibility.
     bool request_shader_reload = false;
     bool shader_auto_reload = false;
     double shader_watch_last_poll = 0.0;
@@ -145,7 +145,6 @@ struct OverlayState {
     int volumetric_quality = Luminumbra::Rendering::kDefaultVolumetricQuality;
     int debug_view_mode = 0; // render-only G-buffer debug overlay:
                              // 0=off,1=albedo,2=normal,3=depth,4=material,5=position ( cycles)
-    bool show_worldgen_viewer = false;
     bool wireframe_mode = false;
     bool imgui_enabled = true;
 };
@@ -420,8 +419,11 @@ struct RenderBenchmarkState {
 };
 
 struct ClientAppContext {
+    // Startup diagnostics and recommendation, available to settings presentation.
+    std::optional<HardwareInfo> hardwareInfo;
     HudState hud;
     OverlayState overlay;
+    bool scenario_active = false;
     CaptureModes capture;
     MenuBackdrop menu;
     LoadingState loading;
@@ -462,5 +464,20 @@ PlayerVerbPresses PollPlayerVerbPresses(ClientAppContext& app,
                                         GLFWwindow* window,
                                         const PlayerController& player,
                                         int (*read_key)(GLFWwindow*, int) = nullptr);
+
+inline bool DeveloperUiAllowed(const ClientAppContext& app) {
+    const auto& capture = app.capture;
+    return DeveloperUiAllowed(DeveloperUiPolicy{app.overlay.imgui_enabled,
+                                                app.scenario_active,
+                                                capture.timelapse_frames != 0,
+                                                capture.scene_active,
+                                                !capture.frame_scan_path.empty(),
+                                                capture.render_parity_active,
+                                                !capture.render_benchmark_path.empty(),
+                                                !capture.survey_dir.empty(),
+                                                !capture.bake_impostor_path.empty(),
+                                                !capture.ui_screenshot_screen.empty(),
+                                                capture.ui_thumbs != 0});
+}
 
 } // namespace Luminumbra::Client::App
