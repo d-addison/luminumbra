@@ -284,6 +284,39 @@ void ParticlePass::clear_emitters() {
     m_live_count = 0;
 }
 
+void ParticlePass::clear_waterfall_spray() {
+    // add_emitter caps the vector at kMaxEmitters; this fixed remap needs no
+    // allocation and keeps removal linear in emitters plus the particle ring.
+    std::array<uint32_t, kMaxEmitters> remap{};
+    uint32_t retained = 0;
+    for (std::size_t index = 0; index < m_active_emitters.size(); ++index) {
+        remap[index] = m_active_emitters[index].waterfall_spray ? kInvalidEmitter : retained++;
+    }
+    if (retained == m_active_emitters.size())
+        return;
+    m_live_count = 0;
+    for (auto& particle : m_particles) {
+        if (!particle.alive)
+            continue;
+        const auto replacement = remap[particle.emitter_index];
+        if (replacement == kInvalidEmitter) {
+            particle.alive = false;
+        } else {
+            particle.emitter_index = replacement;
+            ++m_live_count;
+        }
+    }
+    if (m_splash_emitter_index != kNoSplashEmitter)
+        m_splash_emitter_index = remap[m_splash_emitter_index];
+    if (m_ambient_emitter_index != kMaxEmitters)
+        m_ambient_emitter_index = remap[m_ambient_emitter_index];
+    std::erase_if(m_active_emitters,
+                  [](const ActiveEmitter& emitter) { return emitter.waterfall_spray; });
+    m_descriptors.clear();
+    // The prepared instance records can still contain the removed spray.
+    m_frame_instance_count = 0;
+}
+
 void ParticlePass::set_emitter_origin(uint32_t emitter_id, const glm::vec3& base_origin) {
     //  re-anchor a live emitter's spawn region. We apply
     // the SAME convention as add_emitter (world_origin = base + data.origin) so the
@@ -367,6 +400,7 @@ uint32_t ParticlePass::add_waterfall_spray(const std::filesystem::path& json_pat
         return kInvalidEmitter;
     }
     ActiveEmitter& spray = m_active_emitters.back();
+    spray.waterfall_spray = true;
     // Spawn box spans the channel width horizontally and a shallow band at the
     // plunge pool surface; clamp so the mist stays a plume, not a fog bank.
     const float half_w = std::clamp(channel_width * 0.6f, 1.5f, 8.0f);

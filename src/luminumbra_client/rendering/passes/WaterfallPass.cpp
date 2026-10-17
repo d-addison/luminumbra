@@ -43,6 +43,7 @@ void WaterfallPass::destroy_geometry() {
     m_pending_vertices = std::vector<float>{};
     m_uploaded_floats = 0;
     m_adopted_spray = 0;
+    m_replace_spray = false;
     m_sheet_sites.clear();
     m_geometry_built = false;
 }
@@ -150,6 +151,9 @@ void WaterfallPass::execute(const RenderContext& ctx) {
 // the dressing geometry/spray are never hashed (one-way, regression review/).
 WaterfallPass::PreparedGeometry
 WaterfallPass::build_geometry(const Systems::SHIELD_WorldSystem& world) {
+    // Every world entry gets a fresh survey: seed and water epoch alone
+    // cannot distinguish terrain presets. Both entry paths build here.
+    m_sites.clear();
     PreparedGeometry geometry;
     const auto& sites = waterfall_sites(world);
     // 12 vertices * 6 floats per site. Check both CPU and GL sizes BEFORE
@@ -268,11 +272,12 @@ void WaterfallPass::begin_adoption(PreparedGeometry geometry) {
     if (page_count > m_pages.max_size())
         throw std::length_error("Waterfall page count exceeds addressable size");
     m_pages.reserve(page_count);
+    m_replace_spray = true;
 }
 
 bool WaterfallPass::adopt_next(ParticlePass* particle_pass,
                                const std::filesystem::path& root_path) {
-    if (m_geometry_built || m_sheet_sites.empty())
+    if (m_geometry_built || (m_sheet_sites.empty() && !m_replace_spray))
         return true;
     constexpr int kFloatsPerVertex = 6;
     constexpr std::size_t kFloatsPerPage = kSitesPerPage * 72;
@@ -312,6 +317,13 @@ bool WaterfallPass::adopt_next(ParticlePass* particle_pass,
         PassGl::label_gl_object(GL_VERTEX_ARRAY, page.vao, "waterfall.sheet_vao");
         PassGl::label_gl_object(GL_BUFFER, page.vbo, "waterfall.sheet_vbo");
         m_uploaded_floats += count;
+    }
+    // Defer emitter replacement until validated adoption advances. CPU
+    // preparation, refused payloads and cancellation before adoption leave the
+    // old world's spray intact. Empty replacement worlds must clear it too.
+    if (m_replace_spray && particle_pass) {
+        particle_pass->clear_waterfall_spray();
+        m_replace_spray = false;
     }
     constexpr std::size_t kMaxSpray = 24;
     const auto spray_count = particle_pass ? std::min(m_sheet_sites.size(), kMaxSpray) : 0;

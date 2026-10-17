@@ -185,8 +185,11 @@ public:
     static constexpr uint32_t kInvalidEmitter = 0xFFFFFFFFu;
     uint32_t add_emitter(const std::filesystem::path& json_path, const glm::vec3& world_origin);
     void clear_emitters();
+    // Remove the previous world's waterfall spray and its live particles,
+    // preserving other emitters and their particle/template indices.
+    void clear_waterfall_spray();
 
-    // The pass owns this cached emitter so every clear also invalidates it.
+    // The pass owns this cache: full clears invalidate it, spray removal remaps it.
     // Repeated updates recenter it in constant time; failed loads can be retried.
     void update_ambient_motes(const std::filesystem::path& root_path,
                               const glm::vec3& camera_position);
@@ -280,6 +283,7 @@ private:
         double spawn_accumulator = 0.0; // fractional particles carried frame to frame
         uint64_t rng_state = 0;         // xorshift state, render-only
         float spawn_scale = 1.0f;       // live presentation intensity, not authored data
+        bool waterfall_spray = false;
     };
 
     // Render-only particle (motion state lives here, NEVER snapshotted).
