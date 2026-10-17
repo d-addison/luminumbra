@@ -1,5 +1,6 @@
 #include "SaveTransaction.h"
 
+#include "../ai/CreaturePersistence.h"
 #include "../core/BoundedFileReader.h"
 #include "../fields/FieldPageState.h"
 #include "../world/ActiveRegionLedger.h"
@@ -153,6 +154,8 @@ std::size_t MemberByteLimit(std::string_view path) {
         return world::FieldPageState::kMaxFileBytes;
     if (path == "chunks/region/plant-entities.json")
         return kMaxSaveEntityBytes;
+    if (path == "chunks/region/creature-entities.json")
+        return luminumbra::ai::kMaxStampedCreatureBytes;
     return kMaxSaveMemberBytes;
 }
 
@@ -636,6 +639,7 @@ bool member_path_allowed(std::string_view relative_path) {
     if (relative_path == "world_info.json" || relative_path == "aether_state.efs" ||
         relative_path == "chunks/region/world-manifest.json" ||
         relative_path == "chunks/region/plant-entities.json" ||
+        relative_path == "chunks/region/creature-entities.json" ||
         relative_path == "chunks/region/ground-objects.json" ||
         relative_path == "chunks/region/field-pages.fpg" ||
         relative_path == "chunks/region/active-regions.arl") {
@@ -1181,6 +1185,7 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
                 "aether_state.efs",
                 "chunks/region/world-manifest.json",
                 "chunks/region/plant-entities.json",
+                "chunks/region/creature-entities.json",
                 "chunks/region/ground-objects.json",
                 "chunks/region/field-pages.fpg",
                 "chunks/region/active-regions.arl",
@@ -1202,7 +1207,7 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
                     abort(errors);
                     return false;
                 }
-                // At most kMaxSnapshotMembers directory entries, plus the seven
+                // At most kMaxSnapshotMembers directory entries, plus the eight
                 // fixed paths above (some may be absent or also appear in the scan).
                 if (baseline.size() - fixed_members >= kMaxSnapshotMembers) {
                     AddError(errors, "too many snapshot members");
@@ -1273,7 +1278,8 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
                 return false;
             }
             const bool known = members.count(entry.path) != 0;
-            if (!digest.present && entry.action != "replace" && !known) {
+            if (!digest.present && entry.action != "replace" && !known &&
+                entry.path != "chunks/region/creature-entities.json") {
                 continue; // absent and never indexed: not recorded
             }
             if (known) {

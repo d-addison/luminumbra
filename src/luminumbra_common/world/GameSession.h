@@ -134,7 +134,8 @@ public:
                               const std::string& seed,
                               const std::string& worldType);
 
-    // Load an existing world from disk
+    // Load an existing world from disk. Enabled sessions publish only a fully restored
+    // candidate; refusal preserves the current world and its ability to save.
     bool LoadWorld(const std::string& worldId);
     // Uses the preset loader's status-reader seam for deterministic dependency I/O.
     bool LoadWorld(const std::string& worldId, const World::WorldgenFileStatusReader& read_status);
@@ -174,7 +175,7 @@ public:
 
     // Derived validation reuse only; excluded from persistent and hashed state.
     [[nodiscard]] Persistence::ChunkValidationCache::Stats GetChunkValidationCacheStats() const {
-        return m_chunkValidationCache.stats();
+        return m_chunkValidationCache->stats();
     }
 
     // Durable residency (sim.active_regions only). All zero/false when the flag is off.
@@ -197,9 +198,10 @@ public:
     // generates fresh state: loaded chunks are adopted into the streaming map,
     // and generation skips chunks that already carry voxel data, so loaded
     // edits are never clobbered by regeneration. A missing snapshot is a clean
-    // miss (returns true). A refusal returns false and disables saving.
+    // miss (returns true). A state-load refusal disables saving; a rejected world
+    // replacement preserves the current world and its saveability.
     const std::string& GetWorldOpenError() const {
-        return m_worldOpenError;
+        return m_worldOpenError.empty() ? m_worldLoadError : m_worldOpenError;
     }
     bool LoadWorldState();
     bool LoadWorldStateFrom(const std::filesystem::path& save_dir);
@@ -577,7 +579,8 @@ private:
     bool LoadWorldChecked(const std::string& worldId,
                           const World::WorldgenFileStatusReader& read_status,
                           const WorldOpenCheck& check);
-    Persistence::ChunkValidationCache m_chunkValidationCache{};
+    std::unique_ptr<Persistence::ChunkValidationCache> m_chunkValidationCache =
+        std::make_unique<Persistence::ChunkValidationCache>();
 
     luminumbra::simulation::SimBudgetTelemetry m_simBudgetTelemetry;
     entt::registry m_registry;
@@ -595,6 +598,9 @@ private:
     void ResetWorldSystems(bool keep_admitted_chunk_facts = false);
     bool AdoptWorldState(const std::filesystem::path& save_dir,
                          Persistence::WorldSaveAdmission* admission);
+    bool LoadWorldInternal(const std::string& worldId,
+                           const World::WorldgenFileStatusReader& read_status,
+                           const WorldOpenCheck& check);
     void RestoreWorldClock(const WorldClock& clock);
     void RestoreAmbientFieldsAtTick(std::uint64_t tick);
     bool SaveWorldMetadataTo(const std::filesystem::path& save_dir);
@@ -636,6 +642,7 @@ private:
     bool AdmitPlantAt(entt::entity entity, std::uint64_t fresh_stamp);
     void PrepareRegionalFoliage();
     void RunRegionalEnergyTick(std::uint64_t tick);
+    void CaptureCreatureLocomotionForSave();
     void RunRegionalWaterTick();
     void RunRegionalFoliageTick(luminumbra::simulation::SimBudgetTelemetry::TickScope& budget,
                                 std::uint64_t tick);
@@ -720,6 +727,8 @@ private:
     std::string GenerateWorldId();
     std::unique_ptr<Systems::PhysicsSystem> m_physicsSystem;
     std::string m_worldOpenError;
+    // A rejected replacement leaves the current world usable, including its save path.
+    std::string m_worldLoadError;
     std::size_t m_lastLoadedChunkCount = 0;
     std::vector<std::filesystem::path> m_requiredClientAssets;
 

@@ -7,8 +7,66 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
+#include <vector>
 
 namespace Luminumbra::Components {
+
+// Durable identity and ownership. Runtime avatar slots are deliberately separate.
+struct CreatureRegionComponent {
+    std::uint64_t persistent_id = 0;
+    std::int32_t owner_x = 0;
+    std::int32_t owner_z = 0;
+    std::uint64_t region_stamp = 0;
+};
+
+enum class CreatureTier : std::uint8_t {
+    Full = 0,
+    Coarse = 1
+};
+enum class CreatureTransition : std::uint8_t {
+    None = 0,
+    Promote = 1,
+    Demote = 2
+};
+
+struct CreatureCoarseNeed {
+    std::string name;
+    std::uint32_t pressure_ppm = 0;
+};
+
+// Integer continuation state; cadence counters are distinct from full-AI tick counters.
+struct CreatureCoarseComponent {
+    CreatureTier tier = CreatureTier::Full;
+    CreatureTransition transition = CreatureTransition::None;
+    std::int64_t x_mm = 0;
+    std::int64_t y_mm = 0;
+    std::int64_t z_mm = 0;
+    std::uint32_t hunger_ppm = 0;
+    std::uint32_t thirst_ppm = 0;
+    std::vector<CreatureCoarseNeed> needs;
+    std::uint64_t age_cadences = 0;
+    std::uint64_t reproduce_cadences = 0;
+    std::uint64_t reproduce_cooldown_cadences = 0;
+    std::uint64_t courting_cadences = 0;
+    bool travel_pending = false;
+    std::int32_t destination_x = 0;
+    std::int32_t destination_z = 0;
+};
+
+// Persistent controller participation, independent of the runtime avatar slot.
+// Restore retains this intent; controller construction is a separate session step.
+struct CreatureControllerComponent {
+    bool physics_controlled = false;
+};
+
+// Controller continuation data survives reconstruction; avatar_index never goes on disk.
+struct CreatureLocomotionStateComponent {
+    float velocity_x = 0.0f;
+    float velocity_y = 0.0f;
+    float velocity_z = 0.0f;
+    bool grounded = false;
+};
 
 // Stable 16-bit creature SPECIES id derived from a species name string (FNV-1a folded
 // to 16 bits) — the same scheme foliage uses (foliage::SpeciesId16), kept here as a

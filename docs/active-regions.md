@@ -7,10 +7,12 @@ v0.3.0. Explicit false selects the legacy clock path. Budgets remain unlimited i
 shipped configuration. Enabled host sessions consume this schedule for field pages,
 ground objects, weather, energy, foliage and resident water. Resident water uses the
 checked [regional continuation contract](regional-water-continuation.md). Diagnostics
-and measured budget activation remain separate qualification work.
+and measured budget activation remain separate qualification work. Creature records and
+snapshot compatibility are specified in [creature-entities.md](creature-entities.md).
 
-Strict distant policy and distant creatures are planned for v0.3.1. Regional
-continuation performance/default enablement is planned for v0.4.0 as
+Strict distant policy and simulation content identity are adopted before enabled
+world creation or loading. Distant creature simulation remains planned for v0.3.1.
+Regional continuation performance/default enablement is planned for v0.4.0 as
 [issue #320](https://github.com/d-addison/luminumbra/issues/320). The dedicated
 server autosaves every five minutes by default.
 

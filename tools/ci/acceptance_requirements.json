@@ -3525,8 +3525,8 @@
     {
       "id": "ar.scope.007",
       "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
-      "quote": "Strict distant policy and distant creatures are planned for v0.3.1.",
-      "text": "Strict distant policy and distant creatures are planned for v0.3.1."
+      "quote": "Distant creature simulation remains planned for v0.3.1.",
+      "text": "Distant creature simulation remains planned for v0.3.1."
     },
     {
       "id": "ar.scope.008",
@@ -4181,6 +4181,18 @@
       "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
       "quote": "With the flag disabled, strict policy/species adoption is bypassed, identity is absent, and the existing lenient species, save, hash and artifact paths remain unchanged.",
       "text": "With the flag disabled, strict policy/species adoption is bypassed, identity is absent, and the existing lenient species, save, hash and artifact paths remain unchanged."
+    },
+    {
+      "id": "ar.scope.013",
+      "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
+      "quote": "Strict distant policy and simulation content identity are adopted before enabled world creation or loading.",
+      "text": "Strict distant policy and simulation content identity are adopted before enabled world creation or loading."
+    },
+    {
+      "id": "ar.scope.014",
+      "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
+      "quote": "Creature records and snapshot compatibility are specified in [creature-entities.md](creature-entities.md).",
+      "text": "Creature records and snapshot compatibility are specified in [creature-entities.md](creature-entities.md)."
     }
   ],
   "exclusions": [

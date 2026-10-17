@@ -1,6 +1,7 @@
 #pragma once
 
 #include "SaveTransaction.h"
+#include "ai/CreaturePersistence.h"
 #include "ecs/EntitySnapshot.h"
 #include "fields/FieldPageState.h"
 #include "world/ActiveRegionLedger.h"
@@ -44,6 +45,8 @@ struct RegionDigestInputs {
     // Opaque field page projection of the region (FieldPageState::region_bytes); empty when the
     // region owns no initialized field cells, which keeps the digest of such regions unchanged.
     std::string field_page_bytes;
+    // Complete creature authority, appended after the existing inputs only when nonempty.
+    std::string creature_bytes{};
 };
 
 // Decoded siblings from one successful admission. Published only after all record,
@@ -53,6 +56,7 @@ struct WorldSaveRecords {
     world::GroundObjectStore ground;
     world::FieldPageState pages;
     Ecs::EntityRegistrySnapshot plants;
+    luminumbra::ai::CreatureSnapshot creatures;
     bool has_ledger = false;
 };
 
@@ -116,6 +120,15 @@ public:
     static bool load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapshot& out,
                                     const std::filesystem::path& save_dir,
                                     std::vector<std::string>* errors = nullptr);
+
+    static std::filesystem::path creature_entities_path(const std::filesystem::path& save_dir);
+    static bool save_creature_entities(const luminumbra::ai::CreatureSnapshot& snapshot,
+                                       const std::filesystem::path& save_dir,
+                                       std::vector<std::string>* errors = nullptr);
+    // A previous-release snapshot may omit this member entirely: verified absence is empty.
+    static bool load_creature_entities(luminumbra::ai::CreatureSnapshot& out,
+                                       const std::filesystem::path& save_dir,
+                                       std::vector<std::string>* errors = nullptr);
 
     // Ground object store persisted as region/ground-objects.json (SIBLING to the chunk container).
     // An EMPTY store writes NO file (and removes a stale one). Absent file: out is cleared, true.

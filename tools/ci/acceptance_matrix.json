@@ -1125,7 +1125,7 @@
         },
         {
           "kind": "ctest",
-          "ref": "GameSessionHeadlessWorldTest.CorruptLedgerLoadClearsTheWorld"
+          "ref": "GameSessionHeadlessWorldTest.CorruptLedgerLoadPreservesTheLiveWorld"
         }
       ]
     },
@@ -1762,7 +1762,7 @@
     {
       "id": "contract.dw.policy.02",
       "source": "docs/distant-world.md#per-system-distant-policy",
-      "statement": "Resident water advances on the host fixed tick under the regional continuation contract, with resident eligibility, persisted debt/cursors and indexed continuation. Authored combined water/plant/page continuation evidence is available. The caller does not establish the allocator fixed-cohort prerequisites or claim an unconditional service bound. Strict distant policy, distant creatures, published service bounds and native qualification remain planned.",
+      "statement": "Resident water advances on the host fixed tick under the regional continuation contract, with resident eligibility, persisted debt/cursors and indexed continuation. Authored combined water/plant/page continuation evidence is available. The caller does not establish the allocator fixed-cohort prerequisites or claim an unconditional service bound. Strict policy admission is tracked by the simulation-content row; distant creature simulation, published service bounds and native qualification remain planned.",
       "status": "partial",
       "requirements": [
         "dw.policy.007",
@@ -2955,7 +2955,7 @@
     {
       "id": "contract.ledger-extensions",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "statement": "Version 2 extensions, legacy digest preservation and authoritative frozen-content selection require dedicated acceptance evidence review.",
+      "statement": "Version 2/3 extensions, legacy digest preservation and authoritative frozen-content selection require dedicated acceptance evidence review.",
       "status": "planned",
       "requirements": [
         "ar.file.095",
@@ -3066,6 +3066,18 @@
         {
           "kind": "ctest",
           "ref": "GameSessionHeadlessWorldTest.LegacyMemberWriteRefusalsFailCleanAndDirtySaves"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SaveTransaction.CreatureMemberBoundAppliesBeforeHashingAndUndoAllocation"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.ActiveCreatureReadRefusesOversizedNonRegularAndMalformedWithoutMutation"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.ActiveCreatureReadRefusesSymlinkWithoutMutation"
         }
       ]
     },
@@ -3163,7 +3175,9 @@
         "ar.content.086",
         "ar.content.087",
         "ar.content.088",
-        "ar.content.089"
+        "ar.content.089",
+        "ar.scope.013",
+        "ar.scope.014"
       ],
       "evidence": [
         {
@@ -3254,6 +3268,10 @@
           "kind": "doc",
           "ref": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
           "planned": "review integrated qualification for the content admission contract; owner: ds"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/creature-entities.md"
         }
       ]
     },

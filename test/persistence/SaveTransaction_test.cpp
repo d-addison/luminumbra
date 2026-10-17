@@ -1,3 +1,8 @@
+#ifndef _WIN32
+#include <sys/wait.h>
+#endif
+
+#include "luminumbra_common/ai/CreaturePersistence.h"
 // Match the engine's include order: the base job interface precedes worldgen's
 // bounded reader, while its derived barrier implementation follows it.
 // clang-format off
@@ -43,7 +48,6 @@
 #include <iterator>
 #include <limits>
 #include <map>
-#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <stop_token>
@@ -55,9 +59,9 @@
 
 #ifndef _WIN32
 #include <sys/stat.h>
-#include <sys/wait.h>
 #include <unistd.h>
 #else
+#include <optional>
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -238,6 +242,7 @@ bool CommitOnce(const fs::path& dir,
     SaveTransaction txn(dir, tick, {}, &RawDigest);
     std::vector<std::string> errors;
     std::vector<std::string> keys;
+    keys.reserve(writes.size());
     for (const auto& entry : writes) {
         keys.push_back(entry.first);
     }
@@ -392,7 +397,7 @@ void ChildKilledRecovery(const fs::path& dir, int kill_at) {
 
 // Computes the expected post-commit tree by running the scenario in-process on a copy.
 void ComputeFinalTree(const fs::path& baseline_dir, TreeMap& out) {
-    TempSave scratch;
+    const TempSave scratch;
     CopyTree(baseline_dir, scratch.path());
     ASSERT_TRUE(RunScenario(scratch.path()));
     SnapshotIndex index;
@@ -410,6 +415,7 @@ TEST(SaveTransaction, MemberPathAllowListAcceptsOnlyKnownShapes) {
         "aether_state.efs",
         "chunks/region/world-manifest.json",
         "chunks/region/plant-entities.json",
+        "chunks/region/creature-entities.json",
         "chunks/region/ground-objects.json",
         "chunks/region/field-pages.fpg",
         "chunks/region/active-regions.arl",
@@ -497,7 +503,7 @@ TEST(SaveTransaction, IndexDecodeRejectsMalformedInput) {
 }
 
 TEST(SaveTransaction, ReadSnapshotIndexAbsentIsCleanMiss) {
-    TempSave save;
+    const TempSave save;
     SnapshotIndex index;
     index.generation = 99;
     ASSERT_TRUE(read_snapshot_index(save.path(), index, nullptr));
@@ -506,7 +512,7 @@ TEST(SaveTransaction, ReadSnapshotIndexAbsentIsCleanMiss) {
 }
 
 TEST(SaveTransaction, CommitPublishesIndexAndDeletesJournal) {
-    TempSave save;
+    const TempSave save;
     Put(save.path() / "world_info.json", "v1");
 
     ASSERT_TRUE(
@@ -575,7 +581,7 @@ TEST(SaveTransaction, FirstIndexRefusesFailedRegionScanAndAcceptsAbsentOrEmptyRe
 }
 
 TEST(SaveTransaction, AbortRestoresPreviousBytesAndRemovesCreatedMembers) {
-    TempSave save;
+    const TempSave save;
     ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "a"}}));
     const TreeMap before = Tree(save.path());
 
@@ -599,7 +605,7 @@ TEST(SaveTransaction, AbortRestoresPreviousBytesAndRemovesCreatedMembers) {
 }
 
 TEST(SaveTransaction, DestructorRollsBackAnOpenTransaction) {
-    TempSave save;
+    const TempSave save;
     ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "a"}}));
     const TreeMap before = Tree(save.path());
 
@@ -619,7 +625,7 @@ TEST(SaveTransaction, DestructorRollsBackAnOpenTransaction) {
 }
 
 TEST(SaveTransaction, FailedCommitValidationRollsBack) {
-    TempSave save;
+    const TempSave save;
     ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "a"}}));
     const TreeMap before = Tree(save.path());
 
@@ -639,15 +645,15 @@ TEST(SaveTransaction, FailedCommitValidationRollsBack) {
 }
 
 TEST(SaveTransaction, RecoveryDiscardsStaleJournalWhenIndexAlreadyCommitted) {
-    TempSave save;
+    const TempSave save;
     ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "v0"}}));
 
-    TempSave side;
+    const TempSave side;
     JournalCapture().source = journal_directory(save.path());
     JournalCapture().target = side.path() / "stale_journal";
     fs::remove_all(JournalCapture().target);
     {
-        HookGuard guard(&CaptureJournalHook);
+        const HookGuard guard(&CaptureJournalHook);
         ASSERT_TRUE(CommitOnce(save.path(), 2, {{"world_info.json", "v1"}}));
     }
     ASSERT_TRUE(fs::exists(JournalCapture().target / "txn.json"))
@@ -666,14 +672,14 @@ TEST(SaveTransaction, RecoveryDiscardsStaleJournalWhenIndexAlreadyCommitted) {
 }
 
 TEST(SaveTransaction, RecoveryOnCleanDirectoryIsNothingToDo) {
-    TempSave save;
+    const TempSave save;
     std::vector<std::string> errors;
     EXPECT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::NothingToDo);
     EXPECT_TRUE(errors.empty());
 }
 
 TEST(SaveTransaction, RecoveryRejectsUnparsableJournal) {
-    TempSave save;
+    const TempSave save;
     Put(journal_directory(save.path()) / "txn.json", "garbage");
     std::vector<std::string> errors;
     EXPECT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::Failed);
@@ -824,6 +830,25 @@ TEST(SaveTransaction, HashingBoundsRegularFilesAndReportsMissingSeparately) {
     EXPECT_EQ(bytes, 0u); // size refusal happens before hashing any content
     EXPECT_FALSE(hash_file(save.path(), bytes, hash, exists, nullptr, 4));
     EXPECT_EQ(bytes, 0u);
+}
+
+TEST(SaveTransaction, CreatureMemberBoundAppliesBeforeHashingAndUndoAllocation) {
+    const TempSave save;
+    constexpr std::string_view member = "chunks/region/creature-entities.json";
+    constexpr auto limit = luminumbra::ai::kMaxStampedCreatureBytes;
+    EXPECT_EQ(save_member_byte_limit(member), limit);
+    const auto path = save.path() / member;
+    Put(path, "{}");
+    fs::resize_file(path, limit + 1);
+    std::uint64_t bytes = 99, hash = 99;
+    bool exists = false;
+    EXPECT_FALSE(hash_file(path, bytes, hash, exists, nullptr, save_member_byte_limit(member)));
+    EXPECT_TRUE(exists);
+    EXPECT_EQ(bytes, 0u);
+    SaveTransaction transaction(save.path(), 0, {}, &RawDigest);
+    ASSERT_TRUE(transaction.begin(nullptr));
+    EXPECT_FALSE(transaction.protect({std::string(member)}, nullptr));
+    EXPECT_EQ(fs::file_size(path), limit + 1);
 }
 
 TEST(SaveTransaction, RecoveryRefusesGrowingUndoThroughTheOpenedHashHandle) {
@@ -1235,7 +1260,7 @@ TEST(SaveTransaction, OpenReadersRefuseOversizedPersistenceFiles) {
 }
 
 TEST(SaveTransaction, RecoveryDiscardsJournalWithoutTxnFile) {
-    TempSave save;
+    const TempSave save;
     fs::create_directories(journal_directory(save.path()));
     std::vector<std::string> errors;
     EXPECT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::DiscardedStale);
@@ -1243,7 +1268,7 @@ TEST(SaveTransaction, RecoveryDiscardsJournalWithoutTxnFile) {
 }
 
 TEST(SaveTransaction, RecoverySweepsStagingTemporariesOfAnIndexedDirectoryWithoutJournal) {
-    TempSave dir;
+    const TempSave dir;
     ASSERT_TRUE(CommitOnce(dir.path(), 1, {{"world_info.json", "w"}}));
     Put(dir.path() / "chunks/region/r.0.0.lmr.tmp.123.4", "partial");
     Put(dir.path() / "world_info.json.tmp.5.6", "partial");
@@ -1255,7 +1280,7 @@ TEST(SaveTransaction, RecoverySweepsStagingTemporariesOfAnIndexedDirectoryWithou
 }
 
 TEST(SaveTransaction, RecoverySweepsStagingTemporaries) {
-    TempSave save;
+    const TempSave save;
     ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "w"}}));
     Put(save.path() / "chunks/region/r.0.0.lmr.tmp.123.4", "partial");
     Put(save.path() / "world_info.json.tmp.5.6", "partial");
@@ -1275,7 +1300,7 @@ TEST(SaveTransactionDeathTest, KillAtEveryStepRecoversToBaselineOrFinal) {
     // below (which embed the pid) are valid inside the child.
     ::testing::GTEST_FLAG(death_test_style) = "fast";
 
-    TempSave base;
+    const TempSave base;
     ASSERT_TRUE(
         CommitOnce(base.path(), 1, {{"world_info.json", "w0"}, {"aether_state.efs", "e0"}}));
     const TreeMap baseline = Tree(base.path());
@@ -1285,7 +1310,7 @@ TEST(SaveTransactionDeathTest, KillAtEveryStepRecoversToBaselineOrFinal) {
     ASSERT_FALSE(final_tree.empty());
     ASSERT_NE(final_tree, baseline);
 
-    TempSave work;
+    const TempSave work;
     int killed = 0;
     bool saw_finish = false;
     for (int n = 1; n <= 200 && !saw_finish; ++n) {
@@ -1318,7 +1343,7 @@ TEST(SaveTransactionDeathTest, KillAtEveryStepRecoversToBaselineOrFinal) {
 TEST(SaveTransactionDeathTest, RecoveryItselfSurvivesKillAtEachRollbackEntry) {
     ::testing::GTEST_FLAG(death_test_style) = "fast";
 
-    TempSave base;
+    const TempSave base;
     ASSERT_TRUE(
         CommitOnce(base.path(), 1, {{"world_info.json", "w0"}, {"aether_state.efs", "e0"}}));
     const TreeMap baseline = Tree(base.path());
@@ -1328,12 +1353,12 @@ TEST(SaveTransactionDeathTest, RecoveryItselfSurvivesKillAtEachRollbackEntry) {
     ASSERT_FALSE(final_tree.empty());
 
     // Probe the total hook count of the scenario, and the first journal-published hook.
-    TempSave probe;
+    const TempSave probe;
     CopyTree(base.path(), probe.path());
     DeathState().calls = 0;
     DeathState().published_at = 0;
     {
-        HookGuard guard(&RecordHook);
+        const HookGuard guard(&RecordHook);
         ASSERT_TRUE(RunScenario(probe.path()));
     }
     ASSERT_GT(DeathState().published_at, 0);
@@ -1341,7 +1366,7 @@ TEST(SaveTransactionDeathTest, RecoveryItselfSurvivesKillAtEachRollbackEntry) {
     // Midway between journal publication and the end of the transaction: the journal still exists.
     const int kill_at = (DeathState().published_at + DeathState().calls) / 2;
 
-    TempSave dead;
+    const TempSave dead;
     CopyTree(base.path(), dead.path());
     EXPECT_EXIT(ChildKillScenario(dead.path(), kill_at), KilledOrFinished, "");
     ASSERT_EQ(DeathState().last_exit_code, 7) << "transaction was not killed at hook " << kill_at;
@@ -1350,7 +1375,7 @@ TEST(SaveTransactionDeathTest, RecoveryItselfSurvivesKillAtEachRollbackEntry) {
     bool saw_finish = false;
     int recovery_kills = 0;
     for (int m = 1; m <= 20 && !saw_finish; ++m) {
-        TempSave rec;
+        const TempSave rec;
         CopyTree(dead.path(), rec.path());
         EXPECT_EXIT(ChildKilledRecovery(rec.path(), m), KilledOrFinished, "");
         ASSERT_TRUE(DeathState().last_exit_code == 0 || DeathState().last_exit_code == 7)
@@ -1478,7 +1503,7 @@ TEST(SaveTransaction, DISABLED_WindowsInterruptionChild) {
 }
 
 TEST(SaveTransaction, WindowsKillAtEveryPublicationAndRecoveryStepIsIdempotent) {
-    TempSave base, final, work, interrupted;
+    const TempSave base, final, work, interrupted;
     ASSERT_TRUE(CommitOnce(base.path(),
                            1,
                            {{"world_info.json", "w0"},
@@ -1530,6 +1555,78 @@ TEST(SaveTransaction, WindowsKillAtEveryPublicationAndRecoveryStepIsIdempotent) 
         complete = code == 0;
     }
     EXPECT_TRUE(complete);
+}
+#endif
+
+namespace {
+void FailAfterCreatureReplacement(const char* step, const fs::path& path) {
+    if (std::string_view(step) == "after-replace" && path.filename() == "creature-entities.json") {
+        set_snapshot_step_hook_for_testing(nullptr);
+        throw std::runtime_error("injected failure after creature replacement");
+    }
+}
+#ifndef _WIN32
+void KillAfterCreatureReplacement(const char* step, const fs::path& path) {
+    if (std::string_view(step) == "after-replace" && path.filename() == "creature-entities.json")
+        std::_Exit(7);
+}
+#endif
+} // namespace
+
+TEST(SaveTransaction,
+     RollbackAfterCreatureMemberReplacementRestoresWholeSnapshotAndDropsAcknowledgement) {
+    const TempSave save;
+    ASSERT_TRUE(
+        CommitOnce(save.path(),
+                   1,
+                   {{"world_info.json", "w0"}, {"chunks/region/creature-entities.json", "c0"}}));
+    const auto before = Tree(save.path());
+    bool acknowledged = false;
+    {
+        SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        transaction.defer_until_commit([&acknowledged] { acknowledged = true; });
+        ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "w1"));
+        set_snapshot_step_hook_for_testing(&FailAfterCreatureReplacement);
+        EXPECT_THROW(WorldSaveService::write_member_bytes(
+                         save.path(), "chunks/region/creature-entities.json", "c1"),
+                     std::runtime_error);
+        set_snapshot_step_hook_for_testing(nullptr);
+        EXPECT_EQ(Get(save.path() / "chunks/region/creature-entities.json"), "c1");
+    }
+    EXPECT_EQ(Tree(save.path()), before);
+    EXPECT_FALSE(acknowledged);
+    EXPECT_FALSE(journal_pending(save.path()));
+}
+
+#ifndef _WIN32
+TEST(SaveTransactionDeathTest, RecoveryRollsBackCrashAfterCreatureReplacement) {
+    const TempSave save;
+    ASSERT_TRUE(
+        CommitOnce(save.path(),
+                   1,
+                   {{"world_info.json", "w0"}, {"chunks/region/creature-entities.json", "c0"}}));
+    const auto before = Tree(save.path());
+    EXPECT_EXIT(
+        {
+            SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+            if (!transaction.begin(nullptr) ||
+                !WorldSaveService::write_member_bytes(save.path(), "world_info.json", "w1"))
+                std::_Exit(9);
+            set_snapshot_step_hook_for_testing(&KillAfterCreatureReplacement);
+            WorldSaveService::write_member_bytes(
+                save.path(), "chunks/region/creature-entities.json", "c1");
+            std::_Exit(9);
+        },
+        ::testing::ExitedWithCode(7),
+        "");
+    ASSERT_TRUE(journal_pending(save.path()));
+    EXPECT_EQ(Get(save.path() / "chunks/region/creature-entities.json"), "c1");
+    std::vector<std::string> errors;
+    EXPECT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::RolledBack);
+    EXPECT_EQ(Tree(save.path()), before);
+    EXPECT_FALSE(journal_pending(save.path()));
+    EXPECT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::NothingToDo);
 }
 #endif
 

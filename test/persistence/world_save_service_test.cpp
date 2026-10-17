@@ -3,22 +3,35 @@
 
 #include "../support/UniqueTempPath.h"
 
+#include "ai/CreaturePersistence.h"
+#include "components/CoreComponents.h"
+#include "components/CreatureComponents.h"
 #include "fields/FieldPageState.h"
 #include "persistence/ChunkValidationCache.h"
 #include "persistence/SaveTransaction.h"
 #include "persistence/WorldPersistenceRoundtrip.h"
 #include "persistence/WorldSaveService.h"
 #include "systems/SHIELD_WorldSystem.h"
+#include "world/ActiveRegionLedger.h"
+#include "world/Chunk.h"
 #include "world/GroundObjectStore.h"
 #include "world/MarchingCubes.h"
 #include "world/WorldStreamingState.h"
+#include <entt/entity/fwd.hpp>
+#include <entt/entt.hpp>
+#include <luminumbra/core/Types.h>
+#include <nlohmann/json_fwd.hpp>
+#include <set>
 
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <ios>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <nlohmann/json.hpp>
@@ -26,6 +39,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -46,15 +60,20 @@ std::filesystem::path MakeTempSaveDir(const std::string& tag) {
     return dir;
 }
 
-struct TempSaveDir {
+class TempSaveDir {
+    const std::filesystem::path path_;
+
+public:
     explicit TempSaveDir(const std::string& tag)
-        : path(MakeTempSaveDir(tag)) {}
+        : path_(MakeTempSaveDir(tag)) {}
     ~TempSaveDir() {
         std::error_code remove_error;
-        std::filesystem::remove_all(path, remove_error);
+        std::filesystem::remove_all(path_, remove_error);
     }
 
-    std::filesystem::path path;
+    const std::filesystem::path& path() const {
+        return path_;
+    }
 };
 
 std::shared_ptr<Chunk> AddFixtureChunk(WorldStreamingState& state,
@@ -90,8 +109,8 @@ void PopulateFixtureWorld(WorldStreamingState& state) {
 } // namespace
 
 TEST(WorldSaveService, SaveThenLoadRoundTripPreservesWorldHash) {
-    TempSaveDir save_dir("roundtrip");
-    WorldSaveService service;
+    const TempSaveDir save_dir("roundtrip");
+    const WorldSaveService service;
 
     WorldStreamingState original;
     PopulateFixtureWorld(original);
@@ -99,17 +118,17 @@ TEST(WorldSaveService, SaveThenLoadRoundTripPreservesWorldHash) {
     ASSERT_FALSE(original_hash.empty());
 
     std::vector<std::string> save_errors;
-    ASSERT_TRUE(service.save_world(original, save_dir.path, &save_errors));
+    ASSERT_TRUE(service.save_world(original, save_dir.path(), &save_errors));
     EXPECT_TRUE(save_errors.empty());
     // Persistence v2: the writer emits the LMR1 region container,
     // never the legacy v1 single snapshot.
-    EXPECT_FALSE(std::filesystem::exists(WorldSaveService::world_state_path(save_dir.path)));
-    EXPECT_TRUE(std::filesystem::exists(WorldSaveService::world_manifest_path(save_dir.path)));
-    EXPECT_TRUE(std::filesystem::exists(WorldSaveService::region_file_path(save_dir.path, 0, 0)));
+    EXPECT_FALSE(std::filesystem::exists(WorldSaveService::world_state_path(save_dir.path())));
+    EXPECT_TRUE(std::filesystem::exists(WorldSaveService::world_manifest_path(save_dir.path())));
+    EXPECT_TRUE(std::filesystem::exists(WorldSaveService::region_file_path(save_dir.path(), 0, 0)));
 
     WorldStreamingState restored;
     std::vector<std::string> load_errors;
-    ASSERT_TRUE(service.load_world(restored, save_dir.path, load_errors));
+    ASSERT_TRUE(service.load_world(restored, save_dir.path(), load_errors));
     EXPECT_TRUE(load_errors.empty());
 
     EXPECT_EQ(restored.size(), original.size());
@@ -117,12 +136,12 @@ TEST(WorldSaveService, SaveThenLoadRoundTripPreservesWorldHash) {
 }
 
 TEST(WorldSaveService, LoadFromEmptySaveDirIsCleanMissWithoutErrors) {
-    TempSaveDir save_dir("fresh");
-    WorldSaveService service;
+    const TempSaveDir save_dir("fresh");
+    const WorldSaveService service;
 
     WorldStreamingState state;
     std::vector<std::string> errors;
-    EXPECT_FALSE(service.load_world(state, save_dir.path, errors));
+    EXPECT_FALSE(service.load_world(state, save_dir.path(), errors));
     EXPECT_TRUE(errors.empty());
     EXPECT_TRUE(state.empty());
 }
@@ -130,7 +149,7 @@ TEST(WorldSaveService, LoadFromEmptySaveDirIsCleanMissWithoutErrors) {
 TEST(WorldSaveService, LoadFromMissingSaveDirIsCleanMissWithoutErrors) {
     const std::filesystem::path missing_dir =
         std::filesystem::temp_directory_path() / "luminumbra_world_save_service_does_not_exist";
-    WorldSaveService service;
+    const WorldSaveService service;
 
     WorldStreamingState state;
     std::vector<std::string> errors;
@@ -163,8 +182,8 @@ TEST(ChunkDirtyTracking, DirectVoxelWritePlusMarkIsVisibleThroughStreamingState)
 }
 
 TEST(ChunkDirtyTracking, SaveDirtyChunksWritesSnapshotAndClearsFlags) {
-    TempSaveDir save_dir("dirty");
-    WorldSaveService service;
+    const TempSaveDir save_dir("dirty");
+    const WorldSaveService service;
 
     WorldStreamingState state;
     PopulateFixtureWorld(state);
@@ -174,18 +193,18 @@ TEST(ChunkDirtyTracking, SaveDirtyChunksWritesSnapshotAndClearsFlags) {
     edited->mark_voxel_data_dirty();
 
     std::vector<std::string> errors;
-    const auto report = service.save_dirty_chunks(state, save_dir.path, &errors);
+    const auto report = service.save_dirty_chunks(state, save_dir.path(), &errors);
     EXPECT_TRUE(errors.empty());
     EXPECT_EQ(report.chunks_total, 3u);
     EXPECT_EQ(report.chunks_dirty, 1u);
     EXPECT_TRUE(report.saved);
     EXPECT_GE(report.regions_written, 1u);
-    EXPECT_TRUE(std::filesystem::exists(WorldSaveService::region_file_path(save_dir.path, 0, 0)));
+    EXPECT_TRUE(std::filesystem::exists(WorldSaveService::region_file_path(save_dir.path(), 0, 0)));
     EXPECT_FALSE(edited->is_voxel_data_dirty());
     EXPECT_TRUE(state.dirty_chunk_ids().empty());
 
     // Second pass with nothing dirty performs no save.
-    const auto clean_report = service.save_dirty_chunks(state, save_dir.path, &errors);
+    const auto clean_report = service.save_dirty_chunks(state, save_dir.path(), &errors);
     EXPECT_TRUE(errors.empty());
     EXPECT_EQ(clean_report.chunks_total, 3u);
     EXPECT_EQ(clean_report.chunks_dirty, 0u);
@@ -193,20 +212,20 @@ TEST(ChunkDirtyTracking, SaveDirtyChunksWritesSnapshotAndClearsFlags) {
 }
 
 TEST(ChunkDirtyTracking, SaveDirtyChunksWithoutDirtyChunksWritesNothing) {
-    TempSaveDir save_dir("clean");
-    WorldSaveService service;
+    const TempSaveDir save_dir("clean");
+    const WorldSaveService service;
 
     WorldStreamingState state;
     PopulateFixtureWorld(state);
 
     std::vector<std::string> errors;
-    const auto report = service.save_dirty_chunks(state, save_dir.path, &errors);
+    const auto report = service.save_dirty_chunks(state, save_dir.path(), &errors);
     EXPECT_TRUE(errors.empty());
     EXPECT_EQ(report.chunks_total, 3u);
     EXPECT_EQ(report.chunks_dirty, 0u);
     EXPECT_FALSE(report.saved);
-    EXPECT_FALSE(std::filesystem::exists(WorldSaveService::world_state_path(save_dir.path)));
-    EXPECT_FALSE(std::filesystem::exists(WorldSaveService::region_directory(save_dir.path)));
+    EXPECT_FALSE(std::filesystem::exists(WorldSaveService::world_state_path(save_dir.path())));
+    EXPECT_FALSE(std::filesystem::exists(WorldSaveService::region_directory(save_dir.path())));
 }
 
 TEST(ChunkDirtyTracking, GenerationAndMeshingLeaveChunkClean) {
@@ -231,32 +250,32 @@ TEST(ChunkDirtyTracking, GenerationAndMeshingLeaveChunkClean) {
 }
 
 TEST(WorldSaveService, ClockMetadataValidationPrecedesEveryWrite) {
-    TempSaveDir save_dir("clock_metadata");
-    const auto metadata_path = save_dir.path / "world_info.json";
+    const TempSaveDir save_dir("clock_metadata");
+    const auto metadata_path = save_dir.path() / "world_info.json";
     const auto read = [&]() {
-        std::ifstream file(metadata_path, std::ios::binary);
+        const std::ifstream file(metadata_path, std::ios::binary);
         std::ostringstream bytes;
         bytes << file.rdbuf();
         return bytes.str();
     };
     std::vector<std::string> errors;
     EXPECT_FALSE(WorldSaveService::save_metadata(
-        R"({"container_version":2,"simulationTick":-1})", save_dir.path, &errors));
+        R"({"container_version":2,"simulationTick":-1})", save_dir.path(), &errors));
     EXPECT_FALSE(std::filesystem::exists(metadata_path));
-    EXPECT_FALSE(std::filesystem::exists(save_dir.path / "chunks"));
+    EXPECT_FALSE(std::filesystem::exists(save_dir.path() / "chunks"));
     nlohmann::json metadata = {{"container_version", 2}};
     Luminumbra::world::WorldClock(123, {12000, 4}).write_metadata(metadata);
     const auto valid = metadata.dump(4) + "\n";
-    ASSERT_TRUE(WorldSaveService::save_metadata(valid, save_dir.path));
+    ASSERT_TRUE(WorldSaveService::save_metadata(valid, save_dir.path()));
     EXPECT_EQ(read(), valid);
-    const auto index_path = Luminumbra::Persistence::snapshot_index_path(save_dir.path);
+    const auto index_path = Luminumbra::Persistence::snapshot_index_path(save_dir.path());
     ASSERT_TRUE(std::filesystem::exists(index_path));
     std::ifstream index_file(index_path, std::ios::binary);
     const std::string index_before(std::istreambuf_iterator<char>{index_file}, {});
-    EXPECT_FALSE(WorldSaveService::save_metadata(R"({"container_version":2})", save_dir.path));
+    EXPECT_FALSE(WorldSaveService::save_metadata(R"({"container_version":2})", save_dir.path()));
     EXPECT_EQ(read(), valid);
     metadata["calendar"]["daysPerYear"] = 0;
-    EXPECT_FALSE(WorldSaveService::save_metadata(metadata.dump(), save_dir.path));
+    EXPECT_FALSE(WorldSaveService::save_metadata(metadata.dump(), save_dir.path()));
     EXPECT_EQ(read(), valid);
     // A pre-existing corrupt clock blocks chunk, entity and metadata writers.
     {
@@ -266,28 +285,28 @@ TEST(WorldSaveService, ClockMetadataValidationPrecedesEveryWrite) {
     const auto damaged = read();
     WorldStreamingState state;
     PopulateFixtureWorld(state);
-    EXPECT_FALSE(WorldSaveService{}.save_world(state, save_dir.path));
-    EXPECT_FALSE(WorldSaveService::save_metadata(valid, save_dir.path));
+    EXPECT_FALSE(WorldSaveService{}.save_world(state, save_dir.path()));
+    EXPECT_FALSE(WorldSaveService::save_metadata(valid, save_dir.path()));
     // Clock-bearing metadata is an enabled indexed snapshot, so its region directory
     // already exists. Refusal must preserve the published index, not remove that directory.
     std::ifstream index_after_file(index_path, std::ios::binary);
     EXPECT_EQ(std::string(std::istreambuf_iterator<char>{index_after_file}, {}), index_before);
     EXPECT_EQ(read(), damaged);
     std::ofstream(metadata_path, std::ios::binary | std::ios::trunc) << "{";
-    EXPECT_NO_THROW(EXPECT_FALSE(WorldSaveService::save_metadata(valid, save_dir.path, &errors)));
+    EXPECT_NO_THROW(EXPECT_FALSE(WorldSaveService::save_metadata(valid, save_dir.path(), &errors)));
     EXPECT_EQ(read(), "{");
 }
 
 TEST(WorldSaveService, LegacyMetadataWriterPreservesOpaqueBytesAndMissingDirectoryFailure) {
-    TempSaveDir root("legacy_metadata");
-    const auto missing = root.path / "missing";
+    const TempSaveDir root("legacy_metadata");
+    const auto missing = root.path() / "missing";
     EXPECT_FALSE(WorldSaveService::save_metadata(R"({"container_version":2})", missing));
     EXPECT_FALSE(std::filesystem::exists(missing));
     for (const std::string bytes : {"{", "[]", "null", "opaque legacy input"}) {
         SCOPED_TRACE(bytes);
-        TempSaveDir destination("opaque_metadata");
-        ASSERT_TRUE(WorldSaveService::save_metadata(bytes, destination.path));
-        std::ifstream input(destination.path / "world_info.json", std::ios::binary);
+        const TempSaveDir destination("opaque_metadata");
+        ASSERT_TRUE(WorldSaveService::save_metadata(bytes, destination.path()));
+        const std::ifstream input(destination.path() / "world_info.json", std::ios::binary);
         std::ostringstream saved;
         saved << input.rdbuf();
         EXPECT_EQ(saved.str(), bytes);
@@ -295,19 +314,19 @@ TEST(WorldSaveService, LegacyMetadataWriterPreservesOpaqueBytesAndMissingDirecto
 }
 
 TEST(WorldSaveService, DirectLegacySnapshotsKeepMetadataAboveCatalogSizeLimit) {
-    TempSaveDir destination("large_metadata");
+    const TempSaveDir destination("large_metadata");
     const nlohmann::json metadata = {{"container_version", 2},
-                                     {"extension", std::string(1024 * 1024, 'x')}};
+                                     {"extension", std::string(std::size_t{1024} * 1024, 'x')}};
     const auto bytes = metadata.dump();
-    ASSERT_TRUE(WorldSaveService::save_metadata(bytes, destination.path));
+    ASSERT_TRUE(WorldSaveService::save_metadata(bytes, destination.path()));
     WorldStreamingState original, loaded;
     PopulateFixtureWorld(original);
-    ASSERT_TRUE(WorldSaveService{}.save_world(original, destination.path));
+    ASSERT_TRUE(WorldSaveService{}.save_world(original, destination.path()));
     std::vector<std::string> errors;
-    ASSERT_TRUE(WorldSaveService{}.load_world(loaded, destination.path, errors));
+    ASSERT_TRUE(WorldSaveService{}.load_world(loaded, destination.path(), errors));
     EXPECT_TRUE(errors.empty());
     EXPECT_EQ(WorldSaveService{}.world_hash(loaded), WorldSaveService{}.world_hash(original));
-    EXPECT_TRUE(WorldSaveService::save_metadata(bytes, destination.path));
+    EXPECT_TRUE(WorldSaveService::save_metadata(bytes, destination.path()));
 }
 
 // ---- Ground objects (S5) persistence ----
@@ -339,7 +358,7 @@ std::string JoinErrors(const std::vector<std::string>& errors) {
 TEST(WorldSaveService, GroundObjectsSaveLoadRoundTripAndEmptyStoreRemovesFile) {
     namespace fs = std::filesystem;
     using Luminumbra::world::GroundObjectStore;
-    TempSaveDir save_dir("ground_roundtrip");
+    const TempSaveDir save_dir("ground_roundtrip");
 
     GroundObjectStore store;
     ASSERT_TRUE(store.insert(MakeGroundObject(1, 100, 0)));
@@ -357,74 +376,74 @@ TEST(WorldSaveService, GroundObjectsSaveLoadRoundTripAndEmptyStoreRemovesFile) {
     nlohmann::json metadata = {{"container_version", 2}};
     clock.write_metadata(metadata);
     {
-        WorldSaveService::SaveFactsScope facts(save_dir.path);
+        const WorldSaveService::SaveFactsScope facts(save_dir.path());
         Luminumbra::Persistence::SaveTransaction transaction(
-            save_dir.path, clock.tick(), {}, WorldSaveService::member_digest);
+            save_dir.path(), clock.tick(), {}, WorldSaveService::member_digest);
         ASSERT_TRUE(transaction.begin(&errors)) << JoinErrors(errors);
         ASSERT_TRUE(WorldSaveService::save_metadata_and_active_regions(
-            metadata.dump(), ledger, save_dir.path, &errors))
+            metadata.dump(), ledger, save_dir.path(), &errors))
             << JoinErrors(errors);
-        ASSERT_TRUE(WorldSaveService::save_ground_objects(store, save_dir.path, &errors))
+        ASSERT_TRUE(WorldSaveService::save_ground_objects(store, save_dir.path(), &errors))
             << JoinErrors(errors);
         ASSERT_TRUE(transaction.commit(&errors)) << JoinErrors(errors);
     }
-    EXPECT_TRUE(fs::exists(WorldSaveService::ground_objects_path(save_dir.path)));
+    EXPECT_TRUE(fs::exists(WorldSaveService::ground_objects_path(save_dir.path())));
 
     GroundObjectStore loaded;
-    ASSERT_TRUE(WorldSaveService::load_ground_objects(loaded, save_dir.path, 100, &errors))
+    ASSERT_TRUE(WorldSaveService::load_ground_objects(loaded, save_dir.path(), 100, &errors))
         << JoinErrors(errors);
     EXPECT_EQ(loaded.objects(), store.objects());
 
     // Keep the valid indexed member present so only the empty-store writer can remove it.
     {
-        WorldSaveService::SaveFactsScope facts(save_dir.path);
+        WorldSaveService::SaveFactsScope facts(save_dir.path());
         ASSERT_TRUE(facts.validate(&errors)) << JoinErrors(errors);
         Luminumbra::Persistence::SaveTransaction transaction(
-            save_dir.path, clock.tick(), {}, WorldSaveService::member_digest);
+            save_dir.path(), clock.tick(), {}, WorldSaveService::member_digest);
         ASSERT_TRUE(transaction.begin(&errors)) << JoinErrors(errors);
         ASSERT_TRUE(transaction.protect({"chunks/region/ground-objects.json"}, &errors));
-        ASSERT_TRUE(fs::exists(WorldSaveService::ground_objects_path(save_dir.path)));
+        ASSERT_TRUE(fs::exists(WorldSaveService::ground_objects_path(save_dir.path())));
         ASSERT_TRUE(
-            WorldSaveService::save_ground_objects(GroundObjectStore{}, save_dir.path, &errors))
+            WorldSaveService::save_ground_objects(GroundObjectStore{}, save_dir.path(), &errors))
             << JoinErrors(errors);
         ASSERT_TRUE(transaction.commit(&errors)) << JoinErrors(errors);
     }
-    EXPECT_FALSE(fs::exists(WorldSaveService::ground_objects_path(save_dir.path)));
-    ASSERT_TRUE(WorldSaveService::validate_save(save_dir.path, &errors)) << JoinErrors(errors);
+    EXPECT_FALSE(fs::exists(WorldSaveService::ground_objects_path(save_dir.path())));
+    ASSERT_TRUE(WorldSaveService::validate_save(save_dir.path(), &errors)) << JoinErrors(errors);
     Luminumbra::Persistence::SnapshotIndex index;
-    ASSERT_TRUE(Luminumbra::Persistence::read_snapshot_index(save_dir.path, index, &errors));
+    ASSERT_TRUE(Luminumbra::Persistence::read_snapshot_index(save_dir.path(), index, &errors));
     const auto member = std::find_if(index.members.begin(), index.members.end(), [](const auto& m) {
         return m.path == "chunks/region/ground-objects.json";
     });
     ASSERT_NE(member, index.members.end());
     EXPECT_FALSE(member->present);
     GroundObjectStore absent;
-    ASSERT_TRUE(WorldSaveService::load_ground_objects(absent, save_dir.path, 100, &errors));
+    ASSERT_TRUE(WorldSaveService::load_ground_objects(absent, save_dir.path(), 100, &errors));
     EXPECT_TRUE(absent.empty());
     WorldStreamingState reopened;
-    ASSERT_TRUE(WorldSaveService{}.load_world(reopened, save_dir.path, errors))
+    ASSERT_TRUE(WorldSaveService{}.load_world(reopened, save_dir.path(), errors))
         << JoinErrors(errors);
     EXPECT_TRUE(errors.empty()) << JoinErrors(errors);
 }
 
 TEST(WorldSaveService, GroundObjectIdAtOrAboveNextIdIsRefused) {
     using Luminumbra::world::GroundObjectStore;
-    TempSaveDir save_dir("ground_next_id");
+    const TempSaveDir save_dir("ground_next_id");
     GroundObjectStore store;
     ASSERT_TRUE(store.insert(MakeGroundObject(5, 100, 0)));
     std::vector<std::string> errors;
-    ASSERT_TRUE(WorldSaveService::save_ground_objects(store, save_dir.path, &errors));
+    ASSERT_TRUE(WorldSaveService::save_ground_objects(store, save_dir.path(), &errors));
 
     GroundObjectStore loaded;
-    EXPECT_FALSE(WorldSaveService::load_ground_objects(loaded, save_dir.path, 5, &errors));
+    EXPECT_FALSE(WorldSaveService::load_ground_objects(loaded, save_dir.path(), 5, &errors));
     EXPECT_TRUE(loaded.empty()) << "a refused load leaves the output untouched";
-    EXPECT_TRUE(WorldSaveService::load_ground_objects(loaded, save_dir.path, 6, &errors));
+    EXPECT_TRUE(WorldSaveService::load_ground_objects(loaded, save_dir.path(), 6, &errors));
     EXPECT_EQ(loaded.size(), 1u);
 }
 
 TEST(WorldSaveService, CorruptGroundObjectsFileIsRefusedByLoadAndMemberDigest) {
-    TempSaveDir save_dir("ground_corrupt");
-    const auto path = WorldSaveService::ground_objects_path(save_dir.path);
+    const TempSaveDir save_dir("ground_corrupt");
+    const auto path = WorldSaveService::ground_objects_path(save_dir.path());
     std::filesystem::create_directories(path.parent_path());
     {
         std::ofstream out(path, std::ios::binary);
@@ -432,25 +451,25 @@ TEST(WorldSaveService, CorruptGroundObjectsFileIsRefusedByLoadAndMemberDigest) {
     }
     Luminumbra::world::GroundObjectStore loaded;
     std::vector<std::string> errors;
-    EXPECT_FALSE(WorldSaveService::load_ground_objects(loaded, save_dir.path, 100, &errors));
+    EXPECT_FALSE(WorldSaveService::load_ground_objects(loaded, save_dir.path(), 100, &errors));
     EXPECT_FALSE(errors.empty());
 
     Luminumbra::Persistence::MemberDigest digest;
     std::string error;
     EXPECT_FALSE(WorldSaveService::member_digest(
-        save_dir.path, "chunks/region/ground-objects.json", digest, error));
+        save_dir.path(), "chunks/region/ground-objects.json", digest, error));
     EXPECT_FALSE(error.empty());
 }
 
 TEST(WorldSaveService, GroundObjectWithoutLedgerIsRefusedByLoadWorld) {
-    TempSaveDir save_dir("ground_orphan");
-    WorldSaveService service;
-    WorldStreamingState original;
+    const TempSaveDir save_dir("ground_orphan");
+    const WorldSaveService service;
+    const WorldStreamingState original;
     // Indexing validates full SDF lattices; the tiny legacy chunk fixtures are
     // deliberately incomplete. A manifest-only baseline isolates the orphan
     // refusal without introducing an unrelated invalid chunk member.
     std::vector<std::string> save_errors;
-    ASSERT_TRUE(service.save_world(original, save_dir.path, &save_errors))
+    ASSERT_TRUE(service.save_world(original, save_dir.path(), &save_errors))
         << JoinErrors(save_errors);
 
     Luminumbra::world::GroundObjectStore store;
@@ -465,13 +484,13 @@ TEST(WorldSaveService, GroundObjectWithoutLedgerIsRefusedByLoadWorld) {
     nlohmann::json metadata = {{"container_version", 2}};
     clock.write_metadata(metadata);
     ASSERT_TRUE(WorldSaveService::save_metadata_and_active_regions(
-        metadata.dump(), ledger, save_dir.path, &save_errors));
-    ASSERT_TRUE(WorldSaveService::save_ground_objects(store, save_dir.path, &save_errors))
+        metadata.dump(), ledger, save_dir.path(), &save_errors));
+    ASSERT_TRUE(WorldSaveService::save_ground_objects(store, save_dir.path(), &save_errors))
         << JoinErrors(save_errors);
     // Inject a semantically corrupt but checksum-consistent snapshot for the reader.
-    ASSERT_TRUE(std::filesystem::remove(WorldSaveService::active_regions_path(save_dir.path)));
+    ASSERT_TRUE(std::filesystem::remove(WorldSaveService::active_regions_path(save_dir.path())));
     Luminumbra::Persistence::SnapshotIndex index;
-    ASSERT_TRUE(Luminumbra::Persistence::read_snapshot_index(save_dir.path, index, &save_errors));
+    ASSERT_TRUE(Luminumbra::Persistence::read_snapshot_index(save_dir.path(), index, &save_errors));
     for (auto& member : index.members)
         if (member.path == "chunks/region/active-regions.arl") {
             member.present = false;
@@ -479,13 +498,13 @@ TEST(WorldSaveService, GroundObjectWithoutLedgerIsRefusedByLoadWorld) {
             member.fnv64 = 0;
         }
     ASSERT_TRUE(WorldSaveService::durable_write_file(
-        Luminumbra::Persistence::snapshot_index_path(save_dir.path),
+        Luminumbra::Persistence::snapshot_index_path(save_dir.path()),
         Luminumbra::Persistence::encode_snapshot_index(index),
         &save_errors));
 
     WorldStreamingState restored;
     std::vector<std::string> load_errors;
-    EXPECT_FALSE(service.load_world(restored, save_dir.path, load_errors));
+    EXPECT_FALSE(service.load_world(restored, save_dir.path(), load_errors));
     EXPECT_NE(JoinErrors(load_errors).find("corrupt ground objects: orphaned object"),
               std::string::npos)
         << JoinErrors(load_errors);
@@ -497,7 +516,7 @@ TEST(WorldSaveService, RegionDigestIgnoresEmptyGroundBytesAndSeparatesNonEmptyBy
     const RegionKey key{0, 0};
 
     const std::uint64_t plain = WorldSaveService::region_simulation_digest(no_dir, key, {});
-    WorldStreamingState empty_state;
+    const WorldStreamingState empty_state;
     EXPECT_EQ(
         plain,
         std::stoull(Luminumbra::Persistence::ComputeRegionContentHash(empty_state), nullptr, 16));
@@ -522,7 +541,7 @@ namespace {
 
 void TouchFile(const std::filesystem::path& path) {
     std::filesystem::create_directories(path.parent_path());
-    std::ofstream out(path, std::ios::binary);
+    const std::ofstream out(path, std::ios::binary);
 }
 
 // Regions (0,0) and (1,0) both own cells of page x=1: cells 16..20 belong to region 0 and cells
@@ -539,7 +558,7 @@ Luminumbra::world::FieldPageState MakeFieldState() {
 TEST(WorldSaveService, FieldPagesSaveLoadRoundTripAndEmptyStateRemovesFile) {
     namespace fs = std::filesystem;
     using Luminumbra::world::FieldPageState;
-    TempSaveDir save_dir("field_pages_roundtrip");
+    const TempSaveDir save_dir("field_pages_roundtrip");
 
     const FieldPageState state = MakeFieldState();
     ASSERT_TRUE(state.owns_region({0, 0}));
@@ -551,49 +570,49 @@ TEST(WorldSaveService, FieldPagesSaveLoadRoundTripAndEmptyStateRemovesFile) {
     nlohmann::json metadata = {{"container_version", 2}};
     clock.write_metadata(metadata);
     {
-        WorldSaveService::SaveFactsScope facts(save_dir.path);
+        const WorldSaveService::SaveFactsScope facts(save_dir.path());
         Luminumbra::Persistence::SaveTransaction transaction(
-            save_dir.path, clock.tick(), {}, WorldSaveService::member_digest);
+            save_dir.path(), clock.tick(), {}, WorldSaveService::member_digest);
         ASSERT_TRUE(transaction.begin(&errors)) << JoinErrors(errors);
         ASSERT_TRUE(WorldSaveService::save_metadata_and_active_regions(
-            metadata.dump(), ledger, save_dir.path, &errors))
+            metadata.dump(), ledger, save_dir.path(), &errors))
             << JoinErrors(errors);
-        ASSERT_TRUE(WorldSaveService::save_field_pages(state, save_dir.path, &errors))
+        ASSERT_TRUE(WorldSaveService::save_field_pages(state, save_dir.path(), &errors))
             << JoinErrors(errors);
         ASSERT_TRUE(transaction.commit(&errors)) << JoinErrors(errors);
     }
-    ASSERT_TRUE(WorldSaveService::validate_save(save_dir.path, &errors)) << JoinErrors(errors);
-    EXPECT_TRUE(fs::exists(WorldSaveService::field_pages_path(save_dir.path)));
+    ASSERT_TRUE(WorldSaveService::validate_save(save_dir.path(), &errors)) << JoinErrors(errors);
+    EXPECT_TRUE(fs::exists(WorldSaveService::field_pages_path(save_dir.path())));
 
     FieldPageState loaded;
-    ASSERT_TRUE(WorldSaveService::load_field_pages(loaded, save_dir.path, &errors))
+    ASSERT_TRUE(WorldSaveService::load_field_pages(loaded, save_dir.path(), &errors))
         << JoinErrors(errors);
     EXPECT_EQ(loaded.page_count(), state.page_count());
     EXPECT_EQ(loaded.serialize(), state.serialize());
 
     // The writer must retire the existing indexed member, preserving a valid ledger/clock pair.
-    ASSERT_TRUE(fs::exists(WorldSaveService::field_pages_path(save_dir.path)));
-    ASSERT_TRUE(WorldSaveService::save_field_pages(FieldPageState{}, save_dir.path, &errors))
+    ASSERT_TRUE(fs::exists(WorldSaveService::field_pages_path(save_dir.path())));
+    ASSERT_TRUE(WorldSaveService::save_field_pages(FieldPageState{}, save_dir.path(), &errors))
         << JoinErrors(errors);
-    ASSERT_TRUE(WorldSaveService::validate_save(save_dir.path, &errors)) << JoinErrors(errors);
+    ASSERT_TRUE(WorldSaveService::validate_save(save_dir.path(), &errors)) << JoinErrors(errors);
     Luminumbra::Persistence::SnapshotIndex index;
-    ASSERT_TRUE(Luminumbra::Persistence::read_snapshot_index(save_dir.path, index, &errors));
+    ASSERT_TRUE(Luminumbra::Persistence::read_snapshot_index(save_dir.path(), index, &errors));
     const auto member = std::find_if(index.members.begin(), index.members.end(), [](const auto& m) {
         return m.path == FieldPageState::kRelativePath;
     });
     ASSERT_NE(member, index.members.end());
     EXPECT_FALSE(member->present);
-    EXPECT_FALSE(fs::exists(WorldSaveService::field_pages_path(save_dir.path)));
+    EXPECT_FALSE(fs::exists(WorldSaveService::field_pages_path(save_dir.path())));
     FieldPageState absent = MakeFieldState();
-    ASSERT_TRUE(WorldSaveService::load_field_pages(absent, save_dir.path, &errors));
+    ASSERT_TRUE(WorldSaveService::load_field_pages(absent, save_dir.path(), &errors));
     EXPECT_TRUE(absent.empty());
 }
 
 TEST(WorldSaveService, CorruptFieldPagesFileIsRefusedByLoadAndMemberDigest) {
     namespace fs = std::filesystem;
     using Luminumbra::world::FieldPageState;
-    TempSaveDir save_dir("field_pages_corrupt");
-    const fs::path path = WorldSaveService::field_pages_path(save_dir.path);
+    const TempSaveDir save_dir("field_pages_corrupt");
+    const fs::path path = WorldSaveService::field_pages_path(save_dir.path());
     fs::create_directories(path.parent_path());
     {
         std::ofstream out(path, std::ios::binary | std::ios::trunc);
@@ -603,7 +622,7 @@ TEST(WorldSaveService, CorruptFieldPagesFileIsRefusedByLoadAndMemberDigest) {
     FieldPageState loaded = MakeFieldState();
     const std::size_t before = loaded.page_count();
     std::vector<std::string> errors;
-    EXPECT_FALSE(WorldSaveService::load_field_pages(loaded, save_dir.path, &errors));
+    EXPECT_FALSE(WorldSaveService::load_field_pages(loaded, save_dir.path(), &errors));
     EXPECT_NE(JoinErrors(errors).find("Field pages load failed: "), std::string::npos)
         << JoinErrors(errors);
     EXPECT_EQ(loaded.page_count(), before) << "a refused load leaves the output untouched";
@@ -611,24 +630,24 @@ TEST(WorldSaveService, CorruptFieldPagesFileIsRefusedByLoadAndMemberDigest) {
     Luminumbra::Persistence::MemberDigest digest;
     std::string error;
     EXPECT_FALSE(WorldSaveService::member_digest(
-        save_dir.path, "chunks/region/field-pages.fpg", digest, error));
+        save_dir.path(), "chunks/region/field-pages.fpg", digest, error));
     EXPECT_FALSE(error.empty());
 }
 
 TEST(WorldSaveService, FieldPagesWithoutLedgerAreRefusedByLoadWorld) {
-    TempSaveDir save_dir("field_pages_orphan");
-    WorldSaveService service;
+    const TempSaveDir save_dir("field_pages_orphan");
+    const WorldSaveService service;
     WorldStreamingState original;
     PopulateFixtureWorld(original);
     std::vector<std::string> save_errors;
-    ASSERT_TRUE(service.save_world(original, save_dir.path, &save_errors));
+    ASSERT_TRUE(service.save_world(original, save_dir.path(), &save_errors));
 
-    ASSERT_TRUE(WorldSaveService::save_field_pages(MakeFieldState(), save_dir.path, &save_errors))
+    ASSERT_TRUE(WorldSaveService::save_field_pages(MakeFieldState(), save_dir.path(), &save_errors))
         << JoinErrors(save_errors);
 
     WorldStreamingState restored;
     std::vector<std::string> load_errors;
-    EXPECT_FALSE(service.load_world(restored, save_dir.path, load_errors));
+    EXPECT_FALSE(service.load_world(restored, save_dir.path(), load_errors));
     EXPECT_NE(JoinErrors(load_errors).find("corrupt field pages: orphaned page"), std::string::npos)
         << JoinErrors(load_errors);
 }
@@ -637,29 +656,29 @@ TEST(WorldSaveService, FieldPageSpanningTwoRegionsNeedsEveryOwnerInTheLedger) {
     using Luminumbra::world::ActiveRegionLedger;
     using Luminumbra::world::RegionKey;
     using Luminumbra::world::WorldClock;
-    TempSaveDir save_dir("field_pages_two_owners");
+    const TempSaveDir save_dir("field_pages_two_owners");
     std::vector<std::string> errors;
 
     ActiveRegionLedger ledger;
-    EXPECT_TRUE(WorldSaveService::validate_field_pages(save_dir.path, ledger, &errors))
+    EXPECT_TRUE(WorldSaveService::validate_field_pages(save_dir.path(), ledger, &errors))
         << "an absent file is valid";
 
     const Luminumbra::world::FieldPageState state = MakeFieldState();
     ASSERT_TRUE(state.owns_region({0, 0}));
     ASSERT_TRUE(state.owns_region({1, 0}));
-    ASSERT_TRUE(WorldSaveService::save_field_pages(state, save_dir.path, &errors))
+    ASSERT_TRUE(WorldSaveService::save_field_pages(state, save_dir.path(), &errors))
         << JoinErrors(errors);
     // validate_field_pages only checks that the ledger file exists; it never decodes it here.
-    TouchFile(WorldSaveService::active_regions_path(save_dir.path));
+    TouchFile(WorldSaveService::active_regions_path(save_dir.path()));
 
     ledger.mark_edited(RegionKey{0, 0}, WorldClock{});
-    EXPECT_FALSE(WorldSaveService::validate_field_pages(save_dir.path, ledger, &errors));
+    EXPECT_FALSE(WorldSaveService::validate_field_pages(save_dir.path(), ledger, &errors));
     EXPECT_NE(JoinErrors(errors).find("corrupt field pages: orphaned page"), std::string::npos)
         << JoinErrors(errors);
 
     ledger.mark_edited(RegionKey{1, 0}, WorldClock{});
     errors.clear();
-    EXPECT_TRUE(WorldSaveService::validate_field_pages(save_dir.path, ledger, &errors))
+    EXPECT_TRUE(WorldSaveService::validate_field_pages(save_dir.path(), ledger, &errors))
         << JoinErrors(errors);
 }
 
@@ -673,7 +692,7 @@ TEST(WorldSaveService, FieldPageDigestCompositionTable) {
     const std::string pages = MakeFieldState().region_bytes(key);
     ASSERT_FALSE(pages.empty());
 
-    WorldStreamingState empty_state;
+    const WorldStreamingState empty_state;
     const std::string content = Luminumbra::Persistence::ComputeRegionContentHash(empty_state);
     const auto digest = [&](const std::string& ground_bytes, const std::string& page_bytes) {
         const RegionDigestInputs inputs{.live = {},
@@ -708,7 +727,7 @@ TEST(WorldSaveService, FieldPageDigestCompositionTable) {
 TEST(WorldSaveService, IndexedAbsentEnergyRefusesResealedAgeBeyondSavedClock) {
     using namespace Luminumbra::world;
     namespace P = Luminumbra::Persistence;
-    TempSaveDir save_dir("indexed_absent_energy_future_age");
+    const TempSaveDir save_dir("indexed_absent_energy_future_age");
     const WorldClock clock(16);
     ActiveRegionLedger ledger({}, clock);
     ledger.mark_edited({0, 0}, clock);
@@ -717,34 +736,34 @@ TEST(WorldSaveService, IndexedAbsentEnergyRefusesResealedAgeBeyondSavedClock) {
     clock.write_metadata(metadata);
     std::vector<std::string> errors;
     {
-        WorldSaveService::SaveFactsScope facts(save_dir.path);
+        const WorldSaveService::SaveFactsScope facts(save_dir.path());
         P::SaveTransaction transaction(
-            save_dir.path, clock.tick(), {}, WorldSaveService::member_digest);
+            save_dir.path(), clock.tick(), {}, WorldSaveService::member_digest);
         ASSERT_TRUE(transaction.begin(&errors)) << JoinErrors(errors);
         ASSERT_TRUE(WorldSaveService::save_metadata_and_active_regions(
-            metadata.dump(), ledger, save_dir.path, &errors))
+            metadata.dump(), ledger, save_dir.path(), &errors))
             << JoinErrors(errors);
         // Never-present members are omitted by the index. Install a valid owned
         // record first, then retire it through the writer to create indexed absence.
         ASSERT_TRUE(WorldSaveService::write_member_bytes(
-            save_dir.path, "aether_state.efs", "EFS1 1 0\nP 0 0 0:1\n", &errors))
+            save_dir.path(), "aether_state.efs", "EFS1 1 0\nP 0 0 0:1\n", &errors))
             << JoinErrors(errors);
         ASSERT_TRUE(transaction.commit(&errors)) << JoinErrors(errors);
     }
-    ASSERT_TRUE(WorldSaveService::remove_member(save_dir.path, "aether_state.efs", &errors))
+    ASSERT_TRUE(WorldSaveService::remove_member(save_dir.path(), "aether_state.efs", &errors))
         << JoinErrors(errors);
-    WorldSaveService service;
+    const WorldSaveService service;
     WorldStreamingState control;
-    ASSERT_TRUE(service.load_world(control, save_dir.path, errors)) << JoinErrors(errors);
+    ASSERT_TRUE(service.load_world(control, save_dir.path(), errors)) << JoinErrors(errors);
     P::SnapshotIndex index;
-    ASSERT_TRUE(P::read_snapshot_index(save_dir.path, index, &errors));
+    ASSERT_TRUE(P::read_snapshot_index(save_dir.path(), index, &errors));
     const auto energy =
         std::find_if(index.members.begin(), index.members.end(), [](const auto& member) {
             return member.path == "aether_state.efs";
         });
     ASSERT_NE(energy, index.members.end());
     ASSERT_FALSE(energy->present);
-    ASSERT_FALSE(std::filesystem::exists(save_dir.path / "aether_state.efs"));
+    ASSERT_FALSE(std::filesystem::exists(save_dir.path() / "aether_state.efs"));
     // Keep owner, ARL header and saved clock valid; only the semantic ARL4 age is future.
     ASSERT_TRUE(ledger.set_energy_age({0, 0}, 17));
     const auto corrupt = ledger.encode(); // codec reseals the exact ARL bytes
@@ -759,15 +778,15 @@ TEST(WorldSaveService, IndexedAbsentEnergyRefusesResealedAgeBeyondSavedClock) {
     ASSERT_NE(arl, index.members.end());
     arl->bytes = corrupt.size();
     arl->fnv64 = P::fnv1a64_bytes(corrupt.data(), corrupt.size());
-    std::ofstream(WorldSaveService::active_regions_path(save_dir.path),
+    std::ofstream(WorldSaveService::active_regions_path(save_dir.path()),
                   std::ios::binary | std::ios::trunc)
         << corrupt;
-    std::ofstream(P::snapshot_index_path(save_dir.path), std::ios::binary | std::ios::trunc)
+    std::ofstream(P::snapshot_index_path(save_dir.path()), std::ios::binary | std::ios::trunc)
         << P::encode_snapshot_index(index);
     WorldStreamingState refused;
     AddFixtureChunk(refused, {0, 0, 0}, ChunkState::Idle, 1);
     errors.clear();
-    EXPECT_FALSE(service.load_world(refused, save_dir.path, errors));
+    EXPECT_FALSE(service.load_world(refused, save_dir.path(), errors));
     EXPECT_NE(JoinErrors(errors).find("corrupt regional energy field age"), std::string::npos)
         << JoinErrors(errors);
     EXPECT_TRUE(refused.snapshot_chunks().empty());
@@ -781,7 +800,7 @@ TEST(WorldSaveServiceTest, ChunkVectorRegionDigestUsesV2AuthorityAndDurableMerge
     const auto retained = AddFixtureChunk(durable, IVec3(1, 0, 0), ChunkState::Idle, 2u);
     stored->mark_voxel_data_dirty();
     retained->mark_voxel_data_dirty();
-    ASSERT_TRUE(WorldSaveService{}.save_world(durable, root.path));
+    ASSERT_TRUE(WorldSaveService{}.save_world(durable, root.path()));
 
     WorldStreamingState resident;
     const auto live = AddFixtureChunk(resident, IVec3(0, 0, 0), ChunkState::Idle, 3u);
@@ -798,10 +817,10 @@ TEST(WorldSaveServiceTest, ChunkVectorRegionDigestUsesV2AuthorityAndDurableMerge
     ASSERT_TRUE(expected.insert_chunk(retained));
     const auto expected_digest =
         std::stoull(Luminumbra::Persistence::ComputeRegionContentHash(expected), nullptr, 16);
-    EXPECT_EQ(WorldSaveService::region_simulation_digest(root.path, {0, 0}, chunks),
+    EXPECT_EQ(WorldSaveService::region_simulation_digest(root.path(), {0, 0}, chunks),
               expected_digest);
     EXPECT_EQ(
-        WorldSaveService::region_simulation_digest(root.path,
+        WorldSaveService::region_simulation_digest(root.path(),
                                                    {0, 0},
                                                    RegionDigestInputs{.live = chunks,
                                                                       .parked = {},
@@ -813,14 +832,15 @@ TEST(WorldSaveServiceTest, ChunkVectorRegionDigestUsesV2AuthorityAndDurableMerge
     const std::vector<std::shared_ptr<Chunk>> empty;
     const auto durable_digest =
         std::stoull(Luminumbra::Persistence::ComputeRegionContentHash(durable), nullptr, 16);
-    EXPECT_EQ(WorldSaveService::region_simulation_digest(root.path, {0, 0}, empty), durable_digest);
-    EXPECT_EQ(WorldSaveService::region_simulation_digest(root.path, {0, 0}, {}), durable_digest);
-    EXPECT_EQ(WorldSaveService::region_simulation_digest(root.path, {0, 0}, {live}),
+    EXPECT_EQ(WorldSaveService::region_simulation_digest(root.path(), {0, 0}, empty),
+              durable_digest);
+    EXPECT_EQ(WorldSaveService::region_simulation_digest(root.path(), {0, 0}, {}), durable_digest);
+    EXPECT_EQ(WorldSaveService::region_simulation_digest(root.path(), {0, 0}, {live}),
               expected_digest);
     const std::vector<std::shared_ptr<Chunk>> only_live{live};
     const auto live_digest = WorldSaveService::region_simulation_digest({}, {0, 0}, only_live);
     EXPECT_EQ(WorldSaveService::region_simulation_digest({}, {0, 0}, chunks), live_digest);
-    EXPECT_EQ(WorldSaveService::region_simulation_digest(root.path / "missing", {0, 0}, chunks),
+    EXPECT_EQ(WorldSaveService::region_simulation_digest(root.path() / "missing", {0, 0}, chunks),
               live_digest);
 }
 
@@ -836,11 +856,11 @@ TEST(WorldSaveServiceTest, EditedLoadingRecordKeepsFrozenDigestAcrossResidency) 
     chunk->material_data = {2};
     chunk->mark_voxel_data_dirty();
     chunk->set_state(ChunkState::Loading);
-    ASSERT_TRUE(WorldSaveService{}.save_world(resident, root.path));
+    ASSERT_TRUE(WorldSaveService{}.save_world(resident, root.path()));
 
     std::vector<std::shared_ptr<Chunk>> saved;
     ASSERT_TRUE(WorldSaveService::read_authoritative_region_chunks(
-        WorldSaveService::region_file_path(root.path, key.x, key.z),
+        WorldSaveService::region_file_path(root.path(), key.x, key.z),
         key.x * 32,
         key.x * 32 + 31,
         key.z * 32,
@@ -877,7 +897,7 @@ TEST(WorldSaveServiceTest, EditedLoadingRecordKeepsFrozenDigestAcrossResidency) 
                                         .durable = {},
                                         .ground_object_bytes = {},
                                         .field_page_bytes = {}}));
-    EXPECT_EQ(freeze(root.path,
+    EXPECT_EQ(freeze(root.path(),
                      RegionDigestInputs{.live = resident.snapshot_chunks(),
                                         .parked = {},
                                         .durable = {},
@@ -921,7 +941,7 @@ TEST(WorldSaveServiceTest, EditedLoadingRecordKeepsFrozenDigestAcrossResidency) 
                                         .durable = {},
                                         .ground_object_bytes = {},
                                         .field_page_bytes = {}}));
-    EXPECT_EQ(freeze(root.path,
+    EXPECT_EQ(freeze(root.path(),
                      RegionDigestInputs{.live = {incomplete},
                                         .parked = {incomplete},
                                         .durable = {},
@@ -932,7 +952,7 @@ TEST(WorldSaveServiceTest, EditedLoadingRecordKeepsFrozenDigestAcrossResidency) 
     resident.clear();
     chunk.reset();
     saved.clear();
-    EXPECT_EQ(freeze(root.path,
+    EXPECT_EQ(freeze(root.path(),
                      RegionDigestInputs{.live = {},
                                         .parked = {},
                                         .durable = {},
@@ -994,10 +1014,10 @@ TEST(WorldSaveServiceTest, RegionDigestAuthorityAndLifecycleMatrix) {
                                              .field_page_bytes = {}}),
                       in_memory);
 
-            ASSERT_TRUE(WorldSaveService{}.save_world(resident, root.path));
+            ASSERT_TRUE(WorldSaveService{}.save_world(resident, root.path()));
             WorldStreamingState loaded;
             std::vector<std::string> errors;
-            ASSERT_TRUE(WorldSaveService{}.load_world(loaded, root.path, errors));
+            ASSERT_TRUE(WorldSaveService{}.load_world(loaded, root.path(), errors));
             const auto saved = loaded.snapshot_chunks();
             ASSERT_EQ(saved.size(), 1u);
             EXPECT_EQ(saved.front()->get_state(), lifecycle);
@@ -1005,7 +1025,7 @@ TEST(WorldSaveServiceTest, RegionDigestAuthorityAndLifecycleMatrix) {
                       edited ? ChunkSdfProvenance::LoadedOrEdited
                              : ChunkSdfProvenance::GeneratedCurrentParams);
             // docs/active-regions.md: durable pristine records are regenerable caches.
-            EXPECT_EQ(WorldSaveService::region_simulation_digest(root.path, {0, 0}, {}), settled);
+            EXPECT_EQ(WorldSaveService::region_simulation_digest(root.path(), {0, 0}, {}), settled);
         }
     }
 }
@@ -1015,7 +1035,7 @@ TEST(WorldSaveServiceTest, PublicRegionDigestRejectsUnsupportedKeysBeforeDurable
     const Luminumbra::Persistence::RegionDigestInputs inputs{
         .live = {}, .parked = {}, .durable = {}, .ground_object_bytes = {}, .field_page_bytes = {}};
     const TempSaveDir root("invalid_digest_key");
-    const auto missing_save = root.path / "missing";
+    const auto missing_save = root.path() / "missing";
     for (const RegionKey key : {RegionKey{std::numeric_limits<std::int32_t>::min(), 0},
                                 RegionKey{std::numeric_limits<std::int32_t>::max(), 0},
                                 RegionKey{0, std::numeric_limits<std::int32_t>::min()},
@@ -1065,6 +1085,269 @@ TEST(WorldSaveServiceTest, PublicRegionDigestRejectsUnsupportedKeysBeforeDurable
     }
     EXPECT_FALSE(std::filesystem::exists(missing_save));
 }
+namespace {
+namespace CreatureAuthority = luminumbra::ai;
+namespace CreatureComponents = Luminumbra::Components;
+
+CreatureAuthority::CreatureSnapshot CreatureStoreFixture() {
+    entt::registry registry;
+    const auto e = registry.create();
+    registry.emplace<CreatureComponents::TransformComponent>(e);
+    registry.emplace<CreatureComponents::CreatureComponent>(e).species_id = 1;
+    registry.emplace<CreatureComponents::CreatureRegionComponent>(e).persistent_id = 1;
+    registry.emplace<CreatureComponents::CreatureCoarseComponent>(e);
+    return CreatureAuthority::BuildCreatureSnapshot(registry);
+}
+
+bool InstallCreatureStore(const std::filesystem::path& directory,
+                          const CreatureAuthority::CreatureSnapshot& snapshot) {
+    namespace P = Luminumbra::Persistence;
+    const Luminumbra::world::WorldClock clock;
+    Luminumbra::world::ActiveRegionLedger ledger({}, clock);
+    std::uint64_t id = 0;
+    if (!ledger.allocate_persistent_id(id))
+        return false;
+    ledger.mark_edited({0, 0}, clock);
+    nlohmann::json metadata{{"container_version", 2}, {"snapshotFormat", 1}};
+    clock.write_metadata(metadata);
+    const WorldSaveService::SaveFactsScope facts(directory);
+    P::SaveTransaction transaction(directory, clock.tick(), {}, WorldSaveService::member_digest);
+    return transaction.begin(nullptr) &&
+           WorldSaveService::save_creature_entities(snapshot, directory) &&
+           WorldSaveService::save_metadata_and_active_regions(
+               metadata.dump() + "\n", ledger, directory) &&
+           transaction.commit(nullptr);
+}
+
+// Pinned predecessor snapshot-member allowlist. Its decoder refuses unfamiliar member names
+// before reading payloads, including an explicitly absent creature member.
+bool PreviousReleaseReadsMembers(const Luminumbra::Persistence::SnapshotIndex& index) {
+    const std::set<std::string> singletons{"world_info.json",
+                                           "aether_state.efs",
+                                           "chunks/region/world-manifest.json",
+                                           "chunks/region/plant-entities.json",
+                                           "chunks/region/ground-objects.json",
+                                           "chunks/region/field-pages.fpg",
+                                           "chunks/region/active-regions.arl"};
+    for (const auto& member : index.members)
+        if (!singletons.contains(member.path) && member.path.rfind("chunks/region/r.", 0) != 0)
+            return false;
+    return true;
+}
+} // namespace
+
+TEST(WorldSaveService, CreatureStoreRoundtripEmptyRemovalAndExplicitIndexedAbsence) {
+    namespace P = Luminumbra::Persistence;
+    const TempSaveDir save("creature_roundtrip");
+    const auto original = CreatureStoreFixture();
+    ASSERT_TRUE(InstallCreatureStore(save.path(), original));
+    CreatureAuthority::CreatureSnapshot restored;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(WorldSaveService::load_creature_entities(restored, save.path(), &errors));
+    EXPECT_EQ(CreatureAuthority::SerializeCreatureSnapshot(restored),
+              CreatureAuthority::SerializeCreatureSnapshot(original));
+    EXPECT_TRUE(WorldSaveService::validate_save(save.path(), &errors));
+    P::MemberDigest digest;
+    std::string error;
+    ASSERT_TRUE(WorldSaveService::member_digest(
+        save.path(), "chunks/region/creature-entities.json", digest, error));
+    EXPECT_TRUE(digest.present);
+    ASSERT_TRUE(WorldSaveService::save_creature_entities({}, save.path(), &errors));
+    EXPECT_FALSE(std::filesystem::exists(WorldSaveService::creature_entities_path(save.path())));
+    ASSERT_TRUE(WorldSaveService::load_creature_entities(restored, save.path(), &errors));
+    EXPECT_TRUE(restored.entities.empty());
+    P::SnapshotIndex index;
+    ASSERT_TRUE(P::read_snapshot_index(save.path(), index, &errors));
+    const auto absent =
+        std::find_if(index.members.begin(), index.members.end(), [](const auto& member) {
+            return member.path == "chunks/region/creature-entities.json";
+        });
+    ASSERT_NE(absent, index.members.end());
+    EXPECT_FALSE(absent->present);
+    EXPECT_EQ(absent->bytes, 0u);
+    EXPECT_EQ(absent->fnv64, 0u);
+    EXPECT_TRUE(WorldSaveService::validate_save(save.path(), &errors));
+    // A file appearing behind an absent index member is corruption.
+    std::ofstream(WorldSaveService::creature_entities_path(save.path()), std::ios::binary)
+        << CreatureAuthority::SerializeCreatureSnapshot(original);
+    EXPECT_FALSE(WorldSaveService::load_creature_entities(restored, save.path(), &errors));
+    EXPECT_FALSE(WorldSaveService::validate_save(save.path(), &errors));
+}
+
+TEST(WorldSaveService, FirstEmptyCreatureSaveIsIndexedAbsentAndOlderReaderRefusesNewMember) {
+    namespace P = Luminumbra::Persistence;
+    const TempSaveDir save("creature_first_absent");
+    ASSERT_TRUE(InstallCreatureStore(save.path(), {}));
+    P::SnapshotIndex index;
+    ASSERT_TRUE(P::read_snapshot_index(save.path(), index, nullptr));
+    const auto member = std::find_if(index.members.begin(), index.members.end(), [](const auto& m) {
+        return m.path == "chunks/region/creature-entities.json";
+    });
+    ASSERT_NE(member, index.members.end());
+    EXPECT_FALSE(member->present);
+    EXPECT_FALSE(PreviousReleaseReadsMembers(index));
+    ASSERT_TRUE(WorldSaveService::save_creature_entities(CreatureStoreFixture(), save.path()));
+    ASSERT_TRUE(P::read_snapshot_index(save.path(), index, nullptr));
+    EXPECT_FALSE(PreviousReleaseReadsMembers(index));
+}
+
+TEST(WorldSaveService, PreviousReleaseIndexWithoutCreatureMemberLoadsAsEmpty) {
+    namespace P = Luminumbra::Persistence;
+    const TempSaveDir save("creature_previous_release");
+    ASSERT_TRUE(InstallCreatureStore(save.path(), {}));
+    P::SnapshotIndex index;
+    ASSERT_TRUE(P::read_snapshot_index(save.path(), index, nullptr));
+    std::erase_if(index.members, [](const auto& member) {
+        return member.path == "chunks/region/creature-entities.json";
+    });
+    ASSERT_TRUE(WorldSaveService::durable_write_file(P::snapshot_index_path(save.path()),
+                                                     P::encode_snapshot_index(index)));
+    EXPECT_TRUE(PreviousReleaseReadsMembers(index));
+    auto out = CreatureStoreFixture();
+    ASSERT_TRUE(WorldSaveService::load_creature_entities(out, save.path()));
+    EXPECT_TRUE(out.entities.empty());
+    std::vector<std::string> errors;
+    EXPECT_TRUE(WorldSaveService::validate_save(save.path(), &errors));
+    const TempSaveDir legacy("creature_legacy_absent");
+    out = CreatureStoreFixture();
+    ASSERT_TRUE(WorldSaveService::load_creature_entities(out, legacy.path()));
+    EXPECT_TRUE(out.entities.empty());
+}
+
+TEST(WorldSaveService, MissingUnindexedOrCorruptCreatureMemberRefuses) {
+    const TempSaveDir save("creature_expected_missing");
+    ASSERT_TRUE(InstallCreatureStore(save.path(), CreatureStoreFixture()));
+    std::filesystem::remove(WorldSaveService::creature_entities_path(save.path()));
+    std::vector<std::string> errors;
+    CreatureAuthority::CreatureSnapshot out;
+    EXPECT_FALSE(WorldSaveService::load_creature_entities(out, save.path(), &errors));
+    EXPECT_FALSE(WorldSaveService::validate_save(save.path(), &errors));
+    const TempSaveDir unindexed("creature_unindexed");
+    std::filesystem::create_directories(WorldSaveService::region_directory(unindexed.path()));
+    std::ofstream(WorldSaveService::creature_entities_path(unindexed.path()), std::ios::binary)
+        << CreatureAuthority::SerializeCreatureSnapshot(CreatureStoreFixture());
+    EXPECT_FALSE(WorldSaveService::load_creature_entities(out, unindexed.path(), &errors));
+    EXPECT_FALSE(WorldSaveService::validate_save(unindexed.path(), &errors));
+}
+
+TEST(WorldSaveService, ActiveCreatureReadRefusesOversizedNonRegularAndMalformedWithoutMutation) {
+    namespace P = Luminumbra::Persistence;
+    const TempSaveDir save("creature_bounded_read");
+    const auto original = CreatureStoreFixture();
+    ASSERT_TRUE(InstallCreatureStore(save.path(), original));
+    const auto before = CreatureAuthority::SerializeCreatureSnapshot(original);
+    const auto path = WorldSaveService::creature_entities_path(save.path());
+    auto out = original;
+    P::SaveTransaction transaction(save.path(), 0, {}, WorldSaveService::member_digest);
+    ASSERT_TRUE(transaction.begin(nullptr));
+    // Exercise the reader directly, without an index hash rejecting the input first.
+    for (const std::string bytes : {"", "{", "{}"}) {
+        SCOPED_TRACE(bytes);
+        ASSERT_TRUE(WorldSaveService::durable_write_file(path, bytes));
+        std::vector<std::string> errors;
+        EXPECT_FALSE(WorldSaveService::load_creature_entities(out, save.path(), &errors));
+        EXPECT_FALSE(errors.empty());
+        EXPECT_EQ(CreatureAuthority::SerializeCreatureSnapshot(out), before);
+    }
+    std::filesystem::resize_file(path, CreatureAuthority::kMaxStampedCreatureBytes + 1);
+    std::vector<std::string> errors;
+    EXPECT_FALSE(WorldSaveService::load_creature_entities(out, save.path(), &errors));
+    EXPECT_NE(JoinErrors(errors).find("size cap"), std::string::npos);
+    EXPECT_EQ(CreatureAuthority::SerializeCreatureSnapshot(out), before);
+    ASSERT_TRUE(std::filesystem::remove(path));
+    ASSERT_TRUE(std::filesystem::create_directory(path));
+    errors.clear();
+    EXPECT_FALSE(WorldSaveService::load_creature_entities(out, save.path(), &errors));
+    EXPECT_FALSE(errors.empty());
+    EXPECT_EQ(CreatureAuthority::SerializeCreatureSnapshot(out), before);
+}
+
+#ifndef _WIN32
+TEST(WorldSaveService, ActiveCreatureReadRefusesSymlinkWithoutMutation) {
+    namespace P = Luminumbra::Persistence;
+    const TempSaveDir save("creature_symlink_read");
+    const auto original = CreatureStoreFixture();
+    ASSERT_TRUE(InstallCreatureStore(save.path(), original));
+    const auto before = CreatureAuthority::SerializeCreatureSnapshot(original);
+    const auto path = WorldSaveService::creature_entities_path(save.path());
+    const auto target = save.path() / "creature-target.json";
+    ASSERT_TRUE(WorldSaveService::durable_write_file(target, before));
+    P::SaveTransaction transaction(save.path(), 0, {}, WorldSaveService::member_digest);
+    ASSERT_TRUE(transaction.begin(nullptr));
+    ASSERT_TRUE(std::filesystem::remove(path));
+    std::filesystem::create_symlink(target, path);
+    auto out = original;
+    std::vector<std::string> errors;
+    EXPECT_FALSE(WorldSaveService::load_creature_entities(out, save.path(), &errors));
+    EXPECT_FALSE(errors.empty());
+    EXPECT_EQ(CreatureAuthority::SerializeCreatureSnapshot(out), before);
+}
+#endif
+
+TEST(WorldSaveService, CorrectFingerprintDoesNotAdmitFutureCreatureComponentOrDuplicateSharedId) {
+    namespace P = Luminumbra::Persistence;
+    const auto raw_digest = +[](const std::filesystem::path& dir,
+                                std::string_view member,
+                                P::MemberDigest& out,
+                                std::string& error) {
+        bool exists = false;
+        if (!P::hash_file(dir / std::string(member),
+                          out.bytes,
+                          out.fnv64,
+                          exists,
+                          nullptr,
+                          P::save_member_byte_limit(member))) {
+            error = "cannot fingerprint member";
+            return false;
+        }
+        out.present = exists;
+        return true;
+    };
+    for (const bool future : {false, true}) {
+        const TempSaveDir save(future ? "creature_future" : "creature_duplicate");
+        ASSERT_TRUE(InstallCreatureStore(save.path(), CreatureStoreFixture()));
+        auto snapshot = CreatureStoreFixture();
+        if (future)
+            snapshot.entities[0].components["Creature"]["version"] = 2;
+        {
+            P::SaveTransaction transaction(save.path(), 0, {}, raw_digest);
+            ASSERT_TRUE(transaction.begin(nullptr));
+            if (future) {
+                ASSERT_TRUE(WorldSaveService::write_member_bytes(
+                    save.path(),
+                    "chunks/region/creature-entities.json",
+                    CreatureAuthority::SerializeCreatureSnapshot(snapshot)));
+            } else {
+                Luminumbra::world::GroundObjectStore ground;
+                auto object = MakeGroundObject(1, 0, 0);
+                object.z_mm = 0;
+                ASSERT_TRUE(ground.insert(object));
+                ASSERT_TRUE(WorldSaveService::write_member_bytes(
+                    save.path(), "chunks/region/ground-objects.json", ground.serialize()));
+            }
+            ASSERT_TRUE(transaction.commit(nullptr));
+        }
+        std::vector<std::string> errors;
+        EXPECT_FALSE(WorldSaveService::validate_save(save.path(), &errors));
+        ASSERT_FALSE(errors.empty());
+        EXPECT_NE(JoinErrors(errors).find(future ? "component version" : "shared creature"),
+                  std::string::npos);
+    }
+}
+
+TEST(WorldSaveService, CreatureDigestIsEmptyNeutralAndDetectsContinuationState) {
+    Luminumbra::Persistence::RegionDigestInputs inputs;
+    const auto baseline = WorldSaveService::region_simulation_digest({}, {0, 0}, inputs);
+    inputs.creature_bytes = CreatureAuthority::SerializeCreatureSnapshot(CreatureStoreFixture());
+    const auto populated = WorldSaveService::region_simulation_digest({}, {0, 0}, inputs);
+    EXPECT_NE(populated, baseline);
+    auto changed = CreatureStoreFixture();
+    changed.entities[0].components["Creature"]["data"]["last_action"] = 6;
+    inputs.creature_bytes = CreatureAuthority::SerializeCreatureSnapshot(changed);
+    EXPECT_NE(WorldSaveService::region_simulation_digest({}, {0, 0}, inputs), populated);
+    inputs.creature_bytes.clear();
+    EXPECT_EQ(WorldSaveService::region_simulation_digest({}, {0, 0}, inputs), baseline);
+}
 
 namespace {
 namespace CachePersistence = Luminumbra::Persistence;
@@ -1106,7 +1389,7 @@ bool ValidateCacheFixture(const std::filesystem::path& path,
 }
 
 std::string CacheFileBytes(const std::filesystem::path& path) {
-    std::ifstream input(path, std::ios::binary);
+    const std::ifstream input(path, std::ios::binary);
     std::ostringstream bytes;
     bytes << input.rdbuf();
     return bytes.str();
@@ -1114,29 +1397,29 @@ std::string CacheFileBytes(const std::filesystem::path& path) {
 } // namespace
 
 TEST(WorldSaveService, ValidationCacheColdWarmAndMaterializedLoadsAreEquivalent) {
-    TempSaveDir save_dir("validation_cache_equivalence");
-    ASSERT_NO_FATAL_FAILURE(WriteCacheFixture(save_dir.path));
-    ASSERT_NO_FATAL_FAILURE(IndexCacheFixture(save_dir.path));
+    const TempSaveDir save_dir("validation_cache_equivalence");
+    ASSERT_NO_FATAL_FAILURE(WriteCacheFixture(save_dir.path()));
+    ASSERT_NO_FATAL_FAILURE(IndexCacheFixture(save_dir.path()));
     ValidationCache cache;
     std::vector<std::string> cold_errors, miss_errors, hit_errors;
     std::vector<IVec3> cold_inventory, miss_inventory, hit_inventory;
-    ASSERT_TRUE(ValidateCacheFixture(save_dir.path, cold_errors, &cold_inventory));
+    ASSERT_TRUE(ValidateCacheFixture(save_dir.path(), cold_errors, &cold_inventory));
     ASSERT_EQ(cold_inventory.size(), 1u);
     EXPECT_EQ(cold_inventory.front(), IVec3(0, 0, 0));
     {
         const ValidationCache::Scope scope(cache);
-        ASSERT_TRUE(ValidateCacheFixture(save_dir.path, miss_errors, &miss_inventory));
+        ASSERT_TRUE(ValidateCacheFixture(save_dir.path(), miss_errors, &miss_inventory));
         EXPECT_EQ(cache.stats().misses, 1u);
-        ASSERT_TRUE(ValidateCacheFixture(save_dir.path, hit_errors, &hit_inventory));
+        ASSERT_TRUE(ValidateCacheFixture(save_dir.path(), hit_errors, &hit_inventory));
         EXPECT_EQ(cache.stats().hits, 1u);
         EXPECT_EQ(cache.stats().misses, 1u);
         WorldStreamingState warm_loaded;
         std::vector<std::string> errors;
-        ASSERT_TRUE(WorldSaveService{}.load_world(warm_loaded, save_dir.path, errors));
+        ASSERT_TRUE(WorldSaveService{}.load_world(warm_loaded, save_dir.path(), errors));
         WorldStreamingState cold_loaded;
         ValidationCache disabled(0);
         const ValidationCache::Scope cold_scope(disabled);
-        ASSERT_TRUE(WorldSaveService{}.load_world(cold_loaded, save_dir.path, errors));
+        ASSERT_TRUE(WorldSaveService{}.load_world(cold_loaded, save_dir.path(), errors));
         EXPECT_EQ(WorldSaveService{}.world_hash(warm_loaded),
                   WorldSaveService{}.world_hash(cold_loaded));
         EXPECT_TRUE(errors.empty());
@@ -1148,8 +1431,8 @@ TEST(WorldSaveService, ValidationCacheColdWarmAndMaterializedLoadsAreEquivalent)
 }
 
 TEST(WorldSaveService, ValidationCacheSeparatesPermissiveDigestAndStrictIndexValidation) {
-    TempSaveDir save_dir("validation_cache_modes");
-    ASSERT_NO_FATAL_FAILURE(WriteCacheFixture(save_dir.path, true));
+    const TempSaveDir save_dir("validation_cache_modes");
+    ASSERT_NO_FATAL_FAILURE(WriteCacheFixture(save_dir.path(), true));
     ValidationCache cache;
     {
         const ValidationCache::Scope scope(cache);
@@ -1157,7 +1440,7 @@ TEST(WorldSaveService, ValidationCacheSeparatesPermissiveDigestAndStrictIndexVal
         std::string error;
         for (int attempt = 0; attempt < 3; ++attempt) {
             ASSERT_TRUE(WorldSaveService::member_digest(
-                save_dir.path, "chunks/region/r.0.0.lmr", digest, error))
+                save_dir.path(), "chunks/region/r.0.0.lmr", digest, error))
                 << error;
         }
         EXPECT_EQ(cache.stats().hits, 2u);
@@ -1166,14 +1449,14 @@ TEST(WorldSaveService, ValidationCacheSeparatesPermissiveDigestAndStrictIndexVal
     CachePersistence::MemberDigest digest;
     std::string cold_error, warm_error, retry_error;
     ASSERT_FALSE(WorldSaveService::indexed_member_digest(
-        save_dir.path, "chunks/region/r.0.0.lmr", digest, cold_error));
+        save_dir.path(), "chunks/region/r.0.0.lmr", digest, cold_error));
     ASSERT_FALSE(cold_error.empty());
     {
         const ValidationCache::Scope scope(cache);
         EXPECT_FALSE(WorldSaveService::indexed_member_digest(
-            save_dir.path, "chunks/region/r.0.0.lmr", digest, warm_error));
+            save_dir.path(), "chunks/region/r.0.0.lmr", digest, warm_error));
         EXPECT_FALSE(WorldSaveService::indexed_member_digest(
-            save_dir.path, "chunks/region/r.0.0.lmr", digest, retry_error));
+            save_dir.path(), "chunks/region/r.0.0.lmr", digest, retry_error));
     }
     EXPECT_EQ(warm_error, cold_error);
     EXPECT_EQ(retry_error, cold_error);
@@ -1182,26 +1465,26 @@ TEST(WorldSaveService, ValidationCacheSeparatesPermissiveDigestAndStrictIndexVal
 }
 
 TEST(WorldSaveService, CachedRecordSingleByteCorruptionRetainsColdDiagnostic) {
-    TempSaveDir save_dir("validation_cache_corruption");
-    ASSERT_NO_FATAL_FAILURE(WriteCacheFixture(save_dir.path));
-    ASSERT_NO_FATAL_FAILURE(IndexCacheFixture(save_dir.path));
+    const TempSaveDir save_dir("validation_cache_corruption");
+    ASSERT_NO_FATAL_FAILURE(WriteCacheFixture(save_dir.path()));
+    ASSERT_NO_FATAL_FAILURE(IndexCacheFixture(save_dir.path()));
     ValidationCache cache;
     std::vector<std::string> errors;
     {
         const ValidationCache::Scope scope(cache);
-        ASSERT_TRUE(ValidateCacheFixture(save_dir.path, errors));
-        ASSERT_TRUE(ValidateCacheFixture(save_dir.path, errors));
+        ASSERT_TRUE(ValidateCacheFixture(save_dir.path(), errors));
+        ASSERT_TRUE(ValidateCacheFixture(save_dir.path(), errors));
     }
-    const auto path = WorldSaveService::region_file_path(save_dir.path, 0, 0);
+    const auto path = WorldSaveService::region_file_path(save_dir.path(), 0, 0);
     auto bytes = CacheFileBytes(path);
     ASSERT_GT(bytes.size(), 26u); // One complete record header precedes the compressed bytes.
     bytes.back() = static_cast<char>(static_cast<unsigned char>(bytes.back()) ^ 1u);
     ASSERT_TRUE(WorldSaveService::durable_write_file(path, bytes, &errors));
     std::vector<std::string> cold_errors, warm_errors;
-    ASSERT_FALSE(ValidateCacheFixture(save_dir.path, cold_errors));
+    ASSERT_FALSE(ValidateCacheFixture(save_dir.path(), cold_errors));
     {
         const ValidationCache::Scope scope(cache);
-        EXPECT_FALSE(ValidateCacheFixture(save_dir.path, warm_errors));
+        EXPECT_FALSE(ValidateCacheFixture(save_dir.path(), warm_errors));
     }
     EXPECT_EQ(warm_errors, cold_errors);
     EXPECT_FALSE(warm_errors.empty());
@@ -1210,18 +1493,19 @@ TEST(WorldSaveService, CachedRecordSingleByteCorruptionRetainsColdDiagnostic) {
 }
 
 TEST(WorldSaveService, ValidationCacheEvictionOnlyCausesRevalidation) {
-    TempSaveDir first("validation_cache_evict_first"), second("validation_cache_evict_second");
-    ASSERT_NO_FATAL_FAILURE(WriteCacheFixture(first.path));
-    ASSERT_NO_FATAL_FAILURE(WriteCacheFixture(second.path, false, {1, 0, 0}));
+    const TempSaveDir first("validation_cache_evict_first"),
+        second("validation_cache_evict_second");
+    ASSERT_NO_FATAL_FAILURE(WriteCacheFixture(first.path()));
+    ASSERT_NO_FATAL_FAILURE(WriteCacheFixture(second.path(), false, {1, 0, 0}));
     // Distinct identities exceed the single-entry limit.
     ValidationCache cache(1);
     const ValidationCache::Scope scope(cache);
     std::vector<std::string> errors;
-    ASSERT_TRUE(ValidateCacheFixture(first.path, errors));
-    ASSERT_TRUE(ValidateCacheFixture(first.path, errors));
-    ASSERT_TRUE(ValidateCacheFixture(second.path, errors));
-    ASSERT_TRUE(ValidateCacheFixture(first.path, errors));
-    ASSERT_TRUE(ValidateCacheFixture(first.path, errors));
+    ASSERT_TRUE(ValidateCacheFixture(first.path(), errors));
+    ASSERT_TRUE(ValidateCacheFixture(first.path(), errors));
+    ASSERT_TRUE(ValidateCacheFixture(second.path(), errors));
+    ASSERT_TRUE(ValidateCacheFixture(first.path(), errors));
+    ASSERT_TRUE(ValidateCacheFixture(first.path(), errors));
     EXPECT_EQ(cache.stats().misses, 3u);
     EXPECT_EQ(cache.stats().evictions, 2u);
     EXPECT_EQ(cache.stats().hits, 2u);
@@ -1369,7 +1653,7 @@ TEST(WorldSaveService, ValidationCacheScopesRestoreAndSharedCacheIsThreadSafe) {
                 EXPECT_TRUE(shared.find(key, "payload").has_value());
             }
         };
-        std::jthread first(use_cache, 1u), second(use_cache, 2u);
+        const std::jthread first(use_cache, 1u), second(use_cache, 2u);
     } // Threads finish before the enclosing scope is restored.
     EXPECT_EQ(ValidationCache::active(), previous);
     EXPECT_EQ(shared.stats().entries, 2u);
@@ -1381,19 +1665,19 @@ TEST(WorldSaveService, ValidationCacheScopesRestoreAndSharedCacheIsThreadSafe) {
 }
 
 TEST(WorldSaveService, WarmValidationCacheStillChecksCurrentIndexAndRegionMembership) {
-    TempSaveDir save_dir("validation_cache_context");
-    ASSERT_NO_FATAL_FAILURE(WriteCacheFixture(save_dir.path));
-    ASSERT_NO_FATAL_FAILURE(IndexCacheFixture(save_dir.path));
+    const TempSaveDir save_dir("validation_cache_context");
+    ASSERT_NO_FATAL_FAILURE(WriteCacheFixture(save_dir.path()));
+    ASSERT_NO_FATAL_FAILURE(IndexCacheFixture(save_dir.path()));
     ValidationCache cache;
     std::vector<std::string> errors;
     {
         const ValidationCache::Scope scope(cache);
-        ASSERT_TRUE(ValidateCacheFixture(save_dir.path, errors));
+        ASSERT_TRUE(ValidateCacheFixture(save_dir.path(), errors));
     }
-    const auto index_path = CachePersistence::snapshot_index_path(save_dir.path);
+    const auto index_path = CachePersistence::snapshot_index_path(save_dir.path());
     const auto original_index = CacheFileBytes(index_path);
     CachePersistence::SnapshotIndex index;
-    ASSERT_TRUE(CachePersistence::read_snapshot_index(save_dir.path, index, &errors));
+    ASSERT_TRUE(CachePersistence::read_snapshot_index(save_dir.path(), index, &errors));
     const auto region =
         std::find_if(index.members.begin(), index.members.end(), [](const auto& member) {
             return member.path == "chunks/region/r.0.0.lmr";
@@ -1403,23 +1687,23 @@ TEST(WorldSaveService, WarmValidationCacheStillChecksCurrentIndexAndRegionMember
     ASSERT_TRUE(WorldSaveService::durable_write_file(
         index_path, CachePersistence::encode_snapshot_index(index), &errors));
     std::vector<std::string> cold_errors, warm_errors;
-    ASSERT_FALSE(ValidateCacheFixture(save_dir.path, cold_errors));
+    ASSERT_FALSE(ValidateCacheFixture(save_dir.path(), cold_errors));
     {
         const ValidationCache::Scope scope(cache);
-        EXPECT_FALSE(ValidateCacheFixture(save_dir.path, warm_errors));
+        EXPECT_FALSE(ValidateCacheFixture(save_dir.path(), warm_errors));
     }
     EXPECT_EQ(warm_errors, cold_errors);
     EXPECT_EQ(cache.stats().hits, 1u);
     ASSERT_TRUE(WorldSaveService::durable_write_file(index_path, original_index, &errors));
     // Exact cached bytes moved into a different region still fail contextual identity.
-    std::filesystem::rename(WorldSaveService::region_file_path(save_dir.path, 0, 0),
-                            WorldSaveService::region_file_path(save_dir.path, 1, 0));
+    std::filesystem::rename(WorldSaveService::region_file_path(save_dir.path(), 0, 0),
+                            WorldSaveService::region_file_path(save_dir.path(), 1, 0));
     cold_errors.clear();
     warm_errors.clear();
-    ASSERT_FALSE(ValidateCacheFixture(save_dir.path, cold_errors));
+    ASSERT_FALSE(ValidateCacheFixture(save_dir.path(), cold_errors));
     {
         const ValidationCache::Scope scope(cache);
-        EXPECT_FALSE(ValidateCacheFixture(save_dir.path, warm_errors));
+        EXPECT_FALSE(ValidateCacheFixture(save_dir.path(), warm_errors));
     }
     EXPECT_EQ(warm_errors, cold_errors);
     ASSERT_FALSE(warm_errors.empty());
@@ -1467,15 +1751,15 @@ void ExpectColdAndCachedRefusal(const std::filesystem::path& save, ValidationCac
 } // namespace
 
 TEST(WorldSaveService, WriterSeedsBothIndependentModesWithoutChangingSerializedOrCompressedBytes) {
-    TempSaveDir seeded("writer_seeded"), cold("writer_cold");
+    const TempSaveDir seeded("writer_seeded"), cold("writer_cold");
     ValidationCache cache;
     {
         const ValidationCache::Scope scope(cache);
-        ASSERT_NO_FATAL_FAILURE(WriteCacheFixture(seeded.path));
+        ASSERT_NO_FATAL_FAILURE(WriteCacheFixture(seeded.path()));
     }
-    ASSERT_NO_FATAL_FAILURE(WriteCacheFixture(cold.path));
-    EXPECT_EQ(CacheFileBytes(WorldSaveService::region_file_path(seeded.path, 0, 0)),
-              CacheFileBytes(WorldSaveService::region_file_path(cold.path, 0, 0)));
+    ASSERT_NO_FATAL_FAILURE(WriteCacheFixture(cold.path()));
+    EXPECT_EQ(CacheFileBytes(WorldSaveService::region_file_path(seeded.path(), 0, 0)),
+              CacheFileBytes(WorldSaveService::region_file_path(cold.path(), 0, 0)));
     EXPECT_EQ(cache.stats().modes[0].writer_seeded, 1u);
     EXPECT_EQ(cache.stats().modes[1].writer_seeded, 1u);
     EXPECT_EQ(cache.stats().modes[0].decodes, 0u);
@@ -1483,13 +1767,13 @@ TEST(WorldSaveService, WriterSeedsBothIndependentModesWithoutChangingSerializedO
     {
         const ValidationCache::Scope scope(cache);
         std::vector<std::string> legacy_errors;
-        ASSERT_TRUE(ValidateCacheFixture(seeded.path, legacy_errors));
-        ASSERT_NO_FATAL_FAILURE(IndexCacheFixture(seeded.path));
+        ASSERT_TRUE(ValidateCacheFixture(seeded.path(), legacy_errors));
+        ASSERT_NO_FATAL_FAILURE(IndexCacheFixture(seeded.path()));
         std::vector<std::string> errors;
-        ASSERT_TRUE(ValidateCacheFixture(seeded.path, errors));
+        ASSERT_TRUE(ValidateCacheFixture(seeded.path(), errors));
         WorldStreamingState first, second;
-        ASSERT_TRUE(WorldSaveService{}.load_world(first, seeded.path, errors));
-        ASSERT_TRUE(WorldSaveService{}.load_world(second, seeded.path, errors));
+        ASSERT_TRUE(WorldSaveService{}.load_world(first, seeded.path(), errors));
+        ASSERT_TRUE(WorldSaveService{}.load_world(second, seeded.path(), errors));
         const auto a = first.find_chunk(Chunk::calculate_id({0, 0, 0}));
         const auto b = second.find_chunk(Chunk::calculate_id({0, 0, 0}));
         ASSERT_NE(a, nullptr);
@@ -1508,7 +1792,7 @@ TEST(WorldSaveService, FirstIndexRefusesRetainedLegacyWaterAndPreservesLoadableW
         for (const bool warm : {false, true}) {
             SCOPED_TRACE(retained_region_x);
             SCOPED_TRACE(warm);
-            TempSaveDir save("legacy_water_upgrade");
+            const TempSaveDir save("legacy_water_upgrade");
             ValidationCache cache(warm ? ValidationCache::kMaxEntries : 0);
             const ValidationCache::Scope cache_scope(cache);
             WorldStreamingState source;
@@ -1527,57 +1811,58 @@ TEST(WorldSaveService, FirstIndexRefusesRetainedLegacyWaterAndPreservesLoadableW
                 CachePersistence::SerializeWorldStreamingStateSnapshotJson(source));
             document["chunks"][0].erase("water_edge_flux");
             const auto retained_path =
-                WorldSaveService::region_file_path(save.path, retained_region_x, 0);
+                WorldSaveService::region_file_path(save.path(), retained_region_x, 0);
             const WorldSaveService::ContainerRecord record{
                 retained->get_id(), 0, 0, document.dump()};
             ASSERT_TRUE(WorldSaveService::upsert_container_records(retained_path, {record}));
             ASSERT_TRUE(WorldSaveService::save_metadata(
-                R"({"container_version":2,"name":"legacy-water"})", save.path));
-            const auto metadata_path = save.path / "world_info.json";
+                R"({"container_version":2,"name":"legacy-water"})", save.path()));
+            const auto metadata_path = save.path() / "world_info.json";
             const auto metadata_bytes = CacheFileBytes(metadata_path);
             const auto retained_bytes = CacheFileBytes(retained_path);
             WorldStreamingState before;
             std::vector<std::string> errors;
-            ASSERT_TRUE(WorldSaveService{}.load_world(before, save.path, errors))
+            ASSERT_TRUE(WorldSaveService{}.load_world(before, save.path(), errors))
                 << JoinErrors(errors);
             const auto before_hash = WorldSaveService{}.world_hash(before);
             // Warm only permissive facts: they cannot authorize index publication.
             CachePersistence::MemberDigest digest;
             std::string error;
             ASSERT_TRUE(WorldSaveService::member_digest(
-                save.path,
+                save.path(),
                 "chunks/region/r." + std::to_string(retained_region_x) + ".0.lmr",
                 digest,
                 error))
                 << error;
-            const auto written_path = WorldSaveService::region_file_path(save.path, 0, 0);
+            const auto written_path = WorldSaveService::region_file_path(save.path(), 0, 0);
             const bool written_existed = std::filesystem::exists(written_path);
             const auto written_bytes = CacheFileBytes(written_path);
             CachePersistence::SaveTransaction transaction(
-                save.path, 0, {}, WorldSaveService::member_digest);
+                save.path(), 0, {}, WorldSaveService::member_digest);
             ASSERT_TRUE(transaction.begin(&errors));
             ASSERT_TRUE(transaction.protect(
                 {"chunks/region/r.0.0.lmr", "chunks/region/world-manifest.json", "world_info.json"},
                 &errors));
             WorldStreamingState resident;
             resident.get_or_create_chunk({1, 0, 0});
-            ASSERT_TRUE(WorldSaveService{}.save_world(resident, save.path, &errors))
+            ASSERT_TRUE(WorldSaveService{}.save_world(resident, save.path(), &errors))
                 << JoinErrors(errors);
             ASSERT_TRUE(WorldSaveService::save_metadata(
-                R"({"container_version":2,"name":"upgrade"})", save.path, &errors))
+                R"({"container_version":2,"name":"upgrade"})", save.path(), &errors))
                 << JoinErrors(errors);
             EXPECT_FALSE(transaction.commit(&errors));
             EXPECT_FALSE(errors.empty());
-            EXPECT_FALSE(CachePersistence::snapshot_index_exists(save.path));
-            EXPECT_FALSE(CachePersistence::journal_pending(save.path));
+            EXPECT_FALSE(CachePersistence::snapshot_index_exists(save.path()));
+            EXPECT_FALSE(CachePersistence::journal_pending(save.path()));
             EXPECT_EQ(CacheFileBytes(retained_path), retained_bytes);
             EXPECT_EQ(CacheFileBytes(metadata_path), metadata_bytes);
             EXPECT_EQ(std::filesystem::exists(written_path), written_existed);
             EXPECT_EQ(CacheFileBytes(written_path), written_bytes);
-            EXPECT_FALSE(std::filesystem::exists(WorldSaveService::world_manifest_path(save.path)));
+            EXPECT_FALSE(
+                std::filesystem::exists(WorldSaveService::world_manifest_path(save.path())));
             errors.clear();
             WorldStreamingState after;
-            ASSERT_TRUE(WorldSaveService{}.load_world(after, save.path, errors))
+            ASSERT_TRUE(WorldSaveService{}.load_world(after, save.path(), errors))
                 << JoinErrors(errors);
             EXPECT_TRUE(errors.empty());
             EXPECT_EQ(WorldSaveService{}.world_hash(after), before_hash);
@@ -1591,7 +1876,7 @@ TEST(WorldSaveService, FirstIndexRefusesRetainedLegacyWaterAndPreservesLoadableW
 TEST(WorldSaveService, FirstIndexStrictlyValidatesCompleteAndPartialRetainedWater) {
     for (const bool partial : {false, true}) {
         SCOPED_TRACE(partial);
-        TempSaveDir save("retained_water_validation");
+        const TempSaveDir save("retained_water_validation");
         WorldStreamingState source;
         const auto chunk = source.get_or_create_chunk({0, 0, 0});
         chunk->has_water_sim.store(true);
@@ -1602,21 +1887,21 @@ TEST(WorldSaveService, FirstIndexStrictlyValidatesCompleteAndPartialRetainedWate
         chunk->water_level_data.assign(16, 0.9f);
         chunk->water_flow_data.assign(16, Vec2(0.0f));
         chunk->water_sim_terrain_height.assign(16, -0.1f);
-        ASSERT_TRUE(WorldSaveService{}.save_world(source, save.path));
-        const auto path = WorldSaveService::region_file_path(save.path, 0, 0);
+        ASSERT_TRUE(WorldSaveService{}.save_world(source, save.path()));
+        const auto path = WorldSaveService::region_file_path(save.path(), 0, 0);
         const auto original = CacheFileBytes(path);
         CachePersistence::SaveTransaction transaction(
-            save.path, 0, {}, WorldSaveService::member_digest);
+            save.path(), 0, {}, WorldSaveService::member_digest);
         std::vector<std::string> errors;
         ASSERT_TRUE(transaction.begin(&errors));
         EXPECT_EQ(transaction.commit(&errors), !partial);
         EXPECT_EQ(errors.empty(), !partial);
-        EXPECT_EQ(CachePersistence::snapshot_index_exists(save.path), !partial);
-        EXPECT_FALSE(CachePersistence::journal_pending(save.path));
+        EXPECT_EQ(CachePersistence::snapshot_index_exists(save.path()), !partial);
+        EXPECT_FALSE(CachePersistence::journal_pending(save.path()));
         EXPECT_EQ(CacheFileBytes(path), original);
         if (!partial) {
             WorldStreamingState loaded;
-            ASSERT_TRUE(WorldSaveService{}.load_world(loaded, save.path, errors))
+            ASSERT_TRUE(WorldSaveService{}.load_world(loaded, save.path(), errors))
                 << JoinErrors(errors);
             EXPECT_EQ(WorldSaveService{}.world_hash(loaded), WorldSaveService{}.world_hash(source));
         }
@@ -1626,8 +1911,8 @@ TEST(WorldSaveService, FirstIndexStrictlyValidatesCompleteAndPartialRetainedWate
 TEST(WorldSaveService, FirstIndexRefusesUnknownNonregularAndTruncatedRetainedMembers) {
     for (const int variant : {0, 1, 2}) {
         SCOPED_TRACE(variant);
-        TempSaveDir save("retained_member_refusal");
-        const auto path = WorldSaveService::region_file_path(save.path, 0, 0);
+        const TempSaveDir save("retained_member_refusal");
+        const auto path = WorldSaveService::region_file_path(save.path(), 0, 0);
         std::filesystem::create_directories(path.parent_path());
         const auto member = variant == 0 ? path.parent_path() / "unknown" : path;
         if (variant == 1) {
@@ -1638,13 +1923,13 @@ TEST(WorldSaveService, FirstIndexRefusesUnknownNonregularAndTruncatedRetainedMem
             ASSERT_TRUE(output.good());
         }
         CachePersistence::SaveTransaction transaction(
-            save.path, 0, {}, WorldSaveService::member_digest);
+            save.path(), 0, {}, WorldSaveService::member_digest);
         std::vector<std::string> errors;
         ASSERT_TRUE(transaction.begin(&errors));
         EXPECT_FALSE(transaction.commit(&errors));
         EXPECT_FALSE(errors.empty());
-        EXPECT_FALSE(CachePersistence::snapshot_index_exists(save.path));
-        EXPECT_FALSE(CachePersistence::journal_pending(save.path));
+        EXPECT_FALSE(CachePersistence::snapshot_index_exists(save.path()));
+        EXPECT_FALSE(CachePersistence::journal_pending(save.path()));
         if (variant == 1) {
             EXPECT_TRUE(std::filesystem::is_directory(member));
         } else {
@@ -1654,16 +1939,16 @@ TEST(WorldSaveService, FirstIndexRefusesUnknownNonregularAndTruncatedRetainedMem
 }
 
 TEST(WorldSaveService, WriterPermissiveSuccessNeverSeedsStrictFailure) {
-    TempSaveDir save("writer_modes");
+    const TempSaveDir save("writer_modes");
     ValidationCache cache;
     {
         const ValidationCache::Scope scope(cache);
-        ASSERT_NO_FATAL_FAILURE(WriteCacheFixture(save.path, true));
+        ASSERT_NO_FATAL_FAILURE(WriteCacheFixture(save.path(), true));
         std::vector<std::string> errors;
-        ASSERT_TRUE(ValidateCacheFixture(save.path, errors));
+        ASSERT_TRUE(ValidateCacheFixture(save.path(), errors));
         EXPECT_TRUE(errors.empty());
     }
-    const auto region = WorldSaveService::region_file_path(save.path, 0, 0);
+    const auto region = WorldSaveService::region_file_path(save.path(), 0, 0);
     const auto original = CacheFileBytes(region);
     EXPECT_EQ(cache.stats().modes[0].writer_seeded, 1u);
     EXPECT_EQ(cache.stats().modes[1].writer_seeded, 0u);
@@ -1671,20 +1956,20 @@ TEST(WorldSaveService, WriterPermissiveSuccessNeverSeedsStrictFailure) {
     for (int attempt = 0; attempt < 2; ++attempt) {
         const ValidationCache::Scope scope(cache);
         CachePersistence::SaveTransaction transaction(
-            save.path, 0, {}, WorldSaveService::member_digest);
+            save.path(), 0, {}, WorldSaveService::member_digest);
         std::vector<std::string> errors;
         ASSERT_TRUE(transaction.begin(&errors));
         ASSERT_TRUE(transaction.protect({"chunks/region/r.0.0.lmr"}, &errors));
         EXPECT_FALSE(transaction.commit(&errors));
         EXPECT_FALSE(errors.empty());
-        EXPECT_FALSE(CachePersistence::snapshot_index_exists(save.path));
-        EXPECT_FALSE(CachePersistence::journal_pending(save.path));
+        EXPECT_FALSE(CachePersistence::snapshot_index_exists(save.path()));
+        EXPECT_FALSE(CachePersistence::journal_pending(save.path()));
         EXPECT_EQ(CacheFileBytes(region), original);
     }
     EXPECT_EQ(cache.stats().modes[1].hits, 0u);
     EXPECT_EQ(cache.stats().modes[1].decodes, 2u);
     std::vector<std::string> errors;
-    EXPECT_TRUE(ValidateCacheFixture(save.path, errors));
+    EXPECT_TRUE(ValidateCacheFixture(save.path(), errors));
     EXPECT_TRUE(errors.empty());
 }
 
@@ -1736,16 +2021,16 @@ TEST(WorldSaveService, CanonicalNanBecomesNullAndCannotAuthorizeWriterReuse) {
     EXPECT_TRUE(snapshot.at("chunks").front().at("sdf_data").front().is_null());
     ASSERT_NO_FATAL_FAILURE(ExpectFactsMatchLoader(snapshot, false));
     ASSERT_NO_FATAL_FAILURE(ExpectFactsMatchLoader(snapshot, true));
-    TempSaveDir save("writer_null");
+    const TempSaveDir save("writer_null");
     ValidationCache cache;
     {
         const ValidationCache::Scope scope(cache);
         // The unindexed legacy writer permits publication; reader refusal is unchanged.
-        ASSERT_TRUE(WorldSaveService{}.save_world(state, save.path));
+        ASSERT_TRUE(WorldSaveService{}.save_world(state, save.path()));
         EXPECT_EQ(cache.stats().modes[0].writer_seeded, 0u);
         EXPECT_EQ(cache.stats().modes[1].writer_seeded, 0u);
     }
-    ASSERT_NO_FATAL_FAILURE(ExpectColdAndCachedRefusal(save.path, cache));
+    ASSERT_NO_FATAL_FAILURE(ExpectColdAndCachedRefusal(save.path(), cache));
 }
 
 TEST(WorldSaveService, SpillCreationWriteReadShortReadAndExhaustionFallBackToDecoder) {
@@ -1753,32 +2038,32 @@ TEST(WorldSaveService, SpillCreationWriteReadShortReadAndExhaustionFallBackToDec
                              ValidationCache::SpillFault::Write,
                              ValidationCache::SpillFault::Read,
                              ValidationCache::SpillFault::ShortRead}) {
-        TempSaveDir save("writer_spill_fault");
+        const TempSaveDir save("writer_spill_fault");
         ValidationCache cache(16, 0, ValidationCache::kMaxRecordBytes);
         cache.spill_fault_for_testing(fault);
         const ValidationCache::Scope scope(cache);
-        ASSERT_NO_FATAL_FAILURE(WriteCacheFixture(save.path));
-        ASSERT_NO_FATAL_FAILURE(IndexCacheFixture(save.path));
+        ASSERT_NO_FATAL_FAILURE(WriteCacheFixture(save.path()));
+        ASSERT_NO_FATAL_FAILURE(IndexCacheFixture(save.path()));
         std::vector<std::string> errors;
-        ASSERT_TRUE(ValidateCacheFixture(save.path, errors));
+        ASSERT_TRUE(ValidateCacheFixture(save.path(), errors));
         EXPECT_GT(cache.stats().modes[1].decodes, 0u);
         EXPECT_GT(cache.stats().modes[0].spill_faults + cache.stats().modes[1].spill_faults, 0u);
         EXPECT_TRUE(errors.empty());
         cache.spill_fault_for_testing(ValidationCache::SpillFault::None);
-        ASSERT_TRUE(ValidateCacheFixture(save.path, errors));
+        ASSERT_TRUE(ValidateCacheFixture(save.path(), errors));
         const auto decodes = cache.stats().modes[1].decodes;
-        ASSERT_TRUE(ValidateCacheFixture(save.path, errors));
+        ASSERT_TRUE(ValidateCacheFixture(save.path(), errors));
         EXPECT_EQ(cache.stats().modes[1].decodes, decodes);
         EXPECT_GT(cache.stats().modes[1].hits, 0u);
     }
-    TempSaveDir save("writer_spill_exhausted");
+    const TempSaveDir save("writer_spill_exhausted");
     ValidationCache exhausted(16, 0, 1);
     const ValidationCache::Scope scope(exhausted);
-    ASSERT_NO_FATAL_FAILURE(WriteCacheFixture(save.path));
-    ASSERT_NO_FATAL_FAILURE(IndexCacheFixture(save.path));
+    ASSERT_NO_FATAL_FAILURE(WriteCacheFixture(save.path()));
+    ASSERT_NO_FATAL_FAILURE(IndexCacheFixture(save.path()));
     std::vector<std::string> errors;
-    ASSERT_TRUE(ValidateCacheFixture(save.path, errors));
-    ASSERT_TRUE(ValidateCacheFixture(save.path, errors));
+    ASSERT_TRUE(ValidateCacheFixture(save.path(), errors));
+    ASSERT_TRUE(ValidateCacheFixture(save.path(), errors));
     EXPECT_EQ(exhausted.stats().entries, 0u);
     EXPECT_EQ(exhausted.stats().modes[1].decodes, 2u);
     EXPECT_TRUE(errors.empty());
@@ -1787,18 +2072,18 @@ TEST(WorldSaveService, SpillCreationWriteReadShortReadAndExhaustionFallBackToDec
 TEST(WorldSaveService, WriterSeedAndWarmHitsStillRefuseSameLengthCorruptionAndHeaderChanges) {
     for (const bool warm : {false, true}) {
         for (const bool header : {false, true}) {
-            TempSaveDir save("writer_corruption");
+            const TempSaveDir save("writer_corruption");
             ValidationCache cache;
             {
                 const ValidationCache::Scope scope(cache);
-                ASSERT_NO_FATAL_FAILURE(WriteCacheFixture(save.path));
-                ASSERT_NO_FATAL_FAILURE(IndexCacheFixture(save.path));
+                ASSERT_NO_FATAL_FAILURE(WriteCacheFixture(save.path()));
+                ASSERT_NO_FATAL_FAILURE(IndexCacheFixture(save.path()));
                 if (warm) {
                     std::vector<std::string> errors;
-                    ASSERT_TRUE(ValidateCacheFixture(save.path, errors));
+                    ASSERT_TRUE(ValidateCacheFixture(save.path(), errors));
                 }
             }
-            const auto path = WorldSaveService::region_file_path(save.path, 0, 0);
+            const auto path = WorldSaveService::region_file_path(save.path(), 0, 0);
             auto bytes = CacheFileBytes(path);
             ASSERT_GT(bytes.size(), 26u);
             const std::size_t offset = header ? 18u : bytes.size() - 1;
@@ -1806,7 +2091,7 @@ TEST(WorldSaveService, WriterSeedAndWarmHitsStillRefuseSameLengthCorruptionAndHe
             std::vector<std::string> errors;
             ASSERT_TRUE(WorldSaveService::durable_write_file(path, bytes, &errors));
             EXPECT_EQ(CacheFileBytes(path).size(), bytes.size());
-            ASSERT_NO_FATAL_FAILURE(ExpectColdAndCachedRefusal(save.path, cache));
+            ASSERT_NO_FATAL_FAILURE(ExpectColdAndCachedRefusal(save.path(), cache));
         }
     }
 }
@@ -1814,17 +2099,17 @@ TEST(WorldSaveService, WriterSeedAndWarmHitsStillRefuseSameLengthCorruptionAndHe
 TEST(WorldSaveService, RewrittenSpillAndRecordForceFreshValidationInBothModes) {
     for (const bool strict_first : {false, true}) {
         SCOPED_TRACE(strict_first);
-        TempSaveDir save("spill_integrity");
+        const TempSaveDir save("spill_integrity");
         ValidationCache cache(16, 0, ValidationCache::kMaxRecordBytes);
         {
             const ValidationCache::Scope scope(cache);
-            ASSERT_NO_FATAL_FAILURE(WriteCacheFixture(save.path));
-            ASSERT_NO_FATAL_FAILURE(IndexCacheFixture(save.path));
+            ASSERT_NO_FATAL_FAILURE(WriteCacheFixture(save.path()));
+            ASSERT_NO_FATAL_FAILURE(IndexCacheFixture(save.path()));
             std::vector<std::string> errors;
-            ASSERT_TRUE(ValidateCacheFixture(save.path, errors));
+            ASSERT_TRUE(ValidateCacheFixture(save.path(), errors));
         }
         ASSERT_EQ(cache.stats().entries, 2u);
-        const auto region = WorldSaveService::region_file_path(save.path, 0, 0);
+        const auto region = WorldSaveService::region_file_path(save.path(), 0, 0);
         const auto original = CacheFileBytes(region);
         auto changed = original;
         ASSERT_GT(changed.size(), 26u);
@@ -1847,13 +2132,13 @@ TEST(WorldSaveService, RewrittenSpillAndRecordForceFreshValidationInBothModes) {
         std::vector<std::string> errors, cold_strict;
         ASSERT_TRUE(WorldSaveService::durable_write_file(region, changed, &errors));
         ASSERT_EQ(CacheFileBytes(region).size(), original.size());
-        ASSERT_FALSE(ValidateCacheFixture(save.path, cold_strict));
+        ASSERT_FALSE(ValidateCacheFixture(save.path(), cold_strict));
         ASSERT_NE(JoinErrors(cold_strict).find("failed to decode chunk record payload"),
                   std::string::npos);
         CachePersistence::MemberDigest digest;
         std::string cold_permissive;
         ASSERT_FALSE(WorldSaveService::member_digest(
-            save.path, "chunks/region/r.0.0.lmr", digest, cold_permissive));
+            save.path(), "chunks/region/r.0.0.lmr", digest, cold_permissive));
         const auto before = cache.stats();
         const ValidationCache::Scope scope(cache);
         for (const bool strict : {strict_first, !strict_first}) {
@@ -1861,12 +2146,12 @@ TEST(WorldSaveService, RewrittenSpillAndRecordForceFreshValidationInBothModes) {
             for (int attempt = 0; attempt < 2; ++attempt) {
                 if (strict) {
                     std::vector<std::string> cached;
-                    EXPECT_FALSE(ValidateCacheFixture(save.path, cached));
+                    EXPECT_FALSE(ValidateCacheFixture(save.path(), cached));
                     EXPECT_EQ(cached, cold_strict);
                 } else {
                     std::string cached;
                     EXPECT_FALSE(WorldSaveService::member_digest(
-                        save.path, "chunks/region/r.0.0.lmr", digest, cached));
+                        save.path(), "chunks/region/r.0.0.lmr", digest, cached));
                     EXPECT_EQ(cached, cold_permissive);
                 }
                 EXPECT_EQ(cache.stats().entries, 0u);
@@ -1878,9 +2163,9 @@ TEST(WorldSaveService, RewrittenSpillAndRecordForceFreshValidationInBothModes) {
         // Restoring valid bytes requires a fresh decode; a later hit can then
         // reuse only those newly validated facts.
         ASSERT_TRUE(WorldSaveService::durable_write_file(region, original, &errors));
-        ASSERT_TRUE(ValidateCacheFixture(save.path, errors));
+        ASSERT_TRUE(ValidateCacheFixture(save.path(), errors));
         EXPECT_EQ(cache.stats().modes[1].decodes, before.modes[1].decodes + 3u);
-        ASSERT_TRUE(ValidateCacheFixture(save.path, errors));
+        ASSERT_TRUE(ValidateCacheFixture(save.path(), errors));
         EXPECT_EQ(cache.stats().modes[1].decodes, before.modes[1].decodes + 3u);
         EXPECT_EQ(cache.stats().modes[1].hits, before.modes[1].hits + 1u);
         EXPECT_TRUE(errors.empty()) << JoinErrors(errors);
@@ -1888,16 +2173,16 @@ TEST(WorldSaveService, RewrittenSpillAndRecordForceFreshValidationInBothModes) {
 }
 
 TEST(WorldSaveService, ValidSameLengthSpillReplacementIsDecodedThenSharedAcrossModes) {
-    TempSaveDir save("spill_replacement");
+    const TempSaveDir save("spill_replacement");
     ValidationCache cache(16, 0, ValidationCache::kMaxRecordBytes);
     {
         const ValidationCache::Scope scope(cache);
-        ASSERT_NO_FATAL_FAILURE(WriteCacheFixture(save.path));
-        ASSERT_NO_FATAL_FAILURE(IndexCacheFixture(save.path));
+        ASSERT_NO_FATAL_FAILURE(WriteCacheFixture(save.path()));
+        ASSERT_NO_FATAL_FAILURE(IndexCacheFixture(save.path()));
         std::vector<std::string> errors;
-        ASSERT_TRUE(ValidateCacheFixture(save.path, errors));
+        ASSERT_TRUE(ValidateCacheFixture(save.path(), errors));
     }
-    const auto region = WorldSaveService::region_file_path(save.path, 0, 0);
+    const auto region = WorldSaveService::region_file_path(save.path(), 0, 0);
     auto replacement = CacheFileBytes(region);
     ASSERT_GT(replacement.size(), 26u);
     // LZ4's final literal includes StableDump's newline. A carriage return is
@@ -1921,10 +2206,10 @@ TEST(WorldSaveService, ValidSameLengthSpillReplacementIsDecodedThenSharedAcrossM
     CachePersistence::MemberDigest replacement_digest;
     std::string replacement_error;
     ASSERT_TRUE(WorldSaveService::member_digest(
-        save.path, "chunks/region/r.0.0.lmr", replacement_digest, replacement_error))
+        save.path(), "chunks/region/r.0.0.lmr", replacement_digest, replacement_error))
         << replacement_error;
     CachePersistence::SnapshotIndex index;
-    ASSERT_TRUE(CachePersistence::read_snapshot_index(save.path, index, &errors));
+    ASSERT_TRUE(CachePersistence::read_snapshot_index(save.path(), index, &errors));
     const auto member = std::find_if(index.members.begin(), index.members.end(), [](const auto& e) {
         return e.path == "chunks/region/r.0.0.lmr";
     });
@@ -1932,25 +2217,25 @@ TEST(WorldSaveService, ValidSameLengthSpillReplacementIsDecodedThenSharedAcrossM
     member->bytes = replacement_digest.bytes;
     member->fnv64 = replacement_digest.fnv64;
     ASSERT_TRUE(
-        WorldSaveService::durable_write_file(CachePersistence::snapshot_index_path(save.path),
+        WorldSaveService::durable_write_file(CachePersistence::snapshot_index_path(save.path()),
                                              CachePersistence::encode_snapshot_index(index),
                                              &errors));
-    ASSERT_TRUE(ValidateCacheFixture(save.path, errors)); // Cold acceptance of B.
+    ASSERT_TRUE(ValidateCacheFixture(save.path(), errors)); // Cold acceptance of B.
     const auto before = cache.stats();
     const ValidationCache::Scope scope(cache);
-    ASSERT_TRUE(ValidateCacheFixture(save.path, errors));
+    ASSERT_TRUE(ValidateCacheFixture(save.path(), errors));
     EXPECT_EQ(cache.stats().modes[1].decodes, before.modes[1].decodes + 1u);
     EXPECT_EQ(cache.stats().modes[1].hits, before.modes[1].hits);
     EXPECT_EQ(cache.stats().entries, 1u); // Both A entries were discarded.
     CachePersistence::MemberDigest digest;
     std::string error;
     ASSERT_TRUE(
-        WorldSaveService::member_digest(save.path, "chunks/region/r.0.0.lmr", digest, error))
+        WorldSaveService::member_digest(save.path(), "chunks/region/r.0.0.lmr", digest, error))
         << error;
     EXPECT_EQ(cache.stats().modes[0].decodes, before.modes[0].decodes + 1u);
     EXPECT_EQ(cache.stats().entries, 2u);
     EXPECT_EQ(cache.stats().spill_bytes, replacement.size() - 26u);
-    ASSERT_TRUE(ValidateCacheFixture(save.path, errors));
+    ASSERT_TRUE(ValidateCacheFixture(save.path(), errors));
     EXPECT_EQ(cache.stats().modes[1].decodes, before.modes[1].decodes + 1u);
     EXPECT_EQ(cache.stats().modes[1].hits, before.modes[1].hits + 1u);
     EXPECT_TRUE(errors.empty()) << JoinErrors(errors);
@@ -1958,22 +2243,22 @@ TEST(WorldSaveService, ValidSameLengthSpillReplacementIsDecodedThenSharedAcrossM
 
 TEST(WorldSaveService, WriterSeedStillChecksCurrentIndexAndWrongRegionAfterWriteOrWarming) {
     for (const bool warm : {false, true}) {
-        TempSaveDir save("writer_context");
+        const TempSaveDir save("writer_context");
         ValidationCache cache;
         {
             const ValidationCache::Scope scope(cache);
-            ASSERT_NO_FATAL_FAILURE(WriteCacheFixture(save.path));
-            ASSERT_NO_FATAL_FAILURE(IndexCacheFixture(save.path));
+            ASSERT_NO_FATAL_FAILURE(WriteCacheFixture(save.path()));
+            ASSERT_NO_FATAL_FAILURE(IndexCacheFixture(save.path()));
             if (warm) {
                 std::vector<std::string> errors;
-                ASSERT_TRUE(ValidateCacheFixture(save.path, errors));
+                ASSERT_TRUE(ValidateCacheFixture(save.path(), errors));
             }
         }
-        const auto index_path = CachePersistence::snapshot_index_path(save.path);
+        const auto index_path = CachePersistence::snapshot_index_path(save.path());
         const auto original = CacheFileBytes(index_path);
         CachePersistence::SnapshotIndex index;
         std::vector<std::string> errors;
-        ASSERT_TRUE(CachePersistence::read_snapshot_index(save.path, index, &errors));
+        ASSERT_TRUE(CachePersistence::read_snapshot_index(save.path(), index, &errors));
         const auto member =
             std::find_if(index.members.begin(), index.members.end(), [](const auto& entry) {
                 return entry.path == "chunks/region/r.0.0.lmr";
@@ -1982,16 +2267,16 @@ TEST(WorldSaveService, WriterSeedStillChecksCurrentIndexAndWrongRegionAfterWrite
         ++member->fnv64;
         ASSERT_TRUE(WorldSaveService::durable_write_file(
             index_path, CachePersistence::encode_snapshot_index(index), &errors));
-        ASSERT_NO_FATAL_FAILURE(ExpectColdAndCachedRefusal(save.path, cache));
+        ASSERT_NO_FATAL_FAILURE(ExpectColdAndCachedRefusal(save.path(), cache));
         ASSERT_TRUE(WorldSaveService::durable_write_file(index_path, original, &errors));
-        std::filesystem::rename(WorldSaveService::region_file_path(save.path, 0, 0),
-                                WorldSaveService::region_file_path(save.path, 1, 0));
-        ASSERT_NO_FATAL_FAILURE(ExpectColdAndCachedRefusal(save.path, cache));
+        std::filesystem::rename(WorldSaveService::region_file_path(save.path(), 0, 0),
+                                WorldSaveService::region_file_path(save.path(), 1, 0));
+        ASSERT_NO_FATAL_FAILURE(ExpectColdAndCachedRefusal(save.path(), cache));
     }
 }
 
 TEST(WorldSaveService, SameLengthValidReplacementMustRevalidateFreshBytesAgainstCurrentIndex) {
-    TempSaveDir save("writer_replaced"), replacement("writer_replacement");
+    const TempSaveDir save("writer_replaced"), replacement("writer_replacement");
     WorldStreamingState state;
     const auto chunk = state.get_or_create_chunk({0, 0, 0});
     chunk->set_state(ChunkState::Idle);
@@ -1999,14 +2284,14 @@ TEST(WorldSaveService, SameLengthValidReplacementMustRevalidateFreshBytesAgainst
     ValidationCache cache;
     {
         const ValidationCache::Scope scope(cache);
-        ASSERT_TRUE(WorldSaveService{}.save_world(state, save.path));
-        ASSERT_NO_FATAL_FAILURE(IndexCacheFixture(save.path));
+        ASSERT_TRUE(WorldSaveService{}.save_world(state, save.path()));
+        ASSERT_NO_FATAL_FAILURE(IndexCacheFixture(save.path()));
         std::vector<std::string> errors;
-        ASSERT_TRUE(ValidateCacheFixture(save.path, errors));
+        ASSERT_TRUE(ValidateCacheFixture(save.path(), errors));
     }
-    ASSERT_TRUE(WorldSaveService{}.save_world(state, replacement.path));
-    const auto path = WorldSaveService::region_file_path(save.path, 0, 0);
-    const auto replacement_path = WorldSaveService::region_file_path(replacement.path, 0, 0);
+    ASSERT_TRUE(WorldSaveService{}.save_world(state, replacement.path()));
+    const auto path = WorldSaveService::region_file_path(save.path(), 0, 0);
+    const auto replacement_path = WorldSaveService::region_file_path(replacement.path(), 0, 0);
     const auto original = CacheFileBytes(path);
     auto changed = CacheFileBytes(replacement_path);
     ASSERT_EQ(original, changed);
@@ -2030,63 +2315,63 @@ TEST(WorldSaveService, SameLengthValidReplacementMustRevalidateFreshBytesAgainst
         records.front().payload, decoded, errors, true));
     ASSERT_TRUE(WorldSaveService::durable_write_file(path, changed, &errors));
     const auto decodes = cache.stats().modes[1].decodes;
-    ASSERT_NO_FATAL_FAILURE(ExpectColdAndCachedRefusal(save.path, cache));
+    ASSERT_NO_FATAL_FAILURE(ExpectColdAndCachedRefusal(save.path(), cache));
     EXPECT_GT(cache.stats().modes[1].byte_mismatch, 0u);
     EXPECT_EQ(cache.stats().modes[1].decodes, decodes + 1u);
-    ASSERT_FALSE(ValidateCacheFixture(save.path, errors));
+    ASSERT_FALSE(ValidateCacheFixture(save.path(), errors));
     EXPECT_NE(JoinErrors(errors).find("inconsistent snapshot: chunks/region/r.0.0.lmr"),
               std::string::npos);
 }
 
 TEST(WorldSaveService,
      AbortedWriterSeedsAndRecoveredJournalNeverOverrideRestoredBytesOrDirtyState) {
-    TempSaveDir save("writer_abort");
+    const TempSaveDir save("writer_abort");
     ValidationCache cache;
     const ValidationCache::Scope scope(cache);
-    ASSERT_NO_FATAL_FAILURE(WriteCacheFixture(save.path));
-    ASSERT_NO_FATAL_FAILURE(IndexCacheFixture(save.path));
-    const auto path = WorldSaveService::region_file_path(save.path, 0, 0);
+    ASSERT_NO_FATAL_FAILURE(WriteCacheFixture(save.path()));
+    ASSERT_NO_FATAL_FAILURE(IndexCacheFixture(save.path()));
+    const auto path = WorldSaveService::region_file_path(save.path(), 0, 0);
     const auto original = CacheFileBytes(path);
-    const auto original_index = CacheFileBytes(CachePersistence::snapshot_index_path(save.path));
+    const auto original_index = CacheFileBytes(CachePersistence::snapshot_index_path(save.path()));
     WorldStreamingState state;
     const auto chunk = state.get_or_create_chunk({0, 0, 0});
     chunk->set_state(ChunkState::Idle);
     chunk->max_water_delta_last_tick = 2.0f;
     chunk->mark_voxel_data_dirty();
     const TempSaveDir undo("writer_undo");
-    const auto journal_copy = undo.path;
+    const auto& journal_copy = undo.path();
     // Keep crash artifacts outside the save's member inventory.
     std::string staged;
     {
         CachePersistence::SaveTransaction transaction(
-            save.path, 0, {}, WorldSaveService::member_digest);
+            save.path(), 0, {}, WorldSaveService::member_digest);
         ASSERT_TRUE(transaction.begin(nullptr));
-        const auto report = WorldSaveService{}.save_dirty_chunks(state, save.path);
+        const auto report = WorldSaveService{}.save_dirty_chunks(state, save.path());
         ASSERT_TRUE(report.saved);
         EXPECT_TRUE(chunk->is_voxel_data_dirty());
         staged = CacheFileBytes(path);
         ASSERT_NE(staged, original);
-        std::filesystem::copy(CachePersistence::journal_directory(save.path),
+        std::filesystem::copy(CachePersistence::journal_directory(save.path()),
                               journal_copy,
                               std::filesystem::copy_options::recursive);
         transaction.abort(nullptr);
     }
     EXPECT_TRUE(chunk->is_voxel_data_dirty());
     EXPECT_EQ(CacheFileBytes(path), original);
-    EXPECT_EQ(CacheFileBytes(CachePersistence::snapshot_index_path(save.path)), original_index);
+    EXPECT_EQ(CacheFileBytes(CachePersistence::snapshot_index_path(save.path())), original_index);
     std::vector<std::string> errors;
-    ASSERT_TRUE(ValidateCacheFixture(save.path, errors));
+    ASSERT_TRUE(ValidateCacheFixture(save.path(), errors));
     EXPECT_GT(cache.stats().modes[1].byte_mismatch, 0u);
     ASSERT_TRUE(WorldSaveService::durable_write_file(path, staged, &errors));
     std::filesystem::copy(journal_copy,
-                          CachePersistence::journal_directory(save.path),
+                          CachePersistence::journal_directory(save.path()),
                           std::filesystem::copy_options::recursive);
-    EXPECT_EQ(CachePersistence::recover_pending_journal(save.path, &errors),
+    EXPECT_EQ(CachePersistence::recover_pending_journal(save.path(), &errors),
               CachePersistence::RecoveryOutcome::RolledBack);
-    EXPECT_FALSE(CachePersistence::journal_pending(save.path));
+    EXPECT_FALSE(CachePersistence::journal_pending(save.path()));
     EXPECT_EQ(CacheFileBytes(path), original);
-    EXPECT_EQ(CacheFileBytes(CachePersistence::snapshot_index_path(save.path)), original_index);
-    ASSERT_TRUE(ValidateCacheFixture(save.path, errors));
+    EXPECT_EQ(CacheFileBytes(CachePersistence::snapshot_index_path(save.path())), original_index);
+    ASSERT_TRUE(ValidateCacheFixture(save.path(), errors));
     EXPECT_TRUE(chunk->is_voxel_data_dirty());
     EXPECT_TRUE(errors.empty()) << JoinErrors(errors);
     std::filesystem::remove_all(journal_copy);
@@ -2128,6 +2413,8 @@ TEST(WorldSaveService, CanonicalAndParsedFactsUseTheSameStrictGridAndIdentityChe
         auto changed = snapshot;
         auto& grid = changed["chunks"][0];
         switch (variant) {
+            default:
+                FAIL() << "Unexpected fixture variant: " << variant;
             case 0:
                 grid.erase("water_edge_flux");
                 break;
@@ -2174,8 +2461,8 @@ TEST(WorldSaveService, CanonicalAndParsedFactsUseTheSameStrictGridAndIdentityChe
 }
 
 TEST(WorldSaveService, ConservativeFactsMissKeepsUnusualLegacyAcceptanceOnOriginalDecoder) {
-    TempSaveDir save("facts_fallback");
-    ASSERT_NO_FATAL_FAILURE(WriteCacheFixture(save.path));
+    const TempSaveDir save("facts_fallback");
+    ASSERT_NO_FATAL_FAILURE(WriteCacheFixture(save.path()));
     auto snapshot = FactsFixture();
     snapshot["chunks"][0]["mesh_vertices"] = nullptr;
     snapshot["chunks"][0]["sdf_data"] = nlohmann::json::array();
@@ -2189,16 +2476,16 @@ TEST(WorldSaveService, ConservativeFactsMissKeepsUnusualLegacyAcceptanceOnOrigin
     }
     const WorldSaveService::ContainerRecord record{0, 0, 0, text};
     ASSERT_TRUE(WorldSaveService::upsert_container_records(
-        WorldSaveService::region_file_path(save.path, 0, 0), {record}));
+        WorldSaveService::region_file_path(save.path(), 0, 0), {record}));
     ValidationCache cache;
     const ValidationCache::Scope scope(cache);
     std::vector<std::string> errors;
-    ASSERT_TRUE(ValidateCacheFixture(save.path, errors));
-    ASSERT_NO_FATAL_FAILURE(IndexCacheFixture(save.path));
-    ASSERT_TRUE(ValidateCacheFixture(save.path, errors));
+    ASSERT_TRUE(ValidateCacheFixture(save.path(), errors));
+    ASSERT_NO_FATAL_FAILURE(IndexCacheFixture(save.path()));
+    ASSERT_TRUE(ValidateCacheFixture(save.path(), errors));
     EXPECT_GT(cache.stats().modes[0].decodes, 0u);
     EXPECT_GT(cache.stats().modes[1].decodes, 0u);
-    ASSERT_TRUE(ValidateCacheFixture(save.path, errors));
+    ASSERT_TRUE(ValidateCacheFixture(save.path(), errors));
     EXPECT_GT(cache.stats().modes[1].hits, 0u);
     EXPECT_TRUE(errors.empty());
 }
@@ -2214,7 +2501,8 @@ TEST(WorldSaveService, SingleChunkOpenStreamsArraysWithBoundedBufferingAndUnchan
         chunk->sdf_data.assign(lattice, -0.25f);
         chunk->material_data.assign(lattice, 7);
         chunk->current_water_resolution.store(resolution);
-        const auto cells = static_cast<std::size_t>(resolution * resolution);
+        const auto cells =
+            static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
         chunk->water_depth_mm.assign(cells, 1000);
         chunk->water_bed_mm.assign(cells, -100);
         chunk->water_edge_flux.assign(2 * cells, -10);
@@ -2283,6 +2571,8 @@ TEST(WorldSaveService, StreamingChunkOpenPreservesStrictRefusalsAndLegacyFluxFal
         auto changed = baseline;
         auto& grid = changed["chunks"][0];
         switch (variant) {
+            default:
+                FAIL() << "Unexpected fixture variant: " << variant;
             case 0:
                 grid["water_depth_mm"][0] = 2147483648ULL;
                 break;
@@ -2364,7 +2654,7 @@ TEST(WorldSaveService, StreamingChunkOpenPreservesLegacyContainersAndDuplicateKe
 
 TEST(WorldSaveService, IndexedAdmissionDecodesEachChunkAndFieldFileOnce) {
     namespace W = Luminumbra::world;
-    TempSaveDir save("admission_work");
+    const TempSaveDir save("admission_work");
     const W::WorldClock clock(16);
     W::ActiveRegionLedger ledger({}, clock);
     ledger.mark_edited({0, 0}, clock);
@@ -2383,23 +2673,23 @@ TEST(WorldSaveService, IndexedAdmissionDecodesEachChunkAndFieldFileOnce) {
                                     (Luminumbra::CHUNK_SIZE_Y + 1) * (Luminumbra::CHUNK_SIZE_Z + 1);
     chunk->sdf_data.assign(lattice, -0.25f);
     chunk->mark_voxel_data_dirty();
-    WorldSaveService service;
+    const WorldSaveService service;
     nlohmann::json metadata = {{"container_version", 2}};
     clock.write_metadata(metadata);
     std::vector<std::string> errors;
     {
-        WorldSaveService::SaveFactsScope facts(save.path);
+        const WorldSaveService::SaveFactsScope facts(save.path());
         Luminumbra::Persistence::SaveTransaction transaction(
-            save.path, clock.tick(), {}, WorldSaveService::member_digest);
+            save.path(), clock.tick(), {}, WorldSaveService::member_digest);
         ASSERT_TRUE(transaction.begin(&errors)) << JoinErrors(errors);
         ASSERT_TRUE(WorldSaveService::save_metadata_and_active_regions(
-            metadata.dump(), ledger, save.path, &errors))
+            metadata.dump(), ledger, save.path(), &errors))
             << JoinErrors(errors);
-        ASSERT_TRUE(WorldSaveService::save_field_pages(pages, save.path, &errors))
+        ASSERT_TRUE(WorldSaveService::save_field_pages(pages, save.path(), &errors))
             << JoinErrors(errors);
-        ASSERT_TRUE(WorldSaveService::save_ground_objects(ground, save.path, &errors))
+        ASSERT_TRUE(WorldSaveService::save_ground_objects(ground, save.path(), &errors))
             << JoinErrors(errors);
-        ASSERT_TRUE(service.save_world(original, save.path, &errors)) << JoinErrors(errors);
+        ASSERT_TRUE(service.save_world(original, save.path(), &errors)) << JoinErrors(errors);
         ASSERT_TRUE(transaction.commit(&errors)) << JoinErrors(errors);
     }
     const auto hash = service.world_hash(original);
@@ -2413,7 +2703,7 @@ TEST(WorldSaveService, IndexedAdmissionDecodesEachChunkAndFieldFileOnce) {
         WorldStreamingState loaded;
         std::vector<IVec3> inventory;
         ASSERT_TRUE(service.load_world(
-            loaded, save.path, errors, {}, [retain](const IVec3&) { return retain; }, &inventory))
+            loaded, save.path(), errors, {}, [retain](const IVec3&) { return retain; }, &inventory))
             << JoinErrors(errors);
         EXPECT_EQ(WorldSaveService::field_page_decode_count_for_testing() - field_decodes, 1u);
         EXPECT_EQ(cache.stats().modes[1].decodes, 1u);
@@ -2446,7 +2736,8 @@ TEST(WorldSaveService, SaveStreamsBulkArraysWithBoundedWorkAndCanonicalRecordByt
         chunk->pending_mesh_indices = chunk->mesh_indices;
         chunk->pending_water_mesh_vertices = chunk->mesh_vertices;
         chunk->pending_water_mesh_indices = chunk->mesh_indices;
-        const auto cells = static_cast<std::size_t>(resolution * resolution);
+        const auto cells =
+            static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
         chunk->current_water_resolution.store(resolution);
         chunk->water_depth_mm.assign(cells, 1000);
         chunk->water_bed_mm.assign(cells, -100);
@@ -2473,15 +2764,15 @@ TEST(WorldSaveService, SaveStreamsBulkArraysWithBoundedWorkAndCanonicalRecordByt
             EXPECT_EQ(streamed_fact->coords, dom_fact->coords);
             EXPECT_EQ(streamed_fact->sdf_size, dom_fact->sdf_size);
         }
-        TempSaveDir save("streamed_save");
+        const TempSaveDir save("streamed_save");
         const auto encodes = CachePersistence::SnapshotStreamEncodeCountForTesting();
         std::vector<std::string> errors;
-        ASSERT_TRUE(WorldSaveService{}.save_world(original, save.path, &errors))
+        ASSERT_TRUE(WorldSaveService{}.save_world(original, save.path(), &errors))
             << JoinErrors(errors);
         EXPECT_EQ(CachePersistence::SnapshotStreamEncodeCountForTesting() - encodes, 1u);
         std::vector<WorldSaveService::ContainerRecord> records;
         ASSERT_TRUE(WorldSaveService::read_container_records(
-            WorldSaveService::region_file_path(save.path, -1, 0), records, &errors));
+            WorldSaveService::region_file_path(save.path(), -1, 0), records, &errors));
         ASSERT_EQ(records.size(), 1u);
         EXPECT_EQ(records.front().payload, canonical);
         // Exercise non-empty multi-chunk envelopes and canonical id ordering, too.
@@ -2489,7 +2780,7 @@ TEST(WorldSaveService, SaveStreamsBulkArraysWithBoundedWorkAndCanonicalRecordByt
         EXPECT_EQ(CachePersistence::StreamWorldStreamingStateSnapshotJson(original),
                   CachePersistence::SerializeWorldStreamingStateSnapshotJson(original));
     }
-    WorldStreamingState empty;
+    const WorldStreamingState empty;
     EXPECT_EQ(CachePersistence::StreamWorldStreamingStateSnapshotJson(empty),
               CachePersistence::SerializeWorldStreamingStateSnapshotJson(empty));
 }
@@ -2520,4 +2811,34 @@ TEST(WorldSaveService, StreamedWriterFactsPreserveConservativeRefusals) {
         for (const bool strict : {false, true})
             EXPECT_EQ(streamed[strict].has_value(), dom[strict].has_value());
     }
+}
+
+TEST(WorldSaveService, AdmissionCarriesValidatedCreaturesAndRefusalClearsCandidateRecords) {
+    namespace P = Luminumbra::Persistence;
+    const TempSaveDir save("creature_admission");
+    const auto original = CreatureStoreFixture();
+    ASSERT_TRUE(InstallCreatureStore(save.path(), original));
+    WorldStreamingState chunks;
+    P::WorldSaveRecords records;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(
+        WorldSaveService{}.load_world(chunks, save.path(), errors, {}, {}, nullptr, &records))
+        << JoinErrors(errors);
+    EXPECT_TRUE(records.has_ledger);
+    EXPECT_EQ(CreatureAuthority::SerializeCreatureSnapshot(records.creatures),
+              CreatureAuthority::SerializeCreatureSnapshot(original));
+    std::string error;
+    EXPECT_TRUE(CreatureAuthority::ValidateCreatureSnapshot(
+        records.creatures, records.ledger, records.ground, records.plants, error))
+        << error;
+    std::filesystem::remove(WorldSaveService::creature_entities_path(save.path()));
+    EXPECT_FALSE(
+        WorldSaveService{}.load_world(chunks, save.path(), errors, {}, {}, nullptr, &records));
+    EXPECT_FALSE(errors.empty());
+    EXPECT_FALSE(records.has_ledger);
+    EXPECT_TRUE(records.creatures.entities.empty());
+    EXPECT_TRUE(records.plants.entities.empty());
+    EXPECT_TRUE(records.ground.empty());
+    EXPECT_TRUE(records.pages.empty());
+    EXPECT_TRUE(chunks.empty());
 }
