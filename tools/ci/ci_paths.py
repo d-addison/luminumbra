@@ -13,6 +13,7 @@ import sys
 # Only reviewed, test-backed files may skip native builds. New files require
 # an explicit coverage decision; directory membership never grants an exemption.
 PYTHON_TESTS = (
+    "test/rendering/test_frame_attribution_wiring.py",
     "tools/ci/test_ci_paths.py",
     "tools/ci/test_cache_retention.py",
     "tools/ci/test_check_docs.py",
@@ -35,6 +36,7 @@ PYTHON_TESTS = (
     "tools/perf/test_render_budget.py",
     "tools/perf/test_render_contract.py",
     "tools/perf/test_render_runner_evidence.py",
+    "tools/perf/test_render_crash_capture.py",
     "tools/perf/test_sim_budget_gate.py",
     "tools/perf/test_terrain_aovs.py",
     "tools/release/test_sbom.py",

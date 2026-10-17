@@ -132,6 +132,9 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         self.startup_delay = 0
         self.loaders = True
         self.process_exception = None
+        def ordinary_run(command, *, receipt, evidence_parent, expected_exit=0, **kwargs):
+            return subprocess.run(command, **kwargs)
+        mock.patch.object(runner.crash_capture, 'run', side_effect=ordinary_run).start()
         self.original_run = subprocess.run
         self.calls = []
         mock.patch.object(runner.subprocess, 'run', side_effect=self.run_child).start()
@@ -218,7 +221,7 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
                 process.wait()
 
     def paths(self, name='capture'):
-        stem = 'test_traversal_twice-' + name
+        stem = 'test_traversal_twice-' + self.case.root.name + '-' + name
         return self.artifacts / (stem + '.json'), self.artifacts / (stem + '.process.json')
 
     def receipt(self, name='capture'):

@@ -13,6 +13,8 @@ import tempfile
 import time
 import unittest
 
+import render_crash_capture as crash_capture
+
 import render_contract as contract
 import render_runner_process as process_runner
 
@@ -106,7 +108,8 @@ def _report_timeout(receipt, log):
         pass
 
 
-def _run_process(command, *, cwd, environment, log, artifact, retained, receipt_path):
+def _run_process(command, *, cwd, environment, log, artifact, retained, receipt_path,
+                 expected_exit=0):
     # Retire only this case's exact outputs, including a repeated invocation in
     # the same runtime root. Never let an earlier capture appear current.
     for path in (artifact, retained, receipt_path, log):
@@ -123,12 +126,14 @@ def _run_process(command, *, cwd, environment, log, artifact, retained, receipt_
         with process_runner.verified_binary(receipt), log.open('wb') as output:
             started = time.perf_counter()
             try:
-                result = subprocess.run(command, cwd=cwd, env=environment,
-                                        stdout=output, stderr=subprocess.STDOUT,
-                                        timeout=180, check=False)
+                result = crash_capture.run(command, receipt=receipt,
+                                           evidence_parent=receipt_path.parent, expected_exit=expected_exit,
+                                           cwd=cwd, env=environment,
+                                           stdout=output, stderr=subprocess.STDOUT,
+                                           timeout=180, check=False)
+                receipt.update(outcome='returned', return_code=result.returncode)
             finally:
                 receipt['elapsed_seconds'] = time.perf_counter() - started
-            receipt.update(outcome='returned', return_code=result.returncode)
     except (subprocess.TimeoutExpired, OSError) as error:
         receipt.update(outcome='timed_out' if isinstance(error, subprocess.TimeoutExpired)
                        else receipt['outcome'], exception_type=type(error).__name__,
@@ -189,16 +194,17 @@ class RenderRunnerTests(unittest.TestCase):
     def run_client(self, name, extra=(), environment=None, expected_exit=0, schema='v3',
                    audio=False):
         artifact = self.root / (name + '.json')
-        log = OPTIONS.artifacts / (self._testMethodName + '-' + name + '.log')
+        log = OPTIONS.artifacts / (self._testMethodName + '-' + self.root.name + '-' + name + '.log')
         command = [str(OPTIONS.client), *([] if audio else ['--no-audio']), '--no-menu-backdrop',
                    '--render-benchmark', str(artifact), '--render-benchmark-schema', schema,
                    '--capture-size', '160x90', '--perf-profile', 'quality',
                    '--render-benchmark-warmup', '2', *extra]
-        retained = OPTIONS.artifacts / (self._testMethodName + '-' + name + '.json')
+        retained = OPTIONS.artifacts / (self._testMethodName + '-' + self.root.name + '-' + name + '.json')
         receipt_path = retained.with_suffix('.process.json')
         result, evidence_errors = _run_process(
             command, cwd=self.root, environment=environment or self.environment,
-            log=log, artifact=artifact, retained=retained, receipt_path=receipt_path)
+            log=log, artifact=artifact, retained=retained, receipt_path=receipt_path,
+            expected_exit=expected_exit)
         self.assertEqual(result.returncode, expected_exit, log.read_text(errors='replace', encoding="utf-8")[-6000:])
         if expected_exit:
             self.assertFalse(artifact.exists())

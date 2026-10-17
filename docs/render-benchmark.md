@@ -642,8 +642,10 @@ and outcome `returned`, `timed_out` or `spawn_error`. `return_code` is null when
 exit status was returned; exception type/message describe timeout or launch
 failure. Binary identity is null if the executable could not be read, and elapsed
 time is null if execution was never attempted. Elapsed time uses `perf_counter()`
-around the process call. Hashing and evidence finalization
-are outside the recorded process interval. No capture-completion timestamp or
+around the process call. Launch identity hashing and JSON receipt publication
+are outside the recorded process interval. On Windows that interval includes
+debug-event handling and any failure-only native evidence collection; it is
+not a frame measurement. No capture-completion timestamp or
 teardown duration is inferred from these receipts.
 
 Both receipt producers resolve the executable to its real path and verify its
@@ -672,6 +674,38 @@ original timeout, launch error or validation assertion. A normally returning
 process cannot silently succeed when required evidence persistence failed.
 Capture and receipt writes use sibling temporary files followed by replacement.
 The receipt describes a process outcome, not a passing test or qualified benchmark.
+
+On Windows, both render process runners launch one child with
+`DEBUG_ONLY_THIS_PROCESS`. The launching thread owns the debug loop; first-chance
+application exceptions reach the application's handlers, and second-chance
+exceptions are passed back to Windows after capture. A monitor/API failure fails
+closed without relaunching. Timeout and monitor failure terminate, detach and reap
+the owned child before fixture cleanup. The existing process deadlines and
+executable identity guard remain in force. Expected refusal exits and successful
+runs produce no dump or image copies. POSIX retains its existing launch behavior.
+
+Failure evidence uses a fresh `native-failure-*` directory beside the process
+receipt, under `test-artifacts` for integrated tests. The `native_diagnostics`
+receipt field records exception code, instruction address, access type/address,
+registers, loaded module paths/bases, retention status and image hashes. A normal
+minidump retains exception context, thread stacks and modules; full process memory
+is excluded. Capture requires the faulting thread's stack/context and rejects
+partial or mismatched dumps. Timeout evidence explicitly reports no exception dump.
+The collector holds loaded image file handles and copies the launch executable
+only when its SHA-256 matches the launch receipt, plus relevant GL/Vulkan modules
+including Mesa. Adjacent PDB and debug files are retained as symbol candidates;
+their debugger build identity still needs validation. Missing or failed evidence
+is an explicit error and cannot make a crash or timeout pass.
+
+Collection caps are 512 live module handles, 32 image/symbol files, 512 MiB total
+image/symbol bytes, 1 MiB copy blocks and a 64 MiB dump enforced before each dump
+write. Image retention has a five-second budget after failure; dump callbacks
+respect the original process deadline. Per-fixture output names and fresh native
+evidence directories isolate parallel CTest cases and reject stale dumps. Both
+Windows CI lanes preserve Release optimization, enable compiler debug information
+and upload the entire `test-artifacts` tree even after test failure. The original
+native access violation remains unresolved until matching CI evidence locates its
+cause; these diagnostics claim no rendering fix.
 
 Terminal shutdown now emits seven timestamped `Shutdown stage:` breadcrumbs:
 `query_cleanup_started`, `query_cleanup_finished`, `world_readers_drain_started`,
@@ -715,3 +749,80 @@ explicitly disable TAAU and record zero jitter; normal-default captures retain t
 temporal path. Validators accept preset revisions 6 and 7. The shipping hills
 traversal now declares revision 7; its pinned identities need recapture from CI
 after the terrain and preset changes.
+
+## Continuous CPU attribution (issue #387)
+
+Detailed CPU attribution is off by default. `--frame-attribution` enables the
+frame collector, foliage stage timings, work counters and the `foliage-split`
+slow-frame log. Disabled collectors and stage timers take a branch without clock
+reads. This applies to gameplay, preview/menu and qualification callers alike.
+
+`--frame-attribution-csv` also enables that collection and writes every presented
+frame to `logs/frame-attribution.csv` in the process working directory, independently of
+benchmark warmup, the 12 ms slow-frame threshold and the 400-line log window.
+It is off by default, replaces the previous session's CSV, streams through a
+bounded buffer and closes on normal exit. It does not change vsync or the frame
+cap; “uncapped” refers to the recording duration and number of rows.
+
+The frame interval runs from loop entry through buffer swap. Its exclusive
+buckets are sim, stream, render submission, present, foliage rebuilds,
+scatter input preparation, plant rebake, event polling, menu rendering and UI
+rendering. `other_ms` is the remainder; these buckets plus the remainder sum to
+`frame_ms`. Rebuilds from preview and QA callers also enter the foliage bucket;
+any nested rebuild time is subtracted from its render or menu parent. Menu
+rendering includes the menu's UI; `ui_ms` covers the separate
+in-game RmlUi and final ImGui render calls. SLOWFRAME preserves its existing
+field order and appends `foliage`, `menu` and `ui`; with attribution enabled,
+`other` excludes all listed exclusive buckets. The legacy `foliage_inst` field
+remains rebuild time only.
+
+Foliage stage times are CPU wall time, including GL submission calls, without
+GPU waits or new readbacks. `signature_ms` includes polling existing evidence
+and early-out handling. `surface_ms` covers complete uncached column builds
+(including CPU placement in fallback), never individual candidate timers.
+`repack_ms` covers aggregate GPU input assembly excluding surface builds.
+`cpu_fallback_ms` is inclusive of its surface builds and mapped uploads; do not
+add it to those sub-times. Palette/scratch time includes null-data storage
+allocation; `scratch_bytes` records that allocation separately from actual
+`uploaded_bytes`. Copy bytes include the sorted working copy, aggregate inputs,
+completed readback snapshots and CPU emitted/mapped records; hash bytes describe
+the unchanged evidence input hash. Frozen qualification rebuilds are identified
+as `frozen_gpu`; their submission time includes output clears and existing
+readback submission, including the first rebuild started by qualification.
+
+`reason_mask` combines: 1 initial build, 2 config (enabled, evidence phase,
+quantized gate wind, fade or density), 4 camera cell, 8 ground revision,
+16 scatter chunks, 32 pending backlog. Components mirror the existing signature;
+they do not introduce invalidation. `admitted_columns` counts columns included
+in the selected build after culling and budgeting; `surface_misses` counts
+uncached column builds. `deferred_columns` counts budget deferrals encountered
+before the existing capacity stop; `backlog` is the existing pending-work flag.
+Early-outs report zero rebuild work and `reused_gpu` or `reused_cpu`; an existing
+readback consumed before the early-out still contributes its copy bytes.
+`fallback` distinguishes GPU disabled/unavailable, missing resources and the
+GPU column capacity limit. No readback is enabled by recording.
+
+`instance_capacity` is storage capacity, never a generated count. The CSV's
+`generated_count` and `count_generation` are empty when no count is known.
+The per-frame stage times and work counters aggregate all calls on the render
+thread; `rebuild_calls` reports the number of invocations, reason bits and backlog
+are ORed, and differing path/fallback tokens become `mixed`. The instance
+snapshot belongs to the last invocation in that frame. With no invocation,
+capacity is zero and the generated count is empty. Each pass also exposes its
+last collected invocation's diagnostic without affecting its rebuild decision.
+
+The optional profiling build uses `-DLUMINUMBRA_ENABLE_TRACY=ON` in a separate
+build directory. The client links the profiler interface in all variants; with
+the default `OFF` setting it adds no profiling definitions or dependencies.
+
+Completed GPU counts are only exposed with readback active and a matching build
+generation. Ordinary and frozen rebuilds clear the known count until that
+generation's readback completes; empty builds have a known zero count. Retained
+blade snapshots keep their own source generation for qualification. CPU fallback
+counts are available directly. Disabling readback retires its submission marker;
+re-enabling retries the snapshot even when inputs are unchanged. Frozen rebuilds
+also obey the disabled readback policy. Frame scans use `luminumbra.frame_scan.v2`:
+`foliage.instances` is a nonnegative integer when known (including zero), or
+`null` when unavailable. Readers must preserve unknown counts rather than
+coercing them to zero. `foliage.instance_capacity` is storage capacity, never a
+substitute count. The overlay labels capacity explicitly.
