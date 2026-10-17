@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <ios>
 #include <locale>
@@ -121,10 +122,13 @@ void record_foliage_rebuild(const FoliageRebuild& rebuild,
     total.reasons |= rebuild.reasons;
     total.admitted_columns += rebuild.admitted_columns;
     total.surface_misses += rebuild.surface_misses;
+    total.surface_samples += rebuild.surface_samples;
     total.deferred_columns += rebuild.deferred_columns;
     total.copied_bytes += rebuild.copied_bytes;
     total.hashed_bytes += rebuild.hashed_bytes;
     total.uploaded_bytes += rebuild.uploaded_bytes;
+    total.uploads += rebuild.uploads;
+    total.stale_results += rebuild.stale_results;
     total.scratch_bytes += rebuild.scratch_bytes;
     total.backlog = total.backlog || rebuild.backlog;
     frame.rebuild_ms += milliseconds;

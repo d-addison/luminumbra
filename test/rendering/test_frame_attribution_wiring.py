@@ -1,6 +1,7 @@
 """Guard production attribution wiring beyond the pure bucket/count tests."""
 
 from pathlib import Path
+import json
 import re
 import unittest
 
@@ -65,6 +66,12 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertRegex(compact(self.foliage),
                          r"if \(collect_attribution\) \{ // Diagnostic[^\n]*? "
                          r"Attribution::ScatterSignature components\{\};")
+
+    def test_benchmark_does_not_enable_foliage_input_hashing(self):
+        update = compact(block(self.main, "static void UpdateFoliageScatter("))
+        self.assertIn("foliage->set_evidence_enabled(scenario_config.foliage_visual_smoke() && "
+                      "!g_app.capture.play_paths);", update)
+        self.assertNotIn("render_benchmark_path", update)
 
     def test_menu_input_ownership_and_exclusive_attribution_share_the_call(self):
         main = compact(self.main)
@@ -140,6 +147,34 @@ class FrameAttributionWiring(unittest.TestCase):
         for operation in ("glClearBufferData(", "dispatch_scatter();", "submit_foliage_readback();"):
             self.assertGreater(frozen.index(operation), timer_position)
         self.assertNotIn("timer.stop()", frozen)
+
+    def test_foliage_cached_uniforms_retain_attributed_program_lifetimes(self):
+        init = block(self.foliage, "void FoliagePass::init_compute(")
+        destroy = block(self.foliage, "void FoliagePass::destroy_compute()")
+        upload = block(self.foliage, "bool FoliagePass::rebuild_instances_gpu(")
+        dispatch = block(self.foliage, "void FoliagePass::dispatch_scatter()")
+        for program in ("m_compute_prog", "m_prefix_prog"):
+            self.assertIn(f"AttributedGl::Program {program}{{}};", self.pass_header)
+            self.assertIn(f"AttributedGl::DeleteProgram(glDeleteProgram, {program})", destroy)
+            self.assertIn(f"{program} = {{}};", destroy)
+        for cache, fields in (
+            ("m_scatter_uniforms", ("chunk_count", "archetype_count", "total_weight",
+                                     "max_candidates", "max_instances", "density_scale",
+                                     "camera_xz", "fade_end_m", "wind_xz", "emit")),
+            ("m_prefix_uniforms", ("group_count", "max_instances")),
+        ):
+            self.assertIn(f"{cache} = {{", init)
+            self.assertIn(f"{cache} = {{}};", destroy)
+            for field in fields:
+                self.assertIn(f".{field} = glGetUniformLocation(", init)
+                self.assertIn(f"{cache}.{field}", upload + dispatch)
+        self.assertNotIn("glGetUniformLocation(", upload + dispatch)
+        self.assertEqual(dispatch.count("AttributedGl::UseProgram("), 4)
+        self.assertEqual(dispatch.count("AttributedGl::Submit("), 3)
+        self.assertNotRegex(dispatch, r"\bgl(?:UseProgram|DispatchCompute)\s*\(")
+        self.assertIn("m_uploaded_input_hash.reset();", destroy)
+        self.assertIn("m_uploaded_chunk_count = 0;", destroy)
+        self.assertIn("m_group_storage_bytes = 0;", destroy)
 
     def test_client_uses_only_the_opt_in_profiler_interface(self):
         targets = read(ROOT / "src/CMakeLists.txt")
@@ -402,6 +437,45 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertTrue(record.startswith("if (!active()) return false; return write_csv_row(m_out,"))
         self.assertEqual(compact(block(self.header, "bool active() const")),
                          "return m_out.is_open() && m_out.good();")
+
+    def test_deterministic_work_gates_are_registered_on_standard_targets(self):
+        cmake = read(ROOT / "test/CMakeLists.txt")
+        for target, source in (
+            ("common_tests", "common/DeterministicWorkBudget_test.cpp"),
+            ("pass_context_test", "rendering/foliage_rebuild_test.cpp"),
+        ):
+            sources = re.search(r"add_executable\(" + target + r"\s+(.*?)^\)",
+                                cmake, re.S | re.M)
+            self.assertIsNotNone(sources)
+            self.assertIn(source, sources.group(1))
+            roster = re.search(r"set\(LUMINUMBRA_GTEST_TARGETS\s+(.*?)^\)",
+                               cmake, re.S | re.M)
+            self.assertIsNotNone(roster)
+            self.assertIn(target, roster.group(1).split())
+        native = read(ROOT / "test/common/DeterministicWorkBudget_test.cpp")
+        for name in ("EveryPinnedLimitRejectsAnInjectedExcess",
+                     "IdleRejectsOneUploadByteAndOneHashByteIndependently",
+                     "LiveSubsystemMovementEditAndDrainStayBounded"):
+            self.assertIn("TEST(DeterministicWorkBudget, " + name + ")", native)
+        for name in ("DeterministicWorkBudgetMovementEditDrainAndIdle",
+                     "OutdatedRevisionReadbackIsDiscardedBeforeAdoption"):
+            self.assertIn("TEST_F(FoliageRebuildTest, " + name + ")",
+                          read(ROOT / "test/rendering/foliage_rebuild_test.cpp"))
+
+    def test_reviewed_work_budget_data_has_integer_units_and_exact_idle_zero(self):
+        data = json.loads(read(ROOT / "test/fixtures/deterministic-work-budgets.json"))
+        self.assertEqual(data["schema"], "luminumbra.deterministic_work_budgets.v1")
+        self.assertEqual(set(data["limits"]), {"idle", "foliage", "simulation"})
+        for limits in data["limits"].values():
+            self.assertTrue(limits)
+            for name, limit in limits.items():
+                self.assertIs(type(limit), int)
+                self.assertGreaterEqual(limit, 0)
+                self.assertLess(limit, 2**64 - 1)
+                self.assertNotRegex(name, r"(?i)ms|time|seconds|fps")
+        self.assertEqual(data["limits"]["idle"]["uploaded_bytes"], 0)
+        self.assertEqual(data["limits"]["idle"]["hashed_bytes"], 0)
+        self.assertTrue(all(value == 0 for value in data["limits"]["idle"].values()))
 
     def test_recorder_finalization_failure_reaches_shutdown_error_path(self):
         finish = compact(block(self.collector, "bool FrameRecorder::finish()"))

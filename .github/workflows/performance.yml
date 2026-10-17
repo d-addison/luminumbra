@@ -102,6 +102,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Test performance result contract
+        shell: bash
         run: |
           python tools/perf/test_perf.py
           python tools/perf/test_fixture_hash.py
@@ -112,7 +113,10 @@ jobs:
           python tools/perf/test_check_residency.py
           python tools/perf/test_plan_qualification.py
           python tools/perf/test_run_qualification.py
+          python tools/perf/test_render_runner_evidence.py
           python tools/perf/test_render_budget.py
+          python tools/perf/test_check_gl_debug_log.py
+          python tools/perf/test_summarize_process_receipts.py
           python tools/ci/test_validate_performance_measurement.py
           python tools/ci/test_qualification_capture.py
       - name: Test acceptance matrix execution contract
@@ -161,7 +165,15 @@ jobs:
       - name: Configure
         run: cmake --preset perf -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
       - name: Build measurement target
-        run: cmake --build --preset perf --target worldgen_preview_test --parallel 4
+        run: cmake --build --preset perf --target worldgen_preview_test luminumbra_client_app --parallel 4
+      - name: Test native render runner
+        # These registered cases run tools/perf/test_render_runner.py with the client
+        # and generated synthetic assets; the contract job needs neither.
+        run: |
+          env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \
+            xvfb-run -a ctest --preset perf --no-tests=error \
+              -R '^(RenderTraversalIntegrated|RenderBenchmarkImplicitCreationFailure|RenderBenchmarkOverrideCollection|RenderTraversalEmbeddedPresetRefusal)$' \
+              --output-on-failure
       - name: Measure preview frame
         run: |
           env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \

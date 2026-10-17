@@ -5631,6 +5631,7 @@ namespace {
 
 constexpr uint32_t kLtexMagic = 0x5845544C; // 'LTEX' little-endian
 constexpr uint16_t kLtexVersion = 1;
+
 template<typename T>
 bool ReadPod(std::ifstream& in, T& value) {
     in.read(reinterpret_cast<char*>(&value), sizeof(T));

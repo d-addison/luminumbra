@@ -2308,7 +2308,13 @@ void RenderInterface_GL3::ResetProgram() {
     UseProgram(ProgramId::None);
 }
 
-bool RmlGL3::Initialize(Rml::String* out_message) {
+bool RmlGL3::Initialize(
+#if defined RMLUI_PLATFORM_EMSCRIPTEN || !defined RMLUI_GL3_CUSTOM_LOADER
+    Rml::String* out_message
+#else
+    Rml::String*
+#endif
+) {
 #if defined RMLUI_PLATFORM_EMSCRIPTEN
     if (out_message)
         *out_message = "Started Emscripten WebGL renderer.";
