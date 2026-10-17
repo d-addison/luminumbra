@@ -4,8 +4,14 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <ios>
+#include <optional>
+#include <ostream>
 #include <sstream>
 #include <streambuf>
 #include <string>
@@ -298,6 +304,83 @@ TEST(FrameAttribution, DisabledCollectionDoesNotPublishOrChangeStageTotals) {
         EXPECT_EQ(enabled.snapshot().rebuild.rebuild_calls, 1u);
     }
     EXPECT_FALSE(foliage_frame_active());
+}
+
+TEST(FrameAttribution, ConstScopesCollectObservationsAndRestoreDisabledParents) {
+    EXPECT_FALSE(foliage_frame_active());
+    record_foliage_rebuild({}, 99, 262144, 99, 99);
+    {
+        const FoliageFrameScope disabled;
+        EXPECT_FALSE(foliage_frame_active());
+        {
+            const FoliageFrameScope frame(true);
+            const auto& snapshot = frame.snapshot();
+            EXPECT_TRUE(foliage_frame_active());
+            EXPECT_EQ(snapshot.rebuild.rebuild_calls, 0u);
+            EXPECT_FALSE(snapshot.count_known);
+            FoliageRebuild gpu{};
+            gpu.path = FoliagePath::Gpu;
+            gpu.reasons = Initial;
+            gpu.hashed_bytes = 200;
+            gpu.uploaded_bytes = 300;
+            record_foliage_rebuild(gpu, 4, 262144, 123, 7);
+            EXPECT_EQ(snapshot.rebuild.rebuild_calls, 1u);
+            EXPECT_EQ(snapshot.rebuild.hashed_bytes, 200u);
+            EXPECT_EQ(snapshot.rebuild.uploaded_bytes, 300u);
+            EXPECT_EQ(snapshot.capacity, 262144u);
+            EXPECT_TRUE(snapshot.count_known);
+            EXPECT_EQ(snapshot.generated_count, 123u);
+            EXPECT_EQ(snapshot.count_generation, 7u);
+            {
+                const FoliageFrameScope nested_disabled(false);
+                EXPECT_FALSE(foliage_frame_active());
+                record_foliage_rebuild(gpu, 99, 262144, 99, 99);
+                {
+                    const FoliageFrameScope nested_enabled(true);
+                    EXPECT_TRUE(foliage_frame_active());
+                    record_foliage_rebuild(gpu, 2, 262144, 0, 8);
+                    EXPECT_EQ(nested_enabled.snapshot().rebuild.rebuild_calls, 1u);
+                    EXPECT_TRUE(nested_enabled.snapshot().count_known);
+                    EXPECT_EQ(nested_enabled.snapshot().generated_count, 0u);
+                    EXPECT_EQ(nested_enabled.snapshot().count_generation, 8u);
+                    EXPECT_EQ(snapshot.rebuild.rebuild_calls, 1u);
+                }
+                EXPECT_FALSE(foliage_frame_active());
+                record_foliage_rebuild(gpu, 99, 262144, 99, 99);
+                EXPECT_EQ(nested_disabled.snapshot().rebuild.rebuild_calls, 0u);
+                EXPECT_DOUBLE_EQ(nested_disabled.snapshot().rebuild_ms, 0);
+            }
+            EXPECT_TRUE(foliage_frame_active());
+            EXPECT_EQ(snapshot.rebuild.rebuild_calls, 1u);
+            FoliageRebuild cpu{};
+            cpu.path = FoliagePath::Cpu;
+            cpu.reasons = Config;
+            cpu.uploaded_bytes = 50;
+            record_foliage_rebuild(cpu, 3, 128, std::nullopt, 0);
+            EXPECT_EQ(&snapshot, &frame.snapshot());
+            EXPECT_EQ(snapshot.rebuild.rebuild_calls, 2u);
+            EXPECT_EQ(snapshot.rebuild.path, FoliagePath::Mixed);
+            EXPECT_EQ(snapshot.rebuild.reasons, Initial | Config);
+            EXPECT_EQ(snapshot.rebuild.hashed_bytes, 200u);
+            EXPECT_EQ(snapshot.rebuild.uploaded_bytes, 350u);
+            EXPECT_DOUBLE_EQ(snapshot.rebuild_ms, 7);
+            EXPECT_EQ(snapshot.capacity, 128u);
+            EXPECT_FALSE(snapshot.count_known);
+            EXPECT_EQ(snapshot.generated_count, 0u);
+            EXPECT_EQ(snapshot.count_generation, 0u);
+        }
+        EXPECT_FALSE(foliage_frame_active());
+        record_foliage_rebuild({}, 99, 262144, 99, 99);
+        EXPECT_EQ(disabled.snapshot().rebuild.rebuild_calls, 0u);
+        EXPECT_DOUBLE_EQ(disabled.snapshot().rebuild_ms, 0);
+    }
+    EXPECT_FALSE(foliage_frame_active());
+    record_foliage_rebuild({}, 99, 262144, 99, 99);
+    const FoliageFrameScope next_frame(true);
+    EXPECT_EQ(next_frame.snapshot().rebuild.rebuild_calls, 0u);
+    EXPECT_EQ(next_frame.snapshot().rebuild.path, FoliagePath::NotCalled);
+    EXPECT_FALSE(next_frame.snapshot().count_known);
+    EXPECT_DOUBLE_EQ(next_frame.snapshot().rebuild_ms, 0);
 }
 
 // A bounded sink that accepts a prefix, then reports a write error on every

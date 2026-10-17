@@ -67,6 +67,14 @@ class FrameAttributionWiring(unittest.TestCase):
                          r"if \(collect_attribution\) \{ // Diagnostic[^\n]*? "
                          r"Attribution::ScatterSignature components\{\};")
 
+    def test_const_scope_observations_have_mutable_storage(self):
+        # Writes through the registered pointer must remain defined for const
+        # scope tokens; runtime assertions alone cannot reliably expose this UB.
+        scope = compact(block(self.header, "class FoliageFrameScope"))
+        self.assertRegex(scope, r"\bmutable FoliageFrame m_frame\s*\{\s*\}\s*;")
+        self.assertEqual(compact(block(scope, "const FoliageFrame& snapshot() const")),
+                         "return m_frame;")
+
     def test_benchmark_does_not_enable_foliage_input_hashing(self):
         update = compact(block(self.main, "static void UpdateFoliageScatter("))
         self.assertIn("foliage->set_evidence_enabled(scenario_config.foliage_visual_smoke() && "
