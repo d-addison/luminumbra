@@ -177,8 +177,14 @@ set(CLIENT_VENDOR_SOURCES)
 
 # Main client executable sources.
 set(CLIENT_APP_SOURCES
+    ${CMAKE_CURRENT_LIST_DIR}/../startup/RuntimeEntry.cpp
     ${CMAKE_CURRENT_LIST_DIR}/main_client.cpp
 )
+
+# Preserve the implementation TU's ISA while routing both client binaries
+# through the baseline startup wrapper before constructing engine state.
+set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/main_client.cpp PROPERTIES
+    COMPILE_DEFINITIONS "main=LuminumbraApplicationMain")
 
 # Complete executable source set for legacy consumers that include this file
 # directly.
