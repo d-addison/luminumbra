@@ -308,6 +308,24 @@ class AsanShardTests(unittest.TestCase):
                         shards.merge(self.root, output)
                     self.assertFalse(output.exists())
 
+    def test_merge_result_metadata_matches_evidence_validators(self):
+        for shard in (1, 2):
+            for result in ("completed", "suppressed", "skipped", "unknown", ""):
+                with self.subTest(shard=shard, result=result):
+                    self.reports()
+                    path = self.root / f"shard-{shard}/ctest.junit.xml"
+                    tree = ET.parse(path)
+                    tree.getroot()[0].set("result", result)
+                    tree.write(path)
+                    output = self.root / "merged.xml"
+                    if result == "completed":
+                        shards.merge(self.root, output)
+                        output.unlink()
+                    else:
+                        with self.assertRaisesRegex(ValueError, "unevaluated"):
+                            shards.merge(self.root, output)
+                        self.assertFalse(output.exists())
+
     def test_merge_rejects_executed_addition_or_removal_against_planned_roster(self):
         for change in ("append", "remove"):
             with self.subTest(change=change):

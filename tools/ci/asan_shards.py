@@ -110,6 +110,7 @@ def merge(directory, output):
         require(len(names) == len(set(names)), f"shard {shard} contains duplicate tests")
         require(not observed.intersection(names), "tests ran in both shards")
         require(not any(case.get("status") not in (None, "run") or
+                        case.get("result") not in (None, "completed") or
                         any(case.find(tag) is not None for tag in ("failure", "error", "skipped"))
                         for case in cases), "shard has failed or unevaluated tests")
         observed.update(names)
