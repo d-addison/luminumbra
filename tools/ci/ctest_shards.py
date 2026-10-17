@@ -218,9 +218,9 @@ def plan(directory, shard, profile="gcc", timings=None):
     selection = [indices[0], indices[0], 1, *indices[1:]]
     (directory / "ctest.shard-index.txt").write_text(",".join(map(str, selection)) + "\n", encoding="utf-8")
     (directory / "ctest.partition.json").write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
-    if os.environ.get("GITHUB_OUTPUT"):
-        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
-            handle.write(f"prefab={'true' if any(name.startswith('PrefabRuntimeTest.') for name in names) else 'false'}\n")
+    # Library callers can plan synthetic inventories inside a running CTest step.
+    # Only the CLI publishes the real producer's workflow output.
+    return any(name.startswith("PrefabRuntimeTest.") for name in names)
 
 
 def run(directory, profile="gcc"):
@@ -390,7 +390,10 @@ def main(default_profile="gcc", legacy_evidence=False):
         if args.mode == "plan":
             names = planned_roster(args.directory)
             require(all(any(suite in name for name in names) for suite in args.require_suite), "missing expected CTest suite")
-            plan(args.directory, args.shard, args.profile, read_json(args.timings) if args.timings else None)
+            prefab = plan(args.directory, args.shard, args.profile, read_json(args.timings) if args.timings else None)
+            if os.environ.get("GITHUB_OUTPUT"):
+                with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+                    handle.write(f"prefab={'true' if prefab else 'false'}\n")
         elif args.mode == "run":
             return run(args.directory, args.profile)
         elif args.mode == "merge":

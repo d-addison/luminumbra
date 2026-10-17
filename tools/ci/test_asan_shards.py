@@ -3,6 +3,7 @@
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shlex
 import shutil
@@ -35,8 +36,21 @@ class AsanShardTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
+        environment = patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop("GITHUB_OUTPUT", None)
         self.names = ["ordinary", *(f"ActiveRegions/SimBudgetWorldParity.Replay/{n}" for n in range(4)), "last"]
         self.tests = [test(name) for name in self.names]
+
+    def test_synthetic_plans_do_not_publish_workflow_outputs(self):
+        self.assertNotIn("GITHUB_OUTPUT", os.environ)
+        output = self.root / "step-output"
+        sentinel = b"sentinel=retained\nprefab=true\n"
+        output.write_bytes(sentinel)
+        with patch.dict(os.environ, GITHUB_OUTPUT=str(output)):
+            self.planned_selection(self.tests, self.tests)
+        self.assertEqual(output.read_bytes(), sentinel)
 
     def test_stride_alternates_four_heavy_tests_and_covers_exactly_once(self):
         result = shards.partition(self.tests, self.names)

@@ -1,0 +1,12 @@
+{
+  "archetypes": [
+    {
+      "name": "short_grass",
+      "color": [0.2, 0.3, 0.1],
+      "half_width": 0.04,
+      "height": 0.15,
+      "sways": true,
+      "density_weight": 2.0
+    }
+  ]
+}
