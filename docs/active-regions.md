@@ -9,10 +9,10 @@ ground objects, weather, energy, foliage and resident water. Resident water uses
 checked [regional continuation contract](regional-water-continuation.md). Diagnostics
 and measured budget activation remain separate qualification work.
 
-Strict distant policy and distant creatures (S8) are planned for v0.3.1. Regional
+Strict distant policy and distant creatures are planned for v0.3.1. Regional
 continuation performance/default enablement is planned for v0.4.0 as
 [issue #320](https://github.com/d-addison/luminumbra/issues/320). The dedicated
-server autosaves every five minutes.
+server autosaves every five minutes by default.
 
 ## Activation and ordering
 
@@ -70,9 +70,10 @@ history even when they contribute no frozen content. Consumed work stops owning
 records on the next tick.
 
 Invalid host input never throws out of the session. Non-finite or out-of-range
-(|x|,|z| >= 2^24) walking anchors, ground-object edit positions and region pins are
-ignored and counted (observational, never hashed or saved). Invalid replicated anchors, work for
-regions the ledger does not know, and visit-time ledger exhaustion are skipped inside the scheduler
+(outside -2^24 <= x,z < 2^24) walking anchors and ground-object edit positions
+are ignored and counted (observational, never hashed or saved). Region pins outside
+-32768 <= x,z < 32768 are ignored and counted with the same observational rules.
+Invalid replicated anchors, work for regions the ledger does not know, and visit-time ledger exhaustion are skipped inside the scheduler
 and counted in the schedule's `rejected` triple; the schedule digest appends that triple only when
 it is non-zero, so valid input keeps its digest.
 A scheduler exception, or an edit/pin that cannot be recorded because the ledger is full, is a
@@ -165,7 +166,7 @@ this file as an unknown region file. Decode failure never changes the destinatio
 ledger. Unknown extension types cannot be skipped and are corrupt.
 Version 1 ledgers load with or without frozen history. Their historical digest
 values, freeze stamps and canonical bytes are preserved without recomputation.
-They retain the version 1 envelope until every legacy historical digest has
+Their legacy digest projection remains undeclared until every legacy historical digest has
 been refreshed at a later freeze or its record evicted; waking alone does not
 refresh a digest. This avoids declaring legacy digests as projection 2.
 Flag-off legacy saves without a ledger retain their existing load, save and hash
@@ -212,15 +213,26 @@ Version 1 has no extensions. Version 2 uses the same header and records, then
 a LE u32 `ext_len` followed by exactly that many extension bytes. Each extension
 is a TLV: LE u16 type, LE u32 value length, then the value bytes. Types must be
 strictly ascending, with no duplicates; unknown types, truncated values and
-`ext_len == 0` are corrupt. Type 2 is
-`digest_projection`, with a one-byte value of 2. A value greater than 2 refuses
+`ext_len == 0` are corrupt. Supported extension values are:
+
+| Type | Value |
+| --- | --- |
+| 1 | Persistent allocator: one LE u64 next ID in [2, 2^63]; emitted when advanced from 1. |
+| 2 | `digest_projection`: one byte equal to 2. |
+| 3 | Water debt: LE u32 count, then sorted (LE i32 x, LE i32 z, LE u64 positive Q32 debt) entries, at most one per owned region. |
+| 4 | Energy ages: LE u32 count, then sorted (LE i32 x, LE i32 z, LE u64 absolute tick) entries, at most one per owned region. |
+| 5 | Simulation content identity: 40 bytes containing LE u16 encoding, defaults and algorithm versions, LE u16 zero reserved, then LE u64 policy, creature definitions, plant definitions and population digests. |
+| 6 | Completed work: LE u32 count, then sorted (LE i32 x, LE i32 z, LE u64 positive work) entries, at most one per owned region. |
+
+Map extensions are emitted only when nonempty.
+For type 2, a value greater than 2 refuses
 with `Unsupported frozen digest projection.`; a lower value is corrupt.
-The encoder emits version 2 with this declaration whenever a record is frozen
+The digest declaration is emitted whenever a record is frozen
 or retains a nonzero freeze stamp or frozen digest, including after waking,
 provided no legacy historical digest remains. A version 1 reload conservatively
 treats all historical digests as legacy, including any refreshed before saving.
-When all extensions are absent, the encoder emits version 1.
-The declaration belongs only to the persistence envelope and adds no canonical
+The encoder emits version 2 whenever any supported extension is present; otherwise it emits version 1.
+The digest declaration belongs only to the persistence envelope and adds no canonical
 hash term.
 
 The footer is one LE u64 FNV-1a-64 checksum over every preceding byte, including
@@ -235,6 +247,12 @@ ticked stamp precedes its freeze stamp. The ledger tick cannot exceed the saved
 WorldClock tick, and the canonical tick cannot exceed its validation ceiling.
 Configuration is stored and hashed with the ledger rather than
 read from an unrecorded machine-local budget.
+
+Persistence reads and hashes each use a verified opened regular-file handle, refuse symlinks and non-regular files, enforce a format-specific byte bound during reading, and refuse growth or truncation.
+Plant admission and both snapshot writer lanes support at most 65,536 plants, at most 8,192 bytes per canonical plant record, and 65,536 bytes of envelope margin, giving a read and write bound of 536,936,448 bytes.
+Legacy energy accepts 1 through 64 channels and at most 67,108,864 decoded value bytes; the text bound is 406,847,552 bytes (12 bytes per uint16 value, 32 bytes per page, and 64 header bytes).
+A missing legacy energy record is neutral; unreadable, oversized or invalid records fail loading with a distinct error and never silently erase authoritative state.
+Region containers have a shared read and write bound of 268,435,456 bytes, checked before writer allocation.
 
 Frozen content is supplied at the transition by merging authoritative lod-0
 chunks by id, with live chunks taking precedence over parked chunks, then durable
