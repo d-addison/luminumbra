@@ -1,9 +1,11 @@
 """Independent stdlib computation of SystemConfig's canonical session identity."""
 
+from collections import Counter
 import copy
 import json
 import math
 from pathlib import Path
+import re
 import struct
 import unittest
 
@@ -62,6 +64,33 @@ def identity(document, **session_options):
 
 
 class SystemConfigIdentityTest(unittest.TestCase):
+    def test_literal_ctest_names_are_unique_in_each_registration_directory(self):
+        # Check each first-party registration directory separately: CTest names
+        # are directory-scoped. Variable-generated names are reviewed at their
+        # foreach source; this check covers explicit NAME registrations.
+        for relative in ("test/CMakeLists.txt", "tools/CMakeLists.txt",
+                         "tools/static_preview/CMakeLists.txt"):
+            with self.subTest(path=relative):
+                source = (ROOT / relative).read_text(encoding="utf-8")
+                names = re.findall(
+                    r'(?im)^\s*add_test\s*\(\s*NAME\s+"?([^\s"$()]+)"?\s', source)
+                self.assertTrue(names, "No literal CTest registrations found")
+                duplicates = sorted(name for name, count in Counter(names).items() if count > 1)
+                self.assertEqual(duplicates, [], f"Duplicate CTest names in {relative}")
+
+    def test_identity_ctest_retains_isolation_and_properties(self):
+        source = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        normalized = " ".join(source.split())
+        registration = (
+            'add_test(NAME SystemConfigIdentityPython COMMAND "${Python3_EXECUTABLE}" -I -B '
+            '"${CMAKE_SOURCE_DIR}/test/tools/test_system_config_identity.py") '
+            'set_tests_properties(SystemConfigIdentityPython PROPERTIES LABELS "tools" TIMEOUT 60)'
+        )
+        self.assertIn(registration, normalized)
+        self.assertEqual(source.count("/test/tools/test_system_config_identity.py"), 1)
+        self.assertLess(normalized.index("find_package(Python3 COMPONENTS Interpreter REQUIRED)"),
+                        normalized.index(registration))
+
     def test_historical_workload_explicitly_covers_every_registered_flag(self):
         historical = json.loads(
             (ROOT / "test/fixtures/historical-defaults-off.json").read_text(encoding="utf-8")

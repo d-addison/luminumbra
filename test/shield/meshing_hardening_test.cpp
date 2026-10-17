@@ -28,9 +28,15 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <future>
+#include <memory>
 #include <vector>
 
+#include "core/JobSystem.h"
+#include "entt/entity/fwd.hpp"
+#include "systems/PhysicsSystem.h"
 #include "systems/SHIELD_WorldSystem.h"
+#include "systems/WaterSystem.h"
 #include "world/Chunk.h"
 #include "world/MarchingCubes.h"
 
@@ -942,4 +948,283 @@ TEST(StreamingHardening, MalformedSdfChunkRegeneratesByteIdenticalToFresh) {
         << "regenerated SDF must be byte-identical to fresh generation";
     EXPECT_EQ(HashVec(chunk.mesh_vertices), HashVec(fresh.vertices));
     EXPECT_EQ(HashVec(chunk.mesh_indices), HashVec(fresh.indices));
+}
+
+namespace {
+// Occupy the sole worker before dispatch, with release guaranteed on assertion
+// failure before the world's destructor drains its jobs. No sleep or timing
+// determines whether the mesh input predates the edit.
+class PausedMeshWorker {
+public:
+    explicit PausedMeshWorker(JobSystem& jobs)
+        : jobs_(jobs) {
+        const auto released = release_.get_future().share();
+        handle_ = jobs_.dispatch_batch({[this, released] {
+            started_.set_value();
+            released.wait();
+        }});
+        started_.get_future().wait();
+    }
+    ~PausedMeshWorker() {
+        release();
+        jobs_.wait(handle_);
+    }
+    void release() {
+        if (!released_) {
+            released_ = true;
+            release_.set_value();
+        }
+    }
+
+private:
+    JobSystem& jobs_;
+    std::promise<void> started_;
+    std::promise<void> release_;
+    JobHandle handle_;
+    bool released_ = false;
+};
+
+std::shared_ptr<Chunk> AdoptFlatMesh(SHIELD_WorldSystem& world, int lod) {
+    auto chunk = std::make_shared<Chunk>(IVec3(0));
+    world.GenerateChunkData(*chunk);
+    if (lod >= 0)
+        World::MarchingCubes::PolygoniseTerrain(world, *chunk, 0.0f, lod == 0 ? 1 : 4);
+    chunk->current_lod.store(lod);
+    chunk->set_state(lod < 0 ? ChunkState::Idle : ChunkState::Ready);
+    if (!world.adopt_streamed_chunk(chunk))
+        return {};
+    return chunk;
+}
+
+void ExpectEditedMesh(const SHIELD_WorldSystem& world, const Chunk& chunk) {
+    Chunk expected(chunk.get_coords());
+    expected.sdf_data = chunk.sdf_data;
+    expected.heightmap_data = chunk.heightmap_data;
+    expected.material_data = chunk.material_data;
+    World::MarchingCubes::PolygoniseTerrain(world, expected, 0.0f, 1);
+    EXPECT_EQ(HashVec(chunk.mesh_vertices), HashVec(expected.mesh_vertices));
+    EXPECT_EQ(chunk.mesh_indices, expected.mesh_indices);
+    EXPECT_EQ(chunk.current_lod.load(), 0);
+}
+} // namespace
+
+TEST(StreamingHardening, DelayedTerrainCompletionRetainsEditInvalidationAcrossBothLanes) {
+    // Empty chunks use High; existing meshes changing LOD use Normal. Exercise
+    // both forced and due-tick drains, and both carve and fill mutations.
+    for (const int old_lod : {-1, 2}) {
+        for (const bool fill : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << old_lod << ":" << fill);
+            JobSystem jobs;
+            jobs.startup(1);
+            SHIELD_WorldSystem world(&jobs, nullptr, MakeFlatSurfaceParams(), 1337);
+            world.debug_set_streaming_radius_cap(1);
+            if (fill)
+                world.begin_tick(10);
+            auto chunk = AdoptFlatMesh(world, old_lod);
+            ASSERT_NE(chunk, nullptr);
+            const auto old_vertices = HashVec(chunk->mesh_vertices);
+            const auto old_indices = chunk->mesh_indices;
+            const auto old_version = chunk->mesh_version.load();
+            chunk->has_collision.store(true);
+            PausedMeshWorker paused(jobs);
+            entt::registry registry;
+            world.update(registry, Vec3(8), nullptr);
+            ASSERT_EQ(chunk->pending_lod.load(), 0);
+            ASSERT_FALSE(chunk->pending_mesh_ready.load());
+            const auto revision = chunk->voxel_revision();
+            ASSERT_EQ(world.EditTerrainVoxel(Vec3(8), 2.0f, fill, nullptr), 1);
+            ASSERT_GT(chunk->voxel_revision(), revision);
+            ASSERT_EQ(chunk->current_lod.load(), -1);
+            paused.release();
+            if (fill)
+                world.activate_due(100);
+            else
+                world.wait_for_streaming_jobs();
+            EXPECT_EQ(chunk->current_lod.load(), -1);
+            EXPECT_EQ(HashVec(chunk->mesh_vertices), old_vertices);
+            EXPECT_EQ(chunk->mesh_indices, old_indices);
+            EXPECT_EQ(chunk->mesh_version.load(), old_version);
+            EXPECT_EQ(chunk->applied_transition_faces.load(), 0);
+            EXPECT_TRUE(chunk->has_collision.load());
+            EXPECT_TRUE(chunk->is_voxel_data_dirty());
+            EXPECT_EQ(chunk->pending_lod.load(), -1);
+            EXPECT_FALSE(chunk->pending_mesh_ready.load());
+            EXPECT_FALSE(chunk->pending_mesh_failed.load());
+            EXPECT_TRUE(chunk->pending_mesh_vertices.empty());
+            EXPECT_TRUE(chunk->pending_mesh_indices.empty());
+            world.update(registry, Vec3(8), nullptr);
+            world.wait_for_streaming_jobs();
+            ExpectEditedMesh(world, *chunk);
+            EXPECT_GT(chunk->mesh_version.load(), old_version);
+        }
+    }
+}
+
+TEST(StreamingHardening, SynchronousEditRebuildCannotBeSkippedByStaleCompletion) {
+    for (const bool fill : {false, true}) {
+        JobSystem jobs;
+        jobs.startup(1);
+        PhysicsSystem physics;
+        physics.startup();
+        SHIELD_WorldSystem world(&jobs, nullptr, MakeFlatSurfaceParams(), 1337);
+        world.debug_set_streaming_radius_cap(1);
+        auto chunk = AdoptFlatMesh(world, 2);
+        ASSERT_NE(chunk, nullptr);
+        PausedMeshWorker paused(jobs);
+        entt::registry registry;
+        world.update(registry, Vec3(8), nullptr);
+        ASSERT_EQ(chunk->pending_lod.load(), 0);
+        const auto old_mesh = HashVec(chunk->mesh_vertices);
+        world.SetVoxelEditObserver([&](const IVec3&) {
+            paused.release();
+            // Finish the old snapshot without publication; the production
+            // synchronous preparation below must drain and reject it.
+            world.quiesce_streaming_jobs_for_save();
+        });
+        ASSERT_EQ(world.EditTerrainVoxel(Vec3(8), 2.0f, fill, &physics), 1);
+        world.SetVoxelEditObserver({});
+        ExpectEditedMesh(world, *chunk);
+        EXPECT_NE(HashVec(chunk->mesh_vertices), old_mesh);
+        EXPECT_TRUE(chunk->has_collision.load());
+        EXPECT_TRUE(chunk->is_voxel_data_dirty());
+        EXPECT_EQ(world.pending_publication_chunks(), 0u);
+    }
+}
+
+TEST(StreamingHardening, RefusedSynchronousEditReopensSettledCandidateScan) {
+    JobSystem jobs;
+    jobs.startup(1);
+    SHIELD_WorldSystem world(&jobs, nullptr, MakeFlatSurfaceParams(), 1337);
+    world.debug_set_streaming_radius_cap(1);
+    auto chunk = AdoptFlatMesh(world, 0);
+    ASSERT_NE(chunk, nullptr);
+    entt::registry registry;
+    world.update(registry, Vec3(8), nullptr);
+    ASSERT_EQ(world.get_last_streaming_budget_stats().meshing_candidates, 0u);
+    ASSERT_EQ(world.EditTerrainVoxel(Vec3(8), 2.0f, false, nullptr), 1);
+    world.update(registry, Vec3(8), nullptr);
+    EXPECT_GT(world.get_last_streaming_budget_stats().submitted_meshing, 0u);
+    world.wait_for_streaming_jobs();
+    ExpectEditedMesh(world, *chunk);
+}
+
+TEST(StreamingHardening, RefusedWorkerDispatchLeavesEditedMeshAndCollisionUntouched) {
+    // A stopped job system refuses the batch; no ready result can be published.
+    JobSystem jobs;
+    SHIELD_WorldSystem world(&jobs, nullptr, MakeFlatSurfaceParams(), 1337);
+    auto chunk = AdoptFlatMesh(world, 2);
+    ASSERT_NE(chunk, nullptr);
+    const auto old_mesh = HashVec(chunk->mesh_vertices);
+    const auto old_version = chunk->mesh_version.load();
+    chunk->has_collision.store(true);
+    entt::registry registry;
+    world.update(registry, Vec3(8), nullptr);
+    ASSERT_EQ(chunk->pending_lod.load(), 0);
+    ASSERT_EQ(world.EditTerrainVoxel(Vec3(8), 2.0f, false, nullptr), 1);
+    world.wait_for_streaming_jobs();
+    EXPECT_EQ(chunk->current_lod.load(), -1);
+    EXPECT_EQ(HashVec(chunk->mesh_vertices), old_mesh);
+    EXPECT_EQ(chunk->mesh_version.load(), old_version);
+    EXPECT_TRUE(chunk->has_collision.load());
+    EXPECT_EQ(chunk->pending_lod.load(), -1);
+    EXPECT_FALSE(chunk->pending_mesh_failed.load());
+    EXPECT_EQ(chunk->get_state(), ChunkState::Ready);
+}
+
+TEST(StreamingHardening, StaleTerrainDoesNotDiscardIndependentWaterMeshOutput) {
+    JobSystem jobs;
+    jobs.startup(1);
+    WaterSystem water(nullptr, nullptr);
+    water.SetBootPaused(true);
+    SHIELD_WorldSystem world(&jobs, &water, MakeFlatSurfaceParams(), 1337);
+    auto chunk = AdoptFlatMesh(world, 2);
+    ASSERT_NE(chunk, nullptr);
+    chunk->current_water_resolution.store(4);
+    chunk->has_water_sim.store(true);
+    chunk->water_level_data.assign(16, 10.0f);
+    chunk->water_depth_mm.assign(16, 2000);
+    chunk->mark_water_data_dirty();
+    PausedMeshWorker paused(jobs);
+    entt::registry registry;
+    world.update(registry, Vec3(8), nullptr);
+    ASSERT_EQ(chunk->pending_lod.load(), 0);
+    const auto water_version = chunk->water_mesh_version.load();
+    // Change only voxel truth: water input remains independently renderable.
+    chunk->sdf_data.assign(chunk->sdf_data.size(), 1.0f);
+    chunk->mark_voxel_data_dirty();
+    chunk->current_lod.store(-1);
+    paused.release();
+    world.wait_for_streaming_jobs();
+    EXPECT_EQ(chunk->current_lod.load(), -1);
+    EXPECT_GT(chunk->water_mesh_version.load(), water_version);
+    EXPECT_EQ(chunk->water_mesh_vertices.size(), 64u);
+    EXPECT_EQ(chunk->water_mesh_indices.size(), 96u);
+    // Shared authority revision conservatively requests a fresh water mesh.
+    EXPECT_FALSE(chunk->water_mesh_generated.load());
+    const auto terrain_version = chunk->mesh_version.load();
+    world.update(registry, Vec3(8), nullptr);
+    world.wait_for_streaming_jobs();
+    EXPECT_TRUE(chunk->mesh_vertices.empty());
+    EXPECT_GT(chunk->mesh_version.load(), terrain_version);
+    EXPECT_TRUE(chunk->water_mesh_generated.load());
+
+    // Water-only work must not change LOD, terrain version, or collision state.
+    const auto terrain_after = chunk->mesh_version.load();
+    const auto water_after = chunk->water_mesh_version.load();
+    chunk->water_mesh_generated.store(false);
+    chunk->has_collision.store(true);
+    world.update(registry, Vec3(8), nullptr);
+    world.wait_for_streaming_jobs();
+    EXPECT_EQ(chunk->current_lod.load(), 0);
+    EXPECT_EQ(chunk->mesh_version.load(), terrain_after);
+    EXPECT_TRUE(chunk->has_collision.load());
+    EXPECT_GT(chunk->water_mesh_version.load(), water_after);
+    EXPECT_TRUE(chunk->water_mesh_generated.load());
+    world.SetWaterSystem(nullptr);
+}
+
+TEST(StreamingHardening, WaterRevisionChangeDoesNotRejectCurrentTerrainCompletion) {
+    JobSystem jobs;
+    jobs.startup(1);
+    SHIELD_WorldSystem world(&jobs, nullptr, MakeFlatSurfaceParams(), 1337);
+    auto chunk = AdoptFlatMesh(world, 2);
+    ASSERT_NE(chunk, nullptr);
+    PausedMeshWorker paused(jobs);
+    entt::registry registry;
+    world.update(registry, Vec3(8), nullptr);
+    ASSERT_EQ(chunk->pending_lod.load(), 0);
+    const auto terrain_version = chunk->mesh_version.load();
+    const auto voxel_revision = chunk->voxel_revision();
+    const auto authority_revision = chunk->authority_hash_revision();
+    chunk->mark_water_data_dirty();
+    ASSERT_EQ(chunk->voxel_revision(), voxel_revision);
+    ASSERT_GT(chunk->authority_hash_revision(), authority_revision);
+    paused.release();
+    world.wait_for_streaming_jobs();
+    ExpectEditedMesh(world, *chunk);
+    EXPECT_GT(chunk->mesh_version.load(), terrain_version);
+    EXPECT_FALSE(chunk->water_mesh_generated.load());
+}
+
+TEST(StreamingHardening, MeshSnapshotOwnersSurviveQueuedWorkAndReleaseAfterWorldClear) {
+    JobSystem jobs;
+    jobs.startup(1);
+    SHIELD_WorldSystem world(&jobs, nullptr, MakeFlatSurfaceParams(), 1337);
+    auto chunk = AdoptFlatMesh(world, 2);
+    ASSERT_NE(chunk, nullptr);
+    const std::weak_ptr<Chunk> owner = chunk;
+    PausedMeshWorker paused(jobs);
+    entt::registry registry;
+    world.update(registry, Vec3(8), nullptr);
+    ASSERT_EQ(chunk->pending_lod.load(), 0);
+    chunk.reset();
+    EXPECT_FALSE(owner.expired());
+    paused.release();
+    // clear_world must join and retire every pending snapshot before releasing
+    // resident ownership. No worker can outlive the world or its input owner.
+    world.clear_world(nullptr);
+    // Joining also retires the job callable after its completion notification.
+    jobs.shutdown();
+    EXPECT_TRUE(owner.expired());
+    EXPECT_EQ(world.pending_publication_chunks(), 0u);
 }

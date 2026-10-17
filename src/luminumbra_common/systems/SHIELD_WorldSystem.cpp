@@ -4685,6 +4685,9 @@ int SHIELD_WorldSystem::EditTerrainVoxel(const Vec3& world_pos,
                 }
             }
     if (edited > 0) {
+        // Keep asynchronous rebuilding eligible even if synchronous preparation
+        // refuses (for example, without a physics system at this call site).
+        ++m_dirty_generation;
         // Couple the water: a dig lowers the bed (drain), a fill raises it (dam). The bed
         // delta tracks the carve depth at the sphere center (~radius below the surface).
         const std::int32_t delta_mm =
@@ -5506,8 +5509,13 @@ SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem>& ch
             add_face_if_neighbor_is_finer(
                 0, 1, Luminumbra::World::MarchingCubes::TransitionFaceMaxZ);
         }
-        mesh_batch.chunks.push_back(
-            {chunk, terrain_mesh_required, transition_faces, chunk->authority_hash_revision()});
+        // Revisions and input arrays are captured together on the owner thread.
+        // Workers must not sample live revisions or mutable voxel/water arrays.
+        mesh_batch.chunks.push_back({chunk,
+                                     terrain_mesh_required,
+                                     transition_faces,
+                                     chunk->authority_hash_revision(),
+                                     chunk->voxel_revision()});
 
         auto& lane_jobs = work_item.high_priority ? high_priority_jobs : normal_priority_jobs;
         // Copy before dispatch: simulation ticks may mutate these fields while
@@ -5673,7 +5681,16 @@ bool SHIELD_WorldSystem::publish_front_meshing_batch(bool force) {
         const bool mesh_failed = chunk->pending_mesh_failed.load(std::memory_order_acquire);
 
         if (mesh_ready && !mesh_failed) {
-            if (job_chunk.terrain_mesh_required) {
+            // An edit may have invalidated LOD while this snapshot was queued
+            // or running. Reject only its terrain output, retaining that
+            // invalidation, mesh/collider versions, and transition state. The
+            // shared authority revision is a conservative fallback once the
+            // saturating voxel counter reaches its maximum.
+            const bool terrain_current =
+                chunk->voxel_revision() == job_chunk.voxel_revision &&
+                (job_chunk.voxel_revision != std::numeric_limits<u32>::max() ||
+                 chunk->authority_hash_revision() == job_chunk.authority_revision);
+            if (job_chunk.terrain_mesh_required && terrain_current) {
                 //  ( step 1): the LOD0-promotion backfill
                 // publish that used to live here moved to
                 // process_completed_promotion_jobs — the meshing lane is
