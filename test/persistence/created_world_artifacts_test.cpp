@@ -6,6 +6,7 @@
 #include <ios>
 #include <iterator>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <system_error>
 
@@ -20,7 +21,6 @@
 #include <windows.h>
 #else
 #include <cerrno>
-#include <fcntl.h>
 #include <stdio.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -34,11 +34,20 @@ namespace NativeRace {
 BOOL WINAPI Inspect(HANDLE file, LPBY_HANDLE_FILE_INFORMATION info);
 BOOL WINAPI Close(HANDLE file);
 BOOL WINAPI Dispose(HANDLE file, FILE_INFO_BY_HANDLE_CLASS kind, LPVOID info, DWORD bytes);
+HANDLE WINAPI Open(LPCWSTR path,
+                   DWORD access,
+                   DWORD share,
+                   LPSECURITY_ATTRIBUTES security,
+                   DWORD disposition,
+                   DWORD flags,
+                   HANDLE template_file);
 #define GetFileInformationByHandle NativeRace::Inspect
 #define CloseHandle NativeRace::Close
 #define SetFileInformationByHandle NativeRace::Dispose
+#define CreateFileW NativeRace::Open
 #else
 int Inspect(const char* path, struct stat* info);
+int Describe(int file, struct stat* info);
 int Unlink(int directory, const char* path, int flags);
 #if defined(__linux__)
 int Restore(int from, const char* source, int to, const char* destination, unsigned flags);
@@ -48,6 +57,7 @@ int Restore(int from, const char* source, int to, const char* destination, unsig
 #define renameatx_np NativeRace::Restore
 #endif
 #define lstat NativeRace::Inspect
+#define fstat NativeRace::Describe
 #define unlinkat NativeRace::Unlink
 #endif
 } // namespace NativeRace
@@ -58,8 +68,10 @@ int Restore(int from, const char* source, int to, const char* destination, unsig
 #undef GetFileInformationByHandle
 #undef CloseHandle
 #undef SetFileInformationByHandle
+#undef CreateFileW
 #else
 #undef lstat
+#undef fstat
 #undef unlinkat
 #if defined(__linux__)
 #undef renameat2
@@ -71,7 +83,12 @@ int Restore(int from, const char* source, int to, const char* destination, unsig
 namespace NativeRace {
 enum class Boundary : std::uint8_t {
     AfterValidation,
-    AfterBinding
+    AfterBinding,
+    BeforeIdentification,
+    BeforePublication,
+    AfterCreation,
+    IdentificationFailure,
+    UnknownIdentity
 };
 struct Replacement {
     std::filesystem::path target;
@@ -110,11 +127,42 @@ bool Matches(const BY_HANDLE_FILE_INFORMATION& info) {
 
 BOOL WINAPI Inspect(HANDLE file, LPBY_HANDLE_FILE_INFORMATION info) {
     auto* active = Active();
+    if (active && !active->fired && active->boundary == Boundary::IdentificationFailure) {
+        active->fired = true;
+        ::SetLastError(ERROR_ACCESS_DENIED);
+        return FALSE;
+    }
     const auto result = ::GetFileInformationByHandle(file, info);
+    if (result && active && !active->fired && active->boundary == Boundary::AfterCreation) {
+        active->fired = true;
+        std::filesystem::rename(active->target, active->moved);
+    }
+    if (result && active && !active->fired && active->boundary == Boundary::UnknownIdentity) {
+        active->fired = true;
+        info->nFileIndexHigh = 0;
+        info->nFileIndexLow = 0;
+    }
     if (result && active && !active->fired && Matches(*info) &&
         active->boundary == Boundary::AfterValidation && ++active->inspections == 2)
         active->pending_close = file;
     return result;
+}
+
+HANDLE WINAPI Open(LPCWSTR path,
+                   DWORD access,
+                   DWORD share,
+                   LPSECURITY_ATTRIBUTES security,
+                   DWORD disposition,
+                   DWORD flags,
+                   HANDLE template_file) {
+    auto* active = Active();
+    if (active && !active->fired && active->boundary == Boundary::BeforeIdentification &&
+        active->target == path)
+        Replace(*active);
+    if (active && !active->fired && active->boundary == Boundary::BeforePublication &&
+        (access & FILE_ADD_SUBDIRECTORY) != 0 && active->target.parent_path() == path)
+        Replace(*active);
+    return ::CreateFileW(path, access, share, security, disposition, flags, template_file);
 }
 
 BOOL WINAPI Close(HANDLE file) {
@@ -138,10 +186,28 @@ BOOL WINAPI Dispose(HANDLE file, FILE_INFO_BY_HANDLE_CLASS kind, LPVOID info, DW
 #else
 int Inspect(const char* path, struct stat* info) {
     auto* active = Active();
+    if (active && !active->fired && active->target == path &&
+        active->boundary == Boundary::BeforeIdentification)
+        Replace(*active);
     const int result = ::lstat(path, info);
     if (result == 0 && active && !active->fired && active->target == path &&
         active->boundary == Boundary::AfterValidation && ++active->inspections == 2)
         Replace(*active);
+    return result;
+}
+
+int Describe(int file, struct stat* info) {
+    auto* active = Active();
+    if (active && !active->fired && active->boundary == Boundary::IdentificationFailure) {
+        active->fired = true;
+        errno = EIO;
+        return -1;
+    }
+    const auto result = ::fstat(file, info);
+    if (result == 0 && active && !active->fired && active->boundary == Boundary::UnknownIdentity) {
+        active->fired = true;
+        info->st_ino = 0;
+    }
     return result;
 }
 
@@ -156,15 +222,24 @@ int Unlink(int directory, const char* path, int flags) {
 #if defined(__linux__) || defined(__APPLE__)
 int Restore(int from, const char* source, int to, const char* destination, unsigned flags) {
     auto* active = Active();
+    if (active && !active->fired && active->boundary == Boundary::BeforePublication &&
+        active->target == destination)
+        Replace(*active);
     if (active && !active->restore_occupant.empty() && !active->restore_blocked) {
         active->restore_blocked = true;
         std::filesystem::rename(active->restore_occupant, active->target);
     }
 #if defined(__linux__)
-    return ::renameat2(from, source, to, destination, flags);
+    const auto result = ::renameat2(from, source, to, destination, flags);
 #else
-    return ::renameatx_np(from, source, to, destination, flags);
+    const auto result = ::renameatx_np(from, source, to, destination, flags);
 #endif
+    if (result == 0 && active && !active->fired && active->boundary == Boundary::AfterCreation &&
+        active->target == destination) {
+        active->fired = true;
+        std::filesystem::rename(active->target, active->moved);
+    }
+    return result;
 }
 #endif
 #endif
@@ -210,17 +285,21 @@ protected:
         Race().boundary = boundary;
 #if defined(_WIN32)
         // Read identity through a handle, independent of path spelling/8.3 aliases.
-        const auto file = ::CreateFileW(target.c_str(),
-                                        FILE_READ_ATTRIBUTES,
-                                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                        nullptr,
-                                        OPEN_EXISTING,
-                                        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-                                        nullptr);
-        ASSERT_NE(file, INVALID_HANDLE_VALUE);
-        const auto identified = ::GetFileInformationByHandle(file, &Race().identity);
-        EXPECT_TRUE(::CloseHandle(file));
-        ASSERT_TRUE(identified);
+        if (boundary == NativeRace::Boundary::AfterValidation ||
+            boundary == NativeRace::Boundary::AfterBinding) {
+            const auto file =
+                ::CreateFileW(target.c_str(),
+                              FILE_READ_ATTRIBUTES,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                              nullptr,
+                              OPEN_EXISTING,
+                              FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                              nullptr);
+            ASSERT_NE(file, INVALID_HANDLE_VALUE);
+            const auto identified = ::GetFileInformationByHandle(file, &Race().identity);
+            EXPECT_TRUE(::CloseHandle(file));
+            ASSERT_TRUE(identified);
+        }
 #endif
         NativeRace::Active() = &Race();
     }
@@ -284,6 +363,106 @@ TEST_F(CreatedWorldCleanup, RootReplacedAfterValidationIsRestoredAndNeverDeleted
     EXPECT_TRUE(std::filesystem::is_directory(save));
     EXPECT_TRUE(std::filesystem::is_directory(Race().moved));
 }
+
+TEST_F(CreatedWorldCleanup, RootReplacedBeforeIdentificationCannotBeClaimedForRollback) {
+    CreatedWorldArtifacts artifacts;
+    const auto save = Root() / "created-world";
+    std::filesystem::create_directory(Root() / "replacement");
+    Arm(save, NativeRace::Boundary::BeforeIdentification);
+    EXPECT_THROW(artifacts.create_root(save), std::runtime_error);
+    ASSERT_TRUE(Race().fired);
+    const auto error = artifacts.rollback();
+    EXPECT_NE(error.find("changed identity"), std::string::npos) << error;
+    EXPECT_TRUE(std::filesystem::is_directory(save));
+    EXPECT_TRUE(std::filesystem::is_directory(Race().moved));
+}
+
+TEST_F(CreatedWorldCleanup, ChildReplacedBeforeIdentificationCannotBeClaimedForRollback) {
+    CreatedWorldArtifacts artifacts;
+    const auto save = Root() / "created-world";
+    artifacts.create_root(save);
+    const auto directory = save / "chunks";
+    std::filesystem::create_directory(Root() / "replacement");
+    Arm(directory, NativeRace::Boundary::BeforeIdentification);
+    EXPECT_THROW(artifacts.create_directory(directory), std::runtime_error);
+    ASSERT_TRUE(Race().fired);
+    const auto error = artifacts.rollback();
+    EXPECT_NE(error.find("changed identity"), std::string::npos) << error;
+    EXPECT_TRUE(std::filesystem::is_directory(directory));
+    EXPECT_TRUE(std::filesystem::is_directory(Race().moved));
+}
+
+TEST_F(CreatedWorldCleanup, MissingOrUnknownCreationIdentityRefusesRollback) {
+    for (const auto boundary :
+         {NativeRace::Boundary::IdentificationFailure, NativeRace::Boundary::UnknownIdentity}) {
+        CreatedWorldArtifacts artifacts;
+        const auto save =
+            Root() / ("created-world-" + std::to_string(static_cast<unsigned>(boundary)));
+        Arm(save, boundary);
+        EXPECT_THROW(artifacts.create_root(save), std::runtime_error);
+        ASSERT_TRUE(Race().fired);
+        const auto before = std::distance(std::filesystem::directory_iterator(Root()),
+                                          std::filesystem::directory_iterator());
+        ASSERT_GT(before, 0);
+        EXPECT_FALSE(artifacts.rollback().empty());
+        // Preserve all uncertain directories, including an unpublished stage.
+        EXPECT_EQ(std::distance(std::filesystem::directory_iterator(Root()),
+                                std::filesystem::directory_iterator()),
+                  before);
+        NativeRace::Active() = nullptr;
+        Race() = {};
+    }
+}
+
+TEST_F(CreatedWorldCleanup, DisappearingCreatedDirectoryCannotReportSuccessfulCreation) {
+    CreatedWorldArtifacts artifacts;
+    const auto save = Root() / "created-world";
+    Arm(save, NativeRace::Boundary::AfterCreation);
+    EXPECT_THROW(artifacts.create_root(save), std::runtime_error);
+    ASSERT_TRUE(Race().fired);
+    EXPECT_FALSE(std::filesystem::exists(save));
+    EXPECT_TRUE(std::filesystem::is_directory(Race().moved));
+    EXPECT_TRUE(artifacts.rollback().empty());
+    EXPECT_TRUE(std::filesystem::is_directory(Race().moved));
+}
+
+#if defined(_WIN32) || defined(__linux__) || defined(__APPLE__)
+TEST_F(CreatedWorldCleanup, OccupiedPublicationRetainsReplacementAndRollsBackOnlyTheStage) {
+    CreatedWorldArtifacts artifacts;
+    const auto save = Root() / "created-world";
+    std::filesystem::create_directory(Root() / "replacement");
+    Arm(save, NativeRace::Boundary::BeforePublication);
+    EXPECT_THROW(artifacts.create_root(save), std::runtime_error);
+    ASSERT_TRUE(Race().fired);
+    EXPECT_TRUE(artifacts.rollback().empty());
+    EXPECT_TRUE(std::filesystem::is_directory(save));
+    EXPECT_EQ(std::distance(std::filesystem::directory_iterator(Root()),
+                            std::filesystem::directory_iterator()),
+              1);
+}
+
+TEST_F(CreatedWorldCleanup, OccupiedChildPublicationRefusesToRemoveTheUnownedOccupant) {
+    CreatedWorldArtifacts artifacts;
+    const auto save = Root() / "created-world";
+    artifacts.create_root(save);
+    const auto directory = save / "chunks";
+    std::filesystem::create_directory(Root() / "replacement");
+    Arm(directory, NativeRace::Boundary::BeforePublication);
+    EXPECT_THROW(artifacts.create_directory(directory), std::runtime_error);
+    ASSERT_TRUE(Race().fired);
+    EXPECT_FALSE(artifacts.rollback().empty());
+    EXPECT_TRUE(std::filesystem::is_directory(directory));
+#if defined(_WIN32)
+    // Exclusive native creation failed before adding any staged directory.
+    constexpr auto expected_entries = 1;
+#else
+    constexpr auto expected_entries = 2;
+#endif
+    EXPECT_EQ(std::distance(std::filesystem::directory_iterator(save),
+                            std::filesystem::directory_iterator()),
+              expected_entries);
+}
+#endif
 
 TEST_F(CreatedWorldCleanup, FileAppearingAfterRemovalBindsCannotBeDeletedThroughItsOldName) {
     CreatedWorldArtifacts artifacts;

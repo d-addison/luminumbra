@@ -793,9 +793,25 @@ TEST(WorldEntryWiring, CleanupDrainsReadersBeforeReleasingWorldAndSuppressesInco
     EXPECT_NE(source.find("glfwSetWindowCloseCallback(window"), std::string::npos);
     EXPECT_NE(source.find("SetNavigationAwayCallback([&] { world_entry.cancel_input(true); })"),
               std::string::npos);
-    EXPECT_NE(
-        source.find("ImGui_ImplGlfw_MouseButtonCallback(callback_window, button, action, mods)"),
-        std::string::npos);
+    const auto mouse_callback = source.find("glfwSetMouseButtonCallback(");
+    const auto mouse_latch =
+        source.find("entry_input->cancel_input(inside && action == GLFW_PRESS)", mouse_callback);
+    const auto mouse_forward =
+        source.find("mouse_button_callback(callback_window, button, action, mods)", mouse_latch);
+    ASSERT_NE(mouse_callback, std::string::npos);
+    ASSERT_NE(mouse_latch, std::string::npos);
+    ASSERT_NE(mouse_forward, std::string::npos);
+    EXPECT_LT(mouse_latch, mouse_forward);
+    const auto callbacks = ReadSource("src/luminumbra_client/app/InputCallbacks.cpp");
+    const auto mouse_start = callbacks.find("void mouse_button_callback(");
+    const auto mouse_end = callbacks.find("void window_focus_callback(", mouse_start);
+    ASSERT_NE(mouse_start, std::string::npos);
+    ASSERT_NE(mouse_end, std::string::npos);
+    const auto mouse_body = callbacks.substr(mouse_start, mouse_end - mouse_start);
+    EXPECT_NE(mouse_body.find("ImGui_ImplGlfw_MouseButtonCallback(window, button, action, mods)"),
+              std::string::npos);
+    EXPECT_NE(mouse_body.find("Rml_UIManager::MouseButtonCallback(window, button, action, mods)"),
+              std::string::npos);
     const auto rollback = drain.find("entry_artifacts.rollback()");
     ASSERT_NE(rollback, std::string::npos);
     EXPECT_LT(world, rollback);
