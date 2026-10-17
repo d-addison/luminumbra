@@ -1234,6 +1234,64 @@ class CachedGitSafetyTests(unittest.TestCase):
         self.assertFalse(self.marker.exists())
         self.assertEqual(self.cache_state(), before)
 
+    def test_metadata_scan_checks_components_once_per_containment_and_refreshes(self):
+        # Rewalking every ancestor before containment duplicates Windows
+        # filesystem probes for every metadata entry, including loose objects.
+        metadata = self.source / ".git"
+        entries = {metadata, *metadata.rglob("*")}
+        with patch.object(deps, "contained", wraps=deps.contained) as contain, \
+                patch.object(deps, "reject_reparse_points", wraps=deps.reject_reparse_points) as check:
+            deps.git_metadata(self.source, self.cache)
+        expected = [self.source / ".git"]
+        for call in contain.call_args_list:
+            expected.extend(call.args)
+        self.assertEqual([call.args[0] for call in check.call_args_list], expected)
+        self.assertLessEqual(entries, {call.args[0] for call in contain.call_args_list})
+        # A subsequent operation must inspect changed metadata afresh, even
+        # when the preceding scan accepted the same repository and paths.
+        config = self.source / ".git/config"
+        original = config.read_bytes()
+        config.write_bytes(original + b'\n[include]\npath = missing\n')
+        with patch.object(deps.subprocess, "check_output", side_effect=AssertionError("Git ran")):
+            self.assert_refused_without_writes()
+        config.write_bytes(original)
+        for action in self.actions():
+            action()
+        self.assertFalse(self.marker.exists())
+
+    def test_metadata_type_lookup_failures_and_unknown_types_refuse_without_writes(self):
+        entry = self.source / ".git/unknown metadata"
+        entry.write_bytes(b"metadata")
+        lstat = Path.lstat
+        before = self.cache_state()
+        lock = self.lock.read_bytes()
+        for failure in (PermissionError("unreadable metadata type"),
+                        OSError(errno.EIO, "partial metadata lookup"),
+                        FileNotFoundError("metadata disappeared"), None):
+            def lookup(path, *args, **kwargs):
+                if path == entry:
+                    if failure is not None:
+                        raise failure
+                    return SimpleNamespace(st_mode=stat.S_IFIFO | 0o600)
+                return lstat(path, *args, **kwargs)
+
+            for action in self.actions():
+                expected = type(failure) if failure is not None else deps.DependencyError
+                with self.subTest(failure=failure, action=action):
+                    with patch.object(Path, "lstat", lookup), patch.object(
+                            deps.subprocess, "check_output", side_effect=AssertionError("Git ran")):
+                        with self.assertRaises(expected) as caught:
+                            action()
+                        if failure is not None:
+                            self.assertIs(caught.exception, failure)
+                        else:
+                            self.assertIn("unsupported Git metadata file", str(caught.exception))
+                    self.assertEqual(self.cache_state(), before)
+                    self.assertEqual(self.lock.read_bytes(), lock)
+                    self.assertFalse(self.marker.exists())
+                    self.assertFalse((self.root / "scratch/staged").exists())
+                    self.assertFalse((self.root / "scratch/init.cmake").exists())
+
     def test_config_includes_are_refused_in_all_metadata_configs_before_git_runs(self):
         outside = self.base / "outside config"
         outside.write_text("[core]\n\tbare = false\n")

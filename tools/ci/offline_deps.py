@@ -225,25 +225,28 @@ def git_metadata(source: Path, cache: Path) -> None:
     seen = set()
 
     def visit(path):
-        reject_reparse_points(path)
-        if path.is_symlink():
-            contained(path, cache)
+        # Containment checks the original components for reparse points before
+        # resolving them. Do this once per visit, before inspecting file type;
+        # nothing is retained across scans or intervening Git processes.
+        resolved = contained(path, cache)
+        mode = path.lstat().st_mode
+        if stat.S_ISLNK(mode):
             if not path.exists():
                 raise DependencyError("dangling Git metadata symlink")
-        resolved = contained(path, cache)
+            mode = path.stat().st_mode
         # Check the logical name before deduplicating resolved symlink targets:
         # a config alias may point at an already visited, differently named file.
-        if path.name.casefold() in {"config", "config.worktree"} and path.is_file():
+        if path.name.casefold() in {"config", "config.worktree"} and stat.S_ISREG(mode):
             text = path.read_text(encoding="utf-8-sig", errors="surrogateescape")
             if config_has_includes(text):
                 raise DependencyError(f"Git config includes are not allowed: {path}")
         if resolved in seen:
             return
         seen.add(resolved)
-        if path.is_dir():
+        if stat.S_ISDIR(mode):
             for child in sorted(path.iterdir(), key=lambda p: os.fsencode(p.name)):
                 visit(child)
-        elif not path.is_file():
+        elif not stat.S_ISREG(mode):
             raise DependencyError("unsupported Git metadata file")
 
     active, complete = set(), {}
