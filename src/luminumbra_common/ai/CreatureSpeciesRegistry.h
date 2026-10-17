@@ -21,15 +21,19 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <exception>
 #include <filesystem>
-#include <fstream>
-#include <sstream>
 #include <string>
+#include <system_error>
+#include <utility>
 #include <vector>
 
 #include "nlohmann/json.hpp"
 
 #include "../components/CreatureComponents.h"
+#include "../core/FilesystemPath.h"
+#include "../world/WorldgenDependencySnapshot.h"
+#include "../world/WorldgenFileReader.h"
 #include "CreatureBrain.h"  // CreatureBrainParams (per-species IAUS overrides)
 #include "CreatureGenome.h" // SpeciesGenomeRanges (per-species gene bounds)
 
@@ -174,37 +178,104 @@ public:
         }
     }
 
-    // Load every *.json under `dir` (sorted by filename for determinism). Returns the
-    // count loaded; per-file failures are appended to `errors` and skipped.
+    // Load every immediate regular *.json under `dir` in UTF-8 filename order.
+    // Parse failures warn and skip. I/O failures append diagnostics and set io_failed;
+    // invalid UTF-8 filenames also fail the scan before any reads or registry changes.
+    // A failed scan reads no files and leaves the registry unchanged. Reader/iterator
+    // exceptions are contained here, including for callers that omit io_failed.
+    // The reader observes the exact bytes parsed. The iterator type and status reader
+    // permit deterministic failure coverage without relying on native permissions.
+    template<typename DirectoryIterator = std::filesystem::directory_iterator>
     std::size_t LoadFromDirectory(const std::filesystem::path& dir,
-                                  std::vector<std::string>& errors) {
-        std::error_code ec;
-        if (!std::filesystem::is_directory(dir, ec)) {
-            errors.push_back("creature species directory not found: " + dir.string());
-            return 0;
-        }
-        std::vector<std::filesystem::path> files;
-        for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
-            if (entry.is_regular_file() && entry.path().extension() == ".json")
-                files.push_back(entry.path());
-        }
-        std::sort(files.begin(), files.end());
-        std::size_t loaded = 0;
-        for (const auto& f : files) {
-            std::ifstream in(f, std::ios::binary);
-            if (!in) {
-                errors.push_back("cannot open " + f.string());
-                continue;
+                                  std::vector<std::string>& errors,
+                                  const ::Luminumbra::World::WorldgenFileReader& read_file =
+                                      ::Luminumbra::World::ReadWorldgenFile,
+                                  bool* io_failed = nullptr,
+                                  const ::Luminumbra::World::WorldgenFileStatusReader& read_status =
+                                      ::Luminumbra::World::ReadWorldgenSymlinkStatus) {
+        if (io_failed != nullptr)
+            *io_failed = false;
+        const std::size_t original_size = m_species.size();
+        const auto report_io_failure = [&](const std::string& message) {
+            if (io_failed != nullptr)
+                *io_failed = true;
+            errors.push_back(message);
+        };
+        try {
+            std::error_code ec;
+            auto status = read_status(dir, ec);
+            if (!ec && std::filesystem::is_symlink(status))
+                status = std::filesystem::status(dir, ec);
+            if (ec || !std::filesystem::is_directory(status)) {
+                report_io_failure("creature species directory unavailable: " +
+                                  ::Luminumbra::Filesystem::GenericUtf8PathString(dir));
+                return 0;
             }
-            std::ostringstream ss;
-            ss << in.rdbuf();
-            std::string err;
-            if (AddFromJsonText(ss.str(), err))
-                ++loaded;
-            else
-                errors.push_back(f.filename().string() + ": " + err);
+            std::vector<std::filesystem::path> files;
+            DirectoryIterator current(dir, ec);
+            const DirectoryIterator end;
+            if (ec) {
+                report_io_failure("cannot enumerate creature species directory: " +
+                                  ::Luminumbra::Filesystem::GenericUtf8PathString(dir) + ": " +
+                                  ec.message());
+                return 0;
+            }
+            while (current != end) {
+                const auto& entry = *current;
+                const bool regular = entry.is_regular_file(ec);
+                if (ec) {
+                    report_io_failure(
+                        "cannot inspect creature species entry: " +
+                        ::Luminumbra::Filesystem::GenericUtf8PathString(entry.path()) + ": " +
+                        ec.message());
+                    return 0;
+                }
+                if (regular && entry.path().extension() == ".json") {
+                    const auto filename =
+                        ::Luminumbra::Filesystem::GenericUtf8PathString(entry.path().filename());
+                    if (!::Luminumbra::World::IsValidDependencyPathUtf8(filename)) {
+                        report_io_failure("creature species filename is not valid UTF-8");
+                        return 0;
+                    }
+                    files.push_back(entry.path());
+                }
+                current.increment(ec);
+                if (ec) {
+                    report_io_failure("cannot advance creature species directory: " +
+                                      ::Luminumbra::Filesystem::GenericUtf8PathString(dir) + ": " +
+                                      ec.message());
+                    return 0;
+                }
+            }
+            std::sort(files.begin(), files.end(), [](const auto& first, const auto& second) {
+                return ::Luminumbra::Filesystem::GenericUtf8PathString(first.filename()) <
+                       ::Luminumbra::Filesystem::GenericUtf8PathString(second.filename());
+            });
+            std::size_t loaded = 0;
+            for (const auto& f : files) {
+                std::string bytes;
+                if (!read_file(f, bytes)) {
+                    report_io_failure("cannot read " +
+                                      ::Luminumbra::Filesystem::GenericUtf8PathString(f));
+                    continue;
+                }
+                std::string err;
+                if (AddFromJsonText(bytes, err))
+                    ++loaded;
+                else
+                    errors.push_back(::Luminumbra::Filesystem::GenericUtf8PathString(f.filename()) +
+                                     ": " + err);
+            }
+            return loaded;
+        } catch (const std::exception& error) {
+            m_species.resize(original_size);
+            report_io_failure("creature species directory load failed: " +
+                              std::string(error.what()));
+        } catch (...) {
+            m_species.resize(original_size);
+            report_io_failure("creature species directory load failed: unknown exception");
         }
-        return loaded;
+        return 0;
     }
 
     // Resolve by stable id-16 (the value carried on CreatureComponent::species_id).

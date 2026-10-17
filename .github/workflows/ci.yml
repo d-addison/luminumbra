@@ -207,7 +207,8 @@ jobs:
           # It exists to catch whole suites silently vanishing (a CMake guard flipping,
           # discovery failing), not to be an exact inventory. Raise it when tests are
           # added in bulk; lowering it needs a justification in the PR description.
-          python3 tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 2280
+          # Require each developer target explicitly; total-count margin cannot hide one.
+          python3 tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 2340 --require-test ConsoleFixture.CompleteInventoryDefaultsBindingsAndUnavailableRows --require-test UiFixture.DefaultPassiveHudRendersWithoutShellOrFocusAndCanBeDisabled --require-test DeveloperPersistence.DirectConstructionMatchesFactoryDefaultsAndInitializesRecords
       - name: Qualify installed prefab runtime
         if: ${{ needs.changes.outputs.needs_cpp != 'false' }}
         timeout-minutes: 5
@@ -301,7 +302,7 @@ jobs:
             -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DLUMINUMBRA_ENABLE_DILIGENT=OFF -DLUMINUMBRA_ENABLE_GNS=ON
-      - name: Build the shared sockets transport against GNS
+      - name: Build the sockets transport and server modes against GNS
         run: |
           # Upgraded from a -fsyntax-only probe of one file to a real build.
           # SteamNetworkingTransport and GnsTransport now share NetSocketsTransport,
@@ -311,11 +312,13 @@ jobs:
           # building the GNS side is the only way to get real compile coverage of
           # the socket logic the Steam transport also runs. A syntax check could
           # not catch a link-level or template-instantiation break; this can.
-          cmake --build build/gns-probe --target luminumbra_common --parallel 4
+          cmake --build build/gns-probe --target luminumbra_common luminumbra_server_app --parallel 4
           # Fail loudly if the shared body was not actually part of that build,
           # so this job cannot silently degrade back into proving nothing.
           find build/gns-probe -name 'NetSocketsTransport.cpp.o' -print -quit \
             | grep -q . || { echo "NetSocketsTransport.cpp was not compiled"; exit 1; }
+          find build/gns-probe -path '*/modes/Gns.cpp.o' -print -quit \
+            | grep -q . || { echo "Gns.cpp was not compiled"; exit 1; }
 
   diligent-rhi:
     name: Diligent RHI / software GL
@@ -610,7 +613,8 @@ jobs:
           # Linux software-GL lane: no GL-related skip is acceptable, and any
           # remaining skip is a hard failure.
           # Inventory floor: measured 2284 tests on devel b56cdba1, minus ~1% margin (see the Linux lane for the policy).
-          python tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 2260
+          # Require each developer target explicitly; total-count margin cannot hide one.
+          python tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 2320 --require-test ConsoleFixture.CompleteInventoryDefaultsBindingsAndUnavailableRows --require-test UiFixture.DefaultPassiveHudRendersWithoutShellOrFocusAndCanBeDisabled --require-test DeveloperPersistence.DirectConstructionMatchesFactoryDefaultsAndInitializesRecords
       - name: Report compiler cache statistics
         if: ${{ needs.changes.outputs.needs_cpp != 'false' && (always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.ccache-stage.outcome == 'success') }}
         continue-on-error: true
@@ -830,7 +834,8 @@ jobs:
           # other software-GL lanes: no GL-related skip is acceptable, and
           # any remaining skip is a hard failure.
           # Inventory floor: measured 2284 tests on devel b56cdba1, minus ~1% margin (see the Linux lane for the policy).
-          python tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 2260
+          # Require each developer target explicitly; total-count margin cannot hide one.
+          python tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 2320 --require-test ConsoleFixture.CompleteInventoryDefaultsBindingsAndUnavailableRows --require-test UiFixture.DefaultPassiveHudRendersWithoutShellOrFocusAndCanBeDisabled --require-test DeveloperPersistence.DirectConstructionMatchesFactoryDefaultsAndInitializesRecords
       - name: Bind manual qualification evidence
         if: always() && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)
         shell: msys2 {0}
