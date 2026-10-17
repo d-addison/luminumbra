@@ -1858,6 +1858,8 @@ class Supervisor(unittest.TestCase):
                     if phase != "construct":
                         (watcher if phase == "watcher_start" else reader).start.side_effect = failure
                     with patch.object(process_module.os, "name", host), \
+                         patch.object(process_module.sys, "platform", "win32" if host == "nt" else "linux"), \
+                         patch.object(process_module.signal, "SIGKILL", 9, create=True), \
                          patch.object(process_module.os, "killpg", create=True) as kill_group, \
                          patch.object(process_module.subprocess, "Popen", return_value=worker) as spawn, \
                          patch.object(process_module.threading, "Thread",
@@ -1874,7 +1876,7 @@ class Supervisor(unittest.TestCase):
                             worker.kill.assert_called_once_with()
                             kill_group.assert_not_called()
                         else:
-                            kill_group.assert_called_once_with(worker.pid, process_module.signal.SIGKILL)
+                            kill_group.assert_called_once_with(worker.pid, 9)
                     reader.join.assert_not_called()
 
     def test_thread_start_error_survives_all_compiler_cleanup_failures(self):
@@ -1885,6 +1887,7 @@ class Supervisor(unittest.TestCase):
         for action in (worker.kill, worker.wait, worker.stdout.close):
             action.side_effect = OSError("Injected compiler cleanup failure")
         with patch.object(process_module.os, "name", "nt"), \
+             patch.object(process_module.sys, "platform", "win32"), \
              patch.object(process_module.subprocess, "Popen", return_value=worker), \
              patch.object(process_module.threading, "Thread", return_value=watcher):
             with self.assertRaises(RuntimeError) as caught:
@@ -1905,6 +1908,7 @@ class Supervisor(unittest.TestCase):
                     {"kill": worker.kill, "join": reader.join,
                      "close": worker.stdout.close}[phase].side_effect = failure
                 with patch.object(process_module.os, "name", "nt"), \
+                     patch.object(process_module.sys, "platform", "win32"), \
                      patch.object(process_module.subprocess, "Popen", return_value=worker), \
                      patch.object(process_module.threading, "Thread", side_effect=[watcher, reader]), \
                      patch.object(process_module, "atomic_json") as publish:
@@ -1922,6 +1926,7 @@ class Supervisor(unittest.TestCase):
             with self.subTest(host=host):
                 failure = RuntimeError("Injected event setup failure")
                 with patch.object(process_module.os, "name", host), \
+                     patch.object(process_module.sys, "platform", "win32" if host == "nt" else "linux"), \
                      patch.object(process_module, "_require_pidfds"), \
                      patch.object(process_module, "_owned_command", return_value=(["unused"], 11, 12)) as command, \
                      patch.object(process_module.os, "close"), \
@@ -1944,6 +1949,7 @@ class Supervisor(unittest.TestCase):
                 raise failure
 
         with patch.object(process_module.os, "name", "posix"), \
+             patch.object(process_module.sys, "platform", "linux"), \
              patch.object(process_module, "_require_pidfds"), \
              patch.object(process_module, "_owned_command", return_value=(["unused"], 11, 12)), \
              patch.object(process_module.os, "close", side_effect=close), \
@@ -1958,6 +1964,26 @@ class Supervisor(unittest.TestCase):
         worker.wait.assert_called_once()
         for stream in (worker.stdin, worker.stdout, worker.stderr):
             stream.close.assert_called_once_with()
+
+    def test_host_simulations_supply_apis_unavailable_on_windows(self):
+        # Use module-local copies so the runner keeps its real filesystem host.
+        host_os = SimpleNamespace(**vars(process_module.os))
+        host_os.name = "nt"
+        for name in ("killpg", "getpgrp", "waitpid", "WNOHANG", "pidfd_open"):
+            host_os.__dict__.pop(name, None)
+        host_signal = SimpleNamespace(**vars(process_module.signal))
+        for name in ("SIGKILL", "pidfd_send_signal"):
+            host_signal.__dict__.pop(name, None)
+        host_sys = SimpleNamespace(**vars(process_module.sys))
+        host_sys.platform = "win32"
+        with patch.object(process_module, "os", host_os), \
+             patch.object(process_module, "signal", host_signal), \
+             patch.object(process_module, "sys", host_sys):
+            self.test_thread_setup_failure_closes_and_reaps_compiler_on_both_platforms()
+            self.test_owned_worker_event_setup_failure_precedes_spawn_on_both_platforms()
+            self.test_owned_worker_control_close_failure_still_kills_reaps_and_closes()
+            self.test_thread_start_error_survives_all_compiler_cleanup_failures()
+            self.test_supervisor_cleanup_failure_still_reaps_joins_and_closes()
 
     def run_child(self, script, timeout=5, cancel=False):
         with tempfile.TemporaryDirectory() as temporary:
