@@ -609,7 +609,10 @@ TEST(GameSessionHeadlessWorldTest, SpeciesChangesRefuseLockstepAndReplayBeforeTi
 TEST(GameSessionHeadlessWorldTest, SpeciesIdentityIsAdoptedOnCreateLoadAndIoRefusal) {
     using Luminumbra::TestSupport::SpeciesIdentityFixture;
     const SpeciesIdentityFixture fixture;
-    const auto baseline = fixture.Resolve();
+    const auto baseline = Luminumbra::world::LoadTerrainPresetFromJson(
+        Luminumbra::world::ResolveEffectivePreset(SpeciesIdentityFixture::Preset(),
+                                                  Luminumbra::world::TerrainPresetUse::NewWorld),
+        fixture.Root() / "data");
     ASSERT_TRUE(baseline.ok);
     // Reader failure coverage is independent of OS privilege/permission bits.
     luminumbra::ai::CreatureSpeciesRegistry incomplete;
@@ -1009,7 +1012,9 @@ TEST(GameSessionHeadlessWorldTest, HeadlessCreateWorldSucceedsWithSimulationAsse
         std::ifstream input(saved_preset);
         ASSERT_TRUE(input);
         const auto resolved = nlohmann::json::parse(input);
-        EXPECT_EQ(resolved.at("schema_rev"), 7);
+        EXPECT_EQ(resolved.at("schema_rev"), 8);
+        EXPECT_EQ(resolved.at("generation_params").at("terrain").at("surface_sampling_revision"),
+                  2);
         EXPECT_TRUE(
             resolved.at("generation_params").at("terrain").at("island_mask_enabled").get<bool>());
 
@@ -1074,7 +1079,10 @@ TEST(GameSessionHeadlessWorldTest, CustomPresetEmbedsInSaveAndChangesTerrain) {
         ASSERT_NE(custom_world.GetWorldSystem(), nullptr);
         EXPECT_FALSE(base.PresetContentHash().empty());
         EXPECT_NE(base.PresetContentHash(), custom_world.PresetContentHash());
-        const auto identity = Luminumbra::world::LoadTerrainPresetFromJson(j, root.path() / "data");
+        const auto identity = Luminumbra::world::LoadTerrainPresetFromJson(
+            Luminumbra::world::ResolveEffectivePreset(
+                j, Luminumbra::world::TerrainPresetUse::NewWorld),
+            root.path() / "data");
         ASSERT_TRUE(identity.ok);
         EXPECT_EQ(custom_world.PresetContentHash(), identity.preset_content_hash);
 
@@ -2156,9 +2164,9 @@ TEST(GameSessionHeadlessWorldTest, EmptyLegacyEnergySnapshotPreservesNonAlignedC
         SCOPED_TRACE(tick);
         for (auto* session : {&control, &loaded, &explicit_load}) {
             ASSERT_EQ(session->TickSimulation(dt), 1u);
-            if (tick < 11)
+            if (tick < 11) {
                 EXPECT_EQ(session->GetEnergyFieldState()->at_cell(0, 0), 60000u);
-            else
+            } else
                 EXPECT_LT(session->GetEnergyFieldState()->at_cell(0, 0), 60000u);
         }
         EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(control));

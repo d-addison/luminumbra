@@ -71,7 +71,7 @@ anim::AnimationClip g_skinned_test_clip;
 // Sky predicate for the diff gate: blue-led bright pixels (sky and drifting
 // clouds). The test mesh renders with the warm sand material, which this
 // never matches.
-bool IsSkinnedSkyPixel(unsigned char r, unsigned char g, unsigned char b) {
+bool IsSkinnedSkyPixel(unsigned char r, unsigned char, unsigned char b) {
     return b > 110 && static_cast<int>(b) > static_cast<int>(r) + 12;
 }
 

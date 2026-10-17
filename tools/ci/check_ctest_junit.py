@@ -59,9 +59,11 @@ def main() -> int:
     unexpected: list[str] = []
     approved_skips = 0
     for case in cases:
-        if (case.find("skipped") is None
-                and case.get("status") in (None, "run")
-                and case.get("result") in (None, "completed")):
+        if (case.get("status") not in (None, "run")
+                or case.get("result") not in (None, "completed")):
+            unexpected.append(case.get("name", "<unnamed>"))
+            continue
+        if case.find("skipped") is None:
             continue
         if skip_is_allowed(case):
             approved_skips += 1

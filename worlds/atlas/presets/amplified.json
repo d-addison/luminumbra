@@ -1,10 +1,11 @@
 {
   "name": "Amplified",
   "description": "Minecraft-Amplified style: towering peaks, deep valleys, perched alpine lakes and cliffs. Deliberately exaggerated (not DEM-realistic).",
-  "schema_rev": 7,
+  "schema_rev": 8,
   "realism_exempt": true,
   "generation_params": {
     "terrain": {
+      "surface_sampling_revision": 2,
       "base_frequency": 0.0095,
       "base_amplitude": 78.0,
       "octaves": 6,

@@ -148,6 +148,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include <memory>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <system_error>
 #include <unordered_map>
@@ -1377,7 +1378,13 @@ int main(int argc, char* argv[]) {
     std::string root_path_str = RuntimeRootString(root_dir);
     LUMINUMBRA_CORE_INFO("Runtime root: {}", root_path_str);
 
-    RuntimeScenarioConfig scenario_config = ParseRuntimeScenarioConfig(argc, argv, root_dir);
+    RuntimeScenarioConfig scenario_config;
+    try {
+        scenario_config = ParseRuntimeScenarioConfig(argc, argv, root_dir);
+    } catch (const std::invalid_argument& error) {
+        LUMINUMBRA_CORE_ERROR("{}", error.what());
+        return 2;
+    }
     std::string override_error;
     if (!scenario_config.systems_config_path.empty() ||
         HasCommandLineFlag(argc, argv, "--systems-config") ||
@@ -2473,6 +2480,10 @@ int main(int argc, char* argv[]) {
                     scenario_config.horizon_radius,
                     scenario_config.collision_radius);
             }
+            if (!horizon_ready) {
+                refuse_world_entry("Surface preparation exceeds the supported work budget.", false);
+                return;
+            }
             g_camera = std::make_unique<Luminumbra::Rendering::Camera>(
                 gameSession->GetMetadata().spawnPoint);
             g_camera->MouseSensitivity =
@@ -3393,8 +3404,11 @@ int main(int argc, char* argv[]) {
         LUMINUMBRA_CORE_INFO(
             "Runtime boot metrics mode: capturing fixed frames through streaming scheduler.");
         if (gameSession->GetWorldSystem() && gameSession->GetPhysicsSystem()) {
-            gameSession->GetWorldSystem()->EnsureSurfaceReadyNear(
-                gameSession->GetMetadata().spawnPoint, gameSession->GetPhysicsSystem(), 4, 2);
+            if (!gameSession->GetWorldSystem()->EnsureSurfaceReadyNear(
+                    gameSession->GetMetadata().spawnPoint, gameSession->GetPhysicsSystem(), 4, 2)) {
+                LUMINUMBRA_CORE_ERROR("Runtime capture refused: surface preparation failed");
+                return 2;
+            }
         }
 
         constexpr float capture_delta_time = 1.0f / 60.0f;
@@ -3457,15 +3471,13 @@ int main(int argc, char* argv[]) {
             DrainWorldDressing(jobSystem, s_worldDressing, s_worldDressingHandle);
             if (gameSession->CreateTransientWorld("Menu Vista", "424242", "mountains") &&
                 gameSession->LoadWorldState()) {
-                if (auto* ws = gameSession->GetWorldSystem()) {
-                    // Surface-ready around the FIXED vantage (8,*,8), not the spawn point, so the
-                    // framed valley is streamed in before the first menu frame.
-                    if (gameSession->GetPhysicsSystem()) {
-                        ws->EnsureSurfaceReadyNear(Luminumbra::Vec3(8.0f, 58.0f, 8.0f),
-                                                   gameSession->GetPhysicsSystem(),
-                                                   6,
-                                                   2);
-                    }
+                // Prepare the fixed vantage before publishing the backdrop as ready.
+                if (auto* ws = gameSession->GetWorldSystem();
+                    ws && gameSession->GetPhysicsSystem() &&
+                    ws->EnsureSurfaceReadyNear(Luminumbra::Vec3(8.0f, 58.0f, 8.0f),
+                                               gameSession->GetPhysicsSystem(),
+                                               6,
+                                               2)) {
                     g_camera = std::make_unique<Luminumbra::Rendering::Camera>(
                         glm::vec3(8.0f, 58.0f, 8.0f),
                         glm::vec3(0.0f, 1.0f, 0.0f),
@@ -3481,6 +3493,8 @@ int main(int argc, char* argv[]) {
                     g_app.loading.world_render_data_initialized = true;
                     g_app.menu.menu_backdrop_active = true;
                     LUMINUMBRA_CORE_INFO("Menu backdrop world ready (golden-hour mountain vista).");
+                } else {
+                    refuse_world_entry("Menu surface preparation failed.", false);
                 }
             }
         }
@@ -3960,11 +3974,20 @@ int main(int argc, char* argv[]) {
                 if (static_cast<size_t>(g_app.loading.generation_dispatch_index) >=
                     g_app.loading.initial_chunks_to_load.size()) {
                     if (gameSession->GetWorldSystem() && gameSession->GetPhysicsSystem()) {
-                        gameSession->GetWorldSystem()->EnsureSurfaceReadyNear(
-                            gameSession->GetMetadata().spawnPoint,
-                            gameSession->GetPhysicsSystem(),
-                            12,
-                            4);
+                        if (!gameSession->GetWorldSystem()->EnsureSurfaceReadyNear(
+                                gameSession->GetMetadata().spawnPoint,
+                                gameSession->GetPhysicsSystem(),
+                                12,
+                                4)) {
+                            if (g_loading_visualizer)
+                                g_loading_visualizer->EndVisualization();
+                            SetGameState(window, gameStateManager, GameState::MAIN_MENU);
+                            if (g_uiManager)
+                                g_uiManager->RequestLoadDocument("main_menu.rml");
+                            refuse_world_entry(
+                                "Surface preparation exceeds the supported work budget.", false);
+                            break;
+                        }
                     }
                     LUMINUMBRA_CORE_INFO("World generation phase complete. Entering world.");
                     g_camera = std::make_unique<Luminumbra::Rendering::Camera>(
@@ -4874,14 +4897,16 @@ int main(int argc, char* argv[]) {
                         if (g_app.capture.survey_settle < 45) {
                             ++g_app.capture.survey_settle;
                         } else {
-                            Luminumbra::Rendering::RunSceneSurvey(
-                                window,
-                                *gameSession,
-                                renderPipeline,
-                                *g_camera,
-                                std::filesystem::path(g_app.capture.survey_dir),
-                                root_dir / "data/common/materials.json",
-                                g_app.overlay.wireframe_mode);
+                            if (!Luminumbra::Rendering::RunSceneSurvey(
+                                    window,
+                                    *gameSession,
+                                    renderPipeline,
+                                    *g_camera,
+                                    std::filesystem::path(g_app.capture.survey_dir),
+                                    root_dir / "data/common/materials.json",
+                                    g_app.overlay.wireframe_mode)) {
+                                exit_code = 2;
+                            }
                             glfwSetWindowShouldClose(window, GLFW_TRUE);
                         }
                     }

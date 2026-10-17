@@ -22,6 +22,7 @@
 #include "../ai/CreatureSpeciesRegistry.h"
 #include "../core/FilesystemPath.h"
 #include "../core/Log.h"
+#include "../systems/SHIELD_WorldSystem.h"
 #include "BiomeTable.h"
 #include "StructurePlacement.h"
 #include "WorldgenDependencySnapshot.h"
@@ -427,10 +428,31 @@ nlohmann::json ResolveTerrainPresetDefaults(const nlohmann::json& preset) {
     return out;
 }
 
-std::string CanonicalResolvedTerrainPresetJson(const nlohmann::json& preset) {
+nlohmann::json ResolveEffectivePreset(const nlohmann::json& preset, TerrainPresetUse use) {
+    // Do not upgrade malformed, retired or future contracts into a valid one.
+    if (const auto schema = preset.find("schema_rev");
+        schema != preset.end() &&
+        (!schema->is_number_integer() || *schema < kMinTerrainPresetSchemaRevision ||
+         *schema > kTerrainPresetSchemaRevision))
+        return preset;
     auto resolved = ResolveTerrainPresetDefaults(preset);
-    resolved["schema_rev"] = kTerrainPresetSchemaRevision;
-    return resolved.dump(-1, ' ', true);
+    if (!JsonHasObject(resolved, "generation_params") ||
+        !JsonHasObject(resolved["generation_params"], "terrain"))
+        return resolved;
+    auto& terrain = resolved["generation_params"]["terrain"];
+    if (!terrain.contains("surface_sampling_revision") && use == TerrainPresetUse::NewWorld)
+        terrain["surface_sampling_revision"] = Systems::kSurfaceSamplingRevision;
+    const auto revision = terrain.find("surface_sampling_revision");
+    // Invalid selectors are left for the loader to diagnose without typed reads.
+    if (revision != terrain.end() && revision->is_number_integer() && *revision == 2)
+        resolved["schema_rev"] = kTerrainPresetSchemaRevision;
+    else if (revision == terrain.end() || (revision->is_number_integer() && *revision == 1))
+        resolved["schema_rev"] = kHistoricalTerrainPresetIdentityRevision;
+    return resolved;
+}
+
+std::string CanonicalResolvedTerrainPresetJson(const nlohmann::json& preset) {
+    return ResolveEffectivePreset(preset).dump(-1, ' ', true);
 }
 
 std::string TerrainPresetContentHash(const nlohmann::json& preset) {
@@ -458,7 +480,7 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
     nlohmann::json data;
     try {
         data = nlohmann::json::parse(file);
-    } catch (const nlohmann::json::parse_error& e) {
+    } catch (const nlohmann::json::exception& e) {
         result.errors.push_back("failed to parse world preset JSON '" +
                                 Filesystem::GenericUtf8PathString(preset_path) + "': " + e.what());
         return result;
@@ -475,26 +497,19 @@ LoadTerrainPresetFromJson(const nlohmann::json& source,
                           const World::WorldgenFileStatusReader& read_status,
                           const World::WorldgenFileReader& dependency_reader) try {
     TerrainPresetLoadResult result;
-    // Validate revision type before resolving defaults, retaining the no-throw error path.
-    if (source.contains("schema_rev") && !source["schema_rev"].is_number_integer()) {
-        result.errors.push_back("world preset schema_rev must be an integer: " + provenance);
-        return result;
-    }
-    const nlohmann::json data = ResolveTerrainPresetDefaults(source);
-
     // schema_rev is validated when declared, not required. Every preset under
     // worlds/atlas/presets/ carries it, but in-memory fixtures construct minimal
     // param blocks for unrelated assertions and have never had to declare it.
     // Requiring it would be a new contract, which is a bigger change than this
-    // guard is for.
-    if (data.contains("schema_rev") && !data["schema_rev"].is_number_integer()) {
+    // guard is for. Validate before resolving, retaining the no-throw error path.
+    if (source.contains("schema_rev") && !source["schema_rev"].is_number_integer()) {
         result.errors.push_back("world preset schema_rev must be an integer: found " +
-                                data["schema_rev"].dump() + ": " + provenance);
+                                source["schema_rev"].dump() + ": " + provenance);
         return result;
     }
 
-    const std::int64_t schema_revision = data.contains("schema_rev")
-                                             ? data["schema_rev"].get<std::int64_t>()
+    const std::int64_t schema_revision = source.contains("schema_rev")
+                                             ? source["schema_rev"].get<std::int64_t>()
                                              : kMinTerrainPresetSchemaRevision;
     if (schema_revision < kMinTerrainPresetSchemaRevision ||
         schema_revision > kTerrainPresetSchemaRevision) {
@@ -504,6 +519,8 @@ LoadTerrainPresetFromJson(const nlohmann::json& source,
                                 std::to_string(schema_revision) + ": " + provenance);
         return result;
     }
+
+    const nlohmann::json data = ResolveEffectivePreset(source);
 
     if (!JsonHasObject(data, "generation_params")) {
         result.errors.push_back("world preset is missing object generation_params: " + provenance);
@@ -591,6 +608,25 @@ LoadTerrainPresetFromJson(const nlohmann::json& source,
 
     // Consume the versioned, materialized generation parameters.
     Systems::TerrainGenParams& params = result.params;
+    // Absent in existing saved presets: preserve their activation schedule and
+    // persisted vertex materials. CreateWorld stamps revision 2 for new worlds.
+    if (const auto revision = terrain.find("surface_sampling_revision");
+        revision != terrain.end()) {
+        if (!revision->is_number_integer() || *revision < 1 ||
+            *revision > Systems::kSurfaceSamplingRevision) {
+            result.errors.push_back("surface_sampling_revision must be an integer in 1.." +
+                                    std::to_string(Systems::kSurfaceSamplingRevision) + ": " +
+                                    provenance);
+            return result;
+        }
+        params.surface_sampling_revision = revision->get<int>();
+    }
+    if (params.surface_sampling_revision == Systems::kSurfaceSamplingRevision &&
+        schema_revision < kTerrainPresetSchemaRevision) {
+        result.errors.push_back("surface_sampling_revision 2 requires preset schema revision 8: " +
+                                provenance);
+        return result;
+    }
     // Missing optional blocks retain historical off semantics in revision 6.
     const bool shipping_defaults = schema_revision >= 7;
     result.extras.hydro.enabled = shipping_defaults;
@@ -750,6 +786,7 @@ LoadTerrainPresetFromJson(const nlohmann::json& source,
     WarnUnknownKeys(terrain,
                     "generation_params.terrain",
                     {"base_frequency",
+                     "surface_sampling_revision",
                      "base_amplitude",
                      "octaves",
                      "persistence",
@@ -783,6 +820,12 @@ LoadTerrainPresetFromJson(const nlohmann::json& source,
         return result;
     result.preset_content_hash = HashPresetIdentity(source, manifest);
     result.ok = true;
+    return result;
+} catch (const nlohmann::json::exception& error) {
+    // File and in-memory callers share the same refusal for malformed typed values.
+    TerrainPresetLoadResult result;
+    result.errors.push_back("failed to resolve world preset: invalid world preset JSON values '" +
+                            provenance + "': " + error.what());
     return result;
 } catch (const std::exception& error) {
     // Include serialization/hashing in the resolver boundary. Discard any captured
