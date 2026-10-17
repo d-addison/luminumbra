@@ -283,9 +283,9 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         ci = jobs(self.workflows["ci.yml"])
         matrix = "${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture && fromJSON('[0]') || fromJSON('[1,2]') }}"
         for job_id, profile, title, runner, limit, floor in (
-                ("linux", "gcc", "Linux / GCC", "ubuntu-24.04", "60", "2280"),
-                ("windows-msvc", "msvc", "Windows / MSVC", "windows-2025", "90", "2260"),
-                ("windows-ucrt64", "ucrt64", "Windows / MSYS2 UCRT64", "windows-2025", "85", "2260")):
+                ("linux", "gcc", "Linux / GCC", "ubuntu-24.04", "60", "2340"),
+                ("windows-msvc", "msvc", "Windows / MSVC", "windows-2025", "90", "2320"),
+                ("windows-ucrt64", "ucrt64", "Windows / MSYS2 UCRT64", "windows-2025", "85", "2320")):
             with self.subTest(job=job_id):
                 producer, aggregate = ci[job_id], ci[job_id + "-result"]
                 self.assertEqual(value(producer, "shard", 8), matrix)
@@ -316,6 +316,22 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                 merge = next(step for step in steps(aggregate) if "name: Merge shard JUnit and check inventory\n" in step)
                 self.assertIn(f"ctest_shards.py merge --profile {profile}", merge)
                 self.assertIn("--minimum-tests " + floor, merge)
+                check = ("tools/ci/check_ctest_junit.py build/release/ctest.junit.xml"
+                         " --minimum-tests " + floor)
+                for name in ASAN_REQUIRED_TESTS:
+                    check += " --require-test " + name
+                self.assertIn("python3 " + check, merge)
+                self.assertLess(merge.index("ctest_shards.py merge --profile " + profile),
+                                merge.index("python3 " + check))
+                test_name = "Configure, build, and test" if profile == "msvc" else "Test"
+                test = next(step for step in steps(producer) if "name: " + test_name + "\n" in step)
+                full_check = ("if (${{ matrix.shard }} -eq 0) {\n  python " + check + "\n}"
+                              if profile == "msvc" else
+                              "if [ '${{ matrix.shard }}' = 0 ]; then\n  " +
+                              ("python3 " if profile == "gcc" else "python ") + check + "\nfi")
+                self.assertIn(full_check, value(test, "run", 8))
+                self.assertEqual(value(test, "run", 8).count("check_ctest_junit.py"), 1)
+                self.assertEqual(value(merge, "run", 8).count("check_ctest_junit.py"), 1)
                 self.assertIn('if [ "$CI_QUALIFICATION" = true ]; then full=(--full); fi', merge)
                 self.assertIn('"${full[@]}"', merge)
                 self.assertNotIn("merge-multiple: true", aggregate)
@@ -754,6 +770,58 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                     comments[path.name] = matches[0]
         self.assertEqual(set(comments), expected)
         self.assertEqual(len(set(comments.values())), 1, comments)
+
+
+class WorkflowCacheCleanupPolicyTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.workflow = (ROOT / ".github/workflows/cache-cleanup.yml").read_text(encoding="utf-8")
+
+    def test_only_cache_writer_completions_trigger_serialized_cleanup(self):
+        triggers = self.workflow.split("\non:\n", 1)[1].split("\npermissions:\n", 1)[0]
+        events = "\n".join(line for line in triggers.splitlines() if not line.lstrip().startswith("#"))
+        self.assertEqual(events.strip(),
+                         "workflow_run:\n"
+                         "    workflows: [CI, AddressSanitizer, Performance observations]\n"
+                         "    types: [completed]")
+        self.assertEqual(value(self.workflow, "group", 2), "cache-cleanup")
+        self.assertEqual(value(self.workflow, "cancel-in-progress", 2), "false")
+
+    def test_completion_list_covers_every_cache_saving_workflow(self):
+        writers = set()
+        for path in (ROOT / ".github/workflows").glob("*.yml"):
+            workflow = path.read_text(encoding="utf-8")
+            # Include combined restore/save actions and action-managed package
+            # caches as well as explicit save steps, across every platform lane.
+            saves = re.search(r"^\s+(?:- )?uses: actions/cache(?:/save)?@", workflow, re.MULTILINE)
+            package_cache = any(
+                setting.strip() != "false"
+                for setting in re.findall(r"^\s+cache: ([^\n#]+)", workflow, re.MULTILINE)
+            )
+            if saves or package_cache:
+                writers.add(value(workflow, "name", 0))
+        self.assertEqual(writers, {"CI", "AddressSanitizer", "Performance observations"})
+        completions = value(self.workflow, "workflows", 4).strip("[]").split(", ")
+        self.assertEqual(set(completions), writers)
+
+    def test_cleanup_filter_accepts_only_main_and_devel_push_completions(self):
+        expression = value(jobs(self.workflow)["cleanup"], "if", 4)
+        for event in ("workflow_run", "push", "pull_request", "workflow_dispatch"):
+            for source_event in ("push", "pull_request", "schedule", "workflow_dispatch"):
+                for branch in ("main", "devel", "feature"):
+                    for ref in ("refs/heads/main", "refs/heads/devel", "refs/heads/feature"):
+                        actual = expression
+                        for key, replacement in (
+                            ("github.event.workflow_run.head_branch", branch),
+                            ("github.event.workflow_run.event", source_event),
+                            ("github.event_name", event), ("github.ref", ref),
+                        ):
+                            actual = actual.replace(key, repr(replacement))
+                        actual = actual.replace("&&", "and").replace("||", "or")
+                        expected = (event == "workflow_run" and source_event == "push"
+                                    and branch in ("main", "devel"))
+                        with self.subTest(event=event, source_event=source_event, branch=branch, ref=ref):
+                            self.assertEqual(eval(actual, {"__builtins__": {}}), expected)
 
 
 class WorkflowAttributionPolicyTests(unittest.TestCase):

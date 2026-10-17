@@ -362,16 +362,20 @@ void main()
         // the prescribed strict comparisons retain exactly representable limits
         // without expanding a clip band. It cannot change half-open cell ownership.
         float horizontalSquared = dot(relativeWorld.xz, relativeWorld.xz);
-        vec3 local = farTileLocal();
         if (dot(relativeWorld, relativeWorld) < 176.0 * 176.0 ||
-            horizontalSquared > u_farOuterRadius * u_farOuterRadius || farLiveOwns(local, fs_in.MaterialID))
+            horizontalSquared > u_farOuterRadius * u_farOuterRadius)
             discard;
-        if (u_farArrivalEligible == 1 &&
-            horizontalSquared <= u_farFinerOuterRadius * u_farFinerOuterRadius &&
-            all(greaterThanEqual(local.xz, vec2(0.0))) && all(lessThan(local.xz, vec2(u_farTileEdge)))) {
-            int child = int(local.x >= u_farTileEdge * 0.5) + 2 * int(local.z >= u_farTileEdge * 0.5);
-            if (local.y >= u_farChildY[child].x && local.y <= u_farChildY[child].y)
+        if (u_farLiveCellCount > 0 || u_farArrivalEligible == 1) {
+            vec3 local = farTileLocal();
+            if (u_farLiveCellCount > 0 && farLiveOwns(local, fs_in.MaterialID))
                 discard;
+            if (u_farArrivalEligible == 1 &&
+                horizontalSquared <= u_farFinerOuterRadius * u_farFinerOuterRadius &&
+                all(greaterThanEqual(local.xz, vec2(0.0))) && all(lessThan(local.xz, vec2(u_farTileEdge)))) {
+                int child = int(local.x >= u_farTileEdge * 0.5) + 2 * int(local.z >= u_farTileEdge * 0.5);
+                if (local.y >= u_farChildY[child].x && local.y <= u_farChildY[child].y)
+                    discard;
+            }
         }
     }
     if (u_farWorldLadder != 1 && u_farClipInnerRadius > 0.0 &&

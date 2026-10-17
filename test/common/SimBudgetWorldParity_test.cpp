@@ -10,6 +10,7 @@
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_server/ServerWorldRunner.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -25,6 +26,107 @@ namespace {
 namespace fs = std::filesystem;
 using luminumbra::simulation::SimBudgetStage;
 using luminumbra::simulation::SimBudgetTelemetry;
+
+// Keep the replay oracle explicit: a new stage must be reviewed before it is covered.
+constexpr std::array kWorkComparedStages = {
+    SimBudgetStage::ServerPhysics,
+    SimBudgetStage::Animation,
+    SimBudgetStage::Instinct,
+    SimBudgetStage::Perception,
+    SimBudgetStage::Scent,
+    SimBudgetStage::Locomotion,
+    SimBudgetStage::Creatures,
+    SimBudgetStage::Wind,
+    SimBudgetStage::Weather,
+    SimBudgetStage::WindWeather,
+    SimBudgetStage::Aether,
+    SimBudgetStage::Energy,
+    SimBudgetStage::Irrigation,
+    SimBudgetStage::Soil,
+    SimBudgetStage::Plants,
+    SimBudgetStage::Pollination,
+    SimBudgetStage::Disease,
+    SimBudgetStage::Crops,
+    SimBudgetStage::Fire,
+    SimBudgetStage::Grazing,
+    SimBudgetStage::Lifespan,
+    SimBudgetStage::Alarm,
+    SimBudgetStage::Decay,
+    SimBudgetStage::Circadian,
+    SimBudgetStage::Territory,
+    SimBudgetStage::Packs,
+    SimBudgetStage::Migration,
+    SimBudgetStage::Events,
+    SimBudgetStage::ServerStreaming,
+    SimBudgetStage::ServerWater,
+};
+static_assert(
+    [] {
+        if (kWorkComparedStages.size() != static_cast<std::size_t>(SimBudgetStage::Count))
+            return false;
+        for (std::size_t stage = 0; stage < kWorkComparedStages.size(); ++stage)
+            if (static_cast<std::size_t>(kWorkComparedStages[stage]) != stage)
+                return false;
+        return true;
+    }(),
+    "Compare every simulation budget stage exactly once in enum order");
+
+void ExpectStageSamples(const SimBudgetTelemetry& trace, std::uint64_t ticks, bool active_regions) {
+    for (std::size_t stage = 0; stage < trace.SamplesByStage().size(); ++stage) {
+        SCOPED_TRACE(std::string(luminumbra::simulation::kSimBudgetStageNames[stage]));
+        const auto& samples = trace.SamplesByStage()[stage];
+        const auto identity = static_cast<SimBudgetStage>(stage);
+        const bool unexecuted =
+            active_regions ? identity == SimBudgetStage::Wind || identity == SimBudgetStage::Weather
+                           : identity == SimBudgetStage::WindWeather;
+        if (unexecuted) {
+            EXPECT_TRUE(samples.empty());
+            continue;
+        }
+        ASSERT_EQ(samples.size(), ticks);
+        for (std::size_t i = 0; i < samples.size(); ++i) {
+            EXPECT_EQ(samples[i].tick, i + 1);
+            if (identity == SimBudgetStage::Wind || identity == SimBudgetStage::Weather)
+                EXPECT_EQ(samples[i].work, 64u * 64u);
+            else if (identity == SimBudgetStage::WindWeather)
+                EXPECT_EQ(samples[i].work, 2u * 64u * 64u);
+            else if (identity == SimBudgetStage::ServerPhysics)
+                EXPECT_EQ(samples[i].work, 1u);
+        }
+    }
+}
+
+// Call after ExpectStageSamples succeeds so the first plant and creature samples exist.
+void ExpectWorkSummary(const SimBudgetTelemetry& trace, std::uint64_t ticks, bool active_regions) {
+    EXPECT_GT(trace.Summarize(SimBudgetStage::Creatures).work_total, 0u);
+    EXPECT_GT(trace.Summarize(SimBudgetStage::Plants).work_total, 0u);
+    EXPECT_GT(trace.Summarize(SimBudgetStage::Scent).work_total, 0u);
+    EXPECT_EQ(trace.Summarize(SimBudgetStage::Wind).work_total,
+              active_regions ? 0u : ticks * 64u * 64u);
+    EXPECT_EQ(trace.Summarize(SimBudgetStage::Weather).work_total,
+              active_regions ? 0u : ticks * 64u * 64u);
+    EXPECT_EQ(trace.Summarize(SimBudgetStage::WindWeather).work_total,
+              active_regions ? ticks * 2u * 64u * 64u : 0u);
+    EXPECT_EQ(trace.SamplesByStage()[static_cast<std::size_t>(SimBudgetStage::Plants)][0].work, 6u);
+    EXPECT_EQ(trace.SamplesByStage()[static_cast<std::size_t>(SimBudgetStage::Creatures)][0].work,
+              8u);
+}
+
+void ExpectMatchingWork(const SimBudgetTelemetry& first, const SimBudgetTelemetry& repeated) {
+    for (const auto identity : kWorkComparedStages) {
+        const auto stage = static_cast<std::size_t>(identity);
+        SCOPED_TRACE(std::string(luminumbra::simulation::kSimBudgetStageNames[stage]));
+        const auto& expected = first.SamplesByStage()[stage];
+        const auto& actual = repeated.SamplesByStage()[stage];
+        ASSERT_EQ(actual.size(), expected.size());
+        // Compare individual ticks and work, including dynamic work invisible to hashes.
+        // Duration is observational wall-clock data and must not match across runs.
+        for (std::size_t sample = 0; sample < expected.size(); ++sample) {
+            EXPECT_EQ(actual[sample].tick, expected[sample].tick) << "sample=" << sample;
+            EXPECT_EQ(actual[sample].work, expected[sample].work) << "sample=" << sample;
+        }
+    }
+}
 
 class SimBudgetWorldParity : public testing::TestWithParam<bool> {
 private:
@@ -82,6 +184,7 @@ TEST_P(SimBudgetWorldParity, Populated3600TicksPreserveWorldHashAndReplayWork) {
     constexpr std::uint64_t ticks = 3600;
     std::string untraced_hash;
     SimBudgetTelemetry first_trace;
+    // One untraced world and two independent traced worlds per parameter.
     for (int pass = 0; pass < 3; ++pass) {
         SCOPED_TRACE(pass);
         Luminumbra::Server::ServerWorldRunnerConfig config;
@@ -118,39 +221,15 @@ TEST_P(SimBudgetWorldParity, Populated3600TicksPreserveWorldHashAndReplayWork) {
         } else {
             EXPECT_EQ(hash, untraced_hash);
             const auto& trace = runner.Session()->GetSimBudgetTelemetry();
-            for (std::size_t stage = 0; stage < trace.SamplesByStage().size(); ++stage) {
-                const auto& samples = trace.SamplesByStage()[stage];
-                const auto identity = static_cast<SimBudgetStage>(stage);
-                const bool unexecuted = GetParam() ? identity == SimBudgetStage::Wind ||
-                                                         identity == SimBudgetStage::Weather
-                                                   : identity == SimBudgetStage::WindWeather;
-                if (unexecuted) {
-                    EXPECT_TRUE(samples.empty());
-                    continue;
-                }
-                ASSERT_EQ(samples.size(), ticks);
-                for (std::size_t i = 0; i < samples.size(); ++i)
-                    EXPECT_EQ(samples[i].tick, i + 1);
-            }
-            EXPECT_GT(trace.Summarize(SimBudgetStage::Creatures).work_total, 0u);
-            EXPECT_GT(trace.Summarize(SimBudgetStage::Plants).work_total, 0u);
-            EXPECT_GT(trace.Summarize(SimBudgetStage::Scent).work_total, 0u);
-            EXPECT_EQ(trace.Summarize(SimBudgetStage::Wind).work_total,
-                      GetParam() ? 0u : ticks * 64u * 64u);
-            EXPECT_EQ(trace.Summarize(SimBudgetStage::Weather).work_total,
-                      GetParam() ? 0u : ticks * 64u * 64u);
-            EXPECT_EQ(trace.Summarize(SimBudgetStage::WindWeather).work_total,
-                      GetParam() ? ticks * 2u * 64u * 64u : 0u);
-            EXPECT_EQ(
-                trace.SamplesByStage()[static_cast<std::size_t>(SimBudgetStage::Plants)][0].work,
-                6u);
-            EXPECT_EQ(
-                trace.SamplesByStage()[static_cast<std::size_t>(SimBudgetStage::Creatures)][0].work,
-                8u);
+            ASSERT_NO_FATAL_FAILURE(ExpectStageSamples(trace, ticks, GetParam()));
+            ExpectWorkSummary(trace, ticks, GetParam());
+            // Capture before the save toggle clears session telemetry.
             if (pass == 1)
                 first_trace = trace;
-            else
+            else {
                 EXPECT_TRUE(first_trace.WorkMatches(trace));
+                ASSERT_NO_FATAL_FAILURE(ExpectMatchingWork(first_trace, trace));
+            }
         }
 
         // Exercise the ordinary save path, including live plant persistence and
