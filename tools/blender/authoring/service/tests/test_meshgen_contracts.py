@@ -131,6 +131,11 @@ class Requests(unittest.TestCase):
         project = project_fixture()
         project["evaluation"] = {"waivable": ["final_tris_within_budget"]}
         effective = resolve(project, "rock").effective
+        with self.assertRaises(Refusal) as caught:
+            accepted_waivers(["final_tris_within_budget"], effective, acceptance_fixture())
+        self.assertEqual(caught.exception.finding['rule_id'], 'finish.budget_exceeded')
+        project['finish'] = {'decimate': {'on_over_budget': 'accept_flagged'}}
+        effective = resolve(project, "rock").effective
         self.assertEqual(accepted_waivers(["final_tris_within_budget"], effective, acceptance_fixture()), ["final_tris_within_budget"])
         validate_request({**request_fixture(), "accept_flagged": acceptance_fixture()})
         for acceptance in (None, True, {"gates": ["final_tris_within_budget"]},
