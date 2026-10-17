@@ -3,6 +3,7 @@
 #include "ai/CreaturePersistence.h"
 #include "ai/DecompositionSystem.h"
 #include "ai/LifespanSystem.h"
+#include "ai/StimulusChannels.h"
 #include "components/AlarmComponents.h"
 #include "components/CircadianComponents.h"
 #include "components/CombustionComponents.h"
@@ -23,11 +24,23 @@
 #include "components/ThirstComponents.h"
 #include "core/WaterComponents.h"
 #include "persistence/PlantPersistence.h"
+#include "world/ActiveRegionLedger.h"
+#include "world/GroundObjectStore.h"
+#include "world/WorldClock.h"
+
+#include <entt/entity/entity.hpp>
+#include <entt/entity/fwd.hpp>
+#include <entt/entt.hpp>
 
 #include <bit>
+#include <cstddef>
+#include <cstdint>
 #include <limits>
-#include <set>
+#include <stdexcept>
+#include <string>
 #include <type_traits>
+#include <utility>
+#include <vector>
 
 namespace {
 namespace A = luminumbra::ai;
@@ -764,7 +777,7 @@ void ExpectEveryField(const entt::registry& original,
               original.all_of<C::CreaturePhysicsComponent>(source));
     const auto reference = [&](entt::entity actual, entt::entity expected) {
         if (expected == entt::null) {
-            EXPECT_EQ(actual, entt::null);
+            EXPECT_EQ(actual, entt::entity{entt::null});
         } else {
             ASSERT_TRUE(restored.valid(actual));
             EXPECT_EQ(restored.get<C::CreatureRegionComponent>(actual).persistent_id,
@@ -897,13 +910,13 @@ TEST(CreaturePersistence, EveryComponentAndEveryFieldRoundTripsBitExactly) {
     entt::registry restored;
     // Change all raw entity handles so preserving references requires actual remapping.
     for (int i = 0; i < 7; ++i)
-        restored.create();
+        ASSERT_TRUE(restored.valid(restored.create()));
     A::ApplyCreatureSnapshot(restored, loaded);
     entt::entity restored_first = entt::null;
     for (auto e : restored.view<C::CreatureRegionComponent>())
         if (restored.get<C::CreatureRegionComponent>(e).persistent_id == 1)
             restored_first = e;
-    ASSERT_NE(restored_first, entt::null);
+    ASSERT_NE(restored_first, entt::entity{entt::null});
     ExpectEveryField(original, first, restored, restored_first);
     EXPECT_EQ(A::SerializeCreatureSnapshot(A::BuildCreatureSnapshot(restored)), bytes);
     EXPECT_FALSE(restored.view<C::CreaturePhysicsComponent>().begin() !=
@@ -955,7 +968,7 @@ TEST(CreaturePersistence, DurablePlantReferencesResolveAndUnsupportedOrWrongKind
     EXPECT_TRUE(A::ValidateCreatureSnapshot(snapshot, Ledger(2), {}, plants, error)) << error;
     entt::registry restored;
     for (int i = 0; i < 7; ++i)
-        restored.create();
+        ASSERT_TRUE(restored.valid(restored.create()));
     F::ApplyPlantEntitySnapshot(restored, plants);
     A::ApplyCreatureSnapshot(restored, snapshot);
     const auto actor = *restored.view<C::SensesComponent>().begin();
@@ -1193,9 +1206,10 @@ TEST(CreaturePersistence, LegacyControllerAbsenceLoadsAndNextSaveStampsNonpartic
             EXPECT_FALSE(restored.get<C::CreatureControllerComponent>(out).physics_controlled);
             EXPECT_FALSE(restored.all_of<C::CreaturePhysicsComponent>(out));
             EXPECT_EQ(restored.all_of<C::CreatureLocomotionStateComponent>(out), velocity);
-            if (velocity)
+            if (velocity) {
                 EXPECT_EQ(restored.get<C::CreatureLocomotionStateComponent>(out).velocity_y,
                           -0.375f);
+            }
             const auto saved = A::SerializeCreatureSnapshot(A::BuildCreatureSnapshot(restored));
             EXPECT_EQ(nlohmann::json::parse(saved)["entities"][0]["components"]["Controller"],
                       (nlohmann::json{{"version", 1}, {"data", {{"physics_controlled", false}}}}));
@@ -1229,13 +1243,19 @@ TEST(CreaturePersistence, EmitterRadiusRefusesExtremeValuesAndAcceptsLastNonzero
             EXPECT_EQ(restored.get<C::FieldEmitterComponent>(target).radius_cells, radius);
         }
         source.get<C::FieldEmitterComponent>(e).radius_cells = radius;
-        if (!accepted)
+        if (!accepted) {
             EXPECT_THROW(A::BuildCreatureSnapshot(source), std::invalid_argument);
+        }
     }
 }
 
-struct RestoreSignals {
+class RestoreSignals {
     int calls = 0;
+
+public:
+    int CallCount() const {
+        return calls;
+    }
     void Observe(entt::registry&, entt::entity) {
         ++calls;
     }
@@ -1249,7 +1269,7 @@ TEST(CreaturePersistence, RefusalPreservesEntityAllocationGenerationsAndEmitsNoS
     for (const bool dangling : {false, true}) {
         entt::registry destination, control;
         for (auto* r : {&destination, &control}) {
-            r->create();
+            ASSERT_TRUE(r->valid(r->create()));
             const auto recycled = r->create();
             r->destroy(recycled);
         }
@@ -1265,7 +1285,7 @@ TEST(CreaturePersistence, RefusalPreservesEntityAllocationGenerationsAndEmitsNoS
         else
             invalid.entities[1].components["Transform"]["data"]["scale_z_bits"] = 0x7f800000u;
         EXPECT_THROW(A::ApplyCreatureSnapshot(destination, invalid), std::invalid_argument);
-        EXPECT_EQ(signals.calls, 0);
+        EXPECT_EQ(signals.CallCount(), 0);
         for (int i = 0; i < 8; ++i)
             EXPECT_EQ(destination.create(), control.create());
         destination.on_construct<C::TransformComponent>().disconnect<&RestoreSignals::Observe>(
@@ -1346,21 +1366,57 @@ TEST(CreaturePersistence, ParserBudgetsRefuseLargeCollectionsBeforeMaterializing
     refuse(std::string(33, '[') + "0" + std::string(33, ']'), "nesting limit");
 }
 
+namespace {
+void CheckWaypointNodeBudgetRoundtrip(const std::string& bytes,
+                                      std::size_t count,
+                                      bool stamped,
+                                      bool fits) {
+    A::CreatureSnapshot loaded;
+    std::string error;
+    if (fits) {
+        ASSERT_TRUE(A::LoadCreatureSnapshot(bytes, loaded, error)) << error;
+        ASSERT_EQ(loaded.entities.size(), count);
+        for (std::size_t i = 0; i < loaded.entities.size(); ++i) {
+            const auto& record = loaded.entities[i];
+            EXPECT_EQ(record.id, i + 1);
+            EXPECT_EQ(record.components["LocomotionPath"]["data"]["waypoints"].size(),
+                      A::kMaxCreatureVector);
+            EXPECT_EQ(record.components["Controller"]["data"]["physics_controlled"], false);
+        }
+        const auto saved = A::SerializeCreatureSnapshot(loaded);
+        EXPECT_EQ(saved.size(), bytes.size() + (stamped ? 0 : count * 63));
+        if (stamped) {
+            EXPECT_EQ(saved, bytes);
+        }
+    } else {
+        EXPECT_FALSE(A::LoadCreatureSnapshot(bytes, loaded, error));
+        EXPECT_NE(error.find("creature node limit"), std::string::npos) << error;
+        EXPECT_TRUE(loaded.entities.empty());
+    }
+}
+} // namespace
+
 TEST(CreaturePersistence, MaximumWaypointVectorsKeepTheLegacyNodeBudget) {
     entt::registry registry;
     const auto e = Creature(registry, 1);
     registry.emplace<C::LocomotionPathComponent>(e).waypoints.resize(A::kMaxCreatureVector,
                                                                      Luminumbra::Vec2(0.0f));
     const auto prototype = A::BuildCreatureSnapshot(registry).entities.front();
-    const auto nodes = [](const auto& self, const nlohmann::json& value) -> std::size_t {
-        std::size_t result = 1 + (value.is_object() ? value.size() : 0);
-        if (value.is_structured())
-            for (const auto& child : value)
-                result += self(self, child);
+    const auto nodes = [](const nlohmann::json& value) {
+        std::size_t result = 0;
+        std::vector<const nlohmann::json*> pending{&value};
+        while (!pending.empty()) {
+            const auto* current = pending.back();
+            pending.pop_back();
+            result += 1 + (current->is_object() ? current->size() : 0);
+            if (current->is_structured())
+                for (const auto& child : *current)
+                    pending.push_back(&child);
+        }
         return result;
     };
     // Each stamped record has 1,405 nodes including its wrapper; the document has five.
-    ASSERT_EQ(nodes(nodes, prototype.components) + 4, 1405u);
+    ASSERT_EQ(nodes(prototype.components) + 4, 1405u);
     ASSERT_EQ(A::kMaxCreatureNodes, 4194304u);
     ASSERT_EQ(A::kCreatureControllerStampNodes, 8u);
     for (const bool stamped : {false, true}) {
@@ -1397,27 +1453,7 @@ TEST(CreaturePersistence, MaximumWaypointVectorsKeepTheLegacyNodeBudget) {
             }
             snapshot.entities.clear();
             snapshot.entities.shrink_to_fit();
-            A::CreatureSnapshot loaded;
-            std::string error;
-            if (fits) {
-                ASSERT_TRUE(A::LoadCreatureSnapshot(bytes, loaded, error)) << error;
-                ASSERT_EQ(loaded.entities.size(), count);
-                for (std::size_t i = 0; i < loaded.entities.size(); ++i) {
-                    const auto& record = loaded.entities[i];
-                    EXPECT_EQ(record.id, i + 1);
-                    EXPECT_EQ(record.components["LocomotionPath"]["data"]["waypoints"].size(),
-                              A::kMaxCreatureVector);
-                    EXPECT_EQ(record.components["Controller"]["data"]["physics_controlled"], false);
-                }
-                const auto saved = A::SerializeCreatureSnapshot(loaded);
-                EXPECT_EQ(saved.size(), bytes.size() + (stamped ? 0 : count * 63));
-                if (stamped)
-                    EXPECT_EQ(saved, bytes);
-            } else {
-                EXPECT_FALSE(A::LoadCreatureSnapshot(bytes, loaded, error));
-                EXPECT_NE(error.find("creature node limit"), std::string::npos) << error;
-                EXPECT_TRUE(loaded.entities.empty());
-            }
+            ASSERT_NO_FATAL_FAILURE(CheckWaypointNodeBudgetRoundtrip(bytes, count, stamped, fits));
         }
     }
 }

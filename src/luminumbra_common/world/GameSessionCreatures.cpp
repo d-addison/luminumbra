@@ -1,20 +1,40 @@
+#include "../ai/CreatureBrainSystem.h"
 #include "../ai/CreatureCoarse.h"
+#include "../ai/CreatureGenome.h"
 #include "../ai/CreaturePersistence.h"
+#include "../ai/CreatureReproductionSystem.h"
 #include "../ai/CreatureSpeciesRegistry.h"
 #include "../ai/DecompositionSystem.h"
-#include "../ai/ThirstSystem.h"
+#include "../components/AlarmComponents.h"
 #include "../components/CircadianComponents.h"
 #include "../components/CoreComponents.h"
+#include "../components/CreatureComponents.h"
+#include "../components/ForagingComponents.h"
 #include "../components/InstinctComponents.h"
 #include "../components/MortalComponents.h"
+#include "../components/ThirstComponents.h"
+#include "../core/DeterministicRng.h"
 #include "../persistence/PlantPersistence.h"
 #include "../systems/FoliageRegistryStage.h"
 #include "../systems/PhysicsSystem.h"
+#include "ActiveRegionLedger.h"
+#include "DistantPolicy.h"
 #include "GameSession.h"
+#include "RegionPopulator.h"
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <entt/entity/entity.hpp>
+#include <entt/entity/fwd.hpp>
+#include <entt/entity/registry.hpp>
 #include <limits>
+#include <luminumbra/core/Types.h>
+#include <map>
 #include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace Luminumbra::world {
 namespace {
@@ -167,8 +187,8 @@ void StageCreatureAuthority(entt::registry& registry,
     registry.emplace<C::CreatureCoarseComponent>(entity);
     registry.emplace<C::CreatureControllerComponent>(
         entity, C::CreatureControllerComponent{physics_controlled});
-    if (physics_controlled)
-        registry.get_or_emplace<C::CreatureLocomotionStateComponent>(entity);
+    if (physics_controlled && !registry.all_of<C::CreatureLocomotionStateComponent>(entity))
+        registry.emplace<C::CreatureLocomotionStateComponent>(entity);
     CaptureCreature(registry, entity, prepare);
 }
 } // namespace

@@ -1935,8 +1935,8 @@
     {
       "id": "ar.activation.050",
       "source": "docs/active-regions.md#activation-and-ordering",
-      "quote": "Non-finite or out-of-range (|x|,|z| >= 2^24) walking anchors, ground-object edit positions and region pins are ignored and counted (observational, never hashed or saved).",
-      "text": "Non-finite or out-of-range (|x|,|z| >= 2^24) walking anchors, ground-object edit positions and region pins are ignored and counted (observational, never hashed or saved)."
+      "quote": "Non-finite or out-of-range (outside -2^24 <= x,z < 2^24) walking anchors and ground-object edit positions are ignored and counted (observational, never hashed or saved).",
+      "text": "Non-finite or out-of-range (outside -2^24 <= x,z < 2^24) walking anchors and ground-object edit positions are ignored and counted (observational, never hashed or saved)."
     },
     {
       "id": "ar.activation.051",
@@ -2197,12 +2197,6 @@
       "text": "The validation ceiling is the latest world time the ledger knows about, bounds every persisted record stamp, and is observational bookkeeping excluded from the hash."
     },
     {
-      "id": "ar.file.034",
-      "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Session load raises only the ceiling to the restored clock.",
-      "text": "Session load raises only the ceiling to the restored clock."
-    },
-    {
       "id": "ar.file.035",
       "source": "docs/active-regions.md#file-and-compatibility",
       "quote": "The canonical tick, every region record, hold counter, pressure, simulation cursor, frozen digest, configuration and anchor are preserved, and no scheduler tick or catch-up runs.",
@@ -2255,12 +2249,6 @@
       "source": "docs/active-regions.md#file-and-compatibility",
       "quote": "Its ceiling starts at the restored WorldClock tick without executing a tick, so an immediate edit or pin can be saved before simulation advances.",
       "text": "Its ceiling starts at the restored WorldClock tick without executing a tick, so an immediate edit or pin can be saved before simulation advances."
-    },
-    {
-      "id": "ar.file.044",
-      "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "This permits v0.3.0 saves to load in v0.3.1 without relabelling opaque old digests.",
-      "text": "This permits v0.3.0 saves to load in v0.3.1 without relabelling opaque old digests."
     },
     {
       "id": "ar.file.045",
@@ -3307,30 +3295,6 @@
       "text": "Version 1 ledgers load with or without frozen history."
     },
     {
-      "id": "ar.file.096",
-      "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Standalone decoding preserves historical bytes.",
-      "text": "Standalone decoding preserves historical bytes."
-    },
-    {
-      "id": "ar.file.097",
-      "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "During enabled session loading, absent projection metadata adopts the current projection from validated scratch authority before publishing the world.",
-      "text": "During enabled session loading, absent projection metadata adopts the current projection from validated scratch authority before publishing the world."
-    },
-    {
-      "id": "ar.file.098",
-      "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Every historical stamp is recomputed using the shared authority capture, including disk-only chunks and all consumer domains.",
-      "text": "Every historical stamp is recomputed using the shared authority capture, including disk-only chunks and all consumer domains."
-    },
-    {
-      "id": "ar.file.099",
-      "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "the next successful snapshot transaction writes the projection declaration.",
-      "text": "the next successful snapshot transaction writes the projection declaration."
-    },
-    {
       "id": "ar.file.100",
       "source": "docs/active-regions.md#file-and-compatibility",
       "quote": "Flag-off legacy saves without a ledger retain their existing load, save and hash behaviour, with no new files, bytes or hash terms.",
@@ -3369,14 +3333,14 @@
     {
       "id": "ar.file.106",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Type 2 is `digest_projection`, with a one-byte value of 2.",
-      "text": "Type 2 is `digest_projection`, with a one-byte value of 2."
+      "quote": "Supported extension values are:",
+      "text": "Supported extension values are:"
     },
     {
       "id": "ar.file.107",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "A value greater than 2 refuses with `Unsupported frozen digest projection.`;",
-      "text": "A value greater than 2 refuses with `Unsupported frozen digest projection.`;"
+      "quote": "For type 2, a value greater than 2 refuses with `Unsupported frozen digest projection.`;",
+      "text": "For type 2, a value greater than 2 refuses with `Unsupported frozen digest projection.`;"
     },
     {
       "id": "ar.file.108",
@@ -3387,8 +3351,8 @@
     {
       "id": "ar.file.109",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "The encoder emits version 2 with this declaration whenever a record is frozen or retains a nonzero freeze stamp or frozen digest, including after waking, provided no legacy historical digest remains.",
-      "text": "The encoder emits version 2 with this declaration whenever a record is frozen or retains a nonzero freeze stamp or frozen digest, including after waking, provided no legacy historical digest remains."
+      "quote": "The digest declaration is emitted whenever a record is frozen or retains a nonzero freeze stamp or frozen digest, including after waking, provided no legacy historical digest remains.",
+      "text": "The digest declaration is emitted whenever a record is frozen or retains a nonzero freeze stamp or frozen digest, including after waking, provided no legacy historical digest remains."
     },
     {
       "id": "ar.file.110",
@@ -3399,14 +3363,14 @@
     {
       "id": "ar.file.111",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "When all extensions are absent, the encoder emits version 1.",
-      "text": "When all extensions are absent, the encoder emits version 1."
+      "quote": "The encoder emits version 2 whenever any supported extension is present;",
+      "text": "The encoder emits version 2 whenever any supported extension is present;"
     },
     {
       "id": "ar.file.112",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "The declaration belongs only to the persistence envelope and adds no canonical hash term.",
-      "text": "The declaration belongs only to the persistence envelope and adds no canonical hash term."
+      "quote": "The digest declaration belongs only to the persistence envelope and adds no canonical hash term.",
+      "text": "The digest declaration belongs only to the persistence envelope and adds no canonical hash term."
     },
     {
       "id": "ar.file.113",
@@ -3519,8 +3483,8 @@
     {
       "id": "ar.scope.007",
       "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
-      "quote": "Strict distant policy and simulation content identity are adopted before enabled world creation or loading.",
-      "text": "Strict distant policy and simulation content identity are adopted before enabled world creation or loading."
+      "quote": "Distant creature simulation remains planned for v0.3.1.",
+      "text": "Distant creature simulation remains planned for v0.3.1."
     },
     {
       "id": "ar.scope.008",
@@ -3531,8 +3495,8 @@
     {
       "id": "ar.scope.010",
       "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
-      "quote": "The dedicated server autosaves every five minutes.",
-      "text": "The dedicated server autosaves every five minutes."
+      "quote": "The dedicated server autosaves every five minutes by default.",
+      "text": "The dedicated server autosaves every five minutes by default."
     },
     {
       "id": "ar.file.119",
@@ -4501,12 +4465,6 @@
       "text": "Load compares identity before adopting loaded ledger/consumer state;"
     },
     {
-      "id": "ar.policy.087",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "an integrity refusal by the direct state loader prevents saving.",
-      "text": "an integrity refusal by the direct state loader prevents saving."
-    },
-    {
       "id": "ar.policy.088",
       "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
       "quote": "A legacy flag-off world may opt in and adopt current content for the first time.",
@@ -4521,14 +4479,914 @@
     {
       "id": "ar.scope.013",
       "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
-      "quote": "Creature records and snapshot compatibility are specified in [creature-entities.md](creature-entities.md).",
-      "text": "Creature records and snapshot compatibility are specified in [creature-entities.md](creature-entities.md)."
+      "quote": "Strict distant policy and simulation content identity are adopted before enabled world creation or loading.",
+      "text": "Strict distant policy and simulation content identity are adopted before enabled world creation or loading."
     },
     {
       "id": "ar.scope.014",
       "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
-      "quote": "Distant creature simulation remains planned for v0.3.1.",
-      "text": "Distant creature simulation remains planned for v0.3.1."
+      "quote": "Creature records and snapshot compatibility are specified in [creature-entities.md](creature-entities.md).",
+      "text": "Creature records and snapshot compatibility are specified in [creature-entities.md](creature-entities.md)."
+    },
+    {
+      "id": "ar.activation.065",
+      "source": "docs/active-regions.md#activation-and-ordering",
+      "quote": "Region pins outside -32768 <= x,z < 32768 are ignored and counted with the same observational rules.",
+      "text": "Region pins outside -32768 <= x,z < 32768 are ignored and counted with the same observational rules."
+    },
+    {
+      "id": "ar.file.120",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "| 1 | Persistent allocator: one LE u64 next ID in [2, 2^63];",
+      "text": "| 1 | Persistent allocator: one LE u64 next ID in [2, 2^63];"
+    },
+    {
+      "id": "ar.file.121",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "emitted when advanced from 1. |",
+      "text": "emitted when advanced from 1. |"
+    },
+    {
+      "id": "ar.file.122",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "| 2 | `digest_projection`: one byte equal to 2. |",
+      "text": "| 2 | `digest_projection`: one byte equal to 2. |"
+    },
+    {
+      "id": "ar.file.123",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "| 3 | Water debt: LE u32 count, then sorted (LE i32 x, LE i32 z, LE u64 positive Q32 debt) entries, at most one per owned region. |",
+      "text": "| 3 | Water debt: LE u32 count, then sorted (LE i32 x, LE i32 z, LE u64 positive Q32 debt) entries, at most one per owned region. |"
+    },
+    {
+      "id": "ar.file.124",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "| 4 | Energy ages: LE u32 count, then sorted (LE i32 x, LE i32 z, LE u64 absolute tick) entries, at most one per owned region. |",
+      "text": "| 4 | Energy ages: LE u32 count, then sorted (LE i32 x, LE i32 z, LE u64 absolute tick) entries, at most one per owned region. |"
+    },
+    {
+      "id": "ar.file.125",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "| 6 | Completed work: LE u32 count, then sorted (LE i32 x, LE i32 z, LE u64 positive work) entries, at most one per owned region. |",
+      "text": "| 6 | Completed work: LE u32 count, then sorted (LE i32 x, LE i32 z, LE u64 positive work) entries, at most one per owned region. |"
+    },
+    {
+      "id": "ar.file.126",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "| 5 | Simulation content identity: 40 bytes containing LE u16 encoding, defaults and algorithm versions, LE u16 zero reserved, then LE u64 policy, creature definitions, plant definitions and population digests. |",
+      "text": "| 5 | Simulation content identity: 40 bytes containing LE u16 encoding, defaults and algorithm versions, LE u16 zero reserved, then LE u64 policy, creature definitions, plant definitions and population digests. |"
+    },
+    {
+      "id": "ar.file.127",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Map extensions are emitted only when nonempty.",
+      "text": "Map extensions are emitted only when nonempty."
+    },
+    {
+      "id": "ar.file.128",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "otherwise it emits version 1.",
+      "text": "otherwise it emits version 1."
+    },
+    {
+      "id": "ar.file.129",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Persistence reads and hashes each use a verified opened regular-file handle, refuse symlinks and non-regular files, enforce a format-specific byte bound during reading, and refuse growth or truncation.",
+      "text": "Persistence reads and hashes each use a verified opened regular-file handle, refuse symlinks and non-regular files, enforce a format-specific byte bound during reading, and refuse growth or truncation."
+    },
+    {
+      "id": "ar.file.130",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Plant admission and both snapshot writer lanes support at most 65,536 plants, at most 8,192 bytes per canonical plant record, and 65,536 bytes of envelope margin, giving a read and write bound of 536,936,448 bytes.",
+      "text": "Plant admission and both snapshot writer lanes support at most 65,536 plants, at most 8,192 bytes per canonical plant record, and 65,536 bytes of envelope margin, giving a read and write bound of 536,936,448 bytes."
+    },
+    {
+      "id": "ar.file.131",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Legacy energy accepts 1 through 64 channels and at most 67,108,864 decoded value bytes;",
+      "text": "Legacy energy accepts 1 through 64 channels and at most 67,108,864 decoded value bytes;"
+    },
+    {
+      "id": "ar.file.132",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "the text bound is 406,847,552 bytes (12 bytes per uint16 value, 32 bytes per page, and 64 header bytes).",
+      "text": "the text bound is 406,847,552 bytes (12 bytes per uint16 value, 32 bytes per page, and 64 header bytes)."
+    },
+    {
+      "id": "ar.file.133",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "A missing legacy energy record is neutral;",
+      "text": "A missing legacy energy record is neutral;"
+    },
+    {
+      "id": "ar.file.134",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "unreadable, oversized or invalid records fail loading with a distinct error and never silently erase authoritative state.",
+      "text": "unreadable, oversized or invalid records fail loading with a distinct error and never silently erase authoritative state."
+    },
+    {
+      "id": "ar.file.135",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Region containers have a shared read and write bound of 268,435,456 bytes, checked before writer allocation.",
+      "text": "Region containers have a shared read and write bound of 268,435,456 bytes, checked before writer allocation."
+    },
+    {
+      "id": "ar.authority-capture.001",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "`GameSession::CaptureAuthorityState` reads a completed simulation boundary and returns either an immutable `AuthorityHashState` or an error with no state.",
+      "text": "`GameSession::CaptureAuthorityState` reads a completed simulation boundary and returns either an immutable `AuthorityHashState` or an error with no state."
+    },
+    {
+      "id": "ar.authority-capture.002",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "It does not synchronize water, admit entities, allocate persistent identities, wake owners, sample controllers, recover a journal or save.",
+      "text": "It does not synchronize water, admit entities, allocate persistent identities, wake owners, sample controllers, recover a journal or save."
+    },
+    {
+      "id": "ar.authority-capture.003",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Water authority is synchronized at simulation boundaries;",
+      "text": "Water authority is synchronized at simulation boundaries;"
+    },
+    {
+      "id": "ar.authority-capture.004",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "pending water divergence is represented in a copied hash projection without changing its source.",
+      "text": "pending water divergence is represented in a copied hash projection without changing its source."
+    },
+    {
+      "id": "ar.authority-capture.005",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "The enabled inventory validates committed snapshot membership and expected records before selecting ready resident, then parked, then committed durable content.",
+      "text": "The enabled inventory validates committed snapshot membership and expected records before selecting ready resident, then parked, then committed durable content."
+    },
+    {
+      "id": "ar.authority-capture.006",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Pristine and Loading candidates cannot shadow edited disk records.",
+      "text": "Pristine and Loading candidates cannot shadow edited disk records."
+    },
+    {
+      "id": "ar.authority-capture.007",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Disk-only records are discovered independently of residency hints.",
+      "text": "Disk-only records are discovered independently of residency hints."
+    },
+    {
+      "id": "ar.authority-capture.008",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Owners sort by signed `(x, z)` and chunks by `ChunkID`.",
+      "text": "Owners sort by signed `(x, z)` and chunks by `ChunkID`."
+    },
+    {
+      "id": "ar.authority-capture.009",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Items, plants, complete creatures, ambient and foliage pages, and regional energy also contribute owners;",
+      "text": "Items, plants, complete creatures, ambient and foliage pages, and regional energy also contribute owners;"
+    },
+    {
+      "id": "ar.authority-capture.010",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "visits and pristine chunks alone do not contribute content.",
+      "text": "visits and pristine chunks alone do not contribute content."
+    },
+    {
+      "id": "ar.authority-capture.011",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Each non-Frozen owner uses the existing `region_content_v2` composition, followed by its ground-and-plant, page-and-energy, and complete creature extensions in that order.",
+      "text": "Each non-Frozen owner uses the existing `region_content_v2` composition, followed by its ground-and-plant, page-and-energy, and complete creature extensions in that order."
+    },
+    {
+      "id": "ar.authority-capture.012",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Frozen owners select their complete stamped digest.",
+      "text": "Frozen owners select their complete stamped digest."
+    },
+    {
+      "id": "ar.authority-capture.013",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "The complete ledger codec stays outside that regional digest;",
+      "text": "The complete ledger codec stays outside that regional digest;"
+    },
+    {
+      "id": "ar.authority-capture.014",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "existing regional water-debt and energy-age extensions retain their established ordering.",
+      "text": "existing regional water-debt and energy-age extensions retain their established ordering."
+    },
+    {
+      "id": "ar.authority-capture.015",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "New authority envelopes frame tags, counts, little-endian integers and variable-length bytes explicitly.",
+      "text": "New authority envelopes frame tags, counts, little-endian integers and variable-length bytes explicitly."
+    },
+    {
+      "id": "ar.authority-capture.016",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Seed, generator identity and effective simulation settings are included;",
+      "text": "Seed, generator identity and effective simulation settings are included;"
+    },
+    {
+      "id": "ar.authority-capture.017",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "presentation settings, runtime handles, cache generations and save receipts are excluded.",
+      "text": "presentation settings, runtime handles, cache generations and save receipts are excluded."
+    },
+    {
+      "id": "ar.authority-capture.018",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "The host can supply its canonical avatar snapshot to the capture envelope.",
+      "text": "The host can supply its canonical avatar snapshot to the capture envelope."
+    },
+    {
+      "id": "ar.authority-capture.019",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Freeze stamping reads only the requested owner's durable region and projects only that owner's entities and regional content.",
+      "text": "Freeze stamping reads only the requested owner's durable region and projects only that owner's entities and regional content."
+    },
+    {
+      "id": "ar.authority-capture.020",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "It shares the regional recipe and chunk projection with full capture, without constructing world diagnostics or serializing unrelated entity stores on the scheduler path.",
+      "text": "It shares the regional recipe and chunk projection with full capture, without constructing world diagnostics or serializing unrelated entity stores on the scheduler path."
+    },
+    {
+      "id": "ar.authority-capture.021",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Enabled session hash helpers use these checked projections.",
+      "text": "Enabled session hash helpers use these checked projections."
+    },
+    {
+      "id": "ar.authority-capture.022",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "The chunk helper returns an empty string and latches a fault on capture failure;",
+      "text": "The chunk helper returns an empty string and latches a fault on capture failure;"
+    },
+    {
+      "id": "ar.authority-capture.023",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "const helpers report failure by exception.",
+      "text": "const helpers report failure by exception."
+    },
+    {
+      "id": "ar.authority-capture.024",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Consumers of the checked API must require a state before composing or publishing a checksum.",
+      "text": "Consumers of the checked API must require a state before composing or publishing a checksum."
+    },
+    {
+      "id": "ar.authority-capture.025",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Disabled hashes, save codecs, checkpoint layouts and artifact serialization retain their legacy paths.",
+      "text": "Disabled hashes, save codecs, checkpoint layouts and artifact serialization retain their legacy paths."
+    },
+    {
+      "id": "ar.frozen-adoption.001",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Outside missing-projection adoption, session load raises only the ceiling to the restored clock.",
+      "text": "Outside missing-projection adoption, session load raises only the ceiling to the restored clock."
+    },
+    {
+      "id": "ar.frozen-adoption.002",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Standalone decoding preserves historical bytes.",
+      "text": "Standalone decoding preserves historical bytes."
+    },
+    {
+      "id": "ar.frozen-adoption.003",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "During enabled session loading, absent projection metadata adopts the current projection from validated scratch authority before publishing the world.",
+      "text": "During enabled session loading, absent projection metadata adopts the current projection from validated scratch authority before publishing the world."
+    },
+    {
+      "id": "ar.frozen-adoption.004",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Every historical stamp is recomputed using the shared authority capture, including disk-only chunks and all consumer domains.",
+      "text": "Every historical stamp is recomputed using the shared authority capture, including disk-only chunks and all consumer domains."
+    },
+    {
+      "id": "ar.frozen-adoption.005",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Identities, ages, travel, population and freeze times do not advance.",
+      "text": "Identities, ages, travel, population and freeze times do not advance."
+    },
+    {
+      "id": "ar.frozen-adoption.006",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "The load writes no save members;",
+      "text": "The load writes no save members;"
+    },
+    {
+      "id": "ar.frozen-adoption.007",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "the next successful snapshot transaction writes the projection declaration.",
+      "text": "the next successful snapshot transaction writes the projection declaration."
+    },
+    {
+      "id": "ar.frozen-adoption.008",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "A failed adoption publishes no candidate state, and a failed save preserves the committed historical bytes.",
+      "text": "A failed adoption publishes no candidate state, and a failed save preserves the committed historical bytes."
+    },
+    {
+      "id": "ar.frozen-adoption.009",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "This permits v0.3.0 saves to load in v0.3.1 without relabelling opaque old digests.",
+      "text": "This permits v0.3.0 saves to load in v0.3.1 without relabelling opaque old digests."
+    },
+    {
+      "id": "ar.frozen-adoption.010",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Present malformed or unsupported projection metadata still refuses atomically.",
+      "text": "Present malformed or unsupported projection metadata still refuses atomically."
+    },
+    {
+      "id": "ar.frozen-adoption.011",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "| 7 | Activation state: LE u32 intent count, sorted (LE i32 x, LE i32 z, u8 creation-pending, u8 cause) entries, then LE u32 pending count and sorted (LE u64 tick, LE i32 x, LE i32 z, u8 cause) entrie",
+      "text": "| 7 | Activation state: LE u32 intent count, sorted (LE i32 x, LE i32 z, u8 creation-pending, u8 cause) entries, then LE u32 pending count and sorted (LE u64 tick, LE i32 x, LE i32 z, u8 cause) entries."
+    },
+    {
+      "id": "ar.frozen-adoption.012",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Causes are presence=1, pin=2 and edit=3;",
+      "text": "Causes are presence=1, pin=2 and edit=3;"
+    },
+    {
+      "id": "ar.frozen-adoption.013",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "combined count is at most 1,048,576 and every entry names an owned region. |",
+      "text": "combined count is at most 1,048,576 and every entry names an owned region. |"
+    },
+    {
+      "id": "ar.frozen-adoption.014",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "an integrity refusal by the direct state loader prevents saving.",
+      "text": "an integrity refusal by the direct state loader prevents saving."
+    },
+    {
+      "id": "ar.frozen-adoption.015",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "A failed public world replacement preserves the current session and its ability to save, and reports the replacement error separately.",
+      "text": "A failed public world replacement preserves the current session and its ability to save, and reports the replacement error separately."
+    },
+    {
+      "id": "ar.frozen-adoption.016",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Throughout a Frozen interval, underlying chunk/water, plant, creature, item, field-page and energy authority remains stable through unrelated ticks, parking, saving and restart.",
+      "text": "Throughout a Frozen interval, underlying chunk/water, plant, creature, item, field-page and energy authority remains stable through unrelated ticks, parking, saving and restart."
+    },
+    {
+      "id": "ar.frozen-adoption.017",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Controller removal discards only the runtime attachment;",
+      "text": "Controller removal discards only the runtime attachment;"
+    },
+    {
+      "id": "ar.frozen-adoption.018",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "it does not sample new locomotion or change logical controller participation.",
+      "text": "it does not sample new locomotion or change logical controller participation."
+    },
+    {
+      "id": "ar.frozen-adoption.019",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Saving is observational for Frozen continuation.",
+      "text": "Saving is observational for Frozen continuation."
+    },
+    {
+      "id": "ar.frozen-adoption.020",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Thaw applies only the bounded, one-shot plant resume policy;",
+      "text": "Thaw applies only the bounded, one-shot plant resume policy;"
+    },
+    {
+      "id": "ar.frozen-adoption.021",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "creatures and regional energy accept ordinary updates without multiplying them by elapsed Frozen time.",
+      "text": "creatures and regional energy accept ordinary updates without multiplying them by elapsed Frozen time."
+    },
+    {
+      "id": "ar.frozen-adoption.022",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Enabled disk-only restoration retains the durable water grid and its saved resolution, including for Frozen owners.",
+      "text": "Enabled disk-only restoration retains the durable water grid and its saved resolution, including for Frozen owners."
+    },
+    {
+      "id": "ar.frozen-adoption.023",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "A grid that differs from the session target adapts only through a budgeted regional water visit after thaw.",
+      "text": "A grid that differs from the session target adapts only through a budgeted regional water visit after thaw."
+    },
+    {
+      "id": "ar.frozen-adoption.024",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Flag-off restoration retains the global resolution migration.",
+      "text": "Flag-off restoration retains the global resolution migration."
+    },
+    {
+      "id": "ar.frozen-adoption.025",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Missing or invalid expected durable authority still latches a fault and suppresses procedural regeneration.",
+      "text": "Missing or invalid expected durable authority still latches a fault and suppresses procedural regeneration."
+    },
+    {
+      "id": "ar.frozen-adoption.026",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "`FrozenAuthority_test.cpp` covers missing metadata adoption and subsequent stamping, present malformed metadata refusal, all content domains across residency and restart with independent mutation cont",
+      "text": "`FrozenAuthority_test.cpp` covers missing metadata adoption and subsequent stamping, present malformed metadata refusal, all content domains across residency and restart with independent mutation controls, controller cleanup and resumed continuation, creature/energy thaw timing, and current-world saveability after failed replacement."
+    },
+    {
+      "id": "ar.frozen-adoption.027",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "The ledger tests also cover atomic adoption when a later owner's authority read fails.",
+      "text": "The ledger tests also cover atomic adoption when a later owner's authority read fails."
+    },
+    {
+      "id": "ar.pending.001",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Enabled snapshots also contain `chunks/region/simulation-pending.spn`, an indexed authoritative member committed with the clock, ledger, entities and energy values.",
+      "text": "Enabled snapshots also contain `chunks/region/simulation-pending.spn`, an indexed authoritative member committed with the clock, ledger, entities and energy values."
+    },
+    {
+      "id": "ar.pending.002",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "It stores future and undelivered simulation events, the next event sequence, and retained energy deposits.",
+      "text": "It stores future and undelivered simulation events, the next event sequence, and retained energy deposits."
+    },
+    {
+      "id": "ar.pending.003",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "An empty queue still preserves its sequence.",
+      "text": "An empty queue still preserves its sequence."
+    },
+    {
+      "id": "ar.pending.004",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "The member uses SPN1 version 1, fixed-width little-endian integers, length-framed topic/payload bytes and a trailing FNV-1a-64 checksum.",
+      "text": "The member uses SPN1 version 1, fixed-width little-endian integers, length-framed topic/payload bytes and a trailing FNV-1a-64 checksum."
+    },
+    {
+      "id": "ar.pending.005",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Events sort by `(tick, signed lane, sequence)`;",
+      "text": "Events sort by `(tick, signed lane, sequence)`;"
+    },
+    {
+      "id": "ar.pending.006",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "deposits preserve multiplicity and sort by `(packed cell key, channel, emitter ID, amount)`.",
+      "text": "deposits preserve multiplicity and sort by `(packed cell key, channel, emitter ID, amount)`."
+    },
+    {
+      "id": "ar.pending.007",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Decode checks the 64 MiB file cap, 16,384 events, 8 MiB combined event text and the existing regional deposit cap before allocating decoded payloads.",
+      "text": "Decode checks the 64 MiB file cap, 16,384 events, 8 MiB combined event text and the existing regional deposit cap before allocating decoded payloads."
+    },
+    {
+      "id": "ar.pending.008",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Unknown versions, noncanonical order, duplicate event sequences, invalid channels, trailing bytes and checksum failures refuse the candidate atomically.",
+      "text": "Unknown versions, noncanonical order, duplicate event sequences, invalid channels, trailing bytes and checksum failures refuse the candidate atomically."
+    },
+    {
+      "id": "ar.pending.009",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Enabled event admission shares the codec's count, text, tick and activation-key bounds.",
+      "text": "Enabled event admission shares the codec's count, text, tick and activation-key bounds."
+    },
+    {
+      "id": "ar.pending.010",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Publish and ordinary batch preparation refuse before consuming a sequence;",
+      "text": "Publish and ordinary batch preparation refuse before consuming a sequence;"
+    },
+    {
+      "id": "ar.pending.011",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "refused publication leaves the queue unchanged.",
+      "text": "refused publication leaves the queue unchanged."
+    },
+    {
+      "id": "ar.pending.012",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Queued text is accounted for incrementally, including successful delivery and queue replacement.",
+      "text": "Queued text is accounted for incrementally, including successful delivery and queue replacement."
+    },
+    {
+      "id": "ar.pending.013",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "These limits apply only with active regions enabled: the legacy bus admitted events without these bounds and retains that behavior when the flag is off.",
+      "text": "These limits apply only with active regions enabled: the legacy bus admitted events without these bounds and retains that behavior when the flag is off."
+    },
+    {
+      "id": "ar.pending.014",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Enabled prepared batches carry count and text totals with only inserted and removed deliveries.",
+      "text": "Enabled prepared batches carry count and text totals with only inserted and removed deliveries."
+    },
+    {
+      "id": "ar.pending.015",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Ordered queue nodes transfer at commit without copying or recounting retained future events;",
+      "text": "Ordered queue nodes transfer at commit without copying or recounting retained future events;"
+    },
+    {
+      "id": "ar.pending.016",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "activation reconciliation visits its activation index rather than the ordinary queue.",
+      "text": "activation reconciliation visits its activation index rather than the ordinary queue."
+    },
+    {
+      "id": "ar.pending.017",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Full queue validation occurs at restore.",
+      "text": "Full queue validation occurs at restore."
+    },
+    {
+      "id": "ar.pending.018",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Within one save, validated ledger state and pending-member fingerprints are reused.",
+      "text": "Within one save, validated ledger state and pending-member fingerprints are reused."
+    },
+    {
+      "id": "ar.pending.019",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Pending activation facts are checked against the final ledger outbox whenever either member changes, including ledger-only replacement or removal;",
+      "text": "Pending activation facts are checked against the final ledger outbox whenever either member changes, including ledger-only replacement or removal;"
+    },
+    {
+      "id": "ar.pending.020",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "member replacement invalidates the corresponding facts.",
+      "text": "member replacement invalidates the corresponding facts."
+    },
+    {
+      "id": "ar.pending.021",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Commit and initial index enumeration do not decode writer-produced pending payloads again.",
+      "text": "Commit and initial index enumeration do not decode writer-produced pending payloads again."
+    },
+    {
+      "id": "ar.pending.022",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Pending-state and ledger publication and removal always join or open an indexed transaction, including raw member writes and first standalone publication.",
+      "text": "Pending-state and ledger publication and removal always join or open an indexed transaction, including raw member writes and first standalone publication."
+    },
+    {
+      "id": "ar.pending.023",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "An allocator-only ledger also requires indexing;",
+      "text": "An allocator-only ledger also requires indexing;"
+    },
+    {
+      "id": "ar.pending.024",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "an empty legacy ledger save remains a no-op.",
+      "text": "an empty legacy ledger save remains a no-op."
+    },
+    {
+      "id": "ar.pending.025",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Installing the first ledger makes any existing pending member applicable to the final snapshot;",
+      "text": "Installing the first ledger makes any existing pending member applicable to the final snapshot;"
+    },
+    {
+      "id": "ar.pending.026",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "if baseline validation ignored it, commit performs one bounded decode and reuses its verified facts.",
+      "text": "if baseline validation ignored it, commit performs one bounded decode and reuses its verified facts."
+    },
+    {
+      "id": "ar.pending.027",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Before publishing, commit also checks the pending member's original presence, index membership, size and fingerprint.",
+      "text": "Before publishing, commit also checks the pending member's original presence, index membership, size and fingerprint."
+    },
+    {
+      "id": "ar.pending.028",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Replacements and removals use the journal's original fingerprint;",
+      "text": "Replacements and removals use the journal's original fingerprint;"
+    },
+    {
+      "id": "ar.pending.029",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "retained members reuse their validated digest.",
+      "text": "retained members reuse their validated digest."
+    },
+    {
+      "id": "ar.pending.030",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "An indexed mismatch refuses and restores the original snapshot bytes.",
+      "text": "An indexed mismatch refuses and restores the original snapshot bytes."
+    },
+    {
+      "id": "ar.pending.031",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Disabled sessions do not probe, read, fingerprint or validate the pending member;",
+      "text": "Disabled sessions do not probe, read, fingerprint or validate the pending member;"
+    },
+    {
+      "id": "ar.pending.032",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "clock compatibility uses the existing metadata and ledger indicators.",
+      "text": "clock compatibility uses the existing metadata and ledger indicators."
+    },
+    {
+      "id": "ar.pending.033",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "A v0.3.0 snapshot without this member adopts an empty queue and deposit buffer;",
+      "text": "A v0.3.0 snapshot without this member adopts an empty queue and deposit buffer;"
+    },
+    {
+      "id": "ar.pending.034",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "activation deliveries are derived from its validated ledger outbox in bounded prefixes ordered by durable activation key.",
+      "text": "activation deliveries are derived from its validated ledger outbox in bounded prefixes ordered by durable activation key."
+    },
+    {
+      "id": "ar.pending.035",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Excess deliveries remain in that outbox and are admitted on later ticks as queue capacity becomes available;",
+      "text": "Excess deliveries remain in that outbox and are admitted on later ticks as queue capacity becomes available;"
+    },
+    {
+      "id": "ar.pending.036",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "historical outboxes may exceed the general event queue's capacity.",
+      "text": "historical outboxes may exceed the general event queue's capacity."
+    },
+    {
+      "id": "ar.pending.037",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "The next enabled save writes the member.",
+      "text": "The next enabled save writes the member."
+    },
+    {
+      "id": "ar.pending.038",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "A present member restores the exact event queue and sequence without enqueuing additional deliveries during load.",
+      "text": "A present member restores the exact event queue and sequence without enqueuing additional deliveries during load."
+    },
+    {
+      "id": "ar.pending.039",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Queued activation deliveries must match the separate ledger outbox;",
+      "text": "Queued activation deliveries must match the separate ledger outbox;"
+    },
+    {
+      "id": "ar.pending.040",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "activations not yet enqueued remain in that outbox for the next tick.",
+      "text": "activations not yet enqueued remain in that outbox for the next tick."
+    },
+    {
+      "id": "ar.pending.041",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Missing indexed members and unlisted present members remain integrity failures.",
+      "text": "Missing indexed members and unlisted present members remain integrity failures."
+    },
+    {
+      "id": "ar.pending.042",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "The outbox is not merged with or replaced by the general event queue.",
+      "text": "The outbox is not merged with or replaced by the general event queue."
+    },
+    {
+      "id": "ar.pending.043",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Enabled delivery acknowledges only completed events.",
+      "text": "Enabled delivery acknowledges only completed events."
+    },
+    {
+      "id": "ar.pending.044",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "A throwing handler or a stop requested during delivery retains the failed event and its undelivered suffix, including future work.",
+      "text": "A throwing handler or a stop requested during delivery retains the failed event and its undelivered suffix, including future work."
+    },
+    {
+      "id": "ar.pending.045",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Subscribers must be observational, idempotent, or transactional: callback side effects already performed cannot be rolled back by the bus.",
+      "text": "Subscribers must be observational, idempotent, or transactional: callback side effects already performed cannot be rolled back by the bus."
+    },
+    {
+      "id": "ar.pending.046",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "A recovery save preserves these events and deposits retained by a refused energy tick, without clearing the scheduler fault.",
+      "text": "A recovery save preserves these events and deposits retained by a refused energy tick, without clearing the scheduler fault."
+    },
+    {
+      "id": "ar.pending.047",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Rollback and crash recovery restore the pending member with the rest of the snapshot.",
+      "text": "Rollback and crash recovery restore the pending member with the rest of the snapshot."
+    },
+    {
+      "id": "ar.pending.048",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "The immutable authority capture exposes framed pending event and deposit projections for regional and page diagnostic consumers, and includes both in composed authority.",
+      "text": "The immutable authority capture exposes framed pending event and deposit projections for regional and page diagnostic consumers, and includes both in composed authority."
+    },
+    {
+      "id": "ar.pending.049",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Nonempty retained deposits also enter the existing energy slot.",
+      "text": "Nonempty retained deposits also enter the existing energy slot."
+    },
+    {
+      "id": "ar.pending.050",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Hash reads do not deliver events or consume deposits.",
+      "text": "Hash reads do not deliver events or consume deposits."
+    },
+    {
+      "id": "ar.pending.051",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Disabled delivery, hash recipes, saves and artifacts retain their existing paths and bytes.",
+      "text": "Disabled delivery, hash recipes, saves and artifacts retain their existing paths and bytes."
+    },
+    {
+      "id": "ar.named-hashes.001",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "Enabled server, record/replay, lockstep, smoke and networked-session captures use one checked `AuthorityHashState` per request.",
+      "text": "Enabled server, record/replay, lockstep, smoke and networked-session captures use one checked `AuthorityHashState` per request."
+    },
+    {
+      "id": "ar.named-hashes.002",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "The common persistence composer consumes that immutable capture, including the canonical host avatar snapshot.",
+      "text": "The common persistence composer consumes that immutable capture, including the canonical host avatar snapshot."
+    },
+    {
+      "id": "ar.named-hashes.003",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "Enabled host plant rosters are admitted in entity order before the first tick-zero capture.",
+      "text": "Enabled host plant rosters are admitted in entity order before the first tick-zero capture."
+    },
+    {
+      "id": "ar.named-hashes.004",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "An absent avatar argument denotes the canonical empty roster.",
+      "text": "An absent avatar argument denotes the canonical empty roster."
+    },
+    {
+      "id": "ar.named-hashes.005",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "Enabled terrain and water diagnostics read the resolved authoritative inventory and exclude residency and lifecycle state.",
+      "text": "Enabled terrain and water diagnostics read the resolved authoritative inventory and exclude residency and lifecycle state."
+    },
+    {
+      "id": "ar.named-hashes.006",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "Smoke artifacts add four enabled-only `sub_hashes` keys, also present in each run and in `sub_hashes_replay`: `regions` frames clock, ledger/configuration and pending events;",
+      "text": "Smoke artifacts add four enabled-only `sub_hashes` keys, also present in each run and in `sub_hashes_replay`: `regions` frames clock, ledger/configuration and pending events;"
+    },
+    {
+      "id": "ar.named-hashes.007",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "`creatures` covers the complete persistent creature snapshot;",
+      "text": "`creatures` covers the complete persistent creature snapshot;"
+    },
+    {
+      "id": "ar.named-hashes.008",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "`items` covers canonical ground objects;",
+      "text": "`items` covers canonical ground objects;"
+    },
+    {
+      "id": "ar.named-hashes.009",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "`pages` frames complete field pages, regional energy and retained deposits.",
+      "text": "`pages` frames complete field pages, regional energy and retained deposits."
+    },
+    {
+      "id": "ar.named-hashes.010",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "All four participate in the smoke verdict.",
+      "text": "All four participate in the smoke verdict."
+    },
+    {
+      "id": "ar.named-hashes.011",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "Their values are diagnostics;",
+      "text": "Their values are diagnostics;"
+    },
+    {
+      "id": "ar.named-hashes.012",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "the composed hash retains its existing slots and regional content recipe.",
+      "text": "the composed hash retains its existing slots and regional content recipe."
+    },
+    {
+      "id": "ar.named-hashes.013",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "Enabled network peers cover the same admitted content/configuration identity through the common composer at checkpoints.",
+      "text": "Enabled network peers cover the same admitted content/configuration identity through the common composer at checkpoints."
+    },
+    {
+      "id": "ar.named-hashes.014",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "The client establishes one immutable effective `SystemConfig` before creating its world;",
+      "text": "The client establishes one immutable effective `SystemConfig` before creating its world;"
+    },
+    {
+      "id": "ar.named-hashes.015",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "the network driver's `Begin` calls the headless `GameSession::CreateNetworkHost` factory.",
+      "text": "the network driver's `Begin` calls the headless `GameSession::CreateNetworkHost` factory."
+    },
+    {
+      "id": "ar.named-hashes.016",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "That factory forwards the snapshot through `ConfigureSimulationFromPeer` before world creation, then loads host state and prepares the spawn surface.",
+      "text": "That factory forwards the snapshot through `ConfigureSimulationFromPeer` before world creation, then loads host state and prepares the spawn surface."
+    },
+    {
+      "id": "ar.named-hashes.017",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "The snapshot includes active regions, water, weather, energy and all creature/plant tuning.",
+      "text": "The snapshot includes active regions, water, weather, energy and all creature/plant tuning."
+    },
+    {
+      "id": "ar.named-hashes.018",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "Both checkpoint hooks select their recipe from that shared snapshot.",
+      "text": "Both checkpoint hooks select their recipe from that shared snapshot."
+    },
+    {
+      "id": "ar.named-hashes.019",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "A contradictory local active-regions flag refuses capture instead of silently switching recipes.",
+      "text": "A contradictory local active-regions flag refuses capture instead of silently switching recipes."
+    },
+    {
+      "id": "ar.named-hashes.020",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "Configuration replacement after world creation refuses without changing the admitted configuration.",
+      "text": "Configuration replacement after world creation refuses without changing the admitted configuration."
+    },
+    {
+      "id": "ar.named-hashes.021",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "A capture failure clears all outputs, latches the session fault and prevents checkpoint publication.",
+      "text": "A capture failure clears all outputs, latches the session fault and prevents checkpoint publication."
+    },
+    {
+      "id": "ar.named-hashes.022",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "Recording checks initial, checkpoint and final captures before finalizing;",
+      "text": "Recording checks initial, checkpoint and final captures before finalizing;"
+    },
+    {
+      "id": "ar.named-hashes.023",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "lockstep capture refusal stops the exchange before storing or sending a hash, sends the existing disconnect notification at the agreed tick and closes the transport.",
+      "text": "lockstep capture refusal stops the exchange before storing or sending a hash, sends the existing disconnect notification at the agreed tick and closes the transport."
+    },
+    {
+      "id": "ar.named-hashes.024",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "No later simulation tick runs.",
+      "text": "No later simulation tick runs."
+    },
+    {
+      "id": "ar.named-hashes.025",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "Recovery saves continue to use the existing fault contract.",
+      "text": "Recovery saves continue to use the existing fault contract."
+    },
+    {
+      "id": "ar.named-hashes.026",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "HashMsg and LREC1 retain tick, world, terrain, water and entities, without named diagnostic fields.",
+      "text": "HashMsg and LREC1 retain tick, world, terrain, water and entities, without named diagnostic fields."
+    },
+    {
+      "id": "ar.named-hashes.027",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "Frame grouping does not change checkpoint authority at a completed tick.",
+      "text": "Frame grouping does not change checkpoint authority at a completed tick."
+    },
+    {
+      "id": "ar.named-hashes.028",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "With active regions disabled, the historical hash recipes and artifact bytes remain unchanged;",
+      "text": "With active regions disabled, the historical hash recipes and artifact bytes remain unchanged;"
+    },
+    {
+      "id": "ar.named-hashes.029",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "new named keys are omitted even if a reused in-memory result contains diagnostic values.",
+      "text": "new named keys are omitted even if a reused in-memory result contains diagnostic values."
+    },
+    {
+      "id": "ar.named-hashes.030",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "quote": "Native compiler, runtime and performance qualification remains pending.",
+      "text": "Native compiler, runtime and performance qualification remains pending."
     },
     {
       "id": "dw.regions.104",
@@ -4651,12 +5509,6 @@
       "text": "source inspection and formatting checks do not establish their results."
     },
     {
-      "id": "ar.activation.065",
-      "source": "docs/active-regions.md#activation-and-ordering",
-      "quote": "Both clocks identify the faulting tick T.",
-      "text": "Both clocks identify the faulting tick T."
-    },
-    {
       "id": "ar.activation.066",
       "source": "docs/active-regions.md#activation-and-ordering",
       "quote": "Mutations already committed at T remain authoritative;",
@@ -4765,576 +5617,6 @@
       "text": "checked authoritative preparation failure latches and returns failure without escaping shutdown."
     },
     {
-      "id": "ar.file.120",
-      "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "the commit index is replaced last.",
-      "text": "the commit index is replaced last."
-    },
-    {
-      "id": "ar.file.121",
-      "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Failure before that commit restores the previous complete snapshot and defers memory acknowledgements, dirty clearing and parked release until a successful commit.",
-      "text": "Failure before that commit restores the previous complete snapshot and defers memory acknowledgements, dirty clearing and parked release until a successful commit."
-    },
-    {
-      "id": "ar.file.122",
-      "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "See the [snapshot protocol](distant-world.md#persistence-and-format-contract) for the wider persistence contract.",
-      "text": "See the [snapshot protocol](distant-world.md#persistence-and-format-contract) for the wider persistence contract."
-    },
-    {
-      "id": "ar.file.123",
-      "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Identities, ages, travel, population and freeze times do not advance.",
-      "text": "Identities, ages, travel, population and freeze times do not advance."
-    },
-    {
-      "id": "ar.file.124",
-      "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "The load writes no save members;",
-      "text": "The load writes no save members;"
-    },
-    {
-      "id": "ar.file.125",
-      "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "A failed adoption publishes no candidate state, and a failed save preserves the committed historical bytes.",
-      "text": "A failed adoption publishes no candidate state, and a failed save preserves the committed historical bytes."
-    },
-    {
-      "id": "ar.file.126",
-      "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Present malformed or unsupported projection metadata still refuses atomically.",
-      "text": "Present malformed or unsupported projection metadata still refuses atomically."
-    },
-    {
-      "id": "ar.policy.090",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "A failed public world replacement preserves the current session and its ability to save, and reports the replacement error separately.",
-      "text": "A failed public world replacement preserves the current session and its ability to save, and reports the replacement error separately."
-    },
-    {
-      "id": "ar.capture.001",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "`GameSession::CaptureAuthorityState` reads a completed simulation boundary and returns either an immutable `AuthorityHashState` or an error with no state.",
-      "text": "`GameSession::CaptureAuthorityState` reads a completed simulation boundary and returns either an immutable `AuthorityHashState` or an error with no state."
-    },
-    {
-      "id": "ar.capture.002",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "It does not synchronize water, admit entities, allocate persistent identities, wake owners, sample controllers, recover a journal or save.",
-      "text": "It does not synchronize water, admit entities, allocate persistent identities, wake owners, sample controllers, recover a journal or save."
-    },
-    {
-      "id": "ar.capture.003",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Water authority is synchronized at simulation boundaries;",
-      "text": "Water authority is synchronized at simulation boundaries;"
-    },
-    {
-      "id": "ar.capture.004",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "pending water divergence is represented in a copied hash projection without changing its source.",
-      "text": "pending water divergence is represented in a copied hash projection without changing its source."
-    },
-    {
-      "id": "ar.capture.005",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "The enabled inventory validates committed snapshot membership and expected records before selecting ready resident, then parked, then committed durable content.",
-      "text": "The enabled inventory validates committed snapshot membership and expected records before selecting ready resident, then parked, then committed durable content."
-    },
-    {
-      "id": "ar.capture.006",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Pristine and Loading candidates cannot shadow edited disk records.",
-      "text": "Pristine and Loading candidates cannot shadow edited disk records."
-    },
-    {
-      "id": "ar.capture.007",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Disk-only records are discovered independently of residency hints.",
-      "text": "Disk-only records are discovered independently of residency hints."
-    },
-    {
-      "id": "ar.capture.008",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Owners sort by signed `(x, z)` and chunks by `ChunkID`.",
-      "text": "Owners sort by signed `(x, z)` and chunks by `ChunkID`."
-    },
-    {
-      "id": "ar.capture.009",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Items, plants, complete creatures, ambient and foliage pages, and regional energy also contribute owners;",
-      "text": "Items, plants, complete creatures, ambient and foliage pages, and regional energy also contribute owners;"
-    },
-    {
-      "id": "ar.capture.010",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "visits and pristine chunks alone do not contribute content.",
-      "text": "visits and pristine chunks alone do not contribute content."
-    },
-    {
-      "id": "ar.capture.011",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Each non-Frozen owner uses the existing `region_content_v2` composition, followed by its ground-and-plant, page-and-energy, and complete creature extensions in that order.",
-      "text": "Each non-Frozen owner uses the existing `region_content_v2` composition, followed by its ground-and-plant, page-and-energy, and complete creature extensions in that order."
-    },
-    {
-      "id": "ar.capture.012",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Frozen owners select their complete stamped digest.",
-      "text": "Frozen owners select their complete stamped digest."
-    },
-    {
-      "id": "ar.capture.013",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "The complete ledger codec stays outside that regional digest;",
-      "text": "The complete ledger codec stays outside that regional digest;"
-    },
-    {
-      "id": "ar.capture.014",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "existing regional water-debt and energy-age extensions retain their established ordering.",
-      "text": "existing regional water-debt and energy-age extensions retain their established ordering."
-    },
-    {
-      "id": "ar.capture.015",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "New authority envelopes frame tags, counts, little-endian integers and variable-length bytes explicitly.",
-      "text": "New authority envelopes frame tags, counts, little-endian integers and variable-length bytes explicitly."
-    },
-    {
-      "id": "ar.capture.016",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Seed, generator identity and effective simulation settings are included;",
-      "text": "Seed, generator identity and effective simulation settings are included;"
-    },
-    {
-      "id": "ar.capture.017",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "presentation settings, runtime handles, cache generations and save receipts are excluded.",
-      "text": "presentation settings, runtime handles, cache generations and save receipts are excluded."
-    },
-    {
-      "id": "ar.capture.018",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "The host can supply its canonical avatar snapshot to the capture envelope.",
-      "text": "The host can supply its canonical avatar snapshot to the capture envelope."
-    },
-    {
-      "id": "ar.capture.019",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Freeze stamping reads only the requested owner's durable region and projects only that owner's entities and regional content.",
-      "text": "Freeze stamping reads only the requested owner's durable region and projects only that owner's entities and regional content."
-    },
-    {
-      "id": "ar.capture.020",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "It shares the regional recipe and chunk projection with full capture, without constructing world diagnostics or serializing unrelated entity stores on the scheduler path.",
-      "text": "It shares the regional recipe and chunk projection with full capture, without constructing world diagnostics or serializing unrelated entity stores on the scheduler path."
-    },
-    {
-      "id": "ar.capture.021",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Throughout a Frozen interval, underlying chunk/water, plant, creature, item, field-page and energy authority remains stable through unrelated ticks, parking, saving and restart.",
-      "text": "Throughout a Frozen interval, underlying chunk/water, plant, creature, item, field-page and energy authority remains stable through unrelated ticks, parking, saving and restart."
-    },
-    {
-      "id": "ar.capture.022",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Controller removal discards only the runtime attachment;",
-      "text": "Controller removal discards only the runtime attachment;"
-    },
-    {
-      "id": "ar.capture.023",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "it does not sample new locomotion or change logical controller participation.",
-      "text": "it does not sample new locomotion or change logical controller participation."
-    },
-    {
-      "id": "ar.capture.024",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Saving is observational for Frozen continuation.",
-      "text": "Saving is observational for Frozen continuation."
-    },
-    {
-      "id": "ar.capture.025",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Thaw applies only the bounded, one-shot plant resume policy;",
-      "text": "Thaw applies only the bounded, one-shot plant resume policy;"
-    },
-    {
-      "id": "ar.capture.026",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "creatures and regional energy accept ordinary updates without multiplying them by elapsed Frozen time.",
-      "text": "creatures and regional energy accept ordinary updates without multiplying them by elapsed Frozen time."
-    },
-    {
-      "id": "ar.capture.027",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Enabled disk-only restoration retains the durable water grid and its saved resolution, including for Frozen owners.",
-      "text": "Enabled disk-only restoration retains the durable water grid and its saved resolution, including for Frozen owners."
-    },
-    {
-      "id": "ar.capture.028",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "A grid that differs from the session target adapts only through a budgeted regional water visit after thaw.",
-      "text": "A grid that differs from the session target adapts only through a budgeted regional water visit after thaw."
-    },
-    {
-      "id": "ar.capture.029",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Flag-off restoration retains the global resolution migration.",
-      "text": "Flag-off restoration retains the global resolution migration."
-    },
-    {
-      "id": "ar.capture.030",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Missing or invalid expected durable authority still latches a fault and suppresses procedural regeneration.",
-      "text": "Missing or invalid expected durable authority still latches a fault and suppresses procedural regeneration."
-    },
-    {
-      "id": "ar.capture.031",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "`FrozenAuthority_test.cpp` covers missing metadata adoption and subsequent stamping, present malformed metadata refusal, all content domains across residency and restart with independent mutation cont",
-      "text": "`FrozenAuthority_test.cpp` covers missing metadata adoption and subsequent stamping, present malformed metadata refusal, all content domains across residency and restart with independent mutation controls, controller cleanup and resumed continuation, creature/energy thaw timing, and current-world saveability after failed replacement."
-    },
-    {
-      "id": "ar.capture.032",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "The ledger tests also cover atomic adoption when a later owner's authority read fails.",
-      "text": "The ledger tests also cover atomic adoption when a later owner's authority read fails."
-    },
-    {
-      "id": "ar.capture.033",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Enabled session hash helpers use these checked projections.",
-      "text": "Enabled session hash helpers use these checked projections."
-    },
-    {
-      "id": "ar.capture.034",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "The chunk helper returns an empty string and latches a fault on capture failure;",
-      "text": "The chunk helper returns an empty string and latches a fault on capture failure;"
-    },
-    {
-      "id": "ar.capture.035",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "const helpers report failure by exception.",
-      "text": "const helpers report failure by exception."
-    },
-    {
-      "id": "ar.capture.036",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Consumers of the checked API must require a state before composing or publishing a checksum.",
-      "text": "Consumers of the checked API must require a state before composing or publishing a checksum."
-    },
-    {
-      "id": "ar.capture.037",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Disabled hashes, save codecs, checkpoint layouts and artifact serialization retain their legacy paths.",
-      "text": "Disabled hashes, save codecs, checkpoint layouts and artifact serialization retain their legacy paths."
-    },
-    {
-      "id": "ar.capture.038",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Enabled snapshots also contain `chunks/region/simulation-pending.spn`, an indexed authoritative member committed with the clock, ledger, entities and energy values.",
-      "text": "Enabled snapshots also contain `chunks/region/simulation-pending.spn`, an indexed authoritative member committed with the clock, ledger, entities and energy values."
-    },
-    {
-      "id": "ar.capture.039",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "It stores future and undelivered simulation events, the next event sequence, and retained energy deposits.",
-      "text": "It stores future and undelivered simulation events, the next event sequence, and retained energy deposits."
-    },
-    {
-      "id": "ar.capture.040",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "An empty queue still preserves its sequence.",
-      "text": "An empty queue still preserves its sequence."
-    },
-    {
-      "id": "ar.capture.041",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "The member uses SPN1 version 1, fixed-width little-endian integers, length-framed topic/payload bytes and a trailing FNV-1a-64 checksum.",
-      "text": "The member uses SPN1 version 1, fixed-width little-endian integers, length-framed topic/payload bytes and a trailing FNV-1a-64 checksum."
-    },
-    {
-      "id": "ar.capture.042",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Events sort by `(tick, signed lane, sequence)`;",
-      "text": "Events sort by `(tick, signed lane, sequence)`;"
-    },
-    {
-      "id": "ar.capture.043",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "deposits preserve multiplicity and sort by `(packed cell key, channel, emitter ID, amount)`.",
-      "text": "deposits preserve multiplicity and sort by `(packed cell key, channel, emitter ID, amount)`."
-    },
-    {
-      "id": "ar.capture.044",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Decode checks the 64 MiB file cap, 16,384 events, 8 MiB combined event text and the existing regional deposit cap before allocating decoded payloads.",
-      "text": "Decode checks the 64 MiB file cap, 16,384 events, 8 MiB combined event text and the existing regional deposit cap before allocating decoded payloads."
-    },
-    {
-      "id": "ar.capture.045",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Unknown versions, noncanonical order, duplicate event sequences, invalid channels, trailing bytes and checksum failures refuse the candidate atomically.",
-      "text": "Unknown versions, noncanonical order, duplicate event sequences, invalid channels, trailing bytes and checksum failures refuse the candidate atomically."
-    },
-    {
-      "id": "ar.capture.046",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Enabled event admission shares the codec's count, text, tick and activation-key bounds.",
-      "text": "Enabled event admission shares the codec's count, text, tick and activation-key bounds."
-    },
-    {
-      "id": "ar.capture.047",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Publish and ordinary batch preparation refuse before consuming a sequence;",
-      "text": "Publish and ordinary batch preparation refuse before consuming a sequence;"
-    },
-    {
-      "id": "ar.capture.048",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "refused publication leaves the queue unchanged.",
-      "text": "refused publication leaves the queue unchanged."
-    },
-    {
-      "id": "ar.capture.049",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Queued text is accounted for incrementally, including successful delivery and queue replacement.",
-      "text": "Queued text is accounted for incrementally, including successful delivery and queue replacement."
-    },
-    {
-      "id": "ar.capture.050",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "These limits apply only with active regions enabled: the legacy bus admitted events without these bounds and retains that behavior when the flag is off.",
-      "text": "These limits apply only with active regions enabled: the legacy bus admitted events without these bounds and retains that behavior when the flag is off."
-    },
-    {
-      "id": "ar.capture.051",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Enabled prepared batches carry count and text totals with only inserted and removed deliveries.",
-      "text": "Enabled prepared batches carry count and text totals with only inserted and removed deliveries."
-    },
-    {
-      "id": "ar.capture.052",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Ordered queue nodes transfer at commit without copying or recounting retained future events;",
-      "text": "Ordered queue nodes transfer at commit without copying or recounting retained future events;"
-    },
-    {
-      "id": "ar.capture.053",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "activation reconciliation visits its activation index rather than the ordinary queue.",
-      "text": "activation reconciliation visits its activation index rather than the ordinary queue."
-    },
-    {
-      "id": "ar.capture.054",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Full queue validation occurs at restore.",
-      "text": "Full queue validation occurs at restore."
-    },
-    {
-      "id": "ar.capture.055",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Within one save, validated ledger state and pending-member fingerprints are reused.",
-      "text": "Within one save, validated ledger state and pending-member fingerprints are reused."
-    },
-    {
-      "id": "ar.capture.056",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Pending activation facts are checked against the final ledger outbox whenever either member changes, including ledger-only replacement or removal;",
-      "text": "Pending activation facts are checked against the final ledger outbox whenever either member changes, including ledger-only replacement or removal;"
-    },
-    {
-      "id": "ar.capture.057",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "member replacement invalidates the corresponding facts.",
-      "text": "member replacement invalidates the corresponding facts."
-    },
-    {
-      "id": "ar.capture.058",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Commit and initial index enumeration do not decode writer-produced pending payloads again.",
-      "text": "Commit and initial index enumeration do not decode writer-produced pending payloads again."
-    },
-    {
-      "id": "ar.capture.059",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Pending-state and ledger publication and removal always join or open an indexed transaction, including raw member writes and first standalone publication.",
-      "text": "Pending-state and ledger publication and removal always join or open an indexed transaction, including raw member writes and first standalone publication."
-    },
-    {
-      "id": "ar.capture.060",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "An allocator-only ledger also requires indexing;",
-      "text": "An allocator-only ledger also requires indexing;"
-    },
-    {
-      "id": "ar.capture.061",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "an empty legacy ledger save remains a no-op.",
-      "text": "an empty legacy ledger save remains a no-op."
-    },
-    {
-      "id": "ar.capture.062",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Installing the first ledger makes any existing pending member applicable to the final snapshot;",
-      "text": "Installing the first ledger makes any existing pending member applicable to the final snapshot;"
-    },
-    {
-      "id": "ar.capture.063",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "if baseline validation ignored it, commit performs one bounded decode and reuses its verified facts.",
-      "text": "if baseline validation ignored it, commit performs one bounded decode and reuses its verified facts."
-    },
-    {
-      "id": "ar.capture.064",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Before publishing, commit also checks the pending member's original presence, index membership, size and fingerprint.",
-      "text": "Before publishing, commit also checks the pending member's original presence, index membership, size and fingerprint."
-    },
-    {
-      "id": "ar.capture.065",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Replacements and removals use the journal's original fingerprint;",
-      "text": "Replacements and removals use the journal's original fingerprint;"
-    },
-    {
-      "id": "ar.capture.066",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "retained members reuse their validated digest.",
-      "text": "retained members reuse their validated digest."
-    },
-    {
-      "id": "ar.capture.067",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "An indexed mismatch refuses and restores the original snapshot bytes.",
-      "text": "An indexed mismatch refuses and restores the original snapshot bytes."
-    },
-    {
-      "id": "ar.capture.068",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Disabled sessions do not probe, read, fingerprint or validate the pending member;",
-      "text": "Disabled sessions do not probe, read, fingerprint or validate the pending member;"
-    },
-    {
-      "id": "ar.capture.069",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "clock compatibility uses the existing metadata and ledger indicators.",
-      "text": "clock compatibility uses the existing metadata and ledger indicators."
-    },
-    {
-      "id": "ar.capture.070",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "A v0.3.0 snapshot without this member adopts an empty queue and deposit buffer;",
-      "text": "A v0.3.0 snapshot without this member adopts an empty queue and deposit buffer;"
-    },
-    {
-      "id": "ar.capture.071",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "activation deliveries are derived from its validated ledger outbox in bounded prefixes ordered by durable activation key.",
-      "text": "activation deliveries are derived from its validated ledger outbox in bounded prefixes ordered by durable activation key."
-    },
-    {
-      "id": "ar.capture.072",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Excess deliveries remain in that outbox and are admitted on later ticks as queue capacity becomes available;",
-      "text": "Excess deliveries remain in that outbox and are admitted on later ticks as queue capacity becomes available;"
-    },
-    {
-      "id": "ar.capture.073",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "historical outboxes may exceed the general event queue's capacity.",
-      "text": "historical outboxes may exceed the general event queue's capacity."
-    },
-    {
-      "id": "ar.capture.074",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "The next enabled save writes the member.",
-      "text": "The next enabled save writes the member."
-    },
-    {
-      "id": "ar.capture.075",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "A present member restores the exact event queue and sequence without enqueuing additional deliveries during load.",
-      "text": "A present member restores the exact event queue and sequence without enqueuing additional deliveries during load."
-    },
-    {
-      "id": "ar.capture.076",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Queued activation deliveries must match the separate ledger outbox;",
-      "text": "Queued activation deliveries must match the separate ledger outbox;"
-    },
-    {
-      "id": "ar.capture.077",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "activations not yet enqueued remain in that outbox for the next tick.",
-      "text": "activations not yet enqueued remain in that outbox for the next tick."
-    },
-    {
-      "id": "ar.capture.078",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Missing indexed members and unlisted present members remain integrity failures.",
-      "text": "Missing indexed members and unlisted present members remain integrity failures."
-    },
-    {
-      "id": "ar.capture.079",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "The outbox is not merged with or replaced by the general event queue.",
-      "text": "The outbox is not merged with or replaced by the general event queue."
-    },
-    {
-      "id": "ar.capture.080",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Enabled delivery acknowledges only completed events.",
-      "text": "Enabled delivery acknowledges only completed events."
-    },
-    {
-      "id": "ar.capture.081",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "A throwing handler or a stop requested during delivery retains the failed event and its undelivered suffix, including future work.",
-      "text": "A throwing handler or a stop requested during delivery retains the failed event and its undelivered suffix, including future work."
-    },
-    {
-      "id": "ar.capture.082",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Subscribers must be observational, idempotent, or transactional: callback side effects already performed cannot be rolled back by the bus.",
-      "text": "Subscribers must be observational, idempotent, or transactional: callback side effects already performed cannot be rolled back by the bus."
-    },
-    {
-      "id": "ar.capture.083",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "A recovery save preserves these events and deposits retained by a refused energy tick, without clearing the scheduler fault.",
-      "text": "A recovery save preserves these events and deposits retained by a refused energy tick, without clearing the scheduler fault."
-    },
-    {
-      "id": "ar.capture.084",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Rollback and crash recovery restore the pending member with the rest of the snapshot.",
-      "text": "Rollback and crash recovery restore the pending member with the rest of the snapshot."
-    },
-    {
-      "id": "ar.capture.085",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "The immutable authority capture exposes framed pending event and deposit projections for regional and page diagnostic consumers, and includes both in composed authority.",
-      "text": "The immutable authority capture exposes framed pending event and deposit projections for regional and page diagnostic consumers, and includes both in composed authority."
-    },
-    {
-      "id": "ar.capture.086",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Nonempty retained deposits also enter the existing energy slot.",
-      "text": "Nonempty retained deposits also enter the existing energy slot."
-    },
-    {
-      "id": "ar.capture.087",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Hash reads do not deliver events or consume deposits.",
-      "text": "Hash reads do not deliver events or consume deposits."
-    },
-    {
       "id": "ar.capture.088",
       "source": "docs/active-regions.md#checked-authority-hash-capture",
       "quote": "Pending snapshot and deposit preparation failures are contained at completed boundaries.",
@@ -5369,192 +5651,6 @@
       "source": "docs/active-regions.md#checked-authority-hash-capture",
       "quote": "Neither capture nor save is permitted inside a catch-up batch.",
       "text": "Neither capture nor save is permitted inside a catch-up batch."
-    },
-    {
-      "id": "ar.capture.094",
-      "source": "docs/active-regions.md#checked-authority-hash-capture",
-      "quote": "Disabled delivery, hash recipes, saves and artifacts retain their existing paths and bytes.",
-      "text": "Disabled delivery, hash recipes, saves and artifacts retain their existing paths and bytes."
-    },
-    {
-      "id": "ar.checkpoints.001",
-      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
-      "quote": "Enabled server, record/replay, lockstep, smoke and networked-session captures use one checked `AuthorityHashState` per request.",
-      "text": "Enabled server, record/replay, lockstep, smoke and networked-session captures use one checked `AuthorityHashState` per request."
-    },
-    {
-      "id": "ar.checkpoints.002",
-      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
-      "quote": "The common persistence composer consumes that immutable capture, including the canonical host avatar snapshot.",
-      "text": "The common persistence composer consumes that immutable capture, including the canonical host avatar snapshot."
-    },
-    {
-      "id": "ar.checkpoints.003",
-      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
-      "quote": "Enabled host plant rosters are admitted in entity order before the first tick-zero capture.",
-      "text": "Enabled host plant rosters are admitted in entity order before the first tick-zero capture."
-    },
-    {
-      "id": "ar.checkpoints.004",
-      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
-      "quote": "An absent avatar argument denotes the canonical empty roster.",
-      "text": "An absent avatar argument denotes the canonical empty roster."
-    },
-    {
-      "id": "ar.checkpoints.005",
-      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
-      "quote": "Enabled terrain and water diagnostics read the resolved authoritative inventory and exclude residency and lifecycle state.",
-      "text": "Enabled terrain and water diagnostics read the resolved authoritative inventory and exclude residency and lifecycle state."
-    },
-    {
-      "id": "ar.checkpoints.006",
-      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
-      "quote": "Smoke artifacts add four enabled-only `sub_hashes` keys, also present in each run and in `sub_hashes_replay`: `regions` frames clock, ledger/configuration and pending events;",
-      "text": "Smoke artifacts add four enabled-only `sub_hashes` keys, also present in each run and in `sub_hashes_replay`: `regions` frames clock, ledger/configuration and pending events;"
-    },
-    {
-      "id": "ar.checkpoints.007",
-      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
-      "quote": "`creatures` covers the complete persistent creature snapshot;",
-      "text": "`creatures` covers the complete persistent creature snapshot;"
-    },
-    {
-      "id": "ar.checkpoints.008",
-      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
-      "quote": "`items` covers canonical ground objects;",
-      "text": "`items` covers canonical ground objects;"
-    },
-    {
-      "id": "ar.checkpoints.009",
-      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
-      "quote": "`pages` frames complete field pages, regional energy and retained deposits.",
-      "text": "`pages` frames complete field pages, regional energy and retained deposits."
-    },
-    {
-      "id": "ar.checkpoints.010",
-      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
-      "quote": "All four participate in the smoke verdict.",
-      "text": "All four participate in the smoke verdict."
-    },
-    {
-      "id": "ar.checkpoints.011",
-      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
-      "quote": "Their values are diagnostics;",
-      "text": "Their values are diagnostics;"
-    },
-    {
-      "id": "ar.checkpoints.012",
-      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
-      "quote": "the composed hash retains its existing slots and regional content recipe.",
-      "text": "the composed hash retains its existing slots and regional content recipe."
-    },
-    {
-      "id": "ar.checkpoints.013",
-      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
-      "quote": "Enabled network peers cover the same admitted content/configuration identity through the common composer at checkpoints.",
-      "text": "Enabled network peers cover the same admitted content/configuration identity through the common composer at checkpoints."
-    },
-    {
-      "id": "ar.checkpoints.014",
-      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
-      "quote": "The client establishes one immutable effective `SystemConfig` before creating its world;",
-      "text": "The client establishes one immutable effective `SystemConfig` before creating its world;"
-    },
-    {
-      "id": "ar.checkpoints.015",
-      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
-      "quote": "the network driver's `Begin` calls the headless `GameSession::CreateNetworkHost` factory.",
-      "text": "the network driver's `Begin` calls the headless `GameSession::CreateNetworkHost` factory."
-    },
-    {
-      "id": "ar.checkpoints.016",
-      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
-      "quote": "That factory forwards the snapshot through `ConfigureSimulationFromPeer` before world creation, then loads host state and prepares the spawn surface.",
-      "text": "That factory forwards the snapshot through `ConfigureSimulationFromPeer` before world creation, then loads host state and prepares the spawn surface."
-    },
-    {
-      "id": "ar.checkpoints.017",
-      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
-      "quote": "The snapshot includes active regions, water, weather, energy and all creature/plant tuning.",
-      "text": "The snapshot includes active regions, water, weather, energy and all creature/plant tuning."
-    },
-    {
-      "id": "ar.checkpoints.018",
-      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
-      "quote": "Both checkpoint hooks select their recipe from that shared snapshot.",
-      "text": "Both checkpoint hooks select their recipe from that shared snapshot."
-    },
-    {
-      "id": "ar.checkpoints.019",
-      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
-      "quote": "A contradictory local active-regions flag refuses capture instead of silently switching recipes.",
-      "text": "A contradictory local active-regions flag refuses capture instead of silently switching recipes."
-    },
-    {
-      "id": "ar.checkpoints.020",
-      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
-      "quote": "Configuration replacement after world creation refuses without changing the admitted configuration.",
-      "text": "Configuration replacement after world creation refuses without changing the admitted configuration."
-    },
-    {
-      "id": "ar.checkpoints.021",
-      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
-      "quote": "A capture failure clears all outputs, latches the session fault and prevents checkpoint publication.",
-      "text": "A capture failure clears all outputs, latches the session fault and prevents checkpoint publication."
-    },
-    {
-      "id": "ar.checkpoints.022",
-      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
-      "quote": "Recording checks initial, checkpoint and final captures before finalizing;",
-      "text": "Recording checks initial, checkpoint and final captures before finalizing;"
-    },
-    {
-      "id": "ar.checkpoints.023",
-      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
-      "quote": "lockstep capture refusal stops the exchange before storing or sending a hash, sends the existing disconnect notification at the agreed tick and closes the transport.",
-      "text": "lockstep capture refusal stops the exchange before storing or sending a hash, sends the existing disconnect notification at the agreed tick and closes the transport."
-    },
-    {
-      "id": "ar.checkpoints.024",
-      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
-      "quote": "No later simulation tick runs.",
-      "text": "No later simulation tick runs."
-    },
-    {
-      "id": "ar.checkpoints.025",
-      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
-      "quote": "Recovery saves continue to use the existing fault contract.",
-      "text": "Recovery saves continue to use the existing fault contract."
-    },
-    {
-      "id": "ar.checkpoints.026",
-      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
-      "quote": "HashMsg and LREC1 retain tick, world, terrain, water and entities, without named diagnostic fields.",
-      "text": "HashMsg and LREC1 retain tick, world, terrain, water and entities, without named diagnostic fields."
-    },
-    {
-      "id": "ar.checkpoints.027",
-      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
-      "quote": "Frame grouping does not change checkpoint authority at a completed tick.",
-      "text": "Frame grouping does not change checkpoint authority at a completed tick."
-    },
-    {
-      "id": "ar.checkpoints.028",
-      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
-      "quote": "With active regions disabled, the historical hash recipes and artifact bytes remain unchanged;",
-      "text": "With active regions disabled, the historical hash recipes and artifact bytes remain unchanged;"
-    },
-    {
-      "id": "ar.checkpoints.029",
-      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
-      "quote": "new named keys are omitted even if a reused in-memory result contains diagnostic values.",
-      "text": "new named keys are omitted even if a reused in-memory result contains diagnostic values."
-    },
-    {
-      "id": "ar.checkpoints.030",
-      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
-      "quote": "Native compiler, runtime and performance qualification remains pending.",
-      "text": "Native compiler, runtime and performance qualification remains pending."
     },
     {
       "id": "ar.reference.001",
@@ -6011,6 +6107,30 @@
       "source": "docs/active-regions.md#host-fail-stop-qualification-sources",
       "quote": "Native GLFW termination, reader drain and exit saves, F4 fault presentation, Windows crash recovery, issue #242 performance, allocation/timing and long-run qualification remain pending.",
       "text": "Native GLFW termination, reader drain and exit saves, F4 fault presentation, Windows crash recovery, issue #242 performance, allocation/timing and long-run qualification remain pending."
+    },
+    {
+      "id": "ar.activation.084",
+      "source": "docs/active-regions.md#activation-and-ordering",
+      "quote": "Both clocks identify the faulting tick T.",
+      "text": "Both clocks identify the faulting tick T."
+    },
+    {
+      "id": "ar.file.136",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "the commit index is replaced last.",
+      "text": "the commit index is replaced last."
+    },
+    {
+      "id": "ar.file.137",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Failure before that commit restores the previous complete snapshot and defers memory acknowledgements, dirty clearing and parked release until a successful commit.",
+      "text": "Failure before that commit restores the previous complete snapshot and defers memory acknowledgements, dirty clearing and parked release until a successful commit."
+    },
+    {
+      "id": "ar.file.138",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "See the [snapshot protocol](distant-world.md#persistence-and-format-contract) for the wider persistence contract.",
+      "text": "See the [snapshot protocol](distant-world.md#persistence-and-format-contract) for the wider persistence contract."
     }
   ],
   "exclusions": [

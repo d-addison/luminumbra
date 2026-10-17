@@ -8,6 +8,7 @@
 // frame loop's non-IN_GAME branch, at the exact point the inline code ran.
 
 #include "app/ClientAppContext.h"
+#include "app/MenuPreviewInput.h"
 
 #include <string>
 
@@ -27,15 +28,6 @@ class GameSession;
 
 namespace Luminumbra::Client::App {
 
-// Create-world preview orbit/drag bookkeeping (formerly main()-locals): the
-// last candidate signature so params are only re-derived when the form
-// actually changed, plus the cursor-drag state for the turntable orbit.
-struct MenuPreviewState {
-    std::string lastSig;
-    bool dragging = false;
-    double lastCursorX = 0.0, lastCursorY = 0.0;
-};
-
 void RenderMenuScreens(ClientAppContext& app,
                        GLFWwindow* window,
                        float deltaTime,
@@ -45,6 +37,7 @@ void RenderMenuScreens(ClientAppContext& app,
                        Luminumbra::Rendering::RenderPipeline& renderPipeline,
                        Luminumbra::Client::Rml_UIManager* uiManager,
                        Luminumbra::Client::WorldgenPreview* worldgenPreview,
-                       MenuPreviewState& previewState);
+                       MenuPreviewState& previewState,
+                       const UiInputRouter& inputRouter);
 
 } // namespace Luminumbra::Client::App

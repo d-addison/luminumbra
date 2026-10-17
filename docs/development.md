@@ -82,13 +82,19 @@ cache actions, with no paid cache service.
 All Actions caches, including performance, clang-tidy results, and MSYS2 packages,
 are saved only on `push` events to `refs/heads/main` or `refs/heads/devel`; PRs,
 scheduled runs, and manual dispatches never save caches. `cache-cleanup.yml` runs
-on trusted maintainer pushes to devel/main, activating retention as soon as the
-workflow lands on devel. Once installed on the default branch (main), it also runs
-after pushed CI, AddressSanitizer or Performance observations completes. All
-cleanup runs share one concurrency group and never cancel an active cleanup.
+only after CI, AddressSanitizer or Performance observations completes for a push
+to main/devel. CI saves the Linux, Diligent, Windows MSVC/UCRT64 compiler caches,
+clang-tidy shards and MSYS2 packages; AddressSanitizer saves its compiler cache;
+Performance observations saves preview and paired compiler caches (its candidate
+cache save is also covered, though qualification capture currently runs manually).
+Documentation, game-assets, Blender authoring, release and UCRT attribution do not
+save Actions caches. The completion trigger must be installed on the default
+branch (main) to activate retention. There is no direct push trigger, so completion
+runs cannot cancel pending push cleanup runs and freeze devel. All cleanup runs
+share one concurrency group and never cancel an active cleanup.
 It retains the newest generation by creation time per branch and lane across
 configuration changes and SHA keys, protecting both live branch heads' keys and
-the triggering SHA (`github.sha` for push, `workflow_run.head_sha` for workflow_run)
+the triggering SHA (`workflow_run.head_sha`)
 even when cleanup is delayed until the branch advances. The named `RECENCY_GRACE`
 constant in `cache-cleanup.yml` is six hours: caches whose creation or last access
 (whichever is later) falls within that window are never deleted, preserving caches
@@ -204,9 +210,9 @@ The standalone plan explicitly lists tests in `tools/ci`, `tools/perf`,
 `tools/release`, `tools/assets`, `tools/audio`, `tools/persistence`, and
 `tools/rendering/acceptance`, plus visual-critique, timelapse, SDF doc,
 runtime-manifest, visual-montage, and Blender core/GLB contracts. This preserves
-Windows coverage for CTest-registered Python suites. The POSIX shebang fixtures in
-`test_tidy_cache.py` run only on Linux. Classification exemptions are explicit
-reviewed files, including covered test-backed modules; new files require builds.
+Windows coverage for CTest-registered Python suites. The interpreter-launched
+fixtures in `test_tidy_cache.py` run on Linux and Windows. Classification exemptions
+are explicit reviewed files, including covered test-backed modules; new files require builds.
 Native integrations such as `qualify_prefab_runtime.py`, its packaged service and
 installed acceptance inputs, `test_render_runner.py`, its native fixture generator
 and imports, and simulation capture tools stay on the build path.
