@@ -1,5 +1,15 @@
 #include "../support/SimulationContentFixture.h"
+#include "luminumbra_common/core/SystemConfig.h"
+#include "luminumbra_common/world/ActiveRegionLedger.h"
+#include "luminumbra_common/world/WorldStreamingState.h"
 #include <gtest/gtest.h>
+#include <ios>
+#include <luminumbra/core/Types.h>
+#include <nlohmann/json_fwd.hpp>
+#include <stop_token>
+#include <system_error>
+#include <utility>
+#include <vector>
 
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/components/CreatureComponents.h"
@@ -44,7 +54,7 @@ using Persistence::WorldSaveService;
 using world::GameSession;
 
 std::string Read(const fs::path& path) {
-    std::ifstream input(path, std::ios::binary);
+    const std::ifstream input(path, std::ios::binary);
     std::ostringstream bytes;
     bytes << input.rdbuf();
     return bytes.str();
@@ -103,23 +113,32 @@ void ExpectMissingPresetReason(const std::string& error, const fs::path& expecte
 
 class WorldOpenRefusal : public testing::TestWithParam<std::tuple<int, int>> {
 protected:
-    fs::path root;
-    fs::path save;
-    JobSystem jobs;
+    struct State {
+        fs::path root;
+        fs::path save;
+        JobSystem jobs;
+    };
+    State& Fixture() {
+        return state_;
+    }
+    const State& Fixture() const {
+        return state_;
+    }
+
     void SetUp() override {
-        root = UniqueRoot();
-        Luminumbra::TestSupport::WriteSimulationContentFixture(root);
-        fs::create_directories(root / "worlds/atlas/presets");
+        Fixture().root = UniqueRoot();
+        Luminumbra::TestSupport::WriteSimulationContentFixture(Fixture().root);
+        fs::create_directories(Fixture().root / "worlds/atlas/presets");
         fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets/default.json",
-                      root / "worlds/atlas/presets/default.json");
+                      Fixture().root / "worlds/atlas/presets/default.json");
         fs::copy(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets-rev6",
-                 root / "worlds/atlas/presets-rev6",
+                 Fixture().root / "worlds/atlas/presets-rev6",
                  fs::copy_options::recursive);
-        save = root / "worlds/saves/fixture";
+        Fixture().save = Fixture().root / "worlds/saves/fixture";
         Write(
-            save / "world_info.json",
+            Fixture().save / "world_info.json",
             R"({"container_version":2,"name":"Fixture","seed":"1337","worldType":"default","creationTime":1,"spawnPoint":{"x":8,"y":18,"z":8}})");
-        jobs.startup(1);
+        Fixture().jobs.startup(1);
         WorldStreamingState state;
         auto chunk = state.get_or_create_chunk(IVec3(0, 0, 0));
         chunk->sdf_data.assign(static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) *
@@ -128,33 +147,33 @@ protected:
         chunk->heightmap_data.assign(
             static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Z + 1), 8.0f);
         chunk->mark_sdf_loaded_or_edited();
-        ASSERT_TRUE(WorldSaveService{}.save_world(state, save));
+        ASSERT_TRUE(WorldSaveService{}.save_world(state, Fixture().save));
     }
     void TearDown() override {
-        jobs.shutdown();
+        Fixture().jobs.shutdown();
         std::error_code ec;
-        fs::remove_all(root, ec);
+        fs::remove_all(Fixture().root, ec);
     }
     std::string RootString() const {
-        return root.generic_string() + "/";
+        return Fixture().root.generic_string() + "/";
     }
     void Damage(int kind) {
-        const auto manifest = WorldSaveService::world_manifest_path(save);
-        const auto region = WorldSaveService::region_file_path(save, 0, 0);
+        const auto manifest = WorldSaveService::world_manifest_path(Fixture().save);
+        const auto region = WorldSaveService::region_file_path(Fixture().save, 0, 0);
         auto bytes = Read(region);
         if (kind == 0 || kind == 1) {
             if (kind == 0)
-                fs::remove_all(WorldSaveService::region_directory(save));
-            Write(WorldSaveService::world_state_path(save), "{obsolete snapshot}");
+                fs::remove_all(WorldSaveService::region_directory(Fixture().save));
+            Write(WorldSaveService::world_state_path(Fixture().save), "{obsolete snapshot}");
         } else if (kind == 2) {
-            Write(save / "chunks/world-state.json.bak", "obsolete backup");
+            Write(Fixture().save / "chunks/world-state.json.bak", "obsolete backup");
         } else if (kind == 3 || kind == 4 || kind == 5) {
             bytes[4] = kind == 5 ? 3 : 1;
             if (kind == 3)
                 fs::remove(manifest);
             if (kind == 4) {
                 // A good region sorts first, but may never escape as partial state.
-                Write(WorldSaveService::region_file_path(save, 1, 0), bytes);
+                Write(WorldSaveService::region_file_path(Fixture().save, 1, 0), bytes);
             } else
                 Write(region, bytes);
         } else if (kind == 6) {
@@ -173,10 +192,10 @@ protected:
                 json["container_version"] = 1;
             Write(manifest, json.dump());
         } else if (kind == 12) {
-            fs::remove_all(WorldSaveService::region_directory(save));
-            Write(save / "chunks/region/unknown.bin", "unknown");
+            fs::remove_all(WorldSaveService::region_directory(Fixture().save));
+            Write(Fixture().save / "chunks/region/unknown.bin", "unknown");
         } else if (kind == 13) {
-            fs::rename(region, save / "chunks/region/r.invalid.lmr");
+            fs::rename(region, Fixture().save / "chunks/region/r.invalid.lmr");
         } else if (kind == 21) {
             auto json = nlohmann::json::parse(Read(manifest));
             json["schema"] = "luminumbra.persistence.world_manifest.v2";
@@ -190,14 +209,14 @@ protected:
             json.erase("container_version");
             Write(manifest, json.dump());
         } else if (kind == 20) {
-            fs::remove_all(WorldSaveService::region_directory(save));
-            Write(WorldSaveService::region_file_path(save, 0, 0), "");
+            fs::remove_all(WorldSaveService::region_directory(Fixture().save));
+            Write(WorldSaveService::region_file_path(Fixture().save, 0, 0), "");
         } else if (kind >= 22) {
-            const auto metadata = save / "world_info.json";
+            const auto metadata = Fixture().save / "world_info.json";
             auto json = nlohmann::json::parse(Read(metadata));
             if (kind == 22) {
                 // A world created before its first chunk save still has durable metadata.
-                fs::remove_all(save / "chunks");
+                fs::remove_all(Fixture().save / "chunks");
                 json.erase("container_version");
             } else if (kind == 23)
                 json.erase("container_version"); // mixed old metadata and current chunks
@@ -264,6 +283,9 @@ protected:
             ASSERT_TRUE(WorldSaveService::upsert_container_records(region, {record}));
         }
     }
+
+private:
+    State state_;
 };
 
 TEST_P(WorldOpenRefusal, RefusesBeforeGenerationAndPreservesAllDiskBytes) {
@@ -271,28 +293,28 @@ TEST_P(WorldOpenRefusal, RefusesBeforeGenerationAndPreservesAllDiskBytes) {
     std::unique_ptr<GameSession> client;
     if (entry < 2) {
         client = std::make_unique<GameSession>();
-        client->SetJobSystem(&jobs);
+        client->SetJobSystem(&Fixture().jobs);
         client->SetRootPath(RootString());
         if (entry == 1)
             ASSERT_TRUE(client->CreateWorld("Client", "1337", "default"));
     }
     Damage(kind);
-    const auto before = DiskBytes(root);
-    const auto catalog = Persistence::EnumerateSavedWorlds(root);
+    const auto before = DiskBytes(Fixture().root);
+    const auto catalog = Persistence::EnumerateSavedWorlds(Fixture().root);
     ASSERT_TRUE(catalog.error.empty());
-    const auto inspected = Persistence::InspectSavedWorld(root, "fixture");
+    const auto inspected = Persistence::InspectSavedWorld(Fixture().root, "fixture");
     EXPECT_FALSE(inspected.error.empty());
     const bool obsolete = kind <= 4 || kind == 11 || kind == 14 || kind == 17 || kind == 22 ||
                           kind == 23 || kind == 27;
     const bool future = kind == 5 || kind == 8 || kind == 15 || kind == 21 || kind == 24;
-    EXPECT_FALSE(WorldSaveService::has_world_save(save));
+    EXPECT_FALSE(WorldSaveService::has_world_save(Fixture().save));
     WorldStreamingState rejected;
     rejected.get_or_create_chunk(IVec3(2, 0, 2));
     std::vector<std::string> diagnostics;
-    EXPECT_FALSE(WorldSaveService{}.load_world(rejected, save, diagnostics));
+    EXPECT_FALSE(WorldSaveService{}.load_world(rejected, Fixture().save, diagnostics));
     EXPECT_TRUE(rejected.empty());
     EXPECT_FALSE(diagnostics.empty());
-    EXPECT_FALSE(WorldSaveService{}.save_world(rejected, save));
+    EXPECT_FALSE(WorldSaveService{}.save_world(rejected, Fixture().save));
     std::string error;
     if (entry == 2) {
         Server::ServerWorldRunnerConfig config;
@@ -315,15 +337,15 @@ TEST_P(WorldOpenRefusal, RefusesBeforeGenerationAndPreservesAllDiskBytes) {
             EXPECT_FALSE(session.LoadWorld("fixture"));
         } else {
             // The client's scenario load path opens an explicit save directory.
-            EXPECT_FALSE(session.LoadWorldStateFrom(save));
+            EXPECT_FALSE(session.LoadWorldStateFrom(Fixture().save));
             EXPECT_TRUE(session.GetWorldSystem()->snapshot_streamed_chunks().empty());
         }
         error = session.GetWorldOpenError();
         EXPECT_EQ(session.GetLastLoadedChunkCount(), 0u);
         EXPECT_FALSE(session.SaveWorld());
         EXPECT_FALSE(session.SaveWorldState());
-        EXPECT_FALSE(session.SaveWorldStateTo(save));
-        EXPECT_FALSE(session.LoadWorldStateFrom(save));
+        EXPECT_FALSE(session.SaveWorldStateTo(Fixture().save));
+        EXPECT_FALSE(session.LoadWorldStateFrom(Fixture().save));
     }
     ASSERT_FALSE(error.empty());
     if (obsolete)
@@ -335,7 +357,7 @@ TEST_P(WorldOpenRefusal, RefusesBeforeGenerationAndPreservesAllDiskBytes) {
         EXPECT_EQ(error.find("future"), std::string::npos);
     }
     client.reset(); // includes client teardown
-    EXPECT_EQ(DiskBytes(root), before);
+    EXPECT_EQ(DiskBytes(Fixture().root), before);
 }
 
 INSTANTIATE_TEST_SUITE_P(PersistenceEntryPoints,
@@ -347,19 +369,19 @@ INSTANTIATE_TEST_SUITE_P(ClockMetadataEntryPoints,
                          testing::Combine(testing::Range(0, 3), testing::Range(30, 60)));
 
 TEST_F(WorldOpenRefusal, MissingMetadataRefusesCatalogClientAndServerWithoutChangingBytes) {
-    ASSERT_TRUE(fs::remove(save / "world_info.json"));
-    const auto before = DiskBytes(root);
+    ASSERT_TRUE(fs::remove(Fixture().save / "world_info.json"));
+    const auto before = DiskBytes(Fixture().root);
     const std::string expected =
         "World unavailable: its save directory or metadata is missing or unreadable.";
-    const auto inspected = Persistence::InspectSavedWorld(root, "fixture");
+    const auto inspected = Persistence::InspectSavedWorld(Fixture().root, "fixture");
     EXPECT_EQ(inspected.error, expected);
-    const auto catalog = Persistence::EnumerateSavedWorlds(root);
+    const auto catalog = Persistence::EnumerateSavedWorlds(Fixture().root);
     ASSERT_TRUE(catalog.error.empty());
     ASSERT_EQ(catalog.worlds.size(), 1u);
     EXPECT_EQ(catalog.worlds.front().error, expected);
     {
         GameSession client;
-        client.SetJobSystem(&jobs);
+        client.SetJobSystem(&Fixture().jobs);
         client.SetRootPath(RootString());
         EXPECT_FALSE(client.LoadWorld("fixture"));
         EXPECT_EQ(client.GetWorldOpenError(), expected);
@@ -378,29 +400,121 @@ TEST_F(WorldOpenRefusal, MissingMetadataRefusesCatalogClientAndServerWithoutChan
     world::WorldStateSaveReport report;
     runner.Shutdown(&report);
     EXPECT_FALSE(report.saved);
-    EXPECT_EQ(DiskBytes(root), before);
+    EXPECT_EQ(DiskBytes(Fixture().root), before);
+}
+
+TEST_F(WorldOpenRefusal, SeparateSaveRootUsesRuntimeFallbackForLegacyPresets) {
+    const auto storage = Fixture().root / "storage";
+    fs::create_directories(storage / "worlds");
+    fs::rename(Fixture().root / "worlds/saves", storage / "worlds/saves");
+    Fixture().save = storage / "worlds/saves/fixture";
+    ASSERT_FALSE(fs::exists(Fixture().save / "preset.json"));
+    for (const std::string name : {"default", "legacy_custom"}) {
+        SCOPED_TRACE(name);
+        const auto preset =
+            Fixture().root /
+            (name == "default" ? "worlds/atlas/presets-rev6" : "worlds/atlas/presets") /
+            (name + ".json");
+        if (name != "default")
+            fs::copy_file(Fixture().root / "worlds/atlas/presets/default.json", preset);
+        auto metadata = nlohmann::json::parse(Read(Fixture().save / "world_info.json"));
+        metadata["worldType"] = name;
+        Write(Fixture().save / "world_info.json", metadata.dump());
+        const auto inspected = Persistence::InspectSavedWorld(storage, Fixture().root, "fixture");
+        ASSERT_TRUE(inspected.error.empty()) << inspected.error;
+        EXPECT_EQ(inspected.preset_path, preset);
+        const auto catalog = Persistence::EnumerateSavedWorlds(storage, Fixture().root);
+        ASSERT_TRUE(catalog.error.empty()) << catalog.error;
+        ASSERT_EQ(catalog.worlds.size(), 1u);
+        EXPECT_TRUE(catalog.worlds.front().error.empty());
+        EXPECT_EQ(catalog.worlds.front().preset_path, preset);
+        GameSession session;
+        session.SetRootPath(RootString());
+        session.SetSaveRootPath(storage);
+        session.SetJobSystem(&Fixture().jobs);
+        ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
+        EXPECT_EQ(session.GetMetadata().worldType, name);
+    }
+}
+
+TEST_F(WorldOpenRefusal, SeparateSaveRootRetainsEmbeddedPresetRefusals) {
+    const auto storage = Fixture().root / "storage";
+    fs::create_directories(storage / "worlds");
+    fs::rename(Fixture().root / "worlds/saves", storage / "worlds/saves");
+    Fixture().save = storage / "worlds/saves/fixture";
+    const auto canonical =
+        nlohmann::json::parse(Read(Fixture().root / "worlds/atlas/presets/default.json")).dump();
+    const auto original = nlohmann::json::parse(Read(Fixture().save / "world_info.json"));
+    for (const std::string name : {"default", "custom"}) {
+        SCOPED_TRACE(name);
+        Write(Fixture().root / "worlds/atlas/presets" / (name + ".json"), canonical);
+        auto metadata = original;
+        metadata["worldType"] = name;
+        metadata["presetFormat"] = Persistence::kSavedPresetFormat;
+        metadata["presetIdentity"] = Persistence::StableChecksum(canonical);
+        Write(Fixture().save / "preset.json", canonical);
+        Write(Fixture().save / "world_info.json", metadata.dump());
+        const auto valid = Persistence::InspectSavedWorld(storage, Fixture().root, "fixture");
+        ASSERT_TRUE(valid.error.empty()) << valid.error;
+        EXPECT_EQ(valid.preset_path, Fixture().save / "preset.json");
+        EXPECT_EQ(valid.preset_source_json, canonical);
+        for (const std::string defect :
+             {"missing preset", "missing identity", "identity mismatch", "unsupported format"}) {
+            SCOPED_TRACE(defect);
+            Write(Fixture().save / "preset.json", canonical);
+            auto damaged = metadata;
+            if (defect == "missing preset")
+                fs::remove(Fixture().save / "preset.json");
+            else if (defect == "missing identity")
+                damaged.erase("presetIdentity");
+            else if (defect == "identity mismatch")
+                damaged["presetIdentity"] = "mismatched";
+            else
+                damaged["presetFormat"] = 0;
+            Write(Fixture().save / "world_info.json", damaged.dump());
+            const auto before = DiskBytes(Fixture().root);
+            const auto inspected =
+                Persistence::InspectSavedWorld(storage, Fixture().root, "fixture");
+            ASSERT_FALSE(inspected.error.empty());
+            const auto catalog = Persistence::EnumerateSavedWorlds(storage, Fixture().root);
+            ASSERT_TRUE(catalog.error.empty()) << catalog.error;
+            ASSERT_EQ(catalog.worlds.size(), 1u);
+            EXPECT_EQ(catalog.worlds.front().error, inspected.error);
+            GameSession session;
+            session.SetRootPath(RootString());
+            session.SetSaveRootPath(storage);
+            session.SetJobSystem(&Fixture().jobs);
+            EXPECT_FALSE(session.LoadWorld("fixture"));
+            EXPECT_EQ(session.GetWorldOpenError(), inspected.error);
+            EXPECT_EQ(session.GetWorldSystem(), nullptr);
+            EXPECT_FALSE(session.SaveWorld());
+            EXPECT_FALSE(session.SaveWorldState());
+            EXPECT_EQ(DiskBytes(Fixture().root), before);
+        }
+    }
 }
 
 TEST_F(WorldOpenRefusal, MissingEmbeddedPresetAndAtlasFallbackRefuseBeforeGeneration) {
-    const auto atlas = root / "worlds/atlas/presets-rev6/default.json";
-    const auto embedded = save / "preset.json";
+    const auto atlas = Fixture().root / "worlds/atlas/presets-rev6/default.json";
+    const auto embedded = Fixture().save / "preset.json";
     ASSERT_TRUE(fs::copy_file(atlas, embedded));
-    ASSERT_TRUE(Persistence::InspectSavedWorld(root, "fixture").error.empty());
+    ASSERT_TRUE(Persistence::InspectSavedWorld(Fixture().root, "fixture").error.empty());
     ASSERT_TRUE(fs::remove(embedded));
     // An embedded-preset deletion alone is loadable through the frozen revision-6 atlas fallback.
-    ASSERT_TRUE(Persistence::InspectSavedWorld(root, "fixture").error.empty());
-    EXPECT_EQ(Persistence::InspectSavedWorld(root, "fixture").preset_path, atlas);
+    ASSERT_TRUE(Persistence::InspectSavedWorld(Fixture().root, "fixture").error.empty());
+    EXPECT_EQ(Persistence::InspectSavedWorld(Fixture().root, "fixture").preset_path, atlas);
     ASSERT_TRUE(fs::remove(atlas));
-    ASSERT_TRUE(fs::remove(root / "worlds/atlas/presets/default.json"));
-    const auto before = DiskBytes(root);
-    ExpectMissingPresetReason(Persistence::InspectSavedWorld(root, "fixture").error, atlas);
-    const auto catalog = Persistence::EnumerateSavedWorlds(root);
+    ASSERT_TRUE(fs::remove(Fixture().root / "worlds/atlas/presets/default.json"));
+    const auto before = DiskBytes(Fixture().root);
+    ExpectMissingPresetReason(Persistence::InspectSavedWorld(Fixture().root, "fixture").error,
+                              atlas);
+    const auto catalog = Persistence::EnumerateSavedWorlds(Fixture().root);
     ASSERT_TRUE(catalog.error.empty());
     ASSERT_EQ(catalog.worlds.size(), 1u);
     ExpectMissingPresetReason(catalog.worlds.front().error, atlas);
     {
         GameSession client;
-        client.SetJobSystem(&jobs);
+        client.SetJobSystem(&Fixture().jobs);
         client.SetRootPath(RootString());
         EXPECT_FALSE(client.LoadWorld("fixture"));
         ExpectMissingPresetReason(client.GetWorldOpenError(), atlas);
@@ -420,32 +534,33 @@ TEST_F(WorldOpenRefusal, MissingEmbeddedPresetAndAtlasFallbackRefuseBeforeGenera
     world::WorldStateSaveReport report;
     runner.Shutdown(&report);
     EXPECT_FALSE(report.saved);
-    EXPECT_EQ(DiskBytes(root), before);
+    EXPECT_EQ(DiskBytes(Fixture().root), before);
 }
 
 TEST_F(WorldOpenRefusal, ActiveClockSaveRefusesWithFeatureOffThroughEveryOpenPath) {
     // This case exercises the legacy clock path, independently of shipping defaults.
-    Write(root / "data/common/systems.json", R"({"sim":{"active_regions":{"enabled":false}}})");
+    Write(Fixture().root / "data/common/systems.json",
+          R"({"sim":{"active_regions":{"enabled":false}}})");
     GameSession writer;
     writer.SetRootPath(RootString());
-    writer.SetJobSystem(&jobs);
+    writer.SetJobSystem(&Fixture().jobs);
     writer.SetActiveRegionsEnabled(true);
     ASSERT_TRUE(writer.LoadWorld("fixture"));
     writer.TickSimulation(writer.GetSimulationClock().fixed_dt());
     ASSERT_TRUE(writer.SaveWorldState());
-    const auto before = DiskBytes(root);
-    const auto inspected = Persistence::InspectSavedWorld(root, "fixture");
+    const auto before = DiskBytes(Fixture().root);
+    const auto inspected = Persistence::InspectSavedWorld(Fixture().root, "fixture");
     ASSERT_TRUE(inspected.error.empty());
     EXPECT_TRUE(inspected.requires_active_regions);
     EXPECT_EQ(inspected.clock.tick(), 1u);
     GameSession reader;
     reader.SetActiveRegionsEnabled(false); // Required for the feature-off refusal.
     reader.SetRootPath(RootString());
-    reader.SetJobSystem(&jobs);
+    reader.SetJobSystem(&Fixture().jobs);
     ASSERT_TRUE(reader.CreateTransientWorld("Reader", "1337", "default"));
-    EXPECT_FALSE(reader.LoadWorldStateFrom(save));
+    EXPECT_FALSE(reader.LoadWorldStateFrom(Fixture().save));
     EXPECT_NE(reader.GetWorldOpenError().find("Incompatible configuration"), std::string::npos);
-    EXPECT_FALSE(reader.SaveWorldStateTo(save));
+    EXPECT_FALSE(reader.SaveWorldStateTo(Fixture().save));
     EXPECT_FALSE(reader.LoadWorld("fixture"));
     EXPECT_NE(reader.GetWorldOpenError().find("Incompatible configuration"), std::string::npos);
     EXPECT_FALSE(reader.SaveWorld());
@@ -458,42 +573,42 @@ TEST_F(WorldOpenRefusal, ActiveClockSaveRefusesWithFeatureOffThroughEveryOpenPat
     EXPECT_FALSE(runner.Boot());
     EXPECT_NE(runner.GetBootError().find("Incompatible configuration"), std::string::npos);
     runner.Shutdown();
-    EXPECT_EQ(DiskBytes(root), before);
+    EXPECT_EQ(DiskBytes(Fixture().root), before);
 }
 
 TEST_F(WorldOpenRefusal, CorruptClockMetadataOnlySaveRefusesBeforeFirstChunkSave) {
-    fs::remove_all(save / "chunks");
-    auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+    fs::remove_all(Fixture().save / "chunks");
+    auto metadata = nlohmann::json::parse(Read(Fixture().save / "world_info.json"));
     metadata["simulationTick"] = -1;
-    Write(save / "world_info.json", metadata.dump());
-    const auto before = DiskBytes(root);
+    Write(Fixture().save / "world_info.json", metadata.dump());
+    const auto before = DiskBytes(Fixture().root);
     GameSession session;
     session.SetRootPath(RootString());
-    session.SetJobSystem(&jobs);
+    session.SetJobSystem(&Fixture().jobs);
     session.SetActiveRegionsEnabled(true);
     EXPECT_FALSE(session.LoadWorld("fixture"));
     EXPECT_NE(session.GetWorldOpenError().find("simulationTick"), std::string::npos);
     EXPECT_FALSE(session.SaveWorld());
-    EXPECT_FALSE(WorldSaveService::validate_save(save));
-    EXPECT_EQ(DiskBytes(root), before);
+    EXPECT_FALSE(WorldSaveService::validate_save(Fixture().save));
+    EXPECT_EQ(DiskBytes(Fixture().root), before);
 }
 
 TEST_F(WorldOpenRefusal, CurrentMetadataOnlyWorldLoadsBeforeFirstChunkSave) {
-    fs::remove_all(save / "chunks");
-    const auto before = DiskBytes(save);
-    EXPECT_FALSE(WorldSaveService::has_world_save(save));
-    EXPECT_TRUE(WorldSaveService::validate_save(save));
+    fs::remove_all(Fixture().save / "chunks");
+    const auto before = DiskBytes(Fixture().save);
+    EXPECT_FALSE(WorldSaveService::has_world_save(Fixture().save));
+    EXPECT_TRUE(WorldSaveService::validate_save(Fixture().save));
     GameSession session;
-    session.SetJobSystem(&jobs);
+    session.SetJobSystem(&Fixture().jobs);
     session.SetRootPath(RootString());
     ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
     EXPECT_EQ(session.GetLastLoadedChunkCount(), 0u);
-    EXPECT_EQ(DiskBytes(save), before);
+    EXPECT_EQ(DiskBytes(Fixture().save), before);
 }
 
 TEST_F(WorldOpenRefusal, CurrentClientLoadPreservesAuthoritativeChunkAndFreshMissSucceeds) {
     GameSession session;
-    session.SetJobSystem(&jobs);
+    session.SetJobSystem(&Fixture().jobs);
     session.SetRootPath(RootString());
     ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
     EXPECT_EQ(session.GetLastLoadedChunkCount(), 1u);
@@ -509,14 +624,14 @@ TEST_F(WorldOpenRefusal, CurrentClientLoadPreservesAuthoritativeChunkAndFreshMis
 TEST_F(WorldOpenRefusal, CurrentServerBootKeepsLoadedAuthorityAndSkipsWaterSettle) {
     // Keep the legacy clock and the fixture's 8x8 water grids: this test checks
     // loaded authority/no-settle, independently of clock and resolution migrations.
-    Write(root / "data/common/systems.json",
+    Write(Fixture().root / "data/common/systems.json",
           R"({"sim":{"active_regions":{"enabled":false},"water_high_res":{"enabled":false}}})");
     Server::ServerWorldRunnerConfig config;
     config.root_path = RootString();
     config.world_id = "fixture";
     config.surface_radius = 0;
     config.collision_radius = 0;
-    const auto before = DiskBytes(save);
+    const auto before = DiskBytes(Fixture().save);
     Server::ServerWorldRunner runner(config);
     ASSERT_TRUE(runner.Boot()) << runner.GetBootError();
     ASSERT_NE(runner.Session(), nullptr);
@@ -532,12 +647,12 @@ TEST_F(WorldOpenRefusal, CurrentServerBootKeepsLoadedAuthorityAndSkipsWaterSettl
     }
     EXPECT_TRUE(found);
     runner.Shutdown();
-    EXPECT_EQ(DiskBytes(save), before);
+    EXPECT_EQ(DiskBytes(Fixture().save), before);
 }
 
 TEST_F(WorldOpenRefusal, CatalogSeparatesEmptyUnavailableAndRealMetadataWithoutWriting) {
-    const auto before = DiskBytes(root);
-    const auto catalog = Persistence::EnumerateSavedWorlds(root);
+    const auto before = DiskBytes(Fixture().root);
+    const auto catalog = Persistence::EnumerateSavedWorlds(Fixture().root);
     ASSERT_TRUE(catalog.error.empty());
     ASSERT_EQ(catalog.worlds.size(), 1u);
     EXPECT_TRUE(catalog.worlds.front().error.empty());
@@ -545,43 +660,45 @@ TEST_F(WorldOpenRefusal, CatalogSeparatesEmptyUnavailableAndRealMetadataWithoutW
     EXPECT_EQ(catalog.worlds.front().metadata.name, "Fixture");
     EXPECT_EQ(catalog.worlds.front().metadata.seed, "1337");
     EXPECT_EQ(catalog.worlds.front().metadata.creationTime, 1);
-    const auto empty = Persistence::EnumerateSavedWorlds(root / "absent");
+    const auto empty = Persistence::EnumerateSavedWorlds(Fixture().root / "absent");
     EXPECT_TRUE(empty.error.empty());
     EXPECT_TRUE(empty.worlds.empty());
-    EXPECT_EQ(DiskBytes(root), before);
+    EXPECT_EQ(DiskBytes(Fixture().root), before);
 
-    fs::remove_all(root / "worlds/saves");
-    Write(root / "worlds/saves", "not a directory");
-    const auto unavailable = Persistence::EnumerateSavedWorlds(root);
+    fs::remove_all(Fixture().root / "worlds/saves");
+    Write(Fixture().root / "worlds/saves", "not a directory");
+    const auto unavailable = Persistence::EnumerateSavedWorlds(Fixture().root);
     EXPECT_FALSE(unavailable.error.empty());
     EXPECT_TRUE(unavailable.worlds.empty());
 }
 
 TEST_F(WorldOpenRefusal, CancelledValidationNeverReportsAValidSaveOrLeavesPartialAuthority) {
-    const auto before = DiskBytes(root);
-    std::stop_source cancellation;
+    const auto before = DiskBytes(Fixture().root);
+    const std::stop_source cancellation;
     cancellation.request_stop();
     const auto inspected =
-        Persistence::InspectSavedWorld(root, "fixture", cancellation.get_token());
+        Persistence::InspectSavedWorld(Fixture().root, "fixture", cancellation.get_token());
     EXPECT_FALSE(inspected.error.empty());
     std::vector<std::string> errors;
-    EXPECT_FALSE(WorldSaveService::validate_save(save, &errors, cancellation.get_token()));
+    EXPECT_FALSE(
+        WorldSaveService::validate_save(Fixture().save, &errors, cancellation.get_token()));
     ASSERT_FALSE(errors.empty());
     EXPECT_NE(errors.front().find("cancelled"), std::string::npos);
     WorldStreamingState rejected;
     rejected.get_or_create_chunk(IVec3(2, 0, 2));
     errors.clear();
-    EXPECT_FALSE(WorldSaveService{}.load_world(rejected, save, errors, cancellation.get_token()));
+    EXPECT_FALSE(
+        WorldSaveService{}.load_world(rejected, Fixture().save, errors, cancellation.get_token()));
     EXPECT_TRUE(rejected.empty());
     EXPECT_FALSE(errors.empty());
-    EXPECT_EQ(DiskBytes(root), before);
+    EXPECT_EQ(DiskBytes(Fixture().root), before);
 }
 
 TEST_F(WorldOpenRefusal, InvalidMetadataAndMissingWorldRefuseWithoutExceptionsOrWrites) {
     GameSession session;
     session.SetRootPath(RootString());
-    session.SetJobSystem(&jobs);
-    const auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+    session.SetJobSystem(&Fixture().jobs);
+    const auto metadata = nlohmann::json::parse(Read(Fixture().save / "world_info.json"));
     const std::vector<std::pair<std::string, nlohmann::json>> invalid = {
         {"name", 42},
         {"seed", nullptr},
@@ -592,47 +709,49 @@ TEST_F(WorldOpenRefusal, InvalidMetadataAndMissingWorldRefuseWithoutExceptionsOr
     for (const auto& [field, value] : invalid) {
         auto damaged = metadata;
         damaged[field] = value;
-        Write(save / "world_info.json", damaged.dump());
-        const auto before = DiskBytes(root);
+        Write(Fixture().save / "world_info.json", damaged.dump());
+        const auto before = DiskBytes(Fixture().root);
         EXPECT_FALSE(session.LoadWorld("fixture")) << field;
         EXPECT_FALSE(session.GetWorldOpenError().empty()) << field;
         EXPECT_FALSE(session.SaveWorld());
         EXPECT_FALSE(session.SaveWorldState());
-        EXPECT_EQ(DiskBytes(root), before);
+        EXPECT_EQ(DiskBytes(Fixture().root), before);
     }
     for (const std::string id : {"missing", "../fixture", "..\\fixture", "/fixture"}) {
-        const auto before = DiskBytes(root);
+        const auto before = DiskBytes(Fixture().root);
         EXPECT_FALSE(session.LoadWorld(id));
-        EXPECT_EQ(DiskBytes(root), before);
+        EXPECT_EQ(DiskBytes(Fixture().root), before);
     }
 }
 
 TEST_F(WorldOpenRefusal, EmbeddedPresetLoadsWithoutTheOriginalNamedPreset) {
-    fs::rename(root / "worlds/atlas/presets/default.json", save / "preset.json");
-    ASSERT_TRUE(fs::remove(root / "worlds/atlas/presets-rev6/default.json"));
-    const auto before = DiskBytes(root);
+    fs::rename(Fixture().root / "worlds/atlas/presets/default.json",
+               Fixture().save / "preset.json");
+    ASSERT_TRUE(fs::remove(Fixture().root / "worlds/atlas/presets-rev6/default.json"));
+    const auto before = DiskBytes(Fixture().root);
     GameSession session;
     session.SetRootPath(RootString());
-    session.SetJobSystem(&jobs);
+    session.SetJobSystem(&Fixture().jobs);
     ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
-    const auto preset = world::LoadTerrainPreset(save / "preset.json");
+    const auto preset = world::LoadTerrainPreset(Fixture().save / "preset.json");
     ASSERT_TRUE(preset.ok);
     EXPECT_FALSE(session.PresetContentHash().empty());
     EXPECT_EQ(session.PresetContentHash(), preset.preset_content_hash);
     EXPECT_EQ(session.GetLastLoadedChunkCount(), 1u);
-    EXPECT_EQ(DiskBytes(root), before);
+    EXPECT_EQ(DiskBytes(Fixture().root), before);
 }
 
 TEST_F(WorldOpenRefusal, NonEmbeddedAdditionalNamedPresetUsesOriginalFile) {
-    const auto preset_path = root / "worlds/atlas/presets/my_hills.json";
-    auto preset = nlohmann::json::parse(Read(root / "worlds/atlas/presets-rev6/default.json"));
+    const auto preset_path = Fixture().root / "worlds/atlas/presets/my_hills.json";
+    auto preset =
+        nlohmann::json::parse(Read(Fixture().root / "worlds/atlas/presets-rev6/default.json"));
     preset["generation_params"]["terrain"]["height_offset"] = 17.0f;
     Write(preset_path, preset.dump());
-    auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+    auto metadata = nlohmann::json::parse(Read(Fixture().save / "world_info.json"));
     metadata["worldType"] = "my_hills";
     ASSERT_FALSE(metadata.contains("presetIdentity"));
-    ASSERT_FALSE(fs::exists(save / "preset.json"));
-    ASSERT_FALSE(fs::exists(root / "worlds/atlas/presets-rev6/my_hills.json"));
+    ASSERT_FALSE(fs::exists(Fixture().save / "preset.json"));
+    ASSERT_FALSE(fs::exists(Fixture().root / "worlds/atlas/presets-rev6/my_hills.json"));
     const auto identity = Persistence::StableChecksum(preset.dump());
 
     for (const auto& identity_metadata : {nlohmann::json::object(),
@@ -642,21 +761,21 @@ TEST_F(WorldOpenRefusal, NonEmbeddedAdditionalNamedPresetUsesOriginalFile) {
         SCOPED_TRACE(identity_metadata.dump());
         auto saved_metadata = metadata;
         saved_metadata.update(identity_metadata);
-        Write(save / "world_info.json", saved_metadata.dump());
-        const auto before = DiskBytes(root);
+        Write(Fixture().save / "world_info.json", saved_metadata.dump());
+        const auto before = DiskBytes(Fixture().root);
 
-        const auto inspected = Persistence::InspectSavedWorld(root, "fixture");
+        const auto inspected = Persistence::InspectSavedWorld(Fixture().root, "fixture");
         EXPECT_EQ(inspected.preset_path, preset_path);
         GameSession session;
         session.SetRootPath(RootString());
-        session.SetJobSystem(&jobs);
+        session.SetJobSystem(&Fixture().jobs);
         if (saved_metadata.contains("presetIdentity") &&
             saved_metadata.at("presetIdentity") != identity) {
             EXPECT_NE(inspected.error.find("identity"), std::string::npos);
             EXPECT_FALSE(session.LoadWorld("fixture"));
             EXPECT_NE(session.GetWorldOpenError().find("identity"), std::string::npos);
             EXPECT_EQ(session.GetWorldSystem(), nullptr);
-            EXPECT_EQ(DiskBytes(root), before);
+            EXPECT_EQ(DiskBytes(Fixture().root), before);
             continue;
         }
         ASSERT_TRUE(inspected.error.empty()) << inspected.error;
@@ -664,14 +783,14 @@ TEST_F(WorldOpenRefusal, NonEmbeddedAdditionalNamedPresetUsesOriginalFile) {
         EXPECT_FLOAT_EQ(session.GetWorldSystem()->get_params().height_offset, 17.0f);
         EXPECT_FALSE(session.GetWorldSystem()->get_params().island_mask_enabled);
         EXPECT_EQ(session.GetLastLoadedChunkCount(), 1u);
-        EXPECT_EQ(DiskBytes(root), before);
+        EXPECT_EQ(DiskBytes(Fixture().root), before);
     }
 }
 
 TEST_F(WorldOpenRefusal, EveryFrozenPresetResolvesHistoricalBytesAndChecksIdentity) {
     const fs::path source = LUMINUMBRA_SOURCE_ROOT;
-    const auto original_metadata = nlohmann::json::parse(Read(save / "world_info.json"));
-    ASSERT_FALSE(fs::exists(save / "preset.json"));
+    const auto original_metadata = nlohmann::json::parse(Read(Fixture().save / "world_info.json"));
+    ASSERT_FALSE(fs::exists(Fixture().save / "preset.json"));
     for (const char* name : {"amplified",
                              "archipelago",
                              "cave_dense",
@@ -682,9 +801,9 @@ TEST_F(WorldOpenRefusal, EveryFrozenPresetResolvesHistoricalBytesAndChecksIdenti
                              "temperate_forest"}) {
         SCOPED_TRACE(name);
         const auto filename = std::string(name) + ".json";
-        const auto historical = root / "worlds/atlas/presets-rev6" / filename;
+        const auto historical = Fixture().root / "worlds/atlas/presets-rev6" / filename;
         fs::copy_file(source / "worlds/atlas/presets" / filename,
-                      root / "worlds/atlas/presets" / filename,
+                      Fixture().root / "worlds/atlas/presets" / filename,
                       fs::copy_options::overwrite_existing);
         const auto identity =
             Persistence::StableChecksum(nlohmann::json::parse(Read(historical)).dump());
@@ -698,49 +817,52 @@ TEST_F(WorldOpenRefusal, EveryFrozenPresetResolvesHistoricalBytesAndChecksIdenti
             SCOPED_TRACE(identity_metadata.dump());
             auto saved_metadata = metadata;
             saved_metadata.update(identity_metadata);
-            Write(save / "world_info.json", saved_metadata.dump());
-            const auto before = DiskBytes(root);
-            const auto inspected = Persistence::InspectSavedWorld(root, "fixture");
+            Write(Fixture().save / "world_info.json", saved_metadata.dump());
+            const auto before = DiskBytes(Fixture().root);
+            const auto inspected = Persistence::InspectSavedWorld(Fixture().root, "fixture");
             EXPECT_EQ(inspected.preset_path, historical);
             if (saved_metadata.value("presetIdentity", identity) == identity)
                 EXPECT_TRUE(inspected.error.empty()) << inspected.error;
             else
                 EXPECT_NE(inspected.error.find("identity"), std::string::npos);
-            EXPECT_EQ(DiskBytes(root), before);
+            EXPECT_EQ(DiskBytes(Fixture().root), before);
         }
         // Even metadata without an identity must refuse if its frozen file is absent.
-        Write(save / "world_info.json", metadata.dump());
+        Write(Fixture().save / "world_info.json", metadata.dump());
         ASSERT_TRUE(fs::remove(historical));
-        const auto before = DiskBytes(root);
-        const auto inspected = Persistence::InspectSavedWorld(root, "fixture");
+        const auto before = DiskBytes(Fixture().root);
+        const auto inspected = Persistence::InspectSavedWorld(Fixture().root, "fixture");
         ExpectMissingPresetReason(inspected.error, historical);
-        EXPECT_EQ(DiskBytes(root), before);
+        EXPECT_EQ(DiskBytes(Fixture().root), before);
     }
 }
 
 TEST_F(WorldOpenRefusal, NonEmbeddedRevisionSixHillsPreservesTerrainIdentity) {
     const fs::path source = LUMINUMBRA_SOURCE_ROOT;
-    Write(save / "world_info.json",
+    Write(Fixture().save / "world_info.json",
           Read(source / "test/fixtures/saves/revision6-hills/world_info.json"));
-    fs::create_directories(root / "data");
-    fs::copy(source / "data/common", root / "data/common", fs::copy_options::recursive);
-    ASSERT_FALSE(fs::exists(save / "preset.json"));
-    const auto before = DiskBytes(root);
+    ASSERT_GT(fs::remove_all(Fixture().root / "data/common"), 0u);
+    fs::create_directories(Fixture().root / "data");
+    fs::copy(source / "data/common", Fixture().root / "data/common", fs::copy_options::recursive);
+    ASSERT_FALSE(fs::exists(Fixture().save / "preset.json"));
+    const auto before = DiskBytes(Fixture().root);
     const auto historical =
-        world::LoadTerrainPreset(root / "worlds/atlas/presets-rev6/default.json");
-    const auto shipping = world::LoadTerrainPreset(root / "worlds/atlas/presets/default.json");
+        world::LoadTerrainPreset(Fixture().root / "worlds/atlas/presets-rev6/default.json");
+    const auto shipping =
+        world::LoadTerrainPreset(Fixture().root / "worlds/atlas/presets/default.json");
     ASSERT_TRUE(historical.ok);
     ASSERT_TRUE(shipping.ok);
     EXPECT_FALSE(historical.params.island_mask_enabled);
     EXPECT_TRUE(shipping.params.island_mask_enabled);
     EXPECT_EQ(
         Persistence::StableChecksum(
-            nlohmann::json::parse(Read(root / "worlds/atlas/presets-rev6/default.json")).dump()),
+            nlohmann::json::parse(Read(Fixture().root / "worlds/atlas/presets-rev6/default.json"))
+                .dump()),
         "026f24207a8ffc7e");
 
     GameSession session;
     session.SetRootPath(RootString());
-    session.SetJobSystem(&jobs);
+    session.SetJobSystem(&Fixture().jobs);
     ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
     const auto& params = session.GetWorldSystem()->get_params();
     EXPECT_FALSE(params.island_mask_enabled);
@@ -758,57 +880,58 @@ TEST_F(WorldOpenRefusal, NonEmbeddedRevisionSixHillsPreservesTerrainIdentity) {
     EXPECT_EQ(World::ComputeTerrainParamsHash(params, session.GetWorldSystem()->get_seed()),
               16636010052247870746ull);
     EXPECT_EQ(session.GetLastLoadedChunkCount(), 1u);
-    EXPECT_EQ(DiskBytes(root), before);
+    EXPECT_EQ(DiskBytes(Fixture().root), before);
 }
 
 TEST_F(WorldOpenRefusal, NonEmbeddedSaveWithoutIdentityNeverUsesShippingPreset) {
     // The fixture's old metadata has no identity. Removing shipping content
     // must not affect inspection or opening of an existing world.
-    fs::remove(root / "worlds/atlas/presets/default.json");
-    const auto before = DiskBytes(root);
-    const auto inspected = Persistence::InspectSavedWorld(root, "fixture");
+    fs::remove(Fixture().root / "worlds/atlas/presets/default.json");
+    const auto before = DiskBytes(Fixture().root);
+    const auto inspected = Persistence::InspectSavedWorld(Fixture().root, "fixture");
     ASSERT_TRUE(inspected.error.empty()) << inspected.error;
-    EXPECT_EQ(inspected.preset_path, root / "worlds/atlas/presets-rev6/default.json");
+    EXPECT_EQ(inspected.preset_path, Fixture().root / "worlds/atlas/presets-rev6/default.json");
     GameSession session;
     session.SetRootPath(RootString());
-    session.SetJobSystem(&jobs);
+    session.SetJobSystem(&Fixture().jobs);
     ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
     EXPECT_FALSE(session.GetWorldSystem()->get_params().island_mask_enabled);
-    EXPECT_EQ(DiskBytes(root), before);
+    EXPECT_EQ(DiskBytes(Fixture().root), before);
 }
 
 TEST_F(WorldOpenRefusal, MissingHistoricalPresetRefusesRatherThanUsingShipping) {
-    const auto historical = root / "worlds/atlas/presets-rev6/default.json";
+    const auto historical = Fixture().root / "worlds/atlas/presets-rev6/default.json";
     ASSERT_TRUE(fs::remove(historical));
-    const auto before = DiskBytes(root);
-    const auto inspected = Persistence::InspectSavedWorld(root, "fixture");
+    const auto before = DiskBytes(Fixture().root);
+    const auto inspected = Persistence::InspectSavedWorld(Fixture().root, "fixture");
     ExpectMissingPresetReason(inspected.error, historical);
     GameSession session;
     session.SetRootPath(RootString());
-    session.SetJobSystem(&jobs);
+    session.SetJobSystem(&Fixture().jobs);
     EXPECT_FALSE(session.LoadWorld("fixture"));
     ExpectMissingPresetReason(session.GetWorldOpenError(), historical);
     EXPECT_EQ(session.GetWorldSystem(), nullptr);
-    EXPECT_EQ(DiskBytes(root), before);
+    EXPECT_EQ(DiskBytes(Fixture().root), before);
 }
 
 TEST_F(WorldOpenRefusal, RecordedPresetIdentityMismatchRefusesBeforeGeneration) {
     for (const bool embedded : {false, true}) {
         if (embedded)
-            fs::copy_file(root / "worlds/atlas/presets/default.json", save / "preset.json");
+            fs::copy_file(Fixture().root / "worlds/atlas/presets/default.json",
+                          Fixture().save / "preset.json");
         for (const auto& identity : {nlohmann::json("wrong"), nlohmann::json(123)}) {
-            auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+            auto metadata = nlohmann::json::parse(Read(Fixture().save / "world_info.json"));
             metadata["presetIdentity"] = identity;
-            Write(save / "world_info.json", metadata.dump());
-            const auto before = DiskBytes(root);
-            const auto inspected = Persistence::InspectSavedWorld(root, "fixture");
+            Write(Fixture().save / "world_info.json", metadata.dump());
+            const auto before = DiskBytes(Fixture().root);
+            const auto inspected = Persistence::InspectSavedWorld(Fixture().root, "fixture");
             EXPECT_NE(inspected.error.find("identity"), std::string::npos);
             GameSession session;
             session.SetRootPath(RootString());
-            session.SetJobSystem(&jobs);
+            session.SetJobSystem(&Fixture().jobs);
             EXPECT_FALSE(session.LoadWorld("fixture"));
             EXPECT_EQ(session.GetWorldSystem(), nullptr);
-            EXPECT_EQ(DiskBytes(root), before);
+            EXPECT_EQ(DiskBytes(Fixture().root), before);
         }
     }
 }
@@ -819,7 +942,7 @@ TEST_F(WorldOpenRefusal, CreateEditSaveRestartAndSwitchPreserveAuthority) {
     {
         GameSession created;
         created.SetRootPath(RootString());
-        created.SetJobSystem(&jobs);
+        created.SetJobSystem(&Fixture().jobs);
         ASSERT_TRUE(created.CreateWorld("Edited <world>", "424242", "default"));
         id = created.GetMetadata().worldId;
         auto* world = created.GetWorldSystem();
@@ -839,10 +962,10 @@ TEST_F(WorldOpenRefusal, CreateEditSaveRestartAndSwitchPreserveAuthority) {
         ASSERT_TRUE(report.saved);
         ASSERT_TRUE(created.SaveWorld());
     }
-    const auto before = DiskBytes(root);
+    const auto before = DiskBytes(Fixture().root);
     GameSession reopened;
     reopened.SetRootPath(RootString());
-    reopened.SetJobSystem(&jobs);
+    reopened.SetJobSystem(&Fixture().jobs);
     for (int switch_count = 0; switch_count < 6; ++switch_count) {
         ASSERT_TRUE(reopened.LoadWorld(id)) << reopened.GetWorldOpenError();
         EXPECT_EQ(reopened.GetMetadata().spawnPoint, Vec3(8, 18, 8));
@@ -865,7 +988,7 @@ TEST_F(WorldOpenRefusal, CreateEditSaveRestartAndSwitchPreserveAuthority) {
         EXPECT_EQ(reopened.GetWorldSystem()->snapshot_streamed_chunks().front()->sdf_data.front(),
                   1.0f);
     }
-    EXPECT_EQ(DiskBytes(root), before);
+    EXPECT_EQ(DiskBytes(Fixture().root), before);
 }
 
 TEST_F(WorldOpenRefusal, SavedWorldLifecycleFixtureSwitchesWithoutWritingAnything) {
@@ -873,41 +996,41 @@ TEST_F(WorldOpenRefusal, SavedWorldLifecycleFixtureSwitchesWithoutWritingAnythin
     spec.world_id = "synthetic-lifecycle";
     spec.chunk_count = FixtureChunksFromEnv("LUMIN_LIFECYCLE_FIXTURE_CHUNKS", 64);
     spec.preset_source = fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets/default.json";
-    const auto report = Persistence::WriteSyntheticSave(spec, root);
+    const auto report = Persistence::WriteSyntheticSave(spec, Fixture().root);
     ASSERT_TRUE(report.ok) << report.error;
-    const auto before = DiskBytes(root);
+    const auto before = DiskBytes(Fixture().root);
     GameSession reopened;
     reopened.SetRootPath(RootString());
-    reopened.SetJobSystem(&jobs);
+    reopened.SetJobSystem(&Fixture().jobs);
     for (int switch_count = 0; switch_count < 6; ++switch_count) {
         ASSERT_TRUE(reopened.LoadWorld("synthetic-lifecycle")) << reopened.GetWorldOpenError();
         ASSERT_TRUE(reopened.LoadWorld("fixture")) << reopened.GetWorldOpenError();
     }
-    EXPECT_EQ(DiskBytes(root), before);
+    EXPECT_EQ(DiskBytes(Fixture().root), before);
 }
 
 TEST_F(WorldOpenRefusal, InterruptedMetadataSaveKeepsPreviousBytesAndCanRetry) {
     GameSession session;
     session.SetRootPath(RootString());
-    session.SetJobSystem(&jobs);
+    session.SetJobSystem(&Fixture().jobs);
     ASSERT_TRUE(session.LoadWorld("fixture"));
-    const auto before = DiskBytes(root);
+    const auto before = DiskBytes(Fixture().root);
     session.SetSpawnPoint(Vec3(10, 20, 30));
     WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
     EXPECT_FALSE(session.SaveWorld());
     WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
-    EXPECT_EQ(DiskBytes(root), before);
+    EXPECT_EQ(DiskBytes(Fixture().root), before);
     ASSERT_TRUE(session.SaveWorld());
-    const auto saved = Persistence::InspectSavedWorld(root, "fixture");
+    const auto saved = Persistence::InspectSavedWorld(Fixture().root, "fixture");
     EXPECT_TRUE(saved.error.empty());
     EXPECT_EQ(saved.metadata.spawnPoint, Vec3(10, 20, 30));
 }
 
 TEST_F(WorldOpenRefusal, MenuWorldCreatesNoSaveAndClearsPreviousWorldState) {
-    const auto before = DiskBytes(root);
+    const auto before = DiskBytes(Fixture().root);
     GameSession session;
     session.SetRootPath(RootString());
-    session.SetJobSystem(&jobs);
+    session.SetJobSystem(&Fixture().jobs);
     ASSERT_TRUE(session.LoadWorld("fixture"));
     ASSERT_TRUE(session.CreateTransientWorld("Menu Vista", "424242", "default"));
     EXPECT_TRUE(session.LoadWorldState());
@@ -915,7 +1038,7 @@ TEST_F(WorldOpenRefusal, MenuWorldCreatesNoSaveAndClearsPreviousWorldState) {
     EXPECT_TRUE(session.GetWorldSystem()->snapshot_streamed_chunks().empty());
     EXPECT_FALSE(session.SaveWorld());
     EXPECT_FALSE(session.SaveWorldState());
-    EXPECT_EQ(DiskBytes(root), before);
+    EXPECT_EQ(DiskBytes(Fixture().root), before);
 }
 
 TEST_F(WorldOpenRefusal, AbsentLedgerPreservesSchedulerAndRestoresClockWithoutRegionState) {
@@ -925,8 +1048,8 @@ TEST_F(WorldOpenRefusal, AbsentLedgerPreservesSchedulerAndRestoresClockWithoutRe
     ledger.pin({0, 0}, true, world::WorldClock{});
     const world::WorldClock restored(45);
     std::vector<std::string> errors;
-    ASSERT_FALSE(fs::exists(WorldSaveService::active_regions_path(save)));
-    ASSERT_TRUE(WorldSaveService::load_active_regions(ledger, save, &errors, restored));
+    ASSERT_FALSE(fs::exists(WorldSaveService::active_regions_path(Fixture().save)));
+    ASSERT_TRUE(WorldSaveService::load_active_regions(ledger, Fixture().save, &errors, restored));
     EXPECT_TRUE(errors.empty());
     EXPECT_EQ(ledger.config(), scheduler);
     EXPECT_EQ(ledger.tick(), restored.tick());
@@ -969,12 +1092,12 @@ TEST_F(WorldOpenRefusal, FreshRunnerBootAndAbsentLedgerReloadPreserveSchedulerId
     runner.Shutdown();
     // A subsequent runner with no override must identify the saved effective scheduler.
     config.region_scheduler.reset();
-    const auto before = DiskBytes(root);
+    const auto before = DiskBytes(Fixture().root);
     Server::ServerWorldRunner loaded(config);
     ASSERT_TRUE(loaded.Boot()) << loaded.GetBootError();
     EXPECT_EQ(loaded.Session()->GetActiveRegionLedger().config(), scheduler);
     EXPECT_EQ(loaded.Session()->SystemConfigIdentity(), expected.SystemConfigIdentity());
-    EXPECT_EQ(DiskBytes(root), before);
+    EXPECT_EQ(DiskBytes(Fixture().root), before);
     loaded.Shutdown();
 }
 
@@ -987,7 +1110,7 @@ TEST_F(WorldOpenRefusal, PersistedSchedulerIdentityRefusesDifferentAdmissionAndR
     ++reduced_shift.reduced_shift;
     GameSession baseline;
     baseline.SetRootPath(RootString());
-    baseline.SetJobSystem(&jobs);
+    baseline.SetJobSystem(&Fixture().jobs);
     ASSERT_TRUE(baseline.LoadWorld("fixture")) << baseline.GetWorldOpenError();
     const auto baseline_identity = baseline.SystemConfigIdentity();
     for (const auto scheduler : {work_limit, hold_ticks, reduced_shift}) {
@@ -996,17 +1119,18 @@ TEST_F(WorldOpenRefusal, PersistedSchedulerIdentityRefusesDifferentAdmissionAndR
         SCOPED_TRACE(static_cast<unsigned>(scheduler.reduced_shift));
         world::ActiveRegionLedger persisted(scheduler);
         persisted.set_local_anchor(Vec3(8, 18, 8));
-        ASSERT_TRUE(WorldSaveService::save_active_regions(persisted, world::WorldClock{}, save));
-        const auto before = DiskBytes(root);
+        ASSERT_TRUE(
+            WorldSaveService::save_active_regions(persisted, world::WorldClock{}, Fixture().save));
+        const auto before = DiskBytes(Fixture().root);
         GameSession loaded, expected;
         loaded.SetRootPath(RootString());
-        loaded.SetJobSystem(&jobs);
+        loaded.SetJobSystem(&Fixture().jobs);
         ASSERT_TRUE(loaded.LoadWorld("fixture")) << loaded.GetWorldOpenError();
         expected.SetRegionSchedulerConfig(scheduler);
         EXPECT_EQ(loaded.GetActiveRegionLedger().config(), scheduler);
         EXPECT_EQ(loaded.SystemConfigIdentity(), expected.SystemConfigIdentity());
         ASSERT_NE(loaded.SystemConfigIdentity(), baseline_identity);
-        EXPECT_EQ(DiskBytes(root), before);
+        EXPECT_EQ(DiskBytes(Fixture().root), before);
 
         Net::LockstepConfig local;
         local.local_client_id = 0;
@@ -1033,7 +1157,7 @@ TEST_F(WorldOpenRefusal, PersistedSchedulerIdentityRefusesDifferentAdmissionAndR
         Replay::ReplayHeader header;
         header.system_config_identity = baseline_identity;
         header.preset_content_hash = loaded.PresetContentHash();
-        const auto replay_path = root / "scheduler.lrec1";
+        const auto replay_path = Fixture().root / "scheduler.lrec1";
         Replay::ReplayWriter writer;
         ASSERT_TRUE(writer.Open(replay_path.string(), header));
         ASSERT_TRUE(writer.Finalize(0));
@@ -1060,10 +1184,11 @@ TEST_F(WorldOpenRefusal, LoadedSchedulerSurvivesTransientCreateAndAbsentLedgerRe
     const world::RegionSchedulerConfig scheduler{10, 3, 2};
     world::ActiveRegionLedger persisted(scheduler);
     persisted.set_local_anchor(Vec3(8, 18, 8));
-    ASSERT_TRUE(WorldSaveService::save_active_regions(persisted, world::WorldClock{}, save));
+    ASSERT_TRUE(
+        WorldSaveService::save_active_regions(persisted, world::WorldClock{}, Fixture().save));
     GameSession session, expected;
     session.SetRootPath(RootString());
-    session.SetJobSystem(&jobs);
+    session.SetJobSystem(&Fixture().jobs);
     expected.SetRegionSchedulerConfig(scheduler);
     ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
     const auto expect_scheduler = [&]() {
@@ -1076,11 +1201,12 @@ TEST_F(WorldOpenRefusal, LoadedSchedulerSurvivesTransientCreateAndAbsentLedgerRe
     ASSERT_TRUE(session.LoadWorldState());
     expect_scheduler();
     // Exercise direct state load into an existing transient world, followed by an absent file.
-    ASSERT_TRUE(session.LoadWorldStateFrom(save)) << session.GetWorldOpenError();
+    ASSERT_TRUE(session.LoadWorldStateFrom(Fixture().save)) << session.GetWorldOpenError();
     expect_scheduler();
-    ASSERT_TRUE(fs::exists(WorldSaveService::active_regions_path(save)));
-    ASSERT_TRUE(WorldSaveService::remove_member(save, "chunks/region/active-regions.arl"));
-    ASSERT_TRUE(session.LoadWorldStateFrom(save)) << session.GetWorldOpenError();
+    ASSERT_TRUE(fs::exists(WorldSaveService::active_regions_path(Fixture().save)));
+    ASSERT_TRUE(
+        WorldSaveService::remove_member(Fixture().save, "chunks/region/active-regions.arl"));
+    ASSERT_TRUE(session.LoadWorldStateFrom(Fixture().save)) << session.GetWorldOpenError();
     expect_scheduler();
     ASSERT_TRUE(session.CreateWorld("Scheduler reset", "1337", "default"));
     expect_scheduler();
@@ -1092,12 +1218,13 @@ TEST_F(WorldOpenRefusal, ExplicitSchedulerConflictRefusesLoadAndRunnerBootWithou
     const world::RegionSchedulerConfig scheduler{10, 3, 2};
     world::ActiveRegionLedger persisted(scheduler);
     persisted.set_local_anchor(Vec3(8, 18, 8));
-    ASSERT_TRUE(WorldSaveService::save_active_regions(persisted, world::WorldClock{}, save));
-    const auto before = DiskBytes(root);
+    ASSERT_TRUE(
+        WorldSaveService::save_active_regions(persisted, world::WorldClock{}, Fixture().save));
+    const auto before = DiskBytes(Fixture().root);
     // A matching explicit override is accepted and preserves all decoded scheduler state.
     GameSession matching;
     matching.SetRootPath(RootString());
-    matching.SetJobSystem(&jobs);
+    matching.SetJobSystem(&Fixture().jobs);
     matching.SetRegionSchedulerConfig(scheduler);
     const auto matching_identity = matching.SystemConfigIdentity();
     ASSERT_TRUE(matching.LoadWorld("fixture")) << matching.GetWorldOpenError();
@@ -1113,7 +1240,7 @@ TEST_F(WorldOpenRefusal, ExplicitSchedulerConflictRefusesLoadAndRunnerBootWithou
          {work_limit, hold_ticks, reduced_shift, world::RegionSchedulerConfig{}}) {
         GameSession refused;
         refused.SetRootPath(RootString());
-        refused.SetJobSystem(&jobs);
+        refused.SetJobSystem(&Fixture().jobs);
         refused.SetRegionSchedulerConfig(override_config);
         const auto requested_identity = refused.SystemConfigIdentity();
         EXPECT_FALSE(refused.LoadWorld("fixture"));
@@ -1121,14 +1248,14 @@ TEST_F(WorldOpenRefusal, ExplicitSchedulerConflictRefusesLoadAndRunnerBootWithou
         EXPECT_EQ(refused.GetActiveRegionLedger().config(), override_config);
         EXPECT_EQ(refused.SystemConfigIdentity(), requested_identity);
         EXPECT_FALSE(refused.SaveWorld());
-        EXPECT_EQ(DiskBytes(root), before);
+        EXPECT_EQ(DiskBytes(Fixture().root), before);
         // The direct state-load entry point enforces the same conflict policy.
         ASSERT_TRUE(refused.CreateTransientWorld("Scheduler conflict", "1337", "default"));
-        EXPECT_FALSE(refused.LoadWorldStateFrom(save));
+        EXPECT_FALSE(refused.LoadWorldStateFrom(Fixture().save));
         EXPECT_EQ(refused.GetWorldOpenError(), conflict);
         EXPECT_EQ(refused.GetActiveRegionLedger().config(), override_config);
         EXPECT_EQ(refused.SystemConfigIdentity(), requested_identity);
-        EXPECT_EQ(DiskBytes(root), before);
+        EXPECT_EQ(DiskBytes(Fixture().root), before);
     }
     Server::ServerWorldRunnerConfig config;
     config.root_path = RootString();
@@ -1139,11 +1266,12 @@ TEST_F(WorldOpenRefusal, ExplicitSchedulerConflictRefusesLoadAndRunnerBootWithou
     EXPECT_FALSE(runner.Boot());
     EXPECT_EQ(runner.GetBootError(), conflict);
     EXPECT_EQ(runner.Session(), nullptr);
-    EXPECT_EQ(DiskBytes(root), before);
+    EXPECT_EQ(DiskBytes(Fixture().root), before);
 }
 
 TEST_F(WorldOpenRefusal, ServerAutosaveAndFullSnapshotCarryTheAbsoluteClock) {
-    Write(root / "data/common/systems.json", R"({"sim":{"active_regions":{"enabled":true}}})");
+    Write(Fixture().root / "data/common/systems.json",
+          R"({"sim":{"active_regions":{"enabled":true}}})");
     Server::ServerWorldRunnerConfig config;
     config.root_path = RootString();
     config.world_id = "fixture";
@@ -1165,13 +1293,13 @@ TEST_F(WorldOpenRefusal, ServerAutosaveAndFullSnapshotCarryTheAbsoluteClock) {
             original.Session()->TickSimulation(original.Session()->GetSimulationClock().fixed_dt()),
             1u);
     original.RunFixedTicks(1);
-    EXPECT_EQ(Persistence::InspectSavedWorld(root, "fixture").clock.tick(), 45u);
+    EXPECT_EQ(Persistence::InspectSavedWorld(Fixture().root, "fixture").clock.tick(), 45u);
     ASSERT_GT(original.SaveFullSnapshot(), 0u);
-    const auto before = DiskBytes(root);
+    const auto before = DiskBytes(Fixture().root);
     Server::ServerWorldRunner loaded(config);
     ASSERT_TRUE(loaded.Boot()) << loaded.GetBootError();
     EXPECT_EQ(loaded.TickCount(), original.TickCount());
-    EXPECT_EQ(DiskBytes(root), before);
+    EXPECT_EQ(DiskBytes(Fixture().root), before);
     const auto compare = [&]() {
         EXPECT_EQ(original.Session()->GetWindFieldSystem()->ComputeWindSubHash(),
                   loaded.Session()->GetWindFieldSystem()->ComputeWindSubHash());
@@ -1198,7 +1326,7 @@ TEST_F(WorldOpenRefusal, ServerAutosaveAndFullSnapshotCarryTheAbsoluteClock) {
     original.RunFixedTicks(1);
     EXPECT_TRUE(callback);
     original.Shutdown();
-    EXPECT_EQ(Persistence::InspectSavedWorld(root, "fixture").clock.tick(), 51u);
+    EXPECT_EQ(Persistence::InspectSavedWorld(Fixture().root, "fixture").clock.tick(), 51u);
     loaded.Shutdown();
 }
 
@@ -1287,27 +1415,30 @@ void PreparePendingSnapshot(GameSession& session,
 }
 
 struct PendingSnapshotState {
-    explicit PendingSnapshotState(const GameSession& session)
-        : plant_hash(session.ComputePlantSubHash())
-        , energy_bytes(session.GetEnergyFieldState()->CanonicalBytes())
-        , ledger_bytes(session.GetActiveRegionLedger().canonical_bytes())
-        , clock_bytes(session.GetWorldClock().canonical_bytes()) {}
-
-    void ExpectUnchanged(const GameSession& session, const Chunk& chunk) const {
-        SCOPED_TRACE("pending snapshot state");
-        EXPECT_TRUE(chunk.is_voxel_data_dirty());
-        EXPECT_FLOAT_EQ(chunk.heightmap_data.front(), 42.0f);
-        EXPECT_EQ(session.ComputePlantSubHash(), plant_hash);
-        EXPECT_EQ(session.GetEnergyFieldState()->CanonicalBytes(), energy_bytes);
-        EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(), ledger_bytes);
-        EXPECT_EQ(session.GetWorldClock().canonical_bytes(), clock_bytes);
-    }
-
     std::string plant_hash;
     std::string energy_bytes;
     std::string ledger_bytes;
     std::string clock_bytes;
 };
+
+PendingSnapshotState CapturePendingSnapshotState(const GameSession& session) {
+    return {.plant_hash = session.ComputePlantSubHash(),
+            .energy_bytes = session.GetEnergyFieldState()->CanonicalBytes(),
+            .ledger_bytes = session.GetActiveRegionLedger().canonical_bytes(),
+            .clock_bytes = session.GetWorldClock().canonical_bytes()};
+}
+
+void ExpectUnchanged(const PendingSnapshotState& pending,
+                     const GameSession& session,
+                     const Chunk& chunk) {
+    SCOPED_TRACE("pending snapshot state");
+    EXPECT_TRUE(chunk.is_voxel_data_dirty());
+    EXPECT_FLOAT_EQ(chunk.heightmap_data.front(), 42.0f);
+    EXPECT_EQ(session.ComputePlantSubHash(), pending.plant_hash);
+    EXPECT_EQ(session.GetEnergyFieldState()->CanonicalBytes(), pending.energy_bytes);
+    EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(), pending.ledger_bytes);
+    EXPECT_EQ(session.GetWorldClock().canonical_bytes(), pending.clock_bytes);
+}
 
 Server::ServerWorldRunnerConfig SnapshotRunnerConfig(const std::string& root_path,
                                                      bool active_regions) {
@@ -1374,17 +1505,17 @@ TEST_F(WorldOpenRefusal, ServerFullSnapshotPresetChangeRefusesWithoutWritesOrAck
             PreparePendingSnapshot(*session, chunk, existing_snapshot);
             if (HasFatalFailure())
                 return;
-            const PendingSnapshotState pending(*session);
+            const auto pending = CapturePendingSnapshotState(*session);
 
             for (const auto* changed : {"preset", "identity", "both"}) {
                 SCOPED_TRACE(changed);
                 preset_files.Rewrite(changed);
                 if (HasFatalFailure())
                     return;
-                const SnapshotDestinationBytes before(root);
+                const SnapshotDestinationBytes before(Fixture().root);
                 EXPECT_EQ(runner.SaveFullSnapshot(), 0u);
                 before.ExpectUnchanged();
-                pending.ExpectUnchanged(*session, *chunk);
+                ExpectUnchanged(pending, *session, *chunk);
                 EXPECT_EQ(runner.StreamedChunkCount(), 1u);
                 preset_files.Restore();
                 if (HasFatalFailure())
@@ -1397,7 +1528,8 @@ TEST_F(WorldOpenRefusal, ServerFullSnapshotPresetChangeRefusesWithoutWritesOrAck
             // The legacy full snapshot writes chunks/metadata; flush plants and energy too.
             ASSERT_TRUE(session->SaveWorldState());
             EXPECT_FALSE(chunk->is_voxel_data_dirty());
-            ExpectSnapshotReloaded(pending, *chunk, config, session->GetMetadata().worldId, jobs);
+            ExpectSnapshotReloaded(
+                pending, *chunk, config, session->GetMetadata().worldId, Fixture().jobs);
             if (HasFatalFailure())
                 return;
             runner.Shutdown();
@@ -1407,7 +1539,8 @@ TEST_F(WorldOpenRefusal, ServerFullSnapshotPresetChangeRefusesWithoutWritesOrAck
 
 TEST_F(WorldOpenRefusal, LegacyFullSnapshotCallbackAndMetadataFailureKeepChunkCount) {
     // This case exercises the legacy clock path, independently of shipping defaults.
-    Write(root / "data/common/systems.json", R"({"sim":{"active_regions":{"enabled":false}}})");
+    Write(Fixture().root / "data/common/systems.json",
+          R"({"sim":{"active_regions":{"enabled":false}}})");
     Server::ServerWorldRunnerConfig config;
     config.root_path = RootString();
     config.world_id = "fixture";
@@ -1438,17 +1571,17 @@ TEST_F(WorldOpenRefusal, LegacyFullSnapshotCallbackAndMetadataFailureKeepChunkCo
 }
 
 TEST_F(WorldOpenRefusal, LegacyExplicitSessionSnapshotsKeepLargeKeylessMetadata) {
-    auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
-    metadata["extension"] = std::string(1024 * 1024, 'x');
-    Write(save / "world_info.json", metadata.dump());
+    auto metadata = nlohmann::json::parse(Read(Fixture().save / "world_info.json"));
+    metadata["extension"] = std::string(std::size_t{1024} * 1024u, 'x');
+    Write(Fixture().save / "world_info.json", metadata.dump());
     GameSession session;
     session.SetRootPath(RootString());
-    session.SetJobSystem(&jobs);
+    session.SetJobSystem(&Fixture().jobs);
     session.SetActiveRegionsEnabled(false); // Legacy keyless snapshots have no clock metadata.
     ASSERT_TRUE(session.CreateTransientWorld("Legacy direct load", "1337", "default"));
-    ASSERT_TRUE(session.LoadWorldStateFrom(save)) << session.GetWorldOpenError();
-    EXPECT_TRUE(session.SaveWorldStateTo(save));
-    EXPECT_EQ(Read(save / "world_info.json"), metadata.dump());
+    ASSERT_TRUE(session.LoadWorldStateFrom(Fixture().save)) << session.GetWorldOpenError();
+    EXPECT_TRUE(session.SaveWorldStateTo(Fixture().save));
+    EXPECT_EQ(Read(Fixture().save / "world_info.json"), metadata.dump());
 }
 
 } // namespace

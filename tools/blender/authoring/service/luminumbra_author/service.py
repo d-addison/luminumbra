@@ -61,6 +61,22 @@ def worker_command():
     return [sys.executable, "-m", "luminumbra_author", "_compiler"]
 
 
+def rename_quarantine(path, destination, deadline):
+    # Windows pins a live supervisor's working directory until its ownership
+    # pipe watcher finishes teardown. All recovery moves share a 10-second bound.
+    while True:
+        try:
+            path.rename(destination)
+            return
+        except OSError as error:
+            if getattr(error, "winerror", None) not in (5, 32, 33):
+                raise
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            time.sleep(min(0.05, remaining))
+
+
 class BuildService:
     def __init__(self, project, toolchain, *, timeout=120):
         self.project = Path(project).resolve(strict=True)
@@ -83,6 +99,7 @@ class BuildService:
         except BlockingIOError as error:
             raise Refusal("session.busy", "Another authoring service owns this project.") from error
         self.mutex = threading.RLock()
+        self.close_mutex = threading.Lock()
         self.jobs, self.cancellations = {}, {}
         self.closed = False
         try:
@@ -102,15 +119,19 @@ class BuildService:
         atomic_json(self.root / "jobs" / job["job_id"] / "receipt.json", job)
 
     def _recover(self):
+        # Acquiring session.lock first proves no prior service still owns jobs.
+        deadline = time.monotonic() + 10
         current = self.current()
+        self._resume_quarantine(deadline)
         paths = list((self.root / "jobs").iterdir())
-        require(len(paths) <= 256, "job.limit", "Project reached the retained-job limit.")
+        container = None
         for path in paths:
-            require(path.is_dir() and not path.is_symlink() and JOB_ID.fullmatch(path.name),
+            require(path.is_dir() and not path_is_link(path) and JOB_ID.fullmatch(path.name),
                     "state.invalid", "Unexpected entry in the job directory.")
             receipt = path / "receipt.json"
             if not receipt.exists():
                 # Crash between making a private job directory and recording it.
+                container = self._quarantine_job(path, container, deadline)
                 continue
             job = read_json(relative_path(path, "receipt.json"))
             require(job.get("schema") == RECEIPT and job.get("job_id") == path.name
@@ -122,9 +143,70 @@ class BuildService:
                 job.update(status="succeeded", recovery="Publication committed before service exit.")
                 self._save(job)
             elif job["status"] not in TERMINAL:
-                job.update(status="failed", findings=[Refusal(
-                    "job.orphaned", "Service exited before publication; submit a new build.").finding])
-                self._save(job)
+                container = self._quarantine_job(path, container, deadline, retain_status=True)
+                self.jobs[path.name] = read_json(path / "receipt.json")
+        require(len(self.jobs) <= 256, "job.limit", "Project reached the retained-job limit.")
+
+    def _resume_quarantine(self, deadline):
+        intent = self.root / "quarantine-pending.json"
+        require(not path_is_link(intent), "path.symlink", "Invalid quarantine intent path.")
+        if not intent.exists():
+            return
+        transition = read_json(intent)
+        require(isinstance(transition, dict) and set(transition) == {"job_id", "container"}
+                and isinstance(transition["job_id"], str) and JOB_ID.fullmatch(transition["job_id"])
+                and isinstance(transition["container"], str)
+                and re.fullmatch(r"[0-9]{8}T[0-9]{6}Z(?:-[0-9]+)?", transition["container"]),
+                "state.invalid", "Invalid quarantine transition.")
+        job_id = transition["job_id"]
+        path = self.root / "jobs" / job_id
+        archived = self.root / "quarantine" / transition["container"] / job_id
+        for directory in (self.root, path.parent, path, archived.parent.parent,
+                          archived.parent, archived):
+            require(not path_is_link(directory), "path.symlink", "Invalid quarantine path.")
+        source = archived if archived.exists() else path
+        require(source.is_dir(), "state.invalid", "Missing quarantine source.")
+        job = read_json(relative_path(source, "receipt.json"))
+        require(isinstance(job, dict) and job.get("schema") == RECEIPT
+                and job.get("job_id") == job_id and job.get("mode") == "NATIVE"
+                and job.get("status") not in TERMINAL,
+                "state.invalid", "Invalid quarantined job receipt.")
+        if source == path:
+            rename_quarantine(path, archived, deadline)
+        # The original receipt remains evidence; replay only replaces the status copy.
+        path.mkdir(exist_ok=True)
+        job.update(status="failed", findings=[Refusal(
+            "job.orphaned", "Service exited before publication; submit a new build.").finding])
+        self._save(job)
+        intent.unlink()
+
+    def _quarantine_job(self, path, container, deadline, *, retain_status=False):
+        quarantine = self.root / "quarantine"
+        for directory in (self.root, self.root / "jobs", path, quarantine):
+            require(not path_is_link(directory), "path.symlink", "Invalid quarantine path.")
+        quarantine.mkdir(exist_ok=True)
+        require(quarantine.is_dir() and quarantine.resolve().is_relative_to(self.root),
+                "state.invalid", "Quarantine must be a directory inside authoring state.")
+        if container is None:
+            stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+            counter = 0
+            while True:
+                container = quarantine / (stamp if counter == 0 else f"{stamp}-{counter}")
+                try:
+                    os.mkdir(container)
+                    break
+                except FileExistsError:
+                    counter += 1
+        if retain_status:
+            # Record the destination before moving the only receipt. Startup replays
+            # this intent until a replacement receipt has been atomically published.
+            atomic_json(self.root / "quarantine-pending.json",
+                        {"job_id": path.name, "container": container.name})
+            self._resume_quarantine(deadline)
+        else:
+            # Rename the entire directory, preserving all user data.
+            rename_quarantine(path, container / path.name, deadline)
+        return container
 
     def capabilities(self):
         return {"version": VERSION, "protocol": 1, "mode": "NATIVE", "profiles": [PROFILE, PREFAB_PROFILE],
@@ -533,12 +615,12 @@ class BuildService:
             return manifest
 
     def close(self):
-        with self.mutex:
-            if self.closed:
-                return
-            self.closed = True
-            for job_id, event in self.cancellations.items():
-                if self.jobs[job_id]["status"] not in TERMINAL:
-                    event.set()
-        self.executor.shutdown(wait=True, cancel_futures=False)
-        self.project_lock.close()
+        with self.close_mutex:
+            with self.mutex:
+                self.closed = True
+                for job_id, event in self.cancellations.items():
+                    if self.jobs[job_id]["status"] not in TERMINAL:
+                        event.set()
+            self.executor.shutdown(wait=True, cancel_futures=False)
+            # Retry a failed release even though submissions are already closed.
+            self.project_lock.close()
