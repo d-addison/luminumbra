@@ -985,11 +985,21 @@ class _ReadDiagnostics(io.StringIO):
 
 class _RefreshSnapshot:
     """Bind validation to input bytes and the complete discovery file sets."""
-    def __init__(self, root: Path, paths: list[Path]) -> None:
+    def __init__(self, root: Path, paths: list[Path], *, aliases: dict[Path, Path] | None = None) -> None:
         self.root = root
         self.discovery = self._discover()
         self.fingerprints: dict[Path, tuple[Path, bytes | None]] = {}
+        self.identities: dict[Path, tuple[int, int, int] | None] = {}
         self.add([*paths, *sorted(self.discovery), *(root / path for path in CONTRACT_DOCUMENTS)])
+        for original, target in (aliases or {}).items():
+            path = original.absolute()
+            # Bind the name to the destination selected before lock-overlap
+            # checks. Never read through a newly retargeted alias here.
+            if path.resolve() != target:
+                raise MatrixError("refresh input snapshot changed; retry after source edits finish")
+            if path not in self.fingerprints:
+                self.identities[path] = self._identity(path)
+                self.fingerprints[path] = self.fingerprints[target]
 
     def _discover(self) -> set[Path]:
         cmake_files, gtest_files = _discovery_files(self.root)
@@ -998,19 +1008,40 @@ class _RefreshSnapshot:
     @staticmethod
     def _fingerprint(path: Path) -> bytes | None:
         try:
-            return hashlib.sha256(path.read_bytes()).digest()
+            # The same closed-file reader bounds allocation, rejects devices
+            # without blocking, and checks bytes/identity through its handle.
+            return hashlib.sha256(_read_transaction_file(path, _TRANSACTION_BYTES)[0]).digest()
         except FileNotFoundError:
             return None
+
+    @staticmethod
+    def _identity(path: Path) -> tuple[int, int, int] | None:
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            return None
+        # lstat supplies real IDs on Windows; DirEntry.stat may return zeros.
+        if not metadata.st_ino:
+            raise MatrixError(f"snapshot file identity unavailable: {path}")
+        return metadata.st_dev, metadata.st_ino, stat.S_IFMT(metadata.st_mode)
 
     def add(self, paths: list[Path]) -> None:
         for path in paths:
             path = path.absolute()
             if path not in self.fingerprints:
-                self.fingerprints[path] = (path.resolve(), self._fingerprint(path))
+                self.identities[path] = self._identity(path)
+                target = path.resolve()
+                self.fingerprints[path] = (target, self._fingerprint(target))
 
     def verify(self, published: dict[Path, bytes]) -> None:
         if (self._discover() != self.discovery or any(
-                path.resolve() != target or self._fingerprint(path) != published.get(target, fingerprint)
+                path.resolve() != target or self._fingerprint(target) != published.get(target, fingerprint)
+                # Publishing replaces regular files, but must preserve links
+                # used to reach them. Unpublished names retain their identities
+                # even when an external replacement has identical bytes.
+                or ((target not in published or (self.identities[path] is not None
+                                                and stat.S_ISLNK(self.identities[path][2])))
+                    and self._identity(path) != self.identities[path])
                 for path, (target, fingerprint) in self.fingerprints.items())):
             raise MatrixError("refresh input snapshot changed; retry after source edits finish")
 
@@ -1084,7 +1115,9 @@ def _read_transaction_file(path: Path, limit: int) -> tuple[bytes, os.stat_resul
         before = _transaction_metadata(handle)
         if not stat.S_ISREG(before.st_mode) or not before.st_ino or before.st_size > limit:
             raise MatrixError(f"invalid recovery file or size: {path}")
-        data = handle.read(limit + 1)
+        # Allocate from the verified size, with one byte to detect growth;
+        # even an empty file never requests the full 16 MiB file bound.
+        data = handle.read(before.st_size + 1)
         after = _transaction_metadata(handle)
         same_identity = _same_transaction_identity(path, before)
     if (len(data) > limit or len(data) != before.st_size
@@ -1342,6 +1375,8 @@ def _replace_outputs(
             replaced.append(path)
             identities[path] = (target, identity)
             published[target] = digests[path]
+            if verify is not None:
+                verify(published)
         if verify is not None:
             verify(published)
         if journal_published:
@@ -2030,19 +2065,28 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _run_locked(args: argparse.Namespace, root: Path) -> int:
-    args.matrix = args.matrix if args.matrix is not None else root / "tools/ci/acceptance_matrix.json"
-    args.inventory = root / "tools/ci/acceptance_requirements.json"
-    args.generated_doc = root / "docs/acceptance-matrix.md"
+    # A speculative reader may retry. Never discard its original names by
+    # mutating the parsed arguments, including an aliased checkout root.
+    args = copy.copy(args)
+    args.matrix = args.matrix if args.matrix is not None else args.root / "tools/ci/acceptance_matrix.json"
+    args.inventory = args.root / "tools/ci/acceptance_requirements.json"
+    args.generated_doc = args.root / "docs/acceptance-matrix.md"
     # Use one identity for aliases, including Windows short names and paths
     # containing parent components, throughout snapshots and publication.
     # Defaults follow the same rule: replace the resolved destination and
     # preserve the symlink used to reach it.
+    aliases: dict[Path, Path] = {}
     for name in ("matrix", "inventory", "generated_doc", "check_doc", "write_doc", "discovery",
                  "execution_receipt"):
         path = getattr(args, name)
         if path is not None:
-            setattr(args, name, path.resolve())
-    args.junit = [path.resolve() for path in args.junit]
+            if path not in aliases:
+                aliases[path] = path.resolve()
+            setattr(args, name, aliases[path])
+    for path in args.junit:
+        if path not in aliases:
+            aliases[path] = path.resolve()
+    args.junit = [aliases[path] for path in args.junit]
     lock_path = _refresh_lock_path(root, required=False)
     lock = lock_path.resolve() if lock_path is not None else None
     if lock is not None and any(path is not None and _same_path(path, lock)
@@ -2053,11 +2097,11 @@ def _run_locked(args: argparse.Namespace, root: Path) -> int:
                                              args.discovery, args.check_doc, *args.junit)):
         raise MatrixError("refresh lock cannot be used as an input")
     snapshot = None
-    if args.refresh_inventory:
+    if args.refresh_inventory or args.write_doc is not None or args.execution_receipt is not None:
         paths = [args.inventory, args.matrix, args.generated_doc, *args.junit]
         paths.extend(path for path in (args.discovery, args.check_doc, args.write_doc,
                                        args.execution_receipt) if path is not None)
-        snapshot = _RefreshSnapshot(root, paths)
+        snapshot = _RefreshSnapshot(root, paths, aliases=aliases)
     return _run(args, root, snapshot)
 
 
@@ -2071,6 +2115,8 @@ def _run(args: argparse.Namespace, root: Path, snapshot: _RefreshSnapshot | None
 
     inputs, protected_inputs = _matrix_input_paths(matrix, root)
     _check_output_paths(args, root, matrix_path, protected_inputs)
+    if snapshot is not None:
+        snapshot.add(inputs)
     refreshed = None
     decisions: list[dict[str, Any]] = []
     outputs: list[tuple[Path, str]] = []
@@ -2078,8 +2124,6 @@ def _run(args: argparse.Namespace, root: Path, snapshot: _RefreshSnapshot | None
         inventory_path = args.inventory
         doc = args.generated_doc
         try:
-            if snapshot is not None:
-                snapshot.add(inputs)
             inventory = load_matrix(inventory_path)
             refreshed, refreshed_matrix, decisions = refresh_inventory(inventory, matrix, root)
             # Matrix precedes inventory even when only canonical formatting changes.

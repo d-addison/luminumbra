@@ -11,6 +11,7 @@ import io
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -332,6 +333,52 @@ raise SystemExit(module["main"](sys.argv[3:]))
                      ("AlphaContract", "Alpha.One", "Instances/Param.Three/0", "Instances/Param.Three/1")]
         self.write_junit(report, cases)
         return discovery, report
+
+    @contextlib.contextmanager
+    def retargetable_path(self, alias: Path, *, denied: bool = False) -> Any:
+        """Use real links where permitted, and equivalent resolution otherwise."""
+        first = alias.with_name("original-" + alias.name)
+        second = alias.with_name("retargeted-" + alias.name)
+        directory = alias.is_dir()
+        alias.rename(first)
+        duplicate = shutil.copytree if directory else shutil.copyfile
+        duplicate(first, second)
+        current = first
+        linked = False
+        with contextlib.ExitStack() as stack:
+            try:
+                if denied:
+                    stack.enter_context(mock.patch.object(Path, "symlink_to", side_effect=PermissionError("denied")))
+                try:
+                    alias.symlink_to(first, target_is_directory=directory)
+                    linked = True
+                except OSError:
+                    duplicate(first, alias)
+                    resolve = Path.resolve
+                    def resolved(path: Path, *args: Any, **kwargs: Any) -> Path:
+                        # Resolve parent components after following the alias,
+                        # as a real directory link or Windows short name does.
+                        if path.is_relative_to(alias):
+                            path = current / path.relative_to(alias)
+                        return resolve(path, *args, **kwargs)
+                    stack.enter_context(mock.patch.object(Path, "resolve", resolved))
+                def retarget() -> None:
+                    nonlocal current
+                    current = second
+                    if linked:
+                        alias.unlink()
+                        alias.symlink_to(second, target_is_directory=directory)
+                yield first, second, retarget
+            finally:
+                if linked or not directory:
+                    alias.unlink()
+                else:
+                    shutil.rmtree(alias)
+                first.rename(alias)
+                if directory:
+                    shutil.rmtree(second)
+                else:
+                    second.unlink()
 
     def write_junit(self, path: Path, cases: list[dict[str, Any]]) -> None:
         suite = ET.Element("testsuite")
@@ -1012,6 +1059,307 @@ script.write_text('changed input', encoding='utf-8')
         args.write_doc.unlink()
         MODULE._check_output_paths(args, self.root, self.matrix_path, [script])
 
+    def test_cli_alias_retargeting_refuses_before_and_after_every_publication(self) -> None:
+        for name in ("inventory", "matrix", "generated", "check", "write", "discovery", "receipt", "junit"):
+            for boundary in ("loaded", "staging", 1, 2, 3, 4, 5):
+                for denied in (False, True):
+                    with self.subTest(alias=name, boundary=boundary, denied=denied):
+                        paths, before = self.prepare_rollback()
+                        discovery, report = self.execution_inputs()
+                        check, export, receipt = (self.tmp / filename for filename in
+                                                   ("check.md", "export.md", "receipt.json"))
+                        updated = MODULE.refresh_inventory(self.inventory, MODULE.load_matrix(self.matrix_path),
+                                                           self.root)[1]
+                        check.write_bytes(MODULE.render_doc(updated).encode("utf-8"))
+                        export.write_bytes(b"previous export\n")
+                        receipt.write_bytes(b"previous receipt\n")
+                        aliases = dict(zip(("generated", "matrix", "inventory"), paths))
+                        aliases.update(check=check, write=export, discovery=discovery, receipt=receipt, junit=report)
+                        alias = aliases[name]
+                        with self.retargetable_path(alias, denied=denied) as (first, second, retarget):
+                            originals = {path.resolve(): data for path, data in before.items()}
+                            originals.update({path.resolve(): path.read_bytes() for path in
+                                              (check, export, receipt, discovery, report)})
+                            originals[second] = second.read_bytes()
+                            load, publish, replace = MODULE.load_matrix, MODULE._replace_outputs, Path.replace
+                            changed = False
+                            published = []
+                            def change() -> None:
+                                nonlocal changed
+                                self.assertFalse(changed)
+                                retarget()
+                                changed = True
+                            def after_read(path: Path) -> Any:
+                                result = load(path)
+                                if boundary == "loaded" and path == paths[2].resolve():
+                                    change()
+                                return result
+                            def before_stage(*args: Any, **kwargs: Any) -> None:
+                                if boundary == "staging":
+                                    change()
+                                publish(*args, **kwargs)
+                            def after_replace(path: Path, target: Path) -> Path:
+                                result = replace(path, target)
+                                published.append(target)
+                                if boundary == len(published):
+                                    change()
+                                return result
+                            with mock.patch.object(MODULE, "load_matrix", after_read), \
+                                    mock.patch.object(MODULE, "_replace_outputs", before_stage), \
+                                    mock.patch.object(Path, "replace", after_replace):
+                                code, out, err = self.run_main(*self.base_args(), "--refresh-inventory",
+                                    "--check-doc", str(check), "--write-doc", str(export),
+                                    "--discovery", str(discovery), "--junit", str(report),
+                                    "--execution-receipt", str(receipt))
+                            self.assertTrue(changed)
+                            self.assertEqual(code, 2, err)
+                            self.assertIn("input snapshot changed", err)
+                            self.assertNotIn("static references ok", out)
+                            self.assertNotIn("rollback incomplete", err)
+                            self.assertEqual(len(published), boundary if isinstance(boundary, int) else 0)
+                            self.assertEqual(alias.resolve(), second)
+                            self.assertEqual({path: path.read_bytes() for path in originals}, originals)
+                            self.assertEqual(list(self.tmp.rglob(".acceptance-*")), [])
+                            self.assertFalse(MODULE._refresh_lock_path(self.root).with_suffix(".transaction").exists())
+
+    def test_parent_and_checkout_alias_retargeting_rolls_back_actual_destinations(self) -> None:
+        for parent in (self.root / "tools/ci", self.root):
+            for denied in (False, True):
+                with self.subTest(parent=parent.name, denied=denied):
+                    paths, before = self.prepare_rollback(generated_evidence=False)
+                    with self.retargetable_path(parent, denied=denied) as (first, second, retarget):
+                        originals = {path.resolve(): data for path, data in before.items()}
+                        originals.update({path: path.read_bytes() for path in second.rglob("*")
+                                          if path.is_file() and ".git" not in path.parts})
+                        replace = Path.replace
+                        def publish(path: Path, target: Path) -> Path:
+                            result = replace(path, target)
+                            retarget()
+                            return result
+                        with mock.patch.object(Path, "replace", publish):
+                            code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+                        self.assertEqual(code, 2, err)
+                        self.assertIn("input snapshot changed", err)
+                        self.assertNotIn("rollback incomplete", err)
+                        self.assertEqual(parent.resolve(), second)
+                        self.assertEqual({path: path.read_bytes() for path in originals}, originals)
+                        self.assertEqual(list(first.rglob(".acceptance-*")), [])
+
+    def test_nonrefresh_writers_reject_cli_and_referenced_input_alias_retargeting(self) -> None:
+        for name in ("matrix", "inventory", "generated", "check", "discovery", "junit", "write", "receipt",
+                     "reference"):
+            for during in (False, True):
+                with self.subTest(alias=name, during=during):
+                    self.prepare_refresh()
+                    discovery, report = self.execution_inputs()
+                    doc = self.root / "docs/acceptance-matrix.md"
+                    export, receipt = self.tmp / "export.md", self.tmp / "receipt.json"
+                    export.write_bytes(b"old export")
+                    receipt.write_bytes(b"old receipt")
+                    aliases = dict(matrix=self.matrix_path, inventory=self.root / "tools/ci/acceptance_requirements.json",
+                                   generated=doc, check=doc, discovery=discovery, junit=report,
+                                   write=export, receipt=receipt, reference=self.root / "tools/script.py")
+                    with self.retargetable_path(aliases[name]) as (first, second, retarget):
+                        before = {path.resolve(): path.read_bytes() for path in aliases.values()}
+                        before[second] = second.read_bytes()
+                        replace, publish = Path.replace, MODULE._replace_outputs
+                        changed = False
+                        def before_stage(*args: Any, **kwargs: Any) -> None:
+                            if not during:
+                                retarget()
+                            publish(*args, **kwargs)
+                        def after_replace(path: Path, target: Path) -> Path:
+                            nonlocal changed
+                            result = replace(path, target)
+                            if not changed:
+                                changed = True
+                                retarget()
+                            return result
+                        with mock.patch.object(MODULE, "_replace_outputs", before_stage), \
+                                mock.patch.object(Path, "replace", after_replace if during else replace):
+                            code, out, err = self.run_main(*self.base_args(), "--write-doc", str(export),
+                                "--check-doc", str(doc), "--discovery", str(discovery), "--junit", str(report),
+                                "--execution-receipt", str(receipt))
+                        self.assertEqual(code, 2, err)
+                        self.assertIn("input snapshot changed", err)
+                        self.assertNotIn("references passed", out)
+                        self.assertNotIn("rollback incomplete", err)
+                        self.assertEqual({path: path.read_bytes() for path in before}, before)
+                        self.assertEqual(list(self.tmp.rglob(".acceptance-*")), [])
+
+    def test_same_byte_input_hardlink_rebindings_are_refused(self) -> None:
+        for name in ("inventory", "matrix", "source", "script", "cmake", "gtest", "discovery", "junit"):
+            with self.subTest(input=name):
+                paths, before = self.prepare_rollback()
+                discovery, report = self.execution_inputs()
+                sources = dict(inventory=paths[2], matrix=paths[1], source=self.root / "docs/d.md",
+                               script=self.root / "tools/script.py", cmake=self.root / "test/CMakeLists.txt",
+                               gtest=self.root / "test/x_test.cpp", discovery=discovery, junit=report)
+                source = sources[name]
+                saved, replacement = self.tmp / "saved-input", self.tmp / "replacement-input"
+                saved.hardlink_to(source)
+                replacement.write_bytes(source.read_bytes())
+                publish = MODULE._replace_outputs
+                def rebind(*args: Any, **kwargs: Any) -> None:
+                    source.unlink()
+                    source.hardlink_to(replacement)
+                    publish(*args, **kwargs)
+                try:
+                    with mock.patch.object(MODULE, "_replace_outputs", rebind), \
+                            mock.patch.object(Path, "replace", autospec=True, side_effect=Path.replace) as replace:
+                        code, _, err = self.run_main(*self.base_args(), "--refresh-inventory",
+                            "--discovery", str(discovery), "--junit", str(report))
+                    self.assertEqual(code, 2, err)
+                    self.assertIn("input snapshot changed", err)
+                    replace.assert_not_called()
+                    self.assertEqual({path: path.read_bytes() for path in paths}, before)
+                    self.assertEqual(source.read_bytes(), saved.read_bytes())
+                    self.assertEqual(source.read_bytes(), replacement.read_bytes())
+                finally:
+                    saved.unlink()
+                    replacement.unlink()
+
+    def test_alias_change_before_snapshot_never_reads_the_new_target(self) -> None:
+        paths, before = self.prepare_rollback()
+        alias = paths[2]
+        lock = MODULE._refresh_lock_path(self.root)
+        for failure in ("lock", "missing", "partial", "unreadable"):
+            with self.subTest(target=failure):
+                with self.retargetable_path(alias, denied=True) as (first, second, retarget):
+                    if failure == "partial":
+                        second.write_bytes(b"{")
+                    elif failure == "missing":
+                        second.unlink()
+                    snapshot, fingerprint, resolve = MODULE._RefreshSnapshot.__init__, \
+                        MODULE._RefreshSnapshot._fingerprint, Path.resolve
+                    def resolved(path: Path, *args: Any, **kwargs: Any) -> Path:
+                        result = resolve(path, *args, **kwargs)
+                        return lock if failure == "lock" and result == second else result
+                    def create(snapshot_self: Any, *args: Any, **kwargs: Any) -> None:
+                        retarget()
+                        snapshot(snapshot_self, *args, **kwargs)
+                    def read(path: Path) -> Any:
+                        self.assertNotIn(path, (second, lock))
+                        return fingerprint(path)
+                    try:
+                        with mock.patch.object(Path, "resolve", resolved), \
+                                mock.patch.object(MODULE._RefreshSnapshot, "__init__", create), \
+                                mock.patch.object(MODULE._RefreshSnapshot, "_fingerprint", staticmethod(read)), \
+                                mock.patch.object(Path, "replace") as replace:
+                            code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+                        self.assertEqual(code, 2, err)
+                        self.assertIn("input snapshot changed", err)
+                        replace.assert_not_called()
+                        self.assertEqual(first.read_bytes(), before[alias])
+                    finally:
+                        if not second.exists():
+                            second.touch()
+        self.assertEqual({path: path.read_bytes() for path in paths}, before)
+
+    def test_snapshot_unknown_or_unreadable_name_identity_refuses_without_publication(self) -> None:
+        paths, before = self.prepare_rollback()
+        lstat = Path.lstat
+        for failure in ("unknown", "unreadable"):
+            with self.subTest(failure=failure):
+                def metadata(path: Path) -> Any:
+                    result = lstat(path)
+                    if path == paths[2]:
+                        if failure == "unreadable":
+                            raise PermissionError("input identity unreadable")
+                        values = list(result)
+                        values[1] = 0
+                        return os.stat_result(values)
+                    return result
+                with mock.patch.object(Path, "lstat", metadata), mock.patch.object(Path, "replace") as replace:
+                    code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+                self.assertEqual(code, 2, err)
+                self.assertIn("identity unavailable" if failure == "unknown" else "identity unreadable", err)
+                replace.assert_not_called()
+                self.assertEqual({path: path.read_bytes() for path in paths}, before)
+
+    def test_snapshot_inputs_and_outputs_use_the_bounded_regular_file_reader(self) -> None:
+        for role in ("input", "output"):
+            for failure in ("special", "oversize", "partial", "changed"):
+                with self.subTest(role=role, failure=failure):
+                    self.prepare_refresh()
+                    export = self.tmp / "export.md"
+                    export.write_bytes(b"previous export")
+                    blocked = self.matrix_path if role == "input" else export
+                    identity = MODULE._read_transaction_file(blocked, MODULE._TRANSACTION_BYTES)[1]
+                    before = {path: path.read_bytes() for path in (self.matrix_path, export)}
+                    metadata = MODULE._transaction_metadata
+                    reads = 0
+                    def information(handle: Any) -> Any:
+                        nonlocal reads
+                        result = metadata(handle)
+                        if not os.path.samestat(result, identity):
+                            return result
+                        reads += 1
+                        fields = list(result)
+                        if failure == "special":
+                            fields[0] = stat.S_IFIFO | 0o600
+                        elif failure == "oversize":
+                            fields[6] = MODULE._TRANSACTION_BYTES + 1
+                        elif failure == "partial":
+                            fields[6] += 1
+                        elif reads > 1:
+                            fields[8] += 1
+                        else:
+                            return result
+                        return os.stat_result(fields)
+                    with mock.patch.object(MODULE, "_transaction_metadata", information), \
+                            mock.patch.object(MODULE, "load_matrix", wraps=MODULE.load_matrix) as load, \
+                            mock.patch.object(Path, "replace") as replace:
+                        code, _, err = self.run_main(*self.base_args(), "--write-doc", str(export))
+                    self.assertEqual(code, 2, err)
+                    self.assertIn("invalid recovery file or size" if failure in {"special", "oversize"}
+                                  else "recovery file changed", err)
+                    self.assertGreater(reads, 0)
+                    load.assert_not_called()
+                    replace.assert_not_called()
+                    self.assertEqual({path: path.read_bytes() for path in before}, before)
+
+    def test_repeated_cli_alias_uses_the_first_selected_destination(self) -> None:
+        paths, before = self.prepare_rollback(generated_evidence=False)
+        doc = paths[0]
+        with self.retargetable_path(doc, denied=True) as (first, second, retarget):
+            resolve = Path.resolve
+            changed = False
+            def selected(path: Path, *args: Any, **kwargs: Any) -> Path:
+                nonlocal changed
+                result = resolve(path, *args, **kwargs)
+                if path == doc and not changed:
+                    changed = True
+                    retarget()
+                return result
+            with mock.patch.object(Path, "resolve", selected), \
+                    mock.patch.object(Path, "replace", autospec=True, side_effect=Path.replace) as replace:
+                code, _, err = self.run_main(*self.base_args(), "--refresh-inventory",
+                                             "--check-doc", str(doc), "--write-doc", str(doc))
+            self.assertTrue(changed)
+            self.assertEqual(code, 2, err)
+            self.assertIn("input snapshot changed", err)
+            replace.assert_not_called()
+            self.assertEqual(first.read_bytes(), before[doc])
+            self.assertEqual(second.read_bytes(), before[doc])
+            self.assertEqual({path: path.read_bytes() for path in paths[1:]},
+                             {path: before[path] for path in paths[1:]})
+
+    def test_locked_retries_keep_original_cli_names(self) -> None:
+        self.prepare_refresh()
+        with self.retargetable_path(self.matrix_path) as (first, second, retarget):
+            args = MODULE.argparse.Namespace(root=self.root, matrix=self.matrix_path, refresh_inventory=False,
+                check_doc=None, write_doc=None, discovery=None, execution_receipt=None,
+                junit=[], require_landed=False, ci_context=False)
+            original = vars(args).copy()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(MODULE._run_locked(args, self.root), 0)
+                retarget()
+                second.write_bytes(b"{")
+                self.assertEqual(MODULE._run_locked(args, self.root), 2)
+            self.assertEqual(vars(args), original)
+            self.assertNotEqual(first.read_bytes(), second.read_bytes())
+
     def test_refresh_aliased_inputs_and_standard_document_share_one_identity(self) -> None:
         self.prepare_refresh()
         (self.root / MODULE.CONTRACT_DOCUMENTS[1]).write_text(
@@ -1181,7 +1529,7 @@ script.write_text('changed input', encoding='utf-8')
     def test_generated_document_evidence_stays_in_refresh_snapshot(self) -> None:
         doc = self.root / "docs/acceptance-matrix.md"
         validate = MODULE.validate
-        read = Path.read_bytes
+        read = MODULE._read_transaction_file
         for failure in ("changed", "unreadable", "removed"):
             with self.subTest(failure=failure):
                 paths, before = self.prepare_rollback()
@@ -1196,12 +1544,12 @@ script.write_text('changed input', encoding='utf-8')
                     elif failure == "changed":
                         doc.write_bytes(b"External document edit.\n")
                     return result
-                def read_after_validation(path: Path) -> bytes:
+                def read_after_validation(path: Path, limit: int) -> Any:
                     if checked and path == doc and failure == "unreadable":
                         raise PermissionError("document unreadable")
-                    return read(path)
+                    return read(path, limit)
                 with mock.patch.object(MODULE, "validate", validate_then_change), \
-                        mock.patch.object(Path, "read_bytes", read_after_validation), \
+                        mock.patch.object(MODULE, "_read_transaction_file", read_after_validation), \
                         mock.patch.object(Path, "replace") as publish:
                     code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
                 self.assertTrue(checked)
@@ -1367,7 +1715,7 @@ script.write_text('changed input', encoding='utf-8')
                          self.root / "docs/acceptance-matrix.md")
                 before = [path.read_bytes() for path in paths]
                 replace = Path.replace
-                read = Path.read_bytes
+                read = MODULE._read_transaction_file
                 replaced = False
                 def replace_then_change(file: Path, target: Path) -> Path:
                     nonlocal replaced
@@ -1378,13 +1726,13 @@ script.write_text('changed input', encoding='utf-8')
                     elif failure == "partial":
                         source.write_bytes(b"# Part")
                     return result
-                def unreadable(file: Path) -> bytes:
+                def unreadable(file: Path, limit: int) -> Any:
                     if replaced and file == source and failure == "unreadable":
                         raise PermissionError("commit input unreadable")
-                    return read(file)
+                    return read(file, limit)
                 try:
                     with mock.patch.object(Path, "replace", replace_then_change), \
-                            mock.patch.object(Path, "read_bytes", unreadable):
+                            mock.patch.object(MODULE, "_read_transaction_file", unreadable):
                         code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
                     self.assertEqual(code, 2, err)
                     self.assertIn("commit input unreadable" if failure == "unreadable"
@@ -2213,14 +2561,15 @@ script.write_text('changed input', encoding='utf-8')
         paths = (self.root / "tools/ci/acceptance_requirements.json", self.matrix_path,
                  self.root / "docs/acceptance-matrix.md", extra_doc, receipt)
         before = [path.read_bytes() for path in paths]
-        read = Path.read_bytes
+        read = MODULE._read_transaction_file
         for blocked in paths:
             with self.subTest(path=blocked):
-                def denied(file: Path) -> bytes:
+                def denied(file: Path, limit: int) -> Any:
                     if file == blocked:
                         raise PermissionError("output read denied")
-                    return read(file)
-                with mock.patch.object(Path, "read_bytes", denied), mock.patch.object(Path, "replace") as replace:
+                    return read(file, limit)
+                with mock.patch.object(MODULE, "_read_transaction_file", denied), \
+                        mock.patch.object(Path, "replace") as replace:
                     code, _, err = self.run_main(*self.base_args(), "--refresh-inventory",
                                                   "--write-doc", str(extra_doc), "--junit", str(report),
                                                   "--discovery", str(discovery), "--execution-receipt", str(receipt))
@@ -3907,6 +4256,81 @@ script.write_text('changed input', encoding='utf-8')
 
 
 class AcceptanceRecoveryTests(AcceptanceFixture):
+    def test_recovery_reads_allocate_from_the_verified_file_size(self) -> None:
+        path = self.tmp / "bounded-input"
+        fdopen = os.fdopen
+        for data in (b"", b"small", b"x" * 4096):
+            with self.subTest(size=len(data)):
+                path.write_bytes(data)
+                requests = []
+                def opened(*args: Any, **kwargs: Any) -> Any:
+                    handle = fdopen(*args, **kwargs)
+                    read = handle.read
+                    def bounded(size: int) -> bytes:
+                        requests.append(size)
+                        return read(size)
+                    handle.read = bounded
+                    return handle
+                with mock.patch.object(os, "fdopen", opened):
+                    actual, identity = MODULE._read_transaction_file(path, MODULE._TRANSACTION_BYTES)
+                self.assertEqual(actual, data)
+                self.assertEqual(identity.st_size, len(data))
+                self.assertEqual(requests, [len(data) + 1])
+
+    def test_retargeted_inventory_alias_recovers_the_actual_publication_destinations(self) -> None:
+        paths, before = self.prepare_rollback()
+        inventory = paths[2]
+        program = """
+import os, pathlib, runpy, sys
+module = runpy.run_path(sys.argv[1])["main"].__globals__
+alias, first, second = map(pathlib.Path, sys.argv[2:5])
+current = first
+resolve, replace = pathlib.Path.resolve, pathlib.Path.replace
+verify = module["_RefreshSnapshot"].verify
+def resolved(path, *args, **kwargs):
+    return current if path == alias else resolve(path, *args, **kwargs)
+def publish(path, target):
+    global current
+    result = replace(path, target)
+    if target == first:
+        current = second
+    return result
+def terminate_on_refusal(snapshot, published):
+    try:
+        verify(snapshot, published)
+    except module["MatrixError"]:
+        if current == second:
+            os._exit(73)
+        raise
+pathlib.Path.resolve = resolved
+pathlib.Path.replace = publish
+module["_RefreshSnapshot"].verify = terminate_on_refusal
+raise SystemExit(module["main"](sys.argv[5:]))
+"""
+        for denied in (False, True):
+            with self.subTest(denied=denied), self.retargetable_path(inventory, denied=denied) as (first, second, retarget):
+                child = subprocess.run([sys.executable, "-I", "-B", "-c", program, str(MODULE_PATH),
+                                        str(inventory), str(first), str(second), *self.base_args(),
+                                        "--refresh-inventory"], capture_output=True, text=True, timeout=5)
+                self.assertEqual(child.returncode, 73, (child.stdout, child.stderr))
+                journal = MODULE._refresh_lock_path(self.root).with_suffix(".transaction")
+                entries = json.loads(journal.read_bytes())["outputs"]
+                self.assertEqual([Path(entry["path"]) for entry in entries], [*paths[:2], first])
+                retarget()
+                identity = inventory.lstat()
+                with mock.patch.object(MODULE, "load_matrix", side_effect=MODULE.MatrixError("stop after recovery")):
+                    code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+                self.assertEqual(code, 2, err)
+                self.assertIn("stop after recovery", err)
+                self.assertEqual(first.read_bytes(), before[inventory])
+                self.assertEqual(second.read_bytes(), before[inventory])
+                self.assertEqual(inventory.resolve(), second)
+                self.assertTrue(os.path.samestat(identity, inventory.lstat()))
+                self.assertEqual({path: path.read_bytes() for path in paths[:2]},
+                                 {path: before[path] for path in paths[:2]})
+                self.assertFalse(journal.exists())
+                self.assertEqual(list(self.tmp.rglob(".acceptance-*")), [])
+
     @classmethod
     def setUpClass(cls) -> None:
         super().setUpClass()
