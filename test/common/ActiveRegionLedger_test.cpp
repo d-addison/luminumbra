@@ -303,7 +303,7 @@ TEST(ActiveRegionLedgerTest, FrozenContentsAndCursorDoNotAdvanceAndResumeIsBound
                   .elapsed_ticks,
               36000u);
     EXPECT_EQ(ActiveRegionLedger::resume_window(kFar, 3, WorldClock(100000), 7).elapsed_ticks, 7u);
-    EXPECT_THROW(ActiveRegionLedger::resume_window(kFar, 3, WorldClock(2), 7),
+    EXPECT_THROW(static_cast<void>(ActiveRegionLedger::resume_window(kFar, 3, WorldClock(2), 7)),
                  std::invalid_argument);
 }
 
@@ -438,16 +438,37 @@ TEST(ActiveRegionLedgerTest, CadenceRunsOnlyAtDerivedPhaseAndFailedFreezeLeavesL
 TEST(ActiveRegionLedgerTest, ValidAnchorBoundaries) {
     const auto nan = std::numeric_limits<float>::quiet_NaN();
     const auto inf = std::numeric_limits<float>::infinity();
-    EXPECT_TRUE(ActiveRegionLedger::valid_anchor(Vec3(-16777216.0f, 0, -16777216.0f)));
-    EXPECT_TRUE(ActiveRegionLedger::valid_anchor(Vec3(16777215.0f, 5, 16777215.0f)));
+    EXPECT_TRUE(ActiveRegionLedger::valid_anchor(Vec3(-16777216.0f, 0, 0)));
+    EXPECT_TRUE(ActiveRegionLedger::valid_anchor(Vec3(0, 0, -16777216.0f)));
+    EXPECT_TRUE(ActiveRegionLedger::valid_anchor(Vec3(16777215.0f, 5, 0)));
+    EXPECT_TRUE(ActiveRegionLedger::valid_anchor(Vec3(0, 5, 16777215.0f)));
     EXPECT_TRUE(ActiveRegionLedger::valid_anchor(Vec3(0, -1e30f, 0)));
     EXPECT_FALSE(ActiveRegionLedger::valid_anchor(Vec3(16777216.0f, 0, 0)));
     EXPECT_FALSE(ActiveRegionLedger::valid_anchor(Vec3(0, 0, 16777216.0f)));
+    // -2^24 - 1 rounds to -2^24 in binary32; -16777218 is the next lower float.
     EXPECT_FALSE(ActiveRegionLedger::valid_anchor(Vec3(-16777218.0f, 0, 0)));
+    EXPECT_FALSE(ActiveRegionLedger::valid_anchor(Vec3(0, 0, -16777218.0f)));
     EXPECT_FALSE(ActiveRegionLedger::valid_anchor(Vec3(nan, 0, 0)));
     EXPECT_FALSE(ActiveRegionLedger::valid_anchor(Vec3(0, 0, inf)));
     EXPECT_FALSE(ActiveRegionLedger::valid_anchor(Vec3(0, nan, 0)));
     EXPECT_FALSE(ActiveRegionLedger::valid_anchor(Vec3(0, -inf, 0)));
+}
+
+TEST(ActiveRegionLedgerTest, PinBoundariesOnBothAxes) {
+    ActiveRegionLedger ledger;
+    const WorldClock clock;
+    for (const auto key :
+         std::array<RegionKey, 4>{{{-32768, 0}, {32767, 0}, {0, -32768}, {0, 32767}}}) {
+        ledger.pin(key, true, clock);
+        ASSERT_TRUE(ledger.records().contains(key));
+        EXPECT_TRUE(ledger.records().at(key).pinned);
+    }
+    const auto before = ledger.encode();
+    for (const auto key :
+         std::array<RegionKey, 4>{{{-32769, 0}, {32768, 0}, {0, -32769}, {0, 32768}}}) {
+        EXPECT_THROW(ledger.pin(key, true, clock), std::invalid_argument);
+        EXPECT_EQ(ledger.encode(), before);
+    }
 }
 
 TEST(ActiveRegionLedgerTest, TrySetLocalAnchorDoesNotThrowAndKeepsPreviousAnchor) {

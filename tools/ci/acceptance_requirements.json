@@ -1611,8 +1611,8 @@
     {
       "id": "ar.scope.002",
       "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
-      "quote": "It is gated by the existing `sim.active_regions` switch, enabled in compiled and packaged defaults for v0.3.0.",
-      "text": "It is gated by the existing `sim.active_regions` switch, enabled in compiled and packaged defaults for v0.3.0."
+      "quote": "It is gated by the existing `sim.active_regions` switch, enabled in compiled and packaged defaults since v0.3.0.",
+      "text": "It is gated by the existing `sim.active_regions` switch, enabled in compiled and packaged defaults since v0.3.0."
     },
     {
       "id": "ar.scope.003",
@@ -1629,14 +1629,14 @@
     {
       "id": "ar.scope.005",
       "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
-      "quote": "No distant system consumes this schedule yet;",
-      "text": "No distant system consumes this schedule yet;"
+      "quote": "Enabled host sessions consume this schedule for field pages, ground objects, weather, energy, foliage and resident water.",
+      "text": "Enabled host sessions consume this schedule for field pages, ground objects, weather, energy, foliage and resident water."
     },
     {
       "id": "ar.scope.006",
       "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
-      "quote": "field pages, creature records, water shares, diagnostics and measured budget activation remain separate work.",
-      "text": "field pages, creature records, water shares, diagnostics and measured budget activation remain separate work."
+      "quote": "Diagnostics and measured budget activation remain separate qualification work.",
+      "text": "Diagnostics and measured budget activation remain separate qualification work."
     },
     {
       "id": "ar.activation.001",
@@ -1935,8 +1935,8 @@
     {
       "id": "ar.activation.050",
       "source": "docs/active-regions.md#activation-and-ordering",
-      "quote": "Non-finite or out-of-range (|x|,|z| >= 2^24) walking anchors, ground-object edit positions and region pins are ignored and counted (observational, never hashed or saved).",
-      "text": "Non-finite or out-of-range (|x|,|z| >= 2^24) walking anchors, ground-object edit positions and region pins are ignored and counted (observational, never hashed or saved)."
+      "quote": "Non-finite or out-of-range (outside -2^24 <= x,z < 2^24) walking anchors and ground-object edit positions are ignored and counted (observational, never hashed or saved).",
+      "text": "Non-finite or out-of-range (outside -2^24 <= x,z < 2^24) walking anchors and ground-object edit positions are ignored and counted (observational, never hashed or saved)."
     },
     {
       "id": "ar.activation.051",
@@ -3301,6 +3301,12 @@
       "text": "Consumed work stops owning records on the next tick."
     },
     {
+      "id": "ar.activation.065",
+      "source": "docs/active-regions.md#activation-and-ordering",
+      "quote": "Region pins outside -32768 <= x,z < 32768 are ignored and counted with the same observational rules.",
+      "text": "Region pins outside -32768 <= x,z < 32768 are ignored and counted with the same observational rules."
+    },
+    {
       "id": "ar.file.095",
       "source": "docs/active-regions.md#file-and-compatibility",
       "quote": "Version 1 ledgers load with or without frozen history.",
@@ -3315,8 +3321,8 @@
     {
       "id": "ar.file.097",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "They retain the version 1 envelope until every legacy historical digest has been refreshed at a later freeze or its record evicted;",
-      "text": "They retain the version 1 envelope until every legacy historical digest has been refreshed at a later freeze or its record evicted;"
+      "quote": "Their legacy digest projection remains undeclared until every legacy historical digest has been refreshed at a later freeze or its record evicted;",
+      "text": "Their legacy digest projection remains undeclared until every legacy historical digest has been refreshed at a later freeze or its record evicted;"
     },
     {
       "id": "ar.file.098",
@@ -3369,14 +3375,14 @@
     {
       "id": "ar.file.106",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "The currently supported extension is type 2, `digest_projection`, with a one-byte value of 2.",
-      "text": "The currently supported extension is type 2, `digest_projection`, with a one-byte value of 2."
+      "quote": "Supported extension values are:",
+      "text": "Supported extension values are:"
     },
     {
       "id": "ar.file.107",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "A value greater than 2 refuses with `Unsupported frozen digest projection.`;",
-      "text": "A value greater than 2 refuses with `Unsupported frozen digest projection.`;"
+      "quote": "For type 2, a value greater than 2 refuses with `Unsupported frozen digest projection.`;",
+      "text": "For type 2, a value greater than 2 refuses with `Unsupported frozen digest projection.`;"
     },
     {
       "id": "ar.file.108",
@@ -3387,8 +3393,8 @@
     {
       "id": "ar.file.109",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "The encoder emits version 2 with this declaration whenever a record is frozen or retains a nonzero freeze stamp or frozen digest, including after waking, provided no legacy historical digest remains.",
-      "text": "The encoder emits version 2 with this declaration whenever a record is frozen or retains a nonzero freeze stamp or frozen digest, including after waking, provided no legacy historical digest remains."
+      "quote": "The digest declaration is emitted whenever a record is frozen or retains a nonzero freeze stamp or frozen digest, including after waking, provided no legacy historical digest remains.",
+      "text": "The digest declaration is emitted whenever a record is frozen or retains a nonzero freeze stamp or frozen digest, including after waking, provided no legacy historical digest remains."
     },
     {
       "id": "ar.file.110",
@@ -3399,20 +3405,20 @@
     {
       "id": "ar.file.111",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Otherwise the extension set is empty and the encoder emits version 1.",
-      "text": "Otherwise the extension set is empty and the encoder emits version 1."
+      "quote": "The encoder emits version 2 whenever any supported extension is present;",
+      "text": "The encoder emits version 2 whenever any supported extension is present;"
     },
     {
       "id": "ar.file.112",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "The declaration belongs only to the persistence envelope and adds no canonical hash term.",
-      "text": "The declaration belongs only to the persistence envelope and adds no canonical hash term."
+      "quote": "The digest declaration belongs only to the persistence envelope and adds no canonical hash term.",
+      "text": "The digest declaration belongs only to the persistence envelope and adds no canonical hash term."
     },
     {
       "id": "ar.file.113",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Files are capped at 109,051,979 bytes before allocation.",
-      "text": "Files are capped at 109,051,979 bytes before allocation."
+      "quote": "Files are capped at 159,383,671 bytes before allocation.",
+      "text": "Files are capped at 159,383,671 bytes before allocation."
     },
     {
       "id": "ar.file.114",
@@ -3519,8 +3525,8 @@
     {
       "id": "ar.scope.007",
       "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
-      "quote": "Indexed authority durability/rehydration, durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water continuation (issue #242), and strict distant policy and distant creatures (S8) are planned for v0.3.1.",
-      "text": "Indexed authority durability/rehydration, durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water continuation (issue #242), and strict distant policy and distant creatures (S8) are planned for v0.3.1."
+      "quote": "Strict distant policy and distant creatures are planned for v0.3.1.",
+      "text": "Strict distant policy and distant creatures are planned for v0.3.1."
     },
     {
       "id": "ar.scope.008",
@@ -3529,28 +3535,118 @@
       "text": "Regional continuation performance/default enablement is planned for v0.4.0 as [issue #320](https://github.com/d-addison/luminumbra/issues/320)."
     },
     {
-      "id": "ar.scope.009",
-      "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
-      "quote": "These consumers are outside the shipping scheduler foundation.",
-      "text": "These consumers are outside the shipping scheduler foundation."
-    },
-    {
       "id": "ar.scope.010",
       "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
-      "quote": "The dedicated server autosaves every five minutes;",
-      "text": "The dedicated server autosaves every five minutes;"
+      "quote": "The dedicated server autosaves every five minutes by default.",
+      "text": "The dedicated server autosaves every five minutes by default."
     },
     {
-      "id": "ar.scope.011",
+      "id": "ar.scope.012",
       "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
-      "quote": "this does not implement those continuation consumers.",
-      "text": "this does not implement those continuation consumers."
+      "quote": "Resident water uses the checked [regional continuation contract](regional-water-continuation.md).",
+      "text": "Resident water uses the checked [regional continuation contract](regional-water-continuation.md)."
     },
     {
       "id": "ar.file.119",
       "source": "docs/active-regions.md#file-and-compatibility",
       "quote": "Presets now use revision 7 with revision-6 omission compatibility and frozen packaged-preset fallback.",
       "text": "Presets now use revision 7 with revision-6 omission compatibility and frozen packaged-preset fallback."
+    },
+    {
+      "id": "ar.file.120",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "| 1 | Persistent allocator: one LE u64 next ID in [2, 2^63];",
+      "text": "| 1 | Persistent allocator: one LE u64 next ID in [2, 2^63];"
+    },
+    {
+      "id": "ar.file.121",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "emitted when advanced from 1. |",
+      "text": "emitted when advanced from 1. |"
+    },
+    {
+      "id": "ar.file.122",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "| 2 | `digest_projection`: one byte equal to 2. |",
+      "text": "| 2 | `digest_projection`: one byte equal to 2. |"
+    },
+    {
+      "id": "ar.file.123",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "| 3 | Water debt: LE u32 count, then sorted (LE i32 x, LE i32 z, LE u64 positive Q32 debt) entries, at most one per owned region. |",
+      "text": "| 3 | Water debt: LE u32 count, then sorted (LE i32 x, LE i32 z, LE u64 positive Q32 debt) entries, at most one per owned region. |"
+    },
+    {
+      "id": "ar.file.124",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "| 4 | Energy ages: LE u32 count, then sorted (LE i32 x, LE i32 z, LE u64 absolute tick) entries, at most one per owned region. |",
+      "text": "| 4 | Energy ages: LE u32 count, then sorted (LE i32 x, LE i32 z, LE u64 absolute tick) entries, at most one per owned region. |"
+    },
+    {
+      "id": "ar.file.125",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "| 6 | Completed work: LE u32 count, then sorted (LE i32 x, LE i32 z, LE u64 positive work) entries, at most one per owned region. |",
+      "text": "| 6 | Completed work: LE u32 count, then sorted (LE i32 x, LE i32 z, LE u64 positive work) entries, at most one per owned region. |"
+    },
+    {
+      "id": "ar.file.126",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Type 5 remains reserved and is refused;",
+      "text": "Type 5 remains reserved and is refused;"
+    },
+    {
+      "id": "ar.file.127",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "map extensions are emitted only when nonempty.",
+      "text": "map extensions are emitted only when nonempty."
+    },
+    {
+      "id": "ar.file.128",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "otherwise it emits version 1.",
+      "text": "otherwise it emits version 1."
+    },
+    {
+      "id": "ar.file.129",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Persistence reads and hashes each use a verified opened regular-file handle, refuse symlinks and non-regular files, enforce a format-specific byte bound during reading, and refuse growth or truncation.",
+      "text": "Persistence reads and hashes each use a verified opened regular-file handle, refuse symlinks and non-regular files, enforce a format-specific byte bound during reading, and refuse growth or truncation."
+    },
+    {
+      "id": "ar.file.130",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Plant admission and both snapshot writer lanes support at most 65,536 plants, at most 8,192 bytes per canonical plant record, and 65,536 bytes of envelope margin, giving a read and write bound of 536,936,448 bytes.",
+      "text": "Plant admission and both snapshot writer lanes support at most 65,536 plants, at most 8,192 bytes per canonical plant record, and 65,536 bytes of envelope margin, giving a read and write bound of 536,936,448 bytes."
+    },
+    {
+      "id": "ar.file.131",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Legacy energy accepts 1 through 64 channels and at most 67,108,864 decoded value bytes;",
+      "text": "Legacy energy accepts 1 through 64 channels and at most 67,108,864 decoded value bytes;"
+    },
+    {
+      "id": "ar.file.132",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "the text bound is 406,847,552 bytes (12 bytes per uint16 value, 32 bytes per page, and 64 header bytes).",
+      "text": "the text bound is 406,847,552 bytes (12 bytes per uint16 value, 32 bytes per page, and 64 header bytes)."
+    },
+    {
+      "id": "ar.file.133",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "A missing legacy energy record is neutral;",
+      "text": "A missing legacy energy record is neutral;"
+    },
+    {
+      "id": "ar.file.134",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "unreadable, oversized or invalid records fail loading with a distinct error and never silently erase authoritative state.",
+      "text": "unreadable, oversized or invalid records fail loading with a distinct error and never silently erase authoritative state."
+    },
+    {
+      "id": "ar.file.135",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Region containers have a shared read and write bound of 268,435,456 bytes, checked before writer allocation.",
+      "text": "Region containers have a shared read and write bound of 268,435,456 bytes, checked before writer allocation."
     }
   ],
   "exclusions": [
