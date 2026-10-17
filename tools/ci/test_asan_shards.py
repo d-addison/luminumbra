@@ -34,7 +34,8 @@ class AsanShardTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        # Match run()'s canonical directory spelling, including Windows 8.3 aliases.
+        self.root = Path(temporary.name).resolve()
         self.names = ["ordinary", *(f"ActiveRegions/SimBudgetWorldParity.Replay/{n}" for n in range(4)), "last"]
         self.tests = [test(name) for name in self.names]
 
@@ -240,6 +241,25 @@ class AsanShardTests(unittest.TestCase):
                                                  "--output-junit", "ctest.junit.xml"])
                 # Both calls inherit the wrapper's cwd and environment.
                 self.assertEqual(execute.kwargs, {})
+
+    def test_ctest_context_fixture_resolves_temporary_directory_alias(self):
+        # Exercise alternate spellings without requiring Windows symlink privileges.
+        child = self.root / "directory alias"
+        child.mkdir()
+        alias = child / ".."
+        self.assertNotEqual(alias, self.root)
+        self.assertEqual(alias.resolve(), self.root)
+        fixture = AsanShardTests(
+            "test_unchanged_roster_runs_in_the_same_ctest_context_and_preserves_status")
+        result = unittest.TestResult()
+        with patch.object(tempfile, "TemporaryDirectory") as temporary:
+            temporary.return_value.name = str(alias)
+            fixture.run(result)
+        self.assertEqual(result.testsRun, 1)
+        self.assertEqual(result.errors, [])
+        self.assertEqual(result.failures, [])
+        self.assertEqual(result.skipped, [])
+        self.assertEqual(fixture.root, self.root)
 
     def test_failed_or_malformed_execution_discovery_never_launches_tests(self):
         self.planned_selection(self.tests, self.tests)
