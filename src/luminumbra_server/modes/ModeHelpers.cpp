@@ -33,7 +33,7 @@ Luminumbra::Net::HelloMsg RuntimeHelloFrom(const ServerCliOptions& options,
     hello.preset = options.preset;
     hello.client_id = LocalNetworkPlayerId(options);
     if (captured_session) {
-        hello.system_config_identity = captured_session->SystemConfigIdentity();
+        hello.system_config_identity = captured_session->SessionConfigIdentity();
         hello.preset_content_hash = captured_session->PresetContentHash();
         hello.simulation_content_identity = CapturedSimulationIdentityForHello(*captured_session);
         return hello;
@@ -56,8 +56,11 @@ Luminumbra::Net::HelloMsg RuntimeHelloFrom(const ServerCliOptions& options,
         std::string content_error;
         if (!Luminumbra::world::AdmitSimulationContent(root, content, content_error)) {
             LUMINUMBRA_CORE_ERROR("Network content admission refused: {}", content_error);
-            return hello; // Missing identity fails closed at admission.
+            hello.system_config_identity.clear();
+            return hello; // Missing identities fail closed at admission.
         }
+        hello.system_config_identity = Luminumbra::world::BindSimulationContentIdentity(
+            hello.system_config_identity, content.identity);
         hello.simulation_content_identity = content.identity.encode();
     } else {
         hello.simulation_content_identity = Luminumbra::Net::kInactiveSimulationContentIdentity;
@@ -66,8 +69,8 @@ Luminumbra::Net::HelloMsg RuntimeHelloFrom(const ServerCliOptions& options,
         options.preset_json_override
             ? Luminumbra::world::LoadTerrainPresetFromJson(
                   nlohmann::json::parse(*options.preset_json_override), root / "data")
-            : Luminumbra::world::LoadTerrainPreset(root / "worlds/atlas/presets" /
-                                                   (options.preset + ".json"));
+            : Luminumbra::world::LoadTerrainPreset(
+                  root / "worlds/atlas/presets" / (options.preset + ".json"), root / "data");
     hello.preset_content_hash = preset.preset_content_hash;
     return hello;
 }

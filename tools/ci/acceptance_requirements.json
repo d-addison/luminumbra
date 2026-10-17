@@ -69,8 +69,8 @@
     {
       "id": "dw.scope.002",
       "source": "docs/distant-world.md#scope",
-      "quote": "The addressable extent is set by the packed chunk identity (`Chunk.h`, \u00b12^20 chunks of 16 m, about \u00b116,777 km on each horizontal axis;",
-      "text": "The addressable extent is set by the packed chunk identity (`Chunk.h`, \u00b12^20 chunks of 16 m, about \u00b116,777 km on each horizontal axis;"
+      "quote": "The addressable extent is set by the packed chunk identity (`Chunk.h`, ±2^20 chunks of 16 m, about ±16,777 km on each horizontal axis;",
+      "text": "The addressable extent is set by the packed chunk identity (`Chunk.h`, ±2^20 chunks of 16 m, about ±16,777 km on each horizontal axis;"
     },
     {
       "id": "dw.scope.003",
@@ -225,8 +225,8 @@
     {
       "id": "dw.tiers.002",
       "source": "docs/distant-world.md#tier-ladder",
-      "quote": "Each tier stores sparse 5\u00d75\u00d75 signed-distance bricks and is polygonised per tile with Marching Cubes;",
-      "text": "Each tier stores sparse 5\u00d75\u00d75 signed-distance bricks and is polygonised per tile with Marching Cubes;"
+      "quote": "Each tier stores sparse 5×5×5 signed-distance bricks and is polygonised per tile with Marching Cubes;",
+      "text": "Each tier stores sparse 5×5×5 signed-distance bricks and is polygonised per tile with Marching Cubes;"
     },
     {
       "id": "dw.tiers.003",
@@ -957,8 +957,8 @@
     {
       "id": "dw.policy.024",
       "source": "docs/distant-world.md#per-system-distant-policy",
-      "quote": "distant creatures do not use scent | \u2014 |",
-      "text": "distant creatures do not use scent | \u2014 |"
+      "quote": "distant creatures do not use scent | — |",
+      "text": "distant creatures do not use scent | — |"
     },
     {
       "id": "dw.policy.025",
@@ -969,8 +969,8 @@
     {
       "id": "dw.policy.026",
       "source": "docs/distant-world.md#per-system-distant-policy",
-      "quote": "| Scheduled game events | Not implemented | Deferred to a later milestone | \u2014 |",
-      "text": "| Scheduled game events | Not implemented | Deferred to a later milestone | \u2014 |"
+      "quote": "| Scheduled game events | Not implemented | Deferred to a later milestone | — |",
+      "text": "| Scheduled game events | Not implemented | Deferred to a later milestone | — |"
     },
     {
       "id": "dw.policy.027",
@@ -1083,8 +1083,8 @@
     {
       "id": "dw.calendar.013",
       "source": "docs/distant-world.md#simulation-clock-and-calendar",
-      "quote": "`dayLengthTicks` must be an integer in [1, 2^31), `daysPerYear` an integer in [1, 366], `simulationTick` an unsigned integer below 2^62, and the products day \u00d7 year and tick + catch-up clamp are overflow-checked;",
-      "text": "`dayLengthTicks` must be an integer in [1, 2^31), `daysPerYear` an integer in [1, 366], `simulationTick` an unsigned integer below 2^62, and the products day \u00d7 year and tick + catch-up clamp are overflow-checked;"
+      "quote": "`dayLengthTicks` must be an integer in [1, 2^31), `daysPerYear` an integer in [1, 366], `simulationTick` an unsigned integer below 2^62, and the products day × year and tick + catch-up clamp are overflow-checked;",
+      "text": "`dayLengthTicks` must be an integer in [1, 2^31), `daysPerYear` an integer in [1, 366], `simulationTick` an unsigned integer below 2^62, and the products day × year and tick + catch-up clamp are overflow-checked;"
     },
     {
       "id": "dw.calendar.014",
@@ -1437,8 +1437,8 @@
     {
       "id": "dw.perf.001",
       "source": "docs/distant-world.md#performance-measurement-contract",
-      "quote": "Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840\u00d71600 and 3440\u00d71440.",
-      "text": "Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840\u00d71600 and 3440\u00d71440."
+      "quote": "Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840×1600 and 3440×1440.",
+      "text": "Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840×1600 and 3440×1440."
     },
     {
       "id": "dw.perf.002",
@@ -2265,8 +2265,8 @@
     {
       "id": "ar.file.045",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Corrupt, truncated, oversized, duplicate, misordered or inconsistent records refuse with `Corrupt active-region ledger.` A valid magic followed by a version greater than 2 refuses distinctly with `Unsupported future active-region ledger version.` Version zero is corrupt.",
-      "text": "Corrupt, truncated, oversized, duplicate, misordered or inconsistent records refuse with `Corrupt active-region ledger.` A valid magic followed by a version greater than 2 refuses distinctly with `Unsupported future active-region ledger version.` Version zero is corrupt."
+      "quote": "Corrupt, truncated, oversized, duplicate, misordered or inconsistent records refuse with `Corrupt active-region ledger.` A valid magic followed by a version greater than 3 refuses distinctly with `Unsupported future active-region ledger version.` Version zero is corrupt.",
+      "text": "Corrupt, truncated, oversized, duplicate, misordered or inconsistent records refuse with `Corrupt active-region ledger.` A valid magic followed by a version greater than 3 refuses distinctly with `Unsupported future active-region ledger version.` Version zero is corrupt."
     },
     {
       "id": "ar.file.046",
@@ -2319,8 +2319,8 @@
     {
       "id": "ar.file.054",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "| 4 | 2 | version = 1 or 2 |",
-      "text": "| 4 | 2 | version = 1 or 2 |"
+      "quote": "| 4 | 2 | version = 1, 2 or 3 |",
+      "text": "| 4 | 2 | version = 1, 2 or 3 |"
     },
     {
       "id": "ar.file.055",
@@ -2505,8 +2505,8 @@
     {
       "id": "ar.file.085",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Total length must be exactly 56 + count * 104 + 8 for version 1, or 56 + count * 104 + 4 + ext_len + 8 for version 2.",
-      "text": "Total length must be exactly 56 + count * 104 + 8 for version 1, or 56 + count * 104 + 4 + ext_len + 8 for version 2."
+      "quote": "Total length must be exactly 56 + count * 104 + 8 for version 1, or 56 + count * 104 + 4 + ext_len + 8 for versions 2 and 3.",
+      "text": "Total length must be exactly 56 + count * 104 + 8 for version 1, or 56 + count * 104 + 4 + ext_len + 8 for versions 2 and 3."
     },
     {
       "id": "ar.file.086",
@@ -3351,8 +3351,8 @@
     {
       "id": "ar.file.102",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Version 2 uses the same header and records, then a LE u32 `ext_len` followed by exactly that many extension bytes.",
-      "text": "Version 2 uses the same header and records, then a LE u32 `ext_len` followed by exactly that many extension bytes."
+      "quote": "Versions 2 and 3 use the same header and records, then a LE u32 `ext_len` followed by exactly that many extension bytes.",
+      "text": "Versions 2 and 3 use the same header and records, then a LE u32 `ext_len` followed by exactly that many extension bytes."
     },
     {
       "id": "ar.file.103",
@@ -3405,8 +3405,8 @@
     {
       "id": "ar.file.111",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "The encoder emits version 2 whenever any supported extension is present;",
-      "text": "The encoder emits version 2 whenever any supported extension is present;"
+      "quote": "The encoder emits version 3 when content identity is present, version 2 for other extensions;",
+      "text": "The encoder emits version 3 when content identity is present, version 2 for other extensions;"
     },
     {
       "id": "ar.file.112",
@@ -3591,8 +3591,8 @@
     {
       "id": "ar.file.126",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "| 5 | Simulation content identity: 40 bytes containing LE u16 encoding, defaults and algorithm versions, LE u16 zero reserved, then LE u64 policy, creature definitions, plant definitions and population digests. |",
-      "text": "| 5 | Simulation content identity: 40 bytes containing LE u16 encoding, defaults and algorithm versions, LE u16 zero reserved, then LE u64 policy, creature definitions, plant definitions and population digests. |"
+      "quote": "| 5 | Version 3 simulation content identity: 40 bytes containing LE u16 encoding, defaults and algorithm versions, LE u16 zero reserved, then LE u64 policy, creature definitions, plant definitions and population digests. |",
+      "text": "| 5 | Version 3 simulation content identity: 40 bytes containing LE u16 encoding, defaults and algorithm versions, LE u16 zero reserved, then LE u64 policy, creature definitions, plant definitions and population digests. |"
     },
     {
       "id": "ar.file.127",
@@ -3657,14 +3657,14 @@
     {
       "id": "ar.content.002",
       "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Each inventory must contain 1\u2013256 JSON definitions;",
-      "text": "Each inventory must contain 1\u2013256 JSON definitions;"
+      "quote": "Each inventory must contain 1–256 JSON definitions;",
+      "text": "Each inventory must contain 1–256 JSON definitions;"
     },
     {
       "id": "ar.content.003",
       "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "each document is capped at 1 MiB and the captured inventories together at 16 MiB.",
-      "text": "each document is capped at 1 MiB and the captured inventories together at 16 MiB."
+      "quote": "each document is capped at 1 MiB and the captured inventories together at 16 MiB, with each directory scan capped at 512 entries including ignored files.",
+      "text": "each document is capped at 1 MiB and the captured inventories together at 16 MiB, with each directory scan capped at 512 entries including ignored files."
     },
     {
       "id": "ar.content.004",
@@ -3795,8 +3795,8 @@
     {
       "id": "ar.content.025",
       "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Malformed systems configuration, including raw NUL, selects defaults;",
-      "text": "Malformed systems configuration, including raw NUL, selects defaults;"
+      "quote": "Syntax errors and raw NUL in systems configuration select defaults;",
+      "text": "Syntax errors and raw NUL in systems configuration select defaults;"
     },
     {
       "id": "ar.content.026",
@@ -3831,8 +3831,8 @@
     {
       "id": "ar.content.031",
       "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Every authored plant entry has exactly `max_cadence_shift` (integer 1\u20138) and `resume_cap_ticks` (integer 0\u201336,000).",
-      "text": "Every authored plant entry has exactly `max_cadence_shift` (integer 1\u20138) and `resume_cap_ticks` (integer 0\u201336,000)."
+      "quote": "Every authored plant entry has exactly `max_cadence_shift` (integer 1–8) and `resume_cap_ticks` (integer 0–36,000).",
+      "text": "Every authored plant entry has exactly `max_cadence_shift` (integer 1–8) and `resume_cap_ticks` (integer 0–36,000)."
     },
     {
       "id": "ar.content.032",
@@ -3897,8 +3897,8 @@
     {
       "id": "ar.content.042",
       "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "TLV 5 is always present in newly created enabled worlds, even with no regions or creatures.",
-      "text": "TLV 5 is always present in newly created enabled worlds, even with no regions or creatures."
+      "quote": "TLV 5 requires ledger version 3 and is always present in newly created enabled worlds, even with no regions or creatures.",
+      "text": "TLV 5 requires ledger version 3 and is always present in newly created enabled worlds, even with no regions or creatures."
     },
     {
       "id": "ar.content.043",
@@ -4155,8 +4155,8 @@
     {
       "id": "ar.content.085",
       "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "A present identity must match newly captured content exactly or open refuses with `Simulation content identity mismatch.` Unsupported identity/default/algorithm versions, nonzero reserved fields, wrong lengths and duplicate or misordered TLVs are corrupt.",
-      "text": "A present identity must match newly captured content exactly or open refuses with `Simulation content identity mismatch.` Unsupported identity/default/algorithm versions, nonzero reserved fields, wrong lengths and duplicate or misordered TLVs are corrupt."
+      "quote": "A present identity must match newly captured content exactly or open refuses with `Simulation content identity mismatch.` Unsupported identity/default/algorithm versions, nonzero reserved fields, wrong lengths, content identity in version 2, missing identity in version 3 and duplicate or misordered TLVs are corrupt.",
+      "text": "A present identity must match newly captured content exactly or open refuses with `Simulation content identity mismatch.` Unsupported identity/default/algorithm versions, nonzero reserved fields, wrong lengths, content identity in version 2, missing identity in version 3 and duplicate or misordered TLVs are corrupt."
     },
     {
       "id": "ar.content.086",
@@ -4193,6 +4193,12 @@
       "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
       "quote": "Hello version 4 also binds captured content identity, while replay layout remains version 3.",
       "text": "Hello version 4 also binds captured content identity, while replay layout remains version 3."
+    },
+    {
+      "id": "ar.content.091",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "the opaque network/replay configuration identity binds the same captured content.",
+      "text": "the opaque network/replay configuration identity binds the same captured content."
     }
   ],
   "exclusions": [
@@ -4351,8 +4357,8 @@
     {
       "id": "dw.perf.018",
       "source": "docs/distant-world.md#performance-measurement-contract",
-      "quote": "Current behaviour: the benchmark records means only, sums eleven pass timers instead of bracketing the frame, pins the framebuffer to 3840\u00d71600, and does not record the renderer string;",
-      "text": "Current behaviour: the benchmark records means only, sums eleven pass timers instead of bracketing the frame, pins the framebuffer to 3840\u00d71600, and does not record the renderer string;",
+      "quote": "Current behaviour: the benchmark records means only, sums eleven pass timers instead of bracketing the frame, pins the framebuffer to 3840×1600, and does not record the renderer string;",
+      "text": "Current behaviour: the benchmark records means only, sums eleven pass timers instead of bracketing the frame, pins the framebuffer to 3840×1600, and does not record the renderer string;",
       "reason": "Descriptive Current behaviour paragraph contrasts shipped behaviour with the accepted future contract; it is not an acceptance requirement.",
       "category": "current-behaviour"
     },

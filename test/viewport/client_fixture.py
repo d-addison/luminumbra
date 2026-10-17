@@ -64,10 +64,10 @@ while True:
             else:
                 (evidence / 'session.json').write_bytes(b' ' * (1024 * 1024 + 1))
         sys.exit(0)
+    atomic_write(project / ('frame-received-' + session), canonical(state['sequence']))
     if mode == 'hang':
         threading.Event().wait()
     if mode == 'startup-frame-delay':
-        (project / ('frame-received-' + session)).touch()
         while not (project / ('frame-release-' + session)).exists():
             time.sleep(.01)
     pixels = state['state']['width'] * state['state']['height']
@@ -77,3 +77,4 @@ while True:
     if mode == 'wrong':
         frame['sequence'] += 1
     write_record(sys.stdout.buffer, encode(frame, payload, key))
+    atomic_write(project / ('frame-sent-' + session), canonical(state['sequence']))

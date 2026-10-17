@@ -346,6 +346,12 @@ public:
                               std::string_view relative_path,
                               MemberDigest& out,
                               std::string& error);
+    // Index publication requires the strict water contract used by indexed readers,
+    // including retained legacy records. Refuse incompatible payloads without rewriting them.
+    static bool indexed_member_digest(const std::filesystem::path& save_dir,
+                                      std::string_view relative_path,
+                                      MemberDigest& out,
+                                      std::string& error);
     // Durable single-member writers for flag-on GameSession members (plants, energy). They join the
     // active transaction for save_dir, else run an implicit one when the directory is indexed, else
     // just replace the file durably. relative_path must satisfy member_path_allowed.
@@ -428,6 +434,11 @@ public:
                                            std::vector<std::string>* errors = nullptr) const;
 
 private:
+    static bool member_digest_impl(const std::filesystem::path& save_dir,
+                                   std::string_view relative_path,
+                                   MemberDigest& out,
+                                   std::string& error,
+                                   bool strict_water);
     // The single v2 write seam: serializes the given chunks into LMR1 region
     // files, merging with on-disk records, and refreshes the world manifest.
     // regions_written receives the

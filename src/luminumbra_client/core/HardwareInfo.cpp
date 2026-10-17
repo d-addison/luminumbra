@@ -68,7 +68,7 @@ std::string FormatHardwareDiagnostics(const HardwareInfo& info, bool enabled) {
         return {};
     }
     using luminumbra::core::GraphicsIdentityRuleName;
-    using luminumbra::core::GraphicsPresetName;
+    using luminumbra::core::GraphicsPresetDisplayName;
     const auto& inputs = info.inputs;
     const auto& recommendation = info.recommendation;
     const auto& reason = recommendation.reason;
@@ -85,13 +85,13 @@ std::string FormatHardwareDiagnostics(const HardwareInfo& info, bool enabled) {
         output << "unknown";
     }
     output << " framebuffer=" << inputs.framebufferWidth << 'x' << inputs.framebufferHeight
-           << " recommended_preset=" << GraphicsPresetName(recommendation.preset)
+           << " recommended_preset=" << GraphicsPresetDisplayName(recommendation.preset)
            << " rules_revision=" << recommendation.rulesRevision
            << " identity_rule=" << GraphicsIdentityRuleName(reason.identityRule) << " model='"
            << recommendation.matchedModel
-           << "' ceilings(gpu=" << GraphicsPresetName(reason.gpuCeiling)
-           << ",cpu=" << GraphicsPresetName(reason.cpuCeiling)
-           << ",vram=" << (reason.vramCeiling ? GraphicsPresetName(*reason.vramCeiling) : "unknown")
+           << "' ceilings(gpu=" << GraphicsPresetDisplayName(reason.gpuCeiling)
+           << ",cpu=" << GraphicsPresetDisplayName(reason.cpuCeiling) << ",vram="
+           << (reason.vramCeiling ? GraphicsPresetDisplayName(*reason.vramCeiling) : "unknown")
            << ") binding(gpu=" << reason.gpuBinding << ",cpu=" << reason.cpuBinding
            << ",vram=" << reason.vramBinding << ')';
     return output.str();

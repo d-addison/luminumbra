@@ -108,7 +108,7 @@ int RunLockstepLoopback(const ServerCliOptions& options) {
         c.tick_rate_hz = 30;
         c.local_client_id = 0;
         c.peer_client_id = 1;
-        c.system_config_identity = host_runner->Session()->SystemConfigIdentity();
+        c.system_config_identity = host_runner->Session()->SessionConfigIdentity();
         c.preset_content_hash = host_runner->Session()->PresetContentHash();
         c.simulation_content_identity = CapturedSimulationIdentityForHello(*host_runner->Session());
         return c;
@@ -116,7 +116,7 @@ int RunLockstepLoopback(const ServerCliOptions& options) {
     auto peer_cfg = host_cfg;
     peer_cfg.local_client_id = 1;
     peer_cfg.peer_client_id = 0;
-    peer_cfg.system_config_identity = peer_runner->Session()->SystemConfigIdentity();
+    peer_cfg.system_config_identity = peer_runner->Session()->SessionConfigIdentity();
     peer_cfg.preset_content_hash = peer_runner->Session()->PresetContentHash();
     peer_cfg.simulation_content_identity =
         CapturedSimulationIdentityForHello(*peer_runner->Session());
