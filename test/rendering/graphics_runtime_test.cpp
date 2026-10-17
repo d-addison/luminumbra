@@ -635,6 +635,10 @@ TEST(GraphicsRuntimePure, ShrinkingAndGrowingHorizonRetainsEditedAuthorityAndRej
     const auto before = world.capture_far_lod_sdf_snapshot(3, 0);
     ASSERT_TRUE(before);
     ASSERT_EQ(before->entries.size(), 1u);
+    EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*before));
+    EXPECT_GT(before->region_authority_revision, 0u); // Adoption published authority.
+    EXPECT_EQ(before->entries.front().provenance, Luminumbra::ChunkSdfProvenance::LoadedOrEdited);
+    EXPECT_EQ(before->entries.front().sdf_data.front(), 1);
     FarLodSystem far;
     far.set_horizon(1500, 1550);
     EXPECT_FALSE(far.region_admission(3, 0, glm::vec3(0)).wanted);
@@ -642,19 +646,33 @@ TEST(GraphicsRuntimePure, ShrinkingAndGrowingHorizonRetainsEditedAuthorityAndRej
     chunk->sdf_data.front() = -1;
     chunk->mark_voxel_data_dirty();
     EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(*before));
-    for (const auto preset :
-         {GraphicsPreset::Medium, GraphicsPreset::High, GraphicsPreset::Ultra}) {
+    for (const auto preset : {GraphicsPreset::Medium,
+                              GraphicsPreset::Low,
+                              GraphicsPreset::High,
+                              GraphicsPreset::Low,
+                              GraphicsPreset::Ultra}) {
+        SCOPED_TRACE(GraphicsPresetName(preset));
         const auto values = GraphicsRuntimeValues(Resolve(preset));
         far.set_horizon(values.far_radius_m, values.far_outer_clip_m);
         const auto admission = far.region_admission(3, 0, glm::vec3(0));
-        EXPECT_TRUE(admission.wanted);
+        EXPECT_EQ(admission.wanted, preset != GraphicsPreset::Low);
         EXPECT_EQ(admission.tier, Luminumbra::World::FarLodTier::F2);
         const auto current = world.capture_far_lod_sdf_snapshot(3, 0);
         ASSERT_TRUE(current);
         ASSERT_EQ(current->entries.size(), 1u);
         EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*current));
+        EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(*before));
+        EXPECT_EQ(before->entries.front().sdf_data.front(), 1); // The capture owns its bytes.
+        EXPECT_EQ(current->entries.front().coords, chunk->get_coords());
+        EXPECT_EQ(current->entries.front().provenance,
+                  Luminumbra::ChunkSdfProvenance::LoadedOrEdited);
+        EXPECT_FALSE(current->entries.front().authority_durable);
         EXPECT_EQ(current->entries.front().sdf_data.front(), -1);
-        EXPECT_GT(current->region_authority_revision, before->region_authority_revision);
+        EXPECT_GT(current->entries.front().voxel_revision, before->entries.front().voxel_revision);
+        // Direct chunk edits advance the local revision. World/region counters
+        // track world-owned authority publication, independently of the horizon.
+        EXPECT_EQ(current->authority_revision, before->authority_revision);
+        EXPECT_EQ(current->region_authority_revision, before->region_authority_revision);
     }
 }
 

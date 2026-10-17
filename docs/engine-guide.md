@@ -239,6 +239,13 @@ resident chunk data; far terrain uses region tiles and reduced SDF authority.
 The [SHIELD SDF contract](shield/sdf-contract.md) defines sign convention,
 sample ownership, shared borders, and LOD behavior.
 
+Legacy far snapshots track world/region authority publication separately from
+each captured chunk's voxel revision and provenance. A direct edit to a resident
+chunk's SDF followed by `mark_voxel_data_dirty()` advances the chunk revision and
+stales an earlier capture without advancing the publication counters. Shrinking
+or growing the graphics horizon changes derived mesh admission, preserving
+edited authority and rejection of stale captures.
+
 Generation and meshing may execute through `JobSystem`, which has high and
 normal priority lanes plus starvation protection. Completion timing is not
 publication timing: batches become visible in deterministic dispatch/tick order.
