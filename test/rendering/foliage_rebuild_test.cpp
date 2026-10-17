@@ -187,7 +187,9 @@ protected:
     }
     // Independent copy of the pre-optimization recipe, using actual uploaded
     // bytes rather than the implementation's retained CPU scratch.
-    static std::uint64_t LegacyUploadedHash(const FoliagePass& pass, std::size_t count) {
+    static std::uint64_t LegacyUploadedHash(const FoliagePass& pass,
+                                            std::size_t count,
+                                            const glm::vec3& camera = kCamera) {
         std::uint64_t hash = 1469598103934665603ull;
         // The fixtures supply the admitted logical count (at most three), since
         // retained buffer capacity includes unused slots and dispatch unbinds
@@ -241,7 +243,7 @@ protected:
             total_weight = 1;
         }
         for (const float value :
-             {kCamera.x, kCamera.z, pass.density_scale(), pass.fade_end_m(), total_weight}) {
+             {camera.x, camera.z, pass.density_scale(), pass.fade_end_m(), total_weight}) {
             hash = Fnv(&value, sizeof(value), hash);
         }
         return hash;
@@ -1250,7 +1252,12 @@ TEST_F(FoliageRebuildTest, CameraReorderUploadsMetadataOnceAndPrefixReplacesEver
     ASSERT_NO_FATAL_FAILURE(Initialize(reused.pass));
     reused.pass.set_evidence_enabled(true);
     const auto chunks = Chunks(3);
-    Rebuild(reused.pass, chunks, 1);
+    // Attribution retains its own signature only while a collector is active.
+    // Establish that baseline before measuring either camera-only transition.
+    const auto initial = RebuildAttributed(reused.pass, chunks, 1);
+    EXPECT_EQ(initial.reasons, Attribution::Initial);
+    EXPECT_EQ(initial.path, Attribution::FoliagePath::Gpu);
+    EXPECT_EQ(reused.pass.uploaded_input_hash(), LegacyUploadedHash(reused.pass, chunks.size()));
     const auto count_buffer = Binding(3);
     struct Metadata {
         std::array<float, 24> params{};
@@ -1308,7 +1315,7 @@ TEST_F(FoliageRebuildTest, CameraReorderUploadsMetadataOnceAndPrefixReplacesEver
                                          0,
                                          0}));
         const auto hash = reused.pass.uploaded_input_hash();
-        EXPECT_EQ(hash, LegacyUploadedHash(reused.pass, chunks.size()));
+        EXPECT_EQ(hash, LegacyUploadedHash(reused.pass, chunks.size(), camera));
         {
             RebuildGlCalls calls;
             ExpectReused(RebuildAttributed(reused.pass, chunks, ++frame, camera), true);
