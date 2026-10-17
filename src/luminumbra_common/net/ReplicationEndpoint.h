@@ -31,6 +31,7 @@
 #include <deque>
 #include <functional>
 #include <map>
+#include <optional>
 #include <vector>
 
 #include "LockstepSession.h"  // ILockstepTransport
@@ -142,8 +143,10 @@ public:
                            const std::function<const ReplEntityState&(std::size_t)>& read_entity,
                            const std::vector<std::uint32_t>& removed_ids = {});
 
-    // Drains all currently-available inbound frames from every client: Usercmd
-    // (newest-wins) and Ack (monotonic). Non-blocking.
+    // Shares at most 1024 receive polls and a 256 KiB payload threshold across
+    // all clients and nested drains per call (plus one frame, at most 64 MiB).
+    // Saturation retains messages and closing links for later calls. Usercmd
+    // is newest-wins and Ack is monotonic. Non-blocking.
     void PumpInbound();
 
     // The newest usercmd received from a client (for the sim to apply), or null.
@@ -206,6 +209,8 @@ private:
     struct ClientLink {
         ILockstepTransport* transport = nullptr;
         UsercmdReceiver inbound;
+        bool close_pending = false;
+        bool closed = false;
         std::uint32_t next_snapshot_seq = 1;
         //  per-client FULL (post-AOI) snapshots we have sent, keyed by seq,
         // so a delta can be computed against whichever one the client last ACKed.
@@ -232,8 +237,9 @@ private:
         bool backed_up = false;
         int over_hwm_streak = 0;
     };
-    static void DrainClientInbound(ClientLink& link);
-    static void CloseClientTransport(ClientLink& link);
+    static bool DrainClientInbound(ClientLink& link, FrameReceiveBudget& work);
+    static bool CloseClientTransport(ClientLink& link, FrameReceiveBudget& work);
+    std::optional<std::uint32_t> m_last_inbound_client;
     std::map<std::uint32_t, ClientLink> m_clients; // ordered -> deterministic broadcast order
     // Intentional bandwidth default: previously false; SetDeltaCompression(false)
     // restores full snapshots.
@@ -277,10 +283,13 @@ public:
         , m_transport(transport) {}
 
     // Sends one tick of input upstream (records the latest tick for the ack).
-    // A terminal send failure applies available snapshots before closing the transport.
+    // A terminal send failure applies snapshots in bounded batches before closing.
+    // Continue with PumpInbound or SendUsercmd until the receive source drains.
     void SendUsercmd(const UsercmdMsg& cmd);
 
-    // Drains inbound snapshots (most-recent-wins) and sends an Ack for the newest.
+    // Applies inbound snapshots (most-recent-wins) and ACKs the newest. Each
+    // public call shares the server receive bounds across all nested drains;
+    // pending terminal close retains the transport until an empty receive poll.
     void PumpInbound();
 
     [[nodiscard]] bool has_snapshot() const {
@@ -294,12 +303,15 @@ public:
     }
 
 private:
-    bool DrainInbound();
-    void TransportDisconnected();
+    void DrainInbound(FrameReceiveBudget& work);
+    void TransportDisconnected(FrameReceiveBudget& work);
 
     std::uint32_t m_player_id = 0;
     ILockstepTransport* m_transport = nullptr;
     bool m_disconnected = false;
+    bool m_disconnect_pending = false;
+    bool m_receive_drain_pending = false;
+    bool m_ack_pending = false;
     SnapshotReceiver m_receiver;
     std::uint64_t m_latest_usercmd_tick = 0;
     bool m_sent_any_usercmd = false;

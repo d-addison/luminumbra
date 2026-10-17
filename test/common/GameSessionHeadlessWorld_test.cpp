@@ -2164,9 +2164,9 @@ TEST(GameSessionHeadlessWorldTest, EmptyLegacyEnergySnapshotPreservesNonAlignedC
         SCOPED_TRACE(tick);
         for (auto* session : {&control, &loaded, &explicit_load}) {
             ASSERT_EQ(session->TickSimulation(dt), 1u);
-            if (tick < 11)
+            if (tick < 11) {
                 EXPECT_EQ(session->GetEnergyFieldState()->at_cell(0, 0), 60000u);
-            else
+            } else
                 EXPECT_LT(session->GetEnergyFieldState()->at_cell(0, 0), 60000u);
         }
         EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(control));

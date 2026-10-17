@@ -3501,8 +3501,8 @@
     {
       "id": "dw.persistence.058",
       "source": "docs/distant-world.md#persistence-and-format-contract",
-      "quote": "Lockstep protocol and LREC1 replay layout are version 3 and bind effective configuration plus resolved preset/dependency content;",
-      "text": "Lockstep protocol and LREC1 replay layout are version 3 and bind effective configuration plus resolved preset/dependency content;"
+      "quote": "Lockstep Hello is version 4;",
+      "text": "Lockstep Hello is version 4;"
     },
     {
       "id": "dw.persistence.059",
@@ -3551,6 +3551,18 @@
       "source": "docs/active-regions.md#file-and-compatibility",
       "quote": "Presets now use revision 8 with revision-6 omission compatibility and frozen packaged-preset fallback.",
       "text": "Presets now use revision 8 with revision-6 omission compatibility and frozen packaged-preset fallback."
+    },
+    {
+      "id": "dw.persistence.061",
+      "source": "docs/distant-world.md#persistence-and-format-contract",
+      "quote": "LREC1 uses version 3 for complete streams and version 4 for diagnostic suffixes with an elided prefix.",
+      "text": "LREC1 uses version 3 for complete streams and version 4 for diagnostic suffixes with an elided prefix."
+    },
+    {
+      "id": "dw.persistence.062",
+      "source": "docs/distant-world.md#persistence-and-format-contract",
+      "quote": "Both replay versions bind effective configuration plus resolved preset/dependency content;",
+      "text": "Both replay versions bind effective configuration plus resolved preset/dependency content;"
     },
     {
       "id": "dw.station.001",

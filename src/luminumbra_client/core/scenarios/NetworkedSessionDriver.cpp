@@ -318,28 +318,18 @@ bool NetworkedSessionDriver::Begin(Luminumbra::world::GameSession* client_sessio
         host_cfg, m_impl->host_transport.get(), host_hooks);
     m_impl->client = std::make_unique<Luminumbra::Net::LockstepSession>(
         client_cfg, m_impl->client_transport.get(), client_hooks);
+    // Both sessions own bounded disk replay recorders, including the scenario
+    // path; late desyncs populate their existing status.dump_path automatically.
 
     // Handshake: queue both Hellos first, then complete both ends (single-process
     // driver order, exactly as RunLockstepLoopback does).
     {
-        Luminumbra::Net::HelloMsg ch;
-        ch.seed = config.seed;
-        ch.preset = config.preset;
-        ch.tick_rate_hz = 30;
-        ch.client_id = 1;
-        ch.system_config_identity = client_cfg.system_config_identity;
-        ch.preset_content_hash = client_cfg.preset_content_hash;
+        const auto ch = Luminumbra::Net::MakeLockstepHello(client_cfg);
         if (!m_impl->client_transport->SendFrame(Luminumbra::Net::EncodeHello(ch))) {
             m_failure_reason = "handshake_failed";
             return false;
         }
-        Luminumbra::Net::HelloMsg hh;
-        hh.seed = config.seed;
-        hh.preset = config.preset;
-        hh.tick_rate_hz = 30;
-        hh.client_id = 0;
-        hh.system_config_identity = host_cfg.system_config_identity;
-        hh.preset_content_hash = host_cfg.preset_content_hash;
+        const auto hh = Luminumbra::Net::MakeLockstepHello(host_cfg);
         if (!m_impl->host_transport->SendFrame(Luminumbra::Net::EncodeHello(hh))) {
             m_failure_reason = "handshake_failed";
             return false;
@@ -415,15 +405,27 @@ void NetworkedSessionDriver::Disconnect() {
     if (m_impl->client) {
         m_impl->client->Disconnect();
     }
-    m_disconnected = true;
-    // A clean Bye on both ends with no desync == clean shutdown.
-    if (!m_desynced) {
-        m_impl->clean_disconnect = true;
+    const auto host_status =
+        m_impl->host ? m_impl->host->Status() : Luminumbra::Net::LockstepStatus{};
+    const auto client_status =
+        m_impl->client ? m_impl->client->Status() : Luminumbra::Net::LockstepStatus{};
+    if (host_status.desynced || client_status.desynced) {
+        m_desynced = true;
+        m_failure_reason =
+            "desync_tick_" + std::to_string(host_status.desynced ? host_status.desync_tick
+                                                                 : client_status.desync_tick);
     }
+    // Disconnect may yield while queued checkpoints drain. Keep continuation
+    // available and never advertise a clean shutdown before both ends terminate.
+    m_disconnected = (!m_impl->host || host_status.peer_disconnected) &&
+                     (!m_impl->client || client_status.peer_disconnected);
+    m_impl->clean_disconnect = m_impl->host && m_impl->client && m_disconnected && !m_desynced;
 }
 
 bool NetworkedSessionDriver::WriteArtifact(const std::filesystem::path& artifact_dir,
                                            double duration_seconds) {
+    // Refresh closure and late checkpoint status before evaluating the artifact.
+    Disconnect();
     // Settle both worlds and capture the final hashes for the equality assert.
     std::string host_hash;
     std::string client_hash;
@@ -446,8 +448,10 @@ bool NetworkedSessionDriver::WriteArtifact(const std::filesystem::path& artifact
     const bool end_hashes_equal = !host_hash.empty() && host_hash == client_hash;
     const bool reached_budget = host_status.agreed_tick == m_impl->config.budget_ticks &&
                                 client_status.agreed_tick == m_impl->config.budget_ticks;
-    const bool passed = m_failure_reason.empty() && !m_desynced && reached_budget &&
-                        end_hashes_equal && m_impl->clean_disconnect;
+    const bool passed = m_failure_reason.empty() && !m_desynced && host_status.peer_disconnected &&
+                        client_status.peer_disconnected && !host_status.desynced &&
+                        !client_status.desynced && reached_budget && end_hashes_equal &&
+                        m_impl->clean_disconnect;
 
     const GLDebugRuntimeStats gl_debug = CurrentGLDebugRuntimeStats();
 
