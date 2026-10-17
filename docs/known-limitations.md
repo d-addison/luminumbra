@@ -10,7 +10,7 @@ and content formats may still change.
 
 - **v0.3.0 breaks saved-world compatibility.** Create a new world. Current saves
   use LMR1 v2, the `luminumbra.persistence.world_manifest.v1` schema declaring
-  container version 2, and FSD2 v3. New packaged presets use revision 7; revision 6
+  container version 2, and FSD2 v3. New packaged presets use revision 8 with sampling revision 2; revision 6
   and omitted revisions retain historical defaults. Saves without an embedded
   packaged preset resolve to frozen revision-6 bytes, including `cave_dense`.
   Shaping is unconditional and enabled caves use

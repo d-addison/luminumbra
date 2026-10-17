@@ -100,7 +100,7 @@ The record is `<save>/chunks/region/active-regions.arl`, following the accepted
 contract's placement in the region integrity scan. This resolves the slice
 brief's conflicting save-root wording in favour of that contract. ARL1 does
 not alter LMR1 v2, the world manifest, EFS1, plant payloads, FSD2 v3, or canonical
-chunk serialization. Presets now use revision 7 with revision-6 omission
+chunk serialization. Presets now use revision 8 with revision-6 omission
 compatibility and frozen packaged-preset fallback. An anchor-only ledger is not a chunk
 snapshot: with active regions enabled, the first save with dirty chunks writes all
 resident chunks, including clean chunks in other regions. The disabled path keeps

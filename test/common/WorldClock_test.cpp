@@ -583,10 +583,12 @@ TEST(WorldClockTest, SkyCircadianAndStimulusSharePinnedCalendarPhases) {
         const float sky_day = sky::TimeOfDayFromWorldClock(clock);
         EXPECT_FLOAT_EQ(sky_day, day_phase >= 0.5f ? day_phase - 0.5f : day_phase + 0.5f);
         const auto sun = sky::ComputeSunGeometry(sky_day, season.sunDeclination);
-        if (day_phase == 0.0f)
+        if (day_phase == 0.0f) {
             EXPECT_LT(sun.upFactor, 0.0f);
-        if (day_phase == 0.5f)
+        }
+        if (day_phase == 0.5f) {
             EXPECT_GT(sun.upFactor, 0.0f);
+        }
     }
     EXPECT_NEAR(sky::ComputeSeason(WorldClock(0)).wave, -1.0f, 1e-6f);
     EXPECT_NEAR(sky::ComputeSeason(WorldClock(year / 2)).wave, 1.0f, 1e-6f);

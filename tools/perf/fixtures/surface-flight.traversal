@@ -4,8 +4,8 @@ tick_rate 30
 speed_mps 8
 seed 424242
 preset default
-preset_revision 7
-preset_identity 0b5c29c7a27f611a
+preset_revision 8
+preset_identity 56ffbe1771cddfa6
 content_identity 7583622726659997707
 expected_ticks 1800
 cold_cache true

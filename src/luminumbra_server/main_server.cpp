@@ -44,6 +44,7 @@
 #include "luminumbra_common/replay/ReplayStream.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/PlayerAvatar.h"
+#include "luminumbra_common/world/SurfaceWorkBudget.h"
 
 #include "luminumbra_common/systems/AetherFieldSystem.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
@@ -173,10 +174,14 @@ ServerCliOptions ParseOptions(int argc, char* argv[]) {
                 options.ticks = std::strtoull(v, nullptr, 10);
         } else if (std::strcmp(arg, "--radius") == 0) {
             if (const char* v = next_value(i))
-                options.surface_radius = std::atoi(v);
+                options.parse_error =
+                    !Luminumbra::World::TryParseSurfaceRadius(v, options.surface_radius) ||
+                    options.parse_error;
         } else if (std::strcmp(arg, "--collision-radius") == 0) {
             if (const char* v = next_value(i))
-                options.collision_radius = std::atoi(v);
+                options.parse_error =
+                    !Luminumbra::World::TryParseSurfaceRadius(v, options.collision_radius) ||
+                    options.parse_error;
         } else if (std::strcmp(arg, "--test-streaming-radius-cap") == 0) {
             if (const char* v = next_value(i))
                 options.test_streaming_radius_cap = std::atoi(v);
