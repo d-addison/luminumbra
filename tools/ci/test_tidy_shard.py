@@ -202,7 +202,7 @@ class ShardWorkflowTests(unittest.TestCase):
     def test_three_standard_runners_keep_full_push_analysis_and_separate_caches(self):
         job = self.jobs["tidy-shard"]
         self.assertIn("name: Static analysis / clang-tidy shard ${{ matrix.shard }}/3\n", job)
-        self.assertIn("runs-on: " + '${{ vars.LUM_SELF_HOSTED == \'true\' && (github.event_name == \'push\' || github.event_name == \'workflow_dispatch\' || (github.event_name == \'pull_request\' && github.event.pull_request.head.repo.full_name != \'\' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON(\'["self-hosted","Linux","X64","lum-vq1"]\') || \'ubuntu-24.04\' }}' + "\n", job)
+        self.assertIn("runs-on: " + '${{ vars.LUM_SELF_HOSTED == \'true\' && (github.event_name == \'push\' || (github.event_name == \'pull_request\' && github.event.pull_request.head.repo.full_name != \'\' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON(\'["self-hosted","Linux","X64","lum-vq1"]\') || \'ubuntu-24.04\' }}' + "\n", job)
         self.assertIn("timeout-minutes: 60\n", job)
         self.assertRegex(job, r"strategy:\n      fail-fast: false\n      matrix:\n        shard: \[1, 2, 3\]")
         self.assertIn("--shard ${{ matrix.shard }}/3", job)

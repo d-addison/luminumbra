@@ -20,7 +20,7 @@ GUARDED = {
     "asan.yml": ("asan", "Linux / GCC ASan"),
     "performance.yml": ("preview-frame", "Preview frame / software OpenGL"),
 }
-SELF_HOSTED_RUNS_ON = '${{ vars.LUM_SELF_HOSTED == \'true\' && (github.event_name == \'push\' || github.event_name == \'workflow_dispatch\' || (github.event_name == \'pull_request\' && github.event.pull_request.head.repo.full_name != \'\' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON(\'["self-hosted","Linux","X64","lum-vq1"]\') || \'ubuntu-24.04\' }}'
+SELF_HOSTED_RUNS_ON = '${{ vars.LUM_SELF_HOSTED == \'true\' && (github.event_name == \'push\' || (github.event_name == \'pull_request\' && github.event.pull_request.head.repo.full_name != \'\' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON(\'["self-hosted","Linux","X64","lum-vq1"]\') || \'ubuntu-24.04\' }}'
 READY = "github.event_name != 'pull_request' || github.event.pull_request.draft == false"
 UCRT_ROUTE = (
     "github.event_name == 'pull_request' || github.ref_name == 'main' || "

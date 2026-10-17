@@ -95,10 +95,11 @@ jobs:
     # satisfy GitHub branch protection before the ready run finishes.
     needs: changes
     if: ${{ !cancelled() }}
-    runs-on: ${{ vars.LUM_SELF_HOSTED == 'true' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != '' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","Linux","X64","lum-vq1"]') || 'ubuntu-24.04' }}
+    runs-on: ${{ vars.LUM_SELF_HOSTED == 'true' && (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != '' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","Linux","X64","lum-vq1"]') || 'ubuntu-24.04' }}
     timeout-minutes: 60
     env:
       CCACHE_COMPILERCHECK: content
+      CCACHE_DIR: ${{ github.workspace }}/.cache/ccache
       CCACHE_MAXSIZE: 400M
     outputs:
       route: ${{ steps.route.outputs.route }}
@@ -164,11 +165,11 @@ jobs:
         if: ${{ needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'workflow_dispatch' || inputs.qualification_capture != true) }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.cache/ccache
-          key: linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-${{ github.sha }}
+          path: .cache/ccache
+          key: linux-x64-gcc-ccache-checkout-v2-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-${{ github.sha }}
           restore-keys: |
-            linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-
-            linux-x64-gcc-ccache-
+            linux-x64-gcc-ccache-checkout-v2-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-
+            linux-x64-gcc-ccache-checkout-v2-
       - name: Configure
         if: ${{ needs.changes.outputs.needs_cpp != 'false' }}
         id: configure
@@ -197,8 +198,8 @@ jobs:
         continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.cache/ccache
-          key: linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-${{ github.sha }}
+          path: .cache/ccache
+          key: linux-x64-gcc-ccache-checkout-v2-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-${{ github.sha }}
       - name: Test
         if: ${{ needs.changes.outputs.needs_cpp != 'false' }}
         id: tests
@@ -905,7 +906,7 @@ jobs:
 
   lint:
     name: Format changed files
-    runs-on: ${{ vars.LUM_SELF_HOSTED == 'true' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != '' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","Linux","X64","lum-vq1"]') || 'ubuntu-24.04' }}
+    runs-on: ${{ vars.LUM_SELF_HOSTED == 'true' && (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != '' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","Linux","X64","lum-vq1"]') || 'ubuntu-24.04' }}
     timeout-minutes: 15
     steps:
       - name: Check out repository
@@ -928,7 +929,7 @@ jobs:
     name: Static analysis / clang-tidy shard ${{ matrix.shard }}/3
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
-    runs-on: ${{ vars.LUM_SELF_HOSTED == 'true' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != '' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","Linux","X64","lum-vq1"]') || 'ubuntu-24.04' }}
+    runs-on: ${{ vars.LUM_SELF_HOSTED == 'true' && (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != '' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","Linux","X64","lum-vq1"]') || 'ubuntu-24.04' }}
     # The gate analyses 458 translation units across src/, test/ and tools/ plus
     # their first-party headers. Three Linux runners partition that
     # full scope by path hash so every merged tip gets complete analysis within
@@ -1013,7 +1014,7 @@ jobs:
 
   public-tree:
     name: Public tree / inventory honesty
-    runs-on: ${{ vars.LUM_SELF_HOSTED == 'true' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != '' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","Linux","X64","lum-vq1"]') || 'ubuntu-24.04' }}
+    runs-on: ${{ vars.LUM_SELF_HOSTED == 'true' && (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != '' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","Linux","X64","lum-vq1"]') || 'ubuntu-24.04' }}
     timeout-minutes: 10
     steps:
       - name: Check out repository

@@ -6,6 +6,9 @@
 # the comparison and the commit happen on normalised bytes, so the churn can
 # neither be seen nor be committed. Binary files are detected and left alone.
 * text=auto
+# Runner shell entrypoints must remain executable by Git Bash on Windows.
+tools/ci/prepare_self_hosted.sh text eol=lf
+tools/ci/self_hosted_job_hook.sh text eol=lf
 # Upstream schema pin and embedded traversal identity use exact file bytes.
 tools/release/spdx/spdx-2.3.schema.json -text
 tools/perf/fixtures/*.traversal -text

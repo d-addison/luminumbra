@@ -8,7 +8,13 @@ if [[ "$workspace" != "$GITHUB_WORKSPACE" || "$PWD" != "$workspace" ]]; then
     echo '::error::Expected the checkout root as the working directory' >&2
     exit 1
 fi
-git -C "$workspace" clean -ffdx -- .
+# RUNNER_TEMP and the checkout must belong to the same dedicated instance.
+# The host hook independently validates these against root-owned configuration.
+if [[ "$RUNNER_TEMP" != */_temp || "$workspace" != "${RUNNER_TEMP%/_temp}/luminumbra/luminumbra" ||
+      -L "$workspace" || -L "$RUNNER_TEMP" || ! -O "$workspace" || ! -O "$RUNNER_TEMP" ]]; then
+    echo '::error::Expected runner-owned checkout and temporary directories' >&2
+    exit 1
+fi
 
 missing=()
 # Fixed provisioning inventory: check every package and executable, accumulating
@@ -34,12 +40,17 @@ if (( ${#missing[@]} )); then
     exit 1
 fi
 
+# Refuse missing dependencies before deleting checkout leftovers. The host hook
+# has already admitted this job before checkout; this also clears the stable
+# compiler cache before any Actions restore can run.
+git -C "$workspace" clean -ffdx -- .
+
 # Each runner instance owns RUNNER_TEMP; each job also gets a unique directory.
 # The runner removes RUNNER_TEMP at job completion, including cancelled jobs.
 umask 077
 job_temp=$(mktemp -d "$RUNNER_TEMP/lum-ci.XXXXXXXX")
 job_home="$job_temp/home"
-mkdir -p "$job_home/.cache/ccache" "$job_home/.config/ccache" "$job_temp/tmp" "$job_temp/runtime" "$job_temp/bin"
+mkdir -p "$workspace/.cache/ccache" "$job_home/.cache" "$job_home/.config/ccache" "$job_temp/tmp" "$job_temp/runtime" "$job_temp/bin"
 : > "$job_home/.config/ccache/ccache.conf"
 # The host only needs the versioned formatter; keep the hosted install untouched.
 ln -s "$(command -v clang-format-18)" "$job_temp/bin/clang-format"
@@ -53,7 +64,7 @@ ln -s "$(command -v python3)" "$job_temp/bin/python"
     echo "TMPDIR=$job_temp/tmp"
     echo "TMP=$job_temp/tmp"
     echo "TEMP=$job_temp/tmp"
-    echo "CCACHE_DIR=$job_home/.cache/ccache"
+    echo "CCACHE_DIR=$workspace/.cache/ccache"
     echo "CCACHE_TEMPDIR=$job_temp/tmp"
     echo "CCACHE_CONFIGPATH=$job_home/.config/ccache/ccache.conf"
     echo 'PYTHONNOUSERSITE=1'

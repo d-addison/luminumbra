@@ -73,6 +73,12 @@ if(BUILD_TESTING)
 
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     add_test(
+        NAME SelfHostedRunnerContract
+        COMMAND "${Python3_EXECUTABLE}" -I -B
+                "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_self_hosted_runner.py")
+    set_tests_properties(SelfHostedRunnerContract
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
         NAME WorldgenProbeSmokeValidatorContract
         COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_worldgen_probe_smoke.py")
