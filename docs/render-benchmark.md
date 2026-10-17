@@ -576,7 +576,7 @@ variant fetches the upstream source; for offline use, supply an already
 provisioned checkout with `-DFETCHCONTENT_SOURCE_DIR_TRACY=/path/to/tracy`.
 The fetch settings in `cmake/tracy.cmake` pin Tracy v0.13.1 to an exact
 upstream revision; check out that same revision for offline use. Tracy uses the BSD-3-Clause licence; its verbatim notice is in
-[Third-party licenses](../THIRD_PARTY_LICENSES.md#tracy-v0131) and must accompany
+[Third-party licenses](https://github.com/d-addison/luminumbra/blob/devel/THIRD_PARTY_LICENSES.md#tracy-v0131) and must accompany
 redistributed Tracy-enabled binaries.
 
 The `perf`, default, debug and release configurations disable Tracy. Their event
@@ -604,7 +604,9 @@ Capture-only rendering uses `Client capture frame` and `Client capture` marks.
 The queue plot measures from ring insertion to execution start for both priority
 lanes and both single and batch dispatch. Its timestamp storage and clock reads
 exist only in profile builds. Worker thread names identify the job pool, world
-preview, audio propagation, saved-world catalog and TCP accept workers.
+preview, audio propagation and saved-world catalog workers. Disposable TCP accept
+threads retain their `TCP accept worker job` zone without explicit thread names,
+which Tracy retains for the process lifetime.
 
 `Job queue lock wait`, `Job completion lock wait`, `World chunks lock wait`,
 `Chunk state lock wait`, `Worldgen epoch lock wait`, the hydrology and far-build

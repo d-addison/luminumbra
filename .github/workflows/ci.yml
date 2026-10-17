@@ -295,7 +295,7 @@ jobs:
             build-essential cmake extra-cmake-modules libabsl-dev \
             libfreetype6-dev libgl1-mesa-dev libglu1-mesa-dev libprotobuf-dev \
             libssl-dev libwayland-dev libxkbcommon-dev ninja-build pkg-config \
-            protobuf-compiler wayland-protocols xorg-dev
+            protobuf-compiler python3-numpy python3-pil wayland-protocols xorg-dev
       - name: Configure GNS and Tracy profile compile check
         run: |
           cmake --preset profile -B build/gns-probe \

@@ -128,6 +128,13 @@ def check_enabled_compile():
     require("cmake --preset profile -B build/gns-probe -DBUILD_TESTING=ON "
             "-DLUMINUMBRA_ENABLE_GNS=ON" in commands,
             "CI must configure the enabled profile preset with both compile fixtures available")
+    configure_index = commands.index(
+        "cmake --preset profile -B build/gns-probe -DBUILD_TESTING=ON -DLUMINUMBRA_ENABLE_GNS=ON")
+    bootstrap = commands[:configure_index]
+    for package in ("python3-numpy", "python3-pil"):
+        require(any(re.search(r"\bapt-get install\b.*\b" + package + r"\b", command)
+                    for command in bootstrap),
+                f"Profile BUILD_TESTING configuration requires {package} before configure")
     require(any(command.startswith(
         "cmake --build build/gns-probe --parallel 4 --target "
         "luminumbra_common luminumbra_server_app luminumbra_client_app luminumbra_client_qa_app "
@@ -297,8 +304,11 @@ def check_dependency():
             == "16f7df4828bd89c880c17dd2f45e834b754b6d5e8c9a9ee886af1be4b89475ca",
             "Tracy licence must match the complete upstream v0.13.1 text")
     documentation = read("docs/render-benchmark.md")
-    for token in (tag[1], "BSD-3-Clause", "../THIRD_PARTY_LICENSES.md#tracy-v0131"):
+    for token in (tag[1], "BSD-3-Clause",
+                  "https://github.com/d-addison/luminumbra/blob/devel/THIRD_PARTY_LICENSES.md#tracy-v0131"):
         require(token in documentation, f"Missing profile dependency documentation: {token}")
+    require("../THIRD_PARTY_LICENSES.md" not in documentation,
+            "Profile licence link must work from the generated documentation root")
 
 
 def check_zones():
@@ -327,11 +337,18 @@ def check_zones():
     for path, thread, wait in (
             ("src/luminumbra_client/world/WorldgenPreview.cpp", "World preview worker", "Preview condition wait"),
             ("src/luminumbra_client/audio/AudioPropagationSystem.cpp", "Audio propagation worker", "Audio condition wait"),
-            ("src/luminumbra_common/persistence/AsyncSavedWorldCatalog.cpp", "Saved world catalog worker", "Saved world catalog condition wait"),
-            ("src/luminumbra_server/modes/RuntimeTcpSlot.cpp", "TCP accept worker", "TCP accept future wait")):
+            ("src/luminumbra_common/persistence/AsyncSavedWorldCatalog.cpp", "Saved world catalog worker", "Saved world catalog condition wait")):
         source = read(path)
         require(f'LUMIN_PROFILE_THREAD("{thread}")' in source, f"Unnamed {thread}")
         require(f'LUMIN_PROFILE_WAIT("{wait}"' in source, f"Missing wait zone: {wait}")
+    tcp = read("src/luminumbra_server/modes/RuntimeTcpSlot.cpp")
+    require(not re.search(r"\b(?:LUMIN_PROFILE_THREAD|SetThreadName(?:WithHint)?)\s*\(", tcp),
+            "Disposable TCP attempts must not retain process-lifetime thread names")
+    accept = function_body(tcp, "void StartRuntimeTcpAccept(")
+    require('LUMIN_PROFILE_ZONE_N("TCP accept worker job");' in accept,
+            "Disposable TCP attempts must retain their job zone")
+    for wait in ("TCP accept future poll", "TCP accept future get", "TCP accept future wait"):
+        require(f'LUMIN_PROFILE_WAIT("{wait}"' in tcp, f"Missing wait zone: {wait}")
     # Enumerate sibling shader implementations and pass entry points so additions
     # cannot silently introduce an unprofiled backend.
     for source in (ROOT / "src").rglob("*.cpp"):

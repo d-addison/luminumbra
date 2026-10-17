@@ -1,5 +1,13 @@
 #include "ModeHelpers.h"
+#include "core/Log.h"
 #include "core/Profiler.h"
+#include "net/LockstepSession.h"
+
+#include <chrono>
+#include <cstdint>
+#include <future>
+#include <memory>
+#include <vector>
 
 namespace {
 
@@ -47,7 +55,8 @@ void StartRuntimeTcpAccept(RuntimeTcpClientSlot& slot) {
     const std::uint16_t port = slot.port;
     slot.accepting = true;
     slot.accept_result = std::async(std::launch::async, [transport, port]() {
-        LUMIN_PROFILE_THREAD("TCP accept worker");
+        // Each attempt uses a disposable thread. Tracy retains explicit thread
+        // names for the process lifetime, so keep only the scoped job zone here.
         LUMIN_PROFILE_ZONE_N("TCP accept worker job");
         return transport->Listen(port, /*timeout_ms=*/250);
     });
