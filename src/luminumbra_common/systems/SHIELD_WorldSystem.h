@@ -843,6 +843,14 @@ public:
             }
         }
     }
+    [[nodiscard]] std::shared_lock<std::shared_mutex> try_acquire_worldgen_sample_scope() const {
+        if (m_worldgen_writer_pending.load(std::memory_order_acquire))
+            return {};
+        std::shared_lock<std::shared_mutex> scope(m_worldgen_epoch_mutex, std::try_to_lock);
+        if (!scope.owns_lock() || m_worldgen_writer_pending.load(std::memory_order_acquire))
+            return {};
+        return scope;
+    }
     //  telemetry: lifetime totals of promotion-lane dispatches
     // (batches, chunks). Static smoke runs are expected to record ZERO (the
     // resident set is constant post-boot); moving runs exercise the lane.
@@ -934,6 +942,14 @@ public:
     bool durable_residency() const {
         return m_durable_residency;
     }
+    // Render-only currency: a mesh's source revisions must still match live truth.
+    // Missing publication metadata refuses ownership; no culler state participates.
+    bool far_live_mesh_current(const Chunk& chunk, bool water) const;
+    // O(1) owner-thread change detector: no chunk visits, locks, allocations, samples or I/O.
+    // Includes direct chunk water/voxel writers, which do not all publish a region revision.
+    // The last element counts unpublished generation batches and Loading chunks, including
+    // pristine ones. Zero means generation no longer blocks a preview capture.
+    std::array<u64, 5> far_world_publication_token() const;
     // A durable Error is fail-stop; callers must never reinterpret it as a missing chunk.
     [[nodiscard]] bool durable_read_failed() const noexcept {
         return m_durable_read_failed;
@@ -964,9 +980,10 @@ public:
     std::vector<std::shared_ptr<::Luminumbra::Chunk>> snapshot_parked_chunks() const;
     // Quiescent owner-thread publication boundary; borrowed values end at visitor return.
     // The caller admits ordering scratch before entry. Live identities precede parked ones.
-    bool visit_edited_source_preview(
-        std::size_t max_records,
-        const std::function<bool(const Chunk&, bool parked)>& visitor) const;
+    // Only relevant authority consumes the record cap; Loading still refuses before filtering.
+    bool visit_edited_source_preview(std::size_t max_records,
+                                     const std::function<bool(const Chunk&, bool parked)>& visitor,
+                                     const std::function<bool(const Chunk&)>& relevant = {}) const;
     // Moves every water-dirty chunk (resident and parked) to LoadedOrEdited authority and re-arms
     // its save-dirty bit. Only call with sim.active_regions on.
     void sync_water_authority();
@@ -1058,6 +1075,9 @@ private:
     mutable std::atomic<bool> m_worldgen_writer_pending{false};
     mutable std::atomic<u64> m_far_lod_capture_epoch{0};
     std::atomic<u64> m_far_lod_authority_revision{0};
+    u64 m_far_publication_epoch = 0;
+    std::shared_ptr<ChunkAuthorityChanges> m_far_source_changes =
+        std::make_shared<ChunkAuthorityChanges>();
     mutable std::mutex m_far_lod_region_revision_mutex;
     std::map<std::pair<i32, i32>, u64> m_far_lod_region_revisions;
     void bump_far_lod_authority_revision(const IVec3& chunk_coords);
@@ -1119,6 +1139,17 @@ private:
     std::shared_ptr<Chunk> read_committed_chunk(const IVec3& coords) const;
     std::size_t m_parked_bytes = 0;
     bool m_durable_residency = false;
+    struct FarLiveMeshCurrency {
+        std::weak_ptr<const Chunk> chunk;
+        u32 pending_terrain = 0, pending_water = 0;
+        u32 terrain_revision = 0, water_revision = 0;
+        u32 terrain_version = 0, water_version = 0;
+        bool terrain_published = false, water_published = false;
+    };
+    // Bounded optional render metadata. Admission failure leaves live ownership absent.
+    static constexpr std::size_t kFarLiveMeshCurrencyLimit = 16384;
+    std::map<ChunkID, FarLiveMeshCurrency> m_farLiveMeshCurrency;
+    FarLiveMeshCurrency* far_live_mesh_record(const std::shared_ptr<Chunk>& chunk);
     std::size_t m_parked_bytes_limit = static_cast<std::size_t>(256) * 1024u * 1024u;
     bool m_persistence_save_requested = false;
     std::int64_t m_persistence_tick = -1;

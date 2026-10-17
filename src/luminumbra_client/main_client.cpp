@@ -2125,6 +2125,7 @@ int main(int argc, char* argv[]) try {
     auto gameSession = std::make_unique<Luminumbra::world::GameSession>();
     gameSession->SetJobSystem(&jobSystem);
     gameSession->SetRootPath(root_path_str);
+    gameSession->EnableFarWorldPersistenceSafety();
     gameSession->SetSaveRootPath(path_options.save_root);
     gameSession->ApplySystemConfig(g_systemConfig);
 
@@ -2233,10 +2234,6 @@ int main(int argc, char* argv[]) try {
             LUMINUMBRA_CORE_WARN(
                 "Far-world Ladder refused: cave_field requires exact 0 (BandLimited) "
                 "or 1 (BoxFiltered). Legacy remains effective.");
-        else
-            LUMINUMBRA_CORE_WARN(
-                "Far-world Ladder requested; normal world activation refuses without "
-                "immutable committed authority and dirty parking. Legacy remains effective.");
     }
     // set the sky-LUT GPU flag BEFORE startup so the one-shot precompute
     // (init_sky_lut, inside startup) takes the GPU compute path. render.sky_lut_gpu, default OFF.
@@ -2365,8 +2362,23 @@ int main(int argc, char* argv[]) try {
 
     auto prepare_world_entry = [&]() {
         renderPipeline.prepare_world_swap();
+        gameSession->ClearFarWorldPublication();
         DrainBackgroundWorldScan(jobSystem);
         DrainWorldDressing(jobSystem, s_worldDressing, s_worldDressingHandle);
+    };
+    gameSession->SetBeforeWorldReplacement(prepare_world_entry);
+
+    auto publish_saved_far_world = [&](const Luminumbra::Rendering::Camera& camera) {
+        Luminumbra::world::FarWorldPublicationRequest request;
+        if (!renderPipeline.prepare_saved_far_world_capture(
+                gameSession->GetFarWorldSaveRoot(), camera, request))
+            return;
+        std::shared_ptr<const Luminumbra::world::FarWorldPublication> publication;
+        std::string diagnostic;
+        if (gameSession->CaptureFarWorldPublication(request, publication, diagnostic))
+            renderPipeline.bind_saved_far_world(std::move(publication));
+        else if (!diagnostic.empty())
+            renderPipeline.refuse_saved_far_world_publication(std::move(diagnostic));
     };
 
     auto refuse_world_entry = [&](const std::string& fallback, bool use_world_error = true) {
@@ -2658,7 +2670,6 @@ int main(int argc, char* argv[]) try {
             return;
         }
         // The UI's inspection is advisory: revalidate all artifacts at the moment of opening.
-        prepare_world_entry();
         if (!gameSession->LoadWorld(id, check_benchmark_world)) {
             refuse_world_entry("Could not load this world.");
             return;
@@ -3410,6 +3421,7 @@ int main(int argc, char* argv[]) try {
                     break;
                 }
                 glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+                publish_saved_far_world(*g_camera);
                 renderPipeline.render_frame(gameSession->GetRegistry(),
                                             *gameSession->GetWorldSystem(),
                                             *g_camera,
@@ -4769,6 +4781,7 @@ int main(int argc, char* argv[]) try {
                     if (!terrain_coverage_dir.empty())
                         renderPipeline.set_terrain_coverage_diagnostics_enabled(
                             g_rb_active, terrain_coverage_bypass_camera_region_guard);
+                    publish_saved_far_world(*g_camera);
                     renderPipeline.render_frame(gameSession->GetRegistry(),
                                                 *gameSession->GetWorldSystem(),
                                                 *g_camera,
@@ -5732,6 +5745,7 @@ int main(int argc, char* argv[]) try {
     // Drain the  far-field heightfield build before the world is cleared —
     // its worker job reads the world by pointer (else a teardown-time use-after-free).
     renderPipeline.prepare_world_swap();
+    gameSession->ClearFarWorldPublication();
     if (auto* world_system = gameSession->GetWorldSystem()) {
         world_system->clear_world(gameSession->GetPhysicsSystem());
         mark_shutdown("world_cleared");

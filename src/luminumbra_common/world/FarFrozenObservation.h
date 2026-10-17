@@ -56,6 +56,9 @@ struct FarFrozenCaptureSource {
     // separate render fingerprint; it never changes durable.generation.
     std::uint64_t content_identity = 0;
     FarFrozenUse use = FarFrozenUse::Committed;
+    // Renderer-only capture keeps the LegacySigned16 density/material consumed by meshes.
+    // The default dual-image capture and its durable bake semantics are unchanged.
+    bool render_only = false;
     // Required committed resolver, including an explicit Absent result for an
     // empty committed layer. A missing resolver cannot prove edits are absent.
     FarFrozenTerrainOverride committed;
@@ -107,8 +110,22 @@ public:
     FarEditedImageIdentity durable_identity() const noexcept {
         return durable_;
     }
+    bool render_only() const noexcept {
+        return render_only_;
+    }
     FarFrozenUse use() const noexcept {
         return use_;
+    }
+    // Allocation lifetime stays with the image, including every worker alias.
+    const FarVolumeMemoryPool* memory_pool() const noexcept {
+        return pool_.get();
+    }
+    std::shared_ptr<FarVolumeMemoryPool> memory_pool_handle() const noexcept {
+        return pool_;
+    }
+    // Sample/vector payload only; the shared allocation is also charged in pool.
+    std::uint64_t payload_bytes() const noexcept {
+        return lease_.bytes();
     }
     FarCaveMode caves() const noexcept {
         return caves_;
@@ -151,11 +168,21 @@ private:
     std::uint64_t identity_, pristine_identity_;
     FarEditedImageIdentity durable_;
     FarFrozenUse use_;
+    bool render_only_ = false;
     FarCaveMode caves_;
     FarVolumeNumericProfile numeric_;
     std::vector<Grid> grids_;
     std::vector<float> heights_;
     std::vector<FarVolumeSample> pristine_, composed_;
+    std::vector<std::int16_t> render_density_;
+    std::vector<std::uint8_t> render_material_;
+    template<class T>
+    struct RenderRun {
+        std::size_t end = 0;
+        T value = 0;
+    };
+    std::vector<RenderRun<std::int16_t>> render_density_runs_;
+    std::vector<RenderRun<std::uint8_t>> render_material_runs_;
     std::vector<FarFrozenWaterSample> water_;
 };
 

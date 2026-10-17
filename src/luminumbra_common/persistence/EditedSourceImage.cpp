@@ -57,8 +57,7 @@ struct Payload {
 std::array<std::int64_t, 3> Axes(const Position& position) {
     return {position.x, position.y, position.z};
 }
-Footprint ChunkFootprint(const Chunk& chunk) {
-    const auto& c = chunk.get_coords();
+Footprint ChunkFootprint(const IVec3& c) {
     const Position origin{static_cast<std::int64_t>(c.x) * CHUNK_SIZE_X,
                           static_cast<std::int64_t>(c.y) * CHUNK_SIZE_Y,
                           static_cast<std::int64_t>(c.z) * CHUNK_SIZE_Z};
@@ -424,7 +423,7 @@ Error AppendChunk(EditedSourceData& data,
     if (selection.tiles.size() > (limits.max_selection_probes - work.selection_probes) / 7)
         return Error::WorkLimit;
     work.selection_probes += selection.tiles.size() * 7;
-    const auto footprint = ChunkFootprint(chunk);
+    const auto footprint = ChunkFootprint(chunk.get_coords());
     const bool relevant = Selected(footprint, selection);
     auto payload_limit = std::min(limits.max_decode_bytes, limits.max_scratch_bytes / 2);
     if (relevant)
@@ -622,7 +621,7 @@ Error EditedSourceCaptureAccess::Load(const std::filesystem::path& root,
             if (!selection.tiles.empty()) {
                 const auto admitted_records =
                     std::min(admitted_samples / kSamples,
-                             (limits.max_selection_probes - work.selection_probes) / 7 /
+                             (limits.max_selection_probes - work.selection_probes) / 14 /
                                  selection.tiles.size());
                 admitted_samples = admitted_records * kSamples;
             }
@@ -631,7 +630,12 @@ Error EditedSourceCaptureAccess::Load(const std::filesystem::path& root,
                 limits.max_decode_bytes - decoded_total,
                 limits.max_scratch_bytes / 2,
                 limits.max_records - record_total,
-                admitted_samples};
+                admitted_samples,
+                [&selection, &work](const IVec3& coords) {
+                    // Header classification and decoded validation each probe the selection.
+                    work.selection_probes += selection.tiles.size() * 7;
+                    return Selected(ChunkFootprint(coords), selection);
+                }};
             if (!WorldSaveService::read_edited_source_region(
                     root / path,
                     read_limits,

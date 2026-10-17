@@ -709,6 +709,47 @@ TEST(FarFrozenObservation, ProductionCaptureNeverCopiesTargetsOnRefusalOrSuccess
     EXPECT_EQ(calls, captured_calls);
 }
 
+TEST(FarFrozenObservation, ProductionCapturePreservesRenderOnlyModeAndItsRefusals) {
+    const Luminumbra::Systems::TerrainGenParams params;
+    const auto world =
+        std::make_unique<Luminumbra::Systems::SHIELD_WorldSystem>(nullptr, nullptr, params, 1337);
+    auto source = Source();
+    source.use = FarFrozenUse::Preview;
+    source.render_only = true;
+    const FarVolumeRequest request{{5, 0, 0}, {-256, 256}, 42};
+    auto pool = Pool();
+    std::shared_ptr<const FarFrozenObservation> output;
+    ASSERT_EQ(CaptureWorldFarVolumeObservation(*world, request, source, Limits(), pool, output),
+              Error::None);
+    ASSERT_TRUE(output);
+    EXPECT_TRUE(output->render_only());
+    EXPECT_FALSE(output->PristineSampler()(5, {0, 0, 0}));
+    const auto retained = output;
+    const auto held = pool->used(), attempts = pool->attempts();
+    for (int refusal = 0; refusal < 4; ++refusal) {
+        auto invalid = source;
+        auto limits = Limits();
+        auto expected = Error::IdentityMismatch;
+        if (refusal == 0)
+            invalid.use = FarFrozenUse::Committed;
+        if (refusal == 1)
+            invalid.pristine.numeric = FarVolumeNumericProfile::RawFloat;
+        if (refusal == 2) {
+            invalid.committed = {};
+            expected = Error::InvalidSource;
+        }
+        if (refusal == 3) {
+            limits.max_water_samples = 0;
+            expected = Error::WorkLimit;
+        }
+        EXPECT_EQ(CaptureWorldFarVolumeObservation(*world, request, invalid, limits, pool, output),
+                  expected);
+        EXPECT_EQ(output, retained);
+        EXPECT_EQ(pool->used(), held);
+        EXPECT_EQ(pool->attempts(), attempts);
+    }
+}
+
 TEST(FarFrozenObservation, ProductionCaptureLeavesSimulationStateUnchangedAndSurvivesClose) {
     Luminumbra::Systems::TerrainGenParams params;
     params.base_amplitude = 0;

@@ -53,6 +53,10 @@ inline std::shared_ptr<World::FarEditedCachePolicy> FarCachePolicy() {
     limits.content_identity = 29;
     limits.capture_source = [](const Persistence::EditedSourceImage& image) {
         FarFrozenCaptureSource source;
+        // This fixture has no committed terrain override.
+        source.committed = [](std::uint8_t, const FarVolumePosition&) {
+            return FarFrozenOverride<FarVolumeSample>{};
+        };
         source.durable = image.Identity();
         source.content_identity = 29;
         source.pristine.field_identity = 17;

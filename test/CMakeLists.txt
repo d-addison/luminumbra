@@ -218,6 +218,9 @@ add_executable(common_tests
     ../src/luminumbra_client/rendering/ShaderSource.cpp
     ../src/luminumbra_client/rendering/FarWorldDiagnostics.cpp
     ../src/luminumbra_client/rendering/FarWorldRenderer.cpp
+    ../src/luminumbra_client/rendering/FarVolumeHandoff.cpp
+    ../src/luminumbra_client/rendering/FarWorldHandoffRenderer.cpp
+    ../src/luminumbra_client/rendering/FarWorldHandoffDiagnostics.cpp
     ../src/luminumbra_client/rendering/FarWorldOwnership.cpp
     ../src/luminumbra_client/rendering/FarWorldDepthBias.cpp
     ../src/luminumbra_client/rendering/FarVolumeBuildQueue.cpp

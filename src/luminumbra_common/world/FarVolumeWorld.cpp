@@ -52,6 +52,7 @@ CaptureWorldFarVolumeObservation(const Systems::SHIELD_WorldSystem& world,
         production.durable = source.durable;
         production.content_identity = source.content_identity;
         production.use = source.use;
+        production.render_only = source.render_only;
         const auto borrow = [](auto& target, const auto& callback) {
             if (callback)
                 target = std::cref(callback);

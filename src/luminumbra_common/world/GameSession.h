@@ -15,12 +15,15 @@
 #include "../simulation/SimulationEventBus.h"
 #include "../systems/PollinationSystem.h"
 #include "ActiveRegionLedger.h"
+#include "FarEditedCache.h"
+#include "FarVolumeRuntime.h"
 #include "GroundObjectStore.h"
 #include "RegionPopulator.h"
 #include "WorldClock.h"
 #include "WorldMetadata.h"
 #include "WorldgenFileReader.h"
 #include "entt/entt.hpp"
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <ctime>
@@ -30,6 +33,7 @@
 #include <memory>
 #include <optional>
 #include <set>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -121,6 +125,40 @@ struct PersistenceStatus {
     bool save_requested = false;
 };
 
+struct FarWorldPublicationCapture;
+
+struct FarWorldPublicationRequest {
+    std::uint64_t world_epoch = 0;
+    World::FarCaveMode caves = World::FarCaveMode::BandLimited;
+    std::span<const World::FarTileKey> wanted;
+    float camera_y = 0;
+    // Production polling captures at most one tile per call. False/empty diagnostic
+    // means pending or unchanged; a refusal is reported once, then retried on change.
+    bool incremental = false;
+    World::FarEditedCacheLimits limits;
+    World::FarVolumeSpanLedgerLimits spans{-8192, 8192, 2048};
+    std::size_t max_history_keys = 2048;
+    std::shared_ptr<World::FarVolumeMemoryPool> source_memory;
+    std::array<std::shared_ptr<World::FarVolumeMemoryPool>, World::kFarTierCount> memory;
+};
+struct FarWorldPublicationTile {
+    World::FarTileKey key;
+    World::FarVolumeSpanLedger span;
+    std::shared_ptr<const World::FarFrozenObservation> observation;
+};
+struct FarWorldPublication {
+    // Declaration order retains admission through all payload destruction.
+    std::shared_ptr<World::FarVolumeMemoryPool> memory;
+    World::FarVolumeMemoryLease reservation;
+    std::uint64_t world_epoch = 0, publication_serial = 0, committed_generation = 0;
+    World::FarCaveMode caves = World::FarCaveMode::BandLimited;
+    std::array<std::uint64_t, 5> source_token{};
+    std::filesystem::path save_root;
+    std::vector<FarWorldPublicationTile> tiles;
+    // Includes keys that have left wanted; their extents cannot shrink on re-entry.
+    std::vector<std::pair<World::FarTileKey, World::FarVolumeSpanLedger>> history;
+};
+
 class GameSession {
 public:
     GameSession();
@@ -151,6 +189,13 @@ public:
     // Load an existing world from disk. Enabled sessions publish only a fully restored
     // candidate; refusal preserves the current world and its ability to save.
     bool LoadWorld(const std::string& worldId);
+    // Called after a candidate validates, immediately before the old world is retired.
+    void SetBeforeWorldReplacement(std::function<void()> boundary) {
+        m_beforeWorldReplacement = std::move(boundary);
+    }
+    std::filesystem::path GetFarWorldSaveRoot() const {
+        return m_regionDurableDirectory.empty() ? GetWorldSaveDir() : m_regionDurableDirectory;
+    }
     // Uses the preset loader's status-reader seam for deterministic dependency I/O.
     bool LoadWorld(const std::string& worldId, const World::WorldgenFileStatusReader& read_status);
     using WorldOpenCheck = std::function<std::string(
@@ -169,6 +214,21 @@ public:
     // supplies finite immutable policy and complete supports; activation is a separate concern.
     void SetFarEditedCachePolicy(const std::shared_ptr<const World::FarEditedCachePolicy>& policy);
     [[nodiscard]] bool FarEditedCacheEnabled() const;
+    // Host persistence safety, independent of rendering and sim.active_regions. Once
+    // enabled it remains enabled for this session, including failed saves and renderer refusal.
+    void EnableFarWorldPersistenceSafety();
+    // Host calls after draining renderer work at close/policy/world identity changes.
+    void ClearFarWorldPublication();
+    static World::FarEditedCacheLimits FarWorldPublicationLimits();
+    bool CaptureFarWorldPublication(const FarWorldPublicationRequest&,
+                                    std::shared_ptr<const FarWorldPublication>& out,
+                                    std::string& diagnostic);
+    std::uint64_t FarWorldCaptureCount() const {
+        return m_farCaptureCount;
+    }
+    std::uint64_t FarWorldObservationCaptureCount() const {
+        return m_farObservationCaptureCount;
+    }
     // Owner-thread capture at a quiescent publication boundary. Committed truth comes only from
     // disk; optional live/parked layers remain separate volatile observations. Refusal preserves
     // out.
@@ -875,6 +935,24 @@ private:
     const std::thread::id m_editedSourceOwner = std::this_thread::get_id();
     bool m_editedSourceCaptureActive = false;
     std::shared_ptr<const World::FarEditedCachePolicy> m_farEditedCachePolicy;
+    bool m_farWorldPersistenceSafety = false;
+    bool BeginFarWorldPublicationCapture(const FarWorldPublicationRequest&,
+                                         std::string& diagnostic);
+    std::uint64_t m_farPublicationSerial = 0;
+    std::uint64_t m_farPublicationChange = 0, m_farCaptureCount = 0,
+                  m_farObservationCaptureCount = 0;
+    struct FarCaptureAttempt {
+        std::array<std::uint64_t, 5> source_token{};
+        std::uint64_t session_change = 0, world_epoch = 0;
+        World::FarCaveMode caves = World::FarCaveMode::BandLimited;
+        float camera_y = 0;
+        std::size_t wanted_count = 0;
+        std::array<World::FarTileKey, 320> wanted{};
+    };
+    std::optional<FarCaptureAttempt> m_farCaptureAttempt;
+    std::shared_ptr<FarWorldPublicationCapture> m_farCapture;
+    std::shared_ptr<const FarWorldPublication> m_farPublication;
+    std::function<void()> m_beforeWorldReplacement;
 };
 
 } // namespace Luminumbra::world

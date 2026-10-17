@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <vector>
@@ -34,6 +35,14 @@ struct VoxelVertex {
     u32 material_id;
 };
 
+// Shared lifetime prevents worker notifications from retaining a world or dangling after close.
+// Mutations publish their metadata before the release increment; owner polls use acquire loads.
+struct ChunkAuthorityChanges {
+    std::atomic<u64> revisions{0};
+    std::atomic<u64> membership{0};
+    std::atomic<u64> loading{0};
+};
+
 class Chunk {
 public:
     static constexpr i32 kPackedMinXz = -(1 << 20);
@@ -49,14 +58,24 @@ public:
         return m_id;
     }
 
+    // Counts actual metadata visits/state locks on this thread, including publication polling.
+    // Test telemetry only; never persisted, hashed or used by scheduling.
+    static u64 debug_authority_read_count() {
+        return s_authority_reads;
+    }
+    // Owner boundary only, before dispatch/after quiescence. A null observer detaches residency.
+    void observe_authority_changes(std::shared_ptr<ChunkAuthorityChanges> changes);
+
     // Thread-safe state management
     ChunkState get_state() const {
+        ++s_authority_reads;
         std::lock_guard<std::mutex> lock(m_state_mutex);
         return m_state;
     }
 
     void set_state(ChunkState new_state) {
         std::lock_guard<std::mutex> lock(m_state_mutex);
+        notify_loading_change(m_state, new_state);
         m_state = new_state;
     }
 
@@ -74,14 +93,17 @@ public:
                    revision, revision + 1u, std::memory_order_acq_rel, std::memory_order_acquire)) {
         }
         m_voxel_data_dirty.store(true, std::memory_order_release);
+        notify_authority_change();
     }
     void clear_voxel_data_dirty() {
-        m_voxel_data_dirty.store(false, std::memory_order_release);
+        if (m_voxel_data_dirty.exchange(false, std::memory_order_acq_rel) && needs_authority())
+            notify_authority_change();
     }
     bool is_voxel_data_dirty() const {
         return m_voxel_data_dirty.load(std::memory_order_acquire);
     }
     void mark_sdf_generated_current_params() {
+        const bool was_authoritative = needs_authority();
         if (has_water_authority()) {
             // Water divergence is sticky authority: a generation/promotion backfill of the
             // terrain must not make the chunk regenerable again.
@@ -90,6 +112,7 @@ public:
             u32 expected = 0u;
             m_voxel_revision.compare_exchange_strong(
                 expected, 1u, std::memory_order_acq_rel, std::memory_order_acquire);
+            notify_authority_change();
             // Leave the voxel-dirty bit untouched: it may carry an unsaved water obligation.
             return;
         }
@@ -97,6 +120,8 @@ public:
                                std::memory_order_release);
         m_voxel_revision.store(0u, std::memory_order_release);
         m_voxel_data_dirty.store(false, std::memory_order_release);
+        if (was_authoritative)
+            notify_authority_change();
     }
     // Post-generation acknowledgement: a promoted/backfilled terrain is pure generation output,
     // except on water-authoritative chunks where the dirty bit may carry unsaved water state.
@@ -106,11 +131,14 @@ public:
         }
     }
     void mark_sdf_loaded_or_edited() {
+        const bool changed = sdf_provenance() != ChunkSdfProvenance::LoadedOrEdited;
         m_sdf_provenance.store(static_cast<u8>(ChunkSdfProvenance::LoadedOrEdited),
                                std::memory_order_release);
         u32 expected = 0u;
         m_voxel_revision.compare_exchange_strong(
             expected, 1u, std::memory_order_acq_rel, std::memory_order_acquire);
+        if (changed)
+            notify_authority_change();
     }
     ChunkSdfProvenance sdf_provenance() const {
         return static_cast<ChunkSdfProvenance>(m_sdf_provenance.load(std::memory_order_acquire));
@@ -131,32 +159,37 @@ public:
                    revision, revision + 1u, std::memory_order_acq_rel, std::memory_order_acquire)) {
         }
         m_water_state_dirty.store(true, std::memory_order_release);
+        notify_authority_change();
     }
     bool is_water_state_dirty() const {
         return m_water_state_dirty.load(std::memory_order_acquire);
     }
     void clear_water_state_dirty() {
-        m_water_state_dirty.store(false, std::memory_order_release);
+        if (m_water_state_dirty.exchange(false, std::memory_order_acq_rel))
+            notify_authority_change();
     }
     u32 water_revision() const {
         return m_water_revision.load(std::memory_order_acquire);
     }
     // Sticky: set once the chunk's water state has diverged from worldgen initialisation.
     void set_water_authority() {
-        m_water_authority.store(true, std::memory_order_release);
+        if (!m_water_authority.exchange(true, std::memory_order_acq_rel))
+            notify_authority_change();
     }
     bool has_water_authority() const {
         return m_water_authority.load(std::memory_order_acquire);
     }
     // True when the chunk cannot be regenerated byte-identically from worldgen.
     bool needs_authority() const {
+        ++s_authority_reads;
         return sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited || has_water_authority() ||
                is_water_state_dirty();
     }
     // Re-arms the save-dirty bit WITHOUT touching provenance or the voxel revision (used to
     // transfer water divergence into the existing save selection and to retry after a failed save).
     void mark_dirty_for_save() {
-        m_voxel_data_dirty.store(true, std::memory_order_release);
+        if (!m_voxel_data_dirty.exchange(true, std::memory_order_acq_rel) && needs_authority())
+            notify_authority_change();
     }
     // Approximate heap footprint: sum of vector capacities * element size, including water and
     // mesh buffers. Used for the parked-bytes budget.
@@ -354,6 +387,14 @@ public:
     bool try_set_state(ChunkState expected_state, ChunkState new_state);
 
 private:
+    void notify_authority_change() {
+        if (const auto changes = m_authority_changes.load(std::memory_order_acquire))
+            changes->revisions.fetch_add(1, std::memory_order_release);
+    }
+    // Called with m_state_mutex held, so Loading membership cannot race attachment.
+    void notify_loading_change(ChunkState before, ChunkState after);
+    inline static thread_local u64 s_authority_reads = 0;
+    std::atomic<std::shared_ptr<ChunkAuthorityChanges>> m_authority_changes{nullptr};
     const IVec3 m_coords;
     const ChunkID m_id;
     ChunkState m_state;

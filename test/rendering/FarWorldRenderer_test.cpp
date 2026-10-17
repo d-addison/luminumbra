@@ -1,4 +1,5 @@
 #include "luminumbra_client/rendering/Camera.h"
+#include "luminumbra_client/rendering/FarWorldHandoffRenderer.h"
 #include "luminumbra_client/rendering/FarWorldRenderer.h"
 #include "luminumbra_common/core/SystemConfig.h"
 
@@ -157,8 +158,9 @@ public:
     ~Fixture() override {
         EXPECT_EQ(state_.live, 0u);
         EXPECT_FALSE(state_.destroyed);
-        if (gate_ && !gate_->first_sample.load())
+        if (gate_ && !gate_->first_sample.load()) {
             EXPECT_TRUE(gate_->exited.try_wait());
+        }
         state_.fixture_released = true;
     }
     std::uint64_t content_identity() const noexcept override {
@@ -1694,4 +1696,266 @@ TEST(FarWorldRenderer, WetEmptyTerrainCountsRetainedAndActualSubmissionSeparatel
     SubmitSelectedFarWorld(off, {}, {}, {});
     EXPECT_EQ(owner.renderer.Diagnostic().tiers[4].resident.submitted_water_indices,
               on.tiers[4].resident.submitted_water_indices);
+}
+
+namespace {
+FarVolumeResidencyLimits RendererHandoffLimits() {
+    auto limits = FarWorldDevelopmentLimits().residency;
+    limits.entry_slots.fill(6);
+    for (auto& queue : limits.queues) {
+        queue.descriptor_slots = 8;
+        queue.result_slots = 2;
+    }
+    return limits;
+}
+FarTierBudgets RendererHandoffBudgets() {
+    FarTierBudgets budgets;
+    budgets.bytes.fill(64 * 1024 * 1024);
+    return budgets;
+}
+FarHandoffTileInput RendererHandoffInput(FarWorldHandoffRenderer& renderer,
+                                         FarTileKey key,
+                                         std::uint64_t generation,
+                                         bool mixed) {
+    FarVolumeWantedRequest wanted;
+    EXPECT_TRUE(ToFarVolumeTileKey(key, wanted.intent.key));
+    wanted.identity = {1, 100 + generation, 0, key, generation, 1};
+    wanted.intent.extra_span = FarVolumeCoverageSpan{-256, 64};
+    const auto edge = FarTileEdgeMeters(key.tier);
+    FarFrozenCaptureSource source;
+    // This fixture has no committed terrain override.
+    source.committed = [](std::uint8_t, const FarVolumePosition&) {
+        return FarFrozenOverride<FarVolumeSample>{};
+    };
+    source.content_identity = source.pristine.field_identity = wanted.identity.content_hash;
+    source.durable = {generation, FarEditedImageState::Committed};
+    source.pristine.height = [](std::int64_t, std::int64_t) {
+        return 0.0f;
+    };
+    source.pristine.density =
+        [mixed, key, edge](const FarVolumePosition& p, float, std::uint32_t, FarCaveMode) {
+            const auto x = p.x - key.tx * edge, z = p.z - key.tz * edge;
+            return FarVolumeSample{
+                mixed && x >= 0 && x <= 256 && z >= 0 && z <= 256 ? float(p.y) + .25f : 3.0f, 7};
+        };
+    source.water = [](std::int64_t, std::int64_t) {
+        return FarFrozenWaterSample{false, 0};
+    };
+    FarVolumeRequest request;
+    EXPECT_TRUE(
+        ResolveFarVolumeCoverage(wanted.intent,
+                                 source.pristine,
+                                 RendererHandoffLimits().queues[key.tier - 1].compilation.authority,
+                                 request));
+    std::shared_ptr<const FarFrozenObservation> image;
+    EXPECT_EQ(CaptureFarVolumeObservation(request,
+                                          source,
+                                          {1, 100'000, 2'000'000, 100'000, 32 * 1024 * 1024},
+                                          renderer.MemoryPool(key.tier),
+                                          image),
+              FarFrozenCaptureError::None);
+    if (!image)
+        return {};
+    wanted.identity.content_hash = image->content_identity();
+    const auto input = MakeFarHandoffTileInput(wanted, image);
+    EXPECT_TRUE(input);
+    return input.value_or(FarHandoffTileInput{});
+}
+FarHandoffManifest RendererHandoffManifest(std::uint64_t serial,
+                                           std::span<const FarHandoffTileInput> tiles) {
+    return {1, serial, serial, FarCaveMode::BandLimited, FarVolumeNumericProfile::RawFloat, tiles};
+}
+bool RendererHandoffWait(const std::function<bool()>& predicate) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    do {
+        if (predicate())
+            return true;
+        std::this_thread::yield();
+    } while (std::chrono::steady_clock::now() < deadline);
+    return false;
+}
+class RendererHandoffGate final : public std::pmr::memory_resource {
+public:
+    explicit RendererHandoffGate(BuildGate& gate)
+        : gate_(gate) {}
+    std::atomic<bool> armed{false};
+
+private:
+    BuildGate& gate_;
+    const std::thread::id owner_ = std::this_thread::get_id();
+    void* do_allocate(std::size_t bytes, std::size_t alignment) override {
+        if (std::this_thread::get_id() != owner_ && armed.exchange(false)) {
+            gate_.entered.count_down();
+            gate_.release.wait();
+            gate_.exited.count_down();
+        }
+        return std::pmr::new_delete_resource()->allocate(bytes, alignment);
+    }
+    void do_deallocate(void* p, std::size_t bytes, std::size_t alignment) override {
+        std::pmr::new_delete_resource()->deallocate(p, bytes, alignment);
+    }
+    bool do_is_equal(const std::pmr::memory_resource& other) const noexcept override {
+        return this == &other;
+    }
+};
+} // namespace
+
+TEST(FarWorldHandoffRenderer, SameFrameOwnershipAndSubmitExceptionRestoreBindings) {
+    JobSystem jobs;
+    jobs.startup(1);
+    DriverState state;
+    FarWorldHandoffRenderer renderer;
+    auto driver = std::make_unique<Driver>(state);
+    auto* fake = driver.get();
+    renderer.InstallBackend(std::move(driver));
+    ASSERT_TRUE(renderer.Bind(jobs,
+                              1,
+                              FarCaveMode::BandLimited,
+                              FarVolumeNumericProfile::RawFloat,
+                              RendererHandoffBudgets(),
+                              RendererHandoffLimits()));
+    auto inputs = std::array{RendererHandoffInput(renderer, {5, 0, 0}, 1, true)};
+    ASSERT_TRUE(renderer.StageTarget(RendererHandoffManifest(1, inputs)));
+    std::uint64_t frame = 0;
+    ASSERT_TRUE(RendererHandoffWait([&] {
+        renderer.AdvanceFrame(++frame, {0, 0, 0}, {1, 1, 16 * 1024 * 1024});
+        return renderer.Handoff()->State().serving_serial == 1;
+    }));
+    std::size_t prepares = 0;
+    const auto prepare = [&](const auto&) {
+        ++prepares;
+        return true;
+    };
+    EXPECT_EQ(renderer.Submit({0, 0, 0}, prepare).refused, 1u);
+    EXPECT_EQ(prepares, 0u);
+    renderer.BeginLiveOwnership(frame - 1);
+    ASSERT_TRUE(renderer.FinishLiveOwnership());
+    EXPECT_EQ(renderer.Submit({0, 0, 0}, prepare).refused, 1u);
+    renderer.BeginLiveOwnership(frame);
+    ASSERT_TRUE(renderer.FinishLiveOwnership());
+    fake->BindVertexArray(37);
+    fake->BindBuffer(FarVolumeBufferKind::Vertex, 38);
+    EXPECT_THROW(renderer.Submit({0, 0, 0},
+                                 [&](const auto&) -> bool {
+                                     EXPECT_THROW(renderer.BeginLiveOwnership(frame),
+                                                  std::logic_error);
+                                     fake->BindVertexArray(39);
+                                     throw std::runtime_error("draw preparation failed");
+                                 }),
+                 std::runtime_error);
+    EXPECT_FALSE(state.ownership_bound);
+    EXPECT_EQ(fake->vao(), 37u);
+    std::uint32_t vbo = 0;
+    fake->GetVertexBufferBinding(vbo);
+    EXPECT_EQ(vbo, 38u);
+    EXPECT_EQ(renderer.Submit({0, 0, 0}, prepare).draws, 1u);
+    EXPECT_FALSE(state.ownership_bound);
+    EXPECT_EQ(fake->vao(), 37u);
+    renderer.PrepareWorldSwap();
+    EXPECT_EQ(state.live, 0u);
+    state.fixture_released = true;
+    renderer.Shutdown();
+}
+
+TEST(FarWorldHandoffRenderer, WorldSwapUnbindsBeforeJoiningAndReleasesBothGenerations) {
+    JobSystem jobs;
+    jobs.startup(2);
+    DriverState state;
+    BuildGate barrier;
+    RendererHandoffGate gate(barrier);
+    FarWorldHandoffRenderer renderer;
+    // Fatal test exits still release the worker before renderer destruction.
+    struct Release {
+        BuildGate& barrier;
+        DriverState& state;
+        ~Release() {
+            if (!barrier.release.try_wait())
+                barrier.release.count_down();
+            state.release_on_drain = nullptr;
+        }
+    } release{barrier, state};
+    renderer.InstallBackend(std::make_unique<Driver>(state));
+    ASSERT_TRUE(renderer.Bind(jobs,
+                              1,
+                              FarCaveMode::BandLimited,
+                              FarVolumeNumericProfile::RawFloat,
+                              RendererHandoffBudgets(),
+                              RendererHandoffLimits(),
+                              &gate));
+    auto a = std::array{RendererHandoffInput(renderer, {5, 0, 0}, 1, true),
+                        RendererHandoffInput(renderer, {4, 0, 0}, 1, true)};
+    ASSERT_TRUE(renderer.StageTarget(RendererHandoffManifest(1, a)));
+    std::uint64_t frame = 0;
+    ASSERT_TRUE(RendererHandoffWait([&] {
+        renderer.AdvanceFrame(++frame, {0, 0, 0}, {2, 2, 16 * 1024 * 1024});
+        const auto observed = renderer.Handoff()->Observe({4, 0, 0});
+        if (!observed)
+            return false;
+        return observed->serving.has_value();
+    }));
+    auto b = std::array{RendererHandoffInput(renderer, {5, 0, 0}, 2, true),
+                        RendererHandoffInput(renderer, {4, 0, 0}, 2, true)};
+    ASSERT_TRUE(renderer.StageTarget(RendererHandoffManifest(2, b)));
+    gate.armed = true;
+    renderer.AdvanceFrame(++frame, {0, 0, 0}, {1, 0, 0});
+    ASSERT_TRUE(RendererHandoffWait([&] { return barrier.entered.try_wait(); }));
+    ASSERT_TRUE(RendererHandoffWait([&] {
+        renderer.AdvanceFrame(++frame, {0, 0, 0}, {1, 1, 16 * 1024 * 1024});
+        const auto observed = renderer.Handoff()->Observe({4, 0, 0});
+        if (!observed)
+            return false;
+        return IsFarTileCovering(observed->target_coverage);
+    }));
+    EXPECT_EQ(renderer.Handoff()->State().serving_serial, 1u);
+    const auto staged = renderer.Handoff()->Observe({4, 0, 0});
+    ASSERT_TRUE(staged);
+    if (!staged)
+        return;
+    EXPECT_GT(staged->staged_gpu_bytes, 0u);
+    std::weak_ptr<const FarFrozenObservation> held = b[0].observation;
+    a = {};
+    b = {};
+    const auto creates = state.live;
+    EXPECT_GT(creates, 0u);
+    state.release_on_drain = &barrier;
+    renderer.PrepareWorldSwap();
+    EXPECT_EQ(state.held_build_drains, 1u);
+    EXPECT_EQ(state.live, 0u);
+    EXPECT_EQ(state.deletes, creates);
+    EXPECT_TRUE(held.expired());
+    EXPECT_TRUE(barrier.exited.try_wait());
+    EXPECT_EQ(renderer.Handoff(), nullptr);
+    state.fixture_released = true;
+    renderer.Shutdown();
+}
+
+TEST(FarWorldHandoffRenderer, ExternalCaptureAliasesKeepOneMemoryDomainAliveAfterSwap) {
+    JobSystem jobs;
+    DriverState state;
+    FarWorldHandoffRenderer renderer;
+    renderer.InstallBackend(std::make_unique<Driver>(state));
+    ASSERT_TRUE(renderer.Bind(jobs,
+                              1,
+                              FarCaveMode::BandLimited,
+                              FarVolumeNumericProfile::RawFloat,
+                              RendererHandoffBudgets(),
+                              RendererHandoffLimits()));
+    auto pool = renderer.MemoryPool(5);
+    std::weak_ptr<FarVolumeMemoryPool> weak = pool;
+    auto input = RendererHandoffInput(renderer, {5, 0, 0}, 1, false);
+    const auto before_alias = pool->used();
+    auto alias = input;
+    EXPECT_EQ(pool->used(), before_alias);
+    renderer.PrepareWorldSwap();
+    EXPECT_FALSE(weak.expired());
+    const auto retained = pool->used();
+    input = {};
+    EXPECT_EQ(pool->used(), retained);
+    alias = {};
+    EXPECT_LT(pool->used(), retained);
+    EXPECT_GT(pool->used(), 0u); // The shared memory domain's own control charge.
+    pool.reset();
+    EXPECT_TRUE(weak.expired());
+    state.fixture_released = true;
+    renderer.Shutdown();
 }

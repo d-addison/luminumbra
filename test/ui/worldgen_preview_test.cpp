@@ -27,12 +27,19 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <nlohmann/json.hpp>
 #include <numeric>
 #include <thread>
 #include <vector>
 
+#include "../support/SimulationContentFixture.h"
+#include "../support/UniqueTempPath.h"
+#include "luminumbra_common/core/FilesystemPath.h"
+#include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
+#include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
+#include "rendering/Camera.h"
 #include "rendering/RenderPipeline.h"
 #include "world/WorldgenPreview.h"
 
@@ -199,7 +206,545 @@ struct PreviewFixture {
     }
 };
 
+struct SavedBindingFixture {
+    fs::path root = Luminumbra::TestSupport::CreateUniqueTempDirectory("saved_binding_");
+    Luminumbra::JobSystem jobs;
+    std::unique_ptr<Luminumbra::world::GameSession> session;
+    Luminumbra::Rendering::RenderPipeline pipeline;
+    Luminumbra::Rendering::Camera camera{glm::vec3(8, 32, 8)};
+    bool ok = false;
+
+    explicit SavedBindingFixture(bool save_initial_edit = true) {
+        jobs.startup(2);
+        fs::create_directories(root / "worlds" / "atlas" / "presets");
+        {
+            std::ofstream preset(root / "worlds" / "atlas" / "presets" / "binding.json");
+            preset << R"({"schema_rev":6,"generation_params":{"terrain":{
+                "base_frequency":0.01,"base_amplitude":0.0,"octaves":1,
+                "persistence":0.5,"lacunarity":2.0,"height_offset":8.0,
+                "shaping":{"peaks_amplitude":0.0,"domain_warp_amplitude":0.0,
+                "continental_spline":[[-1.0,0.0],[1.0,0.0]]},"hydro":{"enabled":false}},
+                "features":{"caves_enabled":false}}})";
+        }
+        Luminumbra::TestSupport::WriteSimulationContentFixture(root);
+        session = std::make_unique<Luminumbra::world::GameSession>();
+        // Exercise saved rendering independently of regional simulation and rain divergence.
+        session->SetActiveRegionsEnabled(false);
+        session->SetWeatherRainEnabled(false);
+        session->SetJobSystem(&jobs);
+        session->SetRootPath(Luminumbra::Filesystem::GenericPathString(root) + "/");
+        session->EnableFarWorldPersistenceSafety();
+        if (!session->CreateWorld("SavedBinding", "12345", "binding"))
+            return;
+        if (save_initial_edit) {
+            auto edited = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(4, 0, 4));
+            edited->sdf_data.assign(17 * 17 * 17, -3.0f);
+            edited->material_data.assign(17 * 17 * 17, 7);
+            edited->mark_sdf_loaded_or_edited();
+            edited->mark_voxel_data_dirty();
+            edited->set_state(Luminumbra::ChunkState::Idle);
+            if (!session->GetWorldSystem()->adopt_streamed_chunk(edited) || !session->SaveWorld() ||
+                !session->SaveWorldState())
+                return;
+        }
+        const auto id = session->GetMetadata().worldId;
+        if ((save_initial_edit && !session->LoadWorld(id)) ||
+            !pipeline.startup(64, 64, SourceRoot()))
+            return;
+        pipeline.attach_farlod_job_system(&jobs);
+        pipeline.set_far_world_mode(Luminumbra::Rendering::FarWorldMode::Ladder);
+        pipeline.set_far_world_cave_policy(Luminumbra::World::FarCaveMode::BandLimited);
+        session->SetBeforeWorldReplacement([this] {
+            pipeline.prepare_world_swap();
+            session->ClearFarWorldPublication();
+        });
+        ok = true;
+    }
+    ~SavedBindingFixture() {
+        if (session)
+            session->SetBeforeWorldReplacement({});
+        pipeline.shutdown();
+        session.reset();
+        jobs.shutdown();
+        std::error_code error;
+        fs::remove_all(root, error);
+    }
+    bool Capture(std::shared_ptr<const Luminumbra::world::FarWorldPublication>& publication,
+                 std::string& diagnostic) {
+        Luminumbra::world::FarWorldPublicationRequest request;
+        if (!pipeline.prepare_saved_far_world_capture(
+                session->GetFarWorldSaveRoot(), camera, request)) {
+            diagnostic = pipeline.saved_far_world_refusal();
+            return false;
+        }
+        // Poll exactly as production does, retaining the complete computed wanted set.
+        for (std::size_t frame = 0; frame <= request.wanted.size(); ++frame) {
+            if (session->CaptureFarWorldPublication(request, publication, diagnostic))
+                return pipeline.bind_saved_far_world(publication);
+            if (!diagnostic.empty()) {
+                pipeline.refuse_saved_far_world_publication(diagnostic);
+                return false;
+            }
+        }
+        diagnostic = "publication did not finish within its bounded tile steps";
+        return false;
+    }
+};
+
 } // namespace
+
+TEST(SavedFarWorldBinding, SuccessfulLoadBindsAndFailedOpenRetainsTarget) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    SavedBindingFixture fixture;
+    ASSERT_TRUE(fixture.ok);
+    EXPECT_FALSE(fixture.pipeline.saved_far_world_renderer().Handoff());
+    std::shared_ptr<const Luminumbra::world::FarWorldPublication> publication;
+    std::string diagnostic;
+    ASSERT_TRUE(fixture.Capture(publication, diagnostic)) << diagnostic;
+    const auto* handoff = fixture.pipeline.saved_far_world_renderer().Handoff();
+    ASSERT_TRUE(handoff);
+    const auto serial = handoff->State().target_serial;
+    EXPECT_EQ(serial, publication->publication_serial);
+    EXPECT_FALSE(fixture.session->LoadWorld("unavailable_saved_world"));
+    EXPECT_EQ(fixture.pipeline.saved_far_world_renderer().Handoff(), handoff);
+    EXPECT_EQ(handoff->State().target_serial, serial);
+    EXPECT_TRUE(fixture.pipeline.bind_saved_far_world(publication));
+    const auto id = fixture.session->GetMetadata().worldId;
+    std::size_t checks = 0;
+    const Luminumbra::world::GameSession::WorldOpenCheck reject =
+        [&checks](const auto&, const auto&, std::uint32_t) {
+            ++checks;
+            return std::string("saved world identity refused");
+        };
+    EXPECT_FALSE(fixture.session->LoadWorld(id, reject));
+    EXPECT_EQ(checks, 1u);
+    EXPECT_EQ(fixture.session->GetWorldOpenError(), "saved world identity refused");
+    EXPECT_EQ(fixture.pipeline.saved_far_world_renderer().Handoff(), handoff);
+    EXPECT_EQ(handoff->State().target_serial, serial);
+    const Luminumbra::World::WorldgenFileStatusReader unavailable = [](const fs::path&,
+                                                                       std::error_code& error) {
+        error = std::make_error_code(std::errc::permission_denied);
+        return fs::file_status(fs::file_type::none);
+    };
+    EXPECT_FALSE(fixture.session->LoadWorld(id, unavailable));
+    EXPECT_EQ(fixture.pipeline.saved_far_world_renderer().Handoff(), handoff);
+    EXPECT_EQ(handoff->State().target_serial, serial);
+    EXPECT_TRUE(fixture.session->SaveWorld());
+}
+
+TEST(SavedFarWorldBinding, FirstStateSaveOfNormalResidencyCapturesReopensAndBinds) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    SavedBindingFixture fixture(false);
+    ASSERT_TRUE(fixture.ok);
+    using namespace Luminumbra;
+    using Service = Persistence::WorldSaveService;
+    auto* world_system = fixture.session->GetWorldSystem();
+    ASSERT_TRUE(world_system);
+    const auto root = fixture.session->GetWorldSaveDir();
+    ASSERT_FALSE(Service::has_chunk_snapshot(root));
+    const auto initial = world_system->GetInitialChunkLoadList(fixture.camera.Position);
+    ASSERT_GE(initial.size(), 1875u);
+    for (const auto& coords : initial) {
+        auto chunk = std::make_shared<Chunk>(coords);
+        world_system->GenerateChunkData(*chunk, 4);
+        chunk->set_state(ChunkState::Idle);
+        ASSERT_TRUE(world_system->adopt_streamed_chunk(chunk));
+    }
+    for (const IVec3 coords : {IVec3(4, 0, 4), IVec3(5, 0, 4)}) {
+        const auto chunk = world_system->find_streamed_chunk(coords);
+        ASSERT_TRUE(chunk);
+        world_system->GenerateChunkData(*chunk);
+        chunk->sdf_data[8 + 17 * (8 + 17 * 8)] -= 1.0f;
+        chunk->mark_voxel_data_dirty();
+    }
+    const auto residents = world_system->snapshot_streamed_chunks();
+    EXPECT_GT(std::count_if(residents.begin(),
+                            residents.end(),
+                            [](const auto& chunk) { return chunk && !chunk->needs_authority(); }),
+              1800);
+    // This is the first state save, not a metadata-only save or a dirty-region rewrite.
+    world::WorldStateSaveReport report;
+    ASSERT_TRUE(fixture.session->SaveWorldState(&report));
+    EXPECT_GE(report.chunks_total, 1875u);
+    EXPECT_GE(report.chunks_saved, 1875u);
+    EXPECT_TRUE(report.saved);
+    EXPECT_EQ(report.chunks_dirty, 2u);
+    ASSERT_TRUE(Service::has_chunk_snapshot(root));
+    std::size_t disk_records = 0;
+    for (const auto& entry : fs::directory_iterator(Service::region_directory(root))) {
+        if (entry.path().extension() != ".lmr")
+            continue;
+        std::vector<Service::ContainerRecord> records;
+        ASSERT_TRUE(Service::read_container_records(entry.path(), records));
+        disk_records += std::count_if(records.begin(), records.end(), [](const auto& record) {
+            return record.lod_level == 0;
+        });
+    }
+    EXPECT_GE(disk_records, 1875u);
+    std::shared_ptr<const world::FarWorldPublication> publication;
+    std::string diagnostic;
+    ASSERT_TRUE(fixture.Capture(publication, diagnostic)) << diagnostic;
+    ASSERT_TRUE(publication);
+    const auto generation = publication->committed_generation;
+    const auto id = fixture.session->GetMetadata().worldId;
+    ASSERT_TRUE(fixture.session->LoadWorld(id));
+    EXPECT_FALSE(fixture.pipeline.saved_far_world_renderer().Handoff());
+    ASSERT_TRUE(fixture.Capture(publication, diagnostic)) << diagnostic;
+    ASSERT_TRUE(publication);
+    EXPECT_EQ(publication->committed_generation, generation);
+    ASSERT_TRUE(fixture.pipeline.saved_far_world_renderer().Handoff());
+    EXPECT_EQ(fixture.pipeline.saved_far_world_renderer().Handoff()->State().target_serial,
+              publication->publication_serial);
+    const auto edited = fixture.session->GetWorldSystem()->find_authoritative_chunk({4, 0, 4});
+    ASSERT_TRUE(edited);
+    EXPECT_EQ(edited->sdf_provenance(), ChunkSdfProvenance::LoadedOrEdited);
+}
+
+TEST(SavedFarWorldBinding, ProductionWantedSetAndReplacementAdmitWithinUnchangedTierBudgets) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    SavedBindingFixture fixture;
+    ASSERT_TRUE(fixture.ok);
+    using namespace Luminumbra;
+    auto* const world_system = fixture.session->GetWorldSystem();
+    ASSERT_TRUE(world_system);
+    // Park real unsaved edits before populating the normal initial-load footprint.
+    // Generate their shared boundaries rather than manufacturing conflicting lattices.
+    world_system->debug_set_streaming_radius_cap(1);
+    std::vector<std::shared_ptr<Chunk>> parked_edits;
+    for (const IVec3 coords : {IVec3(40, 0, 4), IVec3(41, 0, 4)}) {
+        auto chunk = std::make_shared<Chunk>(coords);
+        world_system->GenerateChunkData(*chunk);
+        chunk->sdf_data[8 + 17 * (8 + 17 * 8)] -= 1.0f;
+        chunk->mark_sdf_loaded_or_edited();
+        chunk->mark_voxel_data_dirty();
+        chunk->set_state(ChunkState::Idle);
+        ASSERT_TRUE(world_system->adopt_streamed_chunk(chunk));
+        parked_edits.push_back(std::move(chunk));
+    }
+    for (int step = 0; step < 12; ++step) {
+        world_system->update(fixture.session->GetRegistry(),
+                             fixture.camera.Position,
+                             fixture.session->GetPhysicsSystem());
+        world_system->wait_for_streaming_jobs();
+    }
+    for (const auto& chunk : parked_edits) {
+        EXPECT_FALSE(world_system->find_streamed_chunk(chunk->get_coords()));
+        ASSERT_EQ(world_system->find_authoritative_chunk(chunk->get_coords()), chunk);
+        EXPECT_TRUE(chunk->is_voxel_data_dirty());
+    }
+    ASSERT_GE(world_system->parking_status().parked_count, parked_edits.size());
+    const auto initial = world_system->GetInitialChunkLoadList(fixture.camera.Position);
+    ASSERT_GE(initial.size(), 1875u);
+    for (const auto& coords : initial) {
+        if (world_system->find_streamed_chunk(coords))
+            continue;
+        if (world_system->restore_authoritative_chunk(coords)) {
+            ASSERT_TRUE(world_system->find_streamed_chunk(coords));
+            ASSERT_FALSE(world_system->durable_read_failed());
+            continue;
+        }
+        auto chunk = std::make_shared<Chunk>(coords);
+        world_system->GenerateChunkData(*chunk,
+                                        4); // The normal coarse, regenerable residency path.
+        chunk->set_state(ChunkState::Idle);
+        ASSERT_TRUE(world_system->adopt_streamed_chunk(chunk));
+    }
+    const auto live_edit = world_system->find_streamed_chunk({2, 0, 2});
+    ASSERT_TRUE(live_edit);
+    world_system->GenerateChunkData(*live_edit);
+    live_edit->sdf_data[8 + 17 * (8 + 17 * 8)] -= 1.0f;
+    live_edit->mark_sdf_loaded_or_edited();
+    live_edit->mark_voxel_data_dirty();
+    const auto residents = world_system->snapshot_streamed_chunks();
+    ASSERT_GE(residents.size(), 1875u);
+    EXPECT_GT(std::count_if(residents.begin(),
+                            residents.end(),
+                            [](const auto& chunk) { return chunk && !chunk->needs_authority(); }),
+              1800);
+    std::vector<World::FarTileKey> wanted;
+    ASSERT_EQ(
+        World::ComputeFarWantedSet(fixture.camera.Position.x, fixture.camera.Position.z, wanted),
+        World::FarWantedError::None);
+    ASSERT_GE(
+        std::count_if(wanted.begin(), wanted.end(), [](const auto& key) { return key.tier == 1; }),
+        16);
+    world::FarWorldPublicationRequest request;
+    ASSERT_TRUE(fixture.pipeline.prepare_saved_far_world_capture(
+        fixture.session->GetFarWorldSaveRoot(), fixture.camera, request));
+    ASSERT_EQ(std::vector<World::FarTileKey>(request.wanted.begin(), request.wanted.end()), wanted);
+    const auto captures = fixture.session->FarWorldCaptureCount();
+    std::shared_ptr<const world::FarWorldPublication> publication;
+    std::string diagnostic;
+    for (std::size_t frame = 0; frame <= wanted.size(); ++frame) {
+        const auto observations = fixture.session->FarWorldObservationCaptureCount();
+        const bool complete =
+            fixture.session->CaptureFarWorldPublication(request, publication, diagnostic);
+        ASSERT_TRUE(diagnostic.empty()) << diagnostic;
+        EXPECT_LE(fixture.session->FarWorldObservationCaptureCount() - observations, 1u);
+        EXPECT_EQ(complete, frame == wanted.size());
+    }
+    ASSERT_TRUE(publication);
+    ASSERT_EQ(publication->tiles.size(), wanted.size());
+    for (std::size_t i = 0; i < wanted.size(); ++i)
+        EXPECT_EQ(publication->tiles[i].key, wanted[i]);
+    EXPECT_EQ(fixture.session->FarWorldCaptureCount(), captures + 1);
+    ASSERT_TRUE(fixture.pipeline.bind_saved_far_world(publication));
+    const auto old = publication; // Keep old/new overlap charged, like serving workers.
+    // Direct edited revisions must still change the token above 1,024 total residents.
+    const auto token = world_system->far_world_publication_token();
+    live_edit->sdf_data[8 + 17 * (8 + 17 * 8)] -= 1.0f;
+    live_edit->mark_voxel_data_dirty();
+    EXPECT_NE(world_system->far_world_publication_token(), token);
+    ASSERT_TRUE(fixture.session->SaveWorld());
+    ASSERT_TRUE(fixture.Capture(publication, diagnostic)) << diagnostic;
+    EXPECT_GT(publication->committed_generation, old->committed_generation);
+    const auto limits = Rendering::FarWorldDevelopmentLimits();
+    for (const auto& pool : request.memory) {
+        ASSERT_TRUE(pool);
+        EXPECT_EQ(pool->limit(), 256ull * 1024 * 1024);
+        EXPECT_LE(pool->peak(), pool->limit());
+        EXPECT_LE(pool->used() + limits.build_headroom_bytes, pool->limit());
+        EXPECT_EQ(pool->refusals(), 0u);
+    }
+    EXPECT_EQ(fixture.pipeline.saved_far_world_renderer().Handoff()->State().target_serial,
+              publication->publication_serial);
+}
+
+TEST(SavedFarWorldBinding, LoadingCompletionRetriesOnceAndBindsWithoutPublicationInputChanges) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    SavedBindingFixture fixture;
+    ASSERT_TRUE(fixture.ok);
+    using namespace Luminumbra;
+    auto* const world_system = fixture.session->GetWorldSystem();
+    ASSERT_TRUE(world_system);
+    auto loading = std::make_shared<Chunk>(IVec3(1, 0, 1));
+    world_system->GenerateChunkData(*loading, 4);
+    loading->set_state(ChunkState::Idle);
+    ASSERT_TRUE(world_system->adopt_streamed_chunk(loading));
+    loading->set_state(ChunkState::Loading);
+    ASSERT_FALSE(loading->needs_authority());
+    const auto before_token = world_system->far_world_publication_token();
+    world::FarWorldPublicationRequest request;
+    ASSERT_TRUE(fixture.pipeline.prepare_saved_far_world_capture(
+        fixture.session->GetFarWorldSaveRoot(), fixture.camera, request));
+    const auto captures = fixture.session->FarWorldCaptureCount();
+    std::shared_ptr<const world::FarWorldPublication> publication;
+    std::string diagnostic;
+    EXPECT_FALSE(fixture.session->CaptureFarWorldPublication(request, publication, diagnostic));
+    EXPECT_NE(diagnostic.find("generation publication is pending"), std::string::npos);
+    EXPECT_FALSE(publication);
+    EXPECT_EQ(fixture.session->FarWorldCaptureCount(), captures + 1);
+    for (int frame = 0; frame < 120; ++frame) {
+        EXPECT_FALSE(fixture.session->CaptureFarWorldPublication(request, publication, diagnostic));
+        EXPECT_TRUE(diagnostic.empty());
+    }
+    EXPECT_EQ(fixture.session->FarWorldCaptureCount(), captures + 1);
+    // The owner publishes generation completion, without moving the camera, changing wanted
+    // keys, touching edited revisions, or invalidating the session publication explicitly.
+    loading->set_state(ChunkState::Idle);
+    const auto after_token = world_system->far_world_publication_token();
+    EXPECT_EQ(before_token[0], after_token[0]);
+    EXPECT_GT(after_token[1], before_token[1]);
+    EXPECT_EQ(before_token[2], after_token[2]);
+    EXPECT_EQ(before_token[3], after_token[3]);
+    EXPECT_GT(before_token[4], 0u);
+    EXPECT_EQ(after_token[4], 0u);
+    for (std::size_t frame = 0; frame <= request.wanted.size(); ++frame) {
+        const auto observations = fixture.session->FarWorldObservationCaptureCount();
+        const bool complete =
+            fixture.session->CaptureFarWorldPublication(request, publication, diagnostic);
+        ASSERT_TRUE(diagnostic.empty()) << diagnostic;
+        EXPECT_LE(fixture.session->FarWorldObservationCaptureCount() - observations, 1u);
+        EXPECT_EQ(complete, frame == request.wanted.size());
+    }
+    EXPECT_EQ(fixture.session->FarWorldCaptureCount(), captures + 2);
+    ASSERT_TRUE(publication);
+    ASSERT_TRUE(fixture.pipeline.bind_saved_far_world(publication));
+    ASSERT_TRUE(fixture.pipeline.saved_far_world_renderer().Handoff());
+    EXPECT_EQ(fixture.pipeline.saved_far_world_renderer().Handoff()->State().target_serial,
+              publication->publication_serial);
+    const auto attempts = request.source_memory->attempts();
+    for (int frame = 0; frame < 120; ++frame) {
+        EXPECT_FALSE(fixture.session->CaptureFarWorldPublication(request, publication, diagnostic));
+        EXPECT_TRUE(diagnostic.empty());
+    }
+    EXPECT_EQ(fixture.session->FarWorldCaptureCount(), captures + 2);
+    EXPECT_EQ(request.source_memory->attempts(), attempts);
+}
+
+TEST(SavedFarWorldBinding, CaveSaveAsAndWorldReplacementDrainOldTargets) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    SavedBindingFixture fixture;
+    ASSERT_TRUE(fixture.ok);
+    std::shared_ptr<const Luminumbra::world::FarWorldPublication> publication;
+    std::string diagnostic;
+    ASSERT_TRUE(fixture.Capture(publication, diagnostic)) << diagnostic;
+    const auto original = publication;
+    ASSERT_TRUE(fixture.pipeline.saved_far_world_renderer().Handoff());
+    // Admit work before each invalidation, exercising the renderer's drain seam.
+    // The worker owns only frozen observations even while the session is replaced.
+    auto advance = [&fixture] {
+        fixture.pipeline.render_frame(fixture.session->GetRegistry(),
+                                      *fixture.session->GetWorldSystem(),
+                                      fixture.camera,
+                                      0,
+                                      false);
+        EXPECT_EQ(fixture.pipeline.far_world_selection().effective,
+                  Luminumbra::Rendering::FarWorldMode::Ladder);
+    };
+    advance();
+    fixture.pipeline.set_far_world_cave_policy(Luminumbra::World::FarCaveMode::BoxFiltered);
+    fixture.session->ClearFarWorldPublication();
+    EXPECT_FALSE(fixture.pipeline.saved_far_world_renderer().Handoff());
+    EXPECT_EQ(fixture.pipeline.prev_view_proj(), glm::mat4(1));
+    EXPECT_FALSE(fixture.pipeline.bind_saved_far_world(original));
+    ASSERT_TRUE(fixture.Capture(publication, diagnostic)) << diagnostic;
+    EXPECT_GT(publication->world_epoch, original->world_epoch);
+    advance();
+    const auto before_save_as = publication;
+    const auto copy = fixture.root / "copy";
+    // Persistence safety must cover save-as even when rendering has no save policy installed.
+    fixture.session->SetFarEditedCachePolicy({});
+    ASSERT_FALSE(fixture.session->FarEditedCacheEnabled());
+    const auto source = fixture.session->GetWorldSaveDir();
+    Luminumbra::Persistence::SnapshotIndex committed;
+    ASSERT_TRUE(Luminumbra::Persistence::read_snapshot_index(source, committed, nullptr));
+    EXPECT_FALSE(fixture.session->RunInSnapshotTransaction([&] {
+        EXPECT_NE(Luminumbra::Persistence::SaveTransaction::active_for(source), nullptr);
+        EXPECT_TRUE(fixture.session->SaveWorld());
+        return false;
+    }));
+    Luminumbra::Persistence::SnapshotIndex rolled_back;
+    ASSERT_TRUE(Luminumbra::Persistence::read_snapshot_index(source, rolled_back, nullptr));
+    EXPECT_EQ(rolled_back.generation, committed.generation);
+    ASSERT_TRUE(fixture.pipeline.saved_far_world_renderer().Handoff());
+    EXPECT_EQ(fixture.pipeline.saved_far_world_renderer().Handoff()->State().target_serial,
+              before_save_as->publication_serial);
+    ASSERT_TRUE(fixture.session->SaveWorldStateTo(copy));
+    EXPECT_TRUE(fs::is_regular_file(copy / "world_info.json"));
+    EXPECT_FALSE(fixture.pipeline.saved_far_world_renderer().Handoff());
+    EXPECT_EQ(fixture.pipeline.prev_view_proj(), glm::mat4(1));
+    EXPECT_FALSE(fixture.pipeline.bind_saved_far_world(before_save_as));
+    ASSERT_TRUE(fixture.Capture(publication, diagnostic)) << diagnostic;
+    EXPECT_EQ(publication->save_root, copy);
+    advance();
+    const auto before_swap = publication;
+    const auto id = fixture.session->GetMetadata().worldId;
+    ASSERT_TRUE(fixture.session->LoadWorld(id));
+    EXPECT_FALSE(fixture.pipeline.saved_far_world_renderer().Handoff());
+    EXPECT_EQ(fixture.pipeline.prev_view_proj(), glm::mat4(1));
+    EXPECT_FALSE(fixture.pipeline.bind_saved_far_world(before_swap));
+    ASSERT_TRUE(fixture.Capture(publication, diagnostic)) << diagnostic;
+    fixture.pipeline.prepare_world_swap();
+    fixture.session->ClearFarWorldPublication();
+    EXPECT_FALSE(fixture.pipeline.saved_far_world_renderer().Handoff());
+    EXPECT_FALSE(fixture.pipeline.bind_saved_far_world(publication));
+}
+
+TEST(SavedFarWorldBinding, UnavailableSavedEditRetainsTargetWithoutFixtureSubstitution) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    SavedBindingFixture fixture;
+    ASSERT_TRUE(fixture.ok);
+    std::shared_ptr<const Luminumbra::world::FarWorldPublication> publication;
+    std::string diagnostic;
+    ASSERT_TRUE(fixture.Capture(publication, diagnostic)) << diagnostic;
+    const auto* handoff = fixture.pipeline.saved_far_world_renderer().Handoff();
+    ASSERT_TRUE(handoff);
+    const auto serial = handoff->State().target_serial;
+    const auto edited = fixture.session->GetWorldSystem()->find_authoritative_chunk({4, 0, 4});
+    ASSERT_TRUE(edited);
+    ASSERT_FALSE(edited->sdf_data.empty());
+    edited->sdf_data.pop_back();
+    edited->mark_voxel_data_dirty();
+    EXPECT_FALSE(fixture.Capture(publication, diagnostic));
+    EXPECT_FALSE(fixture.pipeline.saved_far_world_refusal().empty());
+    EXPECT_EQ(fixture.pipeline.saved_far_world_renderer().Handoff(), handoff);
+    EXPECT_EQ(handoff->State().target_serial, serial);
+    EXPECT_EQ(fixture.pipeline.far_world_renderer()
+                  .Selection(Luminumbra::Rendering::FarWorldPurpose::World)
+                  .refusal,
+              Luminumbra::Rendering::FarWorldRefusal::ImmutableAuthorityUnavailable);
+}
+
+TEST(SavedFarWorldBinding, NoBindingPreservesFixtureDiagnosticsAndPreviewSelection) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    SavedBindingFixture fixture;
+    ASSERT_TRUE(fixture.ok);
+    using namespace Luminumbra::Rendering;
+    const auto original = FarWorldDiagnosticJson(fixture.pipeline.far_world_diagnostic());
+    const auto selection = fixture.pipeline.far_world_renderer().Selection(FarWorldPurpose::World);
+    EXPECT_EQ(selection.refusal, FarWorldRefusal::ImmutableAuthorityUnavailable);
+    EXPECT_FALSE(fixture.pipeline.bind_saved_far_world({}));
+    EXPECT_FALSE(fixture.pipeline.saved_far_world_refusal().empty());
+    EXPECT_FALSE(fixture.pipeline.saved_far_world_renderer().Handoff());
+    fixture.pipeline.set_far_lod_preview_anchor(glm::vec3(0), 176);
+    Luminumbra::world::FarWorldPublicationRequest request;
+    EXPECT_FALSE(fixture.pipeline.prepare_saved_far_world_capture(
+        fixture.session->GetFarWorldSaveRoot(), fixture.camera, request));
+    EXPECT_EQ(fixture.pipeline.far_world_renderer().Selection(FarWorldPurpose::Preview).refusal,
+              FarWorldRefusal::PreviewOverride);
+    fixture.pipeline.clear_far_lod_preview_anchor();
+    EXPECT_EQ(FarWorldDiagnosticJson(fixture.pipeline.far_world_diagnostic()), original);
+}
+
+TEST(SavedFarWorldBinding, RenderOnAndOffLeaveSimulationAndSchedulerEqual) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    SavedBindingFixture fixture;
+    ASSERT_TRUE(fixture.ok);
+    const auto hash = fixture.session->ComputeChunkStateHash();
+    const auto water = fixture.session->GetWorldSystem()->debug_water_state_hash();
+    const auto schedule = fixture.session->GetRegionSchedule();
+    const auto tick = fixture.session->GetSimulationTickCount();
+    std::shared_ptr<const Luminumbra::world::FarWorldPublication> publication;
+    std::string diagnostic;
+    ASSERT_TRUE(fixture.Capture(publication, diagnostic)) << diagnostic;
+    for (const auto mode : {Luminumbra::Rendering::FarWorldMode::Ladder,
+                            Luminumbra::Rendering::FarWorldMode::Legacy}) {
+        fixture.pipeline.set_far_world_mode(mode);
+        fixture.pipeline.render_frame(fixture.session->GetRegistry(),
+                                      *fixture.session->GetWorldSystem(),
+                                      fixture.camera,
+                                      0,
+                                      false);
+        EXPECT_EQ(fixture.session->ComputeChunkStateHash(), hash);
+        EXPECT_EQ(fixture.session->GetWorldSystem()->debug_water_state_hash().hash, water.hash);
+        EXPECT_EQ(fixture.session->GetRegionSchedule(), schedule);
+        EXPECT_EQ(fixture.session->GetSimulationTickCount(), tick);
+        EXPECT_FALSE(fixture.session->ActiveRegionsEnabled());
+    }
+}
+
+TEST(SavedFarWorldBinding, UnuploadedAndStaleTerrainDoNotClaimSeparatelyReadyWater) {
+    using namespace Luminumbra::Rendering;
+    FarWorldLiveUpload upload;
+    upload.snapshot_version = 2;
+    upload.uploaded_version = 1;
+    upload.uploaded_indices = 3;
+    upload.valid_allocation = true;
+    upload.water_snapshot_version = 4;
+    upload.water_uploaded_version = 4;
+    upload.water_uploaded_indices = 3;
+    upload.water_valid_allocation = true;
+    upload.water_pass_eligible = true;
+    EXPECT_FALSE(IsFarWorldLiveUploadCurrent(upload));
+    EXPECT_TRUE(IsFarWorldLiveWaterUploadCurrent(upload));
+    upload.uploaded_version = 2;
+    upload.valid_allocation = false;
+    EXPECT_FALSE(IsFarWorldLiveUploadCurrent(upload));
+    upload.water_uploaded_version = 3;
+    EXPECT_FALSE(IsFarWorldLiveWaterUploadCurrent(upload));
+    upload.valid_allocation = true;
+    EXPECT_TRUE(IsFarWorldLiveUploadCurrent(upload));
+    EXPECT_FALSE(IsFarWorldLiveWaterUploadCurrent(upload));
+}
 
 TEST(WorldgenPreviewTest, RendersCandidateDioramaToTargetWithoutCrashing) {
     HiddenGlContext ctx;

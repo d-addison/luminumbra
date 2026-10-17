@@ -257,3 +257,108 @@ catalog/control storage, encoded/decoded overlap, and retained cache storage.
 Aliases keep reservations until payload destruction, including previous outputs
 during replacement. Limits are caller admissions rather than shipping defaults.
 No GPU queue, renderer handoff, simulation activation or new hash input is added.
+
+## Saved-world renderer binding
+
+The client enables persistence safety for both renderer selections, independently
+of `sim.active_regions`. Dirty terrain and authoritative water use the existing
+resident/parked/durable lookup and rehydration paths. A parking limit retains dirty
+residents and requests a save; a failed save retains its obligations. Rendering
+does not enable regions or advance simulation. Without derived publication enabled,
+legacy save writers and their on-disk formats remain in use.
+
+`GameSession::CaptureFarWorldPublication` runs on the session owner at a tick
+publication boundary, quiesces streaming without publishing simulation work, and
+holds the worldgen sampling scope. It acquires committed authority through
+`AcquireFarCommittedCache`, then captures copied live and parked sources. Terrain
+uses live, parked, committed, then pristine precedence. Unavailable authority
+refuses the replacement. Water comes from copied authoritative integer bed/depth
+state or validated legacy float projections, including explicit dry cells, or
+pristine hydrology where authority is absent. It is never added to the
+terrain-only FSV1 format.
+
+Each publication carries the save identity, committed generation, cave policy,
+process-local serial and immutable terrain/water observations. Its keyed span
+history survives keys leaving the wanted set. Closed footprints and six axial
+normal contributors extend only affected keys; no diagonal or global edit-span
+expansion is used. Inventory selection covers legal vertical columns so an edit
+outside the render extension budget causes refusal instead of pristine fallback.
+Source interpolation keeps double Z/Y/X accumulation and lower-node material ties.
+Capture owns complete rectangular normal halos before any worker can sample them.
+
+Production polls allocation-free monotonic authority counters,
+committed-publication notifications, world/cave identity, camera-height band and
+canonical wanted keys. Unchanged polls do no authority capture, quiescing or
+sampling and retain the same publication. Admission counts only authority relevant
+to the wanted closed supports and six axial contributors, before ordering or
+copying; pristine residency does not consume the 1,024-record authority allowance.
+Committed admission uses existing container header flags and packed identities:
+only selected edited lod-0 records consume that allowance. Pristine payloads are
+not decoded; container structure and the complete member fingerprint are still
+checked. Every edited payload, including unselected authority, retains validation
+and the existing decode/sample/byte limits. Manifest storage has its own scratch
+admission, independent of the authority-record count. Both header selection and
+decoded selection consume the existing selection-probe budget.
+
+Chunk mutation hooks release-publish revision changes; owner polls acquire-load
+the shared counters without visiting chunks or taking their state locks. Loading
+transitions hold the chunk state mutex while updating the pending count and a
+monotonic transition counter. Owner-only attach/detach happens before dispatch or
+after quiescence; parking, unpark, release and replacement update membership.
+The observer owns only counters, so retained chunks cannot call a destroyed world.
+Test telemetry counts actual chunk metadata visits/state locks on the polling
+thread, including unchanged session polls.
+Selection probes and ordering storage retain finite admissions. Loading chunks
+and unpublished generation batches refuse explicitly, including pristine chunks;
+their pending count participates in the token so completion retries once without
+requiring camera movement or edited revisions. A busy owner/tick, save, or worldgen
+boundary remains retryable at the next poll. Each poll attempts acquisition at
+most once. Over-budget or invalid/unavailable edited authority remains refused
+until a tracked input changes, with diagnostics and previous output retained.
+Source acquisition has the existing finite read, validation, bake
+and byte admissions and occupies its own staging step. Later polls capture at
+most one volume, in descending tier/key order. Copied preview sources remain fixed
+through staging; later edits queue another publication rather than mixing sources
+or starving the current one. Worldgen, world identity and policy changes cancel
+staging. Previously published observations are reused when their inputs and spans
+are unchanged.
+
+Renderer observations retain explicit water, heights and complete terrain halos,
+using the mesh facade's existing LegacySigned16 density conversion and exact
+materials. Lossless run compression reduces uniform interior storage; dense
+storage remains available when smaller. Temporary compression overlap is admitted
+before allocation. Fingerprints include raw samples, so numeric conversion cannot
+hide an observation change. Renderer-only observations refuse pristine sampling
+and durable baking; durable cache captures retain their dual-image behavior.
+
+`RenderPipeline::bind_saved_far_world` stages these observations in the separate
+handoff renderer. Its existing serving/target rules, fallback promotion and combined
+terrain/water coverage remain authoritative. The host has finite admissions for
+320 wanted tiles, 2,048 retained span keys, copied sources, capture work and bytes;
+copied source and persistence scratch storage share a 2 GiB pool, separate from
+the unchanged 256 MiB renderer tier pools. These are bounded host
+admissions, not performance qualification. Existing fixture limits and queue,
+build and per-frame work limits are unchanged. Both previous and replacement
+publications retain memory reservations through their payload lifetimes.
+
+Live ownership requires current published source revisions, current mesh versions
+and valid uploaded allocations. Terrain and water are checked separately, before
+visibility culling. Stale, pending or unuploaded meshes cannot hide far coverage.
+Production refusal is reported separately from fixture diagnostics. No fixture
+authority is installed for a saved world. Preview and debug fixture selection and
+the fixture renderer's failed-rebuild behavior remain unchanged.
+
+World open validates a complete candidate before invoking the host replacement
+callback, so failed open preserves the current world and binding. Successful world
+replacement and save-as identity changes drain the old renderer before releasing
+session publication state. Cave-policy changes and close use the same pipeline
+invalidation seams, resetting temporal history. Workers retain only immutable
+observations and never call the session or access save paths. Saves continue to
+use the existing single keyed finalizer and committed publication receipts;
+preview observations cannot become durable bake input. Valid saves without new
+catalog or index records remain eligible for generation-zero legacy adoption.
+
+CPU session regressions are registered through the existing durable-residency
+test file. Binding/render regressions use the existing hidden-GL preview test
+target, its shared GL resource lock and CI failure-on-skip policy. Native runtime
+and performance qualification remain separate from the binding contract.

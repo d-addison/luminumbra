@@ -22,6 +22,7 @@
 #include "luminumbra_common/core/Environment.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/Chunk.h"
+#include "luminumbra_common/world/GameSession.h"
 #include "passes/AerialPass.h"
 #include "passes/DebugViewPass.h" // render-only G-buffer debug visualizer (default-OFF)
 #include "passes/FinalBlitPass.h" // -T01: FinalBlit on the RenderContext seam
@@ -72,22 +73,6 @@
 // fresh CMake configure would fail; folding the impl here keeps the build
 // incremental). The.ipp opens its own Luminumbra::Rendering namespace.
 #include "SkyAtmosphereLut.ipp"
-
-namespace {
-inline bool AABBOutsidePlane(const glm::vec3& minp, const glm::vec3& maxp, const glm::vec4& plane) {
-    glm::vec3 p = glm::vec3(plane.x >= 0 ? maxp.x : minp.x,
-                            plane.y >= 0 ? maxp.y : minp.y,
-                            plane.z >= 0 ? maxp.z : minp.z);
-    return (glm::dot(glm::vec3(plane), p) + plane.w) < 0.0f;
-}
-inline bool
-AABBFrustumCulled(const glm::vec3& minp, const glm::vec3& maxp, const glm::vec4 planes[6]) {
-    for (int i = 0; i < 6; ++i)
-        if (AABBOutsidePlane(minp, maxp, planes[i]))
-            return true;
-    return false;
-}
-} // namespace
 
 namespace Luminumbra::Rendering {
 
@@ -238,6 +223,7 @@ constexpr const char* kGpuTimerPassNames[] = {
 RenderPipeline::RenderPipeline()
     : m_farlod(std::make_unique<FarLodSystem>())
     , m_far_world(std::make_unique<FarWorldRenderer>())
+    , m_saved_far_world(std::make_unique<FarWorldHandoffRenderer>())
     , m_gbuffer_pass(std::make_unique<GBufferPass>())
     , m_shadow_pass(std::make_unique<ShadowPass>())
     , m_ssao_pass(std::make_unique<SsaoPass>())
@@ -327,6 +313,7 @@ bool RenderPipeline::startup(u32 screen_width,
         // startup runs after successful GL loading, with the client context
         // current. Never capture a GL context in the independent constructor.
         m_far_world->InstallBackend(std::make_unique<FarVolumeGlDriver>());
+        m_saved_far_world->InstallBackend(std::make_unique<FarVolumeGlDriver>());
         set_default_shadow_cascade_splits(m_shadow_pass->shadow_map());
 
         init_shaders();
@@ -1249,6 +1236,7 @@ bool RenderPipeline::capture_ssao_parity(const std::filesystem::path& out_dir,
 }
 
 void RenderPipeline::attach_farlod_job_system(JobSystem* job_system) {
+    m_saved_far_jobs = job_system;
     if (m_farlod) {
         m_farlod->attach_job_system(job_system);
     }
@@ -1264,11 +1252,17 @@ void RenderPipeline::set_far_world_mode(FarWorldMode requested) {
 FarWorldCavePolicy
 RenderPipeline::set_far_world_cave_policy(std::optional<World::FarCaveMode> requested) {
     // The renderer validates owner-thread/re-entry state, as for set_far_world_mode.
+    const auto previous = m_far_world->CavePolicy(FarWorldPurpose::World).requested;
+    if (previous != requested) {
+        clear_saved_far_world_binding();
+        ++m_far_world_epoch;
+    }
     m_far_world->SetRequestedCavePolicy(requested);
     return m_far_world->CavePolicy(FarWorldPurpose::World);
 }
 
 void RenderPipeline::prepare_world_swap() {
+    clear_saved_far_world_binding();
     m_far_world->PrepareWorldSwap();
     ++m_far_world_epoch;
     m_frame_prepared.valid = false;
@@ -1279,6 +1273,179 @@ void RenderPipeline::prepare_world_swap() {
         m_farlod->prepare_world_swap();
     }
     // The drain retains resident meshes; keep their inventory until rebind or shutdown.
+}
+
+void RenderPipeline::clear_saved_far_world_binding() {
+    m_saved_far_world->PrepareWorldSwap();
+    m_saved_far_publication.reset();
+    std::vector<World::FarTileKey>().swap(m_saved_far_wanted);
+    m_saved_far_wanted_charge = {};
+    m_saved_far_pool.reset();
+    m_saved_far_root.clear();
+    m_saved_far_attempted = false;
+    m_saved_far_refusal.clear();
+    m_frame_prepared.valid = false;
+    m_taau_pass->invalidate_history();
+    m_prev_view_proj = glm::mat4(1.0f);
+    m_frustumCache.valid = false;
+}
+
+void RenderPipeline::refuse_saved_far_world_publication(std::string reason) {
+    if (m_saved_far_refusal != reason)
+        LUMINUMBRA_CORE_WARN("Saved far-world publication refused: {}", reason);
+    m_saved_far_refusal = std::move(reason);
+}
+
+bool RenderPipeline::prepare_saved_far_world_capture(const std::filesystem::path& root,
+                                                     const Camera& camera,
+                                                     world::FarWorldPublicationRequest& out) {
+    if (m_far_world_preview || m_offscreen_target_active ||
+        m_far_world->Selection(FarWorldPurpose::World).requested != FarWorldMode::Ladder)
+        return false;
+    if (m_saved_far_attempted && m_saved_far_root != root) {
+        clear_saved_far_world_binding();
+        ++m_far_world_epoch;
+    }
+    m_saved_far_attempted = true;
+    m_saved_far_root = root;
+    const auto caves = m_far_world->CavePolicy(FarWorldPurpose::World).requested;
+    if (root.empty() || !caves || !m_saved_far_jobs) {
+        refuse_saved_far_world_publication("save identity, cave policy or jobs unavailable");
+        return false;
+    }
+    const auto limits = FarWorldDevelopmentLimits();
+    if (!m_saved_far_world->Handoff()) {
+        if (!m_saved_far_world->Bind(*m_saved_far_jobs,
+                                     m_far_world_epoch,
+                                     *caves,
+                                     World::FarVolumeNumericProfile::LegacySigned16,
+                                     limits.budgets,
+                                     limits.residency)) {
+            refuse_saved_far_world_publication("backend or bounded renderer admission unavailable");
+            return false;
+        }
+        // Persistence capture has its own bounded pool; frozen observations use
+        // the unchanged renderer tier pools, including old/new GPU overlap.
+        try {
+            m_saved_far_pool =
+                std::make_shared<World::FarVolumeMemoryPool>(2ull * 1024 * 1024 * 1024);
+        } catch (const std::bad_alloc&) {
+            refuse_saved_far_world_publication("capture memory domain allocation refused");
+            m_saved_far_world->PrepareWorldSwap();
+            return false;
+        }
+        World::FarVolumeMemoryLease lease(*m_saved_far_pool);
+        if (!lease.TryCharge(1024 + 640 * sizeof(World::FarTileKey))) {
+            refuse_saved_far_world_publication("wanted-key memory admission refused");
+            m_saved_far_world->PrepareWorldSwap();
+            m_saved_far_pool.reset();
+            return false;
+        }
+        m_saved_far_wanted_charge = std::move(lease);
+    }
+    try {
+        m_saved_far_wanted.reserve(640);
+        if (World::ComputeFarWantedSet(camera.Position.x, camera.Position.z, m_saved_far_wanted) !=
+                World::FarWantedError::None ||
+            m_saved_far_wanted.size() > 320) {
+            refuse_saved_far_world_publication("wanted-key admission refused");
+            return false;
+        }
+    } catch (const std::bad_alloc&) {
+        refuse_saved_far_world_publication("wanted-key allocation refused");
+        return false;
+    }
+    world::FarWorldPublicationRequest request;
+    request.world_epoch = m_far_world_epoch;
+    request.caves = *caves;
+    request.wanted = m_saved_far_wanted;
+    // A camera-height band prevents sub-brick motion from restarting staged capture.
+    request.camera_y = std::floor(camera.Position.y / 32.0f) * 32.0f + 16.0f;
+    request.incremental = true;
+    request.limits = world::GameSession::FarWorldPublicationLimits();
+    request.spans = limits.spans;
+    request.source_memory = m_saved_far_pool;
+    for (std::size_t i = 0; i < request.memory.size(); ++i)
+        request.memory[i] = m_saved_far_world->MemoryPool(i + 1);
+    out = std::move(request);
+    return true;
+}
+
+bool RenderPipeline::bind_saved_far_world(std::shared_ptr<const world::FarWorldPublication> image) {
+    if (!image || !m_saved_far_attempted || image->world_epoch != m_far_world_epoch ||
+        image->save_root != m_saved_far_root || !m_saved_far_world->Handoff()) {
+        refuse_saved_far_world_publication("publication does not match the saved-world binding");
+        return false;
+    }
+    const auto pool = m_saved_far_world->MemoryPool(1);
+    if (!pool || image->tiles.size() > 320) {
+        refuse_saved_far_world_publication("manifest memory domain or tile admission refused");
+        return false;
+    }
+    World::FarVolumeMemoryLease scratch(*pool);
+    if (!scratch.TryCharge(image->tiles.size() * sizeof(FarHandoffTileInput))) {
+        refuse_saved_far_world_publication("manifest descriptor admission refused");
+        return false;
+    }
+    try {
+        std::vector<FarHandoffTileInput> tiles;
+        tiles.reserve(image->tiles.size());
+        const auto limits = FarWorldDevelopmentLimits();
+        for (const auto& tile : image->tiles) {
+            const auto intent = tile.span.Intent();
+            if (!intent || !tile.observation) {
+                refuse_saved_far_world_publication("incomplete immutable tile publication");
+                return false;
+            }
+            FarVolumeWantedRequest wanted;
+            wanted.identity = {image->world_epoch,
+                               tile.observation->content_identity(),
+                               static_cast<std::uint8_t>(image->caves),
+                               tile.key,
+                               image->committed_generation,
+                               tile.span.generation()};
+            wanted.intent = *intent;
+            wanted.build_headroom_bytes = limits.build_headroom_bytes;
+            auto input = MakeFarHandoffTileInput(std::move(wanted), tile.observation);
+            if (!input) {
+                refuse_saved_far_world_publication("frozen water bridge admission refused");
+                return false;
+            }
+            tiles.push_back(std::move(*input));
+        }
+        if (!m_saved_far_world->StageTarget({image->world_epoch,
+                                             image->publication_serial,
+                                             image->committed_generation,
+                                             image->caves,
+                                             World::FarVolumeNumericProfile::LegacySigned16,
+                                             tiles})) {
+            refuse_saved_far_world_publication(
+                "immutable target manifest refused; serving retained");
+            return false;
+        }
+        const bool first = !m_saved_far_publication;
+        m_saved_far_publication = std::move(image);
+        m_saved_far_refusal.clear();
+        if (first) {
+            m_taau_pass->invalidate_history();
+            m_prev_view_proj = glm::mat4(1.0f);
+            m_frustumCache.valid = false;
+        }
+        return true;
+    } catch (const std::exception&) {
+        refuse_saved_far_world_publication("manifest allocation refused; serving retained");
+        return false;
+    }
+}
+
+FarWorldSelection RenderPipeline::saved_far_world_selection(FarWorldPurpose purpose) const {
+    if (purpose != FarWorldPurpose::World || !m_saved_far_attempted)
+        return m_far_world->Selection(purpose);
+    const auto requested = m_far_world->Selection(purpose).requested;
+    return SelectFarWorld(requested,
+                          purpose,
+                          m_saved_far_publication ? FarWorldRefusal::None
+                                                  : FarWorldRefusal::ImmutableAuthorityUnavailable);
 }
 
 void RenderPipeline::set_far_lod_preview_anchor(const glm::vec3& center, float inner_radius_m) {
@@ -2329,7 +2496,8 @@ void RenderPipeline::gather_lights(entt::registry& registry, const glm::vec3& ca
 }
 
 std::vector<RenderPipeline::ChunkMeshSnapshot>
-RenderPipeline::build_chunk_snapshots(const std::vector<Chunk*>& renderable_chunks) const {
+RenderPipeline::build_chunk_snapshots(const std::vector<Chunk*>& renderable_chunks,
+                                      const Systems::SHIELD_WorldSystem* currency) const {
     std::vector<ChunkMeshSnapshot> snapshots;
     snapshots.reserve(renderable_chunks.size());
 
@@ -2348,16 +2516,33 @@ RenderPipeline::build_chunk_snapshots(const std::vector<Chunk*>& renderable_chun
         snapshot.terrain_index_count = chunk->mesh_indices.size();
         snapshot.water_vertex_count = chunk->water_mesh_vertices.size();
         snapshot.water_index_count = chunk->water_mesh_indices.size();
+        snapshot.terrain_current =
+            !currency || (chunk->get_state() == ChunkState::Ready &&
+                          chunk->pending_lod.load(std::memory_order_acquire) < 0 &&
+                          !chunk->pending_mesh_ready.load(std::memory_order_acquire) &&
+                          !chunk->pending_generation_ready.load(std::memory_order_acquire));
+        snapshot.water_current =
+            !currency || (chunk->water_mesh_generated.load(std::memory_order_acquire) &&
+                          chunk->water_mesh_dirty_ticks == 0 &&
+                          !chunk->pending_mesh_ready.load(std::memory_order_acquire));
+        if (currency) {
+            snapshot.terrain_current =
+                snapshot.terrain_current && currency->far_live_mesh_current(*chunk, false);
+            snapshot.water_current =
+                snapshot.water_current && currency->far_live_mesh_current(*chunk, true);
+        }
 
         const u32 version_after_metadata = chunk->mesh_version.load(std::memory_order_acquire);
         const u32 water_version_after_metadata =
             chunk->water_mesh_version.load(std::memory_order_acquire);
         if (version_after_metadata != snapshot.mesh_version) {
+            snapshot.terrain_current = !currency;
             snapshot.mesh_version = version_after_metadata;
             snapshot.terrain_vertex_count = 0;
             snapshot.terrain_index_count = 0;
         }
         if (water_version_after_metadata != snapshot.water_mesh_version) {
+            snapshot.water_current = !currency;
             snapshot.water_mesh_version = water_version_after_metadata;
             snapshot.water_vertex_count = 0;
             snapshot.water_index_count = 0;
@@ -2423,7 +2608,7 @@ void RenderPipeline::render_frame(entt::registry& registry,
                                                    : FarWorldPurpose::World;
     select_frame_far_world(
         FarWorldSubmissionOverride(
-            ApplyLegacyFarWorldEnable(m_far_world->Selection(purpose), m_legacy_far_enabled),
+            ApplyLegacyFarWorldEnable(saved_far_world_selection(purpose), m_legacy_far_enabled),
             m_far_world_submission),
         camera);
     m_far_world_advanced = false;
@@ -2624,7 +2809,8 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
     // Dry caves below sea/lake level retain their air lighting.
     m_underwater_factor = world_system.IsUnderwater(camera.Position) ? 1.0f : 0.0f;
     auto renderable_chunks = world_system.get_renderable_chunks();
-    auto renderable_chunk_snapshots = build_chunk_snapshots(renderable_chunks);
+    auto renderable_chunk_snapshots = build_chunk_snapshots(
+        renderable_chunks, m_saved_far_attempted && !m_far_world_preview ? &world_system : nullptr);
     m_last_mesh_upload_stats = {};
     m_last_mesh_upload_stats.snapshot_count = renderable_chunk_snapshots.size();
     m_last_render_pass_stats = {};
@@ -2642,7 +2828,11 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
     manage_water_gpu_resources(renderable_chunk_snapshots, camera);
     ensure_terrain_culling_hierarchy(renderable_chunk_snapshots);
     if (m_frame_far_selection.effective == FarWorldMode::Ladder) {
-        m_far_world->BeginLiveOwnership(m_far_world_frame);
+        const bool saved = m_saved_far_attempted && !m_far_world_preview;
+        if (saved)
+            m_saved_far_world->BeginLiveOwnership(m_far_world_frame);
+        else
+            m_far_world->BeginLiveOwnership(m_far_world_frame);
         for (const auto& chunk : renderable_chunk_snapshots) {
             const auto found = m_chunk_render_data.find(chunk.id);
             FarWorldLiveUpload upload;
@@ -2653,6 +2843,7 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
                 upload.uploaded_version = data.mesh_version;
                 upload.uploaded_indices = data.element_count;
                 upload.valid_allocation =
+                    chunk.terrain_current &&
                     data.pool_handle != ChunkRenderData::kInvalidPoolHandle &&
                     m_chunk_geometry_pool.allocation(data.pool_handle).live &&
                     m_chunk_geometry_pool.allocation(data.pool_handle).index_count ==
@@ -2665,15 +2856,21 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
                 water_data.SetLadderWaterUpload(
                     upload,
                     chunk.water_mesh_version,
-                    m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Water) &&
+                    chunk.water_current &&
+                        m_isolation_config.renders(
+                            Client::ScenarioHarness::IsolationLayer::Water) &&
                         m_water_pass->shader() && m_water_pass->shader()->IsValid());
             }
-            if (!m_far_world->AddLiveUpload(upload))
+            if (!(saved ? m_saved_far_world->AddLiveUpload(upload)
+                        : m_far_world->AddLiveUpload(upload)))
                 break;
         }
         // Failure deliberately leaves no published mask. Submit refuses the
         // entire far stage this frame rather than claiming a truncated live set.
-        m_far_world->FinishLiveOwnership();
+        if (saved)
+            m_saved_far_world->FinishLiveOwnership();
+        else
+            m_far_world->FinishLiveOwnership();
     }
 
     // Far-LOD scheduling: ring-diff the wanted region set, integrate
@@ -2698,6 +2895,13 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
             m_far_world_advanced = legacy != nullptr;
         },
         [&] {
+            if (m_saved_far_attempted && !m_far_world_preview) {
+                m_far_world_advanced = m_saved_far_world->AdvanceFrame(
+                    m_far_world_frame,
+                    {camera.Position.x, camera.Position.y, camera.Position.z},
+                    FarWorldDevelopmentLimits().frame);
+                return;
+            }
             m_far_world_advanced = m_far_world->PrepareFrame(
                 m_far_world_frame, {camera.Position.x, camera.Position.y, camera.Position.z});
             // Checked request refusal is reported; one scheduler per frame.
@@ -2957,6 +3161,9 @@ void RenderPipeline::execute_stage_gbuffer(const Camera& camera) {
         gbuffer_input.legacy_far = legacy_far_compatibility();
         if (m_frame_far_selection.effective == FarWorldMode::Ladder)
             gbuffer_input.submit_ladder = [this, &camera](const FarWorldPrepareDraw& prepare) {
+                if (m_saved_far_attempted && !m_far_world_preview)
+                    return m_saved_far_world->Submit(
+                        {camera.Position.x, camera.Position.y, camera.Position.z}, prepare);
                 return m_far_world->Submit(
                     {camera.Position.x, camera.Position.y, camera.Position.z}, prepare);
             };
@@ -2988,7 +3195,7 @@ void RenderPipeline::execute_stage_gbuffer(const Camera& camera) {
         m_last_render_pass_stats.authored_draws += gstats.authored_draws;
         m_last_render_pass_stats.authored_indices_drawn += gstats.authored_indices;
     }
-    if (!m_far_world_paired)
+    if (!m_far_world_paired && (!m_saved_far_attempted || m_far_world_preview))
         m_far_world->CaptureDiagnostic(m_frame_far_selection,
                                        m_far_world_frame,
                                        {camera.Position.x, camera.Position.y, camera.Position.z},
@@ -4025,6 +4232,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     // Release allocations while the captured context is current, including
     // startup failure. Repeated shutdown/destruction sees an empty owner.
     m_far_world->Shutdown();
+    m_saved_far_world->Shutdown();
     if (m_farlod) {
         m_farlod->shutdown();
     }
@@ -5519,9 +5727,6 @@ namespace {
 
 constexpr uint32_t kLtexMagic = 0x5845544C; // 'LTEX' little-endian
 constexpr uint16_t kLtexVersion = 1;
-// Layers reserved per size-class array. Over-provisioning is cheap (storage is
-// allocated lazily per uploaded layer in this iteration; growth reallocates).
-constexpr uint32_t kResidencyArrayInitialCapacity = 8;
 
 template<typename T>
 bool ReadPod(std::ifstream& in, T& value) {
@@ -5647,7 +5852,6 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
     const Rendering::CelestialFrame celestial = Rendering::EvaluateCelestialBodies(
         m_timeOfDay, m_seasonSunDeclination, m_seasonTick, moon_forced, kTicksPerLunarCycle);
     const Rendering::SunGeometry& sun_geo = celestial.sun_geometry;
-    float sun_angle_rad = sun_geo.angleRad;
     const float season_tilt_z = sun_geo.tiltZ;
     m_sun.direction = sun_geo.direction;
 

@@ -6,6 +6,7 @@
 #include <optional>
 
 #include "../../include/luminumbra/core/Types.h"
+#include "FarWorldHandoffRenderer.h"
 #include "FarWorldRenderer.h"
 #include "FarWorldReplay.h"
 #include "FrameBufferObject.h" // FrameBufferObject (extracted)
@@ -48,6 +49,10 @@ namespace Luminumbra::Systems {
 class SHIELD_WorldSystem;
 struct TerrainGenParams;
 } // namespace Luminumbra::Systems
+namespace Luminumbra::world {
+struct FarWorldPublication;
+struct FarWorldPublicationRequest;
+} // namespace Luminumbra::world
 namespace Luminumbra::Rendering {
 struct StaticDrawSnapshot;
 
@@ -819,6 +824,20 @@ public:
     // Internal, non-persisted request. Normal worlds retain a typed refusal until
     // immutable committed authority is available. Fixtures bind explicitly.
     void set_far_world_mode(FarWorldMode requested);
+    // Owner-thread host seam. Capture is performed by the session before rendering;
+    // neither this pipeline nor any render worker calls back into a session.
+    bool prepare_saved_far_world_capture(const std::filesystem::path& save_root,
+                                         const Camera&,
+                                         world::FarWorldPublicationRequest& out);
+    bool bind_saved_far_world(std::shared_ptr<const world::FarWorldPublication>);
+    void clear_saved_far_world_binding();
+    void refuse_saved_far_world_publication(std::string reason);
+    const std::string& saved_far_world_refusal() const {
+        return m_saved_far_refusal;
+    }
+    const FarWorldHandoffRenderer& saved_far_world_renderer() const {
+        return *m_saved_far_world;
+    }
     // Startup/world-entry policy; runtime changes first reset history via
     // set_far_world_mode. Returns the resolved request for caller diagnostics.
     FarWorldCavePolicy set_far_world_cave_policy(std::optional<World::FarCaveMode> requested);
@@ -955,6 +974,7 @@ private:
         size_t terrain_index_count = 0;
         size_t water_vertex_count = 0;
         size_t water_index_count = 0;
+        bool terrain_current = false, water_current = false;
 
         bool has_terrain_mesh() const {
             return terrain_vertex_count > 0 && terrain_index_count > 0;
@@ -1007,7 +1027,8 @@ private:
     RenderContext make_luminance_meter_context();
 
     std::vector<ChunkMeshSnapshot>
-    build_chunk_snapshots(const std::vector<Chunk*>& renderable_chunks) const;
+    build_chunk_snapshots(const std::vector<Chunk*>& renderable_chunks,
+                          const Systems::SHIELD_WorldSystem* currency = nullptr) const;
 
     //   (the  unlock): render_frame is split into prepare_frame (ALL
     // per-frame CPU mutation — clock snapshot, time-of-day advance, light gathering,
@@ -1294,6 +1315,16 @@ private:
     // using values published by the Legacy branch rather than Ladder reading its counters.
     std::size_t m_legacy_far_resident_bytes = 0, m_legacy_far_vertex_arrays = 0;
     std::unique_ptr<FarWorldRenderer> m_far_world;
+    std::unique_ptr<FarWorldHandoffRenderer> m_saved_far_world;
+    JobSystem* m_saved_far_jobs = nullptr;
+    std::shared_ptr<const world::FarWorldPublication> m_saved_far_publication;
+    std::shared_ptr<World::FarVolumeMemoryPool> m_saved_far_pool;
+    World::FarVolumeMemoryLease m_saved_far_wanted_charge;
+    std::vector<World::FarTileKey> m_saved_far_wanted;
+    std::filesystem::path m_saved_far_root;
+    std::string m_saved_far_refusal;
+    bool m_saved_far_attempted = false;
+    FarWorldSelection saved_far_world_selection(FarWorldPurpose) const;
     FarWorldSelection m_frame_far_selection;
     std::uint64_t m_far_world_frame = 0;
     bool m_far_world_preview = false;
@@ -1717,9 +1748,9 @@ private:
         glm::vec3 max;
 
         AABB() = default;
-        AABB(const glm::vec3& min, const glm::vec3& max)
-            : min(min)
-            , max(max) {}
+        AABB(const glm::vec3& minimum, const glm::vec3& maximum)
+            : min(minimum)
+            , max(maximum) {}
     };
 
     struct ChunkCullEntry {
@@ -1735,8 +1766,8 @@ private:
         bool is_leaf = true;
 
         CullingNode() = default;
-        CullingNode(const AABB& bounds)
-            : bounds(bounds) {}
+        CullingNode(const AABB& node_bounds)
+            : bounds(node_bounds) {}
     };
 
     class HierarchicalCuller {
