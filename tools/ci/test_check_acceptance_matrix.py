@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import ctypes
 import errno
 import importlib.util
 import io
@@ -264,23 +265,35 @@ class AcceptanceMatrixTests(unittest.TestCase):
         return [json.loads(line.removeprefix("inventory decision: "))
                 for line in output.splitlines() if line.startswith("inventory decision: ")]
 
-    def start_paused_refresh(self) -> subprocess.Popen[str]:
+    def start_paused_refresh(self, *, during_publication: bool = False) -> subprocess.Popen[str]:
         ready = self.tmp / "refresh-ready"
         ready.unlink(missing_ok=True)
         program = """
 import pathlib, runpy, sys
 module = runpy.run_path(sys.argv[1])["main"].__globals__
 original = module["refresh_inventory"]
-def paused(*args):
-    result = original(*args)
+replace = pathlib.Path.replace
+def pause():
     pathlib.Path(sys.argv[4]).write_bytes(b"ready")
     sys.stdin.read(1)
+def paused(*args):
+    result = original(*args)
+    pause()
     return result
-module["refresh_inventory"] = paused
+def published(path, target):
+    result = replace(path, target)
+    pathlib.Path.replace = replace
+    pause()
+    return result
+if sys.argv[5] == "publish":
+    pathlib.Path.replace = published
+else:
+    module["refresh_inventory"] = paused
 raise SystemExit(module["main"](["--root", sys.argv[2], "--matrix", sys.argv[3], "--refresh-inventory"]))
 """
         child = subprocess.Popen([sys.executable, "-I", "-B", "-c", program, str(MODULE_PATH),
-                                  str(self.root), str(self.matrix_path), str(ready)],
+                                  str(self.root), str(self.matrix_path), str(ready),
+                                  "publish" if during_publication else "prepare"],
                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                  stderr=subprocess.PIPE, text=True)
         def cleanup() -> None:
@@ -297,6 +310,106 @@ raise SystemExit(module["main"](["--root", sys.argv[2], "--matrix", sys.argv[3],
             time.sleep(0.01)
         return child
 
+    def test_readers_refuse_mixed_publication_then_accept_completed_refresh(self) -> None:
+        discovery, report = self.execution_inputs()
+        doc = self.root / "docs/acceptance-matrix.md"
+        for options in ([], ["--check-doc", str(doc)],
+                        ["--junit", str(report), "--discovery", str(discovery)]):
+            with self.subTest(options=options):
+                self.write_inventory()
+                self.prepare_refresh()
+                (self.root / MODULE.CONTRACT_DOCUMENTS[1]).write_text(
+                    "# Moved\nEvery requirement has evidence.\n", encoding="utf-8")
+                child = self.start_paused_refresh(during_publication=True)
+                try:
+                    with mock.patch.object(MODULE, "load_matrix", wraps=MODULE.load_matrix) as load:
+                        code, _, err = self.run_main(*self.base_args(), *options)
+                    self.assertEqual(code, 2, err)
+                    self.assertIn("cannot acquire inventory refresh lock within deadline", err)
+                    load.assert_not_called()
+                    self.assertIsNone(child.poll())
+                    out, err = child.communicate("x", timeout=5)
+                    self.assertEqual(child.returncode, 0, (out, err))
+                finally:
+                    if child.poll() is None:
+                        child.kill()
+                    child.communicate(timeout=5)
+                code, _, err = self.run_main(*self.base_args(), *options)
+                self.assertEqual(code, 0, err)
+
+    def test_read_lock_failures_do_not_read_inputs(self) -> None:
+        self.prepare_refresh()
+        for error in (errno.EACCES, errno.EAGAIN, errno.EDEADLK, errno.EIO):
+            with self.subTest(error=error), \
+                    mock.patch.object(MODULE, "_try_refresh_lock", side_effect=OSError(error, "unavailable")), \
+                    mock.patch.object(MODULE.time, "monotonic", side_effect=[0.0, 3.0]), \
+                    mock.patch.object(MODULE, "load_matrix") as load:
+                code, _, err = self.run_main(*self.base_args())
+                self.assertEqual(code, 2, err)
+                self.assertIn("unavailable" if error == errno.EIO else "within deadline", err)
+                load.assert_not_called()
+        with mock.patch.object(Path, "open", side_effect=PermissionError("lock open denied")), \
+                mock.patch.object(MODULE, "load_matrix") as load:
+            code, _, err = self.run_main(*self.base_args())
+        self.assertEqual(code, 2, err)
+        self.assertIn("lock open denied", err)
+        load.assert_not_called()
+
+    def test_reader_retries_after_publication_finishes_before_loading_inputs(self) -> None:
+        self.prepare_rollback()
+        child = self.start_paused_refresh(during_publication=True)
+        with mock.patch.object(MODULE, "load_matrix", wraps=MODULE.load_matrix) as load:
+            def finish_publication(delay: float) -> None:
+                self.assertGreater(delay, 0)
+                load.assert_not_called()
+                out, err = child.communicate("x", timeout=5)
+                self.assertEqual(child.returncode, 0, (out, err))
+            with mock.patch.object(MODULE.time, "sleep", side_effect=finish_publication) as wait:
+                code, _, err = self.run_main(*self.base_args(), "--check-doc",
+                                             str(self.root / "docs/acceptance-matrix.md"))
+        self.assertEqual(code, 0, err)
+        wait.assert_called_once()
+        self.assertTrue(load.called)
+
+    def test_readers_share_the_lock_and_writers_wait(self) -> None:
+        self.prepare_refresh()
+        with MODULE._refresh_lock(self.root, shared=True):
+            code, _, err = self.run_main(*self.base_args())
+            self.assertEqual(code, 0, err)
+            with mock.patch.object(MODULE.time, "monotonic", side_effect=[0.0, 3.0]):
+                code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+            self.assertEqual(code, 2, err)
+            self.assertIn("within deadline", err)
+
+    def test_reader_creates_missing_lock_and_opens_existing_lock_read_only(self) -> None:
+        self.prepare_refresh()
+        lock = MODULE._refresh_lock_path(self.root)
+        lock.unlink()
+        code, _, err = self.run_main(*self.base_args())
+        self.assertEqual(code, 0, err)
+        self.assertEqual(lock.read_bytes(), b"")
+        identity, opened = lock.stat(), []
+        open_path = Path.open
+        def read_only(path: Path, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+            if path == lock:
+                opened.append(mode)
+                if mode != "rb":
+                    raise PermissionError("metadata is read-only")
+            return open_path(path, mode, *args, **kwargs)
+        with mock.patch.object(Path, "open", read_only):
+            code, _, err = self.run_main(*self.base_args())
+        self.assertEqual(code, 0, err)
+        self.assertEqual(opened, ["rb"])
+        self.assertTrue(os.path.samestat(identity, lock.stat()))
+        lock.unlink()
+        with mock.patch.object(Path, "open", side_effect=[FileNotFoundError(),
+                                                         PermissionError("lock creation denied")]), \
+                mock.patch.object(MODULE, "load_matrix") as load:
+            code, _, err = self.run_main(*self.base_args())
+        self.assertEqual(code, 2, err)
+        self.assertIn("lock creation denied", err)
+        load.assert_not_called()
+
     def test_overlapping_refresh_is_refused_without_stealing_live_lock(self) -> None:
         self.prepare_refresh()
         (self.root / MODULE.CONTRACT_DOCUMENTS[1]).write_text(
@@ -306,7 +419,8 @@ raise SystemExit(module["main"](["--root", sys.argv[2], "--matrix", sys.argv[3],
         before = [path.read_bytes() for path in paths]
         child = self.start_paused_refresh()
         acquire = MODULE._refresh_lock
-        with mock.patch.object(MODULE, "_refresh_lock", side_effect=lambda root: acquire(root, timeout=0.05)):
+        with mock.patch.object(MODULE, "_refresh_lock",
+                               side_effect=lambda root, **kwargs: acquire(root, timeout=0.05, **kwargs)):
             code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
         self.assertEqual(code, 2, err)
         self.assertIn("cannot acquire inventory refresh lock within deadline", err)
@@ -376,24 +490,59 @@ raise SystemExit(module["main"](["--root", sys.argv[2], "--matrix", sys.argv[3],
         self.assertEqual(PUBLIC_TREE.validate(self.root), [])
 
     def test_refresh_lock_uses_both_platform_primitives(self) -> None:
-        for name, module_name in (("nt", "msvcrt"), ("posix", "fcntl")):
-            with self.subTest(platform=name):
+        for name, module_name, shared in ((name, module_name, shared)
+                                         for name, module_name in (("nt", "msvcrt"), ("posix", "fcntl"))
+                                         for shared in (False, True)):
+            with self.subTest(platform=name, shared=shared):
                 primitive = mock.Mock()
                 primitive.LOCK_EX = 2
                 primitive.LOCK_NB = 4
+                primitive.LOCK_SH = 1
                 handle = mock.Mock()
+                kernel = mock.Mock()
                 with mock.patch.object(MODULE, "os", mock.Mock(name=name)), \
-                        mock.patch.dict(sys.modules, {module_name: primitive}):
+                        mock.patch.dict(sys.modules, {module_name: primitive}), \
+                        mock.patch.object(ctypes, "WinDLL", return_value=kernel, create=True):
                     MODULE.os.name = name
-                    MODULE._try_refresh_lock(handle)
+                    MODULE._try_refresh_lock(handle, shared=shared)
                 if name == "nt":
-                    handle.seek.assert_called_once_with(0)
-                    primitive.locking.assert_called_once_with(handle.fileno(), primitive.LK_NBLCK, 1)
+                    primitive.get_osfhandle.assert_called_once_with(handle.fileno())
+                    args = kernel.LockFileEx.call_args.args
+                    self.assertEqual(args[:5], (primitive.get_osfhandle.return_value,
+                                               1 if shared else 3, 0, 1, 0))
+                    overlapped = args[5]._obj
+                    self.assertEqual((overlapped.Internal, overlapped.InternalHigh,
+                                      overlapped.Offset, overlapped.OffsetHigh, overlapped.hEvent),
+                                     (0, 0, 0, 0, None))
+                    self.assertEqual(len(kernel.LockFileEx.argtypes), 6)
+                    primitive.locking.assert_not_called()
+                    handle.seek.assert_not_called()
                     handle.read.assert_not_called()
                     handle.write.assert_not_called()
                 else:
                     primitive.flock.assert_called_once_with(
-                        handle.fileno(), primitive.LOCK_EX | primitive.LOCK_NB)
+                        handle.fileno(), (primitive.LOCK_SH if shared else primitive.LOCK_EX) | primitive.LOCK_NB)
+
+    def test_windows_read_and_write_lock_errors_preserve_deadline_policy(self) -> None:
+        for shared in (False, True):
+            for error in (33, 6):
+                with self.subTest(shared=shared, error=error):
+                    kernel = mock.Mock()
+                    kernel.LockFileEx.return_value = 0
+                    with mock.patch.object(MODULE, "os", mock.Mock(name="nt")), \
+                            mock.patch.dict(sys.modules, {"msvcrt": mock.Mock()}), \
+                            mock.patch.object(ctypes, "WinDLL", return_value=kernel, create=True), \
+                            mock.patch.object(ctypes, "get_last_error", return_value=error, create=True), \
+                            mock.patch.object(ctypes, "WinError", return_value=OSError(errno.EIO, "invalid handle"),
+                                              create=True) as failure:
+                        MODULE.os.name = "nt"
+                        with self.assertRaises(OSError) as caught:
+                            MODULE._try_refresh_lock(mock.Mock(), shared=shared)
+                    self.assertEqual(caught.exception.errno, errno.EACCES if error == 33 else errno.EIO)
+                    if error == 33:
+                        failure.assert_not_called()
+                    else:
+                        failure.assert_called_once_with(error)
 
     def test_refresh_source_changes_before_or_during_publication_are_rolled_back(self) -> None:
         for during in (False, True):
@@ -510,6 +659,112 @@ raise SystemExit(module["main"](["--root", sys.argv[2], "--matrix", sys.argv[3],
         before = doc.read_bytes(), doc.stat().st_mtime_ns
         self.assertEqual(self.run_main(*args)[0], 0)
         self.assertEqual((doc.read_bytes(), doc.stat().st_mtime_ns), before)
+
+    def test_default_output_destinations_use_resolved_paths_for_publish_and_rollback(self) -> None:
+        self.matrix_path = self.root / "tools/ci/acceptance_matrix.json"
+        resolve, replace = Path.resolve, Path.replace
+        for name in ("document", "matrix", "inventory"):
+            for fail in (False, True):
+                with self.subTest(output=name, fail=fail):
+                    paths, before = self.prepare_rollback()
+                    alias = dict(zip(("document", "matrix", "inventory"), paths))[name]
+                    destination = self.tmp / ("resolved-" + alias.name)
+                    destination.write_bytes(before[alias])
+                    # Model resolution on Windows without symlink privileges;
+                    # POSIX also exercises actual symlink replacement semantics.
+                    def resolved(path: Path, *args: Any, **kwargs: Any) -> Path:
+                        result = resolve(path, *args, **kwargs)
+                        return destination if result == alias else result
+                    published = []
+                    def publish(path: Path, target: Path) -> Path:
+                        published.append(target)
+                        if fail and len(published) == 3:
+                            raise PermissionError("last output unavailable")
+                        return replace(path, target)
+                    expected = [destination if path == alias else path for path in paths]
+                    with contextlib.ExitStack() as stack:
+                        if os.name == "nt":
+                            stack.enter_context(mock.patch.object(Path, "resolve", resolved))
+                        else:
+                            alias.unlink()
+                            alias.symlink_to(destination)
+                            def restore_alias() -> None:
+                                alias.unlink()
+                                alias.write_bytes(before[alias])
+                            stack.callback(restore_alias)
+                        identity = alias.lstat()
+                        with mock.patch.object(Path, "replace", publish):
+                            code, _, err = self.run_main("--root", str(self.root), "--refresh-inventory")
+                        self.assertEqual(code, 2 if fail else 0, err)
+                        self.assertEqual(published, expected)
+                        self.assertTrue(os.path.samestat(identity, alias.lstat()))
+                        if fail:
+                            self.assertIn("last output unavailable", err)
+                            self.assertNotIn("rollback incomplete", err)
+                            self.assertEqual(destination.read_bytes(), before[alias])
+                            self.assertEqual({path: path.read_bytes() for path in paths}, before)
+                        else:
+                            self.assertNotEqual(destination.read_bytes(), before[alias])
+                        self.assertEqual(list(self.tmp.rglob(".acceptance-*")), [])
+
+    def test_default_input_destinations_are_resolved_for_readers(self) -> None:
+        self.matrix_path = self.root / "tools/ci/acceptance_matrix.json"
+        self.prepare_refresh()
+        inventory = self.root / "tools/ci/acceptance_requirements.json"
+        resolve = Path.resolve
+        for alias in (self.matrix_path, inventory):
+            with self.subTest(input=alias):
+                destination = self.tmp / ("resolved-" + alias.name)
+                destination.write_bytes(alias.read_bytes())
+                original = alias.read_bytes()
+                alias.write_bytes(b"partial input")
+                def resolved(path: Path, *args: Any, **kwargs: Any) -> Path:
+                    result = resolve(path, *args, **kwargs)
+                    return destination if result == alias else result
+                try:
+                    with mock.patch.object(Path, "resolve", resolved):
+                        code, _, err = self.run_main("--root", str(self.root))
+                    self.assertEqual(code, 0, err)
+                    for data in (b"", b"{", b'{"schema": "unknown"}'):
+                        destination.write_bytes(data)
+                        with mock.patch.object(Path, "resolve", resolved):
+                            code, _, err = self.run_main("--root", str(self.root))
+                        self.assertNotEqual(code, 0, err)
+                    read = Path.read_text
+                    def unreadable(path: Path, *args: Any, **kwargs: Any) -> str:
+                        if path == destination:
+                            raise PermissionError("resolved input unreadable")
+                        return read(path, *args, **kwargs)
+                    with mock.patch.object(Path, "resolve", resolved), \
+                            mock.patch.object(Path, "read_text", unreadable):
+                        code, _, err = self.run_main("--root", str(self.root))
+                    self.assertNotEqual(code, 0, err)
+                    self.assertIn("resolved input unreadable", err)
+                    destination.unlink()
+                    with mock.patch.object(Path, "resolve", resolved):
+                        code, _, err = self.run_main("--root", str(self.root))
+                    self.assertNotEqual(code, 0, err)
+                finally:
+                    alias.write_bytes(original)
+
+    def test_default_destinations_cannot_read_the_mandatory_lock_range(self) -> None:
+        self.matrix_path = self.root / "tools/ci/acceptance_matrix.json"
+        self.prepare_refresh()
+        lock, resolve = MODULE._refresh_lock_path(self.root), Path.resolve
+        for alias in (self.matrix_path, self.root / "tools/ci/acceptance_requirements.json",
+                      self.root / "docs/acceptance-matrix.md"):
+            for refresh in (False, True):
+                with self.subTest(alias=alias, refresh=refresh):
+                    def resolved(path: Path, *args: Any, **kwargs: Any) -> Path:
+                        result = resolve(path, *args, **kwargs)
+                        return lock if result == alias else result
+                    with mock.patch.object(Path, "resolve", resolved), \
+                            mock.patch.object(MODULE, "load_matrix") as load:
+                        code, _, err = self.run_main("--root", str(self.root),
+                                                     *(["--refresh-inventory"] if refresh else []))
+                    self.assertEqual(code, 2, err)
+                    self.assertIn("refresh lock cannot be used as an input", err)
+                    load.assert_not_called()
 
     def test_changed_or_unreadable_commit_input_restores_old_outputs(self) -> None:
         for failure in ("unreadable", "removed", "partial"):

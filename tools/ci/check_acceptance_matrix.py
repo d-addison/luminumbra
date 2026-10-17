@@ -878,28 +878,53 @@ def _refresh_lock_path(root: Path) -> Path:
     return metadata / "acceptance-refresh.lock"
 
 
-def _try_refresh_lock(handle: Any) -> None:
+def _try_refresh_lock(handle: Any, *, shared: bool = False) -> None:
     if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
         import msvcrt
         # Lock one byte even in an empty file. Never read or write this mandatory
         # locked range through another handle, or rename/unlink the lock file.
-        handle.seek(0)
-        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        # CRT read-lock modes are exclusive too; LockFileEx supplies shared locks.
+        class Overlapped(ctypes.Structure):
+            _fields_ = [("Internal", ctypes.c_size_t), ("InternalHigh", ctypes.c_size_t),
+                        ("Offset", wintypes.DWORD), ("OffsetHigh", wintypes.DWORD),
+                        ("hEvent", wintypes.HANDLE)]
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        acquire = kernel.LockFileEx
+        acquire.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD,
+                            wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(Overlapped)]
+        acquire.restype = wintypes.BOOL
+        # FAIL_IMMEDIATELY (1), plus EXCLUSIVE_LOCK (2) for writers only.
+        overlapped = Overlapped()
+        if not acquire(msvcrt.get_osfhandle(handle.fileno()), 1 if shared else 3,
+                       0, 1, 0, ctypes.byref(overlapped)):
+            error = ctypes.get_last_error()
+            if error == 33:  # ERROR_LOCK_VIOLATION: retry under the same deadline.
+                raise OSError(errno.EACCES, "inventory refresh lock is held")
+            raise ctypes.WinError(error)
     else:
         import fcntl
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(handle.fileno(), (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB)
 
 
 @contextlib.contextmanager
-def _refresh_lock(root: Path, *, timeout: float = 2.0) -> Iterator[None]:
+def _refresh_lock(root: Path, *, shared: bool = False, timeout: float = 2.0) -> Iterator[None]:
     # Kernel ownership, rather than a PID or age check, makes a crashed holder
     # harmless and prevents stealing a live holder's lock. Closing releases it.
     path = _refresh_lock_path(root)
-    with path.open("a+b") as handle:
+    try:
+        # Readers need no metadata writes once either participant creates the
+        # persistent file. Never bypass locking when that file is absent.
+        handle = path.open("rb" if shared else "a+b")
+    except FileNotFoundError:
+        handle = path.open("a+b")
+    with handle:
         deadline = time.monotonic() + timeout
         while True:
             try:
-                _try_refresh_lock(handle)
+                _try_refresh_lock(handle, shared=shared)
                 break
             except OSError as exc:
                 if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
@@ -1222,14 +1247,15 @@ def validate(
     index: TestIndex,
     root: Path,
     require_landed: bool,
-    *, inventory: dict[str, Any] | None = None,
+    *, inventory: dict[str, Any] | None = None, inventory_path: Path | None = None,
 ) -> list[str]:
     """Validate disk inputs, or a prospective inventory before publishing it."""
     base = root.resolve()
     problems: list[tuple[str, str]] = []
     try:
         if inventory is None:
-            inventory = load_matrix(base / "tools/ci/acceptance_requirements.json")
+            inventory = load_matrix(inventory_path if inventory_path is not None
+                                    else base / "tools/ci/acceptance_requirements.json")
         requirements, inventory_errors = validate_inventory(inventory, base)
     except MatrixError as exc:
         requirements, inventory_errors = {}, [str(exc)]
@@ -1529,8 +1555,8 @@ def _matrix_input_paths(matrix: dict[str, Any], root: Path) -> list[Path]:
 
 
 def _check_output_paths(args: argparse.Namespace, root: Path, matrix_path: Path, inputs: list[Path]) -> None:
-    inventory = root / "tools/ci/acceptance_requirements.json"
-    doc = root / "docs/acceptance-matrix.md"
+    inventory = args.inventory
+    doc = args.generated_doc
     targets = [inventory, matrix_path, doc] if args.refresh_inventory else []
     if args.write_doc is not None and (not args.refresh_inventory or args.write_doc.resolve() != doc.resolve()):
         targets.append(args.write_doc)
@@ -1575,41 +1601,48 @@ def main(argv: list[str] | None = None) -> int:
         print("error: --junit and --discovery are required together for execution evidence", file=sys.stderr)
         return 2
     try:
-        # Use one identity for aliases, including Windows short names and paths
-        # containing parent components, throughout snapshots and publication.
-        for name in ("matrix", "check_doc", "write_doc", "discovery", "execution_receipt"):
-            path = getattr(args, name)
-            if path is not None:
-                setattr(args, name, path.resolve())
-        args.junit = [path.resolve() for path in args.junit]
-        # Every writer participates, so a standalone --write-doc or receipt
-        # cannot interleave with a refresh. Readers need no metadata writes.
+        # Every reader and writer holds the same kernel lock for the complete
+        # read/validate/publish operation. Shared acquisition uses the existing
+        # bounded wait, including Windows mandatory byte-range locking.
         writing = args.refresh_inventory or args.write_doc is not None or args.execution_receipt is not None
-        with _refresh_lock(root) if writing else contextlib.nullcontext():
-            if writing:
-                lock = _refresh_lock_path(root).resolve()
-                if any(path is not None and path.resolve() == lock
-                       for path in (args.write_doc, args.execution_receipt)):
-                    raise MatrixError("output path overlaps an input: refresh lock")
-                if any(path is not None and path.resolve() == lock
-                       for path in (args.matrix, args.discovery, args.check_doc, *args.junit)):
-                    raise MatrixError("refresh lock cannot be used as an input")
-            snapshot = None
-            if args.refresh_inventory:
-                paths = [root / "tools/ci/acceptance_requirements.json",
-                         args.matrix if args.matrix is not None else root / "tools/ci/acceptance_matrix.json",
-                         root / "docs/acceptance-matrix.md", *args.junit]
-                paths.extend(path for path in (args.discovery, args.check_doc, args.write_doc,
-                                               args.execution_receipt) if path is not None)
-                snapshot = _RefreshSnapshot(root, paths)
-            return _run(args, root, snapshot)
+        with _refresh_lock(root, shared=not writing):
+            return _run_locked(args, root)
     except (MatrixError, OSError, UnicodeError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
 
+def _run_locked(args: argparse.Namespace, root: Path) -> int:
+    args.matrix = args.matrix if args.matrix is not None else root / "tools/ci/acceptance_matrix.json"
+    args.inventory = root / "tools/ci/acceptance_requirements.json"
+    args.generated_doc = root / "docs/acceptance-matrix.md"
+    # Use one identity for aliases, including Windows short names and paths
+    # containing parent components, throughout snapshots and publication.
+    # Defaults follow the same rule: replace the resolved destination and
+    # preserve the symlink used to reach it.
+    for name in ("matrix", "inventory", "generated_doc", "check_doc", "write_doc", "discovery",
+                 "execution_receipt"):
+        path = getattr(args, name)
+        if path is not None:
+            setattr(args, name, path.resolve())
+    args.junit = [path.resolve() for path in args.junit]
+    lock = _refresh_lock_path(root).resolve()
+    if any(path == lock for path in (args.write_doc, args.execution_receipt)):
+        raise MatrixError("output path overlaps an input: refresh lock")
+    if any(path == lock for path in (args.matrix, args.inventory, args.generated_doc,
+                                     args.discovery, args.check_doc, *args.junit)):
+        raise MatrixError("refresh lock cannot be used as an input")
+    snapshot = None
+    if args.refresh_inventory:
+        paths = [args.inventory, args.matrix, args.generated_doc, *args.junit]
+        paths.extend(path for path in (args.discovery, args.check_doc, args.write_doc,
+                                       args.execution_receipt) if path is not None)
+        snapshot = _RefreshSnapshot(root, paths)
+    return _run(args, root, snapshot)
+
+
 def _run(args: argparse.Namespace, root: Path, snapshot: _RefreshSnapshot | None) -> int:
-    matrix_path = args.matrix if args.matrix is not None else root / "tools" / "ci" / "acceptance_matrix.json"
+    matrix_path = args.matrix
     try:
         matrix = load_matrix(matrix_path)
     except MatrixError as exc:
@@ -1622,8 +1655,8 @@ def _run(args: argparse.Namespace, root: Path, snapshot: _RefreshSnapshot | None
     decisions: list[dict[str, Any]] = []
     outputs: list[tuple[Path, str]] = []
     if args.refresh_inventory:
-        inventory_path = root / "tools/ci/acceptance_requirements.json"
-        doc = root / "docs/acceptance-matrix.md"
+        inventory_path = args.inventory
+        doc = args.generated_doc
         try:
             if snapshot is not None:
                 snapshot.add(inputs)
@@ -1642,7 +1675,8 @@ def _run(args: argparse.Namespace, root: Path, snapshot: _RefreshSnapshot | None
             print("inventory decision: " + json.dumps(decision, sort_keys=True))
 
     index = index_tests(root)
-    errors = validate(matrix, index, root, args.require_landed, inventory=refreshed)
+    errors = validate(matrix, index, root, args.require_landed,
+                      inventory=refreshed, inventory_path=args.inventory)
     if errors or decisions:
         for message in errors:
             print(f"error: {message}", file=sys.stderr)
