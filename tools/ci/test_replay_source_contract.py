@@ -343,12 +343,21 @@ class ReplaySourceContract(unittest.TestCase):
         self.assertLess(entry.index("if (!horizon_ready)"), entry.index("g_camera ="))
         self.assertRegex(main, r'if \(!gameSession->GetWorldSystem\(\)->EnsureSurfaceReadyNear\('
                          r'[^;]*, 4, 2\)\)\s*\{[^}]*return 2;')
-        loading = main.split('"CONSTRUCTING WORLD GEOMETRY..."', 1)[1].split(
-            '"World generation phase complete. Entering world."', 1)[0]
-        self.assertRegex(loading, r'if \(!gameSession->GetWorldSystem\(\)->'
-                         r'EnsureSurfaceReadyNear\([\s\S]*?\)\)\s*\{[\s\S]*'
+        horizon = main.split("auto prepare_entry_horizon =", 1)[1].split(
+            "auto drain_entry =", 1)[0]
+        self.assertRegex(horizon, r'return gameSession->GetWorldSystem\(\)->'
+                         r'EnsureSurfaceReadyNear\([^;]*, 12, 4\);')
+        staged = main.split("case WorldEntryStage::PrepareHorizon:", 1)[1].split(
+            "case WorldEntryStage::Activate:", 1)[0]
+        self.assertRegex(staged, r'if \(!prepare_entry_horizon\(\)\)\s*\{\s*'
+                         r'refuse_world_entry\([^;]*;\s*return WorldEntryResult::Failed;')
+        loading = main.split("case GameState::WORLD_LOADING: {", 1)[1].split(
+            "case GameState::IN_GAME:", 1)[0]
+        self.assertRegex(loading, r'if \(!prepare_entry_horizon\(\)\)\s*\{[\s\S]*'
                          r'refuse_world_entry\([^;]*;\s*break;')
         self.assertIn('g_uiManager->RequestLoadDocument("main_menu.rml");', loading)
+        self.assertLess(loading.index("if (!prepare_entry_horizon())"),
+                        loading.index("activate_loaded_world();"))
         backdrop = main.split('CreateTransientWorld("Menu Vista"', 1)[1].split(
             "int exit_code = 0;", 1)[0]
         self.assertRegex(backdrop, r'if \(auto\* ws = gameSession->GetWorldSystem\(\);\s*'

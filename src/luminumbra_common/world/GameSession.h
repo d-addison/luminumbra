@@ -26,6 +26,10 @@
 #include <string>
 #include <vector>
 
+namespace Luminumbra::Persistence {
+class CreatedWorldArtifacts;
+}
+
 namespace luminumbra::fields {
 class EnergyFieldState; //  (): the stateful energy layer
 }
@@ -93,6 +97,12 @@ public:
                      const std::string& seed,
                      const std::string& worldType,
                      const std::string* customPresetJson);
+    // Staged entry retains the journal until activation or drained rollback.
+    bool CreateWorld(const std::string& name,
+                     const std::string& seed,
+                     const std::string& worldType,
+                     const std::string* customPresetJson,
+                     Persistence::CreatedWorldArtifacts& artifacts);
     // Replay must preserve omitted historical selectors and their identity bytes.
     // A required content identity is checked before directory creation or live-world replacement.
     bool CreateWorld(const std::string& name,
@@ -115,6 +125,12 @@ public:
 
     // Load an existing world from disk
     bool LoadWorld(const std::string& worldId);
+
+    // Changes when create/load releases the previous world, including a
+    // replacement that subsequently fails. Refusal before replacement preserves it.
+    std::uint64_t WorldRevision() const {
+        return m_worldRevision;
+    }
 
     // Save the current world state
     bool SaveWorld();
@@ -488,10 +504,12 @@ private:
     float m_circadianAmplitude = 1.0f;
     float m_plantMutationRate = luminumbra::foliage::kPollinationMutationFrac;
     WorldMetadata m_metadata;
+    std::uint64_t m_worldRevision = 0;
     bool m_transientWorld = false;
     void ResetWorldSystems();
     void RestoreWorldClock(const WorldClock& clock);
-    bool SaveWorldMetadataTo(const std::filesystem::path& save_dir);
+    bool SaveWorldMetadataTo(const std::filesystem::path& save_dir,
+                             Persistence::CreatedWorldArtifacts* artifacts = nullptr);
     bool ClockConfigurationCompatible(const std::filesystem::path& save_dir) const;
     WorldClock m_worldClock;
     void AttachRegionEditObserver();
@@ -521,6 +539,7 @@ private:
                              const std::string& worldType,
                              const std::string* customPresetJson,
                              bool transient,
+                             Persistence::CreatedWorldArtifacts* artifacts,
                              TerrainPresetUse presetUse,
                              const std::string& requiredPresetContentHash = {});
     // Cap catch-up to 2 ticks/frame (default is 4) so a

@@ -933,6 +933,20 @@ public:
     // emitter at each plunge foot (capped to bound particle cost).
     // dressing on a world-deterministic site set — never hashed (one-way).
     void prepare_waterfalls(const Systems::SHIELD_WorldSystem& world);
+    // CPU-only: exclusive pass/site-cache access, with the world retained until
+    // the job drains. Other adoption operations below require the GL thread.
+    WaterfallPass::PreparedGeometry
+    build_waterfall_geometry(const Systems::SHIELD_WorldSystem& world) {
+        return m_waterfall_pass->build_geometry(world);
+    }
+    void begin_waterfall_adoption(WaterfallPass::PreparedGeometry geometry) {
+        m_waterfall_pass->begin_adoption(std::move(geometry));
+    }
+    bool adopt_waterfalls() {
+        return m_waterfall_pass->adopt_next(m_particle_pass.get(), m_root_path);
+    }
+    // Entry cancellation runs after its CPU job and world readers are drained.
+    void cancel_waterfall_adoption();
 
 private:
     friend struct TerrainCullingTestPeer;

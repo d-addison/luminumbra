@@ -4279,6 +4279,13 @@ void RenderPipeline::cleanup_gpu_resources() {
 }
 
 // Bake the live waterfall dressing in the pass that owns its geometry and draw.
+void RenderPipeline::cancel_waterfall_adoption() {
+    m_waterfall_pass->destroy_geometry();
+    m_waterfall_pass->waterfall_cache().clear();
+    if (m_particle_pass)
+        m_particle_pass->clear_emitters();
+}
+
 void RenderPipeline::prepare_waterfalls(const Systems::SHIELD_WorldSystem& world) {
     m_waterfall_pass->prepare(world, m_particle_pass.get(), m_root_path);
 }

@@ -19,6 +19,8 @@ struct EntityRegistrySnapshot;
 
 namespace Luminumbra::Persistence {
 
+class CreatedWorldArtifacts;
+
 // Counters describing one incremental save pass over the streaming state.
 struct WorldSaveDirtyReport {
     std::size_t chunks_total = 0;
@@ -76,7 +78,8 @@ public:
     static bool save_active_regions(world::ActiveRegionLedger& ledger,
                                     const world::WorldClock& clock,
                                     const std::filesystem::path& save_dir,
-                                    std::vector<std::string>* errors = nullptr);
+                                    std::vector<std::string>* errors = nullptr,
+                                    CreatedWorldArtifacts* artifacts = nullptr);
     // Missing file: clear region state at absent_clock and preserve ledger.config().
     // Present file: decode its persisted scheduler settings along with the region state.
     static bool load_active_regions(world::ActiveRegionLedger& ledger,
@@ -118,7 +121,8 @@ public:
     // Refuses an unsupported existing save before touching its metadata.
     static bool save_metadata(const std::string& bytes,
                               const std::filesystem::path& save_dir,
-                              std::vector<std::string>* errors = nullptr);
+                              std::vector<std::string>* errors = nullptr,
+                              CreatedWorldArtifacts* artifacts = nullptr);
     // Prevalidate the incoming pair and keep the installed ledger tick <= clock tick
     // between replacements, including when an explicit snapshot rewinds the clock.
     // Host-thread-only, synchronous and non-reentrant across sessions. Production
@@ -126,7 +130,8 @@ public:
     static bool save_metadata_and_active_regions(const std::string& bytes,
                                                  world::ActiveRegionLedger& ledger,
                                                  const std::filesystem::path& save_dir,
-                                                 std::vector<std::string>* errors = nullptr);
+                                                 std::vector<std::string>* errors = nullptr,
+                                                 CreatedWorldArtifacts* artifacts = nullptr);
 
     // Shared read-only clock validation for catalog, explicit snapshots and writers.
     // Missing metadata is a legacy snapshot with a default clock.
@@ -202,9 +207,12 @@ public:
     // previous complete file, or on POSIX the new complete file when only the final
     // directory flush failed, never a partial file. Used for derived files that live
     // beside the save, such as the far authority overlay.
+    // With a creation journal, the parent must already be owned. Temporary and
+    // published files remain journal-owned on failure until writers drain and rollback runs.
     static bool write_file_durably(const std::filesystem::path& destination,
                                    const std::string& bytes,
-                                   std::vector<std::string>* errors = nullptr);
+                                   std::vector<std::string>* errors = nullptr,
+                                   CreatedWorldArtifacts* artifacts = nullptr);
 
     // Called after ledger staging is flushed/closed, before replacement. Returning
     // false fails the write and cleans up; a test subprocess may terminate here

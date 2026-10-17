@@ -395,6 +395,8 @@ void Rml_UIManager::Render() {
 }
 
 void Rml_UIManager::RequestLoadDocument(std::string path) {
+    if (path != m_activeDocument && m_navigationAwayCallback)
+        m_navigationAwayCallback();
     m_documentToLoad = std::move(path);
 }
 
@@ -626,8 +628,11 @@ void Rml_UIManager::BindEventListeners(Rml::ElementDocument* document) {
     if (auto* e = document->GetElementById("gallery_btn"))
         AddClickSoundListener(e, [this](Rml::Event&) { this->RequestLoadDocument("gallery.rml"); });
     if (auto* e = document->GetElementById("quit_btn"))
-        AddClickSoundListener(
-            e, [this](Rml::Event&) { glfwSetWindowShouldClose(this->m_window, true); });
+        AddClickSoundListener(e, [this](Rml::Event&) {
+            if (m_navigationAwayCallback)
+                m_navigationAwayCallback();
+            glfwSetWindowShouldClose(this->m_window, true);
+        });
     if (auto* e = document->GetElementById("back_btn"))
         AddClickSoundListener(e, [this, document](Rml::Event&) {
             // Leaving settings persists the live-applied changes (sliders apply on change; the
