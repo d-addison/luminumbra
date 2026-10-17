@@ -670,7 +670,7 @@
     {
       "id": "iss.126",
       "source": "issue #126",
-      "statement": "Every inventoried requirement in both reviewed documents has a matrix row with named evidence or explicit planned work. The checker refuses omitted or stale statements and unaudited exclusions; native execution and planned acceptance work remain unqualified.",
+      "statement": "Every statement in both reviewed documents is inventoried and mapped to named evidence or explicit planned work. AcceptanceMatrixContract tests the static completeness, reference and generated-document checks; planned acceptance work and native execution remain unqualified.",
       "status": "covered",
       "evidence": [
         {
@@ -1126,30 +1126,6 @@
         {
           "kind": "ctest",
           "ref": "GameSessionHeadlessWorldTest.CorruptLedgerLoadPreservesTheLiveWorld"
-        }
-      ]
-    },
-    {
-      "id": "contract.region-input-bounds",
-      "source": "docs/active-regions.md#activation-and-ordering",
-      "statement": "Walking anchors and ground-object edit positions require finite coordinates and -2^24 <= x,z < 2^24; region pins require -32768 <= x,z < 32768. Invalid inputs are ignored and counted observationally. The boundary predicate and host refusal paths have authored unit evidence; static validation does not prove execution.",
-      "status": "covered",
-      "requirements": [
-        "ar.activation.050",
-        "ar.activation.065"
-      ],
-      "evidence": [
-        {
-          "kind": "ctest",
-          "ref": "ActiveRegionLedgerTest.ValidAnchorBoundaries"
-        },
-        {
-          "kind": "ctest",
-          "ref": "GameSessionHeadlessWorldTest.InvalidHostInputsNeverThrowAndAreCounted"
-        },
-        {
-          "kind": "ctest",
-          "ref": "ActiveRegionLedgerTest.PinBoundariesOnBothAxes"
         }
       ]
     },
@@ -2221,38 +2197,6 @@
       ]
     },
     {
-      "id": "contract.region-default-qualification",
-      "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
-      "statement": "Regional continuation performance qualification remains planned for v0.4.0 under issue #320; compiled switch defaults do not qualify that release obligation.",
-      "status": "planned",
-      "requirements": [
-        "ar.scope.008"
-      ],
-      "evidence": [
-        {
-          "kind": "doc",
-          "ref": "docs/regional-water-continuation.md",
-          "planned": "Qualify representative-world regional continuation performance for v0.4.0; owner: ds"
-        }
-      ]
-    },
-    {
-      "id": "contract.region-diagnostics",
-      "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
-      "statement": "Diagnostics and measured budget activation remain separate qualification work.",
-      "status": "planned",
-      "requirements": [
-        "ar.scope.006"
-      ],
-      "evidence": [
-        {
-          "kind": "doc",
-          "ref": "docs/distant-world.md",
-          "planned": "Qualify the regional diagnostic panel and measured budget activation together with representative-world evidence; owner: ds"
-        }
-      ]
-    },
-    {
       "id": "contract.ar.activation.01",
       "source": "docs/active-regions.md#activation-and-ordering",
       "statement": "Acceptance obligations: The host's last walking feet position is stored as an optional anchor and restored before ticking. / Camera movement and noclip updates cannot replace it. / Replicated server avatar positions are supplied at the host tick boundary; / avatar persistence remains outside this slice. / an explicitly empty server list visits no regions, even when the ledger holds a local anchor. / Voxel edits notify each modified chunk's region.",
@@ -3001,6 +2945,916 @@
       ]
     },
     {
+      "id": "contract.population-registration",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "statement": "Register population before world adoption, seal configuration identity, reject replacement, and populate each eligible owner once. Empty callbacks persist populated decisions without allocating entities. Request-field and ineligible-owner controls remain planned.",
+      "status": "partial",
+      "requirements": [
+        "dw.regions.031",
+        "dw.regions.032",
+        "dw.regions.033",
+        "dw.regions.034",
+        "dw.regions.035",
+        "dw.regions.036",
+        "dw.regions.037",
+        "dw.regions.038"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.RegisteredPopulationIdentityRefusesChangedConfigurationOnLoad"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.S8GPopulationRunsInRegionKeyOrderOnce"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.S8GPopulatedSurvivesSaveAndRestart"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RegionPopulator.EmptySuccessSetsPopulatedWithoutIdsOrWork"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RegionPopulator.DefaultNoneCreatesNoAmbientPopulation"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/distant-world.md",
+          "planned": "Add independent controls for registered-callback contract/configuration and sorted object-type/payload identity framing (dw.regions.032), default-none real-session decisions (dw.regions.034), Reduced/Frozen callback exclusion (dw.regions.037), and request tick, population RNG domain and centre-sampled biome (dw.regions.038); owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.population-commands",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "statement": "Stage creature and object commands in call order, use the command index for retry-stable founder draws, reject positions before and after millimetre conversion, and roll back invalid or over-capacity batches. Complete production founder defaults and captured-species resolution remain planned.",
+      "status": "partial",
+      "requirements": [
+        "dw.regions.039",
+        "dw.regions.040",
+        "dw.regions.041",
+        "dw.regions.042",
+        "dw.regions.043",
+        "dw.regions.044",
+        "dw.regions.045",
+        "dw.regions.046",
+        "dw.regions.047"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "RegionPopulator.CommandsAreStagedInCallOrder"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RegionPopulator.RetryUsesTheSamePopulationStream"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RegionPopulator.CommandsCannotSpawnOutsideRequestedOwner"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RegionPopulator.ValidationFailureRollsBackAllocatorEntitiesObjectsAndEvents"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RegionPopulator.CapacityFailureRollsBackTheWholeRegion"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.S8GPopulationRunsInRegionKeyOrderOnce"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/distant-world.md",
+          "planned": "Prove captured-species resolution rather than the fixture factory (dw.regions.040), all production founder genome, sex, role, intent and continuation defaults (dw.regions.041), and deterministic callback/configuration behavior (dw.regions.044); owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.population-transaction",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "statement": "Prepare population privately and publish commands together; failures preserve allocator generations, component signals, runtime attachments, events and work. Construction observers survive publication and non-owning groups refuse it. Remaining publication and group guards require dedicated controls.",
+      "status": "partial",
+      "requirements": [
+        "dw.regions.048",
+        "dw.regions.049",
+        "dw.regions.050",
+        "dw.regions.051",
+        "dw.regions.052",
+        "dw.regions.053",
+        "dw.regions.054",
+        "dw.regions.055",
+        "dw.regions.056",
+        "dw.regions.057",
+        "dw.regions.058",
+        "dw.regions.059",
+        "dw.regions.060"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "RegionPopulator.ThrowAfterSeveralCommandsChangesNoAuthority"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RegionPopulator.EntityPreparationFailurePreservesAllocatorGenerations"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RegionPopulator.NonOwningGroupRefusesPublicationWithoutChangingMembership"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RegionPopulator.EmptyNonOwningGroupRefusesBeforeAnyEntityOrSequenceIsPublished"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RegionPopulator.EventPreparationFailureConsumesNoSequences"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RegionPopulator.SuccessfulPublicationPreservesExistingOptionalInventoryAndReferences"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RegionPopulator.MixedCommandsAllocateIdsInSinkOrder"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.S8GPopulationFailureLeavesCoherentFaultRecoverySave"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.S8GSuccessfulHandlerSavePreservesNextTickWorkAndContinuation"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/distant-world.md",
+          "planned": "Audit the full private preparation/publication set and nonthrowing exchanges (dw.regions.048-.049), ordinary-view semantics (dw.regions.052), owning groups and destruction/exclusion listeners (dw.regions.053-.054), and absence of public ground-spawn side effects (dw.regions.060); owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.activation-intents",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "statement": "Notify creation and direct thaw, exclude budget recovery, and capture the current accepted operation with edit over pin over presence precedence. Reject invalid requests and retain the captured cause across unpin; owner retention for undelivered entries is tested.",
+      "status": "partial",
+      "requirements": [
+        "dw.regions.061",
+        "dw.regions.062",
+        "dw.regions.063",
+        "dw.regions.064",
+        "dw.regions.065",
+        "dw.regions.066",
+        "dw.regions.067",
+        "dw.regions.068",
+        "dw.regions.069",
+        "dw.regions.070"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedger.ActivationIncludesAbsentToActive"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedger.ActivationIncludesDirectFrozenToActive"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedger.ReducedToActiveRecoveryDoesNotActivateAgain"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedger.ActivationCauseUsesCurrentEditPinPresencePrecedence"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedger.StickyFlagsDoNotDetermineActivationCause"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedger.RejectedInputsCreateNoActivationIntent"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedger.ActivationIntentAndOutboxRoundTrip"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedger.PendingActivationRetainsOwnerUntilAcknowledgement"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/distant-world.md",
+          "planned": "Add an idle-retention control with an unscheduled activation intent, separately from the pending outbox (dw.regions.070); owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.activation-envelope",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "statement": "Persist and validate TLV 7 intents and outbox transactionally, adopt absent metadata as empty, and preserve the existing file envelope. Roundtrip and malformed-input controls are landed; the full byte oracle, combined-count bound and extension-growth rollback remain planned.",
+      "status": "partial",
+      "requirements": [
+        "dw.regions.071",
+        "dw.regions.072",
+        "dw.regions.073",
+        "dw.regions.074",
+        "dw.regions.075",
+        "dw.regions.076",
+        "dw.regions.077",
+        "dw.regions.078",
+        "dw.regions.079",
+        "dw.regions.080",
+        "dw.regions.081",
+        "dw.regions.082"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedger.ActivationIntentAndOutboxRoundTrip"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedger.AbsentActivationExtensionAdoptsEmpty"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedger.MalformedActivationExtensionRefusesTransactionally"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedger.ActivationMetadataDoesNotRaiseLedgerFileLimit"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/distant-world.md",
+          "planned": "Add independent complete intent/outbox byte and ordering oracles (dw.regions.071-.073), combined count boundary (dw.regions.074), exhaustive key/order/boolean/cause/tick failures (dw.regions.075), growing allocator/identity/debt/age/work envelope rollback (dw.regions.077-.078), and exact canonical activation tag/value placement (dw.regions.082); owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.activation-delivery",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "statement": "Queue durable activations before population events, reconcile restored keys atomically, and acknowledge only after successful delivery and continuation checks. Restart replays an unacknowledged stable key without repeating successful in-process delivery. Production payload variants and subscriber constraints need further controls.",
+      "status": "partial",
+      "requirements": [
+        "dw.regions.083",
+        "dw.regions.084",
+        "dw.regions.085",
+        "dw.regions.086",
+        "dw.regions.087",
+        "dw.regions.088",
+        "dw.regions.089",
+        "dw.regions.090",
+        "dw.regions.091",
+        "dw.regions.092",
+        "dw.regions.093",
+        "dw.regions.094",
+        "dw.regions.095"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.S8GPopulationRunsInRegionKeyOrderOnce"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.S8GExplicitLoadInsertsLowerActivationKeyInDurableOrder"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.S8GExplicitLoadReplacesQueuedActivationCause"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.S8GSaveBeforeActivationDeliveryRestoresOutbox"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.S8GDeliveredActivationIsNotRecreatedOnLoad"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationEventBusOrderGate"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/distant-world.md",
+          "planned": "Exercise production edit and presence payload strings in addition to pin, rather than fixture events (dw.regions.085), observational/idempotent subscribers (dw.regions.094), and isolation of authoritative population from activation subscribers (dw.regions.095); owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.activation-save-load",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "statement": "Save during activation delivery preserves outbox, populated decisions and next-tick completed-work charge. Restart continues without repopulation; explicit-load enqueue preparation failure preserves every prior live authority and event sequence. Reentrant operation refusal remains planned.",
+      "status": "partial",
+      "requirements": [
+        "dw.regions.096",
+        "dw.regions.097",
+        "dw.regions.098",
+        "dw.regions.099",
+        "dw.regions.100",
+        "dw.regions.101",
+        "dw.regions.102"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.S8GSaveBeforeActivationDeliveryRestoresOutbox"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.S8GSuccessfulHandlerSavePreservesNextTickWorkAndContinuation"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.S8GExplicitLoadEnqueueFailurePreservesLiveAuthority"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.ActivationFaultsStopFirstMiddleAndLastFrameTicks"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationEventBusOrderGate"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/distant-world.md",
+          "planned": "Add direct load/replacement and recursive-tick refusal assertions inside activation handlers (dw.regions.097); owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.population-legacy",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "statement": "Disabled population preserves legacy save files, world hash, artifact bytes and event publish/drain ordering.",
+      "status": "covered",
+      "requirements": [
+        "dw.regions.103"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.S8GFlagOffPreservesSaveFileCountHashAndArtifactBytes"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationEventBusOrderGate"
+        }
+      ]
+    },
+    {
+      "id": "contract.content-admission",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "statement": "Capture required species inventories and optional policy transactionally, reject unsafe or changed filesystem content, and preserve adopted content on refusal. Both POSIX and Windows refusal paths have registered controls; exhaustive parser and inventory limits remain planned.",
+      "status": "partial",
+      "requirements": [
+        "ar.policy.001",
+        "ar.policy.002",
+        "ar.policy.003",
+        "ar.policy.004",
+        "ar.policy.005",
+        "ar.policy.006",
+        "ar.policy.007",
+        "ar.policy.008",
+        "ar.policy.009",
+        "ar.policy.010",
+        "ar.policy.011",
+        "ar.policy.012",
+        "ar.policy.013",
+        "ar.policy.014",
+        "ar.policy.015",
+        "ar.policy.016",
+        "ar.policy.017",
+        "ar.policy.018",
+        "ar.policy.019",
+        "ar.policy.020",
+        "ar.policy.021"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.EnabledContentPreflightRefusesBeforePublishingOrSavingWorld"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.AdoptedContentIsImmutableAndPolicyMismatchRefusesBothLoadPaths"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PolicyUnknownSpeciesAndInventoryCountRefuse"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.CompleteInventoryCollisionAfterZeroRemapRefuses"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.DuplicateInventoryNamesRefuseAcrossDifferentPaths"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.SpeciesIdentityCrossLanguageVectors"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.IdentityIndependentOfDirectoryEnumeration"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.DefinitionResourceCapsAndDirectoryChangesRefuseAtomically"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PolicyCleanAbsenceSelectsDefaults"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.MissingPolicyParentRefusesWithoutChangingAdoptedContent"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.RawNulPolicyRefusesWithoutChangingAdoptedContent"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.RawNulDefinitionsRefuseWithoutChangingAdoptedContentOrIdentityOutput"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PolicyIoSymlinkNonregularOversizeAndChangedReadRefuse"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PolicyUnreadableModeRefuses"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PolicyParentRemovedAfterCheckIsError"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PolicyParentReplacedAfterCheckIsError"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PolicyLeafSymlinkRefuses"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PolicyParentSymlinkRefuses"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PolicyLeafReplacedBySymlinkBeforeOpenRefuses"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PolicyWindowsReadAccessDeniedRefuses"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PolicyWindowsAccessDeniedBeforeOpenRefuses"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PolicyWindowsLeafJunctionRefuses"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PolicyWindowsParentJunctionRefuses"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PolicyWindowsLeafReplacedByJunctionBeforeOpenRefuses"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PolicyWindowsParentReplacedByJunctionAfterCheckRefuses"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PolicyRegularLeafReplacedBeforeOpenRefuses"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PolicyGrownAndShrunkDuringReadRefuse"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PolicyUtf8BomCrFinalLfAndDepthRefuse"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.DefinitionMalformedPresentFieldNeverDefaults"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Complete exact 1/256 inventory endpoints and individual/aggregate byte endpoints (ar.policy.002-.003), definition-name UTF-8/NUL/length boundaries (ar.policy.004), both-domain parser depth/string/collection/event caps (ar.policy.018), and const-only session API verification (ar.policy.020); owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.content-document-readers",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "statement": "Raw NUL is refused before biome, preset, structure and species registry adoption; malformed systems configuration selects defaults and malformed budget profiles refuse. Registered reader regressions cover the file and captured-dependency paths; caller-framed population identity remains separate planned evidence.",
+      "status": "partial",
+      "requirements": [
+        "ar.policy.022",
+        "ar.policy.023",
+        "ar.policy.024",
+        "ar.policy.025",
+        "ar.policy.026"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "BiomeReverbTest.RawNulRefusesWholeTableAndCleanBytesLoadIdentically"
+        },
+        {
+          "kind": "ctest",
+          "ref": "TerrainPresetLoaderTest.RawNulRefusesBeforeAdoptingPreset"
+        },
+        {
+          "kind": "ctest",
+          "ref": "TerrainPresetLoaderTest.CapturedDependencyReadersRefuseRawNulBeforeAdoption"
+        },
+        {
+          "kind": "ctest",
+          "ref": "StructurePlacementTest.RawNulPlacementAndPieceRefusePool"
+        },
+        {
+          "kind": "ctest",
+          "ref": "CreatureSpeciesRegistry.RawNulTextAndFilesRefuseWithoutChangingRegistry"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SpeciesRegistry.RawNulTextAndFilesRefuseWithoutChangingRegistry"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SystemConfig.RawNulRefusesWholeConfiguration"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SystemConfig.EmptyAndBlankJsonAreDefaults"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimBudgetProfileTest.RawNulRefusesWholeProfile"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.CustomPresetRawNulRefusesBeforePublishingOrSavingWorld"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Prove caller-supplied population configuration is identity framing rather than a parsed document (ar.policy.026), and complete malformed-input controls beyond raw NUL for every operator budget profile path (ar.policy.025); owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.policy-schema",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "statement": "Require the exact policy schema and field sets, validate creature and plant integer endpoints, and refuse missing, unknown, duplicate, future, boolean, decimal, exponent, negative and overflowing values.",
+      "status": "covered",
+      "requirements": [
+        "ar.policy.027",
+        "ar.policy.028",
+        "ar.policy.029",
+        "ar.policy.030",
+        "ar.policy.031",
+        "ar.policy.032"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PolicyEveryIntegerEndpoint"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PolicyBooleanDecimalExponentNegativeAndOverflowRefuse"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PolicyUnknownMissingDuplicateAndFutureFieldsRefuseAtomically"
+        }
+      ]
+    },
+    {
+      "id": "contract.policy-defaults",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "statement": "Resolve omitted and explicit defaults identically and retain documented zero semantics, cadence interpretation and algorithm version. Consumer-wide enforcement and version interpretation still need dedicated evidence.",
+      "status": "partial",
+      "requirements": [
+        "ar.policy.033",
+        "ar.policy.034",
+        "ar.policy.035",
+        "ar.policy.036",
+        "ar.policy.037",
+        "ar.policy.038",
+        "ar.policy.039",
+        "ar.policy.040",
+        "ar.policy.041"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PolicyAbsentEmptyAndExplicitDefaultsResolveEqually"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.OverrideCanonicalRoundTripAndSemanticDefaults"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.ResolvedPlantPolicyDrivesSessionCadenceAndResume"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Prove zero need/travel, lifecycle and promotion consumer semantics (ar.policy.034-.036), explicit zero plant catch-up across continuation (ar.policy.038), accepted-owner coarse cadence and algorithm-version interpretation (ar.policy.039-.040), and enforcement by each consumer (ar.policy.041); owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.content-identity-wire",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "statement": "New enabled worlds carry TLV 5 even when empty; its exact 40-byte little-endian version/default/algorithm/reserved/digest layout is pinned by an independent byte oracle.",
+      "status": "covered",
+      "requirements": [
+        "ar.policy.042",
+        "ar.policy.043",
+        "ar.policy.044",
+        "ar.policy.045",
+        "ar.policy.046",
+        "ar.policy.047",
+        "ar.policy.048",
+        "ar.policy.049",
+        "ar.policy.050",
+        "ar.policy.051"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.AdoptedContentIsImmutableAndPolicyMismatchRefusesBothLoadPaths"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedgerTest.ContentIdentityIsImmutableAndHasAnExactVersionedWireRecord"
+        }
+      ]
+    },
+    {
+      "id": "contract.content-policy-projection",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "statement": "Policy identity uses the specified FNV constants, framing, ordering, tags, versions and resolved fields; path changes and missing/empty/explicit defaults preserve identity. Complete canonical byte framing remains planned.",
+      "status": "partial",
+      "requirements": [
+        "ar.policy.052",
+        "ar.policy.053",
+        "ar.policy.054",
+        "ar.policy.055",
+        "ar.policy.056",
+        "ar.policy.057",
+        "ar.policy.058",
+        "ar.policy.059",
+        "ar.policy.060",
+        "ar.policy.061"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.SpeciesIdentityCrossLanguageVectors"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.IdentityIndependentOfDirectoryEnumeration"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.IdentityExcludesPresentationWhitespacePathsAndJsonOrder"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PolicyAbsentEmptyAndExplicitDefaultsResolveEqually"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.OverrideCanonicalRoundTripAndSemanticDefaults"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.IdentityIncludesDefaultAndAlgorithmVersionsAndPopulationConfiguration"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Add independent canonical policy preimage/digest vectors for little-endian integer and length framing, full tag/version/default table, every resolved field and fully authored overrides (ar.policy.053-.054 and ar.policy.057-.059); equality controls alone do not prove those byte layouts; owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.content-definition-projection",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "statement": "Definition identity includes resolved simulation data and all species, excludes presentation and paths, and adopts compiled defaults. Independent complete creature and plant payload byte vectors remain planned.",
+      "status": "partial",
+      "requirements": [
+        "ar.policy.062",
+        "ar.policy.063",
+        "ar.policy.064",
+        "ar.policy.065",
+        "ar.policy.066",
+        "ar.policy.067",
+        "ar.policy.068",
+        "ar.policy.069"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.IdentityExcludesPresentationWhitespacePathsAndJsonOrder"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.IdentityIncludesUnreferencedCreatureAndPlantSimulationDefinitions"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.ResolvedSpeciesDefaultsEqualExplicitSimulationDefaults"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Add independent complete definition preimage/digest vectors for tags, names, IDs, counts, brain and genome field order, float bits and plant gene enum order, plus every omitted field in both domains (ar.policy.062-.067); owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.content-population-identity",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "statement": "Population identity binds caller-supplied versioned contract and canonical configuration before adoption and refuses empty or oversized inputs atomically. Exact framing and all contract limits need independent controls.",
+      "status": "partial",
+      "requirements": [
+        "ar.policy.070",
+        "ar.policy.071",
+        "ar.policy.072",
+        "ar.policy.073",
+        "ar.policy.074",
+        "ar.policy.075"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.IdentityIncludesDefaultAndAlgorithmVersionsAndPopulationConfiguration"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.PopulationIdentityInputsAreAdoptedAndBoundedAtomically"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.RegisteredPopulationIdentityRefusesChangedConfigurationOnLoad"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RegionPopulator.DefaultNoneCreatesNoAmbientPopulation"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Prove exact population tag/framing and default none digest (ar.policy.070-.071), UTF-8 and 256-byte contract plus exact configuration endpoints (ar.policy.073), and identity-only absence of callbacks or population-file adoption (ar.policy.074); owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.content-session-identity",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "statement": "Seal immutable content identity before loaded authority, persist historical adoption on the next save, reject mismatches and malformed TLVs, preserve completed work and keep disabled paths byte-identical. Exact canonical suffix placement and legacy opt-in need additional controls.",
+      "status": "partial",
+      "requirements": [
+        "ar.policy.076",
+        "ar.policy.077",
+        "ar.policy.078",
+        "ar.policy.079",
+        "ar.policy.080",
+        "ar.policy.081",
+        "ar.policy.082",
+        "ar.policy.083",
+        "ar.policy.084",
+        "ar.policy.085",
+        "ar.policy.086",
+        "ar.policy.087",
+        "ar.policy.088",
+        "ar.policy.089"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedgerTest.ContentIdentityIsImmutableAndHasAnExactVersionedWireRecord"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedgerTest.ContentIdentityPrecedesCompletedWorkAndPreservesNextDecision"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedgerTest.ContentAndWorkEnvelopeRefusesMalformedOrMisorderedTlvsAtomically"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.AdoptedContentIsImmutableAndPolicyMismatchRefusesBothLoadPaths"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.SpeciesSimulationMismatchRefusesAndPresentationChangesReload"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.IndexedEnabledHistoricalLedgerAdoptsIdentityOnNextSave"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FlagOffPolicyHasNoEffectOnSaveHashOrArtifactBytes"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FlagOffLoadThenSavePreservesExistingWorldBytes"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Add an independent canonical content-identity suffix/placement oracle (ar.policy.076), exhaustive load-before-authority preservation on mismatch (ar.policy.086), and an explicit legacy flag-off world opting in (ar.policy.088); owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.region-input-bounds",
+      "source": "docs/active-regions.md#activation-and-ordering",
+      "statement": "Walking anchors and ground-object edit positions require finite coordinates and -2^24 <= x,z < 2^24; region pins require -32768 <= x,z < 32768. Invalid inputs are ignored and counted observationally. The boundary predicate and host refusal paths have authored unit evidence; static validation does not prove execution.",
+      "status": "covered",
+      "requirements": [
+        "ar.activation.050",
+        "ar.activation.065"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedgerTest.ValidAnchorBoundaries"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.InvalidHostInputsNeverThrowAndAreCounted"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedgerTest.PinBoundariesOnBothAxes"
+        }
+      ]
+    },
+    {
+      "id": "contract.region-default-qualification",
+      "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
+      "statement": "Regional continuation performance qualification remains planned for v0.4.0 under issue #320; compiled switch defaults do not qualify that release obligation.",
+      "status": "planned",
+      "requirements": [
+        "ar.scope.008"
+      ],
+      "evidence": [
+        {
+          "kind": "doc",
+          "ref": "docs/regional-water-continuation.md",
+          "planned": "Qualify representative-world regional continuation performance for v0.4.0; owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.region-diagnostics",
+      "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
+      "statement": "Diagnostics and measured budget activation remain separate qualification work.",
+      "status": "planned",
+      "requirements": [
+        "ar.scope.006"
+      ],
+      "evidence": [
+        {
+          "kind": "doc",
+          "ref": "docs/distant-world.md",
+          "planned": "Qualify the regional diagnostic panel and measured budget activation together with representative-world evidence; owner: ds"
+        }
+      ]
+    },
+    {
       "id": "contract.persistence-read-bounds",
       "source": "docs/active-regions.md#file-and-compatibility",
       "statement": "Persistence hashes and reads enforce regular-file byte bounds; legacy energy decoding and load refusals preserve authority, and plant admission and writers share population and record limits. Authored regressions cover large legitimate energy and plant records; native execution remains unqualified.",
@@ -3087,95 +3941,95 @@
       "statement": "Strict policy and species admission, canonical content identity, and ledger compatibility have registered parser, persistence and session regressions. Integrated native qualification and acceptance evidence review remain outstanding.",
       "status": "partial",
       "requirements": [
-        "ar.content.001",
-        "ar.content.002",
-        "ar.content.003",
-        "ar.content.004",
-        "ar.content.005",
-        "ar.content.006",
-        "ar.content.007",
-        "ar.content.008",
-        "ar.content.009",
-        "ar.content.010",
-        "ar.content.011",
-        "ar.content.012",
-        "ar.content.013",
-        "ar.content.014",
-        "ar.content.015",
-        "ar.content.016",
-        "ar.content.017",
-        "ar.content.018",
-        "ar.content.019",
-        "ar.content.020",
-        "ar.content.021",
-        "ar.content.022",
-        "ar.content.023",
-        "ar.content.024",
-        "ar.content.025",
-        "ar.content.026",
-        "ar.content.027",
-        "ar.content.028",
-        "ar.content.029",
-        "ar.content.030",
-        "ar.content.031",
-        "ar.content.032",
-        "ar.content.033",
-        "ar.content.034",
-        "ar.content.035",
-        "ar.content.036",
-        "ar.content.037",
-        "ar.content.038",
-        "ar.content.039",
-        "ar.content.040",
-        "ar.content.041",
-        "ar.content.042",
-        "ar.content.043",
-        "ar.content.044",
-        "ar.content.045",
-        "ar.content.046",
-        "ar.content.047",
-        "ar.content.048",
-        "ar.content.049",
-        "ar.content.050",
-        "ar.content.051",
-        "ar.content.052",
-        "ar.content.053",
-        "ar.content.054",
-        "ar.content.055",
-        "ar.content.056",
-        "ar.content.057",
-        "ar.content.058",
-        "ar.content.059",
-        "ar.content.060",
-        "ar.content.061",
-        "ar.content.062",
-        "ar.content.063",
-        "ar.content.064",
-        "ar.content.065",
-        "ar.content.066",
-        "ar.content.067",
-        "ar.content.068",
-        "ar.content.069",
-        "ar.content.070",
-        "ar.content.071",
-        "ar.content.072",
-        "ar.content.073",
-        "ar.content.074",
-        "ar.content.075",
-        "ar.content.076",
-        "ar.content.077",
-        "ar.content.078",
-        "ar.content.079",
-        "ar.content.080",
-        "ar.content.081",
-        "ar.content.082",
-        "ar.content.083",
-        "ar.content.084",
-        "ar.content.085",
-        "ar.content.086",
-        "ar.content.087",
-        "ar.content.088",
-        "ar.content.089",
+        "ar.policy.001",
+        "ar.policy.002",
+        "ar.policy.003",
+        "ar.policy.004",
+        "ar.policy.005",
+        "ar.policy.006",
+        "ar.policy.007",
+        "ar.policy.008",
+        "ar.policy.009",
+        "ar.policy.010",
+        "ar.policy.011",
+        "ar.policy.012",
+        "ar.policy.013",
+        "ar.policy.014",
+        "ar.policy.015",
+        "ar.policy.016",
+        "ar.policy.017",
+        "ar.policy.018",
+        "ar.policy.019",
+        "ar.policy.020",
+        "ar.policy.021",
+        "ar.policy.022",
+        "ar.policy.023",
+        "ar.policy.024",
+        "ar.policy.025",
+        "ar.policy.026",
+        "ar.policy.027",
+        "ar.policy.028",
+        "ar.policy.029",
+        "ar.policy.030",
+        "ar.policy.031",
+        "ar.policy.032",
+        "ar.policy.033",
+        "ar.policy.034",
+        "ar.policy.035",
+        "ar.policy.036",
+        "ar.policy.037",
+        "ar.policy.038",
+        "ar.policy.039",
+        "ar.policy.040",
+        "ar.policy.041",
+        "ar.policy.042",
+        "ar.policy.043",
+        "ar.policy.044",
+        "ar.policy.045",
+        "ar.policy.046",
+        "ar.policy.047",
+        "ar.policy.048",
+        "ar.policy.049",
+        "ar.policy.050",
+        "ar.policy.051",
+        "ar.policy.052",
+        "ar.policy.053",
+        "ar.policy.054",
+        "ar.policy.055",
+        "ar.policy.056",
+        "ar.policy.057",
+        "ar.policy.058",
+        "ar.policy.059",
+        "ar.policy.060",
+        "ar.policy.061",
+        "ar.policy.062",
+        "ar.policy.063",
+        "ar.policy.064",
+        "ar.policy.065",
+        "ar.policy.066",
+        "ar.policy.067",
+        "ar.policy.068",
+        "ar.policy.069",
+        "ar.policy.070",
+        "ar.policy.071",
+        "ar.policy.072",
+        "ar.policy.073",
+        "ar.policy.074",
+        "ar.policy.075",
+        "ar.policy.076",
+        "ar.policy.077",
+        "ar.policy.078",
+        "ar.policy.079",
+        "ar.policy.080",
+        "ar.policy.081",
+        "ar.policy.082",
+        "ar.policy.083",
+        "ar.policy.084",
+        "ar.policy.085",
+        "ar.policy.086",
+        "ar.policy.087",
+        "ar.policy.088",
+        "ar.policy.089",
         "ar.scope.013",
         "ar.scope.014"
       ],

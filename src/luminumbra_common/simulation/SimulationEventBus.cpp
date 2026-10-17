@@ -2,7 +2,10 @@
 
 #include <algorithm>
 #include <iomanip>
+#include <limits>
+#include <set>
 #include <sstream>
+#include <stdexcept>
 
 namespace luminumbra::simulation {
 namespace {
@@ -81,7 +84,104 @@ void OrderedEventBus::subscribe(Handler handler) {
     handlers_.push_back(std::move(handler));
 }
 
+OrderedEventBus::PreparedBatch
+OrderedEventBus::prepare_batch(std::span<const SimulationEvent> events,
+                               const std::function<void()>& preparation,
+                               bool reconcile_activations) const {
+    PreparedBatch batch{pending_events_, next_sequence_};
+    std::vector<SimulationEvent> restored_events;
+    if (reconcile_activations) {
+        // Reconstruct activations from the authoritative outbox, including payloads.
+        // Ordinary queued events survive; live-only activation keys do not.
+        std::erase_if(batch.events,
+                      [](const auto& queued) { return queued.activation.has_value(); });
+        restored_events.assign(events.begin(), events.end());
+        std::stable_sort(
+            restored_events.begin(), restored_events.end(), [](const auto& lhs, const auto& rhs) {
+                return lhs.activation < rhs.activation;
+            });
+        // Fresh sequences in durable-key order also replace stale delivery ordering.
+        events = restored_events;
+    }
+    std::set<ActivationDeliveryKey> queued_keys;
+    for (const auto& event : batch.events)
+        if (event.activation)
+            queued_keys.insert(*event.activation);
+    for (const auto& event : events) {
+        if (event.activation && !queued_keys.insert(*event.activation).second)
+            continue;
+        if (batch.next_sequence == std::numeric_limits<std::uint64_t>::max())
+            throw std::overflow_error("Event sequence space exhausted");
+        auto candidate = event;
+        candidate.sequence = batch.next_sequence++;
+        batch.events.push_back(std::move(candidate));
+    }
+    if (preparation)
+        preparation();
+    return batch;
+}
+void OrderedEventBus::commit_batch(PreparedBatch&& batch) noexcept {
+    pending_events_.swap(batch.events);
+    next_sequence_ = batch.next_sequence;
+}
+std::vector<SimulationEvent>
+OrderedEventBus::drain_enabled(std::uint64_t inclusive_tick,
+                               const std::function<bool()>& continue_delivery,
+                               const std::function<void(const ActivationDeliveryKey&)>& acknowledge,
+                               const std::function<void(bool)>& activation_delivery) {
+    if (draining_enabled_)
+        throw std::logic_error("Recursive enabled event drain");
+    struct DrainGuard {
+        bool& draining;
+        explicit DrainGuard(bool& value)
+            : draining(value) {
+            draining = true;
+        }
+        ~DrainGuard() {
+            draining = false;
+        }
+    } guard(draining_enabled_);
+    std::vector<SimulationEvent> delivered;
+    auto eligible = pending_events_;
+    std::stable_sort(eligible.begin(), eligible.end(), event_order_less);
+    for (const auto& event : eligible) {
+        if (event.tick > inclusive_tick || (continue_delivery && !continue_delivery()))
+            break;
+        // Handlers can relocate the live queue; the original event remains pending until ack.
+        delivered.push_back(event);
+        const auto handlers = handlers_;
+        struct DeliveryGuard {
+            const std::function<void(bool)>& boundary;
+            bool active;
+            DeliveryGuard(const std::function<void(bool)>& callback, bool enabled)
+                : boundary(callback)
+                , active(enabled && static_cast<bool>(callback)) {
+                if (active)
+                    boundary(true);
+            }
+            ~DeliveryGuard() {
+                if (active)
+                    boundary(false);
+            }
+        } delivery(activation_delivery, event.activation.has_value());
+        for (const auto& handler : handlers) {
+            if (continue_delivery && !continue_delivery())
+                return delivered;
+            handler(event);
+        }
+        if (continue_delivery && !continue_delivery())
+            return delivered;
+        if (event.activation && acknowledge)
+            acknowledge(*event.activation);
+        std::erase_if(pending_events_,
+                      [&](const auto& queued) { return queued.sequence == event.sequence; });
+    }
+    return delivered;
+}
+
 void OrderedEventBus::clear() {
+    if (draining_enabled_)
+        throw std::logic_error("Cannot clear an enabled delivery in progress");
     pending_events_.clear();
     handlers_.clear();
     next_sequence_ = 0;

@@ -55,6 +55,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <new>
 #include <set>
 #include <span>
 #include <sstream>
@@ -1214,6 +1215,12 @@ TEST_P(SavedWorldPresetTest, NewSaveRoundTripsWithMarkerAndCanonicalIdentity) {
     EXPECT_EQ(SavedPresetTestDiskBytes(Fixture().root.path()), before);
     ASSERT_TRUE(loaded.SaveWorld());
     EXPECT_EQ(nlohmann::json::parse(ReadClockTestFile(save / "world_info.json")), metadata);
+    const auto copy = root.path() / "reopened-copy";
+    ASSERT_TRUE(loaded.SaveWorldStateTo(copy));
+    if (GetParam()) {
+        EXPECT_EQ(nlohmann::json::parse(ReadClockTestFile(copy / "preset.json")), preset);
+        EXPECT_EQ(nlohmann::json::parse(ReadClockTestFile(copy / "world_info.json")), metadata);
+    }
 }
 
 TEST_P(SavedWorldPresetTest, CustomAdditionalNamedPresetCarriesItsExactIdentity) {
@@ -2537,6 +2544,8 @@ TEST(GameSessionHeadlessWorldTest, ClockSnapshotsRefuseInsideCatchUpBatch) {
     const auto before = ReadClockTestFile(metadata);
     int callbacks = 0;
     session.GetSimulationEventBus().subscribe([&](const auto& event) {
+        if (event.topic != "save")
+            return;
         ++callbacks;
         EXPECT_EQ(session.GetSimulationTickCount(), event.tick);
         EXPECT_FALSE(session.IsSimulationTickBoundary());
@@ -7144,6 +7153,7 @@ TEST(GameSessionHeadlessWorldTest, S7PageCapEditAndFailedResumeAreAtomicAndRetai
     EXPECT_EQ(burned_id, 2u);
     const auto stage_count = SF::FoliageRegistryStageCount();
     TickOnce(live); // resume growth then a child needs page 4097: refuse all staged foliage
+    ASSERT_TRUE(live.GetRegionSchedulerFault());
     const auto fault = live.GetRegionSchedulerFault();
     ASSERT_TRUE(fault.has_value());
     if (!fault.has_value())
@@ -7992,6 +8002,7 @@ TEST(GameSessionHeadlessWorldTest, CreatureAuthoritySavesReloadsAndRemovesEmptyS
         fs::exists(P::WorldSaveService::creature_entities_path(original.GetWorldSaveDir())));
     GameSession restored;
     EnableSnapshotSession(restored, root, jobs);
+    ASSERT_TRUE(restored.LoadWorld(original.GetMetadata().worldId)) << restored.GetWorldOpenError();
     std::size_t checked = 0;
     const GameSession::WorldOpenCheck check = [&](const P::SavedWorld&,
                                                   const Luminumbra::Systems::TerrainGenParams&,
@@ -8960,19 +8971,21 @@ void CheckLegacyCreatureSessionOracle() {
     S8O::MakeRoster(expected, false);
     const auto initial = actual.view<C::CreatureComponent>().size();
     const auto save = session.GetWorldSaveDir();
+    auto expected_preset = Luminumbra::world::ResolveTerrainPresetDefaults(
+        nlohmann::json::parse(ReadClockTestFile(SourcePresetPath())));
+    expected_preset["schema_rev"] = Luminumbra::world::kTerrainPresetSchemaRevision;
     const nlohmann::json expected_metadata = {
         {"container_version", 2},
+        {"presetFormat", P::kSavedPresetFormat},
+        {"presetIdentity", P::StableChecksum(expected_preset.dump())},
         {"name", "Legacy creature trajectory"},
         {"seed", "1337"},
         {"worldType", "default"},
         {"creationTime", 123456789},
         {"spawnPoint", {{"x", 8.0f}, {"y", 100.0f}, {"z", 8.0f}}},
         {"waterSimCursor", std::size_t{0}}};
-    auto expected_preset = Luminumbra::world::ResolveTerrainPresetDefaults(
-        nlohmann::json::parse(ReadClockTestFile(SourcePresetPath())));
-    expected_preset["schema_rev"] = Luminumbra::world::kTerrainPresetSchemaRevision;
     const std::map<std::string, std::string> expected_files{
-        {"preset.json", expected_preset.dump(2) + "\n"},
+        {"preset.json", expected_preset.dump() + "\n"},
         {"world_info.json", expected_metadata.dump(4) + "\n"}};
     for (std::uint64_t tick = 1; tick <= 100; ++tick) {
         SCOPED_TRACE(tick);
@@ -9230,17 +9243,19 @@ TEST(GameSessionHeadlessWorldTest, S8EFlagOffPreservesSaveFileCountHashAndArtifa
     luminumbra::ai::ScentField scent(128, 128, 4);
     luminumbra::fields::EnergyFieldState energy(2);
     energy.SetAnchorCell(0, 0);
+    auto expected_preset = Luminumbra::world::ResolveTerrainPresetDefaults(
+        nlohmann::json::parse(ReadClockTestFile(SourcePresetPath())));
+    expected_preset["schema_rev"] = Luminumbra::world::kTerrainPresetSchemaRevision;
     const nlohmann::json expected_metadata = {
         {"container_version", 2},
+        {"presetFormat", P::kSavedPresetFormat},
+        {"presetIdentity", P::StableChecksum(expected_preset.dump())},
         {"name", "Legacy secondary trajectory"},
         {"seed", "1337"},
         {"worldType", "default"},
         {"creationTime", 123456789},
         {"spawnPoint", {{"x", 8.0f}, {"y", 100.0f}, {"z", 8.0f}}},
         {"waterSimCursor", std::size_t{0}}};
-    auto expected_preset = Luminumbra::world::ResolveTerrainPresetDefaults(
-        nlohmann::json::parse(ReadClockTestFile(SourcePresetPath())));
-    expected_preset["schema_rev"] = Luminumbra::world::kTerrainPresetSchemaRevision;
     for (std::uint64_t tick = 1; tick <= 12; ++tick) {
         SCOPED_TRACE(tick);
         luminumbra::ai::StimulusContext context;
@@ -9298,7 +9313,7 @@ TEST(GameSessionHeadlessWorldTest, S8EFlagOffPreservesSaveFileCountHashAndArtifa
                 disk_record += c;
             }
             const std::map<std::string, std::string> files{
-                {"preset.json", expected_preset.dump(2) + "\n"},
+                {"preset.json", expected_preset.dump() + "\n"},
                 {"world_info.json", expected_metadata.dump(4) + "\n"},
                 {"aether_state.efs", disk_record}};
             ASSERT_TRUE(session.SaveWorld());
@@ -9603,6 +9618,10 @@ TEST(GameSessionHeadlessWorldTest,
         jobs.startup(1);
         GameSession original, restored;
         CreateGroundWorld(original, root, jobs, "Controller fault recovery");
+        original.PinActiveRegion(ActiveRegionLedger::region_at(original.GetMetadata().spawnPoint),
+                                 true);
+        const_cast<luminumbra::core::SimulationClock&>(original.GetSimulationClock()) =
+            luminumbra::core::SimulationClock(30.0, 4u);
         auto& registry = original.GetRegistry();
         const auto e = registry.create();
         registry.emplace<C::TransformComponent>(e).position = original.GetMetadata().spawnPoint;
@@ -9642,6 +9661,600 @@ TEST(GameSessionHeadlessWorldTest,
         EXPECT_EQ(restored.GetActiveRegionLedger().next_persistent_id(), next);
     }
 }
+
+namespace {
+Luminumbra::world::RegionPopulator
+SessionPopulation(std::vector<Luminumbra::world::RegionKey>* calls = nullptr) {
+    using namespace Luminumbra::world;
+    return {
+        "session-fixture:v1",
+        "founders-and-objects",
+        {{7u, 9u}},
+        [calls](const RegionPopulateRequest& request) {
+            if (calls)
+                calls->push_back(request.key);
+            const Luminumbra::Vec3 position{static_cast<float>(request.key.x) * 512.0f + 128.0f,
+                                            100.0f,
+                                            static_cast<float>(request.key.z) * 512.0f + 128.0f};
+            request.sink.spawn(GroundObjectSpawnCommand{7u, position, 0u, 2u});
+            request.sink.spawn(
+                CreatureSpawnCommand{C::CreatureSpeciesId16("fixture_creature"), position, false});
+        }};
+}
+std::string PopulationCreatureBytes(GameSession& session) {
+    return luminumbra::ai::SerializeCreatureSnapshot(
+        luminumbra::ai::BuildCreatureSnapshot(session.GetRegistry()));
+}
+void PreparePopulationWorld(GameSession& session,
+                            const HeadlessRoot& root,
+                            JobSystem& jobs,
+                            std::vector<Luminumbra::world::RegionKey>* calls = nullptr) {
+    session.SetRegionPopulator(SessionPopulation(calls));
+    CreateGroundWorld(session, root, jobs, "Registered population");
+    session.SetReplicatedSimulationAnchors({});
+    session.PinActiveRegion({2, 1}, true);
+    session.PinActiveRegion({-2, 3}, true);
+}
+TEST(GameSessionHeadlessWorldTest, S8GPopulationRunsInRegionKeyOrderOnce) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    std::vector<Luminumbra::world::RegionKey> calls;
+    PreparePopulationWorld(session, root, jobs, &calls);
+    std::vector<std::string> event_topics;
+    session.GetSimulationEventBus().subscribe([&](const auto& event) {
+        event_topics.push_back(event.topic);
+        if (event.topic == "region.activated") {
+            ASSERT_TRUE(event.activation);
+            const auto key = *event.activation;
+            EXPECT_TRUE(session.GetActiveRegionLedger().records().at({key.x, key.z}).populated);
+        }
+    });
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    ASSERT_FALSE(calls.empty());
+    EXPECT_TRUE(std::is_sorted(calls.begin(), calls.end()));
+    EXPECT_EQ(std::adjacent_find(calls.begin(), calls.end()), calls.end());
+    const auto first_ground = std::find(event_topics.begin(), event_topics.end(), "ground.spawned");
+    ASSERT_NE(first_ground, event_topics.end());
+    EXPECT_EQ(std::find(first_ground, event_topics.end(), "region.activated"), event_topics.end());
+    for (const auto e : session.GetRegistry().view<C::CreatureGenomeComponent>()) {
+        EXPECT_EQ(session.GetRegistry().get<C::CreatureGenomeComponent>(e).age_ticks, 0u);
+        EXPECT_EQ(session.GetRegistry().get<C::CreatureRegionComponent>(e).region_stamp, 1u);
+        EXPECT_FALSE(session.GetRegistry().all_of<C::CreaturePhysicsComponent>(e));
+    }
+    const auto count = calls.size();
+    TickOnce(session);
+    EXPECT_EQ(calls.size(), count);
+    EXPECT_EQ(session.GetPopulationActivity().successes, count);
+    EXPECT_EQ(session.GetPopulationActivity().failures, 0u);
+    EXPECT_EQ(session.GetPopulationActivity().pending_activations, 0u);
+    EXPECT_THROW(session.SetRegionPopulator(SessionPopulation()), std::logic_error);
+}
+TEST(GameSessionHeadlessWorldTest, S8GPopulatedSurvivesSaveAndRestart) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session, restored;
+    std::vector<Luminumbra::world::RegionKey> calls;
+    PreparePopulationWorld(session, root, jobs, &calls);
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    const auto population = PopulationCreatureBytes(session);
+    const auto next = session.GetActiveRegionLedger().next_persistent_id();
+    ASSERT_TRUE(session.SaveWorld());
+    restored.SetRegionPopulator(SessionPopulation(&calls));
+    EnableSnapshotSession(restored, root, jobs);
+    ASSERT_TRUE(restored.LoadWorld(session.GetMetadata().worldId)) << restored.GetWorldOpenError();
+    restored.SetReplicatedSimulationAnchors({});
+    EXPECT_EQ(PopulationCreatureBytes(restored), population);
+    EXPECT_EQ(restored.GetGroundObjects().canonical_bytes(),
+              session.GetGroundObjects().canonical_bytes());
+    EXPECT_EQ(restored.GetActiveRegionLedger().canonical_bytes(),
+              session.GetActiveRegionLedger().canonical_bytes());
+    const auto count = calls.size();
+    TickOnce(session);
+    TickOnce(restored);
+    EXPECT_EQ(calls.size(), count);
+    EXPECT_EQ(restored.GetActiveRegionLedger().next_persistent_id(), next);
+    EXPECT_EQ(PopulationCreatureBytes(restored), PopulationCreatureBytes(session));
+    EXPECT_EQ(SessionWorldHash(restored), SessionWorldHash(session));
+}
+TEST(GameSessionHeadlessWorldTest, S8GSaveBeforeActivationDeliveryRestoresOutbox) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session, restored;
+    std::vector<Luminumbra::world::RegionKey> calls;
+    PreparePopulationWorld(session, root, jobs, &calls);
+    std::optional<luminumbra::simulation::ActivationDeliveryKey> saved_key;
+    std::string saved_creatures;
+    session.GetSimulationEventBus().subscribe([&](const auto& event) {
+        if (event.topic != "region.activated")
+            return;
+        ASSERT_TRUE(event.activation);
+        saved_key = event.activation;
+        saved_creatures = PopulationCreatureBytes(session);
+        ASSERT_TRUE(session.SaveWorld());
+        throw std::runtime_error("Interrupted activation delivery");
+    });
+    TickOnce(session);
+    ASSERT_TRUE(session.GetRegionSchedulerFault());
+    ASSERT_TRUE(saved_key);
+    EXPECT_FALSE(session.GetActiveRegionLedger().pending_activations().empty());
+    const auto populated_count = calls.size();
+    restored.SetRegionPopulator(SessionPopulation(&calls));
+    EnableSnapshotSession(restored, root, jobs);
+    ASSERT_TRUE(restored.LoadWorld(session.GetMetadata().worldId)) << restored.GetWorldOpenError();
+    restored.SetReplicatedSimulationAnchors({});
+    EXPECT_EQ(PopulationCreatureBytes(restored), saved_creatures);
+    EXPECT_GT(restored.GetSimulationEventBus().pending_count(), 0u);
+    std::vector<luminumbra::simulation::ActivationDeliveryKey> delivered;
+    restored.GetSimulationEventBus().subscribe([&](const auto& event) {
+        if (event.activation)
+            delivered.push_back(*event.activation);
+    });
+    TickOnce(restored);
+    ASSERT_FALSE(restored.GetRegionSchedulerFault());
+    EXPECT_EQ(std::count(delivered.begin(), delivered.end(), *saved_key), 1);
+    EXPECT_EQ(calls.size(), populated_count);
+    EXPECT_TRUE(restored.GetActiveRegionLedger().pending_activations().empty());
+    const auto delivered_count = delivered.size();
+    TickOnce(restored);
+    EXPECT_EQ(delivered.size(), delivered_count);
+}
+TEST(GameSessionHeadlessWorldTest, S8GSuccessfulHandlerSavePreservesNextTickWorkAndContinuation) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session, restored;
+    session.SetRegionSchedulerConfig({1, 1, 1});
+    PreparePopulationWorld(session, root, jobs);
+    std::optional<luminumbra::simulation::ActivationDeliveryKey> saved_key;
+    bool saved = false;
+    bool returned = false;
+    session.GetSimulationEventBus().subscribe([&](const auto& event) {
+        if (!event.activation || saved)
+            return;
+        saved_key = event.activation;
+        saved = session.SaveWorld();
+        returned = true;
+    });
+    TickOnce(session);
+    ASSERT_TRUE(returned);
+    ASSERT_TRUE(saved);
+    ASSERT_TRUE(saved_key);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    ASSERT_TRUE(session.GetActiveRegionLedger().pending_activations().empty());
+    const auto completed = session.GetActiveRegionLedger().completed_work();
+    ASSERT_FALSE(completed.empty());
+    restored.SetRegionPopulator(SessionPopulation());
+    EnableSnapshotSession(restored, root, jobs);
+    ASSERT_TRUE(restored.LoadWorld(session.GetMetadata().worldId)) << restored.GetWorldOpenError();
+    restored.SetReplicatedSimulationAnchors({});
+    EXPECT_EQ(restored.GetActiveRegionLedger().completed_work(), completed);
+    EXPECT_EQ(PopulationCreatureBytes(restored), PopulationCreatureBytes(session));
+    unsigned replays = 0;
+    restored.GetSimulationEventBus().subscribe([&](const auto& event) {
+        if (event.activation == saved_key)
+            ++replays;
+    });
+    std::uint64_t expected_charge = 0;
+    for (const auto& [key, work] : completed) {
+        (void)key;
+        expected_charge += work;
+    }
+    bool transitioned = false;
+    for (unsigned tick = 0; tick < 4; ++tick) {
+        TickOnce(session);
+        TickOnce(restored);
+        ASSERT_FALSE(session.GetRegionSchedulerFault());
+        ASSERT_FALSE(restored.GetRegionSchedulerFault());
+        if (tick == 0) {
+            EXPECT_EQ(session.GetRegionSchedule().work, expected_charge);
+            EXPECT_EQ(restored.GetRegionSchedule().work, expected_charge);
+        }
+        transitioned = transitioned || !session.GetRegionSchedule().transitions.empty();
+        EXPECT_EQ(restored.GetRegionSchedule(), session.GetRegionSchedule());
+        EXPECT_EQ(restored.GetActiveRegionLedger().records(),
+                  session.GetActiveRegionLedger().records());
+        EXPECT_EQ(restored.GetActiveRegionLedger().completed_work(),
+                  session.GetActiveRegionLedger().completed_work());
+        EXPECT_EQ(SessionWorldHash(restored), SessionWorldHash(session));
+    }
+    EXPECT_TRUE(transitioned);
+    EXPECT_EQ(replays, 1u);
+}
+TEST(GameSessionHeadlessWorldTest, ActivationHandlerRefusesChangedPresetWithoutWrites) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    PreparePopulationWorld(session, root, jobs);
+    const auto save = session.GetWorldSaveDir();
+    const SnapshotPresetFiles files(save);
+    unsigned deliveries = 0;
+    session.GetSimulationEventBus().subscribe([&](const auto& event) {
+        if (!event.activation)
+            return;
+        ++deliveries;
+        const auto ledger = session.GetActiveRegionLedger().canonical_bytes();
+        const auto creatures = PopulationCreatureBytes(session);
+        for (const auto* changed : {"preset", "identity", "both"}) {
+            SCOPED_TRACE(changed);
+            ASSERT_NO_FATAL_FAILURE(files.Rewrite(changed));
+            const SnapshotDestinationBytes before(save);
+            EXPECT_FALSE(session.SaveWorld());
+            before.ExpectUnchanged();
+            EXPECT_FALSE(session.SaveWorldState());
+            before.ExpectUnchanged();
+            EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(), ledger);
+            EXPECT_EQ(PopulationCreatureBytes(session), creatures);
+            ASSERT_NO_FATAL_FAILURE(files.Restore());
+        }
+        ASSERT_TRUE(session.SaveWorld());
+    });
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_GT(deliveries, 0u);
+    EXPECT_TRUE(session.GetActiveRegionLedger().pending_activations().empty());
+}
+
+TEST(GameSessionHeadlessWorldTest, S8GExplicitLoadEnqueueFailurePreservesLiveAuthority) {
+    for (const bool allocation_failure : {false, true}) {
+        const HeadlessRoot root;
+        JobSystem jobs;
+        jobs.startup(1);
+        GameSession source, live;
+        PreparePopulationWorld(source, root, jobs);
+        bool saved = false;
+        source.GetSimulationEventBus().subscribe([&](const auto& event) {
+            if (!event.activation)
+                return;
+            saved = source.SaveWorld();
+            throw std::runtime_error("Interrupted activation delivery");
+        });
+        TickOnce(source);
+        ASSERT_TRUE(saved);
+        ASSERT_TRUE(source.GetRegionSchedulerFault());
+        live.SetRegionPopulator(SessionPopulation());
+        CreateGroundWorld(live, root, jobs, "Existing authority");
+        live.SetReplicatedSimulationAnchors({});
+        // Advance an empty destination so every loaded clock/store differs from live state.
+        TickOnce(live);
+        TickOnce(live);
+        const auto entity = ClockTestCreature(live);
+        live.GetRegistry().emplace<C::TagComponent>(entity).tag = "retained runtime attachment";
+        live.GetSimulationEventBus().publish(9, "retained.event", "payload");
+        const auto ledger = live.GetActiveRegionLedger().encode();
+        const auto creatures = PopulationCreatureBytes(live);
+        const auto ground = live.GetGroundObjects().canonical_bytes();
+        const auto fields = live.GetFieldPages().serialize();
+        const auto clock = live.GetWorldClock();
+        const auto simulation_clock = live.GetSimulationClock();
+        const auto schedule = live.GetRegionSchedule();
+        const auto chunks = live.GetWorldSystem()->snapshot_streamed_chunks();
+        const auto events = live.GetSimulationEventBus().pending_count();
+        const auto hash = SessionWorldHash(live);
+        bool prepared = false;
+        live.SetActivationEnqueuePreparationHook([&] {
+            prepared = true;
+            if (allocation_failure)
+                throw std::bad_alloc();
+            throw std::runtime_error("Activation enqueue preparation failure");
+        });
+        EXPECT_FALSE(live.LoadWorldStateFrom(source.GetWorldSaveDir()));
+        ASSERT_TRUE(prepared);
+        EXPECT_FALSE(live.GetWorldOpenError().empty());
+        EXPECT_EQ(SessionWorldHash(live), hash);
+        EXPECT_EQ(live.GetActiveRegionLedger().encode(), ledger);
+        EXPECT_EQ(PopulationCreatureBytes(live), creatures);
+        ASSERT_TRUE(live.GetRegistry().valid(entity));
+        EXPECT_EQ(live.GetRegistry().get<C::TagComponent>(entity).tag,
+                  "retained runtime attachment");
+        EXPECT_EQ(live.GetGroundObjects().canonical_bytes(), ground);
+        EXPECT_EQ(live.GetFieldPages().serialize(), fields);
+        EXPECT_EQ(live.GetWorldClock().tick(), clock.tick());
+        EXPECT_EQ(live.GetWorldClock().calendar(), clock.calendar());
+        EXPECT_EQ(live.GetSimulationClock().tick_count(), simulation_clock.tick_count());
+        EXPECT_EQ(live.GetSimulationClock().accumulator(), simulation_clock.accumulator());
+        EXPECT_EQ(live.GetRegionSchedule(), schedule);
+        EXPECT_EQ(live.GetWorldSystem()->snapshot_streamed_chunks(), chunks);
+        EXPECT_EQ(live.GetSimulationEventBus().pending_count(), events);
+        EXPECT_EQ(live.GetSimulationEventBus().publish(9, "sequence.probe", ""), 1u);
+    }
+}
+void SaveActivationOutbox(GameSession& session,
+                          const HeadlessRoot& root,
+                          JobSystem& jobs,
+                          const std::vector<Luminumbra::world::RegionKey>& keys) {
+    ASSERT_NO_FATAL_FAILURE(CreateGroundWorld(session, root, jobs, "Activation outbox"));
+    session.SetReplicatedSimulationAnchors({});
+    for (const auto key : keys)
+        session.PinActiveRegion(key, true);
+    session.GetSimulationEventBus().subscribe([](const auto& event) {
+        if (event.activation)
+            throw std::runtime_error("Retain activation outbox before acknowledgement");
+    });
+    ASSERT_NO_FATAL_FAILURE(TickOnce(session));
+    ASSERT_TRUE(session.GetRegionSchedulerFault());
+    ASSERT_EQ(session.GetWorldClock().tick(), 1u);
+    ASSERT_EQ(session.GetActiveRegionLedger().pending_activations().size(), keys.size());
+    ASSERT_TRUE(session.SaveWorld());
+}
+TEST(GameSessionHeadlessWorldTest, S8GExplicitLoadInsertsLowerActivationKeyInDurableOrder) {
+    namespace S = luminumbra::simulation;
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession source, live;
+    ASSERT_NO_FATAL_FAILURE(SaveActivationOutbox(source, root, jobs, {{0, 0}, {1, 0}}));
+    ASSERT_NO_FATAL_FAILURE(CreateGroundWorld(live, root, jobs, "Live activation order"));
+    live.SetReplicatedSimulationAnchors({});
+    EXPECT_EQ(live.GetSimulationEventBus().publish(1, "ordinary", "retained"), 0u);
+    const std::vector<S::SimulationEvent> queued{{1,
+                                                  std::numeric_limits<std::int32_t>::min(),
+                                                  0,
+                                                  "region.activated",
+                                                  "1,0,pin",
+                                                  S::ActivationDeliveryKey{1, 1, 0}},
+                                                 {1,
+                                                  std::numeric_limits<std::int32_t>::min(),
+                                                  0,
+                                                  "region.activated",
+                                                  "2,0,pin",
+                                                  S::ActivationDeliveryKey{1, 2, 0}}};
+    auto& bus = live.GetSimulationEventBus();
+    bus.commit_batch(bus.prepare_batch(queued));
+    ASSERT_EQ(bus.pending_count(), 3u);
+    ASSERT_TRUE(live.LoadWorldStateFrom(source.GetWorldSaveDir())) << live.GetWorldOpenError();
+    live.SetReplicatedSimulationAnchors({});
+    ASSERT_EQ(bus.pending_count(), 3u);
+    std::vector<S::SimulationEvent> delivered;
+    bus.subscribe([&](const auto& event) { delivered.push_back(event); });
+    ASSERT_NO_FATAL_FAILURE(TickOnce(live));
+    ASSERT_FALSE(live.GetRegionSchedulerFault());
+    ASSERT_EQ(delivered.size(), 3u);
+    EXPECT_EQ(delivered[0].activation, (S::ActivationDeliveryKey{1, 0, 0}));
+    EXPECT_EQ(delivered[0].payload, "0,0,pin");
+    EXPECT_EQ(delivered[1].activation, (S::ActivationDeliveryKey{1, 1, 0}));
+    EXPECT_EQ(delivered[1].payload, "1,0,pin");
+    EXPECT_LT(delivered[0].sequence, delivered[1].sequence);
+    EXPECT_EQ(delivered[2].topic, "ordinary");
+    EXPECT_EQ(delivered[2].payload, "retained");
+    EXPECT_EQ(delivered[2].sequence, 0u);
+    EXPECT_TRUE(live.GetActiveRegionLedger().pending_activations().empty());
+    EXPECT_EQ(bus.pending_count(), 0u);
+    ASSERT_NO_FATAL_FAILURE(TickOnce(live));
+    EXPECT_EQ(delivered.size(), 3u);
+}
+TEST(GameSessionHeadlessWorldTest, S8GExplicitLoadReplacesQueuedActivationCause) {
+    namespace S = luminumbra::simulation;
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession source, live;
+    ASSERT_NO_FATAL_FAILURE(SaveActivationOutbox(source, root, jobs, {{1, 0}}));
+    ASSERT_NO_FATAL_FAILURE(CreateGroundWorld(live, root, jobs, "Live activation cause"));
+    live.SetReplicatedSimulationAnchors({});
+    const S::ActivationDeliveryKey key{1, 1, 0};
+    const std::vector<S::SimulationEvent> queued{
+        {1, std::numeric_limits<std::int32_t>::min(), 0, "region.activated", "1,0,presence", key}};
+    auto& bus = live.GetSimulationEventBus();
+    bus.commit_batch(bus.prepare_batch(queued));
+    ASSERT_EQ(bus.pending_count(), 1u);
+    ASSERT_TRUE(live.LoadWorldStateFrom(source.GetWorldSaveDir())) << live.GetWorldOpenError();
+    live.SetReplicatedSimulationAnchors({});
+    ASSERT_EQ(bus.pending_count(), 1u);
+    std::vector<S::SimulationEvent> delivered;
+    bus.subscribe([&](const auto& event) { delivered.push_back(event); });
+    ASSERT_NO_FATAL_FAILURE(TickOnce(live));
+    ASSERT_FALSE(live.GetRegionSchedulerFault());
+    ASSERT_EQ(delivered.size(), 1u);
+    EXPECT_EQ(delivered[0].activation, key);
+    EXPECT_EQ(delivered[0].topic, "region.activated");
+    EXPECT_EQ(delivered[0].payload, "1,0,pin");
+    EXPECT_TRUE(live.GetActiveRegionLedger().pending_activations().empty());
+    EXPECT_EQ(bus.pending_count(), 0u);
+    ASSERT_NO_FATAL_FAILURE(TickOnce(live));
+    EXPECT_EQ(delivered.size(), 1u);
+}
+TEST(GameSessionHeadlessWorldTest, S8GDeliveredActivationIsNotRecreatedOnLoad) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session, restored;
+    PreparePopulationWorld(session, root, jobs);
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_TRUE(session.GetActiveRegionLedger().pending_activations().empty());
+    ASSERT_TRUE(session.SaveWorld());
+    restored.SetRegionPopulator(SessionPopulation());
+    EnableSnapshotSession(restored, root, jobs);
+    ASSERT_TRUE(restored.LoadWorld(session.GetMetadata().worldId)) << restored.GetWorldOpenError();
+    restored.SetReplicatedSimulationAnchors({});
+    EXPECT_EQ(restored.GetSimulationEventBus().pending_count(), 0u);
+    unsigned deliveries = 0;
+    restored.GetSimulationEventBus().subscribe([&](const auto& event) {
+        if (event.topic == "region.activated")
+            ++deliveries;
+    });
+    TickOnce(restored);
+    EXPECT_EQ(deliveries, 0u);
+}
+void CheckPopulationFaultRecovery(std::uint64_t fault_tick, unsigned failure) {
+    using namespace Luminumbra::world;
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    auto populator = SessionPopulation();
+    const auto founders = populator.populate;
+    populator.populate = [=](const RegionPopulateRequest& request) {
+        founders(request);
+        if (failure == 2)
+            request.sink.spawn(
+                GroundObjectSpawnCommand{99u,
+                                         {static_cast<float>(request.key.x) * 512.0f + 128.0f,
+                                          100.0f,
+                                          static_cast<float>(request.key.z) * 512.0f + 128.0f},
+                                         0u,
+                                         0u});
+        if (failure == 3) {
+            const Luminumbra::Vec3 position{static_cast<float>(request.key.x) * 512.0f + 128.0f,
+                                            100.0f,
+                                            static_cast<float>(request.key.z) * 512.0f + 128.0f};
+            for (std::size_t i = 0; i < GroundObjectStore::kMaxObjects; ++i)
+                request.sink.spawn(GroundObjectSpawnCommand{7u, position, 0u, 0u});
+        }
+    };
+    if (failure >= 2)
+        populator.canonical_configuration += ";invalid-case=" + std::to_string(failure);
+    const auto recovery_populator = populator;
+    session.SetRegionPopulator(std::move(populator));
+    CreateGroundWorld(session, root, jobs, "Population fault recovery");
+    session.SetReplicatedSimulationAnchors({});
+    const RegionKey owner{2, 1};
+    session.PinActiveRegion(owner, true);
+    // A four-tick test clock exposes first, middle and last fault positions.
+    const_cast<luminumbra::core::SimulationClock&>(session.GetSimulationClock()) =
+        luminumbra::core::SimulationClock(30.0, 4u);
+    // Hold the callback until the selected real tick.
+    auto& records = const_cast<std::map<RegionKey, ActiveRegionRecord>&>(
+        session.GetActiveRegionLedger().records());
+    records.at(owner).populated = fault_tick != 1;
+    session.GetSimulationEventBus().subscribe([&](const auto& event) {
+        if (event.topic == "population.enable")
+            const_cast<std::map<RegionKey, ActiveRegionRecord>&>(
+                session.GetActiveRegionLedger().records())
+                .at(owner)
+                .populated = false;
+    });
+    if (fault_tick != 1)
+        session.GetSimulationEventBus().publish(fault_tick - 1, "population.enable", "");
+    const auto fail = [] {
+        throw std::runtime_error("Population preparation failure");
+    };
+    if (failure < 2)
+        session.SetPopulationPreparationHooks(failure == 1 ? PopulationPreparationHooks{{}, fail}
+                                                           : PopulationPreparationHooks{fail, {}});
+    const auto next = session.GetActiveRegionLedger().next_persistent_id();
+    EXPECT_EQ(session.TickSimulation(3.0 * session.GetSimulationClock().fixed_dt()), fault_tick);
+    ASSERT_TRUE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.GetWorldClock().tick(), fault_tick);
+    EXPECT_EQ(session.GetActiveRegionLedger().next_persistent_id(), next);
+    EXPECT_FALSE(session.GetActiveRegionLedger().records().at(owner).populated);
+    EXPECT_TRUE(session.GetRegistry().view<C::CreatureComponent>().empty());
+    EXPECT_TRUE(session.GetGroundObjects().empty());
+    EXPECT_TRUE(session.GetActiveRegionLedger().completed_work().empty());
+    EXPECT_EQ(session.GetPopulationActivity().failures, 1u);
+    for (const bool delayed : {false, true}) {
+        if (delayed)
+            EXPECT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 0u);
+        ASSERT_TRUE(session.SaveWorld());
+        GameSession restored;
+        restored.SetRegionPopulator(recovery_populator);
+        EnableSnapshotSession(restored, root, jobs);
+        ASSERT_TRUE(restored.LoadWorld(session.GetMetadata().worldId))
+            << restored.GetWorldOpenError();
+        restored.SetReplicatedSimulationAnchors({});
+        EXPECT_EQ(restored.GetActiveRegionLedger().next_persistent_id(), next);
+        EXPECT_TRUE(restored.GetRegistry().view<C::CreatureComponent>().empty());
+        EXPECT_TRUE(restored.GetGroundObjects().empty());
+        TickOnce(restored);
+        if (failure < 2) {
+            ASSERT_FALSE(restored.GetRegionSchedulerFault());
+            EXPECT_GT(restored.GetActiveRegionLedger().next_persistent_id(), next);
+        } else {
+            ASSERT_TRUE(restored.GetRegionSchedulerFault());
+            EXPECT_EQ(restored.GetActiveRegionLedger().next_persistent_id(), next);
+            EXPECT_FALSE(restored.GetActiveRegionLedger().records().at(owner).populated);
+            EXPECT_TRUE(restored.GetRegistry().view<C::CreatureComponent>().empty());
+            EXPECT_TRUE(restored.GetGroundObjects().empty());
+        }
+    }
+}
+TEST(GameSessionHeadlessWorldTest, S8GPopulationFailureLeavesCoherentFaultRecoverySave) {
+    for (const std::uint64_t fault_tick : {1ull, 2ull, 3ull})
+        for (unsigned failure = 0; failure < 4; ++failure)
+            CheckPopulationFaultRecovery(fault_tick, failure);
+}
+void CheckActivationFaultRecovery(std::uint64_t fault_tick, bool enqueue) {
+    using namespace Luminumbra::world;
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    CreateGroundWorld(session, root, jobs, "Activation fault recovery");
+    session.SetReplicatedSimulationAnchors({});
+    const_cast<luminumbra::core::SimulationClock&>(session.GetSimulationClock()) =
+        luminumbra::core::SimulationClock(30.0, 4u);
+    const RegionKey owner{3, 4};
+    session.GetSimulationEventBus().subscribe([&](const auto& event) {
+        if (event.topic == "activation.request")
+            session.PinActiveRegion(owner, true);
+        if (!enqueue && event.topic == "region.activated" && event.tick == fault_tick)
+            throw std::runtime_error("Activation delivery failure");
+    });
+    if (fault_tick == 1)
+        session.PinActiveRegion(owner, true);
+    else
+        session.GetSimulationEventBus().publish(fault_tick - 1, "activation.request", "");
+    if (enqueue)
+        session.SetActivationEnqueuePreparationHook([&] {
+            if (session.GetWorldClock().tick() == fault_tick)
+                throw std::runtime_error("Activation enqueue failure");
+        });
+    const auto next = session.GetActiveRegionLedger().next_persistent_id();
+    EXPECT_EQ(session.TickSimulation(3.0 * session.GetSimulationClock().fixed_dt()), fault_tick);
+    ASSERT_TRUE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.GetWorldClock().tick(), fault_tick);
+    EXPECT_EQ(session.GetActiveRegionLedger().next_persistent_id(), next);
+    EXPECT_TRUE(session.GetActiveRegionLedger().completed_work().empty());
+    ASSERT_EQ(session.GetActiveRegionLedger().pending_activations().size(), 1u);
+    const auto pending = session.GetActiveRegionLedger().pending_activations();
+    const auto creatures = PopulationCreatureBytes(session);
+    const auto objects = session.GetGroundObjects().canonical_bytes();
+    for (const bool delayed : {false, true}) {
+        if (delayed)
+            EXPECT_EQ(session.TickSimulation(3.0 * session.GetSimulationClock().fixed_dt()), 0u);
+        ASSERT_TRUE(session.SaveWorld());
+        GameSession restored;
+        EnableSnapshotSession(restored, root, jobs);
+        ASSERT_TRUE(restored.LoadWorld(session.GetMetadata().worldId))
+            << restored.GetWorldOpenError();
+        restored.SetReplicatedSimulationAnchors({});
+        EXPECT_EQ(restored.GetActiveRegionLedger().pending_activations(), pending);
+        EXPECT_EQ(restored.GetActiveRegionLedger().next_persistent_id(), next);
+        EXPECT_EQ(PopulationCreatureBytes(restored), creatures);
+        EXPECT_EQ(restored.GetGroundObjects().canonical_bytes(), objects);
+        std::vector<luminumbra::simulation::ActivationDeliveryKey> keys;
+        restored.GetSimulationEventBus().subscribe([&](const auto& event) {
+            if (event.activation)
+                keys.push_back(*event.activation);
+        });
+        TickOnce(restored);
+        ASSERT_FALSE(restored.GetRegionSchedulerFault());
+        ASSERT_EQ(keys.size(), 1u);
+        EXPECT_EQ(keys.front(),
+                  (luminumbra::simulation::ActivationDeliveryKey{fault_tick, owner.x, owner.z}));
+        EXPECT_TRUE(restored.GetActiveRegionLedger().pending_activations().empty());
+        EXPECT_FALSE(restored.GetActiveRegionLedger().records().at(owner).populated);
+        EXPECT_EQ(restored.GetActiveRegionLedger().next_persistent_id(), next);
+        TickOnce(restored);
+        EXPECT_EQ(keys.size(), 1u);
+    }
+}
+TEST(GameSessionHeadlessWorldTest, ActivationFaultsStopFirstMiddleAndLastFrameTicks) {
+    for (const std::uint64_t fault_tick : {1ull, 2ull, 3ull})
+        for (const bool enqueue : {false, true})
+            CheckActivationFaultRecovery(fault_tick, enqueue);
+}
+TEST(GameSessionHeadlessWorldTest, S8GFlagOffPreservesSaveFileCountHashAndArtifactBytes) {
+    CheckLegacyCreatureSessionOracle();
+}
+} // namespace
 
 namespace {
 // Preserve every file byte, including compressed records and index member order.

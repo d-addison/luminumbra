@@ -23,10 +23,19 @@ using Luminumbra::Vec3;
 
 const RegionKey kFar{10, -3};
 
+// Legacy envelope/retention fixtures represent notifications already delivered by a host.
+void AcknowledgeAllActivations(ActiveRegionLedger& ledger) {
+    const auto pending = ledger.pending_activations();
+    for (const auto& [key, activation] : pending) {
+        (void)activation;
+        ledger.acknowledge_activation(key.first, key.second);
+    }
+}
 ActiveRegionLedger Distant(RegionSchedulerConfig config = {10, 2, 2}) {
     ActiveRegionLedger ledger(config);
     ledger.mark_edited(kFar, WorldClock{});
     ledger.schedule(WorldClock(1)); // consume edit wake
+    AcknowledgeAllActivations(ledger);
     return ledger;
 }
 RegionSchedule Step(ActiveRegionLedger& ledger, std::uint64_t tick, std::uint64_t units) {
@@ -677,6 +686,7 @@ TEST(ActiveRegionLedgerTest, V1FrozenHistoryLoadsAndRoundTripsVerbatimIncludingA
             original.schedule(WorldClock(5));
             ASSERT_EQ(original.records().at(kFar).state, RegionState::Active);
         }
+        AcknowledgeAllActivations(original);
         const auto good = original.encode();
         const std::size_t ext = good.size() - 8 - 11;
         auto bytes = good.substr(0, ext) + std::string(8, '\0');
@@ -735,6 +745,7 @@ TEST(ActiveRegionLedgerTest, LegacyFrozenHistoryRoundTripsWithGroundExtensionsUn
         reopened.mark_edited(kFar, WorldClock(3));
         for (std::uint64_t tick = 4; tick <= 6; ++tick)
             Step(reopened, tick, 1);
+        AcknowledgeAllActivations(reopened);
         ASSERT_EQ(reopened.records().at(kFar).frozen_at, 6u);
         EXPECT_TRUE(reopened.completed_work().empty());
         // Refreezing replaces the last historical digest and now declares projection 2.
@@ -751,6 +762,7 @@ TEST(ActiveRegionLedgerTest, LegacyEnvelopeUpgradesOnlyAfterEveryHistoricalDiges
     for (std::uint64_t tick = 4; tick <= 6; ++tick)
         Step(original, tick, 1);
     ASSERT_EQ(original.records().at(second).state, RegionState::Frozen);
+    AcknowledgeAllActivations(original);
     const auto good = original.encode();
     auto bytes = good.substr(0, good.size() - 8 - 11) + std::string(8, '\0');
     bytes[4] = 1;
@@ -763,6 +775,7 @@ TEST(ActiveRegionLedgerTest, LegacyEnvelopeUpgradesOnlyAfterEveryHistoricalDiges
     for (std::uint64_t tick = 7; tick <= 9; ++tick)
         Step(restored, tick, 1);
     ASSERT_EQ(restored.records().at(kFar).frozen_at, 9u);
+    AcknowledgeAllActivations(restored);
     EXPECT_EQ(Version(restored.encode()), 1u);
     EXPECT_EQ(Reload(restored).canonical_bytes(), restored.canonical_bytes());
 
@@ -770,6 +783,7 @@ TEST(ActiveRegionLedgerTest, LegacyEnvelopeUpgradesOnlyAfterEveryHistoricalDiges
     for (std::uint64_t tick = 10; tick <= 12; ++tick)
         Step(restored, tick, 1);
     ASSERT_EQ(restored.records().at(second).frozen_at, 12u);
+    AcknowledgeAllActivations(restored);
     EXPECT_EQ(Version(restored.encode()), 2u);
     EXPECT_EQ(Reload(restored).encode(), restored.encode());
 }
@@ -784,6 +798,7 @@ ActiveRegionLedger HomeVisit() {
     ActiveRegionLedger ledger;
     const std::array anchors{Vec3(100, 0, 100)};
     ledger.schedule(WorldClock(1), anchors);
+    AcknowledgeAllActivations(ledger);
     return ledger;
 }
 std::vector<RegionKey> Keys(const ActiveRegionLedger& ledger) {
@@ -956,6 +971,7 @@ TEST(ActiveRegionLedgerTest, RetentionKeepsTheLedgerBounded) {
             static_cast<float>((i % 30) * 2048), 0.0f, static_cast<float>((i / 30) * 2048));
     ActiveRegionLedger ledger;
     ledger.schedule(WorldClock(1), std::span<const Vec3>(grid));
+    AcknowledgeAllActivations(ledger);
     EXPECT_GT(ledger.records().size(), 1000u);
     const std::array lone{Vec3(0, 0, 0)};
     ActiveRegionLedger fresh;
@@ -1539,4 +1555,189 @@ TEST(ActiveRegionLedger, ReusedScheduleScratchPreservesPriorityTraceAndRollback)
               fresh.schedule(WorldClock(9), {}, work, digest));
 }
 
+} // namespace
+
+namespace {
+TEST(ActiveRegionLedger, ActivationIncludesAbsentToActive) {
+    ActiveRegionLedger ledger;
+    ledger.mark_edited(kFar, WorldClock{});
+    ASSERT_TRUE(ledger.activation_intents().at(kFar).creation_pending);
+    const auto schedule = ledger.schedule(WorldClock(1), std::span<const Vec3>{});
+    EXPECT_TRUE(schedule.transitions.empty());
+    ASSERT_EQ(ledger.pending_activations().size(), 1u);
+    EXPECT_EQ(ledger.pending_activations().begin()->second,
+              (PendingRegionActivation{kFar, 1, ActivationCause::Edit}));
+    EXPECT_TRUE(ledger.activation_intents().empty());
+    ActiveRegionLedger presence;
+    const std::array anchors{Vec3(256.0f, 0.0f, 256.0f)};
+    presence.schedule(WorldClock(1), anchors);
+    EXPECT_EQ(presence.pending_activations().size(), presence.records().size());
+    for (const auto& [key, activation] : presence.pending_activations()) {
+        EXPECT_EQ(key.first, 1u);
+        EXPECT_EQ(activation.cause, ActivationCause::Presence);
+    }
+}
+TEST(ActiveRegionLedger, ActivationIncludesDirectFrozenToActive) {
+    auto ledger = FrozenLedger();
+    ledger.pin(kFar, true, WorldClock(3));
+    EXPECT_EQ(ledger.activation_intents().at(kFar).wake_cause, ActivationCause::Pin);
+    ledger.schedule(WorldClock(4), std::span<const Vec3>{});
+    ASSERT_EQ(ledger.pending_activations().size(), 1u);
+    EXPECT_EQ(ledger.pending_activations().begin()->second,
+              (PendingRegionActivation{kFar, 4, ActivationCause::Pin}));
+}
+TEST(ActiveRegionLedger, ReducedToActiveRecoveryDoesNotActivateAgain) {
+    auto ledger = Distant({0, 1, 1});
+    Step(ledger, 2, 1);
+    ASSERT_EQ(ledger.records().at(kFar).state, RegionState::Reduced);
+    Step(ledger, 3, 0);
+    EXPECT_EQ(ledger.records().at(kFar).state, RegionState::Active);
+    EXPECT_TRUE(ledger.pending_activations().empty());
+    auto frozen = FrozenLedger();
+    Step(frozen, 4, 0);
+    Step(frozen, 5, 0);
+    EXPECT_EQ(frozen.records().at(kFar).state, RegionState::Active);
+    EXPECT_TRUE(frozen.pending_activations().empty());
+}
+TEST(ActiveRegionLedger, ActivationCauseUsesCurrentEditPinPresencePrecedence) {
+    for (unsigned mask = 0; mask < 4; ++mask) {
+        auto ledger = FrozenLedger();
+        if (mask & 1u)
+            ledger.pin(kFar, true, WorldClock(3));
+        if (mask & 2u)
+            ledger.mark_edited(kFar, WorldClock(3));
+        const std::array anchors{Vec3(5376.0f, 0.0f, -1280.0f)};
+        ledger.schedule(WorldClock(4), anchors);
+        const auto activation = ledger.pending_activations().at({4, kFar});
+        EXPECT_EQ(activation.cause,
+                  (mask & 2u)   ? ActivationCause::Edit
+                  : (mask & 1u) ? ActivationCause::Pin
+                                : ActivationCause::Presence);
+    }
+}
+TEST(ActiveRegionLedger, StickyFlagsDoNotDetermineActivationCause) {
+    auto ledger = FrozenLedger();
+    ASSERT_TRUE(ledger.records().at(kFar).edited);
+    ledger.pin(kFar, true, WorldClock(3));
+    ledger.pin(kFar, false, WorldClock(3));
+    ledger.schedule(WorldClock(4), std::span<const Vec3>{});
+    EXPECT_EQ(ledger.pending_activations().at({4, kFar}).cause, ActivationCause::Pin);
+    AcknowledgeAllActivations(ledger);
+    Step(ledger, 5, 1);
+    Step(ledger, 6, 1);
+    const std::array anchors{Vec3(5376.0f, 0.0f, -1280.0f)};
+    ledger.schedule(WorldClock(7), anchors);
+    EXPECT_EQ(ledger.pending_activations().at({7, kFar}).cause, ActivationCause::Presence);
+}
+TEST(ActiveRegionLedger, RejectedInputsCreateNoActivationIntent) {
+    ActiveRegionLedger ledger;
+    const auto before = ledger.encode();
+    EXPECT_THROW(ledger.mark_edited({32768, 0}, WorldClock{}), std::invalid_argument);
+    EXPECT_THROW(ledger.pin({0, -32769}, true, WorldClock{}), std::invalid_argument);
+    ledger.pin(kFar, false, WorldClock{});
+    EXPECT_EQ(ledger.encode(), before);
+    const std::array invalid{Vec3(std::numeric_limits<float>::infinity(), 0.0f, 0.0f)};
+    ledger.schedule(WorldClock(1), invalid);
+    EXPECT_TRUE(ledger.activation_intents().empty());
+    EXPECT_TRUE(ledger.pending_activations().empty());
+    EXPECT_TRUE(ledger.records().empty());
+}
+TEST(ActiveRegionLedger, ActivationIntentAndOutboxRoundTrip) {
+    ActiveRegionLedger ledger;
+    ledger.pin({2, 3}, true, WorldClock{});
+    ledger.schedule(WorldClock(1), std::span<const Vec3>{});
+    ledger.mark_edited({-2, -3}, WorldClock(1));
+    auto restored = Reload(ledger);
+    EXPECT_EQ(restored.activation_intents(), ledger.activation_intents());
+    EXPECT_EQ(restored.pending_activations(), ledger.pending_activations());
+    EXPECT_EQ(restored.canonical_bytes(), ledger.canonical_bytes());
+    EXPECT_EQ(restored.encode(), ledger.encode());
+    const auto canonical = restored.canonical_bytes();
+    restored.acknowledge_activation(1, {2, 3});
+    EXPECT_NE(restored.canonical_bytes(), canonical);
+    ledger.schedule(WorldClock(2), std::span<const Vec3>{});
+    ASSERT_EQ(ledger.pending_activations().size(), 2u);
+    EXPECT_EQ(ledger.pending_activations().rbegin()->second.key, (RegionKey{-2, -3}));
+}
+TEST(ActiveRegionLedger, AbsentActivationExtensionAdoptsEmpty) {
+    const auto historical = Distant();
+    ASSERT_EQ(Version(historical.encode()), 1u);
+    auto restored = Reload(historical);
+    EXPECT_TRUE(restored.activation_intents().empty());
+    EXPECT_TRUE(restored.pending_activations().empty());
+    restored.schedule(WorldClock(2), std::span<const Vec3>{});
+    EXPECT_TRUE(restored.pending_activations().empty());
+    EXPECT_EQ(Version(restored.encode()), 1u);
+}
+std::string ActivationPayload(std::uint64_t tick = 1, std::uint8_t cause = 3) {
+    return LittleEndian(0, 4) + LittleEndian(1, 4) + LittleEndian(tick, 8) +
+           LittleEndian(static_cast<std::uint32_t>(kFar.x), 4) +
+           LittleEndian(static_cast<std::uint32_t>(kFar.z), 4) + LittleEndian(cause, 1);
+}
+TEST(ActiveRegionLedger, MalformedActivationExtensionRefusesTransactionally) {
+    for (const auto& value : {std::string{},
+                              LittleEndian(0, 8),
+                              ActivationPayload(0),
+                              ActivationPayload(2),
+                              ActivationPayload(1, 0),
+                              ActivationPayload(1, 4),
+                              ActivationPayload() + "extra",
+                              LittleEndian(ActiveRegionLedger::kMaxRegions + 1ull, 4)})
+        ExpectRefused(Version2With(Tlv(7, value)), ActiveRegionLedger::kCorruptMessage);
+    auto unknown = ActivationPayload();
+    unknown.replace(16, 4, LittleEndian(99, 4));
+    ExpectRefused(Version2With(Tlv(7, unknown)), ActiveRegionLedger::kCorruptMessage);
+    auto duplicate = LittleEndian(0, 4) + LittleEndian(2, 4) + ActivationPayload().substr(8) +
+                     ActivationPayload().substr(8);
+    ExpectRefused(Version2With(Tlv(7, duplicate)), ActiveRegionLedger::kCorruptMessage);
+    const auto intent = LittleEndian(1, 4) + LittleEndian(static_cast<std::uint32_t>(kFar.x), 4) +
+                        LittleEndian(static_cast<std::uint32_t>(kFar.z), 4);
+    for (const auto& suffix :
+         {std::string("\2\3", 2), std::string("\1\4", 2), std::string("\0\3", 2)})
+        ExpectRefused(Version2With(Tlv(7, intent + suffix + LittleEndian(0, 4))),
+                      ActiveRegionLedger::kCorruptMessage);
+}
+TEST(ActiveRegionLedger, PendingActivationRetainsOwnerUntilAcknowledgement) {
+    ActiveRegionLedger ledger;
+    const std::array anchors{Vec3(100.0f, 0.0f, 100.0f)};
+    ledger.schedule(WorldClock(1), anchors);
+    const auto count = ledger.records().size();
+    Idle(ledger, 1 + kIdle, kNobodyOwns);
+    EXPECT_EQ(ledger.records().size(), count);
+    EXPECT_EQ(ledger.pending_activations().size(), count);
+    ledger = Reload(ledger);
+    AcknowledgeAllActivations(ledger);
+    Idle(ledger, 2 + kIdle, kNobodyOwns);
+    EXPECT_TRUE(ledger.records().empty());
+}
+TEST(ActiveRegionLedger, DefaultNoneDoesNotPreventIdleRetention) {
+    auto ledger = HomeVisit();
+    for (const auto& [key, record] : ledger.records()) {
+        (void)key;
+        EXPECT_FALSE(record.populated);
+    }
+    Idle(ledger, 1 + kIdle, kNobodyOwns);
+    EXPECT_TRUE(ledger.records().empty());
+}
+TEST(ActiveRegionLedger, ActivationMetadataDoesNotRaiseLedgerFileLimit) {
+    constexpr auto expected = ActiveRegionLedger::kHeaderBytes +
+                              ActiveRegionLedger::kMaxRegions * ActiveRegionLedger::kRecordBytes +
+                              4u + 14u + 7u + 6u + SimulationContentIdentity::kEncodedBytes +
+                              3u * (10u + 16u * ActiveRegionLedger::kMaxRegions) + 8u;
+    static_assert(ActiveRegionLedger::kMaxFileBytes == expected);
+    ActiveRegionLedger ledger;
+    ledger.mark_edited(kFar, WorldClock{});
+    ledger.schedule(WorldClock(1), std::span<const Vec3>{});
+    EXPECT_EQ(ledger.encode().size(),
+              ActiveRegionLedger::kHeaderBytes + ActiveRegionLedger::kRecordBytes + 4u + 6u + 25u +
+                  8u);
+    EXPECT_EQ(Reload(ledger).encode(), ledger.encode());
+    std::string oversized(ActiveRegionLedger::kMaxFileBytes + 1, '\0');
+    oversized.replace(0, 6, std::string("ARL1\2\0", 6));
+    auto destination = Distant();
+    const auto before = destination.encode();
+    std::string error;
+    EXPECT_FALSE(ActiveRegionLedger::decode(oversized, destination, error));
+    EXPECT_EQ(destination.encode(), before);
+}
 } // namespace

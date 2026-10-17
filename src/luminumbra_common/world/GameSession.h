@@ -16,6 +16,7 @@
 #include "../systems/PollinationSystem.h"
 #include "ActiveRegionLedger.h"
 #include "GroundObjectStore.h"
+#include "RegionPopulator.h"
 #include "WorldClock.h"
 #include "WorldMetadata.h"
 #include "WorldgenFileReader.h"
@@ -448,8 +449,27 @@ public:
                                          std::string canonical_configuration = {}) {
         if (m_worldSystem || m_simulationContent)
             throw std::logic_error("Set population identity before creating or opening a world");
+        if (m_regionPopulator && (contract != m_populationContract ||
+                                  canonical_configuration != m_populationConfiguration))
+            throw std::logic_error("Registered population identity is immutable");
         m_populationContract = std::move(contract);
         m_populationConfiguration = std::move(canonical_configuration);
+    }
+
+    void SetRegionPopulator(RegionPopulator populator);
+    void SetActivationEnqueuePreparationHook(std::function<void()> hook) {
+        m_activationEnqueuePreparation = std::move(hook);
+    }
+    void SetPopulationPreparationHooks(PopulationPreparationHooks hooks) {
+        m_populationPreparation = std::move(hooks);
+    }
+    struct PopulationActivity {
+        std::uint64_t successes = 0, failures = 0, pending_activations = 0;
+    };
+    [[nodiscard]] PopulationActivity GetPopulationActivity() const noexcept {
+        auto result = m_populationActivity;
+        result.pending_activations = m_activeRegionLedger.pending_activations().size();
+        return result;
     }
 
     // Set before creating/opening a world, like the other sim feature keys.
@@ -734,6 +754,11 @@ private:
         luminumbra::core::SystemConfig::Defaults();
     bool m_activeRegionsEnabled = true;
     bool m_simulationBatchInProgress = false;
+    bool m_activationDeliveryInProgress = false;
+    [[nodiscard]] bool CanSaveWorldNow() const {
+        return IsSimulationTickBoundary() ||
+               (m_activeRegionsEnabled && m_activationDeliveryInProgress && m_regionWork.empty());
+    }
     bool CreateWorldInternal(const std::string& name,
                              const std::string& seed,
                              const std::string& worldType,
@@ -766,6 +791,22 @@ private:
     std::shared_ptr<const SimulationContent> m_simulationContent;
     std::string m_populationContract = std::string(kDefaultPopulationContract);
     std::string m_populationConfiguration;
+    std::shared_ptr<const RegionPopulator> m_regionPopulator;
+    PopulationPreparationHooks m_populationPreparation;
+    std::function<void()> m_activationEnqueuePreparation;
+    PopulationActivity m_populationActivity;
+    [[nodiscard]] luminumbra::simulation::OrderedEventBus::PreparedBatch
+    PrepareRegionActivations(const ActiveRegionLedger& ledger) const;
+    void QueueRegionActivations();
+    void DrainSimulationEvents(std::uint64_t current_tick);
+    bool PrepareRegionTick(std::uint64_t current_tick);
+    void PopulateActiveRegions();
+    void StagePopulationCreature(entt::registry& stage,
+                                 const CreatureSpawnCommand& command,
+                                 std::uint64_t id,
+                                 RegionKey key,
+                                 std::uint64_t tick,
+                                 std::uint64_t draw) const;
     // Living-world substrate fields (lazily created when a participant first opts in, so a world
     // with none stays byte-identical). Anchored at the spawn point with a fixed grid extent.
     std::unique_ptr<luminumbra::foliage::SoilGrid> m_soilGrid;

@@ -303,6 +303,76 @@ saves only on quit or shutdown, and the dedicated server autosave interval defau
 to 9000 ticks (five minutes at the canonical 30 Hz clock). Explicit zero disables
 autosave; capture and determinism fixtures explicitly use 30 ticks.
 
+`GameSession::SetRegionPopulator` registers a versioned callback before world creation or open.
+Its contract, canonical configuration and sorted object-type/payload ceilings join the immutable
+simulation content identity. Replacement during an open world refuses. `none:v1` has no callback,
+allocates no ambient entities and creates no populated decisions. A registered callback that
+returns no commands still records a durable populated decision, without IDs or entity work.
+
+On each real tick, Active unpopulated regions invoke the callback in signed RegionKey order.
+Reduced and Frozen owners do not invoke it. Requests contain the absolute tick, a stateless
+population-domain RegionRng, the deterministic surface-biome ID sampled at the region centre,
+and a staging sink. The sink exposes only ordered creature/object commands. Creature commands
+resolve against captured species data; the engine constructs founder genomes, sex, species role,
+controller intent and continuation from explicit defaults. Command index selects the founder draw,
+including earlier object commands. There is no physics step during population. Callbacks must be
+deterministic functions of the request and registered configuration; retries use the same inputs.
+
+Positions must remain within the requested owner both before and after round-half-away-from-zero
+millimetre conversion. Unknown species, unregistered object types, payloads beyond their registered
+ceiling, invalid positions and aggregate persistence limits refuse the whole region. The transaction
+prepares a private ledger/allocator, object store, component data pools, event queue/sequences and
+work vector. Publication uses nonthrowing pool exchanges and store moves. Entity generation state,
+existing component signals, unrelated pools and runtime attachments are retained; staging emits no
+live component signals. Population uses ordinary views; both owning and non-owning groups over a
+population component refuse during preparation. The guard conservatively rejects affected pools
+with destruction listeners, including group exclusion listeners, so cached memberships cannot
+become stale. Construction-only observers remain connected. Deterministic preparation hooks run
+before publication.
+Failure consumes no IDs or event sequences, leaves populated clear, latches a session fault and
+publishes no completed work. Success publishes all commands in sink order. Work becomes durable
+after the enabled ordered event drain succeeds or in a snapshot taken during activation delivery.
+Public ground-spawn side effects are not used by staging.
+
+Activation notifications describe first creation reaching Active and direct Frozen-to-Active wakes.
+Reduced-to-Active budget recovery emits none. Ledger-owned `ActivationIntent` stores whether
+creation is pending and the current operation's cause. Accepted edits, true pins and validated
+presence capture causes transactionally; rejected inputs and unpin create none. Causes merge as
+edit (3) > pin (2) > presence (1). Sticky historical flags never choose the cause. A captured wake
+cause remains attached to its pending operation. Scheduler decisions consume the intent and append
+`PendingRegionActivation` to the durable outbox. Both structures retain their owners.
+
+ARL v2 TLV 7 contains little-endian u32 intent count; RegionKey-ordered intent rows of i32 X,
+i32 Z, u8 creation-pending and u8 cause; then u32 pending count and rows ordered by `(tick,key)`
+of u64 activation tick, i32 X, i32 Z and u8 cause. Each count and their sum are bounded by
+`kMaxRegions`. Keys, ordering, ownership, booleans, causes and tick ceilings are validated.
+The existing file-byte ceiling is unchanged: metadata shares that envelope with all other authority.
+Growing allocator, identity, debt, age and completed-work extensions must also fit this envelope;
+a refused update restores its prior authority. Absent TLV 7 adopts empty queues and infers no notification from loaded Active records. Present
+malformed data refuses transactionally. Empty metadata emits no TLV. Nonempty metadata appends
+`|activation:v1:` plus the TLV value to canonical ledger authority, inside the existing hash slot.
+
+The bus queues outbox entries in `(activation_tick,key)` order at the activation lane before
+population events. Topic is `region.activated`; payload is exactly `<x>,<z>,<cause>` using
+`edit`, `pin` or `presence`. Optional event metadata carries the stable key `(activation_tick,x,z)`
+outside that unchanged payload. Prepared batch enqueue allocates sequences atomically and does
+not enqueue a key already pending in this process. Open reconstructs the queue from the ledger;
+loading itself creates no new notification.
+
+Enabled drain retains each notification through all handlers and the final continuation check,
+then acknowledges the ledger entry. Handler failure faults the session and retains the entry.
+A successful in-process delivery occurs once. Interruption or restart can replay an unacknowledged
+entry with the same key: this is a durable at-least-once boundary. Subscribers must be observational
+and idempotent by delivery key. Authoritative population uses the transaction, never an activation
+subscriber. A save from an activation handler is permitted after consumers have completed and
+before acknowledgement; load/replacement and recursive ticking remain blocked. Such a save
+preserves the outbox, populated decisions and completed consumer work independently. The saved
+ledger includes the next-tick work charge even when the saving handler returns successfully;
+restart delivers without repopulating and charges the same work as uninterrupted continuation.
+Activation enqueue preparation on explicit load completes against the candidate ledger before
+any loaded authority is installed; a preparation failure preserves the prior session authority.
+The disabled publish/drain path and its ordering/checksum fixture remain unchanged.
+
 ## Per-system distant policy
 
 | System | Near (live disc) | Distant active region | Frozen region |

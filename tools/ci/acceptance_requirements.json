@@ -3301,12 +3301,6 @@
       "text": "Consumed work stops owning records on the next tick."
     },
     {
-      "id": "ar.activation.065",
-      "source": "docs/active-regions.md#activation-and-ordering",
-      "quote": "Region pins outside -32768 <= x,z < 32768 are ignored and counted with the same observational rules.",
-      "text": "Region pins outside -32768 <= x,z < 32768 are ignored and counted with the same observational rules."
-    },
-    {
       "id": "ar.file.095",
       "source": "docs/active-regions.md#file-and-compatibility",
       "quote": "Version 1 ledgers load with or without frozen history.",
@@ -3541,16 +3535,1006 @@
       "text": "The dedicated server autosaves every five minutes by default."
     },
     {
+      "id": "ar.file.119",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Presets now use revision 7 with revision-6 omission compatibility and frozen packaged-preset fallback.",
+      "text": "Presets now use revision 7 with revision-6 omission compatibility and frozen packaged-preset fallback."
+    },
+    {
       "id": "ar.scope.012",
       "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
       "quote": "Resident water uses the checked [regional continuation contract](regional-water-continuation.md).",
       "text": "Resident water uses the checked [regional continuation contract](regional-water-continuation.md)."
     },
     {
-      "id": "ar.file.119",
-      "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Presets now use revision 7 with revision-6 omission compatibility and frozen packaged-preset fallback.",
-      "text": "Presets now use revision 7 with revision-6 omission compatibility and frozen packaged-preset fallback."
+      "id": "dw.regions.031",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "`GameSession::SetRegionPopulator` registers a versioned callback before world creation or open.",
+      "text": "`GameSession::SetRegionPopulator` registers a versioned callback before world creation or open."
+    },
+    {
+      "id": "dw.regions.032",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Its contract, canonical configuration and sorted object-type/payload ceilings join the immutable simulation content identity.",
+      "text": "Its contract, canonical configuration and sorted object-type/payload ceilings join the immutable simulation content identity."
+    },
+    {
+      "id": "dw.regions.033",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Replacement during an open world refuses.",
+      "text": "Replacement during an open world refuses."
+    },
+    {
+      "id": "dw.regions.034",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "`none:v1` has no callback, allocates no ambient entities and creates no populated decisions.",
+      "text": "`none:v1` has no callback, allocates no ambient entities and creates no populated decisions."
+    },
+    {
+      "id": "dw.regions.035",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "A registered callback that returns no commands still records a durable populated decision, without IDs or entity work.",
+      "text": "A registered callback that returns no commands still records a durable populated decision, without IDs or entity work."
+    },
+    {
+      "id": "dw.regions.036",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "On each real tick, Active unpopulated regions invoke the callback in signed RegionKey order.",
+      "text": "On each real tick, Active unpopulated regions invoke the callback in signed RegionKey order."
+    },
+    {
+      "id": "dw.regions.037",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Reduced and Frozen owners do not invoke it.",
+      "text": "Reduced and Frozen owners do not invoke it."
+    },
+    {
+      "id": "dw.regions.038",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Requests contain the absolute tick, a stateless population-domain RegionRng, the deterministic surface-biome ID sampled at the region centre, and a staging sink.",
+      "text": "Requests contain the absolute tick, a stateless population-domain RegionRng, the deterministic surface-biome ID sampled at the region centre, and a staging sink."
+    },
+    {
+      "id": "dw.regions.039",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "The sink exposes only ordered creature/object commands.",
+      "text": "The sink exposes only ordered creature/object commands."
+    },
+    {
+      "id": "dw.regions.040",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Creature commands resolve against captured species data;",
+      "text": "Creature commands resolve against captured species data;"
+    },
+    {
+      "id": "dw.regions.041",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "the engine constructs founder genomes, sex, species role, controller intent and continuation from explicit defaults.",
+      "text": "the engine constructs founder genomes, sex, species role, controller intent and continuation from explicit defaults."
+    },
+    {
+      "id": "dw.regions.042",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Command index selects the founder draw, including earlier object commands.",
+      "text": "Command index selects the founder draw, including earlier object commands."
+    },
+    {
+      "id": "dw.regions.043",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "There is no physics step during population.",
+      "text": "There is no physics step during population."
+    },
+    {
+      "id": "dw.regions.044",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Callbacks must be deterministic functions of the request and registered configuration;",
+      "text": "Callbacks must be deterministic functions of the request and registered configuration;"
+    },
+    {
+      "id": "dw.regions.045",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "retries use the same inputs.",
+      "text": "retries use the same inputs."
+    },
+    {
+      "id": "dw.regions.046",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Positions must remain within the requested owner both before and after round-half-away-from-zero millimetre conversion.",
+      "text": "Positions must remain within the requested owner both before and after round-half-away-from-zero millimetre conversion."
+    },
+    {
+      "id": "dw.regions.047",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Unknown species, unregistered object types, payloads beyond their registered ceiling, invalid positions and aggregate persistence limits refuse the whole region.",
+      "text": "Unknown species, unregistered object types, payloads beyond their registered ceiling, invalid positions and aggregate persistence limits refuse the whole region."
+    },
+    {
+      "id": "dw.regions.048",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "The transaction prepares a private ledger/allocator, object store, component data pools, event queue/sequences and work vector.",
+      "text": "The transaction prepares a private ledger/allocator, object store, component data pools, event queue/sequences and work vector."
+    },
+    {
+      "id": "dw.regions.049",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Publication uses nonthrowing pool exchanges and store moves.",
+      "text": "Publication uses nonthrowing pool exchanges and store moves."
+    },
+    {
+      "id": "dw.regions.050",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Entity generation state, existing component signals, unrelated pools and runtime attachments are retained;",
+      "text": "Entity generation state, existing component signals, unrelated pools and runtime attachments are retained;"
+    },
+    {
+      "id": "dw.regions.051",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "staging emits no live component signals.",
+      "text": "staging emits no live component signals."
+    },
+    {
+      "id": "dw.regions.052",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Population uses ordinary views;",
+      "text": "Population uses ordinary views;"
+    },
+    {
+      "id": "dw.regions.053",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "both owning and non-owning groups over a population component refuse during preparation.",
+      "text": "both owning and non-owning groups over a population component refuse during preparation."
+    },
+    {
+      "id": "dw.regions.054",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "The guard conservatively rejects affected pools with destruction listeners, including group exclusion listeners, so cached memberships cannot become stale.",
+      "text": "The guard conservatively rejects affected pools with destruction listeners, including group exclusion listeners, so cached memberships cannot become stale."
+    },
+    {
+      "id": "dw.regions.055",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Construction-only observers remain connected.",
+      "text": "Construction-only observers remain connected."
+    },
+    {
+      "id": "dw.regions.056",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Deterministic preparation hooks run before publication.",
+      "text": "Deterministic preparation hooks run before publication."
+    },
+    {
+      "id": "dw.regions.057",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Failure consumes no IDs or event sequences, leaves populated clear, latches a session fault and publishes no completed work.",
+      "text": "Failure consumes no IDs or event sequences, leaves populated clear, latches a session fault and publishes no completed work."
+    },
+    {
+      "id": "dw.regions.058",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Success publishes all commands in sink order.",
+      "text": "Success publishes all commands in sink order."
+    },
+    {
+      "id": "dw.regions.059",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Work becomes durable after the enabled ordered event drain succeeds or in a snapshot taken during activation delivery.",
+      "text": "Work becomes durable after the enabled ordered event drain succeeds or in a snapshot taken during activation delivery."
+    },
+    {
+      "id": "dw.regions.060",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Public ground-spawn side effects are not used by staging.",
+      "text": "Public ground-spawn side effects are not used by staging."
+    },
+    {
+      "id": "dw.regions.061",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Activation notifications describe first creation reaching Active and direct Frozen-to-Active wakes.",
+      "text": "Activation notifications describe first creation reaching Active and direct Frozen-to-Active wakes."
+    },
+    {
+      "id": "dw.regions.062",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Reduced-to-Active budget recovery emits none.",
+      "text": "Reduced-to-Active budget recovery emits none."
+    },
+    {
+      "id": "dw.regions.063",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Ledger-owned `ActivationIntent` stores whether creation is pending and the current operation's cause.",
+      "text": "Ledger-owned `ActivationIntent` stores whether creation is pending and the current operation's cause."
+    },
+    {
+      "id": "dw.regions.064",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Accepted edits, true pins and validated presence capture causes transactionally;",
+      "text": "Accepted edits, true pins and validated presence capture causes transactionally;"
+    },
+    {
+      "id": "dw.regions.065",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "rejected inputs and unpin create none.",
+      "text": "rejected inputs and unpin create none."
+    },
+    {
+      "id": "dw.regions.066",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Causes merge as edit (3) > pin (2) > presence (1).",
+      "text": "Causes merge as edit (3) > pin (2) > presence (1)."
+    },
+    {
+      "id": "dw.regions.067",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Sticky historical flags never choose the cause.",
+      "text": "Sticky historical flags never choose the cause."
+    },
+    {
+      "id": "dw.regions.068",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "A captured wake cause remains attached to its pending operation.",
+      "text": "A captured wake cause remains attached to its pending operation."
+    },
+    {
+      "id": "dw.regions.069",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Scheduler decisions consume the intent and append `PendingRegionActivation` to the durable outbox.",
+      "text": "Scheduler decisions consume the intent and append `PendingRegionActivation` to the durable outbox."
+    },
+    {
+      "id": "dw.regions.070",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Both structures retain their owners.",
+      "text": "Both structures retain their owners."
+    },
+    {
+      "id": "dw.regions.071",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "ARL v2 TLV 7 contains little-endian u32 intent count;",
+      "text": "ARL v2 TLV 7 contains little-endian u32 intent count;"
+    },
+    {
+      "id": "dw.regions.072",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "RegionKey-ordered intent rows of i32 X, i32 Z, u8 creation-pending and u8 cause;",
+      "text": "RegionKey-ordered intent rows of i32 X, i32 Z, u8 creation-pending and u8 cause;"
+    },
+    {
+      "id": "dw.regions.073",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "then u32 pending count and rows ordered by `(tick,key)` of u64 activation tick, i32 X, i32 Z and u8 cause.",
+      "text": "then u32 pending count and rows ordered by `(tick,key)` of u64 activation tick, i32 X, i32 Z and u8 cause."
+    },
+    {
+      "id": "dw.regions.074",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Each count and their sum are bounded by `kMaxRegions`.",
+      "text": "Each count and their sum are bounded by `kMaxRegions`."
+    },
+    {
+      "id": "dw.regions.075",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Keys, ordering, ownership, booleans, causes and tick ceilings are validated.",
+      "text": "Keys, ordering, ownership, booleans, causes and tick ceilings are validated."
+    },
+    {
+      "id": "dw.regions.076",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "The existing file-byte ceiling is unchanged: metadata shares that envelope with all other authority.",
+      "text": "The existing file-byte ceiling is unchanged: metadata shares that envelope with all other authority."
+    },
+    {
+      "id": "dw.regions.077",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Growing allocator, identity, debt, age and completed-work extensions must also fit this envelope;",
+      "text": "Growing allocator, identity, debt, age and completed-work extensions must also fit this envelope;"
+    },
+    {
+      "id": "dw.regions.078",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "a refused update restores its prior authority.",
+      "text": "a refused update restores its prior authority."
+    },
+    {
+      "id": "dw.regions.079",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Absent TLV 7 adopts empty queues and infers no notification from loaded Active records.",
+      "text": "Absent TLV 7 adopts empty queues and infers no notification from loaded Active records."
+    },
+    {
+      "id": "dw.regions.080",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Present malformed data refuses transactionally.",
+      "text": "Present malformed data refuses transactionally."
+    },
+    {
+      "id": "dw.regions.081",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Empty metadata emits no TLV.",
+      "text": "Empty metadata emits no TLV."
+    },
+    {
+      "id": "dw.regions.082",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Nonempty metadata appends `|activation:v1:` plus the TLV value to canonical ledger authority, inside the existing hash slot.",
+      "text": "Nonempty metadata appends `|activation:v1:` plus the TLV value to canonical ledger authority, inside the existing hash slot."
+    },
+    {
+      "id": "dw.regions.083",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "The bus queues outbox entries in `(activation_tick,key)` order at the activation lane before population events.",
+      "text": "The bus queues outbox entries in `(activation_tick,key)` order at the activation lane before population events."
+    },
+    {
+      "id": "dw.regions.084",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Topic is `region.activated`;",
+      "text": "Topic is `region.activated`;"
+    },
+    {
+      "id": "dw.regions.085",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "payload is exactly `<x>,<z>,<cause>` using `edit`, `pin` or `presence`.",
+      "text": "payload is exactly `<x>,<z>,<cause>` using `edit`, `pin` or `presence`."
+    },
+    {
+      "id": "dw.regions.086",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Optional event metadata carries the stable key `(activation_tick,x,z)` outside that unchanged payload.",
+      "text": "Optional event metadata carries the stable key `(activation_tick,x,z)` outside that unchanged payload."
+    },
+    {
+      "id": "dw.regions.087",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Prepared batch enqueue allocates sequences atomically and does not enqueue a key already pending in this process.",
+      "text": "Prepared batch enqueue allocates sequences atomically and does not enqueue a key already pending in this process."
+    },
+    {
+      "id": "dw.regions.088",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Open reconstructs the queue from the ledger;",
+      "text": "Open reconstructs the queue from the ledger;"
+    },
+    {
+      "id": "dw.regions.089",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "loading itself creates no new notification.",
+      "text": "loading itself creates no new notification."
+    },
+    {
+      "id": "dw.regions.090",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Enabled drain retains each notification through all handlers and the final continuation check, then acknowledges the ledger entry.",
+      "text": "Enabled drain retains each notification through all handlers and the final continuation check, then acknowledges the ledger entry."
+    },
+    {
+      "id": "dw.regions.091",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Handler failure faults the session and retains the entry.",
+      "text": "Handler failure faults the session and retains the entry."
+    },
+    {
+      "id": "dw.regions.092",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "A successful in-process delivery occurs once.",
+      "text": "A successful in-process delivery occurs once."
+    },
+    {
+      "id": "dw.regions.093",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Interruption or restart can replay an unacknowledged entry with the same key: this is a durable at-least-once boundary.",
+      "text": "Interruption or restart can replay an unacknowledged entry with the same key: this is a durable at-least-once boundary."
+    },
+    {
+      "id": "dw.regions.094",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Subscribers must be observational and idempotent by delivery key.",
+      "text": "Subscribers must be observational and idempotent by delivery key."
+    },
+    {
+      "id": "dw.regions.095",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Authoritative population uses the transaction, never an activation subscriber.",
+      "text": "Authoritative population uses the transaction, never an activation subscriber."
+    },
+    {
+      "id": "dw.regions.096",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "A save from an activation handler is permitted after consumers have completed and before acknowledgement;",
+      "text": "A save from an activation handler is permitted after consumers have completed and before acknowledgement;"
+    },
+    {
+      "id": "dw.regions.097",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "load/replacement and recursive ticking remain blocked.",
+      "text": "load/replacement and recursive ticking remain blocked."
+    },
+    {
+      "id": "dw.regions.098",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Such a save preserves the outbox, populated decisions and completed consumer work independently.",
+      "text": "Such a save preserves the outbox, populated decisions and completed consumer work independently."
+    },
+    {
+      "id": "dw.regions.099",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "The saved ledger includes the next-tick work charge even when the saving handler returns successfully;",
+      "text": "The saved ledger includes the next-tick work charge even when the saving handler returns successfully;"
+    },
+    {
+      "id": "dw.regions.100",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "restart delivers without repopulating and charges the same work as uninterrupted continuation.",
+      "text": "restart delivers without repopulating and charges the same work as uninterrupted continuation."
+    },
+    {
+      "id": "dw.regions.101",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "Activation enqueue preparation on explicit load completes against the candidate ledger before any loaded authority is installed;",
+      "text": "Activation enqueue preparation on explicit load completes against the candidate ledger before any loaded authority is installed;"
+    },
+    {
+      "id": "dw.regions.102",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "a preparation failure preserves the prior session authority.",
+      "text": "a preparation failure preserves the prior session authority."
+    },
+    {
+      "id": "dw.regions.103",
+      "source": "docs/distant-world.md#persistent-active-regions",
+      "quote": "The disabled publish/drain path and its ordering/checksum fixture remain unchanged.",
+      "text": "The disabled publish/drain path and its ordering/checksum fixture remain unchanged."
+    },
+    {
+      "id": "ar.policy.001",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "With `sim.active_regions` enabled, create and load capture and validate both required species inventories before constructing world systems.",
+      "text": "With `sim.active_regions` enabled, create and load capture and validate both required species inventories before constructing world systems."
+    },
+    {
+      "id": "ar.policy.002",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Each inventory must contain 1\u2013256 JSON definitions;",
+      "text": "Each inventory must contain 1\u2013256 JSON definitions;"
+    },
+    {
+      "id": "ar.policy.003",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "each document is capped at 1 MiB and the captured inventories together at 16 MiB.",
+      "text": "each document is capped at 1 MiB and the captured inventories together at 16 MiB."
+    },
+    {
+      "id": "ar.policy.004",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Names are nonempty UTF-8 strings of at most 256 bytes without NUL.",
+      "text": "Names are nonempty UTF-8 strings of at most 256 bytes without NUL."
+    },
+    {
+      "id": "ar.policy.005",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Duplicate names or folded 16-bit IDs refuse within each species domain, including the zero-to-one ID remap.",
+      "text": "Duplicate names or folded 16-bit IDs refuse within each species domain, including the zero-to-one ID remap."
+    },
+    {
+      "id": "ar.policy.006",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Creature IDs use `CreatureSpeciesId16` with its existing offset basis, folding and constants;",
+      "text": "Creature IDs use `CreatureSpeciesId16` with its existing offset basis, folding and constants;"
+    },
+    {
+      "id": "ar.policy.007",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "plant IDs use `SpeciesId16`.",
+      "text": "plant IDs use `SpeciesId16`."
+    },
+    {
+      "id": "ar.policy.008",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Policy names must resolve in the matching inventory.",
+      "text": "Policy names must resolve in the matching inventory."
+    },
+    {
+      "id": "ar.policy.009",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Species filenames and paths do not identify definitions.",
+      "text": "Species filenames and paths do not identify definitions."
+    },
+    {
+      "id": "ar.policy.010",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Captured definitions and both registries are ordered by declared name using unsigned UTF-8 bytes, so enumeration and biome selection remain stable across filename changes.",
+      "text": "Captured definitions and both registries are ordered by declared name using unsigned UTF-8 bytes, so enumeration and biome selection remain stable across filename changes."
+    },
+    {
+      "id": "ar.policy.011",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "`data/common/sim/distant_policy.json` is optional.",
+      "text": "`data/common/sim/distant_policy.json` is optional."
+    },
+    {
+      "id": "ar.policy.012",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "A missing leaf in an existing readable parent directory selects the compiled table.",
+      "text": "A missing leaf in an existing readable parent directory selects the compiled table."
+    },
+    {
+      "id": "ar.policy.013",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "A missing parent, status, permission, open, read and change-during-read errors refuse;",
+      "text": "A missing parent, status, permission, open, read and change-during-read errors refuse;"
+    },
+    {
+      "id": "ar.policy.014",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "directories, symlinks and reparse points cannot substitute for content files or parents.",
+      "text": "directories, symlinks and reparse points cannot substitute for content files or parents."
+    },
+    {
+      "id": "ar.policy.015",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Present policy documents require UTF-8 without BOM, LF line endings and a final LF.",
+      "text": "Present policy documents require UTF-8 without BOM, LF line endings and a final LF."
+    },
+    {
+      "id": "ar.policy.016",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Species documents accept ordinary JSON whitespace.",
+      "text": "Species documents accept ordinary JSON whitespace."
+    },
+    {
+      "id": "ar.policy.017",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Raw NUL bytes refuse before parsing in both domains, including after an otherwise valid document.",
+      "text": "Raw NUL bytes refuse before parsing in both domains, including after an otherwise valid document."
+    },
+    {
+      "id": "ar.policy.018",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Both use duplicate-key detection before adoption, a nesting cap of 32, strings of at most 256 bytes, at most 256 entries in any collection, and at most 65,536 parser callback events.",
+      "text": "Both use duplicate-key detection before adoption, a nesting cap of 32, strings of at most 256 bytes, at most 256 entries in any collection, and at most 65,536 parser callback events."
+    },
+    {
+      "id": "ar.policy.019",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Unknown keys, wrong types, narrowing and non-finite simulation numbers refuse.",
+      "text": "Unknown keys, wrong types, narrowing and non-finite simulation numbers refuse."
+    },
+    {
+      "id": "ar.policy.020",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Adoption is transactional and the session exposes only const content and registries.",
+      "text": "Adoption is transactional and the session exposes only const content and registries."
+    },
+    {
+      "id": "ar.policy.021",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Later file edits cannot change an open world's policy.",
+      "text": "Later file edits cannot change an open world's policy."
+    },
+    {
+      "id": "ar.policy.022",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Biome tables, terrain presets, structure placement and piece documents, and species registry text also refuse raw NUL before parsing.",
+      "text": "Biome tables, terrain presets, structure placement and piece documents, and species registry text also refuse raw NUL before parsing."
+    },
+    {
+      "id": "ar.policy.023",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Biome and preset loads report an error without adopting a table or preset;",
+      "text": "Biome and preset loads report an error without adopting a table or preset;"
+    },
+    {
+      "id": "ar.policy.024",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "structure loads retain their existing per-file error handling.",
+      "text": "structure loads retain their existing per-file error handling."
+    },
+    {
+      "id": "ar.policy.025",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Malformed systems configuration, including raw NUL, selects defaults;",
+      "text": "Malformed systems configuration, including raw NUL, selects defaults;"
+    },
+    {
+      "id": "ar.policy.026",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "malformed operator budget profiles refuse.",
+      "text": "malformed operator budget profiles refuse."
+    },
+    {
+      "id": "ar.policy.027",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Population configuration is caller-supplied identity framing, not a parsed document.",
+      "text": "Population configuration is caller-supplied identity framing, not a parsed document."
+    },
+    {
+      "id": "ar.policy.028",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "The policy root has exactly `schema`, `creature_species` and `plant_species`;",
+      "text": "The policy root has exactly `schema`, `creature_species` and `plant_species`;"
+    },
+    {
+      "id": "ar.policy.029",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "`schema` is `luminumbra.distant_policy.v1`.",
+      "text": "`schema` is `luminumbra.distant_policy.v1`."
+    },
+    {
+      "id": "ar.policy.030",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Every authored creature entry has exactly `coarse_need_rate_ppm` (u32), `coarse_travel_m_per_cadence` (u32), `promote_distance_m` (u16), `lifespan_cadences` (u32) and `reproduce_cadences` (u32).",
+      "text": "Every authored creature entry has exactly `coarse_need_rate_ppm` (u32), `coarse_travel_m_per_cadence` (u32), `promote_distance_m` (u16), `lifespan_cadences` (u32) and `reproduce_cadences` (u32)."
+    },
+    {
+      "id": "ar.policy.031",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Every authored plant entry has exactly `max_cadence_shift` (integer 1\u20138) and `resume_cap_ticks` (integer 0\u201336,000).",
+      "text": "Every authored plant entry has exactly `max_cadence_shift` (integer 1\u20138) and `resume_cap_ticks` (integer 0\u201336,000)."
+    },
+    {
+      "id": "ar.policy.032",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Boolean, floating, exponent, negative and negative-zero tokens cannot stand in for these unsigned integers.",
+      "text": "Boolean, floating, exponent, negative and negative-zero tokens cannot stand in for these unsigned integers."
+    },
+    {
+      "id": "ar.policy.033",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Compiled defaults table version 1 resolves missing creature entries to need rate 0, travel 0, promotion distance 512 m, lifespan limit 0 and reproduction limit 0.",
+      "text": "Compiled defaults table version 1 resolves missing creature entries to need rate 0, travel 0, promotion distance 512 m, lifespan limit 0 and reproduction limit 0."
+    },
+    {
+      "id": "ar.policy.034",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Zero need/travel rates do nothing;",
+      "text": "Zero need/travel rates do nothing;"
+    },
+    {
+      "id": "ar.policy.035",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "zero lifecycle limits disable their mechanisms;",
+      "text": "zero lifecycle limits disable their mechanisms;"
+    },
+    {
+      "id": "ar.policy.036",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "explicit zero promotion disables promotion.",
+      "text": "explicit zero promotion disables promotion."
+    },
+    {
+      "id": "ar.policy.037",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Plant defaults are maximum shift 8 and resume cap 36,000 ticks;",
+      "text": "Plant defaults are maximum shift 8 and resume cap 36,000 ticks;"
+    },
+    {
+      "id": "ar.policy.038",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "explicit zero resume cap discards catch-up.",
+      "text": "explicit zero resume cap discards catch-up."
+    },
+    {
+      "id": "ar.policy.039",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "A coarse cadence means one accepted owner due step, rather than a separate fixed tick interval.",
+      "text": "A coarse cadence means one accepted owner due step, rather than a separate fixed tick interval."
+    },
+    {
+      "id": "ar.policy.040",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Algorithm version 1 seals this interpretation.",
+      "text": "Algorithm version 1 seals this interpretation."
+    },
+    {
+      "id": "ar.policy.041",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Consumer enforcement of these policies belongs to the corresponding simulation systems.",
+      "text": "Consumer enforcement of these policies belongs to the corresponding simulation systems."
+    },
+    {
+      "id": "ar.policy.042",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "TLV 5 is always present in newly created enabled worlds, even with no regions or creatures.",
+      "text": "TLV 5 is always present in newly created enabled worlds, even with no regions or creatures."
+    },
+    {
+      "id": "ar.policy.043",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Its value is exactly 40 bytes, without padding:",
+      "text": "Its value is exactly 40 bytes, without padding:"
+    },
+    {
+      "id": "ar.policy.044",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "| 0 | 2 | LE u16 identity encoding version, 1 |",
+      "text": "| 0 | 2 | LE u16 identity encoding version, 1 |"
+    },
+    {
+      "id": "ar.policy.045",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "| 2 | 2 | LE u16 compiled defaults version, 1 |",
+      "text": "| 2 | 2 | LE u16 compiled defaults version, 1 |"
+    },
+    {
+      "id": "ar.policy.046",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "| 4 | 2 | LE u16 simulation algorithm version, 1 |",
+      "text": "| 4 | 2 | LE u16 simulation algorithm version, 1 |"
+    },
+    {
+      "id": "ar.policy.047",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "| 6 | 2 | LE u16 reserved, zero |",
+      "text": "| 6 | 2 | LE u16 reserved, zero |"
+    },
+    {
+      "id": "ar.policy.048",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "| 8 | 8 | LE u64 resolved policy digest |",
+      "text": "| 8 | 8 | LE u64 resolved policy digest |"
+    },
+    {
+      "id": "ar.policy.049",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "| 16 | 8 | LE u64 creature definitions digest |",
+      "text": "| 16 | 8 | LE u64 creature definitions digest |"
+    },
+    {
+      "id": "ar.policy.050",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "| 24 | 8 | LE u64 plant definitions digest |",
+      "text": "| 24 | 8 | LE u64 plant definitions digest |"
+    },
+    {
+      "id": "ar.policy.051",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "| 32 | 8 | LE u64 populator identity/configuration digest |",
+      "text": "| 32 | 8 | LE u64 populator identity/configuration digest |"
+    },
+    {
+      "id": "ar.policy.052",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Each digest uses FNV-1a-64 over the canonical bytes below, with offset basis 14695981039346656037 and multiplier 1099511628211, wrapping modulo 2^64.",
+      "text": "Each digest uses FNV-1a-64 over the canonical bytes below, with offset basis 14695981039346656037 and multiplier 1099511628211, wrapping modulo 2^64."
+    },
+    {
+      "id": "ar.policy.053",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Integer fields are little endian;",
+      "text": "Integer fields are little endian;"
+    },
+    {
+      "id": "ar.policy.054",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "strings/byte sections are framed with a LE u32 byte length.",
+      "text": "strings/byte sections are framed with a LE u32 byte length."
+    },
+    {
+      "id": "ar.policy.055",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Inventories are ordered by unsigned UTF-8 name bytes.",
+      "text": "Inventories are ordered by unsigned UTF-8 name bytes."
+    },
+    {
+      "id": "ar.policy.056",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "No filesystem order or path is hashed.",
+      "text": "No filesystem order or path is hashed."
+    },
+    {
+      "id": "ar.policy.057",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "The resolved policy projection begins with the unframed ASCII tag `ds-effective-policy:v1`, then u16 defaults version, u16 algorithm version, the five compiled creature fields in the order listed above (4, 4, 2",
+      "text": "The resolved policy projection begins with the unframed ASCII tag `ds-effective-policy:v1`, then u16 defaults version, u16 algorithm version, the five compiled creature fields in the order listed above (4, 4, 2, 4, 4 bytes), and the two compiled plant fields (1, 4 bytes)."
+    },
+    {
+      "id": "ar.policy.058",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Next comes u32 creature count and each resolved entry as framed name, u16 species ID and the five fields, followed by u32 plant count and each resolved entry as framed name, u16 species ID and the two fields.",
+      "text": "Next comes u32 creature count and each resolved entry as framed name, u16 species ID and the five fields, followed by u32 plant count and each resolved entry as framed name, u16 species ID and the two fields."
+    },
+    {
+      "id": "ar.policy.059",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "The compiled table is included even when all species have authored overrides.",
+      "text": "The compiled table is included even when all species have authored overrides."
+    },
+    {
+      "id": "ar.policy.060",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Missing, empty and explicit-default policy documents therefore produce the same identity.",
+      "text": "Missing, empty and explicit-default policy documents therefore produce the same identity."
+    },
+    {
+      "id": "ar.policy.061",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Override-only canonical JSON remains a separate parser round-trip representation.",
+      "text": "Override-only canonical JSON remains a separate parser round-trip representation."
+    },
+    {
+      "id": "ar.policy.062",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Creature and plant definition projections begin with `ds-creature-definitions:v1` and `ds-plant-definitions:v1` respectively, then u32 count and each definition's framed name, u16 species ID and framed resolved",
+      "text": "Creature and plant definition projections begin with `ds-creature-definitions:v1` and `ds-plant-definitions:v1` respectively, then u32 count and each definition's framed name, u16 species ID and framed resolved simulation payload."
+    },
+    {
+      "id": "ar.policy.063",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Creature payloads contain u8 predator, u8 nocturnal, u32 biome-name count with framed names in sorted order, then IEEE-754 u32 float bits for brain weights in order wander, rest, sleep, hunt, flee, graze, flee ",
+      "text": "Creature payloads contain u8 predator, u8 nocturnal, u32 biome-name count with framed names in sorted order, then IEEE-754 u32 float bits for brain weights in order wander, rest, sleep, hunt, flee, graze, flee logistic m, flee logistic c, drink;"
+    },
+    {
+      "id": "ar.policy.064",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "then each core and sensory genome range as low/high float bits.",
+      "text": "then each core and sensory genome range as low/high float bits."
+    },
+    {
+      "id": "ar.policy.065",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Range order is move speed, vigilance, hunger threshold, size scale, vision cosine half-FOV, vision range and hearing range.",
+      "text": "Range order is move speed, vigilance, hunger threshold, size scale, vision cosine half-FOV, vision range and hearing range."
+    },
+    {
+      "id": "ar.policy.066",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Plant payloads contain u8 perennial, u32 lifespan ticks, then low/high float bits for each gene in `PlantGene` enum order.",
+      "text": "Plant payloads contain u8 perennial, u32 lifespan ticks, then low/high float bits for each gene in `PlantGene` enum order."
+    },
+    {
+      "id": "ar.policy.067",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Omitted fields are resolved through the registry's compiled defaults.",
+      "text": "Omitted fields are resolved through the registry's compiled defaults."
+    },
+    {
+      "id": "ar.policy.068",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Display names, colours, discovery rarity, render archetypes, JSON key order and whitespace are excluded.",
+      "text": "Display names, colours, discovery rarity, render archetypes, JSON key order and whitespace are excluded."
+    },
+    {
+      "id": "ar.policy.069",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "All definitions contribute, including species not mentioned by authored policy.",
+      "text": "All definitions contribute, including species not mentioned by authored policy."
+    },
+    {
+      "id": "ar.policy.070",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "The population projection begins with `ds-population:v1`, then framed populator contract and framed canonical configuration bytes.",
+      "text": "The population projection begins with `ds-population:v1`, then framed populator contract and framed canonical configuration bytes."
+    },
+    {
+      "id": "ar.policy.071",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "The current unregistered contract is `none:v1` with empty configuration.",
+      "text": "The current unregistered contract is `none:v1` with empty configuration."
+    },
+    {
+      "id": "ar.policy.072",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "`GameSession::SetSimulationPopulationIdentity` supplies these inputs before create/load;",
+      "text": "`GameSession::SetSimulationPopulationIdentity` supplies these inputs before create/load;"
+    },
+    {
+      "id": "ar.policy.073",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "admission requires a nonempty UTF-8 contract of at most 256 bytes and caps canonical configuration at 1 MiB.",
+      "text": "admission requires a nonempty UTF-8 contract of at most 256 bytes and caps canonical configuration at 1 MiB."
+    },
+    {
+      "id": "ar.policy.074",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "This identity seam does not implement a population callback or adopt game population files.",
+      "text": "This identity seam does not implement a population callback or adopt game population files."
+    },
+    {
+      "id": "ar.policy.075",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Registered population content must be supplied before world adoption and versioned when its behavior changes.",
+      "text": "Registered population content must be supplied before world adoption and versioned when its behavior changes."
+    },
+    {
+      "id": "ar.policy.076",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "The ledger canonical projection appends `|content_identity:` and the exact identity record before `|completed_work:`.",
+      "text": "The ledger canonical projection appends `|content_identity:` and the exact identity record before `|completed_work:`."
+    },
+    {
+      "id": "ar.policy.077",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "This feeds the existing enabled ecology/world hash at boot, including an empty creature world, without changing network or replay layouts.",
+      "text": "This feeds the existing enabled ecology/world hash at boot, including an empty creature world, without changing network or replay layouts."
+    },
+    {
+      "id": "ar.policy.078",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "TLV 5 precedes existing TLV 6 in the persistence envelope;",
+      "text": "TLV 5 precedes existing TLV 6 in the persistence envelope;"
+    },
+    {
+      "id": "ar.policy.079",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "completed-work encoding and next-decision behavior are unchanged.",
+      "text": "completed-work encoding and next-decision behavior are unchanged."
+    },
+    {
+      "id": "ar.policy.080",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Identity adoption is immutable;",
+      "text": "Identity adoption is immutable;"
+    },
+    {
+      "id": "ar.policy.081",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "repeated identical adoption is allowed, changing it refuses.",
+      "text": "repeated identical adoption is allowed, changing it refuses."
+    },
+    {
+      "id": "ar.policy.082",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Opening an enabled world without TLV 5 adopts the current resolved content, including historical enabled or indexed state.",
+      "text": "Opening an enabled world without TLV 5 adopts the current resolved content, including historical enabled or indexed state."
+    },
+    {
+      "id": "ar.policy.083",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Adoption must succeed;",
+      "text": "Adoption must succeed;"
+    },
+    {
+      "id": "ar.policy.084",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "the next save writes TLV 5.",
+      "text": "the next save writes TLV 5."
+    },
+    {
+      "id": "ar.policy.085",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "A present identity must match newly captured content exactly or open refuses with `Simulation content identity mismatch.` Unsupported identity/default/algorithm versions, nonzero reserved fields, wrong lengths ",
+      "text": "A present identity must match newly captured content exactly or open refuses with `Simulation content identity mismatch.` Unsupported identity/default/algorithm versions, nonzero reserved fields, wrong lengths and duplicate or misordered TLVs are corrupt."
+    },
+    {
+      "id": "ar.policy.086",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "Load compares identity before adopting loaded ledger/consumer state;",
+      "text": "Load compares identity before adopting loaded ledger/consumer state;"
+    },
+    {
+      "id": "ar.policy.087",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "a refusal prevents saving.",
+      "text": "a refusal prevents saving."
+    },
+    {
+      "id": "ar.policy.088",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "A legacy flag-off world may opt in and adopt current content for the first time.",
+      "text": "A legacy flag-off world may opt in and adopt current content for the first time."
+    },
+    {
+      "id": "ar.policy.089",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "With the flag disabled, strict policy/species adoption is bypassed, identity is absent, and the existing lenient species, save, hash and artifact paths remain unchanged.",
+      "text": "With the flag disabled, strict policy/species adoption is bypassed, identity is absent, and the existing lenient species, save, hash and artifact paths remain unchanged."
+    },
+    {
+      "id": "ar.scope.013",
+      "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
+      "quote": "Strict distant policy and simulation content identity are adopted before enabled world creation or loading.",
+      "text": "Strict distant policy and simulation content identity are adopted before enabled world creation or loading."
+    },
+    {
+      "id": "ar.scope.014",
+      "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
+      "quote": "Creature records and snapshot compatibility are specified in [creature-entities.md](creature-entities.md).",
+      "text": "Creature records and snapshot compatibility are specified in [creature-entities.md](creature-entities.md)."
+    },
+    {
+      "id": "ar.activation.065",
+      "source": "docs/active-regions.md#activation-and-ordering",
+      "quote": "Region pins outside -32768 <= x,z < 32768 are ignored and counted with the same observational rules.",
+      "text": "Region pins outside -32768 <= x,z < 32768 are ignored and counted with the same observational rules."
     },
     {
       "id": "ar.file.120",
@@ -3647,552 +4631,6 @@
       "source": "docs/active-regions.md#file-and-compatibility",
       "quote": "Region containers have a shared read and write bound of 268,435,456 bytes, checked before writer allocation.",
       "text": "Region containers have a shared read and write bound of 268,435,456 bytes, checked before writer allocation."
-    },
-    {
-      "id": "ar.content.001",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "With `sim.active_regions` enabled, create and load capture and validate both required species inventories before constructing world systems.",
-      "text": "With `sim.active_regions` enabled, create and load capture and validate both required species inventories before constructing world systems."
-    },
-    {
-      "id": "ar.content.002",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Each inventory must contain 1\u2013256 JSON definitions;",
-      "text": "Each inventory must contain 1\u2013256 JSON definitions;"
-    },
-    {
-      "id": "ar.content.003",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "each document is capped at 1 MiB and the captured inventories together at 16 MiB.",
-      "text": "each document is capped at 1 MiB and the captured inventories together at 16 MiB."
-    },
-    {
-      "id": "ar.content.004",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Names are nonempty UTF-8 strings of at most 256 bytes without NUL.",
-      "text": "Names are nonempty UTF-8 strings of at most 256 bytes without NUL."
-    },
-    {
-      "id": "ar.content.005",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Duplicate names or folded 16-bit IDs refuse within each species domain, including the zero-to-one ID remap.",
-      "text": "Duplicate names or folded 16-bit IDs refuse within each species domain, including the zero-to-one ID remap."
-    },
-    {
-      "id": "ar.content.006",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Creature IDs use `CreatureSpeciesId16` with its existing offset basis, folding and constants;",
-      "text": "Creature IDs use `CreatureSpeciesId16` with its existing offset basis, folding and constants;"
-    },
-    {
-      "id": "ar.content.007",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "plant IDs use `SpeciesId16`.",
-      "text": "plant IDs use `SpeciesId16`."
-    },
-    {
-      "id": "ar.content.008",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Policy names must resolve in the matching inventory.",
-      "text": "Policy names must resolve in the matching inventory."
-    },
-    {
-      "id": "ar.content.009",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Species filenames and paths do not identify definitions.",
-      "text": "Species filenames and paths do not identify definitions."
-    },
-    {
-      "id": "ar.content.010",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Captured definitions and both registries are ordered by declared name using unsigned UTF-8 bytes, so enumeration and biome selection remain stable across filename changes.",
-      "text": "Captured definitions and both registries are ordered by declared name using unsigned UTF-8 bytes, so enumeration and biome selection remain stable across filename changes."
-    },
-    {
-      "id": "ar.content.011",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "`data/common/sim/distant_policy.json` is optional.",
-      "text": "`data/common/sim/distant_policy.json` is optional."
-    },
-    {
-      "id": "ar.content.012",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "A missing leaf in an existing readable parent directory selects the compiled table.",
-      "text": "A missing leaf in an existing readable parent directory selects the compiled table."
-    },
-    {
-      "id": "ar.content.013",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "A missing parent, status, permission, open, read and change-during-read errors refuse;",
-      "text": "A missing parent, status, permission, open, read and change-during-read errors refuse;"
-    },
-    {
-      "id": "ar.content.014",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "directories, symlinks and reparse points cannot substitute for content files or parents.",
-      "text": "directories, symlinks and reparse points cannot substitute for content files or parents."
-    },
-    {
-      "id": "ar.content.015",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Present policy documents require UTF-8 without BOM, LF line endings and a final LF.",
-      "text": "Present policy documents require UTF-8 without BOM, LF line endings and a final LF."
-    },
-    {
-      "id": "ar.content.016",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Species documents accept ordinary JSON whitespace.",
-      "text": "Species documents accept ordinary JSON whitespace."
-    },
-    {
-      "id": "ar.content.017",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Raw NUL bytes refuse before parsing in both domains, including after an otherwise valid document.",
-      "text": "Raw NUL bytes refuse before parsing in both domains, including after an otherwise valid document."
-    },
-    {
-      "id": "ar.content.018",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Both use duplicate-key detection before adoption, a nesting cap of 32, strings of at most 256 bytes, at most 256 entries in any collection, and at most 65,536 parser callback events.",
-      "text": "Both use duplicate-key detection before adoption, a nesting cap of 32, strings of at most 256 bytes, at most 256 entries in any collection, and at most 65,536 parser callback events."
-    },
-    {
-      "id": "ar.content.019",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Unknown keys, wrong types, narrowing and non-finite simulation numbers refuse.",
-      "text": "Unknown keys, wrong types, narrowing and non-finite simulation numbers refuse."
-    },
-    {
-      "id": "ar.content.020",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Adoption is transactional and the session exposes only const content and registries.",
-      "text": "Adoption is transactional and the session exposes only const content and registries."
-    },
-    {
-      "id": "ar.content.021",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Later file edits cannot change an open world's policy.",
-      "text": "Later file edits cannot change an open world's policy."
-    },
-    {
-      "id": "ar.content.022",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Biome tables, terrain presets, structure placement and piece documents, and species registry text also refuse raw NUL before parsing.",
-      "text": "Biome tables, terrain presets, structure placement and piece documents, and species registry text also refuse raw NUL before parsing."
-    },
-    {
-      "id": "ar.content.023",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Biome and preset loads report an error without adopting a table or preset;",
-      "text": "Biome and preset loads report an error without adopting a table or preset;"
-    },
-    {
-      "id": "ar.content.024",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "structure loads retain their existing per-file error handling.",
-      "text": "structure loads retain their existing per-file error handling."
-    },
-    {
-      "id": "ar.content.025",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Malformed systems configuration, including raw NUL, selects defaults;",
-      "text": "Malformed systems configuration, including raw NUL, selects defaults;"
-    },
-    {
-      "id": "ar.content.026",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "malformed operator budget profiles refuse.",
-      "text": "malformed operator budget profiles refuse."
-    },
-    {
-      "id": "ar.content.027",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Population configuration is caller-supplied identity framing, not a parsed document.",
-      "text": "Population configuration is caller-supplied identity framing, not a parsed document."
-    },
-    {
-      "id": "ar.content.028",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "The policy root has exactly `schema`, `creature_species` and `plant_species`;",
-      "text": "The policy root has exactly `schema`, `creature_species` and `plant_species`;"
-    },
-    {
-      "id": "ar.content.029",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "`schema` is `luminumbra.distant_policy.v1`.",
-      "text": "`schema` is `luminumbra.distant_policy.v1`."
-    },
-    {
-      "id": "ar.content.030",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Every authored creature entry has exactly `coarse_need_rate_ppm` (u32), `coarse_travel_m_per_cadence` (u32), `promote_distance_m` (u16), `lifespan_cadences` (u32) and `reproduce_cadences` (u32).",
-      "text": "Every authored creature entry has exactly `coarse_need_rate_ppm` (u32), `coarse_travel_m_per_cadence` (u32), `promote_distance_m` (u16), `lifespan_cadences` (u32) and `reproduce_cadences` (u32)."
-    },
-    {
-      "id": "ar.content.031",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Every authored plant entry has exactly `max_cadence_shift` (integer 1\u20138) and `resume_cap_ticks` (integer 0\u201336,000).",
-      "text": "Every authored plant entry has exactly `max_cadence_shift` (integer 1\u20138) and `resume_cap_ticks` (integer 0\u201336,000)."
-    },
-    {
-      "id": "ar.content.032",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Boolean, floating, exponent, negative and negative-zero tokens cannot stand in for these unsigned integers.",
-      "text": "Boolean, floating, exponent, negative and negative-zero tokens cannot stand in for these unsigned integers."
-    },
-    {
-      "id": "ar.content.033",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Compiled defaults table version 1 resolves missing creature entries to need rate 0, travel 0, promotion distance 512 m, lifespan limit 0 and reproduction limit 0.",
-      "text": "Compiled defaults table version 1 resolves missing creature entries to need rate 0, travel 0, promotion distance 512 m, lifespan limit 0 and reproduction limit 0."
-    },
-    {
-      "id": "ar.content.034",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Zero need/travel rates do nothing;",
-      "text": "Zero need/travel rates do nothing;"
-    },
-    {
-      "id": "ar.content.035",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "zero lifecycle limits disable their mechanisms;",
-      "text": "zero lifecycle limits disable their mechanisms;"
-    },
-    {
-      "id": "ar.content.036",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "explicit zero promotion disables promotion.",
-      "text": "explicit zero promotion disables promotion."
-    },
-    {
-      "id": "ar.content.037",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Plant defaults are maximum shift 8 and resume cap 36,000 ticks;",
-      "text": "Plant defaults are maximum shift 8 and resume cap 36,000 ticks;"
-    },
-    {
-      "id": "ar.content.038",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "explicit zero resume cap discards catch-up.",
-      "text": "explicit zero resume cap discards catch-up."
-    },
-    {
-      "id": "ar.content.039",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "A coarse cadence means one accepted owner due step, rather than a separate fixed tick interval.",
-      "text": "A coarse cadence means one accepted owner due step, rather than a separate fixed tick interval."
-    },
-    {
-      "id": "ar.content.040",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Algorithm version 1 seals this interpretation.",
-      "text": "Algorithm version 1 seals this interpretation."
-    },
-    {
-      "id": "ar.content.041",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Consumer enforcement of these policies belongs to the corresponding simulation systems.",
-      "text": "Consumer enforcement of these policies belongs to the corresponding simulation systems."
-    },
-    {
-      "id": "ar.content.042",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "TLV 5 is always present in newly created enabled worlds, even with no regions or creatures.",
-      "text": "TLV 5 is always present in newly created enabled worlds, even with no regions or creatures."
-    },
-    {
-      "id": "ar.content.043",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Its value is exactly 40 bytes, without padding:",
-      "text": "Its value is exactly 40 bytes, without padding:"
-    },
-    {
-      "id": "ar.content.044",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "| 0 | 2 | LE u16 identity encoding version, 1 |",
-      "text": "| 0 | 2 | LE u16 identity encoding version, 1 |"
-    },
-    {
-      "id": "ar.content.045",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "| 2 | 2 | LE u16 compiled defaults version, 1 |",
-      "text": "| 2 | 2 | LE u16 compiled defaults version, 1 |"
-    },
-    {
-      "id": "ar.content.046",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "| 4 | 2 | LE u16 simulation algorithm version, 1 |",
-      "text": "| 4 | 2 | LE u16 simulation algorithm version, 1 |"
-    },
-    {
-      "id": "ar.content.047",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "| 6 | 2 | LE u16 reserved, zero |",
-      "text": "| 6 | 2 | LE u16 reserved, zero |"
-    },
-    {
-      "id": "ar.content.048",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "| 8 | 8 | LE u64 resolved policy digest |",
-      "text": "| 8 | 8 | LE u64 resolved policy digest |"
-    },
-    {
-      "id": "ar.content.049",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "| 16 | 8 | LE u64 creature definitions digest |",
-      "text": "| 16 | 8 | LE u64 creature definitions digest |"
-    },
-    {
-      "id": "ar.content.050",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "| 24 | 8 | LE u64 plant definitions digest |",
-      "text": "| 24 | 8 | LE u64 plant definitions digest |"
-    },
-    {
-      "id": "ar.content.051",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "| 32 | 8 | LE u64 populator identity/configuration digest |",
-      "text": "| 32 | 8 | LE u64 populator identity/configuration digest |"
-    },
-    {
-      "id": "ar.content.052",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Each digest uses FNV-1a-64 over the canonical bytes below, with offset basis 14695981039346656037 and multiplier 1099511628211, wrapping modulo 2^64.",
-      "text": "Each digest uses FNV-1a-64 over the canonical bytes below, with offset basis 14695981039346656037 and multiplier 1099511628211, wrapping modulo 2^64."
-    },
-    {
-      "id": "ar.content.053",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Integer fields are little endian;",
-      "text": "Integer fields are little endian;"
-    },
-    {
-      "id": "ar.content.054",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "strings/byte sections are framed with a LE u32 byte length.",
-      "text": "strings/byte sections are framed with a LE u32 byte length."
-    },
-    {
-      "id": "ar.content.055",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Inventories are ordered by unsigned UTF-8 name bytes.",
-      "text": "Inventories are ordered by unsigned UTF-8 name bytes."
-    },
-    {
-      "id": "ar.content.056",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "No filesystem order or path is hashed.",
-      "text": "No filesystem order or path is hashed."
-    },
-    {
-      "id": "ar.content.057",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "The resolved policy projection begins with the unframed ASCII tag `ds-effective-policy:v1`, then u16 defaults version, u16 algorithm version, the five compiled creature fields in the order listed above (4, 4, 2, 4, 4 bytes), and the two compiled plant fields (1, 4 bytes).",
-      "text": "The resolved policy projection begins with the unframed ASCII tag `ds-effective-policy:v1`, then u16 defaults version, u16 algorithm version, the five compiled creature fields in the order listed above (4, 4, 2, 4, 4 bytes), and the two compiled plant fields (1, 4 bytes)."
-    },
-    {
-      "id": "ar.content.058",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Next comes u32 creature count and each resolved entry as framed name, u16 species ID and the five fields, followed by u32 plant count and each resolved entry as framed name, u16 species ID and the two fields.",
-      "text": "Next comes u32 creature count and each resolved entry as framed name, u16 species ID and the five fields, followed by u32 plant count and each resolved entry as framed name, u16 species ID and the two fields."
-    },
-    {
-      "id": "ar.content.059",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "The compiled table is included even when all species have authored overrides.",
-      "text": "The compiled table is included even when all species have authored overrides."
-    },
-    {
-      "id": "ar.content.060",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Missing, empty and explicit-default policy documents therefore produce the same identity.",
-      "text": "Missing, empty and explicit-default policy documents therefore produce the same identity."
-    },
-    {
-      "id": "ar.content.061",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Override-only canonical JSON remains a separate parser round-trip representation.",
-      "text": "Override-only canonical JSON remains a separate parser round-trip representation."
-    },
-    {
-      "id": "ar.content.062",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Creature and plant definition projections begin with `ds-creature-definitions:v1` and `ds-plant-definitions:v1` respectively, then u32 count and each definition's framed name, u16 species ID and framed resolved simulation payload.",
-      "text": "Creature and plant definition projections begin with `ds-creature-definitions:v1` and `ds-plant-definitions:v1` respectively, then u32 count and each definition's framed name, u16 species ID and framed resolved simulation payload."
-    },
-    {
-      "id": "ar.content.063",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Creature payloads contain u8 predator, u8 nocturnal, u32 biome-name count with framed names in sorted order, then IEEE-754 u32 float bits for brain weights in order wander, rest, sleep, hunt, flee, graze, flee logistic m, flee logistic c, drink;",
-      "text": "Creature payloads contain u8 predator, u8 nocturnal, u32 biome-name count with framed names in sorted order, then IEEE-754 u32 float bits for brain weights in order wander, rest, sleep, hunt, flee, graze, flee logistic m, flee logistic c, drink;"
-    },
-    {
-      "id": "ar.content.064",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "then each core and sensory genome range as low/high float bits.",
-      "text": "then each core and sensory genome range as low/high float bits."
-    },
-    {
-      "id": "ar.content.065",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Range order is move speed, vigilance, hunger threshold, size scale, vision cosine half-FOV, vision range and hearing range.",
-      "text": "Range order is move speed, vigilance, hunger threshold, size scale, vision cosine half-FOV, vision range and hearing range."
-    },
-    {
-      "id": "ar.content.066",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Plant payloads contain u8 perennial, u32 lifespan ticks, then low/high float bits for each gene in `PlantGene` enum order.",
-      "text": "Plant payloads contain u8 perennial, u32 lifespan ticks, then low/high float bits for each gene in `PlantGene` enum order."
-    },
-    {
-      "id": "ar.content.067",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Omitted fields are resolved through the registry's compiled defaults.",
-      "text": "Omitted fields are resolved through the registry's compiled defaults."
-    },
-    {
-      "id": "ar.content.068",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Display names, colours, discovery rarity, render archetypes, JSON key order and whitespace are excluded.",
-      "text": "Display names, colours, discovery rarity, render archetypes, JSON key order and whitespace are excluded."
-    },
-    {
-      "id": "ar.content.069",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "All definitions contribute, including species not mentioned by authored policy.",
-      "text": "All definitions contribute, including species not mentioned by authored policy."
-    },
-    {
-      "id": "ar.content.070",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "The population projection begins with `ds-population:v1`, then framed populator contract and framed canonical configuration bytes.",
-      "text": "The population projection begins with `ds-population:v1`, then framed populator contract and framed canonical configuration bytes."
-    },
-    {
-      "id": "ar.content.071",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "The current unregistered contract is `none:v1` with empty configuration.",
-      "text": "The current unregistered contract is `none:v1` with empty configuration."
-    },
-    {
-      "id": "ar.content.072",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "`GameSession::SetSimulationPopulationIdentity` supplies these inputs before create/load;",
-      "text": "`GameSession::SetSimulationPopulationIdentity` supplies these inputs before create/load;"
-    },
-    {
-      "id": "ar.content.073",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "admission requires a nonempty UTF-8 contract of at most 256 bytes and caps canonical configuration at 1 MiB.",
-      "text": "admission requires a nonempty UTF-8 contract of at most 256 bytes and caps canonical configuration at 1 MiB."
-    },
-    {
-      "id": "ar.content.074",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "This identity seam does not implement a population callback or adopt game population files.",
-      "text": "This identity seam does not implement a population callback or adopt game population files."
-    },
-    {
-      "id": "ar.content.075",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Registered population content must be supplied before world adoption and versioned when its behavior changes.",
-      "text": "Registered population content must be supplied before world adoption and versioned when its behavior changes."
-    },
-    {
-      "id": "ar.content.076",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "The ledger canonical projection appends `|content_identity:` and the exact identity record before `|completed_work:`.",
-      "text": "The ledger canonical projection appends `|content_identity:` and the exact identity record before `|completed_work:`."
-    },
-    {
-      "id": "ar.content.077",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "This feeds the existing enabled ecology/world hash at boot, including an empty creature world, without changing network or replay layouts.",
-      "text": "This feeds the existing enabled ecology/world hash at boot, including an empty creature world, without changing network or replay layouts."
-    },
-    {
-      "id": "ar.content.078",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "TLV 5 precedes existing TLV 6 in the persistence envelope;",
-      "text": "TLV 5 precedes existing TLV 6 in the persistence envelope;"
-    },
-    {
-      "id": "ar.content.079",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "completed-work encoding and next-decision behavior are unchanged.",
-      "text": "completed-work encoding and next-decision behavior are unchanged."
-    },
-    {
-      "id": "ar.content.080",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Identity adoption is immutable;",
-      "text": "Identity adoption is immutable;"
-    },
-    {
-      "id": "ar.content.081",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "repeated identical adoption is allowed, changing it refuses.",
-      "text": "repeated identical adoption is allowed, changing it refuses."
-    },
-    {
-      "id": "ar.content.082",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Opening an enabled world without TLV 5 adopts the current resolved content, including historical enabled or indexed state.",
-      "text": "Opening an enabled world without TLV 5 adopts the current resolved content, including historical enabled or indexed state."
-    },
-    {
-      "id": "ar.content.083",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Adoption must succeed;",
-      "text": "Adoption must succeed;"
-    },
-    {
-      "id": "ar.content.084",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "the next save writes TLV 5.",
-      "text": "the next save writes TLV 5."
-    },
-    {
-      "id": "ar.content.085",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "A present identity must match newly captured content exactly or open refuses with `Simulation content identity mismatch.` Unsupported identity/default/algorithm versions, nonzero reserved fields, wrong lengths and duplicate or misordered TLVs are corrupt.",
-      "text": "A present identity must match newly captured content exactly or open refuses with `Simulation content identity mismatch.` Unsupported identity/default/algorithm versions, nonzero reserved fields, wrong lengths and duplicate or misordered TLVs are corrupt."
-    },
-    {
-      "id": "ar.content.086",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Load compares identity before adopting loaded ledger/consumer state;",
-      "text": "Load compares identity before adopting loaded ledger/consumer state;"
-    },
-    {
-      "id": "ar.content.087",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "a refusal prevents saving.",
-      "text": "a refusal prevents saving."
-    },
-    {
-      "id": "ar.content.088",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "A legacy flag-off world may opt in and adopt current content for the first time.",
-      "text": "A legacy flag-off world may opt in and adopt current content for the first time."
-    },
-    {
-      "id": "ar.content.089",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "With the flag disabled, strict policy/species adoption is bypassed, identity is absent, and the existing lenient species, save, hash and artifact paths remain unchanged.",
-      "text": "With the flag disabled, strict policy/species adoption is bypassed, identity is absent, and the existing lenient species, save, hash and artifact paths remain unchanged."
-    },
-    {
-      "id": "ar.scope.013",
-      "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
-      "quote": "Strict distant policy and simulation content identity are adopted before enabled world creation or loading.",
-      "text": "Strict distant policy and simulation content identity are adopted before enabled world creation or loading."
-    },
-    {
-      "id": "ar.scope.014",
-      "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
-      "quote": "Creature records and snapshot compatibility are specified in [creature-entities.md](creature-entities.md).",
-      "text": "Creature records and snapshot compatibility are specified in [creature-entities.md](creature-entities.md)."
     }
   ],
   "exclusions": [

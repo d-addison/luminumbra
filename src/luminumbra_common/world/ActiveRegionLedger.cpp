@@ -97,19 +97,78 @@ ActiveRegionRecord& ActiveRegionLedger::activate(RegionKey key, const WorldClock
     m_headerTick = std::max(m_headerTick, clock.tick());
     return it->second;
 }
+void ActiveRegionLedger::capture_activation(RegionKey key, bool creation, ActivationCause cause) {
+    auto it = m_activationIntents.find(key);
+    if (it == m_activationIntents.end()) {
+        if (m_activationIntents.size() + m_pendingActivations.size() >= kMaxRegions)
+            throw std::length_error("Activation authority capacity reached");
+        m_activationIntents.emplace(key, ActivationIntent{creation, cause});
+    } else {
+        it->second.creation_pending = it->second.creation_pending || creation;
+        it->second.wake_cause = std::max(it->second.wake_cause, cause);
+    }
+}
 void ActiveRegionLedger::mark_edited(RegionKey key, const WorldClock& clock) {
-    auto& record = activate(key, clock);
+    auto next = *this;
+    const bool creation = !next.m_records.contains(key);
+    auto& record = next.activate(key, clock);
+    if (creation || record.state == RegionState::Frozen || next.m_activationIntents.contains(key))
+        next.capture_activation(key, creation, ActivationCause::Edit);
     record.edited = true;
     record.last_edit = clock.tick();
     record.wake_pending = true;
+    next.validate_envelope();
+    *this = std::move(next);
 }
 void ActiveRegionLedger::pin(RegionKey key, bool pinned, const WorldClock& clock) {
     if (!pinned && !m_records.contains(key))
         return;
-    auto& record = activate(key, clock);
-    record.pinned = pinned;
-    if (pinned)
+    auto next = *this;
+    const bool creation = !next.m_records.contains(key);
+    auto& record = next.activate(key, clock);
+    if (pinned) {
+        if (creation || record.state == RegionState::Frozen ||
+            next.m_activationIntents.contains(key))
+            next.capture_activation(key, creation, ActivationCause::Pin);
         record.wake_pending = true;
+    }
+    record.pinned = pinned;
+    next.validate_envelope();
+    *this = std::move(next);
+}
+void ActiveRegionLedger::acknowledge_activation(std::uint64_t tick, RegionKey key) noexcept {
+    m_pendingActivations.erase({tick, key});
+}
+void ActiveRegionLedger::materialize_activation(RegionKey key, std::uint64_t tick) {
+    const auto intent = m_activationIntents.find(key);
+    if (intent == m_activationIntents.end())
+        return;
+    const ActivationKey delivery{tick, key};
+    auto [it, added] = m_pendingActivations.try_emplace(
+        delivery, PendingRegionActivation{key, tick, intent->second.wake_cause});
+    if (!added)
+        it->second.cause = std::max(it->second.cause, intent->second.wake_cause);
+    m_activationIntents.erase(intent);
+}
+std::size_t ActiveRegionLedger::encoded_size() const noexcept {
+    std::size_t extensions = 0;
+    if (m_nextPersistentId != 1)
+        extensions += 14;
+    if (any_frozen_history() && m_legacyFrozenDigests.empty())
+        extensions += 7;
+    for (const auto count : {m_waterDebts.size(), m_energyAges.size(), m_completedWork.size()})
+        if (count != 0)
+            extensions += 10 + 16 * count;
+    if (m_contentIdentity)
+        extensions += 6 + SimulationContentIdentity::kEncodedBytes;
+    if (!m_activationIntents.empty() || !m_pendingActivations.empty())
+        extensions += 14 + 10 * m_activationIntents.size() + 17 * m_pendingActivations.size();
+    return kHeaderBytes + kRecordBytes * m_records.size() + 8 +
+           (extensions == 0 ? 0 : 4 + extensions);
+}
+void ActiveRegionLedger::validate_envelope() const {
+    if (encoded_size() > kMaxFileBytes)
+        throw std::length_error("Active-region ledger byte capacity reached");
 }
 void ActiveRegionLedger::set_populated(RegionKey key, bool populated) {
     m_records.at(key).populated = populated;
@@ -125,6 +184,10 @@ bool ActiveRegionLedger::set_water_debts(const WaterDebts& debts) {
             return false;
     auto next = debts;
     m_waterDebts.swap(next);
+    if (encoded_size() > kMaxFileBytes) {
+        m_waterDebts.swap(next);
+        return false;
+    }
     return true;
 }
 bool ActiveRegionLedger::acknowledge_resume(RegionKey key, std::uint64_t frozen_at) {
@@ -160,6 +223,14 @@ void ActiveRegionLedger::acknowledge_world_clock(const WorldClock& clock) noexce
 bool ActiveRegionLedger::allocate_persistent_id(std::uint64_t& id) {
     if (m_nextPersistentId >= kPersistentIdLimit)
         return false;
+    if (m_nextPersistentId == 1) {
+        ++m_nextPersistentId;
+        if (encoded_size() > kMaxFileBytes) {
+            --m_nextPersistentId;
+            return false;
+        }
+        --m_nextPersistentId;
+    }
     id = m_nextPersistentId++;
     return true;
 }
@@ -173,7 +244,11 @@ bool ActiveRegionLedger::energy_age(RegionKey key, std::uint64_t& age) const noe
 bool ActiveRegionLedger::set_energy_age(RegionKey key, std::uint64_t age) {
     if (!m_records.contains(key) || age >= WorldClock::kTickLimit)
         return false;
-    m_energyAges.insert_or_assign(key, age);
+    const auto [it, inserted] = m_energyAges.insert_or_assign(key, age);
+    if (inserted && encoded_size() > kMaxFileBytes) {
+        m_energyAges.erase(it);
+        return false;
+    }
     return true;
 }
 bool ActiveRegionLedger::set_energy_ages(const EnergyAges& ages) {
@@ -182,6 +257,10 @@ bool ActiveRegionLedger::set_energy_ages(const EnergyAges& ages) {
             return false;
     auto next = ages;
     m_energyAges.swap(next);
+    if (encoded_size() > kMaxFileBytes) {
+        m_energyAges.swap(next);
+        return false;
+    }
     return true;
 }
 std::uint32_t ActiveRegionLedger::phase(RegionKey key, std::uint8_t shift) {
@@ -224,7 +303,10 @@ void ActiveRegionLedger::visit(const Vec3& anchor,
                 ++rejected.capacity;
                 continue;
             }
+            const bool creation = !m_records.contains(key);
             auto& record = activate(key, clock);
+            if (creation || record.state == RegionState::Frozen)
+                capture_activation(key, creation, ActivationCause::Presence);
             record.visited = true;
             record.last_proximity = clock.tick();
         }
@@ -232,6 +314,11 @@ void ActiveRegionLedger::visit(const Vec3& anchor,
 void ActiveRegionLedger::evict_idle(const WorldClock& clock, const OwnershipProbe& owned) {
     if (!owned)
         return;
+    std::set<RegionKey> pending_owners;
+    for (const auto& [delivery, activation] : m_pendingActivations) {
+        (void)delivery;
+        pending_owners.insert(activation.key);
+    }
     for (auto it = m_records.begin(); it != m_records.end();) {
         const auto& r = it->second;
         // Cheap record conditions first so the probe runs only for evictable records.
@@ -239,7 +326,8 @@ void ActiveRegionLedger::evict_idle(const WorldClock& clock, const OwnershipProb
                           clock.tick() - r.last_proximity >= kIdleEvictionTicks;
         if (!r.pinned && !r.edited && !r.populated && r.water_cursor == 0 && idle &&
             !m_completedWork.contains(it->first) && !m_energyAges.contains(it->first) &&
-            !m_waterDebts.contains(it->first) && !owned(it->first)) {
+            !m_waterDebts.contains(it->first) && !m_activationIntents.contains(it->first) &&
+            !pending_owners.contains(it->first) && !owned(it->first)) {
             m_legacyFrozenDigests.erase(it->first);
             it = m_records.erase(it);
         } else
@@ -264,6 +352,7 @@ RegionSchedule ActiveRegionLedger::schedule(const WorldClock& clock,
     auto result =
         next.schedule_in_place(clock, replicated_anchors, combined, durable_digest, owned, storage);
     next.m_completedWork.clear();
+    next.validate_envelope();
     *this = std::move(next);
     return result;
 }
@@ -392,6 +481,10 @@ ActiveRegionLedger::schedule_in_place(const WorldClock& clock,
             r.cadence_phase = phase(key, r.cadence_shift);
             result.transitions.push_back({key, previous, r.state});
         }
+        const auto intent = m_activationIntents.find(key);
+        if (r.state == RegionState::Active && intent != m_activationIntents.end() &&
+            (intent->second.creation_pending || previous == RegionState::Frozen))
+            materialize_activation(key, clock.tick());
         r.wake_pending = false;
         r.last_decision = clock.tick();
         if (r.state != RegionState::Frozen &&
@@ -447,7 +540,11 @@ void ActiveRegionLedger::publish_completed_work(std::span<const RegionWork> work
         if (total != 0)
             completed[units.key] = Sum(completed[units.key], total);
     }
-    m_completedWork = std::move(completed);
+    m_completedWork.swap(completed);
+    if (encoded_size() > kMaxFileBytes) {
+        m_completedWork.swap(completed);
+        throw std::length_error("Active-region ledger byte capacity reached");
+    }
 }
 
 std::string ActiveRegionLedger::payload(bool observational) const {
@@ -525,6 +622,8 @@ std::string ActiveRegionLedger::canonical_bytes() const {
             Append(bytes, total, 8);
         }
     }
+    if (!m_activationIntents.empty() || !m_pendingActivations.empty())
+        bytes += "|activation:v1:" + activation_bytes();
     return bytes;
 }
 bool ActiveRegionLedger::adopt_content_identity(const SimulationContentIdentity& identity) {
@@ -532,7 +631,12 @@ bool ActiveRegionLedger::adopt_content_identity(const SimulationContentIdentity&
     if (!SimulationContentIdentity::decode(identity.encode(), validated) ||
         (m_contentIdentity && *m_contentIdentity != identity))
         return false;
+    const auto previous = m_contentIdentity;
     m_contentIdentity = identity;
+    if (encoded_size() > kMaxFileBytes) {
+        m_contentIdentity = previous;
+        return false;
+    }
     return true;
 }
 bool ActiveRegionLedger::validate_content_identity(const SimulationContentIdentity& identity,
@@ -561,7 +665,8 @@ std::string ActiveRegionLedger::encode() const {
     const bool declare_projection = any_frozen_history() && m_legacyFrozenDigests.empty();
     const bool allocator_advanced = m_nextPersistentId != 1;
     const bool extension = declare_projection || allocator_advanced || !m_waterDebts.empty() ||
-                           !m_energyAges.empty() || m_contentIdentity || !m_completedWork.empty();
+                           !m_energyAges.empty() || m_contentIdentity || !m_completedWork.empty() ||
+                           !m_activationIntents.empty() || !m_pendingActivations.empty();
     std::string bytes = "ARL1";
     Append(bytes, extension ? 2 : 1, 2);
     Append(bytes, 0, 2);
@@ -614,11 +719,75 @@ std::string ActiveRegionLedger::encode() const {
                 Append(tlvs, total, 8);
             }
         }
+        if (!m_activationIntents.empty() || !m_pendingActivations.empty()) {
+            const auto activation = activation_bytes();
+            Append(tlvs, 7, 2);
+            Append(tlvs, activation.size(), 4);
+            tlvs += activation;
+        }
         Append(bytes, tlvs.size(), 4);
         bytes += tlvs;
     }
     Append(bytes, Hash(bytes), 8);
     return bytes;
+}
+std::string ActiveRegionLedger::activation_bytes() const {
+    std::string bytes;
+    Append(bytes, m_activationIntents.size(), 4);
+    for (const auto& [key, intent] : m_activationIntents) {
+        Append(bytes, static_cast<std::uint32_t>(key.x), 4);
+        Append(bytes, static_cast<std::uint32_t>(key.z), 4);
+        Append(bytes, intent.creation_pending, 1);
+        Append(bytes, static_cast<std::uint8_t>(intent.wake_cause), 1);
+    }
+    Append(bytes, m_pendingActivations.size(), 4);
+    for (const auto& [delivery, pending] : m_pendingActivations) {
+        Append(bytes, delivery.first, 8);
+        Append(bytes, static_cast<std::uint32_t>(pending.key.x), 4);
+        Append(bytes, static_cast<std::uint32_t>(pending.key.z), 4);
+        Append(bytes, static_cast<std::uint8_t>(pending.cause), 1);
+    }
+    return bytes;
+}
+bool ActiveRegionLedger::decode_activations(std::string_view bytes) {
+    if (bytes.size() < 8)
+        return false;
+    Reader in(bytes);
+    const auto intents = in.read(4);
+    if (intents > kMaxRegions || bytes.size() < 8 + 10 * intents)
+        return false;
+    std::optional<RegionKey> prior;
+    for (std::uint64_t i = 0; i < intents; ++i) {
+        const RegionKey key{std::bit_cast<std::int32_t>(static_cast<std::uint32_t>(in.read(4))),
+                            std::bit_cast<std::int32_t>(static_cast<std::uint32_t>(in.read(4)))};
+        const auto creation = in.read(1), cause = in.read(1);
+        if (!ValidKey(key) || !m_records.contains(key) || (prior && key <= *prior) ||
+            creation > 1 || cause < 1 || cause > 3 ||
+            (!creation && !m_records.at(key).wake_pending))
+            return false;
+        m_activationIntents.emplace(
+            key, ActivationIntent{creation != 0, static_cast<ActivationCause>(cause)});
+        prior = key;
+    }
+    const auto pending = in.read(4);
+    if (pending > kMaxRegions || intents + pending > kMaxRegions || intents + pending == 0 ||
+        bytes.size() != 8 + 10 * intents + 17 * pending)
+        return false;
+    std::optional<ActivationKey> previous;
+    for (std::uint64_t i = 0; i < pending; ++i) {
+        const auto tick = in.read(8);
+        const RegionKey key{std::bit_cast<std::int32_t>(static_cast<std::uint32_t>(in.read(4))),
+                            std::bit_cast<std::int32_t>(static_cast<std::uint32_t>(in.read(4)))};
+        const auto cause = in.read(1);
+        const ActivationKey delivery{tick, key};
+        if (!ValidKey(key) || !m_records.contains(key) || (previous && delivery <= *previous) ||
+            tick == 0 || tick > m_tick || tick >= WorldClock::kTickLimit || cause < 1 || cause > 3)
+            return false;
+        m_pendingActivations.emplace(
+            delivery, PendingRegionActivation{key, tick, static_cast<ActivationCause>(cause)});
+        previous = delivery;
+    }
+    return true;
 }
 bool ActiveRegionLedger::decode(std::string_view bytes,
                                 ActiveRegionLedger& out,
@@ -742,7 +911,7 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
                     return false;
                 const auto value = extension.substr(at, length);
                 at += length;
-                if ((have_previous && type <= previous_type) || (type < 1 || type > 6))
+                if ((have_previous && type <= previous_type) || (type < 1 || type > 7))
                     return false;
                 have_previous = true;
                 previous_type = type;
@@ -829,6 +998,11 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
                         result.m_completedWork.emplace(key, total);
                         prior = key;
                     }
+                    continue;
+                }
+                if (type == 7) {
+                    if (!result.decode_activations(value))
+                        return false;
                     continue;
                 }
                 if (length != 1)

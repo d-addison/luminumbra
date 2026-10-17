@@ -62,6 +62,23 @@ struct RegionTransition {
     bool operator==(const RegionTransition&) const = default;
 };
 
+enum class ActivationCause : std::uint8_t {
+    Presence = 1,
+    Pin = 2,
+    Edit = 3
+};
+struct ActivationIntent {
+    bool creation_pending = false;
+    ActivationCause wake_cause = ActivationCause::Presence;
+    bool operator==(const ActivationIntent&) const = default;
+};
+struct PendingRegionActivation {
+    RegionKey key;
+    std::uint64_t activation_tick = 0;
+    ActivationCause cause = ActivationCause::Presence;
+    bool operator==(const PendingRegionActivation&) const = default;
+};
+
 // Observational counts of inputs that the scheduler skipped deterministically.
 struct RegionRejections {
     std::uint32_t anchors = 0, work = 0, capacity = 0;
@@ -112,6 +129,7 @@ public:
     // Version 2 adds a u32 extension length and ascending TLVs: type 1 allocator (14 bytes),
     // type 2 digest projection (7 bytes), type 3 water debt, type 4 energy ages, type 5
     // content identity (46 bytes), and type 6 completed work (10 + 16 bytes per owned key).
+    // Type 7 activation metadata shares this existing byte allowance.
     static constexpr std::size_t kMaxFileBytes = kHeaderBytes + kMaxRegions * kRecordBytes + 4 + 7 +
                                                  14 + 6 + SimulationContentIdentity::kEncodedBytes +
                                                  3 * (6 + 4 + 16 * kMaxRegions) + 8;
@@ -205,6 +223,14 @@ public:
     void mark_edited(RegionKey key, const WorldClock& clock);
     void pin(RegionKey key, bool pinned, const WorldClock& clock);
     void set_populated(RegionKey key, bool populated);
+    using ActivationKey = std::pair<std::uint64_t, RegionKey>;
+    [[nodiscard]] const auto& activation_intents() const noexcept {
+        return m_activationIntents;
+    }
+    [[nodiscard]] const auto& pending_activations() const noexcept {
+        return m_pendingActivations;
+    }
+    void acknowledge_activation(std::uint64_t tick, RegionKey key) noexcept;
     void set_water_cursor(RegionKey key, std::uint64_t cursor);
     void mark_saved(const WorldClock& clock);
     // Completed consumer work produced at tick(), consumed once by schedule(tick()+1).
@@ -253,6 +279,12 @@ private:
     void evict_idle(const WorldClock& clock, const OwnershipProbe& owned);
     ActiveRegionRecord& activate(RegionKey key, const WorldClock& clock);
     void visit(const Vec3& anchor, const WorldClock& clock, RegionRejections& rejected);
+    void capture_activation(RegionKey key, bool creation, ActivationCause cause);
+    void materialize_activation(RegionKey key, std::uint64_t tick);
+    [[nodiscard]] std::string activation_bytes() const;
+    bool decode_activations(std::string_view bytes);
+    [[nodiscard]] std::size_t encoded_size() const noexcept;
+    void validate_envelope() const;
     std::string payload(bool observational) const;
     // True when any record has been frozen (now or in the past).
     bool any_frozen_history() const;
@@ -269,6 +301,8 @@ private:
     std::uint64_t m_headerTick = 0;
     std::uint64_t m_nextPersistentId = 1;
     std::optional<SimulationContentIdentity> m_contentIdentity;
+    std::map<RegionKey, ActivationIntent> m_activationIntents;
+    std::map<ActivationKey, PendingRegionActivation> m_pendingActivations;
 };
 
 } // namespace Luminumbra::world
