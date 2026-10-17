@@ -133,6 +133,12 @@ TerrainPresetLoadResult LoadTerrainPreset(
     const std::filesystem::path& preset_path,
     const World::WorldgenFileStatusReader& read_status = World::ReadWorldgenSymlinkStatus);
 
+// Saved presets may live outside the runtime tree; resolve their dependencies here.
+TerrainPresetLoadResult LoadTerrainPreset(
+    const std::filesystem::path& preset_path,
+    const std::filesystem::path& data_root,
+    const World::WorldgenFileStatusReader& read_status = World::ReadWorldgenSymlinkStatus);
+
 // Explicit CLI preset override, validated against the runtime data root. Failure leaves
 // json_text unchanged; successful text is passed to GameSession::CreateWorld.
 bool LoadTerrainPresetOverride(const std::filesystem::path& preset_path,

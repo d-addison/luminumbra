@@ -10,6 +10,7 @@
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/components/CreatureComponents.h"
 #include "luminumbra_common/components/PlantComponents.h"
+#include "luminumbra_common/core/FramePacing.h"
 #include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/game/CodexView.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
@@ -26,6 +27,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -1008,9 +1010,17 @@ void DrawSettingsContents(ClientAppContext& app,
     if (ImGui::SliderFloat("FOV", &us.fov, 30.0f, 110.0f, "%.0f deg")) {
         camera->Zoom = us.fov;
     }
-    if (ImGui::Checkbox("VSync", &us.vsync)) {
-        glfwSwapInterval(us.vsync ? 1 : 0);
+    ImGui::Checkbox("VSync", &us.vsync);
+    const char* cap_labels[] = {"Unlimited", "30", "60", "120", "144", "165", "240"};
+    static_assert(std::size(cap_labels) == std::size(luminumbra::core::kFrameCaps));
+    constexpr int cap_count = static_cast<int>(std::size(luminumbra::core::kFrameCaps));
+    int selected_cap = 0;
+    for (int i = 0; i < cap_count; ++i) {
+        if (us.frame_cap == luminumbra::core::kFrameCaps[i])
+            selected_cap = i;
     }
+    if (ImGui::Combo("Frame cap", &selected_cap, cap_labels, cap_count))
+        us.frame_cap = luminumbra::core::kFrameCaps[selected_cap];
     ImGui::Separator();
     {
         // Window mode — applied live via ApplyWindowMode (no-op on capture-pinned
