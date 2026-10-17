@@ -105,6 +105,22 @@ class CTestSkipAuditTests(unittest.TestCase):
         self.assertEqual(output, "")
         self.assertIn("Unexpected unevaluated tests:\n  - Developer.First\n", errors)
 
+    def test_required_target_passes_when_registered(self):
+        self.check_required_test("DeveloperConsoleUi.ScopedContextRestoresPreviousContext", 0)
+
+    def test_missing_target_fails_even_when_inventory_floor_is_met(self):
+        self.check_required_test("UiFixture.MissingTarget", 1)
+
+    def check_required_test(self, required: str, expected: int):
+        output, errors = self.audit_required_tests(
+            ["DeveloperConsoleUi.ScopedContextRestoresPreviousContext", "Unrelated.ExtraCoverage"],
+            [required], expected)
+        if expected:
+            self.assertIn("Required CTest cases are missing:", errors)
+            self.assertIn(required, errors)
+        else:
+            self.assertIn("2 tests; 0 approved skips", output)
+
     def test_allow_list_is_empty(self):
         # Every previously allow-listed test now genuinely runs. Guard against a
         # skip quietly being re-admitted here without justification.

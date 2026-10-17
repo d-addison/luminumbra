@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import contextlib
 import errno
 import json
 from pathlib import Path
@@ -183,22 +184,36 @@ class CatalogTests(unittest.TestCase):
                 check.local_file(root, check.CATALOG)
 
     def test_symlink_does_not_publish_external_evidence(self):
-        with tempfile.TemporaryDirectory() as outside:
+        with tempfile.TemporaryDirectory() as outside, contextlib.ExitStack() as stack:
             external = Path(outside) / "source.json"
             external.write_text("{}", encoding="utf-8")
-            link = self.root / "linked.json"
+            link = self.root.resolve() / "linked.json"
             try:
                 link.symlink_to(external)
             except OSError as error:
                 if (error.errno not in (errno.EPERM, errno.EACCES, errno.ENOSYS, errno.EOPNOTSUPP)
                         and getattr(error, "winerror", None) not in (1, 50, 1314)):
                     raise
-                self.skipTest(f"Symlink creation is unavailable: {error}")
+                # Exercise the same refusal without requiring link privileges.
+                original_lstat = Path.lstat
+                def lstat(path, *args, **kwargs):
+                    if path == link:
+                        return mock.Mock(st_mode=stat.S_IFLNK, st_file_attributes=0)
+                    return original_lstat(path, *args, **kwargs)
+                stack.enter_context(mock.patch.object(Path, "lstat", new=lstat))
             try:
                 self.row("B09")["fixture"]["source_paths"] = ["linked.json"]
                 self.rejected("linked evidence")
             finally:
-                link.unlink()
+                link.unlink(missing_ok=True)
+
+    def test_symlink_evidence_refused_without_privilege_with_aliased_root(self):
+        # Exercise a different root spelling without requiring Windows short names.
+        alias = self.root / ".." / self.root.name
+        with mock.patch.object(self, "root", alias), mock.patch.object(
+            Path, "symlink_to", side_effect=PermissionError(errno.EACCES, "denied")
+        ):
+            self.test_symlink_does_not_publish_external_evidence()
 
     def packet(self, scenario_id="R12"):
         """Synthetic contract data only; deliberately never native acceptance."""

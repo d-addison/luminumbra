@@ -346,7 +346,9 @@ void HandleFatalSignal(int signo, siginfo_t* info, void* context) {
 
 bool InstallAlternateStack() {
     constexpr std::size_t kAlternateStackBytes = 64 * 1024;
-    static std::unique_ptr<char[]> stack;
+    // Intentionally retain successful storage for the process lifetime: fatal signal
+    // handlers remain installed during static destruction and may still use this stack.
+    static char* stack = nullptr;
     static thread_local bool installed_on_this_thread = false;
     // The server installs once on its entry thread. Keep that ownership even if the
     // thread exits: a different thread must never share its alternate-stack storage.
@@ -365,14 +367,14 @@ bool InstallAlternateStack() {
         }
     }
     stack_t alternate{};
-    alternate.ss_sp = stack ? stack.get() : candidate.get();
+    alternate.ss_sp = stack ? stack : candidate.get();
     alternate.ss_size = kAlternateStackBytes;
     alternate.ss_flags = 0;
     if (::sigaltstack(&alternate, nullptr) != 0) {
         return false;
     }
     if (candidate) {
-        stack = std::move(candidate);
+        stack = candidate.release();
     }
     installed_on_this_thread = true;
     return true;

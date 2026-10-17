@@ -231,12 +231,13 @@ jobs:
           ctest --preset release --show-only=json-v1 > build/release/ctest-discovery.json
           env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \
             xvfb-run -a python3 tools/ci/ctest_shards.py run --profile gcc --directory build/release
-          # Inventory floor: measured 2301 tests on devel b56cdba1, minus ~1% margin.
+          # Inventory floor: checked on the full suite here and the shard union below.
           # It exists to catch whole suites silently vanishing (a CMake guard flipping,
           # discovery failing), not to be an exact inventory. Raise it when tests are
           # added in bulk; lowering it needs a justification in the PR description.
+          # Require each developer target explicitly; total-count margin cannot hide one.
           if [ '${{ matrix.shard }}' = 0 ]; then
-            python3 tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 2280
+            python3 tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 2340 --require-test ConsoleFixture.CompleteInventoryDefaultsBindingsAndUnavailableRows --require-test UiFixture.DefaultPassiveHudRendersWithoutShellOrFocusAndCanBeDisabled --require-test DeveloperPersistence.DirectConstructionMatchesFactoryDefaultsAndInitializesRecords
           fi
       - name: Qualify installed prefab runtime
         if: ${{ needs.changes.outputs.needs_cpp != 'false' && steps.tests.outputs.prefab == 'true' }}
@@ -338,7 +339,7 @@ jobs:
             -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DLUMINUMBRA_ENABLE_DILIGENT=OFF -DLUMINUMBRA_ENABLE_GNS=ON
-      - name: Build the shared sockets transport against GNS
+      - name: Build the sockets transport and server modes against GNS
         run: |
           # Upgraded from a -fsyntax-only probe of one file to a real build.
           # SteamNetworkingTransport and GnsTransport now share NetSocketsTransport,
@@ -348,11 +349,13 @@ jobs:
           # building the GNS side is the only way to get real compile coverage of
           # the socket logic the Steam transport also runs. A syntax check could
           # not catch a link-level or template-instantiation break; this can.
-          cmake --build build/gns-probe --target luminumbra_common --parallel 4
+          cmake --build build/gns-probe --target luminumbra_common luminumbra_server_app --parallel 4
           # Fail loudly if the shared body was not actually part of that build,
           # so this job cannot silently degrade back into proving nothing.
           find build/gns-probe -name 'NetSocketsTransport.cpp.o' -print -quit \
             | grep -q . || { echo "NetSocketsTransport.cpp was not compiled"; exit 1; }
+          find build/gns-probe -path '*/modes/Gns.cpp.o' -print -quit \
+            | grep -q . || { echo "Gns.cpp was not compiled"; exit 1; }
 
   diligent-rhi:
     name: Diligent RHI / software GL
@@ -655,9 +658,10 @@ jobs:
           # With llvmpipe deployed this lane holds the same standard as the
           # Linux software-GL lane: no GL-related skip is acceptable, and any
           # remaining skip is a hard failure.
-          # Inventory floor: measured 2284 tests on devel b56cdba1, minus ~1% margin (see the Linux lane for the policy).
+          # Inventory floor: checked on the full suite here and the shard union below.
+          # Require each developer target explicitly; total-count margin cannot hide one.
           if (${{ matrix.shard }} -eq 0) {
-            python tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 2260
+            python tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 2320 --require-test ConsoleFixture.CompleteInventoryDefaultsBindingsAndUnavailableRows --require-test UiFixture.DefaultPassiveHudRendersWithoutShellOrFocusAndCanBeDisabled --require-test DeveloperPersistence.DirectConstructionMatchesFactoryDefaultsAndInitializesRecords
           }
       - name: Report compiler cache statistics
         if: ${{ needs.changes.outputs.needs_cpp != 'false' && (always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.ccache-stage.outcome == 'success') }}
@@ -898,9 +902,10 @@ jobs:
           # With llvmpipe deployed this lane holds the same standard as the
           # other software-GL lanes: no GL-related skip is acceptable, and
           # any remaining skip is a hard failure.
-          # Inventory floor: measured 2284 tests on devel b56cdba1, minus ~1% margin (see the Linux lane for the policy).
+          # Inventory floor: checked on the full suite here and the shard union below.
+          # Require each developer target explicitly; total-count margin cannot hide one.
           if [ '${{ matrix.shard }}' = 0 ]; then
-            python tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 2260
+            python tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 2320 --require-test ConsoleFixture.CompleteInventoryDefaultsBindingsAndUnavailableRows --require-test UiFixture.DefaultPassiveHudRendersWithoutShellOrFocusAndCanBeDisabled --require-test DeveloperPersistence.DirectConstructionMatchesFactoryDefaultsAndInitializesRecords
           fi
       - name: Bind manual qualification evidence
         if: always() && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)
@@ -1029,7 +1034,13 @@ jobs:
             --prefix gcc-junit-${{ github.sha }}-${{ github.run_id }} --attempt ${{ github.run_attempt }} "${full[@]}"
           python3 tools/ci/ctest_shards.py merge --profile gcc --directory build/gcc-shards \
             --output build/release/ctest.junit.xml "${full[@]}" --needs-heavy "$CI_NEEDS_HEAVY" --reason "$CI_HEAVY_REASON"
-          python3 tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 1
+          # The full discovery floor is enforced before the reviewed selection.
+          minimum_tests=2340
+          if [ "$CI_NEEDS_HEAVY" = false ]; then
+            minimum_tests=$((minimum_tests - 2))
+          fi
+          # Require each developer target explicitly; total-count margin cannot hide one.
+          python3 tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests "$minimum_tests" --require-test ConsoleFixture.CompleteInventoryDefaultsBindingsAndUnavailableRows --require-test UiFixture.DefaultPassiveHudRendersWithoutShellOrFocusAndCanBeDisabled --require-test DeveloperPersistence.DirectConstructionMatchesFactoryDefaultsAndInitializesRecords
       - name: Check acceptance matrix CTest execution
         if: needs.linux.result == 'success' && needs.changes.outputs.needs_cpp != 'false'
         env:
@@ -1110,7 +1121,13 @@ jobs:
             --prefix msvc-junit-${{ github.sha }}-${{ github.run_id }} --attempt ${{ github.run_attempt }} "${full[@]}"
           python3 tools/ci/ctest_shards.py merge --profile msvc --directory build/msvc-shards \
             --output build/release/ctest.junit.xml "${full[@]}" --needs-heavy "$CI_NEEDS_HEAVY" --reason "$CI_HEAVY_REASON"
-          python3 tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 1
+          # The full discovery floor is enforced before the reviewed selection.
+          minimum_tests=2320
+          if [ "$CI_NEEDS_HEAVY" = false ]; then
+            minimum_tests=$((minimum_tests - 2))
+          fi
+          # Require each developer target explicitly; total-count margin cannot hide one.
+          python3 tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests "$minimum_tests" --require-test ConsoleFixture.CompleteInventoryDefaultsBindingsAndUnavailableRows --require-test UiFixture.DefaultPassiveHudRendersWithoutShellOrFocusAndCanBeDisabled --require-test DeveloperPersistence.DirectConstructionMatchesFactoryDefaultsAndInitializesRecords
       - name: Upload merged JUnit
         if: needs.windows-msvc.result == 'success' && needs.changes.outputs.needs_cpp != 'false'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -1174,7 +1191,13 @@ jobs:
             --prefix ucrt64-junit-${{ github.sha }}-${{ github.run_id }} --attempt ${{ github.run_attempt }} "${full[@]}"
           python3 tools/ci/ctest_shards.py merge --profile ucrt64 --directory build/ucrt64-shards \
             --output build/release/ctest.junit.xml "${full[@]}" --needs-heavy "$CI_NEEDS_HEAVY" --reason "$CI_HEAVY_REASON"
-          python3 tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 1
+          # The full discovery floor is enforced before the reviewed selection.
+          minimum_tests=2320
+          if [ "$CI_NEEDS_HEAVY" = false ]; then
+            minimum_tests=$((minimum_tests - 2))
+          fi
+          # Require each developer target explicitly; total-count margin cannot hide one.
+          python3 tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests "$minimum_tests" --require-test ConsoleFixture.CompleteInventoryDefaultsBindingsAndUnavailableRows --require-test UiFixture.DefaultPassiveHudRendersWithoutShellOrFocusAndCanBeDisabled --require-test DeveloperPersistence.DirectConstructionMatchesFactoryDefaultsAndInitializesRecords
       - name: Upload merged JUnit
         if: needs.windows-ucrt64.result == 'success' && needs.changes.outputs.needs_cpp != 'false'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

@@ -4,6 +4,7 @@ from pathlib import Path
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,17 @@ SPEC.loader.exec_module(gate)
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def bash_executable() -> str:
+    # Prefer Git Bash over the Windows WSL launcher. CI's shell: bash uses
+    # this same Git installation; native paths work with its MSYS tools.
+    git = shutil.which("git")
+    if git:
+        bash = Path(git).resolve().parent.parent / "bin/bash.exe"
+        if bash.is_file():
+            return str(bash)
+    return "bash"
 
 
 def run_block(workflow: str, step: str) -> str:
@@ -141,7 +153,6 @@ class PathGateTests(unittest.TestCase):
                 with self.subTest(workflow=workflow.name, path=path):
                     self.assertTrue(gate.needs_cpp(path))
 
-    @unittest.skipIf(os.name == "nt", "trusted classification runs on Linux")
     def test_workflow_bootstrap_uses_base_and_fails_open_without_executing_head(self):
         for name in ("ci", "asan", "performance"):
             workflow = (ROOT / f".github/workflows/{name}.yml").read_text(encoding="utf-8")
@@ -150,16 +161,13 @@ class PathGateTests(unittest.TestCase):
                                                (False, True, False), (False, False, True)):
                 with self.subTest(workflow=name, sensitive=sensitive, missing=missing, failed=failed), tempfile.TemporaryDirectory() as directory:
                     root = Path(directory)
-                    bin_dir = root / "bin"
-                    bin_dir.mkdir()
-                    git = bin_dir / "git"
-                    git.write_text(
-                        '#!/bin/sh\ncase "$1" in\n'
+                    fixtures = (
+                        'git() { case "$1" in\n'
                         'diff) test "$FAKE_SENSITIVE" = false;;\n'
-                        'show) test "$FAKE_MISSING" = false || exit 1; cat "$FAKE_BASE_SCRIPT";;\n'
-                        '*) exit 1;;\nesac\n', encoding="utf-8"
+                        'show) test "$FAKE_MISSING" = false || return 1; cat "$FAKE_BASE_SCRIPT";;\n'
+                        '*) return 1;;\nesac; }\n'
+                        'python3() { "$FAKE_PYTHON" -I -B "$@"; }\n'
                     )
-                    git.chmod(0o755)
                     base = root / "base.py"
                     base.write_text(
                         "import os, sys\n"
@@ -174,13 +182,14 @@ class PathGateTests(unittest.TestCase):
                     marker = root / "head-executed"
                     head.write_text(f"from pathlib import Path\nPath({str(marker)!r}).touch()\n", encoding="utf-8")
                     output = root / "output"
-                    env = dict(os.environ, PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                    env = dict(os.environ,
                                CI_EVENT="pull_request", CI_BASE_REF="devel", CI_REPOSITORY="owner/repo",
                                CI_HEAD_REPOSITORY="owner/repo", CI_BASE_SHA="base", CI_HEAD_SHA="head",
-                               RUNNER_TEMP=str(root), GITHUB_WORKSPACE=str(root), GITHUB_OUTPUT=str(output),
-                               FAKE_BASE_SCRIPT=str(base), FAKE_SENSITIVE=str(sensitive).lower(),
+                               RUNNER_TEMP=root.as_posix(), GITHUB_WORKSPACE=root.as_posix(), GITHUB_OUTPUT=output.as_posix(),
+                               FAKE_BASE_SCRIPT=base.as_posix(), FAKE_PYTHON=Path(sys.executable).as_posix(),
+                               FAKE_SENSITIVE=str(sensitive).lower(),
                                FAKE_MISSING=str(missing).lower(), FAKE_FAILED=str(failed).lower())
-                    subprocess.run(["bash", "-e", "-o", "pipefail", "-c", script], env=env, check=True,
+                    subprocess.run([bash_executable(), "-e", "-o", "pipefail", "-c", fixtures + script], env=env, check=True,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                     self.assertFalse(marker.exists())
                     expected = "needs_cpp=true\nneeds_python=true\n" if sensitive or missing or failed else "needs_cpp=false\nneeds_python=true\n"
@@ -211,7 +220,6 @@ class PathGateTests(unittest.TestCase):
             self.assertIn('echo "$message" >> "$GITHUB_STEP_SUMMARY"', body)
             self.assertIn("native build skipped by Classify changed paths", body)
 
-    @unittest.skipIf(os.name == "nt", "route scripts use the hosted bash shell")
     def test_route_is_visible_in_log_summary_and_step_output(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         for job in ("linux", "windows-msvc"):
@@ -219,9 +227,9 @@ class PathGateTests(unittest.TestCase):
             for cpp, route in (("false", "python-only"), ("true", "native"), ("", "native")):
                 with self.subTest(job=job, cpp=cpp), tempfile.TemporaryDirectory() as directory:
                     root = Path(directory)
-                    env = dict(os.environ, NEEDS_CPP=cpp, GITHUB_OUTPUT=str(root / "output"),
-                               GITHUB_STEP_SUMMARY=str(root / "summary"))
-                    result = subprocess.run(["bash", "-e", "-c", script], env=env, check=True,
+                    env = dict(os.environ, NEEDS_CPP=cpp, GITHUB_OUTPUT=(root / "output").as_posix(),
+                               GITHUB_STEP_SUMMARY=(root / "summary").as_posix())
+                    result = subprocess.run([bash_executable(), "-e", "-c", script], env=env, check=True,
                                             stdout=subprocess.PIPE, text=True)
                     self.assertEqual((root / "output").read_text(encoding="utf-8"), f"route={route}\n")
                     self.assertEqual((root / "summary").read_text(encoding="utf-8"), result.stdout)
@@ -426,10 +434,13 @@ class PathGateTests(unittest.TestCase):
             ]):
                 self.assertTrue(gate.classify(ROOT, "pull_request", "base", "head", "owner/repo", "owner/repo", "devel")[2])
 
-    def test_windows_plan_preserves_common_suites_and_omits_posix_fixtures(self):
+    def test_windows_and_posix_plans_have_identical_coverage(self):
+        with patch.object(gate.os, "name", "posix"):
+            posix_commands = gate.python_test_commands(ROOT)
         with patch.object(gate.os, "name", "nt"):
             commands = gate.python_test_commands(ROOT)
-        self.assertNotIn(("tools/ci/test_tidy_cache.py",), commands)
+        self.assertEqual(commands, posix_commands)
+        self.assertIn(("tools/ci/test_tidy_cache.py",), commands)
         for test in gate.PYTHON_TESTS:
             self.assertIn((test,), commands)
 
