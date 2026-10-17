@@ -37,7 +37,7 @@ bool HasFrozenPreset(const std::string& name) {
            name == "temperate_forest";
 }
 
-bool ResolveSavedPreset(const fs::path& root,
+bool ResolveSavedPreset(const fs::path& runtime_root,
                         const fs::path& save,
                         const nlohmann::json& metadata,
                         SavedWorld& result,
@@ -63,8 +63,8 @@ bool ResolveSavedPreset(const fs::path& root,
     const auto presets = HasFrozenPreset(result.metadata.worldType) ? "worlds/atlas/presets-rev6"
                                                                     : "worlds/atlas/presets";
     result.preset_path =
-        has_embedded ? embedded : root / presets / (result.metadata.worldType + ".json");
-    preset = world::LoadTerrainPreset(result.preset_path, read_status);
+        has_embedded ? embedded : runtime_root / presets / (result.metadata.worldType + ".json");
+    preset = world::LoadTerrainPreset(result.preset_path, runtime_root / "data", read_status);
     if (!preset.ok) {
         result.error =
             preset.errors.empty() ? "World preset is unavailable." : preset.errors.front();
@@ -83,6 +83,17 @@ bool ResolveSavedPreset(const fs::path& root,
 } // namespace
 
 SavedWorld InspectSavedWorld(const fs::path& root,
+                             const std::string& world_id,
+                             const std::stop_token& stop,
+                             WorldSaveAdmission* admission,
+                             const SavedWorldChunkSelector& retain,
+                             const World::WorldgenFileStatusReader& read_status,
+                             const SavedWorldOpenCheck& check) {
+    return InspectSavedWorld(root, root, world_id, stop, admission, retain, read_status, check);
+}
+
+SavedWorld InspectSavedWorld(const fs::path& root,
+                             const fs::path& runtime_root,
                              const std::string& world_id,
                              const std::stop_token& stop,
                              WorldSaveAdmission* admission,
@@ -178,7 +189,7 @@ SavedWorld InspectSavedWorld(const fs::path& root,
             return result;
         }
         world::TerrainPresetLoadResult preset;
-        if (!ResolveSavedPreset(root, save, json, result, preset, read_status))
+        if (!ResolveSavedPreset(runtime_root, save, json, result, preset, read_status))
             return result;
         result.error.clear();
         if (check) {
@@ -214,6 +225,12 @@ SavedWorld InspectSavedWorld(const fs::path& root,
 }
 
 SavedWorldCatalog EnumerateSavedWorlds(const fs::path& root, const std::stop_token& stop) {
+    return EnumerateSavedWorlds(root, root, stop);
+}
+
+SavedWorldCatalog EnumerateSavedWorlds(const fs::path& root,
+                                       const fs::path& runtime_root,
+                                       const std::stop_token& stop) {
     SavedWorldCatalog result;
     if (stop.stop_requested()) {
         result.error = "Saved-world validation cancelled.";
@@ -231,7 +248,7 @@ SavedWorldCatalog EnumerateSavedWorlds(const fs::path& root, const std::stop_tok
             }
             if (entry.is_directory() || entry.is_symlink())
                 result.worlds.push_back(
-                    InspectSavedWorld(root, entry.path().filename().string(), stop));
+                    InspectSavedWorld(root, runtime_root, entry.path().filename().string(), stop));
         }
         std::sort(result.worlds.begin(), result.worlds.end(), [](const auto& a, const auto& b) {
             if (a.metadata.creationTime != b.metadata.creationTime)

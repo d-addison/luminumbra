@@ -1,8 +1,8 @@
 #include "GameSession.h"
 #include "../ai/CircadianSystem.h" // Diurnal and nocturnal activity.
+#include "../ai/CreatureBrain.h"
 #include "../ai/CreatureBrainSystem.h"
 #include "../ai/CreatureReproductionSystem.h" // Generational evolution.
-#include "../ai/CreatureSpeciesRegistry.h"    // per-world species definitions
 #include "../ai/DecompositionSystem.h"        // Releases nutrients after death.
 #include "../ai/EcologyTuningConfig.h"
 #include "../ai/ForagingSystem.h"  // ant-trail foraging (Deneubourg double-bridge)
@@ -29,8 +29,11 @@
 #include "../components/CircadianComponents.h"
 #include "../components/CombustionComponents.h"
 #include "../components/CoreComponents.h"
+#include "../components/CreatureComponents.h"
+#include "../components/CropLifecycleComponents.h"
 #include "../components/DecayComponents.h"
 #include "../components/DiseaseComponents.h"
+#include "../components/ForagingComponents.h"
 #include "../components/GrazeableComponent.h"
 #include "../components/InstinctComponents.h"
 #include "../components/IrrigationComponents.h"
@@ -39,17 +42,22 @@
 #include "../components/PackHunterComponents.h"
 #include "../components/PlantComponents.h"
 #include "../components/PollinationComponents.h"
+#include "../components/ScavengerComponent.h"
 #include "../components/SoilComponents.h"
 #include "../components/TerritoryComponents.h"
-#include "../core/JobSystem.h"
+#include "../components/ThirstComponents.h"
 #include "../core/Log.h"
+#include "../core/SystemConfig.h"
+#include "../ecs/EntitySnapshot.h"
 #include "../fields/EnergyFieldState.h"
+#include "../fields/FieldPageState.h"
 #include "../persistence/PlantPersistence.h"
 #include "../persistence/SaveTransaction.h"
 #include "../persistence/SavedWorldCatalog.h"
 #include "../persistence/WorldPersistenceRoundtrip.h" // Persistence::StableChecksum (ComputeScentSubHash)
 #include "../persistence/WorldSaveService.h"
 #include "../scripting/LuaState.h"
+#include "../simulation/SimBudgetTelemetry.h"
 #include "../systems/AetherFieldSystem.h"
 #include "../systems/CropLifecycleSystem.h"
 #include "../systems/FieldEmitterSystem.h" // Gathers field-emitter deposits.
@@ -61,6 +69,7 @@
 #include "../systems/PlantDiseaseSystem.h" // Plant disease propagation.
 #include "../systems/PlantGrowthSystem.h"  // Plant growth tick.
 #include "../systems/PollinationSystem.h"  // Cross-pollination.
+#include "../systems/RegionConsumerGate.h"
 #include "../systems/RegionalFoliage.h"
 #include "../systems/SHIELD_WorldSystem.h" // This includes TerrainGenParams
 #include "../systems/SoilNutrientSystem.h" // Soil-nutrient cycling.
@@ -68,13 +77,34 @@
 #include "../systems/WeatherEventSystem.h" // Pure deterministic weather-event schedule.
 #include "../systems/WeatherSystem.h"
 #include "../systems/WindFieldSystem.h"
+#include "ActiveRegionLedger.h"
+#include "Chunk.h"
+#include "GroundObjectStore.h"
 #include "TerrainPresetLoader.h"
 #include "WorldStreamingState.h"
 #include "WorldgenFileReader.h"
 #include "nlohmann/json.hpp" // For parsing JSON
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cmath> // std::floor (energy-layer anchor quantization)
+#include <cstddef>
+#include <cstdint>
+#include <ctime>
+#include <entt/entity/entity.hpp>
+#include <entt/entity/fwd.hpp>
+#include <entt/entity/registry.hpp>
+#include <exception>
+#include <functional>
+#include <ios>
+#include <limits>
+#include <luminumbra/core/Types.h>
+#include <map>
+#include <nlohmann/json_fwd.hpp>
+#include <ratio>
+#include <span>
+#include <string>
+#include <system_error>
 
 #include <algorithm> // explicit: stabilise std template instantiation for entt storage helpers
 #include <chrono>
@@ -391,9 +421,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
     // Queued work belongs to this next tick; only reentrant batches must refuse.
     if (m_activeRegionsEnabled && m_simulationBatchInProgress)
         return 0;
-    struct BatchGuard {
-        bool& active;
-        bool previous;
+    class BatchGuard {
+    public:
         BatchGuard(bool& value, bool enabled)
             : active(value)
             , previous(value) {
@@ -402,7 +431,12 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
         ~BatchGuard() {
             active = previous;
         }
-    } guard(m_simulationBatchInProgress, m_activeRegionsEnabled);
+
+    private:
+        bool& active;
+        bool previous;
+    };
+    const BatchGuard guard(m_simulationBatchInProgress, m_activeRegionsEnabled);
     std::uint32_t ticks_executed;
     if (m_activeRegionsEnabled) {
         auto advanced_clock = m_simulationClock;
@@ -1078,7 +1112,7 @@ void GameSession::RunFoliageTick(luminumbra::simulation::SimBudgetTelemetry::Tic
     // growth runs AFTER weather. Integer/fixed-point + id-ordered = run==replay.
     // Temperature, light, soil, weather, and irrigation are sampled below.
     if (HasPlantParticipants()) {
-        luminumbra::foliage::EnvSampler plant_env = [this, current_tick](const auto& tf) {
+        const luminumbra::foliage::EnvSampler plant_env = [this, current_tick](const auto& tf) {
             return SamplePlantEnvironment(tf, current_tick);
         };
         luminumbra::foliage::RunPlantGrowthSystemOnTick(m_registry, current_tick, plant_env);
@@ -1194,7 +1228,7 @@ GameSession::ValidateWorldConfig(const std::string& root_path,
     }
 
     if (result.ok) {
-        const TerrainPresetLoadResult preset = LoadTerrainPreset(result.preset_path);
+        const TerrainPresetLoadResult preset = LoadTerrainPreset(result.preset_path, root / "data");
         if (!preset.ok) {
             for (const std::string& error : preset.errors) {
                 AddValidationError(result, error);
@@ -1247,7 +1281,7 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     metadata.worldId = transient ? std::string{} : GenerateWorldId();
     metadata.creationTime = std::time(nullptr);
     metadata.spawnPoint = Vec3(0, 100, 0);
-    const auto worldPath = RuntimeRoot(m_rootPath) / "worlds" / "saves" / metadata.worldId;
+    const auto worldPath = GetSaveRootPath() / "worlds" / "saves" / metadata.worldId;
     if (!transient) {
         try {
             fs::create_directories(worldPath);
@@ -1297,7 +1331,8 @@ bool GameSession::CreateWorldInternal(const std::string& name,
         preset_to_load = world_preset;
     }
 
-    const TerrainPresetLoadResult preset = LoadTerrainPreset(preset_to_load);
+    const TerrainPresetLoadResult preset =
+        LoadTerrainPreset(preset_to_load, RuntimeRoot(m_rootPath) / "data");
     if (!preset.ok) {
         m_worldOpenError = preset.errors.empty() ? "Invalid world preset." : preset.errors.front();
         for (const std::string& error : preset.errors) {
@@ -1317,7 +1352,7 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     m_physicsSystem = std::make_unique<Systems::PhysicsSystem>();
     m_physicsSystem->startup();
 
-    int world_seed = StringToSeed(m_metadata.seed);
+    const int world_seed = std::bit_cast<std::int32_t>(StringToSeed(m_metadata.seed));
     LUMINUMBRA_CORE_INFO("Loaded world preset '{}': height_offset={}, amplitude={}, caves={}",
                          worldType,
                          params.height_offset,
@@ -1370,8 +1405,8 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     InitializeEnergyFieldState();
 
     // Calculate appropriate spawn point based on actual terrain height
-    float spawn_x = 8.0f;
-    float spawn_z = 8.0f;
+    const float spawn_x = 8.0f;
+    const float spawn_z = 8.0f;
     float terrain_height = m_worldSystem->GetTerrainHeightAt(spawn_x, spawn_z);
     LUMINUMBRA_CORE_INFO("Initial terrain height sampled at spawn: {}.", terrain_height);
 
@@ -1432,7 +1467,7 @@ bool GameSession::LoadWorldChecked(const std::string& worldId,
     // reads the directory. The identifier check mirrors InspectSavedWorld's.
     if (!worldId.empty() && worldId != "." && worldId != ".." &&
         worldId.find_first_of("/\\:") == std::string::npos) {
-        const fs::path candidate = RuntimeRoot(m_rootPath) / "worlds" / "saves" / worldId;
+        const fs::path candidate = GetSaveRootPath() / "worlds" / "saves" / worldId;
         std::error_code status_error;
         if (fs::is_directory(candidate, status_error) && !fs::is_symlink(candidate, status_error)) {
             std::vector<std::string> recovery_errors;
@@ -1468,7 +1503,10 @@ bool GameSession::LoadWorldChecked(const std::string& worldId,
             auto planning_params = candidate_params;
             ClampTerrainParams(planning_params);
             prepared_world = std::make_unique<Systems::SHIELD_WorldSystem>(
-                m_jobSystem, nullptr, planning_params, StringToSeed(candidate.metadata.seed));
+                m_jobSystem,
+                nullptr,
+                planning_params,
+                std::bit_cast<std::int32_t>(StringToSeed(candidate.metadata.seed)));
             Vec3 spawn = candidate.metadata.spawnPoint;
             if (!candidate.has_spawn_point)
                 spawn = Vec3(
@@ -1480,6 +1518,7 @@ bool GameSession::LoadWorldChecked(const std::string& worldId,
         return wanted->contains(Chunk::calculate_id(coords));
     };
     const auto saved = Persistence::InspectSavedWorld(
+        GetSaveRootPath(),
         RuntimeRoot(m_rootPath),
         worldId,
         {},
@@ -1507,7 +1546,7 @@ bool GameSession::LoadWorldChecked(const std::string& worldId,
             return false;
         }
     }
-    const fs::path worldPath = RuntimeRoot(m_rootPath) / "worlds" / "saves" / worldId;
+    const fs::path worldPath = GetSaveRootPath() / "worlds" / "saves" / worldId;
     const auto& preset = admission.preset;
     if (!preset.ok) {
         m_worldOpenError = preset.errors.empty() ? "World preset admission is unavailable."
@@ -1530,7 +1569,7 @@ bool GameSession::LoadWorldChecked(const std::string& worldId,
         m_simulationClock.reset(m_worldClock.tick());
     }
     m_transientWorld = false;
-    int world_seed = StringToSeed(m_metadata.seed);
+    const int world_seed = std::bit_cast<std::int32_t>(StringToSeed(m_metadata.seed));
 
     // Initialize Physics System after config and preset validation passes.
     m_physicsSystem = std::make_unique<Systems::PhysicsSystem>();
@@ -1704,7 +1743,7 @@ bool GameSession::AdmitPlantAt(entt::entity entity, std::uint64_t fresh_stamp) {
             growth.stage >= C::kPlantStageCount || growth.quality > 100)
             return false;
         const auto& genome = m_registry.get<C::PlantGenomeComponent>(entity);
-        for (float gene : genome.genes)
+        for (const float gene : genome.genes)
             if (!std::isfinite(gene) || gene < 0 || gene > 1)
                 return false;
         std::uint64_t id = 0;
@@ -2397,7 +2436,8 @@ void GameSession::AdvanceRegionalWeather(std::uint64_t tick) {
             continue;
         }
         const bool interior_due = due.contains(source);
-        float x = std::bit_cast<float>(storm.center_x), z = std::bit_cast<float>(storm.center_z);
+        const float x = std::bit_cast<float>(storm.center_x),
+                    z = std::bit_cast<float>(storm.center_z);
         float vx = std::bit_cast<float>(storm.velocity_x),
               vz = std::bit_cast<float>(storm.velocity_z);
         if (interior_due) {
@@ -3021,7 +3061,8 @@ bool GameSession::RunInSnapshotTransaction(const std::function<bool()>& body) {
 
 Persistence::SavedWorld GameSession::InspectCurrentSavedWorld() {
     const Persistence::ChunkValidationCache::Scope validation_scope(m_chunkValidationCache);
-    auto saved = Persistence::InspectSavedWorld(RuntimeRoot(m_rootPath), m_metadata.worldId);
+    auto saved = Persistence::InspectSavedWorld(
+        GetSaveRootPath(), RuntimeRoot(m_rootPath), m_metadata.worldId);
     if (saved.error.empty() && saved.preset_content_hash != m_presetContentHash)
         saved.error = "Incompatible world preset: content changed since world admission.";
     return saved;
@@ -3199,11 +3240,15 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
     return true;
 }
 
+std::filesystem::path GameSession::GetSaveRootPath() const {
+    return m_saveRootPath.empty() ? RuntimeRoot(m_rootPath) : m_saveRootPath;
+}
+
 std::filesystem::path GameSession::GetWorldSaveDir() const {
     if (m_transientWorld || m_metadata.worldId.empty()) {
         return {};
     }
-    return RuntimeRoot(m_rootPath) / "worlds" / "saves" / m_metadata.worldId;
+    return GetSaveRootPath() / "worlds" / "saves" / m_metadata.worldId;
 }
 
 bool GameSession::SaveWorldState(WorldStateSaveReport* report, WorldStateSaveScope scope) {
@@ -3314,7 +3359,7 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
         // Save-as transfers disk-only obligations one region at a time. Reading and rewriting
         // the same container for each chunk is quadratic in its record count.
         // Live/parked state supersedes the old copy, including clean resident authority.
-        Persistence::WorldSaveService copier;
+        const Persistence::WorldSaveService copier;
         std::vector<std::string> copy_errors;
         std::vector<IVec3> distant;
         for (const auto& coords : m_worldSystem->durable_chunk_inventory())
@@ -3395,7 +3440,7 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
         return empty_ok;
     }
 
-    Persistence::WorldSaveService service;
+    const Persistence::WorldSaveService service;
     std::vector<std::string> errors;
     // Subsequent saves rewrite the edited regions of a supported container.
     const bool has_snapshot =
@@ -3520,7 +3565,7 @@ bool GameSession::AdoptWorldState(const std::filesystem::path& save_dir,
         }
     }
 
-    Persistence::WorldSaveService service;
+    const Persistence::WorldSaveService service;
     WorldStreamingState decoded_chunks;
     WorldStreamingState& loaded = admission ? *admission->chunks : decoded_chunks;
     std::vector<std::string> errors;
@@ -3784,7 +3829,7 @@ uint32_t GameSession::StringToSeed(const std::string& seedStr) const {
         return static_cast<uint32_t>(std::stoull(seedStr));
     } catch (...) {
         // If not a number, hash the string
-        std::hash<std::string> hasher;
+        const std::hash<std::string> hasher;
         return static_cast<uint32_t>(hasher(seedStr));
     }
 }
@@ -3882,7 +3927,7 @@ void GameSession::CaptureRegionalScent() {
     std::array<decltype(stored.begin()), kScentFieldCells> columns;
     for (int x = 0; x < kScentFieldCells; ++x)
         columns[x] = stored.lower_bound({origin_x + x, origin_z});
-    changed.reserve(kScentFieldCells * kScentFieldCells);
+    changed.reserve(static_cast<std::size_t>(kScentFieldCells) * kScentFieldCells);
     for (int z = 0; z < kScentFieldCells; ++z)
         for (int x = 0; x < kScentFieldCells; ++x) {
             const ScentCellKey key{origin_x + x, origin_z + z};
