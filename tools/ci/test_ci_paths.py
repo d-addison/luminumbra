@@ -70,6 +70,8 @@ class PathGateTests(unittest.TestCase):
     def test_runtime_and_qualification_contracts_are_in_standalone_plan(self):
         commands = gate.python_test_commands(ROOT)
         for path in (
+            "tools/gates/test_station_discovery.py",
+            "tools/gates/test_common_library_isa.py",
             "test/tools/test_runtime_config_contract.py",
             "tools/perf/test_check_gl_debug_log.py",
             "tools/perf/test_plan_qualification.py",

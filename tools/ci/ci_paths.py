@@ -13,12 +13,17 @@ import sys
 # Only reviewed, test-backed files may skip native builds. New files require
 # an explicit coverage decision; directory membership never grants an exemption.
 PYTHON_TESTS = (
+    "tools/gates/test_station_discovery.py",
+    "tools/gates/test_common_library_isa.py",
     "test/tools/test_runtime_config_contract.py",
     "tools/ci/test_ci_paths.py",
     "tools/ci/test_cache_retention.py",
     "tools/ci/test_check_docs.py",
     "tools/ci/test_check_ctest_junit.py",
     "tools/ci/test_qualification_capture.py",
+    "tools/ci/test_compare_ambient_receipts.py",
+    "tools/ci/test_qualify_prefab_runtime.py",
+    "tools/static_preview/test_run_software_gl.py",
     "tools/ci/test_slowest_tests.py",
     "tools/ci/test_validate_performance_measurement.py",
     "tools/ci/test_validate_public_tree.py",
