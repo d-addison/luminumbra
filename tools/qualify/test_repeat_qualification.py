@@ -7,6 +7,7 @@ so the test does not depend on the current directory or on sys.path.
 
 from __future__ import annotations
 
+import ctypes
 import errno
 import hashlib
 import importlib.util
@@ -21,7 +22,7 @@ import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest import mock
@@ -132,6 +133,103 @@ sys.exit(0)
 POSIX_LAUNCHER = "#!{python}\n"
 WINDOWS_LAUNCHER = '@"{python}" -I "{child}" %*\r\n'
 
+# The wrapper cannot launch an iteration until its owner has assigned the job.
+# EOF (including an assignment failure) exits without running the harness.
+FIXTURE_BOOTSTRAP = (
+    "import runpy, sys; "
+    "gate = sys.stdin.buffer.read(1); "
+    "sys.stdin.close(); "
+    "sys.argv = sys.argv[1:]; "
+    "runpy.run_path(sys.argv[0], run_name='__main__') if gate == b'!' else None"
+)
+
+
+class WindowsFixtureJob:
+    """Contain the gated harness and every iteration, including new sessions."""
+
+    def __init__(self):
+        from ctypes import wintypes as w
+        self.kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        for name, arguments, result in (
+            ("CreateJobObjectW", [w.LPVOID, w.LPCWSTR], w.HANDLE),
+            ("SetInformationJobObject", [w.HANDLE, ctypes.c_int, w.LPVOID, w.DWORD], w.BOOL),
+            ("AssignProcessToJobObject", [w.HANDLE, w.HANDLE], w.BOOL),
+            ("TerminateJobObject", [w.HANDLE, w.UINT], w.BOOL),
+            ("QueryInformationJobObject", [w.HANDLE, ctypes.c_int, w.LPVOID, w.DWORD, w.LPVOID], w.BOOL),
+            ("CloseHandle", [w.HANDLE], w.BOOL),
+        ):
+            function = getattr(self.kernel, name)
+            function.argtypes, function.restype = arguments, result
+
+        class BasicLimits(ctypes.Structure):
+            _fields_ = [("process_time", ctypes.c_int64), ("job_time", ctypes.c_int64),
+                        ("flags", w.DWORD), ("minimum", ctypes.c_size_t),
+                        ("maximum", ctypes.c_size_t), ("active", w.DWORD),
+                        ("affinity", ctypes.c_size_t), ("priority", w.DWORD),
+                        ("scheduling", w.DWORD)]
+
+        class IoCounters(ctypes.Structure):
+            _fields_ = [(name, ctypes.c_uint64) for name in
+                        ("reads", "writes", "others", "read_bytes", "write_bytes", "other_bytes")]
+
+        class ExtendedLimits(ctypes.Structure):
+            _fields_ = [("basic", BasicLimits), ("io", IoCounters),
+                        ("process_memory", ctypes.c_size_t), ("job_memory", ctypes.c_size_t),
+                        ("peak_process", ctypes.c_size_t), ("peak_job", ctypes.c_size_t)]
+
+        self.handle = self.check(self.kernel.CreateJobObjectW(None, None))
+        try:
+            limits = ExtendedLimits()
+            limits.basic.flags = 0x2000  # KILL_ON_JOB_CLOSE, without descendant breakaway.
+            self.check(self.kernel.SetInformationJobObject(
+                self.handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)))
+        except BaseException:
+            self.close()
+            raise
+
+    @staticmethod
+    def check(value):
+        if not value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        return value
+
+    def assign(self, process):
+        # Popen owns this process handle until the wrapper is reaped.
+        self.check(self.kernel.AssignProcessToJobObject(self.handle, int(process._handle)))
+
+    def terminate_and_wait(self) -> list[str]:
+        from ctypes import wintypes as w
+
+        class Accounting(ctypes.Structure):
+            _fields_ = [("user", ctypes.c_int64), ("kernel", ctypes.c_int64),
+                        ("period_user", ctypes.c_int64), ("period_kernel", ctypes.c_int64),
+                        ("faults", w.DWORD), ("total", w.DWORD),
+                        ("active", w.DWORD), ("terminated", w.DWORD)]
+
+        deadline = time.monotonic() + rq.CLEANUP_TIMEOUT_SECONDS
+        try:
+            self.check(self.kernel.TerminateJobObject(self.handle, 1))
+            while True:
+                info = Accounting()
+                returned = w.DWORD()
+                self.check(self.kernel.QueryInformationJobObject(
+                    self.handle, 1, ctypes.byref(info), ctypes.sizeof(info), ctypes.byref(returned)))
+                if returned.value != ctypes.sizeof(info):
+                    raise OSError("incomplete fixture job accounting")
+                if info.active == 0:
+                    return []
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("owned fixture job did not drain within cleanup deadline")
+                time.sleep(min(0.01, remaining))
+        except OSError as exc:
+            return [f"fixture job cleanup: {type(exc).__name__}: {exc}"]
+
+    def close(self):
+        if self.handle is not None:
+            handle, self.handle = self.handle, None
+            self.check(self.kernel.CloseHandle(handle))
+
 
 def posix_crash_capture_ready(cwd: Path) -> bool:
     """True when this host's core pattern and core limit let the harness collect cores."""
@@ -182,6 +280,28 @@ def pid_alive(pid: int, timeout: float = 30) -> bool:
 def terminate_fixture_tree(process) -> list[str]:
     """The outer fixture owns iterations that start separate POSIX sessions."""
     errors = []
+    job = getattr(process, "_fixture_job", None)
+    if job is not None:
+        # taskkill /T can kill an iteration before its harness, which then
+        # starts another iteration. Job membership covers that race, and job
+        # accounting waits for all inherited log handles, not just the root.
+        # Stop the harness before killing an iteration can wake its wait().
+        # The job retains ownership after the root dies, unlike taskkill /T.
+        if process.poll() is None:
+            try:
+                process.kill()
+            except OSError as exc:
+                errors.append(f"fixture root kill: {type(exc).__name__}: {exc}")
+        try:
+            errors.extend(job.terminate_and_wait())
+        finally:
+            # Reap the root even when job accounting itself raises.
+            try:
+                process.wait(timeout=rq.CLEANUP_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired:
+                errors.append("owned fixture root did not exit within cleanup deadline")
+        return errors
+    descendants = set()
     if os.name == "posix":
         try:
             # Freeze the owning harness before inspecting descendants: otherwise
@@ -225,13 +345,28 @@ def terminate_fixture_tree(process) -> list[str]:
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             errors.append(f"fixture descendant discovery: {type(exc).__name__}: {exc}")
     errors.extend(rq.terminate_process_tree(process))
+    deadline = time.monotonic() + rq.CLEANUP_TIMEOUT_SECONDS
+    while descendants:
+        try:
+            descendants = {pid for pid in descendants if pid_alive(pid)}
+        except (OSError, subprocess.SubprocessError) as exc:
+            errors.append(f"fixture descendant wait: {type(exc).__name__}: {exc}")
+            break
+        if not descendants:
+            break
+        if time.monotonic() >= deadline:
+            errors.append(f"fixture descendants did not exit within cleanup deadline: {sorted(descendants)}")
+            break
+        time.sleep(0.01)
     return errors
 
 
 class HarnessTestCase(unittest.TestCase):
     def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory(prefix="repeat-qualification-test-")
-        self.root = Path(self._tmp.name)
+        # Explicit ownership prevents a finalizer from deleting files while an
+        # undrained descendant may still hold them open.
+        self.root = Path(tempfile.mkdtemp(prefix="repeat-qualification-test-"))
+        self._fixture_cleanup_safe = True
         self.work = self.root / "work"
         self.work.mkdir()
         # The receipt directory contains a space so the output path is exercised with spaces.
@@ -240,7 +375,8 @@ class HarnessTestCase(unittest.TestCase):
         self._fixture_sequence = 0
 
     def tearDown(self) -> None:
-        self._tmp.cleanup()
+        if self._fixture_cleanup_safe:
+            shutil.rmtree(self.root)
 
     def _write_fake_child(self) -> Path:
         # The directory name contains a space so the launcher path is exercised with spaces.
@@ -300,9 +436,14 @@ class HarnessTestCase(unittest.TestCase):
     def run_raw(self, args: list[str], extra_env: dict[str, str] | None = None,
                 timeout: float = 120, ready_file: Path | None = None,
                 diagnostic_dir: Path | None = None):
+        if not self._fixture_cleanup_safe:
+            raise RuntimeError(f"fixture cleanup remains unconfirmed; retained in place: {self.root}")
         env = dict(os.environ)
         env.update(extra_env or {})
-        command = [sys.executable, "-I", "-X", "utf8", str(SCRIPT), *args]
+        command = [sys.executable, "-I", "-B", "-X", "utf8"]
+        if os.name == "nt":
+            command.extend(["-c", FIXTURE_BOOTSTRAP])
+        command.extend([str(SCRIPT), *args])
         self._fixture_sequence += 1
         logs = self.root / "outer-runs" / f"run-{self._fixture_sequence}"
         logs.mkdir(parents=True)
@@ -312,31 +453,65 @@ class HarnessTestCase(unittest.TestCase):
         expired = False
         startup_failure = None
         cleanup_errors = []
-        with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
-            # File-backed streams cannot retain communicate() pipe readers after
-            # a fixture descendant outlives the direct harness process.
-            process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=stdout,
-                                       stderr=stderr, env=env, **options)
-            try:
-                if ready_file is not None:
-                    startup_deadline = time.monotonic() + 30
-                    while not ready_file.is_file():
-                        if process.poll() is not None:
-                            startup_failure = "fixture exited before readiness"
-                            break
-                        if time.monotonic() >= startup_deadline:
-                            startup_failure = "fixture startup watchdog expired after 30s"
-                            break
-                        time.sleep(0.05)
-                    if startup_failure is not None:
-                        expired = True
-                        cleanup_errors = terminate_fixture_tree(process)
-                if not expired:
-                    process.wait(timeout=min(timeout, FIXTURE_MAX_WAIT_SECONDS))
-            except subprocess.TimeoutExpired:
-                expired = True
-                # Kill separate iteration groups and the outer tree while owned.
-                cleanup_errors = terminate_fixture_tree(process)
+        try:
+            with ExitStack() as ownership, stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
+                job = None
+                if os.name == "nt":
+                    job = WindowsFixtureJob()
+                    ownership.callback(job.close)
+                # File-backed streams cannot retain communicate() pipe readers after
+                # a fixture descendant outlives the direct harness process.
+                process = subprocess.Popen(command, stdin=subprocess.PIPE if job else subprocess.DEVNULL, stdout=stdout,
+                                           stderr=stderr, env=env, **options)
+                self._fixture_cleanup_safe = False
+                try:
+                    if job is not None:
+                        # Even a refused assignment owns this gated root: it
+                        # cannot have descendants until the byte below is sent.
+                        process._fixture_job = job
+                        job.assign(process)
+                        process.stdin.write(b"!")
+                        process.stdin.close()
+                    if ready_file is not None:
+                        startup_deadline = time.monotonic() + 30
+                        while not ready_file.is_file():
+                            if process.poll() is not None:
+                                startup_failure = "fixture exited before readiness"
+                                break
+                            if time.monotonic() >= startup_deadline:
+                                startup_failure = "fixture startup watchdog expired after 30s"
+                                break
+                            time.sleep(0.05)
+                        if startup_failure is not None:
+                            expired = True
+                    if not expired:
+                        process.wait(timeout=min(timeout, FIXTURE_MAX_WAIT_SECONDS))
+                except subprocess.TimeoutExpired:
+                    expired = True
+                finally:
+                    try:
+                        if process.stdin is not None:
+                            process.stdin.close()
+                    finally:
+                        try:
+                            if expired or process.poll() is None:
+                                # Reap before preservation, log reads or directory removal,
+                                # including exceptions during readiness or assignment.
+                                cleanup_errors.extend(terminate_fixture_tree(process))
+                            elif job is not None:
+                                cleanup_errors.extend(job.terminate_and_wait())
+                        except BaseException as exc:
+                            cleanup_errors.append(f"fixture drain: {type(exc).__name__}: {exc}")
+                            raise
+                        if not cleanup_errors:
+                            self._fixture_cleanup_safe = True
+        finally:
+            if cleanup_errors:
+                # Cleanup takes precedence over watchdog/startup errors and even
+                # a failed job close. Never inspect or copy an undrained fixture.
+                raise RuntimeError(
+                    f"fixture cleanup failed: {cleanup_errors}; retained in place: {self.root}"
+                ) from sys.exc_info()[1]
         output = stdout_path.read_text(encoding="utf-8", errors="replace")
         error = stderr_path.read_text(encoding="utf-8", errors="replace")
         if expired:
@@ -564,7 +739,386 @@ class RepeatQualificationTest(HarnessTestCase):
         self.assertFalse(self.receipt.exists())
 
 
+class WindowsFixtureJobTest(unittest.TestCase):
+    @contextmanager
+    def native_job(self):
+        kernel = mock.Mock()
+        kernel.CreateJobObjectW.return_value = 11
+        for name in ("SetInformationJobObject", "AssignProcessToJobObject", "TerminateJobObject", "CloseHandle"):
+            getattr(kernel, name).return_value = 1
+        with mock.patch.object(ctypes, "WinDLL", return_value=kernel, create=True), \
+                mock.patch.object(ctypes, "get_last_error", return_value=5, create=True), \
+                mock.patch.object(ctypes, "WinError", side_effect=lambda code: OSError(code, "native failure"), create=True):
+            yield kernel
+
+    def test_creation_limits_and_assignment_fail_closed(self):
+        for failure in ("CreateJobObjectW", "SetInformationJobObject", "AssignProcessToJobObject", None):
+            with self.subTest(failure=failure), self.native_job() as kernel:
+                if failure:
+                    getattr(kernel, failure).return_value = 0
+                job = None
+                try:
+                    if failure:
+                        with self.assertRaises(OSError):
+                            job = WindowsFixtureJob()
+                            job.assign(SimpleNamespace(_handle=22))
+                    else:
+                        job = WindowsFixtureJob()
+                        job.assign(SimpleNamespace(_handle=22))
+                    if failure != "CreateJobObjectW":
+                        limits = kernel.SetInformationJobObject.call_args.args[2]._obj
+                        self.assertEqual(limits.basic.flags, 0x2000)
+                    if failure in (None, "AssignProcessToJobObject"):
+                        kernel.AssignProcessToJobObject.assert_called_once_with(11, 22)
+                finally:
+                    if job is not None:
+                        job.close()
+                        job.close()
+                self.assertEqual(kernel.CloseHandle.call_count, int(failure != "CreateJobObjectW"))
+
+    def test_job_drain_and_native_failure_diagnostics(self):
+        for failure in (None, "empty", "terminate", "query", "partial", "unknown", "deadline", "close"):
+            with self.subTest(failure=failure), self.native_job() as kernel:
+                job = WindowsFixtureJob()
+                active = iter((2, 1, 0))
+
+                def query(_handle, _kind, pointer, size, needed):
+                    kernel.CloseHandle.assert_not_called()
+                    pointer._obj.active = (0 if failure == "empty" else
+                                           1 if failure == "deadline" else next(active))
+                    needed._obj.value = (0 if failure == "unknown" else
+                                         size - 1 if failure == "partial" else size)
+                    return 0 if failure == "query" else 1
+
+                kernel.QueryInformationJobObject.side_effect = query
+                if failure == "terminate":
+                    kernel.TerminateJobObject.return_value = 0
+                clock_values = iter((0., 0., rq.CLEANUP_TIMEOUT_SECONDS))
+                clock = (lambda: next(clock_values)) if failure == "deadline" else (lambda: 0.)
+                with mock.patch.object(time, "monotonic", side_effect=clock), \
+                        mock.patch.object(time, "sleep"):
+                    errors = job.terminate_and_wait()
+                if failure in ("terminate", "query", "partial", "unknown", "deadline"):
+                    self.assertEqual(len(errors), 1)
+                    self.assertIn("fixture job cleanup", errors[0])
+                    if failure == "deadline":
+                        self.assertIn("cleanup deadline", errors[0])
+                    if failure in ("partial", "unknown"):
+                        self.assertIn("incomplete", errors[0])
+                else:
+                    self.assertEqual(errors, [])
+                    self.assertEqual(kernel.QueryInformationJobObject.call_count,
+                                     1 if failure == "empty" else 3)
+                if failure == "close":
+                    kernel.CloseHandle.return_value = 0
+                    with self.assertRaises(OSError):
+                        job.close()
+                else:
+                    job.close()
+                self.assertIsNone(job.handle)
+                job.close()
+                kernel.CloseHandle.assert_called_once_with(11)
+
+    def test_bootstrap_requires_assignment_gate(self):
+        with tempfile.TemporaryDirectory(prefix="rq-bootstrap-") as directory:
+            marker = Path(directory) / "ran"
+            script = Path(directory) / "fixture.py"
+            script.write_text("import sys; from pathlib import Path; Path(sys.argv[1]).touch()", encoding="utf-8")
+            command = [sys.executable, "-I", "-B", "-c", FIXTURE_BOOTSTRAP, str(script), str(marker)]
+            for gate in (b"", b"?", b"!"):
+                with self.subTest(gate=gate):
+                    result = subprocess.run(command, input=gate, capture_output=True, timeout=5)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(marker.exists(), gate == b"!")
+
+
 class FixtureWatchdogTest(HarnessTestCase):
+    def test_failed_drain_stops_all_fixture_filesystem_handling(self):
+        # All cases stay in this interpreter: no mock must cross a child boundary.
+        for platform in ("nt", "posix"):
+            phases = ("timeout", "startup-exit", "startup-deadline", "readiness", "wait")
+            if platform == "nt":
+                phases += ("exit", "assign", "pipe", "close")
+            for phase in phases:
+                for raised in (False, True):
+                    with self.subTest(platform=platform, phase=phase, raised=raised):
+                        root = mock.Mock(pid=100, returncode=0)
+                        root.poll.return_value = 0 if phase in ("exit", "startup-exit", "close") else None
+                        root.stdin = mock.Mock() if platform == "nt" else None
+                        job = mock.Mock()
+                        drain = OSError("fixture drain raised") if raised else ["fixture drain refused"]
+                        drain_options = {"side_effect": drain} if raised else {"return_value": drain}
+                        job.terminate_and_wait.configure_mock(**drain_options)
+                        if phase == "timeout":
+                            root.wait.side_effect = [subprocess.TimeoutExpired("fixture", 1), 0]
+                        elif phase == "wait":
+                            root.wait.side_effect = [KeyboardInterrupt("fixture wait interrupted"), 0]
+                        elif phase == "assign":
+                            job.assign.side_effect = OSError("fixture assignment refused")
+                        elif phase == "pipe":
+                            root.stdin.close.side_effect = BrokenPipeError("fixture gate close refused")
+                        elif phase == "close":
+                            job.close.side_effect = OSError("fixture close refused")
+                        ready = mock.Mock() if phase.startswith("startup") or phase == "readiness" else None
+                        if ready is not None:
+                            ready.is_file.return_value = False
+                            if phase == "readiness":
+                                ready.is_file.side_effect = OSError("fixture readiness unreadable")
+                        clock = iter((0., 30.))
+                        try:
+                            with ExitStack() as patches:
+                                patches.enter_context(mock.patch.dict(
+                                    globals(), os=SimpleNamespace(name=platform, environ=os.environ),
+                                    WindowsFixtureJob=mock.Mock(return_value=job)))
+                                patches.enter_context(mock.patch.object(
+                                    subprocess, "CREATE_NEW_PROCESS_GROUP", 0, create=True))
+                                patches.enter_context(mock.patch.object(subprocess, "Popen", return_value=root))
+                                patches.enter_context(mock.patch.dict(
+                                    globals(), terminate_fixture_tree=mock.Mock(**drain_options)))
+                                patches.enter_context(mock.patch.object(time, "monotonic", side_effect=lambda: next(clock)))
+                                read = patches.enter_context(mock.patch.object(
+                                    Path, "read_text", side_effect=PermissionError("fixture log still locked")))
+                                preserve = patches.enter_context(mock.patch.object(self, "preserve_fixture_failure"))
+                                remove = patches.enter_context(mock.patch.object(shutil, "rmtree"))
+                                with self.assertRaisesRegex(RuntimeError, "fixture cleanup failed:.*fixture drain") as caught:
+                                    self.run_raw([], ready_file=ready)
+                                self.assertIn(str(self.root), str(caught.exception))
+                                self.assertFalse(self._fixture_cleanup_safe)
+                                self.tearDown()
+                                with self.assertRaisesRegex(RuntimeError, "cleanup remains unconfirmed"):
+                                    self.run_raw([])
+                                read.assert_not_called()
+                                preserve.assert_not_called()
+                                remove.assert_not_called()
+                                if platform == "nt":
+                                    job.close.assert_called_once_with()
+                                if phase in ("exit", "close") and platform == "nt":
+                                    job.terminate_and_wait.assert_called_once_with()
+                        finally:
+                            # No real process was started by these failure models.
+                            self._fixture_cleanup_safe = True
+
+    def test_posix_facade_does_not_require_host_signals(self):
+        with mock.patch.dict(globals(), signal=SimpleNamespace()):
+            self.test_posix_descendant_wait_success_and_failures()
+
+    def test_raised_job_drain_still_reaps_root(self):
+        root = mock.Mock()
+        root.poll.return_value = None
+        root._fixture_job.terminate_and_wait.side_effect = OSError("fixture accounting unreadable")
+        with self.assertRaisesRegex(OSError, "fixture accounting unreadable"):
+            terminate_fixture_tree(root)
+        root.kill.assert_called_once_with()
+        root.wait.assert_called_once_with(timeout=rq.CLEANUP_TIMEOUT_SECONDS)
+
+    def test_gate_pipe_failure_still_reaps_owned_job(self):
+        for cleanup_errors in ([], ["fixture query refused"]):
+            with self.subTest(cleanup_errors=cleanup_errors):
+                job = mock.Mock()
+                job.terminate_and_wait.return_value = cleanup_errors
+                root = mock.Mock()
+                root.poll.return_value = None
+                root.stdin.write.side_effect = BrokenPipeError("fixture gate write refused")
+                root.stdin.close.side_effect = BrokenPipeError("fixture gate close refused")
+                with mock.patch.dict(globals(), os=SimpleNamespace(name="nt", environ=os.environ),
+                                     WindowsFixtureJob=mock.Mock(return_value=job)), \
+                        mock.patch.object(subprocess, "CREATE_NEW_PROCESS_GROUP", 0, create=True), \
+                        mock.patch.object(subprocess, "Popen", return_value=root):
+                    if cleanup_errors:
+                        with self.assertRaisesRegex(RuntimeError, "fixture query refused") as caught:
+                            self.run_raw([])
+                        self.assertIsInstance(caught.exception.__cause__, BrokenPipeError)
+                    else:
+                        with self.assertRaises(BrokenPipeError):
+                            self.run_raw([])
+                root.kill.assert_called_once_with()
+                root.wait.assert_called_once_with(timeout=rq.CLEANUP_TIMEOUT_SECONDS)
+                job.terminate_and_wait.assert_called_once_with()
+                job.close.assert_called_once_with()
+                # This fixture used only mock processes; no owner remains.
+                self._fixture_cleanup_safe = True
+
+    def test_windows_runner_assigns_before_gate_and_reports_cleanup_failures(self):
+        script = self.root / "gated.py"
+        marker = self.root / "gated-ran"
+        script.write_text("import sys; from pathlib import Path; Path(sys.argv[1]).touch()", encoding="utf-8")
+        real_popen = subprocess.Popen
+        host_windows = os.name == "nt"
+        for failure in (None, "assign", "spawn", "drain"):
+            with self.subTest(failure=failure):
+                marker.unlink(missing_ok=True)
+                job = mock.Mock()
+                job.terminate_and_wait.return_value = ["fixture drain refused"] if failure == "drain" else []
+                children = []
+
+                def spawn(*args, **options):
+                    if args[0][0] != sys.executable:
+                        # Native cleanup utilities must keep their real Popen
+                        # behavior; the model applies only to the gated root.
+                        return real_popen(*args, **options)
+                    if failure == "spawn":
+                        raise OSError("fixture spawn refused")
+                    # Model the Windows launcher while retaining a safe POSIX
+                    # cleanup group on hosts without Windows process APIs.
+                    if not host_windows:
+                        options.pop("creationflags")
+                        options["start_new_session"] = True
+                    child = real_popen(*args, **options)
+                    children.append(child)
+                    return child
+
+                def assign(_child):
+                    self.assertFalse(marker.exists(), "harness ran before job assignment")
+                    if failure == "assign":
+                        raise OSError("fixture assignment refused")
+
+                job.assign.side_effect = assign
+                with mock.patch.dict(globals(), os=SimpleNamespace(name="nt", environ=os.environ), SCRIPT=script), \
+                        mock.patch.object(subprocess, "CREATE_NEW_PROCESS_GROUP", 0, create=True), \
+                        mock.patch.object(subprocess, "Popen", side_effect=spawn), \
+                        mock.patch.dict(globals(), WindowsFixtureJob=mock.Mock(return_value=job)):
+                    if failure in ("assign", "spawn"):
+                        with self.assertRaises(OSError):
+                            self.run_raw([str(marker)])
+                    elif failure == "drain":
+                        with self.assertRaisesRegex(RuntimeError, "fixture drain refused"):
+                            self.run_raw([str(marker)])
+                    else:
+                        self.assertEqual(self.run_raw([str(marker)]).returncode, 0)
+                self.assertEqual(marker.exists(), failure in (None, "drain"))
+                for child in children:
+                    self.assertIsNotNone(child.poll(), "gated root was not reaped")
+                    self.assertTrue(child.stdin.closed)
+                job.close.assert_called_once_with()
+                # The real gated root above is reaped and launched no descendants.
+                self._fixture_cleanup_safe = True
+
+    def test_owned_job_root_wait_failure_is_reported(self):
+        for kill_failed in (False, True):
+            with self.subTest(kill_failed=kill_failed):
+                root = mock.Mock()
+                root.poll.return_value = None
+                root._fixture_job.terminate_and_wait.return_value = ["fixture query refused"]
+                root.wait.side_effect = subprocess.TimeoutExpired("fixture", rq.CLEANUP_TIMEOUT_SECONDS)
+                if kill_failed:
+                    root.kill.side_effect = OSError("fixture root kill refused")
+                errors = terminate_fixture_tree(root)
+                self.assertEqual(errors[-2:], [
+                    "fixture query refused", "owned fixture root did not exit within cleanup deadline"])
+                if kill_failed:
+                    self.assertEqual(len(errors), 3)
+                    self.assertIn("fixture root kill refused", errors[0])
+                else:
+                    self.assertEqual(len(errors), 2)
+                root.kill.assert_called_once_with()
+
+    def test_posix_descendant_wait_success_and_failures(self):
+        for failure in (None, "empty", "partial", "listing", "kill", "gone", "inspect", "deadline"):
+            with self.subTest(failure=failure):
+                root = mock.Mock(pid=100)
+                root._fixture_job = None
+                root.poll.return_value = 0
+                inspections = 0
+
+                def alive(pid):
+                    nonlocal inspections
+                    if failure == "inspect":
+                        raise OSError("fixture status unreadable")
+                    if pid == 100:
+                        return False
+                    inspections += 1
+                    return failure == "deadline" or inspections == 1
+
+                clock_values = iter((0., rq.CLEANUP_TIMEOUT_SECONDS))
+                clock = (lambda: next(clock_values)) if failure == "deadline" else (lambda: 0.)
+                facade = SimpleNamespace(name="posix", getpgrp=lambda: 1, killpg=mock.Mock())
+                if failure in ("kill", "gone"):
+                    facade.killpg.side_effect = (PermissionError("fixture kill refused") if failure == "kill"
+                                                 else ProcessLookupError("fixture group exited"))
+                listing = ("" if failure == "empty" else "100 1\n" if failure == "partial"
+                           else "100 1 100\n101 100 101\n")
+                listing_options = ({"side_effect": OSError("fixture listing unreadable")} if failure == "listing"
+                                   else {"return_value": SimpleNamespace(stdout=listing)})
+                signals = SimpleNamespace(SIGKILL=9)
+                with mock.patch.dict(globals(), os=facade, signal=signals), \
+                        mock.patch.object(subprocess, "run", **listing_options), \
+                        mock.patch.object(rq, "terminate_process_tree", return_value=[]), \
+                        mock.patch.dict(globals(), pid_alive=alive), \
+                        mock.patch.object(time, "monotonic", side_effect=clock), \
+                        mock.patch.object(time, "sleep"):
+                    errors = terminate_fixture_tree(root)
+                if failure in ("empty", "partial", "listing"):
+                    facade.killpg.assert_not_called()
+                else:
+                    facade.killpg.assert_called_once_with(101, signals.SIGKILL)
+                if failure in ("inspect", "deadline", "partial", "listing", "kill"):
+                    self.assertEqual(len(errors), 1)
+                    diagnostic = {"inspect": "unreadable", "deadline": "cleanup deadline",
+                                  "partial": "discovery", "listing": "listing unreadable", "kill": "kill refused"}
+                    self.assertIn(diagnostic[failure], errors[0])
+                else:
+                    self.assertEqual(errors, [])
+                if failure in (None, "kill", "gone"):
+                    self.assertEqual(inspections, 2)
+
+    def test_outer_cleanup_waits_for_child_log_handle(self) -> None:
+        log = self.root / "held.log"
+        ready = self.root / "handle-ready"
+        source = (
+            "import sys; from pathlib import Path; "
+            "handle = open(sys.argv[1], 'wb'); "
+            "handle.write(b'owned log'); handle.flush(); "
+            "Path(sys.argv[2]).touch(); sys.stdin.buffer.read(1); handle.close()"
+        )
+        child = subprocess.Popen([sys.executable, "-I", "-B", "-c", source, str(log), str(ready)],
+                                 stdin=subprocess.PIPE)
+        try:
+            deadline = time.monotonic() + 5
+            while not ready.exists():
+                self.assertIsNone(child.poll(), "handle owner exited before readiness")
+                self.assertLess(time.monotonic(), deadline, "handle owner never became ready")
+                time.sleep(0.01)
+
+            job = WindowsFixtureJob.__new__(WindowsFixtureJob)
+            job.handle = 11
+            job.kernel = mock.Mock()
+            job.kernel.TerminateJobObject.return_value = 1
+
+            def query_job(_handle, _kind, pointer, size, needed):
+                # Model asynchronous Windows job termination: the root can be
+                # gone while this real child still owns a non-delete-sharing log.
+                pointer._obj.active = int(child.poll() is None)
+                needed._obj.value = size
+                root.kill.assert_called_once_with()
+                if not child.stdin.closed:
+                    self.assertIsNone(child.poll())
+                    child.stdin.write(b"!")
+                    child.stdin.close()
+                return 1
+
+            job.kernel.QueryInformationJobObject.side_effect = query_job
+            root = mock.Mock()
+            root.poll.return_value = None
+            root._fixture_job = job
+            # Only Windows APIs are modeled. The handle owner and its wait are
+            # real; a mock in this interpreter cannot patch the child process.
+            with mock.patch.dict(globals(), os=SimpleNamespace(name="nt")), \
+                    mock.patch.object(rq, "terminate_process_tree", return_value=[]):
+                self.assertEqual(terminate_fixture_tree(root), [])
+            self.assertIsNotNone(child.poll(), "cleanup returned while the child still owned its log")
+            job.kernel.TerminateJobObject.assert_called_once_with(11, 1)
+            root.kill.assert_called_once_with()
+            self.assertGreaterEqual(job.kernel.QueryInformationJobObject.call_count, 2)
+            root.wait.assert_called_once_with(timeout=rq.CLEANUP_TIMEOUT_SECONDS)
+            log.unlink()  # Real Windows denies this until the child handle is closed.
+            job.close()
+        finally:
+            if child.stdin is not None and not child.stdin.closed:
+                child.stdin.close()
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=rq.CLEANUP_TIMEOUT_SECONDS)
+
     def test_outer_watchdog_fails_preserves_output_and_reaps_descendant(self) -> None:
         with tempfile.TemporaryDirectory(prefix="rq-watchdog-retained-") as destination:
             args = [*self.base_args(), "--count", "2", "--timeout-seconds", "600",
@@ -584,13 +1138,12 @@ class FixtureWatchdogTest(HarnessTestCase):
             pid_files = list(retained[0].rglob("grandchild.pid"))
             self.assertEqual(len(pid_files), 1)
             grandchild_pid = int(pid_files[0].read_text())
-            deadline = time.monotonic() + 5
-            while pid_alive(grandchild_pid) and time.monotonic() < deadline:
-                time.sleep(0.05)
+            # Cleanup, not the assertion, must wait for inherited log handles.
             self.assertFalse(pid_alive(grandchild_pid), "fixture descendant survived outer watchdog")
             logs = list(retained[0].rglob("iter-1.log"))
             self.assertEqual(len(logs), 1)
             self.assertIn("fake child iteration=1 mode hang", logs[0].read_text())
+            self.assertFalse(list(retained[0].rglob("iter-2.log")), "harness launched during cleanup")
 
     def test_fixture_runner_keeps_separate_output_streams(self) -> None:
         result = self.run_script(count=1, mode="pass")
