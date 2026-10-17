@@ -244,7 +244,8 @@ or damaged log text does not synthesize measurements. No evidence file is read
 by world loading or hashed into simulation. Compare stage work traces/totals
 separately from duration distributions. This slice proposes no limits or caps.
 
-The capture `fixture_hash` uses the `luminumbra.sim_budget.inputs.v2` domain:
+The capture and paired server comparison share the resolved-input recipe in
+`tools/perf/resolved_fixture.py`, using the `luminumbra.sim_budget.inputs.v2` domain:
 canonical headless `data/common` content, all three selected preset documents,
 and the content of each resolved biome-table reference, including references
 outside `data/common`. Common content includes simulation configuration, policy,
@@ -255,7 +256,9 @@ native generator permits a fallback; adding or removing one changes identity.
 Root locations do not enter the digest. This deliberately replaces the earlier
 common-only capture identity so differing generation inputs cannot compare as
 the same workload. The committed simulation-budget fixture identity is unpinned;
-no pinned identity changes. Other performance capture formats retain their
+no pinned identity changes. Controlled fixtures also include `.perf-controlled`
+marker text because its presence enables runtime overrides. Unmarked shipping
+fixture hashes remain unchanged. Other performance capture formats retain their
 existing identity recipes. An unreadable or malformed preset refuses capture
 before launching the executable or creating evidence output. Inputs are hashed
 again before publication; changed input content refuses a success manifest.
