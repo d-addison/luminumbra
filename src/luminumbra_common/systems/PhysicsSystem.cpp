@@ -206,8 +206,10 @@ void PhysicsSystem::shutdown() {
 }
 
 void PhysicsSystem::update(float delta_time) {
+    m_work_items = {};
     if (!m_jolt_system)
         return;
+    m_work_items.bodies = m_jolt_system->GetNumBodies();
     m_jolt_system->Update(delta_time, 1, m_temp_allocator.get(), m_jolt_job_system.get());
 
     // Process batched physics queries each frame
@@ -356,6 +358,8 @@ void PhysicsSystem::update_player(const glm::vec3& wish_velocity,
                                   float dt) {
     if (!m_player_character || !m_jolt_system)
         return;
+
+    ++m_work_items.characters;
 
     // Get the character's current state
     JPH::Vec3 current_velocity = m_player_character->GetLinearVelocity();
@@ -549,6 +553,7 @@ void PhysicsSystem::update_avatars(float dt) {
         auto& character = m_avatar_characters[i];
         if (!character)
             continue;
+        ++m_work_items.characters;
         const glm::vec2 wish = i < m_avatar_wish.size() ? m_avatar_wish[i] : glm::vec2(0.0f);
         const JPH::Vec3 current_velocity = character->GetLinearVelocity();
         const bool grounded =
