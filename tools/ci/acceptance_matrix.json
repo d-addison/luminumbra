@@ -1591,7 +1591,7 @@
     {
       "id": "contract.dw.vertical.02",
       "source": "docs/distant-world.md#vertical-coverage-and-the-cave-field",
-      "statement": "Acceptance obligations: the band-limited field is the recorded fallback. / Whatever is chosen, openings, overhangs and arches remain silhouette features to the full radius, and the acceptance stations include deep interiors and distant mouths beyond the noise-cave cutoff, not only within it. / Qualification must pin the cave-dense revision and identity. / The packaged `worlds/atlas/presets/cave_dense.json` now uses revision 7; / the revision-6 fixture is frozen in `worlds/atlas/presets-rev6/cave_dense.json`. / See the shipping preset identities under \"Shipping defaults\" in the [engine guide](engine-guide.md) before comparing captures or synchronizing the game repository's fixture and identity sidecar.",
+      "statement": "Acceptance obligations: the band-limited field is the recorded fallback. / Whatever is chosen, openings, overhangs and arches remain silhouette features to the full radius, and the acceptance stations include deep interiors and distant mouths beyond the noise-cave cutoff, not only within it. / Qualification must pin the cave-dense revision and identity. / The packaged `worlds/atlas/presets/cave_dense.json` now uses revision 8; / the revision-6 fixture is frozen in `worlds/atlas/presets-rev6/cave_dense.json`. / See the shipping preset identities under \"Shipping defaults\" in the [engine guide](engine-guide.md) before comparing captures or synchronizing the game repository's fixture and identity sidecar.",
       "status": "planned",
       "requirements": [
         "dw.vertical.007",
@@ -2352,7 +2352,7 @@
     {
       "id": "contract.ar.file.01",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "statement": "Acceptance obligations: The record is `<save>/chunks/region/active-regions.arl`, following the accepted contract's placement in the region integrity scan. / This resolves the slice brief's conflicting save-root wording in favour of that contract. / ARL1 does not alter LMR1 v2, the world manifest, EFS1, plant payloads, FSD2 v3, or canonical chunk serialization. / An anchor-only ledger is not a chunk snapshot: with active regions enabled, the first save with dirty chunks writes all resident chunks, including clean chunks in other regions. / The disabled path keeps the legacy existing-save query: a plant-only save makes later saves incremental. / Snapshot transaction publication is separate work; / Presets now use revision 7 with revision-6 omission compatibility and frozen packaged-preset fallback.",
+      "statement": "Acceptance obligations: The record is `<save>/chunks/region/active-regions.arl`, following the accepted contract's placement in the region integrity scan. / This resolves the slice brief's conflicting save-root wording in favour of that contract. / ARL1 does not alter LMR1 v2, the world manifest, EFS1, plant payloads, FSD2 v3, or canonical chunk serialization. / An anchor-only ledger is not a chunk snapshot: with active regions enabled, the first save with dirty chunks writes all resident chunks, including clean chunks in other regions. / The disabled path keeps the legacy existing-save query: a plant-only save makes later saves incremental. / Snapshot transaction publication is separate work; / Presets now use revision 8 with revision-6 omission compatibility and frozen packaged-preset fallback.",
       "status": "planned",
       "requirements": [
         "ar.file.001",
@@ -3515,6 +3515,84 @@
         "dw.station.099",
         "dw.station.100"
       ]
+    },
+    {
+      "id": "shield.surface-work-admission",
+      "source": "docs/shield/sdf-contract.md#shield-sdf-contract",
+      "statement": "Synchronous surface and collision radii are bounded at 12 chunks (625 columns), with exact vertical work capped at 8192 chunks before allocation or chunk mutation. Replay decoding, recording, server boot and client scenario admission refuse unsupported radii before world creation or output. A refused preview candidate retains its live world and generation and permits another candidate. Existing accepted identities and encoding are preserved. Source checks are available; native boundary, overflow, refusal and identity regressions await execution.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "ReplaySourceContract"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SurfaceWorkBudget.CheckedColumnsAndExactVerticalBudget",
+          "planned": "registered native regression execution; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SurfaceWorkBudget.DecimalAdmissionHasNoOverflowOrPartialFallback",
+          "planned": "registered native regression execution; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SurfaceWorkAdmission.HeaderDecodeAndWriterRefuseBothRadiiBeforeOutput",
+          "planned": "registered native regression execution; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SurfaceWorkAdmission.RunnerAndRecordingRefuseBeforeSessionOrFiles",
+          "planned": "registered native regression execution; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SurfaceWorkAdmission.RefusedWriterReopenRetainsQueuedRecordingAndPath",
+          "planned": "registered native regression execution; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SurfaceWorkBudget.DirectSurfaceAndCollisionRefuseBeforeChunkMutation",
+          "planned": "registered native regression execution; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SurfaceWorkBudget.TallSurfaceRefusesExactWorkBeforeCreatingChunks",
+          "planned": "registered native regression execution; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RuntimeSurfaceOptionsTest.RefusesInvalidRadiiAndAcceptsBoundariesInBothSpellings",
+          "planned": "registered native regression execution; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RuntimeSurfaceOptionsTest.RefusesBeforeCreatingSaveRootInEitherArgumentOrder",
+          "planned": "registered native regression execution; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SurfaceWorkAdmission.DirectScenarioConfigsRefuseBeforeWorldMutation",
+          "planned": "registered native regression execution; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "EffectivePresetIdentity.ReplayRadiusAdmissionPreservesBothIdentitiesAtBoundary",
+          "planned": "registered native regression execution; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldgenPreviewTest.RefusedFirstSurfaceKeepsWorldEmptyAndAcceptsNextCandidate",
+          "planned": "registered native regression execution; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldgenPreviewTest.RefusedSurfaceRetainsLiveWorldAndAllowsRecovery",
+          "planned": "registered native regression execution; owner: ac"
+        }
+      ],
+      "requirements": []
     },
     {
       "id": "net.receive-work",

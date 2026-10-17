@@ -229,9 +229,9 @@ tick_rate 30
 speed_mps 8
 seed 424242
 preset default
-preset_revision 6
-preset_identity 026f24207a8ffc7e
-content_identity 16636010052247870746
+preset_revision 8
+preset_identity 56ffbe1771cddfa6
+content_identity 7583622726659997707
 expected_ticks 1800
 cold_cache true
 points 3
@@ -249,7 +249,7 @@ rate must equal expected ticks. A 60-second script at 30 Hz therefore measures
 1800 frames and does **not** necessarily take 60 seconds of wall time. The achieved
 wall duration is recorded as an observation in `measured_duration_seconds`, not
 used to pace the workload. Only 30 Hz,
-preset revisions 6 and 7 and a fresh-process cold cache are supported. The
+preset revisions 6, 7 and 8 and a fresh-process cold cache are supported. The
 cache declaration concerns engine world/tile caches at launch, not driver shader
 caches or OS caches. Warmup subsequently populates the engine caches.
 Seed is a uint32; the preset is a nonempty lowercase identifier using letters,
@@ -575,9 +575,10 @@ wall timing has no cap wait because measurement always runs uncapped.
 
 Spatial parity, upscale seam and terrain AOV captures
 explicitly disable TAAU and record zero jitter; normal-default captures retain the
-temporal path. Validators accept preset revisions 6 and 7. The shipping hills
-traversal now declares revision 7; its pinned identities need recapture from CI
-after the terrain and preset changes.
+temporal path. Validators accept preset revisions 6, 7 and 8. The shipping hills traversal
+now declares revision 8 and sampling revision 2. Its preset identity was regenerated
+with the canonical checksum oracle; the terrain content identity is unchanged.
+See the provenance beside `surface-flight.traversal`.
 
 ## Continuous CPU attribution (issue #387)
 

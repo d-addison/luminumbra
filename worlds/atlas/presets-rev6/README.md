@@ -11,15 +11,15 @@ which shipped it later. Do not edit these copies when changing shipping presets.
 Existing saves without `preset.json` resolve here by `worldType`, even if the
 current packaged preset has been removed or changed. A missing historical preset
 is an error; the catalog never falls back to current shipping terrain. Embedded
-presets remain authoritative. New worlds use `worlds/atlas/presets` at revision 7.
+presets remain authoritative. New worlds use `worlds/atlas/presets` at revision 8 with sampling revision 2.
 
 When save metadata carries `presetIdentity`, the catalog checks it against the
 FNV-1a checksum of canonical JSON (`nlohmann::json::dump()`), the existing
 benchmark identity format. Historical metadata without an identity is supported.
 The revision-6 hills regression fixture pins `026f24207a8ffc7e`; its terrain
 parameter identity at seed 424242 is `16636010052247870746`.
-The frozen cave-dense preset pins `e70158a4777ee36b`; the shipping revision-7
-copy pins `5d081f382b2d5d0d`. Qualification fixtures must declare which version
+The frozen cave-dense preset pins `e70158a4777ee36b`; the shipping revision-8
+copy pins `a9296ce03a5d9f33`. Qualification fixtures must declare which version
 they use rather than assuming identical terrain from the preset name.
 
 This directory is a sibling of `presets` to preserve the canonical loader's

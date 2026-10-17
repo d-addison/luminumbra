@@ -13,6 +13,7 @@
 #include "../simulation/SimulationEventBus.h"
 #include "../systems/PollinationSystem.h"
 #include "ActiveRegionLedger.h"
+#include "TerrainPresetLoader.h"
 #include "WorldClock.h"
 #include "WorldMetadata.h"
 #include "entt/entt.hpp"
@@ -82,7 +83,8 @@ public:
     GameSession();
     ~GameSession();
 
-    // Initialize a new world with the given parameters.
+    // Initialize a new world with the given parameters. Refusal before adoption
+    // preserves the current world and its save eligibility, including fatal state.
     // customPresetJson (optional): a fully-resolved preset JSON (base preset + create-world
     // customize overrides). When provided it is written into THIS world's own save dir
     // (worlds/saves/<id>/preset.json) and used for generation, so the world is self-contained and
@@ -92,6 +94,14 @@ public:
                      const std::string& seed,
                      const std::string& worldType,
                      const std::string* customPresetJson);
+    // Replay must preserve omitted historical selectors and their identity bytes.
+    // A required content identity is checked before directory creation or live-world replacement.
+    bool CreateWorld(const std::string& name,
+                     const std::string& seed,
+                     const std::string& worldType,
+                     const std::string* customPresetJson,
+                     TerrainPresetUse presetUse,
+                     const std::string& requiredPresetContentHash = {});
     // 3-arg overload (named-preset path). Kept as a distinct overload — not a default arg — so
     // translation units compiled against the prior header still resolve a real symbol.
     bool
@@ -104,7 +114,8 @@ public:
                               const std::string& seed,
                               const std::string& worldType);
 
-    // Load an existing world from disk
+    // Load an existing world from disk. Pre-adoption refusal also preserves
+    // the current world and its save eligibility.
     bool LoadWorld(const std::string& worldId);
 
     // Save the current world state
@@ -129,7 +140,9 @@ public:
     // generates fresh state: loaded chunks are adopted into the streaming map,
     // and generation skips chunks that already carry voxel data, so loaded
     // edits are never clobbered by regeneration. A missing snapshot is a clean
-    // miss (returns true). A refusal returns false and disables saving.
+    // miss (returns true). Corrupt/incompatible snapshot refusal disables saving;
+    // a tick-boundary refusal leaves the session unchanged.
+    // Latest create/open diagnostic, independent of current-world save eligibility.
     const std::string& GetWorldOpenError() const {
         return m_worldOpenError;
     }
@@ -511,7 +524,9 @@ private:
                              const std::string& seed,
                              const std::string& worldType,
                              const std::string* customPresetJson,
-                             bool transient);
+                             bool transient,
+                             TerrainPresetUse presetUse,
+                             const std::string& requiredPresetContentHash = {});
     // Cap catch-up to 2 ticks/frame (default is 4) so a
     // single slow frame replays at most 2 sim ticks instead of 4 — halving the worst-case
     // TickSimulation spike. Scoped HERE (not the shared SimulationClock.h constant, which
@@ -547,6 +562,9 @@ private:
     std::string GenerateWorldId();
     std::unique_ptr<Systems::PhysicsSystem> m_physicsSystem;
     std::string m_worldOpenError;
+    // False for fresh, incomplete, or fatally refused snapshot adoption. Operation
+    // diagnostics alone never change this; only coherent adoption enables it.
+    bool m_worldUsable = false;
     std::size_t m_lastLoadedChunkCount = 0;
     std::vector<std::filesystem::path> m_requiredClientAssets;
 
