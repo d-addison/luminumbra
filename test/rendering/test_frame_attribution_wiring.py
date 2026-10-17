@@ -626,8 +626,9 @@ class FrameAttributionWiring(unittest.TestCase):
                              rendered or not (scenic or preview))
         schedule = read(CLIENT / "app/MenuSceneSchedule.h")
         update = block(schedule, "bool update(")
-        self.assertEqual(compact(block(schedule, "float render_delta_seconds() const")),
-                         "return std::chrono::duration<float>(m_now - m_last_render).count();")
+        render_delta = re.sub(r"//[^\n]*", "", block(schedule, "float render_delta_seconds() const"))
+        self.assertEqual(compact(render_delta),
+                         "return std::min(std::chrono::duration<float>(m_now - m_last_render).count(), 1.0f / 20.0f);")
         self.assertIn("m_last_render = m_now;", block(schedule, "void rendered()"))
         self.assertIn("m_now = now;", update)
         slot_expression = re.search(r"const auto slot = (.*?);", update, re.S).group(1)
@@ -658,6 +659,56 @@ class FrameAttributionWiring(unittest.TestCase):
             self.assertEqual(cpp_expression(refresh_expression, **{
                 "key.width": width, "key.height": height, "m_valid": True,
                 "due": False, "interactive": interactive}), expected)
+
+    def test_render_delta_matches_shipping_ceiling_and_preserves_elapsed_consumers(self):
+        schedule = read(CLIENT / "app/MenuSceneSchedule.h")
+        body = re.sub(r"//[^\n]*", "", block(schedule, "float render_delta_seconds() const"))
+        bounded = re.fullmatch(
+            r"\s*return std::min\(std::chrono::duration<float>\(m_now - m_last_render\)"
+            r"\.count\(\), ([\d.]+)f / ([\d.]+)f\);\s*", body)
+        self.assertIsNotNone(bounded)
+        numerator, denominator = map(float, bounded.groups())
+        ceiling = numerator / denominator
+        shipping = re.search(r"deltaTime = std::min\(deltaTime, ([\d.]+)f / ([\d.]+)f\);", self.main)
+        self.assertIsNotNone(shipping)
+        self.assertEqual(ceiling, float(shipping[1]) / float(shipping[2]))
+        self.assertEqual(ceiling, 0.05)
+        # Evaluate the scalar operation extracted above, without native execution.
+        for elapsed, expected in ((0, 0), (0.001, 0.001), (0.033, 0.033),
+                                  (0.049, 0.049), (0.05, 0.05), (0.051, 0.05),
+                                  (0.730, 0.05), (60, 0.05), (99.9, 0.05),
+                                  (-0.001, -0.001)):
+            with self.subTest(elapsed=elapsed):
+                self.assertEqual(min(elapsed, ceiling), expected)
+        self.assertEqual(compact(block(schedule, "double elapsed_seconds() const")),
+                         "return std::chrono::duration<double>(m_now - m_epoch).count();")
+        self.assertEqual(compact(block(schedule, "void invalidate()")), "m_valid = false;")
+        self.assertEqual(compact(block(schedule, "void rendered()")),
+                         "m_valid = true; m_last_render = m_now;")
+        update = block(schedule, "bool update(")
+        self.assertEqual(compact(block(update, "if (!m_started)")),
+                         "m_started = true; m_epoch = now; m_last_render = now;")
+        self.assertEqual(update.count("m_last_render ="), 1)
+        self.assertEqual(update.count("m_epoch ="), 1)
+        menu = block(read(CLIENT / "app/MenuScreens.cpp"), "void RenderMenuScreens(")
+        self.assertIn("std::chrono::duration<float>(menu_now - previewState.last_menu_frame).count()", menu)
+        self.assertIn("app.menu.menu_backdrop_yaw += menu_delta;", menu)
+        self.assertIn("worldgenPreview->tick(menu_delta);", menu)
+        self.assertIn("std::chrono::steady_clock::now()", menu)
+        refresh = block(menu, "if (drawable && (refresh || !has_image))")
+        self.assertIn("const float render_delta = previewState.schedule.render_delta_seconds();", refresh)
+        self.assertIn("worldgenPreview->render_to_backbuffer(renderPipeline, render_delta)", refresh)
+        self.assertIn("*camera, render_delta,", compact(refresh))
+        preview = block(read(CLIENT / "world/WorldgenPreview.cpp"), "bool WorldgenPreview::render_to_backbuffer(")
+        self.assertIn("pipeline.render_frame(m_registry, *m_world, cam, dt,", preview)
+        pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
+        prepare = block(pipeline, "void RenderPipeline::prepare_frame(")
+        self.assertIn("m_particle_pass->update(deltaTime);", prepare)
+        self.assertIn("m_frame_prepared.delta_time = deltaTime;", prepare)
+        self.assertIn("RenderMenuScreens(g_app, window, deltaTime,", compact(self.main))
+        self.assertLess(shipping.start(), self.main.index("RenderMenuScreens(g_app,"))
+        thumbnails = block(menu, "if (app.capture.ui_thumbs > 0")
+        self.assertIn("*camera, deltaTime,", compact(thumbnails))
 
     def test_preview_capture_requires_ready_successes_and_keeps_the_timeout(self):
         menu = block(read(CLIENT / "app/MenuScreens.cpp"), "void RenderMenuScreens(")

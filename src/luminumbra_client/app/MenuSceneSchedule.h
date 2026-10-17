@@ -2,6 +2,7 @@
 
 #include "luminumbra_client/rendering/GraphicsRuntimeConfig.h"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -100,12 +101,16 @@ public:
     bool valid() const {
         return m_valid;
     }
-    // Const presentation diagnostic, including time spent replaying the cache.
+    // Wall presentation time, including cache replay and menu absence. This is
+    // independent of the bounded render-only simulation step below.
     double elapsed_seconds() const {
         return std::chrono::duration<double>(m_now - m_epoch).count();
     }
     float render_delta_seconds() const {
-        return std::chrono::duration<float>(m_now - m_last_render).count();
+        // Match the shipping frame loop's 50 ms ceiling for particles and other
+        // render-only integration. Never repay skipped slots as simulation debt.
+        // The caller uses steady_clock; like the frame loop, only cap the maximum.
+        return std::min(std::chrono::duration<float>(m_now - m_last_render).count(), 1.0f / 20.0f);
     }
 
 private:

@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -168,7 +169,7 @@ TEST(MenuPresentation, ThirtyHertzUsesAbsoluteElapsedSlotsWithoutDrift) {
     // Exact second boundary remains aligned after thousands of skipped slots.
     EXPECT_TRUE(schedule.update(seconds{101}, kScenery));
     EXPECT_DOUBLE_EQ(schedule.elapsed_seconds(), 100);
-    EXPECT_FLOAT_EQ(schedule.render_delta_seconds(), 99.9f);
+    EXPECT_FLOAT_EQ(schedule.render_delta_seconds(), 0.05f);
     schedule.rendered();
     EXPECT_FALSE(schedule.update(seconds{101} + nanoseconds{33'333'333}, kScenery));
     EXPECT_TRUE(schedule.update(seconds{101} + nanoseconds{33'333'334}, kScenery));
@@ -179,12 +180,127 @@ TEST(MenuPresentation, LongFramesSkipObsoleteSamplesAndKeepTheNextDeadline) {
     ASSERT_TRUE(schedule.update(nanoseconds{0}, kScenery));
     schedule.rendered();
     EXPECT_TRUE(schedule.update(milliseconds{730}, kScenery));
-    EXPECT_FLOAT_EQ(schedule.render_delta_seconds(), 0.730f);
+    EXPECT_DOUBLE_EQ(schedule.elapsed_seconds(), 0.730);
+    EXPECT_FLOAT_EQ(schedule.render_delta_seconds(), 0.05f);
     schedule.rendered();
     EXPECT_FALSE(schedule.update(milliseconds{731}, kScenery));
     EXPECT_TRUE(schedule.update(nanoseconds{733'333'334}, kScenery));
     schedule.rendered();
     EXPECT_FALSE(schedule.update(milliseconds{734}, kScenery));
+}
+
+TEST(MenuPresentation, RenderDeltaPreservesPositiveStepsThroughTheShippingCeiling) {
+    for (const int step_ms : {0, 1, 5, 33, 49, 50, 51, 730}) {
+        MenuSceneSchedule schedule;
+        ASSERT_TRUE(schedule.update(seconds{10}, kScenery));
+        EXPECT_FLOAT_EQ(schedule.render_delta_seconds(), 0);
+        schedule.rendered();
+        ASSERT_TRUE(schedule.update(seconds{10} + milliseconds{step_ms}, kScenery, true));
+        EXPECT_FLOAT_EQ(schedule.render_delta_seconds(),
+                        static_cast<float>(std::min(step_ms, 50)) / 1000.0f);
+        EXPECT_DOUBLE_EQ(schedule.elapsed_seconds(), static_cast<double>(step_ms) / 1000.0);
+    }
+}
+
+TEST(MenuPresentation, PausedRenderDoesNotAccumulateCatchupDebtOrMoveAbsoluteSlots) {
+    MenuSceneSchedule schedule;
+    ASSERT_TRUE(schedule.update(seconds{1}, kScenery));
+    schedule.rendered();
+    ASSERT_TRUE(schedule.update(seconds{101}, kScenery));
+    EXPECT_DOUBLE_EQ(schedule.elapsed_seconds(), 100);
+    EXPECT_FLOAT_EQ(schedule.render_delta_seconds(), 0.05f);
+    // A refused render does not consume time, and repeated attempts stay bounded.
+    ASSERT_TRUE(schedule.update(seconds{101} + milliseconds{1}, kScenery, true));
+    EXPECT_FLOAT_EQ(schedule.render_delta_seconds(), 0.05f);
+    schedule.rendered();
+    EXPECT_FALSE(schedule.update(seconds{101} + milliseconds{2}, kScenery));
+    EXPECT_FLOAT_EQ(schedule.render_delta_seconds(), 0.001f);
+    EXPECT_FALSE(schedule.update(seconds{101} + nanoseconds{33'333'333}, kScenery));
+    EXPECT_TRUE(schedule.update(seconds{101} + nanoseconds{33'333'334}, kScenery));
+}
+
+TEST(MenuPresentation, MenuAbsenceAndReentryKeepWallTimeButBoundTheRenderStep) {
+    MenuSceneSchedule schedule;
+    ASSERT_TRUE(schedule.update(seconds{1}, kScenery));
+    schedule.rendered();
+    schedule.invalidate(); // No scene updates while a UI-only menu owns the loop.
+    EXPECT_FALSE(schedule.valid());
+    ASSERT_TRUE(schedule.update(seconds{61}, kScenery));
+    EXPECT_DOUBLE_EQ(schedule.elapsed_seconds(), 60);
+    EXPECT_FLOAT_EQ(schedule.render_delta_seconds(), 0.05f);
+    schedule.rendered();
+    EXPECT_FALSE(schedule.update(seconds{61} + milliseconds{1}, kScenery));
+    EXPECT_FLOAT_EQ(schedule.render_delta_seconds(), 0.001f);
+    // Gameplay resets the schedule in the frame loop; return starts a new epoch.
+    schedule = {};
+    ASSERT_TRUE(schedule.update(seconds{121}, kScenery));
+    EXPECT_DOUBLE_EQ(schedule.elapsed_seconds(), 0);
+    EXPECT_FLOAT_EQ(schedule.render_delta_seconds(), 0);
+    schedule.rendered();
+    EXPECT_TRUE(schedule.update(seconds{121} + nanoseconds{33'333'334}, kScenery));
+    EXPECT_FLOAT_EQ(schedule.render_delta_seconds(),
+                    std::chrono::duration<float>(nanoseconds{33'333'334}).count());
+}
+
+TEST(MenuPresentation, InvalidationKeepsRenderTimeUntilSuccessfulReplacement) {
+    MenuSceneSchedule schedule;
+    auto key = kScenery;
+    ASSERT_TRUE(schedule.update(seconds{1}, key));
+    schedule.rendered();
+    ++key.document;
+    ++key.preview_world;
+    ++key.renderer_target;
+    ++key.camera;
+    key.settings.render_scale = 0.75f;
+    ASSERT_TRUE(schedule.update(seconds{2}, key));
+    EXPECT_FALSE(schedule.valid());
+    EXPECT_FLOAT_EQ(schedule.render_delta_seconds(), 0.05f);
+    schedule.invalidate();
+    ASSERT_TRUE(schedule.update(seconds{2} + milliseconds{1}, key));
+    EXPECT_FLOAT_EQ(schedule.render_delta_seconds(), 0.05f);
+    EXPECT_DOUBLE_EQ(schedule.elapsed_seconds(), 1.001);
+    schedule.rendered();
+    ++key.preview;
+    ASSERT_TRUE(schedule.update(seconds{2} + milliseconds{6}, key));
+    EXPECT_FLOAT_EQ(schedule.render_delta_seconds(), 0.005f);
+}
+
+TEST(MenuPresentation, ZeroDimensionWaitAndResumeDoNotConsumeOrResetRenderTime) {
+    MenuSceneSchedule schedule;
+    ASSERT_TRUE(schedule.update(seconds{1}, kScenery));
+    schedule.rendered();
+    auto key = kScenery;
+    key.width = 0;
+    EXPECT_FALSE(schedule.update(seconds{2}, key, true));
+    EXPECT_FALSE(schedule.valid());
+    EXPECT_FLOAT_EQ(schedule.render_delta_seconds(), 0.05f);
+    key.width = kScenery.width;
+    key.height = 0;
+    EXPECT_FALSE(schedule.update(seconds{3}, key));
+    ASSERT_TRUE(schedule.update(seconds{61}, kScenery));
+    EXPECT_DOUBLE_EQ(schedule.elapsed_seconds(), 60);
+    EXPECT_FLOAT_EQ(schedule.render_delta_seconds(), 0.05f);
+    schedule.rendered();
+    EXPECT_FALSE(schedule.update(seconds{61} + milliseconds{1}, kScenery));
+    EXPECT_FLOAT_EQ(schedule.render_delta_seconds(), 0.001f);
+}
+
+TEST(MenuPresentation, RenderClockMatchesTheFrameLoopsUpperBoundOnlyPolicy) {
+    MenuSceneSchedule schedule;
+    // Epoch values can be negative; only differences feed presentation timing.
+    ASSERT_TRUE(schedule.update(-seconds{1}, kScenery));
+    EXPECT_FLOAT_EQ(schedule.render_delta_seconds(), 0);
+    schedule.rendered();
+    ASSERT_TRUE(schedule.update(-seconds{1} + milliseconds{50}, kScenery));
+    EXPECT_FLOAT_EQ(schedule.render_delta_seconds(), 0.05f);
+    schedule.rendered();
+    EXPECT_FALSE(schedule.update(-seconds{1} + milliseconds{50}, kScenery));
+    EXPECT_FLOAT_EQ(schedule.render_delta_seconds(), 0);
+    // steady_clock cannot regress in production. Preserve the existing policy
+    // for a synthetic reversal instead of silently introducing a lower clamp.
+    ASSERT_TRUE(schedule.update(-seconds{1} + milliseconds{49}, kScenery, true));
+    EXPECT_FLOAT_EQ(schedule.render_delta_seconds(), -0.001f);
+    EXPECT_DOUBLE_EQ(schedule.elapsed_seconds(), 0.049);
 }
 
 TEST(MenuPresentation, ImageCannotCrossResizePreviewOrDocumentTransitions) {
