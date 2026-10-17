@@ -962,7 +962,19 @@ private:
     void prepare_authority_eviction(const std::set<ChunkID>& required);
     bool make_authority_room(PhysicsSystem* physics_system = nullptr);
     bool persist_authority(const std::shared_ptr<::Luminumbra::Chunk>& chunk);
-    std::shared_ptr<::Luminumbra::Chunk> restore_authority(const IVec3& coords);
+    struct AuthorityRestoreBatch;
+    std::shared_ptr<::Luminumbra::Chunk> restore_authority(const IVec3& coords,
+                                                           AuthorityRestoreBatch& batch);
+    std::size_t m_authorityRegionIndexReads = 0;
+
+public:
+    // Cumulative region-index opens for authority restoration, including misses.
+    // Measures batch reuse without exposing mutable persistence internals.
+    std::size_t authority_region_index_reads() const {
+        return m_authorityRegionIndexReads;
+    }
+
+private:
     struct StreamingState {
         std::unordered_map<ChunkID, std::shared_ptr<::Luminumbra::Chunk>> chunks;
         //   (activation queue): per-lane BATCH FIFOs. Each streaming
@@ -1388,6 +1400,8 @@ private:
     // so const-correctness is preserved (no world_hash-affecting state changes).
     mutable std::set<std::pair<std::int64_t, std::int64_t>> m_hydro_prefetch_inflight;
     mutable std::mutex m_hydro_prefetch_mutex;
+    // One owned prefetch batch; drained before world services are destroyed.
+    mutable JobHandle m_hydro_prefetch_handle;
 
 public:
     // Bake the hydraulic-erosion regions covering a disc around (cx,cz) AHEAD of

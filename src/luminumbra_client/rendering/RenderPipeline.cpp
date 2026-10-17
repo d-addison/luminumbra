@@ -2364,7 +2364,8 @@ void RenderPipeline::ensure_terrain_culling_hierarchy(
     std::vector<ChunkID> sorted_chunk_ids;
     sorted_chunk_ids.reserve(renderable_chunks.size());
     for (const auto& chunk : renderable_chunks) {
-        sorted_chunk_ids.push_back(chunk.id);
+        if (chunk.has_terrain_mesh())
+            sorted_chunk_ids.push_back(chunk.id);
     }
     std::sort(sorted_chunk_ids.begin(), sorted_chunk_ids.end());
 
@@ -2375,19 +2376,24 @@ void RenderPipeline::ensure_terrain_culling_hierarchy(
     }
 
     const bool needs_rebuild = !m_terrainCullingCache.valid ||
-                               m_terrainCullingCache.chunk_count != renderable_chunks.size() ||
+                               m_terrainCullingCache.chunk_count != sorted_chunk_ids.size() ||
                                m_terrainCullingCache.chunk_set_signature != signature;
     if (!needs_rebuild) {
         m_last_render_pass_stats.culling_hierarchy_chunks = m_terrainCullingCache.chunk_count;
         return;
     }
 
-    m_hierarchicalCuller.BuildHierarchy(renderable_chunks);
+    std::vector<ChunkMeshSnapshot> terrain_chunks;
+    terrain_chunks.reserve(sorted_chunk_ids.size());
+    for (const auto& chunk : renderable_chunks)
+        if (chunk.has_terrain_mesh())
+            terrain_chunks.push_back(chunk);
+    m_hierarchicalCuller.BuildHierarchy(terrain_chunks);
     m_terrainCullingCache.chunk_set_signature = signature;
-    m_terrainCullingCache.chunk_count = renderable_chunks.size();
+    m_terrainCullingCache.chunk_count = sorted_chunk_ids.size();
     m_terrainCullingCache.valid = true;
     m_last_render_pass_stats.culling_hierarchy_rebuilds++;
-    m_last_render_pass_stats.culling_hierarchy_chunks = renderable_chunks.size();
+    m_last_render_pass_stats.culling_hierarchy_chunks = sorted_chunk_ids.size();
 }
 
 void RenderPipeline::render_frame(entt::registry& registry,
@@ -2638,7 +2644,7 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
             FarWorldLiveUpload upload;
             upload.cell = {chunk.coords.x, chunk.coords.y, chunk.coords.z, 0};
             upload.snapshot_version = chunk.mesh_version;
-            if (found != m_chunk_render_data.end()) {
+            if (chunk.has_terrain_mesh() && found != m_chunk_render_data.end()) {
                 const auto& data = found->second;
                 upload.uploaded_version = data.mesh_version;
                 upload.uploaded_indices = data.element_count;
@@ -2650,7 +2656,7 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
             }
             const auto water_found = m_water_render_data.find(chunk.id);
             upload.water_snapshot_version = chunk.water_mesh_version;
-            if (water_found != m_water_render_data.end()) {
+            if (chunk.has_water_mesh() && water_found != m_water_render_data.end()) {
                 const auto& water_data = water_found->second;
                 water_data.SetLadderWaterUpload(
                     upload,
@@ -4293,7 +4299,8 @@ void RenderPipeline::manage_chunk_gpu_resources(
     std::unordered_set<ChunkID> active_chunk_ids;
     active_chunk_ids.reserve(renderable_chunks.size());
     for (const auto& chunk : renderable_chunks) {
-        active_chunk_ids.insert(chunk.id);
+        if (chunk.has_terrain_mesh())
+            active_chunk_ids.insert(chunk.id);
     }
 
     // Step 2: Mark-and-sweep stale GPU resources.

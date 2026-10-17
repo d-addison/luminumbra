@@ -2,11 +2,16 @@
 
 #include "../ecs/EntitySnapshot.h" //  plant entity snapshot persistence
 #include "WorldPersistenceRoundtrip.h"
+#include "core/FilesystemPath.h"
 #include "luminumbra/core/Types.h"
+#include "world/ActiveRegionLedger.h"
 #include "world/Chunk.h"
 #include "world/FarLodStore.h"
+#include "world/WorldClock.h"
+#include "world/WorldStreamingState.h"
 
-#include "nlohmann/json.hpp"
+#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
 
 #include <lz4.h>
 
@@ -20,9 +25,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <fstream>
-#include <iomanip>
+#include <initializer_list>
 #include <ios>
 #include <limits>
 #include <map>
@@ -32,6 +38,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <stop_token>
+#include <string>
 #include <string_view>
 #include <system_error>
 #include <utility>
@@ -47,7 +54,6 @@
 #include <windows.h>
 #else
 #include <fcntl.h>
-#include <sys/types.h>
 #include <unistd.h>
 #endif
 
@@ -284,7 +290,7 @@ std::size_t ReclaimAbandonedStaging(const std::filesystem::path& destination) {
     const auto directory = destination.parent_path();
     const auto prefix = destination.filename().string() + ".tmp.";
     std::size_t reclaimed = 0;
-    std::filesystem::directory_iterator it(directory, list_error);
+    const std::filesystem::directory_iterator it(directory, list_error);
     if (list_error)
         return 0;
     for (const auto& entry : it) {
@@ -445,8 +451,10 @@ bool WriteRegionBytes(int file, std::string_view bytes, std::vector<std::string>
     while (offset < bytes.size()) {
         const std::size_t remaining = bytes.size() - offset;
         const std::size_t requested = std::min<std::size_t>(
-            remaining, static_cast<std::size_t>((std::numeric_limits<ssize_t>::max)()));
-        const ssize_t written = ::write(file, bytes.data() + offset, requested);
+            remaining,
+            static_cast<std::size_t>(
+                (std::numeric_limits<decltype(::write(file, bytes.data(), 0))>::max)()));
+        const auto written = ::write(file, bytes.data() + offset, requested);
         if (written < 0 && errno == EINTR) {
             continue;
         }
@@ -704,7 +712,21 @@ bool DecompressPayload(const RegionRecord& record,
     return true;
 }
 
-using RegionIndex = WorldSaveService::AuthorityReader;
+struct RegionIndex {
+    struct Record {
+        u64 id = 0;
+        u8 lod_level = 0;
+        u8 flags = 0;
+        u32 raw_size = 0;
+        u32 compressed_size = 0;
+        std::streamoff offset = 0;
+    };
+    std::filesystem::path path;
+    Filesystem::ReplacementSafeInputFile input;
+    // LMR1's u16 count bounds the manifest to 65,535 entries.
+    std::vector<Record> records;
+    std::size_t next = 0;
+};
 
 bool ReadRegionIndex(const std::filesystem::path& path,
                      RegionIndex& index,
@@ -1020,6 +1042,35 @@ bool WriteWorldManifest(const std::filesystem::path& manifest_path,
     return true;
 }
 
+bool OpenAuthorityIndex(const std::filesystem::path& region_file, RegionIndex& reader) {
+    reader = {};
+    reader.path = region_file;
+    std::error_code error;
+    const bool exists = std::filesystem::exists(region_file, error);
+    if (error)
+        return false;
+    if (!exists)
+        return true;
+    if (!ReadRegionIndex(region_file, reader, nullptr))
+        return false;
+    int expected_x = 0, expected_z = 0;
+    if (!ParseRegionFileName(region_file, expected_x, expected_z))
+        return false;
+    std::erase_if(reader.records, [](const auto& record) {
+        return record.lod_level != 0 || (record.flags & kRecordFlagEdited) == 0;
+    });
+    for (const auto& record : reader.records) {
+        int actual_x = 0, actual_z = 0;
+        WorldSaveService::region_coords_for_chunk(Chunk::decode_id(record.id), actual_x, actual_z);
+        if (actual_x != expected_x || actual_z != expected_z)
+            return false;
+    }
+    std::sort(reader.records.begin(), reader.records.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs.id < rhs.id;
+    });
+    return true;
+}
+
 } // namespace
 
 bool WorldSaveService::save_metadata(const std::string& bytes,
@@ -1202,7 +1253,7 @@ bool WorldSaveService::load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapsh
     if (!std::filesystem::exists(path, ec)) {
         return true; // clean miss: a fresh / no-plant world
     }
-    std::ifstream in(path, std::ios::binary);
+    const std::ifstream in(path, std::ios::binary);
     if (!in) {
         AddError(errors, "failed to open plant entities file: " + path.string());
         return false;
@@ -1566,46 +1617,74 @@ WorldSaveService::load_authority_hash_cache(const std::filesystem::path& save_di
     return cache;
 }
 
+struct WorldSaveService::AuthorityReader::Impl {
+    RegionIndex index;
+};
+
+WorldSaveService::AuthorityReader::AuthorityReader() = default;
+WorldSaveService::AuthorityReader::~AuthorityReader() = default;
+WorldSaveService::AuthorityReader::AuthorityReader(AuthorityReader&&) noexcept = default;
+WorldSaveService::AuthorityReader&
+WorldSaveService::AuthorityReader::operator=(AuthorityReader&&) noexcept = default;
+
+bool WorldSaveService::AuthorityReader::open(const std::filesystem::path& region_file) {
+    m_impl = std::make_unique<Impl>();
+    if (OpenAuthorityIndex(region_file, m_impl->index))
+        return true;
+    m_impl.reset();
+    return false;
+}
+
+std::optional<u64> WorldSaveService::AuthorityReader::next_id() const {
+    if (!m_impl || m_impl->index.next >= m_impl->index.records.size())
+        return std::nullopt;
+    return m_impl->index.records[m_impl->index.next].id;
+}
+
+void WorldSaveService::AuthorityReader::skip() {
+    if (next_id())
+        ++m_impl->index.next;
+}
+
+std::shared_ptr<Chunk> WorldSaveService::AuthorityReader::read(u64 id) {
+    if (!m_impl)
+        return nullptr;
+    auto& index = m_impl->index;
+    const auto entry = std::lower_bound(
+        index.records.begin(), index.records.end(), id, [](const auto& record, u64 value) {
+            return record.id < value;
+        });
+    if (entry == index.records.end() || entry->id != id)
+        return nullptr;
+    RegionRecord raw;
+    if (!ReadIndexedRecord(index, *entry, raw, nullptr))
+        throw std::runtime_error("Cannot read durable chunk authority");
+    auto chunk = DecodeChunkRecord(raw, index.path, nullptr);
+    if (!chunk)
+        throw std::runtime_error("Cannot decode durable chunk authority");
+    // Runtime jobs and collider handles belong to the previous process.
+    chunk->reset_pending_jobs();
+    chunk->has_collision.store(false, std::memory_order_release);
+    chunk->set_state(ChunkState::Idle);
+    return chunk;
+}
+
+std::shared_ptr<Chunk> WorldSaveService::AuthorityReader::read_next() {
+    const auto id = next_id();
+    if (!id)
+        return nullptr;
+    auto chunk = read(*id);
+    skip();
+    return chunk;
+}
+
 bool WorldSaveService::open_region_authority(const std::filesystem::path& region_file,
                                              AuthorityReader& reader) {
-    reader = {};
-    reader.path = region_file;
-    std::error_code error;
-    const bool exists = std::filesystem::exists(region_file, error);
-    if (error)
-        return false;
-    if (!exists)
-        return true;
-    if (!ReadRegionIndex(region_file, reader, nullptr))
-        return false;
-    int expected_x = 0, expected_z = 0;
-    if (!ParseRegionFileName(region_file, expected_x, expected_z))
-        return false;
-    std::erase_if(reader.records, [](const auto& record) {
-        return record.lod_level != 0 || (record.flags & kRecordFlagEdited) == 0;
-    });
-    for (const auto& record : reader.records) {
-        int actual_x = 0, actual_z = 0;
-        region_coords_for_chunk(Chunk::decode_id(record.id), actual_x, actual_z);
-        if (actual_x != expected_x || actual_z != expected_z)
-            return false;
-    }
-    std::sort(reader.records.begin(), reader.records.end(), [](const auto& lhs, const auto& rhs) {
-        return lhs.id < rhs.id;
-    });
-    return true;
+    return reader.open(region_file);
 }
 
 std::shared_ptr<Chunk> WorldSaveService::read_next_authority(AuthorityReader& reader) {
-    if (reader.next >= reader.records.size())
-        return nullptr;
-    RegionRecord raw;
-    if (!ReadIndexedRecord(reader, reader.records[reader.next++], raw, nullptr))
-        throw std::runtime_error("Cannot read durable chunk authority");
-    auto chunk = DecodeChunkRecord(raw, reader.path, nullptr);
-    if (!chunk)
-        throw std::runtime_error("Cannot decode durable chunk authority");
-    return chunk;
+    return reader.read_next();
 }
 
 bool WorldSaveService::persist_chunk_authority(const std::filesystem::path& save_dir,
@@ -1641,10 +1720,10 @@ bool WorldSaveService::copy_chunk_authority(const std::filesystem::path& source,
                 int rx = 0, rz = 0;
                 if (!entry.is_regular_file() || !ParseRegionFileName(entry.path(), rx, rz))
                     continue;
-                AuthorityReader previous, incoming;
-                if (!open_region_authority(entry.path(), previous) ||
+                RegionIndex previous, incoming;
+                if (!OpenAuthorityIndex(entry.path(), previous) ||
                     (!source.empty() &&
-                     !open_region_authority(region_file_path(source, rx, rz), incoming)))
+                     !OpenAuthorityIndex(region_file_path(source, rx, rz), incoming)))
                     return false;
                 if (!std::includes(
                         incoming.records.begin(),
@@ -1665,7 +1744,7 @@ bool WorldSaveService::copy_chunk_authority(const std::filesystem::path& source,
             if (!entry.is_regular_file() || !ParseRegionFileName(entry.path(), rx, rz))
                 continue;
             RegionIndex index;
-            if (!open_region_authority(entry.path(), index))
+            if (!OpenAuthorityIndex(entry.path(), index))
                 return false;
             std::vector<RegionReplacement> replacements;
             replacements.reserve(index.records.size());

@@ -1,5 +1,4 @@
 #pragma once
-#include "../core/FilesystemPath.h"
 
 #include "world/ActiveRegionLedger.h"
 #include "world/WorldClock.h"
@@ -9,8 +8,8 @@
 #include <cstdint>
 #include <filesystem>
 #include <initializer_list>
-#include <ios>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <stop_token>
 #include <string>
@@ -166,19 +165,23 @@ public:
     };
     // Owner-thread cursor: keeps the bounded manifest for one region, decoding at
     // most one complete chunk at a time. Render caches are never restored.
-    struct AuthorityReader {
-        struct Record {
-            u64 id = 0;
-            u8 lod_level = 0;
-            u8 flags = 0;
-            u32 raw_size = 0;
-            u32 compressed_size = 0;
-            std::streamoff offset = 0;
-        };
-        std::filesystem::path path;
-        Filesystem::ReplacementSafeInputFile input;
-        std::vector<Record> records;
-        std::size_t next = 0;
+    class AuthorityReader {
+    public:
+        AuthorityReader();
+        ~AuthorityReader();
+        AuthorityReader(AuthorityReader&&) noexcept;
+        AuthorityReader& operator=(AuthorityReader&&) noexcept;
+        bool open(const std::filesystem::path& region_file);
+        std::shared_ptr<Chunk> read_next();
+        // Indexed lookup leaves the sequential cursor unchanged. Missing IDs
+        // return null; malformed payloads throw without publishing a chunk.
+        std::shared_ptr<Chunk> read(u64 id);
+        std::optional<u64> next_id() const;
+        void skip();
+
+    private:
+        struct Impl;
+        std::unique_ptr<Impl> m_impl;
     };
     // Cold scan only, at load or after replacement of the durable authority root.
     static AuthorityHashCache load_authority_hash_cache(const std::filesystem::path& save_dir);

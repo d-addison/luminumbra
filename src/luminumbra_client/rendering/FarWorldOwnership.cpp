@@ -1,10 +1,15 @@
 #include "FarWorldOwnership.h"
 
 #include "luminumbra/core/Types.h"
+#include "luminumbra_common/world/FarTierTable.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <limits>
+#include <span>
 #include <tuple>
 
 namespace Luminumbra::Rendering {
@@ -152,7 +157,13 @@ bool FarWorldOwnership::OwnsWater(const std::array<double, 3>& position) const n
     if (!complete_ || !FarWorldChunkCell(position, cell))
         return false;
     const auto found = std::lower_bound(cells().begin(), cells().end(), cell, Less);
-    return found != cells().end() && !Less(cell, *found) && (found->reserved & kFarWorldWaterReady);
+    if (found != cells().end() && !Less(cell, *found) && (found->reserved & kFarWorldWaterReady))
+        return true;
+    // Water belongs to the horizontal column's Y=0 owner even for raised lakes.
+    cell.y = 0;
+    const auto column = std::lower_bound(cells().begin(), cells().end(), cell, Less);
+    return column != cells().end() && !Less(cell, *column) &&
+           (column->reserved & kFarWorldWaterReady);
 }
 bool FarWorldOwnership::Owns(const FarWorldCellOrigin& origin,
                              const std::array<float, 3>& local) const noexcept {

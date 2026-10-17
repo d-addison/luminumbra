@@ -1177,9 +1177,9 @@ GameSession::ValidateWorldConfig(const std::string& root_path,
         AddValidationError(result, "missing world preset: " + result.preset_path.string());
     }
 
-    // simulation needs only the preset. Any further runtime assets
-    // are caller-supplied (the client registers shaders/RML/fonts; a headless
-    // host registers none).
+    // Preset loading below validates simulation dependencies. Further runtime
+    // assets are caller-supplied (the client registers shaders/RML/fonts; a
+    // headless host registers none).
     for (const fs::path& relative : required_assets) {
         const fs::path path = root / relative;
         if (!fs::exists(path)) {
@@ -2056,13 +2056,7 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         // exist here, so normalize them before the streaming systems see the
         // chunk. Voxel data (sdf/heightmap) and meshes are kept verbatim.
         chunk->has_collision.store(false, std::memory_order_release);
-        chunk->pending_mesh_ready.store(false, std::memory_order_release);
-        chunk->pending_mesh_failed.store(false, std::memory_order_release);
-        chunk->pending_lod.store(-1, std::memory_order_release);
-        chunk->pending_mesh_vertices.clear();
-        chunk->pending_mesh_indices.clear();
-        chunk->pending_water_mesh_vertices.clear();
-        chunk->pending_water_mesh_indices.clear();
+        chunk->reset_pending_jobs();
 
         // Chunks saved mid-transition (Loading/Meshing/Unloading) settle to a
         // stable state; Ready and Idle are restored verbatim (a Ready chunk
@@ -2140,6 +2134,15 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
                          adopted,
                          loaded.size(),
                          save_dir.string());
+    if (m_activeRegionsEnabled) {
+        try {
+            (void)m_worldSystem->compute_chunk_hashes();
+        } catch (const std::exception& error) {
+            m_worldOpenError = error.what();
+            m_worldSystem->clear_world(m_physicsSystem.get());
+            return false;
+        }
+    }
     return true;
 }
 

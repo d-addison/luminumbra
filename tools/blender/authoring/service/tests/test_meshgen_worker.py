@@ -1,4 +1,5 @@
 """Simulated workers only: portable pipe readiness, deadlines, kill/reap and pins."""
+from contextlib import ExitStack
 from pathlib import Path
 import os
 import queue
@@ -63,16 +64,26 @@ class WorkerSupervision(unittest.TestCase):
         self.refusal('worker.policy', lambda: self.simulate(mode='policy'))
 
     def test_windows_compatible_readiness_timeout_cancellation_and_reaping(self):
-        # Clock progresses independently of OS scheduler; no sleeps or long polls.
-        class Clock:
-            def __init__(self): self.value = 0
-            def __call__(self): self.value += .05; return self.value
-        self.refusal('worker.readiness', lambda: self.simulate(mode='no_ready', readiness_timeout=1, clock=Clock()))
+        witness = self.root / 'unready-worker-started'
+        source = ('import sys,threading; from pathlib import Path; sys.stdin.buffer.readline(); '
+                  f'Path({str(witness)!r}).touch(); threading.Event().wait()')
+        fixture = [sys.executable, '-I', '-S', '-B', '-c', source]
+        # Initialization is acknowledged without emitting READY. Only that
+        # observation expires readiness; cleanup keeps the clock fixed.
+        with patch.object(meshgen_worker, 'command', return_value=fixture):
+            self.refusal('worker.readiness', lambda: self.simulate(mode='no_ready', readiness_timeout=1,
+                         clock=lambda: 1.01 if witness.exists() else 0.))
+        self.assertTrue(witness.exists())
         cancelled = threading.Event(); cancelled.set()
         self.refusal('cancelled', lambda: self.simulate(mode='hang', cancel=cancelled))
+        now, ready = [0.], threading.Event()
+        def expire():
+            ready.set()
+            now[0] = .6
         self.refusal('worker.timeout', lambda: run_owned([sys.executable, '-I', '-S', '-B', '-c',
-            'import sys,threading; sys.stdin.buffer.readline(); print("READY",flush=True); threading.Event().wait(60)'],
-            b'{}\n', timeout=1, clock=Clock(), require_ready=False))
+            'import sys,threading; sys.stdin.buffer.readline(); print("READY",flush=True); threading.Event().wait()'],
+            b'{}\n', timeout=1, clock=lambda: now[0], ready_callback=expire, require_ready=False))
+        self.assertTrue(ready.is_set())
 
     def test_crash_missing_readiness_bounded_stdout_stderr_and_stdin(self):
         def script(code): return [sys.executable, '-I', '-S', '-B', '-c', code]
@@ -84,11 +95,28 @@ class WorkerSupervision(unittest.TestCase):
         self.refusal('worker.limit', lambda: run_owned(script('pass'), b'x'*65537, timeout=5))
 
     def test_blocked_stdin_writer_is_bounded_and_reaped(self):
-        class Clock:
-            def __init__(self): self.value = 0
-            def __call__(self): self.value += .05; return self.value
-        self.refusal('worker.timeout', lambda: run_owned([sys.executable, '-I', '-S', '-B', '-c',
-            'import threading; threading.Event().wait(60)'], b'x'*65536, timeout=1, clock=Clock(), require_ready=False))
+        import luminumbra_author.process as owner
+        entered = threading.Event()
+        witness = self.root / 'nonreading-worker-started'
+        popen = subprocess.Popen
+        class Writer:
+            def __init__(self, stream): self.stream = stream
+            def __getattr__(self, name): return getattr(self.stream, name)
+            def write(self, value):
+                entered.set()
+                return self.stream.write(value)
+        def spawn(*args, **kwargs):
+            process = popen(*args, **kwargs)
+            process.stdin = Writer(process.stdin)
+            return process
+        source = ('import threading; from pathlib import Path; '
+                  f'Path({str(witness)!r}).touch(); threading.Event().wait()')
+        def clock(): return .6 if entered.is_set() and witness.exists() else 0.
+        with patch.object(owner.subprocess, 'Popen', side_effect=spawn):
+            self.refusal('worker.timeout', lambda: run_owned([sys.executable, '-I', '-S', '-B', '-c', source],
+                         b'x'*65536, timeout=1, clock=clock, require_ready=False))
+        self.assertTrue(entered.is_set())
+        self.assertTrue(witness.exists())
 
     def test_readiness_line_endings_split_reads_preserve_binary_response(self):
         import luminumbra_author.process as owner
@@ -159,12 +187,25 @@ class WorkerSupervision(unittest.TestCase):
                     from luminumbra_author.meshgen_jobs import process_start
                     self.assertIsNone(process_start(pid))
         finally:
-            if tree: tree.stop()
-            elif process.poll() is None: process.kill()
-            process.wait(timeout=5)
-            if tree: tree.close()
-            for stream in (process.stdin, process.stdout, process.stderr): stream.close()
-            if thread: thread.join(timeout=1)
+            # Register all releases before any operation that can fail. Reap
+            # within the existing process-wait budget, then join before closing
+            # buffered pipes (close can otherwise wait on the reader's lock).
+            until = time.monotonic()+5
+            with ExitStack() as cleanup:
+                if os.name == 'nt': cleanup.callback(process._handle.Close)
+                for stream in (process.stdin, process.stdout, process.stderr):
+                    cleanup.callback(stream.close)
+                if thread:
+                    def join():
+                        thread.join(timeout=1)
+                        self.assertFalse(thread.is_alive())
+                    cleanup.callback(join)
+                if tree:
+                    cleanup.callback(tree.close)
+                    cleanup.callback(tree.reap, deadline=until, clock=time.monotonic)
+                cleanup.callback(lambda: process.wait(timeout=max(0, until-time.monotonic())))
+                if tree: tree.stop()
+                elif process.poll() is None: process.kill()
 
     def test_descendant_readiness_follows_complete_closed_pid_publications(self):
         import json
@@ -260,8 +301,8 @@ class WorkerSupervision(unittest.TestCase):
                     witnessed.extend(json.loads(path.read_text()))
                     if mode == 'cancel': cancel.set()
                     if mode == 'exception': raise RuntimeError('callback failure')
-                clock_start = time.monotonic()
-                def clock(): return clock_start+4.6 if witnessed and mode == 'timeout' else time.monotonic()
+                clock_start = 0.
+                def clock(): return clock_start+4.6 if witnessed and mode == 'timeout' else clock_start
                 spawned = []
                 popen = subprocess.Popen
                 def capture(*args, **kwargs):
@@ -316,14 +357,14 @@ class WorkerSupervision(unittest.TestCase):
                         setattr(process, stream_kind, Delayed(getattr(process, stream_kind)))
                         spawned.append(process)
                         return process
-                    clock_start = time.monotonic()
+                    clock_start = 0.
                     def clock():
                         if spawned and spawned[0].poll() is not None and entered.is_set():
                             exited_checks[0] += 1
                             if exited_checks[0] >= 5:
                                 if outcome == 'deadline': return clock_start+9.6
                                 gate.set()
-                        return time.monotonic()
+                        return clock_start
                     source = "import sys; sys.stdin.buffer.readline(); print('READY',flush=True); sys.stderr.buffer.write(b'x'*70000)"
                     with patch.object(owner.subprocess, 'Popen', side_effect=spawn):
                         call = lambda: run_owned([sys.executable, '-I', '-S', '-B', '-c', source], b'{}\n', timeout=10, clock=clock)
@@ -351,8 +392,12 @@ class WorkerSupervision(unittest.TestCase):
         unrelated = subprocess.Popen([sys.executable, '-I', '-S', '-B', '-c',
             "import sys; print('READY',flush=True); sys.stdin.buffer.read(); print('DONE',flush=True)"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        reader = None
         try:
-            self.assertEqual(unrelated.stdout.readline(), b'READY\n')
+            ready = queue.Queue(maxsize=1)
+            reader = threading.Thread(target=lambda: ready.put(unrelated.stdout.readline()), daemon=True)
+            reader.start()
+            self.assertEqual(ready.get(timeout=5), b'READY\n')
             self.simulate()
             self.assertEqual(state(), before); self.assertIsNone(unrelated.poll())
             result = run_owned([sys.executable, '-I', '-S', '-B', '-c',
@@ -363,9 +408,15 @@ class WorkerSupervision(unittest.TestCase):
             self.assertEqual(unrelated.wait(timeout=5), 0)
             self.assertEqual(unrelated.stdout.read(), b'DONE\n')
         finally:
-            if unrelated.poll() is None: unrelated.kill()
-            unrelated.wait(timeout=5)
-            for stream in (unrelated.stdin, unrelated.stdout, unrelated.stderr): stream.close()
+            with ExitStack() as cleanup:
+                for stream in (unrelated.stdin, unrelated.stdout, unrelated.stderr): cleanup.callback(stream.close)
+                if reader is not None and reader.ident is not None:
+                    def join():
+                        reader.join(timeout=1)
+                        self.assertFalse(reader.is_alive())
+                    cleanup.callback(join)
+                cleanup.callback(unrelated.wait, timeout=5)
+                if unrelated.poll() is None: unrelated.kill()
 
     def test_windows_job_accounting_uses_injected_absolute_deadline_and_disallows_breakaway(self):
         import ctypes
@@ -555,7 +606,7 @@ class WorkerSupervision(unittest.TestCase):
             "p=subprocess.Popen([sys.executable,'-I','-S','-B','-c',"+repr(intermediate)+",sys.argv[1]],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); "
             "p.wait(); path=Path(sys.argv[1]); publish(path,[os.getpid(),*json.loads(path.read_text())]); print('READY',flush=True); time.sleep(60)")
         wrapped, read_fd, write_fd = _owned_command([sys.executable, '-I', '-S', '-B', '-c', root, str(path)], 5, None)
-        process, tree = None, None
+        process, tree, reader = None, None, None
         try:
             process = subprocess.Popen(wrapped, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                        pass_fds=(read_fd,), start_new_session=True)
@@ -573,10 +624,23 @@ class WorkerSupervision(unittest.TestCase):
                 self.assertFalse((Path('/proc')/str(pid)).exists(), f'PID {pid}, including zombies, survived owner EOF')
                 with self.assertRaises(ProcessLookupError): os.kill(pid, 0)
             reader.join(timeout=1)
+            self.assertFalse(reader.is_alive())
         finally:
-            os.close(read_fd)
-            if tree is not None: tree.stop(); tree.close()
-            else: os.close(write_fd)
-            if process is not None:
-                process.wait(timeout=3)
-                process.stdout.close(); process.stderr.close()
+            with ExitStack() as cleanup:
+                cleanup.callback(os.close, read_fd)
+                if process is not None:
+                    cleanup.callback(process.stderr.close)
+                    cleanup.callback(process.stdout.close)
+                    if reader is not None:
+                        def join():
+                            reader.join(timeout=1)
+                            self.assertFalse(reader.is_alive())
+                        cleanup.callback(join)
+                if tree is not None:
+                    cleanup.callback(tree.close)
+                else:
+                    cleanup.callback(os.close, write_fd)
+                if process is not None:
+                    cleanup.callback(process.wait, timeout=3)
+                if tree is not None: tree.stop()
+                elif process is not None and process.poll() is None: process.kill()

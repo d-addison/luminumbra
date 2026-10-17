@@ -160,10 +160,13 @@ constexpr std::size_t DeriveSimWindowChunks(std::size_t cells_per_chunk) {
 std::uint64_t WaterActivityScore(const Chunk& chunk) {
     std::uint64_t activity = 0;
     const int resolution = chunk.current_water_resolution.load(std::memory_order_relaxed);
+    // Water detail levels bound all solver grids to 32*32 cells.
+    if (resolution <= 1 || resolution > 32)
+        return activity;
     const std::size_t cells =
         static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
-    if (resolution <= 1 || chunk.water_depth_mm.size() != cells ||
-        chunk.water_bed_mm.size() != cells || chunk.water_edge_flux.size() != 2 * cells) {
+    if (chunk.water_depth_mm.size() != cells || chunk.water_bed_mm.size() != cells ||
+        chunk.water_edge_flux.size() != 2 * cells) {
         return activity;
     }
 
@@ -204,11 +207,15 @@ int GetWaterResolution(const Chunk& chunk) {
 }
 
 size_t GetWaterCellCount(int resolution) {
-    return static_cast<size_t>(resolution) * static_cast<size_t>(resolution);
+    // Reject invalid metadata before multiplication or allocation.
+    return resolution > 1 && resolution <= 32
+               ? static_cast<size_t>(resolution) * static_cast<size_t>(resolution)
+               : 0;
 }
 
 bool HasCompleteWaterGrid(const Chunk& chunk, int resolution) {
-    if (!chunk.has_water_sim.load(std::memory_order_relaxed) || resolution <= 1) {
+    if (!chunk.has_water_sim.load(std::memory_order_relaxed) || resolution <= 1 ||
+        resolution > 32) {
         return false;
     }
 
@@ -261,7 +268,7 @@ void StepChunkWaterFixed(Chunk& c,
                          const WeatherSystem* weather_rain = nullptr,
                          std::int32_t weather_scale_mm = 0) {
     const int res = GetWaterResolution(c);
-    if (res <= 1)
+    if (res <= 1 || res > 32)
         return;
     const int n = res * res;
     if (static_cast<int>(c.water_depth_mm.size()) != n ||
@@ -447,8 +454,10 @@ void StepChunkWaterFixed(Chunk& c,
         for (int x = 0; x < res; ++x) {
             const int i = IDX(x, z);
             if (depth[i] < 0)
-                depth[i] = 0;       // defensive; the K-clamp should already guarantee this
-            if (bed[i] <= sea_mm) { // ocean is an infinite SINK: settle the surface at sea level
+                depth[i] = 0; // defensive; the K-clamp should already guarantee this
+            // A bed at sea level is a shoreline, capable of holding water.
+            // Only submerged beds belong to the infinite ocean sink.
+            if (bed[i] < sea_mm) {
                 const std::int32_t target =
                     sea_mm - bed[i]; // depth giving surface == sea level (>= 0)
                 if (depth[i] > target) {
@@ -1092,10 +1101,11 @@ void WaterSystem::update(entt::registry& registry,
         0; // CONTINUITY proof: seam cell-pairs with water on BOTH sides of the border
     for (Chunk* A : chunks_to_sim) {
         const int res = GetWaterResolution(*A);
-        if (res <= 1)
+        if (res <= 1 || res > 32)
             continue;
         const int nA = res * res;
         if (static_cast<int>(A->water_depth_mm.size()) != nA ||
+            static_cast<int>(A->water_bed_mm.size()) != nA ||
             static_cast<int>(A->water_edge_flux.size()) != 2 * nA)
             continue;
         const IVec3 ac = A->get_coords();
@@ -1108,7 +1118,8 @@ void WaterSystem::update(entt::registry& registry,
         auto step_face = [&](Chunk* B, bool isX) {
             if (GetWaterResolution(*B) != res)
                 return; // uniform-res only -> cells align cell-for-cell
-            if (static_cast<int>(B->water_depth_mm.size()) != nA)
+            if (static_cast<int>(B->water_depth_mm.size()) != nA ||
+                static_cast<int>(B->water_bed_mm.size()) != nA)
                 return;
             const bool have_mirror_B = (static_cast<int>(B->water_level_data.size()) == nA);
             for (int t = 0; t < res; ++t) {
@@ -1451,7 +1462,7 @@ int WaterSystem::EditTerrainBed(const Vec3& world_pos, std::int32_t delta_mm, fl
             continue;
         Chunk& c = *cptr;
         const int res = GetWaterResolution(c);
-        if (res <= 1 || static_cast<int>(c.water_bed_mm.size()) != res * res)
+        if (res <= 1 || res > 32 || static_cast<int>(c.water_bed_mm.size()) != res * res)
             continue;
         const IVec3 cc = c.get_coords();
         const float cw_x = static_cast<float>(CHUNK_SIZE_X) / static_cast<float>(res);
@@ -1538,6 +1549,9 @@ void WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
     int new_resolution = static_cast<int>(new_level);
     int current_resolution = chunk.current_water_resolution.load();
 
+    if (new_resolution > 32 || (new_resolution > 0 && new_resolution <= 1))
+        return;
+
     if (new_resolution == current_resolution) {
         return; // No change needed
     }
@@ -1558,7 +1572,7 @@ void WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
     // Store old data for interpolation
     std::vector<f32> old_water_levels = chunk.water_level_data;
     std::vector<Vec2> old_flow_data = chunk.water_flow_data;
-    const bool can_interpolate = current_resolution > 1 &&
+    const bool can_interpolate = current_resolution > 1 && current_resolution <= 32 &&
                                  old_water_levels.size() >= GetWaterCellCount(current_resolution) &&
                                  old_flow_data.size() >= GetWaterCellCount(current_resolution);
     // fixed-point water: the HASHED depth interpolates NATIVELY in the mm
@@ -1571,7 +1585,8 @@ void WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
         can_interpolate && old_depth_mm.size() >= GetWaterCellCount(current_resolution);
 
     // Resize arrays
-    const size_t new_sim_size = new_resolution * new_resolution;
+    // Supported detail levels bound these allocations to 32*32 cells.
+    const size_t new_sim_size = GetWaterCellCount(new_resolution);
     chunk.water_level_data.resize(new_sim_size);
     chunk.water_flow_data.resize(new_sim_size);
     chunk.water_sim_terrain_height.resize(new_sim_size);

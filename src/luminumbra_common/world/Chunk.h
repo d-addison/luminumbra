@@ -112,6 +112,24 @@ public:
         return m_voxel_revision.load(std::memory_order_acquire);
     }
 
+    // Call only after workers have drained, when adopting persisted authority.
+    // Serialized staging flags cannot represent a job in the current process.
+    void reset_pending_jobs() {
+        pending_lod.store(-1, std::memory_order_release);
+        pending_mesh_ready.store(false, std::memory_order_release);
+        pending_mesh_failed.store(false, std::memory_order_release);
+        pending_promotion_ready.store(false, std::memory_order_release);
+        pending_promotion_failed.store(false, std::memory_order_release);
+        pending_generation_ready.store(false, std::memory_order_release);
+        pending_mesh_vertices.clear();
+        pending_mesh_indices.clear();
+        pending_water_mesh_vertices.clear();
+        pending_water_mesh_indices.clear();
+        pending_sdf_data.clear();
+        pending_heightmap_data.clear();
+        pending_material_data.clear();
+    }
+
     // --- Voxel & SDF Data ---
     std::vector<f32> sdf_data;
     std::vector<f32> heightmap_data;

@@ -1137,12 +1137,12 @@
       "requirements": [
         "ar.activation.050"
       ],
-      "discrepancy": "The contract and ledger specify [-2^24, 2^24). ActiveRegionLedgerTest.ValidAnchorBoundaries covers the ledger predicate; exact endpoint coverage across walking anchors, ground-object edits and pins remains tracked in issue #250.",
+      "discrepancy": "docs/active-regions.md and the ledger specify [-2^24, 2^24). ActiveRegionLedgerTest.ValidAnchorBoundaries covers the ledger predicate; full walking-anchor, ground-object edit and pin boundary coverage remains planned under issue #250.",
       "evidence": [
         {
           "kind": "ctest",
           "ref": "ActiveRegionLedgerTest.SymmetricAnchorBoundaries",
-          "planned": "Cover both X and Z endpoints for walking anchors, ground-object edits and pins: accept -2^24 and the adjacent interior coordinates, and reject +2^24 and the adjacent exterior coordinates.; owner: ds"
+          "planned": "Cover both X and Z endpoints for walking anchors, ground-object edits and pins: accept -2^24 and the adjacent interior coordinates, and reject +2^24 and the adjacent exterior coordinates, including the next representable float below -2^24.; owner: ds"
         }
       ]
     },
@@ -3079,6 +3079,34 @@
           "kind": "doc",
           "ref": "docs/active-regions.md",
           "planned": "Qualify fixed-tick water across production rendering, save/load and replay workloads; owner: ds"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.WaterOnlyColumnOwnersRenderAndRemeshAboveDeepSeabeds"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.AuthorityRestoreBatchesReuseIndexesAndDiscardOrphanedJobs"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.IndexedAuthorityLookupRefusesPartialUnknownAndUnreadableData"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarWorldOwnership.TerrainAndWaterVersionsEligibilityAndMergedBitsAreIndependent"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.ColumnWaterSeamsRejectPartialBedsOnEitherSide"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarWorldWaterContract.ProductionWaterUsesIndependentReadinessAndCombinedSubmission"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WaterColumnDiagnostics.CarvabilityUsesBedTerrainAndRejectsMissingOrPartialData"
         }
       ]
     },
@@ -3334,6 +3362,10 @@
           "kind": "doc",
           "ref": "docs/active-regions.md",
           "planned": "Qualify client lockstep captures, production availability digests and rejection of older active-region replay hashes under the new scopes; owner: ds"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.LoadPrimesAuthorityHashesBeforeSchedulerFaultInjection"
         }
       ]
     },
