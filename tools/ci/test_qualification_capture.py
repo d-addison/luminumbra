@@ -113,6 +113,20 @@ class CaptureContract(unittest.TestCase):
             with self.subTest(arguments=arguments), patch.object(capture, "module", return_value=self.comparator()), self.assertRaises(ValueError):
                 capture.ambient_receipt(self.junit(**arguments))
 
+    def test_unevaluated_status_cannot_produce_ambient_receipt(self):
+        for status in (None, "run", "disabled", "notrun", "", "unknown"):
+            with self.subTest(status=status), patch.object(capture, "module", return_value=self.comparator()):
+                path = self.junit()
+                tree = ET.parse(path)
+                if status is not None:
+                    next(tree.getroot().iter("testcase")).set("status", status)
+                tree.write(path)
+                if status in (None, "run"):
+                    self.assertEqual(capture.ambient_receipt(path), RECEIPT)
+                else:
+                    with self.assertRaisesRegex(ValueError, "unevaluated"):
+                        capture.ambient_receipt(path)
+
     def test_unevaluated_receipt_testcases_refuse(self):
         for field, value in (("status", "disabled"), ("status", "notrun"),
                              ("status", "skipped"), ("status", "unknown"), ("status", ""),
@@ -151,6 +165,172 @@ class CaptureContract(unittest.TestCase):
         outcomes.pop("tests")
         with self.assertRaises(ValueError):
             capture.successful_producers("linux-gcc", outcomes)
+
+    def asan_binding(self):
+        return {**capture.identity("asan", HEAD, environment("asan"), HEAD),
+                "source_dirty": False, "fixture_scope": "headless-server", "fixture_hash": HASH}
+
+    def asan_records(self):
+        return [{**self.asan_binding(), "shard": shard,
+                 "producers": dict.fromkeys(capture.LANES["asan"][2], "success"),
+                 "binary_sha256": "2" * 64, "junit_sha256": HASH,
+                 **({"ambient": RECEIPT} if shard == 2 else {})} for shard in (1, 2)]
+
+    def test_asan_combines_both_producers_and_uses_receipt_producers_binary(self):
+        records = self.asan_records()
+        self.assertEqual(capture.LANES["asan"],
+                         ("asan.yml", "Linux / GCC ASan", ("identity", "configure", "build", "tests")))
+        self.assertEqual(capture.asan_producers(self.asan_binding(), records)["binary_sha256"], "2" * 64)
+        for field, value in (("candidate_sha", OTHER), ("run_id", 11), ("run_attempt", 3),
+                             ("workflow_sha", OTHER), ("fixture_hash", "0" * 64),
+                             ("source_dirty", True), ("job_name", "other"),
+                             ("binary_sha256", ""), ("junit_sha256", "")):
+            changed = [records[0], {**records[1], field: value}]
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                capture.asan_producers(self.asan_binding(), changed)
+        for state in ("failure", "skipped", "cancelled", ""):
+            changed = [records[0], {**records[1], "producers": {**records[1]["producers"], "tests": state}}]
+            with self.subTest(state=state), self.assertRaises(ValueError):
+                capture.asan_producers(self.asan_binding(), changed)
+        for changed in (records[:1], records[::-1], [records[0], records[0]],
+                        [{**records[0], "ambient": RECEIPT}, records[1]],
+                        [records[0], {key: value for key, value in records[1].items() if key != "ambient"}]):
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                capture.asan_producers(self.asan_binding(), changed)
+
+    def test_asan_producers_reject_different_binaries_in_either_shard_or_attempt(self):
+        for shard in (1, 2):
+            for attempt in (1, 2):
+                records = self.asan_records()
+                records[shard - 1].update(binary_sha256="3" * 64, run_attempt=attempt)
+                with self.subTest(shard=shard, attempt=attempt), \
+                        self.assertRaisesRegex(ValueError, "ASan shard binary digests differ"):
+                    capture.asan_producers(self.asan_binding(), records)
+
+    def test_asan_shard_records_split_google_test_receipt_identity(self):
+        path = self.junit()
+        tree = ET.parse(path)
+        tree.getroot().find("testcase").attrib.update(
+            classname="AmbientDeterminismReceipt", name="EmitsConstructorAndEvolvedHashes")
+        tree.write(path)
+        binary = self.root / "common_tests"
+        binary.write_bytes(b"binary digest fixture")
+        args = types.SimpleNamespace(lane="asan", expected_sha=HEAD, shard=1,
+                                     binary=binary, junit=path,
+                                     output=self.root / "qualification-shard.json")
+        outcomes = dict.fromkeys(capture.LANES["asan"][2], "success")
+        with patch.object(capture, "source_identity", return_value=self.asan_binding()), \
+                patch.dict(capture.os.environ, {"QUALIFICATION_PRODUCERS": json.dumps(outcomes)}), \
+                patch.object(capture, "module", return_value=self.comparator()):
+            capture.write_asan_shard(args)
+        self.assertEqual(capture.read_json(args.output)["ambient"], RECEIPT)
+
+    def write_asan_capture(self, shard_attempts=(2, 2)):
+        binary = self.root / "common_tests"
+        binary.write_bytes(b"binary digest fixture")
+        producers = dict.fromkeys(capture.LANES["asan"][2], "success")
+        for shard in (1, 2):
+            source = self.root / f"shard-{shard}"
+            source.mkdir()
+            junit = self.junit(producers=0 if shard == 1 else 1)
+            destination = source / "ctest.junit.xml"
+            destination.write_bytes(junit.read_bytes())
+            args = types.SimpleNamespace(lane="asan", expected_sha=HEAD, shard=shard,
+                                         binary=binary, junit=destination,
+                                         output=source / "qualification-shard.json")
+            with patch.object(capture, "source_identity", return_value={**self.asan_binding(), "run_attempt": shard_attempts[shard - 1]}), \
+                    patch.dict(capture.os.environ, {"QUALIFICATION_PRODUCERS": json.dumps(producers)}), \
+                    patch.object(capture, "module", return_value=self.comparator()):
+                capture.write_asan_shard(args)
+        args = types.SimpleNamespace(lane="asan", expected_sha=HEAD, binary=None,
+                                     asan_shards=self.root, junit=self.junit(),
+                                     output=self.root / "qualification-capture.json")
+        with patch.object(capture, "source_identity", return_value=self.asan_binding()), \
+                patch.dict(capture.os.environ, {"QUALIFICATION_PRODUCERS": '{"tests":"success"}'}), \
+                patch.object(capture, "module", return_value=self.comparator()):
+            capture.write_manifest(args)
+        return args, producers, binary
+
+    def test_asan_aggregate_only_rerun_accepts_original_successful_producers(self):
+        args, _, _ = self.write_asan_capture((1, 1))
+        document = capture.read_json(args.output)
+        self.assertEqual(document["status"], "complete")
+        self.assertEqual(document["run_attempt"], 2)
+        self.assertEqual([record["run_attempt"] for record in document["asan_shards"]], [1, 1])
+
+    def test_asan_single_shard_rerun_preserves_each_producers_actual_attempt(self):
+        args, _, _ = self.write_asan_capture((1, 2))
+        document = capture.read_json(args.output)
+        self.assertEqual(document["status"], "complete")
+        self.assertEqual(document["run_attempt"], 2)
+        self.assertEqual([record["run_attempt"] for record in document["asan_shards"]], [1, 2])
+
+    def test_asan_manifest_writer_refuses_different_shard_binaries(self):
+        args, _, _ = self.write_asan_capture((1, 2))
+        args.output.unlink()
+        record_path = self.root / "shard-1/qualification-shard.json"
+        record = {**capture.read_json(record_path), "binary_sha256": "3" * 64}
+        record_path.write_text(json.dumps(record), encoding="utf-8")
+        with patch.object(capture, "source_identity", return_value=self.asan_binding()), \
+                patch.dict(capture.os.environ, {"QUALIFICATION_PRODUCERS": '{"tests":"success"}'}), \
+                patch.object(capture, "module", return_value=self.comparator()), \
+                self.assertRaisesRegex(ValueError, "ASan shard binary digests differ"):
+            capture.write_manifest(args)
+        self.assertEqual(capture.read_json(args.output)["status"], "incomplete")
+
+    def test_asan_chain_refuses_different_shard_binaries_before_producer_proof(self):
+        args, _, _ = self.write_asan_capture((1, 2))
+        document = capture.read_json(args.output)
+        document["asan_shards"][0]["binary_sha256"] = "3" * 64
+        args.output.write_text(json.dumps(document), encoding="utf-8")
+        with patch.object(capture, "command", side_effect=[HEAD, ""]), \
+                patch.object(capture, "module", return_value=types.SimpleNamespace(fixture_hash=lambda *_args, **_kwargs: HASH)), \
+                patch.object(capture, "verify_producer") as proof, \
+                self.assertRaisesRegex(ValueError, "ASan shard binary digests differ"):
+            capture.validate_chain(HEAD, [args.output])
+        proof.assert_not_called()
+
+    def test_asan_rerun_attempts_and_reused_producer_identity_and_outcomes_fail_closed(self):
+        records = self.asan_records()
+        records[0]["run_attempt"] = 1
+        for field, bad in (("run_attempt", 0), ("run_attempt", -1), ("run_attempt", 3),
+                           ("run_attempt", True), ("run_attempt", "1"), ("run_attempt", None),
+                           ("run_id", 11), ("candidate_sha", OTHER), ("event_sha", OTHER),
+                           ("workflow_sha", OTHER), ("workflow_ref", "other"),
+                           ("workflow_path", "other"), ("repo", "other"), ("lane", "other"),
+                           ("fixture_hash", "0" * 64), ("source_dirty", True)):
+            with self.subTest(field=field, bad=bad), self.assertRaises(ValueError):
+                capture.asan_producers(self.asan_binding(), [{**records[0], field: bad}, records[1]])
+        for state in ("failure", "skipped", "cancelled", ""):
+            reused = {**records[0], "producers": {**records[0]["producers"], "tests": state}}
+            with self.subTest(state=state), self.assertRaises(ValueError):
+                capture.asan_producers(self.asan_binding(), [reused, records[1]])
+
+    def test_asan_shard_capture_and_aggregate_keep_the_existing_manifest_contract(self):
+        args, producers, binary = self.write_asan_capture()
+        document = capture.read_json(args.output)
+        self.assertEqual(document["status"], "complete")
+        self.assertEqual(document["job_name"], "Linux / GCC ASan")
+        self.assertEqual(document["producers"], producers)
+        self.assertEqual(document["binary_sha256"], capture.digest(binary))
+        self.assertEqual(document["files"], {"ctest.junit.xml": capture.digest(args.junit)})
+        self.assertEqual(len(document["asan_shards"]), 2)
+        for state in ("failure", "skipped", "cancelled", ""):
+            args.output.unlink()
+            with patch.object(capture, "source_identity", return_value=self.asan_binding()), \
+                    patch.dict(capture.os.environ, {"QUALIFICATION_PRODUCERS": json.dumps({"tests": state})}), \
+                    self.assertRaisesRegex(ValueError, "aggregate checks"):
+                capture.write_manifest(args)
+            self.assertEqual(capture.read_json(args.output)["status"], "incomplete")
+        args.output.unlink()
+        record_path = self.root / "shard-1/qualification-shard.json"
+        record_path.write_text(json.dumps({**capture.read_json(record_path), "run_attempt": 1}))
+        (self.root / "shard-1/ctest.junit.xml").write_text("changed")
+        with patch.object(capture, "source_identity", return_value=self.asan_binding()), \
+                patch.dict(capture.os.environ, {"QUALIFICATION_PRODUCERS": '{"tests":"success"}'}), \
+                self.assertRaisesRegex(ValueError, "JUnit digest differs"):
+            capture.write_manifest(args)
+        self.assertEqual(capture.read_json(args.output)["status"], "incomplete")
 
     def document(self):
         return {**capture.identity("linux-gcc", HEAD, environment(), HEAD), "schema": capture.SCHEMA,

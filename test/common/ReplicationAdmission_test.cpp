@@ -53,6 +53,9 @@ public:
     std::size_t MaxFramePayloadBytes() const override {
         return max_frame_payload_bytes;
     }
+    std::size_t MaxReceiveFramePayloadBytes() const override {
+        return max_receive_frame_payload_bytes;
+    }
     bool TryReceiveFrame(std::vector<std::uint8_t>& out) override {
         FrameDelivery delivery = FrameDelivery::Reliable;
         return TryReceiveFrameWithDelivery(out, delivery);
@@ -80,6 +83,7 @@ public:
         m_rx->packets.clear();
     }
     std::size_t max_frame_payload_bytes = kMaxFramePayloadBytes;
+    std::size_t max_receive_frame_payload_bytes = kMaxFramePayloadBytes;
     bool suppress_delivery = false;
     bool fail_send = false;
     std::size_t receives = 0;
@@ -122,6 +126,161 @@ TEST(ReplicationAdmission, ForwardsBackendFrameLimitBeforeAndAfterAdmission) {
     ASSERT_TRUE(pair.join.admission().admitted());
     EXPECT_EQ(host.MaxFramePayloadBytes(), 512u * 1024u);
     EXPECT_EQ(join.MaxFramePayloadBytes(), 512u * 1024u);
+}
+
+TEST(ReplicationAdmission, ForwardsDirectionalReceiveLimitBeforeAndAfterAdmission) {
+    Pair pair;
+    const ILockstepTransport& host = pair.host;
+    const ILockstepTransport& join = pair.join;
+    pair.host_wire.max_receive_frame_payload_bytes = 1024;
+    pair.join_wire.max_receive_frame_payload_bytes = 2048;
+    EXPECT_EQ(host.MaxReceiveFramePayloadBytes(), 1024u);
+    EXPECT_EQ(join.MaxReceiveFramePayloadBytes(), 2048u);
+    EXPECT_EQ(host.MaxFramePayloadBytes(), kMaxFramePayloadBytes);
+    EXPECT_EQ(join.MaxFramePayloadBytes(), kMaxFramePayloadBytes);
+    pair.Admit();
+    ASSERT_TRUE(pair.host.admission().admitted());
+    ASSERT_TRUE(pair.join.admission().admitted());
+    EXPECT_EQ(host.MaxReceiveFramePayloadBytes(), 1024u);
+    EXPECT_EQ(join.MaxReceiveFramePayloadBytes(), 2048u);
+}
+
+TEST(ReplicationAdmission, ControlBatchYieldPreservesClosingClientAndFinalSnapshot) {
+    Pair pair;
+    pair.Admit();
+    ASSERT_TRUE(pair.join.admission().admitted());
+    const auto hello = EncodeHello(Identity(0));
+    for (std::size_t i = 0; i < 3 * kAdmissionDrainLimit; ++i)
+        ASSERT_TRUE(pair.host_wire.SendFrame(hello));
+    SnapshotMsg snapshot;
+    snapshot.snapshot_seq = 9;
+    ASSERT_TRUE(pair.host_wire.SendFrame(EncodeSnapshot(snapshot)));
+    // Outbound refusal must not reinterpret a control-only receive yield as EOF.
+    pair.join_wire.max_frame_payload_bytes = 0;
+    ReplicationClient client(1, &pair.join);
+    const auto before = pair.join_wire.receives;
+    client.SendUsercmd({});
+    EXPECT_LE(pair.join_wire.receives - before, 1024u);
+    EXPECT_EQ(pair.to_join->packets.size(), kAdmissionDrainLimit + 1);
+    EXPECT_FALSE(pair.join.admission().failed());
+    EXPECT_FALSE(client.has_snapshot());
+    for (int batch = 0; batch < 4 && !pair.join.admission().failed(); ++batch)
+        client.PumpInbound();
+    ASSERT_TRUE(client.has_snapshot());
+    EXPECT_EQ(client.snapshot().snapshot_seq, 9u);
+    EXPECT_TRUE(pair.join.admission().failed());
+    EXPECT_TRUE(pair.to_join->packets.empty());
+}
+
+TEST(ReplicationAdmission, ControlFramesShareTheEndpointByteBudget) {
+    auto host_hello = Identity(0);
+    auto join_hello = Identity(1);
+    host_hello.preset.assign(150 * 1024, 'p');
+    join_hello.preset = host_hello.preset;
+    auto to_host = std::make_shared<Channel>();
+    auto to_join = std::make_shared<Channel>();
+    ScriptedTransport host_wire(to_join, to_host);
+    ScriptedTransport join_wire(to_host, to_join);
+    AdmittedReplicationTransport host(host_wire, ReplicationAdmissionRole::Host, host_hello, 1);
+    AdmittedReplicationTransport join(join_wire, ReplicationAdmissionRole::Joiner, join_hello, 0);
+    host.Begin(0);
+    join.Begin(0);
+    host.PumpAdmission(0);
+    join.PumpAdmission(0);
+    ASSERT_TRUE(join.admission().admitted());
+    const auto hello = EncodeHello(host_hello);
+    for (int frame = 0; frame < 3; ++frame)
+        ASSERT_TRUE(host_wire.SendFrame(hello));
+    SnapshotMsg snapshot;
+    snapshot.snapshot_seq = 9;
+    ASSERT_TRUE(host_wire.SendFrame(EncodeSnapshot(snapshot)));
+    ReplicationClient client(1, &join);
+    const auto before = join_wire.receives;
+    client.PumpInbound();
+    EXPECT_EQ(join_wire.receives - before, 2u);
+    EXPECT_FALSE(client.has_snapshot());
+    EXPECT_EQ(to_join->packets.size(), 2u);
+    client.PumpInbound();
+    ASSERT_TRUE(client.has_snapshot());
+    EXPECT_EQ(client.snapshot().snapshot_seq, 9u);
+}
+
+TEST(ReplicationAdmission, BoundedEndpointReceiveRetainsAdmissionRefusals) {
+    // A preceding client can leave one poll in a shared endpoint budget. Hello
+    // admission must yield before consuming the next, malformed queued frame.
+    Pair limited;
+    limited.host.Begin(0);
+    limited.join.Begin(0);
+    ASSERT_TRUE(limited.join_wire.SendFrame({1, 0, 0, 0}));
+    FrameReceiveBudget budget{.polls_left = 1, .payload_bytes = 0};
+    std::vector<std::uint8_t> received_frame;
+    FrameDelivery delivery = FrameDelivery::Reliable;
+    EXPECT_EQ(limited.host.TryReceiveFrameWithDeliveryBounded(received_frame, delivery, budget),
+              FrameReceiveResult::Yield);
+    EXPECT_EQ(budget.polls_left, 0u);
+    EXPECT_EQ(limited.host_wire.receives, 1u);
+    EXPECT_TRUE(limited.host.admission().admitted());
+    EXPECT_FALSE(limited.host.admission().failed());
+    EXPECT_EQ(limited.to_host->packets.size(), 1u);
+    budget = {};
+    EXPECT_EQ(limited.host.TryReceiveFrameWithDeliveryBounded(received_frame, delivery, budget),
+              FrameReceiveResult::Empty);
+    EXPECT_EQ(limited.host_wire.close_reason, "malformed admission frame length");
+
+    for (const bool is_host : {false, true}) {
+        for (const bool truncated : {false, true}) {
+            SCOPED_TRACE(is_host);
+            SCOPED_TRACE(truncated);
+            Pair pair;
+            auto& gate = is_host ? pair.host : pair.join;
+            auto& wire = is_host ? pair.host_wire : pair.join_wire;
+            auto& peer = is_host ? pair.join_wire : pair.host_wire;
+            gate.Begin(0);
+            auto frame = EncodeHello(Identity(is_host ? 1u : 0u));
+            if (truncated)
+                frame.resize(4); // An incomplete length header must fail before parsing.
+            ASSERT_TRUE(peer.SendFrame(frame, FrameDelivery::Unreliable));
+            ReplicationClient client(1, &gate);
+            client.PumpInbound();
+            EXPECT_FALSE(client.has_snapshot());
+            EXPECT_TRUE(gate.admission().failed());
+            EXPECT_EQ(wire.close_reason,
+                      truncated ? "malformed admission frame length"
+                                : "unreliable admission Hello");
+            const auto receives = wire.receives;
+            client.PumpInbound();
+            EXPECT_EQ(wire.receives, receives);
+        }
+    }
+
+    Pair refused_ack;
+    refused_ack.host.Begin(0);
+    refused_ack.join.Begin(0);
+    refused_ack.host_wire.fail_send = true;
+    ReplicationServer server;
+    server.AddClient(1, &refused_ack.host);
+    server.PumpInbound();
+    EXPECT_EQ(refused_ack.host_wire.close_reason, "admission ack send failed");
+    EXPECT_EQ(server.LatestUsercmd(1), nullptr);
+
+    Pair expired;
+    expired.host.Begin(1000);
+    expired.host.PumpAdmission(1000 + kAdmissionTimeoutTicks);
+    ReplicationClient expired_client(1, &expired.host);
+    expired_client.PumpInbound();
+    EXPECT_EQ(expired.host_wire.close_reason, "admission Hello timeout");
+    EXPECT_EQ(expired.host_wire.receives, 0u);
+    EXPECT_FALSE(expired_client.has_snapshot());
+
+    Pair disconnected;
+    disconnected.Admit();
+    disconnected.host_wire.Close();
+    ReplicationClient disconnected_client(1, &disconnected.join);
+    const auto receives = disconnected.join_wire.receives;
+    disconnected_client.PumpInbound();
+    EXPECT_EQ(disconnected.join_wire.close_reason, "admission disconnected");
+    EXPECT_EQ(disconnected.join_wire.receives, receives);
+    EXPECT_FALSE(disconnected_client.has_snapshot());
 }
 
 TEST(ReplicationAdmission, UnreliableHelloClosesHostAndJoinerBeforeAdmission) {
@@ -386,11 +545,16 @@ TEST(ReplicationAdmission, BothDirectionsRejectWrongVersionIdAndOtherIdentityFie
     for (const auto role : {ReplicationAdmissionRole::Host, ReplicationAdmissionRole::Joiner}) {
         const auto local = Identity(role == ReplicationAdmissionRole::Host ? 0u : 1u);
         const auto compatible = Identity(role == ReplicationAdmissionRole::Host ? 1u : 0u);
-        for (const std::uint16_t version : {std::uint16_t{1}, std::uint16_t{2}, std::uint16_t{4}}) {
+        for (const std::uint16_t version :
+             {std::uint16_t{1},
+              std::uint16_t{2},
+              std::uint16_t{3},
+              static_cast<std::uint16_t>(kLockstepProtocolVersion + 1)}) {
             auto peer = compatible;
             peer.protocol_version = version;
             auto state = Waiting(role, local);
             state.OnFrame(EncodeHello(peer), FrameDelivery::Reliable);
+            EXPECT_TRUE(state.failed());
             EXPECT_EQ(state.reason(), "protocol version mismatch");
         }
         for (int field = 0; field < 4; ++field) {
