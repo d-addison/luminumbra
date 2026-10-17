@@ -18,6 +18,7 @@
 #include "ActiveRegionLedger.h"
 #include "AuthorityHashState.h"
 #include "GroundObjectStore.h"
+#include "RegionDiagnostics.h"
 #include "RegionPopulator.h"
 #include "WorldClock.h"
 #include "WorldMetadata.h"
@@ -531,6 +532,14 @@ public:
     [[nodiscard]] const RegionSchedule& GetRegionSchedule() const {
         return m_regionSchedule;
     }
+    [[nodiscard]] const RegionTransitionRing& GetRegionTransitionRing() const noexcept {
+        return m_regionTransitions;
+    }
+    // Last existing host hash request only; opening the panel never requests a capture.
+    [[nodiscard]] const CachedRegionHashes& GetCachedRegionHashes() const noexcept {
+        return m_cachedRegionHashes;
+    }
+    [[nodiscard]] RegionWaterDiagnostics ObserveRegionalWaterWork() const noexcept;
     [[nodiscard]] const GroundObjectStore& GetGroundObjects() const {
         return m_groundObjects;
     }
@@ -782,6 +791,8 @@ private:
     ActiveRegionLedger m_activeRegionLedger;
     void ReplaceActiveRegionLedger(ActiveRegionLedger ledger);
     RegionSchedule m_regionSchedule;
+    RegionTransitionRing m_regionTransitions;
+    CachedRegionHashes m_cachedRegionHashes;
     world::RegionScheduleScratch m_regionScheduleScratch;
     mutable std::vector<RegionKey> m_sortedDueRegions, m_sortedDueSource;
     std::optional<std::vector<Vec3>> m_replicatedSimulationAnchors;

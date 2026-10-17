@@ -734,6 +734,7 @@ File lengths and manifest counts are checked before read/decompression buffers a
 an allocation-free lexical pass checks JSON depth, collection sizes and node counts before
 DOM construction, followed by duplicate-key, type, integer-range, identity and authority-shape
 checks. Exceeding any limit fails Heavy and publishes no passing comparison.
+Durable reference reads validate type, length, payload and EOF through the same opened regular-file handle, refusing final symlinks, directories, devices and FIFOs; random LMR reads stay within the admitted length.
 
 Incomplete or pristine resident candidates are filtered before precedence selection; missing
 expected records, corrupt members and invalid entity references refuse the comparison. The
@@ -760,3 +761,19 @@ Disabled Heavy retains its historical capture, comparison and artifact keys/byte
 artifacts additionally expose pre-save capture, save neutrality and reference-domain mismatch
 names. No raw reference payload is serialized. Native compilation, test execution, sanitizer
 and performance qualification remain pending.
+
+### Region diagnostics panel
+
+F4 opens `Regions [F4]` during interactive world play with ImGui available.
+The panel takes gameplay input while walking gravity and collision continue through neutral input frames.
+Captured presses stay suppressed until release, physical action edge latches remain current, and opening discards pending jump and crouch requests.
+F4, title close, leaving the world, focus loss and disabling developer UI restore input ownership, callbacks and cursor handling.
+
+Only an open panel builds an owned snapshot on the simulation owner thread.
+Paging and ordering affect display selection only; snapshots never tick simulation, capture authority hashes or read save files.
+A page contains at most 256 rows with a default of 64; summary traversal is bounded by the ledger's 1,048,576-region admission limit.
+The transition ring retains at most 64 actual scheduler transitions, including transitions observed while the panel is closed.
+Cached hashes display their completed-tick age; drawing never refreshes them, and the water service bound remains unknown until qualified.
+
+Registered regressions compare open and closed authority, canonical bytes, named hashes, allocator IDs, replay bytes and save bytes, and cover paging, walking physics, held actions and input cleanup.
+Native execution, platform qualification and representative-world performance qualification remain pending.

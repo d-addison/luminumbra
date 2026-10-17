@@ -52,6 +52,12 @@ void DrawCreatureNameplates(ClientAppContext& app,
                             Luminumbra::Rendering::Camera* camera,
                             Luminumbra::world::GameSession* gameSession);
 
+// Gameplay status entry point retained for callers without a session.
+void DrawFrameStatusOverlays(ClientAppContext& app,
+                             GameState currentState,
+                             const ScenarioHarness::RuntimeScenarioConfig& scenario_config,
+                             Luminumbra::Client::PlayerController* playerController);
+
 // Registered widget contents; visibility/window ownership belongs to the registry.
 void DrawFarmDiagnosticsContents(ClientAppContext& app);
 void DrawGpuProfilerContents(Luminumbra::Rendering::RenderPipeline& renderPipeline,

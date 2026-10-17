@@ -1,4 +1,5 @@
 #include "PlayerController.h"
+#include "app/UiInputRouter.h"
 #include "core/Log.h"
 #include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
@@ -71,8 +72,8 @@ void PlayerController::DrawDebugContents() {
     }
 }
 
-void PlayerController::SetLiveInputGate(std::function<bool(int)> gate) {
-    m_liveInputGate = std::move(gate);
+void PlayerController::SetLiveInputGate(const App::UiInputRouter* router) {
+    m_liveInputGate = router;
 }
 void PlayerController::ClearQueuedLiveInput() {
     m_wantsToJump = false;
@@ -93,7 +94,7 @@ PlayerReplayInputFrame PlayerController::ReadLiveInputFrame() const {
     PlayerReplayInputFrame input{};
     const auto held = [&](InputAction action) {
         const int code = key(action);
-        return (!m_liveInputGate || m_liveInputGate(code)) &&
+        return (!m_liveInputGate || m_liveInputGate->GameplayKeyAllowed(code)) &&
                glfwGetKey(m_window, code) == GLFW_PRESS;
     };
 

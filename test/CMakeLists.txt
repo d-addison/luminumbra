@@ -982,6 +982,10 @@ add_executable(particle_determinism_test
 
 add_executable(far_lod_worker_test
     rendering/far_lod_worker_test.cpp
+    # CPU ImGui frames exercise the production overlay. The F4 callback also
+    # uses a hidden GLFW window; inherit this target's GL resource lock and CI Xvfb lane.
+    client/RegionPanel_test.cpp
+    ../src/luminumbra_server/HeavyAuthorityReference.cpp
     rendering/terrain_culling_test.cpp
     rendering/loading_overlay_test.cpp
     rendering/texture_file_test.cpp

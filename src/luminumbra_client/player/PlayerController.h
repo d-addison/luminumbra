@@ -7,7 +7,6 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <functional>
 #include <glm/glm.hpp>
 #include <optional>
 
@@ -21,6 +20,10 @@ class PhysicsSystem;
 
 namespace luminumbra::core {
 class SystemConfig;
+}
+
+namespace Luminumbra::Client::App {
+class UiInputRouter;
 }
 
 namespace Luminumbra::Client {
@@ -57,12 +60,20 @@ public:
                      std::optional<glm::vec3> restored_walking_feet = std::nullopt);
 
     void Update(float deltaTime);
-    void SetLiveInputGate(std::function<bool(int)> gate);
+    // Non-owning; the application router outlives this controller.
+    void SetLiveInputGate(const App::UiInputRouter* router);
     void ClearQueuedLiveInput();
     void ApplyReplayInput(float deltaTime, const PlayerReplayInputFrame& inputFrame);
     PlayerReplaySnapshot CaptureReplaySnapshot() const;
     void ResetReplayFrameCounter(std::uint64_t frame = 0);
     void ProcessKeyInput(int key, int action);
+
+    // Drop queued movement actions when a UI takes input ownership. Physics can
+    // continue through neutral replay frames without replaying these on release.
+    void DiscardPendingMovementInput() {
+        m_wantsToJump = false;
+        m_wantsToCrouch = false;
+    }
 
     MovementMode GetMovementMode() const {
         return m_mode;
@@ -149,7 +160,7 @@ public:
     }
 
 private:
-    std::function<bool(int)> m_liveInputGate;
+    const App::UiInputRouter* m_liveInputGate = nullptr;
     PlayerReplayInputFrame ReadLiveInputFrame() const;
     void UpdateWalking(float deltaTime,
                        const glm::vec3& wishDir,

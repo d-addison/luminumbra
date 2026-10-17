@@ -69,8 +69,8 @@
     {
       "id": "dw.scope.002",
       "source": "docs/distant-world.md#scope",
-      "quote": "The addressable extent is set by the packed chunk identity (`Chunk.h`, \u00b12^20 chunks of 16 m, about \u00b116,777 km on each horizontal axis;",
-      "text": "The addressable extent is set by the packed chunk identity (`Chunk.h`, \u00b12^20 chunks of 16 m, about \u00b116,777 km on each horizontal axis;"
+      "quote": "The addressable extent is set by the packed chunk identity (`Chunk.h`, ±2^20 chunks of 16 m, about ±16,777 km on each horizontal axis;",
+      "text": "The addressable extent is set by the packed chunk identity (`Chunk.h`, ±2^20 chunks of 16 m, about ±16,777 km on each horizontal axis;"
     },
     {
       "id": "dw.scope.003",
@@ -225,8 +225,8 @@
     {
       "id": "dw.tiers.002",
       "source": "docs/distant-world.md#tier-ladder",
-      "quote": "Each tier stores sparse 5\u00d75\u00d75 signed-distance bricks and is polygonised per tile with Marching Cubes;",
-      "text": "Each tier stores sparse 5\u00d75\u00d75 signed-distance bricks and is polygonised per tile with Marching Cubes;"
+      "quote": "Each tier stores sparse 5×5×5 signed-distance bricks and is polygonised per tile with Marching Cubes;",
+      "text": "Each tier stores sparse 5×5×5 signed-distance bricks and is polygonised per tile with Marching Cubes;"
     },
     {
       "id": "dw.tiers.003",
@@ -957,8 +957,8 @@
     {
       "id": "dw.policy.024",
       "source": "docs/distant-world.md#per-system-distant-policy",
-      "quote": "distant creatures do not use scent | \u2014 |",
-      "text": "distant creatures do not use scent | \u2014 |"
+      "quote": "distant creatures do not use scent | — |",
+      "text": "distant creatures do not use scent | — |"
     },
     {
       "id": "dw.policy.025",
@@ -969,8 +969,8 @@
     {
       "id": "dw.policy.026",
       "source": "docs/distant-world.md#per-system-distant-policy",
-      "quote": "| Scheduled game events | Not implemented | Deferred to a later milestone | \u2014 |",
-      "text": "| Scheduled game events | Not implemented | Deferred to a later milestone | \u2014 |"
+      "quote": "| Scheduled game events | Not implemented | Deferred to a later milestone | — |",
+      "text": "| Scheduled game events | Not implemented | Deferred to a later milestone | — |"
     },
     {
       "id": "dw.policy.027",
@@ -1083,8 +1083,8 @@
     {
       "id": "dw.calendar.013",
       "source": "docs/distant-world.md#simulation-clock-and-calendar",
-      "quote": "`dayLengthTicks` must be an integer in [1, 2^31), `daysPerYear` an integer in [1, 366], `simulationTick` an unsigned integer below 2^62, and the products day \u00d7 year and tick + catch-up clamp are overflow-checked;",
-      "text": "`dayLengthTicks` must be an integer in [1, 2^31), `daysPerYear` an integer in [1, 366], `simulationTick` an unsigned integer below 2^62, and the products day \u00d7 year and tick + catch-up clamp are overflow-checked;"
+      "quote": "`dayLengthTicks` must be an integer in [1, 2^31), `daysPerYear` an integer in [1, 366], `simulationTick` an unsigned integer below 2^62, and the products day × year and tick + catch-up clamp are overflow-checked;",
+      "text": "`dayLengthTicks` must be an integer in [1, 2^31), `daysPerYear` an integer in [1, 366], `simulationTick` an unsigned integer below 2^62, and the products day × year and tick + catch-up clamp are overflow-checked;"
     },
     {
       "id": "dw.calendar.014",
@@ -1437,8 +1437,8 @@
     {
       "id": "dw.perf.001",
       "source": "docs/distant-world.md#performance-measurement-contract",
-      "quote": "Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840\u00d71600 and 3440\u00d71440.",
-      "text": "Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840\u00d71600 and 3440\u00d71440."
+      "quote": "Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840×1600 and 3440×1440.",
+      "text": "Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840×1600 and 3440×1440."
     },
     {
       "id": "dw.perf.002",
@@ -3957,8 +3957,8 @@
     {
       "id": "ar.policy.002",
       "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Each inventory must contain 1\u2013256 JSON definitions;",
-      "text": "Each inventory must contain 1\u2013256 JSON definitions;"
+      "quote": "Each inventory must contain 1–256 JSON definitions;",
+      "text": "Each inventory must contain 1–256 JSON definitions;"
     },
     {
       "id": "ar.policy.003",
@@ -4131,8 +4131,8 @@
     {
       "id": "ar.policy.031",
       "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "Every authored plant entry has exactly `max_cadence_shift` (integer 1\u20138) and `resume_cap_ticks` (integer 0\u201336,000).",
-      "text": "Every authored plant entry has exactly `max_cadence_shift` (integer 1\u20138) and `resume_cap_ticks` (integer 0\u201336,000)."
+      "quote": "Every authored plant entry has exactly `max_cadence_shift` (integer 1–8) and `resume_cap_ticks` (integer 0–36,000).",
+      "text": "Every authored plant entry has exactly `max_cadence_shift` (integer 1–8) and `resume_cap_ticks` (integer 0–36,000)."
     },
     {
       "id": "ar.policy.032",
@@ -5387,6 +5387,426 @@
       "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
       "quote": "Native compiler, runtime and performance qualification remains pending.",
       "text": "Native compiler, runtime and performance qualification remains pending."
+    },
+    {
+      "id": "ar.heavy-reference.001",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "With active regions enabled, Heavy captures the original at a completed simulation boundary before saving, checks that saving leaves authority unchanged, compares a fresh load before its first tick, and compares both sessions after identical continuation.",
+      "text": "With active regions enabled, Heavy captures the original at a completed simulation boundary before saving, checks that saving leaves authority unchanged, compares a fresh load before its first tick, and compares both sessions after identical continuation."
+    },
+    {
+      "id": "ar.heavy-reference.002",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "Production hashes come from the combined runner capture.",
+      "text": "Production hashes come from the combined runner capture."
+    },
+    {
+      "id": "ar.heavy-reference.003",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "Every enabled named diagnostic and the composed world hash participates in equality;",
+      "text": "Every enabled named diagnostic and the composed world hash participates in equality;"
+    },
+    {
+      "id": "ar.heavy-reference.004",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "render meshes remain informational.",
+      "text": "render meshes remain informational."
+    },
+    {
+      "id": "ar.heavy-reference.005",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "The loaded enabled session restores persisted plants without reseeding the synthetic roster.",
+      "text": "The loaded enabled session restores persisted plants without reseeding the synthetic roster."
+    },
+    {
+      "id": "ar.heavy-reference.006",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "`HeavyAuthorityReference` independently enumerates const simulation fields into ordered domain records.",
+      "text": "`HeavyAuthorityReference` independently enumerates const simulation fields into ordered domain records."
+    },
+    {
+      "id": "ar.heavy-reference.007",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "Its local field inventory and little-endian encoding do not consume production hash projections or persistence serializers.",
+      "text": "Its local field inventory and little-endian encoding do not consume production hash projections or persistence serializers."
+    },
+    {
+      "id": "ar.heavy-reference.008",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "Strings and collections carry explicit lengths, float and double values preserve stored bits, component presence is explicit, and entity references use durable kind and persistent ID.",
+      "text": "Strings and collections carry explicit lengths, float and double values preserve stored bits, component presence is explicit, and entity references use durable kind and persistent ID."
+    },
+    {
+      "id": "ar.heavy-reference.009",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "Logical controller participation and locomotion continuation are compared;",
+      "text": "Logical controller participation and locomotion continuation are compared;"
+    },
+    {
+      "id": "ar.heavy-reference.010",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "controller allocation indices are excluded.",
+      "text": "controller allocation indices are excluded."
+    },
+    {
+      "id": "ar.heavy-reference.011",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "The reference covers ready resident, parked and disk-only voxel/material/water authority;",
+      "text": "The reference covers ready resident, parked and disk-only voxel/material/water authority;"
+    },
+    {
+      "id": "ar.heavy-reference.012",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "clock, ledger configuration, allocator, ownership, activation outbox and completed work;",
+      "text": "clock, ledger configuration, allocator, ownership, activation outbox and completed work;"
+    },
+    {
+      "id": "ar.heavy-reference.013",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "complete creatures, plants, items and avatar fields;",
+      "text": "complete creatures, plants, items and avatar fields;"
+    },
+    {
+      "id": "ar.heavy-reference.014",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "ambient masks/cells, storms, strikes, scent, soil, irrigation and weather clocks;",
+      "text": "ambient masks/cells, storms, strikes, scent, soil, irrigation and weather clocks;"
+    },
+    {
+      "id": "ar.heavy-reference.015",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "dormant energy pages and retained deposits;",
+      "text": "dormant energy pages and retained deposits;"
+    },
+    {
+      "id": "ar.heavy-reference.016",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "and pending events with their sequence allocator.",
+      "text": "and pending events with their sequence allocator."
+    },
+    {
+      "id": "ar.heavy-reference.017",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "Identity includes admitted species documents, resolved policies, effective tuning, biome tables, structure templates and population configuration.",
+      "text": "Identity includes admitted species documents, resolved policies, effective tuning, biome tables, structure templates and population configuration."
+    },
+    {
+      "id": "ar.heavy-reference.018",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "Plant orientation/scale, render-only biome settings, cache state, save stamps and validation ceilings remain outside simulation authority.",
+      "text": "Plant orientation/scale, render-only biome settings, cache state, save stamps and validation ceilings remain outside simulation authority."
+    },
+    {
+      "id": "ar.heavy-reference.019",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "The common session exposes a const authority view and paired const store getters;",
+      "text": "The common session exposes a const authority view and paired const store getters;"
+    },
+    {
+      "id": "ar.heavy-reference.020",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "it grants no server type privileged or mutable access.",
+      "text": "it grants no server type privileged or mutable access."
+    },
+    {
+      "id": "ar.heavy-reference.021",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "The world observation returns resident and parked inventories as `shared_ptr<const Chunk>`, expected durable coordinates, and const generation configuration;",
+      "text": "The world observation returns resident and parked inventories as `shared_ptr<const Chunk>`, expected durable coordinates, and const generation configuration;"
+    },
+    {
+      "id": "ar.heavy-reference.022",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "it does not expose the world system.",
+      "text": "it does not expose the world system."
+    },
+    {
+      "id": "ar.heavy-reference.023",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "Compile-time assertions enforce const chunk elements on both observation and reference inputs.",
+      "text": "Compile-time assertions enforce const chunk elements on both observation and reference inputs."
+    },
+    {
+      "id": "ar.heavy-reference.024",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "The reference also observes the persisted ambient anchor's X, Y and Z values separately from the ledger anchor.",
+      "text": "The reference also observes the persisted ambient anchor's X, Y and Z values separately from the ledger anchor."
+    },
+    {
+      "id": "ar.heavy-reference.025",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "The reference reads LMR1 manifests, LZ4 chunk payloads and the commit index itself.",
+      "text": "The reference reads LMR1 manifests, LZ4 chunk payloads and the commit index itself."
+    },
+    {
+      "id": "ar.heavy-reference.026",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "Its field decoder and fingerprint checks invoke no production world loader, projection, canonical serializer or projection-dependent validator.",
+      "text": "Its field decoder and fingerprint checks invoke no production world loader, projection, canonical serializer or projection-dependent validator."
+    },
+    {
+      "id": "ar.heavy-reference.027",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "Singleton members are verified as raw bytes in bounded blocks;",
+      "text": "Singleton members are verified as raw bytes in bounded blocks;"
+    },
+    {
+      "id": "ar.heavy-reference.028",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "their simulation fields are observed directly from the const session stores.",
+      "text": "their simulation fields are observed directly from the const session stores."
+    },
+    {
+      "id": "ar.heavy-reference.029",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "Named offline limits are 16 MiB per index, 64 MiB per raw/compressed record or singleton, 65,535 records per region, 1,048,576 members or collection entries, 32 JSON nesting levels, 2,097,152 JSON nodes, 1 GiB per region container, and 512 MiB of retained authoritative chunk payloads.",
+      "text": "Named offline limits are 16 MiB per index, 64 MiB per raw/compressed record or singleton, 65,535 records per region, 1,048,576 members or collection entries, 32 JSON nesting levels, 2,097,152 JSON nodes, 1 GiB per region container, and 512 MiB of retained authoritative chunk payloads."
+    },
+    {
+      "id": "ar.heavy-reference.030",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "Pristine records are decoded one at a time without consuming the retained budget.",
+      "text": "Pristine records are decoded one at a time without consuming the retained budget."
+    },
+    {
+      "id": "ar.heavy-reference.031",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "File lengths and manifest counts are checked before read/decompression buffers are allocated;",
+      "text": "File lengths and manifest counts are checked before read/decompression buffers are allocated;"
+    },
+    {
+      "id": "ar.heavy-reference.032",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "an allocation-free lexical pass checks JSON depth, collection sizes and node counts before DOM construction, followed by duplicate-key, type, integer-range, identity and authority-shape checks.",
+      "text": "an allocation-free lexical pass checks JSON depth, collection sizes and node counts before DOM construction, followed by duplicate-key, type, integer-range, identity and authority-shape checks."
+    },
+    {
+      "id": "ar.heavy-reference.033",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "Exceeding any limit fails Heavy and publishes no passing comparison.",
+      "text": "Exceeding any limit fails Heavy and publishes no passing comparison."
+    },
+    {
+      "id": "ar.heavy-reference.034",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "Incomplete or pristine resident candidates are filtered before precedence selection;",
+      "text": "Incomplete or pristine resident candidates are filtered before precedence selection;"
+    },
+    {
+      "id": "ar.heavy-reference.035",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "missing expected records, corrupt members and invalid entity references refuse the comparison.",
+      "text": "missing expected records, corrupt members and invalid entity references refuse the comparison."
+    },
+    {
+      "id": "ar.heavy-reference.036",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "The reference does not generate replacement terrain or return a partial observation.",
+      "text": "The reference does not generate replacement terrain or return a partial observation."
+    },
+    {
+      "id": "ar.heavy-reference.037",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "It is an offline observation: normal saves and simulation ticks do not invoke it.",
+      "text": "It is an offline observation: normal saves and simulation ticks do not invoke it."
+    },
+    {
+      "id": "ar.heavy-reference.038",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "The registered Heavy regressions cover save neutrality;",
+      "text": "The registered Heavy regressions cover save neutrality;"
+    },
+    {
+      "id": "ar.heavy-reference.039",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "immediate-load and continuation comparisons;",
+      "text": "immediate-load and continuation comparisons;"
+    },
+    {
+      "id": "ar.heavy-reference.040",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "independently detected omissions of creature energy/cooldowns/rotation, plant stress/genome, items, completed work, pending events, water debt and weather clocks;",
+      "text": "independently detected omissions of creature energy/cooldowns/rotation, plant stress/genome, items, completed work, pending events, water debt and weather clocks;"
+    },
+    {
+      "id": "ar.heavy-reference.041",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "optional presence, persistent references, controller participation, travel and locomotion;",
+      "text": "optional presence, persistent references, controller participation, travel and locomotion;"
+    },
+    {
+      "id": "ar.heavy-reference.042",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "disk-only edits, dormant soil/energy and pending deposits;",
+      "text": "disk-only edits, dormant soil/energy and pending deposits;"
+    },
+    {
+      "id": "ar.heavy-reference.043",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "corrupt/missing-record refusal;",
+      "text": "corrupt/missing-record refusal;"
+    },
+    {
+      "id": "ar.heavy-reference.044",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "and exact legacy capture JSON bytes.",
+      "text": "and exact legacy capture JSON bytes."
+    },
+    {
+      "id": "ar.heavy-reference.045",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "Additional regressions use independently written durable records, check refusal before file/DOM/field allocation, verify malformed inventory leaves state and files unchanged, preserve legal coordinate/resolution boundaries, and run disabled Heavy against the executable legacy v1 contract.",
+      "text": "Additional regressions use independently written durable records, check refusal before file/DOM/field allocation, verify malformed inventory leaves state and files unchanged, preserve legal coordinate/resolution boundaries, and run disabled Heavy against the executable legacy v1 contract."
+    },
+    {
+      "id": "ar.heavy-reference.046",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "The latter compares the entire formatted artifact, including outer keys, verdicts, nested hashes and boot/settle statistics;",
+      "text": "The latter compares the entire formatted artifact, including outer keys, verdicts, nested hashes and boot/settle statistics;"
+    },
+    {
+      "id": "ar.heavy-reference.047",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "only the newly allocated world ID is substituted within that property's value.",
+      "text": "only the newly allocated world ID is substituted within that property's value."
+    },
+    {
+      "id": "ar.heavy-reference.048",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "The expected comparison types, helpers and exclusions are frozen locally from the legacy v1 Heavy contract, independently of current Heavy comparisons.",
+      "text": "The expected comparison types, helpers and exclusions are frozen locally from the legacy v1 Heavy contract, independently of current Heavy comparisons."
+    },
+    {
+      "id": "ar.heavy-reference.049",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "Ambient-anchor controls mutate every stored coordinate through the const view and retain the original production hashes.",
+      "text": "Ambient-anchor controls mutate every stored coordinate through the const view and retain the original production hashes."
+    },
+    {
+      "id": "ar.heavy-reference.050",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "Negative controls change raw authority while retaining the old production digests, so a shared hashing/persistence omission cannot satisfy equality.",
+      "text": "Negative controls change raw authority while retaining the old production digests, so a shared hashing/persistence omission cannot satisfy equality."
+    },
+    {
+      "id": "ar.heavy-reference.051",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "Disabled Heavy retains its historical capture, comparison and artifact keys/bytes;",
+      "text": "Disabled Heavy retains its historical capture, comparison and artifact keys/bytes;"
+    },
+    {
+      "id": "ar.heavy-reference.052",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "enabled artifacts additionally expose pre-save capture, save neutrality and reference-domain mismatch names.",
+      "text": "enabled artifacts additionally expose pre-save capture, save neutrality and reference-domain mismatch names."
+    },
+    {
+      "id": "ar.heavy-reference.053",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "No raw reference payload is serialized.",
+      "text": "No raw reference payload is serialized."
+    },
+    {
+      "id": "ar.heavy-reference.054",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "Native compilation, test execution, sanitizer and performance qualification remain pending.",
+      "text": "Native compilation, test execution, sanitizer and performance qualification remain pending."
+    },
+    {
+      "id": "ar.region-panel.001",
+      "source": "docs/active-regions.md#region-diagnostics-panel",
+      "quote": "F4 opens `Regions [F4]` during interactive world play with ImGui available.",
+      "text": "F4 opens `Regions [F4]` during interactive world play with ImGui available."
+    },
+    {
+      "id": "ar.region-panel.002",
+      "source": "docs/active-regions.md#region-diagnostics-panel",
+      "quote": "The panel takes gameplay input while walking gravity and collision continue through neutral input frames.",
+      "text": "The panel takes gameplay input while walking gravity and collision continue through neutral input frames."
+    },
+    {
+      "id": "ar.region-panel.003",
+      "source": "docs/active-regions.md#region-diagnostics-panel",
+      "quote": "Captured presses stay suppressed until release, physical action edge latches remain current, and opening discards pending jump and crouch requests.",
+      "text": "Captured presses stay suppressed until release, physical action edge latches remain current, and opening discards pending jump and crouch requests."
+    },
+    {
+      "id": "ar.region-panel.004",
+      "source": "docs/active-regions.md#region-diagnostics-panel",
+      "quote": "F4, title close, leaving the world, focus loss and disabling developer UI restore input ownership, callbacks and cursor handling.",
+      "text": "F4, title close, leaving the world, focus loss and disabling developer UI restore input ownership, callbacks and cursor handling."
+    },
+    {
+      "id": "ar.region-panel.005",
+      "source": "docs/active-regions.md#region-diagnostics-panel",
+      "quote": "Only an open panel builds an owned snapshot on the simulation owner thread.",
+      "text": "Only an open panel builds an owned snapshot on the simulation owner thread."
+    },
+    {
+      "id": "ar.region-panel.006",
+      "source": "docs/active-regions.md#region-diagnostics-panel",
+      "quote": "Paging and ordering affect display selection only;",
+      "text": "Paging and ordering affect display selection only;"
+    },
+    {
+      "id": "ar.region-panel.007",
+      "source": "docs/active-regions.md#region-diagnostics-panel",
+      "quote": "snapshots never tick simulation, capture authority hashes or read save files.",
+      "text": "snapshots never tick simulation, capture authority hashes or read save files."
+    },
+    {
+      "id": "ar.region-panel.008",
+      "source": "docs/active-regions.md#region-diagnostics-panel",
+      "quote": "A page contains at most 256 rows with a default of 64;",
+      "text": "A page contains at most 256 rows with a default of 64;"
+    },
+    {
+      "id": "ar.region-panel.009",
+      "source": "docs/active-regions.md#region-diagnostics-panel",
+      "quote": "summary traversal is bounded by the ledger's 1,048,576-region admission limit.",
+      "text": "summary traversal is bounded by the ledger's 1,048,576-region admission limit."
+    },
+    {
+      "id": "ar.region-panel.010",
+      "source": "docs/active-regions.md#region-diagnostics-panel",
+      "quote": "The transition ring retains at most 64 actual scheduler transitions, including transitions observed while the panel is closed.",
+      "text": "The transition ring retains at most 64 actual scheduler transitions, including transitions observed while the panel is closed."
+    },
+    {
+      "id": "ar.region-panel.011",
+      "source": "docs/active-regions.md#region-diagnostics-panel",
+      "quote": "Cached hashes display their completed-tick age;",
+      "text": "Cached hashes display their completed-tick age;"
+    },
+    {
+      "id": "ar.region-panel.012",
+      "source": "docs/active-regions.md#region-diagnostics-panel",
+      "quote": "drawing never refreshes them, and the water service bound remains unknown until qualified.",
+      "text": "drawing never refreshes them, and the water service bound remains unknown until qualified."
+    },
+    {
+      "id": "ar.region-panel.013",
+      "source": "docs/active-regions.md#region-diagnostics-panel",
+      "quote": "Registered regressions compare open and closed authority, canonical bytes, named hashes, allocator IDs, replay bytes and save bytes, and cover paging, walking physics, held actions and input cleanup.",
+      "text": "Registered regressions compare open and closed authority, canonical bytes, named hashes, allocator IDs, replay bytes and save bytes, and cover paging, walking physics, held actions and input cleanup."
+    },
+    {
+      "id": "ar.region-panel.014",
+      "source": "docs/active-regions.md#region-diagnostics-panel",
+      "quote": "Native execution, platform qualification and representative-world performance qualification remain pending.",
+      "text": "Native execution, platform qualification and representative-world performance qualification remain pending."
+    },
+    {
+      "id": "ar.heavy-reference.055",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "Durable reference reads validate type, length, payload and EOF through the same opened regular-file handle, refusing final symlinks, directories, devices and FIFOs;",
+      "text": "Durable reference reads validate type, length, payload and EOF through the same opened regular-file handle, refusing final symlinks, directories, devices and FIFOs;"
+    },
+    {
+      "id": "ar.heavy-reference.056",
+      "source": "docs/active-regions.md#independent-heavy-authority-comparison",
+      "quote": "random LMR reads stay within the admitted length.",
+      "text": "random LMR reads stay within the admitted length."
     }
   ],
   "exclusions": [
@@ -5545,8 +5965,8 @@
     {
       "id": "dw.perf.018",
       "source": "docs/distant-world.md#performance-measurement-contract",
-      "quote": "Current behaviour: the benchmark records means only, sums eleven pass timers instead of bracketing the frame, pins the framebuffer to 3840\u00d71600, and does not record the renderer string;",
-      "text": "Current behaviour: the benchmark records means only, sums eleven pass timers instead of bracketing the frame, pins the framebuffer to 3840\u00d71600, and does not record the renderer string;",
+      "quote": "Current behaviour: the benchmark records means only, sums eleven pass timers instead of bracketing the frame, pins the framebuffer to 3840×1600, and does not record the renderer string;",
+      "text": "Current behaviour: the benchmark records means only, sums eleven pass timers instead of bracketing the frame, pins the framebuffer to 3840×1600, and does not record the renderer string;",
       "reason": "Descriptive Current behaviour paragraph contrasts shipped behaviour with the accepted future contract; it is not an acceptance requirement.",
       "category": "current-behaviour"
     },

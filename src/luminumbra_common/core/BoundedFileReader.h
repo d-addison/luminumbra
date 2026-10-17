@@ -69,6 +69,22 @@ public:
     std::uint64_t size() const {
         return m_size;
     }
+    // Random access stays on the verified handle and within its admitted byte length.
+    void seek(std::uint64_t offset) {
+        if (offset > m_size ||
+            offset > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
+            throw std::runtime_error("save file seek exceeds admitted length");
+#ifdef _WIN32
+        LARGE_INTEGER position{};
+        position.QuadPart = static_cast<LONGLONG>(offset);
+        if (!SetFilePointerEx(m_handle, position, nullptr, FILE_BEGIN))
+            throw std::runtime_error("cannot seek save file");
+#else
+        if (offset > static_cast<std::uint64_t>(std::numeric_limits<off_t>::max()) ||
+            ::lseek(m_handle, static_cast<off_t>(offset), SEEK_SET) < 0)
+            throw std::runtime_error("cannot seek save file");
+#endif
+    }
     std::size_t read(char* data, std::size_t count) {
 #ifdef _WIN32
         DWORD got = 0;

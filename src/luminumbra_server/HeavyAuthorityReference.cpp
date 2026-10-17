@@ -28,6 +28,7 @@
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/GameSession.h"
 
+#include "luminumbra_common/core/BoundedFileReader.h"
 #include "luminumbra_common/core/FilesystemPath.h"
 
 #include <lz4.h>
@@ -39,7 +40,6 @@
 #include <charconv>
 #include <cmath>
 #include <cstdint>
-#include <fstream>
 #include <limits>
 #include <set>
 #include <stdexcept>
@@ -878,7 +878,7 @@ public:
             for (const auto& member : value)
                 Put(member);
         } else {
-            std::apply([this](const auto&... members) { Fields(members...); },
+            std::apply([this](const auto&... members) { this->Fields(members...); },
                        Inventory<T>::Fields(value));
         }
     }
@@ -1100,15 +1100,36 @@ nlohmann::json ReferenceJson(std::string_view bytes) {
     }
 }
 
+void ReadReferenceBytes(Filesystem::RegularFileHandle& file,
+                        char* destination,
+                        std::size_t count,
+                        const char* failure = "Heavy truncated LMR payload") {
+    // Fixed 64 KiB read requests also fit the Windows DWORD API on every platform.
+    std::size_t completed = 0;
+    while (completed < count) {
+        const auto requested = std::min(count - completed, std::size_t{64u * 1024u});
+        const auto received = file.read(destination + completed, requested);
+        Require(received != 0, failure);
+        completed += received;
+    }
+}
+
+bool ReferenceFileExists(const std::filesystem::path& path) {
+    const auto status = std::filesystem::symlink_status(path);
+    if (status.type() == std::filesystem::file_type::not_found)
+        return false;
+    Require(std::filesystem::is_regular_file(status), "Heavy invalid durable member type");
+    return true;
+}
+
 std::string ReadBounded(const std::filesystem::path& path, std::size_t limit) {
-    const auto length = std::filesystem::file_size(path);
-    Require(length <= limit, "Heavy file byte limit");
-    std::ifstream input(path, std::ios::binary);
-    Require(input.is_open(), "Heavy cannot open durable member");
-    std::string bytes(static_cast<std::size_t>(length), '\0');
-    input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-    Require(input.good() && input.peek() == std::char_traits<char>::eof(),
-            "Heavy durable member changed or truncated");
+    Filesystem::RegularFileHandle input(path);
+    Require(input.size() <= limit, "Heavy file byte limit");
+    std::string bytes(static_cast<std::size_t>(input.size()), '\0');
+    ReadReferenceBytes(
+        input, bytes.data(), bytes.size(), "Heavy durable member changed or truncated");
+    char probe = 0;
+    Require(input.read(&probe, 1) == 0, "Heavy durable member changed or truncated");
     return bytes;
 }
 
@@ -1337,14 +1358,13 @@ ReferenceMember ReadReferenceRegion(const std::filesystem::path& path,
                                     int region_z,
                                     std::map<ChunkID, std::shared_ptr<Chunk>>& disk,
                                     std::uint64_t& retained_bytes) {
-    const auto file_bytes = std::filesystem::file_size(path);
+    Filesystem::RegularFileHandle input(path);
+    const auto file_bytes = input.size();
     Require(file_bytes >= 8 && file_bytes <= HeavyReferenceDecodeLimits::kRegionBytes,
             "Heavy LMR byte limit");
-    std::ifstream input(path, std::ios::binary);
-    Require(input.is_open(), "Heavy cannot open LMR");
     std::string header(8, '\0');
-    input.read(header.data(), 8);
-    Require(input.good() && header.substr(0, 4) == "LMR1" && ReadLittle(header, 4, 2) == 2,
+    ReadReferenceBytes(input, header.data(), header.size());
+    Require(header.substr(0, 4) == "LMR1" && ReadLittle(header, 4, 2) == 2,
             "Heavy invalid LMR header");
     const auto count = static_cast<std::size_t>(ReadLittle(header, 6, 2));
     constexpr std::size_t record_header_bytes = 18;
@@ -1352,8 +1372,7 @@ ReferenceMember ReadReferenceRegion(const std::filesystem::path& path,
                 count <= (file_bytes - 8) / record_header_bytes,
             "Heavy truncated LMR manifest");
     std::string manifest(count * record_header_bytes, '\0');
-    input.read(manifest.data(), static_cast<std::streamsize>(manifest.size()));
-    Require(input.good(), "Heavy unreadable LMR manifest");
+    ReadReferenceBytes(input, manifest.data(), manifest.size());
     struct Record {
         std::uint64_t offset;
         std::uint32_t raw_bytes, compressed_bytes;
@@ -1389,10 +1408,9 @@ ReferenceMember ReadReferenceRegion(const std::filesystem::path& path,
                     "Heavy retained chunk storage limit");
             retained_bytes += record.raw_bytes;
         }
-        input.seekg(static_cast<std::streamoff>(record.offset));
+        input.seek(record.offset);
         std::string compressed(record.compressed_bytes, '\0');
-        input.read(compressed.data(), static_cast<std::streamsize>(compressed.size()));
-        Require(input.good(), "Heavy truncated LMR payload");
+        ReadReferenceBytes(input, compressed.data(), compressed.size());
         if (!fingerprint.present) {
             fingerprint.present = true;
             fingerprint.hash = kReferenceFnvOffset;
@@ -1413,6 +1431,11 @@ ReferenceMember ReadReferenceRegion(const std::filesystem::path& path,
         if ((record.flags & 1u) != 0)
             Require(disk.emplace(key.second, chunk).second, "Heavy duplicate durable chunk");
     }
+    // Validate the tail even when only derived LOD records occupy it, then probe growth.
+    input.seek(file_bytes - 1);
+    char tail = 0;
+    ReadReferenceBytes(input, &tail, 1);
+    Require(input.read(&tail, 1) == 0, "Heavy LMR grew during observation");
     return fingerprint;
 }
 
@@ -1425,24 +1448,22 @@ void MatchReferenceMember(const ReferenceMember& expected, const ReferenceMember
 
 ReferenceMember ReferenceFileFingerprint(const std::filesystem::path& path) {
     ReferenceMember result;
-    if (!std::filesystem::exists(path))
+    if (!ReferenceFileExists(path))
         return result;
-    const auto length = std::filesystem::file_size(path);
-    Require(length <= HeavyReferenceDecodeLimits::kRecordBytes, "Heavy member byte limit");
-    std::ifstream input(path, std::ios::binary);
-    Require(input.is_open(), "Heavy cannot open indexed member");
-    result = {true, static_cast<std::uint64_t>(length), kReferenceFnvOffset};
+    Filesystem::RegularFileHandle input(path);
+    Require(input.size() <= HeavyReferenceDecodeLimits::kRecordBytes, "Heavy member byte limit");
+    result = {true, input.size(), kReferenceFnvOffset};
     std::array<char, 64u * 1024u> buffer{};
     std::uint64_t remaining = result.bytes;
     while (remaining > 0) {
         const auto take =
             static_cast<std::size_t>(std::min<std::uint64_t>(remaining, buffer.size()));
-        input.read(buffer.data(), static_cast<std::streamsize>(take));
-        Require(input.good(), "Heavy truncated indexed member");
+        ReadReferenceBytes(input, buffer.data(), take, "Heavy truncated indexed member");
         ReferenceFold(result.hash, std::string_view(buffer.data(), take));
         remaining -= take;
     }
-    Require(input.peek() == std::char_traits<char>::eof(), "Heavy indexed member grew");
+    char probe = 0;
+    Require(input.read(&probe, 1) == 0, "Heavy indexed member grew");
     return result;
 }
 
@@ -1450,8 +1471,9 @@ std::map<ChunkID, std::shared_ptr<Chunk>> ReferenceDisk(const std::filesystem::p
     std::map<ChunkID, std::shared_ptr<Chunk>> disk;
     if (directory.empty())
         return disk;
-    Require(!std::filesystem::exists(directory / "journal"), "Heavy requires committed authority");
-    const bool indexed = std::filesystem::exists(directory / "chunks/region/snapshot.json");
+    Require(!std::filesystem::exists(std::filesystem::symlink_status(directory / "journal")),
+            "Heavy requires committed authority");
+    const bool indexed = ReferenceFileExists(directory / "chunks/region/snapshot.json");
     const auto members =
         indexed ? ReferenceIndex(directory) : std::map<std::string, ReferenceMember>{};
     std::map<std::string, ReferenceMember> actual;
@@ -1498,7 +1520,7 @@ std::string Chunks(const HeavyReferenceInputs& inputs) {
     }
     if (!inputs.chunks.durable.empty() &&
         (inputs.directory.empty() ||
-         !std::filesystem::exists(inputs.directory / "chunks/region/snapshot.json")))
+         !ReferenceFileExists(inputs.directory / "chunks/region/snapshot.json")))
         throw std::runtime_error("Heavy durable inventory requires a snapshot index");
     for (const auto& coords : inputs.chunks.durable) {
         const auto found = disk.find(Chunk::calculate_id(coords));

@@ -31,7 +31,123 @@ InputCallbackBindings& CallbackBindings(GLFWwindow* window) {
     return *static_cast<InputCallbackBindings*>(glfwGetWindowUserPointer(window));
 }
 
+void RegionPanelMouseButton(GLFWwindow* window, int button, int action, int) {
+    const auto& app = *CallbackBindings(window).app;
+    if (app.overlay.imgui_enabled && ImGui::GetCurrentContext() && button >= 0 &&
+        button < ImGuiMouseButton_COUNT)
+        ImGui::GetIO().AddMouseButtonEvent(button, action == GLFW_PRESS);
+}
+
+ImGuiKey RegionPanelKey(int key) {
+    switch (key) {
+        case GLFW_KEY_TAB:
+            return ImGuiKey_Tab;
+        case GLFW_KEY_LEFT:
+            return ImGuiKey_LeftArrow;
+        case GLFW_KEY_RIGHT:
+            return ImGuiKey_RightArrow;
+        case GLFW_KEY_UP:
+            return ImGuiKey_UpArrow;
+        case GLFW_KEY_DOWN:
+            return ImGuiKey_DownArrow;
+        case GLFW_KEY_HOME:
+            return ImGuiKey_Home;
+        case GLFW_KEY_END:
+            return ImGuiKey_End;
+        case GLFW_KEY_PAGE_UP:
+            return ImGuiKey_PageUp;
+        case GLFW_KEY_PAGE_DOWN:
+            return ImGuiKey_PageDown;
+        case GLFW_KEY_SPACE:
+            return ImGuiKey_Space;
+        case GLFW_KEY_ENTER:
+            return ImGuiKey_Enter;
+        case GLFW_KEY_ESCAPE:
+            return ImGuiKey_Escape;
+        default:
+            return ImGuiKey_None;
+    }
+}
+
 } // namespace
+
+void UpdateGameplayPlayer(const RegionPanelState& panel,
+                          PlayerController& player,
+                          float delta_time) {
+    if (panel.open) {
+        player.DiscardPendingMovementInput();
+        player.ApplyReplayInput(delta_time, PlayerReplayInputFrame{});
+    } else {
+        player.Update(delta_time);
+    }
+}
+
+PlayerVerbPresses PollPlayerVerbPresses(ClientAppContext& app,
+                                        GLFWwindow* window,
+                                        const PlayerController& player,
+                                        int (*read_key)(GLFWwindow*, int)) {
+    const auto* bindings =
+        window ? static_cast<const InputCallbackBindings*>(glfwGetWindowUserPointer(window))
+               : nullptr;
+    const auto* router = bindings ? bindings->router : nullptr;
+    const auto edge = [&](int key_code, bool& was_down) {
+        const bool down =
+            (read_key ? read_key(window, key_code) : glfwGetKey(window, key_code)) == GLFW_PRESS;
+        bool suppressed =
+            app.overlay.region_panel.open || (router && !router->GameplayKeyAllowed(key_code));
+        if (key_code >= 0 && key_code <= GLFW_KEY_LAST) {
+            auto& captured =
+                app.overlay.region_panel_captured_keys[static_cast<std::size_t>(key_code)];
+            if (!down)
+                captured = false;
+            else if (app.overlay.region_panel.open)
+                captured = true;
+            suppressed = suppressed || captured;
+        }
+        const bool fired = down && !was_down && !suppressed;
+        was_down = down;
+        return fired;
+    };
+    auto& previous = app.interactions;
+    PlayerVerbPresses presses;
+    presses.farmPlant = edge(player.key(InputAction::FarmPlant), previous.farmPlant);
+    presses.farmWater = edge(player.key(InputAction::FarmWater), previous.farmWater);
+    presses.farmFertilize = edge(player.key(InputAction::FarmFertilize), previous.farmFertilize);
+    presses.farmHarvest = edge(player.key(InputAction::FarmHarvest), previous.farmHarvest);
+    presses.farmCycleSpecies = edge(GLFW_KEY_V, previous.farmCycleSpecies);
+    presses.terraformDig = edge(GLFW_KEY_R, previous.terraformDig);
+    presses.terraformFill = edge(GLFW_KEY_T, previous.terraformFill);
+    return presses;
+}
+
+void CloseRegionPanelInput(GLFWwindow* window) {
+    auto& app = *CallbackBindings(window).app;
+    app.overlay.region_panel.open = false;
+    if (!app.overlay.region_panel_input_attached)
+        return;
+    if (ImGui::GetCurrentContext()) {
+        auto& io = ImGui::GetIO();
+        io.ClearEventsQueue();
+        io.ClearInputKeys();
+        io.ClearInputMouse();
+        // These are the previous frame's requests; the next ImGui frame recomputes them.
+        io.WantCaptureKeyboard = false;
+        io.WantCaptureMouse = false;
+        io.WantTextInput = false;
+    }
+    glfwSetMouseButtonCallback(window, app.overlay.region_panel_previous_mouse_button);
+    glfwSetCursorPosCallback(window, app.overlay.region_panel_previous_cursor);
+    glfwSetScrollCallback(window, app.overlay.region_panel_previous_scroll);
+    app.overlay.region_panel_previous_mouse_button = nullptr;
+    app.overlay.region_panel_previous_cursor = nullptr;
+    app.overlay.region_panel_previous_scroll = nullptr;
+    app.overlay.region_panel_input_attached = false;
+    RefreshInputOwnership(window);
+    if (!CallbackBindings(window).router) {
+        glfwSetInputMode(window, GLFW_CURSOR, app.overlay.region_panel_previous_cursor_mode);
+        app.input.firstMouse = true;
+    }
+}
 
 void InstallInputCallbacks(GLFWwindow* window) {
     glfwSetKeyCallback(window, key_callback);
@@ -46,6 +162,10 @@ void InstallInputCallbacks(GLFWwindow* window) {
 void RefreshInputOwnership(GLFWwindow* window) {
     auto& b = CallbackBindings(window);
     auto& app = *b.app;
+    if (app.overlay.region_panel_input_attached &&
+        (!DeveloperUiAllowed(app) || !ImGui::GetCurrentContext() || !b.in_world ||
+         !b.window_focused))
+        CloseRegionPanelInput(window);
     if (!b.router)
         return;
     const bool ui_enabled = DeveloperUiAllowed(app);
@@ -58,8 +178,10 @@ void RefreshInputOwnership(GLFWwindow* window) {
         app.hud.rebindCaptureAction >= 0 ||
         (ui_enabled && b.developerConsole && b.developerConsole->IsCapturing());
     ownership.console_open = ui_enabled && b.developerConsole && b.developerConsole->IsOpen();
-    ownership.interactive_panel = ui_enabled && b.developerConsole &&
-                                  b.developerConsole->Widgets().HasInteractivePanel("ui.debugger");
+    ownership.interactive_panel =
+        app.overlay.region_panel.open ||
+        (ui_enabled && b.developerConsole &&
+         b.developerConsole->Widgets().HasInteractivePanel("ui.debugger"));
     ownership.rml_debugger = ui_enabled && ui && ui->DeveloperDebuggerVisible();
     ownership.rml_interaction = ownership.rml_debugger || app.hud.paused || app.hud.codexOpen ||
                                 (ui && ui->HasInputInteraction());
@@ -68,7 +190,6 @@ void RefreshInputOwnership(GLFWwindow* window) {
     ownership.imgui_keyboard = imgui && ImGui::GetIO().WantCaptureKeyboard;
     ownership.imgui_mouse = imgui && ImGui::GetIO().WantCaptureMouse;
     if (b.router->SetOwnership(ownership)) {
-        app.interactions = {};
         if (auto* player = b.playerController->get())
             player->ClearQueuedLiveInput();
     }
@@ -87,14 +208,16 @@ void char_callback(GLFWwindow* window, unsigned int codepoint) {
     const auto owner = b.router ? b.router->Character(codepoint) : InputOwner::Developer;
     if (owner == InputOwner::Unfocused)
         return;
-    if (b.app->overlay.imgui_enabled && ImGui::GetCurrentContext())
+    if (b.app->overlay.imgui_enabled && ImGui::GetCurrentContext() &&
+        ImGui::GetIO().BackendPlatformUserData)
         ImGui_ImplGlfw_CharCallback(window, codepoint);
     if (owner == InputOwner::RmlUi)
         Luminumbra::Client::Rml_UIManager::CharCallback(window, codepoint);
 }
 void mouse_button_callback(GLFWwindow* window, int button, int action, int mods) {
     auto& b = CallbackBindings(window);
-    if (b.app->overlay.imgui_enabled && ImGui::GetCurrentContext())
+    if (b.app->overlay.imgui_enabled && ImGui::GetCurrentContext() &&
+        ImGui::GetIO().BackendPlatformUserData)
         ImGui_ImplGlfw_MouseButtonCallback(window, button, action, mods);
     RefreshInputOwnership(window);
     if (b.router && (b.router->Owner() == InputOwner::RmlUi || action == GLFW_RELEASE))
@@ -103,14 +226,16 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
 }
 void window_focus_callback(GLFWwindow* window, int focused) {
     auto& b = CallbackBindings(window);
-    if (b.app->overlay.imgui_enabled && ImGui::GetCurrentContext())
+    if (b.app->overlay.imgui_enabled && ImGui::GetCurrentContext() &&
+        ImGui::GetIO().BackendPlatformUserData)
         ImGui_ImplGlfw_WindowFocusCallback(window, focused);
     b.window_focused = focused != 0;
     RefreshInputOwnership(window);
 }
 void cursor_enter_callback(GLFWwindow* window, int entered) {
     auto& b = CallbackBindings(window);
-    if (b.app->overlay.imgui_enabled && ImGui::GetCurrentContext())
+    if (b.app->overlay.imgui_enabled && ImGui::GetCurrentContext() &&
+        ImGui::GetIO().BackendPlatformUserData)
         ImGui_ImplGlfw_CursorEnterCallback(window, entered);
 }
 
@@ -121,7 +246,8 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
     WindowState& windowState = *bindings.windowState;
     Luminumbra::Client::PlayerController* playerController = bindings.playerController->get();
     Luminumbra::Client::Rml_UIManager* uiManager = bindings.uiManager->get();
-    if (app.overlay.imgui_enabled && ImGui::GetCurrentContext())
+    if (!app.overlay.region_panel.open && app.overlay.imgui_enabled && ImGui::GetCurrentContext() &&
+        ImGui::GetIO().BackendPlatformUserData)
         ImGui_ImplGlfw_KeyCallback(window, key, scancode, action, mods);
     RefreshInputOwnership(window);
     auto* console = DeveloperUiAllowed(app) ? bindings.developerConsole : nullptr;
@@ -130,12 +256,62 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
         bindings.router ? bindings.router->WorldShortcutsAllowed() : bindings.in_world;
     const unsigned scope =
         worldShortcuts ? (photo ? Debug::Photo : Debug::Gameplay) : Debug::Global;
-    const auto route = DispatchDeveloperKey(console, bindings.router, key, action, mods, scope);
+    bool captured_press = false;
+    if (key >= 0 && key <= GLFW_KEY_LAST) {
+        auto& captured = app.overlay.region_panel_captured_keys[static_cast<std::size_t>(key)];
+        captured_press = captured;
+        if (action == GLFW_RELEASE)
+            captured = false;
+        else if (app.overlay.region_panel.open)
+            captured = true;
+    }
+    const bool binding_capture =
+        app.hud.rebindCaptureAction >= 0 || (console && console->IsCapturing());
+    // Panel input and its quarantined repeats must never dispatch developer actions.
+    const bool panel_owns_key =
+        app.overlay.region_panel.open || captured_press || (key == GLFW_KEY_F4 && !binding_capture);
+    const auto route =
+        panel_owns_key
+            ? (bindings.router ? bindings.router->Key(key, action, false, false) : KeyRoute::Ignore)
+            : DispatchDeveloperKey(console, bindings.router, key, action, mods, scope);
+    if (app.overlay.region_panel.open && ImGui::GetCurrentContext()) {
+        auto& io = ImGui::GetIO();
+        io.AddKeyEvent(ImGuiMod_Shift, (mods & GLFW_MOD_SHIFT) != 0);
+        if (const auto panel_key = RegionPanelKey(key);
+            panel_key != ImGuiKey_None && (action == GLFW_PRESS || action == GLFW_RELEASE))
+            io.AddKeyEvent(panel_key, action == GLFW_PRESS);
+    }
     if (action == GLFW_RELEASE) {
         if (uiManager)
             uiManager->KeyCallback(window, key, scancode, action, mods);
         return;
     }
+    // Read-only region diagnostics take ownership of interactive input.
+    if (key == GLFW_KEY_F4 && action == GLFW_PRESS && !binding_capture) {
+        if (!app.overlay.region_panel.open &&
+            (!app.overlay.region_panel_available || !DeveloperUiAllowed(app) ||
+             !bindings.window_focused || !ImGui::GetCurrentContext()))
+            return;
+        if (app.overlay.region_panel.open) {
+            CloseRegionPanelInput(window);
+            return;
+        }
+        app.overlay.region_panel.open = true;
+        // A gameplay press earlier in this event batch may already be queued.
+        if (playerController)
+            playerController->DiscardPendingMovementInput();
+        app.overlay.region_panel_previous_cursor_mode = glfwGetInputMode(window, GLFW_CURSOR);
+        app.overlay.region_panel_previous_mouse_button =
+            glfwSetMouseButtonCallback(window, RegionPanelMouseButton);
+        app.overlay.region_panel_previous_cursor = glfwSetCursorPosCallback(window, mouse_callback);
+        app.overlay.region_panel_previous_scroll = glfwSetScrollCallback(window, scroll_callback);
+        app.overlay.region_panel_input_attached = true;
+        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+        RefreshInputOwnership(window);
+        return;
+    }
+    if (app.overlay.region_panel.open || captured_press)
+        return;
     if (route == KeyRoute::Capture && console && console->IsCapturing()) {
         if (action == GLFW_PRESS)
             console->CaptureKey(key, mods);
@@ -241,8 +417,19 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
 
 void SetGameState(GLFWwindow* window, GameStateManager& gameStateManager, GameState newState) {
     InputCallbackBindings& bindings = CallbackBindings(window);
+    ClientAppContext& app = *bindings.app;
+    CloseRegionPanelInput(window);
     gameStateManager.SetState(newState);
+    app.overlay.region_panel_available = newState == GameState::IN_GAME;
     bindings.in_world = newState == GameState::IN_GAME;
+    if (!bindings.router) {
+        const bool in_world = bindings.in_world;
+        glfwSetInputMode(window, GLFW_CURSOR, in_world ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
+        glfwSetCursorPosCallback(window, in_world ? mouse_callback : nullptr);
+        glfwSetScrollCallback(window, in_world ? scroll_callback : nullptr);
+        glfwSetMouseButtonCallback(window, nullptr);
+        app.input.firstMouse = true;
+    }
     if (bindings.developerConsole)
         bindings.developerConsole->RefreshAvailability();
     RefreshInputOwnership(window);
@@ -262,8 +449,14 @@ void SetGamePaused(GLFWwindow* window, bool paused) {
 void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
     InputCallbackBindings& bindings = CallbackBindings(window);
     ClientAppContext& app = *bindings.app;
+    if (app.overlay.region_panel.open) {
+        if (app.overlay.imgui_enabled && ImGui::GetCurrentContext())
+            ImGui::GetIO().AddMousePosEvent(static_cast<float>(xpos), static_cast<float>(ypos));
+        return;
+    }
     Luminumbra::Rendering::Camera* camera = bindings.camera->get();
-    if (app.overlay.imgui_enabled && ImGui::GetCurrentContext())
+    if (app.overlay.imgui_enabled && ImGui::GetCurrentContext() &&
+        ImGui::GetIO().BackendPlatformUserData)
         ImGui_ImplGlfw_CursorPosCallback(window, xpos, ypos);
     RefreshInputOwnership(window);
     if (bindings.router && bindings.router->Owner() == InputOwner::RmlUi) {
@@ -288,10 +481,17 @@ void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
 void scroll_callback(GLFWwindow* window, double xoffset, double yoffset) {
     InputCallbackBindings& bindings = CallbackBindings(window);
     ClientAppContext& app = *bindings.app;
+    if (app.overlay.region_panel.open) {
+        if (app.overlay.imgui_enabled && ImGui::GetCurrentContext())
+            ImGui::GetIO().AddMouseWheelEvent(static_cast<float>(xoffset),
+                                              static_cast<float>(yoffset));
+        return;
+    }
     Luminumbra::Rendering::Camera* camera = bindings.camera->get();
     Luminumbra::Client::PlayerController* playerController = bindings.playerController->get();
     Luminumbra::Client::Rml_UIManager* uiManager = bindings.uiManager->get();
-    if (app.overlay.imgui_enabled && ImGui::GetCurrentContext())
+    if (app.overlay.imgui_enabled && ImGui::GetCurrentContext() &&
+        ImGui::GetIO().BackendPlatformUserData)
         ImGui_ImplGlfw_ScrollCallback(window, xoffset, yoffset);
     RefreshInputOwnership(window);
     if (bindings.router && bindings.router->Owner() == InputOwner::RmlUi) {
