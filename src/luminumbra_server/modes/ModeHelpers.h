@@ -52,6 +52,9 @@ struct RuntimeTcpClientSlot {
 };
 
 Luminumbra::Server::ServerWorldRunnerConfig RunnerConfigFrom(const ServerCliOptions& options);
+Luminumbra::Server::ServerWorldRunnerConfig
+ReplayRunnerConfigFrom(const ServerCliOptions& options,
+                       const Luminumbra::Replay::ReplayHeader& header);
 std::uint32_t ExpectedNetworkClients(const ServerCliOptions& options);
 std::uint32_t LocalNetworkPlayerId(const ServerCliOptions& options);
 bool ResolveNetworkClientPort(std::uint16_t base_port,

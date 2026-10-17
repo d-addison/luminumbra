@@ -3551,6 +3551,636 @@
       "source": "docs/active-regions.md#file-and-compatibility",
       "quote": "Presets now use revision 8 with revision-6 omission compatibility and frozen packaged-preset fallback.",
       "text": "Presets now use revision 8 with revision-6 omission compatibility and frozen packaged-preset fallback."
+    },
+    {
+      "id": "dw.station.001",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "`luminumbra_station_discovery` is a CPU-only tool linked to `luminumbra_common`.",
+      "text": "`luminumbra_station_discovery` is a CPU-only tool linked to `luminumbra_common`."
+    },
+    {
+      "id": "dw.station.002",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "It loads the canonical preset parser with an explicit data root, then constructs an unstreamed query world with no jobs or water system.",
+      "text": "It loads the canonical preset parser with an explicit data root, then constructs an unstreamed query world with no jobs or water system."
+    },
+    {
+      "id": "dw.station.003",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Discovery reads terrain;",
+      "text": "Discovery reads terrain;"
+    },
+    {
+      "id": "dw.station.004",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "it does not create a live session, edit terrain, change generation numerics or produce native qualification evidence.",
+      "text": "it does not create a live session, edit terrain, change generation numerics or produce native qualification evidence."
+    },
+    {
+      "id": "dw.station.005",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "```text luminumbra_station_discovery --preset-json PRESET --data-root DATA --seed INTEGER --kind mouth|arch|horizon|coverage --origin-mm X Z --radius-m R --y-range-m MIN MAX --view-distance-m D --limit N ```",
+      "text": "```text luminumbra_station_discovery --preset-json PRESET --data-root DATA --seed INTEGER --kind mouth|arch|horizon|coverage --origin-mm X Z --radius-m R --y-range-m MIN MAX --view-distance-m D --limit N ```"
+    },
+    {
+      "id": "dw.station.006",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "All flags are required exactly once.",
+      "text": "All flags are required exactly once."
+    },
+    {
+      "id": "dw.station.007",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "`DATA` names the data directory, not the repository root.",
+      "text": "`DATA` names the data directory, not the repository root."
+    },
+    {
+      "id": "dw.station.008",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "The seed is 0 through 2147483615, R is 1 through 16384 metres, D is 0 through 16384 metres and N is 1 through 64.",
+      "text": "The seed is 0 through 2147483615, R is 1 through 16384 metres, D is 0 through 16384 metres and N is 1 through 64."
+    },
+    {
+      "id": "dw.station.009",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Search radius and horizontal camera-to-feature distance are independent.",
+      "text": "Search radius and horizontal camera-to-feature distance are independent."
+    },
+    {
+      "id": "dw.station.010",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Absolute eye positions use metres, Y-up, and exactly the game's scene-set fields `{x,y,z,yaw,pitch}`.",
+      "text": "Absolute eye positions use metres, Y-up, and exactly the game's scene-set fields `{x,y,z,yaw,pitch}`."
+    },
+    {
+      "id": "dw.station.011",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Angles use degrees: yaw zero faces +X, positive yaw faces +Z, positive pitch points upward.",
+      "text": "Angles use degrees: yaw zero faces +X, positive yaw faces +Z, positive pitch points upward."
+    },
+    {
+      "id": "dw.station.012",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Feature orientation uses `DeterministicMath`, with yaw in [-180,180) and pitch clamped to [-89,89].",
+      "text": "Feature orientation uses `DeterministicMath`, with yaw in [-180,180) and pitch clamped to [-89,89]."
+    },
+    {
+      "id": "dw.station.013",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Success writes one compact, key-sorted UTF-8 JSON document and a final LF to stdout;",
+      "text": "Success writes one compact, key-sorted UTF-8 JSON document and a final LF to stdout;"
+    },
+    {
+      "id": "dw.station.014",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "diagnostics go to stderr.",
+      "text": "diagnostics go to stderr."
+    },
+    {
+      "id": "dw.station.015",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "`luminumbra.station-discovery.v1` includes `engine_revision`, `inputs_sha256`, `algorithm: \"sampled-portals.v1\"`, `numeric_profile: \"canonical-worldgen.v1\"`, `certified: false`, seed, the echoed query and candidates.",
+      "text": "`luminumbra.station-discovery.v1` includes `engine_revision`, `inputs_sha256`, `algorithm: \"sampled-portals.v1\"`, `numeric_profile: \"canonical-worldgen.v1\"`, `certified: false`, seed, the echoed query and candidates."
+    },
+    {
+      "id": "dw.station.016",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Candidates contain only an ID, an integer-millimetre `anchor_mm: [x,y,z]` and the five-field pose.",
+      "text": "Candidates contain only an ID, an integer-millimetre `anchor_mm: [x,y,z]` and the five-field pose."
+    },
+    {
+      "id": "dw.station.017",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "The closed JSON Schema 2020-12 is exported by `python3 -I -B tools/gates/station_discovery_contract.py --schema`;",
+      "text": "The closed JSON Schema 2020-12 is exported by `python3 -I -B tools/gates/station_discovery_contract.py --schema`;"
+    },
+    {
+      "id": "dw.station.018",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "the same stdlib module validates types, bounds, IDs and ordering.",
+      "text": "the same stdlib module validates types, bounds, IDs and ordering."
+    },
+    {
+      "id": "dw.station.019",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Its `--input` mode accepts independent `--expected-engine-revision` and `--expected-inputs-sha256` pins;",
+      "text": "Its `--input` mode accepts independent `--expected-engine-revision` and `--expected-inputs-sha256` pins;"
+    },
+    {
+      "id": "dw.station.020",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "`--require-certified` currently refuses every result.",
+      "text": "`--require-certified` currently refuses every result."
+    },
+    {
+      "id": "dw.station.021",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Neither schema validation nor a discovery pose certifies native terrain visibility or continuous cave topology.",
+      "text": "Neither schema validation nor a discovery pose certifies native terrain visibility or continuous cave topology."
+    },
+    {
+      "id": "dw.station.022",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "The build revision is pinned by `LUMINUMBRA_STATION_ENGINE_REVISION` at configure time, defaulting to the checkout revision when Git is available.",
+      "text": "The build revision is pinned by `LUMINUMBRA_STATION_ENGINE_REVISION` at configure time, defaulting to the checkout revision when Git is available."
+    },
+    {
+      "id": "dw.station.023",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Input identity is SHA-256 of a compact key-sorted UTF-8 JSON manifest (non-ASCII names remain unescaped, no final LF), mapping logical relative names to exact-byte SHA-256 digests.",
+      "text": "Input identity is SHA-256 of a compact key-sorted UTF-8 JSON manifest (non-ASCII names remain unescaped, no final LF), mapping logical relative names to exact-byte SHA-256 digests."
+    },
+    {
+      "id": "dw.station.024",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "The preset is `preset.json`;",
+      "text": "The preset is `preset.json`;"
+    },
+    {
+      "id": "dw.station.025",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "consumed biome, structure and species inputs use `data/<relative-name>`.",
+      "text": "consumed biome, structure and species inputs use `data/<relative-name>`."
+    },
+    {
+      "id": "dw.station.026",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Structure inputs include optional placement files and every consumed piece in each type directory.",
+      "text": "Structure inputs include optional placement files and every consumed piece in each type directory."
+    },
+    {
+      "id": "dw.station.027",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Absolute paths, timestamps, timings and session content identities are excluded.",
+      "text": "Absolute paths, timestamps, timings and session content identities are excluded."
+    },
+    {
+      "id": "dw.station.028",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Each input file is limited to 1048576 bytes and each snapshot (preset plus dependencies) to 8388608 bytes, checked before allocating file contents.",
+      "text": "Each input file is limited to 1048576 bytes and each snapshot (preset plus dependencies) to 8388608 bytes, checked before allocating file contents."
+    },
+    {
+      "id": "dw.station.029",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Exceeding any byte, entry or pathname limit exits 1 with an `input-limit` refusal and empty stdout.",
+      "text": "Exceeding any byte, entry or pathname limit exits 1 with an `input-limit` refusal and empty stdout."
+    },
+    {
+      "id": "dw.station.030",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Dependency bytes and structure integer domains are validated before the preset loader can consume them.",
+      "text": "Dependency bytes and structure integer domains are validated before the preset loader can consume them."
+    },
+    {
+      "id": "dw.station.031",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Their names/bytes are checked again after discovery;",
+      "text": "Their names/bytes are checked again after discovery;"
+    },
+    {
+      "id": "dw.station.032",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "observable changes refuse the whole result.",
+      "text": "observable changes refuse the whole result."
+    },
+    {
+      "id": "dw.station.033",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Run against immutable pinned inputs;",
+      "text": "Run against immutable pinned inputs;"
+    },
+    {
+      "id": "dw.station.034",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "these checks do not promise exclusion of every concurrent filesystem race.",
+      "text": "these checks do not promise exclusion of every concurrent filesystem race."
+    },
+    {
+      "id": "dw.station.035",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "`sampled-portals.v1` freezes the following sampled predicate.",
+      "text": "`sampled-portals.v1` freezes the following sampled predicate."
+    },
+    {
+      "id": "dw.station.036",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Enumerate all seeded surface-break cells whose footprints can intersect the search disk, using the same placement decoder as `FindLargestSurfaceBreak`.",
+      "text": "Enumerate all seeded surface-break cells whose footprints can intersect the search disk, using the same placement decoder as `FindLargestSurfaceBreak`."
+    },
+    {
+      "id": "dw.station.037",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Scan global 4 m lattice anchors inside each accepted footprint and the query disk.",
+      "text": "Scan global 4 m lattice anchors inside each accepted footprint and the query disk."
+    },
+    {
+      "id": "dw.station.038",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Loop ranges are clipped to the disk row by row and to Y values that fit the 12 m stencil;",
+      "text": "Loop ranges are clipped to the disk row by row and to Y values that fit the 12 m stencil;"
+    },
+    {
+      "id": "dw.station.039",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "a span with no such lattice Y returns an empty feature catalogue without visits.",
+      "text": "a span with no such lattice Y returns an empty feature catalogue without visits."
+    },
+    {
+      "id": "dw.station.040",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Local index still refers to the full feature bounding box over Z, X, then Y, including skipped lattice points.",
+      "text": "Local index still refers to the full feature bounding box over Z, X, then Y, including skipped lattice points."
+    },
+    {
+      "id": "dw.station.041",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "At an anchor, air requires density >= 0.25 and solid requires density <= -0.25.",
+      "text": "At an anchor, air requires density >= 0.25 and solid requires density <= -0.25."
+    },
+    {
+      "id": "dw.station.042",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "A mouth has an air anchor, a solid roof at Y+4, and a straight face-connected path through air at 4 and 8 metres along an ordered cardinal direction.",
+      "text": "A mouth has an air anchor, a solid roof at Y+4, and a straight face-connected path through air at 4 and 8 metres along an ordered cardinal direction."
+    },
+    {
+      "id": "dw.station.043",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "The 8 m endpoint is exterior only when it and its Y+4/+8/+12 samples are air.",
+      "text": "The 8 m endpoint is exterior only when it and its Y+4/+8/+12 samples are air."
+    },
+    {
+      "id": "dw.station.044",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "An arch additionally requires that access on the opposite side, solid transverse supports at +/-4 m at anchor Y, and solid roof samples above both supports at Y+4.",
+      "text": "An arch additionally requires that access on the opposite side, solid transverse supports at +/-4 m at anchor Y, and solid roof samples above both supports at Y+4."
+    },
+    {
+      "id": "dw.station.045",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "All stencil Y samples must fit within the requested span.",
+      "text": "All stencil Y samples must fit within the requested span."
+    },
+    {
+      "id": "dw.station.046",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "These are sampled mouth/arch candidates;",
+      "text": "These are sampled mouth/arch candidates;"
+    },
+    {
+      "id": "dw.station.047",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "an accepted doline alone is insufficient to classify either.",
+      "text": "an accepted doline alone is insufficient to classify either."
+    },
+    {
+      "id": "dw.station.048",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "For each feature, try viewing directions +X, +Z, -X, -Z in that order, placing the eye D metres behind the anchor.",
+      "text": "For each feature, try viewing directions +X, +Z, -X, -Z in that order, placing the eye D metres behind the anchor."
+    },
+    {
+      "id": "dw.station.049",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Eye Y is the larger of anchor Y+1.8 and terrain height at the eye XZ+1.8.",
+      "text": "Eye Y is the larger of anchor Y+1.8 and terrain height at the eye XZ+1.8."
+    },
+    {
+      "id": "dw.station.050",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Require air at the eye and its six axis offsets of 0.5 m, then along the eye-to-anchor sightline at equally spaced intervals of at most 4 m, including the anchor.",
+      "text": "Require air at the eye and its six axis offsets of 0.5 m, then along the eye-to-anchor sightline at equally spaced intervals of at most 4 m, including the anchor."
+    },
+    {
+      "id": "dw.station.051",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "The interval count is `max(1, ceil((D + abs(anchor_Y - eye_Y)) / 4))`, using the cardinal path's length bound.",
+      "text": "The interval count is `max(1, ceil((D + abs(anchor_Y - eye_Y)) / 4))`, using the cardinal path's length bound."
+    },
+    {
+      "id": "dw.station.052",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Candidates without a clear sampled pose are omitted.",
+      "text": "Candidates without a clear sampled pose are omitted."
+    },
+    {
+      "id": "dw.station.053",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "The completed catalogue is ranked by squared integer-millimetre XZ anchor distance, then signed cell Z, signed cell X and local index;",
+      "text": "The completed catalogue is ranked by squared integer-millimetre XZ anchor distance, then signed cell Z, signed cell X and local index;"
+    },
+    {
+      "id": "dw.station.054",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "apply N after ranking.",
+      "text": "apply N after ranking."
+    },
+    {
+      "id": "dw.station.055",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "IDs encode kind and signed cells (`n` negative, `p` nonnegative) plus local index, so ties and negative coordinates have a stable identity.",
+      "text": "IDs encode kind and signed cells (`n` negative, `p` nonnegative) plus local index, so ties and negative coordinates have a stable identity."
+    },
+    {
+      "id": "dw.station.056",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Mouth ranking does not select the largest opening.",
+      "text": "Mouth ranking does not select the largest opening."
+    },
+    {
+      "id": "dw.station.057",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Sampled terrain heights used for poses and control anchors are rounded upward to millimetres to preserve the minimum terrain clearance.",
+      "text": "Sampled terrain heights used for poses and control anchors are rounded upward to millimetres to preserve the minimum terrain clearance."
+    },
+    {
+      "id": "dw.station.058",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "`horizon` returns up to four control views at the query origin, 1.8 m above terrain, with yaw 0/90/-180/-90 and pitch zero.",
+      "text": "`horizon` returns up to four control views at the query origin, 1.8 m above terrain, with yaw 0/90/-180/-90 and pitch zero."
+    },
+    {
+      "id": "dw.station.059",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "`coverage` adds the 80 m elevated view, yaw 45 and pitch -20.",
+      "text": "`coverage` adds the 80 m elevated view, yaw 45 and pitch -20."
+    },
+    {
+      "id": "dw.station.060",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "All controls share the terrain anchor Y sampled once at that origin.",
+      "text": "All controls share the terrain anchor Y sampled once at that origin."
+    },
+    {
+      "id": "dw.station.061",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Control IDs explicitly contain `-control-`;",
+      "text": "Control IDs explicitly contain `-control-`;"
+    },
+    {
+      "id": "dw.station.062",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "they do not discover features, and D is echoed but does not reposition them.",
+      "text": "they do not discover features, and D is echoed but does not reposition them."
+    },
+    {
+      "id": "dw.station.063",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "They also require sampled eye clearance and the requested Y span.",
+      "text": "They also require sampled eye clearance and the requested Y span."
+    },
+    {
+      "id": "dw.station.064",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Neither kind claims that any tier is covered or settled.",
+      "text": "Neither kind claims that any tier is covered or settled."
+    },
+    {
+      "id": "dw.station.065",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Refuse inverted vertical spans, spans over 512 m, horizontal coordinates or search/pose/stencil footprints beyond +/-2^23 metres, more than 262144 enumerated cells, more than 16777216 lattice visits, or more than 1677721",
+      "text": "Refuse inverted vertical spans, spans over 512 m, horizontal coordinates or search/pose/stencil footprints beyond +/-2^23 metres, more than 262144 enumerated cells, more than 16777216 lattice visits, or more than 16777216 density samples."
+    },
+    {
+      "id": "dw.station.066",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Every visited Z/X/Y anchor counts, including those rejected before sampling;",
+      "text": "Every visited Z/X/Y anchor counts, including those rejected before sampling;"
+    },
+    {
+      "id": "dw.station.067",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "the read-only `StationDiscoveryResult::lattice_visits` diagnostic remains available on refusal.",
+      "text": "the read-only `StationDiscoveryResult::lattice_visits` diagnostic remains available on refusal."
+    },
+    {
+      "id": "dw.station.068",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Exceeding any budget discards all candidates.",
+      "text": "Exceeding any budget discards all candidates."
+    },
+    {
+      "id": "dw.station.069",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Work limits count operations, never elapsed time.",
+      "text": "Work limits count operations, never elapsed time."
+    },
+    {
+      "id": "dw.station.070",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Unsupported/nonfinite sampling also refuses.",
+      "text": "Unsupported/nonfinite sampling also refuses."
+    },
+    {
+      "id": "dw.station.071",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "CLI usage errors (missing, repeated or unknown flags, invalid integer syntax, or an unknown kind) exit 2;",
+      "text": "CLI usage errors (missing, repeated or unknown flags, invalid integer syntax, or an unknown kind) exit 2;"
+    },
+    {
+      "id": "dw.station.072",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "integer overflow, out-of-range query values, missing/invalid input files, parser warnings or clamping, unsupported numerics, and budget exhaustion exit 1 with no partial success on stdout.",
+      "text": "integer overflow, out-of-range query values, missing/invalid input files, parser warnings or clamping, unsupported numerics, and budget exhaustion exit 1 with no partial success on stdout."
+    },
+    {
+      "id": "dw.station.073",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Completed empty/disabled catalogues exit 0 with `candidates: []`.",
+      "text": "Completed empty/disabled catalogues exit 0 with `candidates: []`."
+    },
+    {
+      "id": "dw.station.074",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Output writes are checked through completion;",
+      "text": "Output writes are checked through completion;"
+    },
+    {
+      "id": "dw.station.075",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "a write or flush failure exits 1.",
+      "text": "a write or flush failure exits 1."
+    },
+    {
+      "id": "dw.station.076",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "The tool currently permits exploratory results only on the existing x86-64 AVX2 query path with IEEE binary32 and round-to-nearest;",
+      "text": "The tool currently permits exploratory results only on the existing x86-64 AVX2 query path with IEEE binary32 and round-to-nearest;"
+    },
+    {
+      "id": "dw.station.077",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "unsupported ISA or FP paths refuse before constructing the world.",
+      "text": "unsupported ISA or FP paths refuse before constructing the world."
+    },
+    {
+      "id": "dw.station.078",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Defensive preset refusals include JSON nesting above 128, noninteger/out-of-range integer fields, octaves outside 1..32, hydro iterations outside 0..512, malformed optional blocks/spline pairs, and enabled feature radii ",
+      "text": "Defensive preset refusals include JSON nesting above 128, noninteger/out-of-range integer fields, octaves outside 1..32, hydro iterations outside 0..512, malformed optional blocks/spline pairs, and enabled feature radii below the decoder's 3 m minimum."
+    },
+    {
+      "id": "dw.station.079",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "These checks apply to discovery only;",
+      "text": "These checks apply to discovery only;"
+    },
+    {
+      "id": "dw.station.080",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "they do not change the preset loader or terrain generation.",
+      "text": "they do not change the preset loader or terrain generation."
+    },
+    {
+      "id": "dw.station.081",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Enabled hydro also requires finite nonnegative parameters, thermal/deposition/ evaporation fractions in 0..1, and cell sizes at least 2^-39 m (keeping the horizontal domain within +/-2^62 erosion cells).",
+      "text": "Enabled hydro also requires finite nonnegative parameters, thermal/deposition/ evaporation fractions in 0..1, and cell sizes at least 2^-39 m (keeping the horizontal domain within +/-2^62 erosion cells)."
+    },
+    {
+      "id": "dw.station.082",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Discovery checks the complete query footprint and the 64-cell region's iterations+8 halo before constructing the world.",
+      "text": "Discovery checks the complete query footprint and the 64-cell region's iterations+8 halo before constructing the world."
+    },
+    {
+      "id": "dw.station.083",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Structure placement integers, box minima/extents and resulting maxima, socket positions and byte material IDs are checked before the pool loader converts them.",
+      "text": "Structure placement integers, box minima/extents and resulting maxima, socket positions and byte material IDs are checked before the pool loader converts them."
+    },
+    {
+      "id": "dw.station.084",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "World-backed discovery holds one shared worldgen epoch across the catalogue snapshot and every sample;",
+      "text": "World-backed discovery holds one shared worldgen epoch across the catalogue snapshot and every sample;"
+    },
+    {
+      "id": "dw.station.085",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "callers must not already hold the world's non-recursive sample scope.",
+      "text": "callers must not already hold the world's non-recursive sample scope."
+    },
+    {
+      "id": "dw.station.086",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "The numeric-profile name reserves the intended contract, while `certified: false` explicitly records that shared canonical worldgen numerics and identical GCC/MSVC/UCRT real-seed goldens remain prerequisites for certific",
+      "text": "The numeric-profile name reserves the intended contract, while `certified: false` explicitly records that shared canonical worldgen numerics and identical GCC/MSVC/UCRT real-seed goldens remain prerequisites for certification."
+    },
+    {
+      "id": "dw.station.087",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Existing terrain libm/noise usage is unchanged.",
+      "text": "Existing terrain libm/noise usage is unchanged."
+    },
+    {
+      "id": "dw.station.088",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Synthetic topology fixtures establish mouth/arch predicates, signed ranking, pose clearance/directions, budgets, controls and shared-placement parity;",
+      "text": "Synthetic topology fixtures establish mouth/arch predicates, signed ranking, pose clearance/directions, budgets, controls and shared-placement parity;"
+    },
+    {
+      "id": "dw.station.089",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "real-seed cross-platform goldens are a follow-up, not invented expectations.",
+      "text": "real-seed cross-platform goldens are a follow-up, not invented expectations."
+    },
+    {
+      "id": "dw.station.090",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "The stdlib contract tests and CPU CLI repeat/refusal smoke are ordinary CTest entries without manual or GPU guards.",
+      "text": "The stdlib contract tests and CPU CLI repeat/refusal smoke are ordinary CTest entries without manual or GPU guards."
+    },
+    {
+      "id": "dw.station.091",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Discovery emits no `settled` or qualification claims.",
+      "text": "Discovery emits no `settled` or qualification claims."
+    },
+    {
+      "id": "dw.station.092",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Native pose/name manifest capture integration remains required before these arbitrary poses can qualify through the horizon harness.",
+      "text": "Native pose/name manifest capture integration remains required before these arbitrary poses can qualify through the horizon harness."
+    },
+    {
+      "id": "dw.station.093",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Each station's clock must begin when its exact pose and world/render binding are applied, with readiness inclusive at 90 s.",
+      "text": "Each station's clock must begin when its exact pose and world/render binding are applied, with readiness inclusive at 90 s."
+    },
+    {
+      "id": "dw.station.094",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Recompute expected per-tier coverage independently from that camera: current `Uploaded` and valid `Empty` tiles cover;",
+      "text": "Recompute expected per-tier coverage independently from that camera: current `Uploaded` and valid `Empty` tiles cover;"
+    },
+    {
+      "id": "dw.station.095",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "merely `Ready`, stale generation/binding or insufficient-span tiles do not.",
+      "text": "merely `Ready`, stale generation/binding or insufficient-span tiles do not."
+    },
+    {
+      "id": "dw.station.096",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Complete coverage, sky <=2%, zero seam bands and zero outer edge remain separate native qualification gates, with receipts for every row/profile/display.",
+      "text": "Complete coverage, sky <=2%, zero seam bands and zero outer edge remain separate native qualification gates, with receipts for every row/profile/display."
+    },
+    {
+      "id": "dw.station.097",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Existing deadline, empty-tile, stale-generation, span and water refusal tests remain in force.",
+      "text": "Existing deadline, empty-tile, stale-generation, span and water refusal tests remain in force."
+    },
+    {
+      "id": "dw.station.098",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Custom-station manifest mismatch controls belong to that capture integration.",
+      "text": "Custom-station manifest mismatch controls belong to that capture integration."
+    },
+    {
+      "id": "dw.station.099",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Deep-interior discovery is a separate follow-up;",
+      "text": "Deep-interior discovery is a separate follow-up;"
+    },
+    {
+      "id": "dw.station.100",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "this tool does not complete the game's entire scene set.",
+      "text": "this tool does not complete the game's entire scene set."
+    },
+    {
+      "id": "dw.station.101",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Species files are captured even when biome and structure generation are disabled.",
+      "text": "Species files are captured even when biome and structure generation are disabled."
+    },
+    {
+      "id": "dw.station.102",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Captured files and structure type directories share limits of 4096 entries and 1048576 bytes of logical UTF-8 pathname storage, including the preset key and `data/` prefixes.",
+      "text": "Captured files and structure type directories share limits of 4096 entries and 1048576 bytes of logical UTF-8 pathname storage, including the preset key and `data/` prefixes."
+    },
+    {
+      "id": "dw.station.103",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Each file is parsed and validated as it is captured, before its bytes enter the snapshot.",
+      "text": "Each file is parsed and validated as it is captured, before its bytes enter the snapshot."
+    },
+    {
+      "id": "dw.station.104",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "The loader reads only the validated captured bytes.",
+      "text": "The loader reads only the validated captured bytes."
+    },
+    {
+      "id": "dw.station.105",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Logical dependency names must be relative portable UTF-8 paths without root names, root directories, traversal components, backslashes, colons or NULs.",
+      "text": "Logical dependency names must be relative portable UTF-8 paths without root names, root directories, traversal components, backslashes, colons or NULs."
     }
   ],
   "exclusions": [

@@ -33,6 +33,8 @@ struct ServerWorldRunnerConfig {
     std::string root_path;
     std::optional<luminumbra::core::SystemConfig> systems_config_override;
     std::optional<std::string> preset_json_override;
+    // Playback preserves historical omission; fresh worlds select current sampling.
+    world::TerrainPresetUse preset_use = world::TerrainPresetUse::NewWorld;
     std::string world_name = "Headless Server World";
     std::string seed = "424242";
     // World preset name (worlds/atlas/presets/<preset>.json).

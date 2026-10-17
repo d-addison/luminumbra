@@ -282,7 +282,8 @@ bool ServerWorldRunner::Boot() {
             m_config.world_name,
             m_config.seed,
             m_config.preset,
-            m_config.preset_json_override ? &*m_config.preset_json_override : nullptr);
+            m_config.preset_json_override ? &*m_config.preset_json_override : nullptr,
+            m_config.preset_use);
     }
     if (!world_ready) {
         m_bootError = m_session->GetWorldOpenError();

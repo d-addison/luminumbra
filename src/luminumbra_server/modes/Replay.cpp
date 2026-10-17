@@ -180,19 +180,7 @@ int RunReplay(const ServerCliOptions& options) {
     }
 
     // Boot the session from the header parameters (mirror ServerWorldRunnerConfig).
-    Luminumbra::Server::ServerWorldRunnerConfig config;
-    config.root_path = options.root;
-    config.systems_config_override = options.systems_config_override;
-    config.preset_json_override = options.preset_json_override;
-    config.seed = header.seed_string;
-    config.preset = header.preset;
-    config.world_id.clear();
-    config.world_name = "Replay Playback";
-    config.surface_radius = static_cast<int>(header.surface_radius);
-    config.collision_radius = static_cast<int>(header.collision_radius);
-    config.test_streaming_radius_cap = options.test_streaming_radius_cap;
-    config.autosave_interval_ticks = 0;
-    config.region_scheduler = RunnerConfigFrom(options).region_scheduler;
+    auto config = ReplayRunnerConfigFrom(options, header);
 
     Luminumbra::Server::ServerWorldRunner runner(std::move(config));
     if (!runner.Boot()) {

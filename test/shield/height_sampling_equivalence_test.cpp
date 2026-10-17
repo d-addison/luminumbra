@@ -340,6 +340,123 @@ TEST(HeightSamplingCompatibility, ActivationUsesSavedRevision) {
     }
 }
 
+TEST(HeightSamplingContract, ChunkMaterialWorkReusesHydroLakeAndFeatureCells) {
+    const auto loaded = Luminumbra::world::LoadTerrainPreset(PresetPath("default"));
+    ASSERT_TRUE(loaded.ok);
+    auto params = loaded.params;
+    params.surface_sampling_revision = Luminumbra::Systems::kSurfaceSamplingRevision;
+    params.hydro_enabled = true;
+    params.hydro_iterations = 1;
+    params.lakes_enabled = true;
+    params.surface_breaks_enabled = true;
+    params.cliffs_enabled = true;
+    const SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    for (const float seam : {-1536.0f, 1536.0f}) {
+        // 1536 is shared by the 512 m hydro and 768 m lake grids. Start just
+        // before it to exercise all four regions, including negative floor division.
+        std::vector<Vec3> positions;
+        for (int z = 0; z <= Luminumbra::CHUNK_SIZE_Z; ++z) {
+            for (int x = 0; x <= Luminumbra::CHUNK_SIZE_X; ++x) {
+                const float wx = seam - 0.25f + static_cast<float>(x);
+                const float wz = seam - 0.25f + static_cast<float>(z);
+                const float height = world.GetTerrainHeightAt(wx, wz);
+                for (const float dy : {-1.0f, 0.0f, 1.0f})
+                    positions.emplace_back(wx, height + dy, wz);
+            }
+        }
+        std::vector<Luminumbra::u32> materials(positions.size());
+        SHIELD_WorldSystem::MaterialSamplingWork work;
+        world.ClassifyVertexMaterials(positions.data(), positions.size(), materials.data(), &work);
+        EXPECT_EQ(work.shaped_columns, positions.size() / 3);
+        EXPECT_EQ(work.hydro_regions, 4u);
+        EXPECT_EQ(work.lake_cells, 4u);
+        EXPECT_GT(work.surface_break_cells, 0u);
+        EXPECT_LE(work.surface_break_cells, 16u);
+        for (std::size_t i = 0; i < positions.size(); ++i) {
+            const auto& position = positions[i];
+            auto expected = world.SampleWorldGenLayers(position - Vec3(0.0f, 0.25f, 0.0f)).material;
+            if (expected == Luminumbra::MaterialType::Air ||
+                expected == Luminumbra::MaterialType::Water) {
+                expected = world.SurfaceMaterialForColumn(
+                    position.y - 0.1f,
+                    world.GetTerrainHeightAt(position.x, position.z),
+                    world.BiomeIdAt(position.x, position.z),
+                    world.RiverInfluenceAt(position.x, position.z) > 0.25f);
+            }
+            EXPECT_EQ(materials[i], static_cast<Luminumbra::u32>(expected));
+        }
+    }
+    SHIELD_WorldSystem::MaterialSamplingWork empty{1, 1, 1, 1};
+    world.ClassifyVertexMaterials(nullptr, 0, nullptr, &empty);
+    EXPECT_EQ(empty.shaped_columns, 0u);
+    EXPECT_EQ(empty.hydro_regions, 0u);
+    EXPECT_EQ(empty.lake_cells, 0u);
+    EXPECT_EQ(empty.surface_break_cells, 0u);
+    const auto too_many = static_cast<std::size_t>(std::numeric_limits<int>::max()) + 1;
+    EXPECT_THROW(world.ClassifyVertexMaterials(nullptr, too_many, nullptr), std::length_error);
+}
+
+TEST(HeightSamplingContract, MaterialWorkingSetsEvictWithoutChangingResults) {
+    const auto loaded = Luminumbra::world::LoadTerrainPreset(PresetPath("default"));
+    ASSERT_TRUE(loaded.ok);
+    auto params = loaded.params;
+    params.surface_sampling_revision = Luminumbra::Systems::kSurfaceSamplingRevision;
+    params.hydro_enabled = true;
+    params.hydro_iterations = 1;
+    params.lakes_enabled = true;
+    params.surface_breaks_enabled = true;
+    const SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    std::array<Vec3, 8> positions{};
+    // Seven distinct working sets overflow each fixed cache; revisit the first.
+    for (std::size_t i = 0; i + 1 < positions.size(); ++i) {
+        const float coordinate = static_cast<float>(i) * 1536.0f + 0.25f;
+        positions[i] = Vec3(coordinate, 50.0f, coordinate);
+    }
+    positions.back() = positions.front();
+    std::array<Luminumbra::u32, 8> batched{}, scalar{};
+    world.ClassifyVertexMaterials(positions.data(), positions.size(), batched.data());
+    for (std::size_t i = 0; i < positions.size(); ++i)
+        world.ClassifyVertexMaterials(&positions[i], 1, &scalar[i]);
+    EXPECT_EQ(batched, scalar);
+    EXPECT_EQ(batched.front(), batched.back());
+
+    // More distinct columns than the direct-mapped cache can retain force
+    // collisions. Revisit them with distinct vertical offsets and fresh-call oracles.
+    std::vector<Vec3> collision_positions;
+    for (int z = 0; z < 16; ++z) {
+        for (int x = 0; x < 32; ++x) {
+            const float wx = static_cast<float>(x) * 0.5f + 0.25f;
+            const float wz = static_cast<float>(z) + 0.25f;
+            collision_positions.emplace_back(wx, world.GetTerrainHeightAt(wx, wz), wz);
+        }
+    }
+    for (std::size_t i = 0; i < 512; ++i)
+        collision_positions.push_back(collision_positions[i] + Vec3(0.0f, -4.0f, 0.0f));
+    std::vector<Luminumbra::u32> collision_materials(collision_positions.size());
+    SHIELD_WorldSystem::MaterialSamplingWork collision_work;
+    world.ClassifyVertexMaterials(collision_positions.data(),
+                                  collision_positions.size(),
+                                  collision_materials.data(),
+                                  &collision_work);
+    EXPECT_GT(collision_work.shaped_columns, 512u);
+    EXPECT_LE(collision_work.shaped_columns, collision_positions.size());
+    for (std::size_t i = 0; i < collision_positions.size(); ++i) {
+        Luminumbra::u32 expected = 0;
+        world.ClassifyVertexMaterials(&collision_positions[i], 1, &expected);
+        EXPECT_EQ(collision_materials[i], expected);
+    }
+
+    params.hydro_enabled = false;
+    params.lakes_enabled = false;
+    params.surface_breaks_enabled = false;
+    const SHIELD_WorldSystem disabled(nullptr, nullptr, params, 1337);
+    SHIELD_WorldSystem::MaterialSamplingWork work;
+    disabled.ClassifyVertexMaterials(positions.data(), positions.size(), batched.data(), &work);
+    EXPECT_EQ(work.hydro_regions, 0u);
+    EXPECT_EQ(work.lake_cells, 0u);
+    EXPECT_EQ(work.surface_break_cells, 0u);
+}
+
 TEST(HeightSamplingContract, RejectsOversizeBeforeReadingOrAllocating) {
     const auto params = Luminumbra::Test::SyntheticTerrainParams();
     const SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);

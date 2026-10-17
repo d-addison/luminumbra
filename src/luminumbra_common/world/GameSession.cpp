@@ -1166,20 +1166,29 @@ bool GameSession::CreateWorld(const std::string& name,
                               const std::string& seed,
                               const std::string& worldType,
                               const std::string* customPresetJson) {
-    return CreateWorldInternal(name, seed, worldType, customPresetJson, false);
+    return CreateWorld(name, seed, worldType, customPresetJson, TerrainPresetUse::NewWorld);
+}
+
+bool GameSession::CreateWorld(const std::string& name,
+                              const std::string& seed,
+                              const std::string& worldType,
+                              const std::string* customPresetJson,
+                              TerrainPresetUse presetUse) {
+    return CreateWorldInternal(name, seed, worldType, customPresetJson, false, presetUse);
 }
 
 bool GameSession::CreateTransientWorld(const std::string& name,
                                        const std::string& seed,
                                        const std::string& worldType) {
-    return CreateWorldInternal(name, seed, worldType, nullptr, true);
+    return CreateWorldInternal(name, seed, worldType, nullptr, true, TerrainPresetUse::NewWorld);
 }
 
 bool GameSession::CreateWorldInternal(const std::string& name,
                                       const std::string& seed,
                                       const std::string& worldType,
                                       const std::string* customPresetJson,
-                                      bool transient) {
+                                      bool transient,
+                                      TerrainPresetUse presetUse) {
     m_worldOpenError.clear();
     if (!m_jobSystem) {
         LUMINUMBRA_CORE_ERROR("JobSystem not set before creating world");
@@ -1205,15 +1214,6 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     metadata.creationTime = std::time(nullptr);
     metadata.spawnPoint = Vec3(0, 100, 0);
     const auto worldPath = GetSaveRootPath() / "worlds/saves" / metadata.worldId;
-    if (!transient) {
-        try {
-            fs::create_directories(worldPath);
-        } catch (const std::exception& e) {
-            m_worldOpenError = "Could not create world save directory: " + std::string(e.what());
-            LUMINUMBRA_CORE_ERROR("{}", m_worldOpenError);
-            return false;
-        }
-    }
 
     nlohmann::json resolved;
     try {
@@ -1223,7 +1223,7 @@ bool GameSession::CreateWorldInternal(const std::string& name,
             std::ifstream input(validation.preset_path);
             input >> resolved;
         }
-        resolved = ResolveEffectivePreset(resolved, TerrainPresetUse::NewWorld);
+        resolved = ResolveEffectivePreset(resolved, presetUse);
     } catch (const nlohmann::json::exception& error) {
         m_worldOpenError = "Could not parse this world's preset: " + std::string(error.what());
         return false;
@@ -1238,6 +1238,15 @@ bool GameSession::CreateWorldInternal(const std::string& name,
             LUMINUMBRA_CORE_ERROR("World preset load failed: {}", error);
         }
         return false;
+    }
+    if (!transient) {
+        try {
+            fs::create_directories(worldPath);
+        } catch (const std::exception& e) {
+            m_worldOpenError = "Could not create world save directory: " + std::string(e.what());
+            LUMINUMBRA_CORE_ERROR("{}", m_worldOpenError);
+            return false;
+        }
     }
     std::string saved_preset_json;
     if (!transient) {

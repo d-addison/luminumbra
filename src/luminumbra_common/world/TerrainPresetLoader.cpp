@@ -66,7 +66,8 @@ bool ResolveDependencyManifest(TerrainPresetLoadResult& preset,
                                const std::filesystem::path& data_root,
                                nlohmann::json& manifest,
                                std::vector<std::string>& errors,
-                               const World::WorldgenFileStatusReader& read_status) {
+                               const World::WorldgenFileStatusReader& read_status,
+                               const World::WorldgenFileReader& dependency_reader) {
     // Use the generator's loaders to record their decisions and only the bytes
     // they consume. In particular, a rejected placement stops that pool before
     // any pieces are read; malformed pieces reject a pool after all piece reads.
@@ -106,7 +107,7 @@ bool ResolveDependencyManifest(TerrainPresetLoadResult& preset,
         const auto logical = logical_path(path.lexically_relative(data_root));
         if (logical.empty())
             return false;
-        if (!World::ReadWorldgenFile(path, bytes)) {
+        if (!dependency_reader(path, bytes)) {
             errors.push_back("failed to read worldgen dependency: " + logical);
             return false;
         }
@@ -493,7 +494,8 @@ TerrainPresetLoadResult
 LoadTerrainPresetFromJson(const nlohmann::json& source,
                           const std::filesystem::path& data_root,
                           const std::string& provenance,
-                          const World::WorldgenFileStatusReader& read_status) try {
+                          const World::WorldgenFileStatusReader& read_status,
+                          const World::WorldgenFileReader& dependency_reader) try {
     TerrainPresetLoadResult result;
     // schema_rev is validated when declared, not required. Every preset under
     // worlds/atlas/presets/ carries it, but in-memory fixtures construct minimal
@@ -813,7 +815,8 @@ LoadTerrainPresetFromJson(const nlohmann::json& source,
                     result.warnings);
 
     nlohmann::json manifest;
-    if (!ResolveDependencyManifest(result, data_root, manifest, result.errors, read_status))
+    if (!ResolveDependencyManifest(
+            result, data_root, manifest, result.errors, read_status, dependency_reader))
         return result;
     result.preset_content_hash = HashPresetIdentity(source, manifest);
     result.ok = true;

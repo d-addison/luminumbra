@@ -187,6 +187,95 @@ TEST_F(EffectivePresetIdentity, TcpHostAndDefaultJoinAgreeIncludingUnstampedOver
     }
 }
 
+TEST_F(EffectivePresetIdentity, ReplayBootRetainsHistoricalAndCurrentPresetIdentities) {
+    // Each selector form is a distinct recorded identity. Playback must preserve
+    // omission as well as explicit 1 and 2, for both named and custom presets.
+    for (const auto& [schema, revision] :
+         {std::pair{0, 0}, std::pair{6, 0}, std::pair{7, 0}, std::pair{7, 1}, std::pair{8, 2}}) {
+        auto source = shipping;
+        if (schema == 0)
+            source.erase("schema_rev");
+        else
+            source["schema_rev"] = schema;
+        auto& terrain = source["generation_params"]["terrain"];
+        if (revision == 0)
+            terrain.erase("surface_sampling_revision");
+        else
+            terrain["surface_sampling_revision"] = revision;
+        // Keep the boot regression small without removing any identity checks.
+        terrain["hydro"]["enabled"] = false;
+        WriteCatalog(source);
+        const auto original = LoadTerrainPresetFromJson(source, root / "data");
+        ASSERT_TRUE(original.ok);
+        for (const bool custom : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << revision << " custom=" << custom);
+            options.preset_json_override = custom ? std::optional(source.dump()) : std::nullopt;
+            options.test_streaming_radius_cap = 1;
+            Luminumbra::Replay::ReplayHeader header;
+            header.seed_string = options.seed;
+            header.preset = options.preset;
+            header.surface_radius = 0;
+            header.collision_radius = 0;
+            header.preset_content_hash = original.preset_content_hash;
+            GameSession configured;
+            Configure(configured);
+            header.system_config_identity = configured.SystemConfigIdentity();
+            const auto config = ReplayRunnerConfigFrom(options, header);
+            ASSERT_EQ(config.preset_use, TerrainPresetUse::Historical);
+            Luminumbra::Server::ServerWorldRunner runner(config);
+            ASSERT_TRUE(runner.Boot());
+            auto* session = runner.Session();
+            EXPECT_EQ(session->PresetContentHash(), original.preset_content_hash);
+            EXPECT_EQ(session->GetWorldSystem()->get_params().surface_sampling_revision,
+                      revision == 0 ? 1 : revision);
+            EXPECT_TRUE(Luminumbra::Replay::ConfigurationMatches(
+                header, session->SystemConfigIdentity(), session->PresetContentHash()));
+            auto different = source;
+            different["generation_params"]["terrain"]["surface_sampling_revision"] =
+                revision == 2 ? 1 : 2;
+            const auto mismatch =
+                LoadTerrainPresetFromJson(ResolveEffectivePreset(different), root / "data");
+            ASSERT_TRUE(mismatch.ok);
+            EXPECT_FALSE(Luminumbra::Replay::ConfigurationMatches(
+                header, session->SystemConfigIdentity(), mismatch.preset_content_hash));
+            const auto saved =
+                Luminumbra::Persistence::InspectSavedWorld(root, session->GetMetadata().worldId);
+            ASSERT_TRUE(saved.error.empty()) << saved.error;
+            const auto saved_json = nlohmann::json::parse(saved.preset_json);
+            EXPECT_EQ(saved_json.at("generation_params")
+                          .at("terrain")
+                          .contains("surface_sampling_revision"),
+                      revision != 0);
+            EXPECT_EQ(LoadTerrainPresetFromJson(saved_json, root / "data").preset_content_hash,
+                      original.preset_content_hash);
+            runner.Shutdown();
+        }
+    }
+}
+
+TEST_F(EffectivePresetIdentity, HistoricalCreationRefusesInvalidPresetsBeforeWriting) {
+    GameSession session;
+    Configure(session);
+    ASSERT_TRUE(session.CreateTransientWorld("Retained", options.seed, options.preset));
+    const auto* retained = session.GetWorldSystem();
+    const auto identity = session.PresetContentHash();
+    for (const auto& invalid :
+         {std::string("not JSON"),
+          std::string("{\"schema_rev\":"),
+          std::string("null"),
+          std::string(R"({"generation_params":{"terrain":{"surface_sampling_revision":99}}})")}) {
+        SCOPED_TRACE(invalid);
+        EXPECT_FALSE(session.CreateWorld("Refused replay",
+                                         options.seed,
+                                         options.preset,
+                                         &invalid,
+                                         TerrainPresetUse::Historical));
+        EXPECT_EQ(session.GetWorldSystem(), retained);
+        EXPECT_EQ(session.PresetContentHash(), identity);
+        EXPECT_FALSE(fs::exists(root / "worlds/saves"));
+    }
+}
+
 TEST_F(EffectivePresetIdentity, ExplicitRevisionOneIsPreservedAndCannotJoinRevisionTwo) {
     auto historical = shipping;
     historical["description"] = "Historical \xc3\xa9 landscape";
@@ -237,10 +326,11 @@ TEST_F(EffectivePresetIdentity, TransientWorldsHashTheResolvedSelector) {
                   explicit_one ? 1 : 2);
         EXPECT_EQ(transient.PresetContentHash(), expected.preset_content_hash);
         EXPECT_EQ(transient.PresetContentHash(), RuntimeHelloFrom(options).preset_content_hash);
-        if (explicit_one)
+        if (explicit_one) {
             EXPECT_NE(transient.PresetContentHash(), current_hash);
-        else
+        } else {
             current_hash = transient.PresetContentHash();
+        }
     }
 }
 

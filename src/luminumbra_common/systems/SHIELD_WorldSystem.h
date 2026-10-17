@@ -474,6 +474,10 @@ public:
         bool shaft = false;       // true => vertical cenote shaft
     };
     SurfaceBreakInfo FindLargestSurfaceBreak(float near_x, float near_z, float scan_radius_m) const;
+    // Read-only station discovery catalogue; shares the live placement decoder.
+    SurfaceBreakInfo SurfaceBreakInCell(int cell_x, int cell_z) const;
+    float SurfaceBreakCellSize() const;
+    float SurfaceBreakMaxRadius() const;
     // Elevation-aware water surface level at a column: the local lake surface
     // inside a lake basin (held above the carved floor by its rim), or SEA_LEVEL
     // elsewhere. The WaterSystem seeds + pins its per-cell rest level from this so
@@ -576,8 +580,17 @@ public:
     // final band selection stay per-vertex (cheap). positions are in WORLD
     // space. Revision 1 keeps the historical incomplete height definition so
     // persisted mesh materials in existing worlds remain byte-unchanged.
-    void
-    ClassifyVertexMaterials(const Vec3* positions, std::size_t count, u32* out_materials) const;
+    // Optional per-call work diagnostic; no counters or state are retained in the world.
+    struct MaterialSamplingWork {
+        std::size_t hydro_regions = 0;
+        std::size_t lake_cells = 0;
+        std::size_t surface_break_cells = 0;
+        std::size_t shaped_columns = 0;
+    };
+    void ClassifyVertexMaterials(const Vec3* positions,
+                                 std::size_t count,
+                                 u32* out_materials,
+                                 MaterialSamplingWork* work = nullptr) const;
 
     // SIMD-batched shaped final heights at an arbitrary
     // list of world (x,z) positions. out[i] == ComputeShapedHeight(xs[i], zs[i])
@@ -1161,6 +1174,7 @@ private:
     };
     ShapedHeightSample ComputeShapedHeightSample(float world_x, float world_z) const;
     float ComputeShapedHeight(float world_x, float world_z) const;
+    struct SamplingCache;
     struct ShapingNoiseSample {
         float continentalness = 0.0f;
         float erosion = 0.0f;
@@ -1174,7 +1188,8 @@ private:
     ShapedHeightSample CombineShapedHeightSample(float world_x,
                                                  float world_z,
                                                  const ShapingNoiseSample& noise,
-                                                 bool complete_shaping) const;
+                                                 bool complete_shaping,
+                                                 SamplingCache* cache = nullptr) const;
     // The erosion substrate instantiates ApplyHydro=false, so the bake cannot
     // recurse. Keep the offset before the output store to permit in-place use.
     template<bool ApplyHydro>
@@ -1202,7 +1217,8 @@ private:
     // with hydro disabled, preserving terrain in saved worlds (issue #453).
     ShapedHeightSample
     ComputeShapedHeightSampleImpl(float world_x, float world_z, bool apply_hydro) const;
-    float SampleHydroOffsetMeters(float world_x, float world_z) const;
+    float
+    SampleHydroOffsetMeters(float world_x, float world_z, SamplingCache* cache = nullptr) const;
 
     // the five normalized climate dimensions consumed by the biome
     // lookup. continentalness/erosion/peaks_valleys REUSE the +3/+4/+5 shaping
@@ -1238,6 +1254,7 @@ private:
     // ridge/detail) — the level a lake's surface nestles at. Low-frequency so a
     // lake reads ~flat over its extent. Pure.
     float ContinentalBaseHeight(float world_x, float world_z) const;
+    float LakeSurfaceLevel(float world_x, float world_z, SamplingCache* cache) const;
     // FLAT lake surface: ContinentalBaseHeight sampled at a coarse-snapped position
     // so the surface is constant over a lake (a smoothly-varying surface reads as a
     // concave/tilted lake). The carve + water mesh both use this so basin + surface
@@ -1253,7 +1270,8 @@ private:
     // when surface_breaks disabled. Folded into all three height paths
     // (ComputeShapedHeightSampleImpl, ComputeShapedHeightGrid, GetTerrainHeightAtCoarse)
     // so near/far/coarse stay byte-identical.
-    float SurfaceBreakRimDepression(float world_x, float world_z) const;
+    float
+    SurfaceBreakRimDepression(float world_x, float world_z, SamplingCache* cache = nullptr) const;
     // the ONE shared surface-break sampler. Returns the per-column effective
     // cap (18 outside any feature, lowered toward entrance_min_cap inside a
     // cave-mouth/doline where the interior-proximity probe shows the cave noise is
@@ -1266,7 +1284,9 @@ private:
         float effective_cap;
         float carve;
     };
-    SurfaceBreakSample sample_surface_breaks(const Vec3& world_pos, float surface_h) const;
+    SurfaceBreakSample sample_surface_breaks(const Vec3& world_pos,
+                                             float surface_h,
+                                             SamplingCache* cache = nullptr) const;
     // Monotone piecewise-linear spline over sorted [input, output] control
     // points: endpoint-clamped, plain lerp between neighbors, `fallback` when
     // the point list is empty.
@@ -1327,7 +1347,9 @@ private:
     // kHydroCacheMaxRegions entries the farthest region from the latest request
     // is evicted (see offset_at), so long exploration cannot grow this without
     // limit; eviction only ever costs a byte-identical re-bake.
-    mutable std::map<std::pair<std::int64_t, std::int64_t>, std::vector<float>> m_hydro_cache;
+    mutable std::map<std::pair<std::int64_t, std::int64_t>,
+                     std::shared_ptr<const std::vector<float>>>
+        m_hydro_cache;
     // shared_mutex: warm-cache lookups take a SHARED lock (concurrent across the
     // multithreaded chunk-gen jobs); only the one-time per-region bake takes the
     // exclusive lock, and the bake itself runs OUTSIDE any lock (pure function).

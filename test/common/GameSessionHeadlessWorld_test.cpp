@@ -608,7 +608,10 @@ TEST(GameSessionHeadlessWorldTest, SpeciesChangesRefuseLockstepAndReplayBeforeTi
 TEST(GameSessionHeadlessWorldTest, SpeciesIdentityIsAdoptedOnCreateLoadAndIoRefusal) {
     using Luminumbra::TestSupport::SpeciesIdentityFixture;
     const SpeciesIdentityFixture fixture;
-    const auto baseline = fixture.Resolve();
+    const auto baseline = Luminumbra::world::LoadTerrainPresetFromJson(
+        Luminumbra::world::ResolveEffectivePreset(SpeciesIdentityFixture::Preset(),
+                                                  Luminumbra::world::TerrainPresetUse::NewWorld),
+        fixture.Root() / "data");
     ASSERT_TRUE(baseline.ok);
     // Reader failure coverage is independent of OS privilege/permission bits.
     luminumbra::ai::CreatureSpeciesRegistry incomplete;
@@ -1300,12 +1303,14 @@ public:
 
     void Rewrite(const char* changed) const {
         SCOPED_TRACE(directory.generic_string());
-        if (std::string(changed) != "identity")
+        if (std::string(changed) != "identity") {
             ASSERT_NO_FATAL_FAILURE(
                 WriteSavedPresetTestJson(directory / "preset.json", other_preset));
-        if (std::string(changed) != "preset")
+        }
+        if (std::string(changed) != "preset") {
             ASSERT_NO_FATAL_FAILURE(
                 WriteSavedPresetTestJson(directory / "world_info.json", other_metadata));
+        }
     }
 
     void Restore() const {
@@ -3503,9 +3508,9 @@ void RunSchedulerFaultCase(std::uint64_t k, std::uint64_t start) {
 } // namespace
 
 TEST(GameSessionHeadlessWorldTest, SchedulerFaultStopsTheFrameAndLeavesASavableConsistentSession) {
-    for (const auto [k, start] : {std::pair<std::uint64_t, std::uint64_t>{3, 3},
-                                  std::pair<std::uint64_t, std::uint64_t>{3, 2},
-                                  std::pair<std::uint64_t, std::uint64_t>{4, 4}}) {
+    for (const auto& [k, start] : {std::pair<std::uint64_t, std::uint64_t>{3, 3},
+                                   std::pair<std::uint64_t, std::uint64_t>{3, 2},
+                                   std::pair<std::uint64_t, std::uint64_t>{4, 4}}) {
         ASSERT_NO_FATAL_FAILURE(RunSchedulerFaultCase(k, start));
     }
 }

@@ -86,6 +86,27 @@ Luminumbra::Server::ServerWorldRunnerConfig RunnerConfigFrom(const ServerCliOpti
     return config;
 }
 
+Luminumbra::Server::ServerWorldRunnerConfig
+ReplayRunnerConfigFrom(const ServerCliOptions& options,
+                       const Luminumbra::Replay::ReplayHeader& header) {
+    Luminumbra::Server::ServerWorldRunnerConfig config;
+    config.root_path = options.root;
+    config.systems_config_override = options.systems_config_override;
+    config.preset_json_override = options.preset_json_override;
+    config.seed = header.seed_string;
+    config.preset = header.preset;
+    config.world_id.clear();
+    config.world_name = "Replay Playback";
+    config.preset_use = Luminumbra::world::TerrainPresetUse::Historical;
+    config.surface_radius = static_cast<int>(header.surface_radius);
+    config.collision_radius = static_cast<int>(header.collision_radius);
+    config.test_streaming_radius_cap = options.test_streaming_radius_cap;
+    config.autosave_interval_ticks = 0;
+    config.region_scheduler = RunnerConfigFrom(options).region_scheduler;
+
+    return config;
+}
+
 std::uint32_t ExpectedNetworkClients(const ServerCliOptions& options) {
     return options.clients > 0 ? static_cast<std::uint32_t>(options.clients) : 1u;
 }
