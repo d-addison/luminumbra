@@ -3639,14 +3639,14 @@
     {
       "id": "ar.file.126",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Natural water is admitted in a fixed 3x3 surface-column horizon around each simulation anchor: the terrain-containing chunk and the chunk at `floor(max(terrain_height, generated_water_level) / chunk_height)`, sampled at the column centre and deduplicated when equal.",
-      "text": "Natural water is admitted in a fixed 3x3 surface-column horizon around each simulation anchor: the terrain-containing chunk and the chunk at `floor(max(terrain_height, generated_water_level) / chunk_height)`, sampled at the column centre and deduplicated when equal."
+      "quote": "Natural water is admitted in a fixed 3x3 surface-column horizon around each simulation anchor, with one Y=0 water owner per column and a separate terrain-containing chunk sampled at the column centre.",
+      "text": "Natural water is admitted in a fixed 3x3 surface-column horizon around each simulation anchor, with one Y=0 water owner per column and a separate terrain-containing chunk sampled at the column centre."
     },
     {
       "id": "ar.file.127",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "The terrain chunk provides collision even when submerged below the water chunk.",
-      "text": "The terrain chunk provides collision even when submerged below the water chunk."
+      "quote": "The terrain chunk provides collision independently of the water owner, including when submerged.",
+      "text": "The terrain chunk provides collision independently of the water owner, including when submerged."
     },
     {
       "id": "ar.file.128",
@@ -3657,8 +3657,8 @@
     {
       "id": "ar.file.129",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "The set also includes all edited authority in regions intersecting the ledger's 512 metre activation disc, plus explicit ECS water-source chunks in those regions.",
-      "text": "The set also includes all edited authority in regions intersecting the ledger's 512 metre activation disc, plus explicit ECS water-source chunks in those regions."
+      "quote": "The set also includes all edited authority in regions intersecting the ledger's 512 metre activation disc, plus the Y=0 owners of explicit ECS water sources in those regions.",
+      "text": "The set also includes all edited authority in regions intersecting the ledger's 512 metre activation disc, plus the Y=0 owners of explicit ECS water sources in those regions."
     },
     {
       "id": "ar.file.130",
@@ -3669,8 +3669,8 @@
     {
       "id": "ar.file.131",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Newly admitted natural chunks become durable authority;",
-      "text": "Newly admitted natural chunks become durable authority;"
+      "quote": "Newly simulated water owners become durable authority;",
+      "text": "Newly simulated water owners become durable authority;"
     },
     {
       "id": "ar.file.132",
@@ -3699,8 +3699,8 @@
     {
       "id": "ar.file.136",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Pristine chunks streamed outside the simulation set receive that same generated initial water state for rendering, remain frozen, and never contribute to simulation hashes or freeze digests.",
-      "text": "Pristine chunks streamed outside the simulation set receive that same generated initial water state for rendering, remain frozen, and never contribute to simulation hashes or freeze digests."
+      "quote": "Pristine Y=0 chunks streamed outside the simulation set receive that same generated initial water state for rendering, remain frozen, and never contribute to simulation hashes or freeze digests.",
+      "text": "Pristine Y=0 chunks streamed outside the simulation set receive that same generated initial water state for rendering, remain frozen, and never contribute to simulation hashes or freeze digests."
     },
     {
       "id": "ar.file.137",

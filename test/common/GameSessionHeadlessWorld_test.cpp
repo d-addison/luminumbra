@@ -3501,7 +3501,7 @@ TEST(GameSessionHeadlessWorldTest, ExplicitWaterSourcesOwnChunksWithoutRendering
     session.SetActiveRegionsEnabled(true);
     session.SetWeatherRainEnabled(false);
     ASSERT_TRUE(session.CreateTransientWorld("Source authority", "1337", "default"));
-    const Luminumbra::Vec3 position(520, 8, 24);
+    const Luminumbra::Vec3 position(520, 40, 24);
     session.SetReplicatedSimulationAnchors({position});
     const auto source = session.GetRegistry().create();
     session.GetRegistry().emplace<Luminumbra::Components::TransformComponent>(source).position =
@@ -3509,6 +3509,15 @@ TEST(GameSessionHeadlessWorldTest, ExplicitWaterSourcesOwnChunksWithoutRendering
     session.GetRegistry()
         .emplace<Luminumbra::Components::FlowingWaterSourceComponent>(source)
         .flow_rate = 40.0f;
+    for (const float height : {std::numeric_limits<float>::quiet_NaN(), -100000.0f, 100000.0f}) {
+        const auto invalid_source = session.GetRegistry().create();
+        session.GetRegistry()
+            .emplace<Luminumbra::Components::TransformComponent>(invalid_source)
+            .position = Luminumbra::Vec3(position.x, height, position.z);
+        session.GetRegistry()
+            .emplace<Luminumbra::Components::FlowingWaterSourceComponent>(invalid_source)
+            .flow_rate = 40.0f;
+    }
     // Irrigation is an independent component with a different layout. The two
     // emitters must coexist without aliasing entt storage across systems.
     session.GetRegistry().emplace<Luminumbra::Components::WaterSourceComponent>(source).output =
@@ -3534,12 +3543,12 @@ TEST(GameSessionHeadlessWorldTest, ExplicitWaterSourcesOwnChunksWithoutRendering
             const float z = static_cast<float>(centre.z + dz) * 16 + 8;
             const auto* world = session.GetWorldSystem();
             const float terrain = world->GetTerrainHeightAt(x, z);
-            for (const float height : {terrain, std::max(terrain, world->WaterLevelAt(x, z))}) {
+            for (const float height : {0.0f, terrain}) {
                 const auto coords = Luminumbra::Systems::SHIELD_WorldSystem::world_to_chunk_coords(
                     Luminumbra::Vec3(x, height, z));
                 expected_chunks.insert(Luminumbra::Chunk::calculate_id(coords));
                 ASSERT_NE(world->find_streamed_chunk(coords), nullptr);
-                EXPECT_TRUE(world->find_streamed_chunk(coords)->has_water_sim.load());
+                EXPECT_EQ(world->find_streamed_chunk(coords)->has_water_sim.load(), coords.y == 0);
             }
         }
     }

@@ -3,8 +3,10 @@
 #include <chrono> // For performance testing
 #include <functional>
 #include <iostream> // For printing benchmark results
-#include <memory>   // For std::unique_ptr
-#include <numeric>  // For std::accumulate
+#include <limits>
+#include <memory>  // For std::unique_ptr
+#include <numeric> // For std::accumulate
+#include <set>
 #include <unordered_map>
 #include <vector>
 
@@ -160,6 +162,85 @@ TEST_F(WorldGenerationTest, UnderwaterRequiresWaterAboveItsBedInsteadOfAHeightCu
         << "drained live water must immediately become dry";
     chunk->water_bed_mm.assign(4, -10000);
     EXPECT_FALSE(land.IsUnderwater({-8, -5, -8})) << "dry live basins below sea level stay dry";
+}
+
+TEST_F(WorldGenerationTest, AuthoritativeColumnOverridesWetRenderLayers) {
+    SHIELD_WorldSystem world(nullptr, nullptr, params_guaranteed_surface, 1337);
+    const auto make_grid = [](const IVec3& coords, int depth) {
+        auto chunk = std::make_shared<Chunk>(coords);
+        chunk->current_water_resolution.store(2);
+        chunk->water_bed_mm.assign(4, 10000);
+        chunk->water_depth_mm.assign(4, depth);
+        chunk->has_water_sim.store(true);
+        return chunk;
+    };
+    auto cache = make_grid({-1, 2, -1}, 4000);
+    ASSERT_TRUE(world.adopt_streamed_chunk(cache));
+    EXPECT_TRUE(world.IsUnderwater({-8, 12, -8}));
+    auto owner = make_grid({-1, 0, -1}, 0);
+    owner->mark_water_data_dirty();
+    ASSERT_TRUE(world.adopt_streamed_chunk(owner));
+    EXPECT_FALSE(world.IsUnderwater({-8, 12, -8}));
+    owner->water_depth_mm.assign(4, 4000);
+    EXPECT_TRUE(world.IsUnderwater({-8, 12, -8}));
+    // Incomplete authority cannot allow an unrelated frozen cache to win.
+    owner->water_depth_mm.pop_back();
+    EXPECT_FALSE(world.IsUnderwater({-8, 12, -8}));
+    owner->water_bed_mm.clear();
+    EXPECT_FALSE(world.IsUnderwater({-8, 12, -8}));
+    owner->current_water_resolution.store(std::numeric_limits<int>::max());
+    EXPECT_FALSE(world.IsUnderwater({-8, 12, -8}));
+    owner->current_water_resolution.store(0);
+    EXPECT_FALSE(world.IsUnderwater({-8, 12, -8}));
+    owner->has_water_sim.store(false);
+    EXPECT_FALSE(world.IsUnderwater({-8, 12, -8}));
+}
+
+TEST_F(WorldGenerationTest, WaterColumnsConnectAcrossDifferentGroundLayers) {
+    auto params = params_guaranteed_surface;
+    params.height_offset = 17.0f;
+    SHIELD_WorldSystem world(nullptr, nullptr, params, 1337, true);
+    WaterSystem water(nullptr, &world);
+    water.SetSimResolution(8);
+    water.SetHydrology(true, 0, 0);
+    world.SetWaterSystem(&water);
+    entt::registry registry;
+    const std::set<std::pair<i32, i32>> regions{{0, 0}, {-1, 0}, {0, -1}, {-1, -1}};
+    const std::vector<Vec3> anchors{{8, 20, 8}};
+    world.prepare_region_authority(registry, regions, anchors, nullptr);
+    for (int z = -1; z <= 1; ++z) {
+        for (int x = -1; x <= 1; ++x) {
+            auto column = world.find_streamed_chunk({x, 0, z});
+            auto ground = world.find_streamed_chunk({x, 1, z});
+            ASSERT_NE(column, nullptr);
+            ASSERT_NE(ground, nullptr);
+            EXPECT_TRUE(column->has_water_sim.load());
+            EXPECT_FALSE(ground->has_water_sim.load());
+            column->water_bed_mm.assign(64, x == 0 ? 15000 : 17000);
+            column->water_depth_mm.assign(64, 4000);
+        }
+    }
+    world.simulate_region_authority(registry, regions, anchors, nullptr);
+    EXPECT_GT(world.debug_water_seam_wet_pairs(), 0);
+    auto column = world.find_streamed_chunk({0, 0, 0});
+    EXPECT_GT(column->water_depth_mm[4 * 8 + 7], 4000);
+    const auto depth_before = std::accumulate(
+        column->water_depth_mm.begin(), column->water_depth_mm.end(), std::int64_t{0});
+    water.apply_displacement({8, 17, 8}, 1.0f);
+    EXPECT_GT(std::accumulate(
+                  column->water_depth_mm.begin(), column->water_depth_mm.end(), std::int64_t{0}),
+              depth_before);
+    const auto before = world.water_epoch();
+    EXPECT_GT(world.EditTerrainBed({8, 17, 8}, -1000, 3.0f), 0);
+    EXPECT_GT(world.water_epoch(), before);
+    // The canonical water owner stays independent of the collider layer.
+    for (const auto& chunk : world.snapshot_streamed_chunks()) {
+        if (chunk->get_coords().y != 0) {
+            EXPECT_FALSE(chunk->has_water_authority());
+        }
+    }
+    world.clear_world(nullptr);
+    EXPECT_EQ(world.EditTerrainBed({8, 17, 8}, -1000, 3.0f), 0);
 }
 
 TEST_F(WorldGenerationTest, UndergroundStreamingFollowsTheAnchorAndBuildsCaveMeshes) {

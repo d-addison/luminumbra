@@ -645,7 +645,10 @@ LiveWaterRun RunLiveWaterScenario(const std::string& root) {
         const Vec3 spawn = session.GetMetadata().spawnPoint;
         // Anchor ON the wet body so the capped 96 m disc carries live water.
         const Vec3 anchor = FindWetAnchor(world, spawn);
+        session.SetReplicatedSimulationAnchors({anchor});
         auto tick = [&] {
+            EXPECT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+            EXPECT_FALSE(session.GetRegionSchedulerFault());
             world->update(session.GetRegistry(), {anchor}, physics);
             world->wait_for_streaming_jobs();
         };
@@ -653,12 +656,11 @@ LiveWaterRun RunLiveWaterScenario(const std::string& root) {
             tick();
 
         // Find LIVE standing water on a gridded chunk (the y=0 column probe).
-        // Scan the capped resident disc around the wet anchor: probes beyond
-        // the 6-chunk cap can never be gridded, so +-6 chunks covers exactly
-        // the reachable set.
+        // Only the admitted 3x3 horizon advances water; render caches outside
+        // that horizon keep their initial state.
         float cx = anchor.x, cz = anchor.z;
-        for (int gz = -6; gz <= 6 && !r.found; ++gz) {
-            for (int gx = -6; gx <= 6 && !r.found; ++gx) {
+        for (int gz = -1; gz <= 1 && !r.found; ++gz) {
+            for (int gx = -1; gx <= 1 && !r.found; ++gx) {
                 const float px = anchor.x + static_cast<float>(gx) * 16.0f;
                 const float pz = anchor.z + static_cast<float>(gz) * 16.0f;
                 if (!world->debug_water_grid_at(px, pz))
@@ -683,7 +685,10 @@ LiveWaterRun RunLiveWaterScenario(const std::string& root) {
 
             // DIG the crest bed 8 m down: the surface (bed+depth) falls far below
             // the voxel terrain -> the fall starves. The epoch must advance.
-            world->EditTerrainBed(Vec3(cx, 0.0f, cz), -8000, 6.0f);
+            EXPECT_EQ(world->EditTerrainBed(Vec3(cx, 0.0f, cz), 0, 6.0f), 0);
+            EXPECT_EQ(world->water_epoch(), r.epoch_before);
+            EXPECT_GT(world->EditTerrainBed(Vec3(cx, 0.0f, cz), -8000, 6.0f), 0);
+            EXPECT_GT(world->water_epoch(), r.epoch_before);
             for (int t = 0; t < 8; ++t)
                 tick();
 
@@ -716,7 +721,7 @@ TEST(WaterfallLiveWater, DammingUpstreamExtinguishesSiteDeterministically) {
     const LiveWaterRun a = RunLiveWaterScenario(root);
     const LiveWaterRun b = RunLiveWaterScenario(root);
     ASSERT_TRUE(a.found)
-        << "no LIVE standing water on a gridded chunk within 96 m of the wet anchor (vacuous)";
+        << "no LIVE standing water on a gridded chunk in the admitted wet horizon (vacuous)";
     EXPECT_GT(a.factor_wet, 0.5f) << "live factor should read WET at live standing water (got "
                                   << a.factor_wet << ")";
     EXPECT_LT(a.factor_dammed, 0.02f)

@@ -3,6 +3,7 @@
 #include "luminumbra_client/app/SessionExit.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/replay/RegionScheduleTrace.h"
+#include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_server/modes/ModeHelpers.h"
 #include "luminumbra_server/modes/Modes.h"
 
@@ -54,6 +55,10 @@ void ArmHostFault(GameSession& session) {
     ASSERT_TRUE(WorldSaveService::save_active_regions(
         ledger, session.GetWorldClock(), session.GetWorldSaveDir()));
     ASSERT_TRUE(session.LoadWorldState());
+    // Reload drops regenerable render caches. Restore the simulation horizon
+    // before editing, just as entry and the first server physics tick do.
+    session.PrepareSimulationCollisions();
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
     session.PinActiveRegion(kFaultRegion, true);
     ASSERT_TRUE(session.GetActiveRegionLedger().records().contains(kFaultRegion));
     session.GetSimulationEventBus().subscribe([&session](const auto& event) {
@@ -126,6 +131,10 @@ public:
     bool Boot() {
         if (!ServerWorldRunner::Boot())
             return false;
+        const auto chunks = Session()->GetWorldSystem()->snapshot_streamed_chunks();
+        EXPECT_FALSE(chunks.empty());
+        EXPECT_GT(Session()->GetWorldSystem()->simulation_chunk_count(), 0u);
+        EXPECT_EQ(Session()->GetSimulationTickCount(), 0u);
         HostObservation()->save_dir = Session()->GetWorldSaveDir();
         if (HostObservation()->inject_fault) {
             ArmHostFault(*Session());
@@ -239,6 +248,46 @@ protected:
     }
 };
 
+TEST_F(HostSchedulerFault, FailedEntryReleasesRegistryBeforePhysics) {
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    bool released = false;
+    struct PhysicsLifetimeProbe {
+        GameSession* session = nullptr;
+        bool* released = nullptr;
+        ~PhysicsLifetimeProbe() {
+            EXPECT_NE(session->GetWorldSystem(), nullptr);
+            auto* physics = session->GetPhysicsSystem();
+            EXPECT_NE(physics, nullptr);
+            if (physics) {
+                EXPECT_FALSE(physics->audio_raycast({0, 2, 0}, {0, 1, 0}).hit);
+            }
+            *released = true;
+        }
+    };
+    {
+        GameSession session;
+        session.SetJobSystem(&jobs);
+        session.SetRootPath(root.generic_string() + "/");
+        session.SetActiveRegionsEnabled(true);
+        ASSERT_TRUE(session.CreateTransientWorld("Failed entry cleanup", "1337", "default"));
+        auto probe = std::make_shared<PhysicsLifetimeProbe>();
+        probe->session = &session;
+        probe->released = &released;
+        session.GetRegistry().emplace<std::shared_ptr<PhysicsLifetimeProbe>>(
+            session.GetRegistry().create(), std::move(probe));
+        const auto directory = root / "corrupt-entry";
+        const auto spawn = session.GetMetadata().spawnPoint;
+        const auto key = Luminumbra::world::ActiveRegionLedger::region_at(spawn);
+        WriteHostFile(WorldSaveService::region_file_path(directory, key.x, key.z), "partial");
+        session.GetWorldSystem()->set_authority_directory(directory);
+        EXPECT_FALSE(session.EnsureWorldEntryReady(1, 1));
+        EXPECT_TRUE(session.GetRegionSchedulerFault());
+        EXPECT_EQ(session.GetSimulationTickCount(), 0u);
+    }
+    EXPECT_TRUE(released);
+}
+
 TEST_F(HostSchedulerFault, ServerSavesTheFaultedWorldBeforeReturningExitThree) {
     const auto options = Options();
     EXPECT_EQ(RunServer(options), 3);
@@ -331,7 +380,7 @@ TEST_F(HostSchedulerFault, ClientFaultRequestsQuitAndSavesStateBeforeSpawnMetada
     ASSERT_NO_FATAL_FAILURE(ArmHostFault(session));
     // Headless client needs no streamed terrain: a dirty CPU chunk supplies the
     // recovery-save obligation without constructing a renderer or window.
-    auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+    auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(-1279, 0, -1279));
     chunk->set_state(Luminumbra::ChunkState::Meshing);
     chunk->heightmap_data = {731.0f};
     chunk->mark_sdf_loaded_or_edited();
@@ -392,7 +441,7 @@ TEST_F(HostSchedulerFault, ClientMetadataSaveFailureSuppressesSuccessAndAllowsRe
     session.SetActiveRegionsEnabled(true);
     ASSERT_TRUE(session.CreateWorld("Client metadata failure", "1337", "default"));
     ASSERT_NO_FATAL_FAILURE(ArmHostFault(session));
-    auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+    auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(-1279, 0, -1279));
     chunk->set_state(Luminumbra::ChunkState::Meshing);
     chunk->heightmap_data = {731.0f};
     chunk->mark_sdf_loaded_or_edited();

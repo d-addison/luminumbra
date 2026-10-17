@@ -262,26 +262,24 @@ headless worlds use private temporary authority storage, removed at teardown.
 
 Water initialization, depth, flux, wake/sleep state and threshold counters
 advance once per fixed session tick. Natural water is admitted in a fixed 3x3
-surface-column horizon around each simulation anchor: the terrain-containing
-chunk and the chunk at `floor(max(terrain_height, generated_water_level) /
-chunk_height)`, sampled at the column centre and deduplicated when equal. The
-terrain chunk provides collision even when submerged below the water chunk.
+surface-column horizon around each simulation anchor, with one Y=0 water owner per column
+and a separate terrain-containing chunk sampled at the column centre. The terrain chunk
+provides collision independently of the water owner, including when submerged.
 This one-chunk ring is simulation policy, independent of
-camera, render radius, LOD and streaming completion. The set also includes all
-edited authority in regions intersecting the ledger's 512 metre activation
-disc, plus explicit ECS water-source chunks in those regions. Every member is
+camera, render radius, LOD and streaming completion. The set also includes all edited
+authority in regions intersecting the ledger's 512 metre activation disc, plus the Y=0
+owners of explicit ECS water sources in those regions. Every member is
 admitted synchronously, restoring durable authority before considering canonical
-full generation. Newly admitted natural chunks become durable authority; while
+full generation. Newly simulated water owners become durable authority; while
 their region remains active they follow the same rule as edited chunks.
 
 Replicated anchors take precedence over the saved walking anchor, including an
 explicitly empty list. Natural-water initialization is a pure function of seed,
 coordinates, generation and the fixed simulation resolution. Pending edited-water
 initialization reuses the authoritative heightmap when its samples match the
-simulation cell centres, and otherwise samples canonical terrain. Pristine chunks
-streamed outside the simulation set receive that same generated initial water
-state for rendering, remain frozen, and never contribute to simulation hashes or
-freeze digests.
+simulation cell centres, and otherwise samples canonical terrain. Pristine Y=0 chunks
+streamed outside the simulation set receive that same generated initial water state for
+rendering, remain frozen, and never contribute to simulation hashes or freeze digests.
 Both synchronous horizon meshing and asynchronous meshing render their local
 water grids. Departing authority freezes without catch-up; returning authority
 resumes from the exact durable integer water state. No distant water continuation

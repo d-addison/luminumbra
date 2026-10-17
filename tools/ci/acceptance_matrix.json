@@ -3009,7 +3009,7 @@
     {
       "id": "contract.water-authority",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "statement": "Fixed-tick water uses a camera-independent natural horizon, active-region edited authority and explicit sources. Generated water has sticky ownership independent of terrain provenance; admission restores durable state; initialization uses canonical inputs, including sampled authoritative heightmaps for pending edited water. Departures freeze and returns resume integer state. Sorted admission, initialization, resizing, restored cursors and activity-cache pruning have headless regressions; production qualification remains pending.",
+      "statement": "Fixed-tick water uses a camera-independent natural horizon with one Y=0 owner per column and separate terrain colliders, active-region edited authority and explicit sources. Generated water has sticky ownership independent of terrain provenance; admission restores durable state; initialization uses canonical inputs, including sampled authoritative heightmaps for pending edited water. Departures freeze and returns resume integer state. Sorted admission, initialization, resizing, restored cursors and activity-cache pruning have headless regressions; production qualification remains pending.",
       "status": "partial",
       "requirements": [
         "ar.file.125",
@@ -3064,6 +3064,18 @@
           "ref": "GameSessionHeadlessWorldTest.FreshNaturalWaterAndFrozenRenderWaterShareInitialization"
         },
         {
+          "kind": "ctest",
+          "ref": "WorldGenerationTest.WaterColumnsConnectAcrossDifferentGroundLayers"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldGenerationTest.AuthoritativeColumnOverridesWetRenderLayers"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WaterfallLiveWater.DammingUpstreamExtinguishesSiteDeterministically"
+        },
+        {
           "kind": "doc",
           "ref": "docs/active-regions.md",
           "planned": "Qualify fixed-tick water across production rendering, save/load and replay workloads; owner: ds"
@@ -3101,6 +3113,10 @@
         {
           "kind": "ctest",
           "ref": "WorldOpenRefusal.PartialAuthorityHasNoSimulationCollisionSurface"
+        },
+        {
+          "kind": "ctest",
+          "ref": "HostSchedulerFault.FailedEntryReleasesRegistryBeforePhysics"
         },
         {
           "kind": "doc",

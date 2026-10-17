@@ -4,6 +4,7 @@
 #include "../components/CoreComponents.h"
 #include "../core/Log.h"
 #include "../core/WaterComponents.h"
+#include "../world/ActiveRegionLedger.h"
 #include "../world/Chunk.h"
 #include "SHIELD_WorldSystem.h"
 #include "WeatherSystem.h" // Weather-driven per-cell rain.
@@ -810,7 +811,15 @@ void WaterSystem::update(entt::registry& registry,
         auto& transform = source_view.get<const Components::TransformComponent>(entity);
         auto& source = source_view.get<const Components::FlowingWaterSourceComponent>(entity);
         ++m_debug_sources_seen; // water-source diagnostics
+        if (deterministic_authority &&
+            (!world::ActiveRegionLedger::valid_anchor(transform.position) ||
+             transform.position.y < static_cast<float>(Chunk::kPackedMinY) * CHUNK_SIZE_Y ||
+             transform.position.y >=
+                 (static_cast<float>(Chunk::kPackedMaxY) + 1.0f) * CHUNK_SIZE_Y))
+            continue;
         IVec3 chunk_coords = SHIELD_WorldSystem::world_to_chunk_coords(transform.position);
+        if (deterministic_authority)
+            chunk_coords.y = 0;
         auto it = m_active_chunks->find(Chunk::calculate_id(chunk_coords));
         // water-source FINDING (empirical): water grids live on the 2.5D COLUMN's y=0
         // chunk, but a spring standing on sub-sea-level terrain (river beds carve
@@ -1340,7 +1349,8 @@ void WaterSystem::apply_displacement(const Vec3& world_pos, f32 volume) {
     const int radius = 2;
     const float total_cells = (2 * radius + 1) * (2 * radius + 1);
 
-    IVec3 chunk_coords = SHIELD_WorldSystem::world_to_chunk_coords(world_pos);
+    IVec3 chunk_coords =
+        SHIELD_WorldSystem::world_to_chunk_coords({world_pos.x, 0.0f, world_pos.z});
     auto source_it = m_active_chunks->find(Chunk::calculate_id(chunk_coords));
     if (source_it == m_active_chunks->end() || !source_it->second) {
         return;

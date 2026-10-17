@@ -945,9 +945,12 @@ public:
 
 private:
     const bool m_retainRegionAuthority;
-    // Unique resident chunks across both maps share the existing 8,192 budget.
+    // All aliases share the existing 8,192 resident chunk budget.
     // Rehydration holds at most one additional decoded chunk before admission.
     std::unordered_map<ChunkID, std::shared_ptr<::Luminumbra::Chunk>> m_simulationChunks;
+    // Y=0 aliases only, bounded by the shared resident chunk budget. Water
+    // queries and edits use this set independently of terrain collider layers.
+    std::unordered_map<ChunkID, std::shared_ptr<::Luminumbra::Chunk>> m_simulationWaterChunks;
     std::set<std::pair<i32, i32>> m_simulationRegions;
     std::filesystem::path m_authorityDirectory;
     std::filesystem::path m_temporaryAuthorityDirectory;

@@ -163,24 +163,23 @@ GameSession::GameSession() {
 }
 
 GameSession::~GameSession() {
-    // Jobs can read world, water, weather and physics. Drain before member destruction.
-    if (m_worldSystem)
-        m_worldSystem->quiesce_streaming_jobs_for_save();
-    if (m_physicsSystem)
-        m_physicsSystem->set_world_system(nullptr);
-    m_worldSystem.reset();
+    // Tear down dependents explicitly while their world, registry and physics
+    // services still exist, including when entry fails before the first tick.
+    ResetWorldSystems();
 }
 
 void GameSession::ResetWorldSystems() {
     if (m_worldSystem)
         m_worldSystem->quiesce_streaming_jobs_for_save();
+    // Registry component destructors can use world and physics services. Release
+    // them after workers drain and before either service is destroyed.
+    m_registry.clear();
     // Keep all dependencies alive while the world destructor publishes completed work.
     if (m_physicsSystem)
         m_physicsSystem->set_world_system(nullptr);
     m_worldSystem.reset();
-    m_physicsSystem.reset();
     m_waterSystem.reset();
-    m_registry.clear();
+    m_physicsSystem.reset();
     m_soilGrid.reset();
     m_irrigationGrid.reset();
     m_simulationClock.reset();

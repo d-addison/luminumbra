@@ -1517,31 +1517,42 @@ bool SHIELD_WorldSystem::IsUnderwater(const Vec3& world_pos) const {
     if (!std::isfinite(world_pos.x) || !std::isfinite(world_pos.y) || !std::isfinite(world_pos.z))
         return false;
     const IVec3 column = world_to_chunk_coords(world_pos);
-    bool has_live_grid = false;
-    for (const auto& [id, chunk] : m_streaming_state.chunks) {
-        (void)id;
-        if (!chunk || !chunk->has_water_sim.load(std::memory_order_acquire))
-            continue;
-        const IVec3 coords = chunk->get_coords();
-        if (coords.x != column.x || coords.z != column.z)
-            continue;
-        const int res = chunk->current_water_resolution.load(std::memory_order_relaxed);
+    const auto sample_grid = [&world_pos](const Chunk& chunk) -> std::optional<bool> {
+        if (!chunk.has_water_sim.load(std::memory_order_acquire))
+            return std::nullopt;
+        const int res = chunk.current_water_resolution.load(std::memory_order_relaxed);
         if (res <= 1)
-            continue;
+            return std::nullopt;
         const std::size_t side = static_cast<std::size_t>(res);
-        if (chunk->water_bed_mm.size() != side * side ||
-            chunk->water_depth_mm.size() != side * side)
-            continue;
-        has_live_grid = true;
+        if (side > chunk.water_bed_mm.size() / side || chunk.water_bed_mm.size() != side * side ||
+            chunk.water_depth_mm.size() != side * side)
+            return std::nullopt;
+        const auto coords = chunk.get_coords();
         const float lx = world_pos.x - static_cast<float>(coords.x * CHUNK_SIZE_X);
         const float lz = world_pos.z - static_cast<float>(coords.z * CHUNK_SIZE_Z);
         const int x = std::clamp(static_cast<int>(lx * res / CHUNK_SIZE_X), 0, res - 1);
         const int z = std::clamp(static_cast<int>(lz * res / CHUNK_SIZE_Z), 0, res - 1);
         const std::size_t cell = static_cast<std::size_t>(z) * side + x;
-        const float bed = static_cast<float>(chunk->water_bed_mm[cell]) / 1000.0f;
-        const float depth = static_cast<float>(chunk->water_depth_mm[cell]) / 1000.0f;
-        if (depth > 0.05f && world_pos.y >= bed && world_pos.y < bed + depth - 0.05f)
-            return true;
+        const float bed = static_cast<float>(chunk.water_bed_mm[cell]) / 1000.0f;
+        const float depth = static_cast<float>(chunk.water_depth_mm[cell]) / 1000.0f;
+        return depth > 0.05f && world_pos.y >= bed && world_pos.y < bed + depth - 0.05f;
+    };
+    const auto owner = find_streamed_chunk(IVec3(column.x, 0, column.z));
+    if (owner && owner->has_water_authority())
+        return sample_grid(*owner).value_or(false);
+    bool has_live_grid = false;
+    for (const auto& [id, chunk] : m_streaming_state.chunks) {
+        (void)id;
+        if (!chunk)
+            continue;
+        const auto coords = chunk->get_coords();
+        if (coords.x != column.x || coords.z != column.z)
+            continue;
+        if (const auto wet = sample_grid(*chunk); wet.has_value()) {
+            has_live_grid = true;
+            if (wet.value())
+                return true;
+        }
     }
     if (has_live_grid)
         return false; // a dry/drained live cell overrides the worldgen rest level
@@ -4953,7 +4964,8 @@ void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk, int target_
             base_pos.x, base_pos.z, size_x, size_z, chunk.heightmap_data.data());
         chunk.mark_sdf_generated_current_params();
         chunk.clear_voxel_data_dirty();
-        if (m_retainRegionAuthority && m_water_system && !chunk.has_water_sim.load())
+        if (m_retainRegionAuthority && m_water_system && chunk.get_coords().y == 0 &&
+            !chunk.has_water_sim.load())
             m_water_system->InitializeGeneratedWater(chunk);
         return;
     }
@@ -5059,7 +5071,8 @@ void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk, int target_
     // count as unsaved dirty state.
     chunk.mark_sdf_generated_current_params();
     chunk.clear_voxel_data_dirty();
-    if (m_retainRegionAuthority && m_water_system && !chunk.has_water_sim.load())
+    if (m_retainRegionAuthority && m_water_system && chunk.get_coords().y == 0 &&
+        !chunk.has_water_sim.load())
         m_water_system->InitializeGeneratedWater(chunk);
 }
 
@@ -5530,6 +5543,7 @@ void SHIELD_WorldSystem::clear_world(PhysicsSystem* physics_system) {
     }
     m_streaming_state.chunks.clear();
     m_authorityHashCache.reset();
+    m_simulationWaterChunks.clear();
     m_simulationChunks.clear();
     if (m_water_system)
         m_water_system->ResetActivityCache();
@@ -5833,9 +5847,9 @@ void SHIELD_WorldSystem::prepare_region_authority(entt::registry& registry,
                 const float z =
                     static_cast<float>(centre.z + dz) * CHUNK_SIZE_Z + CHUNK_SIZE_Z / 2.0f;
                 const float terrain = GetTerrainHeightAt(x, z);
-                // Submerged ground can occupy a lower chunk than the water
-                // surface. Physics requires its terrain-containing chunk too.
-                for (const float height : {terrain, std::max(terrain, WaterLevelAt(x, z))}) {
+                // Water is a 2.5D column with one Y=0 owner. Terrain
+                // collision is admitted independently at the ground layer.
+                for (const float height : {0.0f, terrain}) {
                     const auto coords = world_to_chunk_coords(Vec3(x, height, z));
                     if (coords.x >= Chunk::kPackedMinXz && coords.x <= Chunk::kPackedMaxXz &&
                         coords.z >= Chunk::kPackedMinXz && coords.z <= Chunk::kPackedMaxXz &&
@@ -5852,7 +5866,7 @@ void SHIELD_WorldSystem::prepare_region_authority(entt::registry& registry,
                                       const Components::TransformComponent>();
     for (const auto entity : bodies)
         require_horizon(bodies.get<const Components::TransformComponent>(entity).position);
-    // Explicit ECS sources admit their exact (including vertical) chunks too.
+    // Explicit ECS sources admit the same column owner regardless of source height.
     const auto sources = registry.view<const Components::TransformComponent,
                                        const Components::FlowingWaterSourceComponent>();
     for (const auto entity : sources) {
@@ -5861,7 +5875,8 @@ void SHIELD_WorldSystem::prepare_region_authority(entt::registry& registry,
             position.y < static_cast<float>(Chunk::kPackedMinY) * CHUNK_SIZE_Y ||
             position.y >= (static_cast<float>(Chunk::kPackedMaxY) + 1.0f) * CHUNK_SIZE_Y)
             continue;
-        const auto coords = world_to_chunk_coords(position);
+        auto coords = world_to_chunk_coords(position);
+        coords.y = 0;
         int rx = 0, rz = 0;
         Save::region_coords_for_chunk(coords, rx, rz);
         if (regions.contains({rx, rz}))
@@ -5872,6 +5887,12 @@ void SHIELD_WorldSystem::prepare_region_authority(entt::registry& registry,
             it = m_simulationChunks.erase(it);
             m_activation_has_run = false;
         } else
+            ++it;
+    }
+    for (auto it = m_simulationWaterChunks.begin(); it != m_simulationWaterChunks.end();) {
+        if (!m_simulationChunks.contains(it->first))
+            it = m_simulationWaterChunks.erase(it);
+        else
             ++it;
     }
     // Register live edits before rehydration so durable images never overwrite
@@ -5959,6 +5980,10 @@ void SHIELD_WorldSystem::prepare_region_authority(entt::registry& registry,
         for (auto* chunk : collision_candidates)
             replace_chunk_collision(*physics_system, *chunk);
     }
+    for (const auto& [id, chunk] : m_simulationChunks) {
+        if (chunk->get_coords().y == 0)
+            m_simulationWaterChunks.insert_or_assign(id, chunk);
+    }
     m_simulationRegions = regions;
     if (render_changed)
         ++m_dirty_generation;
@@ -5981,10 +6006,10 @@ void SHIELD_WorldSystem::simulate_region_authority(entt::registry& registry,
         // the same bounded solver path on new, loaded and headless peers.
         m_water_system->SetBootPaused(false);
         m_water_system->SetBootSettleMode(false);
-        m_water_system->update(registry, m_simulationChunks, true);
+        m_water_system->update(registry, m_simulationWaterChunks, true);
         // Initialization, flux, depth and sleep counters are all authority.
         // A metadata/chunk save must never acknowledge newer water implicitly.
-        for (const auto& [id, chunk] : m_simulationChunks) {
+        for (const auto& [id, chunk] : m_simulationWaterChunks) {
             (void)id;
             chunk->mark_water_data_dirty();
             render_changed |= !chunk->water_mesh_generated.load(std::memory_order_acquire);
@@ -6151,7 +6176,8 @@ bool SHIELD_WorldSystem::adopt_streamed_chunk(const std::shared_ptr<Luminumbra::
         (!chunk->sdf_data.empty() || !chunk->heightmap_data.empty())) {
         chunk->set_state(Luminumbra::ChunkState::Idle);
     }
-    if (m_retainRegionAuthority && m_water_system && !chunk->has_simulation_authority() &&
+    if (m_retainRegionAuthority && m_water_system && chunk->get_coords().y == 0 &&
+        !chunk->has_simulation_authority() &&
         (!chunk->sdf_data.empty() || !chunk->heightmap_data.empty()))
         m_water_system->InitializeGeneratedWater(*chunk);
     const bool adopted = m_streaming_state.chunks.emplace(chunk->get_id(), chunk).second;

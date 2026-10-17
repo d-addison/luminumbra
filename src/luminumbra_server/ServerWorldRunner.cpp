@@ -332,8 +332,8 @@ bool ServerWorldRunner::Boot() {
     // ready so the physics system can query terrain from tick 1. Meshing
     // stays on because the supported server profile keeps meshes resident.
     const Vec3 spawn_anchor = m_session->GetMetadata().spawnPoint;
-    const bool horizon_ready = world_system->EnsureSurfaceReadyNear(
-        spawn_anchor, physics_system, m_config.surface_radius, m_config.collision_radius);
+    const bool horizon_ready =
+        m_session->EnsureWorldEntryReady(m_config.surface_radius, m_config.collision_radius);
     if (!horizon_ready) {
         LUMINUMBRA_CORE_ERROR(
             "ServerWorldRunner: spawn-anchor surface horizon failed to become ready");
