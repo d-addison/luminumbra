@@ -808,6 +808,20 @@ class OfflineDependenciesTests(unittest.TestCase):
 class CachedGitSafetyTests(unittest.TestCase):
     """Use real local Git repositories; no transports or native tools run."""
 
+    @classmethod
+    def setUpClass(cls):
+        temporary = tempfile.TemporaryDirectory(prefix="cached git template ")
+        cls.addClassCleanup(temporary.cleanup)
+        cls.template_cache = Path(temporary.name).resolve()
+        cls.template_source = cls.template_cache / "sample"
+        cls.template_source.mkdir()
+        cls.initialize(cls.template_source, cls.template_cache)
+        cls.template_identity = {
+            "commit": deps.head(cls.template_source, cls.template_cache),
+            "sha256": deps.source_digest(cls.template_source),
+            "submodules": deps.submodules(cls.template_source, cls.template_cache),
+        }
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="cached git ")
         self.addCleanup(temporary.cleanup)
@@ -818,10 +832,12 @@ class CachedGitSafetyTests(unittest.TestCase):
             "FetchContent_Declare(sample GIT_REPOSITORY https://example.org/sample.git GIT_TAG v1)\n")
         self.cache = self.base / "cache with spaces"
         self.source = self.cache / "sample"
-        self.source.mkdir(parents=True)
-        self.initialize(self.source)
+        # Copy this small, fixed repository, including its real Git objects.
+        # Independent files let every test mutate metadata without rebuilding
+        # the same commit in five Git processes per test on loaded runners.
+        shutil.copytree(self.template_source, self.source)
         self.lock = self.root / "lock.json"
-        self.write_lock()
+        self.save_lock(self.template_identity)
         self.marker = self.base / "executed marker"
         script = self.base / "monitor script.py"
         script.write_text("import pathlib, sys\npathlib.Path(sys.argv[1]).write_text('executed')\n")
@@ -832,23 +848,30 @@ class CachedGitSafetyTests(unittest.TestCase):
     def git(self, source, *args):
         return deps.git(source, *args, cache=self.cache)
 
-    def initialize(self, source):
-        self.git(source, "init", "--quiet")
+    @classmethod
+    def initialize(cls, source, cache):
+        deps.git(source, "init", "--quiet", cache=cache)
         (source / "input.h").write_text("content\n")
-        self.git(source, "add", "input.h")
-        self.commit(source)
+        deps.git(source, "add", "input.h", cache=cache)
+        cls.commit(source, cache)
 
-    def commit(self, source):
-        self.git(source, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.org",
-                 "-c", "commit.gpgSign=false", "commit", "--quiet", "-m", "fixture")
+    @staticmethod
+    def commit(source, cache):
+        deps.git(source, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.org",
+                 "-c", "commit.gpgSign=false", "commit", "--quiet", "-m", "fixture", cache=cache)
 
-    def write_lock(self):
+    def save_lock(self, identity):
         lock = deps.unresolved_lock(self.root)
         lock["status"] = "resolved"
-        lock["dependencies"]["sample"].update(
-            commit=deps.head(self.source, self.cache), sha256=deps.source_digest(self.source),
-            submodules=deps.submodules(self.source, self.cache))
+        lock["dependencies"]["sample"].update(identity)
         self.lock.write_text(json.dumps(lock))
+
+    def write_lock(self):
+        self.save_lock({
+            "commit": deps.head(self.source, self.cache),
+            "sha256": deps.source_digest(self.source),
+            "submodules": deps.submodules(self.source, self.cache),
+        })
 
     def actions(self):
         return (lambda: deps.verify(self.root, self.cache, self.lock),
@@ -871,6 +894,78 @@ class CachedGitSafetyTests(unittest.TestCase):
             self.assertEqual(self.lock.read_bytes(), lock)
             self.assertFalse((self.root / "scratch/staged").exists())
             self.assertFalse((self.root / "scratch/init.cmake").exists())
+
+    def test_fixture_copies_are_independent_without_git_setup(self):
+        # This fails if per-test setup starts Git again. The actual verifier
+        # and stager below use real Git after the setup-only guard is removed.
+        fresh = type(self)()
+        self.addCleanup(fresh.doCleanups)
+        with patch.object(deps.subprocess, "check_output",
+                          side_effect=AssertionError("fixture setup started Git")):
+            fresh.setUp()
+        original_config = (self.source / ".git/config").read_bytes()
+        original_lock = self.lock.read_bytes()
+        self.assertEqual(fresh.lock.read_bytes(), original_lock)
+        (self.source / "input.h").write_text("changed source\n")
+        (self.source / ".git/config").write_text('[include]\npath = missing\n')
+        (self.source / ".git/HEAD").unlink()
+        self.lock.write_text("invalid lock")
+        for source in (fresh.source, self.template_source):
+            with self.subTest(source=source):
+                self.assertEqual((source / "input.h").read_text(), "content\n")
+                self.assertEqual((source / ".git/config").read_bytes(), original_config)
+                self.assertTrue((source / ".git/HEAD").is_file())
+        self.assertEqual(fresh.lock.read_bytes(), original_lock)
+        for action in fresh.actions():
+            action()
+        self.assertEqual((fresh.root / "scratch/staged/sample/input.h").read_text(), "content\n")
+        self.assertFalse(fresh.marker.exists())
+
+    def test_failed_fixture_copy_removes_partial_data_and_preserves_template(self):
+        before = {path.relative_to(self.template_source): path.read_bytes()
+                  for path in self.template_source.rglob("*") if path.is_file()}
+        for failure in (PermissionError("unreadable fixture"), OSError("partial fixture copy")):
+            with self.subTest(failure=failure):
+                fresh = type(self)()
+                self.addCleanup(fresh.doCleanups)
+
+                def fail(source, destination):
+                    self.assertEqual(source, self.template_source)
+                    destination.mkdir(parents=True)
+                    (destination / "partial").write_bytes(b"partial copy")
+                    raise failure
+
+                with patch.object(shutil, "copytree", side_effect=fail):
+                    with self.assertRaises(OSError) as caught:
+                        fresh.setUp()
+                self.assertIs(caught.exception, failure)
+                self.assertTrue((fresh.source / "partial").is_file())
+                self.assertTrue(fresh.doCleanups())
+                self.assertFalse(fresh.base.exists())
+                self.assertEqual({path.relative_to(self.template_source): path.read_bytes()
+                                  for path in self.template_source.rglob("*") if path.is_file()}, before)
+
+    def test_failed_template_initialization_removes_partial_repository(self):
+        class FailedFixture(type(self)):
+            pass
+
+        failure = PermissionError("partial repository initialization")
+
+        def fail(source, cache):
+            self.assertEqual(source.parent, cache)
+            (source / "partial").write_bytes(b"partial metadata")
+            raise failure
+
+        try:
+            with patch.object(FailedFixture, "initialize", side_effect=fail):
+                with self.assertRaises(PermissionError) as caught:
+                    FailedFixture.setUpClass()
+            self.assertIs(caught.exception, failure)
+            self.assertTrue((FailedFixture.template_source / "partial").is_file())
+        finally:
+            FailedFixture.doClassCleanups()
+        self.assertEqual(FailedFixture.tearDown_exceptions, [])
+        self.assertFalse(FailedFixture.template_cache.exists())
 
     def test_cache_fsmonitor_is_neutralized_for_verify_stage_and_status(self):
         self.git(self.source, "config", "core.fsmonitor", self.command)
@@ -1346,16 +1441,16 @@ class CachedGitSafetyTests(unittest.TestCase):
     def test_real_recursive_gitlinks_check_initialized_heads(self):
         nested = self.source / "nested path (v1)"
         nested.mkdir()
-        self.initialize(nested)
+        self.initialize(nested, self.cache)
         child = nested / "child"
         child.mkdir()
-        self.initialize(child)
+        self.initialize(child, self.cache)
         child_head = deps.head(child, self.cache)
         self.git(nested, "update-index", "--add", "--cacheinfo", "160000", child_head, "child")
-        self.commit(nested)
+        self.commit(nested, self.cache)
         nested_head = deps.head(nested, self.cache)
         self.git(self.source, "update-index", "--add", "--cacheinfo", "160000", nested_head, nested.name)
-        self.commit(self.source)
+        self.commit(self.source, self.cache)
         # Initialized submodules normally have a gitdir file, not a directory.
         metadata = self.source / ".git/modules/nested"
         metadata.parent.mkdir()
@@ -1375,10 +1470,10 @@ class CachedGitSafetyTests(unittest.TestCase):
     def test_submodule_gitdir_outside_cache_is_refused(self):
         nested = self.source / "nested"
         nested.mkdir()
-        self.initialize(nested)
+        self.initialize(nested, self.cache)
         nested_head = deps.head(nested, self.cache)
         self.git(self.source, "update-index", "--add", "--cacheinfo", "160000", nested_head, "nested")
-        self.commit(self.source)
+        self.commit(self.source, self.cache)
         self.write_lock()
         metadata = self.base / "outside metadata"
         (nested / ".git").rename(metadata)
