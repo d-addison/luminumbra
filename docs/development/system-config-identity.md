@@ -38,6 +38,15 @@ adjacent integer values. The defaults append `0119000000ffffffffffffffff1e000000
 The domain version changes so older identities cannot be mistaken for this encoding.
 This configuration encoding is independent of the resolved preset hash below.
 
+Regional plants, soil/irrigation pages, emitter admission and resident water use the
+existing `sim.active_regions` gate. They introduce no independent rule switch or
+content-file input. Water resolution, finite hydrology, rain scale and effective
+scheduler settings retain their existing identity slots. Plant/source payloads,
+page contents and continuation debt/cursors are mutable world state covered by the
+regional snapshot and world-hash contracts. Parked-byte limits and autosave intervals
+control persistence resources rather than simulation rules. These additions require
+no change to the v3 configuration encoding, shipping identity pin or preset manifest.
+
 The registry field order and scalar encoding from v2 are preserved. Exact foraging doubles
 and reproduction integers would lose adjacent values if converted to binary32. Signed
 zeros remain distinct. FNV-1a uses offset

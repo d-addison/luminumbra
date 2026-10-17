@@ -98,8 +98,12 @@ struct TerrainPresetLoadResult {
     // FNV-1a-64 of canonical resolved preset JSON and a sorted manifest of
     // logical data_root-relative paths, exact-byte file hashes and loader outcomes.
     std::string preset_content_hash;
+    // Compact, sorted source JSON before revision defaults are materialized. Compatibility
+    // checks and identity consumers must use this captured source rather than reopen the file.
+    std::string source_json;
     // params.worldgen_dependencies retains the loaded objects and manifest that
     // this identity describes, including absent/rejected-input fallback decisions.
+    // Biome/structure content hashes are finalized for pre-construction identity checks.
     Systems::TerrainGenParams params;
     TerrainPresetExtras extras;
     std::vector<std::string> errors;
@@ -125,11 +129,17 @@ std::string TerrainPresetContentHash(const nlohmann::json& preset);
 // result carries ok=false and human-readable messages; params/extras are only
 // meaningful when ok=true. Absent biome tables use legacy classification; present
 // tables must be readable and valid. Enabled structure pools must exist.
-// Runtime callers supply data_root independently of the preset's storage location.
-TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path,
-                                          const std::filesystem::path& data_root);
-// Convenience for presets in the standard worlds/atlas/presets layout.
-TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path);
+// Runtime callers supply data_root independently of the preset storage location.
+// The status reader permits deterministic dependency I/O failure coverage.
+TerrainPresetLoadResult LoadTerrainPreset(
+    const std::filesystem::path& preset_path,
+    const World::WorldgenFileStatusReader& read_status = World::ReadWorldgenSymlinkStatus);
+
+// Saved presets may live outside the runtime tree; resolve their dependencies here.
+TerrainPresetLoadResult LoadTerrainPreset(
+    const std::filesystem::path& preset_path,
+    const std::filesystem::path& data_root,
+    const World::WorldgenFileStatusReader& read_status = World::ReadWorldgenSymlinkStatus);
 
 // Explicit CLI preset override, validated against the runtime data root. Failure leaves
 // json_text unchanged; successful text is passed to GameSession::CreateWorld.

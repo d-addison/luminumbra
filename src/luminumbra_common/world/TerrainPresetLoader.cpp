@@ -1,20 +1,31 @@
 #include "TerrainPresetLoader.h"
 
 #include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstdint>
 #include <exception>
-#include <fstream>
+#include <filesystem>
 #include <initializer_list>
 #include <map>
 #include <memory>
+#include <nlohmann/json_fwd.hpp>
+#include <string>
 #include <string_view>
+#include <system_error>
+#include <utility>
+#include <vector>
 
 #include "nlohmann/json.hpp"
 
 #include "../ai/CreatureSpeciesRegistry.h"
 #include "../core/FilesystemPath.h"
 #include "../core/Log.h"
+#include "../systems/SHIELD_WorldSystem.h"
 #include "BiomeTable.h"
 #include "StructurePlacement.h"
+#include "WorldgenDependencySnapshot.h"
+#include "WorldgenFileReader.h"
 
 namespace Luminumbra::world {
 namespace {
@@ -23,7 +34,7 @@ constexpr std::uint64_t kFnvOffsetBasis = 14695981039346656037ull;
 constexpr std::uint64_t kFnvPrime = 1099511628211ull;
 
 void HashBytes(std::uint64_t& hash, std::string_view bytes) {
-    for (unsigned char byte : bytes) {
+    for (const unsigned char byte : bytes) {
         hash ^= byte;
         hash *= kFnvPrime;
     }
@@ -225,6 +236,8 @@ bool ResolveDependencyManifest(TerrainPresetLoadResult& preset,
         errors.push_back("failed to resolve worldgen dependencies: " + std::string(error.what()));
         return false;
     }
+    Systems::FinalizeTerrainContentHashes(
+        preset.params, snapshot->biome_table, snapshot->structure_pools);
     preset.params.worldgen_dependencies = std::move(snapshot);
     return true;
 }
@@ -425,19 +438,21 @@ std::string TerrainPresetContentHash(const nlohmann::json& preset) {
     return HashPresetIdentity(preset, nlohmann::json::array());
 }
 
-TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path) {
+TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path,
+                                          const World::WorldgenFileStatusReader& read_status) {
     std::error_code ec;
     const auto preset_dir = Filesystem::AbsolutePath(preset_path, ec).parent_path();
-    return LoadTerrainPreset(preset_path,
-                             preset_dir.parent_path().parent_path().parent_path() / "data");
+    return LoadTerrainPreset(
+        preset_path, preset_dir.parent_path().parent_path().parent_path() / "data", read_status);
 }
 
 TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path,
-                                          const std::filesystem::path& data_root) {
+                                          const std::filesystem::path& data_root,
+                                          const World::WorldgenFileStatusReader& read_status) {
     TerrainPresetLoadResult result;
 
-    std::ifstream file(preset_path);
-    if (!file.is_open()) {
+    std::string bytes;
+    if (!World::ReadWorldgenFile(preset_path, bytes)) {
         result.errors.push_back("failed to open world preset: " +
                                 Filesystem::GenericUtf8PathString(preset_path));
         return result;
@@ -445,7 +460,7 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
 
     nlohmann::json data;
     try {
-        data = nlohmann::json::parse(file);
+        data = nlohmann::json::parse(bytes);
     } catch (const nlohmann::json::parse_error& e) {
         result.errors.push_back("failed to parse world preset JSON '" +
                                 Filesystem::GenericUtf8PathString(preset_path) + "': " + e.what());
@@ -453,7 +468,7 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
     }
 
     return LoadTerrainPresetFromJson(
-        data, data_root, Filesystem::GenericUtf8PathString(preset_path));
+        data, data_root, Filesystem::GenericUtf8PathString(preset_path), read_status);
 }
 
 TerrainPresetLoadResult
@@ -662,9 +677,8 @@ LoadTerrainPresetFromJson(const nlohmann::json& source,
         params.biome_relief_enabled = biomes.relief_enabled;
         params.biome_relief_strength = biomes.relief_strength;
     }
-    // Features river/structure flags: rivers and structures
-    // use the versioned resolved choices. The structure template content hash is stamped later by
-    // the world system when it loads the pools (mirrors the biome-table hash).
+    // Features river/structure flags use the versioned resolved choices. Content
+    // hashes are finalized below when the dependency snapshot is published.
     result.extras.features.present = true;
     result.extras.features.rivers_enabled = features.value("rivers_enabled", false);
     result.extras.features.structures_enabled = features.value("structures_enabled", false);
@@ -768,6 +782,7 @@ LoadTerrainPresetFromJson(const nlohmann::json& source,
     if (!ResolveDependencyManifest(result, data_root, manifest, result.errors, read_status))
         return result;
     result.preset_content_hash = HashPresetIdentity(source, manifest);
+    result.source_json = source.dump();
     result.ok = true;
     return result;
 } catch (const std::exception& error) {
@@ -786,18 +801,13 @@ bool LoadTerrainPresetOverride(const std::filesystem::path& preset_path,
                                const std::filesystem::path& data_root,
                                std::string& json_text,
                                std::string& error) {
-    std::ifstream file(preset_path);
-    if (!file) {
+    std::string bytes;
+    if (!World::ReadWorldgenFile(preset_path, bytes)) {
         error = "cannot read preset override: " + Filesystem::GenericUtf8PathString(preset_path);
         return false;
     }
     try {
-        const auto document = nlohmann::json::parse(file);
-        if (file.bad()) {
-            error =
-                "cannot read preset override: " + Filesystem::GenericUtf8PathString(preset_path);
-            return false;
-        }
+        const auto document = nlohmann::json::parse(bytes);
         const auto validated = LoadTerrainPresetFromJson(
             document, data_root, Filesystem::GenericUtf8PathString(preset_path));
         if (!validated.ok) {

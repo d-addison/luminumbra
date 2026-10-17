@@ -32,7 +32,17 @@ and content formats may still change.
   dug pit gains the same physical volume per unit of simulated-chunk-time, within
   a tested band.
 
-  The live solver budget is 4096 cells per tick rather than a fixed chunk count, so
+  With shipping `sim.active_regions=true`, resident water uses the
+  [regional continuation contract](regional-water-continuation.md). Preparation,
+  kernels and faces share a 4096-cell budget per fixed tick. A conservative window
+  costs `2R² + 4R` cells: seven windows at High or 25 at Medium, including border
+  reservations. Loading restores grids unchanged; selected visits prepare or resize
+  them before that visit’s kernel. There is no boot stepping, bulk migration or
+  elapsed-time water catch-up. Resident scans and planning remain outside that cell
+  budget, and dynamic eligibility does not establish a fixed-cohort service bound.
+
+  With explicit `sim.active_regions=false`, the legacy live solver budget is
+  4096 cells per tick rather than a fixed chunk count, so
   High shrinks the chunk window (16 instead of 64) to bound solver cell steps
   at uniform resolution. This does not bound the entire update, including scans
   over resident chunks and activity scoring.

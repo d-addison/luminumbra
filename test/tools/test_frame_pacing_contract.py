@@ -74,7 +74,7 @@ class FramePacingSourceContract(unittest.TestCase):
             self.assertLess(wait, loop.index(marker), marker)
         self.assertIn("observedFrameSeconds=observedFrame-previousObservedFrame;"
                       "previousObservedFrame=observedFrame;"
-                      "floatcurrentFrame=(float)observedFrame;"
+                      "constfloatcurrentFrame=static_cast<float>(observedFrame);"
                       "floatdeltaTime=currentFrame-lastFrame;", loop)
         self.assertIn("(_now-_frameStart).count()", loop)
         self.assertIn("(g_rb_before_swap-g_rb_frame_start)", loop)

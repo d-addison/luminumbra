@@ -240,6 +240,25 @@ TEST(SimBudgetTelemetry, DisabledSkipsCounterAndArtifactExtension) {
     EXPECT_FALSE(artifact.contains("sim_budget"));
 }
 
+TEST(SimBudgetTelemetry, RegionalSubstepsAggregateWithinHostTickAndRemainSeparateAcrossTicks) {
+    SimBudgetTelemetry telemetry;
+    telemetry.SetEnabled(true);
+    telemetry.Record(SimBudgetStage::Plants, 100, 2, 1.5);
+    telemetry.Record(SimBudgetStage::Soil, 100, 256, 2.0);
+    telemetry.Record(SimBudgetStage::Plants, 100, 3, 0.5);
+    telemetry.Record(SimBudgetStage::Plants, 101, 4, 3.0);
+    const auto& plants =
+        telemetry.SamplesByStage()[static_cast<std::size_t>(SimBudgetStage::Plants)];
+    ASSERT_EQ(plants.size(), 2u);
+    EXPECT_EQ(plants[0].tick, 100u);
+    EXPECT_EQ(plants[0].work, 5u);
+    EXPECT_DOUBLE_EQ(plants[0].duration_ms, 2.0);
+    EXPECT_EQ(plants[1].tick, 101u);
+    EXPECT_EQ(plants[1].work, 4u);
+    EXPECT_DOUBLE_EQ(plants[1].duration_ms, 3.0);
+    EXPECT_EQ(telemetry.Summarize(SimBudgetStage::Soil).work_total, 256u);
+}
+
 TEST(SimBudgetTelemetry, PercentilesUsePerfLinearInterpolation) {
     SimBudgetTelemetry telemetry;
     telemetry.SetEnabled(true);

@@ -114,8 +114,17 @@ public:
     }
 
     void Record(SimBudgetStage stage, std::uint64_t tick, std::uint64_t work, double duration_ms) {
-        if (enabled_)
-            samples_[static_cast<std::size_t>(stage)].push_back({tick, work, duration_ms});
+        if (!enabled_)
+            return;
+        auto& samples = samples_[static_cast<std::size_t>(stage)];
+        // Regional resume interleaves repeated visits to each stage within one host tick.
+        // Retain one sample per stage/tick, summing actual work and measured intervals.
+        if (!samples.empty() && samples.back().tick == tick) {
+            samples.back().work += work;
+            samples.back().duration_ms += duration_ms;
+        } else {
+            samples.push_back({.tick = tick, .work = work, .duration_ms = duration_ms});
+        }
     }
 
     // Deliberately excludes all wall-clock values, including in replay validation.

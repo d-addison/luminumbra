@@ -50,6 +50,7 @@ Luminumbra::Server::ServerWorldRunnerConfig RunnerConfigFrom(const ServerCliOpti
     config.collision_radius = options.collision_radius;
     config.test_streaming_radius_cap = options.test_streaming_radius_cap;
     config.autosave_interval_ticks = options.autosave_ticks;
+    config.parked_bytes_limit = options.parked_bytes_limit;
     config.avatar_count = options.avatars;
     config.ecology_roster = options.ecology_roster;
     config.planted_roster = options.planted_roster;

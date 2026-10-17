@@ -9,16 +9,22 @@
 #include "../ai/WildlifeFoliageSystem.h"      // ai::WildlifeFoliageTuning (full-control)
 #include "../core/SimulationClock.h"
 #include "../core/SystemConfig.h"
+#include "../fields/FieldPageState.h"
+#include "../persistence/ChunkValidationCache.h"
 #include "../simulation/SimBudgetTelemetry.h"
 #include "../simulation/SimulationEventBus.h"
 #include "../systems/PollinationSystem.h"
 #include "ActiveRegionLedger.h"
+#include "GroundObjectStore.h"
 #include "WorldClock.h"
 #include "WorldMetadata.h"
+#include "WorldgenFileReader.h"
 #include "entt/entt.hpp"
+#include <chrono>
 #include <cstdint>
 #include <ctime>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -38,14 +44,21 @@ class CreatureSpeciesRegistry; // per-world species definition table
 } // namespace luminumbra::ai
 
 namespace luminumbra::foliage {
-class SoilGrid;       // soil nutrient field (systems/SoilNutrientSystem.h)
+class SoilGrid; // soil nutrient field (systems/SoilNutrientSystem.h)
+struct PlantEnvSample;
 class IrrigationGrid; // soil-moisture field (systems/IrrigationSystem.h)
 } // namespace luminumbra::foliage
+
+namespace Luminumbra::Persistence {
+struct SavedWorld;
+struct WorldSaveAdmission;
+} // namespace Luminumbra::Persistence
 
 namespace Luminumbra {
 class JobSystem;
 
 namespace Systems {
+struct TerrainGenParams;
 class SHIELD_WorldSystem;
 class PhysicsSystem;
 class WaterSystem;
@@ -67,14 +80,29 @@ struct WorldConfigValidationResult {
     std::vector<std::string> errors;
 };
 
-// Counters for one runtime world-state save pass. The on-disk layout
-// is a whole-world snapshot, so chunks_saved is the full streamed chunk count
-// whenever a write happened and zero otherwise.
+// Counters for one runtime world-state save pass. chunks_total counts resident/parked chunks;
+// chunks_saved counts the selected in-memory cohort when a chunk write succeeds.
 struct WorldStateSaveReport {
     std::size_t chunks_total = 0;
     std::size_t chunks_dirty = 0;
     std::size_t chunks_saved = 0;
     bool saved = false;
+};
+
+enum class WorldStateSaveScope {
+    ResidentSnapshot,
+    // Automatic saves retain changed authority; regenerable terrain stays a cache.
+    DurableChanges
+};
+
+struct PersistenceStatus {
+    std::size_t parked_count = 0;
+    std::size_t parked_bytes = 0;
+    std::int64_t oldest_parked_tick = -1;
+    std::int64_t last_save_tick = -1;
+    double last_save_ms = 0.0;
+    std::uint32_t failures = 0;
+    bool save_requested = false;
 };
 
 class GameSession {
@@ -106,9 +134,24 @@ public:
 
     // Load an existing world from disk
     bool LoadWorld(const std::string& worldId);
+    // Uses the preset loader's status-reader seam for deterministic dependency I/O.
+    bool LoadWorld(const std::string& worldId, const World::WorldgenFileStatusReader& read_status);
+    using WorldOpenCheck = std::function<std::string(
+        const Persistence::SavedWorld&, const Systems::TerrainGenParams&, std::uint32_t)>;
+    // Called once after metadata/preset admission, before chunk validation or terrain planning.
+    // An empty diagnostic accepts the identity; ordinary save validation still follows.
+    bool LoadWorld(const std::string& worldId, const WorldOpenCheck& check);
+
+    // Owner thread only. Reinspect current files for identity consumers, reusing exact-byte
+    // chunk validation facts from admission/saves while preserving catalog refusal checks.
+    Persistence::SavedWorld InspectCurrentSavedWorld();
 
     // Save the current world state
     bool SaveWorld();
+    // Flag on: runs `body` (which may call SaveWorldState/SaveWorld and indexed-member writers)
+    // inside ONE snapshot transaction published with a single index. Otherwise just runs `body`.
+    // Owner thread only; returns the body's verdict, and false when the commit fails.
+    bool RunInSnapshotTransaction(const std::function<bool()>& body);
 
     // Read-only destination preset/identity check, before any save writes or acknowledgements.
     [[nodiscard]] bool SavedPresetCompatible(const std::filesystem::path& save_dir) const;
@@ -118,11 +161,34 @@ public:
     // (worlds/saves/<world_id>). Incremental contract: nothing is written when
     // no chunk carries unsaved voxel edits, so a never-edited world stays
     // byte-for-byte on the fresh-world path. The first write of an edited
-    // world emits a full snapshot; later writes flush through
-    // WorldSaveService::save_dirty_chunks.
-    bool SaveWorldState(WorldStateSaveReport* report = nullptr);
+    // world emits the selected snapshot; later writes flush through
+    // WorldSaveService::save_dirty_chunks. Automatic hosts select DurableChanges;
+    // explicit snapshots retain generated resident cache coverage by default.
+    bool SaveWorldState(WorldStateSaveReport* report = nullptr,
+                        WorldStateSaveScope scope = WorldStateSaveScope::ResidentSnapshot);
     bool SaveWorldStateTo(const std::filesystem::path& save_dir,
-                          WorldStateSaveReport* report = nullptr);
+                          WorldStateSaveReport* report = nullptr,
+                          WorldStateSaveScope scope = WorldStateSaveScope::ResidentSnapshot);
+
+    // Derived validation reuse only; excluded from persistent and hashed state.
+    [[nodiscard]] Persistence::ChunkValidationCache::Stats GetChunkValidationCacheStats() const {
+        return m_chunkValidationCache.stats();
+    }
+
+    // Durable residency (sim.active_regions only). All zero/false when the flag is off.
+    [[nodiscard]] PersistenceStatus GetPersistenceStatus() const;
+    // True when the world asked for a save (a dirty authoritative chunk hit the parked byte
+    // limit) and the retry back-off after a failed save has elapsed.
+    [[nodiscard]] bool PersistenceSaveRequested() const;
+    void ClearPersistenceSaveRequest();
+    // 0 = unlimited. Applied when the world system is wired (and immediately if it exists).
+    void SetParkedBytesLimit(std::size_t bytes);
+    static constexpr std::uint64_t kSaveRetryTicks = 300;
+    static constexpr std::uint64_t kAutosaveTicks = 9000;
+    // Periodic autosave for hosts without their own interval (the client). True once kAutosaveTicks
+    // have elapsed since the last successful save (or since first observed), outside the failure
+    // back-off. Always false unless sim.active_regions is on.
+    [[nodiscard]] bool PersistenceAutosaveDue();
 
     // Loads a previously saved snapshot into the live streaming state. Must be
     // called AFTER the world systems initialize but BEFORE chunk streaming
@@ -390,6 +456,18 @@ public:
     [[nodiscard]] const RegionSchedule& GetRegionSchedule() const {
         return m_regionSchedule;
     }
+    [[nodiscard]] const GroundObjectStore& GetGroundObjects() const {
+        return m_groundObjects;
+    }
+    [[nodiscard]] const FieldPageState& GetFieldPages() const {
+        return m_fieldPages;
+    }
+    // Main-thread admission/edit seams. Enabled edits are transactional and own
+    // their region before publishing any cell or identity.
+    bool AdmitPlant(entt::entity entity);
+    bool SetFoliageCell(const Vec3& position, bool soil, std::int32_t value);
+    [[nodiscard]] std::int32_t SoilNutrientAt(const Vec3& position) const;
+    [[nodiscard]] std::int32_t IrrigationAt(const Vec3& position) const;
     // A fatal scheduler/obligation fault. Once latched the session is fail-stop: the
     // simulation clock is rewound to the faulting tick, no further ticks run, and hosts
     // are expected to save and stop. Saving a faulted session is allowed.
@@ -400,6 +478,8 @@ public:
     // Observational counters of rejected host inputs; never hashed, digested or saved.
     struct RegionInputRejections {
         std::uint32_t anchors = 0, edits = 0, pins = 0;
+        std::uint32_t ground_spawns = 0;
+        std::uint32_t field_pages = 0;
     };
     [[nodiscard]] const std::optional<RegionSchedulerFault>& GetRegionSchedulerFault() const {
         return m_regionFault;
@@ -416,9 +496,24 @@ public:
     void NotifyGroundObjectEdit(const Vec3& position);
     void PinActiveRegion(RegionKey key, bool pinned);
     void RecordActiveRegionWork(RegionWork work);
+    // Main-thread only, like the other host inputs. Returns the new persistent id, or 0 when the
+    // flag is off (no state touched) or the spawn is refused.
+    std::uint64_t SpawnGroundObject(std::uint32_t type,
+                                    std::int64_t x_mm,
+                                    std::int64_t y_mm,
+                                    std::int64_t z_mm,
+                                    std::uint64_t despawn_after,
+                                    std::uint32_t payload);
+    std::uint64_t SpawnGroundObject(std::uint32_t type,
+                                    Vec3 position,
+                                    std::uint32_t despawn_after,
+                                    std::uint32_t payload);
 
     // Fold only when enabled, inside the existing ecology hash slot.
     [[nodiscard]] std::string FoldClockIntoEcologyHash(const std::string& ecology_hash) const;
+    // Enabled chunk slot hashes authoritative truth across residency/save history. The default
+    // path retains the existing streamed-state projection and wire/checkpoint slots.
+    [[nodiscard]] std::string ComputeChunkStateHash();
     [[nodiscard]] bool IsSimulationTickBoundary() const {
         return !m_activeRegionsEnabled || (!m_simulationBatchInProgress && m_regionWork.empty());
     }
@@ -467,6 +562,11 @@ public:
     std::filesystem::path GetSaveRootPath() const;
 
 private:
+    bool LoadWorldChecked(const std::string& worldId,
+                          const World::WorldgenFileStatusReader& read_status,
+                          const WorldOpenCheck& check);
+    Persistence::ChunkValidationCache m_chunkValidationCache{};
+
     luminumbra::simulation::SimBudgetTelemetry m_simBudgetTelemetry;
     entt::registry m_registry;
     luminumbra::ai::EcologyTuning m_ecologyTuning{}; // Defaults match compiled constants.
@@ -480,23 +580,82 @@ private:
     float m_plantMutationRate = luminumbra::foliage::kPollinationMutationFrac;
     WorldMetadata m_metadata;
     bool m_transientWorld = false;
-    void ResetWorldSystems();
+    void ResetWorldSystems(bool keep_admitted_chunk_facts = false);
+    bool AdoptWorldState(const std::filesystem::path& save_dir,
+                         Persistence::WorldSaveAdmission* admission);
     void RestoreWorldClock(const WorldClock& clock);
+    void RestoreAmbientFieldsAtTick(std::uint64_t tick);
     bool SaveWorldMetadataTo(const std::filesystem::path& save_dir);
     bool ClockConfigurationCompatible(const std::filesystem::path& save_dir) const;
     WorldClock m_worldClock;
     void AttachRegionEditObserver();
+    void RecordPersistenceSaveOutcome(bool ok, double elapsed_ms);
+    std::size_t m_parkedBytesLimit = static_cast<std::size_t>(256) * 1024u * 1024u;
+    std::int64_t m_lastSaveTick = -1;
+    double m_lastSaveMs = 0.0;
+    std::uint32_t m_saveFailures = 0;
+    std::int64_t m_lastSaveFailureTick = -1;
     RegionSchedulerConfig m_regionSchedulerConfig;
     std::optional<RegionSchedulerConfig> m_regionSchedulerOverride;
     ActiveRegionLedger m_activeRegionLedger;
     void ReplaceActiveRegionLedger(ActiveRegionLedger ledger);
     RegionSchedule m_regionSchedule;
+    world::RegionScheduleScratch m_regionScheduleScratch;
+    mutable std::vector<RegionKey> m_sortedDueRegions, m_sortedDueSource;
     std::optional<std::vector<Vec3>> m_replicatedSimulationAnchors;
-    std::vector<RegionWork> m_regionWork;
+    std::vector<RegionWork> m_regionWork;          // External inputs for the next schedule call.
+    std::vector<RegionWork> m_regionCompletedWork; // Transient successful consumer work this tick.
     std::optional<RegionSchedulerFault> m_regionFault;
     RegionInputRejections m_regionInputRejections;
+    // Authoritative in-memory ground objects (S5). Empty unless spawned with the flag on.
+    GroundObjectStore m_groundObjects;
+    // Authoritative in-memory field pages (S6). Empty unless the region flag is on.
+    FieldPageState m_fieldPages;
+    FieldPageState m_previousFieldPages;
+    FieldPageState::ScheduledScratch m_fieldScheduleScratch;
     void LatchRegionFault(std::uint64_t tick, std::string message);
     void RunRegionScheduler(std::uint64_t current_tick);
+    // Sorted, de-duplicated due regions of the current schedule.
+    [[nodiscard]] const std::vector<RegionKey>& SortedDueRegions() const;
+    // Ages the due, owned regions' ground objects by one tick and publishes despawns.
+    void AdvanceGroundObjects(std::uint64_t tick);
+    // Activates and steps the due, ledger-backed regions' field pages by one tick.
+    void AdvanceFieldPages(std::uint64_t tick);
+    bool AdmitPlantAt(entt::entity entity, std::uint64_t fresh_stamp);
+    void PrepareRegionalFoliage();
+    void RunRegionalEnergyTick(std::uint64_t tick);
+    void RunRegionalWaterTick();
+    void RunRegionalFoliageTick(luminumbra::simulation::SimBudgetTelemetry::TickScope& budget,
+                                std::uint64_t tick);
+    void RunRegionalFoliageTickImpl(luminumbra::simulation::SimBudgetTelemetry::TickScope& budget,
+                                    std::uint64_t tick,
+                                    const FieldPageState& previous,
+                                    const std::map<RegionKey, std::uint32_t>& windows,
+                                    const std::map<RegionKey, std::uint64_t>& resumes);
+    void RunFoliageTick(luminumbra::simulation::SimBudgetTelemetry::TickScope& budget,
+                        std::uint64_t tick);
+    [[nodiscard]] luminumbra::foliage::PlantEnvSample
+    SamplePlantEnvironment(const Components::TransformComponent& transform,
+                           std::uint64_t tick) const;
+    [[nodiscard]] std::string PlantRegionProjection(RegionKey key) const;
+    std::map<RegionKey, std::uint64_t> m_foliagePreviousTicks;
+
+    void BindRegionalFieldQueries();
+    [[nodiscard]] std::uint16_t SampleRegionalChannel(int channel, const Vec3& position) const;
+    [[nodiscard]] std::string RegionalAmbientHash(std::uint8_t channels, bool weather) const;
+    void ProjectRegionalWeather(bool restoring = false);
+    [[nodiscard]] std::string RegionalFieldProjection(RegionKey key) const;
+    void AdvanceRegionalWeather(std::uint64_t tick);
+    [[nodiscard]] float ScentDomainOrigin(bool x_axis) const;
+    [[nodiscard]] RegionKey ScentCellOwner(int x, int z) const;
+    [[nodiscard]] bool ScentCellDue(int x, int z) const;
+    [[nodiscard]] bool ScentEdgeOpen(int x, int z, int nx, int nz) const;
+    void RestoreRegionalScent();
+    void CaptureRegionalScent();
+    // Capture workspace only; cleared before use and excluded from save/hash state.
+    std::vector<std::pair<ScentCellKey, ScentCell>> m_scentCaptureUpdates;
+    // Ledger edit mark for a ground object's region. False when refused (fault or counted reject).
+    bool MarkGroundRegionEdited(const GroundObject& object);
     std::filesystem::path m_regionDurableDirectory;
     // Stable only in the clock slice; world-anchored pages replace this grid in C4.
     Vec3 m_ambientFieldAnchor{};
@@ -557,6 +716,7 @@ private:
     // m_aetherStateEnabled (called at CreateWorld/LoadWorld after the
     // re-derivable aether system exists). OFF -> stays null -> byte-identical.
     void InitializeEnergyFieldState();
+    bool RestoreLegacyEnergyRecord(const std::filesystem::path& save_dir);
     // Persist the layer's record beside the chunk save (null/all-zero -> no
     // file). Serialize normalizes, which is state-idempotent at save time.
     bool SaveEnergyFieldRecord(const std::filesystem::path& save_dir);
@@ -567,7 +727,9 @@ private:
     bool m_weatherRainEnabled = true;       // See SetWeatherRainEnabled.
     std::int32_t m_weatherRainScaleMm = 25; // Millimetres per tick at full precipitation.
     bool m_weatherEventsEnabled = true;     // See SetWeatherEventsEnabled.
-    bool HasScentParticipants() const;
+    bool HasScentParticipants(bool require_due = true) const;
+    bool HasScentBorderWork() const;
+    void AdvanceNearScent();
     bool HasPlantParticipants() const; //  opt-in gate
     std::string m_rootPath;
     std::filesystem::path m_saveRootPath;

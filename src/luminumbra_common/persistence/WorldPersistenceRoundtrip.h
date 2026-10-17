@@ -1,10 +1,14 @@
 #pragma once
 
+#include "ChunkValidationCache.h"
 #include "ecs/EntitySnapshot.h"
 #include "world/WorldStreamingState.h"
 
+#include <array>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -76,10 +80,34 @@ const char* WorldHashSchema();
 const char* WorldHashAlgorithm();
 const char* EntitySnapshotArtifactSchema();
 
-std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& state);
+using ChunkValidationModes = std::array<std::optional<ChunkValidationCache::Facts>, 2>;
+std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& state,
+                                                     ChunkValidationModes* facts = nullptr);
+// Save-path writer: canonical bytes identical to the DOM serializer above, with
+// at most one bulk-array element represented as JSON at a time.
+struct SnapshotEncodeWork {
+    std::size_t array_elements = 0;
+    std::size_t peak_buffered_array_elements = 0;
+};
+std::string StreamWorldStreamingStateSnapshotJson(const WorldStreamingState& state,
+                                                  ChunkValidationModes* facts = nullptr,
+                                                  SnapshotEncodeWork* work = nullptr);
+std::uint64_t SnapshotStreamEncodeCountForTesting();
+// Success-only loader-equivalent validation. Unusual input takes the original decoder path.
+std::optional<ChunkValidationCache::Facts>
+TryWorldStreamingSnapshotFacts(const std::string& text, ChunkID id, bool strict_water);
+// Observational decode work for bulk chunk arrays (excluding the small envelope).
+// Excluded from snapshots and hashes.
+struct SnapshotDecodeWork {
+    bool streamed = false;
+    std::size_t array_elements = 0;
+    std::size_t peak_buffered_array_elements = 0;
+};
 bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
                                          WorldStreamingState& out_state,
-                                         std::vector<std::string>& errors);
+                                         std::vector<std::string>& errors,
+                                         bool strict_water = false,
+                                         SnapshotDecodeWork* work = nullptr);
 bool ValidateWorldStreamingChunkFormatJson(const std::string& chunk_json,
                                            std::vector<std::string>& errors);
 // Deterministic world hash over the canonical snapshot bytes (same

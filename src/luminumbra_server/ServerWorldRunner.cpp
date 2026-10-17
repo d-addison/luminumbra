@@ -235,9 +235,8 @@ bool ServerWorldRunner::Boot() {
     // optional worker-count override (LUMINUMBRA_JOB_WORKERS). The
     // streamed-chunk world_hash is INVARIANT to worker count (hashes are computed
     // after a full streaming quiesce), so this is a pure scheduling knob: the
-    // replay gates set it to 1 to minimize the headless server's known
-    // intermittent shutdown/streaming race (documented in ) without
-    // touching the hash. Unset => one worker per hardware thread (production).
+    // replay gates can set it to 1 to bound worker usage without touching the
+    // hash. Unset => one worker per hardware thread (production).
     if (const auto workers = Core::ReadEnvironment("LUMINUMBRA_JOB_WORKERS")) {
         m_jobSystem.startup(static_cast<std::size_t>(std::strtoul(workers->c_str(), nullptr, 10)));
     } else {
@@ -269,6 +268,7 @@ bool ServerWorldRunner::Boot() {
                 ? *m_config.systems_config_override
                 : luminumbra::core::SystemConfig::LoadFromFile(systems_json.string());
         m_session->ApplySystemConfig(sys_cfg);
+        m_session->SetParkedBytesLimit(static_cast<std::size_t>(m_config.parked_bytes_limit));
     }
     m_session->SetFiniteHydrologyEnabled(m_config.finite_hydrology);
     // A headless host has no client asset manifest; simulation assets alone are
@@ -775,13 +775,31 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
                                             world_system->debug_water_state_hash().hash);
         }
 
-        if (m_config.autosave_interval_ticks > 0 && simulation_tick > 0 &&
-            (simulation_tick % m_config.autosave_interval_ticks) == 0) {
+        std::uint64_t autosave_interval = m_config.autosave_interval_ticks;
+        if (autosave_interval == 0 && m_config.autosave_default_when_unset &&
+            m_session->ActiveRegionsEnabled()) {
+            autosave_interval = kDefaultActiveRegionsAutosaveTicks;
+        }
+        if (autosave_interval > 0 && simulation_tick > 0 &&
+            (simulation_tick % autosave_interval) == 0) {
             // Synchronous host-thread save. Snapshot/shutdown run between RunFixedTicks calls.
             world::WorldStateSaveReport save_report;
-            if (m_session->SaveWorldState(&save_report)) {
+            if (m_session->SaveWorldState(&save_report,
+                                          world::WorldStateSaveScope::DurableChanges)) {
                 report.autosave_passes += 1;
                 if (save_report.saved && save_report.chunks_dirty > 0) {
+                    report.autosave_writes += 1;
+                }
+            }
+        }
+
+        // Byte-limit pressure: a dirty authoritative chunk could not be parked, so persist now.
+        if (m_session->PersistenceSaveRequested()) {
+            world::WorldStateSaveReport pressure_report;
+            if (m_session->SaveWorldState(&pressure_report,
+                                          world::WorldStateSaveScope::DurableChanges)) {
+                report.autosave_passes += 1;
+                if (pressure_report.saved && pressure_report.chunks_dirty > 0) {
                     report.autosave_writes += 1;
                 }
             }
@@ -956,7 +974,8 @@ std::string ServerWorldRunner::ComputeWorldHash() {
     // into the top-level hash. The chunk hash itself is unchanged; the composite
     // deliberately is not.
     return Persistence::ComposeWorldHash(
-        service.world_hash(state),
+        m_session->ActiveRegionsEnabled() ? m_session->ComputeChunkStateHash()
+                                          : service.world_hash(state),
         WindSubHash(m_session.get()),
         WeatherSubHash(m_session.get()),
         AetherSubHash(m_session.get()),
@@ -1041,7 +1060,9 @@ void ServerWorldRunner::ComputeWorldHashAndSubHashes(
     //   +   +  + gate-populated-world-replay +
     // hash revisionS: composite world_hash (chunk + wind + weather + aether + scents + ecology +
     // plants).
-    out_world_hash = Persistence::ComposeWorldHash(service.world_hash(state),
+    out_world_hash = Persistence::ComposeWorldHash(m_session->ActiveRegionsEnabled()
+                                                       ? m_session->ComputeChunkStateHash()
+                                                       : service.world_hash(state),
                                                    wind_hash,
                                                    weather_hash,
                                                    aether_hash,
@@ -1086,21 +1107,26 @@ std::size_t ServerWorldRunner::SaveFullSnapshot() {
     }
 
     Persistence::WorldSaveService service;
-    std::vector<std::string> errors;
-    if (!service.save_world(state, save_dir, &errors)) {
-        for (const std::string& error : errors) {
-            LUMINUMBRA_CORE_ERROR("SaveFullSnapshot failed: {}", error);
+    // Flag on: the chunk snapshot, the session state and the metadata are ONE snapshot
+    // transaction (a single index publication); flag off just runs the body.
+    const bool saved = m_session->RunInSnapshotTransaction([&]() {
+        std::vector<std::string> errors;
+        if (!service.save_world(state, save_dir, &errors)) {
+            for (const std::string& error : errors) {
+                LUMINUMBRA_CORE_ERROR("SaveFullSnapshot failed: {}", error);
+            }
+            return false;
         }
-        return 0;
-    }
-    // refresh world_info.json alongside the chunk snapshot so world-level
-    // sim state captured there (the water sim-window cursor) reflects THIS save
-    // moment, not world creation. Without this a loaded session resimulates from a
-    // stale cursor and the water evolution diverges from the original's.
-    if (m_session->ActiveRegionsEnabled() && !m_session->SaveWorldState())
-        return 0;
-    const bool metadata_saved = m_session->SaveWorld();
-    if (m_session->ActiveRegionsEnabled() && !metadata_saved)
+        // refresh world_info.json alongside the chunk snapshot so world-level
+        // sim state captured there (the water sim-window cursor) reflects THIS save
+        // moment, not world creation. Without this a loaded session resimulates from a
+        // stale cursor and the water evolution diverges from the original's.
+        if (m_session->ActiveRegionsEnabled() && !m_session->SaveWorldState())
+            return false;
+        const bool metadata_saved = m_session->SaveWorld();
+        return !m_session->ActiveRegionsEnabled() || metadata_saved;
+    });
+    if (!saved)
         return 0;
     return state.size();
 }
@@ -1140,18 +1166,21 @@ std::size_t ServerWorldRunner::CreatureCount() const {
         .size();
 }
 
-void ServerWorldRunner::Shutdown(world::WorldStateSaveReport* shutdown_save_report) {
+void ServerWorldRunner::Shutdown(world::WorldStateSaveReport* shutdown_save_report,
+                                 ShutdownDiagnostics* diagnostics) {
     if (m_shutdown) {
         return;
     }
     m_shutdown = true;
 
+    using Clock = std::chrono::steady_clock;
+    const auto save_start = diagnostics ? Clock::now() : Clock::time_point{};
     if (m_booted && m_session) {
         // The host tick loop has returned, so this cannot overlap autosave/snapshot.
         // Save on shutdown via WorldSaveService (incremental contract: a
         // never-edited world writes nothing and stays on the fresh path).
         world::WorldStateSaveReport save_report;
-        m_session->SaveWorldState(&save_report);
+        m_session->SaveWorldState(&save_report, world::WorldStateSaveScope::DurableChanges);
         if (shutdown_save_report) {
             *shutdown_save_report = save_report;
         }
@@ -1162,11 +1191,21 @@ void ServerWorldRunner::Shutdown(world::WorldStateSaveReport* shutdown_save_repo
             save_report.saved);
     }
 
+    const auto teardown_start = diagnostics ? Clock::now() : Clock::time_point{};
+    if (diagnostics) {
+        diagnostics->save_seconds =
+            std::chrono::duration<double>(teardown_start - save_start).count();
+        if (m_session)
+            diagnostics->cache = m_session->GetChunkValidationCacheStats();
+    }
     m_session.reset();
     if (m_booted) {
         m_jobSystem.shutdown();
     }
     m_booted = false;
+    if (diagnostics)
+        diagnostics->teardown_seconds =
+            std::chrono::duration<double>(Clock::now() - teardown_start).count();
 }
 
 } // namespace Luminumbra::Server

@@ -28,6 +28,8 @@
 
 namespace Luminumbra::Server {
 
+inline constexpr std::uint64_t kDefaultActiveRegionsAutosaveTicks = 9000;
+
 struct ServerWorldRunnerConfig {
     // Runtime root with trailing separator (GameSession concatenates paths).
     std::string root_path;
@@ -52,6 +54,11 @@ struct ServerWorldRunnerConfig {
     // (GameSession::SaveWorldState incremental contract). 0 disables.
     // Default: five minutes at the canonical 30 Hz clock.
     std::uint64_t autosave_interval_ticks = 9000;
+    // When true and autosave_interval_ticks == 0 and sim.active_regions is on, autosave every
+    // kDefaultActiveRegionsAutosaveTicks ticks. Only the plain server mode sets it.
+    bool autosave_default_when_unset = false;
+    // Parked-chunk byte limit applied to the session (sim.active_regions only). 0 = unlimited.
+    std::uint64_t parked_bytes_limit = 256ull * 1024ull * 1024ull;
     // Explicit workload override, applied before world creation or loading.
     bool finite_hydrology = true;
     //  number of deterministic player avatars to spawn at
@@ -276,7 +283,12 @@ public:
     // Saves world state through WorldSaveService (incremental contract: a
     // never-edited world writes nothing) and tears the session down.
     // Called by the destructor when not invoked explicitly.
-    void Shutdown(world::WorldStateSaveReport* shutdown_save_report = nullptr);
+    struct ShutdownDiagnostics {
+        double save_seconds = 0, teardown_seconds = 0;
+        Persistence::ChunkValidationCache::Stats cache;
+    };
+    void Shutdown(world::WorldStateSaveReport* shutdown_save_report = nullptr,
+                  ShutdownDiagnostics* diagnostics = nullptr);
 
 private:
     std::string m_bootError;

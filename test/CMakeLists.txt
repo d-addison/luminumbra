@@ -247,6 +247,7 @@ add_executable(common_tests
     common/WorldgenPreviewReinitRace_test.cpp
     common/MultiAnchorStreaming_test.cpp
     common/PromotionSimTruthDecoupling_test.cpp
+    common/WorldDurableResidency_test.cpp
     common/WaterDeterminism_test.cpp
     common/PlayerAvatar_test.cpp
     common/ReplicationProtocol_test.cpp
@@ -260,6 +261,12 @@ add_executable(common_tests
     common/ServerHeadlessHygiene_test.cpp
     common/SimulationClock_test.cpp
     common/ActiveRegionLedger_test.cpp
+    common/RegionConsumerGate_test.cpp
+    common/FoliageFieldPages_test.cpp
+    common/WaterShare_test.cpp
+    common/RegionalWater_test.cpp
+    common/GroundObjectStore_test.cpp
+    common/FieldPageState_test.cpp
     common/WorldClock_test.cpp
     common/StructurePlacement_test.cpp
     common/StructureStamping_test.cpp
@@ -1489,6 +1496,7 @@ add_executable(frontier_gates_test
     ai/instinct_locomotion_test.cpp
     ai/astar_grid_test.cpp
     ai/scent_field_test.cpp
+    ai/scent_field_gates_test.cpp
     ai/deterministic_rng_test.cpp
     ai/perception_test.cpp
     ai/evolution_test.cpp
@@ -1517,11 +1525,13 @@ add_executable(frontier_gates_test
     scripting/aether_script_binding_test.cpp
     fields/scalar_field_diffusion_gate_test.cpp
     fields/energy_field_state_test.cpp
+    persistence/ChunkValidationCache_test.cpp
     persistence/world_save_service_test.cpp
     persistence/plant_persistence_test.cpp
     persistence/world_save_region_format_test.cpp
     persistence/persistence_hardening_test.cpp
     persistence/save_load_corruption_corpus_test.cpp
+    persistence/SaveTransaction_test.cpp
 )
 
 target_compile_definitions(frontier_gates_test PRIVATE
@@ -2026,14 +2036,9 @@ foreach(_lum_gtest_target ${LUMINUMBRA_GTEST_TARGETS})
         gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120
             PROPERTIES RUN_SERIAL TRUE)
     elseif(_lum_gtest_target STREQUAL world_open_refusal_test)
-        # Carries the populated 3,600-tick telemetry parity runs, which execute
-        # three full simulations per parameter. They take about four minutes each
-        # in Debug and about eight under the sanitizer on a developer machine, so
-        # the workflow's 300-second default expires on a slower runner. The tick
-        # count is the evidence, not the runtime: it is what proves the world hash
-        # is unmoved by telemetry across both switches, so raise the bound rather
-        # than shorten the run. Everything else in this target is fast; the cost of
-        # the wider bound is only that a genuine hang here surfaces later.
+        # Carries three populated 3,600-tick passes per parity entry/parameter. Keep the
+        # existing bound; HeavyTestsCTest.cmake assigns scheduling costs to these
+        # discovered tests so CTest starts them early in sanitizer lanes.
         gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120
             PROPERTIES TIMEOUT 1800)
     elseif(_lum_gtest_target IN_LIST LUMINUMBRA_GL_GTEST_TARGETS)
@@ -2043,6 +2048,12 @@ foreach(_lum_gtest_target ${LUMINUMBRA_GTEST_TARGETS})
         gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120)
     endif()
 endforeach()
+
+# Apply child-only labels after discovery has registered the tests. This CTest
+# include mechanism works since CMake 3.10; discovery TEST_FILTER requires 3.22.
+set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES
+    "${CMAKE_CURRENT_SOURCE_DIR}/persistence/SaveTransactionCTest.cmake"
+    "${CMAKE_CURRENT_SOURCE_DIR}/HeavyTestsCTest.cmake")
 
 # The deterministic forest geometry harness is manual because it validates a
 # pinned 16k-tree workload rather than ordinary unit behavior. It guards the

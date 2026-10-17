@@ -6,6 +6,7 @@
 // solver, fixtures, and contracts are unchanged.
 
 #include <cstddef>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -50,12 +51,17 @@ public:
     void set_permeability(std::size_t x, std::size_t y, double permeability);
     void seal(std::size_t x, std::size_t y, bool sealed = true);
 
-    [[nodiscard]] ScalarDiffusionReport diffuse(std::size_t iterations, double diffusion_rate);
+    using EdgeGate = std::function<bool(std::size_t, std::size_t, std::size_t, std::size_t)>;
+    [[nodiscard]] ScalarDiffusionReport
+    diffuse(std::size_t iterations, double diffusion_rate, const EdgeGate& gate = {});
+    // Identical evolution without constructing a diagnostic report or scanning for metrics.
+    void advance(std::size_t iterations, double diffusion_rate, const EdgeGate& gate = {});
 
 private:
+    template<bool Report>
+    ScalarDiffusionReport
+    evolve(std::size_t iterations, double diffusion_rate, const EdgeGate& gate);
     [[nodiscard]] std::size_t index(std::size_t x, std::size_t y) const;
-    [[nodiscard]] bool can_exchange(std::size_t lhs, std::size_t rhs) const noexcept;
-    [[nodiscard]] double edge_conductance(std::size_t lhs, std::size_t rhs) const noexcept;
 
     std::size_t width_ = 0;
     std::size_t height_ = 0;

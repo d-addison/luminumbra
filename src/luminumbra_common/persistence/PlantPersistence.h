@@ -14,18 +14,37 @@
 // the no-plant save path stays byte-identical.
 
 #include <algorithm>
+#include <array>
+#include <bit>
+#include <cstddef>
 #include <cstdint>
+#include <exception>
+#include <stdexcept>
+#include <string_view>
+#include <utility>
 #include <vector>
 
+#include <entt/entity/fwd.hpp>
 #include <entt/entt.hpp>
+#include <nlohmann/json_fwd.hpp>
 
+#include "../components/CombustionComponents.h"
 #include "../components/CoreComponents.h"
 #include "../components/CropLifecycleComponents.h"
 #include "../components/DiseaseComponents.h"
+#include "../components/GrazeableComponent.h"
+#include "../components/IrrigationComponents.h"
+#include "../components/MortalComponents.h"
 #include "../components/PlantComponents.h"
 #include "../components/PollinationComponents.h"
 #include "../components/SoilComponents.h"
+#include "../core/WaterComponents.h"
 #include "../ecs/EntitySnapshot.h"
+#include "../world/ActiveRegionLedger.h"
+#include "../world/GroundObjectStore.h"
+#include "SaveTransaction.h"
+#include <cmath>
+#include <set>
 
 namespace luminumbra::foliage {
 
@@ -33,7 +52,7 @@ namespace pp_detail {
 inline nlohmann::json
 GenesToJson(const std::array<float, ::Luminumbra::Components::kPlantGeneCount>& g) {
     nlohmann::json a = nlohmann::json::array();
-    for (float v : g)
+    for (const float v : g)
         a.push_back(v);
     return a;
 }
@@ -47,9 +66,10 @@ inline void GenesFromJson(const nlohmann::json& a,
 // Project all plant entities into a deterministic snapshot. Plants need (at minimum) PlantTag +
 // growth + genome + transform; soil/health/pollination/lifecycle are optional (per-plant opt-in).
 [[nodiscard]] inline ::Luminumbra::Ecs::EntityRegistrySnapshot
-BuildPlantEntitySnapshot(const entt::registry& reg) {
+BuildPlantEntitySnapshot(const entt::registry& reg, bool persistent_identity = false) {
     namespace C = ::Luminumbra::Components;
     ::Luminumbra::Ecs::EntityRegistrySnapshot snap;
+    snap.persistent_identity = persistent_identity;
     auto view = reg.view<const C::PlantTag,
                          const C::PlantGrowthComponent,
                          const C::PlantGenomeComponent,
@@ -60,6 +80,14 @@ BuildPlantEntitySnapshot(const entt::registry& reg) {
         ::Luminumbra::Ecs::EntitySnapshotRecord rec;
         rec.entity_id = static_cast<std::uint64_t>(entt::to_integral(e));
         rec.name = "plant";
+        if (persistent_identity) {
+            const auto& owner = reg.get<const C::PlantRegionComponent>(e);
+            rec.entity_id = owner.persistent_id;
+            rec.components.push_back({"PlantRegion",
+                                      {{"owner_x", owner.owner_x},
+                                       {"owner_z", owner.owner_z},
+                                       {"region_stamp", owner.region_stamp}}});
+        }
 
         const auto& tf = reg.get<const C::TransformComponent>(e);
         rec.components.push_back(
@@ -106,10 +134,322 @@ BuildPlantEntitySnapshot(const entt::registry& reg) {
                                        {"generations", lc->generations},
                                        {"species_id", lc->species_id}}});
         }
+        if (persistent_identity) {
+            if (reg.all_of<C::PollinationTag>(e))
+                rec.components.push_back({"PollinationTag", nlohmann::json::object()});
+            if (const auto* c = reg.try_get<const C::CombustibleComponent>(e))
+                rec.components.push_back({"Combustible",
+                                          {{"fuel_milli", c->fuel_milli},
+                                           {"moisture_milli", c->moisture_milli},
+                                           {"burn_state", c->burn_state},
+                                           {"burn_ticks_remaining", c->burn_ticks_remaining},
+                                           {"ignition_radius", c->ignition_radius}}});
+            if (const auto* c = reg.try_get<const C::MortalComponent>(e))
+                rec.components.push_back({"Mortal",
+                                          {{"age_ticks", c->age_ticks},
+                                           {"lifespan_ticks", c->lifespan_ticks},
+                                           {"dead", c->dead}}});
+            if (const auto* c = reg.try_get<const C::GrazeableComponent>(e))
+                rec.components.push_back(
+                    {"Grazeable",
+                     {{"biomass", c->biomass}, {"last_grazed_tick", c->last_grazed_tick}}});
+            if (const auto* c = reg.try_get<const C::WaterSourceComponent>(e))
+                rec.components.push_back({"WaterSource", {{"output", c->output}}});
+            if (const auto* c = reg.try_get<const C::WaterFlowSourceComponent>(e))
+                rec.components.push_back(
+                    {"WaterFlowSource",
+                     {{"flow_rate_bits", std::bit_cast<std::uint32_t>(c->flow_rate)}}});
+            if (const auto* c = reg.try_get<const C::IgnitionSourceComponent>(e))
+                rec.components.push_back(
+                    {"IgnitionSource", {{"radius", c->radius}, {"intensity", c->intensity}}});
+        }
         snap.entities.push_back(std::move(rec));
     }
     ::Luminumbra::Ecs::SortEntityRegistrySnapshot(snap);
     return snap;
+}
+
+inline void ApplyPlantEntitySnapshot(entt::registry& reg,
+                                     const ::Luminumbra::Ecs::EntityRegistrySnapshot& snap);
+
+namespace pp_detail {
+inline bool ConsumePlantBytes(std::size_t amount, std::size_t& remaining) {
+    if (amount > remaining)
+        return false;
+    remaining -= amount;
+    return true;
+}
+inline bool PlantStringFits(std::string_view text, std::size_t& remaining) {
+    if (!ConsumePlantBytes(2, remaining) || text.size() > remaining)
+        return false;
+    for (const auto ch : text) {
+        const auto byte = static_cast<unsigned char>(ch);
+        // JSON escapes control bytes using at most six bytes; other UTF-8 bytes
+        // remain literal. Using six also covers the shorter named escapes.
+        const std::size_t width = byte < 32 ? 6 : ch == '"' || ch == '\\' ? 2 : 1;
+        if (!ConsumePlantBytes(width, remaining))
+            return false;
+    }
+    return true;
+}
+inline bool PlantValueFits(const nlohmann::json& value, std::size_t depth, std::size_t& remaining) {
+    struct Frame {
+        const nlohmann::json* data = nullptr;
+        nlohmann::json::const_iterator next{};
+        nlohmann::json::const_iterator end{};
+        std::size_t indentation = 0;
+        bool entered = false;
+    };
+    // A fixed 17-frame stack refuses unknown nested metadata without recursion.
+    // Generated plant components need at most three nested containers.
+    std::array<Frame, 17> frames{};
+    frames[0].data = &value;
+    frames[0].indentation = depth;
+    std::size_t count = 1;
+    while (count != 0) {
+        auto& frame = frames[count - 1];
+        const auto& item = *frame.data;
+        if (!frame.entered) {
+            if (frame.indentation > 16 || item.is_binary() || item.is_discarded())
+                return false;
+            if (item.is_primitive()) {
+                // Every JSON numeric primitive fits in 32 bytes, including float exponents.
+                if (!(item.is_string()
+                          ? PlantStringFits(item.get_ref<const std::string&>(), remaining)
+                          : ConsumePlantBytes(item.is_number()    ? 32
+                                              : item.is_boolean() ? 5
+                                                                  : 4,
+                                              remaining)))
+                    return false;
+                --count;
+                continue;
+            }
+            if (!ConsumePlantBytes(2, remaining))
+                return false;
+            if (item.empty()) {
+                --count;
+                continue;
+            }
+            frame.next = item.begin();
+            frame.end = item.end();
+            frame.entered = true;
+        }
+        if (frame.next == frame.end) {
+            if (!ConsumePlantBytes(1 + 4 * frame.indentation, remaining))
+                return false;
+            --count;
+            continue;
+        }
+        // Newline, indentation, and a possible comma for this element.
+        if (!ConsumePlantBytes(2 + 4 * (frame.indentation + 1), remaining) ||
+            (item.is_object() &&
+             (!PlantStringFits(frame.next.key(), remaining) || !ConsumePlantBytes(2, remaining))) ||
+            count == frames.size())
+            return false;
+        Frame child;
+        child.data = &frame.next.value();
+        child.indentation = frame.indentation + 1;
+        ++frame.next;
+        frames[count++] = std::move(child);
+    }
+    return true;
+}
+} // namespace pp_detail
+
+// Conservatively bound canonical JSON before copying/serializing a record.
+// The 8 KiB budget includes a 512-byte single-record envelope and 100 bytes of
+// wrapper/indentation per component; component data starts at indentation depth 5.
+inline bool PlantRecordFits(const ::Luminumbra::Ecs::EntitySnapshotRecord& record) {
+    std::size_t remaining = ::Luminumbra::Persistence::kMaxSavePlantRecordBytes - 512;
+    if (!pp_detail::PlantStringFits(record.name, remaining))
+        return false;
+    for (const auto& component : record.components) {
+        if (!pp_detail::ConsumePlantBytes(100, remaining) ||
+            !pp_detail::PlantStringFits(component.type, remaining) ||
+            !pp_detail::PlantValueFits(component.data, 5, remaining))
+            return false;
+    }
+    return true;
+}
+
+// Validate enabled authority before creating any entities. Never assign new IDs to
+// loaded records: a missing identity/owner is corruption, not fresh admission.
+inline bool ValidatePlantEntitySnapshot(const ::Luminumbra::Ecs::EntityRegistrySnapshot& snap,
+                                        const ::Luminumbra::world::ActiveRegionLedger& ledger,
+                                        const ::Luminumbra::world::GroundObjectStore& ground,
+                                        std::string& error) {
+    try {
+        if (snap.entities.size() > ::Luminumbra::Persistence::kMaxSavePlants)
+            throw std::invalid_argument("plant population exceeds save limit");
+        if (!snap.entities.empty() && !snap.persistent_identity)
+            throw std::invalid_argument("plant identity mode missing");
+        std::set<std::uint64_t> ids;
+        for (const auto& [id, object] : ground.objects())
+            ids.insert(id);
+        for (const auto& rec : snap.entities) {
+            if (!PlantRecordFits(rec))
+                throw std::invalid_argument("plant record exceeds save limit");
+            if (rec.name != "plant" || !rec.entity_id ||
+                rec.entity_id >= ledger.next_persistent_id() || !ids.insert(rec.entity_id).second)
+                throw std::invalid_argument("duplicate or invalid shared plant ID");
+            std::set<std::string> types;
+            const nlohmann::json *owner = nullptr, *transform = nullptr, *growth = nullptr;
+            for (const auto& c : rec.components) {
+                const std::set<std::string> allowed{"Transform",
+                                                    "PlantGenome",
+                                                    "PlantGrowth",
+                                                    "PlantRegion",
+                                                    "SoilFeeder",
+                                                    "PlantHealth",
+                                                    "Pollination",
+                                                    "PollinationTag",
+                                                    "CropLifecycle",
+                                                    "Combustible",
+                                                    "Mortal",
+                                                    "Grazeable",
+                                                    "WaterSource",
+                                                    "WaterFlowSource",
+                                                    "IgnitionSource"};
+                if (!allowed.contains(c.type))
+                    throw std::invalid_argument("unknown enabled plant component");
+                if (!types.insert(c.type).second)
+                    throw std::invalid_argument("duplicate plant component");
+                if (c.type == "PlantRegion")
+                    owner = &c.data;
+                if (c.type == "Transform")
+                    transform = &c.data;
+                if (c.type == "PlantGrowth")
+                    growth = &c.data;
+            }
+            if (!owner || !transform || !growth || !types.contains("PlantGenome"))
+                throw std::invalid_argument("incomplete persistent plant");
+            const ::Luminumbra::Vec3 pos(transform->at("x").get<float>(),
+                                         transform->at("y").get<float>(),
+                                         transform->at("z").get<float>());
+            const ::Luminumbra::world::RegionKey key{owner->at("owner_x").get<std::int32_t>(),
+                                                     owner->at("owner_z").get<std::int32_t>()};
+            for (const char* coord : {"owner_x", "owner_z"}) {
+                const auto& v = owner->at(coord);
+                if (!v.is_number_integer() || v.get<std::int64_t>() < -32768 ||
+                    v.get<std::int64_t>() >= 32768)
+                    throw std::invalid_argument("invalid plant owner coordinate");
+            }
+            const auto stamp = owner->at("region_stamp").get<std::uint64_t>();
+            if (!::Luminumbra::world::ActiveRegionLedger::valid_anchor(pos) ||
+                ::Luminumbra::world::ActiveRegionLedger::region_at(pos) != key ||
+                !ledger.records().contains(key) || stamp > ledger.header_tick() ||
+                growth->at("last_tick").get<std::uint64_t>() != stamp)
+                throw std::invalid_argument("invalid plant owner or stamp");
+            if (growth->at("stage").get<unsigned>() >= ::Luminumbra::Components::kPlantStageCount ||
+                growth->at("quality").get<unsigned>() > 100)
+                throw std::invalid_argument("invalid plant growth state");
+            for (const auto& c : rec.components) {
+                // Reject narrowing and negative encodings for every persisted integer.
+                const auto integer = [&c](const char* name, std::uint64_t limit) {
+                    const auto& v = c.data.at(name);
+                    if (!v.is_number_integer() ||
+                        (v.is_number_integer() && !v.is_number_unsigned() &&
+                         v.get<std::int64_t>() < 0) ||
+                        v.get<std::uint64_t>() > limit)
+                        throw std::invalid_argument("invalid plant integer");
+                };
+                const auto finite = [&c](const char* name, float low, float high) {
+                    const float v = c.data.at(name).get<float>();
+                    if (!std::isfinite(v) || v < low || v > high)
+                        throw std::invalid_argument("invalid plant scalar");
+                };
+                if (c.type == "PlantRegion")
+                    integer("region_stamp", ledger.header_tick());
+                if (c.type == "PlantGrowth") {
+                    integer("species_id", 65535);
+                    integer("stage", 5);
+                    integer("quality", 100);
+                    integer("growth_points", 0xffffffffu);
+                    integer("stress_points", 0xffffffffu);
+                    integer("tended", 255);
+                    integer("last_tick", ledger.header_tick());
+                    integer("planted_tick", stamp);
+                }
+                if (c.type == "PlantHealth") {
+                    integer("infection", 1000);
+                    integer("resistance", 1000);
+                    integer("state", 3);
+                    integer("infected_ticks", 0xffffffffu);
+                }
+                if (c.type == "SoilFeeder") {
+                    integer("uptake", 65535);
+                    integer("absorbed", 0xffffffffu);
+                }
+                if (c.type == "Pollination") {
+                    integer("last_pollen_tick", ledger.header_tick());
+                    integer("crosses", 0xffffffffu);
+                    if (!c.data.at("pollinated").is_boolean())
+                        throw std::invalid_argument("invalid pollination flag");
+                }
+                if (c.type == "CropLifecycle") {
+                    integer("ripe_ticks", 0xffffffffu);
+                    integer("lifespan_ticks", 0xffffffffu);
+                    integer("generations", 65535);
+                    integer("species_id", 65535);
+                    if (!c.data.at("perennial").is_boolean())
+                        throw std::invalid_argument("invalid perennial flag");
+                }
+                if (c.type == "Combustible") {
+                    integer("fuel_milli", 1000);
+                    integer("moisture_milli", 1000);
+                    integer("burn_state", 2);
+                    integer("burn_ticks_remaining", 0xffffffffu);
+                    finite("ignition_radius", 0, 16777216);
+                }
+                if (c.type == "Mortal") {
+                    integer("age_ticks", 0xffffffffu);
+                    integer("lifespan_ticks", 0xffffffffu);
+                    integer("dead", 1);
+                }
+                if (c.type == "Grazeable") {
+                    finite("biomass", 0, 1);
+                    integer("last_grazed_tick", 0xffffffffu);
+                }
+                if (c.type == "WaterSource")
+                    integer("output", 65535);
+                if (c.type == "WaterFlowSource") {
+                    integer("flow_rate_bits", 0xffffffffu);
+                    const auto flow =
+                        std::bit_cast<float>(c.data.at("flow_rate_bits").get<std::uint32_t>());
+                    if (!std::isfinite(flow) || flow < 0)
+                        throw std::invalid_argument("invalid physical water source flow");
+                }
+                if (c.type == "IgnitionSource") {
+                    finite("radius", 0, 16777216);
+                    finite("intensity", 0, 16777216);
+                }
+                if (c.type == "PlantGenome" || c.type == "Pollination") {
+                    const auto& genes =
+                        c.data.at(c.type == "PlantGenome" ? "genes" : "next_genome");
+                    if (genes.size() != ::Luminumbra::Components::kPlantGeneCount)
+                        throw std::invalid_argument("invalid plant genome size");
+                    for (const auto& g : genes) {
+                        const auto v = g.get<float>();
+                        if (!std::isfinite(v) || v < 0 || v > 1)
+                            throw std::invalid_argument("invalid plant gene");
+                    }
+                }
+            }
+        }
+        // Decode and reproject before adoption: unknown/missing payload fields,
+        // narrowing and duplicate opt-in components cannot survive this oracle.
+        if (!snap.entities.empty()) {
+            entt::registry decoded;
+            ApplyPlantEntitySnapshot(decoded, snap);
+            if (::Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(BuildPlantEntitySnapshot(
+                    decoded, true)) != ::Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(snap))
+                throw std::invalid_argument("noncanonical plant payload");
+        }
+        return true;
+    } catch (const std::exception& e) {
+        error = std::string("Corrupt plant authority: ") + e.what();
+        return false;
+    }
 }
 
 // Reconstruct plant entities from a snapshot into `reg` (creates fresh entities). Unknown component
@@ -124,7 +464,39 @@ inline void ApplyPlantEntitySnapshot(entt::registry& reg,
         reg.emplace<C::PlantTag>(e);
         for (const auto& comp : rec.components) {
             const nlohmann::json& d = comp.data;
-            if (comp.type == "Transform") {
+            if (comp.type == "PollinationTag" && snap.persistent_identity) {
+                reg.emplace<C::PollinationTag>(e);
+            } else if (comp.type == "Combustible" && snap.persistent_identity) {
+                auto& c = reg.emplace<C::CombustibleComponent>(e);
+                c.fuel_milli = d.at("fuel_milli").get<std::uint16_t>();
+                c.moisture_milli = d.at("moisture_milli").get<std::uint16_t>();
+                c.burn_state = d.at("burn_state").get<std::uint8_t>();
+                c.burn_ticks_remaining = d.at("burn_ticks_remaining").get<std::uint32_t>();
+                c.ignition_radius = d.at("ignition_radius").get<float>();
+            } else if (comp.type == "Mortal" && snap.persistent_identity) {
+                auto& c = reg.emplace<C::MortalComponent>(e);
+                c.age_ticks = d.at("age_ticks").get<std::uint32_t>();
+                c.lifespan_ticks = d.at("lifespan_ticks").get<std::uint32_t>();
+                c.dead = d.at("dead").get<std::uint8_t>();
+            } else if (comp.type == "Grazeable" && snap.persistent_identity) {
+                auto& c = reg.emplace<C::GrazeableComponent>(e);
+                c.biomass = d.at("biomass").get<float>();
+                c.last_grazed_tick = d.at("last_grazed_tick").get<std::uint32_t>();
+            } else if (comp.type == "WaterSource" && snap.persistent_identity) {
+                reg.emplace<C::WaterSourceComponent>(e, d.at("output").get<std::uint16_t>());
+            } else if (comp.type == "WaterFlowSource" && snap.persistent_identity) {
+                reg.emplace<C::WaterFlowSourceComponent>(
+                    e, std::bit_cast<float>(d.at("flow_rate_bits").get<std::uint32_t>()));
+            } else if (comp.type == "IgnitionSource" && snap.persistent_identity) {
+                reg.emplace<C::IgnitionSourceComponent>(
+                    e, d.at("radius").get<float>(), d.at("intensity").get<float>());
+            } else if (comp.type == "PlantRegion" && snap.persistent_identity) {
+                auto& owner = reg.emplace<C::PlantRegionComponent>(e);
+                owner.persistent_id = rec.entity_id;
+                owner.owner_x = d.at("owner_x").get<std::int32_t>();
+                owner.owner_z = d.at("owner_z").get<std::int32_t>();
+                owner.region_stamp = d.at("region_stamp").get<std::uint64_t>();
+            } else if (comp.type == "Transform") {
                 auto& tf = reg.emplace<C::TransformComponent>(e);
                 tf.position = ::Luminumbra::Vec3(
                     d.at("x").get<float>(), d.at("y").get<float>(), d.at("z").get<float>());
@@ -156,8 +528,9 @@ inline void ApplyPlantEntitySnapshot(entt::registry& reg,
                 // persisted PollinationComponent means the plant participated in cross-pollination,
                 // and the pollination tick views PollinationTag — without it a reloaded field would
                 // stop drifting. Co-emplaced with the component (they are always added together at
-                // spawn).
-                reg.emplace<C::PollinationTag>(e);
+                // spawn). Enabled snapshots persist the marker independently.
+                if (!snap.persistent_identity)
+                    reg.emplace<C::PollinationTag>(e);
                 auto& pc = reg.emplace<C::PollinationComponent>(e);
                 pc.pollinated = d.at("pollinated").get<bool>();
                 pc.last_pollen_tick = d.at("last_pollen_tick").get<std::uint64_t>();

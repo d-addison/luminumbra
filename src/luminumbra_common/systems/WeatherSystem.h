@@ -33,6 +33,7 @@
 // write NOTHING back into the sim or world_hash.
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -128,6 +129,25 @@ public:
     // registry, the deterministic runtime contract  -- appended FIRST, append only, never
     // reusing +1..+11).
     explicit WeatherSystem(int world_seed);
+    void BindRegionalBackend(std::function<WeatherSample(const Vec3&)> sample,
+                             std::function<std::string()> hash) {
+        m_regional_sample = std::move(sample);
+        m_regional_hash = std::move(hash);
+    }
+    // Pure query projections adopted from FPG authority; this does not advance evolution.
+    void AdoptRegionalWeather(std::uint64_t tick,
+                              const Vec3& anchor,
+                              std::vector<StormCell> storms,
+                              std::vector<StrikeEvent> strikes) {
+        m_last_tick = tick;
+        if (m_regional_sample) {
+            const auto sample = m_regional_sample(anchor);
+            m_anchor_category = sample.category;
+            m_anchor_wind = sample.wind;
+        }
+        m_storm_cells = std::move(storms);
+        m_strikes = std::move(strikes);
+    }
 
     // Advance weather to `tick` anchored on the streamed region around
     // `region_anchor` (world-space; the spawn/stream anchor). Pure function of
@@ -216,6 +236,8 @@ public:
     }
 
 private:
+    std::function<WeatherSample(const Vec3&)> m_regional_sample;
+    std::function<std::string()> m_regional_hash;
     // Map a world position to a local cell (clamped result reported via in_region).
     void LocalCell(const Vec3& world_pos, int& out_lx, int& out_lz, bool& in_region) const;
     // Classify a (pressure, temperature, humidity) triple into a category.

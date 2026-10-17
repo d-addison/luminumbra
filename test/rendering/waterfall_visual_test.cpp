@@ -634,6 +634,8 @@ LiveWaterRun RunLiveWaterScenario(const std::string& root) {
         Luminumbra::world::GameSession session;
         session.SetJobSystem(&jobs);
         session.SetRootPath(root);
+        // This fixture advances water through streaming updates rather than fixed regional ticks.
+        session.SetActiveRegionsEnabled(false);
         // This crest-edit fixture needs the replenished standing-water rest level;
         // finite catchment depletion is covered by the hydrology tests.
         session.SetFiniteHydrologyEnabled(false);

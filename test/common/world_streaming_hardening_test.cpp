@@ -19,7 +19,8 @@
 //
 // Determinism contract: every assertion is float/byte EXACT (EXPECT_EQ on the
 // canonical strings / hashes; the underlying terrain math is the engine's
-// DeterministicMath path). No wall-clock, no std::random.
+// DeterministicMath path). Hash/serialization checks use no wall-clock or
+// std::random; the drain regression uses a bounded wait to detect early return.
 //
 // Namespace discipline (the #1 compile bite): WorldStreamingState/Chunk live in
 // CAPITAL-L ::Luminumbra; the persistence helpers in ::Luminumbra::Persistence;
@@ -38,12 +39,19 @@
 #include "world/StructurePlacement.h"
 #include "world/WorldStreamingState.h"
 
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <string>
+#include <thread>
 #include <tuple>
 #include <vector>
 
@@ -74,6 +82,143 @@ namespace World = Luminumbra::World;
 
 using Luminumbra::Systems::SHIELD_WorldSystem;
 using Luminumbra::Systems::TerrainGenParams;
+
+// Park the only worker before submitting prefetch work, so every batch stays
+// pending until the test opens the gate. Release on assertion failure too.
+class HydroPrefetchWorkerGate {
+public:
+    explicit HydroPrefetchWorkerGate(Luminumbra::JobSystem& jobs) {
+        const auto state = m_state;
+        jobs.dispatch([state]() {
+            state->entered.store(true, std::memory_order_release);
+            while (!state->released.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+        });
+        while (!m_state->entered.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+    }
+
+    ~HydroPrefetchWorkerGate() {
+        release();
+    }
+
+    HydroPrefetchWorkerGate(const HydroPrefetchWorkerGate&) = delete;
+    HydroPrefetchWorkerGate& operator=(const HydroPrefetchWorkerGate&) = delete;
+
+    void release() {
+        m_state->released.store(true, std::memory_order_release);
+    }
+
+private:
+    struct State {
+        std::atomic<bool> entered{false};
+        std::atomic<bool> released{false};
+    };
+    std::shared_ptr<State> m_state = std::make_shared<State>();
+};
+
+enum class HydroPrefetchDrain {
+    Save,
+    Streaming,
+    Destruction
+};
+
+void CheckHydroPrefetchDrain(HydroPrefetchDrain drain) {
+    SCOPED_TRACE(static_cast<int>(drain));
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    TerrainGenParams params;
+    params.hydro_enabled = true;
+    params.hydro_iterations = 1;
+    auto world = std::make_unique<SHIELD_WorldSystem>(&jobs, nullptr, params, 424242);
+    HydroPrefetchWorkerGate gate(jobs);
+    // Separate cold regions exercise ownership of multiple outstanding batches.
+    const std::array<Luminumbra::JobHandle, 2> batches{
+        world->PrefetchHydroRegions(0.0f, 0.0f, 0.0f),
+        world->PrefetchHydroRegions(4096.0f, -4096.0f, 0.0f)};
+    std::array<int, 2> queued_counts{};
+    for (std::size_t i = 0; i < batches.size(); ++i) {
+        ASSERT_TRUE(batches[i].counter);
+        queued_counts[i] = batches[i].counter->load(std::memory_order_acquire);
+        ASSERT_GT(queued_counts[i], 0);
+    }
+
+    std::mutex mutex;
+    std::condition_variable changed;
+    std::atomic<bool> returned{false};
+    std::array<int, 2> counts_at_return{};
+    std::thread drainer([&]() {
+        switch (drain) {
+            case HydroPrefetchDrain::Save:
+                world->quiesce_streaming_jobs_for_save();
+                break;
+            case HydroPrefetchDrain::Streaming:
+                world->wait_for_streaming_jobs();
+                break;
+            case HydroPrefetchDrain::Destruction:
+                world.reset();
+                break;
+        }
+        std::lock_guard<std::mutex> lock(mutex);
+        for (std::size_t i = 0; i < batches.size(); ++i) {
+            counts_at_return[i] = batches[i].counter->load(std::memory_order_acquire);
+        }
+        returned.store(true, std::memory_order_release);
+        changed.notify_all();
+    });
+    bool returned_while_gated;
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        // A correct drain cannot return with the worker gated, even on a slow
+        // machine. Missing waits fail whenever the helper returns within this
+        // deadline; slow scheduling can only delay detection, never cause failure.
+        returned_while_gated = changed.wait_for(lock, std::chrono::milliseconds(300), [&]() {
+            return returned.load(std::memory_order_acquire);
+        });
+        EXPECT_FALSE(returned_while_gated) << "Drain returned with prefetch batches still queued";
+        for (std::size_t i = 0; i < batches.size(); ++i) {
+            EXPECT_EQ(batches[i].counter->load(std::memory_order_acquire), queued_counts[i]);
+        }
+    }
+    if (drain == HydroPrefetchDrain::Destruction && returned_while_gated) {
+        // This path runs in an exit-test child. Do not release queued captures
+        // against a destroyed world or unwind into JobSystem's draining shutdown.
+        std::_Exit(EXIT_FAILURE);
+    }
+    gate.release();
+    drainer.join();
+    EXPECT_TRUE(returned.load(std::memory_order_acquire));
+    for (std::size_t i = 0; i < batches.size(); ++i) {
+        EXPECT_EQ(counts_at_return[i], 0);
+        EXPECT_EQ(batches[i].counter->load(std::memory_order_acquire), 0);
+    }
+    // Clean up pending jobs even if a save/streaming drain failed its assertions.
+    for (const auto& batch : batches) {
+        jobs.wait(batch);
+    }
+    world.reset();
+    jobs.shutdown();
+}
+
+TEST(StreamingHardening, HydroPrefetchBatchesCompleteBeforeDrainReturns) {
+    for (const auto drain : {HydroPrefetchDrain::Save, HydroPrefetchDrain::Streaming}) {
+        ASSERT_NO_FATAL_FAILURE(CheckHydroPrefetchDrain(drain));
+    }
+}
+
+TEST(StreamingHardeningDeathTest, HydroPrefetchBatchesCompleteBeforeDestructionReturns) {
+    // Start workers in the child; isolate the unsafe lifetime on a broken drain.
+    GTEST_FLAG_SET(death_test_style, "threadsafe");
+    ASSERT_EXIT(
+        {
+            CheckHydroPrefetchDrain(HydroPrefetchDrain::Destruction);
+            std::_Exit(::testing::Test::HasFailure() ? EXIT_FAILURE : EXIT_SUCCESS);
+        },
+        ::testing::ExitedWithCode(EXIT_SUCCESS),
+        "");
+}
 
 // ---------------------------------------------------------------------------
 // Fixtures / helpers

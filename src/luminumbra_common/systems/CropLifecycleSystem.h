@@ -1,4 +1,5 @@
 #pragma once
+#include "../systems/RegionConsumerGate.h"
 
 //   ( germination): CropLifecycleSystem — advances ripe plants through
 // SENESCENCE and reseeds the next generation. Each tick, for every CropLifecycleComponent plant:
@@ -49,7 +50,13 @@ struct CropLifecycleStats {
 // Advance every CropLifecycleComponent plant one tick. world_seed lets distinct worlds diverge
 // (GameSession passes the default 0, mirroring the reproduction/pollination systems).
 inline CropLifecycleStats
-RunCropLifecycleOnTick(entt::registry& reg, std::uint64_t tick, std::uint64_t world_seed = 0) {
+RunCropLifecycleOnTick(entt::registry& reg,
+                       std::uint64_t tick,
+                       std::uint64_t world_seed = 0,
+                       const ::Luminumbra::world::RegionEntityGate& gate = {},
+                       const ::Luminumbra::world::RegionEntityWork& completed = {},
+                       const std::function<bool(const ::Luminumbra::Vec3&)>& birth_gate = {},
+                       const std::function<void(entt::entity)>& born = {}) {
     namespace Comp = ::Luminumbra::Components;
     namespace dm = ::Luminumbra::DeterministicMath;
     CropLifecycleStats stats;
@@ -60,11 +67,13 @@ RunCropLifecycleOnTick(entt::registry& reg, std::uint64_t tick, std::uint64_t wo
                          const Comp::TransformComponent>();
     std::vector<entt::entity> ents;
     for (auto e : view)
-        ents.push_back(e);
+        if (::Luminumbra::world::AdmitRegionEntity(gate, e))
+            ents.push_back(e);
     if (ents.empty())
         return stats; // opt-in: no participants -> byte-identical no-op
-    std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
-        return entt::to_integral(a) < entt::to_integral(b);
+    std::sort(ents.begin(), ents.end(), [&reg, &gate](entt::entity a, entt::entity b) {
+        return ::Luminumbra::world::RegionEntityIdentity(reg, a, bool(gate)) <
+               ::Luminumbra::world::RegionEntityIdentity(reg, b, bool(gate));
     });
 
     const std::uint8_t kFruiting = static_cast<std::uint8_t>(Comp::PlantStage::Fruiting);
@@ -80,6 +89,8 @@ RunCropLifecycleOnTick(entt::registry& reg, std::uint64_t tick, std::uint64_t wo
     std::vector<entt::entity> deaths;
 
     for (auto e : ents) {
+        if (completed)
+            completed(e);
         auto& lc = view.get<Comp::CropLifecycleComponent>(e);
         auto& g = view.get<Comp::PlantGrowthComponent>(e);
 
@@ -102,13 +113,15 @@ RunCropLifecycleOnTick(entt::registry& reg, std::uint64_t tick, std::uint64_t wo
         // Deterministic seed DISPERSAL: a nearby cell from a per-plant integer-seeded RNG.
         luminumbra::core::DeterministicRng rng = luminumbra::core::DeterministicRng::seeded(
             kGerminationSeedOffset ^ world_seed,
-            static_cast<std::uint64_t>(entt::to_integral(e)),
+            ::Luminumbra::world::RegionEntityIdentity(reg, e, bool(gate)),
             tick);
         const float ang = rng.next_unit() * 6.2831853f;
         const float rad = 1.0f + rng.next_unit() * 2.0f; // 1..3 m from the parent
         const auto& tf = view.get<const Comp::TransformComponent>(e);
         const ::Luminumbra::Vec3 childPos(
             tf.position.x + rad * dm::Cos(ang), tf.position.y, tf.position.z + rad * dm::Sin(ang));
+        if (birth_gate && !birth_gate(childPos))
+            continue;
         births.push_back({childPos, childGenome, lc.perennial, lc.lifespan_ticks, lc.species_id});
         ++lc.generations;
         ++stats.reseeded;
@@ -141,6 +154,8 @@ RunCropLifecycleOnTick(entt::registry& reg, std::uint64_t tick, std::uint64_t wo
         reg.emplace<Comp::PollinationComponent>(child);
         reg.emplace<Comp::SoilFeederComponent>(
             child); // children feed on soil too (FarmingSystem opt-in parity)
+        if (born)
+            born(child);
     }
     for (auto e : deaths)
         reg.destroy(e);

@@ -13,6 +13,9 @@ import tempfile
 import time
 import unittest
 
+# Resolve sibling modules for direct execution with isolated Python.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 import render_contract as contract
 import render_runner_process as process_runner
 
@@ -274,6 +277,9 @@ class RenderRunnerTests(unittest.TestCase):
                 log = self.run_client(name, ['--load-world', saved.name, *extra], expected_exit=2)
                 self.assertIn('World open refused: Incompatible world preset: '
                               'saved preset identity does not match.', log)
+                self.assertNotRegex(log, r'Loading [0-9]+ chunks')
+                self.assertNotIn('World state loaded:', log)
+                self.assertNotIn('EnsureSurfaceReadyNear:', log)
                 self.assertEqual(save_bytes(), before)
 
 

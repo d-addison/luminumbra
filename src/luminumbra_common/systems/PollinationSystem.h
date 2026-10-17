@@ -1,4 +1,5 @@
 #pragma once
+#include "../systems/RegionConsumerGate.h"
 
 // sim.pollination — DETERMINISTIC cross-pollination of neighbouring plants so a
 // field's genetics DRIFT over seasons. A flowering / fruiting plant ("donor")
@@ -138,11 +139,14 @@ inline Comp::PlantGenomeComponent PollinateCross(const Comp::PlantGenomeComponen
 // Advance pollination by one fixed tick. Pure function of registry state + the tick
 // (the RNG seed). Returns telemetry counts. `wind_xz` biases donor reach (defaults
 // to still air). `world_seed` lets distinct worlds diverge.
-inline PollinationStats RunPollinationOnTick(entt::registry& reg,
-                                             std::uint64_t tick,
-                                             ::Luminumbra::Vec2 wind_xz = ::Luminumbra::Vec2(0.0f),
-                                             std::uint64_t world_seed = 0,
-                                             float mutation_frac = kPollinationMutationFrac) {
+inline PollinationStats
+RunPollinationOnTick(entt::registry& reg,
+                     std::uint64_t tick,
+                     ::Luminumbra::Vec2 wind_xz = ::Luminumbra::Vec2(0.0f),
+                     std::uint64_t world_seed = 0,
+                     float mutation_frac = kPollinationMutationFrac,
+                     const ::Luminumbra::world::RegionEntityGate& gate = {},
+                     const ::Luminumbra::world::RegionEntityWork& completed = {}) {
     PollinationStats stats;
 
     auto view = reg.view<Comp::PollinationTag,
@@ -154,9 +158,11 @@ inline PollinationStats RunPollinationOnTick(entt::registry& reg,
     // id-ordered participant ids so donor-selection ties + apply order are deterministic.
     std::vector<entt::entity> ents;
     for (auto e : view)
-        ents.push_back(e);
-    std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
-        return entt::to_integral(a) < entt::to_integral(b);
+        if (::Luminumbra::world::AdmitRegionEntity(gate, e))
+            ents.push_back(e);
+    std::sort(ents.begin(), ents.end(), [&reg, &gate](entt::entity a, entt::entity b) {
+        return ::Luminumbra::world::RegionEntityIdentity(reg, a, bool(gate)) <
+               ::Luminumbra::world::RegionEntityIdentity(reg, b, bool(gate));
     });
 
     //  (read): for each receiver pick its best donor (smallest wind-biased
@@ -171,8 +177,10 @@ inline PollinationStats RunPollinationOnTick(entt::registry& reg,
     std::vector<Cross> crosses;
 
     for (auto r : ents) {
+        if (completed)
+            completed(r);
         ++stats.considered;
-        const std::uint64_t rid = static_cast<std::uint64_t>(entt::to_integral(r));
+        const std::uint64_t rid = ::Luminumbra::world::RegionEntityIdentity(reg, r, bool(gate));
         const auto& r_tf = view.get<Comp::TransformComponent>(r);
         const auto& r_genome = view.get<Comp::PlantGenomeComponent>(r);
 
@@ -184,7 +192,7 @@ inline PollinationStats RunPollinationOnTick(entt::registry& reg,
         for (auto d : ents) { // already id-ordered -> deterministic tie-break
             if (d == r)
                 continue;
-            const std::uint64_t did = static_cast<std::uint64_t>(entt::to_integral(d));
+            const std::uint64_t did = ::Luminumbra::world::RegionEntityIdentity(reg, d, bool(gate));
             const auto& d_growth = view.get<Comp::PlantGrowthComponent>(d);
             if (!IsPollenDonor(d_growth))
                 continue; // only reproductive plants donate

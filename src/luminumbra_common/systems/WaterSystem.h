@@ -1,10 +1,15 @@
 #pragma once
 #include "../../../include/luminumbra/core/Types.h"
 #include "../core/JobSystem.h"
+#include "../world/WaterShare.h"
+#include "RegionalWater.h"
 #include "entt/entt.hpp"
 #include <cstdint>
 #include <memory>
+#include <optional>
+#include <span>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace Luminumbra {
@@ -50,8 +55,8 @@ Selection SelectPriorityWindow(std::vector<Candidate> candidates,
 enum class WaterDetailLevel {
     Off = 0,    // No simulation
     Low = 4,    // 4x4 grid (16 cells)
-    Medium = 8, // 8x8 grid (64 cells) - current default
-    High = 16,  // 16x16 grid (256 cells)
+    Medium = 8, // 8x8 grid (64 cells)
+    High = 16,  // 16x16 grid (256 cells) - current default
     Ultra = 32  // 32x32 grid (1024 cells)
 };
 
@@ -79,6 +84,53 @@ public:
 
     void update(entt::registry& registry,
                 const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>& active_chunks);
+
+    // Enabled sessions evolve water at the fixed tick, after weather. Streaming only binds
+    // the resident query map. The caller supplies the host-thread resident view, never authority
+    // IO.
+    void SetRegionalScheduling(bool enabled) {
+        m_regional_scheduling = enabled;
+    }
+    [[nodiscard]] bool regional_scheduling() const {
+        return m_regional_scheduling;
+    }
+    struct RegionalWork {
+        std::uint64_t global_windows = 0, border_windows = 0, allocated_windows = 0;
+        std::uint64_t used_windows = 0, unused_windows = 0, unallocated_windows = 0;
+        std::uint64_t preparation_cells = 0, water_cells = 0, total_cells = 0;
+        std::int64_t source_mm = 0, sink_mm = 0, preparation_mm = 0;
+        // Exact physical volume in mm * quarter-square-metres; all legal cell areas
+        // are integral in this unit, including saved 32x32 grids during resize.
+        std::int64_t volume_before_qmm = 0, volume_after_qmm = 0;
+        std::int64_t source_volume_qmm = 0, sink_volume_qmm = 0, preparation_volume_qmm = 0;
+        bool mass_ok = true;
+        // Dynamic eligibility/reservations do not establish a fixed-cohort service theorem.
+        bool fixed_cohort_bound_known = false;
+        std::vector<world::water_share::Grant> grants;
+        std::vector<ChunkID> visits;
+        void Reset() {
+            auto retained_grants = std::move(grants);
+            auto retained_visits = std::move(visits);
+            *this = {};
+            grants = std::move(retained_grants);
+            visits = std::move(retained_visits);
+            grants.clear();
+            visits.clear();
+        }
+        bool operator==(const RegionalWork&) const = default;
+    };
+    [[nodiscard]] const RegionalWork& regional_work() const {
+        return m_regional_work;
+    }
+    // Strict enabled durable decode and live preflight share the same grid checks.
+    static void ValidateRegionalGrid(const Chunk& chunk);
+    // Refusal throws before publication, preserving chunks, ledger, work and telemetry.
+    void UpdateRegional(entt::registry& registry,
+                        std::span<const std::shared_ptr<Chunk>> resident,
+                        world::ActiveRegionLedger& ledger,
+                        const world::RegionSchedule& schedule,
+                        std::vector<world::RegionWork>& completed,
+                        std::uint64_t cell_budget = 4096);
 
     /**
      * @brief Sets the ECS entity whose TransformComponent drives camera-relative water LOD.
@@ -192,6 +244,7 @@ public:
         return m_sim_resolution;
     }
 
+    // Legacy scheduling only; regional scheduling refuses this uncapped operation.
     // boot-time save-migration pass: resize EVERY loaded water chunk to the session
     // resolution in one call, bypassing MAX_WATER_RESIZES_PER_TICK (that cap bounds
     // LIVE frame cost; a loaded world whose saved resolution mismatches the session
@@ -261,11 +314,18 @@ public:
     void ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level);
 
 private:
+    int StepSharedWaterFace(Chunk& owner, Chunk& neighbor, bool is_x, bool checked = false);
+    void StepRegionalInterior(Chunk& chunk, RegionalWork& result);
+    void PrepareRegionalGrid(Chunk& chunk);
     // (water performance contract) The float render-mirror sim (dispatch_simulation_jobs /
     // simulate_chunk_water + its WaterChunkSnapshot/Output/Neighbors structs) was DEAD CODE — zero
     // callers; the live path is the integer  StepChunkWaterFixed. Removed.
     Vec3 get_camera_position(entt::registry& registry) const;
 
+    std::optional<std::uint64_t> m_last_regional_tick;
+    bool m_regional_scheduling = false;
+    RegionalWork m_regional_work;
+    RegionalWork m_regionalScratch;
     JobSystem* m_job_system;
 
     SHIELD_WorldSystem* m_shield_system;
@@ -277,6 +337,9 @@ private:
     const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>* m_active_chunks = nullptr;
 
     //  finite-hydrology config (set via SetHydrology; integer -> deterministic).
+    // Reusable transaction workspace, never authority. Every staged payload is
+    // overwritten from its live resident before use; nonresident entries are pruned.
+    RegionalWater::PlanningCache m_regionalPlanning;
     bool m_finite_hydrology = true;
     std::int32_t m_rain_mm_per_tick = 0;
     std::int32_t m_evap_mm_per_tick = 0;
@@ -294,13 +357,15 @@ private:
     bool m_boot_settle_mode = false;
     // The single uniform hashed sim resolution (cells per chunk side). Default High
     // (16x16, 1 m cells) — see SetSimResolution; set once pre-world via sim.water_high_res.
-    // At uniform resolution, live solver steps share the 4096-cell budget
+    // With regional scheduling disabled, solver steps share the 4096-cell budget
     // (16 High chunks, 64 Medium chunks).
     // High first-time seeding costs about 4x per chunk, amortized at six chunks per live tick;
     // live migration resizes one chunk per tick. Steady-state solver time is a few percent higher
     // (see docs/known-limitations.md). Boot settle seeds/simulates the full backlog and world
     // load migrates all mismatched grids in one pass; the live caps do not bound those paths
     // or resident-chunk scans and activity scoring in the rest of the update.
+    // Regional scheduling uses budgeted fixed-tick preparation/kernel/face visits
+    // and preserves loaded grids until selected (docs/regional-water-continuation.md).
     int m_sim_resolution = static_cast<int>(WaterDetailLevel::High);
     // loaded-boot water pause (see SetBootPaused). update is a no-op while set.
     bool m_boot_paused = false;

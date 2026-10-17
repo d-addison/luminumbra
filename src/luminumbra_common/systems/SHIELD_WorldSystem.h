@@ -6,6 +6,7 @@
 #include "../world/Chunk.h"
 #include "../world/FarLodStore.h"
 #include "../world/FarVolume.h"
+#include "../world/ResidentChunkRoster.h"
 #include "../world/StructurePlacement.h"
 #include "../world/WorldgenDependencySnapshot.h"
 #include "FastNoise/FastNoise.h"
@@ -22,6 +23,7 @@
 #include <optional>
 #include <set>
 #include <shared_mutex>
+#include <span>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -169,8 +171,8 @@ struct TerrainGenParams {
     float lake_depth = 5.0f;        // metres the basin floor sits below the lake surface
     float lake_max_carve = 22.0f;   // clamp on terrain lowered into the basin
     float lake_bank_offset = 2.0f;  // lake surface sits this far below the local land level (banks)
-    // fnv1a64 of the canonicalized biome table content, stamped by the world
-    // system when it loads the table (0 when biomes are disabled or the table
+    // fnv1a64 of the canonicalized biome table content, stamped by the preset
+    // loader and world system (0 when biomes are disabled or the table
     // failed to load). ComputeTerrainParamsHash mixes this in so pristine
     // far-LOD tiles self-invalidate when the table content changes even though
     // the path is unchanged.
@@ -210,6 +212,13 @@ struct TerrainGenParams {
     float hydro_sediment_capacity = 0.40f;
     float hydro_max_offset = 24.0f; // clamp |offset| (m)
 };
+
+// Stamp only accepted, enabled content, preserving pool order and zero hashes for
+// disabled/failed inputs. Shared by preset admission and direct world construction;
+// reads only the supplied loaded objects and performs no filesystem access.
+void FinalizeTerrainContentHashes(TerrainGenParams& params,
+                                  const World::BiomeTable& biome_table,
+                                  std::span<const World::StructureTemplatePool> structure_pools);
 
 // Immutable value data handed to far-LOD workers.  The capture owns these
 // vectors and never exposes a mutable streamed Chunk beyond the owner thread.
@@ -439,6 +448,9 @@ public:
     std::vector<::Luminumbra::Chunk*> get_renderable_chunks();
     float get_density_at(const Vec3& world_pos) const;
     float GetTerrainHeightAt(float world_x, float world_z) const;
+    // Owner-thread downward probe over available terrain truth. Never generates or performs IO;
+    // edited resident SDF supersedes the procedural surface in its vertical band.
+    std::optional<float> ProbeTerrainBelow(const Vec3& requested) const;
     // the single cave-carve composition point. Samples the cheese BODY noise
     // and adds spaghetti EDGE tunnels and Worley caverns via order-free max. Called identically
     // by every density site (mesh / collision / query) so they cannot disagree.
@@ -612,7 +624,11 @@ public:
     void regenerate_all_chunks(PhysicsSystem* physics_system);
     void clear_world(PhysicsSystem* physics_system);
     void SetWaterSystem(WaterSystem* water_system);
-    std::vector<IVec3> GetInitialChunkLoadList(const Vec3& center_pos) const; // <<< NEW
+    std::vector<IVec3> GetInitialChunkLoadList(const Vec3& center_pos) const;
+    // Main-thread planning work only; never serialized or used by simulation.
+    [[nodiscard]] std::size_t debug_initial_load_plan_count() const {
+        return m_initial_load_plan_count.load(std::memory_order_relaxed);
+    }
     JobHandle dispatch_generation_jobs(const std::vector<IVec3>& chunks_to_generate);
     // Generation request carrying the meshing step the chunk is being
     // generated for, so far-ring (step > 1) chunks can skip the interior SDF
@@ -796,7 +812,7 @@ public:
     // sim truth going live independently of any render-mesh publish.
     void wait_for_promotion_jobs();
     //   (activation queue): stability WITHOUT publication. Drains every
-    // streaming lane (generation, promotion, meshing) with RAW handle waits —
+    // streaming lane (generation, promotion, meshing, hydro prefetch) with RAW handle waits —
     // no pending→live movement, no stage-B dispatch, no state flips — so the
     // caller (the SAVE path) serializes stable bytes without becoming an
     // accidental activation event. Publication stays exclusively owned by the
@@ -877,6 +893,10 @@ public:
         std::uint64_t still_pending = 0; // dispatched, never activated by report time
     };
     ActivationShadowReport activation_shadow_report() const;
+    // Host-thread-only borrowed roster; refreshed from current map identities on each call.
+    // Valid until the next roster refresh, unload, clear or world-system destruction. Do not mutate
+    // streaming membership while using it. Loading transitions remain live observations.
+    std::span<const std::shared_ptr<::Luminumbra::Chunk>> resident_streamed_chunks() const;
     // Shared-ownership snapshot of every streamed chunk (save path).
     std::vector<std::shared_ptr<::Luminumbra::Chunk>> snapshot_streamed_chunks() const;
     // Owner-thread capture for a 32x32 chunk far region plus a one-chunk X/Z
@@ -899,6 +919,77 @@ public:
     // (without clobbering the streamed chunk) when a chunk with the same id
     // is already active.
     bool adopt_streamed_chunk(const std::shared_ptr<::Luminumbra::Chunk>& chunk);
+
+    // --- Durable residency (S3). All of it is inert unless set_durable_residency(true). ---
+    struct ParkingStatus {
+        std::size_t parked_count = 0;
+        std::size_t parked_bytes = 0;
+        std::int64_t oldest_parked_tick = -1; // m_current_sim_tick at parking time; -1 when empty
+        std::size_t blocked_dirty = 0; // dirty authoritative chunks kept resident by the byte limit
+        bool save_requested = false;
+    };
+    void set_durable_residency(bool on) {
+        m_durable_residency = on;
+    }
+    bool durable_residency() const {
+        return m_durable_residency;
+    }
+    // A durable Error is fail-stop; callers must never reinterpret it as a missing chunk.
+    [[nodiscard]] bool durable_read_failed() const noexcept {
+        return m_durable_read_failed;
+    }
+    // 0 = unlimited. Default 256 MiB.
+    void set_parked_bytes_limit(std::size_t bytes) {
+        if (bytes != m_parked_bytes_limit) {
+            ++m_dirty_generation; // re-run activation so a changed limit takes effect
+        }
+        m_parked_bytes_limit = bytes;
+    }
+    // Clock used only to stamp parked chunks. Deliberately separate from begin_tick so it never
+    // changes activation-queue scheduling on hosts that do not drive begin_tick.
+    void note_persistence_tick(std::int64_t sim_tick) {
+        m_persistence_tick = sim_tick;
+    }
+    ParkingStatus parking_status() const;
+    bool persistence_save_requested() const {
+        return m_persistence_save_requested;
+    }
+    void clear_persistence_save_request() {
+        m_persistence_save_requested = false;
+    }
+    // Resident chunk, else parked chunk, else nullptr.
+    std::shared_ptr<::Luminumbra::Chunk> find_authoritative_chunk(const IVec3& coords) const;
+    // Resident chunks plus parked chunks (parked ones sorted by id). No duplicates.
+    std::vector<std::shared_ptr<::Luminumbra::Chunk>> snapshot_authoritative_chunks() const;
+    std::vector<std::shared_ptr<::Luminumbra::Chunk>> snapshot_parked_chunks() const;
+    // Moves every water-dirty chunk (resident and parked) to LoadedOrEdited authority and re-arms
+    // its save-dirty bit. Only call with sim.active_regions on.
+    void sync_water_authority();
+    // Stage all allocation and acquire the revision lock before water publication. The
+    // owner thread retains this token through the nonthrowing whole-plan commit.
+    struct WaterAuthorityPublication {
+        std::unique_lock<std::mutex> lock;
+        std::map<std::pair<i32, i32>, u64> revisions;
+        u64 revision = 0;
+        bool changed = false;
+    };
+    WaterAuthorityPublication prepare_water_authority_publication(std::span<Chunk* const> chunks);
+    void publish_water_authority(WaterAuthorityPublication&& publication) noexcept;
+
+    // Moves a parked chunk back into the resident map. Returns true iff the id was parked.
+    bool unpark_chunk(ChunkID id);
+    // Owner-thread committed identity inventory. Durable payloads are loaded only when wanted;
+    // the loader must return the exact identity or throw (never regenerate expected authority).
+    void set_durable_chunk_loader(std::function<std::shared_ptr<Chunk>(const IVec3&)> loader,
+                                  std::function<void(std::string)> fault);
+    void remember_durable_chunks(const std::vector<IVec3>& coords);
+    std::vector<IVec3> durable_chunk_inventory() const;
+    bool restore_authoritative_chunk(const IVec3& coords);
+    void release_clean_parked_chunks();
+    void note_persistence_outcome(bool ok) {
+        m_evictions_suspended = !ok;
+        ++m_dirty_generation;
+    }
 
 private:
     struct StreamingState {
@@ -923,6 +1014,7 @@ private:
             std::shared_ptr<::Luminumbra::Chunk> chunk;
             bool terrain_mesh_required = true;
             u8 transition_faces = 0;
+            u32 water_revision = 0;
         };
         struct MeshingBatch {
             JobHandle handle;      // Normal lane
@@ -955,6 +1047,7 @@ private:
     };
 
     StreamingState m_streaming_state;
+    mutable ResidentChunkRoster m_resident_roster{};
     // the worldgen-epoch gate (see acquire_worldgen_sample_scope).
     mutable std::shared_mutex m_worldgen_epoch_mutex;
     mutable std::atomic<bool> m_worldgen_writer_pending{false};
@@ -1007,6 +1100,26 @@ private:
     std::uint64_t m_dirty_generation = 0;
     std::uint64_t m_last_serviced_generation = 0;
     std::function<void(const IVec3&)> m_voxelEditObserver;
+    struct ParkedChunk {
+        std::shared_ptr<::Luminumbra::Chunk> chunk;
+        std::size_t bytes = 0;
+        std::int64_t tick = -1;
+    };
+    std::unordered_map<ChunkID, ParkedChunk> m_parked;
+    std::map<ChunkID, IVec3> m_durable_chunks;
+    std::function<std::shared_ptr<Chunk>(const IVec3&)> m_durable_chunk_loader;
+    std::function<void(std::string)> m_durable_chunk_fault;
+    mutable bool m_durable_read_failed = false;
+    bool m_evictions_suspended = false;
+    std::shared_ptr<Chunk> read_committed_chunk(const IVec3& coords) const;
+    std::size_t m_parked_bytes = 0;
+    bool m_durable_residency = false;
+    std::size_t m_parked_bytes_limit = static_cast<std::size_t>(256) * 1024u * 1024u;
+    bool m_persistence_save_requested = false;
+    std::int64_t m_persistence_tick = -1;
+    std::size_t m_parking_blocked_dirty = 0;
+    std::size_t m_parking_deferred =
+        0; // authoritative chunks kept resident this pass (not quiescent)
     std::vector<Vec3> m_last_anchor_positions;
 
     // Elide update_chunk_activation's O(radius^2)
@@ -1080,6 +1193,7 @@ private:
     // deterministic).
     ColumnSurfaceSpan column_surface_span(int chunk_x, int chunk_z);
     std::unordered_map<u64, ColumnSurfaceSpan> m_column_surface_span_cache;
+    mutable std::atomic<std::size_t> m_initial_load_plan_count{0};
 
     // --- Helper Functions ---
     // Returns true if it actually ran the activation pass (false if it was elided because the
@@ -1326,6 +1440,10 @@ private:
     // so const-correctness is preserved (no world_hash-affecting state changes).
     mutable std::set<std::pair<std::int64_t, std::int64_t>> m_hydro_prefetch_inflight;
     mutable std::mutex m_hydro_prefetch_mutex;
+    // Owned batches keep every prefetch capture of this inside the world's lifetime.
+    // Guarded by m_hydro_prefetch_mutex; never hold it while waiting on workers.
+    mutable std::vector<JobHandle> m_hydro_prefetch_batches;
+    void wait_for_hydro_prefetch_jobs() const;
 
 public:
     // Bake the hydraulic-erosion regions covering a disc around (cx,cz) AHEAD of
@@ -1334,8 +1452,9 @@ public:
     // the cause of the laggy-while-flying with hydro on). No-op when hydro is off.
     // const: only mutates the deterministic recompute-on-load hydro caches (mutable),
     // so the far-LOD scheduler (which holds a const SHIELD_WorldSystem*) can warm far
-    // regions ahead of BuildPristineFarLodTile.
-    void PrefetchHydroRegions(float cx, float cz, float radius_m) const;
+    // regions ahead of BuildPristineFarLodTile. Returns this call's batch handle;
+    // the world retains ownership even when the caller does not wait on it.
+    JobHandle PrefetchHydroRegions(float cx, float cz, float radius_m) const;
 };
 
 } // namespace Luminumbra::Systems

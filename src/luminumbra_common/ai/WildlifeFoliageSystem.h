@@ -1,4 +1,5 @@
 #pragma once
+#include "../systems/RegionConsumerGate.h"
 
 // sim.wildlife_foliage: the ECOLOGY x FOLIAGE coupling: non-predator CREATURES
 // GRAZE/TRAMPLE the nearby PLANTS, and the plants slowly REGROW when left alone. This
@@ -97,9 +98,12 @@ struct WildlifeFoliageStats {
 // Advance the wildlife-foliage coupling by ONE fixed tick. Pure function of registry
 // state. id-ordered; graze pressure is summed per plant (order-independent) and feed is
 // summed per creature, then both are applied in id-ordered passes.
-inline WildlifeFoliageStats RunWildlifeFoliageOnTick(entt::registry& reg,
-                                                     std::uint64_t tick,
-                                                     const WildlifeFoliageTuning& tuning = {}) {
+inline WildlifeFoliageStats
+RunWildlifeFoliageOnTick(entt::registry& reg,
+                         std::uint64_t tick,
+                         const WildlifeFoliageTuning& tuning = {},
+                         const ::Luminumbra::world::RegionEntityGate& gate = {},
+                         const ::Luminumbra::world::RegionEntityWork& completed = {}) {
     WildlifeFoliageStats stats;
     const float graze_radius_sq = tuning.graze_radius * tuning.graze_radius;
 
@@ -112,16 +116,21 @@ inline WildlifeFoliageStats RunWildlifeFoliageOnTick(entt::registry& reg,
     {
         auto cview = reg.view<const Comp::CreatureComponent, const Comp::TransformComponent>();
         std::vector<entt::entity> cents(cview.begin(), cview.end());
-        std::sort(cents.begin(), cents.end(), [](entt::entity a, entt::entity b) {
-            return entt::to_integral(a) < entt::to_integral(b);
+        std::sort(cents.begin(), cents.end(), [&reg, &gate](entt::entity a, entt::entity b) {
+            return ::Luminumbra::world::RegionEntityIdentity(reg, a, bool(gate)) <
+                   ::Luminumbra::world::RegionEntityIdentity(reg, b, bool(gate));
         });
         grazers.reserve(cents.size());
         for (auto e : cents) {
+            if (!::Luminumbra::world::AdmitRegionEntity(gate, e))
+                continue;
             const auto& cr = cview.get<const Comp::CreatureComponent>(e);
             if (cr.is_predator || cr.eaten)
                 continue; // only live herbivores graze
             const auto& tf = cview.get<const Comp::TransformComponent>(e);
             grazers.push_back({e, tf.position.x, tf.position.z});
+            if (completed)
+                completed(e);
             ++stats.grazers;
         }
     }
@@ -129,8 +138,9 @@ inline WildlifeFoliageStats RunWildlifeFoliageOnTick(entt::registry& reg,
     // --- 2. Gather grazeable plants, id-ordered. ---
     auto pview = reg.view<Comp::GrazeableComponent, const Comp::TransformComponent>();
     std::vector<entt::entity> pents(pview.begin(), pview.end());
-    std::sort(pents.begin(), pents.end(), [](entt::entity a, entt::entity b) {
-        return entt::to_integral(a) < entt::to_integral(b);
+    std::sort(pents.begin(), pents.end(), [&reg, &gate](entt::entity a, entt::entity b) {
+        return ::Luminumbra::world::RegionEntityIdentity(reg, a, bool(gate)) <
+               ::Luminumbra::world::RegionEntityIdentity(reg, b, bool(gate));
     });
 
     // Per-creature feed accumulator, indexed parallel to `grazers` (summed so applying it
@@ -139,6 +149,10 @@ inline WildlifeFoliageStats RunWildlifeFoliageOnTick(entt::registry& reg,
 
     // --- 3. id-ordered pass over plants: count grazers in range, graze or regrow. ---
     for (auto pe : pents) {
+        if (!::Luminumbra::world::AdmitRegionEntity(gate, pe))
+            continue;
+        if (completed)
+            completed(pe);
         ++stats.plants;
         auto& gz = pview.get<Comp::GrazeableComponent>(pe);
         const auto& ptf = pview.get<const Comp::TransformComponent>(pe);

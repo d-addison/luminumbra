@@ -23,18 +23,21 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "app/GraphicsSessionOverrides.h"
 #include "app/HangWatchdog.h"
 #include "app/InputCallbacks.h"
+#include "app/MenuPreviewInput.h"
 #include "app/MenuScreens.h"
 #include "app/ProcgenPalettes.h"
 #include "app/RegisterDeveloperWidgets.h"
 #include "app/RenderBenchmarkReport.h"
+#include "app/RenderMeasurement.h"
 #include "app/RuntimeRoot.h"
 #include "app/RuntimeStateRecorder.h"
 #include "app/SessionExit.h"
+#include "app/UiInputRouter.h"
 #include "app/WindowModeControls.h"
 #include "audio/AudioManagerFactory.h"
-#include "audio/AudioPropagationSystem.h"   // ComputeWaterfallRoar (static)
 #include "audio/EnvironmentalAudioSystem.h" // /09: day/night beds + biome/weather reverb
 #include "audio/IAudioManager.h"
+#include "audio/MiniaudioManager.h"
 #include "audio/NullAudioManager.h"
 #include "core/BenchmarkPose.h"
 #include "core/Debug.h"
@@ -47,16 +50,18 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "core/RuntimeScenarioConfig.h"
 #include "core/ScenarioRunner.h"
 #include "debug/DebugCamera.h" // deterministic feature locator (--debug-goto cave|doline)
+#include "debug/DeveloperCommandRegistry.h"
 #include "debug/DeveloperConsole.h"
 #include "debug/DeveloperLogAttachment.h"
+#include "debug/DeveloperWidgetRegistry.h"
 #include "debug/WorldGenViewer.h"
 #include "debug/widgets/DeveloperWidgetUi.h"
 #include "debug/widgets/PassiveDeveloperWidgets.h"
 #include "debug/widgets/RenderControlWidgets.h"
+#include "foliage/SpeciesRegistry.h"
 #include "luminumbra_common/ai/CreatureSpeciesRegistry.h" // species id -> display name for the codex/discovery HUD
-#include "luminumbra_common/ai/EcologyTuningConfig.h" //  resolve sim.ecology brain tuning
-#include "luminumbra_common/ai/SimTuningConfig.h" // full-control: resolve per-system creature tuning
 #include "luminumbra_common/animation/AnimationRuntime.h" // skinned skeleton/clip loaders for ambient wildlife
+#include "luminumbra_common/animation/SkinnedMeshFormat.h"
 #include "luminumbra_common/components/AlarmComponents.h"      // herd-alarm collective flee
 #include "luminumbra_common/components/CircadianComponents.h"  // diurnal/nocturnal sleep clock
 #include "luminumbra_common/components/CombustionComponents.h" // sim.fire demo markers
@@ -64,7 +69,6 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "luminumbra_common/components/CreatureComponents.h"   //  creature markers
 #include "luminumbra_common/components/DecayComponents.h"      // decomposition (carcass fades)
 #include "luminumbra_common/components/ForagingComponents.h"   // ant-trail forager colonies
-#include "luminumbra_common/components/LightingComponents.h"   // lumin-crystal cave point lights
 #include "luminumbra_common/components/MigratoryComponents.h"  // seasonal drive
 #include "luminumbra_common/components/MortalComponents.h"     // lifespan / natural death
 #include "luminumbra_common/components/PackHunterComponents.h" // coordinated pack hunting
@@ -72,22 +76,19 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "luminumbra_common/components/ScavengerComponent.h" // ambient-wildlife predator scavenging
 #include "luminumbra_common/components/TerritoryComponents.h" // home-range homing
 #include "luminumbra_common/components/ThirstComponents.h" // ambient-wildlife thirst + water holes
+#include "luminumbra_common/core/DeterministicRng.h"
 #include "luminumbra_common/core/Environment.h"
+#include "luminumbra_common/core/FramePacing.h"
+#include "luminumbra_common/core/GraphicsPresetClassifier.h"
 #include "luminumbra_common/core/GraphicsPresets.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/SystemConfig.h" // user.* video/audio/controls settings
-#include "luminumbra_common/game/CodexView.h" // pure presentation model for the codex browse screen
-#include "luminumbra_common/game/Objectives.h" // progression goals surfaced on the HUD
-#include "luminumbra_common/game/PhotoMode.h" // photo-capture feature: photo-mode capture loop (read-only observer)
-#include "luminumbra_common/network/NetworkLoopbackAuthority.h"
 #include "luminumbra_common/persistence/SavedWorldCatalog.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/systems/AetherFieldSystem.h" // Aether-field sampling.
-#include "luminumbra_common/systems/CreatureProcgen.h" // genome -> body-proportion build (procedural silhouette)
-#include "luminumbra_common/systems/FarmingSystem.h" //  MakePlantFromSpecies + SpeciesRegistry
+#include "luminumbra_common/systems/FarmingSystem.h"     //  MakePlantFromSpecies + SpeciesRegistry
 #include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/PlantGrowthSystem.h" //  phenotype/genome
-#include "luminumbra_common/systems/PlantProcgen.h"      //  procedural plant geometry (render-only)
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/systems/WaterSystem.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
@@ -97,18 +98,24 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "luminumbra_common/world/KnobLayer.h" //  semantic-knob layer + startup invariant
 #include "luminumbra_common/world/TerrainPresetLoader.h"
 #include "nlohmann/json.hpp"
+#include "player/InputActions.h"
 #include "player/PlayerController.h"
+#include "rendering/BenchmarkGpuQueries.h"
 #include "rendering/Camera.h"
-#include "rendering/ExposureModel.h" //  rendering: lens EV -> render exposure multiplier
 #include "rendering/FarLodSystem.h"
+#include "rendering/FarWorldCaveSelection.h"
+#include "rendering/FarWorldSelection.h"
 #include "rendering/FoliageSurface.h" // Rendering::FoliageScatterContext / FoliageSurfaceQuery
 #include "rendering/FrameHealth.h" // auto frame-health anomaly verdict (black/unlit/blown), render-only
 #include "rendering/FrameScan.h" // framescan: deterministic what's-in-frame scan tool (render-only)
 #include "rendering/GlDebugOutput.h" // KHR_debug callback + debug groups/labels (env-gated LUMIN_GL_DEBUG)
 #include "rendering/ImpostorBake.h"  //  far-field tree impostor atlas bake (render-only)
 #include "rendering/LightningBolt.h" // Deterministic bolt geometry.
-#include "rendering/PixelIo.h"       // Rendering::WritePixelBufferPpm (capture artifact writer)
+#include "rendering/OctaImpostor.h"
+#include "rendering/PixelIo.h" // Rendering::WritePixelBufferPpm (capture artifact writer)
+#include "rendering/RenderFrameTypes.h"
 #include "rendering/RenderPipeline.h"
+#include "rendering/RenderingDefaults.h"
 #include "rendering/SceneSurvey.h" // survey: autonomous tour+screenshot of world POIs (render-only)
 #include "rendering/ScentFieldRenderMirror.h" // one-way scent snapshot for the ground decal
 #include "rendering/Shader.h"
@@ -125,31 +132,53 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "ui/core/UIHotReload.h"
 #include "world/WorldgenOverride.h"
 #include "world/WorldgenPreview.h"
+#include <RmlUi/Core/Element.h>
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <backends/imgui_impl_glfw.h>
 #include <backends/imgui_impl_opengl3.h>
+#include <bit>
 #include <cctype>
 #include <chrono>
 #include <cmath>
 #include <csignal>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <entt/entity/entity.hpp>
+#include <entt/entity/fwd.hpp>
+#include <entt/entity/registry.hpp>
+#include <exception>
 #include <filesystem>
 #include <fstream>
+#include <glm/ext/matrix_clip_space.hpp>
+#include <glm/ext/matrix_float4x4.hpp>
+#include <glm/ext/quaternion_trigonometric.hpp>
+#include <glm/ext/vector_float2.hpp>
+#include <glm/ext/vector_float3.hpp>
+#include <glm/ext/vector_float4.hpp>
+#include <glm/geometric.hpp>
+#include <glm/trigonometric.hpp>
 #include <imgui.h>
-#include <iomanip>
+#include <ios>
+#include <iterator>
 #include <limits>
+#include <luminumbra/core/Types.h>
 #include <memory>
+#include <nlohmann/json_fwd.hpp>
 #include <optional>
+#include <ratio>
 #include <sstream>
+#include <stdexcept>
+#include <stop_token>
 #include <string>
 #include <system_error>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 // Main-loop heartbeat for the opt-in hang watchdog (--hang-watchdog-seconds): bumped
@@ -172,9 +201,10 @@ using Luminumbra::Rendering::WritePixelBufferPpm;
 // glfwGetKeyName; special keys are named explicitly.
 // Derive the user-preset slug (and world-type id "user_<slug>") from a display name.
 // Shared by the save/exists/rename bridges so collision detection matches save behaviour.
-static std::string UserPresetSlug(const std::string& displayName) {
+namespace {
+std::string UserPresetSlug(const std::string& displayName) {
     std::string slug;
-    for (char ch : displayName) {
+    for (const char ch : displayName) {
         if (std::isalnum(static_cast<unsigned char>(ch)))
             slug += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
         else if ((ch == ' ' || ch == '-' || ch == '_') && !slug.empty() && slug.back() != '_')
@@ -187,7 +217,7 @@ static std::string UserPresetSlug(const std::string& displayName) {
     return slug.substr(0, 32);
 }
 
-static std::string KeyDisplayLabel(int key) {
+std::string KeyDisplayLabel(int key) {
     switch (key) {
         case GLFW_KEY_SPACE:
             return "Space";
@@ -250,9 +280,9 @@ struct WorldDressingPending {
     // render.creature_spawn values resolved at dispatch (consume-side; no RNG involved).
     float pred_speed = 4.0f, prey_speed = 2.6f, init_hunger = 0.2f;
 };
-static void DrainWorldDressing(Luminumbra::JobSystem& jobs,
-                               std::shared_ptr<WorldDressingPending>& worldDressing,
-                               Luminumbra::JobHandle& worldDressingHandle) {
+void DrainWorldDressing(Luminumbra::JobSystem& jobs,
+                        std::shared_ptr<WorldDressingPending>& worldDressing,
+                        Luminumbra::JobHandle& worldDressingHandle) {
     if (worldDressingHandle.counter) {
         jobs.wait(worldDressingHandle);
     }
@@ -306,15 +336,15 @@ constexpr double kResizeDebounceSeconds = 0.12;
 using Luminumbra::Client::ScenarioHarness::WindowMode;
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-static void ConsumeWorldDressing(ClientAppContext& g_app,
-                                 Luminumbra::Systems::SHIELD_WorldSystem* ws,
-                                 Luminumbra::world::GameSession* gameSession,
-                                 Luminumbra::Rendering::RenderPipeline& renderPipeline,
-                                 const std::filesystem::path& root_dir,
-                                 ProcgenPlantState& g_procgen,
-                                 luminumbra::core::SystemConfig& g_systemConfig,
-                                 std::shared_ptr<WorldDressingPending>& worldDressing,
-                                 Luminumbra::JobHandle& worldDressingHandle) {
+void ConsumeWorldDressing(ClientAppContext& g_app,
+                          Luminumbra::Systems::SHIELD_WorldSystem* ws,
+                          Luminumbra::world::GameSession* gameSession,
+                          Luminumbra::Rendering::RenderPipeline& renderPipeline,
+                          const std::filesystem::path& root_dir,
+                          ProcgenPlantState& g_procgen,
+                          luminumbra::core::SystemConfig& g_systemConfig,
+                          std::shared_ptr<WorldDressingPending>& worldDressing,
+                          Luminumbra::JobHandle& worldDressingHandle) {
     namespace anim = luminumbra::animation;
 
     // Consume: non-blocking poll of the JobHandle counter (
@@ -792,7 +822,8 @@ static void ConsumeWorldDressing(ClientAppContext& g_app,
                 const float x0 = anchor.x - N * sp * 0.5f, z0 = anchor.z - N * sp * 0.5f;
                 for (int iz = 0; iz < N; ++iz)
                     for (int ix = 0; ix < N; ++ix) {
-                        const float cx = x0 + ix * sp, cz = z0 + iz * sp;
+                        const float cx = x0 + static_cast<float>(ix) * sp,
+                                    cz = z0 + static_cast<float>(iz) * sp;
                         const auto e = reg.create();
                         auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
                         tf.position = Luminumbra::Vec3(cx, terr(cx, cz), cz);
@@ -816,12 +847,12 @@ static void ConsumeWorldDressing(ClientAppContext& g_app,
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-static void CaptureTimelapseFrame(ClientAppContext& g_app,
-                                  GLFWwindow* window,
-                                  GameState currentState,
-                                  Luminumbra::world::GameSession* gameSession,
-                                  Luminumbra::Rendering::RenderPipeline& renderPipeline,
-                                  ProcgenPlantState& g_procgen) {
+void CaptureTimelapseFrame(ClientAppContext& g_app,
+                           GLFWwindow* window,
+                           GameState currentState,
+                           Luminumbra::world::GameSession* gameSession,
+                           Luminumbra::Rendering::RenderPipeline& renderPipeline,
+                           ProcgenPlantState& g_procgen) {
     // --timelapse: dump the rendered frame, then fast-forward sim-time (+ the day clock)
     // for the next one. Pair with --no-ui so no overlay is baked into the frame.
     if (g_app.capture.timelapse_frames > 0 && currentState == GameState::IN_GAME && gameSession) {
@@ -940,7 +971,8 @@ static void CaptureTimelapseFrame(ClientAppContext& g_app,
                     const int rainOff =
                         (g_app.capture.timelapse_frames * 3) / 5; // Act 1 rains, Act 2 dries
                     if (g_app.capture.timelapse_captured == rainOff) {
-                        wsr->SetWaterHydrology(/*finite=*/true, /*rain=*/0, /*evap=*/2);
+                        wsr->SetWaterHydrology(
+                            /*finite=*/true, /*rain_mm_per_tick=*/0, /*evap_mm_per_tick=*/2);
                         LUMINUMBRA_CORE_INFO("Timelapse-rain: rain OFF + evaporation ON — "
                                              "water is finite, it recedes (no refill)");
                     }
@@ -995,14 +1027,14 @@ static void CaptureTimelapseFrame(ClientAppContext& g_app,
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-static void UpdateFoliageScatter(ClientAppContext& g_app,
-                                 const std::filesystem::path& root_dir,
-                                 const RuntimeScenarioConfig& scenario_config,
-                                 Luminumbra::Rendering::Camera* g_camera,
-                                 Luminumbra::world::GameSession* gameSession,
-                                 Luminumbra::Rendering::RenderPipeline& renderPipeline,
-                                 double& rb_scatter_ms,
-                                 double& rb_foliage_ms) {
+void UpdateFoliageScatter(ClientAppContext& g_app,
+                          const std::filesystem::path& root_dir,
+                          const RuntimeScenarioConfig& scenario_config,
+                          Luminumbra::Rendering::Camera* g_camera,
+                          Luminumbra::world::GameSession* gameSession,
+                          Luminumbra::Rendering::RenderPipeline& renderPipeline,
+                          double& rb_scatter_ms,
+                          double& rb_foliage_ms) {
     // FOLIAGE in normal play: the GPU grass scatter was previously only
     // built for the foliage_visual_smoke gate, so the live world had no
     // grass. Load the scatter set once, then rebuild the per-chunk scatter
@@ -1139,18 +1171,18 @@ static void UpdateFoliageScatter(ClientAppContext& g_app,
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-static void HandlePlayerVerbs(ClientAppContext& g_app,
-                              GLFWwindow* window,
-                              GameState currentState,
-                              const RuntimeScenarioConfig& scenario_config,
-                              const std::filesystem::path& root_dir,
-                              Luminumbra::Client::PlayerController* g_playerController,
-                              Luminumbra::Rendering::Camera* g_camera,
-                              Luminumbra::Client::IAudioManager* audioManager,
-                              Luminumbra::world::GameSession* gameSession,
-                              Luminumbra::Rendering::RenderPipeline& renderPipeline,
-                              ProcgenPlantState& g_procgen,
-                              const UiInputRouter& inputRouter) {
+void HandlePlayerVerbs(ClientAppContext& g_app,
+                       GLFWwindow* window,
+                       GameState currentState,
+                       const RuntimeScenarioConfig& scenario_config,
+                       const std::filesystem::path& root_dir,
+                       Luminumbra::Client::PlayerController* g_playerController,
+                       Luminumbra::Rendering::Camera* g_camera,
+                       Luminumbra::Client::IAudioManager* audioManager,
+                       Luminumbra::world::GameSession* gameSession,
+                       Luminumbra::Rendering::RenderPipeline& renderPipeline,
+                       ProcgenPlantState& g_procgen,
+                       const UiInputRouter& inputRouter) {
     if (!inputRouter.GameplayAllowed())
         return;
     // ---  : player FARMING verbs (F/G/H/J) ---
@@ -1296,7 +1328,7 @@ static void HandlePlayerVerbs(ClientAppContext& g_app,
                 } else {
                     const float th =
                         gameSession->GetWorldSystem()->GetTerrainHeightAt(aim.x, aim.z);
-                    const char* dev = "dig_soil";
+                    const char* dev;
                     switch (
                         gameSession->GetWorldSystem()->SurfaceVertexMaterial(aim.x, aim.z, th)) {
                         case Luminumbra::MaterialType::Stone:
@@ -1340,9 +1372,11 @@ static void HandlePlayerVerbs(ClientAppContext& g_app,
     }
 }
 
+} // namespace
+
 // Grandfathered monolith: main() currently scores 1281 against the gate's 250 threshold.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-int main(int argc, char* argv[]) {
+int main(int argc, char* argv[]) try {
     ClientRuntimeState runtime;
     auto& g_camera = runtime.camera;
     auto& g_playerController = runtime.playerController;
@@ -1547,7 +1581,7 @@ int main(int argc, char* argv[]) {
                 HasCommandLineFlag(argc, argv, "--timelapse"))
                 throw std::invalid_argument(
                     "traversal requires v3 and exclusive camera/world ownership");
-            if (std::filesystem::file_size(traversal_path) > 1024u * 1024u)
+            if (std::filesystem::file_size(traversal_path) > std::uintmax_t{1024} * 1024u)
                 throw std::invalid_argument("traversal manifest exceeds 1 MiB");
             std::ifstream input(traversal_path, std::ios::binary);
             if (!input)
@@ -1640,13 +1674,17 @@ int main(int argc, char* argv[]) {
         if (!cy.empty()) {
             try {
                 g_app.capture.fixed_cam_yaw = std::stof(cy);
-            } catch (...) {}
+            } catch (const std::exception& error) {
+                LUMINUMBRA_CORE_WARN("Invalid camera yaw: {}", error.what());
+            }
         }
         const std::string cpi = GetCommandLineOption(argc, argv, "--cam-pitch", "");
         if (!cpi.empty()) {
             try {
                 g_app.capture.fixed_cam_pitch = std::stof(cpi);
-            } catch (...) {}
+            } catch (const std::exception& error) {
+                LUMINUMBRA_CORE_WARN("Invalid camera pitch: {}", error.what());
+            }
         }
     }
     // --scene-config <json>: compose a full scene to match a reference, then capture.
@@ -1893,13 +1931,17 @@ int main(int argc, char* argv[]) {
         if (!ds.empty()) {
             try {
                 g_app.capture.timelapse_daystep = std::stof(ds);
-            } catch (...) {}
+            } catch (const std::exception& error) {
+                LUMINUMBRA_CORE_WARN("Invalid timelapse day step: {}", error.what());
+            }
         }
         const std::string t0 = GetCommandLineOption(argc, argv, "--timelapse-tod", "");
         if (!t0.empty()) {
             try {
                 g_app.capture.timelapse_tod = std::stof(t0);
-            } catch (...) {}
+            } catch (const std::exception& error) {
+                LUMINUMBRA_CORE_WARN("Invalid timelapse time: {}", error.what());
+            }
         }
         const std::string td = GetCommandLineOption(argc, argv, "--timelapse-dir", "");
         g_app.capture.timelapse_dir = !td.empty()
@@ -2028,7 +2070,8 @@ int main(int argc, char* argv[]) {
 
     // [[maybe_unused]]: LUMINUMBRA_ASSERT compiles out in release builds, which
     // compile with warnings as errors.
-    [[maybe_unused]] const int status = gladLoadGLLoader((GLADloadproc)glfwGetProcAddress);
+    [[maybe_unused]] const int status =
+        gladLoadGLLoader(reinterpret_cast<GLADloadproc>(glfwGetProcAddress));
     LUMINUMBRA_ASSERT(status, "Failed to initialize GLAD!");
 
     g_app.hardwareInfo = Luminumbra::Client::DetectHardwareInfo(window);
@@ -2414,7 +2457,7 @@ int main(int argc, char* argv[]) {
 
     auto game_content_error = [&]() -> std::string {
         if (!game_asset_startup_error.empty())
-            return game_asset_startup_error;
+            return std::string(game_asset_startup_error);
         if (const auto error = VerifyGameAssets(root_dir); !error.empty())
             return error;
         for (const std::string part : {"trunk", "branches", "leaves"}) {
@@ -2430,7 +2473,51 @@ int main(int argc, char* argv[]) {
         return {};
     };
 
+    bool benchmark_world_checked = false;
+    nlohmann::json benchmark_world_identity;
+    const Luminumbra::world::GameSession::WorldOpenCheck check_benchmark_world =
+        [&](const Luminumbra::Persistence::SavedWorld& saved,
+            const Luminumbra::Systems::TerrainGenParams& params,
+            std::uint32_t seed) -> std::string {
+        if (!benchmark_v3)
+            return {};
+        try {
+            if (!saved.error.empty())
+                return saved.error;
+            const auto preset = nlohmann::json::parse(saved.preset_source_json);
+            benchmark_world_identity = {
+                {"seed", seed},
+                {"preset", saved.metadata.worldType},
+                {"preset_revision", preset.at("schema_rev")},
+                {"preset_identity", Luminumbra::Persistence::StableChecksum(preset.dump())},
+                {"content_identity",
+                 std::to_string(Luminumbra::World::ComputeTerrainParamsHash(
+                     params, std::bit_cast<std::int32_t>(seed)))}};
+            if (traversal &&
+                (benchmark_world_identity["seed"] != traversal->seed ||
+                 benchmark_world_identity["preset"] != traversal->preset ||
+                 benchmark_world_identity["preset_revision"] != traversal->presetRevision ||
+                 benchmark_world_identity["preset_identity"] != traversal->presetIdentity ||
+                 benchmark_world_identity["content_identity"] != traversal->contentIdentity))
+                return "traversal world seed, preset or content identity mismatch";
+            benchmark_world_checked = true;
+            return {};
+        } catch (const std::exception& error) {
+            return error.what();
+        }
+    };
+
     auto finish_world_entry = [&]() {
+        if (benchmark_v3 && !benchmark_world_checked) {
+            const auto* world = gameSession->GetWorldSystem();
+            const auto error = check_benchmark_world(gameSession->InspectCurrentSavedWorld(),
+                                                     world->get_params(),
+                                                     static_cast<std::uint32_t>(world->get_seed()));
+            if (!error.empty()) {
+                refuse_world_entry(error, false);
+                return;
+            }
+        }
         g_playerController.reset();
         g_procgen = {};
         g_app.worldDressing = {};
@@ -2528,7 +2615,7 @@ int main(int argc, char* argv[]) {
         // 3. Get the list of chunks to generate and start the visualizer
         auto* world_system = gameSession->GetWorldSystem();
         // Use the actual spawn position for initial chunk loading
-        Luminumbra::Vec3 spawn_pos = gameSession->GetMetadata().spawnPoint;
+        const Luminumbra::Vec3 spawn_pos = gameSession->GetMetadata().spawnPoint;
         if (runtime_boot_recorder.enabled()) {
             g_app.loading.initial_chunks_to_load.clear();
         } else {
@@ -2638,7 +2725,7 @@ int main(int argc, char* argv[]) {
         }
         // The UI's inspection is advisory: revalidate all artifacts at the moment of opening.
         prepare_world_entry();
-        if (!gameSession->LoadWorld(id)) {
+        if (!gameSession->LoadWorld(id, check_benchmark_world)) {
             refuse_world_entry("Could not load this world.");
             return;
         }
@@ -2701,7 +2788,7 @@ int main(int argc, char* argv[]) {
                     return on ? "true" : "false";
                 }
                 std::string ptr = "/generation_params/";
-                for (char ch : path)
+                for (const char ch : path)
                     ptr += (ch == '.') ? '/' : ch;
                 const nlohmann::json::json_pointer jp(ptr);
                 if (!j.contains(jp))
@@ -2755,7 +2842,7 @@ int main(int argc, char* argv[]) {
                     } else {
                         saved = Luminumbra::Client::BuildCustomPreset(base, params).json;
                     }
-                    const std::string worldType = "user_" + UserPresetSlug(displayName);
+                    std::string worldType = "user_" + UserPresetSlug(displayName);
                     saved["name"] = displayName.empty() ? std::string("Custom") : displayName;
                     std::ofstream out(presets_dir / (worldType + ".json"), std::ios::binary);
                     if (!out)
@@ -2789,10 +2876,15 @@ int main(int argc, char* argv[]) {
                             nlohmann::json j;
                             f >> j;
                             name = j.value("name", stem);
-                        } catch (...) {}
+                        } catch (const std::exception& error) {
+                            LUMINUMBRA_CORE_WARN("Unable to read user preset name: {}",
+                                                 error.what());
+                        }
                         out.emplace_back(name, stem);
                     }
-                } catch (...) {}
+                } catch (const std::exception& error) {
+                    LUMINUMBRA_CORE_WARN("Unable to enumerate user presets: {}", error.what());
+                }
                 return out;
             });
         // Collision check: does saving under this display name target an existing user preset?
@@ -2846,7 +2938,7 @@ int main(int argc, char* argv[]) {
                         in >> j;
                     }
                     j["name"] = newDisplayName.empty() ? std::string("Custom") : newDisplayName;
-                    const std::string newType = "user_" + UserPresetSlug(newDisplayName);
+                    std::string newType = "user_" + UserPresetSlug(newDisplayName);
                     const std::filesystem::path dst = dir / (newType + ".json");
                     {
                         std::ofstream out(dst, std::ios::binary);
@@ -3028,7 +3120,9 @@ int main(int argc, char* argv[]) {
                                                    ? g_playerController->SavedSpawnAnchor()
                                                    : g_camera->Position);
                 // Synchronous main-thread save; shutdown cannot overlap this callback.
-                if (!gameSession->SaveWorldState() || !gameSession->SaveWorld()) {
+                if (!gameSession->SaveWorldState(
+                        nullptr, Luminumbra::world::WorldStateSaveScope::DurableChanges) ||
+                    !gameSession->SaveWorld()) {
                     if (g_uiManager)
                         g_uiManager->ShowMessage("Could not save this world. Check available disk "
                                                  "space and permissions before leaving.");
@@ -3489,25 +3583,25 @@ int main(int argc, char* argv[]) {
     // runner leaves the frame loop on exactly the non-scenario branches it
     // always took. The context is a narrow view of the frame-loop state the
     // moved scenario blocks already read/wrote.
-    ScenarioFrameContext scenario_frame_context{window,
-                                                root_dir,
-                                                root_path_str,
-                                                scenario_config,
-                                                runtime_state_recorder,
-                                                lod_ground_frame_recorder,
-                                                jobSystem,
-                                                gameSession,
-                                                renderPipeline,
-                                                g_camera,
-                                                g_app,
-                                                scenario_world_type,
-                                                scenario_failed,
-                                                scenario_failure_reason,
-                                                scenario_ready,
-                                                scenario_frame_count,
-                                                scenario_play_started_at,
-                                                last_readiness_report,
-                                                exit_code};
+    const ScenarioFrameContext scenario_frame_context{window,
+                                                      root_dir,
+                                                      root_path_str,
+                                                      scenario_config,
+                                                      runtime_state_recorder,
+                                                      lod_ground_frame_recorder,
+                                                      jobSystem,
+                                                      gameSession,
+                                                      renderPipeline,
+                                                      g_camera,
+                                                      g_app,
+                                                      scenario_world_type,
+                                                      scenario_failed,
+                                                      scenario_failure_reason,
+                                                      scenario_ready,
+                                                      scenario_frame_count,
+                                                      scenario_play_started_at,
+                                                      last_readiness_report,
+                                                      exit_code};
 #if defined(LUMINUMBRA_QA_RUNNER)
     const std::unique_ptr<ScenarioRunner> scenario_runner =
         scenario_config.active() ? CreateScenarioRunner(scenario_frame_context) : nullptr;
@@ -3535,8 +3629,6 @@ int main(int argc, char* argv[]) {
     std::unique_ptr<Luminumbra::Rendering::BenchmarkGpuQueries> benchmark_queries;
     std::uint64_t traversal_ticks = 0;
     int traversal_target_tick = 0;
-    bool benchmark_world_checked = false;
-    nlohmann::json benchmark_world_identity;
     std::chrono::steady_clock::time_point traversal_start{};
     double traversal_measured_duration = 0.0;
     nlohmann::json traversal_camera_samples = nlohmann::json::array();
@@ -3565,7 +3657,7 @@ int main(int argc, char* argv[]) {
         const double observedFrame = glfwGetTime();
         observedFrameSeconds = observedFrame - previousObservedFrame;
         previousObservedFrame = observedFrame;
-        float currentFrame = (float)observedFrame;
+        const float currentFrame = static_cast<float>(observedFrame);
         float deltaTime = currentFrame - lastFrame;
         lastFrame = currentFrame;
         deltaTime = std::min(deltaTime, 1.0f / 20.0f);
@@ -3577,43 +3669,9 @@ int main(int argc, char* argv[]) {
             benchmark_v3 && gameStateManager.GetCurrentState() == GameState::IN_GAME &&
             gameSession && g_app.benchmark.warmupFrames >= g_app.capture.render_benchmark_warmup &&
             g_app.benchmark.measuredFrames < g_app.capture.render_benchmark_frames;
-        const auto measured_frame_id = static_cast<std::uint64_t>(
-            g_app.capture.render_benchmark_warmup + g_app.benchmark.measuredFrames);
-        if (benchmark_v3 && !benchmark_world_checked && gameSession &&
-            gameStateManager.GetCurrentState() == GameState::IN_GAME) {
-            try {
-                const auto saved =
-                    Luminumbra::Persistence::InspectSavedWorld(gameSession->GetSaveRootPath(),
-                                                               root_path_str,
-                                                               gameSession->GetMetadata().worldId);
-                if (!saved.error.empty())
-                    throw std::runtime_error(saved.error);
-                std::ifstream input(saved.preset_path, std::ios::binary);
-                const auto preset = nlohmann::json::parse(input);
-                const auto* world = gameSession->GetWorldSystem();
-                benchmark_world_identity = {
-                    {"seed", static_cast<std::uint32_t>(world->get_seed())},
-                    {"preset", gameSession->GetMetadata().worldType},
-                    {"preset_revision", preset.at("schema_rev")},
-                    {"preset_identity", Luminumbra::Persistence::StableChecksum(preset.dump())},
-                    {"content_identity",
-                     std::to_string(Luminumbra::World::ComputeTerrainParamsHash(
-                         world->get_params(), world->get_seed()))}};
-                if (traversal &&
-                    (benchmark_world_identity["seed"] != traversal->seed ||
-                     benchmark_world_identity["preset"] != traversal->preset ||
-                     benchmark_world_identity["preset_revision"] != traversal->presetRevision ||
-                     benchmark_world_identity["preset_identity"] != traversal->presetIdentity ||
-                     benchmark_world_identity["content_identity"] != traversal->contentIdentity))
-                    throw std::runtime_error(
-                        "traversal world seed, preset or content identity mismatch");
-                benchmark_world_checked = true;
-            } catch (const std::exception& error) {
-                LUMINUMBRA_CORE_ERROR("Benchmark world refused: {}", error.what());
-                exit_code = 2;
-                break;
-            }
-        }
+        const auto measured_frame_id =
+            static_cast<std::uint64_t>(g_app.capture.render_benchmark_warmup) +
+            static_cast<std::uint64_t>(g_app.benchmark.measuredFrames);
         if (measuring_v3) {
             measured_samples->append(measured_frame_id);
             benchmark_queries->begin_frame(measured_frame_id);
@@ -3901,13 +3959,14 @@ int main(int argc, char* argv[]) {
                     g_app.loading.initial_chunks_to_load.size()) {
                     std::vector<Luminumbra::IVec3> batch_to_generate;
                     const int batch_start_index = g_app.loading.generation_dispatch_index;
-                    while (static_cast<size_t>(batch_start_index +
-                                               static_cast<int>(batch_to_generate.size())) <
-                               g_app.loading.initial_chunks_to_load.size() &&
-                           static_cast<int>(batch_to_generate.size()) < JOBS_PER_FRAME) {
+                    while (
+                        (static_cast<std::size_t>(batch_start_index) + batch_to_generate.size()) <
+                            g_app.loading.initial_chunks_to_load.size() &&
+                        static_cast<int>(batch_to_generate.size()) < JOBS_PER_FRAME) {
                         batch_to_generate.push_back(
-                            g_app.loading.initial_chunks_to_load
-                                [batch_start_index + static_cast<int>(batch_to_generate.size())]);
+                            g_app.loading.initial_chunks_to_load[static_cast<std::size_t>(
+                                                                     batch_start_index) +
+                                                                 batch_to_generate.size()]);
                     }
                     if (!batch_to_generate.empty()) {
                         gameSession->GetWorldSystem()->dispatch_generation_jobs(batch_to_generate);
@@ -3924,10 +3983,11 @@ int main(int argc, char* argv[]) {
                     }
                 }
 
-                float progress = g_app.loading.initial_chunks_to_load.empty()
-                                     ? 1.0f
-                                     : static_cast<float>(g_app.loading.generation_dispatch_index) /
-                                           g_app.loading.initial_chunks_to_load.size();
+                const float progress =
+                    g_app.loading.initial_chunks_to_load.empty()
+                        ? 1.0f
+                        : static_cast<float>(g_app.loading.generation_dispatch_index) /
+                              static_cast<float>(g_app.loading.initial_chunks_to_load.size());
 
                 glClearColor(0.01f, 0.02f, 0.05f, 1.0f); // Dark blue background
                 glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -4186,7 +4246,9 @@ int main(int argc, char* argv[]) {
                     auto* ws = gameSession->GetWorldSystem();
                     if (!g_app.capture.drain_state.init) {
                         ws->SetWaterHydrology(
-                            /*finite=*/true, g_app.capture.timelapse_rain_mm, /*evap=*/0);
+                            /*finite=*/true,
+                            g_app.capture.timelapse_rain_mm,
+                            /*evap_mm_per_tick=*/0);
                         Luminumbra::Vec3 vp;
                         float bed = 0.0f;
                         if (ws->debug_lowest_land_pos(vp, bed)) {
@@ -4265,6 +4327,12 @@ int main(int argc, char* argv[]) {
                       // continue)
                     Luminumbra::Client::PollSessionFault(
                         *gameSession, [&] { glfwSetWindowShouldClose(window, GLFW_TRUE); });
+                    if (gameSession->PersistenceSaveRequested() ||
+                        gameSession->PersistenceAutosaveDue()) {
+                        // Parked-bytes pressure or the periodic interval: persist now.
+                        gameSession->SaveWorldState(
+                            nullptr, Luminumbra::world::WorldStateSaveScope::DurableChanges);
+                    }
                     rb_sim_ms = std::chrono::duration<double, std::milli>(
                                     std::chrono::steady_clock::now() - _rb_sim_t0)
                                     .count();                         //
@@ -5539,11 +5607,13 @@ int main(int argc, char* argv[]) {
                             glReadPixels(x, y, 1, 1, GL_RGBA, GL_FLOAT, normal.data());
                             glReadBuffer(GL_COLOR_ATTACHMENT2);
                             glReadPixels(x, y, 1, 1, GL_RGB, GL_FLOAT, albedo.data());
-                            probes.push_back({{"uv", {px / 4.0f, py / 4.0f}},
-                                              {"depth", depth},
-                                              {"view_position", position},
-                                              {"material", std::lround(normal[3] * 255.0f)},
-                                              {"albedo", albedo}});
+                            probes.push_back(
+                                {{"uv",
+                                  {static_cast<float>(px) / 4.0f, static_cast<float>(py) / 4.0f}},
+                                 {"depth", depth},
+                                 {"view_position", position},
+                                 {"material", std::lround(normal[3] * 255.0f)},
+                                 {"albedo", albedo}});
                         }
                     }
                     glReadBuffer(GL_COLOR_ATTACHMENT0);
@@ -5834,4 +5904,12 @@ int main(int argc, char* argv[]) {
     glfwDestroyWindow(window);
     glfwTerminate();
     return exit_code;
+}
+
+catch (const std::exception& error) {
+    std::fprintf(stderr, "Client failed: %s\n", error.what());
+    return EXIT_FAILURE;
+} catch (...) {
+    std::fputs("Client failed with an unknown exception\n", stderr);
+    return EXIT_FAILURE;
 }

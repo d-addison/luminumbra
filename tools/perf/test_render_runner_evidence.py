@@ -188,6 +188,16 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
             self.children[-1].kill.assert_called_once_with()
             self.assertIsNotNone(self.children[-1].returncode, 'timed out child was not reaped')
 
+    def test_isolated_runner_reaches_argument_validation(self):
+        result = self.original_run([sys.executable, '-I', '-B', str(options.runner)],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   text=True, check=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('the following arguments are required:', result.stderr)
+        for argument in ('--client', '--source', '--assets', '--artifacts'):
+            self.assertIn(argument, result.stderr)
+        self.assertNotIn('Traceback', result.stderr)
+
     def test_atomic_publication_replaces_existing_files_without_rename(self):
         paths = self.paths()
         for path in paths:

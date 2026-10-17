@@ -6,9 +6,86 @@
 
 #include "luminumbra_common/ai/ScentField.h"
 
+#include <algorithm>
+#include <bit>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <stdexcept>
+#include <utility>
+#include <vector>
+
 namespace {
 using luminumbra::ai::ScentField;
 } // namespace
+
+TEST(ScentField, DiffusionAdvancePreservesLegacyEdgeArithmeticWithAndWithoutGates) {
+    using luminumbra::fields::ScalarFieldDiffusion;
+    constexpr std::size_t width = 11, height = 7, cells = width * height;
+    for (const bool gated : {false, true}) {
+        ScalarFieldDiffusion measured(width, height), unmeasured(width, height);
+        std::vector<double> expected(cells), permeability(cells);
+        std::vector<bool> sealed(cells);
+        for (std::size_t i = 0; i < cells; ++i) {
+            expected[i] = static_cast<double>((i * 37) % 101) / 29.0;
+            permeability[i] = static_cast<double>(i % 5) / 4.0;
+            sealed[i] = i % 13 == 0;
+            for (auto* field : {&measured, &unmeasured}) {
+                field->set(i % width, i / width, expected[i]);
+                field->set_permeability(i % width, i / width, permeability[i]);
+                field->seal(i % width, i / width, sealed[i]);
+            }
+        }
+        const ScalarFieldDiffusion::EdgeGate gate =
+            gated ? ScalarFieldDiffusion::EdgeGate([](auto x, auto z, auto nx, auto nz) {
+                return (x + 3 * z + 5 * nx + 7 * nz) % 4 != 0;
+            })
+                  : ScalarFieldDiffusion::EdgeGate{};
+        // Independent reference to the original pairwise solver, including its diagnostics.
+        for (int tick = 0; tick < 8; ++tick) {
+            double initial = 0;
+            for (const double value : expected)
+                initial += value;
+            const auto report = measured.diffuse(4, 0.25, gate);
+            unmeasured.advance(4, 0.25, gate);
+            ASSERT_EQ(report.steps.size(), 4u);
+            for (std::size_t iteration = 0; iteration < 4; ++iteration) {
+                auto next = expected;
+                double max_delta = 0;
+                const auto exchange = [&](std::size_t a, std::size_t b) {
+                    const double conductance = std::min(permeability[a], permeability[b]);
+                    if (sealed[a] || sealed[b] || conductance <= 0 ||
+                        (gate && !gate(a % width, a / width, b % width, b / width)))
+                        return;
+                    const double delta = (expected[a] - expected[b]) * 0.25 * conductance;
+                    next[a] -= delta;
+                    next[b] += delta;
+                    max_delta = std::max(max_delta, std::abs(delta));
+                };
+                for (std::size_t z = 0; z < height; ++z)
+                    for (std::size_t x = 0; x + 1 < width; ++x)
+                        exchange(z * width + x, z * width + x + 1);
+                for (std::size_t z = 0; z + 1 < height; ++z)
+                    for (std::size_t x = 0; x < width; ++x)
+                        exchange(z * width + x, (z + 1) * width + x);
+                expected = std::move(next);
+                double total = 0;
+                for (const double value : expected)
+                    total += value;
+                EXPECT_EQ(report.steps[iteration].total_energy, total);
+                EXPECT_EQ(report.steps[iteration].conservation_error, std::abs(total - initial));
+                EXPECT_EQ(report.steps[iteration].max_delta, max_delta);
+            }
+            for (std::size_t i = 0; i < cells; ++i) {
+                EXPECT_EQ(std::bit_cast<std::uint64_t>(measured.values()[i]),
+                          std::bit_cast<std::uint64_t>(expected[i]));
+                EXPECT_EQ(std::bit_cast<std::uint64_t>(unmeasured.values()[i]),
+                          std::bit_cast<std::uint64_t>(expected[i]));
+            }
+        }
+        EXPECT_THROW(unmeasured.advance(1, 0.5), std::invalid_argument);
+    }
+}
 
 TEST(ScentField, DepositRaisesOnlyTheTargetCell) {
     ScentField f(8, 8, /*channels=*/1);
@@ -185,4 +262,36 @@ TEST(ScentField, WindCarriesScentFartherDownwindThanDiffusionAlone) {
     // Far downwind (+X of the source), the advected field carries measurably more scent.
     EXPECT_GT(wind.Sample(0, 14, 6), still.Sample(0, 14, 6));
     EXPECT_GT(wind.Sample(0, 14, 6), 0.0);
+}
+
+TEST(ScentField, RegionalFrozenEdgeSealsDepositsAdvectionDiffusionAndClamp) {
+    ScentField field(8, 4, 1);
+    field.RestoreCell(0, 4, 2, 80.0);
+    const ScentField::CellGate due = [](int x, int) {
+        return x < 4;
+    };
+    const ScentField::EdgeGate sealed = [](int x, int, int nx, int) {
+        return x < 4 && nx < 4;
+    };
+    field.BindDepositGate(due);
+    field.Deposit(0, 4, 2, 20.0);
+    field.Step(0.25, 4, 0.1, -1.0, 0.0, due, sealed);
+    field.Clamp(1e-9, 1e6, due);
+    EXPECT_DOUBLE_EQ(field.Sample(0, 4, 2), 80.0);
+    EXPECT_DOUBLE_EQ(field.Sample(0, 5, 2), 0.0);
+    EXPECT_DOUBLE_EQ(field.Sample(0, 3, 2), 1e-9);
+}
+
+TEST(ScentField, RegionalCommonBorderExchangesWithoutInteriorEvaporation) {
+    ScentField field(4, 2, 1);
+    field.RestoreCell(0, 1, 0, 40.0);
+    const ScentField::CellGate neither_due = [](int, int) {
+        return false;
+    };
+    const ScentField::EdgeGate border = [](int x, int, int nx, int) {
+        return (x == 1 && nx == 2) || (x == 2 && nx == 1);
+    };
+    field.Step(0.25, 1, 0.1, 0.0, 0.0, neither_due, border);
+    EXPECT_DOUBLE_EQ(field.Sample(0, 1, 0), 30.0);
+    EXPECT_DOUBLE_EQ(field.Sample(0, 2, 0), 10.0);
 }

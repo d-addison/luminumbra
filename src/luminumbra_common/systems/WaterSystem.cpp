@@ -11,7 +11,9 @@
 #include <chrono> // (water-kernel perf) sub-phase wall timers — telemetry only, never hashed
 #include <cmath>
 #include <glm/gtx/compatibility.hpp>
+#include <limits>
 #include <numeric>
+#include <stdexcept>
 
 namespace Luminumbra::Systems {
 
@@ -129,7 +131,7 @@ constexpr std::int32_t EVAP_MM = 1; // cull <1mm films on non-source cells (dete
 // resolves a river channel. Visual mesh LOD, if wanted, stays a separate  concern.
 // The resolution lives in m_sim_resolution (default High); explicit sim.water_high_res=false
 // selects Medium at construction via SetSimResolution — never mid-run.
-// At uniform resolution, live solver steps are bounded by the 4096-cell budget:
+// With regional scheduling disabled, live solver steps share the 4096-cell budget:
 // 16 chunks at High, 64 at Medium.
 // High first-time grid seeding costs about 4x per chunk, amortized at six chunks per live tick;
 // live grid migration resizes one chunk per tick. Steady-state solver time is a few percent higher
@@ -137,6 +139,9 @@ constexpr std::int32_t EVAP_MM = 1; // cull <1mm films on non-source cells (dete
 // scoring; boot settle seeds and simulates the full backlog, and world load migrates all mismatched
 // grids in one pass. Cross-chunk flux REQUIRES a uniform resolution (boundary cells must align). A
 // mixed-resolution variant would require explicit seam resampling.
+// Regional scheduling instead charges preparation, kernels and faces to budgeted
+// fixed-tick visits; loading preserves grids without stepping or bulk migration.
+// See docs/regional-water-continuation.md for window capacity and seam admission.
 
 // Per-tick rotating sim-window length in CHUNKS, derived from the cell budget at the single
 // uniform sim resolution. Medium (8x8 = 64 cells/chunk) -> 4096/64 = 64 chunks, identical to the
@@ -227,6 +232,19 @@ int PositiveMod(int value, int divisor) {
     return result < 0 ? result + divisor : result;
 }
 
+// Enabled execution checks every authoritative addition in private staged state.
+std::int32_t WaterDepthValue(std::int64_t value) {
+    if (value < 0 || value > std::numeric_limits<std::int32_t>::max())
+        throw std::runtime_error("Regional water depth overflow");
+    return static_cast<std::int32_t>(value);
+}
+void AddWaterDepth(std::int32_t& depth, std::int64_t delta, bool checked) {
+    if (checked)
+        depth = WaterDepthValue(static_cast<std::int64_t>(depth) + delta);
+    else
+        depth += static_cast<std::int32_t>(delta);
+}
+
 //  integer virtual-pipes step for ONE chunk (INTERNAL edges only — cross-chunk flux
 // is ). Injects deterministic river sources, runs flux -> K outflow-clamp -> symmetric apply on
 // the int32 depth/bed/edge_flux, applies the sea/edge sink + evaporation, and regenerates the float
@@ -254,7 +272,8 @@ void StepChunkWaterFixed(Chunk& c,
                          std::int32_t rain_mm,
                          std::int32_t evap_mm,
                          const WeatherSystem* weather_rain = nullptr,
-                         std::int32_t weather_scale_mm = 0) {
+                         std::int32_t weather_scale_mm = 0,
+                         bool checked = false) {
     const int res = GetWaterResolution(c);
     if (res <= 1)
         return;
@@ -262,8 +281,10 @@ void StepChunkWaterFixed(Chunk& c,
     if (static_cast<int>(c.water_depth_mm.size()) != n ||
         static_cast<int>(c.water_bed_mm.size()) != n)
         return;
-    if (static_cast<int>(c.water_edge_flux.size()) != 2 * n)
+    if (static_cast<int>(c.water_edge_flux.size()) != 2 * n) {
         c.water_edge_flux.assign(2 * n, 0);
+        c.mark_water_state_dirty();
+    }
 
     std::vector<std::int32_t>& depth = c.water_depth_mm;
     std::vector<std::int32_t>& bed = c.water_bed_mm;
@@ -282,6 +303,8 @@ void StepChunkWaterFixed(Chunk& c,
     thread_local std::vector<std::int32_t> tl_depth_before;
     tl_depth_before.assign(depth.begin(), depth.end()); // for the activity delta + remesh signal
     const std::vector<std::int32_t>& depth_before = tl_depth_before;
+    thread_local std::vector<std::int32_t> tl_flux_before;
+    tl_flux_before.assign(flux.begin(), flux.end());
 
     // --- : SOURCES (deterministic, pure function of position) ---
     //  FINITE HYDROLOGY: when finite_hydrology is on, water is a CONSERVED quantity — there is
@@ -295,7 +318,14 @@ void StepChunkWaterFixed(Chunk& c,
         // the init loop) — same cell-centre formula, same threshold/discharge, same row order, so
         // the consumed result is BYTE-IDENTICAL to the per-tick computation (run==replay /
         // host==peer).
-        if (static_cast<int>(c.water_src_mm.size()) != n) {
+        const auto& params = shield.get_params();
+        const Chunk::WaterSourceInputs inputs{shield.get_seed(),
+                                              params.rivers_enabled,
+                                              params.river_frequency,
+                                              params.river_pv_min,
+                                              params.river_pv_max};
+        if (static_cast<int>(c.water_src_mm.size()) != n ||
+            (checked && c.water_source_inputs != inputs)) {
             c.water_src_mm.assign(n, 0);
             for (int z = 0; z < res; ++z)
                 for (int x = 0; x < res; ++x) {
@@ -305,9 +335,11 @@ void StepChunkWaterFixed(Chunk& c,
                         c.water_src_mm[IDX(x, z)] = RIVER_DISCHARGE_MM;
                     }
                 }
+            c.water_source_inputs = inputs;
         }
         for (int i = 0; i < n; ++i) {
-            depth[i] += c.water_src_mm[i]; // += 0 for non-source cells (byte-identical)
+            AddWaterDepth(
+                depth[i], c.water_src_mm[i], checked); // += 0 for non-source cells (byte-identical)
             out_src += c.water_src_mm[i];
         }
     }
@@ -316,7 +348,7 @@ void StepChunkWaterFixed(Chunk& c,
     // rainfall pools into puddles -> ponds -> lakes and runs off slopes toward the sea.
     if (rain_mm > 0) {
         for (int i = 0; i < n; ++i)
-            depth[i] += rain_mm;
+            AddWaterDepth(depth[i], rain_mm, checked);
         out_src += static_cast<std::int64_t>(rain_mm) * n;
     }
     //  ==: WEATHER-DRIVEN per-cell rain. Precipitation is
@@ -331,10 +363,14 @@ void StepChunkWaterFixed(Chunk& c,
                 const float wx = cc.x * CHUNK_SIZE_X + (x + 0.5f) * cw_x;
                 const float wz = cc.z * CHUNK_SIZE_Z + (z + 0.5f) * cw_z;
                 const float p = weather_rain->PrecipitationAt(Vec3(wx, 0.0f, wz));
-                const std::int32_t r =
-                    static_cast<std::int32_t>(p * static_cast<float>(weather_scale_mm) + 0.5f);
+                const float quantized = p * static_cast<float>(weather_scale_mm) + 0.5f;
+                if (checked &&
+                    (!std::isfinite(quantized) || quantized < 0.0f ||
+                     static_cast<double>(quantized) > std::numeric_limits<std::int32_t>::max()))
+                    throw std::runtime_error("Regional water rain conversion refused");
+                const auto r = static_cast<std::int32_t>(quantized);
                 if (r > 0) {
-                    depth[IDX(x, z)] += r;
+                    AddWaterDepth(depth[IDX(x, z)], r, checked);
                     out_src += r;
                 }
             }
@@ -417,21 +453,40 @@ void StepChunkWaterFixed(Chunk& c,
             }
         }
 
-    // --- : APPLY (symmetric: same int subtracted from P, added to N -> exact, order-free) ---
-    for (int z = 0; z < res; ++z)
-        for (int x = 0; x < res; ++x) {
-            const int i = IDX(x, z);
-            if (x + 1 < res) {
-                const std::int32_t q = flux[2 * i + 0];
-                depth[i] -= q;
-                depth[IDX(x + 1, z)] += q;
-            }
-            if (z + 1 < res) {
-                const std::int32_t q = flux[2 * i + 1];
-                depth[i] -= q;
-                depth[IDX(x, z + 1)] += q;
+    if (checked) {
+        std::vector<std::int64_t> next_depth(depth.begin(), depth.end());
+        for (int z = 0; z < res; ++z) {
+            for (int x = 0; x < res; ++x) {
+                const int i = IDX(x, z);
+                if (x + 1 < res) {
+                    next_depth[i] -= flux[2 * i];
+                    next_depth[IDX(x + 1, z)] += flux[2 * i];
+                }
+                if (z + 1 < res) {
+                    next_depth[i] -= flux[2 * i + 1];
+                    next_depth[IDX(x, z + 1)] += flux[2 * i + 1];
+                }
             }
         }
+        for (int i = 0; i < n; ++i)
+            depth[i] = WaterDepthValue(next_depth[i]);
+    } else {
+        // --- : APPLY (symmetric: same int subtracted from P, added to N -> exact, order-free) ---
+        for (int z = 0; z < res; ++z)
+            for (int x = 0; x < res; ++x) {
+                const int i = IDX(x, z);
+                if (x + 1 < res) {
+                    const std::int32_t q = flux[2 * i + 0];
+                    depth[i] -= q;
+                    depth[IDX(x + 1, z)] += q;
+                }
+                if (z + 1 < res) {
+                    const std::int32_t q = flux[2 * i + 1];
+                    depth[i] -= q;
+                    depth[IDX(x, z + 1)] += q;
+                }
+            }
+    }
 
     // --- Sinks (sea/edge) + evaporation + defensive clamp + float render mirror ---
     std::int32_t max_delta = 0;
@@ -445,7 +500,8 @@ void StepChunkWaterFixed(Chunk& c,
                 depth[i] = 0;       // defensive; the K-clamp should already guarantee this
             if (bed[i] <= sea_mm) { // ocean is an infinite SINK: settle the surface at sea level
                 const std::int32_t target =
-                    sea_mm - bed[i]; // depth giving surface == sea level (>= 0)
+                    checked ? WaterDepthValue(static_cast<std::int64_t>(sea_mm) - bed[i])
+                            : sea_mm - bed[i]; // depth giving surface == sea level (>= 0)
                 if (depth[i] > target) {
                     out_sink += (depth[i] - target);
                     depth[i] = target;
@@ -473,7 +529,8 @@ void StepChunkWaterFixed(Chunk& c,
             sum_after += depth[i];
             if (have_mirror)
                 c.water_level_data[i] =
-                    static_cast<float>(bed[i] + depth[i]) / static_cast<float>(MM_PER_M);
+                    static_cast<float>(static_cast<std::int64_t>(bed[i]) + depth[i]) /
+                    static_cast<float>(MM_PER_M);
         }
     out_depth_before += sum_before;
     out_depth_after += sum_after;
@@ -484,6 +541,9 @@ void StepChunkWaterFixed(Chunk& c,
             c.water_mesh_generated.store(false);
             c.water_mesh_dirty_ticks = 0;
         }
+    }
+    if (max_delta > 0 || !std::equal(flux.begin(), flux.end(), tl_flux_before.begin())) {
+        c.mark_water_state_dirty();
     }
 }
 
@@ -578,8 +638,123 @@ Vec3 WaterSystem::get_camera_position(entt::registry& registry) const {
     return Vec3(0.0f);
 }
 
+int WaterSystem::StepSharedWaterFace(Chunk& owner, Chunk& neighbor, bool is_x, bool checked) {
+    Chunk* A = &owner;
+    Chunk* B = &neighbor;
+    const int res = GetWaterResolution(owner);
+    if (res <= 1 || GetWaterResolution(neighbor) != res) {
+        return 0;
+    }
+    const int nA = res * res;
+    if (static_cast<int>(owner.water_depth_mm.size()) != nA ||
+        static_cast<int>(owner.water_edge_flux.size()) != 2 * nA ||
+        static_cast<int>(neighbor.water_depth_mm.size()) != nA) {
+        return 0;
+    }
+    const bool have_mirror_A = static_cast<int>(owner.water_level_data.size()) == nA;
+    const bool have_mirror_B = static_cast<int>(neighbor.water_level_data.size()) == nA;
+    const std::int64_t k_accel = KAccelForResolution(res);
+    const std::int32_t min_flow_mm = MinFlowForResolution(res);
+    int seam_wet_pairs = 0;
+    for (int t = 0; t < res; ++t) {
+        int ai, bi, slot;
+        if (is_x) {
+            ai = t * res + (res - 1);
+            bi = t * res + 0;
+            slot = 2 * ai + 0;
+        } else {
+            ai = (res - 1) * res + t;
+            bi = 0 * res + t;
+            slot = 2 * ai + 1;
+        }
+        const std::int64_t surfA =
+            static_cast<std::int64_t>(A->water_bed_mm[ai]) + A->water_depth_mm[ai];
+        const std::int64_t surfB =
+            static_cast<std::int64_t>(B->water_bed_mm[bi]) + B->water_depth_mm[bi];
+        const std::int64_t dSurf = surfA - surfB;
+        std::int64_t q =
+            static_cast<std::int64_t>(A->water_edge_flux[slot]) + ((k_accel * dSurf) >> FLOW_SHIFT);
+        q = (q * FRICTION_NUM) >> FRICTION_SHIFT;
+        if (dSurf < min_flow_mm && dSurf > -min_flow_mm)
+            q = 0;
+        if (q > 2000000000LL)
+            q = 2000000000LL;
+        if (q < -2000000000LL)
+            q = -2000000000LL;
+        if (q > 0) {
+            if (q > A->water_depth_mm[ai])
+                q = A->water_depth_mm[ai];
+        } else if (q < 0) {
+            if (-q > B->water_depth_mm[bi])
+                q = -static_cast<std::int64_t>(B->water_depth_mm[bi]);
+        }
+        const std::int32_t flux_prev = A->water_edge_flux[slot];
+        A->water_edge_flux[slot] = static_cast<std::int32_t>(q);
+        if (A->water_edge_flux[slot] != flux_prev)
+            A->mark_water_state_dirty();
+        AddWaterDepth(A->water_depth_mm[ai], -q, checked);
+        AddWaterDepth(B->water_depth_mm[bi], q, checked);
+        if (A->water_depth_mm[ai] > 0 && B->water_depth_mm[bi] > 0)
+            ++seam_wet_pairs;
+        if (q != 0) {
+            if (checked) {
+                A->ticks_below_threshold = 0;
+                B->ticks_below_threshold = 0;
+                A->water_mesh_generated.store(false);
+                B->water_mesh_generated.store(false);
+            }
+            A->is_water_sleeping.store(false, std::memory_order_relaxed);
+            B->is_water_sleeping.store(false, std::memory_order_relaxed);
+            A->mark_water_state_dirty();
+            B->mark_water_state_dirty();
+            if (have_mirror_A)
+                A->water_level_data[ai] =
+                    static_cast<float>(static_cast<std::int64_t>(A->water_bed_mm[ai]) +
+                                       A->water_depth_mm[ai]) /
+                    static_cast<float>(MM_PER_M);
+            if (have_mirror_B)
+                B->water_level_data[bi] =
+                    static_cast<float>(static_cast<std::int64_t>(B->water_bed_mm[bi]) +
+                                       B->water_depth_mm[bi]) /
+                    static_cast<float>(MM_PER_M);
+        }
+    }
+    return seam_wet_pairs;
+}
+
+void WaterSystem::StepRegionalInterior(Chunk& chunk, RegionalWork& result) {
+    std::int64_t before = 0, after = 0;
+    StepChunkWaterFixed(chunk,
+                        *m_shield_system,
+                        result.source_mm,
+                        result.sink_mm,
+                        before,
+                        after,
+                        m_finite_hydrology,
+                        m_rain_mm_per_tick,
+                        m_evap_mm_per_tick,
+                        m_weather_rain,
+                        m_weather_rain_scale_mm,
+                        true);
+    // Only interior visits progress sleep time. Faces run afterward and preserve their wake.
+    if (chunk.max_water_delta_last_tick < 0.0001f) {
+        chunk.ticks_below_threshold = std::min(chunk.ticks_below_threshold, 119) + 1;
+        chunk.is_water_sleeping.store(chunk.ticks_below_threshold >= 120);
+    } else {
+        chunk.ticks_below_threshold = 0;
+        chunk.is_water_sleeping.store(false);
+    }
+}
+
 void WaterSystem::update(entt::registry& registry,
                          const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>& active_chunks) {
+    if (m_shield_system && m_shield_system->durable_read_failed()) {
+        throw std::runtime_error("water update refused after durable chunk read error");
+    }
+    if (m_regional_scheduling) {
+        m_active_chunks = &active_chunks;
+        return;
+    }
     m_cells_stepped_last_update = 0;
     // (water-kernel perf) sub-phase wall timers — RUNTIME TELEMETRY ONLY (never hashed),
     // the _dbg_split pattern from SHIELD_WorldSystem::update.
@@ -674,9 +849,8 @@ void WaterSystem::update(entt::registry& registry,
         m_water_resize_cursor = (m_water_resize_cursor + budget) % total;
     }
 
-    auto source_view =
-        registry
-            .view<const Components::TransformComponent, const Components::WaterSourceComponent>();
+    auto source_view = registry.view<const Components::TransformComponent,
+                                     const Components::WaterFlowSourceComponent>();
 
     // (worst-frame fix) The dominant moving cost is INIT re-sampling worldgen per cell
     // (~16ms/frame, profiled). The terrain half (GetTerrainHeightAt) is BYTE-IDENTICAL to the
@@ -776,6 +950,9 @@ void WaterSystem::update(entt::registry& registry,
             }
         }
         cp->has_water_sim.store(true);
+        if (cp->needs_authority()) {
+            cp->mark_water_state_dirty();
+        }
         m_water_activity_cache.erase(cp->get_id());
         cp->water_mesh_generated.store(false);
         cp->water_mesh_dirty_ticks = 0;
@@ -814,7 +991,7 @@ void WaterSystem::update(entt::registry& registry,
 
     for (auto entity : source_view) {
         auto& transform = source_view.get<const Components::TransformComponent>(entity);
-        auto& source = source_view.get<const Components::WaterSourceComponent>(entity);
+        auto& source = source_view.get<const Components::WaterFlowSourceComponent>(entity);
         ++m_debug_sources_seen; // water-source diagnostics
         IVec3 chunk_coords = SHIELD_WorldSystem::world_to_chunk_coords(transform.position);
         auto it = m_active_chunks->find(Chunk::calculate_id(chunk_coords));
@@ -863,6 +1040,7 @@ void WaterSystem::update(entt::registry& registry,
                 }
                 // WAKE UP: An internal event occurred in this chunk.
                 chunk.is_water_sleeping.store(false, std::memory_order_relaxed);
+                chunk.mark_water_state_dirty();
                 m_water_activity_cache.erase(chunk.get_id());
             }
         }
@@ -927,6 +1105,8 @@ void WaterSystem::update(entt::registry& registry,
     }
     for (Chunk* chunk : chunks_to_wake) {
         chunk->is_water_sleeping.store(false, std::memory_order_relaxed);
+        if (chunk->needs_authority())
+            chunk->mark_water_state_dirty();
     }
 
     // Bound per-tick work to MAX_WATER_CELLS_PER_TICK. Medium retains its historical flat rotating
@@ -1096,68 +1276,8 @@ void WaterSystem::update(entt::registry& registry,
             static_cast<int>(A->water_edge_flux.size()) != 2 * nA)
             continue;
         const IVec3 ac = A->get_coords();
-        const bool have_mirror_A = (static_cast<int>(A->water_level_data.size()) == nA);
-        // Seam edges use the same resolution-scaled constants as internal edges (the seam
-        // pass hard-gates on equal resolution, so A's res is the pair's res). Byte-identical
-        // integers at the Medium default.
-        const std::int64_t k_accel = KAccelForResolution(res);
-        const std::int32_t min_flow_mm = MinFlowForResolution(res);
-        auto step_face = [&](Chunk* B, bool isX) {
-            if (GetWaterResolution(*B) != res)
-                return; // uniform-res only -> cells align cell-for-cell
-            if (static_cast<int>(B->water_depth_mm.size()) != nA)
-                return;
-            const bool have_mirror_B = (static_cast<int>(B->water_level_data.size()) == nA);
-            for (int t = 0; t < res; ++t) {
-                int ai, bi, slot;
-                if (isX) {
-                    ai = t * res + (res - 1);
-                    bi = t * res + 0;
-                    slot = 2 * ai + 0;
-                } else {
-                    ai = (res - 1) * res + t;
-                    bi = 0 * res + t;
-                    slot = 2 * ai + 1;
-                }
-                const std::int64_t surfA =
-                    static_cast<std::int64_t>(A->water_bed_mm[ai]) + A->water_depth_mm[ai];
-                const std::int64_t surfB =
-                    static_cast<std::int64_t>(B->water_bed_mm[bi]) + B->water_depth_mm[bi];
-                const std::int64_t dSurf = surfA - surfB;
-                std::int64_t q = static_cast<std::int64_t>(A->water_edge_flux[slot]) +
-                                 ((k_accel * dSurf) >> FLOW_SHIFT);
-                q = (q * FRICTION_NUM) >> FRICTION_SHIFT;
-                if (dSurf < min_flow_mm && dSurf > -min_flow_mm)
-                    q = 0;
-                if (q > 2000000000LL)
-                    q = 2000000000LL;
-                if (q < -2000000000LL)
-                    q = -2000000000LL;
-                if (q > 0) {
-                    if (q > A->water_depth_mm[ai])
-                        q = A->water_depth_mm[ai];
-                } else if (q < 0) {
-                    if (-q > B->water_depth_mm[bi])
-                        q = -static_cast<std::int64_t>(B->water_depth_mm[bi]);
-                }
-                A->water_edge_flux[slot] = static_cast<std::int32_t>(q);
-                A->water_depth_mm[ai] -= static_cast<std::int32_t>(q);
-                B->water_depth_mm[bi] += static_cast<std::int32_t>(q);
-                if (A->water_depth_mm[ai] > 0 && B->water_depth_mm[bi] > 0)
-                    ++seam_wet_pairs;
-                if (q != 0) {
-                    A->is_water_sleeping.store(false, std::memory_order_relaxed);
-                    B->is_water_sleeping.store(false, std::memory_order_relaxed);
-                    if (have_mirror_A)
-                        A->water_level_data[ai] =
-                            static_cast<float>(A->water_bed_mm[ai] + A->water_depth_mm[ai]) /
-                            static_cast<float>(MM_PER_M);
-                    if (have_mirror_B)
-                        B->water_level_data[bi] =
-                            static_cast<float>(B->water_bed_mm[bi] + B->water_depth_mm[bi]) /
-                            static_cast<float>(MM_PER_M);
-                }
-            }
+        auto step_face = [&](Chunk* B, bool is_x) {
+            seam_wet_pairs += StepSharedWaterFace(*A, *B, is_x);
         };
         if (Chunk* east = find_in_window(Chunk::calculate_id(ac + IVec3(1, 0, 0))))
             step_face(east, true);
@@ -1176,6 +1296,8 @@ void WaterSystem::update(entt::registry& registry,
     const float SLEEP_THRESHOLD = 0.0001f; // The max water level change to be considered "calm"
 
     for (Chunk* chunk : chunks_to_sim) {
+        if (chunk->needs_authority())
+            chunk->mark_water_state_dirty();
         if (chunk->max_water_delta_last_tick < SLEEP_THRESHOLD) {
             chunk->ticks_below_threshold++;
             if (chunk->ticks_below_threshold >= TICKS_TO_SLEEP) {
@@ -1195,6 +1317,9 @@ void WaterSystem::update(entt::registry& registry,
 }
 
 f32 WaterSystem::get_water_level_at(float world_x, float world_z) const {
+    if (m_shield_system && m_shield_system->durable_read_failed()) {
+        throw std::runtime_error("water query refused after durable chunk read error");
+    }
     if (!m_active_chunks)
         return SEA_LEVEL;
 
@@ -1238,6 +1363,9 @@ f32 WaterSystem::get_water_level_at(float world_x, float world_z) const {
 }
 
 Vec2 WaterSystem::get_water_flow_at(float world_x, float world_z) const {
+    if (m_shield_system && m_shield_system->durable_read_failed()) {
+        throw std::runtime_error("water query refused after durable chunk read error");
+    }
     if (!m_active_chunks) {
         return Vec2(0.0f);
     }
@@ -1285,6 +1413,9 @@ Vec2 WaterSystem::get_water_flow_at(float world_x, float world_z) const {
 }
 
 void WaterSystem::apply_displacement(const Vec3& world_pos, f32 volume) {
+    if (m_shield_system && m_shield_system->durable_read_failed()) {
+        throw std::runtime_error("water edit refused after durable chunk read error");
+    }
     if (!m_active_chunks)
         return;
 
@@ -1367,6 +1498,7 @@ void WaterSystem::apply_displacement(const Vec3& world_pos, f32 volume) {
                     }
                     // WAKE UP: An external event disturbed this chunk.
                     target_chunk.is_water_sleeping.store(false, std::memory_order_relaxed);
+                    target_chunk.mark_water_state_dirty();
                     m_water_activity_cache.erase(target_chunk.get_id());
                 }
             }
@@ -1382,6 +1514,9 @@ void WaterSystem::apply_displacement(const Vec3& world_pos, f32 volume) {
 // as a command for host==peer). The VOXEL/SDF terrain + its render mesh are a separate concern;
 // this couples WATER to a bed change. Returns the number of cells edited.
 int WaterSystem::EditTerrainBed(const Vec3& world_pos, std::int32_t delta_mm, float radius_m) {
+    if (m_shield_system && m_shield_system->durable_read_failed()) {
+        throw std::runtime_error("water bed edit refused after durable chunk read error");
+    }
     if (!m_active_chunks || delta_mm == 0)
         return 0;
     const float r2 = radius_m * radius_m;
@@ -1413,6 +1548,7 @@ int WaterSystem::EditTerrainBed(const Vec3& world_pos, std::int32_t delta_mm, fl
         }
         if (edited) {
             c.is_water_sleeping.store(false, std::memory_order_relaxed);
+            c.mark_water_state_dirty();
             c.water_mesh_generated.store(false);
             c.water_mesh_dirty_ticks = 0;
             m_water_activity_cache.erase(c.get_id());
@@ -1457,6 +1593,11 @@ void WaterSystem::SetSimResolution(int cells_per_side) {
 
 std::size_t WaterSystem::MigrateChunksToSimResolution(
     const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>& chunks) {
+    if (m_shield_system && m_shield_system->durable_read_failed()) {
+        throw std::runtime_error("water migration refused after durable chunk read error");
+    }
+    if (m_regional_scheduling)
+        throw std::runtime_error("Regional water resize requires a budgeted visit");
     const auto target_level = static_cast<WaterDetailLevel>(m_sim_resolution);
     std::size_t migrated = 0;
     for (const auto& entry : chunks) {
@@ -1476,6 +1617,8 @@ std::size_t WaterSystem::MigrateChunksToSimResolution(
 }
 
 void WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level) {
+    if (m_regional_scheduling)
+        throw std::runtime_error("Regional water resize requires a budgeted visit");
     int new_resolution = static_cast<int>(new_level);
     int current_resolution = chunk.current_water_resolution.load();
 
@@ -1493,6 +1636,7 @@ void WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
         chunk.water_mesh_generated.store(false);
         chunk.water_mesh_dirty_ticks = 0;
         chunk.current_water_resolution.store(0);
+        chunk.mark_water_state_dirty();
         return;
     }
 
@@ -1633,6 +1777,7 @@ void WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
     }
 
     chunk.has_water_sim.store(true);
+    chunk.mark_water_state_dirty();
     chunk.water_mesh_generated.store(false);
     chunk.water_mesh_dirty_ticks = 0;
     chunk.current_water_resolution.store(new_resolution);
