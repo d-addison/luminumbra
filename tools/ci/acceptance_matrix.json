@@ -3,6 +3,31 @@
   "description": "Requirement-to-evidence matrix for the expanded v0.3 contract. Rows are statements; evidence items are executable tests, scripts, native commands or documents. The planned field is descriptive text naming outstanding work and its owner; planned items are visible but never count as covered.",
   "rows": [
     {
+      "id": "iss.482",
+      "source": "issue #482",
+      "statement": "Synthetic v2 and v3 report-frame captures accept float rotation rounding at large camera positions with a bounded position-scaled translation allowance, and reject wrong matrices while preserving the small-position tolerance. Receipt evidence retains testcase attribution and requires successful execution metadata; software rendering evidence requires exact testcase identities.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "RenderContractPython"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AmbientReceiptComparatorContract"
+        },
+        {
+          "kind": "ctest",
+          "ref": "QualificationCaptureContract"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SoftwareGlEvidenceContract"
+        }
+      ],
+      "requirements": []
+    },
+    {
       "id": "perf.floor-p99",
       "source": "docs/distant-world.md#performance-measurement-contract",
       "statement": "Both profiles meet p99 frame_wall of at most 16.67 ms on every workload.",

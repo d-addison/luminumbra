@@ -313,9 +313,7 @@ class CheckerEvidenceTests(MatrixTestBase):
         data['camera'] = dict(position=position, yaw=0.0, pitch=0.0, fov=90.0)
         data['capture_context'] = dict(time_of_day_at_report=0.04,
                                        last_world_streaming_position=position)
-        right, up, forward = capture.camera_basis(0, 0)
-        view = [right[0], up[0], -forward[0], 0, right[1], up[1], -forward[1], 0,
-                right[2], up[2], -forward[2], 0, 0, 0, 0, 1]
+        view = capture.camera_view(position, 0, 0)
         projection = [0.0] * 16
         projection[0], projection[5] = 720 / 1280, 1.0
         data['render_uniforms'] = dict(matrix_layout='column_major',
@@ -326,7 +324,7 @@ class CheckerEvidenceTests(MatrixTestBase):
         phase = 0.04 * 2 * math.pi
         data['render_uniforms']['lighting'] = {
             'available': True, 'u_viewPos': position,
-            'u_inverseView': right + [0] + up + [0] + [-v for v in forward] + [0] + position + [1],
+            'u_inverseView': capture.inverse_view(view),
             'u_sun.direction': [math.sin(phase), -math.cos(phase), 0]}
         data['streaming'] = dict(terrain_draws=1, generation_pending=0,
                                  meshing_pending=0, terrain_uploads_pending=0)
