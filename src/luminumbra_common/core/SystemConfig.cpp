@@ -677,6 +677,14 @@ SimulationIdentityValues::SimulationIdentityValues() {
 }
 
 std::string SimulationIdentityValues::ComputeIdentity() const {
+    return ComputeIdentityForRevision(kAuthorityRulesRevision);
+}
+
+std::string SimulationIdentityValues::ComputeLegacyRevision3Identity() const {
+    return ComputeIdentityForRevision(kLegacyAuthorityRulesRevision);
+}
+
+std::string SimulationIdentityValues::ComputeIdentityForRevision(std::uint32_t revision) const {
     static_assert(sizeof(float) == sizeof(std::uint32_t) && std::numeric_limits<float>::is_iec559);
     static_assert(sizeof(double) == sizeof(std::uint64_t) &&
                   std::numeric_limits<double>::is_iec559);
@@ -731,7 +739,7 @@ std::string SimulationIdentityValues::ComputeIdentity() const {
     integer(region_work_limit, 64);
     integer(region_hold_ticks, 32);
     byte(region_reduced_shift);
-    integer(kAuthorityRulesRevision, 32);
+    integer(revision, 32);
     // Hex digits are emitted explicitly so even the result is independent of locale.
     constexpr char digits[] = "0123456789abcdef";
     std::string result(16, '0');

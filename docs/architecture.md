@@ -50,7 +50,7 @@ fallback applies only when no world system is attached.
 Persistence uses LMR1 container v2, the v1 world-manifest schema identifying that
 container version, and FSD2 payload v3. The
 [world format contract](engine-guide.md) gives the
-v0.3.0 refusal message, preset revisions 6–7 and separate obsolete/future/corrupt
+v0.3.0 refusal message, preset revisions 6–8 and separate obsolete/future/corrupt
 failure behavior. Durable legacy worlds are not migrated.
 
 Reliable and unreliable delivery are implemented in the shared GNS/Steam
@@ -91,3 +91,5 @@ Third-party revisions are pinned in CMake dependency declarations or the vendor
 build. First-party code includes third-party APIs at narrow adapter seams. Optional
 integrations, such as Tracy or alternative rendering backends, default off and must
 not change the normal deterministic build.
+
+Current live authority revision 4 captures the global water scheduler cursor once at the completed owner-thread boundary and binds it to water and chunk authority outside the per-chunk cache, with explicit legacy projections retained for historical inspection.

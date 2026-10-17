@@ -33,6 +33,10 @@ struct ServerWorldRunnerConfig {
     std::string root_path;
     std::optional<luminumbra::core::SystemConfig> systems_config_override;
     std::optional<std::string> preset_json_override;
+    // Playback preserves historical omission; fresh worlds select current sampling.
+    world::TerrainPresetUse preset_use = world::TerrainPresetUse::NewWorld;
+    // Playback rechecks dependencies before creating any save directory.
+    std::string required_preset_content_hash;
     std::string world_name = "Headless Server World";
     std::string seed = "424242";
     // World preset name (worlds/atlas/presets/<preset>.json).
@@ -221,7 +225,8 @@ public:
     // minimal. out_world_hash and out_sub are filled together and are exactly the
     // values the separate calls would produce.
     void ComputeWorldHashAndSubHashes(std::string& out_world_hash,
-                                      Persistence::WorldStreamingStateSubHashes& out_sub);
+                                      Persistence::WorldStreamingStateSubHashes& out_sub,
+                                      std::uint64_t* water_scheduler_cursor = nullptr);
 
     //  heavy oracle support: persists the COMPLETE in-memory streamed-
     // chunk snapshot via WorldSaveService::save_world (NOT the dirty-gated

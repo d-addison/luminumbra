@@ -69,8 +69,8 @@
     {
       "id": "dw.scope.002",
       "source": "docs/distant-world.md#scope",
-      "quote": "The addressable extent is set by the packed chunk identity (`Chunk.h`, ±2^20 chunks of 16 m, about ±16,777 km on each horizontal axis;",
-      "text": "The addressable extent is set by the packed chunk identity (`Chunk.h`, ±2^20 chunks of 16 m, about ±16,777 km on each horizontal axis;"
+      "quote": "The addressable extent is set by the packed chunk identity (`Chunk.h`, \u00b12^20 chunks of 16 m, about \u00b116,777 km on each horizontal axis;",
+      "text": "The addressable extent is set by the packed chunk identity (`Chunk.h`, \u00b12^20 chunks of 16 m, about \u00b116,777 km on each horizontal axis;"
     },
     {
       "id": "dw.scope.003",
@@ -225,8 +225,8 @@
     {
       "id": "dw.tiers.002",
       "source": "docs/distant-world.md#tier-ladder",
-      "quote": "Each tier stores sparse 5×5×5 signed-distance bricks and is polygonised per tile with Marching Cubes;",
-      "text": "Each tier stores sparse 5×5×5 signed-distance bricks and is polygonised per tile with Marching Cubes;"
+      "quote": "Each tier stores sparse 5\u00d75\u00d75 signed-distance bricks and is polygonised per tile with Marching Cubes;",
+      "text": "Each tier stores sparse 5\u00d75\u00d75 signed-distance bricks and is polygonised per tile with Marching Cubes;"
     },
     {
       "id": "dw.tiers.003",
@@ -957,8 +957,8 @@
     {
       "id": "dw.policy.024",
       "source": "docs/distant-world.md#per-system-distant-policy",
-      "quote": "distant creatures do not use scent | — |",
-      "text": "distant creatures do not use scent | — |"
+      "quote": "distant creatures do not use scent | \u2014 |",
+      "text": "distant creatures do not use scent | \u2014 |"
     },
     {
       "id": "dw.policy.025",
@@ -969,8 +969,8 @@
     {
       "id": "dw.policy.026",
       "source": "docs/distant-world.md#per-system-distant-policy",
-      "quote": "| Scheduled game events | Not implemented | Deferred to a later milestone | — |",
-      "text": "| Scheduled game events | Not implemented | Deferred to a later milestone | — |"
+      "quote": "| Scheduled game events | Not implemented | Deferred to a later milestone | \u2014 |",
+      "text": "| Scheduled game events | Not implemented | Deferred to a later milestone | \u2014 |"
     },
     {
       "id": "dw.policy.027",
@@ -1083,8 +1083,8 @@
     {
       "id": "dw.calendar.013",
       "source": "docs/distant-world.md#simulation-clock-and-calendar",
-      "quote": "`dayLengthTicks` must be an integer in [1, 2^31), `daysPerYear` an integer in [1, 366], `simulationTick` an unsigned integer below 2^62, and the products day × year and tick + catch-up clamp are overflow-checked;",
-      "text": "`dayLengthTicks` must be an integer in [1, 2^31), `daysPerYear` an integer in [1, 366], `simulationTick` an unsigned integer below 2^62, and the products day × year and tick + catch-up clamp are overflow-checked;"
+      "quote": "`dayLengthTicks` must be an integer in [1, 2^31), `daysPerYear` an integer in [1, 366], `simulationTick` an unsigned integer below 2^62, and the products day \u00d7 year and tick + catch-up clamp are overflow-checked;",
+      "text": "`dayLengthTicks` must be an integer in [1, 2^31), `daysPerYear` an integer in [1, 366], `simulationTick` an unsigned integer below 2^62, and the products day \u00d7 year and tick + catch-up clamp are overflow-checked;"
     },
     {
       "id": "dw.calendar.014",
@@ -1437,8 +1437,8 @@
     {
       "id": "dw.perf.001",
       "source": "docs/distant-world.md#performance-measurement-contract",
-      "quote": "Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840×1600 and 3440×1440.",
-      "text": "Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840×1600 and 3440×1440."
+      "quote": "Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840\u00d71600 and 3440\u00d71440.",
+      "text": "Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840\u00d71600 and 3440\u00d71440."
     },
     {
       "id": "dw.perf.002",
@@ -3459,8 +3459,8 @@
     {
       "id": "dw.vertical.010",
       "source": "docs/distant-world.md#vertical-coverage-and-the-cave-field",
-      "quote": "The packaged `worlds/atlas/presets/cave_dense.json` now uses revision 7;",
-      "text": "The packaged `worlds/atlas/presets/cave_dense.json` now uses revision 7;"
+      "quote": "The packaged `worlds/atlas/presets/cave_dense.json` now uses revision 8;",
+      "text": "The packaged `worlds/atlas/presets/cave_dense.json` now uses revision 8;"
     },
     {
       "id": "dw.vertical.011",
@@ -3549,8 +3549,8 @@
     {
       "id": "ar.file.119",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Presets now use revision 7 with revision-6 omission compatibility and frozen packaged-preset fallback.",
-      "text": "Presets now use revision 7 with revision-6 omission compatibility and frozen packaged-preset fallback."
+      "quote": "Presets now use revision 8 with revision-6 omission compatibility and frozen packaged-preset fallback.",
+      "text": "Presets now use revision 8 with revision-6 omission compatibility and frozen packaged-preset fallback."
     },
     {
       "id": "ar.activation.065",
@@ -4011,8 +4011,8 @@
     {
       "id": "ar.file.188",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "The negotiated system configuration identity includes authority-rules revision 3 in its v4 encoding, so earlier executables are refused before simulation rather than reaching a hash mismatch.",
-      "text": "The negotiated system configuration identity includes authority-rules revision 3 in its v4 encoding, so earlier executables are refused before simulation rather than reaching a hash mismatch."
+      "quote": "The negotiated system configuration identity includes authority-rules revision 4 in its v4 encoding, so earlier executables are refused before simulation rather than reaching a hash mismatch.",
+      "text": "The negotiated system configuration identity includes authority-rules revision 4 in its v4 encoding, so earlier executables are refused before simulation rather than reaching a hash mismatch."
     },
     {
       "id": "ar.file.189",
@@ -4023,8 +4023,8 @@
     {
       "id": "ar.file.190",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "The changed hash meanings have explicit `simulation_authority_v4`, `simulation_terrain_v4` and `simulation_water_v4` scope prefixes, following the versioned content-projection convention.",
-      "text": "The changed hash meanings have explicit `simulation_authority_v4`, `simulation_terrain_v4` and `simulation_water_v4` scope prefixes, following the versioned content-projection convention."
+      "quote": "Legacy active-region primitives retain explicit `simulation_authority_v4`, `simulation_terrain_v4` and `simulation_water_v4` scope prefixes beneath the revision-4 scheduler envelope.",
+      "text": "Legacy active-region primitives retain explicit `simulation_authority_v4`, `simulation_terrain_v4` and `simulation_water_v4` scope prefixes beneath the revision-4 scheduler envelope."
     },
     {
       "id": "ar.file.191",
@@ -4035,8 +4035,8 @@
     {
       "id": "ar.file.192",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Legacy snapshot hashes remain unchanged with active regions disabled.",
-      "text": "Legacy snapshot hashes remain unchanged with active regions disabled."
+      "quote": "Explicit legacy snapshot projections remain byte-exact with active regions disabled, while current live captures add the scheduler envelope.",
+      "text": "Explicit legacy snapshot projections remain byte-exact with active regions disabled, while current live captures add the scheduler envelope."
     },
     {
       "id": "ar.file.193",
@@ -4053,8 +4053,8 @@
     {
       "id": "ar.file.195",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "older active-region captures fail the existing start-hash/checkpoint comparison instead of being silently accepted under the changed water rules.",
-      "text": "older active-region captures fail the existing start-hash/checkpoint comparison instead of being silently accepted under the changed water rules."
+      "quote": "older authority-profile captures remain parseable and are refused by configuration identity before current playback can advance a tick.",
+      "text": "older authority-profile captures remain parseable and are refused by configuration identity before current playback can advance a tick."
     },
     {
       "id": "ar.file.196",
@@ -4859,6 +4859,18 @@
       "source": "docs/distant-world.md#persistence-and-format-contract",
       "quote": "Both replay versions bind effective configuration plus resolved preset/dependency content;",
       "text": "Both replay versions bind effective configuration plus resolved preset/dependency content;"
+    },
+    {
+      "id": "ar.file.scheduler.001",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Live revision-4 captures bind the raw persisted water cursor as u64 little endian to both the water projection and chunk authority outside chunk caches in both active-region flag modes while terrain, mesh and frozen region digests retain their existing bytes.",
+      "text": "Live revision-4 captures bind the raw persisted water cursor as u64 little endian to both the water projection and chunk authority outside chunk caches in both active-region flag modes while terrain, mesh and frozen region digests retain their existing bytes."
+    },
+    {
+      "id": "ar.file.scheduler.002",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Explicit legacy revision-3 identity and projection controls retain their original bytes, with incompatible current playback and peer admission refused before ticks without a legacy fallback.",
+      "text": "Explicit legacy revision-3 identity and projection controls retain their original bytes, with incompatible current playback and peer admission refused before ticks without a legacy fallback."
     }
   ],
   "exclusions": [
@@ -5017,8 +5029,8 @@
     {
       "id": "dw.perf.018",
       "source": "docs/distant-world.md#performance-measurement-contract",
-      "quote": "Current behaviour: the benchmark records means only, sums eleven pass timers instead of bracketing the frame, pins the framebuffer to 3840×1600, and does not record the renderer string;",
-      "text": "Current behaviour: the benchmark records means only, sums eleven pass timers instead of bracketing the frame, pins the framebuffer to 3840×1600, and does not record the renderer string;",
+      "quote": "Current behaviour: the benchmark records means only, sums eleven pass timers instead of bracketing the frame, pins the framebuffer to 3840\u00d71600, and does not record the renderer string;",
+      "text": "Current behaviour: the benchmark records means only, sums eleven pass timers instead of bracketing the frame, pins the framebuffer to 3840\u00d71600, and does not record the renderer string;",
       "reason": "Descriptive Current behaviour paragraph contrasts shipped behaviour with the accepted future contract; it is not an acceptance requirement.",
       "category": "current-behaviour"
     },

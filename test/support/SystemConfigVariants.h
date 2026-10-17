@@ -143,6 +143,8 @@ inline std::vector<std::pair<std::string, std::string>> EffectiveIdentityMismatc
     auto ecology = session.GetEcologyTuning();
     ecology.herd_weight = 0.9f;
     session.SetEcologyTuning(ecology);
+    variants.emplace_back("previous water scheduler rules",
+                          world::GameSession{}.LegacyRevision3SystemConfigIdentity());
     variants.emplace_back("historical authority rules", "60ab3c242d54ce89");
     variants.emplace_back("previous authority rules", "49f2cb57730f3caf");
     variants.emplace_back("previous column ownership rules", "6a02c73e706e06fc");

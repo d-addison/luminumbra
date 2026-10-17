@@ -1,8 +1,22 @@
 #include "GameSession.h"
+#include "../ai/CreatureBrain.h"
+#include "../components/CreatureComponents.h"
+#include "../components/CropLifecycleComponents.h"
+#include "../components/ForagingComponents.h"
+#include "../components/ScavengerComponent.h"
+#include "../components/ThirstComponents.h"
+#include "../core/SystemConfig.h"
+#include "../simulation/SimBudgetTelemetry.h"
+#include "ActiveRegionLedger.h"
+#include "Chunk.h"
+#include "entt/entity/fwd.hpp"
+#include "entt/entt.hpp"
+#include "luminumbra/core/Types.h"
+#include "nlohmann/json_fwd.hpp"
+
 #include "../ai/CircadianSystem.h" // Diurnal and nocturnal activity.
 #include "../ai/CreatureBrainSystem.h"
 #include "../ai/CreatureReproductionSystem.h" // Generational evolution.
-#include "../ai/CreatureSpeciesRegistry.h"    // per-world species definitions
 #include "../ai/DecompositionSystem.h"        // Releases nutrients after death.
 #include "../ai/EcologyTuningConfig.h"
 #include "../ai/ForagingSystem.h"  // ant-trail foraging (Deneubourg double-bridge)
@@ -64,6 +78,7 @@
 #include "../systems/WeatherEventSystem.h" // Pure deterministic weather-event schedule.
 #include "../systems/WeatherSystem.h"
 #include "../systems/WindFieldSystem.h"
+#include "SurfaceWorkBudget.h"
 #include "TerrainPresetLoader.h"
 #include "WorldStreamingState.h"
 #include "luminumbra/core/Types.h"
@@ -71,9 +86,20 @@
 #include <cmath>             // std::floor (energy-layer anchor quantization)
 
 #include <algorithm> // explicit: stabilise std template instantiation for entt storage helpers
+#include <atomic>
 #include <charconv>
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <ctime>
 #include <exception>
+#include <functional>
+#include <ios>
+#include <map>
+#include <span>
+#include <string>
+#include <system_error>
+
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -293,7 +319,8 @@ void GameSession::PrepareSimulationCollisions() {
 }
 
 bool GameSession::EnsureWorldEntryReady(int horizon_radius, int collision_radius) {
-    if (!m_worldSystem || !m_physicsSystem)
+    if (!World::SurfaceRadiiSupported(horizon_radius, collision_radius) || !m_worldSystem ||
+        !m_physicsSystem)
         return false;
     PrepareSimulationCollisions();
     return !m_regionFault &&
@@ -302,6 +329,20 @@ bool GameSession::EnsureWorldEntryReady(int horizon_radius, int collision_radius
 }
 
 std::string GameSession::SystemConfigIdentity() const {
+    return EffectiveIdentityValues().ComputeIdentity();
+}
+
+std::string GameSession::LegacyRevision3SystemConfigIdentity() const {
+    return EffectiveIdentityValues().ComputeLegacyRevision3Identity();
+}
+
+Persistence::WorldAuthorityHashes GameSession::CaptureAuthorityHashes() const {
+    if (!m_worldSystem || m_simulationBatchInProgress || !IsSimulationTickBoundary())
+        throw std::logic_error("Authority capture requires a completed simulation boundary");
+    return m_worldSystem->compute_chunk_hashes();
+}
+
+luminumbra::core::SimulationIdentityValues GameSession::EffectiveIdentityValues() const {
     using luminumbra::core::SysKey;
     using luminumbra::core::SysParam;
     luminumbra::core::SimulationIdentityValues values;
@@ -385,7 +426,7 @@ std::string GameSession::SystemConfigIdentity() const {
     values.scalars[static_cast<std::size_t>(SysParam::ForagingGoalWeight)] =
         m_foragingTuning.goal_weight;
     values.scalars[static_cast<std::size_t>(SysParam::CircadianAmplitude)] = m_circadianAmplitude;
-    return values.ComputeIdentity();
+    return values;
 }
 
 // apply the session water-sim resolution when the owner opted in
@@ -411,18 +452,21 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
     // Queued work belongs to this next tick; only reentrant batches must refuse.
     if (m_activeRegionsEnabled && m_simulationBatchInProgress)
         return 0;
-    struct BatchGuard {
+    class BatchGuard {
         bool& active;
         bool previous;
-        BatchGuard(bool& value, bool enabled)
+
+    public:
+        explicit BatchGuard(bool& value)
             : active(value)
             , previous(value) {
-            active = enabled;
+            active = true;
         }
         ~BatchGuard() {
             active = previous;
         }
-    } guard(m_simulationBatchInProgress, m_activeRegionsEnabled);
+    };
+    const BatchGuard guard(m_simulationBatchInProgress);
     std::uint32_t ticks_executed;
     if (m_activeRegionsEnabled) {
         auto advanced_clock = m_simulationClock;
@@ -886,7 +930,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
         // growth runs AFTER weather. Integer/fixed-point + id-ordered = run==replay.
         // Temperature, light, soil, weather, and irrigation are sampled below.
         if (HasPlantParticipants()) {
-            luminumbra::foliage::EnvSampler plant_env =
+            const luminumbra::foliage::EnvSampler plant_env =
                 [this, foliageOriginX, foliageOriginZ, current_tick](
                     const Luminumbra::Components::TransformComponent& tf) {
                     luminumbra::foliage::PlantEnvSample s;
@@ -1207,20 +1251,32 @@ bool GameSession::CreateWorld(const std::string& name,
                               const std::string& seed,
                               const std::string& worldType,
                               const std::string* customPresetJson) {
-    return CreateWorldInternal(name, seed, worldType, customPresetJson, false);
+    return CreateWorld(name, seed, worldType, customPresetJson, TerrainPresetUse::NewWorld);
+}
+
+bool GameSession::CreateWorld(const std::string& name,
+                              const std::string& seed,
+                              const std::string& worldType,
+                              const std::string* customPresetJson,
+                              TerrainPresetUse presetUse,
+                              const std::string& requiredPresetContentHash) {
+    return CreateWorldInternal(
+        name, seed, worldType, customPresetJson, false, presetUse, requiredPresetContentHash);
 }
 
 bool GameSession::CreateTransientWorld(const std::string& name,
                                        const std::string& seed,
                                        const std::string& worldType) {
-    return CreateWorldInternal(name, seed, worldType, nullptr, true);
+    return CreateWorldInternal(name, seed, worldType, nullptr, true, TerrainPresetUse::NewWorld);
 }
 
 bool GameSession::CreateWorldInternal(const std::string& name,
                                       const std::string& seed,
                                       const std::string& worldType,
                                       const std::string* customPresetJson,
-                                      bool transient) {
+                                      bool transient,
+                                      TerrainPresetUse presetUse,
+                                      const std::string& requiredPresetContentHash) {
     m_worldOpenError.clear();
     if (!m_jobSystem) {
         LUMINUMBRA_CORE_ERROR("JobSystem not set before creating world");
@@ -1246,6 +1302,38 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     metadata.creationTime = std::time(nullptr);
     metadata.spawnPoint = Vec3(0, 100, 0);
     const auto worldPath = GetSaveRootPath() / "worlds/saves" / metadata.worldId;
+
+    nlohmann::json resolved;
+    try {
+        if (customPresetJson) {
+            resolved = nlohmann::json::parse(*customPresetJson);
+        } else {
+            std::ifstream input(validation.preset_path);
+            resolved = nlohmann::json::parse(input);
+        }
+        resolved = ResolveEffectivePreset(resolved, presetUse);
+    } catch (const nlohmann::json::exception& error) {
+        m_worldOpenError = "Could not parse this world's preset: " + std::string(error.what());
+        return false;
+    }
+    // Both persisted and transient worlds adopt the parameters and identity of
+    // these same resolved bytes. Explicit revision 1 remains authoritative.
+    const TerrainPresetLoadResult preset =
+        LoadTerrainPresetFromJson(resolved, RuntimeRoot(m_rootPath) / "data");
+    if (!preset.ok) {
+        m_worldOpenError = preset.errors.empty() ? "Invalid world preset." : preset.errors.front();
+        for (const std::string& error : preset.errors) {
+            LUMINUMBRA_CORE_ERROR("World preset load failed: {}", error);
+        }
+        return false;
+    }
+    // Use the identity of the dependency snapshot generation will adopt. A
+    // replay preflight cannot admit dependency changes between resolution and boot.
+    if (!requiredPresetContentHash.empty() &&
+        preset.preset_content_hash != requiredPresetContentHash) {
+        m_worldOpenError = "This world's resolved preset content does not match the recording.";
+        return false;
+    }
     if (!transient) {
         try {
             fs::create_directories(worldPath);
@@ -1255,50 +1343,16 @@ bool GameSession::CreateWorldInternal(const std::string& name,
             return false;
         }
     }
-
-    fs::path preset_to_load = validation.preset_path;
     std::string saved_preset_json;
     if (!transient) {
-        nlohmann::json resolved;
-        try {
-            if (customPresetJson) {
-                resolved = nlohmann::json::parse(*customPresetJson);
-            } else {
-                std::ifstream input(preset_to_load);
-                input >> resolved;
-            }
-        } catch (const nlohmann::json::exception& error) {
-            m_worldOpenError = "Could not parse this world's preset: " + std::string(error.what());
-            return false;
-        }
-        const auto validated =
-            LoadTerrainPresetFromJson(resolved, RuntimeRoot(m_rootPath) / "data");
-        if (!validated.ok) {
-            m_worldOpenError =
-                validated.errors.empty() ? "Invalid world preset." : validated.errors.front();
-            return false;
-        }
-        resolved = ResolveTerrainPresetDefaults(resolved);
-        // Materialize historical choices before upgrading the revision.
-        resolved["schema_rev"] = kTerrainPresetSchemaRevision;
+        // Save inspection uses compact UTF-8 JSON; the content identity uses
+        // ASCII escapes of the same effective preset, including its schema.
         saved_preset_json = resolved.dump();
-        const fs::path world_preset = worldPath / "preset.json";
-        if (!Persistence::WorldSaveService::write_file_durably(world_preset,
+        if (!Persistence::WorldSaveService::write_file_durably(worldPath / "preset.json",
                                                                saved_preset_json + "\n")) {
             m_worldOpenError = "Could not save this world's resolved preset.";
             return false;
         }
-        preset_to_load = world_preset;
-    }
-
-    const TerrainPresetLoadResult preset =
-        LoadTerrainPreset(preset_to_load, RuntimeRoot(m_rootPath) / "data");
-    if (!preset.ok) {
-        m_worldOpenError = preset.errors.empty() ? "Invalid world preset." : preset.errors.front();
-        for (const std::string& error : preset.errors) {
-            LUMINUMBRA_CORE_ERROR("World preset load failed: {}", error);
-        }
-        return false;
     }
     // Copies the immutable dependency snapshot with the identity's parameters.
     TerrainGenParams params = preset.params;
@@ -1312,7 +1366,7 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     m_physicsSystem = std::make_unique<Systems::PhysicsSystem>();
     m_physicsSystem->startup();
 
-    int world_seed = StringToSeed(m_metadata.seed);
+    const int world_seed = static_cast<int>(StringToSeed(m_metadata.seed));
     LUMINUMBRA_CORE_INFO("Loaded world preset '{}': height_offset={}, amplitude={}, caves={}",
                          worldType,
                          params.height_offset,
@@ -1363,8 +1417,8 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     InitializeEnergyFieldState();
 
     // Calculate appropriate spawn point based on actual terrain height
-    float spawn_x = 8.0f;
-    float spawn_z = 8.0f;
+    const float spawn_x = 8.0f;
+    const float spawn_z = 8.0f;
     float terrain_height = m_worldSystem->GetTerrainHeightAt(spawn_x, spawn_z);
     LUMINUMBRA_CORE_INFO("Initial terrain height sampled at spawn: {}.", terrain_height);
 
@@ -1448,7 +1502,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
         m_simulationClock.reset(m_worldClock.tick());
     }
     m_transientWorld = false;
-    int world_seed = StringToSeed(m_metadata.seed);
+    const int world_seed = static_cast<int>(StringToSeed(m_metadata.seed));
 
     // Initialize Physics System after config and preset validation passes.
     m_physicsSystem = std::make_unique<Systems::PhysicsSystem>();
@@ -1943,6 +1997,25 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         return false;
     }
 
+    WorldClock saved_clock;
+    std::optional<Vec3> ambient_anchor;
+    std::size_t water_cursor = 0;
+    bool requires_active_regions = false;
+    std::vector<std::string> clock_errors;
+    if (!Persistence::WorldSaveService::read_clock_metadata(save_dir,
+                                                            saved_clock,
+                                                            requires_active_regions,
+                                                            &clock_errors,
+                                                            &ambient_anchor,
+                                                            &water_cursor) ||
+        (requires_active_regions && !m_activeRegionsEnabled)) {
+        m_worldOpenError =
+            clock_errors.empty()
+                ? "Incompatible configuration: this world requires sim.active_regions."
+                : clock_errors.front();
+        return false;
+    }
+
     Persistence::WorldSaveService service;
     // Explicit load replaces chunk residency. Release the old snapshot before
     // decoding its bounded replacement; two full resident budgets cannot coexist.
@@ -1967,25 +2040,6 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         return false;
     }
 
-    WorldClock saved_clock;
-    std::optional<Vec3> ambient_anchor;
-    std::size_t water_cursor = 0;
-    bool requires_active_regions = false;
-    std::vector<std::string> clock_errors;
-    if (!Persistence::WorldSaveService::read_clock_metadata(save_dir,
-                                                            saved_clock,
-                                                            requires_active_regions,
-                                                            &clock_errors,
-                                                            &ambient_anchor,
-                                                            &water_cursor) ||
-        (requires_active_regions && !m_activeRegionsEnabled)) {
-        m_worldOpenError =
-            clock_errors.empty()
-                ? "Incompatible configuration: this world requires sim.active_regions."
-                : clock_errors.front();
-        m_worldSystem->clear_world(m_physicsSystem.get());
-        return false;
-    }
     if (m_activeRegionsEnabled) {
         const Vec3 previous_ambient_anchor = m_ambientFieldAnchor;
         m_ambientFieldAnchor = ambient_anchor.value_or(m_metadata.spawnPoint);
@@ -2148,7 +2202,7 @@ uint32_t GameSession::StringToSeed(const std::string& seedStr) const {
         return static_cast<uint32_t>(std::stoull(seedStr));
     } catch (...) {
         // If not a number, hash the string
-        std::hash<std::string> hasher;
+        const std::hash<std::string> hasher;
         return static_cast<uint32_t>(hasher(seedStr));
     }
 }

@@ -38,6 +38,7 @@
 #include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_common/systems/WindFieldSystem.h"
 #include "luminumbra_common/world/Chunk.h"
+#include "luminumbra_common/world/SurfaceWorkBudget.h"
 #include "luminumbra_common/world/WorldStreamingState.h"
 
 namespace Luminumbra::Server {
@@ -228,6 +229,10 @@ ServerWorldRunner::~ServerWorldRunner() {
 }
 
 bool ServerWorldRunner::Boot() {
+    if (!World::SurfaceRadiiSupported(m_config.surface_radius, m_config.collision_radius)) {
+        m_bootError = "Surface and collision radii must be between 0 and 12 chunks";
+        return false;
+    }
     if (m_booted) {
         return true;
     }
@@ -282,7 +287,9 @@ bool ServerWorldRunner::Boot() {
             m_config.world_name,
             m_config.seed,
             m_config.preset,
-            m_config.preset_json_override ? &*m_config.preset_json_override : nullptr);
+            m_config.preset_json_override ? &*m_config.preset_json_override : nullptr,
+            m_config.preset_use,
+            m_config.required_preset_content_hash);
     }
     if (!world_ready) {
         m_bootError = m_session->GetWorldOpenError();
@@ -969,11 +976,10 @@ std::string ServerWorldRunner::ComputeWorldHash() {
     auto* world_system = m_session->GetWorldSystem();
     world_system->wait_for_streaming_jobs();
 
-    const auto chunk_hashes = world_system->compute_chunk_hashes();
+    const auto chunk_hashes = m_session->CaptureAuthorityHashes();
 
-    //   +   hash revisionS: fold the wind AND weather sub-hashes
-    // into the top-level hash. The chunk hash itself is unchanged; the composite
-    // deliberately is not.
+    // Compose the captured chunk authority, including its scheduler, with the
+    // existing simulation fields through the seven established slots.
     return Persistence::ComposeWorldHash(
         chunk_hashes.world,
         WindSubHash(m_session.get()),
@@ -994,7 +1000,7 @@ Persistence::WorldStreamingStateSubHashes ServerWorldRunner::ComputeWorldSubHash
     auto* world_system = m_session->GetWorldSystem();
     world_system->wait_for_streaming_jobs();
 
-    const auto chunk_hashes = world_system->compute_chunk_hashes();
+    const auto chunk_hashes = m_session->CaptureAuthorityHashes();
 
     // The entities sub-hash is the stable checksum of the canonical ECS snapshot.
     //  that snapshot now carries the deterministic player avatars (empty
@@ -1024,12 +1030,16 @@ Persistence::WorldStreamingStateSubHashes ServerWorldRunner::ComputeWorldSubHash
 }
 
 void ServerWorldRunner::ComputeWorldHashAndSubHashes(
-    std::string& out_world_hash, Persistence::WorldStreamingStateSubHashes& out_sub) {
+    std::string& out_world_hash,
+    Persistence::WorldStreamingStateSubHashes& out_sub,
+    std::uint64_t* water_scheduler_cursor) {
     // single quiesce + single chunk snapshot feeding BOTH hashes. This
     // is the recorder/replayer's mid-run checkpoint capture; minimizing the
     // settled-state reads keeps the capture window tight. The produced values are
     // byte-identical to ComputeWorldHash and ComputeWorldSubHashes called
-    // separately (same WorldSaveService::world_hash + same projection).
+    // separately at the same completed boundary (same captured authority).
+    if (water_scheduler_cursor)
+        *water_scheduler_cursor = 0;
     out_world_hash.clear();
     out_sub = Persistence::WorldStreamingStateSubHashes{};
     if (!m_booted || !m_session || !m_session->GetWorldSystem()) {
@@ -1039,7 +1049,9 @@ void ServerWorldRunner::ComputeWorldHashAndSubHashes(
     auto* world_system = m_session->GetWorldSystem();
     world_system->wait_for_streaming_jobs();
 
-    const auto chunk_hashes = world_system->compute_chunk_hashes();
+    const auto chunk_hashes = m_session->CaptureAuthorityHashes();
+    if (water_scheduler_cursor)
+        *water_scheduler_cursor = chunk_hashes.water_scheduler_cursor;
 
     const std::string wind_hash = WindSubHash(m_session.get());
     const std::string weather_hash = WeatherSubHash(m_session.get());

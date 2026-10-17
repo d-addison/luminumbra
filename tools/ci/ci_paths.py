@@ -17,6 +17,7 @@ PYTHON_TESTS = (
     "test/tools/test_system_config_identity.py",
     "test/rendering/test_frame_attribution_wiring.py",
     "tools/ci/test_ci_paths.py",
+    "tools/ci/test_replay_source_contract.py",
     "tools/ci/test_cache_retention.py",
     "tools/ci/test_check_docs.py",
     "tools/ci/test_check_ctest_junit.py",

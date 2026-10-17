@@ -49,7 +49,8 @@ void ExpectFieldArityMatchesTable(const HeavyHashes& hashes, std::size_t table_r
                                   scent_hash,
                                   active_regions,
                                   clock_bytes,
-                                  ledger_bytes] = hashes;
+                                  ledger_bytes,
+                                  water_scheduler_cursor] = hashes;
     [[maybe_unused]] const auto& [terrain,
                                   mesh,
                                   water,
@@ -58,7 +59,7 @@ void ExpectFieldArityMatchesTable(const HeavyHashes& hashes, std::size_t table_r
                                   weather,
                                   aether,
                                   aether_state] = hashes.sub;
-    constexpr std::size_t kTopLevelFields = 6;
+    constexpr std::size_t kTopLevelFields = 7;
     constexpr std::size_t kSubFields = 8;
     // One table row per leaf field; `sub` is a container of the kSubFields rows.
     EXPECT_EQ(table_rows, kTopLevelFields - 1 + kSubFields);
@@ -67,7 +68,8 @@ void ExpectFieldArityMatchesTable(const HeavyHashes& hashes, std::size_t table_r
 TEST(HeavyComparison, TableCoversEveryHashField) {
     ExpectFieldArityMatchesTable(HeavyHashes{}, HeavySubsystemTable().size());
     const auto table = HeavySubsystemTable();
-    const std::set<std::string> expected{"terrain",
+    const std::set<std::string> expected{"water_scheduler_cursor",
+                                         "terrain",
                                          "water",
                                          "entities",
                                          "active_regions",

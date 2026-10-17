@@ -1875,3 +1875,69 @@ TEST_F(WorldOpenRefusal, PartialAuthorityHasNoSimulationCollisionSurface) {
 }
 
 } // namespace
+
+#include "../support/WaterSchedulerFixture.h"
+
+TEST_F(WorldOpenRefusal, SchedulerCursorBindsAllThreeServerCapturesAndSharedClientAuthority) {
+    for (const bool regions : {false, true}) {
+        for (const bool high : {false, true}) {
+            Server::ServerWorldRunnerConfig config;
+            config.root_path = RootString();
+            config.world_id = "fixture";
+            config.surface_radius = 0;
+            config.collision_radius = 0;
+            config.test_streaming_radius_cap = 1;
+            config.systems_config_override =
+                luminumbra::core::SystemConfig::FromJsonString(nlohmann::json{
+                    {"sim",
+                     {{"active_regions", {{"enabled", regions}}},
+                      {"water_high_res", {{"enabled", high}}},
+                      {"hydrology_weather",
+                       {{"enabled", false}}}}}}.dump());
+            Server::ServerWorldRunner first(config), second(config);
+            ASSERT_TRUE(first.Boot()) << first.GetBootError();
+            ASSERT_TRUE(second.Boot()) << second.GetBootError();
+            const auto count = high ? std::size_t{17} : std::size_t{65};
+            auto first_chunks =
+                TestSupport::InstallSchedulerChunks(*first.Session(), high ? 16 : 8, count);
+            auto second_chunks =
+                TestSupport::InstallSchedulerChunks(*second.Session(), high ? 16 : 8, count);
+            second.Session()->GetWorldSystem()->SetWaterSimWindowCursor(count - 1);
+            EXPECT_EQ(first.Session()->GetWorldClock().canonical_bytes(),
+                      second.Session()->GetWorldClock().canonical_bytes());
+            EXPECT_EQ(first.Session()->GetActiveRegionLedger().canonical_bytes(),
+                      second.Session()->GetActiveRegionLedger().canonical_bytes());
+            EXPECT_EQ(first.Session()->SystemConfigIdentity(),
+                      second.Session()->SystemConfigIdentity());
+            EXPECT_EQ(first.Session()->PresetContentHash(), second.Session()->PresetContentHash());
+            const auto first_hash = first.ComputeWorldHash();
+            const auto second_hash = second.ComputeWorldHash();
+            const auto first_sub = first.ComputeWorldSubHashes();
+            const auto second_sub = second.ComputeWorldSubHashes();
+            EXPECT_NE(first_hash, second_hash);
+            EXPECT_NE(first_sub.water, second_sub.water);
+            EXPECT_EQ(first_sub.terrain, second_sub.terrain);
+            for (auto* runner : {&first, &second}) {
+                std::string combined;
+                Persistence::WorldStreamingStateSubHashes sub;
+                runner->ComputeWorldHashAndSubHashes(combined, sub);
+                EXPECT_EQ(combined, runner->ComputeWorldHash());
+                EXPECT_EQ(sub.water, runner->ComputeWorldSubHashes().water);
+                // This immutable session value is also the client driver's production input.
+                const auto shared = runner->Session()->CaptureAuthorityHashes();
+                EXPECT_EQ(shared.sub.water, sub.water);
+                EXPECT_EQ(shared.sub.terrain, sub.terrain);
+                EXPECT_EQ(shared.world,
+                          runner->Session()->GetWorldSystem()->compute_chunk_hashes().world);
+            }
+            first.Session()->GetWaterSystem()->update(
+                first.Session()->GetRegistry(), first_chunks, regions);
+            second.Session()->GetWaterSystem()->update(
+                second.Session()->GetRegistry(), second_chunks, regions);
+            std::size_t different = 0;
+            for (const auto& [id, chunk] : first_chunks)
+                different += chunk->water_depth_mm != second_chunks.at(id)->water_depth_mm;
+            EXPECT_GT(different, 0u);
+        }
+    }
+}

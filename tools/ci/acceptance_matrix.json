@@ -1577,7 +1577,7 @@
     {
       "id": "contract.dw.vertical.02",
       "source": "docs/distant-world.md#vertical-coverage-and-the-cave-field",
-      "statement": "Acceptance obligations: the band-limited field is the recorded fallback. / Whatever is chosen, openings, overhangs and arches remain silhouette features to the full radius, and the acceptance stations include deep interiors and distant mouths beyond the noise-cave cutoff, not only within it. / Qualification must pin the cave-dense revision and identity. / The packaged `worlds/atlas/presets/cave_dense.json` now uses revision 7; / the revision-6 fixture is frozen in `worlds/atlas/presets-rev6/cave_dense.json`. / See the shipping preset identities under \"Shipping defaults\" in the [engine guide](engine-guide.md) before comparing captures or synchronizing the game repository's fixture and identity sidecar.",
+      "statement": "Acceptance obligations: the band-limited field is the recorded fallback. / Whatever is chosen, openings, overhangs and arches remain silhouette features to the full radius, and the acceptance stations include deep interiors and distant mouths beyond the noise-cave cutoff, not only within it. / Qualification must pin the cave-dense revision and identity. / The packaged `worlds/atlas/presets/cave_dense.json` now uses revision 8; / the revision-6 fixture is frozen in `worlds/atlas/presets-rev6/cave_dense.json`. / See the shipping preset identities under \"Shipping defaults\" in the [engine guide](engine-guide.md) before comparing captures or synchronizing the game repository's fixture and identity sidecar.",
       "status": "planned",
       "requirements": [
         "dw.vertical.007",
@@ -2339,7 +2339,7 @@
     {
       "id": "contract.ar.file.01",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "statement": "Acceptance obligations: The record is `<save>/chunks/region/active-regions.arl`, following the accepted contract's placement in the region integrity scan. / This resolves the slice brief's conflicting save-root wording in favour of that contract. / ARL1 does not alter LMR1 v2, the world manifest, EFS1, plant payloads, FSD2 v3, or canonical chunk serialization. / An anchor-only ledger is not a chunk snapshot: with active regions enabled, the first save with dirty chunks writes all resident chunks, including clean chunks in other regions. / The disabled path keeps the legacy existing-save query: a plant-only save makes later saves incremental. / Snapshot transaction publication is separate work; / Presets now use revision 7 with revision-6 omission compatibility and frozen packaged-preset fallback.",
+      "statement": "Acceptance obligations: The record is `<save>/chunks/region/active-regions.arl`, following the accepted contract's placement in the region integrity scan. / This resolves the slice brief's conflicting save-root wording in favour of that contract. / ARL1 does not alter LMR1 v2, the world manifest, EFS1, plant payloads, FSD2 v3, or canonical chunk serialization. / An anchor-only ledger is not a chunk snapshot: with active regions enabled, the first save with dirty chunks writes all resident chunks, including clean chunks in other regions. / The disabled path keeps the legacy existing-save query: a plant-only save makes later saves incremental. / Snapshot transaction publication is separate work; / Presets now use revision 8 with revision-6 omission compatibility and frozen packaged-preset fallback.",
       "status": "planned",
       "requirements": [
         "ar.file.001",
@@ -3518,7 +3518,7 @@
     {
       "id": "contract.authority-rule-identity",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "statement": "Negotiated configuration identity v4 includes authority-rules revision 3 without changing the Hello protocol version, refusing older rules before simulation. Identity regressions are landed; mixed-executable native qualification remains pending.",
+      "statement": "Negotiated configuration identity v4 includes authority-rules revision 4 without changing the Hello protocol version, refusing older rules before simulation. Identity regressions are landed; mixed-executable native qualification remains pending.",
       "status": "partial",
       "requirements": [
         "ar.file.188",
@@ -4061,6 +4061,84 @@
       ]
     },
     {
+      "id": "shield.surface-work-admission",
+      "source": "docs/shield/sdf-contract.md#shield-sdf-contract",
+      "statement": "Synchronous surface and collision radii are bounded at 12 chunks (625 columns), with exact vertical work capped at 8192 chunks before allocation or chunk mutation. Replay decoding, recording, server boot and client scenario admission refuse unsupported radii before world creation or output. A refused preview candidate retains its live world and generation and permits another candidate. Existing accepted identities and encoding are preserved. Source checks are available; native boundary, overflow, refusal and identity regressions await execution.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "ReplaySourceContract"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SurfaceWorkBudget.CheckedColumnsAndExactVerticalBudget",
+          "planned": "registered native regression execution; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SurfaceWorkBudget.DecimalAdmissionHasNoOverflowOrPartialFallback",
+          "planned": "registered native regression execution; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SurfaceWorkAdmission.HeaderDecodeAndWriterRefuseBothRadiiBeforeOutput",
+          "planned": "registered native regression execution; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SurfaceWorkAdmission.RunnerAndRecordingRefuseBeforeSessionOrFiles",
+          "planned": "registered native regression execution; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SurfaceWorkAdmission.RefusedWriterReopenRetainsQueuedRecordingAndPath",
+          "planned": "registered native regression execution; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SurfaceWorkBudget.DirectSurfaceAndCollisionRefuseBeforeChunkMutation",
+          "planned": "registered native regression execution; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SurfaceWorkBudget.TallSurfaceRefusesExactWorkBeforeCreatingChunks",
+          "planned": "registered native regression execution; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RuntimeSurfaceOptionsTest.RefusesInvalidRadiiAndAcceptsBoundariesInBothSpellings",
+          "planned": "registered native regression execution; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RuntimeSurfaceOptionsTest.RefusesBeforeCreatingSaveRootInEitherArgumentOrder",
+          "planned": "registered native regression execution; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SurfaceWorkAdmission.DirectScenarioConfigsRefuseBeforeWorldMutation",
+          "planned": "registered native regression execution; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "EffectivePresetIdentity.ReplayRadiusAdmissionPreservesBothIdentitiesAtBoundary",
+          "planned": "registered native regression execution; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldgenPreviewTest.RefusedFirstSurfaceKeepsWorldEmptyAndAcceptsNextCandidate",
+          "planned": "registered native regression execution; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldgenPreviewTest.RefusedSurfaceRetainsLiveWorldAndAllowsRecovery",
+          "planned": "registered native regression execution; owner: ac"
+        }
+      ],
+      "requirements": []
+    },
+    {
       "id": "net.receive-work",
       "source": "docs/engine-guide.md#persistence-replay-and-networking",
       "statement": "Each lockstep session entry point shares at most 1024 receive polls and a 256 KiB payload threshold plus one transport-bounded frame across nested drains. Saturation preserves pending messages and late checkpoint diagnostics; finite closure drains finish before storage release. Native regressions are registered; execution remains pending. Complete LREC1 streams remain version 3; diagnostic suffixes with an elided prefix use version 4.",
@@ -4175,6 +4253,79 @@
         {
           "kind": "doc",
           "ref": "docs/engine-guide.md"
+        }
+      ]
+    },
+    {
+      "id": "contract.water-scheduler-authority",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "statement": "Current live authority revision 4 binds the raw scheduler cursor to water and world in both flag modes, preserving explicit revision-3 controls and frozen format layouts. Source and encoder checks do not qualify native continuation, transport or timing behavior.",
+      "status": "partial",
+      "requirements": [
+        "ar.file.scheduler.001",
+        "ar.file.scheduler.002"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "WaterDeterminism.RawSchedulerCursorDistinguishesEqualPresentAndDifferentFuture"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WaterDeterminism.BelowBudgetAndEmptyWorldRetainRawCursorUntilLaterActivation"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.NonzeroSchedulerRoundTripsBothLoadPathsAndChangesContinuation"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.SchedulerCursorBindsAllThreeServerCapturesAndSharedClientAuthority"
+        },
+        {
+          "kind": "ctest",
+          "ref": "LockstepSessionTest.RealCursorOnlyCaptureLocalizesWaterWithoutChangingCheckpointLayout"
+        },
+        {
+          "kind": "ctest",
+          "ref": "LockstepSessionTest.CurrentAndLegacyAuthorityProfilesRefuseBothDirectionsBeforeTicks"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ReplayStreamTest.CurrentAndLegacyProfilesParseFrozenLayoutsAndRefusePlaybackBothWays"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ReplayStreamTest.RealCursorOnlyCheckpointPreservesWaterLocalizationThroughReplay"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RegionAuthorityWiringPython"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SystemConfigIdentityPython"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.AuthorityCaptureRequiresACompletedWorldBoundary"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ReplicationAdmission.AuthorityProfilesRefuseBothDirectionsForEveryRoleBeforeForwarding"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RuntimeTcpHelloTest.CurrentAuthorityRefusesLegacyPeerBeforeAdmission"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RuntimeTcpHelloTest.LegacyAuthorityRefusesCurrentPeerBeforeAdmission"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/development/system-config-identity.md",
+          "planned": "Qualify current scheduler authority through native continuation and mixed-profile transport runs; owner: ds"
         }
       ]
     }

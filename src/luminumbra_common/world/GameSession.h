@@ -14,6 +14,7 @@
 #include "../simulation/SimulationEventBus.h"
 #include "../systems/PollinationSystem.h"
 #include "ActiveRegionLedger.h"
+#include "TerrainPresetLoader.h"
 #include "WorldClock.h"
 #include "WorldMetadata.h"
 #include "entt/entt.hpp"
@@ -93,6 +94,14 @@ public:
                      const std::string& seed,
                      const std::string& worldType,
                      const std::string* customPresetJson);
+    // Replay must preserve omitted historical selectors and their identity bytes.
+    // A required content identity is checked before directory creation or live-world replacement.
+    bool CreateWorld(const std::string& name,
+                     const std::string& seed,
+                     const std::string& worldType,
+                     const std::string* customPresetJson,
+                     TerrainPresetUse presetUse,
+                     const std::string& requiredPresetContentHash = {});
     // 3-arg overload (named-preset path). Kept as a distinct overload — not a default arg — so
     // translation units compiled against the prior header still resolve a real symbol.
     bool
@@ -264,6 +273,9 @@ public:
     void ApplySystemConfig(const luminumbra::core::SystemConfig& config);
     // Computed on demand from the current effective simulation gates and tuning.
     [[nodiscard]] std::string SystemConfigIdentity() const;
+    [[nodiscard]] std::string LegacyRevision3SystemConfigIdentity() const;
+    // Immutable value captured on the owner thread at a completed tick boundary.
+    [[nodiscard]] Persistence::WorldAuthorityHashes CaptureAuthorityHashes() const;
     // Resolved preset, biome/structure dependencies and captured species bytes.
     // Shared by TCP Hello, lockstep and replay; never re-reads content.
     [[nodiscard]] const std::string& PresetContentHash() const {
@@ -494,6 +506,7 @@ private:
     void RestoreWorldClock(const WorldClock& clock);
     bool SaveWorldMetadataTo(const std::filesystem::path& save_dir);
     bool SaveWorldMetadata(Persistence::WorldSaveService::SaveBatch& batch);
+    [[nodiscard]] luminumbra::core::SimulationIdentityValues EffectiveIdentityValues() const;
     bool ClockConfigurationCompatible(const std::filesystem::path& save_dir) const;
     WorldClock m_worldClock;
     void AttachRegionEditObserver();
@@ -522,7 +535,9 @@ private:
                              const std::string& seed,
                              const std::string& worldType,
                              const std::string* customPresetJson,
-                             bool transient);
+                             bool transient,
+                             TerrainPresetUse presetUse,
+                             const std::string& requiredPresetContentHash = {});
     // Cap catch-up to 2 ticks/frame (default is 4) so a
     // single slow frame replays at most 2 sim ticks instead of 4 — halving the worst-case
     // TickSimulation spike. Scoped HERE (not the shared SimulationClock.h constant, which

@@ -18,9 +18,11 @@
 #include "entt/entt.hpp"
 #include "luminumbra/core/Types.h"
 #include "systems/PhysicsSystem.h"
+#include "world/SurfaceWorkBudget.h"
 #include <algorithm> // Required for std::max and std::min
 #include <array>
 #include <atomic>
+#include <bit>
 #include <chrono> // runtime telemetry ( implementation note): per-sub-phase streaming timing
 #include <cmath>
 #include <cstddef>
@@ -28,6 +30,7 @@
 #include <cstdlib> // std::llabs (hydro cache eviction distance)
 #include <cstring> // std::memcpy for the deterministic water-state hash
 #include <filesystem>
+#include <glm/common.hpp>
 #include <limits>
 #include <map>
 #include <memory>
@@ -107,7 +110,12 @@ constexpr std::size_t kMaxMeshingBatchesInFlight =
 // back into results, so heights/materials for indices [0,count) are byte-
 // identical and the world_hash is unchanged.
 constexpr std::size_t kNoiseSimdWidth = 16;
-constexpr std::size_t PadToNoiseSimd(std::size_t count) {
+std::size_t PadToNoiseSimd(std::size_t count) {
+    // FastNoise narrows to int; every allocation leaves at most 15 tail lanes.
+    if (count > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+        count > std::vector<float>().max_size() - (kNoiseSimdWidth - 1)) {
+        throw std::length_error("Noise position array is too large");
+    }
     return count + (kNoiseSimdWidth - 1);
 }
 
@@ -300,6 +308,48 @@ DecodeSurfaceBreakCell(int seed, int cx, int cz, const TerrainGenParams& params)
     return f;
 }
 
+// Fixed per-call working sets: misses replace FIFO, never grow with vertex count.
+template<class Key, class Value, std::size_t Capacity>
+class SamplingWorkingSet {
+    struct Entry {
+        Key key{};
+        Value value{};
+    };
+    std::array<Entry, Capacity> entries{};
+    std::size_t used = 0;
+    std::size_t next = 0;
+
+public:
+    Value* find(const Key& key) {
+        for (std::size_t i = 0; i < used; ++i) {
+            if (entries[i].key == key)
+                return &entries[i].value;
+        }
+        return nullptr;
+    }
+    const Value& insert(const Key& key, Value value) {
+        entries[next] = {key, std::move(value)};
+        const auto index = next;
+        next = (next + 1) % Capacity;
+        used = std::min(used + 1, Capacity);
+        return entries[index].value;
+    }
+};
+
+SurfaceBreakFeature
+CachedSurfaceBreakCell(int seed,
+                       int cx,
+                       int cz,
+                       const TerrainGenParams& params,
+                       SamplingWorkingSet<std::pair<int, int>, SurfaceBreakFeature, 16>& features,
+                       std::size_t& sampled_cells) {
+    const std::pair<int, int> key{cx, cz};
+    if (const auto* value = features.find(key))
+        return *value;
+    ++sampled_cells;
+    return features.insert(key, DecodeSurfaceBreakCell(seed, cx, cz, params));
+}
+
 // Legacy single-material classifier (biome_id == kNoBiome). Kept as the exact
 // float-op sequence the pre-biome implementation used so disabled worlds stay
 // byte-zero; SurfaceMaterialForColumn dispatches here when no biome applies.
@@ -422,6 +472,20 @@ struct SHIELD_WorldSystem::AuthorityRestoreBatch {
     std::map<std::pair<int, int>, Persistence::WorldSaveService::AuthorityReader> readers;
 };
 
+// Chunk jobs own these snapshots. At shipping cell pitches, four region/cell
+// entries cover a chunk crossing both seams; 3x3 feature neighborhoods fit in
+// sixteen cells. Smaller pitches and arbitrary batches may evict/recompute,
+// with the same fixed storage bound.
+struct SHIELD_WorldSystem::SamplingCache {
+    SamplingWorkingSet<std::pair<std::int64_t, std::int64_t>,
+                       std::shared_ptr<const std::vector<float>>,
+                       4>
+        hydro;
+    SamplingWorkingSet<std::pair<float, float>, std::array<float, 4>, 4> lakes;
+    SamplingWorkingSet<std::pair<int, int>, SurfaceBreakFeature, 16> features;
+    MaterialSamplingWork work{};
+};
+
 SHIELD_WorldSystem::SHIELD_WorldSystem(JobSystem* job_system,
                                        WaterSystem* water_system,
                                        const TerrainGenParams& params,
@@ -437,6 +501,7 @@ SHIELD_WorldSystem::SHIELD_WorldSystem(JobSystem* job_system,
 
 SHIELD_WorldSystem::~SHIELD_WorldSystem() {
     quiesce_streaming_jobs_for_save();
+    wait_for_hydro_prefetch_jobs();
     wait_for_generation_jobs();
     // Drain promotion workers with RAW waits — teardown must not publish or
     // dispatch stage-B jobs, only guarantee no worker still touches chunks.
@@ -950,8 +1015,14 @@ void SHIELD_WorldSystem::reinitialize_noise(const TerrainGenParams* params,
         m_seed = *seed;
     }
 
-    // Terrain height is a pure function of seed/params; drop the cached
-    // per-column surface spans whenever either changes.
+    // Lock order is epoch -> hydro. Every bake holds the shared epoch, so
+    // none can publish offsets from the old generators after this invalidation.
+    // Per-job caches retain immutable shared region ownership until they finish.
+    {
+        const std::unique_lock<std::shared_mutex> hydro_lock(m_hydro_mutex);
+        m_hydro_cache.clear();
+    }
+    // Terrain height is a pure function of seed/params; drop dependent spans too.
     m_column_surface_span_cache.clear();
 
     // FastNoise2 uses a node-based system to build complex generators.
@@ -1161,8 +1232,6 @@ SHIELD_WorldSystem::ComputeShapedHeightSample(float world_x, float world_z) cons
 
 SHIELD_WorldSystem::ShapedHeightSample SHIELD_WorldSystem::ComputeShapedHeightSampleImpl(
     float world_x, float world_z, bool apply_hydro) const {
-    ShapedHeightSample sample;
-
     // Sampling scopes hold the shared epoch while reinitialization takes the
     // exclusive epoch. Shaping nodes are always built; local references pin
     // their lifetimes throughout this sample without an algorithm fallback.
@@ -1194,20 +1263,50 @@ SHIELD_WorldSystem::ShapedHeightSample SHIELD_WorldSystem::ComputeShapedHeightSa
     const float peaks_valleys = peaks_gen->GenSingle2D(
         sample_x * m_params.peaks_frequency, sample_z * m_params.peaks_frequency, m_seed + 5);
 
+    const float base_noise = m_terrain_generator->GenSingle2D(
+        sample_x * m_params.base_frequency, sample_z * m_params.base_frequency, m_seed);
+    const float island_noise =
+        m_params.island_mask_enabled
+            ? m_island_mask_generator->GenSingle2D(world_x * m_params.island_mask_frequency,
+                                                   world_z * m_params.island_mask_frequency,
+                                                   m_seed + 2)
+            : 0.0f;
+    auto sample = CombineShapedHeightSample(world_x,
+                                            world_z,
+                                            {.continentalness = continentalness,
+                                             .erosion = erosion,
+                                             .peaks_valleys = peaks_valleys,
+                                             .base_noise = base_noise,
+                                             .island_noise = island_noise},
+                                            /*complete_shaping=*/true);
+    if (apply_hydro && m_params.hydro_enabled) {
+        sample.final_height += SampleHydroOffsetMeters(world_x, world_z);
+    }
+    return sample;
+}
+
+SHIELD_WorldSystem::ShapedHeightSample
+SHIELD_WorldSystem::CombineShapedHeightSample(float world_x,
+                                              float world_z,
+                                              const ShapingNoiseSample& noise,
+                                              bool complete_shaping,
+                                              SamplingCache* cache) const {
+    ShapedHeightSample sample;
+
     const float base_level =
-        EvaluateShapingSpline(m_params.continental_spline, continentalness, 0.0f);
+        EvaluateShapingSpline(m_params.continental_spline, noise.continentalness, 0.0f);
     const float amplitude_multiplier =
-        EvaluateShapingSpline(m_params.erosion_spline, erosion, 1.0f);
+        EvaluateShapingSpline(m_params.erosion_spline, noise.erosion, 1.0f);
     // Ridge term: peaks only where erosion is low (eroded land is flat).
-    const float erosion_01 = std::clamp((erosion + 1.0f) * 0.5f, 0.0f, 1.0f);
-    float ridge = EvaluateShapingSpline(m_params.peaks_spline, peaks_valleys, 0.0f) *
+    const float erosion_01 = std::clamp((noise.erosion + 1.0f) * 0.5f, 0.0f, 1.0f);
+    float ridge = EvaluateShapingSpline(m_params.peaks_spline, noise.peaks_valleys, 0.0f) *
                   m_params.peaks_amplitude * std::max(0.0f, 1.0f - erosion_01);
 
     //  per-biome morphology: scale the ridge by the (continuous)
     // temperature field — cold ground (alpine) gets taller/rugged peaks, warm
     // lowlands gentler. Only the ridge term; smooth so no seams. Byte-identical
     // to the batched path in ComputeShapedHeightGrid.
-    if (m_params.biome_relief_enabled && m_temperature_generator) {
+    if (complete_shaping && m_params.biome_relief_enabled && m_temperature_generator) {
         const float temp =
             m_temperature_generator->GenSingle2D(world_x * m_params.temperature_frequency,
                                                  world_z * m_params.temperature_frequency,
@@ -1216,23 +1315,21 @@ SHIELD_WorldSystem::ShapedHeightSample SHIELD_WorldSystem::ComputeShapedHeightSa
         ridge *= 1.0f + m_params.biome_relief_strength * (2.0f * cold01 - 1.0f);
     }
 
-    sample.base_noise = m_terrain_generator->GenSingle2D(
-        sample_x * m_params.base_frequency, sample_z * m_params.base_frequency, m_seed);
+    sample.base_noise = noise.base_noise;
     float terrain_height = m_params.height_offset + base_level +
                            amplitude_multiplier * (sample.base_noise * m_params.base_amplitude) +
                            ridge;
     //  cliffs: terrace the shaped height inside cliff zones (byte-identical
     // to ComputeShapedHeightGrid). No-op when cliffs disabled / outside a zone.
-    terrain_height = CliffTerracedHeight(world_x, world_z, terrain_height);
+    if (complete_shaping) {
+        terrain_height = CliffTerracedHeight(world_x, world_z, terrain_height);
+    }
     sample.pre_island_height = terrain_height;
     sample.final_height = terrain_height;
 
     if (m_params.island_mask_enabled) {
         sample.island_applied = true;
-        sample.island_noise =
-            m_island_mask_generator->GenSingle2D(world_x * m_params.island_mask_frequency,
-                                                 world_z * m_params.island_mask_frequency,
-                                                 m_seed + 2);
+        sample.island_noise = noise.island_noise;
         sample.island_mask = glm::smoothstep(0.1f, 0.25f, sample.island_noise);
         sample.final_height = glm::mix(m_params.height_offset, terrain_height, sample.island_mask);
     }
@@ -1256,9 +1353,9 @@ SHIELD_WorldSystem::ShapedHeightSample SHIELD_WorldSystem::ComputeShapedHeightSa
     // floor below SEA_LEVEL so the global water plane fills it (mirrors the river
     // carve; lake_max_carve gates it to low terrain only). Skipped (byte-zero) when
     // lakes are disabled. Kept byte-identical to ComputeShapedHeightGrid.
-    if (m_params.lakes_enabled) {
+    if (complete_shaping && m_params.lakes_enabled) {
         const float lake_influence = LakeInfluenceFromNoise(world_x, world_z);
-        const float lake_surface = LakeSurfaceLevel(world_x, world_z);
+        const float lake_surface = LakeSurfaceLevel(world_x, world_z, cache);
         sample.final_height -= LakeCarveAmount(sample.final_height, lake_influence, lake_surface);
     }
 
@@ -1266,17 +1363,12 @@ SHIELD_WorldSystem::ShapedHeightSample SHIELD_WorldSystem::ComputeShapedHeightSa
     // doline footprint so the feature reads at distance/coarse-LOD (the SDF carve
     // alone is invisible on the SDF-ignoring far path). Folded into ALL THREE
     // height paths byte-identically. No-op (0) when surface_breaks disabled.
-    sample.final_height -= SurfaceBreakRimDepression(world_x, world_z);
-
-    // hydraulic/thermal relief (decision a). Added LAST so the baked
-    // drainage/talus sits in the final surface EVERY height consumer reads
-    // (collision/spawn/water/far-LOD/mesh). The per-region bake samples the
-    // NO-hydro height (apply_hydro=false) so this never recurses. Skipped (byte-
-    // identical legacy path) when hydro is disabled -> world_hash unchanged.
-    if (apply_hydro && m_params.hydro_enabled) {
-        sample.final_height += SampleHydroOffsetMeters(world_x, world_z);
+    if (complete_shaping) {
+        sample.final_height -= SurfaceBreakRimDepression(world_x, world_z, cache);
     }
 
+    // Callers add hydraulic relief LAST. The bake uses the frozen historical
+    // substrate without hydro, preserving the terrain in existing saved worlds.
     return sample;
 }
 
@@ -1303,7 +1395,9 @@ std::int64_t HydroFloorDiv(std::int64_t a, std::int64_t b) {
 }
 } // namespace
 
-float SHIELD_WorldSystem::SampleHydroOffsetMeters(float world_x, float world_z) const {
+float SHIELD_WorldSystem::SampleHydroOffsetMeters(float world_x,
+                                                  float world_z,
+                                                  SamplingCache* cache) const {
     const float cs = m_params.hydro_cell_size_m;
     if (cs <= 0.0f) {
         return 0.0f;
@@ -1325,10 +1419,11 @@ float SHIELD_WorldSystem::SampleHydroOffsetMeters(float world_x, float world_z) 
         const int m = kHydroRegionCells + 2 * halo;
         const std::size_t cells = static_cast<std::size_t>(m) * static_cast<std::size_t>(m);
         // Build the padded grid's world coords, then sample the NO-hydro base
-        // heights in ONE SIMD batch (apply_hydro=false: no recursion, and the
+        // heights in ONE SIMD batch (ApplyHydro=false: no recursion, and the
         // GenPositionArray2D path is ~10x faster than per-cell GenSingle2D --
-        // keeps the bake off the far-LOD settle critical path). Byte-identical to
-        // the scalar path (position-array parity gate), so the offset is unchanged.
+        // keeps the bake off the far-LOD settle critical path). Freeze the
+        // historical substrate: adding the four missing shaping stages here
+        // would change generated terrain in existing worlds (issue #453).
         std::vector<float> xs(cells, 0.0f);
         std::vector<float> zs(cells, 0.0f);
         for (int pz = 0; pz < m; ++pz) {
@@ -1340,11 +1435,11 @@ float SHIELD_WorldSystem::SampleHydroOffsetMeters(float world_x, float world_z) 
             }
         }
         std::vector<float> heights(cells, 0.0f);
-        ComputeShapedHeightsAtPositions(xs.data(),
-                                        zs.data(),
-                                        cells,
-                                        heights.data(),
-                                        /*apply_hydro=*/false);
+        ComputeShapedHeightsAtPositionsImpl<false>(xs.data(),
+                                                   zs.data(),
+                                                   cells,
+                                                   heights.data(),
+                                                   /*complete_shaping=*/false);
         World::HydroErosionParams p;
         p.iterations = m_params.hydro_iterations;
         p.talus_height = m_params.hydro_talus_height;
@@ -1363,8 +1458,8 @@ float SHIELD_WorldSystem::SampleHydroOffsetMeters(float world_x, float world_z) 
     // Fetch one global cell's baked offset. Warm-cache reads take a SHARED lock
     // (concurrent across chunk-gen jobs); a cold region is baked OUTSIDE the lock
     // then inserted under the exclusive lock. std::map node storage keeps cached
-    // values stable; recompute-on-load (not persisted), deterministic.
-    auto offset_at = [this, &bake_region](std::int64_t gx, std::int64_t gz) -> float {
+    // values immutable; recompute-on-load (not persisted), deterministic.
+    auto offset_at = [this, &bake_region, cache](std::int64_t gx, std::int64_t gz) -> float {
         const std::int64_t rx = HydroFloorDiv(gx, kHydroRegionCells);
         const std::int64_t rz = HydroFloorDiv(gz, kHydroRegionCells);
         const int lx = static_cast<int>(gx - rx * kHydroRegionCells);
@@ -1373,21 +1468,34 @@ float SHIELD_WorldSystem::SampleHydroOffsetMeters(float world_x, float world_z) 
         const std::size_t local =
             static_cast<std::size_t>(lz) * static_cast<std::size_t>(kHydroRegionCells) +
             static_cast<std::size_t>(lx);
+        if (cache) {
+            if (const auto* retained = cache->hydro.find(key))
+                return (**retained)[local];
+            ++cache->work.hydro_regions;
+        }
+        std::shared_ptr<const std::vector<float>> region;
         {
-            std::shared_lock<std::shared_mutex> rlock(m_hydro_mutex);
-            auto it = m_hydro_cache.find(key);
-            if (it != m_hydro_cache.end()) {
-                return it->second[local];
+            const std::shared_lock<std::shared_mutex> rlock(m_hydro_mutex);
+            const auto found = m_hydro_cache.find(key);
+            if (found != m_hydro_cache.end()) {
+                if (!cache)
+                    return (*found->second)[local];
+                region = found->second;
             }
         }
-        std::vector<float> baked = bake_region(rx, rz); // outside any lock
-        std::unique_lock<std::shared_mutex> wlock(m_hydro_mutex);
+        if (region) {
+            if (cache)
+                cache->hydro.insert(key, region);
+            return (*region)[local];
+        }
+        auto baked = std::make_shared<const std::vector<float>>(bake_region(rx, rz));
+        const std::unique_lock<std::shared_mutex> wlock(m_hydro_mutex);
         auto it = m_hydro_cache.try_emplace(key, std::move(baked)).first;
         // Bound the cache: past the cap, evict the region FARTHEST (Chebyshev)
         // from the one just requested — the just-requested key approximates the
         // current activity centre, so hot neighbourhoods survive and only stale
         // far-behind regions fall out. Safe under the exclusive lock: readers
-        // copy a single float under a lock and never retain references. Purely
+        // retain immutable region ownership or copy a float under the lock. Purely
         // a cost bound; a re-read of an evicted region re-bakes byte-identically.
         if (m_hydro_cache.size() > kHydroCacheMaxRegions) {
             auto victim = m_hydro_cache.end();
@@ -1404,7 +1512,10 @@ float SHIELD_WorldSystem::SampleHydroOffsetMeters(float world_x, float world_z) 
                 m_hydro_cache.erase(victim);
             }
         }
-        return it->second[local];
+        region = it->second;
+        if (cache)
+            cache->hydro.insert(key, region);
+        return (*region)[local];
     };
 
     const float o00 = offset_at(gx0, gz0);
@@ -1433,6 +1544,18 @@ void SHIELD_WorldSystem::PrefetchHydroRegions(float cx, float cz, float radius_m
         HydroFloorDiv(static_cast<std::int64_t>(std::floor(cx / cs)), kHydroRegionCells);
     const std::int64_t crz =
         HydroFloorDiv(static_cast<std::int64_t>(std::floor(cz / cs)), kHydroRegionCells);
+    struct Completion {
+        const SHIELD_WorldSystem& world;
+        std::pair<std::int64_t, std::int64_t> key;
+        bool registered = false;
+        ~Completion() {
+            if (!registered)
+                return;
+            const std::lock_guard<std::mutex> lock(world.m_hydro_prefetch_mutex);
+            world.m_hydro_prefetch_inflight.erase(key);
+            world.m_hydro_prefetch_finished.notify_all();
+        }
+    };
     std::vector<Job> jobs;
     for (std::int64_t dz = -reach; dz <= reach; ++dz) {
         for (std::int64_t dx = -reach; dx <= reach; ++dx) {
@@ -1443,40 +1566,40 @@ void SHIELD_WorldSystem::PrefetchHydroRegions(float cx, float cz, float radius_m
                     continue; // already baked
                 }
             }
+            std::shared_ptr<Completion> completion;
             {
                 std::lock_guard<std::mutex> g(m_hydro_prefetch_mutex);
-                if (!m_hydro_prefetch_inflight.insert(rkey).second) {
+                if (m_hydro_prefetch_inflight.contains(rkey)) {
                     continue; // already queued
                 }
+                // Allocate before registration so an allocation failure cannot
+                // leave a key behind that reset/teardown would wait on forever.
+                completion = std::make_shared<Completion>(*this, rkey);
+                m_hydro_prefetch_inflight.insert(rkey);
+                completion->registered = true;
             }
             const float sample_x =
                 static_cast<float>(rkey.first * kHydroRegionCells) * cs + region_m * 0.5f;
             const float sample_z =
                 static_cast<float>(rkey.second * kHydroRegionCells) * cs + region_m * 0.5f;
-            jobs.emplace_back([this, rkey, sample_x, sample_z]() {
-                class Complete {
-                    const SHIELD_WorldSystem& m_world;
-                    std::pair<std::int64_t, std::int64_t> m_key;
-
-                public:
-                    Complete(const SHIELD_WorldSystem& world,
-                             std::pair<std::int64_t, std::int64_t> key)
-                        : m_world(world)
-                        , m_key(key) {}
-                    ~Complete() {
-                        const std::lock_guard<std::mutex> guard(m_world.m_hydro_prefetch_mutex);
-                        m_world.m_hydro_prefetch_inflight.erase(m_key);
-                    }
-                };
-                const Complete complete{*this, rkey};
+            // The last callable copy releases the inflight key, including when
+            // dispatch is rejected or a bake throws. Teardown waits for these
+            // owners before releasing the world they reference.
+            jobs.emplace_back([this, completion, sample_x, sample_z]() {
+                static_cast<void>(completion);
                 const auto worldgen_scope = acquire_worldgen_sample_scope();
-                SampleHydroOffsetMeters(sample_x, sample_z);
+                SampleHydroOffsetMeters(sample_x, sample_z); // triggers + caches the region bake
             });
         }
     }
     if (!jobs.empty()) {
         m_hydro_prefetch_handle = m_job_system->dispatch_batch(jobs);
     }
+}
+
+void SHIELD_WorldSystem::wait_for_hydro_prefetch_jobs() const {
+    std::unique_lock<std::mutex> lock(m_hydro_prefetch_mutex);
+    m_hydro_prefetch_finished.wait(lock, [this]() { return m_hydro_prefetch_inflight.empty(); });
 }
 
 float SHIELD_WorldSystem::RiverCarveAmount(float final_height, float influence) const {
@@ -1525,6 +1648,12 @@ float SHIELD_WorldSystem::ContinentalBaseHeight(float world_x, float world_z) co
 }
 
 float SHIELD_WorldSystem::LakeSurfaceLevel(float world_x, float world_z) const {
+    return LakeSurfaceLevel(world_x, world_z, nullptr);
+}
+
+float SHIELD_WorldSystem::LakeSurfaceLevel(float world_x,
+                                           float world_z,
+                                           SamplingCache* cache) const {
     // the lake surface must be near-constant (flat) over a lake's extent AND
     // continuous across the coarse-cell boundaries. The old code snapped to the
     // NEAREST 768 m node (std::round), so a lake straddling a cell boundary saw two
@@ -1548,10 +1677,22 @@ float SHIELD_WorldSystem::LakeSurfaceLevel(float world_x, float world_z) const {
     const float z0 = fz0 * kLakeCellMeters;
     const float x1 = x0 + kLakeCellMeters;
     const float z1 = z0 + kLakeCellMeters;
-    const float h00 = ContinentalBaseHeight(x0, z0);
-    const float h10 = ContinentalBaseHeight(x1, z0);
-    const float h01 = ContinentalBaseHeight(x0, z1);
-    const float h11 = ContinentalBaseHeight(x1, z1);
+    const std::pair<float, float> key{fx0, fz0};
+    const auto* retained = cache ? cache->lakes.find(key) : nullptr;
+    std::array<float, 4> corners{};
+    if (retained) {
+        corners = *retained;
+    } else {
+        corners = {ContinentalBaseHeight(x0, z0),
+                   ContinentalBaseHeight(x1, z0),
+                   ContinentalBaseHeight(x0, z1),
+                   ContinentalBaseHeight(x1, z1)};
+        if (cache) {
+            cache->lakes.insert(key, corners);
+            ++cache->work.lake_cells;
+        }
+    }
+    const auto [h00, h10, h01, h11] = corners;
     const float a = h00 + (h10 - h00) * tx;
     const float b = h01 + (h11 - h01) * tx;
     const float surface = a + (b - a) * tz;
@@ -1858,8 +1999,8 @@ SHIELD_WorldSystem::FindLargestSurfaceBreak(float near_x, float near_z, float sc
     return best;
 }
 
-SHIELD_WorldSystem::SurfaceBreakSample
-SHIELD_WorldSystem::sample_surface_breaks(const Vec3& world_pos, float surface_h) const {
+SHIELD_WorldSystem::SurfaceBreakSample SHIELD_WorldSystem::sample_surface_breaks(
+    const Vec3& world_pos, float surface_h, SamplingCache* cache) const {
     SurfaceBreakSample out{kCaveSurfaceCapDepth, 0.0f};
     if (!m_params.surface_breaks_enabled) {
         return out; // byte-identical disabled path
@@ -1877,7 +2018,14 @@ SHIELD_WorldSystem::sample_surface_breaks(const Vec3& world_pos, float surface_h
         for (int dx = -1; dx <= 1; ++dx) {
             const int cx = base_cx + dx;
             const int cz = base_cz + dz;
-            const SurfaceBreakFeature f = DecodeSurfaceBreakCell(m_seed, cx, cz, m_params);
+            const SurfaceBreakFeature f =
+                cache ? CachedSurfaceBreakCell(m_seed,
+                                               cx,
+                                               cz,
+                                               m_params,
+                                               cache->features,
+                                               cache->work.surface_break_cells)
+                      : DecodeSurfaceBreakCell(m_seed, cx, cz, m_params);
             if (!f.valid) {
                 continue;
             }
@@ -1943,7 +2091,9 @@ SHIELD_WorldSystem::sample_surface_breaks(const Vec3& world_pos, float surface_h
 // bowl that DIPS the surface inside a doline footprint so the feature reads even on
 // the SDF-ignoring coarse path. Pure 2D (no cave probe) so it is cheap to fold into
 // every height consumer; returns metres to subtract from the surface height.
-float SHIELD_WorldSystem::SurfaceBreakRimDepression(float world_x, float world_z) const {
+float SHIELD_WorldSystem::SurfaceBreakRimDepression(float world_x,
+                                                    float world_z,
+                                                    SamplingCache* cache) const {
     if (!m_params.surface_breaks_enabled) {
         return 0.0f;
     }
@@ -1957,7 +2107,13 @@ float SHIELD_WorldSystem::SurfaceBreakRimDepression(float world_x, float world_z
     for (int dz = -1; dz <= 1; ++dz) {
         for (int dx = -1; dx <= 1; ++dx) {
             const SurfaceBreakFeature f =
-                DecodeSurfaceBreakCell(m_seed, base_cx + dx, base_cz + dz, m_params);
+                cache ? CachedSurfaceBreakCell(m_seed,
+                                               base_cx + dx,
+                                               base_cz + dz,
+                                               m_params,
+                                               cache->features,
+                                               cache->work.surface_break_cells)
+                      : DecodeSurfaceBreakCell(m_seed, base_cx + dx, base_cz + dz, m_params);
             if (!f.valid) {
                 continue;
             }
@@ -2047,10 +2203,15 @@ void SHIELD_WorldSystem::ComputeShapedHeightGrid(
     // math below mirrors ComputeShapedHeightSample EXACTLY; only the noise reads
     // move from per-point GenSingle2D to the SIMD batch entry points (which
     // produce identical float bits on this build, proven by the parity gate).
-    const std::size_t count = static_cast<std::size_t>(size_x) * static_cast<std::size_t>(size_z);
-    if (count == 0) {
+    if (size_x <= 0 || size_z <= 0) {
         return;
     }
+    // GenUniformGrid2D multiplies its signed dimensions internally.
+    if (size_x > std::numeric_limits<int>::max() / size_z) {
+        throw std::length_error("Height grid is too large");
+    }
+    const std::size_t count = static_cast<std::size_t>(size_x) * static_cast<std::size_t>(size_z);
+    const std::size_t noise_pad = PadToNoiseSimd(count);
 
     // --- 1. Unwarped control + warp channels on the integer lattice (SIMD). ---
     std::vector<float> warp_x_grid(count);
@@ -2096,7 +2257,6 @@ void SHIELD_WorldSystem::ComputeShapedHeightGrid(
     // is not a multiple of the SIMD width -- count = size_x*size_z is rarely a
     // multiple of 16) cannot over-read/over-write past the count-sized vectors.
     // Padding is never consumed (only [0,count) is read back) -> hash-neutral.
-    const std::size_t noise_pad = PadToNoiseSimd(count);
     std::vector<float> base_px(noise_pad);
     std::vector<float> base_py(noise_pad);
     std::vector<float> peaks_px(noise_pad);
@@ -2149,68 +2309,22 @@ void SHIELD_WorldSystem::ComputeShapedHeightGrid(
     }
 
     // --- 4. Combine per column, mirroring ComputeShapedHeightSample exactly. ---
+    SamplingCache cache;
     for (int z = 0; z < size_z; ++z) {
         for (int x = 0; x < size_x; ++x) {
             const std::size_t i = static_cast<std::size_t>(x) +
                                   static_cast<std::size_t>(z) * static_cast<std::size_t>(size_x);
-            const float continentalness = continentalness_grid[i];
-            const float erosion = erosion_grid[i];
-            const float peaks_valleys = peaks_noise[i];
-
-            const float base_level =
-                EvaluateShapingSpline(m_params.continental_spline, continentalness, 0.0f);
-            const float amplitude_multiplier =
-                EvaluateShapingSpline(m_params.erosion_spline, erosion, 1.0f);
-            const float erosion_01 = std::clamp((erosion + 1.0f) * 0.5f, 0.0f, 1.0f);
-            float ridge = EvaluateShapingSpline(m_params.peaks_spline, peaks_valleys, 0.0f) *
-                          m_params.peaks_amplitude * std::max(0.0f, 1.0f - erosion_01);
-
-            //  per-biome morphology — byte-identical to ComputeShapedHeightSampleImpl.
-            if (m_params.biome_relief_enabled && m_temperature_generator) {
-                const float world_x = static_cast<float>(base_x + x);
-                const float world_z = static_cast<float>(base_z + z);
-                const float temp =
-                    m_temperature_generator->GenSingle2D(world_x * m_params.temperature_frequency,
-                                                         world_z * m_params.temperature_frequency,
-                                                         m_seed + 8);
-                const float cold01 = std::clamp(0.5f - 0.5f * temp, 0.0f, 1.0f);
-                ridge *= 1.0f + m_params.biome_relief_strength * (2.0f * cold01 - 1.0f);
-            }
-
-            float terrain_height =
-                m_params.height_offset + base_level +
-                amplitude_multiplier * (base_noise[i] * m_params.base_amplitude) + ridge;
-
-            //  cliffs — byte-identical to ComputeShapedHeightSampleImpl.
-            terrain_height = CliffTerracedHeight(
-                static_cast<float>(base_x + x), static_cast<float>(base_z + z), terrain_height);
-
-            if (m_params.island_mask_enabled) {
-                const float mask = glm::smoothstep(0.1f, 0.25f, island_noise[i]);
-                terrain_height = glm::mix(m_params.height_offset, terrain_height, mask);
-            }
-
-            if (m_params.rivers_enabled) {
-                const float world_x = static_cast<float>(base_x + x);
-                const float world_z = static_cast<float>(base_z + z);
-                const float influence = RiverInfluenceFromNoise(world_x, world_z);
-                terrain_height -= RiverCarveAmount(terrain_height, influence);
-            }
-
-            // Lake carve — byte-identical to ComputeShapedHeightSampleImpl.
-            if (m_params.lakes_enabled) {
-                const float world_x = static_cast<float>(base_x + x);
-                const float world_z = static_cast<float>(base_z + z);
-                const float lake_influence = LakeInfluenceFromNoise(world_x, world_z);
-                const float lake_surface = LakeSurfaceLevel(world_x, world_z);
-                terrain_height -= LakeCarveAmount(terrain_height, lake_influence, lake_surface);
-            }
-
-            //  rim depression — byte-identical to ComputeShapedHeightSampleImpl.
-            terrain_height -= SurfaceBreakRimDepression(static_cast<float>(base_x + x),
-                                                        static_cast<float>(base_z + z));
-
-            out[i] = terrain_height;
+            out[i] = CombineShapedHeightSample(
+                         static_cast<float>(base_x + x),
+                         static_cast<float>(base_z + z),
+                         {.continentalness = continentalness_grid[i],
+                          .erosion = erosion_grid[i],
+                          .peaks_valleys = peaks_noise[i],
+                          .base_noise = base_noise[i],
+                          .island_noise = m_params.island_mask_enabled ? island_noise[i] : 0.0f},
+                         /*complete_shaping=*/true,
+                         &cache)
+                         .final_height;
         }
     }
 
@@ -2224,8 +2338,8 @@ void SHIELD_WorldSystem::ComputeShapedHeightGrid(
                 const std::size_t i =
                     static_cast<std::size_t>(x) +
                     static_cast<std::size_t>(z) * static_cast<std::size_t>(size_x);
-                out[i] += SampleHydroOffsetMeters(static_cast<float>(base_x + x),
-                                                  static_cast<float>(base_z + z));
+                out[i] += SampleHydroOffsetMeters(
+                    static_cast<float>(base_x + x), static_cast<float>(base_z + z), &cache);
             }
         }
     }
@@ -2379,6 +2493,16 @@ MaterialType SHIELD_WorldSystem::SurfaceVertexMaterial(float world_x,
 
 void SHIELD_WorldSystem::ComputeShapedHeightsAtPositions(
     const float* xs, const float* zs, std::size_t count, float* out, bool apply_hydro) const {
+    if (apply_hydro) {
+        ComputeShapedHeightsAtPositionsImpl<true>(xs, zs, count, out, /*complete_shaping=*/true);
+    } else {
+        ComputeShapedHeightsAtPositionsImpl<false>(xs, zs, count, out, /*complete_shaping=*/true);
+    }
+}
+
+template<bool ApplyHydro>
+void SHIELD_WorldSystem::ComputeShapedHeightsAtPositionsImpl(
+    const float* xs, const float* zs, std::size_t count, float* out, bool complete_shaping) const {
     if (count == 0) {
         return;
     }
@@ -2445,45 +2569,47 @@ void SHIELD_WorldSystem::ComputeShapedHeightsAtPositions(
                                           0.0f,
                                           m_seed + 5);
 
-    std::vector<float> island_noise;
+    SamplingCache cache;
     for (std::size_t i = 0; i < count; ++i) {
-        const float base_level =
-            EvaluateShapingSpline(m_params.continental_spline, continentalness[i], 0.0f);
-        const float amplitude_multiplier =
-            EvaluateShapingSpline(m_params.erosion_spline, erosion[i], 1.0f);
-        const float erosion_01 = std::clamp((erosion[i] + 1.0f) * 0.5f, 0.0f, 1.0f);
-        const float ridge = EvaluateShapingSpline(m_params.peaks_spline, peaks_noise[i], 0.0f) *
-                            m_params.peaks_amplitude * std::max(0.0f, 1.0f - erosion_01);
-        float h = m_params.height_offset + base_level +
-                  amplitude_multiplier * (base_noise[i] * m_params.base_amplitude) + ridge;
-        if (m_params.island_mask_enabled) {
-            const float in =
-                m_island_mask_generator->GenSingle2D(xs[i] * m_params.island_mask_frequency,
-                                                     zs[i] * m_params.island_mask_frequency,
-                                                     m_seed + 2);
-            const float mask = glm::smoothstep(0.1f, 0.25f, in);
-            h = glm::mix(m_params.height_offset, h, mask);
+        const float island_noise =
+            m_params.island_mask_enabled
+                ? m_island_mask_generator->GenSingle2D(xs[i] * m_params.island_mask_frequency,
+                                                       zs[i] * m_params.island_mask_frequency,
+                                                       m_seed + 2)
+                : 0.0f;
+        const float height = CombineShapedHeightSample(xs[i],
+                                                       zs[i],
+                                                       {.continentalness = continentalness[i],
+                                                        .erosion = erosion[i],
+                                                        .peaks_valleys = peaks_noise[i],
+                                                        .base_noise = base_noise[i],
+                                                        .island_noise = island_noise},
+                                                       complete_shaping,
+                                                       &cache)
+                                 .final_height;
+        if constexpr (ApplyHydro) {
+            if (m_params.hydro_enabled) {
+                out[i] = height + SampleHydroOffsetMeters(xs[i], zs[i], &cache);
+            } else {
+                out[i] = height;
+            }
+        } else {
+            out[i] = height;
         }
-        if (m_params.rivers_enabled) {
-            const float influence = RiverInfluenceFromNoise(xs[i], zs[i]);
-            h -= RiverCarveAmount(h, influence);
-        }
-        // add the baked hydro offset so this matches GetTerrainHeightAt
-        // (apply_hydro=false on the erosion bake's own base samples -> no recursion).
-        if (apply_hydro && m_params.hydro_enabled) {
-            h += SampleHydroOffsetMeters(xs[i], zs[i]);
-        }
-        out[i] = h;
     }
 }
 
 void SHIELD_WorldSystem::ClassifyVertexMaterials(const Vec3* positions,
                                                  std::size_t count,
-                                                 u32* out_materials) const {
+                                                 u32* out_materials,
+                                                 MaterialSamplingWork* work) const {
+    if (work)
+        *work = {};
     if (count == 0) {
         return;
     }
 
+    SamplingCache cache;
     // --- Batched shaped height + climate for every vertex (x,z). ---
     // GenPositionArray2D samples at (xPos[i] + xOffset, yPos[i] + yOffset); we
     // fold the per-channel frequency into the coordinate arrays (zero offsets),
@@ -2591,33 +2717,50 @@ void SHIELD_WorldSystem::ClassifyVertexMaterials(const Vec3* positions,
     }
 
     // --- Per-vertex combine + classification (mirrors the scalar path). ---
+    // A fixed 4 KiB direct-mapped column cache reuses exact horizontal samples
+    // across vertices on vertical edges. Collisions only recompute; there is no
+    // probing, allocation or scan proportional to the number of vertices.
+    struct MaterialColumnSample {
+        float x = 0.0f;
+        float z = 0.0f;
+        float height = 0.0f;
+        bool valid = false;
+    };
+    std::array<MaterialColumnSample, 256> columns{};
+    const bool complete_shaping = m_params.surface_sampling_revision >= kSurfaceSamplingRevision;
     for (std::size_t i = 0; i < count; ++i) {
         const Vec3& p = positions[i];
 
-        // Shaped final height at (x,z) - identical math to
-        // ComputeShapedHeightSample (no island mask in the shipped shaped
-        // presets; include it for completeness when enabled).
-        const float base_level =
-            EvaluateShapingSpline(m_params.continental_spline, continentalness[i], 0.0f);
-        const float amplitude_multiplier =
-            EvaluateShapingSpline(m_params.erosion_spline, erosion[i], 1.0f);
-        const float erosion_01 = std::clamp((erosion[i] + 1.0f) * 0.5f, 0.0f, 1.0f);
-        const float ridge = EvaluateShapingSpline(m_params.peaks_spline, peaks_noise[i], 0.0f) *
-                            m_params.peaks_amplitude * std::max(0.0f, 1.0f - erosion_01);
-        float final_height = m_params.height_offset + base_level +
-                             amplitude_multiplier * (base_noise[i] * m_params.base_amplitude) +
-                             ridge;
-        if (m_params.island_mask_enabled) {
+        const u32 coordinate_hash =
+            std::bit_cast<u32>(p.x) * 0x9e3779b9u ^ std::rotl(std::bit_cast<u32>(p.z), 16);
+        const std::size_t column_index =
+            (coordinate_hash ^ (coordinate_hash >> 16)) % columns.size();
+        auto& column = columns[column_index];
+        float final_height = 0.0f;
+        if (column.valid && column.x == p.x && column.z == p.z) {
+            final_height = column.height;
+        } else {
             const float island_noise =
-                m_island_mask_generator->GenSingle2D(p.x * m_params.island_mask_frequency,
-                                                     p.z * m_params.island_mask_frequency,
-                                                     m_seed + 2);
-            const float mask = glm::smoothstep(0.1f, 0.25f, island_noise);
-            final_height = glm::mix(m_params.height_offset, final_height, mask);
-        }
-        if (m_params.rivers_enabled) {
-            const float influence = RiverInfluenceFromNoise(p.x, p.z);
-            final_height -= RiverCarveAmount(final_height, influence);
+                m_params.island_mask_enabled
+                    ? m_island_mask_generator->GenSingle2D(p.x * m_params.island_mask_frequency,
+                                                           p.z * m_params.island_mask_frequency,
+                                                           m_seed + 2)
+                    : 0.0f;
+            final_height = CombineShapedHeightSample(p.x,
+                                                     p.z,
+                                                     {.continentalness = continentalness[i],
+                                                      .erosion = erosion[i],
+                                                      .peaks_valleys = peaks_noise[i],
+                                                      .base_noise = base_noise[i],
+                                                      .island_noise = island_noise},
+                                                     complete_shaping,
+                                                     &cache)
+                               .final_height;
+            if (complete_shaping && m_params.hydro_enabled) {
+                final_height += SampleHydroOffsetMeters(p.x, p.z, &cache);
+            }
+            column = {p.x, p.z, final_height, true};
+            ++cache.work.shaped_columns;
         }
 
         // Biome id (batched climate + the reused +3/+4/+5 shaping noises).
@@ -2638,7 +2781,7 @@ void SHIELD_WorldSystem::ClassifyVertexMaterials(const Vec3* positions,
         float final_density = terrain_density;
         if (m_params.caves_enabled) {
             const Vec3 wp(p.x, world_y, p.z);
-            const SurfaceBreakSample sb = sample_surface_breaks(wp, final_height);
+            const SurfaceBreakSample sb = sample_surface_breaks(wp, final_height, &cache);
             // single composition point (cheese + noise-router spaghetti tunnels).
             final_density = EvaluateCaveDensity(wp, terrain_density, sb.effective_cap, sb.carve);
         }
@@ -2655,6 +2798,8 @@ void SHIELD_WorldSystem::ClassifyVertexMaterials(const Vec3* positions,
         out_materials[i] = static_cast<u32>(
             SurfaceMaterialForColumn(p.y - 0.1f, final_height, biome_id, river_bank));
     }
+    if (work)
+        *work = cache.work;
 }
 
 SHIELD_WorldSystem::ColumnSurfaceSpan
@@ -2668,13 +2813,19 @@ SHIELD_WorldSystem::compute_column_surface_span(int chunk_x, int chunk_z) const 
 
     // batch the 5 footprint height samples (center + 4
     // corners) through the SIMD position-array path instead of 5 scalar
-    // GenSingle2D sweeps. Byte-identical heights (same shaped helper), but the
+    // GenSingle2D sweeps. Revision 2 uses the complete shared shaping; revision 1
+    // preserves activation spans and scheduling for existing saved worlds. The
     // per-column span cost - the dominant cold-frame streaming cost on shaped
     // presets - drops ~5x.
     const std::array<float, 5> sample_xs{center_x, base_x, max_x, base_x, max_x};
     const std::array<float, 5> sample_zs{center_z, base_z, base_z, max_z, max_z};
     std::array<float, 5> heights{};
-    ComputeShapedHeightsAtPositions(sample_xs.data(), sample_zs.data(), 5, heights.data());
+    ComputeShapedHeightsAtPositionsImpl<true>(sample_xs.data(),
+                                              sample_zs.data(),
+                                              sample_xs.size(),
+                                              heights.data(),
+                                              m_params.surface_sampling_revision >=
+                                                  kSurfaceSamplingRevision);
     const float center_height = heights[0];
     float min_height = center_height;
     float max_height = center_height;
@@ -3803,10 +3954,55 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
     AuthorityRestoreBatch restore_batch;
     std::set<ChunkID> required;
     bool eviction_prepared = false;
-    if (!physics_system) {
+    // Preserve the direct API's historical negative-to-zero normalization.
+    const int radius = std::max(0, surface_radius);
+    const int collision_range = std::max(0, collision_radius);
+    const auto column_count = World::SurfaceColumnCount(static_cast<std::uint64_t>(radius));
+    if (!physics_system || !column_count ||
+        !World::SurfaceRadiiSupported(radius, collision_range)) {
         return false;
     }
 
+    const IVec3 center_chunk = world_to_chunk_coords(world_pos);
+    // Preflight the exact vertical work before allocating or changing chunks.
+    // At most 625 columns and 8192 chunks, including both vertical margins.
+    std::array<ColumnSurfaceSpan, World::kMaxSurfaceColumns> surface_spans{};
+    std::size_t surface_capacity = 0;
+    std::size_t surface_index = 0;
+    for (int dz = -radius; dz <= radius; ++dz) {
+        for (int dx = -radius; dx <= radius; ++dx) {
+            const auto span = column_surface_span(center_chunk.x + dx, center_chunk.z + dz);
+            if (!World::AddSurfaceColumnChunks(span.min_y, span.max_y, surface_capacity))
+                return false;
+            surface_spans[surface_index++] = span;
+        }
+    }
+    //  radius, decoupled from collision (preview fidelity implementation note).
+    // render_lod0_radius < 0 (the default, every game caller) preserves the
+    // historical behaviour exactly: the full-detail LOD0 ring boundary == the
+    // collision radius, so the game's LOD selection — and world_hash — is
+    // unchanged. A caller (the create-world preview) may opt into a LARGER
+    // full-SDF render slice than its collision radius so the visible near rings
+    // render caves/overhangs instead of coarse heightmap LODs, WITHOUT building
+    // any extra gameplay collision (collision still gates on collision_range
+    // below). Clamped to [0, radius] so it never exceeds the built surface disc.
+    const int lod0_range =
+        (render_lod0_radius < 0) ? collision_range : std::clamp(render_lod0_radius, 0, radius);
+    struct SurfaceHorizonChunk {
+        std::shared_ptr<Luminumbra::Chunk> chunk;
+        IVec2 offset{0};
+        int vertical_rank = 0;
+        int lod = 0;
+        int step = 1;
+    };
+
+    std::vector<SurfaceHorizonChunk> chunks_to_build;
+    std::vector<SurfaceHorizonChunk> chunks_to_consider_for_collision;
+    std::array<std::size_t, 3> lod_counts{0u, 0u, 0u};
+    if (surface_capacity > chunks_to_build.max_size())
+        return false;
+    if (surface_capacity > chunks_to_consider_for_collision.max_size())
+        return false;
     // Diagnostic breadcrumbs ( implementation note): EnsureSurfaceReadyNear blocks on
     // three unbounded job waits during the interactive "CONSTRUCTING WORLD GEOMETRY"
     // load. If one wedges (the intermittent freeze), the LAST line printed names the
@@ -3837,38 +4033,6 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
             wait_for_meshing_jobs();
         });
 
-    const IVec3 center_chunk = world_to_chunk_coords(world_pos);
-    const int radius = std::max(0, surface_radius);
-    const int collision_range = std::max(0, collision_radius);
-    //  radius, decoupled from collision (preview fidelity implementation note).
-    // render_lod0_radius < 0 (the default, every game caller) preserves the
-    // historical behaviour exactly: the full-detail LOD0 ring boundary == the
-    // collision radius, so the game's LOD selection — and world_hash — is
-    // unchanged. A caller (the create-world preview) may opt into a LARGER
-    // full-SDF render slice than its collision radius so the visible near rings
-    // render caves/overhangs instead of coarse heightmap LODs, WITHOUT building
-    // any extra gameplay collision (collision still gates on collision_range
-    // below). Clamped to [0, radius] so it never exceeds the built surface disc.
-    const int lod0_range =
-        (render_lod0_radius < 0) ? collision_range : std::clamp(render_lod0_radius, 0, radius);
-    struct SurfaceHorizonChunk {
-        std::shared_ptr<Luminumbra::Chunk> chunk;
-        IVec2 offset{0};
-        int vertical_rank = 0;
-        int lod = 0;
-        int step = 1;
-    };
-
-    std::vector<SurfaceHorizonChunk> chunks_to_build;
-    std::vector<SurfaceHorizonChunk> chunks_to_consider_for_collision;
-    std::array<std::size_t, 3> lod_counts{0u, 0u, 0u};
-    // Reserve at most the shared resident budget, with checked multiplication.
-    const std::size_t diameter = static_cast<std::size_t>(radius) * 2u + 1u;
-    const std::size_t surface_capacity =
-        diameter <= STREAMING_MAX_ACTIVE_CHUNKS_BUDGET / diameter &&
-                diameter * diameter <= STREAMING_MAX_ACTIVE_CHUNKS_BUDGET / 5u
-            ? diameter * diameter * 5u
-            : STREAMING_MAX_ACTIVE_CHUNKS_BUDGET;
     chunks_to_build.reserve(surface_capacity);
     chunks_to_consider_for_collision.reserve(surface_capacity);
 
@@ -3891,6 +4055,7 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
         }
     }
 
+    surface_index = 0;
     for (int dz = -radius; dz <= radius; ++dz) {
         for (int dx = -radius; dx <= radius; ++dx) {
             const int chunk_x = center_chunk.x + dx;
@@ -3899,7 +4064,7 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
             // margin the fixed {-1, 0, 1} band provided on flat terrain;
             // steep columns additionally cover every chunk-Y the isosurface
             // passes through so cliff walls are meshed before world enter.
-            const ColumnSurfaceSpan span = column_surface_span(chunk_x, chunk_z);
+            const ColumnSurfaceSpan& span = surface_spans[surface_index++];
             const int ring_distance = std::max(std::abs(dx), std::abs(dz));
             const int lod = horizon_lod_for_ring(ring_distance, radius, lod0_range);
             const int step = get_lod_step_for_level(lod);
@@ -4621,8 +4786,26 @@ int SHIELD_WorldSystem::EditTerrainVoxel(const Vec3& world_pos,
                                          float radius_m,
                                          bool fill,
                                          PhysicsSystem* physics_system) {
-    if (!std::isfinite(radius_m) || radius_m <= 0.0f || !admit_water_edit(world_pos, radius_m))
+    // The edit must fit its subsequent synchronous remesh before touching SDF.
+    constexpr float max_edit_radius =
+        static_cast<float>((World::kMaxSurfaceRadius - 2) * CHUNK_SIZE_X);
+    if (!std::isfinite(radius_m) || radius_m <= 0.0f || radius_m > max_edit_radius)
         return 0;
+    if (!world::ActiveRegionLedger::valid_anchor(world_pos - Vec3(radius_m)) ||
+        !world::ActiveRegionLedger::valid_anchor(world_pos + Vec3(radius_m)))
+        return 0;
+    const int rings = static_cast<int>(radius_m / static_cast<float>(CHUNK_SIZE_X)) + 2;
+    const IVec3 center = world_to_chunk_coords(world_pos);
+    std::size_t remesh_chunks = 0;
+    // At most 625 columns. Check the exact remesh work before changing any SDF;
+    // the subsequent surface call reuses these cached spans.
+    for (int dz = -rings; dz <= rings; ++dz) {
+        for (int dx = -rings; dx <= rings; ++dx) {
+            const auto span = column_surface_span(center.x + dx, center.z + dz);
+            if (!World::AddSurfaceColumnChunks(span.min_y, span.max_y, remesh_chunks))
+                return 0;
+        }
+    }
     constexpr int size_x = CHUNK_SIZE_X + 1;
     constexpr int size_y = CHUNK_SIZE_Y + 1;
     constexpr int size_z = CHUNK_SIZE_Z + 1;
@@ -4633,6 +4816,8 @@ int SHIELD_WorldSystem::EditTerrainVoxel(const Vec3& world_pos,
     // Chunk-coord AABB the sphere can touch (carve may span several chunks).
     const IVec3 lo = world_to_chunk_coords(world_pos - Vec3(radius_m, radius_m, radius_m));
     const IVec3 hi = world_to_chunk_coords(world_pos + Vec3(radius_m, radius_m, radius_m));
+    if (!admit_water_edit(world_pos, radius_m))
+        return 0;
     int edited = 0;
     for (int cz = lo.z; cz <= hi.z; ++cz)
         for (int cy = lo.y; cy <= hi.y; ++cy)
@@ -4695,7 +4880,6 @@ int SHIELD_WorldSystem::EditTerrainVoxel(const Vec3& world_pos,
         EditTerrainBed(world_pos, delta_mm, radius_m);
         // Rebuild only after both simulation edits are complete. A render
         // preparation refusal must not leave the water bed behind the terrain.
-        const int rings = static_cast<int>(radius_m / static_cast<float>(CHUNK_SIZE_X)) + 2;
         EnsureSurfaceReadyNear(world_pos, physics_system, rings, rings);
     }
     return edited;
@@ -5754,12 +5938,14 @@ void SHIELD_WorldSystem::set_params(const TerrainGenParams& params) {
     // GenerateChunkData concurrently, so generator state must not be mutated
     // until the whole pipeline (including stage B) has settled.
     wait_for_streaming_jobs();
+    wait_for_hydro_prefetch_jobs();
 
     reinitialize_noise(&params);
 }
 
 void SHIELD_WorldSystem::set_seed(int seed) {
     wait_for_streaming_jobs();
+    wait_for_hydro_prefetch_jobs();
 
     reinitialize_noise(nullptr, seed);
 }
@@ -5878,6 +6064,12 @@ std::vector<ChunkID> SHIELD_WorldSystem::simulation_chunk_ids() const {
 }
 
 Persistence::WorldAuthorityHashes SHIELD_WorldSystem::compute_chunk_hashes() const {
+    static_assert(sizeof(std::size_t) <= sizeof(std::uint64_t));
+    const auto cursor = static_cast<std::uint64_t>(GetWaterSimWindowCursor());
+    return Persistence::BindWaterScheduler(compute_legacy_chunk_hashes(), cursor);
+}
+
+Persistence::WorldAuthorityHashes SHIELD_WorldSystem::compute_legacy_chunk_hashes() const {
     if (m_retainRegionAuthority) {
         if (!m_authorityHashCache)
             m_authorityHashCache = std::make_unique<Persistence::AuthorityHashCache>(

@@ -100,12 +100,16 @@ refuses a resume before freeze. No callback consumer or catch-up is installed.
 
 ## File and compatibility
 
+Live revision-4 captures bind the raw persisted water cursor as u64 little endian to both the water projection and chunk authority outside chunk caches in both active-region flag modes while terrain, mesh and frozen region digests retain their existing bytes.
+
+Explicit legacy revision-3 identity and projection controls retain their original bytes, with incompatible current playback and peer admission refused before ticks without a legacy fallback.
+
 The record is `<save>/chunks/region/active-regions.arl`, following the accepted
 contract's placement in the region integrity scan. This resolves the slice
 brief's conflicting save-root wording in favour of that contract. ARL1 does
 not alter LMR1 v2, the world manifest, EFS1, plant payloads, or FSD2 v3;
 active-region chunk snapshots retain explicit terrain and water ownership in optional
-`authority` metadata, while legacy snapshot bytes remain unchanged. Presets now use revision 7 with revision-6 omission
+`authority` metadata, while legacy snapshot bytes remain unchanged. Presets now use revision 8 with revision-6 omission
 compatibility and frozen packaged-preset fallback. An anchor-only ledger is not a chunk
 snapshot: with active regions enabled, the first save with dirty chunks writes all
 resident chunks, including clean chunks in other regions. The disabled path keeps
@@ -371,19 +375,16 @@ recompute, with chunk identity included in every contribution. Render caches,
 meshes and lifecycle flags cannot affect this oracle. The server availability
 digest likewise uses sorted fixed-tick simulation participants in this mode.
 
-The negotiated system configuration identity includes authority-rules revision 3
+The negotiated system configuration identity includes authority-rules revision 4
 in its v4 encoding, so earlier executables are refused before simulation rather
 than reaching a hash mismatch. This does not change the Hello protocol version.
 
-The changed hash meanings have explicit `simulation_authority_v4`,
-`simulation_terrain_v4` and `simulation_water_v4` scope prefixes, following the
-versioned content-projection convention. The water scope includes chunk identity,
+Legacy active-region primitives retain explicit `simulation_authority_v4`, `simulation_terrain_v4` and `simulation_water_v4` scope prefixes beneath the revision-4 scheduler envelope. The water scope includes chunk identity,
 integer bed/depth/flux, initialization, resolution, sleep and threshold fields.
-Legacy snapshot hashes remain unchanged with active regions disabled. LMR1 stores
+Explicit legacy snapshot projections remain byte-exact with active regions disabled, while current live captures add the scheduler envelope. LMR1 stores
 complete content, not these oracle values, and retains its container format;
 water ownership uses optional chunk metadata with legacy omission compatibility. Replay headers/checkpoints do store oracle values;
-older active-region captures fail the existing start-hash/checkpoint comparison
-instead of being silently accepted under the changed water rules. Captures made
+older authority-profile captures remain parseable and are refused by configuration identity before current playback can advance a tick. Captures made
 under the new scopes must be compared with captures under those same scopes.
 
 Plants, creatures and living-world consumers run over authoritative ECS

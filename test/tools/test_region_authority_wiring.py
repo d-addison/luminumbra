@@ -22,6 +22,111 @@ def function(source, name):
 
 
 class RegionAuthorityWiring(unittest.TestCase):
+    def test_scheduler_fold_is_unsigned_fixed_width_and_outside_chunk_cache(self):
+        source = (ROOT / "src/luminumbra_common/persistence/WorldPersistenceRoundtrip.cpp").read_text(encoding="utf-8")
+        fold = function(source, "WorldAuthorityHashes BindWaterScheduler(")
+        self.assertIn('std::string schedule("water_schedule:v1:");', fold)
+        self.assertIn("for (unsigned shift = 0; shift < 64; shift += 8)", fold)
+        self.assertIn("(raw_cursor >> shift) & 0xffu", fold)
+        self.assertIn("const auto scheduler_hash = StableChecksum(schedule);", fold)
+        self.assertIn('hashes.sub.water = StableChecksum("simulation_water_v5|grids:" + hashes.sub.water +', fold)
+        self.assertIn('"|schedule:" + scheduler_hash', fold)
+        self.assertIn('hashes.world = StableChecksum("simulation_authority_v5|base:" + hashes.world +', fold)
+        self.assertIn('"|water:" + hashes.sub.water', fold)
+        self.assertIn("hashes.water_scheduler_cursor = raw_cursor;", fold)
+        self.assertNotIn("%", fold)
+        for name in ("void AuthorityHashCache::update(", "WorldAuthorityHashes AuthorityHashCache::hashes()",
+                     "void RegionContentHasher::append("):
+            self.assertNotIn("cursor", function(source, name))
+        world = SOURCE.read_text(encoding="utf-8")
+        capture = function(world, "Persistence::WorldAuthorityHashes SHIELD_WorldSystem::compute_chunk_hashes()")
+        self.assertEqual(capture.count("GetWaterSimWindowCursor()"), 1)
+        self.assertIn("const auto cursor = static_cast<std::uint64_t>(GetWaterSimWindowCursor());", capture)
+        self.assertIn("return Persistence::BindWaterScheduler(compute_legacy_chunk_hashes(), cursor);", capture)
+        self.assertNotIn("water_cursor", capture)
+        self.assertNotIn("for (", capture)
+        legacy = function(world, "Persistence::WorldAuthorityHashes SHIELD_WorldSystem::compute_legacy_chunk_hashes()")
+        self.assertIn("m_authorityHashCache->hashes()", legacy)
+        self.assertIn("Persistence::ComputeWorldStreamingStateHash(legacy)", legacy)
+        self.assertNotIn("BindWaterScheduler", legacy)
+
+    def test_every_live_capture_uses_the_completed_session_value(self):
+        server = (ROOT / "src/luminumbra_server/ServerWorldRunner.cpp").read_text(encoding="utf-8")
+        for name in ("std::string ServerWorldRunner::ComputeWorldHash()",
+                     "ServerWorldRunner::ComputeWorldSubHashes()",
+                     "void ServerWorldRunner::ComputeWorldHashAndSubHashes("):
+            capture = function(server, name)
+            self.assertIn("const auto chunk_hashes = m_session->CaptureAuthorityHashes();", capture)
+            self.assertLess(capture.index("wait_for_streaming_jobs()"), capture.index("CaptureAuthorityHashes()"))
+            self.assertNotIn("compute_legacy_chunk_hashes", capture)
+        combined = function(server, "void ServerWorldRunner::ComputeWorldHashAndSubHashes(")
+        self.assertIn("*water_scheduler_cursor = chunk_hashes.water_scheduler_cursor;", combined)
+        client = (ROOT / "src/luminumbra_client/core/scenarios/NetworkedSessionDriver.cpp").read_text(encoding="utf-8")
+        capture = function(client, "void NetSessionCaptureHashes(")
+        self.assertIn("auto hashes = ctx->session->CaptureAuthorityHashes();", capture)
+        self.assertIn("out.world_hash = hashes.world;", capture)
+        self.assertIn("out.water = sub.water;", capture)
+        session = (ROOT / "src/luminumbra_common/world/GameSession.cpp").read_text(encoding="utf-8")
+        capture = function(session, "Persistence::WorldAuthorityHashes GameSession::CaptureAuthorityHashes()")
+        self.assertIn("!IsSimulationTickBoundary()", capture)
+        self.assertIn("m_simulationBatchInProgress", capture)
+        batch = function(session, "std::uint32_t GameSession::TickSimulation(")
+        self.assertIn("const BatchGuard guard(m_simulationBatchInProgress);", batch)
+        self.assertIn("active = true;", batch)
+        self.assertNotIn("active = enabled;", batch)
+        self.assertIn("return m_worldSystem->compute_chunk_hashes();", capture)
+        heavy = (ROOT / "src/luminumbra_server/modes/Heavy.cpp").read_text(encoding="utf-8")
+        capture = function(heavy, "HeavyHashes CaptureHashes(")
+        self.assertIn("runner.ComputeWorldHashAndSubHashes(h.world_hash, h.sub, &h.water_scheduler_cursor);", capture)
+        self.assertNotIn("GetWaterSimWindowCursor", capture)
+        comparison = (ROOT / "src/luminumbra_server/HeavyComparison.h").read_text(encoding="utf-8")
+        self.assertIn("a.water_scheduler_cursor == b.water_scheduler_cursor", comparison)
+
+    def test_cursor_load_paths_keep_persisted_state_and_preflight_metadata(self):
+        source = (ROOT / "src/luminumbra_common/world/GameSession.cpp").read_text(encoding="utf-8")
+        self.assertIn("m_worldSystem->SetWaterSimWindowCursor(saved.water_sim_cursor);", function(source, "bool GameSession::LoadWorld("))
+        reload = function(source, "bool GameSession::LoadWorldStateFrom(")
+        self.assertIn("&water_cursor", reload)
+        self.assertIn("m_worldSystem->SetWaterSimWindowCursor(water_cursor);", reload)
+        self.assertLess(reload.index("read_clock_metadata("), reload.index("clear_world("))
+        self.assertLess(reload.index("SetWaterSimWindowCursor(water_cursor)"), reload.index("adopt_streamed_chunk("))
+        self.assertNotIn("SetWaterSimWindowCursor(0)", reload)
+        native = (ROOT / "test/common/GameSessionHeadlessWorld_test.cpp").read_text(encoding="utf-8")
+        case = function(native, "NonzeroSchedulerRoundTripsBothLoadPathsAndChangesContinuation)")
+        for assertion in ("fresh.LoadWorld(", "original.LoadWorldStateFrom(save)",
+                          'metadata["waterSimCursor"] = 0u;', "EXPECT_GT(different, 0u);",
+                          "fresh.CaptureAuthorityHashes().world, before.world"):
+            self.assertIn(assertion, case)
+
+    def test_profile_refusal_covers_both_directions_and_shared_replication_gate(self):
+        source = (ROOT / "test/common/ReplicationAdmission_test.cpp").read_text(encoding="utf-8")
+        case = function(source, "AuthorityProfilesRefuseBothDirectionsForEveryRoleBeforeForwarding)")
+        for token in ("for (const bool regions : {false, true})", "for (const bool legacy_local : {false, true})",
+                      "ReplicationAdmissionRole::Host", "ReplicationAdmissionRole::Joiner",
+                      "session.LegacyRevision3SystemConfigIdentity()", "session.SystemConfigIdentity()",
+                      "EXPECT_FALSE(state.admitted());", "EXPECT_TRUE(state.failed());"):
+            self.assertIn(token, case)
+        source = (ROOT / "test/net/runtime_tcp_hello_test.cpp").read_text(encoding="utf-8")
+        for name in ("CurrentAuthorityRefusesLegacyPeerBeforeAdmission)",
+                     "LegacyAuthorityRefusesCurrentPeerBeforeAdmission)"):
+            case = function(source, name)
+            self.assertIn("peer.SendFrame(EncodeHello(hello))", case)
+            self.assertIn("EXPECT_FALSE(PollRuntimeTcpAccept", case)
+            self.assertIn("ExpectReleased();", case)
+        admission = (ROOT / "src/luminumbra_common/net/ReplicationAdmission.cpp").read_text(encoding="utf-8")
+        case = function(admission, "ReplicationAdmissionState::OnFrame(")
+        self.assertLess(case.index("peer.system_config_identity != m_local.system_config_identity"),
+                        case.index("m_phase = ReplicationAdmissionPhase::Admitted"))
+        self.assertIn('Fail("SystemConfig identity mismatch");', case)
+        for path in ("Gns.cpp", "Steam.cpp"):
+            backend = (ROOT / "src/luminumbra_server/modes" / path).read_text(encoding="utf-8")
+            self.assertIn("AdmittedReplicationTransport", backend)
+            self.assertNotIn("LegacyRevision3SystemConfigIdentity", backend)
+        for path in ("NetTcp.cpp", "RuntimeTcpSlot.cpp"):
+            backend = (ROOT / "src/luminumbra_server/modes" / path).read_text(encoding="utf-8")
+            self.assertIn("HelloMatches", backend)
+            self.assertNotIn("LegacyRevision3SystemConfigIdentity", backend)
+
     def test_snapshot_decoder_moves_terrain_samples_without_numeric_dom_arrays(self):
         source = (ROOT / "src/luminumbra_common/persistence/"
                   "WorldPersistenceRoundtrip.cpp").read_text(encoding="utf-8")

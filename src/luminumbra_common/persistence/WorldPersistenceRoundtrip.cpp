@@ -1339,6 +1339,22 @@ void AuthorityHashCache::update(const std::shared_ptr<Chunk>& incoming) {
     m_water += previous.water;
 }
 
+WorldAuthorityHashes BindWaterScheduler(WorldAuthorityHashes hashes, std::uint64_t raw_cursor) {
+    // Fixed domain plus exactly eight unsigned little-endian bytes. Retain raw
+    // state even below budget: later activation can expose any cursor difference.
+    std::string schedule("water_schedule:v1:");
+    for (unsigned shift = 0; shift < 64; shift += 8)
+        schedule.push_back(
+            static_cast<char>(static_cast<unsigned char>((raw_cursor >> shift) & 0xffu)));
+    const auto scheduler_hash = StableChecksum(schedule);
+    hashes.sub.water = StableChecksum("simulation_water_v5|grids:" + hashes.sub.water +
+                                      "|schedule:" + scheduler_hash);
+    hashes.world = StableChecksum("simulation_authority_v5|base:" + hashes.world +
+                                  "|water:" + hashes.sub.water);
+    hashes.water_scheduler_cursor = raw_cursor;
+    return hashes;
+}
+
 WorldAuthorityHashes AuthorityHashCache::hashes() const {
     const auto count = std::to_string(m_chunks.size());
     WorldAuthorityHashes result;

@@ -360,6 +360,7 @@ TEST(WorldSaveService, WaterCursorValidationPrecedesMetadataAndLedgerReplacement
                                 nlohmann::json(1.5),
                                 nlohmann::json(true),
                                 nlohmann::json("unknown"),
+                                nlohmann::json::parse("18446744073709551616"),
                                 nlohmann::json::object(),
                                 nlohmann::json::array()}) {
         SCOPED_TRACE(invalid.dump());
@@ -389,6 +390,20 @@ TEST(WorldSaveService, WaterCursorValidationPrecedesMetadataAndLedgerReplacement
             WorldSaveService::save_metadata_and_active_regions(partial, rewound, destination.path));
         EXPECT_EQ(read(metadata_path), metadata_bytes);
         EXPECT_EQ(read(ledger_path), ledger_bytes);
+    }
+    for (const auto valid : {std::size_t{0}, std::numeric_limits<std::size_t>::max()}) {
+        metadata["waterSimCursor"] = valid;
+        metadata["unknownSchedulerNote"] = "preserved";
+        ASSERT_TRUE(WorldSaveService::save_metadata_and_active_regions(
+            metadata.dump(), rewound, destination.path));
+        std::size_t accepted = 9;
+        WorldClock accepted_clock;
+        bool accepted_required = false;
+        ASSERT_TRUE(WorldSaveService::read_clock_metadata(
+            destination.path, accepted_clock, accepted_required, nullptr, nullptr, &accepted));
+        EXPECT_EQ(accepted, valid);
+        EXPECT_EQ(nlohmann::json::parse(read(metadata_path)).at("unknownSchedulerNote"),
+                  "preserved");
     }
     metadata.erase("waterSimCursor");
     ASSERT_TRUE(WorldSaveService::save_metadata_and_active_regions(

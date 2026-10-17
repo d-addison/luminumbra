@@ -19,7 +19,7 @@ SHIPPED = json.loads((ROOT / "data/common/systems.json").read_text(encoding="utf
 
 def canonical_bytes(document, *, finite_hydrology=True, rain_scale_mm=25,
                     region_work_limit=(1 << 64) - 1, region_hold_ticks=30,
-                    region_reduced_shift=1, authority_rules_revision=3):
+                    region_reduced_shift=1, authority_rules_revision=4):
     result = bytearray(b"system-config:v4:")
     for key_id, key in enumerate(SCHEMA["keys"]):
         if key["section"] != "sim" and key["enum"] != "RenderCircadian":
@@ -112,17 +112,32 @@ class SystemConfigIdentityTest(unittest.TestCase):
 
     def test_exact_shipping_pin(self):
         self.assertEqual(len(canonical_bytes(SHIPPED)), 301)
-        self.assertEqual(identity(SHIPPED), "09fd7346c6a3c38d")
+        self.assertEqual(identity(SHIPPED, authority_rules_revision=3), "09fd7346c6a3c38d")
+        self.assertEqual(identity(SHIPPED), "2a0d6f2dc4028dda")
         self.assertEqual(canonical_bytes({}), canonical_bytes(SHIPPED))
 
     def test_authority_rules_revision_is_bound(self):
-        self.assertEqual(canonical_bytes(SHIPPED)[-4:], struct.pack("<I", 3))
+        self.assertEqual(canonical_bytes(SHIPPED, authority_rules_revision=3)[-4:], struct.pack("<I", 3))
+        self.assertEqual(canonical_bytes(SHIPPED)[-4:], struct.pack("<I", 4))
         self.assertNotEqual(identity(SHIPPED), identity(SHIPPED, authority_rules_revision=1))
         self.assertNotEqual(identity(SHIPPED), identity(SHIPPED, authority_rules_revision=2))
         header = (ROOT / "src/luminumbra_common/core/SystemConfig.h").read_text(encoding="utf-8")
-        self.assertIn("kAuthorityRulesRevision = 3;", header)
+        self.assertIn("kAuthorityRulesRevision = 4;", header)
         # The previously admitted shipping rules must fail compatibility.
         self.assertNotEqual(identity(SHIPPED), "60ab3c242d54ce89")
+
+    def test_current_profile_pins_are_independently_encoded(self):
+        historical = json.loads((ROOT / "test/fixtures/historical-defaults-off.json").read_text(encoding="utf-8"))
+        self.assertEqual(identity(SHIPPED, authority_rules_revision=4), "2a0d6f2dc4028dda")
+        self.assertEqual(identity(historical, authority_rules_revision=3), "4cfcd32bf0be30e2")
+        self.assertEqual(identity(historical, authority_rules_revision=4), "2cecd744f35f6695")
+        self.assertEqual(canonical_bytes(SHIPPED, authority_rules_revision=3)[:-4],
+                         canonical_bytes(SHIPPED, authority_rules_revision=4)[:-4])
+        source = (ROOT / "src/luminumbra_common/core/SystemConfig.cpp").read_text(encoding="utf-8")
+        self.assertIn("return ComputeIdentityForRevision(kAuthorityRulesRevision);", source)
+        self.assertIn("return ComputeIdentityForRevision(kLegacyAuthorityRulesRevision);", source)
+        self.assertIn("integer(revision, 32);", source)
+        self.assertNotIn("water_scheduler_cursor", source)
 
     def test_every_applied_flag_and_parameter(self):
         baseline = identity(SHIPPED)

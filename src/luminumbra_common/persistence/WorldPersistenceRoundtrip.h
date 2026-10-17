@@ -198,11 +198,17 @@ struct WorldStreamingStateSubHashes {
 };
 
 // Production chunk oracle. Active regions use versioned authority projections;
-// legacy worlds retain the historical snapshot projection.
+// Flag-off worlds use the historical snapshot primitive before scheduler composition.
 struct WorldAuthorityHashes {
     std::string world;
     WorldStreamingStateSubHashes sub;
+    std::uint64_t water_scheduler_cursor = 0;
 };
+
+// Revision-4 live authority: bind one completed-boundary raw cursor to both water
+// and authority. Constant work outside chunk caches; legacy primitives stay exact.
+[[nodiscard]] WorldAuthorityHashes BindWaterScheduler(WorldAuthorityHashes hashes,
+                                                      std::uint64_t raw_cursor);
 
 // Owner-thread cache of small per-chunk identities, never chunk payloads. Modular
 // sums permit constant-time replacement; ids are included in each contribution.

@@ -4,30 +4,26 @@
 
 #include <glad/glad.h>
 
-#include "core/Log.h"
+#include "core/RuntimeScenarioConfig.h"
 #include "core/RuntimeScenarioHarness.h"
-#include "core/scenarios/ScenarioCommon.h"
-#include "luminumbra_common/ai/CreatureSpeciesRegistry.h" //  species base_color -> creature tint
-#include "luminumbra_common/animation/AnimationRuntime.h"
-#include "luminumbra_common/components/CoreComponents.h"
-#include "luminumbra_common/components/InstinctComponents.h"
-#include "luminumbra_common/core/Environment.h"
+#include "luminumbra/core/Types.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/ecs/EntitySnapshot.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
-#include "luminumbra_common/systems/CreatureProcgen.h" //  genome -> body-proportion build
 #include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
-#include "luminumbra_common/systems/WeatherSystem.h"
-#include "luminumbra_common/systems/WindFieldSystem.h"
 #include "luminumbra_common/world/GameSession.h"
+#include "luminumbra_common/world/SurfaceWorkBudget.h"
 #include "luminumbra_common/world/WorldStreamingState.h"
-#include "rendering/Camera.h"
-#include "rendering/LightningBolt.h"
-#include "rendering/passes/FoliagePass.h"
-#include "rendering/passes/ParticlePass.h"
+#include <cstdint>
+#include <memory>
+#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
+#include <string>
+#include <utility>
+#include <vector>
 // lockstep transport seam (engine-generic; ILockstepTransport +
 // LoopbackTransport + LockstepSession). Named SendFrame/TryReceiveFrame to dodge
 // the <windows.h> SendMessage macro (see LockstepSession.h note).
@@ -36,10 +32,7 @@
 // weather/wind state through the REAL EnvironmentalAudioSystem atmosphere model +
 // the AudioPropagationSystem ambience bed and emits the AtmosphereAudio artifact.
 // Client-side dressing only -- no world_hash, no visual-gate dependency.
-#include "audio/AudioPropagationSystem.h"
-#include "audio/EnvironmentalAudioSystem.h"
 #include <algorithm>
-#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -48,8 +41,6 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
-#include <limits>
-#include <sstream>
 #include <system_error>
 
 namespace Luminumbra::Client::ScenarioHarness {
@@ -151,8 +142,9 @@ bool NetSessionApplyStep(std::uint64_t /*tick*/,
 }
 
 // Captures this peer's bare chunk oracle plus terrain/water/entities projections.
-// Active regions merge complete resident and durable authority; legacy worlds
-// retain their historical streamed snapshot hash.
+// Active regions merge complete resident and durable authority. The disabled
+// path uses the historical streamed chunk projection. Both current captures
+// bind the global water scheduler to that projection.
 //
 // This is not the same quantity as ServerWorldRunner::ComputeWorldHashAndSubHashes.
 // The server COMPOSITE world_hash ComposeWorldHash-folds five MORE
@@ -160,7 +152,7 @@ bool NetSessionApplyStep(std::uint64_t /*tick*/,
 // wind|weather|aether|scents|ecology — none of which the client owns independent
 // state for (those fields live on the server-authoritative session; the client
 // renders the server's world). So the client deliberately pins the bare chunk hash
-// (its own deterministic value, 5b316f81a0c72a71), and the NetworkedSession oracle
+// (including the current scheduler authority), and the NetworkedSession oracle
 // is host==client over THIS client quantity on both peers (both compute the same
 // bare hash) — directly comparable, not the composite. Wiring the client to fold
 // the full canonical quantity belongs to the server-authoritative boundary. The static_assert
@@ -176,7 +168,7 @@ void NetSessionCaptureHashes(std::uint64_t tick, Luminumbra::Net::HashMsg& out, 
     auto* world_system = ctx->session->GetWorldSystem();
     world_system->wait_for_streaming_jobs();
 
-    auto hashes = world_system->compute_chunk_hashes();
+    auto hashes = ctx->session->CaptureAuthorityHashes();
     out.world_hash = hashes.world;
     const std::string empty_entities = Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(
         Luminumbra::Ecs::EntityRegistrySnapshot{});
@@ -232,6 +224,10 @@ NetworkedSessionDriver::~NetworkedSessionDriver() {
 
 bool NetworkedSessionDriver::Begin(Luminumbra::world::GameSession* client_session,
                                    const Config& config) {
+    if (!World::SurfaceRadiiSupported(config.surface_radius, config.collision_radius)) {
+        m_failure_reason = "surface_radius_unsupported";
+        return false;
+    }
     if (!client_session) {
         m_failure_reason = "client_session_null";
         return false;
@@ -457,7 +453,7 @@ bool NetworkedSessionDriver::WriteArtifact(const std::filesystem::path& artifact
 
     const GLDebugRuntimeStats gl_debug = CurrentGLDebugRuntimeStats();
 
-    nlohmann::json artifact{
+    const nlohmann::json artifact{
         {"schema", "luminumbra.networked_session.v1"},
         {"generated_by", "luminumbra_client_qa_app --scenario networked_session_smoke ()"},
         {"preset", m_impl->config.preset},

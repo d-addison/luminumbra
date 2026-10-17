@@ -26,8 +26,7 @@ HeavyHashes CaptureHashes(Luminumbra::Server::ServerWorldRunner& runner) {
         h.clock_bytes = runner.Session()->GetWorldClock().canonical_bytes();
         h.ledger_bytes = runner.Session()->GetActiveRegionLedger().canonical_bytes();
     }
-    h.world_hash = runner.ComputeWorldHash();
-    h.sub = runner.ComputeWorldSubHashes();
+    runner.ComputeWorldHashAndSubHashes(h.world_hash, h.sub, &h.water_scheduler_cursor);
     h.scent_hash = runner.Session() ? runner.Session()->ComputeScentSubHash() : std::string();
     return h;
 }
@@ -39,6 +38,7 @@ HeavyHashes CaptureHashes(Luminumbra::Server::ServerWorldRunner& runner) {
 nlohmann::json HeavyHashJson(const HeavyHashes& h) {
     return nlohmann::json{
         {"world_hash", h.world_hash},
+        {"water_scheduler_cursor", h.water_scheduler_cursor},
         {"sub_hashes",
          {
              {"terrain", h.sub.terrain},

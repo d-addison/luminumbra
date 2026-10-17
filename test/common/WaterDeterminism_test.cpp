@@ -65,19 +65,23 @@ using Luminumbra::world::GameSession;
 // within-run path stability still holds. The destructor removes the tree.
 class HeadlessRoot {
 public:
-    explicit HeadlessRoot(bool disable_island_mask = false) {
+    explicit HeadlessRoot(bool historical_physics_scenario = false) {
         root_ = Luminumbra::TestSupport::CreateUniqueTempDirectory(
             "luminumbra_water_determinism_test_");
         const fs::path src(LUMINUMBRA_SOURCE_ROOT);
         fs::create_directories(root_ / "worlds" / "atlas" / "presets");
         fs::copy_file(src / "worlds" / "atlas" / "presets" / "default.json",
                       root_ / "worlds" / "atlas" / "presets" / "default.json");
-        if (disable_island_mask) {
+        if (historical_physics_scenario) {
             const auto path = root_ / "worlds" / "atlas" / "presets" / "default.json";
             std::ifstream input(path);
             auto preset = nlohmann::json::parse(input);
             input.close();
             preset["generation_params"]["terrain"]["island_mask_enabled"] = false;
+            // Keep the calibrated resident chunk set as well as the unmasked bed.
+            // Revision 2 changes activation spans, hence water init and scheduling,
+            // even though the terrain sampler and integer flow kernel are unchanged.
+            preset["generation_params"]["terrain"]["surface_sampling_revision"] = 1;
             std::ofstream output(path);
             output << preset.dump(2);
         }
@@ -932,6 +936,8 @@ PhysicsCompareResult run_bed_edit_compare(const std::string& root,
         session.SetWaterHighResEnabled(high_res);
         EXPECT_TRUE(session.CreateWorld("PhysCompare", "777", "default"));
         SHIELD_WorldSystem* world = session.GetWorldSystem();
+        EXPECT_EQ(world->get_params().surface_sampling_revision, 1);
+        EXPECT_FALSE(world->get_params().island_mask_enabled);
         world->debug_set_streaming_radius_cap(kStreamRadiusCap);
         auto* physics = session.GetPhysicsSystem();
         const Vec3 anchor = find_wet_anchor(world, session.GetMetadata().spawnPoint);
@@ -970,9 +976,10 @@ PhysicsCompareResult run_bed_edit_compare(const std::string& root,
 }
 
 TEST(WaterDeterminism, HighResWaterMatchesMediumPhysicsPerSimPass) {
-    // Keep the bed/shoreline used to calibrate both pit-fill and dam-displacement bands:
-    // the shipping island mask reshapes the terrain and can move find_wet_anchor.
-    const HeadlessRoot root(/*disable_island_mask=*/true);
+    // Keep the bed, shoreline and activation used to calibrate both resolution bands.
+    // The island mask moves find_wet_anchor; sampling revision 2 changes the resident
+    // chunks feeding the capped water scheduler. Neither belongs in a flow-scaling probe.
+    const HeadlessRoot root(/*historical_physics_scenario=*/true);
     const int probe_high = kCompareCadence * kCompareMedTicks; // equal wall-clock horizon
     const int max_high = 2 * probe_high;                       // 2x cadence safety
 
@@ -1070,6 +1077,76 @@ TEST(WaterDeterminism, DisabledRegionsKeepHistoricalInitAndResizeOrder) {
         } else {
             EXPECT_EQ(chunks.at(resize_ids[1])->current_water_resolution.load(), 16);
             EXPECT_EQ(chunks.at(resize_ids[3])->current_water_resolution.load(), 8);
+        }
+    }
+}
+
+#include "../support/WaterSchedulerFixture.h"
+
+TEST(WaterDeterminism, RawSchedulerCursorDistinguishesEqualPresentAndDifferentFuture) {
+    using Luminumbra::TestSupport::SchedulerWorld;
+    for (const bool regions : {false, true}) {
+        for (const auto& [resolution, count] :
+             {std::pair{8, std::size_t{65}}, std::pair{16, std::size_t{17}}}) {
+            SCOPED_TRACE(::testing::Message() << regions << ':' << resolution);
+            SchedulerWorld first(regions, resolution, count), second(regions, resolution, count);
+            first.water.SetSimWindowCursor(0);
+            second.water.SetSimWindowCursor(count - 1);
+            const auto before = first.world.compute_chunk_hashes();
+            const auto other = second.world.compute_chunk_hashes();
+            EXPECT_EQ(first.world.compute_legacy_chunk_hashes().world,
+                      second.world.compute_legacy_chunk_hashes().world);
+            EXPECT_EQ(first.world.compute_legacy_chunk_hashes().sub.water,
+                      second.world.compute_legacy_chunk_hashes().sub.water);
+            EXPECT_EQ(before.sub.terrain, other.sub.terrain);
+            EXPECT_EQ(before.sub.mesh, other.sub.mesh);
+            EXPECT_NE(before.sub.water, other.sub.water);
+            EXPECT_NE(before.world, other.world);
+            EXPECT_EQ(before.water_scheduler_cursor, 0u);
+            EXPECT_EQ(other.water_scheduler_cursor, count - 1);
+            first.Step();
+            second.Step();
+            std::size_t changed = 0;
+            for (const auto& [id, chunk] : first.chunks) {
+                if (chunk->water_depth_mm != second.chunks.at(id)->water_depth_mm)
+                    ++changed;
+                EXPECT_EQ(chunk->sdf_data, second.chunks.at(id)->sdf_data);
+            }
+            EXPECT_GT(changed, 0u);
+            EXPECT_EQ(first.world.compute_chunk_hashes().sub.terrain, before.sub.terrain);
+            EXPECT_EQ(second.world.compute_chunk_hashes().sub.terrain, other.sub.terrain);
+        }
+    }
+}
+
+TEST(WaterDeterminism, BelowBudgetAndEmptyWorldRetainRawCursorUntilLaterActivation) {
+    using Luminumbra::TestSupport::SchedulerWorld;
+    for (const bool regions : {false, true}) {
+        for (const auto& [resolution, count] :
+             {std::pair{8, std::size_t{65}}, std::pair{16, std::size_t{17}}}) {
+            SchedulerWorld first(regions, resolution, 0), second(regions, resolution, 0);
+            second.water.SetSimWindowCursor(count - 1);
+            EXPECT_NE(first.world.compute_chunk_hashes().world,
+                      second.world.compute_chunk_hashes().world);
+            first.Step();
+            second.Step();
+            first.AddChunks(0, 1, resolution);
+            second.AddChunks(0, 1, resolution);
+            first.Step();
+            second.Step();
+            EXPECT_EQ(first.chunks.begin()->second->water_depth_mm,
+                      second.chunks.begin()->second->water_depth_mm);
+            EXPECT_EQ(second.water.GetSimWindowCursor(), count - 1);
+            EXPECT_NE(first.world.compute_chunk_hashes().sub.water,
+                      second.world.compute_chunk_hashes().sub.water);
+            first.AddChunks(1, count, resolution);
+            second.AddChunks(1, count, resolution);
+            first.Step();
+            second.Step();
+            std::size_t changed = 0;
+            for (const auto& [id, chunk] : first.chunks)
+                changed += chunk->water_depth_mm != second.chunks.at(id)->water_depth_mm;
+            EXPECT_GT(changed, 0u);
         }
     }
 }
