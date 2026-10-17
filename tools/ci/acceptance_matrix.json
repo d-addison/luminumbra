@@ -900,7 +900,7 @@
     {
       "id": "iss.483",
       "source": "issue #483",
-      "statement": "Asynchronous meshing captures bounded water and terrain inputs on the main thread. Pending initial meshes, terrain remeshes and water-only remeshes retain dispatch geometry while water simulation advances, including grid resizing, and subsequently mesh the newer water state. Publication rejects superseded chunk generations, mesh versions and voxel revisions; invalid water resolutions and partial surface grids are rejected before allocation. Malformed heightmaps retain the analytic coarse fallback. Promotion reservations hand off to stage-B meshing exactly once for meshless and coarse chunks. Staleness compares only consumed level prefixes and exact-grid depth availability and values; ignored tails and unavailable depth do not queue repeated remeshes. Each dispatch pass copies at most 256 KiB across all terrain and water snapshot channels. Budget-deferred chunks retain their state and capture intervening edits on a later update; bursts drain to synchronous mesh geometry. Promotion admission reserves the maximum stage-B snapshot size so its entire reservation handoff fits the same byte budget. Streaming telemetry counts only admitted work as scheduled and retains byte-budget refusals as deferred.",
+      "statement": "Asynchronous meshing captures bounded water and terrain inputs on the main thread. Pending initial meshes, terrain remeshes and water-only remeshes retain dispatch geometry while water simulation advances, including grid resizing, and subsequently mesh the newer water state. Publication rejects superseded chunk generations, mesh versions and voxel revisions; invalid water resolutions and partial surface grids are rejected before allocation. Malformed heightmaps retain the analytic coarse fallback. Promotion reservations hand off to stage-B meshing exactly once for meshless and coarse chunks. Staleness compares only consumed level prefixes and exact-grid depth availability and values; ignored tails and unavailable depth do not queue repeated remeshes. Each update and each blocking-drain subpass copies at most 256 KiB across all terrain and water snapshot channels. Budget-deferred chunks retain their state and capture intervening edits at their later admission, including a later update; bursts drain to synchronous mesh geometry. Promotion admission reserves the maximum stage-B snapshot size so its entire reservation handoff fits the same byte budget. Streaming telemetry counts only admitted work as scheduled and retains byte-budget refusals as deferred. Blocking drains settle the existing capped scheduler prefix, including deferred descriptors and both promotion stages; due activation retains the original dispatch tick. Save quiescence and destruction fence every admitted lane without publishing or admitting deferred work. Hydro prefetch retains one owned batch handle, fences callbacks before world dependencies are replaced or destroyed, and invalidates derived cache data when seed or parameters change. Rejected hydro dispatches do not prevent subsequent admission. Inline generation publishes completed data using the same generation lane contract.",
       "status": "covered",
       "evidence": [
         {
@@ -938,6 +938,70 @@
         {
           "kind": "ctest",
           "ref": "AsyncWaterMeshing.SnapshotByteBudgetAdmitsExactFitAndEmptySnapshot"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.BlockingDrainSettlesBudgetDeferredRequests"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.DueActivationSettlesBudgetDeferredRequestsAtOriginalTick"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.SurfaceReadinessSettlesBudgetDeferredRequests"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.ClearSettlesDeferredRequestsWithoutResurrection"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.RegenerateSettlesDeferredRequestsWithoutResurrection"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.GeneratorReplacementSettlesBudgetDeferredRequests"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.WaterReplacementFencesAdmittedPromotionAndDeferredMeshes"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.HydroPrefetchFencesSaveAndBlockingDrain"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.HydroPrefetchFencesDestructionAndClear"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.HydroPrefetchFencesSeedParamsAndDependencyReplacement"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.RejectedHydroPrefetchCanBeAdmittedAfterStartup"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarLodWorker.DefaultCaveStreamsEveryNeighbouringMesh"
+        },
+        {
+          "kind": "ctest",
+          "ref": "InitialWorldLoadingPerfTest.PerformanceFrameworkBenchmarkScenariosWriteBudgetArtifacts"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.UpdateSharesSnapshotBudgetWithPromotionHandoff"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.EvictedDeferredDescriptorsDoNotCopyOrMeshReplacementChunks"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.DueActivationHandsOffPromotionAfterFullMeshingFifoDrains"
         }
       ]
     },

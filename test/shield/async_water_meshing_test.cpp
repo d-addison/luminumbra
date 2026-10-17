@@ -1,6 +1,7 @@
 #include "../fixtures/TerrainFixtureParams.h"
 #include "core/JobSystem.h"
 #include "luminumbra/core/Types.h"
+#include "systems/PhysicsSystem.h"
 #include "systems/SHIELD_WorldSystem.h"
 #include "systems/WaterSystem.h"
 #include "world/Chunk.h"
@@ -816,7 +817,7 @@ void CheckBudgetedBurst(bool use_workers, bool promotion, bool edit_deferred) {
                   SHIELD_WorldSystem::kMeshingSnapshotByteBudget);
         ASSERT_NO_FATAL_FAILURE(
             InspectDeferredBurst(world, water, edit_deferred, burst, saw_deferred, edited));
-        world.wait_for_streaming_jobs();
+        world.wait_for_admitted_streaming_jobs();
         completed = CheckCompletedBurst(burst);
         EXPECT_GT(completed, completed_before);
         EXPECT_EQ(world.get_last_streaming_budget_stats().scheduled_meshing,
@@ -861,6 +862,401 @@ TEST(AsyncWaterMeshing, SnapshotByteBudgetPreservesPromotionHandoff) {
         SCOPED_TRACE(use_workers);
         CheckBudgetedBurst(use_workers, true, false);
     }
+}
+
+enum class Settlement : std::uint8_t {
+    FullDrain,
+    DueTick,
+    SurfaceReadiness,
+    Clear,
+    Regenerate,
+    Seed,
+    Params
+};
+
+void CheckSynchronousSettlement(Settlement settlement) {
+    for (const bool use_workers : {false, true}) {
+        for (const bool promotion : {false, true}) {
+            SCOPED_TRACE(use_workers);
+            SCOPED_TRACE(promotion);
+            JobSystem jobs;
+            if (use_workers) {
+                jobs.startup(1);
+            }
+            auto params = Luminumbra::Test::SyntheticTerrainParams();
+            params.base_amplitude = 0.0f;
+            params.height_offset = 8.0f;
+            params.caves_enabled = false;
+            PhysicsSystem physics;
+            if (settlement == Settlement::SurfaceReadiness) {
+                physics.startup();
+            }
+            SHIELD_WorldSystem world(use_workers ? &jobs : nullptr, nullptr, params, 1337);
+            WaterSystem water(use_workers ? &jobs : nullptr, &world);
+            water.SetBootPaused(true);
+            world.SetWaterSystem(&water);
+            world.begin_tick(0);
+            BudgetedBurstMeshes burst;
+            ASSERT_NO_FATAL_FAILURE(PrepareBudgetedBurst(world, water, promotion, burst));
+            entt::registry registry;
+            world.update(registry, std::vector<Vec3>{}, nullptr);
+            EXPECT_GT(world.get_last_streaming_budget_stats().deferred_meshing, 0u);
+            EXPECT_LE(world.last_meshing_snapshot_bytes(),
+                      SHIELD_WorldSystem::kMeshingSnapshotByteBudget);
+            // Raw save fences and early activation must retain all deferred work
+            // without promoting it. The original dispatch tick owns every suffix.
+            world.quiesce_streaming_jobs_for_save();
+            world.activate_due(7);
+            for (const auto& chunk : burst.chunks) {
+                EXPECT_EQ(chunk->mesh_version.load(), 0u);
+            }
+            switch (settlement) {
+                case Settlement::FullDrain:
+                    world.wait_for_streaming_jobs();
+                    break;
+                case Settlement::DueTick:
+                    world.begin_tick(8);
+                    world.activate_due(8);
+                    break;
+                case Settlement::SurfaceReadiness:
+                    ASSERT_TRUE(world.EnsureSurfaceReadyNear(
+                        Vec3(10008.0f, 10.0f, 10008.0f), &physics, 0, 0));
+                    break;
+                case Settlement::Clear:
+                    world.clear_world(nullptr);
+                    break;
+                case Settlement::Regenerate:
+                    world.regenerate_all_chunks(nullptr);
+                    break;
+                case Settlement::Seed:
+                    world.set_seed(7331);
+                    break;
+                case Settlement::Params:
+                    params.height_offset = 12.0f;
+                    world.set_params(params);
+                    break;
+            }
+            EXPECT_EQ(CheckCompletedBurst(burst), kBurstChunks);
+            if (promotion) {
+                EXPECT_EQ(world.promotion_dispatch_totals().chunks, kBurstChunks);
+            }
+            if (settlement == Settlement::Clear || settlement == Settlement::Regenerate) {
+                for (const auto& chunk : burst.chunks) {
+                    EXPECT_NE(world.find_streamed_chunk(chunk->get_coords()), chunk);
+                }
+            }
+            world.wait_for_streaming_jobs();
+            EXPECT_FALSE(world.get_runtime_chunk_stats().meshing_job_active);
+            if (settlement == Settlement::Regenerate) {
+                for (const auto& chunk : burst.chunks) {
+                    const auto regenerated = world.find_streamed_chunk(chunk->get_coords());
+                    ASSERT_NE(regenerated, nullptr);
+                    EXPECT_EQ(regenerated->get_state(), ChunkState::Idle);
+                    EXPECT_FALSE(regenerated->sdf_data.empty());
+                }
+            }
+        }
+    }
+}
+
+TEST(AsyncWaterMeshing, BlockingDrainSettlesBudgetDeferredRequests) {
+    CheckSynchronousSettlement(Settlement::FullDrain);
+}
+TEST(AsyncWaterMeshing, DueActivationSettlesBudgetDeferredRequestsAtOriginalTick) {
+    CheckSynchronousSettlement(Settlement::DueTick);
+}
+TEST(AsyncWaterMeshing, SurfaceReadinessSettlesBudgetDeferredRequests) {
+    CheckSynchronousSettlement(Settlement::SurfaceReadiness);
+}
+TEST(AsyncWaterMeshing, ClearSettlesDeferredRequestsWithoutResurrection) {
+    CheckSynchronousSettlement(Settlement::Clear);
+}
+TEST(AsyncWaterMeshing, RegenerateSettlesDeferredRequestsWithoutResurrection) {
+    CheckSynchronousSettlement(Settlement::Regenerate);
+}
+TEST(AsyncWaterMeshing, GeneratorReplacementSettlesBudgetDeferredRequests) {
+    CheckSynchronousSettlement(Settlement::Seed);
+    CheckSynchronousSettlement(Settlement::Params);
+}
+
+TEST(AsyncWaterMeshing, WaterReplacementFencesAdmittedPromotionAndDeferredMeshes) {
+    for (const bool promotion : {false, true}) {
+        JobSystem jobs;
+        jobs.startup(1);
+        auto params = Luminumbra::Test::SyntheticTerrainParams();
+        params.base_amplitude = 0.0f;
+        params.height_offset = 8.0f;
+        params.caves_enabled = false;
+        SHIELD_WorldSystem world(&jobs, nullptr, params, 1337);
+        auto water = std::make_unique<WaterSystem>(&jobs, &world);
+        water->SetBootPaused(true);
+        world.SetWaterSystem(water.get());
+        world.begin_tick(0);
+        BudgetedBurstMeshes burst;
+        ASSERT_NO_FATAL_FAILURE(PrepareBudgetedBurst(world, *water, promotion, burst));
+        entt::registry registry;
+        world.update(registry, std::vector<Vec3>{}, nullptr);
+        ASSERT_GT(world.get_last_streaming_budget_stats().deferred_meshing, 0u);
+        // This fence must settle admitted stage A and B before the old water
+        // owner can die. Deferred descriptors then use the replacement owner.
+        world.SetWaterSystem(nullptr);
+        water.reset();
+        water = std::make_unique<WaterSystem>(&jobs, &world);
+        water->SetBootPaused(true);
+        world.SetWaterSystem(water.get());
+        world.wait_for_streaming_jobs();
+        EXPECT_EQ(CheckCompletedBurst(burst), kBurstChunks);
+        world.SetWaterSystem(nullptr);
+    }
+}
+
+// A queue barrier makes admission/refusal checks independent of worker timing.
+// It owns no world reference and releases before the job-system owner tears down.
+class QueuedWorkerGate {
+public:
+    explicit QueuedWorkerGate(JobSystem& jobs) {
+        auto entered = std::make_shared<std::promise<void>>();
+        auto started = entered->get_future();
+        const auto release = m_release.get_future().share();
+        jobs.dispatch([entered, release]() {
+            entered->set_value();
+            release.wait();
+        });
+        started.get();
+    }
+    ~QueuedWorkerGate() {
+        release();
+    }
+    void release() {
+        if (!m_released) {
+            m_released = true;
+            m_release.set_value();
+        }
+    }
+
+private:
+    std::promise<void> m_release;
+    bool m_released = false;
+};
+
+TEST(AsyncWaterMeshing, UpdateSharesSnapshotBudgetWithPromotionHandoff) {
+    JobSystem jobs;
+    jobs.startup(1);
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.base_amplitude = 0.0f;
+    params.height_offset = 8.0f;
+    params.caves_enabled = false;
+    SHIELD_WorldSystem world(&jobs, nullptr, params, 1337);
+    WaterSystem water(&jobs, &world);
+    water.SetBootPaused(true);
+    world.SetWaterSystem(&water);
+    BudgetedBurstMeshes burst;
+    ASSERT_NO_FATAL_FAILURE(PrepareBudgetedBurst(world, water, true, burst));
+    entt::registry registry;
+    world.update(registry, std::vector<Vec3>{}, nullptr);
+    world.quiesce_streaming_jobs_for_save();
+    std::size_t promotions = 0;
+    for (const auto& chunk : burst.chunks) {
+        promotions += chunk->pending_lod.load() >= 0 ? 1u : 0u;
+    }
+    ASSERT_GT(promotions, 0u);
+    QueuedWorkerGate gate(jobs);
+    world.update(registry, std::vector<Vec3>{}, nullptr);
+    const auto stage_b_bytes =
+        promotions * (kSnapshotBytes - std::size_t{17} * 17u * 17u * sizeof(u8));
+    EXPECT_EQ(world.last_meshing_snapshot_bytes(), stage_b_bytes);
+    EXPECT_LE(world.last_meshing_snapshot_bytes(), SHIELD_WorldSystem::kMeshingSnapshotByteBudget);
+    gate.release();
+    world.wait_for_streaming_jobs();
+    EXPECT_EQ(CheckCompletedBurst(burst), kBurstChunks);
+}
+
+TEST(AsyncWaterMeshing, EvictedDeferredDescriptorsDoNotCopyOrMeshReplacementChunks) {
+    JobSystem jobs;
+    jobs.startup(1);
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.base_amplitude = 0.0f;
+    params.height_offset = 8.0f;
+    params.caves_enabled = false;
+    SHIELD_WorldSystem world(&jobs, nullptr, params, 1337);
+    world.debug_set_streaming_radius_cap(1);
+    WaterSystem water(&jobs, &world);
+    water.SetBootPaused(true);
+    world.SetWaterSystem(&water);
+    world.begin_tick(0);
+    BudgetedBurstMeshes burst;
+    ASSERT_NO_FATAL_FAILURE(PrepareBudgetedBurst(world, water, false, burst));
+    entt::registry registry;
+    world.update(registry, std::vector<Vec3>{}, nullptr);
+    const auto interval = world.get_last_streaming_budget_stats().update_interval_frames;
+    for (int frame = 1; frame < interval - 1; ++frame) {
+        world.update(registry, std::vector<Vec3>{}, nullptr);
+    }
+    const auto deferred =
+        std::find_if(burst.chunks.begin(), burst.chunks.end(), [](const auto& chunk) {
+            return chunk->pending_lod.load() < 0 && chunk->mesh_version.load() == 0u;
+        });
+    ASSERT_NE(deferred, burst.chunks.end());
+    const auto old = *deferred;
+    world.update(registry, Vec3(4096.0f, 6.0f, 4096.0f), nullptr);
+    ASSERT_EQ(world.find_streamed_chunk(old->get_coords()), nullptr);
+    auto replacement = std::make_shared<Chunk>(old->get_coords());
+    FillDugPond(world, *replacement, 32);
+    replacement->mesh_version.store(7);
+    replacement->water_mesh_version.store(9);
+    ASSERT_TRUE(world.adopt_streamed_chunk(replacement));
+    world.wait_for_streaming_jobs();
+    EXPECT_EQ(world.last_meshing_snapshot_bytes(), 0u);
+    EXPECT_EQ(old->mesh_version.load(), 0u);
+    EXPECT_EQ(old->pending_lod.load(), -1);
+    EXPECT_EQ(replacement->mesh_version.load(), 7u);
+    EXPECT_EQ(replacement->water_mesh_version.load(), 9u);
+    EXPECT_EQ(replacement->pending_lod.load(), -1);
+}
+
+TEST(AsyncWaterMeshing, DueActivationHandsOffPromotionAfterFullMeshingFifoDrains) {
+    JobSystem jobs;
+    jobs.startup(1);
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.base_amplitude = 0.0f;
+    params.height_offset = 8.0f;
+    params.caves_enabled = false;
+    SHIELD_WorldSystem world(&jobs, nullptr, params, 1337);
+    WaterSystem water(&jobs, &world);
+    water.SetBootPaused(true);
+    world.SetWaterSystem(&water);
+    world.begin_tick(0);
+    entt::registry registry;
+    std::vector<std::shared_ptr<Chunk>> chunks;
+    auto promoted = std::make_shared<Chunk>(IVec3(3, 0, 3));
+    FillDugPond(world, *promoted, 32);
+    promoted->material_data.clear();
+    world.GenerateChunkData(*promoted);
+    const auto expected = ReferenceMesh(world, water, *promoted);
+    promoted->sdf_data.clear();
+    // The existing FIFO cap is the eight-tick activation latency plus one.
+    // Nine ordinary batches fill it while the last dispatch also starts stage A.
+    constexpr std::size_t kBatches = 9;
+    for (std::size_t index = 0; index < kBatches; ++index) {
+        auto chunk = std::make_shared<Chunk>(
+            IVec3(static_cast<int>(index % 3u), 0, static_cast<int>(index / 3u)));
+        FillDugPond(world, *chunk, 32);
+        ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+        chunks.push_back(chunk);
+        if (index + 1u == kBatches) {
+            ASSERT_TRUE(world.adopt_streamed_chunk(promoted));
+        }
+        world.update(registry, std::vector<Vec3>{}, nullptr);
+    }
+    world.quiesce_streaming_jobs_for_save();
+    world.wait_for_promotion_jobs();
+    EXPECT_EQ(promoted->sdf_data, expected->sdf_data);
+    EXPECT_EQ(promoted->mesh_version.load(), 0u);
+    world.activate_due(7);
+    EXPECT_EQ(promoted->mesh_version.load(), 0u);
+    world.begin_tick(8);
+    world.activate_due(8);
+    EXPECT_EQ(promoted->mesh_indices, expected->mesh_indices);
+    EXPECT_EQ(promoted->mesh_version.load(), 1u);
+    EXPECT_EQ(promoted->water_mesh_version.load(), 1u);
+    EXPECT_EQ(promoted->pending_lod.load(), -1);
+    for (const auto& chunk : chunks) {
+        EXPECT_EQ(chunk->mesh_version.load(), 1u);
+    }
+    world.wait_for_streaming_jobs();
+    EXPECT_EQ(promoted->mesh_version.load(), 1u);
+}
+
+enum class HydroFence : std::uint8_t {
+    Save,
+    FullDrain,
+    Destroy,
+    Clear,
+    Seed,
+    Params,
+    WaterDetach
+};
+
+void CheckHydroFence(HydroFence fence) {
+    JobSystem jobs;
+    jobs.startup(1);
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.hydro_enabled = true;
+    params.hydro_iterations = 1;
+    auto world = std::make_unique<SHIELD_WorldSystem>(&jobs, nullptr, params, 1337);
+    // Warm derived data before mutation, so seed/parameter invalidation is also
+    // compared with a fresh world rather than merely testing a cold-cache path.
+    world->GetTerrainHeightAt(16.0f, 16.0f);
+    QueuedWorkerGate gate(jobs);
+    world->PrefetchHydroRegions(0.0f, 0.0f, 0.0f);
+    const auto queued = jobs.get_runtime_stats().queue_depth;
+    ASSERT_GT(queued, 0u);
+    world->PrefetchHydroRegions(16384.0f, 16384.0f, 0.0f);
+    EXPECT_EQ(jobs.get_runtime_stats().queue_depth, queued)
+        << "one owned hydro batch must bound outstanding callbacks";
+    gate.release();
+    int seed = 1337;
+    switch (fence) {
+        case HydroFence::Save:
+            world->quiesce_streaming_jobs_for_save();
+            break;
+        case HydroFence::FullDrain:
+            world->wait_for_streaming_jobs();
+            break;
+        case HydroFence::Destroy:
+            world.reset();
+            break;
+        case HydroFence::Clear:
+            world->clear_world(nullptr);
+            break;
+        case HydroFence::Seed:
+            seed = 7331;
+            world->set_seed(seed);
+            break;
+        case HydroFence::Params:
+            params.base_amplitude += 4.0f;
+            world->set_params(params);
+            break;
+        case HydroFence::WaterDetach:
+            world->SetWaterSystem(nullptr);
+            break;
+    }
+    EXPECT_EQ(jobs.get_runtime_stats().queue_depth, 0u);
+    if (fence == HydroFence::Seed || fence == HydroFence::Params) {
+        const SHIELD_WorldSystem reference(nullptr, nullptr, params, seed);
+        EXPECT_EQ(world->GetTerrainHeightAt(16.0f, 16.0f),
+                  reference.GetTerrainHeightAt(16.0f, 16.0f));
+    }
+}
+
+TEST(AsyncWaterMeshing, HydroPrefetchFencesSaveAndBlockingDrain) {
+    CheckHydroFence(HydroFence::Save);
+    CheckHydroFence(HydroFence::FullDrain);
+}
+TEST(AsyncWaterMeshing, HydroPrefetchFencesDestructionAndClear) {
+    CheckHydroFence(HydroFence::Destroy);
+    CheckHydroFence(HydroFence::Clear);
+}
+TEST(AsyncWaterMeshing, HydroPrefetchFencesSeedParamsAndDependencyReplacement) {
+    CheckHydroFence(HydroFence::Seed);
+    CheckHydroFence(HydroFence::Params);
+    CheckHydroFence(HydroFence::WaterDetach);
+}
+
+TEST(AsyncWaterMeshing, RejectedHydroPrefetchCanBeAdmittedAfterStartup) {
+    JobSystem jobs;
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.hydro_enabled = true;
+    params.hydro_iterations = 1;
+    SHIELD_WorldSystem world(&jobs, nullptr, params, 1337);
+    world.PrefetchHydroRegions(0.0f, 0.0f, 0.0f); // rejected by the stopped pool
+    jobs.startup(1);
+    QueuedWorkerGate gate(jobs);
+    world.PrefetchHydroRegions(0.0f, 0.0f, 0.0f);
+    EXPECT_GT(jobs.get_runtime_stats().queue_depth, 0u);
+    gate.release();
+    world.quiesce_streaming_jobs_for_save();
+    EXPECT_EQ(jobs.get_runtime_stats().queue_depth, 0u);
 }
 
 TEST(AsyncWaterMeshing, SnapshotByteAccountingBoundsPartialAndOversizedChannels) {
@@ -952,7 +1348,7 @@ TEST(AsyncWaterMeshing, SnapshotByteAccountingBoundsPartialAndOversizedChannels)
             }
             entt::registry registry;
             world.update(registry, std::vector<Vec3>{}, nullptr);
-            world.wait_for_streaming_jobs();
+            world.wait_for_admitted_streaming_jobs();
             const auto admitted = input.expected_bytes == 0u
                                       ? kChunks
                                       : std::min(kChunks,
@@ -1021,7 +1417,7 @@ TEST(AsyncWaterMeshing, SnapshotByteBudgetAdmitsExactFitAndEmptySnapshot) {
                   SHIELD_WorldSystem::kMeshingSnapshotByteBudget);
         EXPECT_EQ(chunks.back()->pending_lod.load(), -1);
         EXPECT_EQ(chunks.back()->water_mesh_version.load(), 0u);
-        world.wait_for_streaming_jobs();
+        world.wait_for_admitted_streaming_jobs();
         for (std::size_t index = 0; index < kChunks - 1u; ++index) {
             EXPECT_EQ(chunks[index]->water_mesh_version.load(), 1u);
         }

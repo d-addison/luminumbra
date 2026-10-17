@@ -22,6 +22,7 @@
 #include <optional>
 #include <set>
 #include <shared_mutex>
+#include <span>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -645,9 +646,9 @@ public:
         return m_last_streaming_budget_stats;
     }
 
-    // Each dispatch copies at most 256 KiB, including every terrain and water channel.
+    // Each update or blocking-drain subpass copies at most 256 KiB across all channels.
     static constexpr std::size_t kMeshingSnapshotByteBudget = 256u * 1024u;
-    // Main-thread diagnostic for the latest dispatch pass; excluded from world identity.
+    // Main-thread diagnostic for the latest update/subpass; excluded from world identity.
     std::size_t last_meshing_snapshot_bytes() const {
         return m_last_meshing_snapshot_bytes;
     }
@@ -797,9 +798,12 @@ public:
                          PhysicsSystem* physics_system);
 
     // --- Persistence integration (runtime save/load, ) ---
-    // Blocks until in-flight generation and meshing jobs complete so chunk
-    // voxel/mesh data is stable for hashing and serialization.
+    // Settles the capped scheduler prefix, including budget-deferred requests,
+    // promotion stages and hydro callbacks, for synchronous observations.
     void wait_for_streaming_jobs();
+    // Fence and publish admitted work, including both promotion stages, without
+    // admitting budget-deferred requests. Used when replacing a worker dependency.
+    void wait_for_admitted_streaming_jobs();
     //  ( step 1): drains the sim-truth promotion lane ONLY —
     // waits any in-flight promotion generation jobs, publishes their staged
     // voxel fields on this (main) thread, and dispatches the render-mesh
@@ -961,6 +965,7 @@ private:
             std::shared_ptr<::Luminumbra::Chunk> chunk;
             int lod_level = 0;
             bool high_priority = false;
+            u8 transition_faces = 0;
         };
         std::vector<PromotionJobChunk> promotion_job_chunks; // stage A in flight
         std::vector<PromotionJobChunk>
@@ -1001,6 +1006,7 @@ private:
     void shadow_note_evicted(ChunkID id);
     StreamingBudgetFrameStats m_last_streaming_budget_stats;
     std::size_t m_last_meshing_snapshot_bytes = 0;
+    bool m_meshing_snapshot_pass_active = false;
     // debug_set_streaming_radius_cap: 0 = uncapped (production behaviour).
     int m_streaming_radius_cap = 0;
     DbgStreamTimings m_dbg_stream; // runtime telemetry
@@ -1111,9 +1117,22 @@ private:
         // Near-field hole-fill work rides the High job lane (see
         // MAX_HIGH_PRIORITY_MESHING_JOBS_PER_DISPATCH in the.cpp).
         bool high_priority = false;
+        u8 transition_faces = 0;
     };
+    struct MeshingDispatchResult {
+        std::size_t admitted = 0;
+        std::size_t consumed = 0;
+    };
+    // At most one scheduler prefix (4 * MAX_CHUNKS_TO_PROCESS_PER_FRAME). Only
+    // descriptors are retained: mutable chunk buffers are copied at admission.
+    std::vector<MeshingWorkItem> m_deferred_meshing;
+    std::size_t m_deferred_meshing_cursor = 0;
+    std::int64_t m_deferred_meshing_due_tick = -1;
+    bool deferred_meshing_pending() const;
+    std::size_t dispatch_deferred_meshing();
     // Returns the admitted prefix count for streaming-budget telemetry.
-    std::size_t dispatch_meshing_jobs(const std::vector<MeshingWorkItem>& chunks_to_mesh);
+    MeshingDispatchResult dispatch_meshing_jobs(std::span<const MeshingWorkItem> chunks_to_mesh,
+                                                std::int64_t due_tick);
     void process_completed_meshing_jobs(bool force);
     bool meshing_jobs_active() const;
     //  promotion lane (see StreamingState). dispatch_promotion_jobs
@@ -1122,7 +1141,8 @@ private:
     // thread and dispatches stage B. promotion_pipeline_pending covers the
     // whole pipeline (jobs in flight OR unpublished results OR stage B not yet
     // dispatched) for the scheduling gates that today read meshing activity.
-    void dispatch_promotion_jobs(const std::vector<MeshingWorkItem>& chunks_to_promote);
+    void dispatch_promotion_jobs(const std::vector<MeshingWorkItem>& chunks_to_promote,
+                                 std::int64_t due_tick);
     void process_completed_promotion_jobs(bool force);
     // MAIN-THREAD generation publication — flips completed
     // (pending_generation_ready) batch chunks Loading→Idle and clears the
@@ -1345,6 +1365,11 @@ private:
     // so const-correctness is preserved (no world_hash-affecting state changes).
     mutable std::set<std::pair<std::int64_t, std::int64_t>> m_hydro_prefetch_inflight;
     mutable std::mutex m_hydro_prefetch_mutex;
+    // One prefetch batch owns all queued/running hydro callbacks. Serializing
+    // admission and fences keeps handle storage O(1); workers use the other mutex.
+    mutable std::mutex m_hydro_prefetch_dispatch_mutex;
+    mutable JobHandle m_hydro_prefetch_handle;
+    void wait_for_hydro_prefetch_jobs() const;
 
 public:
     // Bake the hydraulic-erosion regions covering a disc around (cx,cz) AHEAD of
