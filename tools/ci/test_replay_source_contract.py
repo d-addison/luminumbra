@@ -192,7 +192,7 @@ class ReplaySourceContract(unittest.TestCase):
         self.assertLess(primitive.index("SurfaceRadiiSupported"),
                         primitive.index("wait_for_generation_jobs"))
         self.assertRegex(primitive, r'if \(!World::AddSurfaceColumnChunks\('
-                         r'span.min_y, span.max_y, surface_capacity\)\)\s*return false;')
+                         r'\s*span.min_y, span.max_y, surface_capacity, m_retainRegionAuthority\)\)\s*return false;')
         self.assertLess(primitive.index("AddSurfaceColumnChunks"),
                         primitive.index("chunks_to_build.reserve(surface_capacity)"))
         self.assertLess(primitive.index("AddSurfaceColumnChunks"),
@@ -208,7 +208,7 @@ class ReplaySourceContract(unittest.TestCase):
                          r'radius_m > max_edit_radius\)\s*return 0;')
         self.assertLess(edit.index("std::isfinite(radius_m)"), edit.index("world_to_chunk_coords"))
         self.assertRegex(edit, r'if \(!World::AddSurfaceColumnChunks\('
-                         r'span.min_y, span.max_y, remesh_chunks\)\)\s*return 0;')
+                         r'\s*span.min_y, span.max_y, remesh_chunks, m_retainRegionAuthority\)\)\s*return 0;')
         self.assertLess(edit.index("AddSurfaceColumnChunks"), edit.index("chunk->sdf_data[idx] ="))
         budget = read_source("src/luminumbra_common/world/SurfaceWorkBudget.h")
         for check in ("kMaxSurfaceRadius = 12", "kMaxSurfaceColumns = 625",
@@ -216,6 +216,25 @@ class ReplaySourceContract(unittest.TestCase):
                       "diameter > max_size / diameter",
                       "count > kMaxSurfaceChunks - total"):
             self.assertIn(check, budget)
+
+    def test_water_owner_union_is_admitted_once_before_drains_and_edits(self):
+        source = read_source("src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        primitive = source.split("bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(", 1)[1].split(
+            "\nfloat SHIELD_WorldSystem::GetTerrainHeightAt(", 1)[0]
+        self.assertEqual(primitive.count("column_surface_span("), 1)
+        self.assertLess(primitive.index("required.insert("), primitive.index("wait_for_generation_jobs"))
+        self.assertIn("const auto& span = surface_spans[surface_index++];", primitive)
+        self.assertIn("surface_capacity, m_retainRegionAuthority", primitive)
+        edit = source.split("int SHIELD_WorldSystem::EditTerrainVoxel(", 1)[1]
+        self.assertIn("remesh_chunks, m_retainRegionAuthority", edit)
+        budget = read_source("src/luminumbra_common/world/SurfaceWorkBudget.h")
+        self.assertIn("retain_water_owner && (min_y > 1 || max_y < -1)", budget)
+        self.assertIn("count > kMaxSurfaceChunks - total", budget)
+        native = read_source("test/common/SurfaceWorkBudget_test.cpp")
+        for name in ("WaterOwnerUnionUsesTheSameBudgetAndCheckedEndpoints",
+                     "WaterOwnerOverflowRetainsPendingGenerationBeforeAnyPublication",
+                     "LegalOffsetsAndNegativeRadiiKeepTerrainAndWaterOwners"):
+            self.assertIn("TEST(SurfaceWorkBudget, " + name + ")", native)
 
     def test_surface_exact_admission_precedes_all_publication_drains(self):
         source = read_source("src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
@@ -225,7 +244,7 @@ class ReplaySourceContract(unittest.TestCase):
         # searching the rest of the translation unit could accept a later call.
         admissions = [re.search(
             r'if \(!World::AddSurfaceColumnChunks\('
-            r'span.min_y, span.max_y, surface_capacity\)\)\s*return false;', primitive)]
+            r'\s*span.min_y, span.max_y, surface_capacity, m_retainRegionAuthority\)\)\s*return false;', primitive)]
         for vector in ("chunks_to_build", "chunks_to_consider_for_collision"):
             admissions.append(re.search(
                 rf'if \(surface_capacity > {vector}\.max_size\(\)\)\s*return false;',

@@ -3326,6 +3326,11 @@
           "kind": "doc",
           "ref": "docs/active-regions.md",
           "planned": "Qualify disabled water ordering, resize rotation and sleep state against historical captures; owner: ds"
+        },
+        {
+          "kind": "ctest",
+          "ref": "PersistenceHardening.SnapshotNumericTypesMatchAcrossFastFallbackAndLegacyContainers",
+          "planned": "Registered native parser regression; execution pending; owner: ds"
         }
       ]
     },
@@ -4134,6 +4139,21 @@
           "kind": "ctest",
           "ref": "WorldgenPreviewTest.RefusedSurfaceRetainsLiveWorldAndAllowsRecovery",
           "planned": "registered native regression execution; owner: ac"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SurfaceWorkBudget.WaterOwnerUnionUsesTheSameBudgetAndCheckedEndpoints",
+          "planned": "Registered native regression; execution and qualification pending; owner: ds"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SurfaceWorkBudget.WaterOwnerOverflowRetainsPendingGenerationBeforeAnyPublication",
+          "planned": "Registered native regression; execution and qualification pending; owner: ds"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SurfaceWorkBudget.LegalOffsetsAndNegativeRadiiKeepTerrainAndWaterOwners",
+          "planned": "Registered native regression; execution and qualification pending; owner: ds"
         }
       ],
       "requirements": []
@@ -4326,6 +4346,31 @@
           "kind": "doc",
           "ref": "docs/development/system-config-identity.md",
           "planned": "Qualify current scheduler authority through native continuation and mixed-profile transport runs; owner: ds"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SystemConfig.FrozenHistoricalIdentityVectorsCoverEveryAppliedSetting",
+          "planned": "Registered native regression; execution and qualification pending; owner: ds"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SystemConfig.FrozenIdentitySessionOptionsCoverBothRegionProfiles",
+          "planned": "Registered native regression; execution and qualification pending; owner: ds"
+        },
+        {
+          "kind": "ctest",
+          "ref": "LockstepSessionTest.EveryTerminalHelloRefusalDrainsWithoutAdmissionOrTicks",
+          "planned": "Registered native regression; execution and qualification pending; owner: ds"
+        },
+        {
+          "kind": "ctest",
+          "ref": "LockstepSessionTest.PendingHelloAndConnectedSendRefusalRetryWithoutDuplicateHello",
+          "planned": "Registered native regression; execution and qualification pending; owner: ds"
+        },
+        {
+          "kind": "ctest",
+          "ref": "LockstepSessionTest.ClosedTransportDuringPendingHelloIsTerminal",
+          "planned": "Registered native regression; execution and qualification pending; owner: ds"
         }
       ]
     }

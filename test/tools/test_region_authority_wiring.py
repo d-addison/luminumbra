@@ -133,7 +133,7 @@ class RegionAuthorityWiring(unittest.TestCase):
         # Select the numeric callback's branch, not the same guard in start_object.
         number = source[source.index("bool number(Number value)"):]
         direct = function(number, "if (m_samples)")
-        self.assertIn("m_samples->push_back(nlohmann::json(value).get<float>());", direct)
+        self.assertIn("m_samples->push_back(static_cast<float>(value));", direct)
         self.assertNotIn("m_dom", direct)
         self.assertNotIn("std::function", source)
         self.assertIn("return true;", direct)
@@ -155,6 +155,38 @@ class RegionAuthorityWiring(unittest.TestCase):
         wrapper = function(source, "bool LoadWorldStreamingStateSnapshotJson(")
         self.assertIn("return decoder.load(json_text, out_state, errors, authority);", wrapper)
 
+    def test_snapshot_fallback_checks_numeric_tokens_before_conversion(self):
+        source = (ROOT / "src/luminumbra_common/persistence/WorldPersistenceRoundtrip.cpp").read_text(encoding="utf-8")
+        samples = function(source, "std::vector<float> NumericSamplesFromJson(")
+        self.assertRegex(samples, r'if \(!value.is_array\(\)\) throw')
+        self.assertRegex(samples, r'if \(!sample.is_number\(\)\) throw')
+        self.assertLess(samples.index("sample.is_number()"), samples.index("sample.get<float>()"))
+        apply = function(source, "void ApplyChunkJson(")
+        for field in ("sdf_data", "heightmap_data", "water_level_data", "water_sim_terrain_height"):
+            self.assertIn('NumericSamplesFromJson(value.at("' + field + '"))', apply)
+        sax = function(source, "bool scalar_allowed() const")
+        self.assertIn("!m_samples", sax)
+        self.assertNotIn("nlohmann::json(value)", function(source, "bool number(Number value)"))
+        native = (ROOT / "test/persistence/persistence_hardening_test.cpp").read_text(encoding="utf-8")
+        self.assertIn("TEST(PersistenceHardening, SnapshotNumericTypesMatchAcrossFastFallbackAndLegacyContainers)", native)
+
+    def test_handshake_refusals_are_terminal_before_tick_or_replay_admission(self):
+        source = (ROOT / "src/luminumbra_common/net/LockstepSession.cpp").read_text(encoding="utf-8")
+        handshake = function(source, "bool LockstepSession::Handshake()")
+        self.assertIn("const auto refuse = [this] { TransportDisconnected(); return false; };", handshake)
+        for marker in ("if (peer.seed != mine.seed)", "if (peer.preset != mine.preset)",
+                       "if (peer.tick_rate_hz != mine.tick_rate_hz)", "if (!HelloMatches(mine, peer))"):
+            self.assertIn("return refuse();", function(source[source.index(marker):], marker))
+        self.assertIn("!m_hello_sent && !m_transport->SendFrame", handshake)
+        self.assertIn("return m_transport->IsPeerConnected() ? false : refuse();", handshake)
+        pump = function(source, "TickResult LockstepSession::PumpTick(")
+        pending = function(source[source.index("TickResult LockstepSession::PumpTick("):], "if (!m_handshaken)")
+        self.assertIn("return terminal_result();", pending)
+        self.assertLess(pump.index("if (!m_handshaken)"), pump.index("DrainPeerMessages()"))
+        drain = function(source, "bool LockstepSession::DrainPeerMessages()")
+        self.assertIn("if (!m_handshaken && m_disconnect_pending) continue;", drain)
+        self.assertLess(drain.index("!m_handshaken && m_disconnect_pending"), drain.index("switch (type)"))
+
     def test_snapshot_fallback_releases_partial_buffers_and_keeps_validation(self):
         source = (ROOT / "src/luminumbra_common/persistence/"
                   "WorldPersistenceRoundtrip.cpp").read_text(encoding="utf-8")
@@ -167,8 +199,12 @@ class RegionAuthorityWiring(unittest.TestCase):
         self.assertTrue(decoder.startswith("m_directTerrainSamples = 0;"))
         for validation in ('snapshot.at("schema")', 'snapshot.at("order_contract")',
                            'snapshot.at("chunk_count")', "chunk->get_id() !=",
-                           "!out_state.insert_chunk(chunk)", "out_state.clear();"):
+                           "!staged.insert_chunk(chunk)", "out_state.clear();"):
             self.assertIn(validation, decoder)
+        self.assertLess(decoder.index('snapshot.at("chunk_count")'),
+                        decoder.index("out_state.insert_chunk(chunk)"))
+        self.assertIn("staged_chunks.push_back(std::move(chunk));", decoder)
+        self.assertIn("for (const auto& chunk : staged_chunks) out_state.insert_chunk(chunk);", decoder)
         keys = function(source, "bool key(std::string& value)")
         self.assertIn("if (m_seenChunks) return false;", keys)
         self.assertIn("if (frame.seen[index]) return false;", keys)

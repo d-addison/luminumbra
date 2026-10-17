@@ -3965,16 +3965,36 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
 
     const IVec3 center_chunk = world_to_chunk_coords(world_pos);
     // Preflight the exact vertical work before allocating or changing chunks.
-    // At most 625 columns and 8192 chunks, including both vertical margins.
+    // At most 625 columns and 8192 chunks, including margins and Y=0 water owners.
     std::array<ColumnSurfaceSpan, World::kMaxSurfaceColumns> surface_spans{};
     std::size_t surface_capacity = 0;
     std::size_t surface_index = 0;
     for (int dz = -radius; dz <= radius; ++dz) {
         for (int dx = -radius; dx <= radius; ++dx) {
             const auto span = column_surface_span(center_chunk.x + dx, center_chunk.z + dz);
-            if (!World::AddSurfaceColumnChunks(span.min_y, span.max_y, surface_capacity))
+            if (!World::AddSurfaceColumnChunks(
+                    span.min_y, span.max_y, surface_capacity, m_retainRegionAuthority))
                 return false;
             surface_spans[surface_index++] = span;
+        }
+    }
+    // Use the admitted spans for the entire required-ID union before any drain
+    // can publish work. Never resample a column after settling pending jobs.
+    if (m_retainRegionAuthority) {
+        surface_index = 0;
+        for (int dz = -radius; dz <= radius; ++dz) {
+            for (int dx = -radius; dx <= radius; ++dx) {
+                const auto& span = surface_spans[surface_index++];
+                const bool extra_owner = span.min_y > 1 || span.max_y < -1;
+                const auto last = static_cast<std::int64_t>(span.max_y) + 1;
+                for (auto layer = static_cast<std::int64_t>(span.min_y) - 1;
+                     layer <= last + extra_owner;
+                     ++layer) {
+                    const int y = layer <= last ? static_cast<int>(layer) : 0;
+                    required.insert(
+                        Chunk::calculate_id(IVec3(center_chunk.x + dx, y, center_chunk.z + dz)));
+                }
+            }
         }
     }
     //  radius, decoupled from collision (preview fidelity implementation note).
@@ -4036,25 +4056,6 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
     chunks_to_build.reserve(surface_capacity);
     chunks_to_consider_for_collision.reserve(surface_capacity);
 
-    if (m_retainRegionAuthority) {
-        for (int dz = -radius; dz <= radius; ++dz) {
-            for (int dx = -radius; dx <= radius; ++dx) {
-                const int x = center_chunk.x + dx;
-                const int z = center_chunk.z + dz;
-                const auto span = column_surface_span(x, z);
-                const bool extra_owner = span.min_y > 1 || span.max_y < -1;
-                for (int layer = span.min_y - 1; layer <= span.max_y + 1 + extra_owner; ++layer) {
-                    const int y = layer <= span.max_y + 1 ? layer : 0;
-                    // At most the shared resident budget of required ids is stored.
-                    const auto id = Chunk::calculate_id(IVec3(x, y, z));
-                    if (required.size() == kActiveChunkBudget && !required.contains(id))
-                        return false;
-                    required.insert(id);
-                }
-            }
-        }
-    }
-
     surface_index = 0;
     for (int dz = -radius; dz <= radius; ++dz) {
         for (int dx = -radius; dx <= radius; ++dx) {
@@ -4071,8 +4072,11 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
             lod_counts[static_cast<std::size_t>(std::clamp(lod, 0, 2))]++;
 
             const bool extra_owner = m_retainRegionAuthority && (span.min_y > 1 || span.max_y < -1);
-            for (int layer = span.min_y - 1; layer <= span.max_y + 1 + extra_owner; ++layer) {
-                const int chunk_y = layer <= span.max_y + 1 ? layer : 0;
+            const auto last = static_cast<std::int64_t>(span.max_y) + 1;
+            for (auto layer = static_cast<std::int64_t>(span.min_y) - 1;
+                 layer <= last + extra_owner;
+                 ++layer) {
+                const int chunk_y = layer <= last ? static_cast<int>(layer) : 0;
                 const IVec3 coords(chunk_x, chunk_y, chunk_z);
                 const ChunkID id = Chunk::calculate_id(coords);
 
@@ -4802,7 +4806,8 @@ int SHIELD_WorldSystem::EditTerrainVoxel(const Vec3& world_pos,
     for (int dz = -rings; dz <= rings; ++dz) {
         for (int dx = -rings; dx <= rings; ++dx) {
             const auto span = column_surface_span(center.x + dx, center.z + dz);
-            if (!World::AddSurfaceColumnChunks(span.min_y, span.max_y, remesh_chunks))
+            if (!World::AddSurfaceColumnChunks(
+                    span.min_y, span.max_y, remesh_chunks, m_retainRegionAuthority))
                 return 0;
         }
     }

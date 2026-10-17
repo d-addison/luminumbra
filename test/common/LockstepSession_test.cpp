@@ -3407,3 +3407,142 @@ TEST(LockstepSessionTest, CurrentAndLegacyAuthorityProfilesRefuseBothDirectionsB
         EXPECT_FALSE(net::HelloMatches(second, first));
     }
 }
+
+TEST(LockstepSessionTest, EveryTerminalHelloRefusalDrainsWithoutAdmissionOrTicks) {
+    for (int variant = 0; variant < 17; ++variant) {
+        SCOPED_TRACE(variant);
+        auto [local, peer] = net::MakeLoopbackPair();
+        ReplenishingTransport transport(*local);
+        auto config = MakeConfig(0, 1);
+        auto hello = net::MakeLockstepHello(config);
+        hello.client_id = 1;
+        switch (variant) {
+            case 0:
+                ++hello.protocol_version;
+                break;
+            case 1:
+                ++hello.seed;
+                break;
+            case 2:
+                hello.preset = "other";
+                break;
+            case 3:
+                ++hello.tick_rate_hz;
+                break;
+            case 4:
+                hello.system_config_identity.clear();
+                break;
+            case 5:
+                hello.system_config_identity = "different";
+                break;
+            case 6:
+                hello.preset_content_hash.clear();
+                break;
+            case 7:
+                hello.preset_content_hash = "different";
+                break;
+            case 8:
+                hello.client_id = 0;
+                break;
+            case 9:
+                hello.client_id = 2;
+                break;
+            case 10:
+                hello.horizon_min = 0;
+                break;
+            case 11:
+                ++hello.horizon_max;
+                break;
+            case 12:
+                ++hello.hash_cadence_ticks;
+                break;
+            case 13:
+                hello.max_frame_bytes = 1;
+                break;
+            case 14:
+                config.horizon_min = 0;
+                break;
+            case 15:
+                break; // Truncated Hello.
+            case 16:
+                break; // Input before Hello.
+        }
+        auto frame = net::EncodeHello(hello);
+        if (variant == 15)
+            frame.pop_back();
+        if (variant == 16)
+            frame = net::EncodeInput({1, 1, {}});
+        ASSERT_TRUE(peer->SendFrame(frame));
+        transport.State().refill_frame = net::EncodeInput({1, 1, {}});
+        transport.State().refill_left = 2 * net::kReceiveQueueFrameLimit;
+        FakeWorld world{0, "same", 0};
+        net::LockstepSession session(config, &transport, MakeHooks(&world));
+        const Luminumbra::TestSupport::ScopedTempFile artifact("refused-hello-", ".lrec1");
+        session.SetDumpPath(artifact.Path().string());
+        EXPECT_FALSE(session.Handshake());
+        EXPECT_LE(transport.State().polls, net::kReceiveQueueFrameLimit);
+        for (int pump = 0; pump < 3; ++pump) {
+            const auto previous_polls = transport.State().polls;
+            const auto outcome = session.PumpTick(10).outcome;
+            EXPECT_TRUE(outcome == net::TickOutcome::WaitingForPeer ||
+                        outcome == net::TickOutcome::PeerDisconnected);
+            EXPECT_LE(transport.State().polls - previous_polls, net::kReceiveQueueFrameLimit);
+            EXPECT_EQ(world.tick, 0u);
+            EXPECT_EQ(session.AgreedTick(), 0u);
+            EXPECT_EQ(session.AdmissionStatus().peer_inputs, 0u);
+            EXPECT_EQ(session.AdmissionStatus().peer_hashes, 0u);
+            EXPECT_EQ(session.AdmissionStatus().replay_bytes, 0u);
+        }
+        EXPECT_TRUE(transport.State().closed);
+        EXPECT_EQ(session.PumpTick(10).outcome, net::TickOutcome::PeerDisconnected);
+        EXPECT_FALSE(session.Handshake());
+        EXPECT_FALSE(session.Status().handshaken);
+        EXPECT_FALSE(fs::exists(artifact.Path()));
+    }
+}
+
+TEST(LockstepSessionTest, PendingHelloAndConnectedSendRefusalRetryWithoutDuplicateHello) {
+    for (const bool refuse_send : {false, true}) {
+        auto [local, peer] = net::MakeLoopbackPair();
+        BackpressuredTransport transport(*local);
+        transport.State().refusals_remaining = refuse_send ? 1u : 0u;
+        FakeWorld world{0, "same", 0};
+        const auto config = MakeConfig(0, 1);
+        net::LockstepSession session(config, &transport, MakeHooks(&world));
+        EXPECT_FALSE(session.Handshake());
+        EXPECT_FALSE(session.Status().peer_disconnected);
+        EXPECT_EQ(session.PumpTick(10).outcome, net::TickOutcome::WaitingForPeer);
+        EXPECT_EQ(world.tick, 0u);
+        ASSERT_TRUE(SendPeerHello(*peer, config));
+        ASSERT_TRUE(session.Handshake());
+        ASSERT_TRUE(session.Handshake()); // Idempotent after acceptance too.
+        std::vector<std::uint8_t> frame;
+        unsigned hellos = 0;
+        while (peer->TryReceiveFrame(frame)) {
+            net::MessageType type;
+            ASSERT_TRUE(net::PeekMessageType(frame, type));
+            if (type == net::MessageType::Hello)
+                ++hellos;
+        }
+        EXPECT_EQ(hellos, 1u);
+        ASSERT_TRUE(peer->SendFrame(net::EncodeInput({1, 1, {}})));
+        EXPECT_EQ(session.PumpTick(10).outcome, net::TickOutcome::Advanced);
+        EXPECT_EQ(world.tick, 1u);
+    }
+}
+
+TEST(LockstepSessionTest, ClosedTransportDuringPendingHelloIsTerminal) {
+    for (const bool retry_handshake : {false, true}) {
+        auto [local, peer] = net::MakeLoopbackPair();
+        FakeWorld world{0, "same", 0};
+        net::LockstepSession session(MakeConfig(0, 1), local.get(), MakeHooks(&world));
+        EXPECT_FALSE(session.Handshake());
+        peer->Close();
+        if (retry_handshake) {
+            EXPECT_FALSE(session.Handshake());
+        }
+        EXPECT_EQ(session.PumpTick(10).outcome, net::TickOutcome::PeerDisconnected);
+        EXPECT_EQ(world.tick, 0u);
+        EXPECT_FALSE(session.Handshake());
+    }
+}

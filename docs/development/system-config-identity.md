@@ -35,7 +35,8 @@ padding: finite hydrology (u8, 0 or 1), rain scale (i32, modulo-2^32 representat
 work limit (u64), hold ticks (u32), reduced cadence shift (u8) and authority-rules
 revision (u32, currently 4). All six values are included even when their associated feature is disabled. No float conversion loses
 adjacent integer values. The current defaults append `0119000000ffffffffffffffff1e0000000104000000`.
-The explicit legacy revision-3 encoder retains `0119000000ffffffffffffffff1e0000000103000000`.
+The explicit historical revision-3 encoder starts with `system-config:v3:` and ends with
+`0119000000ffffffffffffffff1e00000001`, without an appended revision integer.
 The domain version changes so older identities cannot be mistaken for this encoding.
 This configuration encoding is independent of the resolved preset hash below.
 
@@ -45,7 +46,7 @@ zeros remain distinct. FNV-1a uses offset
 14695981039346656037 and prime 1099511628211, with unsigned 64-bit wraparound. The result
 is 16 lowercase hex digits emitted without locale formatting. Shipped defaults serialize
 to **301 bytes → `2a0d6f2dc4028dda`** for revision 4.
-The explicit legacy revision-3 encoder still yields **301 bytes → `09fd7346c6a3c38d`**. The independent stdlib computation in
+The explicit legacy revision-3 encoder still yields **297 bytes → `60ab3c242d54ce89`**. The independent stdlib computation in
 `test/tools/test_system_config_identity.py` resolves JSON inputs through binary32 as
 SystemConfig does, applies effective fallback/clamping/count conversion, encodes with
 `struct.pack('<f' / '<d' / '<I', value)`, and folds each byte as
@@ -86,8 +87,8 @@ validation covers loopback, TCP replication, TCP lockstep and replay; the Hello
 protocol version and wire layout are unchanged. Hardening codec fixtures use
 arbitrary matching identity strings and retain their existing literal values.
 The current historical-defaults-off configuration has identity `2cecd744f35f6695`.
-Its explicit legacy revision-3 identity remains `4cfcd32bf0be30e2`.
-The revision-3 shipping identity `09fd7346c6a3c38d` is refused by current admission,
+Its explicit legacy revision-3 identity remains `74f285c5fa387d66`.
+The revision-3 shipping identity `60ab3c242d54ce89` is refused by current admission,
 and a legacy peer likewise refuses a current identity before ticks or writes.
 Neither admission nor playback retries with the legacy projection after a mismatch.
 Legacy encoders and chunk projections remain available for explicit historical inspection.

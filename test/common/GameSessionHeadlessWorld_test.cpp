@@ -1659,11 +1659,35 @@ TEST(GameSessionHeadlessWorldTest, DisabledRegionsKeepLegacyStreamedCollisionHas
     Luminumbra::WorldStreamingState legacy;
     legacy.insert_chunk(chunk);
     const auto before = SessionWorldHash(session);
-    EXPECT_EQ(SessionWorldSubHashes(session).at("chunk"),
+    // The historical contract includes streamed collider residency. Current R4
+    // additionally binds the raw water scheduler even with regions disabled.
+    EXPECT_EQ(session.GetWorldSystem()->compute_legacy_chunk_hashes().world,
               P::ComputeWorldStreamingStateHash(legacy));
-    chunk->has_collision.store(true);
-    EXPECT_EQ(SessionWorldSubHashes(session).at("chunk"),
+    EXPECT_EQ(SessionWorldSubHashes(session).at("chunk"), "beb828adb58f9130");
+    for (const bool collision : {false, true}) {
+        chunk->has_collision.store(collision);
+        for (const std::uint64_t cursor : {std::uint64_t{0}, std::uint64_t{0x01020304}}) {
+            session.GetWorldSystem()->SetWaterSimWindowCursor(static_cast<std::size_t>(cursor));
+            const auto historical = session.GetWorldSystem()->compute_legacy_chunk_hashes();
+            EXPECT_EQ(historical.world, P::ComputeWorldStreamingStateHash(legacy));
+            std::string scheduler("water_schedule:v1:");
+            for (unsigned byte = 0; byte < 8; ++byte)
+                scheduler.push_back(static_cast<char>((cursor >> (8 * byte)) & 0xffu));
+            const auto water =
+                P::StableChecksum("simulation_water_v5|grids:" +
+                                  P::ComputeWorldStreamingStateSubHashes(legacy).water +
+                                  "|schedule:" + P::StableChecksum(scheduler));
+            const auto expected = P::StableChecksum(
+                "simulation_authority_v5|base:" + P::ComputeWorldStreamingStateHash(legacy) +
+                "|water:" + water);
+            EXPECT_EQ(SessionWorldSubHashes(session).at("chunk"), expected);
+            EXPECT_EQ(session.GetWorldSystem()->compute_chunk_hashes().sub.water, water);
+        }
+    }
+    session.GetWorldSystem()->SetWaterSimWindowCursor(0);
+    EXPECT_EQ(session.GetWorldSystem()->compute_legacy_chunk_hashes().world,
               P::ComputeWorldStreamingStateHash(legacy));
+    EXPECT_EQ(SessionWorldSubHashes(session).at("chunk"), "ded16413f656b1ab");
     EXPECT_NE(SessionWorldHash(session), before);
 }
 
@@ -5004,7 +5028,7 @@ TEST(GameSessionHeadlessWorldTest, EffectiveIdentityUsesDefaultsAndCurrentSetter
     const auto baseline = direct.SystemConfigIdentity();
     EXPECT_FALSE(baseline.empty());
     EXPECT_EQ(baseline, applied.SystemConfigIdentity());
-    EXPECT_EQ(direct.LegacyRevision3SystemConfigIdentity(), "09fd7346c6a3c38d");
+    EXPECT_EQ(direct.LegacyRevision3SystemConfigIdentity(), "60ab3c242d54ce89");
     EXPECT_EQ(baseline, "2a0d6f2dc4028dda");
     for (const auto& [name, identity] : Luminumbra::TestSupport::EffectiveIdentityMismatches()) {
         SCOPED_TRACE(name);

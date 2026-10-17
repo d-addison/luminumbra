@@ -1136,7 +1136,15 @@ LockstepAdmissionStatus LockstepSession::AdmissionStatus() const {
 }
 
 bool LockstepSession::Handshake() {
+    if (m_disconnect_pending || m_status.peer_disconnected || m_status.desynced)
+        return false;
+    if (m_handshaken)
+        return true;
     m_receive_work = {};
+    const auto refuse = [this] {
+        TransportDisconnected();
+        return false;
+    };
     // Send our Hello, then drain until the peer's Hello arrives (loopback: the peer's
     // Hello must already be queued by the single-process driver). A mismatched
     // protocol/version/seed/preset/tick-rate/config identity is rejected loudly.
@@ -1147,15 +1155,15 @@ bool LockstepSession::Handshake() {
             "invalid local lockstep horizons: require 0 < min <= start <= max";
         LUMINUMBRA_CORE_ERROR(
             "lockstep[{}]: {}", m_config.local_client_id, m_status.handshake_error);
-        TransportDisconnected();
-        return false;
+        return refuse();
     }
-    if (!m_transport->SendFrame(EncodeHello(mine))) {
-        LUMINUMBRA_CORE_ERROR("lockstep[{}]: handshake send failed (peer gone)",
-                              m_config.local_client_id);
-        TransportDisconnected();
-        return false;
+    if (!m_hello_sent && !m_transport->SendFrame(EncodeHello(mine))) {
+        LUMINUMBRA_CORE_ERROR("lockstep[{}]: handshake send refused", m_config.local_client_id);
+        // A connected backend can refuse transiently without closing. No
+        // Hello has been sent or peer frame consumed, so a later call may retry.
+        return m_transport->IsPeerConnected() ? false : refuse();
     }
+    m_hello_sent = true;
 
     // Drain frames looking for the peer Hello. Non-Hello frames before the handshake are
     // a protocol error.
@@ -1171,19 +1179,19 @@ bool LockstepSession::Handshake() {
             LUMINUMBRA_CORE_ERROR("lockstep[{}]: expected Hello first, got type {}",
                                   m_config.local_client_id,
                                   frame.empty() ? -1 : static_cast<int>(frame[0]));
-            return false;
+            return refuse();
         }
         if (!DecodeHello(frame, peer)) {
             LUMINUMBRA_CORE_ERROR("lockstep[{}]: malformed or unsupported Hello version (requires "
                                   "Hello v4 identity and admission limits)",
                                   m_config.local_client_id);
-            return false;
+            return refuse();
         }
         got_peer = true;
     }
     if (!got_peer) {
-        LUMINUMBRA_CORE_ERROR("lockstep[{}]: peer never sent Hello", m_config.local_client_id);
-        return false;
+        // No frame yet is a pending handshake, not an identity refusal.
+        return m_transport->IsPeerConnected() ? false : refuse();
     }
 
     if (peer.protocol_version != mine.protocol_version) {
@@ -1191,28 +1199,28 @@ bool LockstepSession::Handshake() {
                               m_config.local_client_id,
                               mine.protocol_version,
                               peer.protocol_version);
-        return false;
+        return refuse();
     }
     if (peer.seed != mine.seed) {
         LUMINUMBRA_CORE_ERROR("lockstep[{}]: seed mismatch (local {} != peer {})",
                               m_config.local_client_id,
                               mine.seed,
                               peer.seed);
-        return false;
+        return refuse();
     }
     if (peer.preset != mine.preset) {
         LUMINUMBRA_CORE_ERROR("lockstep[{}]: preset mismatch (local '{}' != peer '{}')",
                               m_config.local_client_id,
                               mine.preset,
                               peer.preset);
-        return false;
+        return refuse();
     }
     if (peer.tick_rate_hz != mine.tick_rate_hz) {
         LUMINUMBRA_CORE_ERROR("lockstep[{}]: tick-rate mismatch (local {} != peer {})",
                               m_config.local_client_id,
                               mine.tick_rate_hz,
                               peer.tick_rate_hz);
-        return false;
+        return refuse();
     }
 
     if (mine.preset_content_hash.empty() || peer.preset_content_hash.empty() ||
@@ -1220,12 +1228,12 @@ bool LockstepSession::Handshake() {
         LUMINUMBRA_CORE_ERROR(
             "lockstep[{}]: resolved preset/species content hash mismatch or missing identity",
             m_config.local_client_id);
-        return false;
+        return refuse();
     }
     if (!HelloMatches(mine, peer)) {
         LUMINUMBRA_CORE_ERROR("lockstep[{}]: simulation configuration identity mismatch",
                               m_config.local_client_id);
-        return false;
+        return refuse();
     }
 
     // This is a direct two-peer protocol, with no input relay role. Bind Hello to
@@ -1234,13 +1242,12 @@ bool LockstepSession::Handshake() {
         ++m_status.rejected_peer_messages;
         LUMINUMBRA_CORE_ERROR(
             "lockstep[{}]: unexpected peer client id {}", m_config.local_client_id, peer.client_id);
-        return false;
+        return refuse();
     }
     if (!ConfigureRetention(mine, peer)) {
         LUMINUMBRA_CORE_ERROR(
             "lockstep[{}]: {}", m_config.local_client_id, m_status.handshake_error);
-        TransportDisconnected();
-        return false;
+        return refuse();
     }
     // Disk setup and worker startup belong to handshake, never the tick path.
     // Recorder failure affects diagnostics only, not handshake or simulation.
@@ -1250,7 +1257,7 @@ bool LockstepSession::Handshake() {
     // flight before the first tick runs.
     for (std::uint64_t t = 1; t <= m_horizon; ++t) {
         if (!ScheduleLocalInput(t))
-            return false;
+            return refuse();
     }
     m_handshaken = true;
     m_status.handshaken = true;
@@ -1576,6 +1583,10 @@ bool LockstepSession::DrainPeerMessages() {
         // Transports enforce kMaxFramePayloadBytes before allocating. The byte
         // budget is checked before each poll, so this sum cannot overflow.
         m_receive_work.payload_bytes += frame.size();
+        // A refused handshake drains received bytes under the usual budget,
+        // but must never admit inputs, hashes or replay data from that peer.
+        if (!m_handshaken && m_disconnect_pending)
+            continue;
         MessageType type;
         if (!PeekMessageType(frame, type))
             continue;
@@ -1687,6 +1698,11 @@ TickResult LockstepSession::PumpTick(std::uint64_t budget_ticks) {
     };
     if (m_status.desynced || m_status.peer_disconnected)
         return terminal_result();
+    if (!m_handshaken) {
+        if (m_disconnect_pending || !m_transport->IsPeerConnected())
+            TransportDisconnected();
+        return terminal_result();
+    }
     // 1) Drain peer messages (inputs, hash compares, disconnect). A fatal state stops here.
     if (!DrainPeerMessages())
         return terminal_result();

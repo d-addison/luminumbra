@@ -40,11 +40,13 @@ inline constexpr std::size_t kMaxSurfaceChunks = 8192;
 
 // Includes min_y-1 through max_y+1. Keep subsequent int loop endpoints and
 // additions representable; a failed addition leaves the running total intact.
-[[nodiscard]] constexpr bool AddSurfaceColumnChunks(int min_y, int max_y, std::size_t& total) {
+[[nodiscard]] constexpr bool
+AddSurfaceColumnChunks(int min_y, int max_y, std::size_t& total, bool retain_water_owner = false) {
     if (min_y > max_y || min_y == std::numeric_limits<int>::min() ||
         max_y >= std::numeric_limits<int>::max() - 1 || total > kMaxSurfaceChunks)
         return false;
-    const auto count = static_cast<std::uint64_t>(static_cast<std::int64_t>(max_y) - min_y) + 3;
+    const auto count = static_cast<std::uint64_t>(static_cast<std::int64_t>(max_y) - min_y) + 3 +
+                       (retain_water_owner && (min_y > 1 || max_y < -1) ? 1u : 0u);
     if (count > kMaxSurfaceChunks - total)
         return false;
     total += static_cast<std::size_t>(count);

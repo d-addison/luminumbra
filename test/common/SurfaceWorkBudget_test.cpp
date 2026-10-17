@@ -428,4 +428,133 @@ TEST(SurfaceWorkBudget, TallSurfaceRefusalRetainsUnpublishedPromotionBatch) {
     EXPECT_EQ(chunk->mesh_version.load(), original_version + 1u);
 }
 
+TEST(SurfaceWorkBudget, WaterOwnerUnionUsesTheSameBudgetAndCheckedEndpoints) {
+    for (const bool retain : {false, true}) {
+        for (const auto& [low, high] : {std::pair{2, 8191}, std::pair{-8192, -3}}) {
+            std::size_t total = 0;
+            EXPECT_EQ(budget::AddSurfaceColumnChunks(low, high, total, retain), !retain);
+            EXPECT_EQ(total, retain ? 0u : budget::kMaxSurfaceChunks);
+            total = 0;
+            EXPECT_TRUE(budget::AddSurfaceColumnChunks(low, high - 1, total, retain));
+            EXPECT_EQ(total, retain ? budget::kMaxSurfaceChunks : budget::kMaxSurfaceChunks - 1);
+        }
+        for (const auto& [low, high] :
+             {std::pair{-4096, 4093}, std::pair{-1, 8188}, std::pair{-8188, 1}}) {
+            std::size_t total = 0;
+            EXPECT_TRUE(budget::AddSurfaceColumnChunks(low, high, total, retain));
+            EXPECT_EQ(total, budget::kMaxSurfaceChunks);
+        }
+        for (const int endpoint :
+             {std::numeric_limits<int>::min() + 1, std::numeric_limits<int>::max() - 2}) {
+            std::size_t total = 0;
+            EXPECT_TRUE(budget::AddSurfaceColumnChunks(endpoint, endpoint, total, retain));
+            EXPECT_EQ(total, retain ? 4u : 3u);
+        }
+        for (const auto& [low, high] : {std::pair{1, 0},
+                                        std::pair{std::numeric_limits<int>::min(), 0},
+                                        std::pair{0, std::numeric_limits<int>::max()}}) {
+            std::size_t total = 7;
+            EXPECT_FALSE(budget::AddSurfaceColumnChunks(low, high, total, retain));
+            EXPECT_EQ(total, 7u);
+        }
+        std::size_t total = budget::kMaxSurfaceChunks - 3;
+        EXPECT_EQ(budget::AddSurfaceColumnChunks(2, 2, total, retain), !retain);
+        EXPECT_EQ(total, retain ? budget::kMaxSurfaceChunks - 3 : budget::kMaxSurfaceChunks);
+    }
+}
+
+TEST(SurfaceWorkBudget, WaterOwnerOverflowRetainsPendingGenerationBeforeAnyPublication) {
+    for (const bool negative : {false, true}) {
+        auto params = Luminumbra::Test::SyntheticTerrainParams();
+        params.surface_sampling_revision = Luminumbra::Systems::kSurfaceSamplingRevision;
+        params.base_frequency = 0.1f;
+        params.base_amplitude = 1.0f;
+        params.height_offset = 0.0f;
+        params.peaks_amplitude = 0.0f;
+        params.caves_enabled = false;
+        const std::array<float, 5> xs{8, 0, 16, 0, 16};
+        const std::array<float, 5> zs{8, 0, 0, 16, 16};
+        std::array<float, 5> samples{};
+        {
+            Luminumbra::Systems::SHIELD_WorldSystem probe(nullptr, nullptr, params, 1337);
+            probe.ComputeShapedHeightsAtPositions(xs.data(), zs.data(), xs.size(), samples.data());
+        }
+        const auto [minimum, maximum] = std::minmax_element(samples.begin(), samples.end());
+        ASSERT_GT(*maximum, *minimum);
+        // Put the five samples at centers of layers spanning exactly 8190
+        // layers. The two margins fit 8192, but the separate Y=0 owner cannot.
+        const float extent = 8189.0f * static_cast<float>(Luminumbra::CHUNK_SIZE_Y);
+        params.base_amplitude = extent / (*maximum - *minimum);
+        params.height_offset =
+            (negative ? -extent - 40.0f : 40.0f) - *minimum * params.base_amplitude;
+        Luminumbra::JobSystem jobs;
+        jobs.startup(1);
+        Luminumbra::Systems::SHIELD_WorldSystem world(&jobs, nullptr, params, 1337, true);
+        Luminumbra::Systems::PhysicsSystem physics;
+        world.ComputeShapedHeightsAtPositions(xs.data(), zs.data(), xs.size(), samples.data());
+        const auto [lowest, highest] = std::minmax_element(samples.begin(), samples.end());
+        const int low = Luminumbra::Systems::SHIELD_WorldSystem::world_to_chunk_coords(
+                            Luminumbra::Vec3(8, *lowest, 8))
+                            .y;
+        const int high = Luminumbra::Systems::SHIELD_WorldSystem::world_to_chunk_coords(
+                             Luminumbra::Vec3(8, *highest, 8))
+                             .y;
+        ASSERT_TRUE(low > 1 || high < -1);
+        std::size_t total = 0;
+        ASSERT_TRUE(budget::AddSurfaceColumnChunks(low, high, total));
+        ASSERT_EQ(total, budget::kMaxSurfaceChunks);
+        total = 0;
+        ASSERT_FALSE(budget::AddSurfaceColumnChunks(low, high, total, true));
+        const Luminumbra::Vec3 anchor(8.0f);
+        world.begin_tick(0);
+        world.dispatch_generation_jobs(std::vector<Luminumbra::IVec3>{Luminumbra::IVec3(0)});
+        world.quiesce_streaming_jobs_for_save();
+        const auto chunk = world.find_streamed_chunk(Luminumbra::IVec3(0));
+        ASSERT_NE(chunk, nullptr);
+        ASSERT_EQ(world.pending_publication_chunks(), 1u);
+        ASSERT_TRUE(chunk->pending_generation_ready.load());
+        const auto state = chunk->get_state();
+        const auto version = chunk->mesh_version.load();
+        const auto sdf = chunk->sdf_data;
+        EXPECT_FALSE(world.EnsureSurfaceReadyNear(anchor, &physics, 0, 0));
+        EXPECT_FALSE(world.EnsureCollisionReadyNear(anchor, &physics, 0));
+        EXPECT_EQ(world.pending_publication_chunks(), 1u);
+        EXPECT_EQ(chunk->get_state(), state);
+        EXPECT_EQ(chunk->mesh_version.load(), version);
+        EXPECT_TRUE(chunk->pending_generation_ready.load());
+        EXPECT_EQ(chunk->sdf_data, sdf);
+        EXPECT_EQ(world.snapshot_streamed_chunks().size(), 1u);
+        world.begin_tick(8);
+        world.activate_due(8);
+        EXPECT_EQ(world.pending_publication_chunks(), 0u);
+        EXPECT_FALSE(chunk->pending_generation_ready.load());
+        EXPECT_EQ(chunk->get_state(), Luminumbra::ChunkState::Idle);
+    }
+}
+
+TEST(SurfaceWorkBudget, LegalOffsetsAndNegativeRadiiKeepTerrainAndWaterOwners) {
+    for (const bool retain : {false, true}) {
+        for (const float offset : {-48.0f, 0.0f, 48.0f}) {
+            auto params = Luminumbra::Test::SyntheticTerrainParams();
+            params.base_amplitude = 0;
+            params.peaks_amplitude = 0;
+            params.height_offset = offset;
+            params.caves_enabled = false;
+            Luminumbra::JobSystem jobs;
+            jobs.startup(1);
+            Luminumbra::Systems::PhysicsSystem physics;
+            physics.startup();
+            Luminumbra::Systems::SHIELD_WorldSystem world(&jobs, nullptr, params, 1337, retain);
+            const Luminumbra::Vec3 anchor(8, offset, 8);
+            ASSERT_TRUE(world.EnsureSurfaceReadyNear(anchor, &physics, -1, -1));
+            EXPECT_EQ(world.snapshot_streamed_chunks().size(), retain && offset != 0 ? 4u : 3u);
+            if (retain) {
+                EXPECT_NE(world.find_streamed_chunk(Luminumbra::IVec3(0)), nullptr);
+            }
+            ASSERT_TRUE(world.EnsureCollisionReadyNear(anchor, &physics, -1));
+            EXPECT_EQ(world.pending_publication_chunks(), 0u);
+        }
+    }
+}
+
 } // namespace

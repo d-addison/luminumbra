@@ -477,10 +477,10 @@ private:
     template<typename Number>
     bool number(Number value) {
         if (m_samples) {
-            // Same numeric conversion as json::get<vector<float>>. Only a
-            // scalar JSON value exists on the stack; no numeric DOM array.
+            // Only numeric SAX tokens reach here. Convert without boxing each
+            // float in a DOM value; fallback enforces the same numeric types.
             // LMR1 bounds the input to 64 MiB; at most one float per input token.
-            m_samples->push_back(nlohmann::json(value).get<float>());
+            m_samples->push_back(static_cast<float>(value));
             return true;
         }
         if (!scalar_allowed())
@@ -502,6 +502,24 @@ private:
     bool m_seenChunks = false;
 };
 
+std::vector<float> NumericSamplesFromJson(const nlohmann::json& value) {
+    if (!value.is_array())
+        throw std::invalid_argument("sample data must be an array");
+    std::vector<float> samples;
+    // At most one float per JSON input element; check before reserving storage.
+    if (value.size() > samples.max_size())
+        throw std::invalid_argument("sample array exceeds native capacity");
+    samples.reserve(value.size());
+    for (const auto& sample : value) {
+        // json::get<float>() also converts booleans. Saved samples must be
+        // numeric in both the canonical SAX path and the last-key-wins DOM path.
+        if (!sample.is_number())
+            throw std::invalid_argument("sample data must contain only numeric values");
+        samples.push_back(sample.get<float>());
+    }
+    return samples;
+}
+
 void ApplyChunkJson(const nlohmann::json& value,
                     Chunk& chunk,
                     ChunkAuthorityLoadPolicy policy,
@@ -517,10 +535,10 @@ void ApplyChunkJson(const nlohmann::json& value,
     }
     chunk.set_state(ChunkStateFromName(value.at("state").get<std::string>()));
     chunk.sdf_data = terrain && terrain->sdf ? std::move(*terrain->sdf)
-                                             : value.at("sdf_data").get<std::vector<float>>();
+                                             : NumericSamplesFromJson(value.at("sdf_data"));
     chunk.heightmap_data = terrain && terrain->heightmap
                                ? std::move(*terrain->heightmap)
-                               : value.at("heightmap_data").get<std::vector<float>>();
+                               : NumericSamplesFromJson(value.at("heightmap_data"));
     // tolerant read (default empty) so old saves without the field still
     // load and the single-missing-field negative fixture is unaffected.
     chunk.material_data = value.value("material_data", std::vector<u8>{});
@@ -544,9 +562,9 @@ void ApplyChunkJson(const nlohmann::json& value,
     chunk.mesh_version.store(value.at("mesh_version").get<u32>(), std::memory_order_release);
     chunk.water_mesh_version.store(value.at("water_mesh_version").get<u32>(),
                                    std::memory_order_release);
-    chunk.water_level_data = value.at("water_level_data").get<std::vector<float>>();
+    chunk.water_level_data = NumericSamplesFromJson(value.at("water_level_data"));
     chunk.water_flow_data = Vec2ArrayFromJson(value.at("water_flow_data"));
-    chunk.water_sim_terrain_height = value.at("water_sim_terrain_height").get<std::vector<float>>();
+    chunk.water_sim_terrain_height = NumericSamplesFromJson(value.at("water_sim_terrain_height"));
     // restore the authoritative fixed-point water state (absent in pre saves -> empty,
     // the sim re-seeds on the next tick).
     chunk.water_depth_mm = value.contains("water_depth_mm")
@@ -1038,6 +1056,7 @@ bool WorldStreamingSnapshotDecoder::load(const std::string& json_text,
                                          std::vector<std::string>& errors,
                                          ChunkAuthorityLoadPolicy authority) {
     m_directTerrainSamples = 0;
+    out_state.clear();
     try {
         nlohmann::json snapshot;
         std::vector<TerrainSampleArrays> terrain;
@@ -1063,7 +1082,7 @@ bool WorldStreamingSnapshotDecoder::load(const std::string& json_text,
             return false;
         }
 
-        out_state.clear();
+        WorldStreamingState staged;
         // A malformed/torn snapshot that fails partway through the chunk array (bad
         // chunk id, duplicate, or a parse error mid-stream) must not leave the caller
         // a partially-populated world it would mistake for real. Every hard-error exit
@@ -1073,6 +1092,14 @@ bool WorldStreamingSnapshotDecoder::load(const std::string& json_text,
             return false;
         };
         const auto& chunks = snapshot.at("chunks");
+        // Keep serialized insertion order for legacy map-order water consumers.
+        // At most one shared owner per input chunk; validate before reserving.
+        std::vector<std::shared_ptr<Chunk>> staged_chunks;
+        if (chunks.size() > staged_chunks.max_size()) {
+            errors.push_back("snapshot chunk count exceeds native capacity");
+            return reject();
+        }
+        staged_chunks.reserve(chunks.size());
         const bool captured = direct && chunks.is_array() && terrain.size() == chunks.size();
         std::size_t chunk_index = 0;
         std::size_t direct_samples = 0;
@@ -1092,16 +1119,21 @@ bool WorldStreamingSnapshotDecoder::load(const std::string& json_text,
                 errors.push_back("chunk id does not match serialized coordinates");
                 return reject();
             }
-            if (!out_state.insert_chunk(chunk)) {
+            if (!staged.insert_chunk(chunk)) {
                 errors.push_back("duplicate chunk id in world snapshot");
                 return reject();
             }
+            staged_chunks.push_back(std::move(chunk));
         }
 
-        if (out_state.size() != snapshot.at("chunk_count").get<std::size_t>()) {
+        if (staged.size() != snapshot.at("chunk_count").get<std::size_t>()) {
             errors.push_back("loaded chunk count does not match snapshot chunk_count");
             return reject();
         }
+        // No restored chunk is visible until the entire record, including
+        // fallback sample types, IDs and count, has passed validation.
+        for (const auto& chunk : staged_chunks)
+            out_state.insert_chunk(chunk);
         m_directTerrainSamples = direct_samples;
         return true;
     } catch (const std::exception& e) {
