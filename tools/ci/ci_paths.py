@@ -16,6 +16,7 @@ PYTHON_TESTS = (
     "tools/gates/test_station_discovery.py",
     "tools/gates/test_common_library_isa.py",
     "test/tools/test_runtime_config_contract.py",
+    "test/rendering/test_frame_attribution_wiring.py",
     "tools/ci/test_ci_paths.py",
     "tools/ci/test_cache_retention.py",
     "tools/ci/test_check_docs.py",

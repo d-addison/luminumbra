@@ -622,6 +622,7 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         // the simulation entirely (determinism discipline).
         using BudgetStage = luminumbra::simulation::SimBudgetStage;
         auto& budget = m_session->GetSimBudgetTelemetry();
+        const auto snapshots_before = budget.Enabled() ? world_system->snapshot_copies() : 0;
         const std::uint64_t budget_tick = m_session->GetSimulationTickCount() + 1;
         luminumbra::simulation::SimBudgetTelemetry::TickScope physics_budget(budget, budget_tick);
         physics_budget.Next(BudgetStage::ServerPhysics, [] { return 1u; });
@@ -743,6 +744,11 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
             const auto scheduled =
                 world_system->get_last_streaming_budget_stats().scheduled_generation;
             const auto* water = m_session->GetWaterSystem();
+            streaming_budget.RecordWorkItems(budget_tick,
+                                             world_system->get_last_streaming_budget_stats(),
+                                             physics_system->work_items(),
+                                             water ? water->cells_stepped_last_update() : 0u,
+                                             world_system->snapshot_copies() - snapshots_before);
             streaming_budget.Record(budget_tick,
                                     timing,
                                     scheduled,
