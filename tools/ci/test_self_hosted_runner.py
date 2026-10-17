@@ -2,6 +2,7 @@
 """Offline routing and persistent Linux runner preparation contracts."""
 
 import importlib.util
+import io
 import itertools
 import json
 import os
@@ -211,6 +212,8 @@ class RunnerPreparationTests(unittest.TestCase):
         self.env_file = self.root / "environment"
         self.path_file = self.root / "path"
         self.package_log = self.root / "packages"
+        self.command_log = self.root / "commands"
+        self.alias_log = self.root / "aliases"
         self.outside = self.root / "unrelated"
         self.outside.write_text("keep", encoding="utf-8")
         (self.checkout / ".gitignore").write_text("build/\n.tidy-cache/\n", encoding="utf-8")
@@ -222,6 +225,8 @@ class RunnerPreparationTests(unittest.TestCase):
         self.env = dict(os.environ, RUNNER_TEMP=self.runner_temp.as_posix(),
                         GITHUB_ENV=self.env_file.as_posix(), GITHUB_PATH=self.path_file.as_posix(),
                         PACKAGE_LOG=self.package_log.as_posix(), MISSING_PACKAGES="", MISSING_TOOLS="",
+                        COMMAND_LOG=self.command_log.as_posix(), ALIAS_LOG=self.alias_log.as_posix(),
+                        COPY_ADDS_EXE="false",
                         PACKAGE_STATUS="install ok installed", REFUSE_ROOT="false", CHANGE_DIRECTORY="false",
                         REFUSE_LINK="false")
         for key in ("BASH_ENV", "ENV", "CDPATH", "GIT_DIR", "GIT_WORK_TREE"):
@@ -236,7 +241,7 @@ class RunnerPreparationTests(unittest.TestCase):
         # Convert native drive/8.3 spellings through the shell that uses them.
         # In particular, never let a WSL launcher interpret a Windows cwd.
         if builtin command -v cygpath >/dev/null; then
-            for key in RUNNER_TEMP GITHUB_ENV GITHUB_PATH PACKAGE_LOG; do
+            for key in RUNNER_TEMP GITHUB_ENV GITHUB_PATH PACKAGE_LOG COMMAND_LOG ALIAS_LOG; do
                 printf -v "$key" '%s' "$(cygpath -u -- "${!key}")"
                 export "$key"
             done
@@ -256,17 +261,39 @@ class RunnerPreparationTests(unittest.TestCase):
         }
         command() {
             if [[ "$1" == -v ]]; then
+                printf '%s\n' "$2" >> "$COMMAND_LOG"
                 if [[ " $MISSING_TOOLS " == *" $2 "* ]]; then return 1; fi
                 printf '/usr/bin/true\n'
             else builtin command "$@"; fi
         }
         # Provisioning links are modelled inside this subprocess. Git for
         # Windows need not have symlink privileges to check the shell contract.
+        # An external shim also intercepts `builtin command cp`, reproducing
+        # Git for Windows' executable suffix on POSIX for the regression.
+        if [[ "$COPY_ADDS_EXE" == true ]]; then
+            mkdir "$RUNNER_TEMP/copy-tools"
+            printf '#!/bin/bash\nexec /usr/bin/cp "$1" "$2.exe"\n' > "$RUNNER_TEMP/copy-tools/cp"
+            chmod +x "$RUNNER_TEMP/copy-tools/cp"
+            export PATH="$RUNNER_TEMP/copy-tools:$PATH"
+            builtin command cp /usr/bin/true "$RUNNER_TEMP/copy-probe"
+            # Bash file tests can also resolve .exe implicitly; inspect names.
+            probe_files=("$RUNNER_TEMP"/copy-probe*)
+            [[ ${#probe_files[@]} == 1 && "${probe_files[0]}" == "$RUNNER_TEMP/copy-probe.exe" ]]
+        fi
         ln() {
             if [[ "$REFUSE_LINK" == true ]]; then return 1; fi
-            builtin command cp /usr/bin/true "$3"
+            [[ "$1" == -s && "$2" == /usr/bin/true ]] || return 1
+            printf '%s=%s\n' "${3##*/}" "$2" >> "$ALIAS_LOG"
+            # cp can append .exe to the destination on Git for Windows. Write
+            # the bytes to the exact Linux alias name, then make it executable.
+            cat -- "$2" > "$3"
+            chmod +x "$3"
         }
         source "$script"
+        for alias in clang-format python; do
+            [[ -f "$job_temp/bin/$alias" && -x "$job_temp/bin/$alias" ]]
+            "$job_temp/bin/$alias"
+        done
         printf 'fixture-workspace=%s\n' "$GITHUB_WORKSPACE"
         '''
         return subprocess.run([bash_executable(), "--noprofile", "--norc", "-e", "-c", fixture,
@@ -284,6 +311,10 @@ class RunnerPreparationTests(unittest.TestCase):
         self.assertTrue((self.checkout / ".gitignore").is_file())
         self.assertEqual(self.outside.read_text(encoding="utf-8"), "keep")
         self.assertEqual(self.package_log.read_text(encoding="utf-8").splitlines(), PACKAGES)
+        self.assertEqual(self.command_log.read_text(encoding="utf-8").splitlines(),
+                         TOOLS + ["clang-format-18", "python3"])
+        self.assertEqual(self.alias_log.read_text(encoding="utf-8").splitlines(),
+                         ["clang-format=/usr/bin/true", "python=/usr/bin/true"])
         first = self.environment()
         workspace = next(line.split("=", 1)[1] for line in result.stdout.splitlines()
                          if line.startswith("fixture-workspace="))
@@ -302,8 +333,8 @@ class RunnerPreparationTests(unittest.TestCase):
         homes = list(self.runner_temp.glob("lum-ci.*/home"))
         self.assertEqual(len(homes), 1)
         private_bin = homes[0].parent / "bin"
-        self.assertTrue((private_bin / "clang-format").exists())
-        self.assertTrue((private_bin / "python").exists())
+        self.assertTrue((private_bin / "clang-format").is_file())
+        self.assertTrue((private_bin / "python").is_file())
         self.assertEqual(self.path_file.read_text(encoding="utf-8").strip(), first["HOME"].removesuffix("/home") + "/bin")
         self.assertEqual((homes[0] / ".config/ccache/ccache.conf").read_bytes(), b"")
         cache = self.checkout / ".cache/ccache"
@@ -325,6 +356,20 @@ class RunnerPreparationTests(unittest.TestCase):
                                   env=self.env, capture_output=True, text=True, timeout=10)
         self.assertEqual(restored.returncode, 0, restored.stderr)
         self.assertEqual(restored.stdout, "restored")
+
+    def test_alias_fixture_keeps_exact_executable_names_when_cp_appends_exe(self):
+        self.env["COPY_ADDS_EXE"] = "true"
+        result = self.prepare()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.runner_temp / "copy-probe.exe").is_file())
+        self.assertFalse((self.runner_temp / "copy-probe").exists())
+        homes = list(self.runner_temp.glob("lum-ci.*/home"))
+        self.assertEqual(len(homes), 1)
+        private_bin = homes[0].parent / "bin"
+        self.assertEqual(sorted(path.name for path in private_bin.iterdir()), ["clang-format", "python"])
+        # prepare() executes both exact aliases in Bash, including on Windows.
+        self.assertEqual(self.alias_log.read_text(encoding="utf-8").splitlines(),
+                         ["clang-format=/usr/bin/true", "python=/usr/bin/true"])
 
     def test_reports_all_missing_packages_and_commands_before_environment_writes(self):
         self.env.update(MISSING_PACKAGES=" ".join(PACKAGES), MISSING_TOOLS=" ".join(TOOLS))
@@ -420,6 +465,62 @@ class HostHookTests(unittest.TestCase):
         self.payload["workflow"] = {"runs-on": ["self-hosted", "Linux", "X64", "lum-vq1"]}
         with self.assertRaisesRegex(HOOK.Denied, "external or missing PR head"):
             self.validate()
+
+    def test_stock_runner_status_steps_still_execute_after_hook_denial(self):
+        # StepsRunner.cs continues its queue after a failed pre-job step and
+        # evaluates each condition against the updated job result. This models
+        # that control flow, not a launcher that stops on a nonzero hook result.
+        # These executable sentinels reproduce an unresolved security defect;
+        # they are deliberately NOT evidence of safe execution admission.
+        self.payload["pull_request"]["head"]["repo"] = {"full_name": "fork/repo"}
+        for cancelled in (False, True):
+            with self.subTest(cancelled=cancelled), \
+                    patch.object(HOOK, "admit", side_effect=lambda *_: self.validate()), \
+                    patch.object(HOOK.sys, "stderr", new_callable=io.StringIO) as errors:
+                hook_result = HOOK.main()
+                self.assertEqual(hook_result, 1)
+                self.assertIn("external or missing PR head", errors.getvalue())
+            # Cancellation changes failure()/cancelled(), but cannot turn
+            # always() into an execution boundary either.
+            status = "cancelled" if cancelled else "failure"
+            conditions = {"success": status == "success", "always": True,
+                          "failure": status == "failure", "cancelled": status == "cancelled"}
+            for name, condition in conditions.items():
+                sentinel = Path(self.temp.name) / f"{cancelled}-{name}"
+                if condition:
+                    subprocess.run([sys.executable, "-I", "-B", "-c",
+                                    "import pathlib, sys; pathlib.Path(sys.argv[1]).write_text('executed', encoding='utf-8')",
+                                    str(sentinel)], check=True, timeout=10)
+                self.assertEqual(sentinel.is_file(), condition)
+            self.assertTrue((Path(self.temp.name) / f"{cancelled}-always").is_file())
+            if not cancelled:
+                self.assertTrue((Path(self.temp.name) / "False-failure").is_file())
+
+    def test_bash_startup_can_execute_before_stock_hook_denial(self):
+        startup = Path(self.temp.name).resolve() / "startup.sh"
+        sentinel = startup.with_name("startup-sentinel")
+        startup.write_text('printf executed > "$STARTUP_SENTINEL"\n', encoding="utf-8")
+        environment = dict(os.environ, BASH_ENV=startup.as_posix(), STARTUP_SENTINEL=sentinel.as_posix())
+        result = subprocess.run([bash_executable(), "--noprofile", "--norc",
+                                 (ROOT / "tools/ci/self_hosted_job_hook.sh").as_posix()],
+                                env=environment, capture_output=True, text=True, timeout=10)
+        # On Windows the fixed Linux interpreter need not exist. Startup still
+        # executes before either that failure or the Linux policy refusal.
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "executed")
+
+    def test_metadata_success_does_not_claim_execution_admission(self):
+        with patch.object(HOOK, "admit"), patch.object(HOOK.sys, "stdout", new_callable=io.StringIO) as output:
+            self.assertEqual(HOOK.main(), 0)
+        self.assertEqual(output.getvalue(),
+                         "Self-hosted metadata checks passed; external execution admission required\n")
+
+    def test_execution_boundary_is_inventoried_as_unimplemented(self):
+        matrix = json.loads((ROOT / "tools/ci/acceptance_matrix.json").read_text(encoding="utf-8"))
+        row = next(row for row in matrix["rows"] if row["id"] == "ci.self-hosted-admission")
+        self.assertEqual(row["status"], "planned")
+        self.assertTrue(row["evidence"])
+        self.assertTrue(all(item.get("planned") for item in row["evidence"]))
 
     def test_repository_identity_is_exact_in_environment_and_payload(self):
         for value in ("", "external/luminumbra", "D-Addison/luminumbra", None):

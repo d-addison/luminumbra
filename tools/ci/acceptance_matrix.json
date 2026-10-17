@@ -2935,6 +2935,20 @@
           "ref": "FarLodWorker.AuthoritativeCaptureBuildsPersistsAndStales"
         }
       ]
+    },
+    {
+      "id": "ci.self-hosted-admission",
+      "source": "docs/development.md#continuous-integration",
+      "statement": "Persistent self-hosted execution requires a trusted boundary before any untrusted process. The stock job-start hook cannot enforce denial; the boundary remains unimplemented. Keep LUM_SELF_HOSTED unset and the instances unavailable until integrated lifecycle and host verification succeeds.",
+      "status": "planned",
+      "evidence": [
+        {
+          "kind": "doc",
+          "ref": "docs/development.md",
+          "planned": "integrate and verify a trusted listener/supervisor or worker boundary with denial, startup, action, container and cancellation sentinels; owner: maintainers"
+        }
+      ],
+      "requirements": []
     }
   ]
 }

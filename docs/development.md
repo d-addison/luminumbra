@@ -291,8 +291,13 @@ branch and supports manual dispatch. Other scheduled and release routing stays
 unchanged.
 
 The repository variable `LUM_SELF_HOSTED` is an opt-in and kill switch. Leave it
-unset until the host operator has installed the external admission hook and
-confirmed a fork denial test before any checkout or repository script runs.
+unset: execution admission is unresolved and blocks activation. The stock runner's
+job-start hook is not an admission boundary. In
+[StepsRunner.cs](https://github.com/actions/runner/blob/main/src/Runner.Worker/StepsRunner.cs),
+a failed pre-job step updates the job result but subsequent step conditions are
+still evaluated; both `always()` and `failure()` can execute attacker processes.
+[JobExtension.cs](https://github.com/actions/runner/blob/main/src/Runner.Worker/JobExtension.cs)
+places the hook inside that worker lifecycle. A nonzero exit is insufficient.
 Unset or `false` keeps `ubuntu-24.04`. When it equals `true`, only `linux`,
 `tidy-shard` (all three shards), `lint`, and `public-tree` in `ci.yml`, and `asan`
 in `asan.yml` can select `[self-hosted, Linux, X64, lum-vq1]`. These routing
@@ -300,7 +305,8 @@ expressions select pushes and PRs whose nonempty head repository matches this
 repository. Manual dispatches (including qualification captures), schedules,
 `workflow_run`, and other events stay hosted. The routing expression is a
 scheduling preference: a fork can change its YAML and request the labels directly.
-The external host hook is the admission boundary for every job on these runners.
+Every job needs an external execution boundary before any workflow-controlled
+process, including jobs requesting persistent labels directly.
 Required check names, job conditions, timeouts and shard parallelism are unchanged.
 
 This public repository belongs to a User account, so organization runner groups
@@ -308,10 +314,59 @@ and their workflow restrictions are unavailable. The repository settings require
 approval from `all_external_contributors`, a read-only default `GITHUB_TOKEN`, and
 SHA-pinned actions. Maintainers must never approve an external contributor's run
 that changes `.github/` or `tools/ci/`. Approval alone cannot protect a persistent
-host from a modified workflow; keep the variable unset until host enforcement is
-confirmed. This change does not install a hook or change repository settings.
+host from a modified workflow. Unsetting the variable alone cannot protect an
+online runner from direct label requests. Until the boundary below exists, the
+operator must keep these persistent instances offline and unavailable to jobs.
+This repository does not contain the runner worker or listener implementation,
+an integrated supervisor, or evidence of such an installation. No host enforcement
+or activation is claimed; the admission P0 remains unresolved.
 
-For each dedicated Linux runner instance, the host operator must install
+The required host installation contract is:
+
+- A trusted listener/supervisor must validate the actual, authenticated job
+  assignment before launching a worker or allowing any untrusted process.
+  Alternatively, a reviewed worker modification must gate initialization before
+  action preparation, action/container hooks, image builds or pulls, service/job
+  containers, checkout, shell startup, pre/main/post actions and cleanup actions.
+  A job-start script, a workflow step or a workflow condition cannot implement
+  this boundary. The supervisor must use a fixed executable and arguments with
+  a fresh host-controlled environment; no job-supplied shell, `BASH_ENV`, `ENV`,
+  `PATH`, exported shell function, loader or interpreter setting may affect it.
+- Bind repository, event, head/base identity, revision, job ID, run ID and attempt
+  to that one authenticated assignment. Read event metadata before execution
+  from a protected handle or channel, not workflow `env`, inputs or mutable
+  checkout files. `GITHUB_EVENT_PATH` at hook time is not proof of this binding.
+  The metadata checks below remain required but cannot authenticate their own
+  caller. An environment flag or a `boundary_verified` JSON field is not proof.
+- Denial, unreadable/partial/unknown metadata, empty identity, startup failure,
+  deadline expiry or cancellation must prevent worker execution. No alternate
+  worker launch, reusable/composite action, container, pre/post step, `always()`,
+  `failure()` or cancellation condition may bypass the decision. If execution
+  has started, an independently owned boundary must stop and reap only that
+  job's descendants before accepting another assignment. Do not discover targets
+  by process name, kill another instance or cancel a remote run.
+- Isolate each job from persistent listener/supervisor state, credentials, runner
+  binaries and other instances. A prior admitted job must not be able to tamper
+  with the next decision through its account, files, processes or environment.
+  Apply finite metadata, initialization and teardown bounds in that boundary.
+  Pin and review its exact runner version and disable unreviewed automatic updates.
+- Before enabling any instance, the operator must exercise the integrated
+  boundary with same-repository admission and forged fork assignments requesting
+  the labels directly. Observe both `always()` and `failure()` process sentinels,
+  cancellation and post-action sentinels, shell startup injection, action
+  preparation and container execution; every denied job must start none of them.
+  Also exercise every refusal above and instance isolation. A fixture that simply
+  stops on hook failure does not qualify. Record the installed version and
+  evidence outside the checkout; source review and Python fixtures are not host
+  verification. Enable `LUM_SELF_HOSTED=true` only after this contract is met.
+
+This contract is an integration requirement, not a supplied supervisor. There is
+no secure activation procedure using only the scripts in this repository. Keep
+the runner feature's routing available for a future verified integration, with
+the variable unset and the instances unavailable meanwhile.
+
+As a metadata policy component of that future boundary, each dedicated Linux
+runner instance needs
 `tools/ci/self_hosted_job_hook.sh` and `tools/ci/self_hosted_job_hook.py` in a
 root-owned directory outside every checkout, work directory and temporary
 directory, for example `/etc/luminumbra-runner/runner-1/`. All ancestor directories,
@@ -329,8 +384,9 @@ exactly these fields, with the instance's real non-root UID and work directory:
 }
 ```
 
-Set `ACTIONS_RUNNER_HOOK_JOB_STARTED` in the runner's host-managed `.env` to the
-absolute installed shell path and restart that runner service. Protect the `.env`,
+Do not enable a stock runner by setting `ACTIONS_RUNNER_HOOK_JOB_STARTED` to the
+installed shell path. That hook can provide supplementary metadata diagnostics
+after an independent boundary exists. Protect the host-managed `.env`,
 runner installation, service configuration, hook files and their parent
 directories from job writes; install the runner with automatic self-update
 disabled and let the operator update it. The job account must have no sudo or
@@ -344,8 +400,10 @@ exact checkout and temporary paths under it; it never accepts an arbitrary
 `GITHUB_WORKSPACE` as a deletion target.
 
 Before setting `metadata_verified` to true, the operator must verify the installed
-runner version against GitHub's [job hook documentation](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/run-scripts)
-and [default environment variables](https://docs.github.com/en/actions/reference/variables-reference#default-environment-variables).
+runner version's metadata delivery in addition to the execution boundary above.
+GitHub's [job hook documentation](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/run-scripts)
+and [default environment variables](https://docs.github.com/en/actions/reference/variables-reference#default-environment-variables)
+do not establish execution isolation.
 Verify that the job-start hook receives runner-supplied `GITHUB_REPOSITORY`,
 `GITHUB_EVENT_NAME`, `GITHUB_WORKSPACE`, `RUNNER_TEMP` and a readable actual event
 at `GITHUB_EVENT_PATH` before any job step, including checkout. For this layout the
@@ -356,14 +414,15 @@ those values at the hook, disable the hook, or inject startup code through
 version's payload timing or provenance. If these properties cannot be established,
 leave `metadata_verified` false and the runner disabled. Missing metadata or an
 unavailable event at hook time always denies; no API fallback or workflow-provided
-trust flag is accepted. A failing hook must fail the job before its first step.
+trust flag is accepted. `metadata_verified` attests only to metadata checks; it
+cannot turn a failing hook into execution refusal.
 
 The operator's confirmation must include same-repository PR admission and fork PR
 denial, including a fork workflow that requests the labels directly and attempts
 to forge the metadata through YAML environment or inputs. Confirm wrong-repository,
-malformed, absent and unreadable event denial too, with a first-step sentinel that
-never executes for denied jobs. Then confirm that jobs cannot modify the hook or
-its configuration. Only after these checks may a maintainer enable the variable.
+malformed, absent and unreadable event denial too, with the full lifecycle
+sentinels required above. Then confirm that jobs cannot modify the hook or its
+configuration. Metadata checks alone never authorize enabling the variable.
 
 The hook requires `GITHUB_REPOSITORY` to equal `d-addison/luminumbra` exactly, and
 requires matching event repository identity for every supported event. PRs also
@@ -372,11 +431,12 @@ require a branch/tag ref and revision; schedules require a schedule string;
 `workflow_run` requires run identity and revision plus matching repository and
 head repository. Unknown events, including manual dispatch and
 `pull_request_target`, deny. JSON reads are bounded to 1 MiB and reject malformed,
-duplicate-key, non-regular and symlink payloads. After admission, the hook removes
+duplicate-key, non-regular and symlink payloads. After metadata validation, the hook removes
 only contents of the configured runner-owned checkout through directory handles,
 without following symlinks or crossing filesystems. Cleanup is bounded to 100,000
-entries and depth 64; an ownership, race or cleanup error fails the job. Cleanup
-may leave a partially cleaned checkout on failure; it never proceeds to job steps.
+entries and depth 64; an ownership, race or cleanup error returns failure. Cleanup
+may leave a partially cleaned checkout on failure; an external boundary must
+prevent execution after that failure. The stock hook cannot provide this guarantee.
 It does not clean `_temp`, `_actions`, another instance, host tools or protected
 directories. Metadata denial performs no checkout cleanup.
 
@@ -404,10 +464,16 @@ instances without killing another job's display or reserving shared ports.
 All performance jobs, other Linux lanes, Windows, macOS, documentation deploy,
 release, game-assets, Blender and UCRT attribution stay hosted. No paid actions,
 larger/GPU runners, cache cap increase or visibility change is introduced.
-`test_self_hosted_runner.py` covers routing, admission, payload refusal, bounded
+`test_self_hosted_runner.py` covers routing, metadata refusal, bounded
 cleanup and preparation; it is registered in CTest, the standalone Python plan
 and the public-tree workflow. Its shell fixtures use Git for Windows Bash and
-convert native paths there, without requiring Windows symlink privileges.
+convert native paths there, without requiring Windows symlink privileges. Fixture
+aliases copy executable bytes to exact names, avoiding Git Bash `cp` appending
+`.exe` to `clang-format` or `python`. Both aliases execute in the fixture; package,
+command, private environment, path and cache checks remain mandatory. Lifecycle
+tests demonstrate that denied stock-hook jobs can still execute both status
+sentinels and that Bash startup can run before the policy. They reproduce the
+unresolved boundary; they do not prove safe admission or any host installation.
 
 CTest produces JUnit and runtime artifacts. CI verifies a minimum discovered-test
 count so an empty or severely truncated suite cannot report success. Once a

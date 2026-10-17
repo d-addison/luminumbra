@@ -9,7 +9,8 @@ if [[ "$workspace" != "$GITHUB_WORKSPACE" || "$PWD" != "$workspace" ]]; then
     exit 1
 fi
 # RUNNER_TEMP and the checkout must belong to the same dedicated instance.
-# The host hook independently validates these against root-owned configuration.
+# The metadata hook independently checks root-owned configuration. Execution
+# admission requires an external worker boundary; see docs/development.md.
 if [[ "$RUNNER_TEMP" != */_temp || "$workspace" != "${RUNNER_TEMP%/_temp}/luminumbra/luminumbra" ||
       -L "$workspace" || -L "$RUNNER_TEMP" || ! -O "$workspace" || ! -O "$RUNNER_TEMP" ]]; then
     echo '::error::Expected runner-owned checkout and temporary directories' >&2
@@ -40,8 +41,8 @@ if (( ${#missing[@]} )); then
     exit 1
 fi
 
-# Refuse missing dependencies before deleting checkout leftovers. The host hook
-# has already admitted this job before checkout; this also clears the stable
+# Refuse missing dependencies before deleting checkout leftovers. The required
+# external boundary must admit the job before checkout; this clears the stable
 # compiler cache before any Actions restore can run.
 git -C "$workspace" clean -ffdx -- .
 

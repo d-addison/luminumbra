@@ -9,8 +9,8 @@ Statuses declare the available evidence. Static validation requires a mapping fo
 | covered | 18 |
 | partial | 8 |
 | needs-native-run | 17 |
-| planned | 85 |
-| Total | 128 |
+| planned | 86 |
+| Total | 129 |
 
 | Row | Status | Source | Requirements | Statement | Evidence |
 | --- | --- | --- | --- | --- | --- |
@@ -142,3 +142,4 @@ Statuses declare the available evidence. Static validation requires a mapping fo
 | contract.region-retention | planned | `docs/active-regions.md#activation-and-ordering` | ar.activation.061, ar.activation.062, ar.activation.063, ar.activation.064 | Idle retention must preserve scheduling history for pending work and all resident chunks, then release consumed work on the next tick. | doc: `docs/active-regions.md` (planned: map discriminating regression and qualification evidence for the updated contract; owner: ac) |
 | contract.ledger-extensions | planned | `docs/active-regions.md#file-and-compatibility` | ar.file.095, ar.file.096, ar.file.097, ar.file.098, ar.file.099, ar.file.100, ar.file.101, ar.file.102, ar.file.103, ar.file.104, ar.file.105, ar.file.106, ar.file.107, ar.file.108, ar.file.109, ar.file.110, ar.file.111, ar.file.112, ar.file.113, ar.file.114, ar.file.115, ar.file.116, ar.file.117, ar.file.118 | Version 2 extensions, legacy digest preservation and authoritative frozen-content selection require dedicated acceptance evidence review. | doc: `docs/active-regions.md` (planned: map discriminating regression and qualification evidence for the updated contract; owner: ac) |
 | graphics.horizon-authority | covered | `docs/engine-guide.md#world-generation-and-streaming` |  | Legacy graphics horizon changes preserve edited chunk authority and reject stale captures through the chunk voxel revision even when world/region publication revisions are unchanged. This row covers the owner-thread snapshot and admission regression, not native rendering qualification. | ctest: `GraphicsRuntimePure.ShrinkingAndGrowingHorizonRetainsEditedAuthorityAndRejectsStaleCapture`<br>ctest: `StreamingHardening.FarLodSnapshotOwnsBytesAndRejectsStaleLiveData`<br>ctest: `FarLodWorker.AuthoritativeCaptureBuildsPersistsAndStales` |
+| ci.self-hosted-admission | planned | `docs/development.md#continuous-integration` |  | Persistent self-hosted execution requires a trusted boundary before any untrusted process. The stock job-start hook cannot enforce denial; the boundary remains unimplemented. Keep LUM_SELF_HOSTED unset and the instances unavailable until integrated lifecycle and host verification succeeds. | doc: `docs/development.md` (planned: integrate and verify a trusted listener/supervisor or worker boundary with denial, startup, action, container and cancellation sentinels; owner: maintainers) |

@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Host-installed Linux job admission policy; never execute the checkout copy."""
+"""Host-installed Linux metadata policy; not an execution admission boundary.
+
+The stock runner can execute always()/failure() steps after this hook fails.
+Activation requires the external worker boundary in docs/development.md.
+Never execute the checkout copy as a host policy.
+"""
 
 import json
 import os
@@ -16,7 +21,7 @@ MAX_DEPTH = 64
 
 
 class Denied(ValueError):
-    """Admission or checkout validation failed before job steps may execute."""
+    """Metadata or checkout validation failed; the caller must enforce refusal."""
 
 
 def require(condition, message):
@@ -200,7 +205,7 @@ def main():
     except (OSError, ValueError, TypeError, RecursionError) as error:
         print(f"Self-hosted job denied: {error}", file=sys.stderr)
         return 1
-    print("Self-hosted job admitted")
+    print("Self-hosted metadata checks passed; external execution admission required")
     return 0
 
 
