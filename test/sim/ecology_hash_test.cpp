@@ -22,7 +22,9 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include <entt/entt.hpp>
@@ -32,6 +34,7 @@
 #include "components/CircadianComponents.h" //  v2 coverage
 #include "components/CoreComponents.h"
 #include "components/CreatureComponents.h"
+#include "components/InstinctComponents.h"
 #include "components/PackHunterComponents.h"
 #include "components/ThirstComponents.h" //  v2 coverage
 #include "persistence/WorldPersistenceRoundtrip.h"
@@ -39,6 +42,98 @@
 namespace {
 
 namespace Comp = ::Luminumbra::Components;
+
+entt::entity PersistentCreature(entt::registry& registry, std::uint64_t id) {
+    const auto e = registry.create();
+    registry.emplace<Comp::TransformComponent>(e);
+    registry.emplace<Comp::CreatureComponent>(e).species_id = 123;
+    registry.emplace<Comp::CreatureRegionComponent>(e).persistent_id = id;
+    registry.emplace<Comp::CreatureCoarseComponent>(e);
+    return e;
+}
+
+TEST(EcologyHash, EnabledHashIgnoresAllocationOrderGenerationsAndPersistentReferenceHandles) {
+    entt::registry a, b;
+    const auto a1 = PersistentCreature(a, 1), a2 = PersistentCreature(a, 2);
+    const auto recycled = b.create();
+    const auto b2 = PersistentCreature(b, 2);
+    b.destroy(recycled);
+    const auto b1 = PersistentCreature(b, 1);
+    ASSERT_NE(entt::to_integral(a1), entt::to_integral(b1));
+    for (auto [registry, first, second] : {std::tuple{&a, a1, a2}, std::tuple{&b, b1, b2}}) {
+        registry->get<Comp::CreatureComponent>(first).hunger = 0.25f;
+        registry->emplace<Comp::SensesComponent>(first).nearest_food_source = second;
+        registry->emplace<Comp::SensesComponent>(second).nearest_threat = first;
+    }
+    EXPECT_EQ(luminumbra::ai::ComputeEcologySubHash(a, true),
+              luminumbra::ai::ComputeEcologySubHash(b, true));
+    // The disabled projection still orders by legacy entity identity.
+    EXPECT_NE(luminumbra::ai::ComputeEcologySubHash(a, false),
+              luminumbra::ai::ComputeEcologySubHash(b, false));
+}
+
+TEST(EcologyHash, EnabledHashCoversCompleteContinuationAndOptionalPresence) {
+    entt::registry registry;
+    PersistentCreature(registry, 1);
+    const auto baseline = luminumbra::ai::ComputeEcologySubHash(registry, true);
+    const auto changes_hash = [&](auto mutate) {
+        entt::registry changed;
+        const auto entity = PersistentCreature(changed, 1);
+        mutate(changed, entity);
+        EXPECT_NE(baseline, luminumbra::ai::ComputeEcologySubHash(changed, true));
+    };
+    changes_hash([](auto& r, auto entity) {
+        r.template get<Comp::CreatureCoarseComponent>(entity).age_cadences = 1;
+    });
+    changes_hash([](auto& r, auto entity) {
+        auto& c = r.template get<Comp::CreatureCoarseComponent>(entity);
+        c.travel_pending = true;
+        c.destination_x = -1;
+    });
+    changes_hash([](auto& r, auto entity) {
+        r.template get<Comp::CreatureRegionComponent>(entity).region_stamp = 1;
+    });
+    changes_hash([](auto& r, auto entity) {
+        r.template emplace<Comp::CreatureGenomeComponent>(entity).reproduce_cooldown = 7;
+    });
+    changes_hash([](auto& r, auto entity) {
+        r.template emplace<Comp::NeedsComponent>(entity).needs.push_back({"rest", 0.1f, 0.01f});
+    });
+    changes_hash([](auto& r, auto entity) {
+        r.template emplace<Comp::CreatureLocomotionStateComponent>(entity).velocity_y = -2.0f;
+    });
+    changes_hash([](auto& r, auto entity) { r.template emplace<Comp::InstinctAgent>(entity); });
+    changes_hash([](auto& r, auto entity) {
+        r.template get<Comp::CreatureComponent>(entity).wish_x = -0.0f;
+    });
+}
+
+TEST(EcologyHash, DisabledHashIgnoresNewMetadataAndEnabledEmptyRemainsNeutral) {
+    entt::registry registry;
+    EXPECT_TRUE(luminumbra::ai::ComputeEcologySubHash(registry, true).empty());
+    const auto e = PersistentCreature(registry, 1);
+    const auto legacy = luminumbra::ai::ComputeEcologySubHash(registry);
+    // Pin the pre-enabled v2 recipe, independently calculated from its text.
+    EXPECT_EQ(legacy, "eca15f0c76f4efa5");
+    EXPECT_EQ(legacy, luminumbra::ai::ComputeEcologySubHash(registry, false));
+    registry.get<Comp::CreatureCoarseComponent>(e).age_cadences = 99;
+    registry.get<Comp::CreatureRegionComponent>(e).region_stamp = 4;
+    registry.emplace<Comp::CreatureLocomotionStateComponent>(e).velocity_y = -7.0f;
+    EXPECT_EQ(legacy, luminumbra::ai::ComputeEcologySubHash(registry, false));
+    EXPECT_NE(legacy, luminumbra::ai::ComputeEcologySubHash(registry, true));
+}
+
+TEST(EcologyHash, EnabledHashRefusesUnadmittedOrDuplicateIdentity) {
+    entt::registry registry;
+    const auto e = registry.create();
+    registry.emplace<Comp::TransformComponent>(e);
+    registry.emplace<Comp::CreatureComponent>(e);
+    EXPECT_THROW(luminumbra::ai::ComputeEcologySubHash(registry, true), std::invalid_argument);
+    registry.clear();
+    PersistentCreature(registry, 1);
+    PersistentCreature(registry, 1);
+    EXPECT_THROW(luminumbra::ai::ComputeEcologySubHash(registry, true), std::invalid_argument);
+}
 
 // A small mixed roster: one predator (pack) + two prey (genome + alarm), with
 // distinct state so the projection is non-trivial.

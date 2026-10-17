@@ -4,10 +4,32 @@
 #include "luminumbra_common/systems/FireSpreadSystem.h"
 #include "luminumbra_common/systems/PlantDiseaseSystem.h"
 #include "luminumbra_common/systems/PollinationSystem.h"
+#include "luminumbra_common/systems/RegionConsumerGate.h"
 #include <gtest/gtest.h>
 
 namespace {
 namespace C = Luminumbra::Components;
+TEST(RegionConsumerGate, SharedIdentityUsesCreatureAndPlantPersistentIdsOnlyWhenEnabled) {
+    entt::registry a, b;
+    const auto creature_a = a.create(), plant_a = a.create();
+    const auto plant_b = b.create(), creature_b = b.create();
+    a.emplace<C::CreatureRegionComponent>(creature_a).persistent_id = 42;
+    b.emplace<C::CreatureRegionComponent>(creature_b).persistent_id = 42;
+    a.emplace<C::PlantRegionComponent>(plant_a).persistent_id = 43;
+    b.emplace<C::PlantRegionComponent>(plant_b).persistent_id = 43;
+    using Luminumbra::world::RegionEntityIdentity;
+    EXPECT_EQ(RegionEntityIdentity(a, creature_a, true), 42u);
+    EXPECT_EQ(RegionEntityIdentity(b, creature_b, true), 42u);
+    EXPECT_EQ(RegionEntityIdentity(a, plant_a, true), 43u);
+    EXPECT_EQ(RegionEntityIdentity(b, plant_b, true), 43u);
+    EXPECT_EQ(RegionEntityIdentity(a, creature_a, false), entt::to_integral(creature_a));
+    EXPECT_EQ(RegionEntityIdentity(b, creature_b, false), entt::to_integral(creature_b));
+    EXPECT_NE(RegionEntityIdentity(a, creature_a, false),
+              RegionEntityIdentity(b, creature_b, false));
+    const auto unowned = a.create();
+    EXPECT_EQ(RegionEntityIdentity(a, unowned, true), entt::to_integral(unowned));
+}
+
 TEST(RegionConsumerGate, BlockedOwnerRetainsEveryLivingWorldCounter) {
     entt::registry registry;
     const auto entity = registry.create();
