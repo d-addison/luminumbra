@@ -430,6 +430,41 @@ class CompareAmbientReceiptsTests(unittest.TestCase):
         self.assertEqual(out, "")
         self.assertIn("failed, errored or skipped", err)
 
+    def test_unevaluated_status_rejects_attributed_and_suite_level_receipts(self):
+        for status in (None, "run", "disabled", "notrun", "", "unknown"):
+            for attributed in (False, True):
+                with self.subTest(status=status, attributed=attributed), tempfile.TemporaryDirectory() as directory:
+                    lane = write_junit(directory, "a.xml", [] if attributed else [receipt_line()],
+                                       attribute_value=receipt_line() if attributed else None)
+                    tree = ET.parse(lane)
+                    if status is not None:
+                        next(tree.getroot().iter("testcase")).set("status", status)
+                    tree.write(lane)
+                    code, out, err = run_main([f"asan={lane}"])
+                    if status in (None, "run"):
+                        self.assertEqual(code, 0, err)
+                    else:
+                        self.assertEqual(code, 2, err)
+                        self.assertEqual(out, "")
+                        self.assertIn("unevaluated", err)
+
+    def test_unevaluated_status_rejects_required_probe(self):
+        for status in (None, "run", "disabled", "notrun", "", "unknown"):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
+                lane = write_junit(directory, "a.xml", attribute_value=receipt_line())
+                add_probe(lane)
+                tree = ET.parse(lane)
+                if status is not None:
+                    tree.getroot().find("testsuite").findall("testcase")[-1].set("status", status)
+                tree.write(lane)
+                code, out, err = run_main([f"asan={lane}", "--require-probe", "asan"])
+                if status in (None, "run"):
+                    self.assertEqual(code, 0, err)
+                else:
+                    self.assertEqual(code, 2, err)
+                    self.assertEqual(out, "")
+                    self.assertIn("unevaluated", err)
+
     def test_suite_level_receipt_with_failed_testcase_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             lane = write_junit(directory, "a.xml", [receipt_line()], failed=True)

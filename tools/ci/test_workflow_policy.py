@@ -227,9 +227,11 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             for step in steps(job)[1:]:
                 with self.subTest(workflow=filename, job=job_id, step=step.splitlines()[0]):
                     condition = value(step, "if", 8) or ""
-                    if job_id == "asan" and step.startswith("      - name: Reject cancelled workflow\n"):
+                    if (job_id == "asan" or job_id.endswith("-result")) and step.startswith("      - name: Reject cancelled workflow\n"):
                         self.assertEqual(condition, "${{ cancelled() }}")
                         self.assertIsNone(value(step, "continue-on-error", 8))
+                        self.assertEqual(value(step, "run", 8).splitlines()[-1], "exit 1")
+                        self.assertEqual(len(value(step, "run", 8).splitlines()), 2)
                         continue
                     # Ordinary steps implicitly require success(). Evidence steps
                     # using always() must explicitly exclude drafts or be manual-only.
@@ -340,6 +342,10 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         self.assertIn("build/debug-asan/ctest.junit.xml", upload)
         self.assertIn("build/debug-asan/qualification-shard.json", upload)
         self.assertIn("if-no-files-found: error", upload)
+        diagnostics = shard_steps["Upload sanitizer evidence"]
+        self.assertEqual(value(diagnostics, "name", 10),
+                         "asan-test-evidence-${{ github.sha }}-shard-${{ matrix.shard }}")
+        self.assertEqual(value(diagnostics, "overwrite", 10), "true")
         self.assertEqual(value(shard_steps["Bind manual qualification shard evidence"], "QUALIFICATION_PRODUCERS", 10),
                          "'{\"identity\":\"${{ steps.identity.outcome }}\",\"configure\":\"${{ steps.configure.outcome }}\",\"build\":\"${{ steps.build.outcome }}\",\"tests\":\"${{ steps.tests.outcome }}\"}'")
         for name in ("identity", "configure", "build", "tests"):
@@ -381,9 +387,12 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                 gate = next(step for step in steps(aggregate) if "name: Require expected producers and route\n" in step)
                 self.assertEqual(value(gate, "SHARD_RESULT", 10), "${{ needs." + job_id + ".result }}")
                 for key, expression in (("NEEDS_CPP", "needs.changes.outputs.needs_cpp"),
-                                        ("CI_CANCELLED", "cancelled()"), ("CI_EVENT", "github.event_name"),
+                                        ("CI_EVENT", "github.event_name"),
                                         ("CI_DRAFT", "github.event.pull_request.draft")):
                     self.assertEqual(value(gate, key, 10), "${{ " + expression + " }}")
+                self.assertEqual(value(gate, "CI_PATHS_RESULT", 10), "${{ needs.changes.result }}")
+                self.assertIn('--classification "$CI_PATHS_RESULT"', gate)
+                self.assertEqual(value(gate, "CI_CANCELLED", 10), '"false"')
                 self.assertIn('ctest_shards.py gate --result "$SHARD_RESULT" --cpp "$NEEDS_CPP"', gate)
                 merge = next(step for step in steps(aggregate) if "name: Merge shard JUnit and check inventory\n" in step)
                 self.assertIn(f"ctest_shards.py merge --profile {profile}", merge)
@@ -745,6 +754,26 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                                 self.assertEqual(process.returncode == 0, accepted, process.stdout + process.stderr)
                                 if cancelled:
                                     self.assertIn("ASan workflow was cancelled", process.stderr)
+
+    def test_native_aggregates_refuse_cancellation_before_the_route_gate(self):
+        ci = jobs(self.workflows["ci.yml"])
+        for job in ("linux-result", "windows-msvc-result", "windows-ucrt64-result"):
+            with self.subTest(job=job):
+                aggregate = ci[job]
+                refusal = next(step for step in steps(aggregate)
+                               if step.startswith("      - name: Reject cancelled workflow\n"))
+                gate = next(step for step in steps(aggregate)
+                            if step.startswith("      - name: Require expected producers and route\n"))
+                self.assertEqual(value(refusal, "if", 8), "${{ cancelled() }}")
+                self.assertIsNone(value(refusal, "continue-on-error", 8))
+                self.assertIsNone(value(gate, "if", 8))
+                self.assertIsNone(value(gate, "continue-on-error", 8))
+                self.assertLess(aggregate.index(refusal), aggregate.index(gate))
+                result = subprocess.run(
+                    ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c",
+                     value(refusal, "run", 8)], capture_output=True, text=True, timeout=10)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Native test workflow was cancelled", result.stderr)
 
     def test_ucrt_route_seeds_devel_and_preserves_other_event_and_path_guards(self):
         ci = jobs(self.workflows["ci.yml"])

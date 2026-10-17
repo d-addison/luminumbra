@@ -78,6 +78,20 @@ class CaptureContract(unittest.TestCase):
             with self.subTest(arguments=arguments), patch.object(capture, "module", return_value=self.comparator()), self.assertRaises(ValueError):
                 capture.ambient_receipt(self.junit(**arguments))
 
+    def test_unevaluated_status_cannot_produce_ambient_receipt(self):
+        for status in (None, "run", "disabled", "notrun", "", "unknown"):
+            with self.subTest(status=status), patch.object(capture, "module", return_value=self.comparator()):
+                path = self.junit()
+                tree = ET.parse(path)
+                if status is not None:
+                    next(tree.getroot().iter("testcase")).set("status", status)
+                tree.write(path)
+                if status in (None, "run"):
+                    self.assertEqual(capture.ambient_receipt(path), RECEIPT)
+                else:
+                    with self.assertRaisesRegex(ValueError, "unevaluated"):
+                        capture.ambient_receipt(path)
+
     def test_receipt_parser_error_and_changed_ceiling_refuse(self):
         parser = types.SimpleNamespace(_parse_receipt=lambda *_: {**RECEIPT, "ceiling": "1024"}, InputError=ValueError)
         with patch.object(capture, "module", return_value=parser), self.assertRaises(ValueError):

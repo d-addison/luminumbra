@@ -16,7 +16,7 @@ TEST_NAME = "WorldgenPreviewTest.PerFrameRenderProducesComparableObservation"
 
 class PerformanceMeasurementValidatorTest(unittest.TestCase):
     def run_validator(
-        self, *, junit_pass: bool = True, absolute_threshold: bool = False
+        self, *, junit_pass: bool = True, absolute_threshold: bool = False, status: str | None = None
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -24,8 +24,9 @@ class PerformanceMeasurementValidatorTest(unittest.TestCase):
             measurement = root / "measurement.json"
             output = root / "result.json"
             failure = "" if junit_pass else '<failure message="measurement failed" />'
+            status_attribute = "" if status is None else f' status="{status}"'
             report.write_text(
-                f'<testsuite><testcase name="{TEST_NAME}" time="0.1">'
+                f'<testsuite><testcase name="{TEST_NAME}" time="0.1"{status_attribute}>'
                 f"{failure}</testcase></testsuite>",
                 encoding="utf-8",
             )
@@ -52,6 +53,8 @@ class PerformanceMeasurementValidatorTest(unittest.TestCase):
             return subprocess.run(
                 [
                     sys.executable,
+                    "-I",
+                    "-B",
                     str(VALIDATOR),
                     str(report),
                     str(measurement),
@@ -72,6 +75,16 @@ class PerformanceMeasurementValidatorTest(unittest.TestCase):
 
     def test_failed_measurement_test_is_rejected(self) -> None:
         self.assertEqual(self.run_validator(junit_pass=False).returncode, 1)
+
+    def test_unevaluated_status_cannot_produce_performance_measurement(self) -> None:
+        for status in (None, "run", "disabled", "notrun", "", "unknown"):
+            with self.subTest(status=status):
+                completed = self.run_validator(status=status)
+                if status in (None, "run"):
+                    self.assertEqual(completed.returncode, 0, completed.stderr)
+                else:
+                    self.assertEqual(completed.returncode, 1, completed.stderr)
+                    self.assertIn("unevaluated", completed.stderr)
 
     def test_absolute_machine_threshold_is_rejected(self) -> None:
         self.assertEqual(self.run_validator(absolute_threshold=True).returncode, 1)
