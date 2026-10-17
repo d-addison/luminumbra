@@ -221,8 +221,8 @@ int RunReplay(const ServerCliOptions& options) {
     if (!Luminumbra::Replay::ConfigurationMatches(header,
                                                   runner.Session()->SystemConfigIdentity(),
                                                   runner.Session()->PresetContentHash())) {
-        LUMINUMBRA_CORE_ERROR(
-            "replay: incompatible simulation configuration or resolved preset content hash");
+        LUMINUMBRA_CORE_ERROR("replay: incompatible simulation configuration or resolved "
+                              "preset/species content hash");
         return 1;
     }
 

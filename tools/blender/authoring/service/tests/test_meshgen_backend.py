@@ -213,6 +213,23 @@ class BackendTests(RuleAssertions, unittest.TestCase):
         with self.assertRule("glb.limit"):
             inspect_raw_glb(changed_glb(instances), effective)
 
+    def test_raw_scene_selection_requires_an_unambiguous_valid_default(self):
+        for count, default, rule in ((1, 'absent', None), (2, 'absent', 'scene.ambiguous'),
+                                     (2, 0, None), (2, 1, None), (2, 2, 'glb.bounds'),
+                                     (2, -1, 'glb.bounds'), (2, False, 'glb.bounds'),
+                                     (2, None, 'glb.bounds')):
+            with self.subTest(count=count, default=default):
+                def change(doc):
+                    doc['scenes'] = [{} for _ in range(count)]
+                    doc['scenes'][default if type(default) is int and 0 <= default < count else 0] = {'nodes': [0]}
+                    if default == 'absent': doc.pop('scene')
+                    else: doc['scene'] = default
+                data = changed_glb(change)
+                if rule:
+                    with self.assertRule(rule): inspect_raw_glb(data, defaults())
+                else:
+                    self.assertEqual(inspect_raw_glb(data, defaults()), {'triangles': 12, 'vertices': 8})
+
     def test_bounded_json_duplicate_nonfinite_depth_and_collections(self):
         for data, rule in ((b'{"x":1,"x":2}', "json.duplicate"), (b'{"x":NaN}', "json.nonfinite"),
                            (b'{"x":1e999}', "backend.protocol"), (b"["*100+b"0"+b"]"*100, "backend.limit"),

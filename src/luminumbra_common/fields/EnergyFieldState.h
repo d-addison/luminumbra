@@ -97,6 +97,11 @@ public:
     using RegionRecords = std::map<RegionKey, Luminumbra::world::ActiveRegionRecord>;
     using EnergyAges = Luminumbra::world::ActiveRegionLedger::EnergyAges;
     // Same file/decoded allocation limits as the existing indexed energy reader.
+    static constexpr int kMaxChannels = 64;
+    // 64 MiB decoded uint16 values. Legacy text permits 12 bytes/value,
+    // 32 bytes/page (at most 131072 one-channel pages), and a 64-byte header.
+    static constexpr std::size_t kMaxLegacyRecordBytes =
+        (64u * 1024u * 1024u / 2u) * 12u + (64u * 1024u * 1024u / 512u) * 32u + 64u;
     static constexpr std::size_t kMaxRegionalRecordBytes = 16u * 1024u * 1024u;
     static constexpr std::size_t kMaxRegionalValueBytes = 64u * 1024u * 1024u;
     static constexpr std::size_t kMaxRegionalDeposits = kMaxRegionalRecordBytes / 32;
