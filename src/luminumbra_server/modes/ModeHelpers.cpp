@@ -28,12 +28,23 @@ Luminumbra::Net::HelloMsg RuntimeHelloFrom(const ServerCliOptions& options) {
     if (runner_config.region_scheduler)
         session.SetRegionSchedulerConfig(*runner_config.region_scheduler);
     hello.system_config_identity = session.SystemConfigIdentity();
+    if (session.ActiveRegionsEnabled()) {
+        Luminumbra::world::SimulationContent content;
+        std::string content_error;
+        if (!Luminumbra::world::AdmitSimulationContent(root, content, content_error)) {
+            LUMINUMBRA_CORE_ERROR("Network content admission failed: {}", content_error);
+            hello.system_config_identity.clear();
+            return hello;
+        }
+        hello.system_config_identity = Luminumbra::world::BindSimulationContentIdentity(
+            hello.system_config_identity, content.identity);
+    }
     const auto preset =
         options.preset_json_override
             ? Luminumbra::world::LoadTerrainPresetFromJson(
                   nlohmann::json::parse(*options.preset_json_override), root / "data")
-            : Luminumbra::world::LoadTerrainPreset(root / "worlds/atlas/presets" /
-                                                   (options.preset + ".json"));
+            : Luminumbra::world::LoadTerrainPreset(
+                  root / "worlds/atlas/presets" / (options.preset + ".json"), root / "data");
     hello.preset_content_hash = preset.preset_content_hash;
     return hello;
 }

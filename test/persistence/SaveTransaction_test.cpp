@@ -3,7 +3,15 @@
 #endif
 
 #include "luminumbra_common/ai/CreaturePersistence.h"
+// Match the engine's include order: the base job interface precedes worldgen's
+// bounded reader, while its derived barrier implementation follows it.
+// clang-format off
+#include <Jolt/Jolt.h>
+#include <Jolt/Core/JobSystem.h>
 #include "luminumbra_common/core/BoundedFileReader.h"
+#include <Jolt/Core/JobSystemWithBarrier.h>
+// clang-format on
+
 #include "luminumbra_common/fields/EnergyFieldState.h"
 #include "luminumbra_common/fields/FieldPageState.h"
 #include "luminumbra_common/persistence/PlantPersistence.h"
@@ -13,6 +21,7 @@
 #include "luminumbra_common/world/ActiveRegionLedger.h"
 #include "luminumbra_common/world/GroundObjectStore.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
+#include "luminumbra_common/world/WorldStreamingState.h"
 #include "luminumbra_common/world/WorldgenFileReader.h"
 
 #include <entt/entity/fwd.hpp>
@@ -541,6 +550,34 @@ TEST(SaveTransaction, CommitPublishesIndexAndDeletesJournal) {
     EXPECT_EQ(world_after->fnv64, world_copy.fnv64);
     EXPECT_EQ(world_after->generation, world_copy.generation);
     EXPECT_FALSE(journal_pending(save.path()));
+}
+
+TEST(SaveTransaction, FirstIndexRefusesFailedRegionScanAndAcceptsAbsentOrEmptyRegionDirectory) {
+    for (const int variant : {0, 1, 2}) {
+        SCOPED_TRACE(variant);
+        const TempSave save;
+        const auto region = save.path() / "chunks/region";
+        if (variant == 1)
+            fs::create_directories(region);
+        SaveTransaction transaction(save.path(), 0, {}, WorldSaveService::member_digest);
+        std::vector<std::string> errors;
+        ASSERT_TRUE(transaction.begin(&errors));
+        if (variant == 2)
+            Put(region, "not a directory");
+        EXPECT_EQ(transaction.commit(&errors), variant != 2);
+        EXPECT_EQ(errors.empty(), variant != 2);
+        EXPECT_FALSE(journal_pending(save.path()));
+        if (variant == 2) {
+            ASSERT_FALSE(errors.empty());
+            EXPECT_NE(errors.front().find("cannot enumerate snapshot members"), std::string::npos);
+            EXPECT_EQ(Get(region), "not a directory");
+        } else {
+            EXPECT_TRUE(snapshot_index_exists(save.path()));
+            WorldStreamingState loaded;
+            EXPECT_FALSE(WorldSaveService{}.load_world(loaded, save.path(), errors));
+            EXPECT_TRUE(errors.empty());
+        }
+    }
 }
 
 TEST(SaveTransaction, AbortRestoresPreviousBytesAndRemovesCreatedMembers) {

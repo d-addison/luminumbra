@@ -1,6 +1,7 @@
 #include "DistantPolicy.h"
 
 #include "../ai/CreatureSpeciesRegistry.h"
+#include "../core/FilesystemPath.h"
 #include "../foliage/SpeciesRegistry.h"
 #include "nlohmann/json.hpp"
 
@@ -295,23 +296,51 @@ bool Readable(const fs::file_status& status) {
     return status.permissions() == fs::perms::unknown ||
            (status.permissions() & reads) != fs::perms::none;
 }
-void CheckDirectory(const fs::path& path) {
-    std::error_code ec;
-    fs::path current;
-    for (const auto& part : fs::absolute(path)) {
-        current /= part;
+void CheckDirectoryComponent(const fs::path& path) {
 #ifdef _WIN32
-        // Junctions may look like ordinary directories to std::filesystem.
-        // Check every ancestor, including those above the opened parent.
-        const DWORD attributes = GetFileAttributesW(current.c_str());
-        Require(attributes != INVALID_FILE_ATTRIBUTES &&
-                    (attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0,
-                "content parent missing, unreadable, or reparse point");
+    // Junctions may look like ordinary directories to std::filesystem.
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    Require(attributes != INVALID_FILE_ATTRIBUTES &&
+                (attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0,
+            "content parent missing, unreadable, or reparse point");
 #endif
-        const auto status = fs::symlink_status(current, ec);
-        Require(!ec && fs::is_directory(status) && !fs::is_symlink(status) && Readable(status),
-                "content parent missing, unreadable, or symlink");
+    std::error_code ec;
+    const auto status = fs::symlink_status(path, ec);
+    Require(!ec && fs::is_directory(status) && !fs::is_symlink(status) && Readable(status),
+            "content parent missing, unreadable, or symlink");
+}
+void CheckDirectory(const fs::path& path) {
+    const auto absolute = Filesystem::AbsolutePath(path);
+#ifdef _WIN32
+    // Walk native prefixes: a server name or device prefix alone is not a
+    // directory. MinGW's filesystem root decomposition can also lose UNC roots.
+    const auto& native = absolute.native();
+    auto root_end = absolute.root_path().native().size();
+    if (Filesystem::IsWindowsUncPath(absolute)) {
+        const bool extended_unc =
+            native.size() >= 8 && native[2] == L'?' && (native[4] == L'U' || native[4] == L'u') &&
+            (native[5] == L'N' || native[5] == L'n') && (native[6] == L'C' || native[6] == L'c') &&
+            (native[7] == L'\\' || native[7] == L'/');
+        const auto server_end = native.find_first_of(L"\\/", extended_unc ? 8 : 2);
+        Require(server_end != std::wstring::npos, "content directory root is incomplete");
+        const auto share_end = native.find_first_of(L"\\/", server_end + 1);
+        root_end = share_end == std::wstring::npos ? native.size() : share_end + 1;
     }
+    CheckDirectoryComponent(fs::path(native.substr(0, root_end)));
+    for (auto start = root_end; start < native.size();) {
+        const auto separator = native.find_first_of(L"\\/", start);
+        const auto end = separator == std::wstring::npos ? native.size() : separator;
+        CheckDirectoryComponent(fs::path(native.substr(0, end)));
+        start = end == native.size() ? end : end + 1;
+    }
+#else
+    fs::path current = absolute.root_path();
+    CheckDirectoryComponent(current);
+    for (const auto& part : absolute.relative_path()) {
+        current /= part;
+        CheckDirectoryComponent(current);
+    }
+#endif
 }
 // All native opening stays here: pin the parent, compare the checked leaf with the
 // opened handle, and read/verify through that handle without a second path open.
@@ -508,15 +537,15 @@ ContentReadResult OpenSimulationDocument(const fs::path& path,
 }
 
 std::string Utf8Stem(const fs::path& path) {
-    std::string name;
-    for (const auto byte : path.stem().u8string())
-        name.push_back(static_cast<char>(byte));
-    return name;
+    return Filesystem::GenericUtf8PathString(path.stem());
 }
 std::vector<fs::path> DefinitionFiles(const fs::path& directory) {
     CheckDirectory(directory);
     std::vector<fs::path> files;
+    std::size_t entries = 0;
     for (const auto& entry : fs::directory_iterator(directory)) {
+        // Bound actual enumeration, including files excluded by the extension filter.
+        Require(++entries <= kMaxSpeciesDirectoryEntries, "species directory exceeds 512 entries");
         if (entry.path().extension() != ".json")
             continue;
         Require(files.size() < kMaxSpeciesDefinitions, "species inventory exceeds 256 definitions");
@@ -697,6 +726,19 @@ std::uint64_t SimulationContentDigest(std::string_view bytes) {
         hash *= 1099511628211ull;
     }
     return hash;
+}
+std::string BindSimulationContentIdentity(std::string_view configuration_identity,
+                                          const SimulationContentIdentity& content) {
+    std::string bytes = "simulation-session:v1:";
+    Frame(bytes, configuration_identity);
+    bytes += content.encode();
+    auto hash = SimulationContentDigest(bytes);
+    std::string hex(16, '0');
+    for (std::size_t index = 0; index < hex.size(); ++index) {
+        hex[hex.size() - 1 - index] = "0123456789abcdef"[hash & 15u];
+        hash >>= 4u;
+    }
+    return hex;
 }
 ContentReadResult ReadSimulationDocument(const fs::path& path,
                                          bool optional,

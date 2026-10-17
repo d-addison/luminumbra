@@ -73,7 +73,7 @@ int RunNetHostServerMode(const ServerCliOptions& options) {
     std::uint32_t left_count = 0;
     auto next_tick_time = std::chrono::steady_clock::now();
     while (executed < options.ticks) {
-        expected_hello.system_config_identity = runner.Session()->SystemConfigIdentity();
+        expected_hello.system_config_identity = runner.Session()->SessionConfigIdentity();
         expected_hello.preset_content_hash = runner.Session()->PresetContentHash();
         for (RuntimeTcpClientSlot& slot : slots) {
             if (PollRuntimeTcpAccept(slot, expected_hello)) {
