@@ -4,6 +4,7 @@
 #include "FrameScan.h"
 #include "PixelIo.h"
 #include "RenderPipeline.h"
+#include "UploadBudget.h"
 #include "WaterfallDetect.h"
 #include "core/Log.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
@@ -21,6 +22,7 @@
 #include <cmath>
 #include <fstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace Luminumbra::Rendering {
@@ -72,6 +74,12 @@ bool RunSceneSurvey(GLFWwindow* window,
                     const std::filesystem::path& out_dir,
                     const std::filesystem::path& materials_json,
                     bool wireframe) {
+    if (!WriteCaptureText(out_dir / "survey.json",
+                          "{\"status\":\"failed\",\"capture_complete\":false,"
+                          "\"reason\":\"survey_capture_incomplete\"}\n")) {
+        LUMINUMBRA_CORE_ERROR("SceneSurvey: cannot initialize failure evidence");
+        return false;
+    }
     SHIELD_WorldSystem* w = session.GetWorldSystem();
     Systems::PhysicsSystem* phys = session.GetPhysicsSystem();
     if (w == nullptr || phys == nullptr) {
@@ -232,8 +240,9 @@ bool RunSceneSurvey(GLFWwindow* window,
     // --- Capture each target -------------------------------------------------
     int fbw = 0, fbh = 0;
     glfwGetFramebufferSize(window, &fbw, &fbh);
-    std::error_code ec;
-    std::filesystem::create_directories(out_dir, ec);
+    std::size_t pixel_bytes = 0;
+    if (!CapturePixelBytes(fbw, fbh, 3, pixel_bytes))
+        return false;
     nlohmann::json index = nlohmann::json::array();
 
     for (const SurveyTarget& t : targets) {
@@ -281,6 +290,20 @@ bool RunSceneSurvey(GLFWwindow* window,
             w->update(session.GetRegistry(), anchor, phys);
             pipeline.render_frame(session.GetRegistry(), *w, camera, 1.0f / 60.0f, wireframe);
         }
+        if (!settle_uploads(
+                [&] {
+                    const auto& pending = pipeline.get_last_mesh_upload_stats();
+                    return std::pair{pending.terrain_uploads_deferred +
+                                         pending.water_uploads_deferred,
+                                     pending.terrain_budget.adopted + pending.water_budget.adopted};
+                },
+                [&] {
+                    pipeline.render_frame(
+                        session.GetRegistry(), *w, camera, 1.0f / 60.0f, wireframe);
+                })) {
+            LUMINUMBRA_CORE_ERROR("SceneSurvey '{}': render uploads did not settle", t.label);
+            return false;
+        }
         //  probe: report the live sim's max water depth (mm) so river-fill is verifiable by DATA
         // even when the dark survey scene / pixel heuristic can't show it.
         LUMINUMBRA_CORE_INFO("SceneSurvey '{}': live max water depth = {} mm",
@@ -288,14 +311,17 @@ bool RunSceneSurvey(GLFWwindow* window,
                              w->debug_max_water_depth_mm());
 
         const FrameScanReport rep = ScanFrame(pipeline, fbw, fbh, materials_json);
-        WriteFrameScanReport(rep, out_dir / (t.label + ".json"));
+        if (!rep.ok)
+            return false;
 
-        std::vector<unsigned char> px(static_cast<std::size_t>(fbw) *
-                                      static_cast<std::size_t>(fbh) * 3u);
+        std::vector<unsigned char> px(pixel_bytes);
         glReadBuffer(GL_BACK);
         glPixelStorei(GL_PACK_ALIGNMENT, 1);
         glReadPixels(0, 0, fbw, fbh, GL_RGB, GL_UNSIGNED_BYTE, px.data());
-        Luminumbra::Rendering::WritePixelBufferPpm(out_dir / (t.label + ".ppm"), fbw, fbh, px);
+        if (glGetError() != GL_NO_ERROR ||
+            !WritePixelBufferPpm(out_dir / (t.label + ".ppm"), fbw, fbh, px) ||
+            !WriteFrameScanReport(rep, out_dir / (t.label + ".json")))
+            return false;
 
         LUMINUMBRA_CORE_INFO(
             "SceneSurvey captured '{}' cam=({:.0f},{:.0f},{:.0f}) yaw={:.0f} pitch={:.0f}",
@@ -315,7 +341,13 @@ bool RunSceneSurvey(GLFWwindow* window,
                          {"scan", t.label + ".json"}});
     }
 
-    std::ofstream(out_dir / "survey.json") << index.dump(2) << "\n";
+    if (!WriteCaptureText(out_dir / "survey.json", index.dump(2) + "\n")) {
+        // Retain failure evidence if a late flush/close truncated the index.
+        if (!WriteCaptureText(out_dir / "survey.json",
+                              "{\"status\":\"failed\",\"capture_complete\":false}\n"))
+            LUMINUMBRA_CORE_ERROR("SceneSurvey: failed to retain index failure evidence");
+        return false;
+    }
     LUMINUMBRA_CORE_INFO(
         "SceneSurvey: wrote {} POI captures -> {}", targets.size(), out_dir.string());
     return true;

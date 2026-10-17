@@ -1,4 +1,5 @@
 #include "FrameAttribution.h"
+#include "../rendering/UploadBudget.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -91,6 +92,22 @@ FoliageFrameScope::~FoliageFrameScope() {
 bool foliage_frame_active() {
     return current_foliage_frame() != nullptr;
 }
+void record_render_uploads(const Rendering::UploadWorkStats& work,
+                           bool water,
+                           std::size_t pending) {
+    auto* current_frame = current_foliage_frame();
+    if (!current_frame)
+        return;
+    auto& uploads = current_frame->uploads;
+    auto& total = water ? uploads.water : uploads.terrain;
+    total.attempts += work.attempts;
+    total.adopted += work.adopted;
+    total.bytes += work.bytes;
+    total.byte_overshoot += work.byte_overshoot;
+    total.elapsed_ms += work.elapsed_ms;
+    total.overshoot_ms += work.overshoot_ms;
+    (water ? uploads.water_pending : uploads.terrain_pending) += pending;
+}
 void record_foliage_rebuild(const FoliageRebuild& rebuild,
                             double milliseconds,
                             std::uint64_t capacity,
@@ -147,7 +164,11 @@ void write_csv_header(std::ostream& out) {
            "rebuild_calls,reason_mask,admitted_columns,surface_misses,deferred_columns,copied_"
            "bytes,"
            "hashed_bytes,uploaded_bytes,scratch_bytes,backlog,path,fallback,"
-           "instance_capacity,generated_count,count_generation\n";
+           "instance_capacity,generated_count,count_generation,"
+           "terrain_work_ms,terrain_overshoot_ms,terrain_attempts,terrain_adopted,terrain_work_"
+           "bytes,"
+           "terrain_byte_overshoot,terrain_pending,water_work_ms,water_overshoot_ms,water_attempts,"
+           "water_adopted,water_work_bytes,water_byte_overshoot,water_pending\n";
 }
 bool write_csv_row(std::ostream& out,
                    std::uint64_t frame,
@@ -157,7 +178,8 @@ bool write_csv_row(std::ostream& out,
                    std::uint64_t capacity,
                    bool count_known,
                    std::uint64_t generated_count,
-                   std::uint64_t count_generation) {
+                   std::uint64_t count_generation,
+                   const RenderUploads& uploads) {
     if (!out.good())
         return false;
     out << std::fixed << std::setprecision(6) << frame << ',' << frame_ms << ',' << buckets.sim
@@ -178,6 +200,12 @@ bool write_csv_row(std::ostream& out,
     out << ',';
     if (count_known)
         out << count_generation;
+    const auto append_uploads = [&](const Rendering::UploadWorkStats& work, std::size_t pending) {
+        out << ',' << work.elapsed_ms << ',' << work.overshoot_ms << ',' << work.attempts << ','
+            << work.adopted << ',' << work.bytes << ',' << work.byte_overshoot << ',' << pending;
+    };
+    append_uploads(uploads.terrain, uploads.terrain_pending);
+    append_uploads(uploads.water, uploads.water_pending);
     out << '\n';
     return out.good();
 }
@@ -213,7 +241,8 @@ bool FrameRecorder::record(std::uint64_t frame,
                            std::uint64_t capacity,
                            bool count_known,
                            std::uint64_t generated_count,
-                           std::uint64_t count_generation) {
+                           std::uint64_t count_generation,
+                           const RenderUploads& uploads) {
     if (!active())
         return false;
     return write_csv_row(m_out,
@@ -224,6 +253,7 @@ bool FrameRecorder::record(std::uint64_t frame,
                          capacity,
                          count_known,
                          generated_count,
-                         count_generation);
+                         count_generation,
+                         uploads);
 }
 } // namespace Luminumbra::Client::Attribution

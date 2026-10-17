@@ -578,3 +578,72 @@ also obey the disabled readback policy. Frame scans use `luminumbra.frame_scan.v
 `null` when unavailable. Readers must preserve unknown counts rather than
 coercing them to zero. `foliage.instance_capacity` is storage capacity, never a
 substitute count. The overlay labels capacity explicitly.
+
+Terrain and water adoption (issue #390) uses independent presentation budgets.
+The named, compile-time validated defaults in `rendering/UploadBudget.h` are:
+
+| Queue | Payload bytes/frame | Attempts/frame | Progress floor | Time/frame |
+| --- | ---: | ---: | ---: | ---: |
+| Terrain | 4 MiB | 8 | 1 | 3 ms |
+| Water | 1 MiB | 8 | 1 | 1 ms |
+
+Valid ranges are 1 byte through 64 MiB, 1 through 64 attempts, a floor from 1
+through the count limit, and 0.1 through 16 ms. The time interval starts before
+candidate discovery, lifecycle cleanup and ordering. Terrain also charges the
+shared snapshot preparation. Payload copying, foliage ground-query construction
+and GPU submission are inside the same interval. The byte cost is the checked
+vertex-plus-index payload size, charged once per attempt before copying, even
+when an attempt fails. It is separate from driver storage capacity and the
+existing counters for successful payload copies.
+
+After the progress floor, another upload starts only if its entire payload fits
+the remaining byte budget and the time budget has not expired. The count ceiling
+is unconditional. An indivisible upload can exceed time; the progress floor can
+also exceed bytes. Both overshoots are measured, including preparation that has
+already exceeded the time limit before the first attempt. A valid pending upload
+therefore always gets at least one attempt; a failed or superseded payload is
+retried without blocking other pending work. New arrivals are ordered by distance,
+new before replacement, then chunk ID. Existing pending work retains FIFO position,
+including when refreshed to a newer version, so nearer arrivals cannot starve it.
+
+Resident terrain and its foliage support stay available while replacements wait;
+pool growth allocates before releasing the old slice. Water uses a staging slot
+and publishes it only after both writes and attribute validation succeed, retaining
+the old buffers on failure in both Legacy and Ladder modes. The presented water
+version supplies both draw eligibility and far-water ownership while a replacement
+waits, preventing overlapping live and far surfaces. Empty water replacements use
+the same bounded adoption queue and remove the resident draw when adopted.
+The spare-water-slot cache remains bounded at 1024 entries. These queues never gate
+world publication, activation, collision readiness, water simulation or hashes.
+Legacy and Ladder far-tile integration retain their separate existing policies.
+
+The attribution CSV appends `terrain_` and `water_` fields for `work_ms`,
+`overshoot_ms`, `attempts`, `adopted`, `work_bytes`, `byte_overshoot` and `pending`.
+They aggregate every integration call in a presented frame, including menu and
+preview calls. Pending is the sum of each call's remaining backlog observations,
+not a global count of unique chunks. These are inclusive sub-measurements of the
+existing render/menu buckets; do not add their times again to the exclusive frame
+sum. Coverage frame observations expose the same work statistics per integration;
+the benchmark's final streaming record includes its settled status and limits.
+
+Benchmark warmup is a minimum: its final warmup frame waits for both upload queues
+to settle. Scene captures, survey stations, world visual sweeps, frame scans, parity captures,
+benchmark screenshots and terrain AOVs also wait for adoption. Traversal's measured
+frames keep normal budgets and include backlog; its final capture waits again.
+Use `--frame-attribution-csv` during fixed-view and traversal benchmarks to compare
+settled zero-adoption frames against per-frame streaming work and overshoot.
+Additional settling does not advance traversal ticks or measured frame IDs.
+The benchmark records extra presented settling frames in `upload_settling_frames`
+(`warmup` and `capture`), separately from the requested minimum `warmup_frames`.
+
+Settling uses work counts, with no clock input to world state. The initial pending
+terrain-plus-water backlog allows one render pass per item. Work published by a
+render pass adds one pass per observed arrival, up to 8192 arrivals per wait;
+continuous publication beyond this allowance fails explicitly. Successful adoptions
+are counted when detecting arrivals, including when the backlog stays level or
+shrinks. Persistent failures consume the remaining passes. The same policy covers
+synchronous qualification drains and presented warmup/capture waits. Failure returns
+an incomplete result, writes a failed capture record where applicable, and exits
+standalone captures with a nonzero status. The existing frame-scan watchdog remains
+in effect. AOV observations are capped at the requested warmup plus measured frames
+and one capture frame (at most 8192 records); settling retries do not append records.
