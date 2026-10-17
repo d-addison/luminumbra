@@ -19,6 +19,9 @@ namespace Luminumbra::world {
 namespace {
 constexpr float kAirMargin = 0.25f;
 constexpr int kStep = 4;
+// Access offsets are horizontal; the exterior column sets the vertical reach.
+constexpr std::array<int, 4> kExteriorHeights{{0, 4, 8, 12}};
+constexpr int kPortalHeight = kExteriorHeights.back();
 constexpr std::int64_t kStepMm = static_cast<std::int64_t>(kStep) * 1000;
 constexpr std::array<std::array<int, 2>, 4> kDirections{{{1, 0}, {0, 1}, {-1, 0}, {0, -1}}};
 
@@ -57,9 +60,6 @@ public:
             std::abs(z * 1000) > kStationHorizontalBoundMm) {
             throw std::runtime_error("sample outside horizontal domain");
         }
-        if (y < m_query.y_range_m[0] || y > m_query.y_range_m[1]) {
-            throw std::runtime_error("sample outside requested vertical span");
-        }
         if (m_result.density_samples == kStationSampleBudget) {
             throw std::runtime_error("density sample budget exhausted");
         }
@@ -72,13 +72,18 @@ public:
         return value;
     }
     bool Air(double x, double y, double z) {
-        return Density(x, y, z) >= kAirMargin;
+        return InVerticalSpan(y) && Density(x, y, z) >= kAirMargin;
     }
     bool Solid(double x, double y, double z) {
-        return Density(x, y, z) <= -kAirMargin;
+        return InVerticalSpan(y) && Density(x, y, z) <= -kAirMargin;
     }
     bool Exterior(double x, double y, double z) {
-        return Air(x, y, z) && Air(x, y + 4, z) && Air(x, y + 8, z) && Air(x, y + 12, z);
+        for (const int height : kExteriorHeights) {
+            if (!Air(x, y + height, z)) {
+                return false;
+            }
+        }
+        return true;
     }
     bool Access(double x, double y, double z, int dx, int dz) {
         return Air(x + dx * 4, y, z + dz * 4) && Exterior(x + dx * 8, y, z + dz * 8);
@@ -179,6 +184,15 @@ public:
     }
 
 private:
+    bool InVerticalSpan(double y) const {
+        // A stencil or pose outside the span rejects only this candidate. Check
+        // the binary32 coordinate actually passed to the source too: near the
+        // integer Y limits conversion can move an otherwise valid sample out.
+        const double sampled_y = static_cast<float>(y);
+        return y >= m_query.y_range_m[0] && y <= m_query.y_range_m[1] &&
+               sampled_y >= m_query.y_range_m[0] && sampled_y <= m_query.y_range_m[1];
+    }
+
     const StationDiscoverySource& m_source;
     const StationQuery& m_query;
     StationDiscoveryResult& m_result;
@@ -311,14 +325,16 @@ StationDiscoveryResult DiscoverStations(const StationDiscoverySource& source,
             }
             // No portal can fit, even before alignment to the global lattice.
             // Controls above have their own clearance rules and do not use this stencil.
-            if (static_cast<std::int64_t>(query.y_range_m[1]) - query.y_range_m[0] < 12) {
+            if (static_cast<std::int64_t>(query.y_range_m[1]) - query.y_range_m[0] <
+                kPortalHeight) {
                 result.ok = true;
                 return result;
             }
             const int y0 = FloorCell(static_cast<double>(query.y_range_m[0]) / kStep);
             const int y1 = FloorCell(static_cast<double>(query.y_range_m[1]) / kStep);
             const int first_y = -FloorCell(-static_cast<double>(query.y_range_m[0]) / kStep);
-            const int last_y = FloorCell((static_cast<double>(query.y_range_m[1]) - 12) / kStep);
+            const int last_y =
+                FloorCell((static_cast<double>(query.y_range_m[1]) - kPortalHeight) / kStep);
             if (first_y > last_y) {
                 result.ok = true;
                 return result;

@@ -3053,7 +3053,7 @@
     {
       "id": "station.input-bytes",
       "source": "docs/distant-world.md#station-discovery-req-e4",
-      "statement": "Inclusive limits bound each file to 1 MiB, snapshot contents to 8 MiB, captured files and structure directories to 4096 entries, and logical UTF-8 names to 1 MiB. Files are validated before retention; all biome, placement, piece and species loader reads use the captured bytes. Contract and CLI regressions cover bounds, disabled terrain features, rooted and nonportable names, and snapshot-reader failures.",
+      "statement": "Inclusive limits bound each file to 1 MiB, snapshot contents to 8 MiB, captured files and structure directories to 4096 entries, and logical UTF-8 names to 1 MiB. Files are validated before retention; all biome, placement, piece and species loader reads use the captured bytes. Contract and CLI regressions cover bounds, disabled terrain features, rooted and nonportable names, and snapshot-reader failures. Aggregate-limit fixtures contain valid JSON regardless of traversal order, including exactly 8 MiB and one byte beyond it.",
       "status": "covered",
       "evidence": [
         {
@@ -3086,7 +3086,7 @@
     {
       "id": "station.sampled-topology",
       "source": "docs/distant-world.md#station-discovery-req-e4",
-      "statement": "Synthetic topology and placement fixtures verify sampled-portals.v1 lattice enumeration, clipping, indices, density thresholds, connected mouth exterior and arch roof/support predicates.",
+      "statement": "Synthetic topology and placement fixtures verify sampled-portals.v1 lattice enumeration, clipping, indices, density thresholds, connected mouth exterior and arch roof/support predicates. Upper-bound portals use the same 12 m extent as anchor clipping; out-of-span binary32 samples reject individual candidates without refusing the query.",
       "status": "covered",
       "evidence": [
         {
@@ -3208,8 +3208,8 @@
     {
       "id": "station.numeric-inputs",
       "source": "docs/distant-world.md#station-discovery-req-e4",
-      "statement": "Discovery checks its ISA/FP environment and preset, hydro and structure integer domains before world construction while preserving existing world generation; exploratory results remain uncertified. Compile-time injected CPU profiles cover missing FMA, disabled OS AVX state and every required feature for GNU/Clang and MSVC, including optional Jolt AVX-512. The CLI smoke exercises the supported host profile; floating-point environment refusals lack negative controls.",
-      "status": "partial",
+      "statement": "Discovery checks its ISA/FP environment and preset, hydro and structure integer domains before world construction while preserving existing world generation; exploratory results remain uncertified. Compile-time injected CPU profiles cover missing FMA, disabled OS AVX state and every required feature for GNU/Clang and MSVC, including optional Jolt AVX-512. The CLI smoke exercises the supported host profile. Child-process controls set each unsupported rounding mode and the independent MXCSR rounding, FTZ and DAZ states, then require refusal with empty stdout before argument parsing; a supported-state control emits a complete document.",
+      "status": "covered",
       "evidence": [
         {
           "kind": "ctest",
@@ -3221,8 +3221,7 @@
         },
         {
           "kind": "ctest",
-          "ref": "StationDiscoveryNumericRefusals",
-          "planned": "Add negative controls for floating-point environment refusals; owner: worldgen"
+          "ref": "StationDiscoveryNumericRefusals"
         },
         {
           "kind": "ctest",

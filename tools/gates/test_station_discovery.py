@@ -146,6 +146,26 @@ class ContractTests(unittest.TestCase):
         self.assertIn("include(cmake/runtime_isa.cmake)",
                       (root / "CMakeLists.txt").read_text(encoding="utf-8"))
 
+    def test_numeric_negative_controls_use_the_shipping_entry_on_both_platforms(self):
+        root = HERE.parents[1]
+        harness = (root / "test/common/StationDiscoveryNumericEnvironment.cpp").read_text(
+            encoding="utf-8")
+        self.assertIn("int StationDiscoveryEntry(int argc, wchar_t** argv);", harness)
+        self.assertIn("int StationDiscoveryEntry(int argc, char** argv);", harness)
+        self.assertIn("StationDiscoveryEntry(argc - 1, argv + 1)", harness)
+        for control in ("FE_DOWNWARD", "FE_UPWARD", "FE_TOWARDZERO", "_mm_setcsr(baseline |"):
+            self.assertIn(control, harness)
+        cmake = (root / "tools/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn("add_library(station_discovery_numeric_entry OBJECT station_discovery.cpp)", cmake)
+        self.assertIn("main=StationDiscoveryEntry wmain=StationDiscoveryEntry", cmake)
+        self.assertIn("$<TARGET_OBJECTS:station_discovery_numeric_entry>", cmake)
+        self.assertIn("luminumbra_baseline_startup(\n        ", cmake)
+        self.assertIn("station_discovery_numeric_environment PRIVATE -municode", cmake)
+        registration = (root / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn("add_test(NAME StationDiscoveryNumericRefusals", registration)
+        self.assertIn('--numeric-cli "$<TARGET_FILE:station_discovery_numeric_environment>"',
+                      registration)
+
     def test_empty_completed_document(self):
         self.assertEqual(contract.validate(document())["candidates"], [])
 
@@ -758,6 +778,9 @@ class NativeSmoke(unittest.TestCase):
                 raw = contract.canonical({"id": "fixture-%d" % index})
                 (species / ("species-%d.json" % index)).write_bytes(
                     raw + b" " * (file_limit - len(raw)))
+            for entry in species.iterdir():
+                if entry.is_file() and entry.suffix == ".json":
+                    contract.loads(entry.read_bytes())
             refused(b"input-limit: aggregate byte limit exceeded")
 
     def test_aggregate_input_byte_limit_is_inclusive(self):
@@ -777,18 +800,39 @@ class NativeSmoke(unittest.TestCase):
                         {"min": [0, 0, 0], "size": [1, 1, 1], "material": 1}]})
             for path, raw in inputs.items():
                 path.write_bytes(raw + b" " * (file_limit - len(raw)))
+            self.assertEqual(sum(path.stat().st_size for path in inputs), 8 * file_limit)
             command = [self.cli, "--preset-json", str(preset), "--data-root", str(data),
                        "--seed", "17", "--kind", "mouth", "--origin-mm", "0", "0",
                        "--radius-m", "1", "--y-range-m", "0", "100",
                        "--view-distance-m", "0", "--limit", "64"]
             accepted = subprocess.run(command, capture_output=True, check=False)
             self.assertEqual(accepted.returncode, 0, accepted.stderr)
-            # Exactly 8 MiB succeeds; one additional byte must beat even invalid JSON.
-            (pool / "extra.json").write_bytes(b" ")
+            # Exactly 8 MiB succeeds. Every file remains valid JSON, independent of
+            # directory enumeration order, so the aggregate limit must win.
+            # Trim one padding byte so the two-byte object exceeds 8 MiB by
+            # exactly one byte, still with every input individually valid.
+            preset.write_bytes(preset.read_bytes()[:-1])
+            (pool / "extra.json").write_bytes(b"{}")
+            captured = (preset, *pool.glob("*.json"))
+            self.assertEqual(sum(path.stat().st_size for path in captured), 8 * file_limit + 1)
+            for path in captured:
+                contract.loads(path.read_bytes())
             refused = subprocess.run(command, capture_output=True, check=False)
             self.assertEqual(refused.returncode, 1, refused.stderr)
             self.assertEqual(refused.stdout, b"")
             self.assertIn(b"input-limit: aggregate byte limit exceeded", refused.stderr)
+            # A malformed explicitly selected biome is captured before the
+            # structure scan. Its parse refusal wins over later aggregate work.
+            (pool / "extra.json").unlink()
+            fields["generation_params"]["biomes"] = {"table": "common/invalid.json"}
+            raw = contract.canonical(fields)
+            preset.write_bytes(raw + b" " * (file_limit - len(raw)))
+            (data / "common/invalid.json").write_bytes(b" ")
+            refused = subprocess.run(command, capture_output=True, check=False)
+            self.assertEqual(refused.returncode, 1, refused.stderr)
+            self.assertEqual(refused.stdout, b"")
+            self.assertIn(b"parse_error.101", refused.stderr)
+            self.assertNotIn(b"input-limit:", refused.stderr)
 
     def test_input_number_range_is_checked_at_every_json_depth(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1183,6 +1227,42 @@ class NativeSmoke(unittest.TestCase):
             self.assertEqual(refusal.stdout, b"")
 
 
+class NumericSmoke(unittest.TestCase):
+    cli = None
+
+    def test_unsupported_floating_point_states_refuse_before_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data = root / "data"
+            data.mkdir()
+            preset = root / "flat.json"
+            preset.write_bytes(contract.canonical(NativeSmoke.flat_preset()))
+            arguments = ["--preset-json", str(preset), "--data-root", str(data),
+                         "--seed", "17", "--kind", "coverage", "--origin-mm", "0", "0",
+                         "--radius-m", "1", "--y-range-m", "0", "100",
+                         "--view-distance-m", "0", "--limit", "64"]
+            # The same entry and inputs must produce a complete document when
+            # the controls are supported, ruling out unrelated startup refusal.
+            supported = subprocess.run([self.cli, "supported", *arguments],
+                                       capture_output=True, check=False)
+            self.assertEqual(supported.returncode, 0, supported.stderr)
+            self.assertEqual(len(contract.validate(contract.loads(supported.stdout))["candidates"]), 5)
+            states = ("downward", "upward", "toward-zero", "ftz", "daz",
+                      "simd-downward", "simd-upward", "simd-toward-zero")
+            for state in states:
+                for inputs in (arguments, []):
+                    with self.subTest(state=state, valid_arguments=bool(inputs)):
+                        refused = subprocess.run([self.cli, state, *inputs],
+                                                 capture_output=True, check=False)
+                        self.assertEqual(refused.returncode, 1, refused.stderr)
+                        self.assertEqual(refused.stdout, b"")
+                        # Some CRTs expose SIMD rounding through fegetround too.
+                        self.assertRegex(refused.stderr,
+                                         br"station discovery refused: unsupported "
+                                         br"(?:floating-point profile|SIMD floating-point environment)")
+                        self.assertNotIn(b"station discovery usage:", refused.stderr)
+
+
 def load_tests(loader, tests, pattern):
     # Generic unittest discovery remains stdlib-only. The ordinary CLI CTest
     # entry supplies its built executable explicitly to run the native cases.
@@ -1192,9 +1272,13 @@ def load_tests(loader, tests, pattern):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cli")
+    parser.add_argument("--numeric-cli")
     args = parser.parse_args()
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(ContractTests)
     if args.cli is not None:
         NativeSmoke.cli = args.cli
         suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(NativeSmoke))
+    if args.numeric_cli is not None:
+        NumericSmoke.cli = args.numeric_cli
+        suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(NumericSmoke))
     sys.exit(not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful())

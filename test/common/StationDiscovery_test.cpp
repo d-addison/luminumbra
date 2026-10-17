@@ -589,6 +589,123 @@ TEST(StationDiscovery, LatticeBudgetCountsWorkAndDiscardsEarlierCandidates) {
     EXPECT_TRUE(result.candidates.empty());
 }
 
+TEST(StationDiscovery, PortalAtUpperStencilBoundaryStaysInsideSpan) {
+    for (auto kind : {StationKind::Mouth, StationKind::Arch}) {
+        for (const int base_y : {-16, 0, 16}) {
+            auto query = Query(kind);
+            query.y_range_m = {base_y, base_y + 12};
+            auto source = Portal();
+            const auto density = source.density;
+            bool outside = false;
+            float highest = -std::numeric_limits<float>::infinity();
+            source.height = [base_y](float, float) {
+                return static_cast<float>(base_y);
+            };
+            source.density = [&, density](const Vec3& point) {
+                outside |= static_cast<double>(point.y) < base_y ||
+                           static_cast<double>(point.y) > base_y + 12;
+                highest = std::max(highest, point.y);
+                return density(Vec3(point.x, point.y - static_cast<float>(base_y), point.z));
+            };
+            const auto result = DiscoverStations(source, query);
+            ASSERT_TRUE(result.ok) << result.error;
+            ASSERT_EQ(result.candidates.size(), 1u);
+            EXPECT_EQ(result.candidates.front().anchor_mm[1],
+                      static_cast<std::int64_t>(base_y) * 1000);
+            EXPECT_EQ(highest, base_y + 12);
+            EXPECT_FALSE(outside);
+            // One metre less leaves no complete stencil and must not sample.
+            --query.y_range_m[1];
+            const auto clipped = DiscoverStations(source, query);
+            ASSERT_TRUE(clipped.ok) << clipped.error;
+            EXPECT_TRUE(clipped.candidates.empty());
+            EXPECT_EQ(clipped.density_samples, 0u);
+        }
+    }
+}
+
+TEST(StationDiscovery, RoundedSamplesOutsideSpanRejectCandidatesWithoutRefusingQuery) {
+    for (auto kind :
+         {StationKind::Mouth, StationKind::Arch, StationKind::Horizon, StationKind::Coverage}) {
+        for (const auto span : {std::array<int, 2>{2147483632, 2147483647},
+                                std::array<int, 2>{-2147483647, -2147483632}}) {
+            auto query = Query(kind);
+            query.y_range_m = span;
+            auto source = Portal();
+            source.height = [span](float, float) {
+                return static_cast<float>(span[0] < 0 ? span[1] : 2147483520);
+            };
+            bool outside = false;
+            source.density = [&](const Vec3& point) {
+                // An invalid source result must never be requested for a
+                // coordinate that rounded outside the requested vertical span.
+                if (static_cast<double>(point.y) < span[0] ||
+                    static_cast<double>(point.y) > span[1]) {
+                    outside = true;
+                    return std::numeric_limits<float>::quiet_NaN();
+                }
+                return 1.0f;
+            };
+            const auto result = DiscoverStations(source, query);
+            EXPECT_TRUE(result.ok) << result.error;
+            EXPECT_TRUE(result.candidates.empty());
+            EXPECT_FALSE(outside);
+        }
+    }
+}
+
+TEST(StationDiscovery, OutOfSpanEyeDirectionDoesNotRefusePortal) {
+    constexpr int terrain = 33554432;
+    constexpr int base_y = terrain - 32;
+    for (auto kind : {StationKind::Mouth, StationKind::Arch}) {
+        auto query = Query(kind);
+        query.y_range_m = {base_y, terrain + 3};
+        auto source = Portal();
+        const auto density = source.density;
+        source.height = [](float x, float) {
+            return static_cast<float>(x < -4 ? terrain : base_y);
+        };
+        bool outside = false;
+        source.density = [&](const Vec3& point) {
+            if (static_cast<double>(point.y) > query.y_range_m[1]) {
+                outside = true;
+                return std::numeric_limits<float>::quiet_NaN();
+            }
+            return density(Vec3(point.x, point.y - static_cast<float>(base_y), point.z));
+        };
+        const auto result = DiscoverStations(source, query);
+        ASSERT_TRUE(result.ok) << result.error;
+        ASSERT_EQ(result.candidates.size(), 1u);
+        // +X rounds out of span and +Z meets a support; -X remains valid.
+        EXPECT_DOUBLE_EQ(result.candidates.front().pose.x, 8);
+        EXPECT_DOUBLE_EQ(result.candidates.front().pose.z, -4);
+        EXPECT_FALSE(outside);
+    }
+}
+
+TEST(StationDiscovery, RoundedEyeClearanceOutsideSpanRejectsOnlyThatControl) {
+    for (auto kind : {StationKind::Horizon, StationKind::Coverage}) {
+        auto query = Query(kind);
+        query.y_range_m = {33554432, 33554435};
+        auto source = Portal();
+        source.height = [](float, float) {
+            return 33554432.0f;
+        };
+        bool outside = false;
+        source.density = [&](const Vec3& point) {
+            if (static_cast<double>(point.y) > query.y_range_m[1]) {
+                outside = true;
+                return std::numeric_limits<float>::quiet_NaN();
+            }
+            return 1.0f;
+        };
+        const auto result = DiscoverStations(source, query);
+        EXPECT_TRUE(result.ok) << result.error;
+        EXPECT_TRUE(result.candidates.empty());
+        EXPECT_FALSE(outside);
+    }
+}
+
 TEST(StationDiscovery, ShortOrUnalignedPortalSpanDoesNoCatalogueOrLatticeWork) {
     for (auto kind : {StationKind::Mouth, StationKind::Arch}) {
         for (const auto span :

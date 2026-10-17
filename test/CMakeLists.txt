@@ -2104,6 +2104,11 @@ add_test(NAME StationDiscoveryCliSmoke
     COMMAND "${Python3_EXECUTABLE}" -I -B
         "${CMAKE_SOURCE_DIR}/tools/gates/test_station_discovery.py"
         --cli "$<TARGET_FILE:luminumbra_station_discovery>")
+add_test(NAME StationDiscoveryNumericRefusals
+    COMMAND "${Python3_EXECUTABLE}" -I -B
+        "${CMAKE_SOURCE_DIR}/tools/gates/test_station_discovery.py"
+        --numeric-cli "$<TARGET_FILE:station_discovery_numeric_environment>")
+set_tests_properties(StationDiscoveryNumericRefusals PROPERTIES LABELS "world;tools" TIMEOUT 120)
 set_tests_properties(StationDiscoveryContract StationDiscoveryCliSmoke
     PROPERTIES LABELS "world;tools" TIMEOUT 120)
 

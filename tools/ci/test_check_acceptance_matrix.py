@@ -653,12 +653,12 @@ class AcceptanceMatrixTests(unittest.TestCase):
         self.assertEqual(set(requirements), mapped)
         self.assertTrue(MODULE._doc_matches(root / "docs/acceptance-matrix.md", MODULE.render_doc(matrix)))
 
-    def test_station_numeric_evidence_records_missing_refusal_controls(self) -> None:
+    def test_station_numeric_evidence_includes_floating_point_refusal_controls(self) -> None:
         matrix = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_matrix.json")
         row = row_of(matrix, "station.numeric-inputs")
-        self.assertEqual(row["status"], "partial")
-        self.assertIn("floating-point environment refusals lack negative controls",
-                      row["statement"])
+        self.assertEqual(row["status"], "covered")
+        self.assertIn("independent MXCSR rounding, FTZ and DAZ states", row["statement"])
+        self.assertIn({"kind": "ctest", "ref": "StationDiscoveryNumericRefusals"}, row["evidence"])
         self.assertIn("missing FMA, disabled OS AVX state", row["statement"])
         self.assertIn({"kind": "ctest", "ref": "CommonLibraryIsaContract"}, row["evidence"])
         self.assertIn({"kind": "ctest", "ref": "StationDiscoveryCliSmoke"}, row["evidence"])
