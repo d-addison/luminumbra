@@ -14,6 +14,7 @@ import sys
 # an explicit coverage decision; directory membership never grants an exemption.
 PYTHON_TESTS = (
     "tools/ci/test_ci_paths.py",
+    "tools/ci/test_self_hosted_runner.py",
     "tools/ci/test_cache_retention.py",
     "tools/ci/test_check_docs.py",
     "tools/ci/test_check_ctest_junit.py",

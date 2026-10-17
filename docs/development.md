@@ -76,8 +76,8 @@ increases add 0.15 + 0.35 GB and the newly seeded UCRT64 cache adds up to 0.5 GB
 about 2.55 GB per branch, or 5.1 GB across main/devel, leaving about 0.9 GB of the
 6 GB budget for other caches. At all seven lanes' configured caps, one generation
 per branch totals 2.75 GB, or 5.5 GB across both branches, leaving 0.5 GB for
-package and analysis caches. These lanes use standard runners and the existing
-cache actions, with no paid cache service.
+package and analysis caches. These lanes use the existing cache actions, with no
+paid cache service.
 
 All Actions caches, including performance, clang-tidy results, and MSYS2 packages,
 are saved only on `push` events to `refs/heads/main` or `refs/heads/devel`; PRs,
@@ -129,7 +129,7 @@ Compiler and analysis caches can be restored on eligible PR and manual runs.
 The MSYS2 package cache is an exception: its setup action enables both restore
 and save together, so package caching is disabled outside main/devel pushes.
 
-Blocking clang-tidy analysis runs in three path-hash shards on standard Ubuntu
+Blocking clang-tidy analysis runs in three path-hash shards on Linux
 runners, each with a 60-minute timeout. Together they analyse every configured
 first-party translation unit and its headers on every executed merged-tip run;
 pushes use `writeonly` caching and never skip analysis. PRs restore only their
@@ -290,8 +290,52 @@ after merge. Attribution also runs weekly on Sunday at 04:43 UTC on the default
 branch and supports manual dispatch. Other scheduled and release routing stays
 unchanged.
 
-All runners remain standard hosted runners; no paid actions, larger/GPU runners,
-or repository visibility changes are introduced.
+The repository variable `LUM_SELF_HOSTED` is an opt-in and kill switch. Unset or
+`false` keeps `ubuntu-24.04`. When it equals `true`, only `linux`, `tidy-shard`
+(all three shards), `lint`, and `public-tree` in `ci.yml`, and `asan` in `asan.yml`
+can select `[self-hosted, Linux, X64, lum-vq1]`. The expression allows only pushes,
+manual dispatches, and PRs with a nonempty head repository matching this repository.
+Fork PRs, missing PR identity, schedules, `workflow_run`, and other event types
+always select hosted runners, even if triggers are expanded later. A push payload
+has no `pull_request.head.repo.full_name`; missing properties evaluate to an empty
+string, and the explicit push branch still selects the opted-in runner. The gate
+uses only `vars` and `github` contexts, so it also works for matrix shards and
+jobs skipped by their existing job-level conditions. Required check names, job
+conditions, timeouts, shard parallelism, and concurrency remain unchanged.
+
+The dedicated host has three non-root runner instances, without sudo, with the
+workflow dependency packages preinstalled. Each instance must have its own runner
+installation, workspace and `RUNNER_TEMP`. `prepare_self_hosted.sh` checks the full
+package and executable inventory and fails with the complete missing list;
+package installation runs only when `runner.environment == 'github-hosted'`.
+The self-hosted formatter uses the preinstalled `clang-format-18` through a private
+`clang-format` link. No sudo or package installation is attempted on that host.
+Manual capture commands also get a private `python` link to `python3`.
+
+Before build, analysis, formatting or inventory steps, the self-hosted preparation
+checks the checkout root and runs `git clean -ffdx` only there, removing stale
+`build/` and `.tidy-cache` contents. Every job gets a new private home, runtime and
+temporary directory under `RUNNER_TEMP`; the runner removes them at job completion.
+`HOME`, XDG directories, `TMPDIR`, `TMP`, `TEMP` and ccache configuration point there,
+and Python user packages are disabled. No selected job installs pip packages.
+The cache actions still restore/save `~/.cache/ccache`, now in that fresh home;
+ccache uses the same directory and unchanged 400M/600M limits. This prevents local
+PR cache contents from carrying into push saves. PRs still only restore Actions
+caches, and push restores cannot read PR-scoped caches. No cache budget increases.
+`xvfb-run -a` retries occupied displays, uses the private temporary directory for
+authorization files, and cleans up only its own server process; existing displays
+are never killed. Networking fixtures and the soak use OS-assigned loopback ports,
+so concurrent instances do not reserve a shared port in the 8000 range.
+
+All performance jobs stay hosted: `runner-contract` keeps its OS matrix, and
+`preview-frame`, `server-smoke-comparison` and `qualification-capture` keep their
+current GL/display setup until the dedicated host is verified for those paths.
+The aggregate tidy check, other Linux lanes, Windows, macOS, documentation deploy,
+release, game-assets, Blender and UCRT attribution also stay hosted. No paid
+actions, larger/GPU runners, cache cap above 10 GB, or repository visibility
+changes are introduced. `test_self_hosted_runner.py` locks the routing truth table,
+preparation failure paths and workflow wiring; the standalone Python plan and
+public-tree lane both run it.
 
 CTest produces JUnit and runtime artifacts. CI verifies a minimum discovered-test
 count so an empty or severely truncated suite cannot report success. Once a
