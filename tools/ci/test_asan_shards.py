@@ -3,6 +3,7 @@
 
 import importlib.util
 import json
+import re
 from pathlib import Path
 import shlex
 import subprocess
@@ -26,7 +27,12 @@ def aggregate_inventory_arguments():
     workflow = Path(__file__).resolve().parents[2] / ".github/workflows/asan.yml"
     command = next(line for line in workflow.read_text(encoding="utf-8").splitlines()
                    if line.strip().startswith("python3 tools/ci/check_ctest_junit.py "))
-    return shlex.split(command)[3:]
+    arguments = shlex.split(command)[3:]
+    floor = re.search(r"(?m)^          minimum_tests=([0-9]+)$", workflow.read_text(encoding="utf-8"))
+    assert arguments[:2] == ["--minimum-tests", "$minimum_tests"]
+    assert floor is not None
+    arguments[1] = floor.group(1)
+    return arguments
 
 
 class AsanShardTests(unittest.TestCase):

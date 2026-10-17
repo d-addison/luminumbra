@@ -129,6 +129,21 @@ CI_ENTRYPOINTS = (
 )
 
 
+# Exact membership only: UI primitives do not open worlds or drive simulation.
+# New documentation, tooling and client files require a separate review.
+HEAVY_EXEMPT_FILES = {
+    "README.md", "LICENSE", "docs/index.md", "docs/development.md",
+    "src/luminumbra_client/ui/components/common/Button.cpp",
+    "src/luminumbra_client/ui/components/common/Button.h",
+    "src/luminumbra_client/ui/components/common/Panel.cpp",
+    "src/luminumbra_client/ui/components/common/Panel.h",
+}
+
+
+def needs_heavy(path: str) -> bool:
+    return path not in HEAVY_EXEMPT_FILES
+
+
 def covered_python(path: str) -> bool:
     return path in COVERED_PYTHON_FILES
 
@@ -171,9 +186,11 @@ def changed_paths(root: Path, base: str, head: str) -> list[str]:
 
 
 def classify(root: Path, event: str, base: str, head: str,
-             repository: str, head_repository: str) -> tuple[bool, bool]:
+             repository: str, head_repository: str, base_ref: str = "") -> tuple[bool, bool, bool, str]:
     if event != "pull_request":
-        return True, True
+        return True, True, True, "non_pr_event"
+    if base_ref != "devel":
+        return True, True, True, "main_or_unknown_base"
     try:
         if not repository or not head_repository or repository != head_repository:
             raise ValueError("fork PR or missing repository identity")
@@ -189,8 +206,13 @@ def classify(root: Path, event: str, base: str, head: str,
             raise ValueError("empty PR diff")
     except (OSError, subprocess.CalledProcessError, ValueError) as error:
         print(f"Cannot classify PR diff; running all lanes: {error}", file=sys.stderr)
-        return True, True
-    return any(needs_cpp(path) for path in paths), any(needs_python(path) for path in paths)
+        return True, True, True, "classification_uncertain"
+    heavy = any(needs_heavy(path) for path in paths)
+    # Persistence and other heavy-sensitive tooling must reach native tests even
+    # if it used to qualify for a standalone Python route.
+    return (heavy or any(needs_cpp(path) for path in paths),
+            any(needs_python(path) for path in paths), heavy,
+            "heavy_sensitive_paths" if heavy else "reviewed_presentation_or_docs")
 
 
 def python_test_commands(root: Path) -> list[tuple[str, ...]]:
@@ -205,6 +227,7 @@ def main() -> int:
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--event", default=os.environ.get("CI_EVENT", ""))
     parser.add_argument("--base", default=os.environ.get("CI_BASE_SHA", ""))
+    parser.add_argument("--base-ref", default=os.environ.get("CI_BASE_REF", os.environ.get("GITHUB_BASE_REF", "")))
     parser.add_argument("--head", default=os.environ.get("CI_HEAD_SHA", ""))
     parser.add_argument("--repository", default=os.environ.get("CI_REPOSITORY", ""))
     parser.add_argument("--head-repository", default=os.environ.get("CI_HEAD_REPOSITORY", ""))
@@ -216,9 +239,10 @@ def main() -> int:
             print("Running:", " ".join(command), flush=True)
             subprocess.run([sys.executable, "-B", *command], cwd=root, check=True)
         return 0
-    cpp, python = classify(root, args.event, args.base, args.head,
-                           args.repository, args.head_repository)
-    output = f"needs_cpp={str(cpp).lower()}\nneeds_python={str(python).lower()}\n"
+    cpp, python, heavy, reason = classify(root, args.event, args.base, args.head,
+                           args.repository, args.head_repository, args.base_ref)
+    output = (f"needs_cpp={str(cpp).lower()}\nneeds_python={str(python).lower()}\n"
+              f"needs_heavy={str(heavy).lower()}\nheavy_reason={reason}\n")
     print(output, end="")
     if args.output:
         with args.output.open("a", encoding="utf-8") as stream:

@@ -54,6 +54,8 @@ jobs:
     outputs:
       needs_cpp: ${{ steps.paths.outputs.needs_cpp }}
       needs_python: ${{ steps.paths.outputs.needs_python }}
+      needs_heavy: ${{ steps.paths.outputs.needs_heavy }}
+      heavy_reason: ${{ steps.paths.outputs.heavy_reason }}
     steps:
       - name: Check out repository and PR history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -65,6 +67,7 @@ jobs:
           CI_EVENT: ${{ github.event_name }}
           CI_REPOSITORY: ${{ github.repository }}
           CI_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          CI_BASE_REF: ${{ github.base_ref }}
           CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           CI_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
@@ -72,15 +75,32 @@ jobs:
           # The explicit guard also handles bases predating the fail-open rules.
           all_lanes() {
             echo 'Classification uncertain or CI inputs changed; running all lanes'
-            printf 'needs_cpp=true\nneeds_python=true\n' >> "$GITHUB_OUTPUT"
+            printf 'needs_cpp=true\nneeds_python=true\nneeds_heavy=true\nheavy_reason=classification_uncertain\n' >> "$GITHUB_OUTPUT"
           }
-          if [ "$CI_EVENT" != pull_request ] || [ -z "$CI_BASE_SHA" ] ||
-             [ -z "$CI_HEAD_SHA" ] || [ "$CI_REPOSITORY" != "$CI_HEAD_REPOSITORY" ]; then
+          if [ "$CI_EVENT" != pull_request ] || [ "$CI_BASE_REF" != devel ] || [ -z "$CI_BASE_SHA" ] ||
+             [ -z "$CI_HEAD_SHA" ] || [ -z "$CI_REPOSITORY" ] || [ -z "$CI_HEAD_REPOSITORY" ] ||
+             [ "$CI_REPOSITORY" != "$CI_HEAD_REPOSITORY" ]; then
             all_lanes
           elif ! git diff --quiet "$CI_BASE_SHA" "$CI_HEAD_SHA" -- tools/ci/ .github/workflows/ scripts/; then
             all_lanes
           elif git show "$CI_BASE_SHA:tools/ci/ci_paths.py" > "$RUNNER_TEMP/trusted-ci-paths.py"; then
-            if ! python3 -I -B "$RUNNER_TEMP/trusted-ci-paths.py" classify --root "$GITHUB_WORKSPACE"; then
+            rm -f "$RUNNER_TEMP/classified-paths.txt"
+            if GITHUB_OUTPUT="$RUNNER_TEMP/classified-paths.txt" python3 -I -B "$RUNNER_TEMP/trusted-ci-paths.py" classify --root "$GITHUB_WORKSPACE" &&
+               python3 -I -B -c '
+          import pathlib, sys
+          rows = pathlib.Path(sys.argv[1]).read_text().splitlines()
+          assert len(rows) == 4
+          values = dict(row.split("=", 1) for row in rows)
+          assert set(values) == {"needs_cpp", "needs_python", "needs_heavy", "heavy_reason"}
+          assert all(values[key] in ("true", "false") for key in ("needs_cpp", "needs_python", "needs_heavy"))
+          if values["needs_heavy"] == "false":
+              assert values["heavy_reason"] == "reviewed_presentation_or_docs"
+          else:
+              assert values["needs_cpp"] == "true"
+              assert values["heavy_reason"] in ("non_pr_event", "main_or_unknown_base", "classification_uncertain", "heavy_sensitive_paths")
+          ' "$RUNNER_TEMP/classified-paths.txt"; then
+              cat "$RUNNER_TEMP/classified-paths.txt" >> "$GITHUB_OUTPUT"
+            else
               all_lanes
             fi
           else
@@ -102,6 +122,8 @@ jobs:
         # Qualification captures keep one full, binary-bound producer.
         shard: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture && fromJSON('[0]') || fromJSON('[1,2]') }}
     env:
+      CI_NEEDS_HEAVY: ${{ needs.changes.outputs.needs_heavy }}
+      CI_HEAVY_REASON: ${{ needs.changes.outputs.heavy_reason }}
       CCACHE_COMPILERCHECK: content
       CCACHE_MAXSIZE: 400M
     outputs:
@@ -205,7 +227,7 @@ jobs:
         run: |
           ctest --preset release -LE manual --show-only=json-v1 > build/release/ctest.inventory.json
           ctest --preset release --show-only=json-v1 > build/release/ctest.all.json
-          python3 tools/ci/ctest_shards.py plan --profile gcc --shard ${{ matrix.shard }} --directory build/release --require-suite SimBudgetWorldParity. --require-suite AmbientDeterminismReceipt. --require-suite PrefabRuntimeTest. --require-suite PrefabDigest.
+          python3 tools/ci/ctest_shards.py plan --profile gcc --shard ${{ matrix.shard }} --directory build/release --require-suite SimBudgetWorldParity. --require-suite AmbientDeterminismReceipt. --require-suite PrefabRuntimeTest. --require-suite PrefabDigest. --needs-heavy "$CI_NEEDS_HEAVY"
           ctest --preset release --show-only=json-v1 > build/release/ctest-discovery.json
           env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \
             xvfb-run -a python3 tools/ci/ctest_shards.py run --profile gcc --directory build/release
@@ -453,6 +475,8 @@ jobs:
         # Qualification captures keep one full, binary-bound producer.
         shard: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture && fromJSON('[0]') || fromJSON('[1,2]') }}
     env:
+      CI_NEEDS_HEAVY: ${{ needs.changes.outputs.needs_heavy }}
+      CI_HEAVY_REASON: ${{ needs.changes.outputs.heavy_reason }}
       CCACHE_COMPILERCHECK: content
       CCACHE_MAXSIZE: 500M
       # Only the main configure opts in via command-line launchers. Captures
@@ -629,7 +653,7 @@ jobs:
           $env:GALLIUM_DRIVER = 'llvmpipe'
           ctest --preset release -LE manual --show-only=json-v1 | Set-Content -Encoding utf8 build/release/ctest.inventory.json
           ctest --preset release --show-only=json-v1 | Set-Content -Encoding utf8 build/release/ctest.all.json
-          python tools/ci/ctest_shards.py plan --profile msvc --shard ${{ matrix.shard }} --directory build/release --require-suite SimBudgetWorldParity. --require-suite AmbientDeterminismReceipt.
+          python tools/ci/ctest_shards.py plan --profile msvc --shard ${{ matrix.shard }} --directory build/release --require-suite SimBudgetWorldParity. --require-suite AmbientDeterminismReceipt. --needs-heavy "$env:CI_NEEDS_HEAVY"
           python tools/ci/ctest_shards.py run --profile msvc --directory build/release
           # With llvmpipe deployed this lane holds the same standard as the
           # Linux software-GL lane: no GL-related skip is acceptable, and any
@@ -721,12 +745,12 @@ jobs:
 
   windows-ucrt64:
     name: ${{ matrix.shard == 0 && 'Windows / MSYS2 UCRT64 full qualification' || format('Windows / MSYS2 UCRT64 shard {0}/2', matrix.shard) }}
-    # Runs on ready pull requests (devel- and main-bound) and pushes to main/devel.
-    # Devel pushes seed the compiler cache restored by pull requests into devel.
-    # A MinGW/UCRT break shows on the PR that causes it instead of at promotion.
-    # It is not a required devel context; it stays required on main.
+    # Runs on ready pull requests (devel- and main-bound), main/devel pushes,
+    # and every manual dispatch. Devel pushes seed the compiler cache restored
+    # by pull requests into devel. A MinGW/UCRT break shows on the pull request
+    # that causes it. It is not a required devel context; it stays required on main.
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'pull_request' || github.ref_name == 'main' || (github.event_name == 'push' && github.ref == 'refs/heads/devel') || (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)) }}
+    if: ${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
     runs-on: windows-2025
     # Measured 40.6 min end to end on the first post-release promotion run
     # (previously two 135-minute cap kills, before the test streaming caps
@@ -741,6 +765,8 @@ jobs:
         # Qualification captures keep one full, binary-bound producer.
         shard: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture && fromJSON('[0]') || fromJSON('[1,2]') }}
     env:
+      CI_NEEDS_HEAVY: ${{ needs.changes.outputs.needs_heavy }}
+      CI_HEAVY_REASON: ${{ needs.changes.outputs.heavy_reason }}
       CCACHE_COMPILERCHECK: content
       CCACHE_MAXSIZE: 500M
     steps:
@@ -871,7 +897,7 @@ jobs:
           # raised to paper over.
           ctest --preset release -LE manual --show-only=json-v1 > build/release/ctest.inventory.json
           ctest --preset release --show-only=json-v1 > build/release/ctest.all.json
-          python tools/ci/ctest_shards.py plan --profile ucrt64 --shard ${{ matrix.shard }} --directory build/release --require-suite SimBudgetWorldParity. --require-suite AmbientDeterminismReceipt.
+          python tools/ci/ctest_shards.py plan --profile ucrt64 --shard ${{ matrix.shard }} --directory build/release --require-suite SimBudgetWorldParity. --require-suite AmbientDeterminismReceipt. --needs-heavy "$CI_NEEDS_HEAVY"
           python tools/ci/ctest_shards.py run --profile ucrt64 --directory build/release
           # With llvmpipe deployed this lane holds the same standard as the
           # other software-GL lanes: no GL-related skip is acceptable, and
@@ -962,6 +988,9 @@ jobs:
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    env:
+      CI_NEEDS_HEAVY: ${{ needs.changes.outputs.needs_heavy }}
+      CI_HEAVY_REASON: ${{ needs.changes.outputs.heavy_reason }}
     steps:
       - name: Reject draft pull requests
         shell: bash
@@ -975,18 +1004,22 @@ jobs:
           fi
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Reject cancelled workflow
+        if: ${{ cancelled() }}
+        run: |
+          echo "Native test workflow was cancelled" >&2
+          exit 1
       - name: Require expected producers and route
         env:
           SHARD_RESULT: ${{ needs.linux.result }}
           NEEDS_CPP: ${{ needs.changes.outputs.needs_cpp }}
-          CI_CANCELLED: ${{ cancelled() }}
           CI_EVENT: ${{ github.event_name }}
           CI_DRAFT: ${{ github.event.pull_request.draft }}
           CI_QUALIFICATION: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture }}
           CI_ENABLED: "true"
         run: >-
           python3 tools/ci/ctest_shards.py gate --result "$SHARD_RESULT" --cpp "$NEEDS_CPP"
-          --cancelled "$CI_CANCELLED" --event "$CI_EVENT" --draft "$CI_DRAFT"
+          --cancelled false --event "$CI_EVENT" --draft "$CI_DRAFT"
           --qualification "$CI_QUALIFICATION" --enabled "$CI_ENABLED"
       - name: Download shard JUnit
         if: needs.linux.result == 'success' && needs.changes.outputs.needs_cpp != 'false'
@@ -1004,8 +1037,14 @@ jobs:
           python3 tools/ci/ctest_shards.py collect --directory build/gcc-shards \
             --prefix gcc-junit-${{ github.sha }}-${{ github.run_id }} --attempt ${{ github.run_attempt }} "${full[@]}"
           python3 tools/ci/ctest_shards.py merge --profile gcc --directory build/gcc-shards \
-            --output build/release/ctest.junit.xml "${full[@]}"
-          python3 tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 2340 --require-test ConsoleFixture.CompleteInventoryDefaultsBindingsAndUnavailableRows --require-test UiFixture.DefaultPassiveHudRendersWithoutShellOrFocusAndCanBeDisabled --require-test DeveloperPersistence.DirectConstructionMatchesFactoryDefaultsAndInitializesRecords
+            --output build/release/ctest.junit.xml "${full[@]}" --needs-heavy "$CI_NEEDS_HEAVY" --reason "$CI_HEAVY_REASON"
+          # The full discovery floor is enforced before the reviewed selection.
+          minimum_tests=2340
+          if [ "$CI_NEEDS_HEAVY" = false ]; then
+            minimum_tests=$((minimum_tests - 2))
+          fi
+          # Require each developer target explicitly; total-count margin cannot hide one.
+          python3 tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests "$minimum_tests" --require-test ConsoleFixture.CompleteInventoryDefaultsBindingsAndUnavailableRows --require-test UiFixture.DefaultPassiveHudRendersWithoutShellOrFocusAndCanBeDisabled --require-test DeveloperPersistence.DirectConstructionMatchesFactoryDefaultsAndInitializesRecords
       - name: Check acceptance matrix CTest execution
         if: needs.linux.result == 'success' && needs.changes.outputs.needs_cpp != 'false'
         env:
@@ -1027,6 +1066,7 @@ jobs:
           name: gcc-merged-junit-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             build/release/ctest.junit.xml
+            build/release/ctest.junit.selection.json
             build/release/ctest-discovery.json
             build/release/netsoak.junit.xml
             build/release/test-artifacts/acceptance-execution.json
@@ -1039,6 +1079,9 @@ jobs:
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    env:
+      CI_NEEDS_HEAVY: ${{ needs.changes.outputs.needs_heavy }}
+      CI_HEAVY_REASON: ${{ needs.changes.outputs.heavy_reason }}
     steps:
       - name: Reject draft pull requests
         shell: bash
@@ -1052,18 +1095,22 @@ jobs:
           fi
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Reject cancelled workflow
+        if: ${{ cancelled() }}
+        run: |
+          echo "Native test workflow was cancelled" >&2
+          exit 1
       - name: Require expected producers and route
         env:
           SHARD_RESULT: ${{ needs.windows-msvc.result }}
           NEEDS_CPP: ${{ needs.changes.outputs.needs_cpp }}
-          CI_CANCELLED: ${{ cancelled() }}
           CI_EVENT: ${{ github.event_name }}
           CI_DRAFT: ${{ github.event.pull_request.draft }}
           CI_QUALIFICATION: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture }}
           CI_ENABLED: "true"
         run: >-
           python3 tools/ci/ctest_shards.py gate --result "$SHARD_RESULT" --cpp "$NEEDS_CPP"
-          --cancelled "$CI_CANCELLED" --event "$CI_EVENT" --draft "$CI_DRAFT"
+          --cancelled false --event "$CI_EVENT" --draft "$CI_DRAFT"
           --qualification "$CI_QUALIFICATION" --enabled "$CI_ENABLED"
       - name: Download shard JUnit
         if: needs.windows-msvc.result == 'success' && needs.changes.outputs.needs_cpp != 'false'
@@ -1081,14 +1128,22 @@ jobs:
           python3 tools/ci/ctest_shards.py collect --directory build/msvc-shards \
             --prefix msvc-junit-${{ github.sha }}-${{ github.run_id }} --attempt ${{ github.run_attempt }} "${full[@]}"
           python3 tools/ci/ctest_shards.py merge --profile msvc --directory build/msvc-shards \
-            --output build/release/ctest.junit.xml "${full[@]}"
-          python3 tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 2320 --require-test ConsoleFixture.CompleteInventoryDefaultsBindingsAndUnavailableRows --require-test UiFixture.DefaultPassiveHudRendersWithoutShellOrFocusAndCanBeDisabled --require-test DeveloperPersistence.DirectConstructionMatchesFactoryDefaultsAndInitializesRecords
+            --output build/release/ctest.junit.xml "${full[@]}" --needs-heavy "$CI_NEEDS_HEAVY" --reason "$CI_HEAVY_REASON"
+          # The full discovery floor is enforced before the reviewed selection.
+          minimum_tests=2320
+          if [ "$CI_NEEDS_HEAVY" = false ]; then
+            minimum_tests=$((minimum_tests - 2))
+          fi
+          # Require each developer target explicitly; total-count margin cannot hide one.
+          python3 tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests "$minimum_tests" --require-test ConsoleFixture.CompleteInventoryDefaultsBindingsAndUnavailableRows --require-test UiFixture.DefaultPassiveHudRendersWithoutShellOrFocusAndCanBeDisabled --require-test DeveloperPersistence.DirectConstructionMatchesFactoryDefaultsAndInitializesRecords
       - name: Upload merged JUnit
         if: needs.windows-msvc.result == 'success' && needs.changes.outputs.needs_cpp != 'false'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: msvc-merged-junit-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: build/release/ctest.junit.xml
+          path: |
+            build/release/ctest.junit.xml
+            build/release/ctest.junit.selection.json
           if-no-files-found: error
           retention-days: 30
 
@@ -1098,6 +1153,9 @@ jobs:
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    env:
+      CI_NEEDS_HEAVY: ${{ needs.changes.outputs.needs_heavy }}
+      CI_HEAVY_REASON: ${{ needs.changes.outputs.heavy_reason }}
     steps:
       - name: Reject draft pull requests
         shell: bash
@@ -1111,18 +1169,22 @@ jobs:
           fi
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Reject cancelled workflow
+        if: ${{ cancelled() }}
+        run: |
+          echo "Native test workflow was cancelled" >&2
+          exit 1
       - name: Require expected producers and route
         env:
           SHARD_RESULT: ${{ needs.windows-ucrt64.result }}
           NEEDS_CPP: ${{ needs.changes.outputs.needs_cpp }}
-          CI_CANCELLED: ${{ cancelled() }}
           CI_EVENT: ${{ github.event_name }}
           CI_DRAFT: ${{ github.event.pull_request.draft }}
           CI_QUALIFICATION: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture }}
-          CI_ENABLED: ${{ needs.changes.outputs.needs_cpp != 'false' && (github.event_name == 'pull_request' || github.ref_name == 'main' || (github.event_name == 'push' && github.ref == 'refs/heads/devel') || (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)) }}
+          CI_ENABLED: ${{ needs.changes.outputs.needs_cpp != 'false' && (github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
         run: >-
           python3 tools/ci/ctest_shards.py gate --result "$SHARD_RESULT" --cpp "$NEEDS_CPP"
-          --cancelled "$CI_CANCELLED" --event "$CI_EVENT" --draft "$CI_DRAFT"
+          --cancelled false --event "$CI_EVENT" --draft "$CI_DRAFT"
           --qualification "$CI_QUALIFICATION" --enabled "$CI_ENABLED"
       - name: Download shard JUnit
         if: needs.windows-ucrt64.result == 'success' && needs.changes.outputs.needs_cpp != 'false'
@@ -1140,14 +1202,22 @@ jobs:
           python3 tools/ci/ctest_shards.py collect --directory build/ucrt64-shards \
             --prefix ucrt64-junit-${{ github.sha }}-${{ github.run_id }} --attempt ${{ github.run_attempt }} "${full[@]}"
           python3 tools/ci/ctest_shards.py merge --profile ucrt64 --directory build/ucrt64-shards \
-            --output build/release/ctest.junit.xml "${full[@]}"
-          python3 tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 2320 --require-test ConsoleFixture.CompleteInventoryDefaultsBindingsAndUnavailableRows --require-test UiFixture.DefaultPassiveHudRendersWithoutShellOrFocusAndCanBeDisabled --require-test DeveloperPersistence.DirectConstructionMatchesFactoryDefaultsAndInitializesRecords
+            --output build/release/ctest.junit.xml "${full[@]}" --needs-heavy "$CI_NEEDS_HEAVY" --reason "$CI_HEAVY_REASON"
+          # The full discovery floor is enforced before the reviewed selection.
+          minimum_tests=2320
+          if [ "$CI_NEEDS_HEAVY" = false ]; then
+            minimum_tests=$((minimum_tests - 2))
+          fi
+          # Require each developer target explicitly; total-count margin cannot hide one.
+          python3 tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests "$minimum_tests" --require-test ConsoleFixture.CompleteInventoryDefaultsBindingsAndUnavailableRows --require-test UiFixture.DefaultPassiveHudRendersWithoutShellOrFocusAndCanBeDisabled --require-test DeveloperPersistence.DirectConstructionMatchesFactoryDefaultsAndInitializesRecords
       - name: Upload merged JUnit
         if: needs.windows-ucrt64.result == 'success' && needs.changes.outputs.needs_cpp != 'false'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ucrt64-merged-junit-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: build/release/ctest.junit.xml
+          path: |
+            build/release/ctest.junit.xml
+            build/release/ctest.junit.selection.json
           if-no-files-found: error
           retention-days: 30
 
