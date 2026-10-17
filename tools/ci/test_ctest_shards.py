@@ -29,8 +29,167 @@ class CTestShardTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
+        environment = patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop("GITHUB_OUTPUT", None)
         self.tests = [test(f"Suite.Case{index}") for index in range(40)]
         self.names = [row["name"] for row in self.tests]
+
+    def test_synthetic_plans_do_not_publish_workflow_outputs(self):
+        self.assertNotIn("GITHUB_OUTPUT", os.environ)
+        output = self.root / "step-output"
+        sentinel = b"sentinel=retained\nprefab=true\n"
+        for profile in ("asan", "gcc", "msvc", "ucrt64"):
+            tests = [*self.tests, test("SimBudgetWorldParity.First"),
+                     test("SimBudgetWorldParity.Second")]
+            for shard in ((1, 2) if profile == "asan" else (0, 1, 2)):
+                with self.subTest(profile=profile, shard=shard):
+                    output.write_bytes(sentinel)
+                    with patch.dict(os.environ, GITHUB_OUTPUT=str(output)):
+                        self.write_plan(self.root, shard, tests=tests, profile=profile)
+                    self.assertEqual(output.read_bytes(), sentinel)
+
+    def test_cli_publishes_only_the_selected_real_plan(self):
+        tests = self.policy_roster() + [test("PrefabRuntimeTest.Installed"), test("PrefabDigest.Content")]
+        output = self.root / "step-output"
+        sentinel = b"sentinel=retained\n"
+        for script, profile in (("asan_shards.py", "asan"), ("ctest_shards.py", "asan"),
+                                ("ctest_shards.py", "gcc"), ("ctest_shards.py", "msvc"),
+                                ("ctest_shards.py", "ucrt64")):
+            for shard in ((1, 2) if profile == "asan" else (0, 1, 2)):
+                with self.subTest(script=script, profile=profile, shard=shard):
+                    manifest = self.write_plan(self.root, shard, tests=tests, profile=profile)
+                    selected = manifest["partitions"][0 if shard == 0 else shard - 1]
+                    expected = any(name.startswith("PrefabRuntimeTest.") for name in selected)
+                    output.write_bytes(sentinel)
+                    result = subprocess.run(
+                        [sys.executable, "-I", "-B", str(Path(__file__).with_name(script)), "plan",
+                         "--directory", str(self.root), "--profile", profile, "--shard", str(shard)],
+                        env=dict(os.environ, GITHUB_OUTPUT=str(output)),
+                        capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    published = f"prefab={str(expected).lower()}{os.linesep}".encode("utf-8")
+                    self.assertEqual(output.read_bytes(), sentinel + published)
+
+    def test_full_capture_prefab_output_survives_both_contract_suites(self):
+        tests = self.policy_roster() + [test("PrefabRuntimeTest.Installed"), test("PrefabDigest.Content")]
+        self.write_plan(self.root, 0, tests=tests)
+        output = self.root / "step-output"
+        output.write_bytes(b"sentinel=retained\n")
+        environment = dict(os.environ, GITHUB_OUTPUT=str(output))
+        result = subprocess.run(
+            [sys.executable, "-I", "-B", str(Path(__file__).with_name("ctest_shards.py")),
+             "plan", "--directory", str(self.root), "--shard", "0", "--require-suite", "PrefabRuntimeTest."],
+            env=environment, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        expected = b"sentinel=retained\n" + f"prefab=true{os.linesep}".encode("utf-8")
+        self.assertEqual(output.read_bytes(), expected)
+        for script, case in (("test_asan_shards.py", "AsanShardTests"),
+                             ("test_ctest_shards.py", "CTestShardTests")):
+            with self.subTest(script=script):
+                result = subprocess.run(
+                    [sys.executable, "-I", "-B", str(Path(__file__).with_name(script)),
+                     case + ".test_synthetic_plans_do_not_publish_workflow_outputs"],
+                    env=environment, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(output.read_bytes(), expected)
+
+    def test_cli_output_absent_empty_unwritable_and_invalid_inventory(self):
+        output = self.root / "step-output"
+        command = [sys.executable, "-I", "-B", str(Path(__file__).with_name("ctest_shards.py")),
+                   "plan", "--directory", str(self.root), "--shard", "0"]
+        self.write_plan(self.root, 0, tests=self.policy_roster())
+        for value in (None, "", str(self.root)):
+            environment = dict(os.environ)
+            if value is not None:
+                environment["GITHUB_OUTPUT"] = value
+            with self.subTest(output=value):
+                result = subprocess.run(command, env=environment, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 1 if value else 0, result.stdout + result.stderr)
+                self.assertFalse(output.exists())
+                if value:
+                    self.assertIn("CTest plan refused:", result.stderr)
+        sentinel = b"sentinel=retained\nprefab=true\n"
+        for document in ("{", '{"tests": []}', '{"tests": [{"name": "unknown"}]}', None):
+            with self.subTest(document=document):
+                inventory = self.root / "ctest.inventory.json"
+                if document is None:
+                    inventory.unlink()
+                else:
+                    inventory.write_text(document, encoding="utf-8")
+                output.write_bytes(sentinel)
+                result = subprocess.run(command, env=dict(os.environ, GITHUB_OUTPUT=str(output)),
+                                        capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("CTest plan refused:", result.stderr)
+                self.assertEqual(output.read_bytes(), sentinel)
+
+    def test_policy_cli_publication_and_resolved_execution_preserve_fixture_contract(self):
+        output = self.root / "step-output"
+        sentinel = b"sentinel=retained\nprefab=true\n"
+        resolved = self.root.resolve()
+
+        class WindowsBuildAlias(type(self.root)):
+            def resolve(self):
+                return resolved
+
+        alias = WindowsBuildAlias("C:/Users/RUNNER~1/AppData/Local/Temp/build")
+        for profile in shards.PROFILES:
+            tests = self.policy_roster(profile) + [
+                test("PrefabRuntimeTest.Installed", FIXTURES_REQUIRED=["runtime"], TIMEOUT=30),
+                test("PrefabDigest.Content", FIXTURES_SETUP=["runtime"], TIMEOUT=30),
+                test("Runtime.Cleanup", FIXTURES_CLEANUP=["runtime"], TIMEOUT=30)]
+            for selection in ("full", "light", "heavy"):
+                for shard in (1, 2):
+                    with self.subTest(profile=profile, selection=selection, shard=shard):
+                        output.write_bytes(sentinel)
+                        with patch.dict(os.environ, GITHUB_OUTPUT=str(output)):
+                            self.write_plan(self.root, shard, tests=tests, profile=profile,
+                                            selection=selection)
+                        self.assertEqual(output.read_bytes(), sentinel)
+                        result = subprocess.run(
+                            [sys.executable, "-I", "-B", str(Path(__file__).with_name("ctest_shards.py")),
+                             "plan", "--directory", str(self.root), "--profile", profile,
+                             "--shard", str(shard), "--selection", selection],
+                            env=dict(os.environ, GITHUB_OUTPUT=str(output)),
+                            capture_output=True, text=True, timeout=10)
+                        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                        manifest = shards.read_json(self.root / "ctest.partition.json")
+                        self.assertEqual(manifest["selection"], selection)
+                        shards.validate_union(shards.select_tests(tests, profile, selection),
+                                              manifest["partitions"])
+                        selected = manifest["partitions"][shard - 1]
+                        prefab = "PrefabRuntimeTest.Installed" in selected
+                        self.assertEqual(output.read_bytes(), sentinel +
+                                         f"prefab={str(prefab).lower()}{os.linesep}".encode("utf-8"))
+                        fixture = {"PrefabRuntimeTest.Installed", "PrefabDigest.Content", "Runtime.Cleanup"}
+                        self.assertIn(fixture.intersection(selected), (set(), fixture))
+                        if selection == "heavy":
+                            self.assertEqual(set().union(*map(set, manifest["partitions"])), shards.HEAVY_NAMES)
+                            self.assertFalse(prefab)
+                        current = copy.deepcopy(tests)
+                        for row in current:
+                            row["properties"].reverse()
+                        response = subprocess.CompletedProcess([], 0, stdout=json.dumps({"tests": current}))
+                        with patch.object(shards.subprocess, "run", side_effect=[
+                                response, subprocess.CompletedProcess([], 8)]) as invoke:
+                            self.assertEqual(shards.run(alias, profile), 8)
+                        self.assertEqual(invoke.call_args.args[0][4], str(resolved))
+                        self.assertIn(str(resolved / "ctest.shard-index.txt"), invoke.call_args.args[0])
+                        before = {name: (self.root / name).read_bytes() for name in
+                                  ("ctest.partition.json", "ctest.shard-index.txt", "step-output")}
+                        # A partial discovery must refuse before changing plan or workflow outputs.
+                        (self.root / "ctest.inventory.json").write_text("{", encoding="utf-8")
+                        result = subprocess.run(
+                            [sys.executable, "-I", "-B", str(Path(__file__).with_name("ctest_shards.py")),
+                             "plan", "--directory", str(self.root), "--profile", profile,
+                             "--shard", str(shard), "--selection", selection],
+                            env=dict(os.environ, GITHUB_OUTPUT=str(output)),
+                            capture_output=True, text=True, timeout=10)
+                        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                        for name, content in before.items():
+                            self.assertEqual((self.root / name).read_bytes(), content)
 
     def write_plan(self, directory, shard, tests=None, all_tests=None, profile="gcc", roots=None, selection=None):
         directory.mkdir(parents=True, exist_ok=True)
@@ -462,18 +621,46 @@ class CTestShardTests(unittest.TestCase):
                     "msvc": ("release", 4, 180), "ucrt64": ("release", 4, 360)}
         self.assertEqual(shards.PROFILES, expected)
         for profile in ("gcc", "msvc", "ucrt64"):
-            preset, parallel, timeout = expected[profile]
-            self.write_plan(self.root, 1)
-            shards.plan(self.root, 1, profile=profile)
+            for shard in (0, 1, 2):
+                with self.subTest(profile=profile, shard=shard):
+                    self.write_plan(self.root, shard, profile=profile)
+                    self.assert_execution_context(self.root, profile, shard, expected[profile])
+
+    def assert_execution_context(self, directory, profile, shard, limits):
+        resolved = directory.resolve()
+        preset, parallel, timeout = limits
+        selection = [] if shard == 0 else ["-I", str(resolved / "ctest.shard-index.txt")]
+        for status in (0, 8):
             response = subprocess.CompletedProcess([], 0, stdout=json.dumps({"tests": self.tests}))
-            with self.subTest(profile=profile), patch.object(shards.subprocess, "run", side_effect=[response, subprocess.CompletedProcess([], 8)]) as invoke:
-                self.assertEqual(shards.run(self.root, profile), 8)
+            with self.subTest(status=status), patch.object(shards.subprocess, "run", side_effect=[response, subprocess.CompletedProcess([], status)]) as invoke:
+                self.assertEqual(shards.run(directory, profile), status)
                 check, execute = invoke.call_args_list
-                base = ["ctest", "--preset", preset, "--test-dir", str(self.root), "-LE", "manual"]
+                base = ["ctest", "--preset", preset, "--test-dir", str(resolved), "-LE", "manual"]
                 self.assertEqual(check.args[0], [*base, "--show-only=json-v1"])
-                self.assertEqual(execute.args[0], [*base, "--no-tests=error", "-I", str(self.root / "ctest.shard-index.txt"),
+                self.assertEqual(check.kwargs, {"check": True, "capture_output": True, "text": True, "encoding": "utf-8"})
+                self.assertEqual(execute.args[0], [*base, "--no-tests=error", *selection,
                                                   "--parallel", str(parallel), "--timeout", str(timeout),
                                                   "--output-junit", "ctest.junit.xml"])
+                # Both calls inherit the wrapper's cwd and environment.
+                self.assertEqual(execute.kwargs, {})
+
+    def test_windows_short_alias_uses_exact_resolved_full_and_shard_contexts(self):
+        resolved = self.root.resolve()
+
+        # Model the filesystem's short-name expansion without requiring Windows
+        # symlink privilege or enabled 8.3 names. All reads use real plan files.
+        class WindowsBuildAlias(type(self.root)):
+            def resolve(self):
+                return resolved
+
+        alias = WindowsBuildAlias("C:/Users/RUNNER~1/AppData/Local/Temp/build")
+        self.assertNotEqual(str(alias), str(resolved))
+        for profile, limits in (("gcc", ("release", 4, 180)), ("msvc", ("release", 4, 180)),
+                                ("ucrt64", ("release", 4, 360))):
+            for shard in (0, 1, 2):
+                with self.subTest(profile=profile, shard=shard):
+                    self.write_plan(self.root, shard, profile=profile)
+                    self.assert_execution_context(alias, profile, shard, limits)
 
     def test_index_tampering_and_failed_discovery_never_launch_execution(self):
         self.write_plan(self.root, 1)
