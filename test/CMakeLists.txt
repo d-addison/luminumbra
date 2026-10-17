@@ -181,6 +181,8 @@ target_link_libraries(net_sockets_transport_test PRIVATE gtest_main spdlog::spdl
 luminumbra_configure_first_party_target(net_sockets_transport_test)
 
 add_executable(common_tests
+    common/StationDiscoveryArguments_test.cpp
+    common/StationDiscovery_test.cpp
     common/Crc32_test.cpp
     rendering/shader_compositing_contract_test.cpp
     common/AnimationRuntime_test.cpp
@@ -2091,6 +2093,30 @@ set_tests_properties(ShieldRtSpike PROPERTIES
 
 # Simulation telemetry captures require the standard-library Python validator.
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
+set(_common_isa_compiler_args --compiler "${CMAKE_CXX_COMPILER}")
+if(MSVC)
+    list(APPEND _common_isa_compiler_args --msvc)
+endif()
+add_test(NAME CommonLibraryIsaContract
+    COMMAND "${Python3_EXECUTABLE}" -I -B
+        "${CMAKE_SOURCE_DIR}/tools/gates/test_common_library_isa.py"
+        ${_common_isa_compiler_args} --cmake "${CMAKE_COMMAND}")
+set_tests_properties(CommonLibraryIsaContract PROPERTIES LABELS "world;tools" TIMEOUT 30)
+add_test(NAME StationDiscoveryContract
+    COMMAND "${Python3_EXECUTABLE}" -I -B
+        "${CMAKE_SOURCE_DIR}/tools/gates/test_station_discovery.py")
+add_test(NAME StationDiscoveryCliSmoke
+    COMMAND "${Python3_EXECUTABLE}" -I -B
+        "${CMAKE_SOURCE_DIR}/tools/gates/test_station_discovery.py"
+        --cli "$<TARGET_FILE:luminumbra_station_discovery>")
+add_test(NAME StationDiscoveryNumericRefusals
+    COMMAND "${Python3_EXECUTABLE}" -I -B
+        "${CMAKE_SOURCE_DIR}/tools/gates/test_station_discovery.py"
+        --numeric-cli "$<TARGET_FILE:station_discovery_numeric_environment>")
+set_tests_properties(StationDiscoveryNumericRefusals PROPERTIES LABELS "world;tools" TIMEOUT 120)
+set_tests_properties(StationDiscoveryContract StationDiscoveryCliSmoke
+    PROPERTIES LABELS "world;tools" TIMEOUT 120)
+
 add_test(NAME SimBudgetCaptureContract
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/perf/test_capture_sim_budget.py")
 set_tests_properties(SimBudgetCaptureContract PROPERTIES LABELS "simulation;tools" TIMEOUT 60)

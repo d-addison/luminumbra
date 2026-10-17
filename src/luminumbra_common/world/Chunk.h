@@ -3,6 +3,7 @@
 #include "../../../include/luminumbra/core/Types.h"
 #include "core/Log.h"
 #include <atomic>
+#include <bit>
 #include <cstdint>
 #include <limits>
 #include <mutex>
@@ -87,6 +88,25 @@ public:
     // Changes to authoritative voxel or water fields must mark the corresponding dirty data.
     u64 authority_hash_revision() const {
         return m_hash_revision.load(std::memory_order_acquire);
+    }
+    // Owner-thread identity of mutable authority. Array writers advance revision;
+    // public solver bookkeeping is compared directly without scanning cell data.
+    struct AuthorityStamp {
+        u64 revision = 0;
+        bool water_initialized = false;
+        bool water_sleeping = false;
+        int water_resolution = 0;
+        int quiet_ticks = 0;
+        u32 max_delta_bits = 0;
+        bool operator==(const AuthorityStamp&) const = default;
+    };
+    AuthorityStamp authority_stamp() const {
+        return {.revision = authority_hash_revision(),
+                .water_initialized = has_water_sim.load(std::memory_order_acquire),
+                .water_sleeping = is_water_sleeping.load(std::memory_order_acquire),
+                .water_resolution = current_water_resolution.load(std::memory_order_acquire),
+                .quiet_ticks = ticks_below_threshold,
+                .max_delta_bits = std::bit_cast<u32>(max_water_delta_last_tick)};
     }
     bool has_water_authority() const {
         return m_water_authority.load(std::memory_order_acquire);

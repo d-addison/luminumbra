@@ -153,6 +153,7 @@ inline constexpr ChunkFieldResidency kChunkFieldResidency[] = {
     {"water_mesh_dirty_ticks", ResidencyClass::Render},
     {"water_state", ResidencyClass::Sim},
     {"water_authority", ResidencyClass::Sim},
+    {"authority", ResidencyClass::Sim},
 };
 
 } // namespace luminumbra::core

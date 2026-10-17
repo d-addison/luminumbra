@@ -79,13 +79,21 @@ const char* WorldHashSchema();
 const char* WorldHashAlgorithm();
 const char* EntitySnapshotArtifactSchema();
 
-std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& state);
+// Authority snapshots retain ownership explicitly. Legacy callers keep their byte protocol.
+std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& state,
+                                                     bool preserve_authority = false);
+struct ChunkAuthorityLoadPolicy {
+    bool terrain_edited = false;
+    bool migrate_legacy_water = false;
+    bool validate_record_authority = false;
+};
 // Owner-thread eviction snapshot. Omits worker-owned staging arrays, which are
 // discarded on admission; live simulation and render fields remain intact.
 std::string SerializeChunkAuthoritySnapshotJson(const Chunk& chunk);
 bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
                                          WorldStreamingState& out_state,
-                                         std::vector<std::string>& errors);
+                                         std::vector<std::string>& errors,
+                                         ChunkAuthorityLoadPolicy authority = {});
 bool ValidateWorldStreamingChunkFormatJson(const std::string& chunk_json,
                                            std::vector<std::string>& errors);
 // Deterministic world hash over the canonical snapshot bytes (same
@@ -195,10 +203,10 @@ public:
 private:
     struct Contribution {
         std::weak_ptr<Chunk> owner;
-        std::uint64_t revision = 0;
         u32 terrain_revision = 0;
         std::uint64_t terrain = 0;
         std::uint64_t water = 0;
+        Chunk::AuthorityStamp stamp;
     };
     std::unordered_map<ChunkID, Contribution> m_chunks;
     std::uint64_t m_projections = 0;

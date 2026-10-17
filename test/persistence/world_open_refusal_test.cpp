@@ -1496,6 +1496,88 @@ TEST_F(WorldOpenRefusal, ServerFullSnapshotPresetChangeRefusesWithoutWritesOrAck
     }
 }
 
+TEST_F(WorldOpenRefusal, FailedPlantPayloadDoesNotWritePendingEnergy) {
+    for (const bool active_regions : {false, true}) {
+        SCOPED_TRACE(active_regions);
+        GameSession session;
+        session.SetRootPath(RootString());
+        session.SetJobSystem(&jobs);
+        session.SetActiveRegionsEnabled(active_regions);
+        session.SetAetherStateEnabled(true);
+        ASSERT_TRUE(session.CreateWorld("Failed plant payload", "1337", "default"));
+        std::shared_ptr<Chunk> chunk;
+        PreparePendingSnapshot(session, chunk, false);
+        ASSERT_FALSE(HasFatalFailure());
+        chunk->clear_voxel_data_dirty();
+        const SnapshotDestinationBytes before(root);
+        WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
+        const bool saved = session.SaveWorldState();
+        WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
+        EXPECT_FALSE(saved);
+        before.ExpectUnchanged();
+        EXPECT_FALSE(fs::exists(session.GetWorldSaveDir() / "aether_state.efs"));
+        ASSERT_TRUE(session.SaveWorldState());
+        EXPECT_TRUE(fs::is_regular_file(session.GetWorldSaveDir() / "aether_state.efs"));
+        EXPECT_TRUE(
+            fs::is_regular_file(WorldSaveService::plant_entities_path(session.GetWorldSaveDir())));
+    }
+}
+
+TEST_F(WorldOpenRefusal, ActiveFullSnapshotPreservesCleanOwnershipAndRefusesFailedPayload) {
+    const auto config = SnapshotRunnerConfig(RootString(), true);
+    Server::ServerWorldRunner runner(config);
+    BootSnapshotRunner(runner, true);
+    ASSERT_FALSE(HasFatalFailure());
+    auto* session = runner.Session();
+    const auto destination = session->GetWorldSaveDir();
+    auto* energy = session->GetEnergyFieldState();
+    ASSERT_NE(energy, nullptr);
+    energy->SetAnchorCell(0, 0);
+    energy->QueueDeposit(1, 0, 0, 0, 60000);
+    energy->Tick(0);
+    for (const int x : {1280, 1312}) {
+        auto chunk = std::make_shared<Chunk>(IVec3(x, 0, -1280));
+        chunk->set_state(ChunkState::Idle);
+        chunk->heightmap_data = {42.0f};
+        chunk->has_water_sim.store(true);
+        chunk->current_water_resolution.store(2);
+        chunk->water_depth_mm.assign(4, 1000);
+        chunk->water_bed_mm.assign(4, 42000);
+        chunk->water_edge_flux.assign(8, 0);
+        if (x == 1280)
+            chunk->mark_voxel_data_dirty();
+        chunk->clear_voxel_data_dirty();
+        ASSERT_TRUE(session->GetWorldSystem()->adopt_streamed_chunk(chunk));
+    }
+    const auto expected = session->GetWorldSystem()->compute_chunk_hashes().world;
+    const SnapshotDestinationBytes before(root);
+    WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
+    const auto failed_count = runner.SaveFullSnapshot();
+    WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
+    EXPECT_EQ(failed_count, 0u);
+    before.ExpectUnchanged();
+    ASSERT_EQ(runner.SaveFullSnapshot(), 2u);
+    GameSession loaded;
+    loaded.SetRootPath(config.root_path);
+    loaded.SetJobSystem(&jobs);
+    ASSERT_TRUE(config.systems_config_override.has_value());
+    if (!config.systems_config_override.has_value())
+        return;
+    loaded.ApplySystemConfig(*config.systems_config_override);
+    ASSERT_TRUE(loaded.LoadWorld(session->GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    EXPECT_EQ(loaded.GetWorldSystem()->compute_chunk_hashes().world, expected);
+    const auto authority = loaded.GetWorldSystem()->find_streamed_chunk({1280, 0, -1280});
+    const auto generated = loaded.GetWorldSystem()->find_streamed_chunk({1312, 0, -1280});
+    ASSERT_NE(authority, nullptr);
+    ASSERT_NE(generated, nullptr);
+    EXPECT_TRUE(authority->has_simulation_authority());
+    EXPECT_FALSE(generated->has_simulation_authority());
+    EXPECT_FALSE(authority->is_voxel_data_dirty());
+    EXPECT_FALSE(generated->is_voxel_data_dirty());
+    EXPECT_TRUE(generated->has_water_sim.load());
+    runner.Shutdown();
+}
+
 TEST_F(WorldOpenRefusal, LegacyFullSnapshotCallbackAndMetadataFailureKeepChunkCount) {
     // This case exercises the legacy clock path, independently of shipping defaults.
     Write(root / "data/common/systems.json", R"({"sim":{"active_regions":{"enabled":false}}})");

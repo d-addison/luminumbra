@@ -216,7 +216,10 @@ nlohmann::json WaterStateToJson(const Chunk& chunk) {
         {"water_mesh_dirty_ticks", chunk.water_mesh_dirty_ticks}};
 }
 
-nlohmann::json ChunkToJson(const Chunk& chunk, bool sim_only = false, bool omit_pending = false) {
+nlohmann::json ChunkToJson(const Chunk& chunk,
+                           bool sim_only = false,
+                           bool omit_pending = false,
+                           bool preserve_authority = false) {
     // The v0.3.0 cave router produces more render geometry. Hashing must not
     // materialize that geometry only to discard it in the residency projection.
     // Keep every key for the coverage audit; skipped arrays are erased below.
@@ -313,10 +316,29 @@ nlohmann::json ChunkToJson(const Chunk& chunk, bool sim_only = false, bool omit_
         result["water_authority"] =
             chunk.sdf_provenance() == ChunkSdfProvenance::GeneratedCurrentParams ? "generated"
                                                                                  : "edited";
+    if (preserve_authority)
+        result["authority"] = {
+            {"terrain_edited", chunk.sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited},
+            {"water_owned", chunk.has_water_authority()}};
     return result;
 }
 
-void ApplyChunkJson(const nlohmann::json& value, Chunk& chunk) {
+void ValidateAuthorityMetadata(const nlohmann::json& value) {
+    if (const auto ownership = value.find("authority"); ownership != value.end()) {
+        if (!ownership->is_object() || ownership->size() != 2 ||
+            !ownership->contains("terrain_edited") ||
+            !ownership->at("terrain_edited").is_boolean() || !ownership->contains("water_owned") ||
+            !ownership->at("water_owned").is_boolean())
+            throw std::invalid_argument("Invalid chunk authority metadata");
+        const bool terrain_edited = ownership->at("terrain_edited").get<bool>();
+        const bool water_owned = ownership->at("water_owned").get<bool>();
+        if (value.contains("water_authority") &&
+            (!water_owned || (value.at("water_authority") == "edited") != terrain_edited))
+            throw std::invalid_argument("Inconsistent chunk authority metadata");
+    }
+}
+
+void ApplyChunkJson(const nlohmann::json& value, Chunk& chunk, ChunkAuthorityLoadPolicy policy) {
     if (value.contains("water_authority")) {
         const auto ownership = value.at("water_authority").get<std::string>();
         if (ownership != "generated" && ownership != "edited")
@@ -382,6 +404,29 @@ void ApplyChunkJson(const nlohmann::json& value, Chunk& chunk) {
     chunk.max_water_delta_last_tick = water_state.at("max_water_delta_last_tick").get<float>();
     chunk.ticks_below_threshold = water_state.at("ticks_below_threshold").get<int>();
     chunk.water_mesh_dirty_ticks = water_state.at("water_mesh_dirty_ticks").get<int>();
+    // Old container records carry terrain ownership in their header. Initialized
+    // legacy water is durable input; explicit modern ownership keeps render caches
+    // regenerable across saves, cold hashes and rehydration.
+    if (const auto ownership = value.find("authority"); ownership != value.end()) {
+        ValidateAuthorityMetadata(value);
+        const bool terrain_edited = ownership->at("terrain_edited").get<bool>();
+        const bool water_owned = ownership->at("water_owned").get<bool>();
+        if (policy.validate_record_authority &&
+            policy.terrain_edited != (terrain_edited || water_owned))
+            throw std::invalid_argument("Chunk authority does not match its container header");
+        chunk.mark_sdf_generated_current_params();
+        if (terrain_edited)
+            chunk.mark_sdf_loaded_or_edited();
+        if (water_owned)
+            chunk.mark_water_data_dirty();
+    } else {
+        if (policy.terrain_edited && !chunk.has_water_authority())
+            chunk.mark_sdf_loaded_or_edited();
+        if (policy.migrate_legacy_water && chunk.has_water_sim.load(std::memory_order_acquire) &&
+            !chunk.has_water_authority())
+            chunk.mark_water_data_dirty();
+    }
+    chunk.clear_voxel_data_dirty();
 }
 
 std::string StableDump(const nlohmann::json& value) {
@@ -716,6 +761,8 @@ bool ValidateChunkFormatObject(const nlohmann::json& chunk, std::vector<std::str
          (chunk.at("water_authority") != "generated" && chunk.at("water_authority") != "edited")))
         errors.push_back("unknown water authority provenance");
 
+    ValidateAuthorityMetadata(chunk);
+
     if (coords_valid && chunk.contains("chunk_id") && IsJsonInteger(chunk.at("chunk_id"))) {
         const IVec3 coords = IVec3FromJson(chunk.at("coords"));
         const Chunk expected_chunk(coords);
@@ -757,7 +804,8 @@ const char* EntitySnapshotArtifactSchema() {
     return kEntitySnapshotArtifactSchema;
 }
 
-std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& state) {
+std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& state,
+                                                     bool preserve_authority) {
     auto chunks = state.snapshot_chunks();
     std::sort(chunks.begin(), chunks.end(), [](const auto& lhs, const auto& rhs) {
         if (!lhs || !rhs) {
@@ -769,7 +817,7 @@ std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& 
     nlohmann::json chunk_array = nlohmann::json::array();
     for (const auto& chunk : chunks) {
         if (chunk) {
-            chunk_array.push_back(ChunkToJson(*chunk));
+            chunk_array.push_back(ChunkToJson(*chunk, false, false, preserve_authority));
         }
     }
 
@@ -787,13 +835,14 @@ std::string SerializeChunkAuthoritySnapshotJson(const Chunk& chunk) {
         {"order_contract", kOrderContract},
         {"chunk_count", 1},
         {"persisted_fields", PersistedFields()},
-        {"chunks", nlohmann::json::array({ChunkToJson(chunk, false, true)})}};
+        {"chunks", nlohmann::json::array({ChunkToJson(chunk, false, true, true)})}};
     return StableDump(snapshot);
 }
 
 bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
                                          WorldStreamingState& out_state,
-                                         std::vector<std::string>& errors) {
+                                         std::vector<std::string>& errors,
+                                         ChunkAuthorityLoadPolicy authority) {
     try {
         const nlohmann::json snapshot = nlohmann::json::parse(json_text);
         if (snapshot.at("schema").get<std::string>() != kSnapshotSchema) {
@@ -817,7 +866,7 @@ bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
         for (const nlohmann::json& chunk_json : snapshot.at("chunks")) {
             const IVec3 coords = IVec3FromJson(chunk_json.at("coords"));
             auto chunk = std::make_shared<Chunk>(coords);
-            ApplyChunkJson(chunk_json, *chunk);
+            ApplyChunkJson(chunk_json, *chunk, authority);
             if (chunk->get_id() != chunk_json.at("chunk_id").get<ChunkID>()) {
                 errors.push_back("chunk id does not match serialized coordinates");
                 return reject();
@@ -1022,10 +1071,10 @@ void RegionContentHasher::append(const Chunk& chunk) {
 void AuthorityHashCache::update(const std::shared_ptr<Chunk>& chunk) {
     if (!chunk || !chunk->has_simulation_authority())
         return;
-    const auto revision = chunk->authority_hash_revision();
+    const auto stamp = chunk->authority_stamp();
     const auto found = m_chunks.find(chunk->get_id());
     if (found != m_chunks.end() && found->second.owner.lock() == chunk &&
-        found->second.revision == revision)
+        found->second.stamp == stamp)
         return;
     const bool same_owner = found != m_chunks.end() && found->second.owner.lock() == chunk;
     const auto terrain_revision = chunk->voxel_revision();
@@ -1042,10 +1091,10 @@ void AuthorityHashCache::update(const std::shared_ptr<Chunk>& chunk) {
     m_terrain -= previous.terrain;
     m_water -= previous.water;
     previous = {.owner = chunk,
-                .revision = revision,
                 .terrain_revision = terrain_revision,
                 .terrain = terrain,
-                .water = water};
+                .water = water,
+                .stamp = stamp};
     m_terrain += previous.terrain;
     m_water += previous.water;
 }

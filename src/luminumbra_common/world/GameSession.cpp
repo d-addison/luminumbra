@@ -1707,9 +1707,13 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
         !ClockConfigurationCompatible(save_dir) || m_transientWorld || m_metadata.worldId.empty() ||
         !m_worldOpenError.empty() || !SavedPresetCompatible(save_dir))
         return false;
+    auto batch = Persistence::WorldSaveService::SaveBatch::begin(save_dir);
+    return batch && SaveWorldMetadata(*batch);
+}
+
+bool GameSession::SaveWorldMetadata(Persistence::WorldSaveService::SaveBatch& batch) {
+    const auto& save_dir = batch.directory();
     if (m_activeRegionsEnabled) {
-        if (!Persistence::WorldSaveService::validate_save(save_dir))
-            return false;
         std::error_code error;
         fs::create_directories(save_dir, error);
         if (error)
@@ -1751,14 +1755,13 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
         // All production callers save synchronously on the host thread: client
         // world creation/quit/shutdown and server autosave/snapshot/shutdown.
         // Do not dispatch this pair to workers; the writer asserts non-overlap.
-        if (!Persistence::WorldSaveService::save_metadata_and_active_regions(
-                metadata_json.dump(4) + "\n", m_activeRegionLedger, save_dir))
+        if (!batch.save_metadata_and_active_regions(metadata_json.dump(4) + "\n",
+                                                    m_activeRegionLedger))
             return false;
         m_regionDurableDirectory = save_dir;
         if (m_worldSystem)
             m_worldSystem->set_authority_directory(save_dir);
-    } else if (!Persistence::WorldSaveService::save_metadata(metadata_json.dump(4) + "\n",
-                                                             save_dir)) {
+    } else if (!batch.save_metadata(metadata_json.dump(4) + "\n")) {
         return false;
     }
     return true;
@@ -1775,7 +1778,7 @@ std::filesystem::path GameSession::GetWorldSaveDir() const {
     return GetSaveRootPath() / "worlds/saves" / m_metadata.worldId;
 }
 
-bool GameSession::SaveWorldState(WorldStateSaveReport* report) {
+bool GameSession::SaveWorldState(WorldStateSaveReport* report, bool full_snapshot) {
     if (report) {
         *report = {};
     }
@@ -1784,11 +1787,12 @@ bool GameSession::SaveWorldState(WorldStateSaveReport* report) {
         // No active world session; nothing to persist.
         return false;
     }
-    return SaveWorldStateTo(save_dir, report);
+    return SaveWorldStateTo(save_dir, report, full_snapshot);
 }
 
 bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
-                                   WorldStateSaveReport* report) {
+                                   WorldStateSaveReport* report,
+                                   bool full_snapshot) {
     WorldStateSaveReport result;
     if (report) {
         *report = result;
@@ -1799,7 +1803,8 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
         return false;
     }
 
-    if (!Persistence::WorldSaveService::validate_save(save_dir))
+    auto batch = Persistence::WorldSaveService::SaveBatch::begin(save_dir);
+    if (!batch)
         return false;
 
     // Refuse a changed preset or identity before any snapshot write or dirty acknowledgement,
@@ -1842,32 +1847,27 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
 
     const std::vector<ChunkID> dirty_ids = state.dirty_chunk_ids();
     result.chunks_dirty = dirty_ids.size();
-    if (dirty_ids.empty()) {
+    if (dirty_ids.empty() && !full_snapshot) {
         // No dirty CHUNKS. Without an existing snapshot this keeps a save-less, no-plant world
         // byte-for-byte (no chunks/ dir created); a planted world still persists its plants here.
-        const bool plants_ok =
-            Persistence::WorldSaveService::save_plant_entities(plant_snapshot, save_dir, nullptr);
-        const bool energy_ok = SaveEnergyFieldRecord(save_dir);
-        if (!plants_ok || !energy_ok)
+        if (!batch->save_plant_entities(plant_snapshot) || !SaveEnergyFieldRecord(save_dir))
             return false;
         if (report) {
             *report = result;
         }
-        return !m_activeRegionsEnabled || SaveWorldMetadataTo(save_dir);
+        return !m_activeRegionsEnabled || SaveWorldMetadata(*batch);
     }
 
-    Persistence::WorldSaveService service;
     std::vector<std::string> errors;
     // Subsequent saves rewrite the edited regions of a supported container.
-    const bool has_snapshot = m_activeRegionsEnabled
-                                  ? Persistence::WorldSaveService::has_chunk_snapshot(save_dir)
-                                  : Persistence::WorldSaveService::has_world_save(save_dir);
+    const bool has_snapshot =
+        m_activeRegionsEnabled ? batch->has_chunk_snapshot() : batch->has_world_save();
 
     bool ok = false;
-    if (!has_snapshot) {
+    if (full_snapshot || !has_snapshot) {
         // First save of this world: write the full snapshot, then clear the
         // dirty flags exactly like the incremental path does.
-        ok = service.save_world(state, save_dir, &errors);
+        ok = batch->save_world(state, &errors, m_activeRegionsEnabled);
         if (ok) {
             for (const ChunkID id : dirty_ids) {
                 if (const auto chunk = state.find_chunk(id)) {
@@ -1877,7 +1877,7 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
         }
     } else {
         const Persistence::WorldSaveDirtyReport dirty_report =
-            service.save_dirty_chunks(state, save_dir, &errors);
+            batch->save_dirty_chunks(state, &errors, m_activeRegionsEnabled);
         ok = dirty_report.saved;
     }
 
@@ -1894,21 +1894,20 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
     }
 
     //  persist plants alongside the chunk write (empty roster -> no file -> byte-identical).
-    if (!Persistence::WorldSaveService::save_plant_entities(plant_snapshot, save_dir, &errors)) {
+    if (ok && !batch->save_plant_entities(plant_snapshot, &errors)) {
         ok = false;
     }
 
     // persist the stateful energy layer alongside (null/
     // all-zero layer -> no file -> byte-identical; the plant discipline).
-    const bool energy_ok = SaveEnergyFieldRecord(save_dir);
-    if (!energy_ok)
+    if (ok && !SaveEnergyFieldRecord(save_dir))
         ok = false;
 
     for (const std::string& error : errors) {
         LUMINUMBRA_CORE_ERROR("World state save failed: {}", error);
     }
     if (ok && m_activeRegionsEnabled)
-        ok = SaveWorldMetadataTo(save_dir);
+        ok = SaveWorldMetadata(*batch);
     if (ok) {
         result.saved = true;
         result.chunks_saved = result.chunks_total; // whole-snapshot layout
@@ -1950,7 +1949,8 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
                            {},
                            m_activeRegionsEnabled ? Systems::SHIELD_WorldSystem::kActiveChunkBudget
                                                   : std::numeric_limits<std::size_t>::max(),
-                           true);
+                           true,
+                           m_activeRegionsEnabled);
     if (!snapshot_present && !errors.empty()) {
         m_worldOpenError = errors.front();
         m_worldSystem->clear_world(m_physicsSystem.get());
@@ -2058,12 +2058,7 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
             chunk->set_state(has_mesh ? ChunkState::Ready : ChunkState::Idle);
         }
 
-        // Older saves lack the ownership marker. Their initialized water is
-        // already simulation truth; migrate it before admission or re-saving.
-        if (m_activeRegionsEnabled && chunk->has_water_sim.load(std::memory_order_acquire) &&
-            !chunk->has_water_authority())
-            chunk->mark_water_data_dirty();
-        if (m_worldSystem->adopt_streamed_chunk(chunk)) {
+        if (m_worldSystem->adopt_streamed_chunk(chunk, true)) {
             ++adopted;
         }
     }

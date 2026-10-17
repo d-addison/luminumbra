@@ -5,9 +5,11 @@
 
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <utility>
 
 #if !defined(_WIN32) || defined(__CYGWIN__)
@@ -126,14 +128,8 @@ TEST(FilesystemPath, RuntimeRootStringKeepsOrdinaryPlatformSpelling) {
 }
 
 TEST(FilesystemPath, ExplicitRuntimeRootBypassesDiscoveryAndRefusesIncompleteLayouts) {
-    const fs::path directory = Luminumbra::TestSupport::CreateUniqueTempDirectory("runtime-root-");
-    struct Cleanup {
-        fs::path path;
-        ~Cleanup() {
-            std::error_code error;
-            fs::remove_all(path, error);
-        }
-    } cleanup{directory};
+    const Luminumbra::TestSupport::ScopedTempFile temp("runtime-root-", ".tmp");
+    const fs::path directory = temp.Path().parent_path();
     const auto resolve = [&](const fs::path& root) {
         return Luminumbra::Client::App::ResolveRuntimeRoot("client", root);
     };
@@ -163,6 +159,19 @@ TEST(FilesystemPath, ExplicitRuntimeRootBypassesDiscoveryAndRefusesIncompleteLay
 }
 
 #if defined(_WIN32) && !defined(__CYGWIN__)
+TEST(FilesystemPath, UncDataRootNormalizationKeepsDependencyPathsOnTheShare) {
+    for (const fs::path& input : {fs::path(LR"(//server/share/data with spaces/./nested/..)"),
+                                  fs::path(LR"(\\server\share\data with spaces\.\nested\..)"),
+                                  fs::path(LR"(//server/share\data with spaces/nested\..)")}) {
+        const auto root = paths::LexicallyNormalPath(paths::AbsolutePath(input));
+        EXPECT_EQ(root.native(), fs::path(LR"(\\server\share\data with spaces)").native());
+        const auto dependency = root / "common" / "biomes.json";
+        EXPECT_TRUE(paths::IsWindowsUncPath(dependency));
+        EXPECT_EQ(paths::GenericUtf8PathString(dependency),
+                  "//server/share/data with spaces/common/biomes.json");
+    }
+}
+
 TEST(FilesystemPath, UncNormalizationPreservesServerShareAcrossSlashForms) {
     const fs::path expected(LR"(\\server\share\folder with spaces\shader.vert)");
     for (const fs::path& input :

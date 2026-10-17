@@ -9,6 +9,7 @@
 #include "../ai/WildlifeFoliageSystem.h"      // ai::WildlifeFoliageTuning (full-control)
 #include "../core/SimulationClock.h"
 #include "../core/SystemConfig.h"
+#include "../persistence/WorldSaveService.h"
 #include "../simulation/SimBudgetTelemetry.h"
 #include "../simulation/SimulationEventBus.h"
 #include "../systems/PollinationSystem.h"
@@ -119,10 +120,12 @@ public:
     // no chunk carries unsaved voxel edits, so a never-edited world stays
     // byte-for-byte on the fresh-world path. The first write of an edited
     // world emits a full snapshot; later writes flush through
-    // WorldSaveService::save_dirty_chunks.
-    bool SaveWorldState(WorldStateSaveReport* report = nullptr);
+    // WorldSaveService::save_dirty_chunks. Explicit full snapshots also write
+    // clean resident chunks, through the same validation and metadata ordering.
+    bool SaveWorldState(WorldStateSaveReport* report = nullptr, bool full_snapshot = false);
     bool SaveWorldStateTo(const std::filesystem::path& save_dir,
-                          WorldStateSaveReport* report = nullptr);
+                          WorldStateSaveReport* report = nullptr,
+                          bool full_snapshot = false);
 
     // Loads a previously saved snapshot into the live streaming state. Must be
     // called AFTER the world systems initialize but BEFORE chunk streaming
@@ -490,6 +493,7 @@ private:
     void ResetWorldSystems();
     void RestoreWorldClock(const WorldClock& clock);
     bool SaveWorldMetadataTo(const std::filesystem::path& save_dir);
+    bool SaveWorldMetadata(Persistence::WorldSaveService::SaveBatch& batch);
     bool ClockConfigurationCompatible(const std::filesystem::path& save_dir) const;
     WorldClock m_worldClock;
     void AttachRegionEditObserver();

@@ -382,6 +382,27 @@ class HarnessTestCase(unittest.TestCase):
         self.assertEqual(len(runs), 1, runs)
         return runs[0]
 
+class GtestEvidenceTest(unittest.TestCase):
+    def test_only_completed_run_cases_qualify(self):
+        rq = load_harness()
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "gtest.json"
+            for status, result in (("RUN", "COMPLETED"), ("NOTRUN", "COMPLETED"),
+                                   ("DISABLED", "COMPLETED"), ("RUN", "SKIPPED"),
+                                   ("RUN", "SUPPRESSED"), ("RUN", "NOTRUN"),
+                                   (None, "COMPLETED"), ("RUN", None),
+                                   ("unknown", "COMPLETED"), ("RUN", "unknown")):
+                data = {"tests": 1, "failures": 0, "errors": 0,
+                        "testsuites": [{"testsuite": [{"status": status, "result": result}]}]}
+                report.write_text(json.dumps(data), encoding="utf-8")
+                with self.subTest(status=status, result=result):
+                    problem = rq.gtest_report_problem(report, 1)
+                    if status == "RUN" and result == "COMPLETED":
+                        self.assertIsNone(problem)
+                    else:
+                        self.assertIsNotNone(problem)
+
+
 class RepeatQualificationTest(HarnessTestCase):
     def test_all_iterations_pass(self) -> None:
         result = self.run_script(count=3, mode="pass")

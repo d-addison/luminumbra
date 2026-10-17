@@ -41,6 +41,15 @@ class PrefabCtestGateTest(unittest.TestCase):
             with self.subTest(status=status), self.assertRaises(ValueError):
                 validate_ctest(root)
 
+    def test_refuses_unevaluated_and_unknown_results_with_run_status(self):
+        for result in ("skipped", "disabled", "notrun", "unknown", ""):
+            root = self.report()
+            root[0].set("result", result)
+            with self.subTest(result=result), self.assertRaises(ValueError):
+                validate_ctest(root)
+        root[0].set("result", "completed")
+        self.assertEqual(validate_ctest(root), sorted(REQUIRED_CASES))
+
     def test_new_component_tests_must_also_run_and_pass(self):
         root = self.report()
         extra = ET.SubElement(root, "testcase", name="PrefabRuntimeTest.FutureCase", status="run")

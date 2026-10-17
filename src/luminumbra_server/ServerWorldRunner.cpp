@@ -1085,6 +1085,11 @@ std::size_t ServerWorldRunner::SaveFullSnapshot() {
     auto* world_system = m_session->GetWorldSystem();
     world_system->wait_for_streaming_jobs();
 
+    if (m_session->ActiveRegionsEnabled()) {
+        world::WorldStateSaveReport report;
+        return m_session->SaveWorldState(&report, true) ? report.chunks_total : 0;
+    }
+
     WorldStreamingState state;
     for (const auto& chunk : world_system->snapshot_streamed_chunks()) {
         state.insert_chunk(chunk);
@@ -1102,11 +1107,7 @@ std::size_t ServerWorldRunner::SaveFullSnapshot() {
     // sim state captured there (the water sim-window cursor) reflects THIS save
     // moment, not world creation. Without this a loaded session resimulates from a
     // stale cursor and the water evolution diverges from the original's.
-    if (m_session->ActiveRegionsEnabled() && !m_session->SaveWorldState())
-        return 0;
-    const bool metadata_saved = m_session->SaveWorld();
-    if (m_session->ActiveRegionsEnabled() && !metadata_saved)
-        return 0;
+    m_session->SaveWorld();
     return state.size();
 }
 

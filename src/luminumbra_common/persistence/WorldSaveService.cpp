@@ -813,15 +813,17 @@ bool ReadIndexedRecord(RegionIndex& index,
 }
 
 // Current lod-0 records retain canonical in-memory chunk serialization.
-std::string SerializeSingleChunkSnapshot(const std::shared_ptr<Chunk>& chunk) {
+std::string SerializeSingleChunkSnapshot(const std::shared_ptr<Chunk>& chunk,
+                                         bool preserve_authority) {
     WorldStreamingState single;
     single.insert_chunk(chunk);
-    return SerializeWorldStreamingStateSnapshotJson(single);
+    return SerializeWorldStreamingStateSnapshotJson(single, preserve_authority);
 }
 
 std::shared_ptr<Chunk> DecodeChunkRecord(const RegionRecord& record,
                                          const std::filesystem::path& path,
-                                         std::vector<std::string>* errors) {
+                                         std::vector<std::string>* errors,
+                                         bool migrate_legacy_water = false) {
     std::string payload;
     if (!DecompressPayload(record, payload, errors)) {
         return nullptr;
@@ -829,7 +831,13 @@ std::shared_ptr<Chunk> DecodeChunkRecord(const RegionRecord& record,
 
     WorldStreamingState single;
     std::vector<std::string> load_errors;
-    if (!LoadWorldStreamingStateSnapshotJson(payload, single, load_errors)) {
+    if (!LoadWorldStreamingStateSnapshotJson(
+            payload,
+            single,
+            load_errors,
+            {.terrain_edited = (record.flags & kRecordFlagEdited) != 0u,
+             .migrate_legacy_water = migrate_legacy_water,
+             .validate_record_authority = true})) {
         for (std::string& error : load_errors) {
             AddError(errors, std::move(error));
         }
@@ -845,13 +853,6 @@ std::shared_ptr<Chunk> DecodeChunkRecord(const RegionRecord& record,
     if (chunks.front()->get_id() != record.id) {
         AddError(errors, "chunk record id does not match its payload: " + path.string());
         return nullptr;
-    }
-    // Save-dirty is transient, but the container's sticky edited flag is the
-    // durable authority bit. Pristine cached chunks stay regenerable.
-    if ((record.flags & kRecordFlagEdited) != 0u && !chunks.front()->has_water_authority()) {
-        chunks.front()->mark_sdf_loaded_or_edited();
-    } else if (!chunks.front()->has_water_authority()) {
-        chunks.front()->mark_sdf_generated_current_params();
     }
     return chunks.front();
 }
@@ -873,6 +874,7 @@ std::uint8_t ChunkRecordFlags(const Chunk& chunk, std::uint8_t previous_flags) {
 struct RegionReplacement {
     u64 id = 0;
     u8 lod_level = 0;
+    bool preserve_authority = false;
     std::shared_ptr<Chunk> chunk;
     const WorldSaveService::ContainerRecord* container = nullptr;
     RegionIndex* source = nullptr;
@@ -897,6 +899,12 @@ bool RewriteRegionFile(const std::filesystem::path& path,
         const auto& replacement = replacements[i];
         const auto key = std::pair{replacement.lod_level, replacement.id};
         auto found = entries.find(key);
+        if (found != entries.end() && (found->second.record.flags & kRecordFlagEdited) != 0 &&
+            replacement.preserve_authority && replacement.chunk &&
+            !replacement.chunk->has_simulation_authority()) {
+            AddError(errors, "regenerable chunk cannot replace durable simulation authority");
+            return false;
+        }
         if (found == entries.end()) {
             if (entries.size() == std::numeric_limits<u16>::max()) {
                 AddError(errors, "region file exceeds the 65535-record limit");
@@ -946,9 +954,11 @@ bool RewriteRegionFile(const std::filesystem::path& path,
                         record.lod_level = key.first;
                         if (replacement.chunk) {
                             record.flags = ChunkRecordFlags(*replacement.chunk, entry.record.flags);
-                            if (!CompressPayload(SerializeSingleChunkSnapshot(replacement.chunk),
-                                                 record,
-                                                 errors))
+                            if (!CompressPayload(
+                                    SerializeSingleChunkSnapshot(replacement.chunk,
+                                                                 replacement.preserve_authority),
+                                    record,
+                                    errors))
                                 return false;
                         } else {
                             record.flags = replacement.container->flags;
@@ -1072,12 +1082,12 @@ bool OpenAuthorityIndex(const std::filesystem::path& region_file, RegionIndex& r
             valid = false;
             return true;
         }
-        const auto chunk = DecodeChunkRecord(raw, reader.path, nullptr);
+        const auto chunk = DecodeChunkRecord(raw, reader.path, nullptr, true);
         if (!chunk) {
             valid = false;
             return true;
         }
-        return !chunk->has_water_sim.load(std::memory_order_acquire);
+        return !chunk->has_simulation_authority();
     });
     if (!valid)
         return false;
@@ -1098,8 +1108,12 @@ bool OpenAuthorityIndex(const std::filesystem::path& region_file, RegionIndex& r
 bool WorldSaveService::save_metadata(const std::string& bytes,
                                      const std::filesystem::path& save_dir,
                                      std::vector<std::string>* errors) {
-    if (!validate_save(save_dir, errors))
-        return false;
+    return validate_save(save_dir, errors) && save_metadata_validated(bytes, save_dir, errors);
+}
+
+bool WorldSaveService::save_metadata_validated(const std::string& bytes,
+                                               const std::filesystem::path& save_dir,
+                                               std::vector<std::string>* errors) {
     world::WorldClock clock;
     std::string clock_error;
     const auto metadata = nlohmann::json::parse(bytes, nullptr, false);
@@ -1141,6 +1155,13 @@ bool WorldSaveService::save_metadata_and_active_regions(const std::string& bytes
                                                         world::ActiveRegionLedger& ledger,
                                                         const std::filesystem::path& save_dir,
                                                         std::vector<std::string>* errors) {
+    return validate_save(save_dir, errors) && save_pair_validated(bytes, ledger, save_dir, errors);
+}
+
+bool WorldSaveService::save_pair_validated(const std::string& bytes,
+                                           world::ActiveRegionLedger& ledger,
+                                           const std::filesystem::path& save_dir,
+                                           std::vector<std::string>* errors) {
 #ifndef NDEBUG
     const PairedSaveGuard guard;
 #endif
@@ -1173,10 +1194,10 @@ bool WorldSaveService::save_metadata_and_active_regions(const std::string& bytes
     // Each writer validates the installed pair. On rewind, replace the ledger
     // first so it cannot be newer than the clock, even if metadata writing fails.
     if (clock.tick() < previous_clock.tick())
-        return save_active_regions(ledger, clock, save_dir, errors) &&
-               save_metadata(bytes, save_dir, errors);
-    return save_metadata(bytes, save_dir, errors) &&
-           save_active_regions(ledger, clock, save_dir, errors);
+        return save_regions_validated(ledger, clock, save_dir, errors) &&
+               save_metadata_validated(bytes, save_dir, errors);
+    return save_metadata_validated(bytes, save_dir, errors) &&
+           save_regions_validated(ledger, clock, save_dir, errors);
 }
 
 bool WorldSaveService::read_clock_metadata(const std::filesystem::path& save_dir,
@@ -1242,8 +1263,13 @@ std::filesystem::path WorldSaveService::plant_entities_path(const std::filesyste
 bool WorldSaveService::save_plant_entities(const Luminumbra::Ecs::EntityRegistrySnapshot& snapshot,
                                            const std::filesystem::path& save_dir,
                                            std::vector<std::string>* errors) {
-    if (!validate_save(save_dir, errors))
-        return false;
+    return validate_save(save_dir, errors) && save_plants_validated(snapshot, save_dir, errors);
+}
+
+bool WorldSaveService::save_plants_validated(
+    const Luminumbra::Ecs::EntityRegistrySnapshot& snapshot,
+    const std::filesystem::path& save_dir,
+    std::vector<std::string>* errors) {
     const std::filesystem::path path = plant_entities_path(save_dir);
     std::error_code ec;
     if (snapshot.entities.empty()) {
@@ -1320,8 +1346,14 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
                                            const world::WorldClock& clock,
                                            const std::filesystem::path& save_dir,
                                            std::vector<std::string>* errors) {
-    if (!validate_save(save_dir, errors))
-        return false;
+    return validate_save(save_dir, errors) &&
+           save_regions_validated(ledger, clock, save_dir, errors);
+}
+
+bool WorldSaveService::save_regions_validated(world::ActiveRegionLedger& ledger,
+                                              const world::WorldClock& clock,
+                                              const std::filesystem::path& save_dir,
+                                              std::vector<std::string>* errors) {
     // Empty ledgers have no last_save stamps to validate against the ceiling.
     // Require the acknowledged clock before either writing or taking the no-op path.
     if (ledger.header_tick() != clock.tick()) {
@@ -1468,6 +1500,59 @@ bool WorldSaveService::validate_save(const std::filesystem::path& save_dir,
     for (const auto& message : diagnostics)
         AddError(errors, message);
     return diagnostics.empty();
+}
+
+std::optional<WorldSaveService::SaveBatch>
+WorldSaveService::SaveBatch::begin(const std::filesystem::path& directory,
+                                   std::vector<std::string>* errors) {
+    if (directory.empty())
+        return std::nullopt;
+    WorldStreamingState probe;
+    std::vector<std::string> diagnostics;
+    const bool present = WorldSaveService{}.load_world(probe, directory, diagnostics, {}, 1);
+    if (!diagnostics.empty()) {
+        for (const auto& message : diagnostics)
+            AddError(errors, message);
+        return std::nullopt;
+    }
+    return SaveBatch(directory, present, !probe.empty());
+}
+
+bool WorldSaveService::SaveBatch::save_world(const WorldStreamingState& state,
+                                             std::vector<std::string>* errors,
+                                             bool preserve_authority) {
+    m_valid =
+        m_valid && WorldSaveService{}.write_snapshot(
+                       state.snapshot_chunks(), m_directory, errors, nullptr, preserve_authority);
+    return m_valid;
+}
+
+WorldSaveDirtyReport WorldSaveService::SaveBatch::save_dirty_chunks(
+    WorldStreamingState& state, std::vector<std::string>* errors, bool preserve_authority) {
+    if (!m_valid)
+        return {};
+    auto report =
+        WorldSaveService{}.save_dirty_validated(state, m_directory, errors, preserve_authority);
+    m_valid = report.saved || report.chunks_dirty == 0;
+    return report;
+}
+
+bool WorldSaveService::SaveBatch::save_plant_entities(const Ecs::EntityRegistrySnapshot& snapshot,
+                                                      std::vector<std::string>* errors) {
+    m_valid = m_valid && save_plants_validated(snapshot, m_directory, errors);
+    return m_valid;
+}
+
+bool WorldSaveService::SaveBatch::save_metadata(const std::string& bytes,
+                                                std::vector<std::string>* errors) {
+    m_valid = m_valid && save_metadata_validated(bytes, m_directory, errors);
+    return m_valid;
+}
+
+bool WorldSaveService::SaveBatch::save_metadata_and_active_regions(
+    const std::string& bytes, world::ActiveRegionLedger& ledger, std::vector<std::string>* errors) {
+    m_valid = m_valid && save_pair_validated(bytes, ledger, m_directory, errors);
+    return m_valid;
 }
 
 bool WorldSaveService::read_container_records(const std::filesystem::path& region_file,
@@ -1672,11 +1757,9 @@ std::shared_ptr<Chunk> WorldSaveService::AuthorityReader::read(u64 id) {
     RegionRecord raw;
     if (!ReadIndexedRecord(index, *entry, raw, nullptr))
         throw std::runtime_error("Cannot read durable chunk authority");
-    auto chunk = DecodeChunkRecord(raw, index.path, nullptr);
+    auto chunk = DecodeChunkRecord(raw, index.path, nullptr, true);
     if (!chunk)
         throw std::runtime_error("Cannot decode durable chunk authority");
-    if (chunk->has_water_sim.load(std::memory_order_acquire) && !chunk->has_water_authority())
-        chunk->mark_water_data_dirty();
     // Runtime jobs and collider handles belong to the previous process.
     chunk->reset_pending_jobs();
     chunk->has_collision.store(false, std::memory_order_release);
@@ -1704,7 +1787,7 @@ std::shared_ptr<Chunk> WorldSaveService::read_next_authority(AuthorityReader& re
 
 bool WorldSaveService::persist_chunk_authority(const std::filesystem::path& save_dir,
                                                const std::shared_ptr<Chunk>& chunk) {
-    if (save_dir.empty() || !chunk)
+    if (save_dir.empty() || !chunk || !chunk->has_simulation_authority())
         return false;
     int rx = 0, rz = 0;
     region_coords_for_chunk(chunk->get_coords(), rx, rz);
@@ -1868,8 +1951,10 @@ void WorldSaveService::set_before_active_regions_replace_for_testing(bool (*hook
 
 bool WorldSaveService::save_world(const WorldStreamingState& state,
                                   const std::filesystem::path& save_dir,
-                                  std::vector<std::string>* errors) const {
-    return write_snapshot(state.snapshot_chunks(), save_dir, errors);
+                                  std::vector<std::string>* errors,
+                                  bool preserve_authority) const {
+    return validate_save(save_dir, errors) &&
+           write_snapshot(state.snapshot_chunks(), save_dir, errors, nullptr, preserve_authority);
 }
 
 bool WorldSaveService::load_world(WorldStreamingState& state,
@@ -1877,7 +1962,8 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                                   std::vector<std::string>& errors,
                                   const std::stop_token& stop,
                                   std::size_t max_resident_chunks,
-                                  bool require_full_sdf_lattice) const {
+                                  bool require_full_sdf_lattice,
+                                  bool migrate_legacy_water) const {
     state.clear();
     const auto reject = [&state, &errors](const std::string& message) {
         state.clear();
@@ -2012,7 +2098,8 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                 if (stop.stop_requested())
                     return reject("Saved-world validation cancelled.");
                 if (record.lod_level == 0) {
-                    const auto chunk = DecodeChunkRecord(record, path, &errors);
+                    const auto chunk =
+                        DecodeChunkRecord(record, path, &errors, migrate_legacy_water);
                     if (!chunk)
                         return reject("");
                     int chunk_rx = 0, chunk_rz = 0;
@@ -2072,7 +2159,17 @@ std::string WorldSaveService::world_hash(const WorldStreamingState& state) const
 
 WorldSaveDirtyReport WorldSaveService::save_dirty_chunks(WorldStreamingState& state,
                                                          const std::filesystem::path& save_dir,
-                                                         std::vector<std::string>* errors) const {
+                                                         std::vector<std::string>* errors,
+                                                         bool preserve_authority) const {
+    if (state.dirty_chunk_ids().empty() || !validate_save(save_dir, errors))
+        return {.chunks_total = state.size(), .chunks_dirty = state.dirty_chunk_ids().size()};
+    return save_dirty_validated(state, save_dir, errors, preserve_authority);
+}
+
+WorldSaveDirtyReport WorldSaveService::save_dirty_validated(WorldStreamingState& state,
+                                                            const std::filesystem::path& save_dir,
+                                                            std::vector<std::string>* errors,
+                                                            bool preserve_authority) const {
     WorldSaveDirtyReport report;
     report.chunks_total = state.size();
 
@@ -2107,7 +2204,8 @@ WorldSaveDirtyReport WorldSaveService::save_dirty_chunks(WorldStreamingState& st
         }
     }
 
-    if (!write_snapshot(chunks_to_write, save_dir, errors, &report.regions_written)) {
+    if (!write_snapshot(
+            chunks_to_write, save_dir, errors, &report.regions_written, preserve_authority)) {
         return report;
     }
 
@@ -2123,10 +2221,9 @@ WorldSaveDirtyReport WorldSaveService::save_dirty_chunks(WorldStreamingState& st
 bool WorldSaveService::write_snapshot(const std::vector<std::shared_ptr<Chunk>>& chunks,
                                       const std::filesystem::path& save_dir,
                                       std::vector<std::string>* errors,
-                                      std::size_t* regions_written) const {
+                                      std::size_t* regions_written,
+                                      bool preserve_authority) const {
     try {
-        if (!validate_save(save_dir, errors))
-            return false;
         const std::filesystem::path region_dir = region_directory(save_dir);
         std::filesystem::create_directories(region_dir);
 
@@ -2154,7 +2251,10 @@ bool WorldSaveService::write_snapshot(const std::vector<std::shared_ptr<Chunk>>&
             std::vector<RegionReplacement> replacements;
             replacements.reserve(region_chunks.size());
             for (const auto& chunk : region_chunks)
-                replacements.push_back({.id = chunk->get_id(), .lod_level = 0, .chunk = chunk});
+                replacements.push_back({.id = chunk->get_id(),
+                                        .lod_level = 0,
+                                        .preserve_authority = preserve_authority,
+                                        .chunk = chunk});
             if (!RewriteRegionFile(path, replacements, errors))
                 return false;
             ++written;

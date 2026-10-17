@@ -13,6 +13,7 @@
 #include <optional>
 #include <stop_token>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace Luminumbra::Ecs {
@@ -188,7 +189,8 @@ public:
     static bool open_region_authority(const std::filesystem::path& region_file,
                                       AuthorityReader& reader);
     static std::shared_ptr<Chunk> read_next_authority(AuthorityReader& reader);
-    // Atomic replacement of one complete chunk, preserving sibling records.
+    // Atomic replacement of one complete simulation owner, preserving sibling records.
+    // Regenerable chunks are refused before writing.
     // Unlike incremental saves this writes even when dirty was acknowledged.
     static bool persist_chunk_authority(const std::filesystem::path& save_dir,
                                         const std::shared_ptr<Chunk>& chunk);
@@ -266,7 +268,8 @@ public:
     // errors when provided) if the snapshot could not be written.
     bool save_world(const WorldStreamingState& state,
                     const std::filesystem::path& save_dir,
-                    std::vector<std::string>* errors = nullptr) const;
+                    std::vector<std::string>* errors = nullptr,
+                    bool preserve_authority = false) const;
 
     // Loads a previously saved snapshot into state. A missing snapshot file is
     // a clean miss (fresh world): returns false WITHOUT appending an error.
@@ -279,7 +282,8 @@ public:
                     std::vector<std::string>& errors,
                     const std::stop_token& stop = {},
                     std::size_t max_resident_chunks = std::numeric_limits<std::size_t>::max(),
-                    bool require_full_sdf_lattice = false) const;
+                    bool require_full_sdf_lattice = false,
+                    bool migrate_legacy_water = false) const;
 
     // Deterministic hash of the streaming state, reusing the persistence hash
     // machinery (fnv1a_64 over the canonical snapshot bytes). Format
@@ -295,9 +299,77 @@ public:
     // existing save to refuse obsolete, mixed-format, or corrupt durable data.
     WorldSaveDirtyReport save_dirty_chunks(WorldStreamingState& state,
                                            const std::filesystem::path& save_dir,
-                                           std::vector<std::string>* errors = nullptr) const;
+                                           std::vector<std::string>* errors = nullptr,
+                                           bool preserve_authority = false) const;
+
+    // One synchronous owner-thread save operation. Begin validates every durable
+    // record once and retains at most one chunk to determine snapshot presence.
+    // No other writer may change the destination until this operation finishes.
+    // A failed payload poisons the operation: metadata cannot acknowledge it.
+    class SaveBatch {
+    public:
+        static std::optional<SaveBatch> begin(const std::filesystem::path& directory,
+                                              std::vector<std::string>* errors = nullptr);
+        SaveBatch(SaveBatch&& other) noexcept
+            : m_directory(std::move(other.m_directory))
+            , m_hasWorldSave(other.m_hasWorldSave)
+            , m_hasChunkSnapshot(other.m_hasChunkSnapshot)
+            , m_valid(std::exchange(other.m_valid, false)) {}
+        SaveBatch& operator=(SaveBatch&&) noexcept = delete;
+        SaveBatch(const SaveBatch&) = delete;
+        SaveBatch& operator=(const SaveBatch&) = delete;
+        const std::filesystem::path& directory() const {
+            return m_directory;
+        }
+        bool has_world_save() const {
+            return m_hasWorldSave;
+        }
+        bool has_chunk_snapshot() const {
+            return m_hasChunkSnapshot;
+        }
+        bool save_world(const WorldStreamingState& state,
+                        std::vector<std::string>* errors,
+                        bool preserve_authority);
+        WorldSaveDirtyReport save_dirty_chunks(WorldStreamingState& state,
+                                               std::vector<std::string>* errors,
+                                               bool preserve_authority);
+        bool save_plant_entities(const Ecs::EntityRegistrySnapshot& snapshot,
+                                 std::vector<std::string>* errors = nullptr);
+        bool save_metadata(const std::string& bytes, std::vector<std::string>* errors = nullptr);
+        bool save_metadata_and_active_regions(const std::string& bytes,
+                                              world::ActiveRegionLedger& ledger,
+                                              std::vector<std::string>* errors = nullptr);
+
+    private:
+        SaveBatch(std::filesystem::path directory, bool has_world, bool has_chunks)
+            : m_directory(std::move(directory))
+            , m_hasWorldSave(has_world)
+            , m_hasChunkSnapshot(has_chunks) {}
+        std::filesystem::path m_directory;
+        bool m_hasWorldSave = false;
+        bool m_hasChunkSnapshot = false;
+        bool m_valid = true;
+    };
 
 private:
+    static bool save_metadata_validated(const std::string& bytes,
+                                        const std::filesystem::path& directory,
+                                        std::vector<std::string>* errors);
+    static bool save_pair_validated(const std::string& bytes,
+                                    world::ActiveRegionLedger& ledger,
+                                    const std::filesystem::path& directory,
+                                    std::vector<std::string>* errors);
+    static bool save_regions_validated(world::ActiveRegionLedger& ledger,
+                                       const world::WorldClock& clock,
+                                       const std::filesystem::path& directory,
+                                       std::vector<std::string>* errors);
+    static bool save_plants_validated(const Ecs::EntityRegistrySnapshot& snapshot,
+                                      const std::filesystem::path& directory,
+                                      std::vector<std::string>* errors);
+    WorldSaveDirtyReport save_dirty_validated(WorldStreamingState& state,
+                                              const std::filesystem::path& directory,
+                                              std::vector<std::string>* errors,
+                                              bool preserve_authority) const;
     static RegionContentHasher region_content_hasher(const std::filesystem::path& save_dir,
                                                      world::RegionKey key,
                                                      const RegionDigestInputs& inputs);
@@ -309,7 +381,8 @@ private:
     bool write_snapshot(const std::vector<std::shared_ptr<Chunk>>& chunks,
                         const std::filesystem::path& save_dir,
                         std::vector<std::string>* errors,
-                        std::size_t* regions_written = nullptr) const;
+                        std::size_t* regions_written = nullptr,
+                        bool preserve_authority = false) const;
 };
 
 } // namespace Luminumbra::Persistence

@@ -3455,6 +3455,28 @@ TEST(GameSessionHeadlessWorldTest, FirstEnabledChunkSaveIncludesCleanResidentReg
     EXPECT_EQ(SessionWorldHash(loaded), before);
 }
 
+TEST(GameSessionHeadlessWorldTest, ExplicitFullSnapshotHandlesAnEmptyCleanWorld) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(session.CreateWorld("Empty full snapshot", "1337", "default"));
+    ASSERT_TRUE(session.GetWorldSystem()->snapshot_streamed_chunks().empty());
+    const auto save = session.GetWorldSaveDir();
+    ASSERT_TRUE(session.SaveWorldState(nullptr, true));
+    EXPECT_TRUE(fs::exists(P::WorldSaveService::world_manifest_path(save)));
+    EXPECT_FALSE(P::WorldSaveService::has_chunk_snapshot(save));
+    const auto before = ReadClockTestFile(save / "world_info.json");
+    P::WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
+    const bool saved = session.SaveWorldState(nullptr, true);
+    P::WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
+    EXPECT_FALSE(saved);
+    EXPECT_EQ(ReadClockTestFile(save / "world_info.json"), before);
+}
+
 TEST(GameSessionHeadlessWorldTest, EmptyReplicatedAnchorsNeverUseLocalSpawnFallback) {
     const HeadlessRoot root;
     JobSystem jobs;
@@ -5503,6 +5525,148 @@ TEST(GameSessionHeadlessWorldTest, EvictionSnapshotExcludesWorkerStagingAndPrese
     ASSERT_NE(restored, nullptr);
     EXPECT_EQ(P::WorldSaveService::authority_hashes({}, {chunk}).world,
               P::WorldSaveService::authority_hashes({}, {restored}).world);
+}
+
+TEST(GameSessionHeadlessWorldTest, AuthoritySnapshotsKeepTerrainWaterAndRegenerableOwnership) {
+    for (const bool terrain_edited : {false, true}) {
+        for (const bool water_owned : {false, true}) {
+            auto chunk = FlowingRegionChunk({0, 0, 0});
+            chunk->mark_sdf_generated_current_params();
+            if (terrain_edited)
+                chunk->mark_voxel_data_dirty();
+            if (water_owned)
+                chunk->mark_water_data_dirty();
+            const auto snapshot = P::SerializeChunkAuthoritySnapshotJson(*chunk);
+            Luminumbra::WorldStreamingState loaded;
+            std::vector<std::string> errors;
+            ASSERT_TRUE(P::LoadWorldStreamingStateSnapshotJson(snapshot, loaded, errors));
+            const auto restored = loaded.find_chunk(chunk->get_id());
+            ASSERT_NE(restored, nullptr);
+            EXPECT_EQ(restored->sdf_provenance(), chunk->sdf_provenance());
+            EXPECT_EQ(restored->has_water_authority(), water_owned);
+            EXPECT_EQ(restored->has_simulation_authority(), terrain_edited || water_owned);
+            EXPECT_FALSE(restored->is_voxel_data_dirty());
+            EXPECT_EQ(restored->water_depth_mm, chunk->water_depth_mm);
+            EXPECT_EQ(restored->water_edge_flux, chunk->water_edge_flux);
+            EXPECT_EQ(P::WorldSaveService::authority_hashes({}, {restored}).world,
+                      P::WorldSaveService::authority_hashes({}, {chunk}).world);
+        }
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, MalformedAuthorityOwnershipRefusesTheWholeSnapshot) {
+    const auto chunk = FlowingRegionChunk({0, 0, 0});
+    const auto valid = nlohmann::json::parse(P::SerializeChunkAuthoritySnapshotJson(*chunk));
+    for (const auto& invalid :
+         {nlohmann::json(nullptr),
+          nlohmann::json("edited"),
+          nlohmann::json{{"terrain_edited", true}},
+          nlohmann::json{{"terrain_edited", 1}, {"water_owned", false}},
+          nlohmann::json{{"terrain_edited", true}, {"water_owned", "false"}}}) {
+        auto document = valid;
+        document["chunks"][0]["authority"] = invalid;
+        Luminumbra::WorldStreamingState loaded;
+        std::vector<std::string> errors;
+        EXPECT_FALSE(P::LoadWorldStreamingStateSnapshotJson(document.dump(), loaded, errors));
+        EXPECT_TRUE(loaded.empty());
+        EXPECT_FALSE(errors.empty());
+        errors.clear();
+        EXPECT_FALSE(
+            P::ValidateWorldStreamingChunkFormatJson(document["chunks"][0].dump(), errors));
+        EXPECT_FALSE(errors.empty());
+    }
+    auto inconsistent = valid;
+    inconsistent["chunks"][0]["water_authority"] = "generated";
+    Luminumbra::WorldStreamingState loaded;
+    std::vector<std::string> errors;
+    EXPECT_FALSE(P::LoadWorldStreamingStateSnapshotJson(inconsistent.dump(), loaded, errors));
+    EXPECT_TRUE(loaded.empty());
+}
+
+TEST(GameSessionHeadlessWorldTest, UnchangedDurableOwnersEvictWithoutAnotherRegionWrite) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(session.CreateWorld("Durable eviction", "1337", "default"));
+    session.SetReplicatedSimulationAnchors({});
+    const Luminumbra::IVec3 coords(1280, 0, -1280);
+    ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(FlowingRegionChunk(coords)));
+    ASSERT_TRUE(session.SaveWorldState());
+    ASSERT_TRUE(session.LoadWorldState());
+    session.SetReplicatedSimulationAnchors({});
+    auto* world = session.GetWorldSystem();
+    world->debug_set_streaming_radius_cap(1);
+    P::WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
+    for (int frame = 0; frame < 4; ++frame) {
+        world->update(session.GetRegistry(), session.GetMetadata().spawnPoint, nullptr);
+        world->wait_for_streaming_jobs();
+    }
+    P::WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
+    EXPECT_FALSE(world->authority_fault());
+    EXPECT_EQ(world->find_streamed_chunk(coords), nullptr);
+}
+
+TEST(GameSessionHeadlessWorldTest, DurableWaterBookkeepingChangesStillRequireAnEvictionWrite) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(session.CreateWorld("Changed durable eviction", "1337", "default"));
+    session.SetReplicatedSimulationAnchors({});
+    const Luminumbra::IVec3 coords(1280, 0, -1280);
+    ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(FlowingRegionChunk(coords)));
+    ASSERT_TRUE(session.SaveWorldState());
+    ASSERT_TRUE(session.LoadWorldState());
+    session.SetReplicatedSimulationAnchors({});
+    auto* world = session.GetWorldSystem();
+    const auto chunk = world->find_streamed_chunk(coords);
+    ASSERT_NE(chunk, nullptr);
+    ASSERT_FALSE(chunk->is_voxel_data_dirty());
+    ++chunk->ticks_below_threshold;
+    world->debug_set_streaming_radius_cap(1);
+    P::WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
+    for (int frame = 0; frame < 4; ++frame) {
+        world->update(session.GetRegistry(), session.GetMetadata().spawnPoint, nullptr);
+        world->wait_for_streaming_jobs();
+    }
+    P::WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
+    EXPECT_TRUE(world->authority_fault());
+    EXPECT_EQ(world->find_streamed_chunk(coords), chunk);
+}
+
+TEST(GameSessionHeadlessWorldTest, AuthorityHashObservesEverySolverBookkeepingScalar) {
+    auto chunk = FlowingRegionChunk({0, 0, 0});
+    P::AuthorityHashCache cache;
+    cache.update(chunk);
+    const auto verify_change = [&] {
+        const auto before = cache.hashes();
+        const auto projections = cache.projection_count();
+        cache.update(chunk);
+        EXPECT_NE(cache.hashes().sub.water, before.sub.water);
+        EXPECT_NE(cache.hashes().world, before.world);
+        EXPECT_EQ(cache.hashes().sub.terrain, before.sub.terrain);
+        EXPECT_EQ(cache.projection_count(), projections + 1);
+        EXPECT_EQ(cache.hashes().world, P::WorldSaveService::authority_hashes({}, {chunk}).world);
+        cache.update(chunk);
+        EXPECT_EQ(cache.projection_count(), projections + 1);
+    };
+    ++chunk->ticks_below_threshold;
+    verify_change();
+    chunk->max_water_delta_last_tick += 0.5f;
+    verify_change();
+    chunk->is_water_sleeping.store(true);
+    verify_change();
+    chunk->current_water_resolution.store(8);
+    verify_change();
+    chunk->has_water_sim.store(false);
+    verify_change();
 }
 
 TEST(GameSessionHeadlessWorldTest, AuthorityHashProjectsOnlyChangedOwnersAndWaterRevisions) {

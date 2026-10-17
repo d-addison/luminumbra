@@ -1793,6 +1793,23 @@ float SHIELD_WorldSystem::SamplePristineFarDensity(const Vec3& wp,
     return std::max(filtered, analytic);
 }
 
+float SHIELD_WorldSystem::SurfaceBreakCellSize() const {
+    return m_params.surface_breaks_enabled ? m_params.feature_cell_size : 0.0f;
+}
+
+float SHIELD_WorldSystem::SurfaceBreakMaxRadius() const {
+    return m_params.surface_breaks_enabled ? m_params.max_feature_radius : 0.0f;
+}
+
+SHIELD_WorldSystem::SurfaceBreakInfo SHIELD_WorldSystem::SurfaceBreakInCell(int cell_x,
+                                                                            int cell_z) const {
+    if (!m_params.surface_breaks_enabled || m_params.feature_cell_size <= 0.0f) {
+        return {};
+    }
+    const SurfaceBreakFeature f = DecodeSurfaceBreakCell(m_seed, cell_x, cell_z, m_params);
+    return {f.valid, f.center_x, f.center_z, f.radius, f.depth, f.shaft};
+}
+
 SHIELD_WorldSystem::SurfaceBreakInfo
 SHIELD_WorldSystem::FindLargestSurfaceBreak(float near_x, float near_z, float scan_radius_m) const {
     SurfaceBreakInfo best;
@@ -3737,6 +3754,7 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
             physics_system->remove_chunk_collision(id);
         }
         chunk->has_collision.store(false, std::memory_order_release);
+        m_durableAuthorityOwners.erase(id);
         m_streaming_state.chunks.erase(id);
         shadow_note_evicted(id);
     }
@@ -5703,6 +5721,7 @@ void SHIELD_WorldSystem::clear_world(PhysicsSystem* physics_system) {
     m_streaming_state.chunks.clear();
     m_authorityHashCache.reset();
     m_simulationWaterChunks.clear();
+    m_durableAuthorityOwners.clear();
     m_simulationChunks.clear();
     if (m_water_system)
         m_water_system->ResetActivityCache();
@@ -5854,6 +5873,7 @@ void SHIELD_WorldSystem::set_authority_directory(const std::filesystem::path& di
     if (m_authorityDirectory != directory) {
         m_authorityDirectory = directory;
         m_authorityHashCache.reset();
+        m_durableAuthorityOwners.clear();
         m_simulationRegions.clear();
     }
 }
@@ -5864,8 +5884,10 @@ bool SHIELD_WorldSystem::relocate_authority_directory(const std::filesystem::pat
     if (!Persistence::WorldSaveService::copy_chunk_authority(m_authorityDirectory, directory))
         return false;
     auto cache = std::move(m_authorityHashCache);
+    auto durable_owners = std::move(m_durableAuthorityOwners);
     set_authority_directory(directory);
     m_authorityHashCache = std::move(cache);
+    m_durableAuthorityOwners = std::move(durable_owners);
     return true;
 }
 
@@ -5875,9 +5897,19 @@ std::size_t SHIELD_WorldSystem::resident_chunk_count() const {
     return m_streaming_state.chunks.size();
 }
 
+void SHIELD_WorldSystem::remember_durable_authority(const std::shared_ptr<Chunk>& chunk) {
+    if (chunk && chunk->has_simulation_authority() && !chunk->is_voxel_data_dirty())
+        m_durableAuthorityOwners.insert_or_assign(
+            chunk->get_id(), DurableAuthorityOwner{chunk, chunk->authority_stamp()});
+}
+
 bool SHIELD_WorldSystem::persist_authority(const std::shared_ptr<Chunk>& chunk) {
     if (m_authorityFault)
         return false;
+    const auto durable = m_durableAuthorityOwners.find(chunk->get_id());
+    if (!chunk->is_voxel_data_dirty() && durable != m_durableAuthorityOwners.end() &&
+        durable->second.owner.lock() == chunk && durable->second.stamp == chunk->authority_stamp())
+        return true;
     try {
         if (Persistence::WorldSaveService::persist_chunk_authority(m_authorityDirectory, chunk)) {
             notify_far_lod_authority_durable(chunk->get_coords());
@@ -5922,6 +5954,7 @@ bool SHIELD_WorldSystem::make_authority_room(PhysicsSystem* physics_system) {
             physics_system->remove_chunk_collision(it->first);
         chunk->has_collision.store(false, std::memory_order_release);
         shadow_note_evicted(it->first);
+        m_durableAuthorityOwners.erase(it->first);
         m_streaming_state.chunks.erase(it);
         m_collision_pass_dirty = true;
         return true;
@@ -5948,7 +5981,9 @@ std::shared_ptr<Chunk> SHIELD_WorldSystem::restore_authority(const IVec3& coords
         if (!entry->second.open(Save::region_file_path(m_authorityDirectory, rx, rz)))
             throw std::runtime_error("Cannot read durable chunk authority");
     }
-    return entry->second.read(Chunk::calculate_id(coords));
+    auto restored = entry->second.read(Chunk::calculate_id(coords));
+    remember_durable_authority(restored);
+    return restored;
 } catch (const std::exception& error) {
     m_authorityFault = error.what();
     return nullptr;
@@ -6068,6 +6103,7 @@ void SHIELD_WorldSystem::prepare_region_authority(entt::registry& registry,
             if (!m_streaming_state.chunks.contains(id) && !make_authority_room(physics_system))
                 throw std::runtime_error(*m_authorityFault);
             auto chunk = Save::read_next_authority(reader);
+            remember_durable_authority(chunk);
             chunk->set_state(ChunkState::Idle);
             chunk->has_collision.store(false, std::memory_order_release);
             m_streaming_state.chunks.insert_or_assign(id, chunk);
@@ -6212,6 +6248,7 @@ u64 SHIELD_WorldSystem::far_lod_region_authority_revision(i32 rx, i32 rz) const 
 }
 
 void SHIELD_WorldSystem::notify_far_lod_authority_durable(const IVec3& chunk_coords) {
+    remember_durable_authority(find_streamed_chunk(chunk_coords));
     bump_far_lod_authority_revision(chunk_coords);
 }
 
@@ -6306,7 +6343,8 @@ SHIELD_WorldSystem::find_streamed_chunk(const IVec3& coords) const {
     return it != m_streaming_state.chunks.end() ? it->second : nullptr;
 }
 
-bool SHIELD_WorldSystem::adopt_streamed_chunk(const std::shared_ptr<Luminumbra::Chunk>& chunk) {
+bool SHIELD_WorldSystem::adopt_streamed_chunk(const std::shared_ptr<Luminumbra::Chunk>& chunk,
+                                              bool durable) {
     if (!chunk) {
         return false;
     }
@@ -6331,6 +6369,8 @@ bool SHIELD_WorldSystem::adopt_streamed_chunk(const std::shared_ptr<Luminumbra::
     const bool adopted = m_streaming_state.chunks.emplace(chunk->get_id(), chunk).second;
     if (adopted)
         m_activation_has_run = false;
+    if (adopted && durable)
+        remember_durable_authority(chunk);
     if (adopted && chunk->has_simulation_authority()) {
         bump_far_lod_authority_revision(chunk->get_coords());
     }

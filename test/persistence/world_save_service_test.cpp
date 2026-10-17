@@ -637,3 +637,122 @@ TEST(WorldSaveServiceTest, PublicRegionDigestRejectsUnsupportedKeysBeforeDurable
     }
     EXPECT_FALSE(std::filesystem::exists(missing_save));
 }
+
+TEST(WorldSaveService, SaveBatchRefusesCorruptInputsAndPoisonsFailedPayloads) {
+    const TempSaveDir root("save-batch");
+    EXPECT_FALSE(WorldSaveService::SaveBatch::begin({}));
+    auto batch = WorldSaveService::SaveBatch::begin(root.path);
+    if (!batch) {
+        ADD_FAILURE() << "Could not begin a fresh save operation";
+        return;
+    }
+    EXPECT_FALSE(batch->has_world_save());
+    EXPECT_FALSE(batch->has_chunk_snapshot());
+    WorldStreamingState state;
+    auto chunk = state.get_or_create_chunk({0, 0, 0});
+    chunk->heightmap_data = {12.0f};
+    chunk->mark_voxel_data_dirty();
+    ASSERT_TRUE(batch->save_world(state, nullptr, true));
+    auto existing = WorldSaveService::SaveBatch::begin(root.path);
+    if (!existing) {
+        ADD_FAILURE() << "Could not begin an existing save operation";
+        return;
+    }
+    EXPECT_TRUE(existing->has_chunk_snapshot());
+    EXPECT_TRUE(existing->has_world_save());
+    WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
+    EXPECT_FALSE(existing->save_world(state, nullptr, true));
+    EXPECT_FALSE(existing->save_metadata("{}"));
+    EXPECT_FALSE(std::filesystem::exists(root.path / "world_info.json"));
+    // A fresh operation validates the installed image and can write metadata.
+    auto retry = WorldSaveService::SaveBatch::begin(root.path);
+    if (!retry) {
+        ADD_FAILURE() << "Could not retry the save operation";
+        return;
+    }
+    EXPECT_TRUE(retry->save_metadata(R"({"container_version":2})"));
+    const auto region = WorldSaveService::region_file_path(root.path, 0, 0);
+    std::ofstream(region, std::ios::binary | std::ios::trunc) << "partial";
+    std::vector<std::string> errors;
+    EXPECT_FALSE(WorldSaveService::SaveBatch::begin(root.path, &errors));
+    ASSERT_FALSE(errors.empty());
+    EXPECT_NE(errors.front().find("corrupt region file length"), std::string::npos);
+}
+
+TEST(WorldSaveService, SaveBatchEmptyDirtySetAndMoveKeepMetadataOrdering) {
+    const TempSaveDir root("save-batch-empty");
+    auto batch = WorldSaveService::SaveBatch::begin(root.path);
+    if (!batch) {
+        ADD_FAILURE() << "Could not begin an empty save operation";
+        return;
+    }
+    WorldStreamingState state;
+    EXPECT_FALSE(batch->save_dirty_chunks(state, nullptr, true).saved);
+    auto moved = std::move(*batch);
+    EXPECT_FALSE(batch->save_metadata("{}"));
+    EXPECT_TRUE(moved.save_metadata("{}"));
+    EXPECT_TRUE(std::filesystem::exists(root.path / "world_info.json"));
+}
+
+TEST(WorldSaveService, AuthoritySavesRefuseRegenerableReplacementOfDurableOwners) {
+    for (const bool incremental : {false, true}) {
+        SCOPED_TRACE(incremental);
+        const TempSaveDir root("authority-replacement");
+        WorldStreamingState state;
+        auto owner = state.get_or_create_chunk({0, 0, 0});
+        owner->heightmap_data = {12.0f};
+        owner->mark_voxel_data_dirty();
+        WorldSaveService service;
+        ASSERT_TRUE(service.save_world(state, root.path, nullptr, true));
+        const auto path = WorldSaveService::region_file_path(root.path, 0, 0);
+        std::vector<WorldSaveService::ContainerRecord> before;
+        ASSERT_TRUE(WorldSaveService::read_container_records(path, before));
+        state.clear();
+        const auto generated = state.get_or_create_chunk({0, 0, 0});
+        generated->heightmap_data = {3.0f};
+        auto dirty = state.get_or_create_chunk({1, 0, 0});
+        dirty->heightmap_data = {4.0f};
+        dirty->mark_voxel_data_dirty();
+        EXPECT_FALSE(WorldSaveService::persist_chunk_authority(root.path, nullptr));
+        EXPECT_FALSE(WorldSaveService::persist_chunk_authority(root.path, generated));
+        EXPECT_FALSE(WorldSaveService::persist_chunk_authority({}, dirty));
+        if (incremental)
+            EXPECT_FALSE(service.save_dirty_chunks(state, root.path, nullptr, true).saved);
+        else
+            EXPECT_FALSE(service.save_world(state, root.path, nullptr, true));
+        EXPECT_TRUE(dirty->is_voxel_data_dirty());
+        std::vector<WorldSaveService::ContainerRecord> after;
+        ASSERT_TRUE(WorldSaveService::read_container_records(path, after));
+        ASSERT_EQ(after.size(), before.size());
+        ASSERT_EQ(after.size(), 1u);
+        EXPECT_EQ(after.front().payload, before.front().payload);
+        EXPECT_EQ(after.front().flags, before.front().flags);
+        EXPECT_TRUE(WorldSaveService::validate_save(root.path));
+    }
+}
+
+TEST(WorldSaveService, ExplicitOwnershipRejectsContradictoryContainerFlags) {
+    for (const bool owned : {false, true}) {
+        SCOPED_TRACE(owned);
+        const TempSaveDir root("authority-header");
+        WorldStreamingState state;
+        const auto chunk = state.get_or_create_chunk({0, 0, 0});
+        chunk->heightmap_data = {12.0f};
+        if (owned)
+            chunk->mark_voxel_data_dirty();
+        const WorldSaveService::ContainerRecord record{
+            chunk->get_id(),
+            0,
+            static_cast<std::uint8_t>(owned ? 0 : 1),
+            Luminumbra::Persistence::SerializeWorldStreamingStateSnapshotJson(state, true)};
+        const auto path = WorldSaveService::region_file_path(root.path, 0, 0);
+        ASSERT_TRUE(WorldSaveService::upsert_container_records(path, {record}));
+        WorldStreamingState loaded;
+        std::vector<std::string> errors;
+        EXPECT_FALSE(WorldSaveService{}.load_world(loaded, root.path, errors));
+        EXPECT_TRUE(loaded.empty());
+        EXPECT_FALSE(errors.empty());
+        EXPECT_FALSE(WorldSaveService::SaveBatch::begin(root.path));
+        EXPECT_FALSE(WorldSaveService::validate_save(root.path));
+    }
+}

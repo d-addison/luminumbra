@@ -103,13 +103,17 @@ refuses a resume before freeze. No callback consumer or catch-up is installed.
 The record is `<save>/chunks/region/active-regions.arl`, following the accepted
 contract's placement in the region integrity scan. This resolves the slice
 brief's conflicting save-root wording in favour of that contract. ARL1 does
-not alter LMR1 v2, the world manifest, EFS1, plant payloads, FSD2 v3, or canonical
-chunk serialization. Presets now use revision 7 with revision-6 omission
+not alter LMR1 v2, the world manifest, EFS1, plant payloads, or FSD2 v3;
+active-region chunk snapshots retain explicit terrain and water ownership in optional
+`authority` metadata, while legacy snapshot bytes remain unchanged. Presets now use revision 7 with revision-6 omission
 compatibility and frozen packaged-preset fallback. An anchor-only ledger is not a chunk
 snapshot: with active regions enabled, the first save with dirty chunks writes all
 resident chunks, including clean chunks in other regions. The disabled path keeps
 the legacy existing-save query: a plant-only save makes later saves incremental.
-Snapshot transaction publication is separate work; this slice uses the existing durable temporary-write and atomic
+One synchronous save operation validates the existing durable snapshot once, then
+writes chunk, plant and energy payloads before metadata and ledger acknowledgement.
+Standalone writers retain full validation. A failed payload prevents later metadata
+publication in that operation. Snapshot transaction publication is separate work; this slice uses the existing durable temporary-write and atomic
 replacement primitive for the ledger, without claiming cross-file atomicity.
 
 Clock/ledger pair saves are synchronous and non-reentrant on the process's host
@@ -254,7 +258,12 @@ simulated water authority through
 the existing LMR1 durable replacement path before releasing it. This includes
 clean chunks whose dirty flags were acknowledged by an earlier save: later
 water state must also be durable. Optional `water_authority` snapshot metadata
-records generated or edited terrain provenance, and unknown values refuse loading. A failed replacement keeps the complete
+records generated or edited terrain provenance, and unknown values refuse loading.
+Explicit `authority` metadata also distinguishes regenerable initialized water from
+simulation owners, preserves terrain-only ownership, and rejects malformed or
+contradictory ownership fields. Loaded and rehydrated records start clean.
+Eviction reuses an unchanged durable owner only while its identity, array revision
+and water bookkeeping match the saved stamp, with at most one stamp per resident chunk. A failed replacement keeps the complete
 in-memory owner and latches the session's existing fail-stop fault at the next
 tick boundary. Both streaming generation and synchronous surface loading restore
 that durable authority before considering generation. Transient replay and
@@ -337,12 +346,19 @@ authoritative SDF/heightmap contents with newly generated terrain; an edited
 heightfield without full SDF keeps coarse rendering. Loaded and newly edited chunks
 use the same rule.
 
+The server's explicit full snapshot uses the session save operation to persist
+clean resident chunks with their ownership, together with plants and energy,
+before metadata and the ledger. A failed payload prevents metadata acknowledgement.
+
 The server's three production hash captures and the client's lockstep chunk
 capture use a shared authority oracle with active regions enabled. It merges
 complete resident authority over durable terrain and water authority using
 per-chunk terrain and water contributions. A cold scan decodes one durable chunk
 at a time and caches only its two integer contributions; later captures replace
 contributions from the bounded resident set without reading durable records.
+Each capture compares a fixed-size key for water initialization, resolution, sleep,
+quiet-tick count and maximum delta as well as the array revision, so bookkeeping
+changes cannot reuse stale contributions.
 Unsigned modular sums and the chunk count compose the same result as a full
 recompute, with chunk identity included in every contribution. Render caches,
 meshes and lifecycle flags cannot affect this oracle. The server availability

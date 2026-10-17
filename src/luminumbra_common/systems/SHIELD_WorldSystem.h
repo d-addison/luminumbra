@@ -476,6 +476,10 @@ public:
         bool shaft = false;       // true => vertical cenote shaft
     };
     SurfaceBreakInfo FindLargestSurfaceBreak(float near_x, float near_z, float scan_radius_m) const;
+    // Read-only station discovery catalogue; shares the live placement decoder.
+    SurfaceBreakInfo SurfaceBreakInCell(int cell_x, int cell_z) const;
+    float SurfaceBreakCellSize() const;
+    float SurfaceBreakMaxRadius() const;
     // Elevation-aware water surface level at a column: the local lake surface
     // inside a lake basin (held above the carved floor by its rim), or SEA_LEVEL
     // elsewhere. The WaterSystem seeds + pins its per-cell rest level from this so
@@ -941,7 +945,9 @@ public:
     // enforce the shared resident budget; legacy snapshot loads remain uncapped. Returns false
     // (without clobbering the streamed chunk) when a chunk with the same id
     // is already active.
-    bool adopt_streamed_chunk(const std::shared_ptr<::Luminumbra::Chunk>& chunk);
+    // durable is reserved for records decoded from the installed authority directory.
+    bool adopt_streamed_chunk(const std::shared_ptr<::Luminumbra::Chunk>& chunk,
+                              bool durable = false);
 
 private:
     const bool m_retainRegionAuthority;
@@ -962,6 +968,13 @@ private:
     void prepare_authority_eviction(const std::set<ChunkID>& required);
     bool make_authority_room(PhysicsSystem* physics_system = nullptr);
     bool admit_water_edit(const Vec3& world_pos, float radius_m);
+    struct DurableAuthorityOwner {
+        std::weak_ptr<Chunk> owner;
+        Chunk::AuthorityStamp stamp;
+    };
+    // At most one small stamp per resident chunk; erase alongside residency.
+    std::unordered_map<ChunkID, DurableAuthorityOwner> m_durableAuthorityOwners;
+    void remember_durable_authority(const std::shared_ptr<Chunk>& chunk);
     bool persist_authority(const std::shared_ptr<::Luminumbra::Chunk>& chunk);
     struct AuthorityRestoreBatch;
     std::shared_ptr<::Luminumbra::Chunk> restore_authority(const IVec3& coords,
