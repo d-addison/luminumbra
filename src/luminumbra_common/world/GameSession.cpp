@@ -484,9 +484,6 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
     if (m_activeRegionsEnabled && m_simulationBatchInProgress)
         return 0;
     class BatchGuard {
-        bool& active;
-        bool previous;
-
     public:
         BatchGuard(bool& value, bool enabled)
             : active(value)
@@ -496,6 +493,10 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
         ~BatchGuard() {
             active = previous;
         }
+
+    private:
+        bool& active;
+        bool previous;
     };
     const BatchGuard guard(m_simulationBatchInProgress, m_activeRegionsEnabled);
     std::uint32_t ticks_executed;
@@ -1313,7 +1314,7 @@ GameSession::ValidateWorldConfig(const std::string& root_path,
     }
 
     if (result.ok) {
-        const TerrainPresetLoadResult preset = LoadTerrainPreset(result.preset_path);
+        const TerrainPresetLoadResult preset = LoadTerrainPreset(result.preset_path, root / "data");
         if (!preset.ok) {
             for (const std::string& error : preset.errors) {
                 AddValidationError(result, error);
@@ -1376,7 +1377,7 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     metadata.worldId = transient ? std::string{} : GenerateWorldId();
     metadata.creationTime = std::time(nullptr);
     metadata.spawnPoint = Vec3(0, 100, 0);
-    const auto worldPath = RuntimeRoot(m_rootPath) / "worlds" / "saves" / metadata.worldId;
+    const auto worldPath = GetSaveRootPath() / "worlds" / "saves" / metadata.worldId;
     if (!transient) {
         try {
             fs::create_directories(worldPath);
@@ -1430,7 +1431,8 @@ bool GameSession::CreateWorldInternal(const std::string& name,
         preset_to_load = world_preset;
     }
 
-    const TerrainPresetLoadResult preset = LoadTerrainPreset(preset_to_load);
+    const TerrainPresetLoadResult preset =
+        LoadTerrainPreset(preset_to_load, RuntimeRoot(m_rootPath) / "data");
     if (!preset.ok) {
         m_worldOpenError = preset.errors.empty() ? "Invalid world preset." : preset.errors.front();
         for (const std::string& error : preset.errors) {
@@ -1456,7 +1458,7 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     m_physicsSystem = std::make_unique<Systems::PhysicsSystem>();
     m_physicsSystem->startup();
 
-    const int world_seed = static_cast<int>(StringToSeed(m_metadata.seed));
+    const int world_seed = std::bit_cast<std::int32_t>(StringToSeed(m_metadata.seed));
     LUMINUMBRA_CORE_INFO("Loaded world preset '{}': height_offset={}, amplitude={}, caves={}",
                          worldType,
                          params.height_offset,
@@ -1575,6 +1577,7 @@ bool GameSession::LoadWorldChecked(const std::string& worldId,
     // before replacing any live authority. Decode each world only once.
     GameSession candidate;
     candidate.m_rootPath = m_rootPath;
+    candidate.m_saveRootPath = m_saveRootPath;
     candidate.m_jobSystem = m_jobSystem;
     candidate.m_requiredClientAssets = m_requiredClientAssets;
     candidate.m_activeRegionsEnabled = true;
@@ -1639,7 +1642,7 @@ bool GameSession::LoadWorldInternal(const std::string& worldId,
     // reads the directory. The identifier check mirrors InspectSavedWorld's.
     if (!worldId.empty() && worldId != "." && worldId != ".." &&
         worldId.find_first_of("/\\:") == std::string::npos) {
-        const fs::path candidate = RuntimeRoot(m_rootPath) / "worlds" / "saves" / worldId;
+        const fs::path candidate = GetSaveRootPath() / "worlds" / "saves" / worldId;
         std::error_code status_error;
         if (fs::is_directory(candidate, status_error) && !fs::is_symlink(candidate, status_error)) {
             std::vector<std::string> recovery_errors;
@@ -1678,7 +1681,7 @@ bool GameSession::LoadWorldInternal(const std::string& worldId,
                 m_jobSystem,
                 nullptr,
                 planning_params,
-                static_cast<int>(StringToSeed(candidate.metadata.seed)));
+                std::bit_cast<std::int32_t>(StringToSeed(candidate.metadata.seed)));
             Vec3 spawn = candidate.metadata.spawnPoint;
             if (!candidate.has_spawn_point)
                 spawn = Vec3(
@@ -1690,6 +1693,7 @@ bool GameSession::LoadWorldInternal(const std::string& worldId,
         return wanted->contains(Chunk::calculate_id(coords));
     };
     const auto saved = Persistence::InspectSavedWorld(
+        GetSaveRootPath(),
         RuntimeRoot(m_rootPath),
         worldId,
         {},
@@ -1717,7 +1721,7 @@ bool GameSession::LoadWorldInternal(const std::string& worldId,
             return false;
         }
     }
-    const fs::path worldPath = RuntimeRoot(m_rootPath) / "worlds" / "saves" / worldId;
+    const fs::path worldPath = GetSaveRootPath() / "worlds" / "saves" / worldId;
     const auto& preset = admission.preset;
     if (!preset.ok) {
         m_worldOpenError = preset.errors.empty() ? "World preset admission is unavailable."
@@ -1752,7 +1756,7 @@ bool GameSession::LoadWorldInternal(const std::string& worldId,
         m_simulationClock.reset(m_worldClock.tick());
     }
     m_transientWorld = false;
-    const int world_seed = static_cast<int>(StringToSeed(m_metadata.seed));
+    const int world_seed = std::bit_cast<std::int32_t>(StringToSeed(m_metadata.seed));
 
     // Initialize Physics System after config and preset validation passes.
     m_physicsSystem = std::make_unique<Systems::PhysicsSystem>();
@@ -3427,7 +3431,8 @@ void GameSession::CaptureCreatureLocomotionForSave() {
 
 Persistence::SavedWorld GameSession::InspectCurrentSavedWorld() {
     const Persistence::ChunkValidationCache::Scope validation_scope(*m_chunkValidationCache);
-    auto saved = Persistence::InspectSavedWorld(RuntimeRoot(m_rootPath), m_metadata.worldId);
+    auto saved = Persistence::InspectSavedWorld(
+        GetSaveRootPath(), RuntimeRoot(m_rootPath), m_metadata.worldId);
     if (saved.error.empty() && saved.preset_content_hash != m_presetContentHash)
         saved.error = "Incompatible world preset: content changed since world admission.";
     return saved;
@@ -3627,11 +3632,15 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
     return true;
 }
 
+std::filesystem::path GameSession::GetSaveRootPath() const {
+    return m_saveRootPath.empty() ? RuntimeRoot(m_rootPath) : m_saveRootPath;
+}
+
 std::filesystem::path GameSession::GetWorldSaveDir() const {
     if (m_transientWorld || m_metadata.worldId.empty()) {
         return {};
     }
-    return RuntimeRoot(m_rootPath) / "worlds" / "saves" / m_metadata.worldId;
+    return GetSaveRootPath() / "worlds" / "saves" / m_metadata.worldId;
 }
 
 bool GameSession::SaveWorldState(WorldStateSaveReport* report, WorldStateSaveScope scope) {
@@ -4367,7 +4376,7 @@ void GameSession::CaptureRegionalScent() {
     std::array<decltype(stored.begin()), kScentFieldCells> columns;
     for (int x = 0; x < kScentFieldCells; ++x)
         columns[x] = stored.lower_bound({origin_x + x, origin_z});
-    changed.reserve(std::size_t{kScentFieldCells} * kScentFieldCells);
+    changed.reserve(static_cast<std::size_t>(kScentFieldCells) * kScentFieldCells);
     for (int z = 0; z < kScentFieldCells; ++z)
         for (int x = 0; x < kScentFieldCells; ++x) {
             const ScentCellKey key{origin_x + x, origin_z + z};
