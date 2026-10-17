@@ -270,7 +270,7 @@ class AcceptanceFixture(unittest.TestCase):
     def base_args(self) -> list[str]:
         return ["--root", str(self.root), "--matrix", str(self.matrix_path)]
 
-    def prepare_refresh(self) -> dict[str, Any]:
+    def prepare_refresh(self, *, generated_evidence: bool = True) -> dict[str, Any]:
         matrix = baseline_matrix()
         matrix["rows"][0]["requirements"].remove("ar.synthetic")
         matrix["rows"].append({
@@ -279,14 +279,17 @@ class AcceptanceFixture(unittest.TestCase):
             "requirements": ["ar.synthetic"],
             "evidence": [{"kind": "script", "ref": "tools/script.py"}],
         })
+        if generated_evidence:
+            for row in (matrix["rows"][0], matrix["rows"][-1]):
+                row["evidence"].append({"kind": "doc", "ref": "docs/acceptance-matrix.md"})
         self.write_matrix(matrix)
         doc = self.root / "docs/acceptance-matrix.md"
         doc.write_bytes(MODULE.render_doc(matrix).encode("utf-8"))
         return matrix
 
-    def prepare_rollback(self) -> tuple[tuple[Path, ...], dict[Path, bytes]]:
+    def prepare_rollback(self, *, generated_evidence: bool = True) -> tuple[tuple[Path, ...], dict[Path, bytes]]:
         self.write_inventory()
-        self.prepare_refresh()
+        self.prepare_refresh(generated_evidence=generated_evidence)
         (self.root / MODULE.CONTRACT_DOCUMENTS[1]).write_text(
             "# Moved\nEvery requirement has evidence.\n", encoding="utf-8")
         paths = (self.root / "docs/acceptance-matrix.md", self.matrix_path,
@@ -917,13 +920,231 @@ raise SystemExit(module["main"](["--root", sys.argv[2], "--matrix", sys.argv[3],
         self.assertEqual(self.run_main(*args)[0], 0)
         self.assertEqual((doc.read_bytes(), doc.stat().st_mtime_ns), before)
 
+    def test_generated_document_evidence_allows_both_writers_and_separate_exports(self) -> None:
+        doc = self.root / "docs/acceptance-matrix.md"
+        export = self.tmp / "export.md"
+        for options in (["--refresh-inventory"], ["--write-doc", str(doc)],
+                        ["--write-doc", str(export)],
+                        ["--refresh-inventory", "--write-doc", str(export)]):
+            with self.subTest(options=options):
+                matrix = self.prepare_refresh()
+                expected = MODULE.render_doc(matrix).encode("utf-8")
+                doc.write_bytes(b"Stale generated view.\n")
+                export.unlink(missing_ok=True)
+                code, out, err = self.run_main(*self.base_args(), *options)
+                self.assertEqual(code, 0, err)
+                self.assertIn("static references ok", out)
+                if "--write-doc" in options and str(export) in options:
+                    self.assertEqual(export.read_bytes(), expected)
+                if "--refresh-inventory" in options or str(doc) in options:
+                    self.assertEqual(doc.read_bytes(), expected)
+
+    def test_generated_document_as_source_or_other_evidence_remains_protected(self) -> None:
+        doc = self.root / "docs/acceptance-matrix.md"
+        for reference in ("source", "script", "native", "unknown", "alias-spelling", "other-document"):
+            for options in (["--refresh-inventory"], ["--write-doc", str(doc)]):
+                with self.subTest(reference=reference, options=options):
+                    matrix = self.prepare_refresh()
+                    row = matrix["rows"][0]
+                    if reference == "source":
+                        row["source"] = "docs/acceptance-matrix.md#acceptance-matrix"
+                    else:
+                        row["evidence"].append({
+                            "kind": "doc" if reference in {"alias-spelling", "other-document"} else reference,
+                            "ref": "./docs/acceptance-matrix.md" if reference == "alias-spelling"
+                                   else "docs/other.md" if reference == "other-document"
+                                   else "docs/acceptance-matrix.md",
+                        })
+                    if reference == "other-document":
+                        # A nonstandard document reference cannot become its own
+                        # output just because the standard view is also cited.
+                        options = ["--write-doc", str(self.root / "docs/other.md"),
+                                   *(["--refresh-inventory"] if "--refresh-inventory" in options else [])]
+                    self.write_matrix(matrix)
+                    before = {path: path.read_bytes() for path in self.tmp.rglob("*") if path.is_file()}
+                    with mock.patch.object(Path, "replace") as publish:
+                        code, _, err = self.run_main(*self.base_args(), *options)
+                    self.assertEqual(code, 2, err)
+                    self.assertIn("output path overlaps an input", err)
+                    publish.assert_not_called()
+                    self.assertEqual({path: path.read_bytes() for path in self.tmp.rglob("*") if path.is_file()},
+                                     before)
+
+    def test_generated_document_evidence_aliases_remain_real_inputs(self) -> None:
+        doc = self.root / "docs/acceptance-matrix.md"
+        alias = self.root / "docs/alias.md"
+        for kind in ("hardlink", "symlink", "symlink-denied"):
+            for options in (["--refresh-inventory"], ["--write-doc", str(doc)]):
+                with self.subTest(kind=kind, options=options), contextlib.ExitStack() as stack:
+                    matrix = self.prepare_refresh()
+                    matrix["rows"][0]["evidence"].append({"kind": "doc", "ref": "docs/alias.md"})
+                    self.write_matrix(matrix)
+                    if kind == "hardlink":
+                        os.link(doc, alias)
+                    else:
+                        if kind == "symlink-denied":
+                            stack.enter_context(mock.patch.object(Path, "symlink_to",
+                                                                  side_effect=PermissionError("denied")))
+                        try:
+                            alias.symlink_to(doc)
+                        except OSError:
+                            alias.write_bytes(doc.read_bytes())
+                            resolve = Path.resolve
+                            def resolved(path: Path, *args: Any, **kwargs: Any) -> Path:
+                                result = resolve(path, *args, **kwargs)
+                                return doc if result == alias else result
+                            stack.enter_context(mock.patch.object(Path, "resolve", resolved))
+                    stack.callback(alias.unlink)
+                    before = doc.read_bytes()
+                    with mock.patch.object(Path, "replace") as publish:
+                        code, _, err = self.run_main(*self.base_args(), *options)
+                    self.assertEqual(code, 2, err)
+                    self.assertIn("output path overlaps an input", err)
+                    publish.assert_not_called()
+                    self.assertEqual(doc.read_bytes(), before)
+
+    def test_nonstandard_output_cannot_alias_generated_document(self) -> None:
+        self.prepare_refresh()
+        doc = self.root / "docs/acceptance-matrix.md"
+        alias = self.tmp / "export.md"
+        os.link(doc, alias)
+        before = doc.read_bytes()
+        discovery, report = self.execution_inputs()
+        for option in ("--write-doc", "--execution-receipt"):
+            for refresh in (False, True):
+                with self.subTest(option=option, refresh=refresh):
+                    with mock.patch.object(Path, "replace") as publish:
+                        code, _, err = self.run_main(*self.base_args(), option, str(alias),
+                                                     "--junit", str(report), "--discovery", str(discovery),
+                                                     *(["--refresh-inventory"] if refresh else []))
+                    self.assertEqual(code, 2, err)
+                    self.assertIn("output paths must be distinct" if refresh else "output path overlaps an input", err)
+                    publish.assert_not_called()
+                    self.assertEqual(doc.read_bytes(), before)
+                    self.assertTrue(doc.samefile(alias))
+
+    def test_generated_document_resolution_and_validation_precede_publication(self) -> None:
+        doc = self.root / "docs/acceptance-matrix.md"
+        resolve = Path.resolve
+        for outside in (False, True):
+            for fail in (False, True):
+                with self.subTest(outside=outside, fail=fail):
+                    paths, before = self.prepare_rollback()
+                    destination = (self.tmp if outside else self.root) / "resolved-view.md"
+                    destination.write_bytes(before[doc])
+                    def resolved(path: Path, *args: Any, **kwargs: Any) -> Path:
+                        result = resolve(path, *args, **kwargs)
+                        return destination if result == doc else result
+                    read = Path.read_bytes
+                    def read_resolved(path: Path) -> bytes:
+                        return read(destination if path == doc else path)
+                    replace = Path.replace
+                    published = []
+                    def publish(path: Path, target: Path) -> Path:
+                        published.append(target)
+                        if fail and target == paths[-1]:
+                            raise PermissionError("last output unavailable")
+                        return replace(path, target)
+                    # Models reparse/short-name resolution without requiring
+                    # Windows symlink privileges; the identity checks stay real.
+                    with mock.patch.object(Path, "resolve", resolved), \
+                            mock.patch.object(Path, "read_bytes", read_resolved), \
+                            mock.patch.object(Path, "replace", publish):
+                        code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+                    if outside:
+                        self.assertEqual(code, 1, err)
+                        self.assertIn("path escapes root: docs/acceptance-matrix.md", err)
+                        self.assertEqual(published, [])
+                    else:
+                        self.assertEqual(code, 2 if fail else 0, err)
+                        self.assertEqual(published, [destination, *paths[1:]])
+                    if outside or fail:
+                        self.assertEqual(destination.read_bytes(), before[doc])
+                        self.assertEqual({path: path.read_bytes() for path in paths}, before)
+                        self.assertNotIn("rollback incomplete", err)
+                    else:
+                        self.assertEqual(destination.read_bytes(), MODULE.render_doc(
+                            MODULE.load_matrix(self.matrix_path)).encode("utf-8"))
+                    self.assertEqual(list(self.tmp.rglob(".acceptance-*")), [])
+
+    def test_generated_document_evidence_stays_in_refresh_snapshot(self) -> None:
+        doc = self.root / "docs/acceptance-matrix.md"
+        validate = MODULE.validate
+        read = Path.read_bytes
+        for failure in ("changed", "unreadable", "removed"):
+            with self.subTest(failure=failure):
+                paths, before = self.prepare_rollback()
+                checked = False
+                def validate_then_change(*args: Any, **kwargs: Any) -> Any:
+                    nonlocal checked
+                    result = validate(*args, **kwargs)
+                    self.assertEqual(result, [])
+                    checked = True
+                    if failure == "removed":
+                        doc.unlink()
+                    elif failure == "changed":
+                        doc.write_bytes(b"External document edit.\n")
+                    return result
+                def read_after_validation(path: Path) -> bytes:
+                    if checked and path == doc and failure == "unreadable":
+                        raise PermissionError("document unreadable")
+                    return read(path)
+                with mock.patch.object(MODULE, "validate", validate_then_change), \
+                        mock.patch.object(Path, "read_bytes", read_after_validation), \
+                        mock.patch.object(Path, "replace") as publish:
+                    code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+                self.assertTrue(checked)
+                self.assertEqual(code, 2, err)
+                self.assertIn("document unreadable" if failure == "unreadable" else "input snapshot changed", err)
+                publish.assert_not_called()
+                self.assertEqual({path: path.read_bytes() for path in paths[1:]},
+                                 {path: before[path] for path in paths[1:]})
+                if failure == "removed":
+                    self.assertFalse(doc.exists())
+                else:
+                    self.assertEqual(doc.read_bytes(), b"External document edit.\n" if failure == "changed" else before[doc])
+                self.assertEqual(list(self.tmp.rglob(".acceptance-*")), [])
+
+    def test_generated_document_alias_retargeting_is_still_snapshotted(self) -> None:
+        paths, before = self.prepare_rollback()
+        doc = paths[0]
+        first, second = self.root / "first-view.md", self.root / "second-view.md"
+        for path in (first, second):
+            path.write_bytes(before[doc])
+        current = first
+        resolve, read, validate = Path.resolve, Path.read_bytes, MODULE.validate
+        def resolved(path: Path, *args: Any, **kwargs: Any) -> Path:
+            result = resolve(path, *args, **kwargs)
+            return current if result == doc else result
+        def read_resolved(path: Path) -> bytes:
+            return read(current if path == doc else path)
+        def validate_then_retarget(*args: Any, **kwargs: Any) -> Any:
+            nonlocal current
+            result = validate(*args, **kwargs)
+            self.assertEqual(result, [])
+            current = second  # Identical bytes, but a different alias target.
+            return result
+        with mock.patch.object(Path, "resolve", resolved), \
+                mock.patch.object(Path, "read_bytes", read_resolved), \
+                mock.patch.object(MODULE, "validate", validate_then_retarget), \
+                mock.patch.object(Path, "replace") as publish:
+            code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+        self.assertEqual(current, second)
+        self.assertEqual(code, 2, err)
+        self.assertIn("input snapshot changed", err)
+        publish.assert_not_called()
+        self.assertEqual({path: path.read_bytes() for path in paths}, before)
+        self.assertEqual(first.read_bytes(), before[doc])
+        self.assertEqual(second.read_bytes(), before[doc])
+        self.assertEqual(list(self.tmp.rglob(".acceptance-*")), [])
+
     def test_default_output_destinations_use_resolved_paths_for_publish_and_rollback(self) -> None:
         self.matrix_path = self.root / "tools/ci/acceptance_matrix.json"
         resolve, replace = Path.resolve, Path.replace
         for name in ("document", "matrix", "inventory"):
             for fail in (False, True):
                 with self.subTest(output=name, fail=fail):
-                    paths, before = self.prepare_rollback()
+                    paths, before = self.prepare_rollback(generated_evidence=False)
                     alias = dict(zip(("document", "matrix", "inventory"), paths))[name]
                     destination = self.tmp / ("resolved-" + alias.name)
                     destination.write_bytes(before[alias])
@@ -4251,6 +4472,45 @@ raise SystemExit(module["main"](sys.argv[3:]))
 
 
 class ProductionAcceptanceMatrixTests(unittest.TestCase):
+    def test_production_inputs_allow_refresh_and_standard_document_write(self) -> None:
+        root = MODULE.DEFAULT_ROOT
+        doc = root / "docs/acceptance-matrix.md"
+        paths = (root / "tools/ci/acceptance_matrix.json", root / "tools/ci/acceptance_requirements.json", doc)
+        before = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in paths}
+        matrix = MODULE.load_matrix(paths[0])
+        for row_id in ("perf.requirement-matrix", "iss.126"):
+            self.assertIn({"kind": "doc", "ref": "docs/acceptance-matrix.md"}, row_of(matrix, row_id)["evidence"])
+        expected = before[doc][0].decode("utf-8").replace("\r\n", "\n")
+        publish = MODULE._replace_outputs
+        # Read all production inputs in place. Redirect coordination metadata
+        # and publication to scratch so Git metadata may be read-only and an
+        # explicit write may normalize CRLF without changing the checkout.
+        with tempfile.TemporaryDirectory() as temporary:
+            scratch = Path(temporary).resolve()
+            destination = scratch / doc.name
+            destination.write_bytes(expected.replace("\n", "\r\n").encode("utf-8"))
+            def publish_document(outputs: list[tuple[Path, str]], **kwargs: Any) -> None:
+                self.assertTrue(all(path == doc and text == expected for path, text in outputs))
+                publish([(destination, text) for _, text in outputs], **kwargs)
+            for options in (["--refresh-inventory"], ["--write-doc", str(doc)]):
+                with self.subTest(options=options):
+                    out, err = io.StringIO(), io.StringIO()
+                    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                            mock.patch.object(MODULE, "_refresh_lock_path",
+                                              return_value=scratch / "acceptance-refresh.lock"), \
+                            mock.patch.object(MODULE, "_replace_outputs", side_effect=publish_document) as publisher:
+                        code = MODULE.main(["--root", str(root), *options, "--check-doc", str(doc)])
+                    self.assertEqual(code, 0, err.getvalue())
+                    self.assertIn(f"static references ok: {len(matrix['rows'])} rows", out.getvalue())
+                    publisher.assert_called_once()
+                    self.assertEqual(publisher.call_args.args[0], [] if "--refresh-inventory" in options
+                                     else [(doc, expected)])
+                    self.assertEqual({path: (path.read_bytes(), path.stat().st_mtime_ns) for path in paths}, before)
+                    if "--write-doc" in options:
+                        self.assertEqual(destination.read_bytes(), expected.encode("utf-8"))
+            self.assertEqual(list(scratch.glob(".acceptance-*")), [])
+            self.assertFalse((scratch / "acceptance-refresh.transaction").exists())
+
     @immutable_repository_reads()
     def test_deleting_any_required_production_mapping_fails_validation(self) -> None:
         root = MODULE.DEFAULT_ROOT

@@ -1847,21 +1847,34 @@ def _doc_matches(path: Path, expected: str) -> bool:
     return text.replace("\r\n", "\n") == expected
 
 
-def _matrix_input_paths(matrix: dict[str, Any], root: Path) -> list[Path]:
-    references: list[str] = []
+def _matrix_input_paths(matrix: dict[str, Any], root: Path) -> tuple[list[Path], list[Path]]:
+    """Return snapshot inputs and the subset protected against output overlap.
+
+    Only literal doc evidence for the generated view may overlap its output.
+    Retain that reference in snapshots, including its unresolved alias identity.
+    Source uses, other evidence kinds and alias spellings remain protected.
+    """
+    references: list[tuple[str, bool]] = []
     rows = matrix.get("rows", [])
     for row in rows if isinstance(rows, list) else []:
         if not isinstance(row, dict):
             continue
         source = row.get("source")
         if _is_nonempty_str(source):
-            references.append(source.partition("#")[0])
+            references.append((source.partition("#")[0], False))
         evidence = row.get("evidence", [])
         for item in evidence if isinstance(evidence, list) else []:
             if isinstance(item, dict) and item.get("kind") != "ctest" and _is_nonempty_str(item.get("ref")):
-                references.append(item["ref"])
-    return [root / ref for ref in references
-            if not _path_problem(root, ref, must_exist=False) and not (root / ref).is_dir()]
+                generated = item.get("kind") == "doc" and item["ref"] == "docs/acceptance-matrix.md"
+                references.append((item["ref"], generated))
+    inputs, protected = [], []
+    for ref, generated in references:
+        path = root / ref
+        if not _path_problem(root, ref, must_exist=False) and not path.is_dir():
+            inputs.append(path)
+            if not generated:
+                protected.append(path)
+    return inputs, protected
 
 
 def _same_path(left: Path, right: Path) -> bool:
@@ -1896,7 +1909,7 @@ def _check_output_paths(args: argparse.Namespace, root: Path, matrix_path: Path,
         # another output or any contract/evidence input. Document aliases get
         # exactly the same checks as explicitly supplied destinations.
         extra = [] if args.refresh_inventory else [matrix_path, inventory]
-        if path == args.execution_receipt:
+        if path != doc or path == args.execution_receipt:
             extra.append(doc)
         if any(_same_path(path, source) for source in [*protected, *extra]):
             raise MatrixError(f"output path overlaps an input: {path}")
@@ -2006,8 +2019,8 @@ def _run(args: argparse.Namespace, root: Path, snapshot: _RefreshSnapshot | None
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    inputs = _matrix_input_paths(matrix, root)
-    _check_output_paths(args, root, matrix_path, inputs)
+    inputs, protected_inputs = _matrix_input_paths(matrix, root)
+    _check_output_paths(args, root, matrix_path, protected_inputs)
     refreshed = None
     decisions: list[dict[str, Any]] = []
     outputs: list[tuple[Path, str]] = []
