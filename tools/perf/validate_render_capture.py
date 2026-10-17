@@ -118,6 +118,28 @@ def view_position(view):
     return [-sum(view[col*4+row]*view[12+row] for row in range(3)) for col in range(3)]
 
 
+def translation_tolerance(position, rotation_error, operations):
+    # For t = -R*p, |delta t| <= max(|delta R|) * sum(|p|).
+    # Spend only the observed rotation difference, capped at eight float32
+    # epsilons (trig products, normalization and cross products). A bad rotation
+    # cannot buy arbitrary translation slack, and translation-only corruption
+    # keeps the absolute floor. The factors below allow float dot/cofactor
+    # rounding (4) and propagation through R^T*t (8) or the GLM inverse (16).
+    return 0.002 + operations * min(rotation_error, 8 * 2**-23) * sum(abs(x) for x in position)
+
+
+def close_camera_matrix(actual, expected, position, label, source_rotation_error=0, operations=4):
+    actual = finite_vector(actual, 16, label)
+    # Position magnitude must never loosen the rotation or homogeneous entries.
+    rotation = close(actual[:12], expected[:12], 0.002, label)
+    homogeneous = close(actual[15:], expected[15:], 0.002, label)
+    rotation_error = max(abs(actual[col*4+row] - expected[col*4+row])
+                         for col in range(3) for row in range(3))
+    tolerance = translation_tolerance(position, max(rotation_error, source_rotation_error), operations)
+    translation = close(actual[12:15], expected[12:15], tolerance, label)
+    return max(rotation, homogeneous, translation), rotation_error
+
+
 def validate_cell(data, args):
     """Bind a v3 capture to any expected cell parameters supplied by the caller."""
     for name, path in (('profile', ('profile', 'name')),
@@ -202,14 +224,18 @@ def validate(data, args):
     expected_inverse = inverse_view(expected_view)
     expected_position = view_position(expected_view)
     errors = {}
+    source_rotation_error = 0
     for name in ['geometry', 'instanced_static_mesh']:
         program = programs.get(name, {})
         if program.get('available') is not True:
             raise ValueError(f'{name}: program unavailable')
-        errors[name + '_view'] = close(program.get('view'), expected_view, 0.002, name + ' view/report')
+        errors[name + '_view'], rotation_error = close_camera_matrix(
+            program.get('view'), expected_view, position, name + ' view/report')
+        source_rotation_error = max(source_rotation_error, rotation_error)
         view = program['view']
         observed_position = view_position(view)
-        errors[name + '_position'] = close(observed_position, expected_position, 0.002, name + ' observed position/report')
+        errors[name + '_position'] = close(observed_position, expected_position,
+            translation_tolerance(position, rotation_error, 8), name + ' observed position/report')
         projection = finite_vector(program.get('projection'), 16, name + ' projection')
         if projection[0] <= 0 or projection[5] <= 0:
             raise ValueError(f'{name}: invalid perspective scale')
@@ -220,7 +246,9 @@ def validate(data, args):
     if lighting.get('available') is not True:
         raise ValueError('lighting program unavailable')
     errors['lighting_position'] = close(lighting.get('u_viewPos'), position, 1e-5, 'lighting position/report')
-    errors['lighting_inverse_view'] = close(lighting.get('u_inverseView'), expected_inverse, 0.002, 'lighting inverse view/report')
+    errors['lighting_inverse_view'], _ = close_camera_matrix(
+        lighting.get('u_inverseView'), expected_inverse, position, 'lighting inverse view/report',
+        source_rotation_error, operations=16)
     sun = finite_vector(lighting.get('u_sun.direction'), 3, 'lighting sun direction')
     close([math.sqrt(dot(sun,sun))], [1.0], 1e-5, 'sun direction length')
     # Sun travel direction is normalized (sin(phase), -cos(phase), seasonal_z).

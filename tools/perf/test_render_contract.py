@@ -5,6 +5,7 @@ import copy
 import json
 import math
 from pathlib import Path
+import struct
 import subprocess
 import sys
 import tempfile
@@ -405,6 +406,80 @@ class RenderContractTests(unittest.TestCase):
                     broken['render_uniforms'][name][field] = malformed
                     with self.subTest(program=name, value=malformed), self.assertRaises(ValueError):
                         capture.validate(broken, expected)
+
+    def rounded_view(self, position, steps):
+        view = capture.camera_view(position, 137, -27)
+        # Model a different float trig/normalize implementation: move each
+        # rotation coefficient one or two representable floats away from zero.
+        for col in range(3):
+            for row in range(3):
+                index = col*4 + row
+                bits = struct.unpack('<I', struct.pack('<f', view[index]))[0]
+                view[index] = struct.unpack('<f', struct.pack('<I', bits + steps))[0]
+        for row in range(3):
+            view[12+row] = -capture.dot32([view[col*4+row] for col in range(3)], position)
+        return view
+
+    def test_large_position_float_rotation_rounding_is_accepted(self):
+        for position in ([65536, -65536, 65536], [-65536, 32768, -49152]):
+            for steps in (1, 2):
+                view = self.rounded_view(position, steps)
+                oracle = capture.camera_view(position, 137, -27)
+                self.assertGreater(max(abs(a-b) for a, b in zip(view[12:15], oracle[12:15])), 0.002)
+                for schema in ('luminumbra.render_benchmark.v2', contract.SCHEMA):
+                    with self.subTest(position=position, steps=steps, schema=schema):
+                        data = self.report_capture(position, 137, -27, view)
+                        if schema == contract.SCHEMA:
+                            data.update(artifact())
+                        expected = args(position=position, yaw=137, pitch=-27, tod=0,
+                                        qualified_renderer=QUALIFIED if schema == contract.SCHEMA else None)
+                        self.assertEqual(capture.validate(data, expected)['verdict'], 'PASS')
+                        # Genuine errors still fail, even with the rounding
+                        # allowance already spent by the legitimate rotation.
+                        for name, field in (('geometry', 'view'), ('instanced_static_mesh', 'view'),
+                                            ('lighting', 'u_inverseView')):
+                            for index, error in ((0, 0.01), (12, 1.0), (15, 0.01)):
+                                broken = copy.deepcopy(data)
+                                broken['render_uniforms'][name][field][index] += error
+                                with self.subTest(program=name, index=index), self.assertRaises(ValueError):
+                                    capture.validate(broken, expected)
+
+    def test_large_position_does_not_hide_translation_only_errors(self):
+        position = [65536, -32768, 49152]
+        expected = args(position=position, yaw=137, pitch=-27, tod=0, qualified_renderer=None)
+        for name, field in (('geometry', 'view'), ('instanced_static_mesh', 'view'),
+                            ('lighting', 'u_inverseView')):
+            data = self.report_capture(position, 137, -27)
+            data['render_uniforms'][name][field][12] += 0.003
+            with self.subTest(program=name), self.assertRaises(ValueError):
+                capture.validate(data, expected)
+
+    def test_wrong_rotation_cannot_expand_large_position_error_budget(self):
+        position = [65536, -32768, 49152]
+        view = capture.camera_view(position, 137, -27)
+        # This change fits the absolute rotation floor, but is far larger than
+        # float roundoff. Recompute a consistent translation and inverse so
+        # rejection depends on the cap on the propagated rotation error.
+        view[0] += 0.001
+        view[12] = -capture.dot32([view[col*4] for col in range(3)], position)
+        data = self.report_capture(position, 137, -27, view)
+        with self.assertRaisesRegex(ValueError, 'geometry view/report'):
+            capture.validate(data, args(position=position, yaw=137, pitch=-27, tod=0,
+                                        qualified_renderer=None))
+
+    def test_small_position_matrix_tolerance_is_unchanged(self):
+        for name, field in (('geometry', 'view'), ('instanced_static_mesh', 'view'),
+                            ('lighting', 'u_inverseView')):
+            for error, accepted in ((0.0019, True), (0.0021, False)):
+                data = self.report_capture()
+                data['render_uniforms'][name][field][12] += error
+                expected = args(position=[0, 0, 0], yaw=0, pitch=0, tod=0, qualified_renderer=None)
+                with self.subTest(program=name, error=error):
+                    if accepted:
+                        self.assertEqual(capture.validate(data, expected)['verdict'], 'PASS')
+                    else:
+                        with self.assertRaises(ValueError):
+                            capture.validate(data, expected)
 
     def test_requested_pose_rounds_through_float32_without_relaxing_tolerance(self):
         position = [1000.1, -2000.2, 0.1]
