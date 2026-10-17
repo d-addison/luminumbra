@@ -1,5 +1,6 @@
 #include "ui/Rml_UIManager.h"
 #include "audio/IAudioManager.h"
+#include "luminumbra_common/core/FramePacing.h"
 #include <GLFW/glfw3.h>
 #include <RmlUi/Core.h>
 #include <RmlUi/Core/Elements/ElementFormControl.h>
@@ -1221,6 +1222,10 @@ void Rml_UIManager::PopulateSettingsForm(Rml::ElementDocument* document) {
     if (b.GetVSync) {
         SetControlValue(document->GetElementById("setting_vsync"), b.GetVSync() ? "on" : "off");
     }
+    if (b.GetFrameCap) {
+        SetControlValue(document->GetElementById("setting_frame_cap"),
+                        std::to_string(b.GetFrameCap()));
+    }
     if (b.GetFov) {
         const float fov = b.GetFov();
         SetControlValue(document->GetElementById("setting_fov"), FormatFloat(fov, 0));
@@ -1324,8 +1329,19 @@ void Rml_UIManager::ApplySettingFromElement(Rml::Element* element) {
         if (b.SetWindowMode)
             b.SetWindowMode(value);
     } else if (id == "setting_vsync") {
-        if (b.SetVSync)
+        if (b.SetVSync && (value == "on" || value == "off" || value == "1" || value == "0" ||
+                           value == "true" || value == "false"))
             b.SetVSync(value == "on" || value == "1" || value == "true");
+    } else if (id == "setting_frame_cap") {
+        // Match the complete token, rather than accepting numeric prefixes.
+        if (b.SetFrameCap) {
+            for (const int cap : luminumbra::core::kFrameCaps) {
+                if (value == std::to_string(cap)) {
+                    b.SetFrameCap(cap);
+                    break;
+                }
+            }
+        }
     } else if (id == "setting_fov") {
         const float f = as_float(45.0f);
         if (b.SetFov)
@@ -1382,6 +1398,7 @@ void Rml_UIManager::BindSettingsListeners(Rml::ElementDocument* document) {
         "setting_resolution",
         "setting_window_mode",
         "setting_vsync",
+        "setting_frame_cap",
         "setting_fov",
         "setting_mouse_sensitivity",
         "setting_ui_scale",

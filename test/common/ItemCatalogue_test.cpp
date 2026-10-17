@@ -46,7 +46,9 @@ TEST(ItemCatalogueTest, FindByNameAndTypeAndUnsignedBoundaries) {
     document["items"][0]["despawn_after"] = 0;
     ASSERT_TRUE(ItemCatalogue::parse(Bytes(document), catalogue, error));
     EXPECT_TRUE(catalogue.ValidateGameAdmission(error));
-    EXPECT_EQ(catalogue.FindByName("farming-seed")->despawn_after, 0u);
+    seed = catalogue.FindByName("farming-seed");
+    ASSERT_NE(seed, nullptr);
+    EXPECT_EQ(seed->despawn_after, 0u);
 }
 TEST(ItemCatalogueTest, StrictRefusalsLeavePreviouslyParsedStateUnchanged) {
     ItemCatalogue catalogue;
@@ -133,7 +135,9 @@ TEST(ItemCatalogueTest, StrictRefusalsLeavePreviouslyParsedStateUnchanged) {
         EXPECT_FALSE(ItemCatalogue::parse(bytes, catalogue, error)) << bytes.substr(0, 180);
         EXPECT_FALSE(error.empty());
         ASSERT_NE(catalogue.FindByName("farming-seed"), nullptr);
-        EXPECT_EQ(catalogue.FindByType(516719959u)->despawn_after, 900u);
+        const auto* seed = catalogue.FindByType(516719959u);
+        ASSERT_NE(seed, nullptr);
+        EXPECT_EQ(seed->despawn_after, 900u);
     }
 }
 TEST(ItemCatalogueTest, OptionalRenderIsStrictAndRequiresReferenceResolution) {
@@ -151,7 +155,14 @@ TEST(ItemCatalogueTest, OptionalRenderIsStrictAndRequiresReferenceResolution) {
           Json{{"model_id", "farming-seed"}, {"material_id", 2}, {"extra", 0}}}) {
         document["items"][0]["render"] = render;
         EXPECT_FALSE(ItemCatalogue::parse(Bytes(document), catalogue, error));
-        EXPECT_EQ(catalogue.FindByName("farming-seed")->render->material_id, 2u);
+        const auto* seed = catalogue.FindByName("farming-seed");
+        ASSERT_NE(seed, nullptr);
+        const auto& saved_render = seed->render;
+        if (saved_render.has_value()) {
+            EXPECT_EQ(saved_render->material_id, 2u);
+        } else {
+            FAIL() << "Refused parsing discarded the saved render reference.";
+        }
     }
 }
 TEST(ItemCatalogueTest, EntryLimitAndRequiredSeedAdmission) {
@@ -192,6 +203,8 @@ TEST(ItemCatalogueTest, LoaderRefusesAbsentNonregularAndMalformedContentTransact
     EXPECT_FALSE(ItemCatalogue::load(root, catalogue, error));
     std::ofstream(path, std::ios::binary) << "{}\n";
     EXPECT_FALSE(ItemCatalogue::load(path, catalogue, error));
-    EXPECT_EQ(catalogue.FindByName("farming-seed")->type, 516719959u);
+    const auto* seed = catalogue.FindByName("farming-seed");
+    ASSERT_NE(seed, nullptr);
+    EXPECT_EQ(seed->type, 516719959u);
 }
 } // namespace
