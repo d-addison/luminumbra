@@ -1512,19 +1512,71 @@ TEST_F(WorldOpenRefusal, LegacyFullSnapshotCallbackAndMetadataFailureKeepChunkCo
     const auto chunks = runner.StreamedChunkCount();
     ASSERT_GT(chunks, 0u);
     bool called = false;
+    std::size_t callback_count = 0;
     runner.Session()->GetSimulationEventBus().subscribe([&](const auto&) {
         called = true;
+        ++callback_count;
         EXPECT_EQ(runner.SaveFullSnapshot(), chunks);
     });
     runner.Session()->GetSimulationEventBus().publish(1, "save", "");
     ASSERT_EQ(runner.Session()->TickSimulation(runner.Session()->GetSimulationClock().fixed_dt()),
               1u);
     EXPECT_TRUE(called);
-    // A failed open leaves the old streamed chunks available but blocks metadata
-    // saving. The legacy full-snapshot writer still reports the chunk count.
+    EXPECT_EQ(callback_count, 1u);
+    const auto* world_system = runner.Session()->GetWorldSystem();
+    const auto metadata = runner.Session()->GetMetadata();
+    const auto streamed = world_system->snapshot_streamed_chunks();
+    // A refused candidate leaves the current world saveable.
     ASSERT_FALSE(runner.Session()->LoadWorld("missing-world"));
+    ASSERT_TRUE(runner.Session()->SaveWorld());
+    ASSERT_EQ(runner.Session()->GetWorldSaveDir(), save);
+    const auto before_fault = DiskBytes(save);
+
+    // A valid, empty tick-zero sidecar independently requires active-region metadata.
+    // The legacy session must refuse that metadata save, while chunk persistence remains
+    // valid. Keep a hard-link witness outside the save to verify ownership before removal.
+    const auto ledger_path = WorldSaveService::active_regions_path(save);
+    const auto ledger_owner = root / "metadata-failure-ledger";
+    ASSERT_FALSE(fs::exists(ledger_path));
+    ASSERT_FALSE(fs::exists(ledger_owner));
+    const auto ledger_bytes = world::ActiveRegionLedger{}.encode();
+    ASSERT_NO_FATAL_FAILURE(Write(ledger_path, ledger_bytes));
+    fs::create_hard_link(ledger_path, ledger_owner);
+    ASSERT_TRUE(fs::equivalent(ledger_path, ledger_owner));
+    ASSERT_EQ(fs::hard_link_count(ledger_path), 2u);
+    world::WorldClock stored_clock;
+    bool requires_active_regions = false;
+    ASSERT_TRUE(WorldSaveService::read_clock_metadata(save, stored_clock, requires_active_regions));
+    ASSERT_TRUE(requires_active_regions);
+    ASSERT_EQ(stored_clock.tick(), 0u);
+    ASSERT_TRUE(WorldSaveService::validate_save(save));
+    const auto fault_bytes = DiskBytes(save);
     ASSERT_FALSE(runner.Session()->SaveWorld());
+    EXPECT_EQ(DiskBytes(save), fault_bytes);
     EXPECT_EQ(runner.SaveFullSnapshot(), chunks);
+    EXPECT_EQ(DiskBytes(save), fault_bytes);
+
+    ASSERT_TRUE(fs::equivalent(ledger_path, ledger_owner));
+    ASSERT_EQ(Read(ledger_path), ledger_bytes);
+    ASSERT_EQ(Read(ledger_owner), ledger_bytes);
+    ASSERT_EQ(fs::hard_link_count(ledger_path), 2u);
+    ASSERT_TRUE(fs::remove(ledger_path));
+    ASSERT_EQ(fs::hard_link_count(ledger_owner), 1u);
+    ASSERT_TRUE(fs::remove(ledger_owner));
+    EXPECT_EQ(DiskBytes(save), before_fault);
+    ASSERT_TRUE(runner.Session()->SaveWorld());
+    EXPECT_EQ(DiskBytes(save), before_fault);
+    EXPECT_EQ(runner.Session()->GetWorldSystem(), world_system);
+    EXPECT_EQ(world_system->snapshot_streamed_chunks(), streamed);
+    EXPECT_EQ(runner.StreamedChunkCount(), chunks);
+    const auto& retained = runner.Session()->GetMetadata();
+    EXPECT_EQ(retained.worldId, metadata.worldId);
+    EXPECT_EQ(retained.name, metadata.name);
+    EXPECT_EQ(retained.seed, metadata.seed);
+    EXPECT_EQ(retained.worldType, metadata.worldType);
+    EXPECT_EQ(retained.creationTime, metadata.creationTime);
+    EXPECT_EQ(retained.spawnPoint, metadata.spawnPoint);
+    EXPECT_EQ(callback_count, 1u);
     runner.Shutdown();
 }
 
