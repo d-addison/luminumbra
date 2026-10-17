@@ -139,8 +139,8 @@ roster after the existing `-LE manual` policy. Before correctness selection,
 the helper requires the full discovered inventory to meet the existing floor:
 2340 on GCC and 2320 on MSVC, UCRT64 and ASan. It also verifies the exact reviewed
 heavy roster and its labels, so a missing, renamed, newly added or unlabelled
-heavy case refuses selection. No checked-in duration observations
-exist yet, so placement uses stable SHA-256 name hashing. If timing observations
+heavy case refuses selection. No shard-placement duration observations
+are checked in, so placement uses stable SHA-256 name hashing. If timing observations
 are supplied later, they affect placement only; unknown tests receive at least a
 60-second weight or the largest known duration. Fixture setup, consumers and
 cleanup, dependencies and resource locks stay together; CTest keeps its existing
@@ -183,6 +183,18 @@ contains exactly the `Disabled` and `Enabled` active-region variants of
 GoogleTest's `TEST_LIST`, with `NO_PRETTY_VALUES` for stable parameter names,
 feeds `test/HeavyTestsCTest.cmake` after discovery; only these two cases receive
 `heavy`. Quick world-opening refusal and catalog cases remain in light.
+The same hook adds relative CTest `COST` hints based on measured ASan seconds:
+830 for each populated parity variant, 180 for
+`FarLodWorker.CameraRegionCoveragePreservesLiveTerrainAndWaterOwnership`, 125 for
+`FarWorldCaveSelection.ProductionFacadeAdjacentTilesShareBordersHalosAndVerticalBrickSamples`,
+and 120 for `WaterDeterminism.WaterResolutionMigrationConvergesAtLoadBothWays`.
+The upper observed durations prioritize the longest cases in fresh build trees
+without `CTestCostData.txt`. Each name must exist in its target's discovered
+`TEST_LIST`; missing or renamed cases fail when CTest loads the discovery hook.
+These hints affect execution order within the selected shard, leaving registration
+order, names, shard membership and full/light/heavy selection unchanged. The hints
+are properties in the inventory digest, so both producers and execution discovery
+must agree on them. They do not supply the planner's optional timing observations.
 No assertions, seeds, tick counts, test timeouts or manual-test policy change.
 The skip allowlist remains empty: deferral is selection, never a skipped test.
 

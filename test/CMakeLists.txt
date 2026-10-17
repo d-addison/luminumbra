@@ -2036,13 +2036,15 @@ foreach(_lum_gtest_target ${LUMINUMBRA_GTEST_TARGETS})
             PROPERTIES TIMEOUT 1800)
     elseif(_lum_gtest_target IN_LIST LUMINUMBRA_GL_GTEST_TARGETS)
         gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120
+            TEST_LIST ${_lum_gtest_target}_TESTS
             PROPERTIES RESOURCE_LOCK luminumbra_gl_context)
     else()
-        gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120)
+        gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120
+            TEST_LIST ${_lum_gtest_target}_TESTS)
     endif()
 endforeach()
 
-# GoogleTest's discovery includes must run before parameterized case labeling.
+# GoogleTest's discovery includes must run before case labeling and COST hints.
 set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/HeavyTestsCTest.cmake")
 
