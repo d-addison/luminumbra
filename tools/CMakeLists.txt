@@ -285,6 +285,12 @@ if(BUILD_TESTING)
     set_tests_properties(AmbientReceiptComparatorContract
         PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
     add_test(
+        NAME SoftwareGlEvidenceContract
+        COMMAND "${Python3_EXECUTABLE}" -I -B
+                "${CMAKE_CURRENT_SOURCE_DIR}/static_preview/test_run_software_gl.py")
+    set_tests_properties(SoftwareGlEvidenceContract
+        PROPERTIES LABELS "tools;rendering" TIMEOUT 30)
+    add_test(
         NAME QualificationCaptureContract
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_qualification_capture.py")
     set_tests_properties(QualificationCaptureContract
