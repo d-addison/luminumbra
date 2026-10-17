@@ -287,7 +287,7 @@ TEST(GraphicsPresets, LegacyMigrationRetainsExplicitRenderScaleAndIndividualOwne
     EXPECT_DOUBLE_EQ(std::get<double>(config.user().graphics.overrides.at("render_scale")), 0.85);
     ASSERT_TRUE(config.SaveUserOverlay(file.Path().string())); // Replace an existing overlay.
     const auto saved = nlohmann::json::parse(ReadText(file.Path()));
-    EXPECT_EQ(saved.at("settings_schema_version"), kSettingsSchemaVersion);
+    EXPECT_EQ(saved.at("settings_schema_version").get<std::uint32_t>(), kSettingsSchemaVersion);
     EXPECT_FALSE(saved.at("user").at("video").contains("render_scale"));
     const auto reloaded = SystemConfig::LoadLayered("", file.Path().string());
     EXPECT_EQ(reloaded.settings_load_report().state, SettingsLoadState::Loaded);

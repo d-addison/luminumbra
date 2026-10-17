@@ -69,6 +69,7 @@ class FramePacingSourceContract(unittest.TestCase):
             "g_rb_frame_start=std::chrono::steady_clock::now();",
             "benchmark_queries->begin_frame(measured_frame_id);",
             "constauto_frameStart=std::chrono::steady_clock::now();",
+            "Attribution::FoliageFrameScopefoliage_scope(frame_attribution_enabled);",
             "constauto_rb_poll_t0=std::chrono::steady_clock::now();",
         ):
             self.assertLess(wait, loop.index(marker), marker)
@@ -116,6 +117,17 @@ class FramePacingSourceContract(unittest.TestCase):
 
     def test_wait_is_excluded_from_work_timers(self):
         self.assert_wait_precedes_timers(self.main)
+
+    def test_attribution_starts_after_pacing(self):
+        for marker in (
+            "constauto_frameStart=std::chrono::steady_clock::now();",
+            "Attribution::FoliageFrameScopefoliage_scope(frame_attribution_enabled);",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.main)
+                moved = self.main.replace(marker, "", 1).replace(LOOP, LOOP + marker, 1)
+                with self.assertRaises(AssertionError):
+                    self.assert_wait_precedes_timers(moved)
 
     def test_observed_frame_timing_updates_are_required(self):
         for statement in (
