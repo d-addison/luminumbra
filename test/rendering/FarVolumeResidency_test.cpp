@@ -692,6 +692,10 @@ FarHandoffTileInput HandoffInput(const std::shared_ptr<FarVolumeTierMemory>& mem
     wanted.identity.bake_generation = wanted.identity.span_generation = generation;
     wanted.intent.extra_span = FarVolumeCoverageSpan{min_y, max_y};
     FarFrozenCaptureSource source;
+    // This fixture has no committed terrain override.
+    source.committed = [](std::uint8_t, const FarVolumePosition&) {
+        return FarFrozenOverride<FarVolumeSample>{};
+    };
     source.pristine = Authority(wanted, drawable);
     if (solid)
         source.pristine.density = [](const auto&, float, std::uint32_t, FarCaveMode) {
@@ -791,127 +795,125 @@ void CheckHandoffClip(const FarWorldArrival& arrival, std::int64_t origin_y) {
     EXPECT_FALSE(FarWorldArrivalReplaces(
         arrival, edge, {edge / 2 - 1, float(span.max_y - origin_y), edge / 2}, origin_y, 0, 0));
 }
+// One complete case owns its gate and residency through every fatal assertion.
+void CheckPublishedManifestReplacement(std::int64_t coordinate, bool empty_parent, unsigned mask) {
+    SCOPED_TRACE(::testing::Message() << coordinate << ":" << empty_parent << ":" << mask);
+    JobSystem jobs;
+    jobs.startup(2);
+    auto memory = std::make_shared<FarVolumeTierMemory>(Budgets());
+    HandoffWorkerGate gate;
+    FarVolumeHandoff owner(jobs, *memory, Limits(), &gate);
+    HandoffGateRelease release{gate};
+    const FarTileKey parent{5, coordinate, coordinate};
+    std::vector<FarHandoffTileInput> a{HandoffInput(memory, parent, 1, true)};
+    for (std::int64_t z = 0; z < 2; ++z)
+        for (std::int64_t x = 0; x < 2; ++x) {
+            const auto i = x + 2 * z;
+            a.push_back(HandoffInput(memory,
+                                     {4, coordinate * 2 + x, coordinate * 2 + z},
+                                     1,
+                                     false,
+                                     -256,
+                                     64 + float(i) * 128));
+        }
+    ASSERT_TRUE(owner.StageTarget(HandoffManifest(1, a)));
+    std::size_t calls = 0;
+    const auto backend = Backend(calls);
+    ASSERT_TRUE(HandoffSettle(owner, a, backend));
+    EXPECT_TRUE(HandoffDraws(owner).empty());
+    ASSERT_TRUE(owner.TryPromote());
+    ASSERT_TRUE(owner.CoarseMayYield(parent, FarHandoffCoverageView::Serving));
+    const auto before = HandoffDraws(owner);
+    ASSERT_EQ(before.size(), 1u);
+    ASSERT_TRUE(before[0].arrival.eligible);
+    CheckHandoffClip(before[0].arrival, before[0].origin_meters.y);
+    std::vector<FarHandoffTileInput> b{HandoffInput(memory, parent, 2, !empty_parent)};
+    for (std::size_t i = 0; i < 4; ++i) {
+        b.push_back(HandoffInput(
+            memory, a[i + 1].wanted.identity.key, 2, false, -256, 192 + float(i) * 128));
+        if (!(mask & (1u << i)))
+            b.back().wanted.build_headroom_bytes = memory->Pool(4)->limit();
+    }
+    ASSERT_TRUE(owner.StageTarget(HandoffManifest(2, b)));
+    gate.armed = true;
+    EXPECT_EQ(owner.AdvanceFrame(0, 0, {1, 0, 0}, backend).dispatched, 1u);
+    ASSERT_TRUE(HandoffWait([&] { return gate.entered.try_wait(); }));
+    ASSERT_TRUE(HandoffWait([&] {
+        owner.AdvanceFrame(0, 0, {4, 4, 32 * 1024 * 1024}, backend);
+        for (std::size_t i = 0; i < 4; ++i) {
+            const auto value = HandoffObserve(owner, b[i + 1].wanted.identity.key);
+            if (mask & (1u << i)) {
+                if (!IsFarTileCovering(value.target_coverage))
+                    return false;
+            } else if (value.target_eligibility != FarVolumeEligibility::RequestRejected)
+                return false;
+        }
+        return true;
+    }));
+    EXPECT_FALSE(owner.TryPromote());
+    EXPECT_EQ(owner.State().serving_serial, 1u);
+    EXPECT_EQ(owner.CoarseMayYield(parent, FarHandoffCoverageView::Target), mask == 15);
+    const auto during = HandoffDraws(owner);
+    ASSERT_EQ(during.size(), 1u);
+    EXPECT_EQ(during[0].identity, before[0].identity);
+    EXPECT_EQ(during[0].resource, before[0].resource);
+    EXPECT_EQ(during[0].request, before[0].request);
+    EXPECT_TRUE(during[0].arrival.eligible);
+    EXPECT_EQ(during[0].arrival.children, before[0].arrival.children);
+    CheckHandoffClip(during[0].arrival, during[0].origin_meters.y);
+    gate.Release();
+    ASSERT_TRUE(HandoffWait([&] {
+        owner.AdvanceFrame(0, 0, {0, 1, 32 * 1024 * 1024}, backend);
+        return IsFarTileCovering(HandoffObserve(owner, parent).target_coverage);
+    }));
+    ASSERT_TRUE(owner.TryPromote());
+    EXPECT_EQ(owner.State().serving_serial, 2u);
+    EXPECT_EQ(owner.CoarseMayYield(parent, FarHandoffCoverageView::Serving), mask == 15);
+    for (std::size_t i = 0; i < 4; ++i) {
+        const auto value = HandoffObserve(owner, b[i + 1].wanted.identity.key);
+        EXPECT_EQ(IsFarTileCovering(value.serving_coverage), bool(mask & (1u << i)));
+        if (value.serving) {
+            EXPECT_EQ(value.serving->identity, b[i + 1].wanted.identity);
+        }
+    }
+    const auto after = HandoffDraws(owner);
+    ASSERT_EQ(after.size(), empty_parent ? 0u : 1u);
+    const auto parent_value = HandoffObserve(owner, parent);
+    ASSERT_TRUE(parent_value.serving);
+    if (!parent_value.serving)
+        return;
+    EXPECT_EQ(parent_value.serving->identity, b[0].wanted.identity);
+    EXPECT_TRUE(IsFarTileCovering(parent_value.serving_coverage));
+    if (empty_parent) {
+        EXPECT_EQ(parent_value.serving_coverage.state, FarTileState::Empty);
+        EXPECT_EQ(parent_value.serving_gpu_bytes, 0u);
+    } else {
+        EXPECT_EQ(after[0].identity, b[0].wanted.identity);
+        EXPECT_EQ(after[0].arrival.eligible, mask == 15);
+        if (mask == 15) {
+            for (std::size_t i = 0; i < 4; ++i)
+                EXPECT_EQ(after[0].arrival.children[i],
+                          HandoffObserve(owner, b[i + 1].wanted.identity.key).serving_built.span);
+            EXPECT_NE(after[0].arrival.children, before[0].arrival.children);
+            CheckHandoffClip(after[0].arrival, after[0].origin_meters.y);
+        }
+    }
+    if (mask == 15) {
+        FarWorldArrival arrival{true, FarWantedRadiusMeters(4), {}};
+        for (std::size_t i = 0; i < 4; ++i)
+            arrival.children[i] =
+                HandoffObserve(owner, b[i + 1].wanted.identity.key).serving_built.span;
+        CheckHandoffClip(arrival, parent_value.serving_built.span.min_y);
+    }
+}
 } // namespace
 
 TEST(FarVolumeHandoff, ReplacementArrivalMatrixUsesOnlyPublishedManifest) {
     for (const std::int64_t coordinate : {-1, 1})
         for (const bool empty_parent : {false, true})
             for (unsigned mask = 0; mask < 16; ++mask) {
-                SCOPED_TRACE(::testing::Message()
-                             << coordinate << ":" << empty_parent << ":" << mask);
-                JobSystem jobs;
-                jobs.startup(2);
-                auto memory = std::make_shared<FarVolumeTierMemory>(Budgets());
-                HandoffWorkerGate gate;
-                FarVolumeHandoff owner(jobs, *memory, Limits(), &gate);
-                HandoffGateRelease release{gate};
-                const FarTileKey parent{5, coordinate, coordinate};
-                std::vector<FarHandoffTileInput> a{HandoffInput(memory, parent, 1, true)};
-                for (std::int64_t z = 0; z < 2; ++z)
-                    for (std::int64_t x = 0; x < 2; ++x) {
-                        const auto i = x + 2 * z;
-                        a.push_back(HandoffInput(memory,
-                                                 {4, coordinate * 2 + x, coordinate * 2 + z},
-                                                 1,
-                                                 false,
-                                                 -256,
-                                                 64 + float(i) * 128));
-                    }
-                ASSERT_TRUE(owner.StageTarget(HandoffManifest(1, a)));
-                std::size_t calls = 0;
-                const auto backend = Backend(calls);
-                ASSERT_TRUE(HandoffSettle(owner, a, backend));
-                EXPECT_TRUE(HandoffDraws(owner).empty());
-                ASSERT_TRUE(owner.TryPromote());
-                ASSERT_TRUE(owner.CoarseMayYield(parent, FarHandoffCoverageView::Serving));
-                const auto before = HandoffDraws(owner);
-                ASSERT_EQ(before.size(), 1u);
-                ASSERT_TRUE(before[0].arrival.eligible);
-                CheckHandoffClip(before[0].arrival, before[0].origin_meters.y);
-                std::vector<FarHandoffTileInput> b{HandoffInput(memory, parent, 2, !empty_parent)};
-                for (std::size_t i = 0; i < 4; ++i) {
-                    b.push_back(HandoffInput(memory,
-                                             a[i + 1].wanted.identity.key,
-                                             2,
-                                             false,
-                                             -256,
-                                             192 + float(i) * 128));
-                    if (!(mask & (1u << i)))
-                        b.back().wanted.build_headroom_bytes = memory->Pool(4)->limit();
-                }
-                ASSERT_TRUE(owner.StageTarget(HandoffManifest(2, b)));
-                gate.armed = true;
-                EXPECT_EQ(owner.AdvanceFrame(0, 0, {1, 0, 0}, backend).dispatched, 1u);
-                ASSERT_TRUE(HandoffWait([&] { return gate.entered.try_wait(); }));
-                ASSERT_TRUE(HandoffWait([&] {
-                    owner.AdvanceFrame(0, 0, {4, 4, 32 * 1024 * 1024}, backend);
-                    for (std::size_t i = 0; i < 4; ++i) {
-                        const auto value = HandoffObserve(owner, b[i + 1].wanted.identity.key);
-                        if (mask & (1u << i)) {
-                            if (!IsFarTileCovering(value.target_coverage))
-                                return false;
-                        } else if (value.target_eligibility !=
-                                   FarVolumeEligibility::RequestRejected)
-                            return false;
-                    }
-                    return true;
-                }));
-                EXPECT_FALSE(owner.TryPromote());
-                EXPECT_EQ(owner.State().serving_serial, 1u);
-                EXPECT_EQ(owner.CoarseMayYield(parent, FarHandoffCoverageView::Target), mask == 15);
-                const auto during = HandoffDraws(owner);
-                ASSERT_EQ(during.size(), 1u);
-                EXPECT_EQ(during[0].identity, before[0].identity);
-                EXPECT_EQ(during[0].resource, before[0].resource);
-                EXPECT_EQ(during[0].request, before[0].request);
-                EXPECT_TRUE(during[0].arrival.eligible);
-                EXPECT_EQ(during[0].arrival.children, before[0].arrival.children);
-                CheckHandoffClip(during[0].arrival, during[0].origin_meters.y);
-                gate.Release();
-                ASSERT_TRUE(HandoffWait([&] {
-                    owner.AdvanceFrame(0, 0, {0, 1, 32 * 1024 * 1024}, backend);
-                    return IsFarTileCovering(HandoffObserve(owner, parent).target_coverage);
-                }));
-                ASSERT_TRUE(owner.TryPromote());
-                EXPECT_EQ(owner.State().serving_serial, 2u);
-                EXPECT_EQ(owner.CoarseMayYield(parent, FarHandoffCoverageView::Serving),
-                          mask == 15);
-                for (std::size_t i = 0; i < 4; ++i) {
-                    const auto value = HandoffObserve(owner, b[i + 1].wanted.identity.key);
-                    EXPECT_EQ(IsFarTileCovering(value.serving_coverage), bool(mask & (1u << i)));
-                    if (value.serving)
-                        EXPECT_EQ(value.serving->identity, b[i + 1].wanted.identity);
-                }
-                const auto after = HandoffDraws(owner);
-                ASSERT_EQ(after.size(), empty_parent ? 0u : 1u);
-                const auto parent_value = HandoffObserve(owner, parent);
-                ASSERT_TRUE(parent_value.serving);
-                if (!parent_value.serving)
-                    return;
-                EXPECT_EQ(parent_value.serving->identity, b[0].wanted.identity);
-                EXPECT_TRUE(IsFarTileCovering(parent_value.serving_coverage));
-                if (empty_parent) {
-                    EXPECT_EQ(parent_value.serving_coverage.state, FarTileState::Empty);
-                    EXPECT_EQ(parent_value.serving_gpu_bytes, 0u);
-                } else {
-                    EXPECT_EQ(after[0].identity, b[0].wanted.identity);
-                    EXPECT_EQ(after[0].arrival.eligible, mask == 15);
-                    if (mask == 15) {
-                        for (std::size_t i = 0; i < 4; ++i)
-                            EXPECT_EQ(after[0].arrival.children[i],
-                                      HandoffObserve(owner, b[i + 1].wanted.identity.key)
-                                          .serving_built.span);
-                        EXPECT_NE(after[0].arrival.children, before[0].arrival.children);
-                        CheckHandoffClip(after[0].arrival, after[0].origin_meters.y);
-                    }
-                }
-                if (mask == 15) {
-                    FarWorldArrival arrival{true, FarWantedRadiusMeters(4), {}};
-                    for (std::size_t i = 0; i < 4; ++i)
-                        arrival.children[i] =
-                            HandoffObserve(owner, b[i + 1].wanted.identity.key).serving_built.span;
-                    CheckHandoffClip(arrival, parent_value.serving_built.span.min_y);
-                }
+                ASSERT_NO_FATAL_FAILURE(
+                    CheckPublishedManifestReplacement(coordinate, empty_parent, mask));
             }
 }
 
@@ -1160,20 +1162,22 @@ TEST(FarVolumeHandoff, InvalidManifestAndDuplicatePublicationAreTransactional) {
     bad[0].wanted.build_headroom_bytes = 1;
     check(HandoffManifest(1, bad));
     bad = a;
-    ASSERT_TRUE(bad[0].wanted.intent.extra_span);
-    if (!bad[0].wanted.intent.extra_span)
+    auto& extra_span = bad[0].wanted.intent.extra_span;
+    ASSERT_TRUE(extra_span);
+    if (!extra_span)
         return;
-    bad[0].wanted.intent.extra_span->max_y -= 1;
+    extra_span->max_y -= 1;
     check(HandoffManifest(1, bad));
     bad = a;
     bad[0].wanted.water = std::make_shared<const FarWorldConstantWaterObservation>(
         bad[0].wanted.identity.content_hash, false, 0);
     check(HandoffManifest(1, bad));
     bad = a;
-    ASSERT_TRUE(bad[0].wanted.water_bound);
-    if (!bad[0].wanted.water_bound)
+    auto& water_bound = bad[0].wanted.water_bound;
+    ASSERT_TRUE(water_bound);
+    if (!water_bound)
         return;
-    bad[0].wanted.water_bound->max_y = 1;
+    water_bound->max_y = 1;
     check(HandoffManifest(1, bad));
 }
 

@@ -1,26 +1,39 @@
 #include "SaveTransaction.h"
 
+#include "../ai/CreaturePersistence.h"
+#include "../core/BoundedFileReader.h"
+#include "../fields/FieldPageState.h"
 #include "../world/ActiveRegionLedger.h"
 #include "../world/FarAuthorityOverlay.h"
+#include "../world/GroundObjectStore.h"
 #include "WorldSaveService.h"
 
 #include "nlohmann/json.hpp"
+#include <nlohmann/detail/exceptions.hpp>
+#include <nlohmann/json_fwd.hpp>
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <exception>
 #include <filesystem>
-#include <fstream>
-#include <iterator>
+#include <functional>
+#include <ios>
+#include <istream>
 #include <limits>
 #include <map>
+#include <memory>
 #include <mutex>
+#include <optional>
+#include <set>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -32,7 +45,7 @@ namespace {
 
 constexpr std::uint64_t kFnvOffset = 14695981039346656037ull;
 constexpr std::uint64_t kFnvPrime = 1099511628211ull;
-constexpr std::size_t kHashBlockBytes = 1024u * 1024u;
+constexpr std::size_t kHashBlockBytes = 65536; // Fixed 64 KiB hash working buffer.
 
 SaveTransaction*& ActiveTransaction() {
     static thread_local SaveTransaction* active = nullptr;
@@ -82,14 +95,14 @@ bool ParseHex64(std::string_view text, std::uint64_t& out) {
         return false;
     }
     std::uint64_t value = 0;
-    for (char c : text) {
+    for (const char c : text) {
         std::uint64_t digit = 0;
         if (c >= '0' && c <= '9') {
             digit = static_cast<std::uint64_t>(c - '0');
         } else if (c >= 'a' && c <= 'f') {
-            digit = static_cast<std::uint64_t>(c - 'a' + 10);
+            digit = static_cast<std::uint64_t>(c - 'a') + 10u;
         } else if (c >= 'A' && c <= 'F') {
-            digit = static_cast<std::uint64_t>(c - 'A' + 10);
+            digit = static_cast<std::uint64_t>(c - 'A') + 10u;
         } else {
             return false;
         }
@@ -103,7 +116,7 @@ bool AllDigits(std::string_view text) {
     if (text.empty()) {
         return false;
     }
-    for (char c : text) {
+    for (const char c : text) {
         if (c < '0' || c > '9') {
             return false;
         }
@@ -138,23 +151,44 @@ const nlohmann::json* Field(const nlohmann::json& object, const char* key) {
     return it == object.end() ? nullptr : &(*it);
 }
 
-bool ReadAllBytes(const fs::path& file, std::string& out, std::vector<std::string>* errors) {
-    out.clear();
-    std::ifstream in(file, std::ios::binary);
-    if (!in) {
-        AddError(errors, "cannot open for reading: " + file.string());
-        return false;
-    }
-    out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-    if (in.bad()) {
-        AddError(errors, "cannot read: " + file.string());
-        return false;
-    }
-    return true;
+std::size_t& JournalBytesRead() {
+    static thread_local std::size_t bytes = 0;
+    return bytes;
+}
+
+std::size_t MemberByteLimit(std::string_view path) {
+    if (path == "far/catalog.json")
+        return kMaxSnapshotIndexBytes;
+    if (path.starts_with("far/"))
+        return World::kFsv1MaxFileBytes;
+    if (path == kSnapshotIndexRelativePath)
+        return kMaxSnapshotIndexBytes;
+    if (path == "world_info.json")
+        return kMaxSaveMetadataBytes;
+    if (path == "chunks/region/world-manifest.json")
+        return kMaxSaveManifestBytes;
+    if (path == "aether_state.efs")
+        return kMaxSaveEnergyBytes;
+    if (path == "chunks/region/active-regions.arl")
+        return world::ActiveRegionLedger::kMaxFileBytes;
+    if (path == "chunks/region/ground-objects.json")
+        return world::GroundObjectStore::kMaxFileBytes;
+    if (path == "chunks/region/field-pages.fpg")
+        return world::FieldPageState::kMaxFileBytes;
+    if (path == "chunks/region/plant-entities.json")
+        return kMaxSaveEntityBytes;
+    if (path == "chunks/region/creature-entities.json")
+        return luminumbra::ai::kMaxStampedCreatureBytes;
+    return kMaxSaveMemberBytes;
 }
 
 bool SamePath(const fs::path& lhs, const fs::path& rhs) {
     std::error_code ec;
+    // Compare existing directory identity before spelling: Windows case and 8.3 aliases
+    // must share the live-transaction gate even when canonical strings differ.
+    if (fs::equivalent(lhs, rhs, ec) && !ec)
+        return true;
+    ec.clear();
     fs::path lhs_canonical = fs::weakly_canonical(lhs, ec);
     if (ec) {
         lhs_canonical = lhs.lexically_normal();
@@ -173,7 +207,7 @@ bool HasLiveTransaction(const fs::path& save_dir) {
 }
 
 void ReleaseRecoveryGate(const SaveTransaction* transaction) {
-    std::lock_guard lock(RecoveryGate().mutex);
+    const std::lock_guard lock(RecoveryGate().mutex);
     std::erase_if(RecoveryGate().live,
                   [transaction](const auto& entry) { return entry.second == transaction; });
 }
@@ -199,8 +233,8 @@ bool AdmitDerivedUndo(const fs::path& save_dir,
     return false;
 }
 
-// Removes stale staging files (names containing ".tmp.") directly in save_dir and chunks/region.
-// Returns false when a listed temporary could not be removed. Affected directories are flushed.
+// Removes stale staging files directly in save_dir, chunks/region and far.
+// Refuses directories beyond the member visit cap or failed removals; flushes affected directories.
 bool SweepTemporaries(const fs::path& save_dir) {
     bool ok = true;
     const std::array<fs::path, 3> directories = {
@@ -212,8 +246,14 @@ bool SweepTemporaries(const fs::path& save_dir) {
             continue;
         }
         bool removed_any = false;
+        // Bound visits, including non-temporaries and non-regular entries, per directory.
+        std::size_t visits = 0;
         const fs::directory_iterator end;
         for (; it != end; it.increment(ec)) {
+            if (++visits > kMaxSnapshotMembers) {
+                ok = false;
+                break;
+            }
             if (ec) {
                 ok = false;
                 break;
@@ -270,69 +310,224 @@ struct JournalDocument {
     std::vector<JournalEntry> entries;
 };
 
-bool ParseJournal(std::string_view bytes, JournalDocument& out, std::string& error) {
+// Validate directly from the bounded stream. No input copy or JSON DOM is retained;
+// each entry is checked before it enters the recovery list.
+class JournalParser {
+public:
+    using number_integer_t = nlohmann::json::number_integer_t;
+    using number_unsigned_t = nlohmann::json::number_unsigned_t;
+    using number_float_t = nlohmann::json::number_float_t;
+    using string_t = nlohmann::json::string_t;
+    using binary_t = nlohmann::json::binary_t;
+
+    JournalParser(JournalDocument& document, std::string& error)
+        : m_document(document)
+        , m_error(error) {}
+
+    bool null() {
+        return Fail("journal field type invalid");
+    }
+    bool boolean(bool /*value*/) {
+        return Fail("journal field type invalid");
+    }
+    bool number_integer(number_integer_t /*value*/) {
+        return Fail("journal unsigned field invalid");
+    }
+    bool number_float(number_float_t /*value*/, const string_t& /*text*/) {
+        return Fail("journal unsigned field invalid");
+    }
+    bool binary(binary_t& /*value*/) {
+        return Fail("journal field type invalid");
+    }
+
+    bool number_unsigned(number_unsigned_t value) {
+        if (m_state == State::Root) {
+            switch (m_field) {
+                case Field::TxnId:
+                    m_document.txn_id = value;
+                    return true;
+                case Field::Base:
+                    m_document.base_generation = value;
+                    return true;
+                case Field::Next:
+                    m_document.new_generation = value;
+                    return true;
+                default:
+                    break;
+            }
+        } else if (m_state == State::Entry && m_field == Field::PrevBytes) {
+            m_entry.prev_bytes = value;
+            return true;
+        }
+        return Fail("journal unsigned field invalid");
+    }
+
+    bool string(string_t& value) {
+        if (value.size() > kMaxJournalStringBytes)
+            return Fail("journal string exceeds cap");
+        if (m_state == State::Root && m_field == Field::Schema)
+            return value == kJournalSchema || value == kDerivedJournalSchema ||
+                   Fail("unsupported journal schema");
+        if (m_state == State::Entry) {
+            switch (m_field) {
+                case Field::Path:
+                    m_entry.path = value;
+                    return true;
+                case Field::Action:
+                    m_entry.action = value;
+                    return true;
+                case Field::PrevFnv:
+                    return ParseHex64(value, m_entry.prev_fnv64) ||
+                           Fail("journal entry digest invalid");
+                case Field::Undo:
+                    m_entry.undo = value;
+                    return true;
+                default:
+                    break;
+            }
+        }
+        return Fail("journal string field invalid");
+    }
+
+    bool start_object(std::size_t /*elements*/) {
+        if (m_state == State::Start) {
+            m_state = State::Root;
+            return true;
+        }
+        if (m_state != State::Entries)
+            return Fail("journal nesting invalid");
+        if (m_document.entries.size() >= kMaxJournalEntries)
+            return Fail("journal entry count exceeds cap");
+        m_entry = JournalEntry{};
+        m_seen_entry = 0;
+        m_field = Field::None;
+        m_state = State::Entry;
+        return true;
+    }
+
+    bool key(string_t& value) {
+        if (value.size() > kMaxJournalStringBytes)
+            return Fail("journal string exceeds cap");
+        m_field = Field::None;
+        if (m_state == State::Root) {
+            if (value == "schema")
+                m_field = Field::Schema;
+            else if (value == "txn_id")
+                m_field = Field::TxnId;
+            else if (value == "base_generation")
+                m_field = Field::Base;
+            else if (value == "new_generation")
+                m_field = Field::Next;
+            else if (value == "entries")
+                m_field = Field::Entries;
+        } else if (m_state == State::Entry) {
+            if (value == "path")
+                m_field = Field::Path;
+            else if (value == "action")
+                m_field = Field::Action;
+            else if (value == "prev_bytes")
+                m_field = Field::PrevBytes;
+            else if (value == "prev_fnv64")
+                m_field = Field::PrevFnv;
+            else if (value == "undo")
+                m_field = Field::Undo;
+        }
+        if (m_field == Field::None)
+            return Fail("journal field unknown");
+        auto& seen = m_state == State::Root ? m_seen_root : m_seen_entry;
+        const auto bit = Bit(m_field);
+        if ((seen & bit) != 0)
+            return Fail("journal field duplicated");
+        seen |= bit;
+        return true;
+    }
+
+    bool end_object() {
+        if (m_state == State::Root) {
+            const auto required = Bit(Field::Schema) | Bit(Field::TxnId) | Bit(Field::Base) |
+                                  Bit(Field::Next) | Bit(Field::Entries);
+            if (m_seen_root != required)
+                return Fail("journal header fields invalid");
+            m_state = State::Done;
+            return true;
+        }
+        const auto required = Bit(Field::Path) | Bit(Field::Action) | Bit(Field::PrevBytes) |
+                              Bit(Field::PrevFnv) | Bit(Field::Undo);
+        if (m_state != State::Entry || m_seen_entry != required)
+            return Fail("journal entry fields invalid");
+        if (!member_path_allowed(m_entry.path) && m_entry.path != kSnapshotIndexRelativePath)
+            return Fail("journal entry path not allowed");
+        if (m_entry.action != "replace" && m_entry.action != "create")
+            return Fail("journal entry action invalid");
+        if (m_entry.prev_bytes > MemberByteLimit(m_entry.path))
+            return Fail("journal undo size exceeds cap");
+        if (!IsUndoName(m_entry.undo))
+            return Fail("journal undo name invalid");
+        m_document.entries.push_back(std::move(m_entry));
+        m_state = State::Entries;
+        return true;
+    }
+
+    bool start_array(std::size_t /*elements*/) {
+        if (m_state != State::Root || m_field != Field::Entries)
+            return Fail("journal nesting invalid");
+        m_state = State::Entries;
+        return true;
+    }
+    bool end_array() {
+        if (m_state != State::Entries)
+            return Fail("journal nesting invalid");
+        m_state = State::Root;
+        m_field = Field::None;
+        return true;
+    }
+    bool parse_error(std::size_t /*position*/,
+                     const std::string& /*token*/,
+                     const nlohmann::detail::exception& /*exception*/) {
+        return Fail("malformed journal JSON");
+    }
+
+private:
+    enum class State : std::uint8_t {
+        Start,
+        Root,
+        Entries,
+        Entry,
+        Done
+    };
+    enum class Field : std::uint8_t {
+        None,
+        Schema,
+        TxnId,
+        Base,
+        Next,
+        Entries,
+        Path,
+        Action,
+        PrevBytes,
+        PrevFnv,
+        Undo
+    };
+    static constexpr std::uint32_t Bit(Field field) {
+        return std::uint32_t{1} << static_cast<unsigned>(field);
+    }
+    bool Fail(const char* message) {
+        m_error = message;
+        return false;
+    }
+    JournalDocument& m_document;
+    std::string& m_error;
+    State m_state = State::Start;
+    Field m_field = Field::None;
+    std::uint32_t m_seen_root = 0;
+    std::uint32_t m_seen_entry = 0;
+    JournalEntry m_entry;
+};
+
+bool ParseJournal(std::istream& input, JournalDocument& out, std::string& error) {
     out = JournalDocument{};
-    const std::string text(bytes);
-    const nlohmann::json root = nlohmann::json::parse(text, nullptr, false);
-    if (root.is_discarded() || !root.is_object()) {
-        error = "malformed journal JSON";
-        return false;
-    }
-    const nlohmann::json* schema = Field(root, "schema");
-    if (!schema || !schema->is_string() || schema->get<std::string>() != kJournalSchema) {
-        error = "unsupported journal schema";
-        return false;
-    }
-    const nlohmann::json* txn_id = Field(root, "txn_id");
-    const nlohmann::json* base = Field(root, "base_generation");
-    const nlohmann::json* next = Field(root, "new_generation");
-    const nlohmann::json* entries = Field(root, "entries");
-    if (!txn_id || !txn_id->is_number_unsigned() || !base || !base->is_number_unsigned() || !next ||
-        !next->is_number_unsigned() || !entries || !entries->is_array()) {
-        error = "journal header fields invalid";
-        return false;
-    }
-    JournalDocument parsed;
-    parsed.txn_id = txn_id->get<std::uint64_t>();
-    parsed.base_generation = base->get<std::uint64_t>();
-    parsed.new_generation = next->get<std::uint64_t>();
-    for (const nlohmann::json& item : *entries) {
-        const nlohmann::json* path = Field(item, "path");
-        const nlohmann::json* action = Field(item, "action");
-        const nlohmann::json* prev_bytes = Field(item, "prev_bytes");
-        const nlohmann::json* prev_fnv = Field(item, "prev_fnv64");
-        const nlohmann::json* undo = Field(item, "undo");
-        if (!path || !path->is_string() || !action || !action->is_string() || !prev_bytes ||
-            !prev_bytes->is_number_unsigned() || !prev_fnv || !prev_fnv->is_string() || !undo ||
-            !undo->is_string()) {
-            error = "journal entry fields invalid";
-            return false;
-        }
-        JournalEntry entry;
-        entry.path = path->get<std::string>();
-        entry.action = action->get<std::string>();
-        entry.prev_bytes = prev_bytes->get<std::uint64_t>();
-        entry.undo = undo->get<std::string>();
-        if (!member_path_allowed(entry.path) && entry.path != kSnapshotIndexRelativePath) {
-            error = "journal entry path not allowed";
-            return false;
-        }
-        if (entry.action != "replace" && entry.action != "create") {
-            error = "journal entry action invalid";
-            return false;
-        }
-        if (!ParseHex64(prev_fnv->get<std::string>(), entry.prev_fnv64)) {
-            error = "journal entry digest invalid";
-            return false;
-        }
-        if (!IsUndoName(entry.undo)) {
-            error = "journal undo name invalid";
-            return false;
-        }
-        parsed.entries.push_back(std::move(entry));
-    }
-    out = std::move(parsed);
-    return true;
+    JournalParser parser(out, error);
+    return nlohmann::json::sax_parse(input, &parser);
 }
 
 std::string EncodeJournal(std::uint64_t txn_id,
@@ -346,6 +541,8 @@ std::string EncodeJournal(std::uint64_t txn_id,
     root["new_generation"] = new_generation;
     nlohmann::json list = nlohmann::json::array();
     for (const JournalEntry& entry : entries) {
+        if (ClassifySnapshotMember(entry.path) == MemberClass::Derived)
+            root["schema"] = kDerivedJournalSchema;
         nlohmann::json item = nlohmann::json::object();
         item["path"] = entry.path;
         item["action"] = entry.action;
@@ -384,7 +581,8 @@ bool RollbackEntries(const fs::path& save_dir,
             std::uint64_t bytes = 0;
             std::uint64_t fnv64 = 0;
             bool exists = false;
-            if (!hash_file(destination, bytes, fnv64, exists, errors)) {
+            if (!hash_file(
+                    destination, bytes, fnv64, exists, errors, MemberByteLimit(entry.path))) {
                 return false;
             }
             const bool matches = exists && bytes == entry.prev_bytes && fnv64 == entry.prev_fnv64;
@@ -393,7 +591,12 @@ bool RollbackEntries(const fs::path& save_dir,
                 std::uint64_t undo_bytes = 0;
                 std::uint64_t undo_fnv64 = 0;
                 bool undo_exists = false;
-                if (!hash_file(undo_path, undo_bytes, undo_fnv64, undo_exists, errors)) {
+                if (!hash_file(undo_path,
+                               undo_bytes,
+                               undo_fnv64,
+                               undo_exists,
+                               errors,
+                               MemberByteLimit(entry.path))) {
                     return false;
                 }
                 if (!undo_exists || undo_bytes != entry.prev_bytes ||
@@ -402,7 +605,14 @@ bool RollbackEntries(const fs::path& save_dir,
                     return false;
                 }
                 std::string restored;
-                if (!ReadAllBytes(undo_path, restored, errors)) {
+                if (!read_bounded_save_file(
+                        undo_path, restored, MemberByteLimit(entry.path), errors)) {
+                    return false;
+                }
+                // Recheck the bytes actually read: the undo handle may differ from the hashed file.
+                if (restored.size() != entry.prev_bytes ||
+                    fnv1a64_bytes(restored.data(), restored.size()) != entry.prev_fnv64) {
+                    AddError(errors, "journal undo copy changed: " + entry.path);
                     return false;
                 }
                 if (!WorldSaveService::durable_write_file(destination, restored, errors)) {
@@ -459,6 +669,26 @@ void FinishJournal(const fs::path& save_dir) {
 }
 
 } // namespace
+
+bool read_bounded_save_file(const fs::path& path,
+                            std::string& bytes,
+                            std::size_t limit,
+                            std::vector<std::string>* errors,
+                            const std::stop_token& stop) {
+    bytes.clear();
+    try {
+        return Filesystem::ReadBoundedFile(path, bytes, limit, stop);
+    } catch (const std::exception& error) {
+        bytes.clear();
+        AddError(errors,
+                 std::string("cannot read save file ") + path.string() + ": " + error.what());
+        return false;
+    }
+}
+
+std::size_t recovery_journal_bytes_read() {
+    return JournalBytesRead();
+}
 
 fs::path snapshot_index_path(const fs::path& save_dir) {
     return save_dir / "chunks" / "region" / "snapshot.json";
@@ -539,6 +769,8 @@ std::string encode_snapshot_index(const SnapshotIndex& index) {
         const auto cls = ClassifySnapshotMember(member.path);
         if (cls.has_value() && *cls != member.cls)
             throw std::invalid_argument("snapshot member class disagrees with path");
+        if (member.cls == MemberClass::Derived)
+            root["schema"] = kDerivedSnapshotIndexSchema;
         nlohmann::json item = nlohmann::json::object();
         item["path"] = member.path;
         item["class"] = member.cls == MemberClass::Authoritative ? "authoritative" : "derived";
@@ -565,7 +797,9 @@ bool decode_snapshot_index(std::string_view bytes, SnapshotIndex& out, std::stri
         return false;
     }
     const nlohmann::json* schema = Field(root, "schema");
-    if (!schema || !schema->is_string() || schema->get<std::string>() != kSnapshotIndexSchema) {
+    if (!schema || !schema->is_string() ||
+        (schema->get<std::string>() != kSnapshotIndexSchema &&
+         schema->get<std::string>() != kDerivedSnapshotIndexSchema)) {
         error = "unsupported snapshot schema";
         return false;
     }
@@ -680,17 +914,8 @@ bool read_snapshot_index(const fs::path& save_dir,
     if (!exists) {
         return true;
     }
-    const std::uintmax_t size = fs::file_size(path, ec);
-    if (ec) {
-        AddError(errors, "cannot stat snapshot index: " + path.string());
-        return false;
-    }
-    if (size > kMaxSnapshotIndexBytes) {
-        AddError(errors, "snapshot index too large");
-        return false;
-    }
     std::string bytes;
-    if (!ReadAllBytes(path, bytes, errors)) {
+    if (!read_bounded_save_file(path, bytes, kMaxSnapshotIndexBytes, errors)) {
         return false;
     }
     std::string error;
@@ -712,44 +937,49 @@ std::uint64_t fnv1a64_bytes(const void* data, std::size_t size) {
     return Fnv1aUpdate(kFnvOffset, data, size);
 }
 
+std::size_t save_member_byte_limit(std::string_view path) {
+    return MemberByteLimit(path);
+}
+
 bool hash_file(const fs::path& path,
                std::uint64_t& bytes,
                std::uint64_t& fnv64,
                bool& exists,
-               std::vector<std::string>* errors) {
+               std::vector<std::string>* errors,
+               std::size_t limit) {
     bytes = 0;
     fnv64 = 0;
     exists = false;
-    std::error_code ec;
-    const bool present = fs::exists(path, ec);
-    if (ec) {
-        AddError(errors, "cannot stat file: " + path.string());
-        return false;
-    }
-    if (!present) {
-        return true;
-    }
-    std::ifstream in(path, std::ios::binary);
-    if (!in) {
-        AddError(errors, "cannot open for hashing: " + path.string());
-        return false;
-    }
-    exists = true;
-    fnv64 = kFnvOffset;
-    std::vector<char> block(kHashBlockBytes);
-    while (in) {
-        in.read(block.data(), static_cast<std::streamsize>(block.size()));
-        const std::streamsize got = in.gcount();
-        if (got > 0) {
-            fnv64 = Fnv1aUpdate(fnv64, block.data(), static_cast<std::size_t>(got));
-            bytes += static_cast<std::uint64_t>(got);
+    try {
+        std::error_code ec;
+        const auto status = fs::symlink_status(path, ec);
+        if (status.type() == fs::file_type::not_found &&
+            (!ec || ec == std::errc::no_such_file_or_directory))
+            return true;
+        if (ec)
+            throw std::runtime_error("cannot inspect file for hashing: " + path.string());
+        exists = true;
+        Filesystem::BoundedFileInput input(path, limit);
+        report_snapshot_step("hash-opened", path);
+        auto& in = input.stream();
+        std::array<char, kHashBlockBytes> block{};
+        fnv64 = kFnvOffset;
+        while (bytes < input.size()) {
+            const auto count =
+                std::min(block.size(), input.size() - static_cast<std::size_t>(bytes));
+            in.read(block.data(), static_cast<std::streamsize>(count));
+            if (!in)
+                throw std::runtime_error("cannot read for hashing: " + path.string());
+            fnv64 = Fnv1aUpdate(fnv64, block.data(), count);
+            bytes += count;
         }
-    }
-    if (!in.eof()) {
-        AddError(errors, "cannot read for hashing: " + path.string());
+        if (in.peek() != std::char_traits<char>::eof())
+            throw std::runtime_error("file grew while hashing: " + path.string());
+        return true;
+    } catch (const std::exception& ex) {
+        AddError(errors, ex.what());
         return false;
     }
-    return true;
 }
 
 bool journal_pending(const fs::path& save_dir) {
@@ -766,12 +996,16 @@ bool admit_recovery_payloads(const fs::path& save_dir,
         return false;
     if (!fs::exists(txn_path))
         return true;
-    std::string bytes;
     JournalDocument document;
     std::string error;
-    if (!ReadAllBytes(txn_path, bytes, nullptr) || !ParseJournal(bytes, document, error) ||
-        !admit_entries(document.entries.size()))
+    try {
+        Filesystem::BoundedFileInput input(txn_path, kMaxJournalBytes);
+        if (!ParseJournal(input.stream(), document, error) ||
+            !admit_entries(document.entries.size()))
+            return false;
+    } catch (const std::exception&) {
         return false;
+    }
     for (const auto& entry : document.entries) {
         if (entry.action == "replace" && (!admit_file(save_dir / entry.path) ||
                                           !admit_file(journal_directory(save_dir) / entry.undo)))
@@ -782,8 +1016,9 @@ bool admit_recovery_payloads(const fs::path& save_dir,
 
 RecoveryOutcome recover_pending_journal(const fs::path& save_dir,
                                         std::vector<std::string>* errors) {
+    JournalBytesRead() = 0;
     try {
-        std::lock_guard lock(RecoveryGate().mutex);
+        const std::lock_guard lock(RecoveryGate().mutex);
         if (HasLiveTransaction(save_dir)) {
             AddError(errors, "cannot recover a live snapshot transaction");
             return RecoveryOutcome::Failed;
@@ -821,15 +1056,23 @@ RecoveryOutcome recover_pending_journal(const fs::path& save_dir,
             SweepTemporaries(save_dir);
             return RecoveryOutcome::DiscardedStale;
         }
-        std::string bytes;
-        if (!ReadAllBytes(txn_path, bytes, errors)) {
-            return RecoveryOutcome::Failed;
-        }
         JournalDocument document;
         std::string error;
-        if (!ParseJournal(bytes, document, error)) {
-            AddError(errors, "corrupt snapshot journal: " + error);
-            return RecoveryOutcome::Failed;
+        {
+            Filesystem::BoundedFileInput buffer(txn_path, kMaxJournalBytes);
+            auto& input = buffer.stream();
+            bool parsed = false;
+            try {
+                parsed = ParseJournal(input, document, error);
+            } catch (...) {
+                JournalBytesRead() = buffer.bytes_read();
+                throw;
+            }
+            JournalBytesRead() = buffer.bytes_read();
+            if (!parsed) {
+                AddError(errors, "corrupt snapshot journal: " + error);
+                return RecoveryOutcome::Failed;
+            }
         }
         SnapshotIndex committed;
         if (!read_snapshot_index(save_dir, committed, errors)) {
@@ -879,7 +1122,9 @@ SaveTransaction::~SaveTransaction() {
     if (m_state == State::Open || m_state == State::Committing) {
         try {
             abort(nullptr);
-        } catch (...) {}
+        } catch (...) {
+            std::fputs("Snapshot rollback failed; journal retained for recovery.\n", stderr);
+        }
     }
     if (m_registered) {
         ActiveTransaction() = nullptr;
@@ -901,7 +1146,7 @@ bool SaveTransaction::begin(std::vector<std::string>* errors) {
         return false;
     }
     try {
-        std::lock_guard lock(RecoveryGate().mutex);
+        const std::lock_guard lock(RecoveryGate().mutex);
         if (HasLiveTransaction(m_save_dir)) {
             AddError(errors, "save already has a live snapshot transaction");
             return false;
@@ -959,17 +1204,30 @@ bool SaveTransaction::protect_members(const std::vector<std::string>& relative_p
             return false;
         }
     }
-    m_protection_failed = true;
     try {
-        std::vector<std::string> todo;
-        if (m_entries.empty()) {
-            todo.emplace_back(kSnapshotIndexRelativePath);
-        }
-        todo.insert(todo.end(), relative_paths.begin(), relative_paths.end());
+        std::vector<std::string> queued_paths;
+        std::set<std::string> pending;
+        auto append = [this, &queued_paths, &pending, errors](const std::string& rel) {
+            if (m_protected_paths.contains(rel) || !pending.insert(rel).second)
+                return true;
+            // Bound the complete batch before creating undo files or publishing a journal.
+            if (queued_paths.size() >= kMaxJournalEntries - m_entries.size()) {
+                AddError(errors, "journal entry count exceeds cap");
+                return false;
+            }
+            queued_paths.push_back(rel);
+            return true;
+        };
+        if (m_entries.empty() && !append(kSnapshotIndexRelativePath))
+            return false;
+        for (const auto& rel : relative_paths)
+            if (!append(rel))
+                return false;
 
+        m_protection_failed = true;
         const fs::path undo_directory = journal_directory(m_save_dir) / "undo";
         bool added = false;
-        for (const std::string& rel : todo) {
+        for (const std::string& rel : queued_paths) {
             if (m_protected_paths.contains(rel)) {
                 continue;
             }
@@ -981,7 +1239,7 @@ bool SaveTransaction::protect_members(const std::vector<std::string>& relative_p
             std::uint64_t bytes = 0;
             std::uint64_t fnv64 = 0;
             bool exists = false;
-            if (!hash_file(destination, bytes, fnv64, exists, errors)) {
+            if (!hash_file(destination, bytes, fnv64, exists, errors, MemberByteLimit(rel))) {
                 return false;
             }
             Entry entry;
@@ -993,7 +1251,7 @@ bool SaveTransaction::protect_members(const std::vector<std::string>& relative_p
                     return false;
                 }
                 std::string previous;
-                if (!ReadAllBytes(destination, previous, errors)) {
+                if (!read_bounded_save_file(destination, previous, MemberByteLimit(rel), errors)) {
                     return false;
                 }
                 const std::string undo_name = std::to_string(m_next_undo);
@@ -1046,6 +1304,10 @@ bool SaveTransaction::write_journal(std::vector<std::string>* errors) {
     }
     const std::string bytes =
         EncodeJournal(m_txn_id, m_previous.generation, m_new_generation, entries);
+    if (bytes.size() > kMaxJournalBytes) {
+        AddError(errors, "journal exceeds size cap");
+        return false;
+    }
     return WorldSaveService::durable_write_file(
         journal_directory(m_save_dir) / "txn.json", bytes, errors);
 }
@@ -1077,6 +1339,8 @@ SaveTransaction::BeginDerivedGroup(const std::vector<std::string>& paths,
             return std::nullopt;
     }
     GroupState state;
+    state.identity =
+        std::make_shared<const GroupIdentity>(GroupIdentity{this, m_derived_groups.size()});
     state.paths = std::move(sorted);
     state.catalog_digest = catalog_digest;
     m_derived_groups.push_back(std::move(state));
@@ -1085,19 +1349,16 @@ SaveTransaction::BeginDerivedGroup(const std::vector<std::string>& paths,
         abort(errors); // no caller can replace members after incomplete undo publication
         return std::nullopt;
     }
-    DerivedGroup group;
-    group.m_owner = this;
-    group.m_index = m_derived_groups.size() - 1;
-    return group;
+    return m_derived_groups.back().identity;
 }
 
 SaveTransaction::GroupState* SaveTransaction::writable_group(const DerivedGroup& group,
                                                              std::string_view path) {
     if (!owner_thread() || m_state != State::Open || m_rollback_failed || m_protection_failed ||
-        group.m_owner != this || group.m_index >= m_derived_groups.size())
+        !group || group->owner != this || group->index >= m_derived_groups.size())
         return nullptr;
-    auto& state = m_derived_groups[group.m_index];
-    if (state.rolled_back ||
+    auto& state = m_derived_groups[group->index];
+    if (state.identity != group || state.rolled_back ||
         std::find(state.paths.begin(), state.paths.end(), path) == state.paths.end())
         return nullptr;
     return &state;
@@ -1105,12 +1366,16 @@ SaveTransaction::GroupState* SaveTransaction::writable_group(const DerivedGroup&
 
 bool SaveTransaction::RollbackDerivedGroup(const DerivedGroup& group,
                                            std::vector<std::string>* errors) {
-    if (!owner_thread() || m_state != State::Open || group.m_owner != this ||
-        group.m_index >= m_derived_groups.size()) {
+    if (!owner_thread() || m_state != State::Open || !group || group->owner != this ||
+        group->index >= m_derived_groups.size()) {
         AddError(errors, "invalid derived rollback handle");
         return false;
     }
-    auto& state = m_derived_groups[group.m_index];
+    auto& state = m_derived_groups[group->index];
+    if (state.identity != group) {
+        AddError(errors, "unissued derived rollback handle");
+        return false;
+    }
     if (state.rolled_back)
         return true;
     try {
@@ -1208,16 +1473,17 @@ bool SaveTransaction::prepare_derived_groups(std::vector<std::string>* errors) {
             std::string error;
             if (!WorldSaveService::derived_member_digest(
                     m_save_dir, path, m_new_generation, digest, error, state.catalog_digest)) {
-                AddError(errors, "derived publication due: " + path + ": " + error);
+                std::string message = "derived publication due: ";
+                message += path;
+                message += ": ";
+                message += error;
+                AddError(errors, message);
                 valid = false;
                 break;
             }
         }
         if (!valid) {
-            DerivedGroup group;
-            group.m_owner = this;
-            group.m_index = i;
-            if (!RollbackDerivedGroup(group, errors))
+            if (!RollbackDerivedGroup(state.identity, errors))
                 return false;
         }
     }
@@ -1270,8 +1536,14 @@ bool SaveTransaction::adopt_baseline(MemberMap& members, std::vector<std::string
     std::error_code ec;
     fs::directory_iterator it(m_save_dir / "chunks" / "region", ec);
     const fs::directory_iterator end;
+    // Baseline adoption shares the member bound; count even entries that are ignored.
+    std::size_t visits = 0;
     if (!ec) {
         for (; it != end; it.increment(ec)) {
+            if (++visits > kMaxSnapshotMembers) {
+                AddError(errors, "baseline directory entry limit");
+                return false;
+            }
             if (ec) {
                 break;
             }
@@ -1281,6 +1553,10 @@ bool SaveTransaction::adopt_baseline(MemberMap& members, std::vector<std::string
             }
             const std::string rel = "chunks/region/" + it->path().filename().string();
             if (member_path_allowed(rel)) {
+                if (baseline.size() >= kMaxSnapshotMembers) {
+                    AddError(errors, "baseline member limit");
+                    return false;
+                }
                 baseline.push_back(rel);
             }
         }

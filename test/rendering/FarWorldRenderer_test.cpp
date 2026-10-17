@@ -158,8 +158,9 @@ public:
     ~Fixture() override {
         EXPECT_EQ(state_.live, 0u);
         EXPECT_FALSE(state_.destroyed);
-        if (gate_ && !gate_->first_sample.load())
+        if (gate_ && !gate_->first_sample.load()) {
             EXPECT_TRUE(gate_->exited.try_wait());
+        }
         state_.fixture_released = true;
     }
     std::uint64_t content_identity() const noexcept override {
@@ -1722,6 +1723,10 @@ FarHandoffTileInput RendererHandoffInput(FarWorldHandoffRenderer& renderer,
     wanted.intent.extra_span = FarVolumeCoverageSpan{-256, 64};
     const auto edge = FarTileEdgeMeters(key.tier);
     FarFrozenCaptureSource source;
+    // This fixture has no committed terrain override.
+    source.committed = [](std::uint8_t, const FarVolumePosition&) {
+        return FarFrozenOverride<FarVolumeSample>{};
+    };
     source.content_identity = source.pristine.field_identity = wanted.identity.content_hash;
     source.durable = {generation, FarEditedImageState::Committed};
     source.pristine.height = [](std::int64_t, std::int64_t) {
