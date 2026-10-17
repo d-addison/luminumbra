@@ -125,6 +125,7 @@ inline void add_distributions(nlohmann::json& report, SampleRing& ring) {
 inline nlohmann::json render_overrides(int argc, char** argv) {
     nlohmann::json result = nlohmann::json::object();
     // Treat every non-workload CLI option as an override requiring an exact declaration.
+    // Roots select file locations; --systems-config still requires a declaration.
     const std::vector<std::string> flags = {
         "--no-audio", "--auto-create-world", "--auto-enter-world", "--no-menu-backdrop"};
     const std::vector<std::string> options = {"--render-benchmark",
@@ -136,6 +137,8 @@ inline nlohmann::json render_overrides(int argc, char** argv) {
                                               "--load-world",
                                               "--perf-profile",
                                               "--traversal",
+                                              "--runtime-root",
+                                              "--save-root",
                                               "--declare-render-overrides",
                                               "--world-preset",
                                               "--cam-pos",
@@ -145,6 +148,9 @@ inline nlohmann::json render_overrides(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (std::find(flags.begin(), flags.end(), arg) != flags.end())
+            continue;
+        // Assignment-form roots carry their value in this argument; consume no successor.
+        if (arg.rfind("--runtime-root=", 0) == 0 || arg.rfind("--save-root=", 0) == 0)
             continue;
         const bool hasValue = i + 1 < argc && std::string(argv[i + 1]).rfind("--", 0) != 0;
         if (std::find(options.begin(), options.end(), arg) != options.end()) {

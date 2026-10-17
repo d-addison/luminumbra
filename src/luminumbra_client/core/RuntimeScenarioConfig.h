@@ -19,6 +19,15 @@ int GetCommandLineIntOption(int argc, char* argv[], const std::string& flag, int
 uint64_t
 GetCommandLineUInt64Option(int argc, char* argv[], const std::string& flag, uint64_t fallback);
 
+struct RuntimePathOptions {
+    std::filesystem::path runtime_root;
+    std::filesystem::path save_root;
+};
+
+// Parse before asset discovery. Explicit options must be absolute and nonempty;
+// the save root is created here. Invalid options throw with the option name.
+RuntimePathOptions ParseRuntimePathOptions(int argc, char* argv[]);
+
 // --- Window modes ---
 // The client renders into one of these top-level window arrangements. Headless
 // is a first-class mode (no GL context window is shown) that gates/servers use.
