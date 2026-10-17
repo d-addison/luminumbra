@@ -584,6 +584,94 @@ Vec3 WaterSystem::get_camera_position(entt::registry& registry) const {
     return Vec3(0.0f);
 }
 
+std::vector<std::shared_ptr<HighWaterSeedInputs>>
+WaterSystem::prepare_high_water_seed_inputs(const std::vector<Chunk*>& to_init) {
+    // At most six handles in live play; boot uses one per resident init candidate.
+    std::vector<std::shared_ptr<HighWaterSeedInputs>> high_seed_inputs;
+    if (m_sim_resolution == HighWaterSeedInputs::kResolution) {
+        if (to_init.size() > high_seed_inputs.max_size()) {
+            throw std::length_error("Water seed input handle count exceeds capacity");
+        }
+        high_seed_inputs.resize(to_init.size());
+        const auto terrain_generation = m_shield_system->water_seed_terrain_generation();
+        for (std::size_t i = 0; i < to_init.size(); ++i) {
+            Chunk& chunk = *to_init[i];
+            auto inputs = chunk.take_water_seed_inputs();
+            const WaterSeedGeneration generation{terrain_generation,
+                                                 chunk.water_seed_edit_generation()};
+            const bool stale =
+                inputs && (inputs->generation != generation ||
+                           generation.terrain == std::numeric_limits<std::uint64_t>::max() ||
+                           generation.edit == std::numeric_limits<std::uint64_t>::max());
+            if (stale) {
+                ++m_seed_attribution.stale_columns;
+                inputs.reset();
+            }
+            if (inputs && inputs->ready.load(std::memory_order_acquire)) {
+                ++m_seed_attribution.precomputed_columns;
+            } else {
+                ++m_seed_attribution.fallback_columns;
+                inputs = std::make_shared<HighWaterSeedInputs>();
+                inputs->generation = generation;
+                ComputeHighWaterSeedInputs(*inputs, chunk.get_coords(), *m_shield_system);
+            }
+            high_seed_inputs[i] = std::move(inputs);
+        }
+    }
+    return high_seed_inputs;
+}
+
+void WaterSystem::seed_chunk_water(Chunk* cp,
+                                   const std::vector<float>& terrain,
+                                   const HighWaterSeedInputs* inputs) {
+    //  init directly at the fixed camera-independent sim resolution (no later
+    // camera-driven resize -> the hashed grid is uniform + stable on every peer).
+    const int initial_resolution = m_sim_resolution;
+    cp->current_water_resolution.store(initial_resolution);
+    const size_t sim_size = static_cast<size_t>(initial_resolution) * initial_resolution;
+    cp->water_level_data.assign(sim_size, SEA_LEVEL);
+    cp->water_flow_data.assign(sim_size, Vec2(0.0f));
+    cp->water_sim_terrain_height.resize(sim_size);
+    cp->water_rest_level.assign(sim_size, SEA_LEVEL);
+    // fixed-point flowing-water state (HASHED). bed = terrain, depth = standing water
+    // above bed; lakes/sea start filled, dry land + perched channels fill from the sources.
+    cp->water_depth_mm.assign(sim_size, 0);
+    cp->water_bed_mm.assign(sim_size, 0);
+    cp->water_edge_flux.assign(2 * sim_size, 0);
+    const IVec3 c_coords = cp->get_coords();
+    const float cell_width_x = CHUNK_SIZE_X / (float)initial_resolution;
+    const float cell_width_z = CHUNK_SIZE_Z / (float)initial_resolution;
+    const bool have_terrain = (terrain.size() == sim_size); // main thread pre-read the heightmap
+    for (int z = 0; z < initial_resolution; ++z) {
+        for (int x = 0; x < initial_resolution; ++x) {
+            float world_x = c_coords.x * CHUNK_SIZE_X + (x + 0.5f) * cell_width_x;
+            float world_z = c_coords.z * CHUNK_SIZE_Z + (z + 0.5f) * cell_width_z;
+            const int cell = z * initial_resolution + x;
+            // Seed the resting surface from worldgen: sea level, raised to the local lake
+            // surface inside basins so perched lakes start (and stay) filled.
+            const float rest =
+                inputs ? inputs->rest[cell] : m_shield_system->WaterLevelAt(world_x, world_z);
+            // Reuse the mesher's heightmap (byte-identical) when the main thread provided it;
+            // else sample GetTerrainHeightAt directly — same bits, so water_bed_mm is identical
+            // either way.
+            const float terrain_h =
+                inputs ? inputs->terrain[cell]
+                       : (have_terrain ? terrain[cell]
+                                       : m_shield_system->GetTerrainHeightAt(world_x, world_z));
+            cp->water_level_data[cell] = rest;
+            cp->water_rest_level[cell] = rest;
+            cp->water_sim_terrain_height[cell] = terrain_h;
+            cp->water_bed_mm[cell] = static_cast<std::int32_t>(std::lround(terrain_h * MM_PER_M));
+            const long depth0 = std::lround(static_cast<double>(rest - terrain_h) * MM_PER_M);
+            cp->water_depth_mm[cell] = static_cast<std::int32_t>(depth0 > 0 ? depth0 : 0);
+        }
+    }
+    cp->has_water_sim.store(true);
+    m_water_activity_cache.erase(cp->get_id());
+    cp->water_mesh_generated.store(false);
+    cp->water_mesh_dirty_ticks = 0;
+}
+
 void WaterSystem::update(entt::registry& registry,
                          const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>& active_chunks) {
     m_cells_stepped_last_update = 0;
@@ -739,92 +827,10 @@ void WaterSystem::update(entt::registry& registry,
     // publication, or cell order. Retire the request even on fallback so a late
     // worker cannot retain storage in an already initialized column.
     // At most six handles in live play; boot uses one per resident init candidate.
-    std::vector<std::shared_ptr<HighWaterSeedInputs>> high_seed_inputs;
-    if (m_sim_resolution == HighWaterSeedInputs::kResolution) {
-        if (to_init.size() > high_seed_inputs.max_size()) {
-            throw std::length_error("Water seed input handle count exceeds capacity");
-        }
-        high_seed_inputs.resize(to_init.size());
-        const auto terrain_generation = m_shield_system->water_seed_terrain_generation();
-        for (std::size_t i = 0; i < to_init.size(); ++i) {
-            Chunk& chunk = *to_init[i];
-            auto inputs = chunk.take_water_seed_inputs();
-            const WaterSeedGeneration generation{terrain_generation,
-                                                 chunk.water_seed_edit_generation()};
-            const bool stale =
-                inputs && (inputs->generation != generation ||
-                           generation.terrain == std::numeric_limits<std::uint64_t>::max() ||
-                           generation.edit == std::numeric_limits<std::uint64_t>::max());
-            if (stale) {
-                ++m_seed_attribution.stale_columns;
-                inputs.reset();
-            }
-            if (inputs && inputs->ready.load(std::memory_order_acquire)) {
-                ++m_seed_attribution.precomputed_columns;
-            } else {
-                ++m_seed_attribution.fallback_columns;
-                inputs = std::make_shared<HighWaterSeedInputs>();
-                inputs->generation = generation;
-                ComputeHighWaterSeedInputs(*inputs, chunk.get_coords(), *m_shield_system);
-            }
-            high_seed_inputs[i] = std::move(inputs);
-        }
-    }
+    auto high_seed_inputs = prepare_high_water_seed_inputs(to_init);
     if (WaterAttribution::CurrentFrame())
         dbg_split(m_dbg_water.seed_inputs);
 
-    auto seed_chunk_water = [this](Chunk* cp,
-                                   const std::vector<float>& terrain,
-                                   const HighWaterSeedInputs* inputs) {
-        //  init directly at the fixed camera-independent sim resolution (no later
-        // camera-driven resize -> the hashed grid is uniform + stable on every peer).
-        const int initial_resolution = m_sim_resolution;
-        cp->current_water_resolution.store(initial_resolution);
-        const size_t sim_size = static_cast<size_t>(initial_resolution) * initial_resolution;
-        cp->water_level_data.assign(sim_size, SEA_LEVEL);
-        cp->water_flow_data.assign(sim_size, Vec2(0.0f));
-        cp->water_sim_terrain_height.resize(sim_size);
-        cp->water_rest_level.assign(sim_size, SEA_LEVEL);
-        // fixed-point flowing-water state (HASHED). bed = terrain, depth = standing water
-        // above bed; lakes/sea start filled, dry land + perched channels fill from the sources.
-        cp->water_depth_mm.assign(sim_size, 0);
-        cp->water_bed_mm.assign(sim_size, 0);
-        cp->water_edge_flux.assign(2 * sim_size, 0);
-        const IVec3 c_coords = cp->get_coords();
-        const float cell_width_x = CHUNK_SIZE_X / (float)initial_resolution;
-        const float cell_width_z = CHUNK_SIZE_Z / (float)initial_resolution;
-        const bool have_terrain =
-            (terrain.size() == sim_size); // main thread pre-read the heightmap
-        for (int z = 0; z < initial_resolution; ++z) {
-            for (int x = 0; x < initial_resolution; ++x) {
-                float world_x = c_coords.x * CHUNK_SIZE_X + (x + 0.5f) * cell_width_x;
-                float world_z = c_coords.z * CHUNK_SIZE_Z + (z + 0.5f) * cell_width_z;
-                const int cell = z * initial_resolution + x;
-                // Seed the resting surface from worldgen: sea level, raised to the local lake
-                // surface inside basins so perched lakes start (and stay) filled.
-                const float rest =
-                    inputs ? inputs->rest[cell] : m_shield_system->WaterLevelAt(world_x, world_z);
-                // Reuse the mesher's heightmap (byte-identical) when the main thread provided it;
-                // else sample GetTerrainHeightAt directly — same bits, so water_bed_mm is identical
-                // either way.
-                const float terrain_h =
-                    inputs ? inputs->terrain[cell]
-                           : (have_terrain ? terrain[cell]
-                                           : m_shield_system->GetTerrainHeightAt(world_x, world_z));
-                cp->water_level_data[cell] = rest;
-                cp->water_rest_level[cell] = rest;
-                cp->water_sim_terrain_height[cell] = terrain_h;
-                cp->water_bed_mm[cell] =
-                    static_cast<std::int32_t>(std::lround(terrain_h * MM_PER_M));
-                const long depth0 = std::lround(static_cast<double>(rest - terrain_h) * MM_PER_M);
-                cp->water_depth_mm[cell] = static_cast<std::int32_t>(depth0 > 0 ? depth0 : 0);
-            }
-        }
-        cp->has_water_sim.store(true);
-        m_water_activity_cache.erase(cp->get_id());
-        cp->water_mesh_generated.store(false);
-        cp->water_mesh_dirty_ticks = 0;
-    };
     // Initialization is always main-thread ordered, including bulk boot settle.
     // Worker jobs prepare inputs only and never publish simulation state.
     for (std::size_t i = 0; i < to_init.size(); ++i) {

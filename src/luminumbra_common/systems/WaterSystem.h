@@ -10,7 +10,8 @@
 
 namespace Luminumbra {
 class Chunk;
-}
+struct HighWaterSeedInputs;
+} // namespace Luminumbra
 namespace Luminumbra::Systems {
 class SHIELD_WorldSystem;
 }
@@ -274,6 +275,12 @@ private:
     // simulate_chunk_water + its WaterChunkSnapshot/Output/Neighbors structs) was DEAD CODE — zero
     // callers; the live path is the integer  StepChunkWaterFixed. Removed.
     Vec3 get_camera_position(entt::registry& registry) const;
+
+    std::vector<std::shared_ptr<HighWaterSeedInputs>>
+    prepare_high_water_seed_inputs(const std::vector<Chunk*>& to_init);
+    void seed_chunk_water(Chunk* chunk,
+                          const std::vector<float>& terrain,
+                          const HighWaterSeedInputs* inputs);
 
     SHIELD_WorldSystem* m_shield_system;
 
