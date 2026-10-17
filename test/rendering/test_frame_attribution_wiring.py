@@ -1,6 +1,7 @@
 """Guard production attribution wiring beyond the pure bucket/count tests."""
 
 from pathlib import Path
+import ast
 import json
 import re
 import unittest
@@ -33,6 +34,26 @@ def block(text, marker):
             if depth == 0:
                 return text[start + 1:index]
     raise AssertionError(f"Unclosed block: {marker}")
+
+
+def cpp_expression(expression, **bindings):
+    """Evaluate only scalar production predicates, without executing native code."""
+    names = {}
+    for index, (name, value) in enumerate(sorted(bindings.items(), key=lambda item: -len(item[0]))):
+        token = f"value_{index}"
+        expression = re.sub(r"(?<![\w.])" + re.escape(name) + r"(?![\w.])", token, expression)
+        names[token] = value
+    expression = expression.replace("&&", " and ").replace("||", " or ")
+    expression = re.sub(r"!(?!=)", " not ", expression).replace("/", "//")
+    expression = compact(re.sub(r"(?<=\d)'(?=\d)", "", expression))
+    tree = ast.parse(expression, mode="eval")
+    allowed = (ast.Expression, ast.BoolOp, ast.And, ast.Or, ast.UnaryOp, ast.Not,
+               ast.BinOp, ast.Add, ast.Sub, ast.Mult, ast.FloorDiv, ast.Mod,
+               ast.Compare, ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE,
+               ast.Name, ast.Load, ast.Constant)
+    if any(not isinstance(node, allowed) for node in ast.walk(tree)):
+        raise AssertionError(f"Unsupported scalar expression: {expression}")
+    return eval(compile(tree, "<production predicate>", "eval"), {"__builtins__": {}}, names)
 
 
 class FrameAttributionWiring(unittest.TestCase):
@@ -82,6 +103,37 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertTrue(menu.startswith(
             "const bool previewMouseAllowed = previewState.UpdateInputOwnership(inputRouter);"))
 
+    def test_cached_menu_retains_input_ownership_and_scene_state(self):
+        header = read(CLIENT / "app/MenuScreens.h")
+        state = block(header, "struct MenuSceneState : MenuPreviewState")
+        self.assertIn("MenuSceneSchedule schedule;", state)
+        self.assertIn("MenuSceneImage scene_image;", state)
+        self.assertIn("MenuSceneState& previewState,", header)
+        self.assertIn("const UiInputRouter& inputRouter", header)
+        self.assertIn("MenuSceneState menuPreviewState;", self.main)
+        menu = block(read(CLIENT / "app/MenuScreens.cpp"), "void RenderMenuScreens(")
+        self.assertLess(menu.index("UpdateInputOwnership(inputRouter)"),
+                        menu.index("schedule.update(now, key, interactive)"))
+        self.assertIn("previewMouseAllowed &&", menu)
+        self.assertIn("interactive = true;", block(menu, "if (previewState.dragging)"))
+
+    def test_poll_attribution_keeps_ownership_refresh_and_registered_overlays(self):
+        poll = self.main[self.main.index("const auto _rb_poll_t0"):
+                         self.main.index("glfwPollEvents();")]
+        self.assertIn("poll_phases_before = Attribution::phase_total_ms();", poll)
+        self.assertIn("poll_foliage_before = foliage_scope.snapshot().rebuild_ms;", poll)
+        self.assertIn("RefreshInputOwnership(window);", poll)
+        after_poll = compact(self.main[self.main.index("glfwPollEvents();"):])
+        self.assertTrue(after_poll.startswith("glfwPollEvents(); RefreshInputOwnership(window);"))
+        self.assertIn("developerConsole.Draw(developerFrame);", self.main)
+        self.assertNotIn("DrawFrameStatusOverlays(", self.main)
+        self.assertNotIn("DrawGpuProfilerOverlay(", self.main)
+        self.assertRegex(compact(self.main),
+                         r"menuPreviewState.schedule = \{\}; "
+                         r"menuPreviewState.last_menu_frame = \{\}; "
+                         r"//[^\n]*? if \(g_app.capture.timelapse_creatures\) "
+                         r"DrawCreatureNameplates\(")
+
     def test_disabled_timers_do_not_read_clocks(self):
         constructor = compact(block(self.header, "explicit StageTimer("))
         self.assertEqual(constructor, "if (m_running) m_start = std::chrono::steady_clock::now();")
@@ -116,6 +168,34 @@ class FrameAttributionWiring(unittest.TestCase):
         for operation in ("glClearBufferData(", "dispatch_scatter();", "submit_foliage_readback();"):
             self.assertGreater(frozen.index(operation), timer_position)
         self.assertNotIn("timer.stop()", frozen)
+
+    def test_foliage_cached_uniforms_retain_attributed_program_lifetimes(self):
+        init = block(self.foliage, "void FoliagePass::init_compute(")
+        destroy = block(self.foliage, "void FoliagePass::destroy_compute()")
+        upload = block(self.foliage, "bool FoliagePass::rebuild_instances_gpu(")
+        dispatch = block(self.foliage, "void FoliagePass::dispatch_scatter()")
+        for program in ("m_compute_prog", "m_prefix_prog"):
+            self.assertIn(f"AttributedGl::Program {program}{{}};", self.pass_header)
+            self.assertIn(f"AttributedGl::DeleteProgram(glDeleteProgram, {program})", destroy)
+            self.assertIn(f"{program} = {{}};", destroy)
+        for cache, fields in (
+            ("m_scatter_uniforms", ("chunk_count", "archetype_count", "total_weight",
+                                     "max_candidates", "max_instances", "density_scale",
+                                     "camera_xz", "fade_end_m", "wind_xz", "emit")),
+            ("m_prefix_uniforms", ("group_count", "max_instances")),
+        ):
+            self.assertIn(f"{cache} = {{", init)
+            self.assertIn(f"{cache} = {{}};", destroy)
+            for field in fields:
+                self.assertIn(f".{field} = glGetUniformLocation(", init)
+                self.assertIn(f"{cache}.{field}", upload + dispatch)
+        self.assertNotIn("glGetUniformLocation(", upload + dispatch)
+        self.assertEqual(dispatch.count("AttributedGl::UseProgram("), 4)
+        self.assertEqual(dispatch.count("AttributedGl::Submit("), 3)
+        self.assertNotRegex(dispatch, r"\bgl(?:UseProgram|DispatchCompute)\s*\(")
+        self.assertIn("m_uploaded_input_hash.reset();", destroy)
+        self.assertIn("m_uploaded_chunk_count = 0;", destroy)
+        self.assertIn("m_group_storage_bytes = 0;", destroy)
 
     def test_client_uses_only_the_opt_in_profiler_interface(self):
         targets = read(ROOT / "src/CMakeLists.txt")
@@ -162,10 +242,392 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertIn('capacity (count unavailable)', overlay)
         main = compact(self.main)
         self.assertIn("foliage_frame.capacity, foliage_frame.count_known, "
-                      "foliage_frame.generated_count, foliage_frame.count_generation)", main)
+                      "foliage_frame.generated_count, foliage_frame.count_generation, phase_scope.snapshot())", main)
         scope = compact(block(self.foliage, "~RebuildAttributionScope()"))
         self.assertIn("m_pass.frame_instance_count_known() ? "
                       "std::optional<std::size_t>(m_pass.frame_instance_count()) : std::nullopt", scope)
+
+    def test_menu_phase_collection_removes_nested_work_from_parent_buckets(self):
+        main = compact(self.main)
+        self.assertIn("PhaseFrameScope phase_scope(frame_attribution_enabled);", main)
+        for parent in ("menu", "render", "poll", "ui"):
+            self.assertIn(f"const double {parent}_phases_before = Attribution::phase_total_ms();", main)
+            self.assertIn(f"Attribution::phase_total_ms() - {parent}_phases_before", main)
+        self.assertIn("buckets.other(_wallMs, phase_scope.snapshot())", main)
+        self.assertIn("buckets.other(frame_ms, phases)", compact(self.collector))
+        self.assertIn("count_generation, phases)",
+                      compact(block(self.collector, "bool FrameRecorder::record(")))
+        self.assertIn("Phase::WorldCreateCallback", block(self.main, "auto start_world_creation ="))
+        self.assertIn("Phase::WorldLoadCallback", block(self.main, "auto start_world_load ="))
+        ui = read(CLIENT / "ui/Rml_UIManager.cpp")
+        for method, phase in (("Update()", "UiUpdate"), ("Render()", "UiRender"),
+                              ("LoadDocument(", "DocumentLoad")):
+            self.assertIn(f"Phase::{phase}", block(ui, f"void Rml_UIManager::{method}"))
+        for path, marker in (("ui/Rml_Interfaces.cpp", "RmlRenderer::LoadTexture("),
+                             ("ui/gl3/RmlUi_Renderer_GL3.cpp", "RenderInterface_GL3::LoadTexture("),
+                             ("ui/Rml_Interfaces.cpp", "RmlRenderer::GenerateTexture("),
+                             ("ui/gl3/RmlUi_Renderer_GL3.cpp", "RenderInterface_GL3::GenerateTexture(")):
+            self.assertIn("Phase::TextureLoad", block(read(CLIENT / path), marker))
+        preview = read(CLIENT / "world/WorldgenPreview.cpp")
+        self.assertIn("Phase::PreviewAdoption", block(preview, "void WorldgenPreview::swap_pending_into_live("))
+        for marker in ("bool WorldgenPreview::render(", "bool WorldgenPreview::render_to_backbuffer("):
+            self.assertIn("Phase::MenuScene", block(preview, marker))
+        backend = read(CLIENT / "ui/gl3/RmlUi_Renderer_GL3.cpp")
+        self.assertIn("Phase::UiFilters", block(backend, "void RenderInterface_GL3::RenderFilters("))
+        self.assertIn("Phase::ShaderLoad", block(backend, "static bool CreateShaders("))
+        self.assertIn("AttributedGl::UseProgram(glUseProgram,",
+                      block(backend, "void RenderInterface_GL3::UseProgram("))
+        for path, marker in (("rendering/ImpostorBake.cpp", "AttributedGl::Program CompileBakeProgram("),
+                             ("rendering/SkyAtmosphereLut.ipp", "AttributedGl::Program compile_compute("),
+                             ("rendering/passes/LuminanceMeterPass.cpp", "AttributedGl::Program create_compute_program("),
+                             ("rendering/passes/FoliagePass.cpp", "AttributedGl::Program compile_compute_program(")):
+            self.assertIn("Phase::ShaderLoad", block(read(CLIENT / path), marker))
+        legacy = read(CLIENT / "ui/Rml_Interfaces.cpp")
+        self.assertIn("Phase::ShaderLoad", block(legacy, "RmlRenderer::RmlRenderer()"))
+        self.assertIn("AttributedGl::UseProgram(glUseProgram,",
+                      block(legacy, "void RmlRenderer::RenderGeometry("))
+        self.assertRegex(block(legacy, "void RmlRenderer::RenderGeometry("),
+                         r"AttributedGl::Submit\(\s*glDrawElements,")
+        shader = read(CLIENT / "rendering/Shader.cpp")
+        self.assertIn("Phase::ShaderLoad", block(shader, "AttributedGl::Program Shader::buildProgram("))
+        self.assertIn("AttributedGl::UseProgram(glUseProgram,", block(shader, "void Shader::use()"))
+
+    def test_all_program_lifetimes_and_submissions_use_first_use_attribution(self):
+        # Enumerate the rendering and both UI backends, including state restores,
+        # platform branches, compute kernels, indirect and instanced submissions.
+        call = re.compile(r"\bgl(?:CreateProgram|DeleteProgram|UseProgram|"
+                          r"Draw(?:Arrays|Elements)\w*|MultiDraw\w*|DispatchCompute\w*)\s*\(")
+        count = 0
+        for tree in (CLIENT / "rendering", CLIENT / "ui"):
+            for path in sorted(tree.rglob("*")):
+                if path.suffix not in (".cpp", ".h", ".ipp"):
+                    continue
+                source = read(path)
+                code = re.sub(
+                    r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'',
+                    " ", source, flags=re.S)
+                self.assertIsNone(call.search(code), str(path.relative_to(ROOT)))
+                count += code.count("AttributedGl::Submit(")
+        self.assertGreater(count, 40)
+        helper = read(CLIENT / "app/ProgramFirstUse.h")
+        submit = compact(block(helper, "void submit("))
+        self.assertTrue(submit.startswith("if (m_bound->pending) {"))
+        self.assertNotIn("PhaseScope", submit)
+        self.assertNotIn("lookup(", submit)
+        self.assertLess(submit.index("m_bound->pending = false;"),
+                        submit.index("if (shader_first_use_collection_enabled)"))
+        for method, invocation in (("use_attributed(", "function(program);"),
+                                   ("submit_attributed(", "function(std::forward<Args>(args)...);")):
+            cold = compact(block(helper, "void " + method))
+            self.assertLess(cold.index("++m_attributed_calls;"), cold.index("const PhaseScope"))
+            self.assertLess(cold.index("const PhaseScope phase(Phase::ShaderFirstUse);"),
+                            cold.index(invocation))
+            self.assertIn("LUMINUMBRA_FIRST_USE_COLD void " + method, helper)
+            self.assertNotIn("phase.stop", cold)
+        use = compact(block(helper, "void use("))
+        self.assertIn("if (static_cast<unsigned>(shader_first_use_collection_enabled) & "
+                      "static_cast<unsigned>(m_bound->pending))", use)
+        self.assertNotIn("PhaseScope", use)
+        self.assertNotIn("lookup(", use)
+        self.assertEqual(compact(block(helper, "void bind(const Program&")),
+                         "m_bound = program.state;")
+        self.assertIn("__declspec(noinline)", helper)
+        self.assertIn("__attribute__((cold, noinline))", helper)
+        gl = read(CLIENT / "rendering/AttributedGl.h")
+        self.assertIn("return programs.created(function());", block(gl, "CreateProgram("))
+        self.assertIn("programs.deleted(program);", block(gl, "DeleteProgram("))
+        self.assertIn("programs.use(function, program);", block(gl, "UseProgram("))
+        self.assertIn("programs.submit(function, std::forward<Args>(args)...);",
+                      block(gl, "Submit("))
+        self.assertNotIn("thread_local", gl)
+        self.assertNotIn("PhaseScope", gl)
+        self.assertIn("inline constinit bool shader_first_use_collection_enabled = false;",
+                      self.header)
+        for method in ("PhaseFrameScope::PhaseFrameScope(", "PhaseFrameScope::~PhaseFrameScope()"):
+            self.assertIn("shader_first_use_collection_enabled = current_phases() != nullptr;",
+                          block(self.collector, method))
+        preview = read(ROOT / "tools/static_preview/CMakeLists.txt")
+        self.assertIn('"${STATIC_PREVIEW_ROOT}/src/luminumbra_client/app/FrameAttribution.cpp"',
+                      preview)
+
+    def test_program_owners_retain_the_first_use_bit_on_every_backend(self):
+        for path, members in (
+            ("rendering/Shader.h", ("m_id",)),
+            ("rendering/passes/FoliagePass.h", ("m_compute_prog", "m_prefix_prog")),
+            ("rendering/passes/FroxelPass.h", ("m_inject_program", "m_integrate_program")),
+            ("rendering/passes/LuminanceMeterPass.h", ("m_reduce_program",)),
+            ("rendering/SkyAtmosphereLut.h", ("m_skyview_compute_prog",
+                                           "m_transmittance_compute_prog",
+                                           "m_multiscatter_compute_prog")),
+            ("ui/Rml_Interfaces.h", ("m_program",)),
+        ):
+            source = read(CLIENT / path)
+            for member in members:
+                self.assertIn(f"AttributedGl::Program {member}{{}};", source, path)
+        gl3 = read(CLIENT / "ui/gl3/RmlUi_Renderer_GL3.cpp")
+        self.assertIn("EnumArray<Luminumbra::Rendering::AttributedGl::Program, ProgramId>", gl3)
+        self.assertIn("const AttributedGl::Program& prog",
+                      read(CLIENT / "rendering/SkyAtmosphereLut.ipp"))
+        # Helpers must not erase the retained bit by converting creation to GLuint.
+        for path in CLIENT.rglob("*"):
+            if path.suffix in (".cpp", ".h", ".ipp"):
+                self.assertNotRegex(read(path),
+                                    r"\b(?:GLuint|u32|std::uint32_t)\s+\w+\s*=\s*"
+                                    r"(?:Luminumbra::Rendering::)?AttributedGl::CreateProgram\(",
+                                    str(path.relative_to(ROOT)))
+
+    def test_nested_phase_scopes_exclude_children_and_foliage(self):
+        constructor = compact(block(self.collector, "PhaseScope::PhaseScope("))
+        self.assertTrue(constructor.startswith("if (!enabled || !current_phases()) return;"))
+        destructor = compact(block(self.collector, "PhaseScope::~PhaseScope()"))
+        self.assertTrue(destructor.startswith("if (!m_totals) return;"))
+        self.assertIn("m_totals->add(m_phase, elapsed, m_children_ms, foliage - m_child_foliage_ms)",
+                      destructor)
+        self.assertIn("m_parent->m_children_ms += elapsed;", destructor)
+        self.assertIn("m_parent->m_child_foliage_ms += foliage;", destructor)
+        rebuild = block(self.foliage, "~RebuildAttributionScope()")
+        self.assertIn("Attribution::phase_total_ms() - m_phases_before", rebuild)
+
+    def test_collectors_borrow_mutable_storage_through_thread_local_accessors(self):
+        # Check the live accessors and every consumer, so an unused TLS helper
+        # cannot hide a process-global pointer or a stale restoration path.
+        for signature, declaration, result in (
+            ("FoliageFrame*& current_foliage_frame()",
+             "thread_local FoliageFrame* frame = nullptr;", "frame"),
+            ("PhaseTotals*& current_phases()",
+             "thread_local PhaseTotals* totals = nullptr;", "totals"),
+            ("const PhaseScope*& current_phase_scope()",
+             "thread_local const PhaseScope* scope = nullptr;", "scope"),
+        ):
+            self.assertIn(signature, self.collector)
+            self.assertEqual(compact(block(self.collector, signature)),
+                             f"{declaration} return {result};")
+        self.assertEqual(len(re.findall(r"\bthread_local\b", self.collector)), 3)
+        self.assertNotRegex(self.collector,
+                            r"\b(?:current_phases|current_phase_scope)\b(?!\s*\()")
+        for owner, storage in (("FoliageFrameScope", "FoliageFrame m_frame{};"),
+                               ("PhaseFrameScope", "PhaseTotals m_totals{};")):
+            self.assertIn("mutable " + storage, block(self.header, "class " + owner))
+        self.assertNotIn("const_cast", self.collector + self.header)
+        for marker, fragments in (
+            ("PhaseFrameScope::PhaseFrameScope(",
+             ("current_phases() = enabled ? &m_totals : nullptr;",)),
+            ("PhaseFrameScope::~PhaseFrameScope()",
+             ("current_phases() = m_previous;",)),
+            ("bool PhaseFrameScope::is_current() const",
+             ("return current_phases() == &m_totals;",)),
+            ("double phase_total_ms()",
+             ("const auto* totals = current_phases();", "return totals ? totals->sum() : 0;")),
+            ("PhaseScope::PhaseScope(",
+             ("m_totals = current_phases();", "m_parent = current_phase_scope();",
+              "current_phase_scope() = this;")),
+            ("PhaseScope::~PhaseScope()",
+             ("m_parent->m_totals == m_totals", "current_phase_scope() = m_parent;")),
+            ("bool PhaseScope::is_current() const",
+             ("m_totals == current_phases() && current_phase_scope() == this",)),
+        ):
+            body = compact(block(self.collector, marker))
+            for fragment in fragments:
+                self.assertIn(fragment, body)
+        self.assertIn(": m_previous(current_phases())", self.collector)
+
+    def test_menu_cache_captures_before_ui_and_bypasses_render_on_reuse(self):
+        menu = block(read(CLIENT / "app/MenuScreens.cpp"), "void RenderMenuScreens(")
+        self.assertLess(menu.index("copy_scene_image(true)"), menu.index("uiManager->Render()"))
+        self.assertLess(menu.index("copy_scene_image(false)"), menu.index("uiManager->Render()"))
+        refresh = block(menu, "if (drawable && (refresh || !has_image))")
+        self.assertIn("render_to_backbuffer(renderPipeline, render_delta)", refresh)
+        self.assertIn("renderPipeline.render_frame(", refresh)
+        self.assertIn("schedule.rendered()", refresh)
+        reuse = block(menu, "else if (previewState.schedule.valid())")
+        self.assertEqual(compact(reuse), "previewState.scene_image.copy_scene_image(false);")
+        self.assertIn("document_generation()", menu)
+        self.assertIn("worldgenPreview->rebuild_generation()", menu)
+        self.assertIn(".renderer_target = renderPipeline.resize_generation()", compact(menu))
+        pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
+        setter = block(pipeline, "void RenderPipeline::set_render_scale(")
+        self.assertIn("resize_graphics_targets(scale, m_shadow_pass->shadow_map().resolution)", setter)
+        resize = block(pipeline, "bool RenderPipeline::resize_graphics_targets(")
+        self.assertIn("return ApplySceneRenderScale(", resize)
+        self.assertLess(resize.index("if (!m_render_registry.replace_targets("),
+                        resize.index("++m_resize_generation;"))
+        for method in ("void RenderPipeline::on_resize(", "bool RenderPipeline::resize_graphics_targets("):
+            self.assertIn("++m_resize_generation;", block(pipeline, method))
+        for getter in ("render_scale", "get_exposure_override", "get_cloud_quality",
+                       "get_ssao_quality", "volumetric_quality", "taau_enabled",
+                       "sky_lut_gpu_enabled", "auto_exposure_metered", "graphics_runtime_config"):
+            self.assertIn(f"renderPipeline.{getter}()", menu)
+        self.assertLess(menu.index("camera_revision.observe(camera_state())"),
+                        menu.index("camera->Yaw = 95.0f"))
+        self.assertGreater(menu.index("camera_revision.animated(camera_state())"),
+                           menu.index("camera->updateCameraVectors()"))
+        self.assertIn("schedule.update(now, key, interactive)", menu)
+        self.assertIn("menu_backdrop_yaw += menu_delta", menu)
+        self.assertIn("worldgenPreview->tick(menu_delta)", menu)
+        self.assertIn("menuPreviewState.schedule = {};", self.main)
+        self.assertLess(self.main.index("menuPreviewState.scene_image.release_scene_image();"),
+                        self.main.index("glfwDestroyWindow(window);", self.main.index("menuPreviewState.scene_image.release_scene_image();")))
+
+    def test_capture_samples_require_success_and_refusals_replay_without_progress(self):
+        menu = block(read(CLIENT / "app/MenuScreens.cpp"), "void RenderMenuScreens(")
+        scene = block(menu, "if (scenic || previewActive)")
+        refresh = block(scene, "if (drawable && (refresh || !has_image))")
+        self.assertIn("bool scene_rendered = false;", menu[:menu.index("if (scenic || previewActive)")])
+        self.assertEqual(menu.count("scene_rendered = true;"), 1)
+        self.assertEqual(menu.count("schedule.rendered();"), 1)
+        self.assertIn("bool rendered = false;", refresh)
+        preview = compact(block(refresh, "if (previewActive)"))
+        self.assertEqual(preview,
+                         "rendered = worldgenPreview->render_to_backbuffer(renderPipeline, render_delta);")
+        scenic = compact(block(refresh, "else"))
+        self.assertTrue(scenic.endswith("rendered = true;"))
+        self.assertLess(scenic.index("renderPipeline.render_frame("), scenic.index("rendered = true;"))
+        success = compact(block(refresh, "if (rendered)"))
+        self.assertTrue(success.startswith("scene_rendered = true;"))
+        self.assertIn("previewState.schedule.rendered();", success)
+        refused = compact(block(refresh, "else if (has_image && previewState.schedule.valid())"))
+        self.assertEqual(refused, "previewState.scene_image.copy_scene_image(false);")
+        self.assertLess(menu.index("uiManager->Render();"), menu.index("bool ready_to_capture = false;"))
+
+    def test_capture_settling_evaluates_live_throttle_and_admission_predicates(self):
+        # Evaluate the shipping scheduler and counter guards, not a separately
+        # hardcoded cadence. Binding checks above keep render success outside replay.
+        menu = block(read(CLIENT / "app/MenuScreens.cpp"), "void RenderMenuScreens(")
+        regular = block(menu, "else if (app.capture.ui_screenshot_settle < 30)")
+        regular = re.sub(r"//[^\n]*", "", regular)
+        admission = re.fullmatch(r"\s*if \((.*?)\)\s*"
+                                r"\+\+app.capture.ui_screenshot_settle;\s*", regular, re.S)
+        self.assertIsNotNone(admission)
+        predicate = admission.group(1)
+        for scenic, preview, rendered in ((False, False, False), (True, False, False),
+                                         (False, True, False), (True, False, True),
+                                         (False, True, True)):
+            self.assertEqual(cpp_expression(predicate, scene_rendered=rendered,
+                                            scenic=scenic, previewActive=preview),
+                             rendered or not (scenic or preview))
+        schedule = read(CLIENT / "app/MenuSceneSchedule.h")
+        update = block(schedule, "bool update(")
+        self.assertEqual(compact(block(schedule, "float render_delta_seconds() const")),
+                         "return std::chrono::duration<float>(m_now - m_last_render).count();")
+        self.assertIn("m_last_render = m_now;", block(schedule, "void rendered()"))
+        self.assertIn("m_now = now;", update)
+        slot_expression = re.search(r"const auto slot = (.*?);", update, re.S).group(1)
+        refresh_expression = re.search(r"return (.*?);", update, re.S).group(1)
+        second = int(re.search(r"kSecond = ([\d']+);", schedule).group(1).replace("'", ""))
+        last_slot, valid, samples, replayed = -1, False, 0, 0
+        for tick in range(1001):  # 1000 Hz UI over exactly one elapsed second
+            slot = cpp_expression(slot_expression, elapsed=tick * 1_000_000, kSecond=second)
+            refresh = cpp_expression(refresh_expression, **{
+                "key.width": 1920, "key.height": 1080, "m_valid": valid,
+                "due": slot != last_slot, "interactive": False})
+            last_slot = slot
+            if refresh:
+                valid = True
+            else:
+                replayed += 1
+            samples += bool(cpp_expression(predicate, scene_rendered=refresh,
+                                           scenic=True, previewActive=False))
+            if tick == 30:
+                self.assertEqual(samples, 1)  # 31 UI frames cannot settle a scene
+            if tick == 966:
+                self.assertEqual(samples, 29)
+        self.assertEqual((samples, replayed), (31, 970))
+        for width, height, interactive, expected in ((0, 1080, True, False),
+                                                      (1920, 0, True, False),
+                                                      (1920, 1080, True, True),
+                                                      (1920, 1080, False, False)):
+            self.assertEqual(cpp_expression(refresh_expression, **{
+                "key.width": width, "key.height": height, "m_valid": True,
+                "due": False, "interactive": interactive}), expected)
+
+    def test_preview_capture_requires_ready_successes_and_keeps_the_timeout(self):
+        menu = block(read(CLIENT / "app/MenuScreens.cpp"), "void RenderMenuScreens(")
+        preview = block(menu, "if (preview_live_screen)")
+        readiness = preview[preview.index("const bool world_ready"):]
+        reset = re.search(r"if \((.*?)\)\s*app.capture.ui_preview_settle_after_ready = 0;",
+                          readiness, re.S).group(1)
+        increment = re.search(r"else if \((.*?)\)\s*\+\+app.capture.ui_preview_settle_after_ready;",
+                              readiness, re.S).group(1)
+        settled = re.search(r"const bool settled = (.*?);", readiness, re.S).group(1)
+        timeout = re.search(r"const bool timed_out = (.*?);", readiness, re.S).group(1)
+        self.assertRegex(compact(readiness), r"kPreviewTimeoutSeconds = 45\.0;")
+        self.assertRegex(compact(readiness), r"kPreviewSettleAfterReady = 40;")
+        self.assertIn("ready_to_capture = settled || timed_out;", readiness)
+        self.assertIn("worldgenPreview && worldgenPreview->world_ready()", preview)
+        armed = block(preview, "if (!s_preview_wait_armed)")
+        self.assertIn("app.capture.ui_preview_settle_after_ready = 0;", armed)
+        self.assertIn("s_preview_wait_start = std::chrono::steady_clock::now();", armed)
+        self.assertEqual(menu.count("s_preview_wait_start = std::chrono::steady_clock::now();"), 1)
+        count = 0
+        # Pending/missing world, successful renders, cache replays, refused renders,
+        # readiness loss, inactive preview, then a fresh uninterrupted warmup.
+        for ready, active, rendered, expected in (
+                [(False, True, False, 0)] + [(True, True, True, n) for n in range(1, 40)] +
+                [(True, True, False, 39), (False, True, False, 0),
+                 (True, True, True, 1), (True, False, False, 0)] +
+                [(True, True, True, n) for n in range(1, 41)]):
+            values = dict(world_ready=ready, previewActive=active, scene_rendered=rendered)
+            if cpp_expression(reset, **values):
+                count = 0
+            elif cpp_expression(increment, **values):
+                count += 1
+            self.assertEqual(count, expected)
+            self.assertEqual(cpp_expression(settled, **{
+                "world_ready": ready, "app.capture.ui_preview_settle_after_ready": count,
+                "kPreviewSettleAfterReady": 40}), ready and count >= 40)
+        for waited, expected in ((0, False), (44.999, False), (45, True), (46, True)):
+            self.assertEqual(cpp_expression(timeout, waited_s=waited,
+                                            kPreviewTimeoutSeconds=45.0), expected)
+
+    def test_capture_invalidation_batch_advancement_and_thumbnail_siblings(self):
+        menu = block(read(CLIENT / "app/MenuScreens.cpp"), "void RenderMenuScreens(")
+        transition = block(menu, "if (!previewState.capture_key || key != *previewState.capture_key)")
+        for reset in ("app.capture.ui_screenshot_settle = 0;",
+                      "app.capture.ui_preview_settle_after_ready = 0;",
+                      "previewState.capture_key = key;"):
+            self.assertIn(reset, transition)
+        self.assertLess(menu.index("previewState.capture_key = key;"),
+                        menu.index("schedule.update(now, key, interactive)"))
+        self.assertIn("std::optional<MenuSceneKey> capture_key;", read(CLIENT / "app/MenuScreens.h"))
+        without_scene = block(menu[menu.index("} else if (previewState.schedule.valid())"):], "else {")
+        reset = block(without_scene, "if (previewState.capture_key)")
+        for fragment in ("app.capture.ui_screenshot_settle = 0;",
+                         "app.capture.ui_preview_settle_after_ready = 0;",
+                         "previewState.capture_key.reset();"):
+            self.assertIn(fragment, reset)
+        # The inner ready log has no capture writes; use the final ready block.
+        capture = block(menu[menu.index("} else if (app.capture.ui_screenshot_settle < 30)"):],
+                        "if (ready_to_capture)")
+        self.assertIn("s_preview_wait_armed = false;", capture)
+        self.assertLess(capture.index("WritePixelBufferPpm("), capture.index("++app.capture.ui_screen_index;"))
+        for fragment in ("app.capture.ui_screenshot_settle = 0;",
+                         "app.capture.ui_preview_settle_after_ready = 0;",
+                         "previewState.capture_key.reset();", "RequestLoadDocument(",
+                         "glfwSetWindowShouldClose(window, GLFW_TRUE);"):
+            self.assertIn(fragment, capture)
+        self.assertIn("app.capture.ui_screen_index < app.capture.ui_screens.size()", menu)
+        thumbs = block(menu, "if (app.capture.ui_thumbs > 0")
+        self.assertNotIn("schedule.update", thumbs)
+        self.assertLess(thumbs.index("renderPipeline.render_frame("), thumbs.index("++app.capture.ui_thumbs_settle;"))
+        self.assertIn("app.capture.ui_thumbs_settle < 28", thumbs)
+        self.assertIn("app.capture.ui_thumbs_settle = 0;", thumbs)
+        self.assertIn("++app.capture.ui_thumbs_index;", thumbs)
+
+    def test_blur_reuses_geometry_and_kernels_without_changing_the_passes(self):
+        backend = read(CLIENT / "ui/gl3/RmlUi_Renderer_GL3.cpp")
+        quad = block(backend, "void RenderInterface_GL3::DrawFullscreenQuad(Rml::Vector2f")
+        identity = block(quad, "if (uv_offset == Rml::Vector2f() && uv_scaling == Rml::Vector2f(1.f))")
+        self.assertEqual(compact(identity), "DrawFullscreenQuad(); return;")
+        hit = block(quad, "if (const auto* cached = filter_quad_cache.find(key))")
+        self.assertNotIn("CompileGeometry", hit)
+        self.assertNotIn("ReleaseGeometry", hit)
+        self.assertIn("return;", hit)
+        self.assertIn("filter_quad_cache.store(key, geometry)", quad)
+        kernel = block(backend, "static void SetBlurWeights(")
+        hit = block(kernel, "if (const auto* cached = kernels.find(key))")
+        self.assertIn("glUniform1fv", hit)
+        self.assertNotIn("Exp(", hit)
+        self.assertIn("kernels.store(key, weights)", kernel)
 
     def test_nullable_frame_scan_count_requires_v2_for_all_capture_paths(self):
         writer = compact(block(read(CLIENT / "rendering/FrameScan.cpp"),

@@ -500,6 +500,9 @@ public:
     void set_sky_lut_gpu_enabled(bool e) {
         m_sky_lut.set_gpu_skyview_enabled(e);
     }
+    bool sky_lut_gpu_enabled() const {
+        return m_sky_lut.gpu_skyview_enabled();
+    }
     const glm::vec2& taau_jitter_ndc() const {
         return m_taau_jitter_ndc;
     } // sub-pixel projection jitter for the G-buffer

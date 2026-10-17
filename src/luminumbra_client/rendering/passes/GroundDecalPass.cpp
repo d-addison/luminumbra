@@ -1,4 +1,5 @@
 #include "GroundDecalPass.h"
+#include "rendering/AttributedGl.h"
 
 #include "../Camera.h"
 #include "../PassShaderLayouts.h" // enumerable ExpectedLayout registry
@@ -108,7 +109,7 @@ void GroundDecalPass::execute(const RenderContext& ctx) {
     m_shader->setInt("gDepth", 2);
 
     glBindVertexArray(m_vao);
-    glDrawArrays(GL_TRIANGLES, 0, 3);
+    Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLES, 0, 3);
     glBindVertexArray(0);
 }
 

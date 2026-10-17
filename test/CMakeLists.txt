@@ -1923,8 +1923,15 @@ target_include_directories(frame_attribution_test PRIVATE ../src)
 target_link_libraries(frame_attribution_test PRIVATE gtest_main)
 luminumbra_configure_first_party_target(frame_attribution_test)
 
+add_executable(menu_presentation_test rendering/menu_presentation_test.cpp
+    ../src/luminumbra_client/app/FrameAttribution.cpp)
+target_include_directories(menu_presentation_test PRIVATE ../src)
+target_link_libraries(menu_presentation_test PRIVATE gtest_main)
+luminumbra_configure_first_party_target(menu_presentation_test)
+
 set(LUMINUMBRA_GTEST_TARGETS
     frame_attribution_test
+    menu_presentation_test
     graphics_preset_classifier_test
     hardware_info_test
     far_volume_tile_test
