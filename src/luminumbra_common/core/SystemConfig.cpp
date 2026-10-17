@@ -1,15 +1,30 @@
 #include "core/SystemConfig.h"
 
+#include <algorithm>
+#include <array>
 #include <bit>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <ios>
+#include <istream>
 #include <limits>
+#include <map>
+#include <set>
 #include <sstream>
+#include <string>
+#include <system_error>
+#include <utility>
+#include <variant>
+#include <vector>
 
 #include "core/Environment.h"
+#include "core/FramePacing.h"
+#include "core/GraphicsPresets.h"
+#include "core/Log.h"
 #include "nlohmann/json.hpp"
 #include "persistence/WorldPersistenceRoundtrip.h" // Luminumbra::Persistence::StableChecksum
 
@@ -58,6 +73,189 @@ constexpr ParamMeta kParams[] = {
 #undef LUMIN_CONFIG_EMIT_PARAM
 };
 
+bool KnownDeveloperWidget(const std::string& id) {
+    constexpr const char* ids[] = {"perf.hud",
+                                   "perf.gpu",
+                                   "render.shaders",
+                                   "render.debug_views",
+                                   "render.wireframe",
+                                   "world.generation",
+                                   "client.settings",
+                                   "runtime.time",
+                                   "runtime.time_indicator",
+                                   "player.state",
+                                   "farm.debug",
+                                   "world.creature_labels",
+                                   "ui.data_stream",
+                                   "ui.debugger",
+                                   "console.help"};
+    for (const auto* known : ids)
+        if (id == known)
+            return true;
+    return false;
+}
+bool KnownDeveloperLayout(const std::string& id) {
+    return id == "console.toggle" || KnownDeveloperWidget(id);
+}
+bool ObsoleteDeveloperVisibilityBinding(const std::string& id) {
+    return id == "render.debug_views" || id == "render.wireframe" || id == "runtime.time";
+}
+bool KnownDeveloperBinding(const std::string& id) {
+    if (KnownDeveloperWidget(id) && !ObsoleteDeveloperVisibilityBinding(id))
+        return true;
+    constexpr const char* ids[] = {"console.toggle",
+                                   "shader.reload",
+                                   "render.debug-cycle",
+                                   "render.wireframe-toggle",
+                                   "time.slower",
+                                   "time.faster",
+                                   "time.reset"};
+    for (const auto* known : ids)
+        if (id == known)
+            return true;
+    return false;
+}
+template<class Value, class Known>
+void MergeDeveloperRecord(std::map<std::string, Value>& records,
+                          const std::string& id,
+                          Value value,
+                          Known known) {
+    if (!records.contains(id) && records.size() >= DeveloperSettings::kRecordLimit) {
+        if (!known(id))
+            return;
+        // A valid recognized record cannot be crowded out by forward-compatible ids.
+        const auto unknown = std::find_if(
+            records.begin(), records.end(), [&](const auto& entry) { return !known(entry.first); });
+        if (unknown == records.end())
+            return;
+        records.erase(unknown);
+    }
+    records[id] = std::move(value);
+}
+
+// Never compare JSON signed and unsigned numbers before checking their representation.
+bool DeveloperInteger(const nlohmann::json& value, int minimum, int maximum, int& result) {
+    if (value.is_number_unsigned()) {
+        const auto number = value.get<nlohmann::json::number_unsigned_t>();
+        if (number < static_cast<nlohmann::json::number_unsigned_t>(std::max(minimum, 0)) ||
+            number > static_cast<nlohmann::json::number_unsigned_t>(maximum))
+            return false;
+        result = static_cast<int>(number);
+        return true;
+    }
+    if (!value.is_number_integer())
+        return false;
+    const auto number = value.get<nlohmann::json::number_integer_t>();
+    if (number < minimum || number > maximum)
+        return false;
+    result = static_cast<int>(number);
+    return true;
+}
+
+// The DOM parser rejects overflowing numbers before layout validation can run. Locate
+// those tokens with the public SAX interface so recovery stays confined to the layouts subtree.
+class LayoutOverflowLocator : public nlohmann::json_sax<nlohmann::json> {
+public:
+    std::size_t offset = 0;
+    std::string token;
+    nlohmann::json::json_pointer invalid_path{"/user/developer/layouts"};
+
+    bool null() override {
+        return true;
+    }
+    bool boolean(bool) override {
+        return true;
+    }
+    bool number_integer(number_integer_t) override {
+        return true;
+    }
+    bool number_unsigned(number_unsigned_t) override {
+        return true;
+    }
+    bool number_float(number_float_t, const string_t&) override {
+        return true;
+    }
+    bool string(string_t&) override {
+        return true;
+    }
+    bool binary(binary_t&) override {
+        return true;
+    }
+    bool start_object(std::size_t) override {
+        m_frames.push_back({true, {}});
+        return true;
+    }
+    bool key(string_t& name) override {
+        m_frames.back().key = name;
+        return true;
+    }
+    bool end_object() override {
+        m_frames.pop_back();
+        return true;
+    }
+    bool start_array(std::size_t) override {
+        m_frames.push_back({false, {}});
+        return true;
+    }
+    bool end_array() override {
+        m_frames.pop_back();
+        return true;
+    }
+    bool parse_error(std::size_t position,
+                     const std::string& last_token,
+                     const nlohmann::json::exception& error) override {
+        if (error.id == 406 && m_frames.size() >= 3 && m_frames[0].object &&
+            m_frames[0].key == "user" && m_frames[1].object && m_frames[1].key == "developer" &&
+            m_frames[2].object && m_frames[2].key == "layouts" && position >= last_token.size()) {
+            offset = position - last_token.size();
+            token = last_token;
+            // An object contains independent records; any other container (or scalar)
+            // invalidates the whole layouts value. Appending a key also escapes it.
+            if (m_frames.size() > 3 && m_frames[3].object)
+                invalid_path /= m_frames[3].key;
+        }
+        return false;
+    }
+
+private:
+    struct Frame {
+        bool object;
+        std::string key;
+    };
+    std::vector<Frame> m_frames;
+};
+
+nlohmann::json ParseSettingsJson(const std::string& json_text) {
+    // Keep the ordinary path unchanged. Retry only numeric overflow in the layouts subtree;
+    // syntax errors and errors from sim/render or other user settings keep their behavior.
+    std::string recovered;
+    std::set<std::string> invalid_paths;
+    for (;;) {
+        const auto& text = invalid_paths.empty() ? json_text : recovered;
+        try {
+            auto data = nlohmann::json::parse(text);
+            for (const auto& path : invalid_paths) {
+                const nlohmann::json::json_pointer invalid_path(path);
+                if (data.contains(invalid_path))
+                    data.at(invalid_path) = nullptr; // Validation logs and ignores the entry.
+            }
+            return data;
+        } catch (const nlohmann::json::out_of_range& error) {
+            if (error.id != 406)
+                throw;
+            LayoutOverflowLocator locator;
+            nlohmann::json::sax_parse(text, &locator);
+            if (locator.token.empty() ||
+                text.compare(locator.offset, locator.token.size(), locator.token) != 0)
+                throw;
+            if (invalid_paths.empty())
+                recovered = json_text;
+            recovered.replace(locator.offset, locator.token.size(), "null");
+            invalid_paths.insert(locator.invalid_path.to_string());
+        }
+    }
+}
+
 // Overlay the `user.*` section of `data` onto `user`, setting only named fields (merge
 // semantics: an absent field keeps its current/default value). render-client-only; never hashed.
 void ParseUserSection(const nlohmann::json& data, UserSettings& user) {
@@ -65,6 +263,84 @@ void ParseUserSection(const nlohmann::json& data, UserSettings& user) {
         return;
     const nlohmann::json& u = data["user"];
 
+    if (u.contains("developer") && u["developer"].is_object()) {
+        const auto& d = u["developer"];
+        // Each record is independent: malformed siblings never discard valid preferences.
+        if (d.contains("widgets") && d["widgets"].is_object()) {
+            for (const auto& [id, record] : d["widgets"].items()) {
+                if (id.empty() || id.size() > DeveloperSettings::kIdLimit || !record.is_object() ||
+                    !record.contains("visible") || !record["visible"].is_boolean())
+                    continue;
+                MergeDeveloperRecord(user.developer.widgets,
+                                     id,
+                                     record["visible"].get<bool>(),
+                                     KnownDeveloperWidget);
+            }
+        }
+        if (d.contains("layouts")) {
+            if (!d["layouts"].is_object()) {
+                LUMINUMBRA_CORE_WARN("Ignoring malformed developer layouts object");
+            } else {
+                for (const auto& [id, record] : d["layouts"].items()) {
+                    const auto valid_number = [&](const char* field) {
+                        return record.is_object() && record.contains(field) &&
+                               record[field].is_number();
+                    };
+                    if (id.empty() || id.size() > DeveloperSettings::kIdLimit ||
+                        !valid_number("x") || !valid_number("y") || !valid_number("width") ||
+                        !valid_number("height") || !record.contains("open") ||
+                        !record["open"].is_boolean()) {
+                        LUMINUMBRA_CORE_WARN("Ignoring malformed developer layout entry: {}", id);
+                        continue;
+                    }
+                    const double x = record["x"].get<double>(), y = record["y"].get<double>();
+                    const double width = record["width"].get<double>(),
+                                 height = record["height"].get<double>();
+                    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(width) ||
+                        !std::isfinite(height) || std::abs(x) > 1000000 || std::abs(y) > 1000000 ||
+                        width <= 0 || width > 1000000 || height <= 0 || height > 1000000) {
+                        LUMINUMBRA_CORE_WARN("Ignoring malformed developer layout entry: {}", id);
+                        continue;
+                    }
+                    const DeveloperPanelLayout layout{static_cast<float>(x),
+                                                      static_cast<float>(y),
+                                                      static_cast<float>(width),
+                                                      static_cast<float>(height),
+                                                      record["open"].get<bool>()};
+                    if (!ValidDeveloperPanelLayout(layout)) {
+                        LUMINUMBRA_CORE_WARN("Ignoring malformed developer layout entry: {}", id);
+                        continue;
+                    }
+                    MergeDeveloperRecord(user.developer.layouts, id, layout, KnownDeveloperLayout);
+                }
+            }
+        }
+        if (d.contains("bindings") && d["bindings"].is_object()) {
+            for (const auto& [id, record] : d["bindings"].items()) {
+                if (ObsoleteDeveloperVisibilityBinding(id))
+                    continue;
+                if (id.empty() || id.size() > DeveloperSettings::kIdLimit || !record.is_object() ||
+                    !record.contains("key") || !record["key"].is_number_integer() ||
+                    !record.contains("mods") || !record["mods"].is_number_integer())
+                    continue;
+                int key = 0, mods = 0;
+                if (!DeveloperInteger(record["key"], -1, 348, key) ||
+                    !DeveloperInteger(record["mods"], 0, 15, mods))
+                    continue;
+                const bool known_key =
+                    key == -1 || key == 32 || key == 39 || (key >= 44 && key <= 57) || key == 59 ||
+                    key == 61 || (key >= 65 && key <= 93) || key == 96 || key == 161 ||
+                    key == 162 || (key >= 256 && key <= 269) || (key >= 280 && key <= 284) ||
+                    (key >= 290 && key <= 314) || (key >= 320 && key <= 336) || key == 348;
+                if (!known_key)
+                    continue;
+                MergeDeveloperRecord(user.developer.bindings,
+                                     id,
+                                     DeveloperBindingSetting{key, mods},
+                                     KnownDeveloperBinding);
+            }
+        }
+    }
     if (u.contains("video") && u["video"].is_object()) {
         const nlohmann::json& v = u["video"];
         if (v.contains("resolution") && v["resolution"].is_string())
@@ -73,10 +349,18 @@ void ParseUserSection(const nlohmann::json& data, UserSettings& user) {
             user.window_mode = v["window_mode"].get<std::string>();
         if (v.contains("vsync") && v["vsync"].is_boolean())
             user.vsync = v["vsync"].get<bool>();
+        if (v.contains("frame_cap") && v["frame_cap"].is_number_integer()) {
+            // Compare before conversion: oversized JSON integers must not wrap to
+            // an accepted cap. Invalid fields keep the current/default value.
+            for (const int cap : kFrameCaps) {
+                if (v["frame_cap"] == cap) {
+                    user.frame_cap = cap;
+                    break;
+                }
+            }
+        }
         if (v.contains("fov") && v["fov"].is_number())
             user.fov = v["fov"].get<float>();
-        if (v.contains("render_scale") && v["render_scale"].is_number())
-            user.render_scale = v["render_scale"].get<float>();
         if (v.contains("ui_scale") && v["ui_scale"].is_number())
             user.ui_scale = v["ui_scale"].get<float>();
         if (v.contains("mouse_sensitivity") && v["mouse_sensitivity"].is_number())
@@ -99,7 +383,116 @@ void ParseUserSection(const nlohmann::json& data, UserSettings& user) {
     }
 }
 
+bool ParseGraphicsSection(const nlohmann::json& data,
+                          UserSettings& user,
+                          bool legacy,
+                          std::string& error) {
+    const auto& section = data.at("user");
+    if (legacy) {
+        // A legacy installation retains Ultra and every explicitly authored
+        // graphics value, including an explicit value equal to the default.
+        user.graphics.base_preset = GraphicsPreset::Ultra;
+        user.graphics.preset_revision = kGraphicsPresetRevision;
+        if (section.contains("graphics")) {
+            error = "graphics settings require a settings schema version";
+            return false;
+        }
+        if (section.contains("video") && section["video"].is_object() &&
+            section["video"].contains("render_scale")) {
+            const auto& scale = section["video"]["render_scale"];
+            if (!scale.is_number()) {
+                error = "legacy render_scale must be numeric";
+                return false;
+            }
+            user.graphics.overrides["render_scale"] = scale.get<double>();
+        }
+    } else {
+        if (!section.contains("graphics") || !section["graphics"].is_object()) {
+            error = "missing graphics settings object";
+            return false;
+        }
+        const auto& graphics = section["graphics"];
+        GraphicsSettings parsed;
+        if (!graphics.contains("base_preset") || !graphics["base_preset"].is_string() ||
+            !ParseGraphicsPreset(graphics["base_preset"].get<std::string>(), parsed.base_preset) ||
+            !graphics.contains("preset_revision") ||
+            !graphics["preset_revision"].is_number_integer() ||
+            graphics["preset_revision"] != kGraphicsPresetRevision ||
+            !graphics.contains("overrides") || !graphics["overrides"].is_object()) {
+            error = "invalid graphics preset, revision or overrides";
+            return false;
+        }
+        for (const auto& [key, value] : graphics["overrides"].items()) {
+            if (value.is_boolean())
+                parsed.overrides[key] = value.get<bool>();
+            else if (value.is_number())
+                parsed.overrides[key] = value.get<double>();
+            else if (value.is_string())
+                parsed.overrides[key] = value.get<std::string>();
+            else {
+                error = "invalid graphics override type: " + key;
+                return false;
+            }
+        }
+        if (graphics.contains("detection")) {
+            const auto& detection = graphics["detection"];
+            if (!detection.is_object()) {
+                error = "invalid graphics detection metadata";
+                return false;
+            }
+            if (detection.contains("rules_revision")) {
+                const auto& revision = detection["rules_revision"];
+                if (!revision.is_number_integer() || revision < 0 ||
+                    revision > std::numeric_limits<std::uint32_t>::max()) {
+                    error = "invalid detection rules revision";
+                    return false;
+                }
+                parsed.detection.rules_revision = revision.get<std::uint32_t>();
+            }
+            if (detection.contains("observed_hardware")) {
+                const auto& hardware = detection["observed_hardware"];
+                // Hardware summary is bounded to 4096 bytes in persisted metadata.
+                if (!hardware.is_string() || hardware.get_ref<const std::string&>().size() > 4096) {
+                    error = "invalid observed hardware summary";
+                    return false;
+                }
+                parsed.detection.observed_hardware = hardware.get<std::string>();
+            }
+            if (detection.contains("recommended_preset") &&
+                (!detection["recommended_preset"].is_string() ||
+                 !ParseGraphicsPreset(detection["recommended_preset"].get<std::string>(),
+                                      parsed.detection.recommended_preset))) {
+                error = "invalid recommended graphics preset";
+                return false;
+            }
+        }
+        user.graphics = std::move(parsed);
+    }
+    ResolvedGraphics resolved;
+    if (!ResolveGraphics(user.graphics, {}, resolved, error))
+        return false;
+    user.render_scale = static_cast<float>(resolved.values.render_scale);
+    return true;
+}
+
+// Bound settings overlays to 1 MiB before allocating/parsing. Read through the
+// owning stream without separate file-size probes (also valid for Windows locks).
+constexpr std::size_t kMaxSettingsBytes = 1'048'576;
+bool ReadSettingsText(std::istream& file, std::string& text) {
+    std::array<char, 4096> chunk{};
+    while (file) {
+        file.read(chunk.data(), static_cast<std::streamsize>(chunk.size()));
+        const auto count = static_cast<std::size_t>(file.gcount());
+        if (count > kMaxSettingsBytes - text.size())
+            return false;
+        text.append(chunk.data(), count);
+    }
+    return file.eof() && !file.bad();
+}
+
 } // namespace
+
+SystemConfig::SystemConfig() = default;
 
 SystemConfig SystemConfig::Defaults() {
     return SystemConfig{};
@@ -119,7 +512,7 @@ SystemConfig SystemConfig::FromJsonString(const std::string& json_text) {
 
     nlohmann::json data;
     try {
-        data = nlohmann::json::parse(json_text);
+        data = ParseSettingsJson(json_text);
     } catch (const nlohmann::json::parse_error&) {
         return cfg; // malformed/empty/blank -> defaults (graceful)
     }
@@ -178,7 +571,8 @@ SystemConfig SystemConfig::FromJsonString(const std::string& json_text) {
         }
     }
 
-    ParseUserSection(data, cfg.m_user); // user.* (client-only, never hashed)
+    if (data.contains("user") || data.contains("settings_schema_version"))
+        cfg.OverlayUserFromJsonString(json_text); // user.* only; same migration on every load path
     return cfg;
 }
 
@@ -211,13 +605,19 @@ bool SystemConfig::TryLoadFromFile(const std::string& path,
             error = "systems config must be a JSON object: " + path;
             return false;
         }
-        config = FromJsonString(document.dump());
+        config.ReplaceSystemsFrom(FromJsonString(document.dump()));
     } catch (const nlohmann::json::exception& exception) {
         error = "invalid systems config: " + path + ": " + exception.what();
         return false;
     }
     error.clear();
     return true;
+}
+
+void SystemConfig::ReplaceSystemsFrom(const SystemConfig& source) {
+    m_enabled = source.m_enabled;
+    m_param_set = source.m_param_set;
+    m_params = source.m_params;
 }
 
 float SystemConfig::param(SysParam id, float fallback) const {
@@ -347,37 +747,92 @@ int SystemConfig::keybind(const std::string& action, int fallback) const {
 }
 
 void SystemConfig::OverlayUserFromJsonString(const std::string& json_text) {
-    nlohmann::json data;
-    try {
-        data = nlohmann::json::parse(json_text);
-    } catch (const nlohmann::json::parse_error&) {
-        return; // malformed overlay -> leave settings unchanged
+    std::string error;
+    const auto recover = [this](std::string reason) {
+        m_settings_load_report = {.state = SettingsLoadState::Recovery,
+                                  .needs_first_launch_detection = false,
+                                  .recovery_reason = std::move(reason)};
+    };
+    if (json_text.size() > kMaxSettingsBytes) {
+        recover("settings overlay exceeds 1 MiB");
+        return;
     }
-    ParseUserSection(data, m_user); // only user.*; sim/render ignored
+    try {
+        const auto data = ParseSettingsJson(json_text);
+        if (!data.is_object() || !data.contains("user") || !data["user"].is_object()) {
+            recover("settings overlay must contain a user object");
+            return;
+        }
+        const bool legacy = !data.contains("settings_schema_version");
+        if (!legacy && (!data["settings_schema_version"].is_number_integer() ||
+                        data["settings_schema_version"] != kSettingsSchemaVersion)) {
+            recover("unsupported settings schema version");
+            return;
+        }
+        auto candidate = m_user;
+        ParseUserSection(data, candidate);
+        if (!ParseGraphicsSection(data, candidate, legacy, error)) {
+            recover(std::move(error));
+            return;
+        }
+        m_user = std::move(candidate);
+        m_settings_load_report = {.state = legacy ? SettingsLoadState::MigratedLegacy
+                                                  : SettingsLoadState::Loaded,
+                                  .needs_first_launch_detection = false,
+                                  .recovery_reason = {}};
+    } catch (const nlohmann::json::out_of_range&) {
+        // Keep numeric overflow outside developer layouts a hard refusal, and
+        // protect the original overlay from later saves even if the caller catches it.
+        recover("numeric overflow in settings overlay");
+        throw;
+    } catch (const nlohmann::json::exception&) {
+        recover("malformed settings overlay");
+    }
 }
 
 SystemConfig SystemConfig::LoadLayered(const std::string& defaults_path,
                                        const std::string& overlay_path) {
     SystemConfig cfg =
         LoadFromFile(defaults_path); // sim/render/user from defaults (missing -> defaults)
-    std::ifstream overlay(overlay_path);
-    if (overlay) {
-        std::ostringstream buffer;
-        buffer << overlay.rdbuf();
-        cfg.OverlayUserFromJsonString(buffer.str()); // per-user file overrides only user.*
+    std::error_code ec;
+    const auto status = std::filesystem::symlink_status(overlay_path, ec);
+    if (status.type() == std::filesystem::file_type::not_found &&
+        (!ec || ec == std::errc::no_such_file_or_directory)) {
+        cfg.m_settings_load_report = SettingsLoadReport{};
+        return cfg;
     }
+    // Directories, dangling symlinks and unreadable files are recovery, not first launch.
+    if (!ec && std::filesystem::is_regular_file(overlay_path, ec) && !ec) {
+        std::ifstream overlay(overlay_path, std::ios::binary);
+        std::string text;
+        if (overlay && ReadSettingsText(overlay, text)) {
+            cfg.OverlayUserFromJsonString(text);
+            return cfg;
+        }
+    }
+    cfg.m_settings_load_report = {.state = SettingsLoadState::Recovery,
+                                  .needs_first_launch_detection = false,
+                                  .recovery_reason = "cannot read settings overlay"};
     return cfg;
 }
 
 bool SystemConfig::SaveUserOverlay(const std::string& path) const {
+    if (m_settings_load_report.state == SettingsLoadState::Recovery)
+        return false;
+    ResolvedGraphics resolved;
+    std::string error;
+    if (!ResolveGraphics(m_user.graphics, {}, resolved, error) ||
+        GraphicsPresetName(m_user.graphics.detection.recommended_preset).empty() ||
+        m_user.graphics.detection.observed_hardware.size() > 4096)
+        return false;
     // Serialize ONLY the user.* section (no sim/render leakage). Ordered keybinds -> deterministic.
     nlohmann::json user;
     user["video"] = {
         {"resolution", m_user.resolution},
         {"window_mode", m_user.window_mode},
         {"vsync", m_user.vsync},
+        {"frame_cap", IsValidFrameCap(m_user.frame_cap) ? m_user.frame_cap : 0},
         {"fov", m_user.fov},
-        {"render_scale", m_user.render_scale},
         {"ui_scale", m_user.ui_scale},
         {"mouse_sensitivity", m_user.mouse_sensitivity},
     };
@@ -390,26 +845,102 @@ bool SystemConfig::SaveUserOverlay(const std::string& path) const {
     for (const auto& [action, key] : m_user.keybinds)
         controls[action] = key;
     user["controls"] = controls;
+    nlohmann::json developer;
+    developer["schema_version"] = 1;
+    developer["widgets"] = nlohmann::json::object();
+    developer["bindings"] = nlohmann::json::object();
+    developer["layouts"] = nlohmann::json::object();
+    std::size_t widget_count = 0, binding_count = 0, layout_count = 0;
+    for (const bool recognized : {true, false}) {
+        for (const auto& [id, visible] : m_user.developer.widgets) {
+            if (KnownDeveloperWidget(id) != recognized || id.empty() ||
+                id.size() > DeveloperSettings::kIdLimit ||
+                widget_count >= DeveloperSettings::kRecordLimit)
+                continue;
+            developer["widgets"][id] = {{"visible", visible}};
+            ++widget_count;
+        }
+        for (const auto& [id, layout] : m_user.developer.layouts) {
+            if (KnownDeveloperLayout(id) != recognized || id.empty() ||
+                id.size() > DeveloperSettings::kIdLimit ||
+                layout_count >= DeveloperSettings::kRecordLimit ||
+                !ValidDeveloperPanelLayout(layout))
+                continue;
+            developer["layouts"][id] = {{"x", layout.x},
+                                        {"y", layout.y},
+                                        {"width", layout.width},
+                                        {"height", layout.height},
+                                        {"open", layout.open}};
+            ++layout_count;
+        }
+        for (const auto& [id, binding] : m_user.developer.bindings) {
+            if (ObsoleteDeveloperVisibilityBinding(id) || KnownDeveloperBinding(id) != recognized ||
+                id.empty() || id.size() > DeveloperSettings::kIdLimit ||
+                binding_count >= DeveloperSettings::kRecordLimit)
+                continue;
+            developer["bindings"][id] = {{"key", binding.key}, {"mods", binding.mods}};
+            ++binding_count;
+        }
+    }
+    user["developer"] = developer;
+
+    nlohmann::json overrides = nlohmann::json::object();
+    for (const auto& [key, value] : m_user.graphics.overrides) {
+        if (const auto* boolean = std::get_if<bool>(&value))
+            overrides[key] = *boolean;
+        else if (const auto* number = std::get_if<double>(&value))
+            overrides[key] = *number;
+        else if (const auto* text = std::get_if<std::string>(&value))
+            overrides[key] = *text;
+        else
+            return false;
+    }
+    user["graphics"] = {
+        {"base_preset", GraphicsPresetName(m_user.graphics.base_preset)},
+        {"preset_revision", m_user.graphics.preset_revision},
+        {"overrides", overrides},
+        {"detection",
+         {{"rules_revision", m_user.graphics.detection.rules_revision},
+          {"observed_hardware", m_user.graphics.detection.observed_hardware},
+          {"recommended_preset",
+           GraphicsPresetName(m_user.graphics.detection.recommended_preset)}}},
+    };
 
     nlohmann::json doc;
     doc["_comment"] =
         "Luminumbra per-user settings overlay (user.* only; client-only, never hashed).";
     doc["user"] = user;
+    doc["settings_schema_version"] = kSettingsSchemaVersion;
+    std::string serialized;
+    try {
+        serialized = doc.dump(2) + '\n';
+    } catch (const nlohmann::json::exception&) {
+        return false;
+    }
+    if (serialized.size() > kMaxSettingsBytes)
+        return false;
 
     std::error_code ec;
     const std::filesystem::path out(path);
     if (out.has_parent_path())
         std::filesystem::create_directories(out.parent_path(), ec);
+    if (ec)
+        return false;
 
     // Atomic-ish write: temp file then rename over the target.
     const std::filesystem::path tmp = out.string() + ".tmp";
+    bool written = false;
     {
         std::ofstream file(tmp, std::ios::binary | std::ios::trunc);
         if (!file)
             return false;
-        file << doc.dump(2) << '\n';
-        if (!file)
-            return false;
+        file << serialized;
+        file.close(); // Detect flush/close failures before publishing, on every platform.
+        written = !file.fail();
+    }
+    if (!written) {
+        std::filesystem::remove(tmp, ec);
+        return false;
     }
     std::filesystem::rename(tmp, out, ec);
     if (ec) {

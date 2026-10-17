@@ -1,13 +1,21 @@
 #include "ModeHelpers.h"
 
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <system_error>
 
+#include "../ServerCliOptions.h"
+#include "../ServerWorldRunner.h"
 #include "luminumbra_common/core/SystemConfig.h"
+#include "luminumbra_common/net/LockstepSession.h"
+#include "luminumbra_common/network/NetworkLoopbackAuthority.h"
+#include "luminumbra_common/simulation/SimBudgetProfile.h"
+#include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
 #include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
 
 Luminumbra::Net::HelloMsg RuntimeHelloFrom(const ServerCliOptions& options) {
     namespace fs = std::filesystem;

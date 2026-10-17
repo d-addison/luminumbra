@@ -4,6 +4,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <initializer_list>
@@ -18,6 +19,7 @@
 #include "nlohmann/json.hpp"
 #include "nlohmann/json_fwd.hpp"
 
+#include "../ai/CreatureSpeciesRegistry.h"
 #include "../core/FilesystemPath.h"
 #include "../core/Log.h"
 #include "../systems/SHIELD_WorldSystem.h"
@@ -85,7 +87,12 @@ bool ResolveDependencyManifest(TerrainPresetLoadResult& preset,
                 return std::string();
             }
         }
-        return Filesystem::GenericUtf8PathString(logical);
+        auto text = Filesystem::GenericUtf8PathString(logical);
+        if (!World::IsValidDependencyPathUtf8(text)) {
+            errors.push_back("worldgen dependency logical path is not valid UTF-8");
+            return std::string();
+        }
+        return text;
     };
     const auto state = [&](const std::string& logical, const char* outcome) {
         auto& entry = entries[logical];
@@ -137,16 +144,18 @@ bool ResolveDependencyManifest(TerrainPresetLoadResult& preset,
                 const auto& table = snapshot->biome_table;
                 if (!errors.empty())
                     return false;
-                state(logical,
-                      table.ok() && !table.empty()
-                          ? "biome-table-accepted"
-                          : "biome-table-rejected/empty:legacy-classification");
+                if (!table.ok() || table.empty()) {
+                    errors.push_back("invalid worldgen biome table: " + logical);
+                    return false;
+                }
+                state(logical, "biome-table-accepted");
             }
         }
         if (preset.params.structures_enabled) {
             const auto structures = data_root / "common/structures";
             if (!dependency_exists(structures)) {
-                state("common/structures", "structures-directory-absent");
+                errors.push_back("missing worldgen structure pools: common/structures");
+                return false;
             } else {
                 if (!std::filesystem::is_directory(structures)) {
                     errors.push_back("unreadable worldgen dependency directory: common/structures");
@@ -157,6 +166,10 @@ bool ResolveDependencyManifest(TerrainPresetLoadResult& preset,
                 for (const auto& type : std::filesystem::directory_iterator(structures)) {
                     if (type.is_directory())
                         type_dirs.push_back(type.path());
+                }
+                if (type_dirs.empty()) {
+                    errors.push_back("missing worldgen structure pools: common/structures");
+                    return false;
                 }
                 std::sort(type_dirs.begin(), type_dirs.end(), [](const auto& a, const auto& b) {
                     return Filesystem::GenericUtf8PathString(a.filename()) <
@@ -179,13 +192,42 @@ bool ResolveDependencyManifest(TerrainPresetLoadResult& preset,
                         errors.push_back("failed to read worldgen structure pool: " + logical);
                         return false;
                     }
+                    if (!pool.ok()) {
+                        errors.push_back("invalid or empty worldgen structure pool: " + logical);
+                        return false;
+                    }
                     if (!errors.empty())
                         return false;
-                    state(logical, pool.ok() ? "pool-accepted" : "pool-rejected/empty");
+                    state(logical, "pool-accepted");
                     snapshot->structure_pools.push_back(std::move(pool));
                 }
             }
         }
+        // Species are session inputs even when biome/structure generation is off.
+        // Parse through the manifest reader, then retain that exact registry so
+        // GameSession cannot reopen different bytes after identity construction.
+        auto species = std::make_shared<luminumbra::ai::CreatureSpeciesRegistry>();
+        const auto species_dir = data_root / "common/creatures/species";
+        if (dependency_exists(species_dir)) {
+            state("common/creatures/species", "species-directory-present");
+            std::vector<std::string> species_errors;
+            bool species_io_failed = false;
+            species->LoadFromDirectory(
+                species_dir, species_errors, read_file, &species_io_failed, read_status);
+            if (species_io_failed) {
+                errors.push_back("failed to read session species dependencies");
+                for (const auto& message : species_errors)
+                    errors.push_back("Species definition load: " + message);
+                return false;
+            }
+            if (!errors.empty())
+                return false;
+            for (const auto& message : species_errors) {
+                preset.warnings.push_back("Species definition load: " + message);
+                LUMINUMBRA_CORE_WARN("Species definition load: {}", message);
+            }
+        }
+        snapshot->species_table = std::move(species);
         manifest = nlohmann::json::array();
         for (const auto& [logical, entry] : entries) {
             manifest.push_back(entry);
@@ -333,9 +375,7 @@ void ParseBiomesBlock(const nlohmann::json& gen_params,
     biomes.enabled = !biomes.table.empty();
     if (biomes.enabled) {
         // The table path is relative to the data/ root, resolved against the
-        // explicit data_root the caller supplied (the on-disk loader derives it
-        // four parents up from the preset; the in-memory seam is handed it
-        // directly so the table resolves correctly without a temp file).
+        // explicit data_root the caller supplied, independently of save storage.
         biomes.resolved_table_path = Filesystem::GenericUtf8PathString(
             Filesystem::LexicallyNormalPath(data_root / Filesystem::PathFromUtf8(biomes.table)));
     }
@@ -419,6 +459,14 @@ std::string TerrainPresetContentHash(const nlohmann::json& preset) {
 }
 
 TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path) {
+    std::error_code ec;
+    const auto preset_dir = Filesystem::AbsolutePath(preset_path, ec).parent_path();
+    return LoadTerrainPreset(preset_path,
+                             preset_dir.parent_path().parent_path().parent_path() / "data");
+}
+
+TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path,
+                                          const std::filesystem::path& data_root) {
     TerrainPresetLoadResult result;
 
     std::ifstream file(preset_path);
@@ -437,15 +485,6 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
         return result;
     }
 
-    // The table/structure paths are relative to the data/ root. Presets live at
-    // <root>/worlds/atlas/presets/<name>.json, so the data root is four parents
-    // up from the preset file. Derive it here and hand it to the in-memory parse
-    // so on-disk loads are byte-identical to before.
-    std::error_code ec;
-    const std::filesystem::path preset_dir =
-        Filesystem::AbsolutePath(preset_path, ec).parent_path();
-    const std::filesystem::path data_root =
-        preset_dir.parent_path().parent_path().parent_path() / "data";
     return LoadTerrainPresetFromJson(
         data, data_root, Filesystem::GenericUtf8PathString(preset_path));
 }
@@ -782,9 +821,19 @@ LoadTerrainPresetFromJson(const nlohmann::json& source,
 } catch (const nlohmann::json::exception& error) {
     // File and in-memory callers share the same refusal for malformed typed values.
     TerrainPresetLoadResult result;
-    result.errors.push_back("invalid world preset JSON values '" + provenance +
-                            "': " + error.what());
+    result.errors.push_back("failed to resolve world preset: invalid world preset JSON values '" +
+                            provenance + "': " + error.what());
     return result;
+} catch (const std::exception& error) {
+    // Include serialization/hashing in the resolver boundary. Discard any captured
+    // snapshot as well as the identity so callers cannot adopt a partial result.
+    TerrainPresetLoadResult refused;
+    refused.errors.push_back("failed to resolve world preset: " + std::string(error.what()));
+    return refused;
+} catch (...) {
+    TerrainPresetLoadResult refused;
+    refused.errors.push_back("failed to resolve world preset: unknown exception");
+    return refused;
 }
 
 bool LoadTerrainPresetOverride(const std::filesystem::path& preset_path,

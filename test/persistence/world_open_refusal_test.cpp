@@ -1,3 +1,4 @@
+#include "../support/WorldgenTestData.h"
 #include <gtest/gtest.h>
 
 #include "luminumbra_common/components/CoreComponents.h"
@@ -109,6 +110,7 @@ protected:
         fs::create_directories(root / "worlds/atlas/presets");
         fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets/default.json",
                       root / "worlds/atlas/presets/default.json");
+        TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, root);
         fs::copy(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets-rev6",
                  root / "worlds/atlas/presets-rev6",
                  fs::copy_options::recursive);
@@ -376,6 +378,95 @@ TEST_F(WorldOpenRefusal, MissingMetadataRefusesCatalogClientAndServerWithoutChan
     runner.Shutdown(&report);
     EXPECT_FALSE(report.saved);
     EXPECT_EQ(DiskBytes(root), before);
+}
+
+TEST_F(WorldOpenRefusal, SeparateSaveRootUsesRuntimeFallbackForLegacyPresets) {
+    const auto storage = root / "storage";
+    fs::create_directories(storage / "worlds");
+    fs::rename(root / "worlds/saves", storage / "worlds/saves");
+    save = storage / "worlds/saves/fixture";
+    ASSERT_FALSE(fs::exists(save / "preset.json"));
+    for (const std::string name : {"default", "legacy_custom"}) {
+        SCOPED_TRACE(name);
+        const auto preset =
+            root / (name == "default" ? "worlds/atlas/presets-rev6" : "worlds/atlas/presets") /
+            (name + ".json");
+        if (name != "default")
+            fs::copy_file(root / "worlds/atlas/presets/default.json", preset);
+        auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+        metadata["worldType"] = name;
+        Write(save / "world_info.json", metadata.dump());
+        const auto inspected = Persistence::InspectSavedWorld(storage, root, "fixture");
+        ASSERT_TRUE(inspected.error.empty()) << inspected.error;
+        EXPECT_EQ(inspected.preset_path, preset);
+        const auto catalog = Persistence::EnumerateSavedWorlds(storage, root);
+        ASSERT_TRUE(catalog.error.empty()) << catalog.error;
+        ASSERT_EQ(catalog.worlds.size(), 1u);
+        EXPECT_TRUE(catalog.worlds.front().error.empty());
+        EXPECT_EQ(catalog.worlds.front().preset_path, preset);
+        GameSession session;
+        session.SetRootPath(RootString());
+        session.SetSaveRootPath(storage);
+        session.SetJobSystem(&jobs);
+        ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
+        EXPECT_EQ(session.GetMetadata().worldType, name);
+    }
+}
+
+TEST_F(WorldOpenRefusal, SeparateSaveRootRetainsEmbeddedPresetRefusals) {
+    const auto storage = root / "storage";
+    fs::create_directories(storage / "worlds");
+    fs::rename(root / "worlds/saves", storage / "worlds/saves");
+    save = storage / "worlds/saves/fixture";
+    const auto canonical =
+        nlohmann::json::parse(Read(root / "worlds/atlas/presets/default.json")).dump();
+    const auto original = nlohmann::json::parse(Read(save / "world_info.json"));
+    for (const std::string name : {"default", "custom"}) {
+        SCOPED_TRACE(name);
+        Write(root / "worlds/atlas/presets" / (name + ".json"), canonical);
+        auto metadata = original;
+        metadata["worldType"] = name;
+        metadata["presetFormat"] = Persistence::kSavedPresetFormat;
+        metadata["presetIdentity"] = Persistence::StableChecksum(canonical);
+        Write(save / "preset.json", canonical);
+        Write(save / "world_info.json", metadata.dump());
+        const auto valid = Persistence::InspectSavedWorld(storage, root, "fixture");
+        ASSERT_TRUE(valid.error.empty()) << valid.error;
+        EXPECT_EQ(valid.preset_path, save / "preset.json");
+        EXPECT_EQ(valid.preset_json, canonical);
+        for (const std::string defect :
+             {"missing preset", "missing identity", "identity mismatch", "unsupported format"}) {
+            SCOPED_TRACE(defect);
+            Write(save / "preset.json", canonical);
+            auto damaged = metadata;
+            if (defect == "missing preset")
+                fs::remove(save / "preset.json");
+            else if (defect == "missing identity")
+                damaged.erase("presetIdentity");
+            else if (defect == "identity mismatch")
+                damaged["presetIdentity"] = "mismatched";
+            else
+                damaged["presetFormat"] = 0;
+            Write(save / "world_info.json", damaged.dump());
+            const auto before = DiskBytes(root);
+            const auto inspected = Persistence::InspectSavedWorld(storage, root, "fixture");
+            ASSERT_FALSE(inspected.error.empty());
+            const auto catalog = Persistence::EnumerateSavedWorlds(storage, root);
+            ASSERT_TRUE(catalog.error.empty()) << catalog.error;
+            ASSERT_EQ(catalog.worlds.size(), 1u);
+            EXPECT_EQ(catalog.worlds.front().error, inspected.error);
+            GameSession session;
+            session.SetRootPath(RootString());
+            session.SetSaveRootPath(storage);
+            session.SetJobSystem(&jobs);
+            EXPECT_FALSE(session.LoadWorld("fixture"));
+            EXPECT_EQ(session.GetWorldOpenError(), inspected.error);
+            EXPECT_EQ(session.GetWorldSystem(), nullptr);
+            EXPECT_FALSE(session.SaveWorld());
+            EXPECT_FALSE(session.SaveWorldState());
+            EXPECT_EQ(DiskBytes(root), before);
+        }
+    }
 }
 
 TEST_F(WorldOpenRefusal, MissingEmbeddedPresetAndAtlasFallbackRefuseBeforeGeneration) {
@@ -719,8 +810,9 @@ TEST_F(WorldOpenRefusal, NonEmbeddedRevisionSixHillsPreservesTerrainIdentity) {
     const fs::path source = LUMINUMBRA_SOURCE_ROOT;
     Write(save / "world_info.json",
           Read(source / "test/fixtures/saves/revision6-hills/world_info.json"));
-    fs::create_directories(root / "data");
-    fs::copy(source / "data/common", root / "data/common", fs::copy_options::recursive);
+    // SetUp provisions the runtime data once through CopyWorldgenTestData.
+    ASSERT_TRUE(fs::is_regular_file(root / "data/common/biomes.json"));
+    ASSERT_TRUE(fs::is_directory(root / "data/common/structures"));
     ASSERT_FALSE(fs::exists(save / "preset.json"));
     const auto before = DiskBytes(root);
     const auto historical =
