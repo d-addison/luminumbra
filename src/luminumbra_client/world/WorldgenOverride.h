@@ -8,7 +8,9 @@
 namespace Luminumbra::Client {
 
 // Rewrite the display name through a checked, durable temporary file beside the
-// destination. Remove the source only after successful publication and durable flush.
+// destination. Refuse an occupied distinct destination through atomic no-replace
+// publication. Remove the source only after the complete destination is flushed.
+// Same-file and hard-link aliases retain the shared writer's replacement semantics.
 bool RenameUserPreset(const std::filesystem::path& source,
                       const std::filesystem::path& destination,
                       const std::string& display_name);

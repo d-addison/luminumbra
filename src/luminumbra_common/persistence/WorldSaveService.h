@@ -193,8 +193,8 @@ public:
 
     // Test seam for POSIX directory flushes: the next flush after `flushes_to_skip`
     // successful ones fails once, then the seam disarms. A negative value disarms it.
-    // Flushes covered are the ancestor-entry flushes of write_file_durably and the
-    // post-rename destination-directory flush of every region replacement; Windows
+    // Flushes covered include ancestor entries for every replacement, publication
+    // and removal directories (including already-absent files on retries); Windows
     // builds never consult it. Process-global; single-threaded persistence tests only.
     static void set_directory_flush_failure_for_testing(int flushes_to_skip);
 
@@ -215,8 +215,29 @@ public:
                                    const std::string& bytes,
                                    std::vector<std::string>* errors = nullptr);
 
+    // Create a new file with checked, atomic no-replace publication. An occupied
+    // entry (including a dangling symlink) is refused without changing its bytes.
+    // All in-process writers share the same ownership and staging cleanup.
+    static bool create_file_durably(const std::filesystem::path& destination,
+                                    const std::string& bytes,
+                                    std::vector<std::string>* errors = nullptr);
+
+    // Rewrite and rename a parsed file under process save ownership. Refuse an
+    // occupied distinct destination; publication to a missing destination uses
+    // an atomic no-replace operation. Recheck expected source bytes before any
+    // publication. Same-file/case/path aliases and hard links are supported.
+    // Failed source removal rolls back a newly created destination when possible;
+    // alias replacement and post-unlink flush failures may leave the complete new
+    // file visible, as with write_file_durably's final-directory-flush failures.
+    static bool rename_file_durably(const std::filesystem::path& source,
+                                    const std::filesystem::path& destination,
+                                    const std::string& expected_bytes,
+                                    const std::string& bytes,
+                                    std::vector<std::string>* errors = nullptr);
+
     // Retires a neutral optional record and reclaims abandoned staging without
-    // creating directories. Uses the same synchronization as durable writes.
+    // creating directories. POSIX flushes the parent even on an already-absent
+    // retry. Uses the same synchronization as durable writes.
     static bool remove_file_and_staging(const std::filesystem::path& destination,
                                         std::vector<std::string>* errors = nullptr);
 

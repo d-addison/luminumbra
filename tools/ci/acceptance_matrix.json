@@ -3140,7 +3140,7 @@
     {
       "id": "iss.429",
       "source": "issue #429",
-      "statement": "Client defaults, server boot and network admission load systems configuration from the runtime root using generic path spelling. Registered regressions use a conflicting launch directory and cover unavailable or partial runtime defaults, user overlays and explicit overrides. Source checks also require runtime-root UI watches; native execution remains required. Directory watches retain RML and RCSS filters together and discover nested additions; registered regressions also cover duplicate registration, wildcards and removed directories.",
+      "statement": "Client defaults, server boot and network admission load systems configuration from the runtime root with native filesystem paths. Registered regressions use a conflicting launch directory and cover unavailable or partial runtime defaults, user overlays and explicit overrides. Source checks also require runtime-root UI watches; native execution remains required. Directory watches retain RML and RCSS filters together and discover nested additions; registered regressions also cover duplicate registration, wildcards and removed directories.",
       "status": "needs-native-run",
       "evidence": [
         {

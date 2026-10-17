@@ -52,7 +52,12 @@
 #include <windows.h>
 #else
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <sys/types.h>
+#if defined(__linux__)
+#include <linux/fs.h>
+#include <sys/syscall.h>
+#endif
 #include <unistd.h>
 #endif
 
@@ -79,10 +84,70 @@ constexpr std::size_t kRecordHeaderSize = 18;
 constexpr std::uint8_t kRecordFlagEdited = 0x01;
 constexpr std::uint8_t kRecordFlagWaterPresent = 0x02;
 
+struct FileIdentity {
+#if defined(_WIN32)
+    DWORD volume = 0;
+    DWORD index_high = 0;
+    DWORD index_low = 0;
+#else
+    dev_t device{};
+    ino_t inode{};
+#endif
+    bool valid = false;
+};
+
+bool ReadFileIdentity(const std::filesystem::path& path, FileIdentity& identity) {
+#if defined(_WIN32)
+    const HANDLE handle = ::CreateFileW(path.c_str(),
+                                        FILE_READ_ATTRIBUTES,
+                                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                        nullptr,
+                                        OPEN_EXISTING,
+                                        FILE_ATTRIBUTE_NORMAL,
+                                        nullptr);
+    if (handle == INVALID_HANDLE_VALUE)
+        return false;
+    BY_HANDLE_FILE_INFORMATION information{};
+    const bool read = ::GetFileInformationByHandle(handle, &information) != 0;
+    const bool closed = ::CloseHandle(handle) != 0;
+    if (!read || !closed)
+        return false;
+    identity.volume = information.dwVolumeSerialNumber;
+    identity.index_high = information.nFileIndexHigh;
+    identity.index_low = information.nFileIndexLow;
+#else
+    struct stat information {};
+    if (::lstat(path.c_str(), &information) != 0)
+        return false;
+    identity.device = information.st_dev;
+    identity.inode = information.st_ino;
+#endif
+    identity.valid = true;
+    return true;
+}
+
+bool MatchesFileIdentity(const std::filesystem::path& path, const FileIdentity& expected) {
+    FileIdentity current;
+    if (!expected.valid || !ReadFileIdentity(path, current))
+        return false;
+#if defined(_WIN32)
+    return current.volume == expected.volume && current.index_high == expected.index_high &&
+           current.index_low == expected.index_low;
+#else
+    return current.device == expected.device && current.inode == expected.inode;
+#endif
+}
+
 bool WriteFileDurably(const std::filesystem::path& destination,
                       const std::string& bytes,
                       const std::filesystem::path& staging,
-                      std::vector<std::string>* errors);
+                      std::vector<std::string>* errors,
+                      FileIdentity* published_identity = nullptr);
+
+bool FlushAncestorEntries(const std::filesystem::path& destination,
+                          std::vector<std::string>* errors);
+bool FlushRemovalDirectory(const std::filesystem::path& destination,
+                           std::vector<std::string>* errors);
 
 void ValidateRegionDigestKey(world::RegionKey key) {
     // Packed chunk coordinates are [-2^20,2^20); reject unsupported public
@@ -335,14 +400,16 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
         const DWORD error = ::GetLastError();
         if (error != ERROR_FILE_EXISTS && error != ERROR_ALREADY_EXISTS) {
             AddError(errors,
-                     "failed to create temporary region file: " + out_temp.string() + ": " +
+                     "failed to create temporary region file: " +
+                         Filesystem::GenericUtf8PathString(out_temp) + ": " +
                          WindowsErrorMessage(error));
             return false;
         }
     }
     if (file == INVALID_HANDLE_VALUE) {
         AddError(errors,
-                 "failed to allocate a unique temporary region file for: " + destination.string());
+                 "failed to allocate a unique temporary region file for: " +
+                     Filesystem::GenericUtf8PathString(destination));
         return false;
     }
 
@@ -361,7 +428,8 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
             ::CloseHandle(file);
             RemoveTemporaryFile(out_temp);
             AddError(errors,
-                     "failed to write temporary region file: " + out_temp.string() + ": " +
+                     "failed to write temporary region file: " +
+                         Filesystem::GenericUtf8PathString(out_temp) + ": " +
                          WindowsErrorMessage(error));
             return false;
         }
@@ -373,7 +441,8 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
         ::CloseHandle(file);
         RemoveTemporaryFile(out_temp);
         AddError(errors,
-                 "failed to durably flush temporary region file: " + out_temp.string() + ": " +
+                 "failed to durably flush temporary region file: " +
+                     Filesystem::GenericUtf8PathString(out_temp) + ": " +
                      WindowsErrorMessage(error));
         return false;
     }
@@ -381,7 +450,8 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
         const DWORD error = ::GetLastError();
         RemoveTemporaryFile(out_temp);
         AddError(errors,
-                 "failed to close temporary region file: " + out_temp.string() + ": " +
+                 "failed to close temporary region file: " +
+                     Filesystem::GenericUtf8PathString(out_temp) + ": " +
                      WindowsErrorMessage(error));
         return false;
     }
@@ -391,6 +461,8 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
 bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
                                  const std::filesystem::path& destination,
                                  std::vector<std::string>* errors) {
+    if (!FlushAncestorEntries(destination, errors))
+        return false;
     const DWORD attributes = ::GetFileAttributesW(destination.c_str());
     if (attributes != INVALID_FILE_ATTRIBUTES) {
         if (::ReplaceFileW(destination.c_str(),
@@ -403,7 +475,8 @@ bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
         }
         const DWORD error = ::GetLastError();
         AddError(errors,
-                 "failed to atomically replace region file: " + destination.string() + ": " +
+                 "failed to atomically replace region file: " +
+                     Filesystem::GenericUtf8PathString(destination) + ": " +
                      WindowsErrorMessage(error));
         return false;
     }
@@ -411,8 +484,9 @@ bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
     const DWORD attributes_error = ::GetLastError();
     if (attributes_error != ERROR_FILE_NOT_FOUND && attributes_error != ERROR_PATH_NOT_FOUND) {
         AddError(errors,
-                 "failed to inspect region file before replacement: " + destination.string() +
-                     ": " + WindowsErrorMessage(attributes_error));
+                 "failed to inspect region file before replacement: " +
+                     Filesystem::GenericUtf8PathString(destination) + ": " +
+                     WindowsErrorMessage(attributes_error));
         return false;
     }
     if (::MoveFileExW(temp.c_str(), destination.c_str(), MOVEFILE_WRITE_THROUGH)) {
@@ -420,7 +494,8 @@ bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
     }
     const DWORD error = ::GetLastError();
     AddError(errors,
-             "failed to atomically install region file: " + destination.string() + ": " +
+             "failed to atomically install region file: " +
+                 Filesystem::GenericUtf8PathString(destination) + ": " +
                  WindowsErrorMessage(error));
     return false;
 }
@@ -445,14 +520,16 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
         if (errno != EEXIST) {
             const int error = errno;
             AddError(errors,
-                     "failed to create temporary region file: " + out_temp.string() + ": " +
+                     "failed to create temporary region file: " +
+                         Filesystem::GenericUtf8PathString(out_temp) + ": " +
                          PosixErrorMessage(error));
             return false;
         }
     }
     if (file < 0) {
         AddError(errors,
-                 "failed to allocate a unique temporary region file for: " + destination.string());
+                 "failed to allocate a unique temporary region file for: " +
+                     Filesystem::GenericUtf8PathString(destination));
         return false;
     }
 
@@ -470,7 +547,8 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
             ::close(file);
             RemoveTemporaryFile(out_temp);
             AddError(errors,
-                     "failed to write temporary region file: " + out_temp.string() + ": " +
+                     "failed to write temporary region file: " +
+                         Filesystem::GenericUtf8PathString(out_temp) + ": " +
                          PosixErrorMessage(error));
             return false;
         }
@@ -485,16 +563,16 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
         ::close(file);
         RemoveTemporaryFile(out_temp);
         AddError(errors,
-                 "failed to durably flush temporary region file: " + out_temp.string() + ": " +
-                     PosixErrorMessage(error));
+                 "failed to durably flush temporary region file: " +
+                     Filesystem::GenericUtf8PathString(out_temp) + ": " + PosixErrorMessage(error));
         return false;
     }
     if (::close(file) != 0) {
         const int error = errno;
         RemoveTemporaryFile(out_temp);
         AddError(errors,
-                 "failed to close temporary region file: " + out_temp.string() + ": " +
-                     PosixErrorMessage(error));
+                 "failed to close temporary region file: " +
+                     Filesystem::GenericUtf8PathString(out_temp) + ": " + PosixErrorMessage(error));
         return false;
     }
     return true;
@@ -503,13 +581,16 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
 bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
                                  const std::filesystem::path& destination,
                                  std::vector<std::string>* errors) {
+    if (!FlushAncestorEntries(destination, errors))
+        return false;
     // POSIX rename replaces an existing same-filesystem destination atomically.
     // World members stage in the save root outside the chunks scan; standalone
     // containers stage beside the file. Cross-filesystem rename fails safely.
     if (std::rename(temp.c_str(), destination.c_str()) != 0) {
         const int error = errno;
         AddError(errors,
-                 "failed to atomically replace region file: " + destination.string() + ": " +
+                 "failed to atomically replace region file: " +
+                     Filesystem::GenericUtf8PathString(destination) + ": " +
                      PosixErrorMessage(error));
         return false;
     }
@@ -522,7 +603,7 @@ bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
     if (ConsumeDirectoryFlushFailureForTesting()) {
         AddError(errors,
                  "region file was replaced but its directory flush failed (test seam): " +
-                     parent.string());
+                     Filesystem::GenericUtf8PathString(parent));
         return false;
     }
     int directory_flags = O_RDONLY;
@@ -535,7 +616,7 @@ bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
         AddError(
             errors,
             "region file was replaced but its directory could not be opened for durable flush: " +
-                parent.string() + ": " + PosixErrorMessage(error));
+                Filesystem::GenericUtf8PathString(parent) + ": " + PosixErrorMessage(error));
         return false;
     }
     while (::fsync(directory) != 0) {
@@ -544,15 +625,15 @@ bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
         const int error = errno;
         ::close(directory);
         AddError(errors,
-                 "region file was replaced but its directory flush failed: " + parent.string() +
-                     ": " + PosixErrorMessage(error));
+                 "region file was replaced but its directory flush failed: " +
+                     Filesystem::GenericUtf8PathString(parent) + ": " + PosixErrorMessage(error));
         return false;
     }
     if (::close(directory) != 0) {
         const int error = errno;
         AddError(errors,
-                 "region directory close failed after durable replacement: " + parent.string() +
-                     ": " + PosixErrorMessage(error));
+                 "region directory close failed after durable replacement: " +
+                     Filesystem::GenericUtf8PathString(parent) + ": " + PosixErrorMessage(error));
         return false;
     }
     return true;
@@ -563,7 +644,9 @@ bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
 bool FlushDirectoryEntry(const std::filesystem::path& directory_path,
                          std::vector<std::string>* errors) {
     if (ConsumeDirectoryFlushFailureForTesting()) {
-        AddError(errors, "directory flush failed (test seam): " + directory_path.string());
+        AddError(errors,
+                 "directory flush failed (test seam): " +
+                     Filesystem::GenericUtf8PathString(directory_path));
         return false;
     }
     int directory_flags = O_RDONLY;
@@ -574,7 +657,8 @@ bool FlushDirectoryEntry(const std::filesystem::path& directory_path,
     if (directory < 0) {
         const int error = errno;
         AddError(errors,
-                 "cannot open directory for durable flush: " + directory_path.string() + ": " +
+                 "cannot open directory for durable flush: " +
+                     Filesystem::GenericUtf8PathString(directory_path) + ": " +
                      PosixErrorMessage(error));
         return false;
     }
@@ -585,14 +669,15 @@ bool FlushDirectoryEntry(const std::filesystem::path& directory_path,
         const int error = errno;
         ::close(directory);
         AddError(errors,
-                 "directory flush failed: " + directory_path.string() + ": " +
-                     PosixErrorMessage(error));
+                 "directory flush failed: " + Filesystem::GenericUtf8PathString(directory_path) +
+                     ": " + PosixErrorMessage(error));
         return false;
     }
     if (::close(directory) != 0) {
         const int error = errno;
         AddError(errors,
-                 "directory close failed after flush: " + directory_path.string() + ": " +
+                 "directory close failed after flush: " +
+                     Filesystem::GenericUtf8PathString(directory_path) + ": " +
                      PosixErrorMessage(error));
         return false;
     }
@@ -600,6 +685,157 @@ bool FlushDirectoryEntry(const std::filesystem::path& directory_path,
 }
 
 #endif
+
+// Directory traversal is bounded by the supplied path's component count. Repeat
+// it on retries even when a prior attempt already created the directories.
+bool FlushAncestorEntries(const std::filesystem::path& destination,
+                          std::vector<std::string>* errors) {
+#if !defined(_WIN32)
+    for (std::filesystem::path ancestor = destination.parent_path();
+         !ancestor.empty() && ancestor != ancestor.root_path();
+         ancestor = ancestor.parent_path()) {
+        const auto holder =
+            ancestor.has_parent_path() ? ancestor.parent_path() : std::filesystem::path(".");
+        if (!FlushDirectoryEntry(holder, errors))
+            return false;
+    }
+#else
+    (void)destination;
+    (void)errors;
+#endif
+    return true;
+}
+
+bool FlushRemovalDirectory(const std::filesystem::path& destination,
+                           std::vector<std::string>* errors) {
+#if !defined(_WIN32)
+    const auto parent =
+        destination.has_parent_path() ? destination.parent_path() : std::filesystem::path(".");
+    std::error_code error;
+    const bool exists = std::filesystem::exists(parent, error);
+    if (error) {
+        AddError(errors, "cannot inspect removal directory: " + error.message());
+        return false;
+    }
+    // A wholly absent hierarchy is a clean miss. An existing parent must be
+    // flushed even when unlink already succeeded on a previous attempt.
+    return !exists || FlushDirectoryEntry(parent, errors);
+#else
+    (void)destination;
+    (void)errors;
+    return true;
+#endif
+}
+
+// Holds a reference to the newly published file until source retirement. A
+// failed source unlink rolls back only this publication. Process save ownership
+// spans identity checking and removal, as it does all other persistence writers.
+class NewFilePublication {
+public:
+    NewFilePublication(const std::filesystem::path& temp, const std::filesystem::path& destination)
+        : m_temp(temp)
+        , m_destination(destination) {}
+    NewFilePublication(const NewFilePublication&) = delete;
+    NewFilePublication& operator=(const NewFilePublication&) = delete;
+    ~NewFilePublication() {
+#if defined(_WIN32)
+        if (m_handle != INVALID_HANDLE_VALUE) {
+            if (m_published && !m_committed) {
+                FILE_DISPOSITION_INFO disposition{TRUE};
+                ::SetFileInformationByHandle(m_handle,
+                                             FileDispositionInfo,
+                                             &disposition,
+                                             static_cast<DWORD>(sizeof(disposition)));
+            }
+            ::CloseHandle(m_handle);
+        }
+#else
+        if (m_published && !m_committed) {
+            struct stat published {};
+            struct stat named {};
+            // Compare against our still-open file, immediately before unlink,
+            // while process save ownership excludes other persistence writers.
+            if (::fstat(m_descriptor, &published) == 0 &&
+                ::lstat(m_destination.c_str(), &named) == 0 && published.st_dev == named.st_dev &&
+                published.st_ino == named.st_ino) {
+                ::unlink(m_destination.c_str());
+                FlushRemovalDirectory(m_destination, nullptr);
+            }
+        }
+        if (m_descriptor >= 0)
+            ::close(m_descriptor);
+#endif
+        RemoveTemporaryFile(m_temp);
+    }
+    bool Publish(std::vector<std::string>* errors) {
+        if (!FlushAncestorEntries(m_destination, errors))
+            return false;
+#if defined(_WIN32)
+        // Keep identity through the move; rollback targets this handle, never a
+        // replacement file found by looking up the destination a second time.
+        m_handle = ::CreateFileW(m_temp.c_str(),
+                                 DELETE | FILE_READ_ATTRIBUTES,
+                                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                 nullptr,
+                                 OPEN_EXISTING,
+                                 FILE_ATTRIBUTE_NORMAL,
+                                 nullptr);
+        if (m_handle == INVALID_HANDLE_VALUE ||
+            !::MoveFileExW(m_temp.c_str(), m_destination.c_str(), MOVEFILE_WRITE_THROUGH)) {
+            AddError(errors,
+                     "cannot publish an unoccupied destination: " +
+                         WindowsErrorMessage(::GetLastError()));
+            return false;
+        }
+        m_published = true;
+        return true;
+#else
+        m_descriptor = ::open(m_temp.c_str(), O_RDONLY);
+        if (m_descriptor < 0) {
+            AddError(errors, "cannot retain publication identity: " + PosixErrorMessage(errno));
+            return false;
+        }
+        // Native exclusive rename also supports filesystems without hard links.
+        // Other POSIX hosts use link, whose publication atomically refuses every
+        // occupied entry, including dangling symlinks. No overwriting fallback.
+#if defined(__linux__)
+        int installed = static_cast<int>(::syscall(SYS_renameat2,
+                                                   AT_FDCWD,
+                                                   m_temp.c_str(),
+                                                   AT_FDCWD,
+                                                   m_destination.c_str(),
+                                                   RENAME_NOREPLACE));
+        if (installed != 0 && (errno == ENOSYS || errno == EINVAL || errno == EOPNOTSUPP))
+            installed = ::link(m_temp.c_str(), m_destination.c_str());
+#elif defined(__APPLE__)
+        const int installed = ::renamex_np(m_temp.c_str(), m_destination.c_str(), RENAME_EXCL);
+#else
+        const int installed = ::link(m_temp.c_str(), m_destination.c_str());
+#endif
+        if (installed != 0) {
+            AddError(errors,
+                     "cannot publish an unoccupied destination: " + PosixErrorMessage(errno));
+            return false;
+        }
+        m_published = true;
+        return FlushRemovalDirectory(m_destination, errors);
+#endif
+    }
+    void Commit() {
+        m_committed = true;
+    }
+
+private:
+    const std::filesystem::path& m_temp;
+    const std::filesystem::path& m_destination;
+    bool m_published = false;
+    bool m_committed = false;
+#if defined(_WIN32)
+    HANDLE m_handle = INVALID_HANDLE_VALUE;
+#else
+    int m_descriptor = -1;
+#endif
+};
 
 bool CompressPayload(const std::string& payload,
                      RegionRecord& record,
@@ -652,7 +888,9 @@ bool ReadRegionFile(const std::filesystem::path& path,
 
     std::ifstream input(path, std::ios::binary);
     if (!input.is_open()) {
-        AddError(errors, "failed to open region file for reading: " + path.string());
+        AddError(errors,
+                 "failed to open region file for reading: " +
+                     Filesystem::GenericUtf8PathString(path));
         return false;
     }
     std::ostringstream buffer;
@@ -666,30 +904,35 @@ bool ReadRegionFile(const std::filesystem::path& path,
         buffer.write(read_buffer, input.gcount());
     }
     if (input.bad()) {
-        AddError(errors, "failed to read region file: " + path.string());
+        AddError(errors, "failed to read region file: " + Filesystem::GenericUtf8PathString(path));
         return false;
     }
     const std::string bytes = buffer.str();
 
     if (bytes.size() < kRegionFileHeaderSize ||
         std::memcmp(bytes.data(), kRegionMagic, sizeof(kRegionMagic)) != 0) {
-        AddError(errors, "region file is missing the LMR1 magic: " + path.string());
+        AddError(errors,
+                 "region file is missing the LMR1 magic: " +
+                     Filesystem::GenericUtf8PathString(path));
         return false;
     }
     const auto* data = reinterpret_cast<const unsigned char*>(bytes.data());
     const std::uint16_t version = ReadU16(data + 4);
     if (version != kRegionVersion) {
         AddError(errors,
-                 version < kRegionVersion ? WorldSaveService::kObsoleteWorldMessage
-                                          : "unsupported future LMR1 container version " +
-                                                std::to_string(version) + ": " + path.string());
+                 version < kRegionVersion
+                     ? WorldSaveService::kObsoleteWorldMessage
+                     : "unsupported future LMR1 container version " + std::to_string(version) +
+                           ": " + Filesystem::GenericUtf8PathString(path));
         return false;
     }
     const std::uint16_t record_count = ReadU16(data + 6);
 
     const std::size_t manifest_bytes = static_cast<std::size_t>(record_count) * kRecordHeaderSize;
     if (bytes.size() < kRegionFileHeaderSize + manifest_bytes) {
-        AddError(errors, "region file record manifest is truncated: " + path.string());
+        AddError(errors,
+                 "region file record manifest is truncated: " +
+                     Filesystem::GenericUtf8PathString(path));
         return false;
     }
 
@@ -710,14 +953,18 @@ bool ReadRegionFile(const std::filesystem::path& path,
         record.flags = header[9];
         if (record.lod_level > 2 || (record.flags & ~3u) != 0u ||
             !keys.emplace(record.lod_level, record.id).second) {
-            AddError(errors, "corrupt or unknown region record header: " + path.string());
+            AddError(errors,
+                     "corrupt or unknown region record header: " +
+                         Filesystem::GenericUtf8PathString(path));
             out_records.clear();
             return false;
         }
         record.uncompressed_size = ReadU32(header + 10);
         const std::uint32_t compressed_size = ReadU32(header + 14);
         if (payload_offset > bytes.size() || compressed_size > bytes.size() - payload_offset) {
-            AddError(errors, "region file record payload is truncated: " + path.string());
+            AddError(errors,
+                     "region file record payload is truncated: " +
+                         Filesystem::GenericUtf8PathString(path));
             out_records.clear();
             return false;
         }
@@ -725,7 +972,9 @@ bool ReadRegionFile(const std::filesystem::path& path,
         payload_offset += compressed_size;
     }
     if (payload_offset != bytes.size()) {
-        AddError(errors, "region file has trailing bytes after the last record: " + path.string());
+        AddError(errors,
+                 "region file has trailing bytes after the last record: " +
+                     Filesystem::GenericUtf8PathString(path));
         out_records.clear();
         return false;
     }
@@ -736,7 +985,9 @@ bool WriteRegionFile(const std::filesystem::path& path,
                      std::vector<RegionRecord>& records,
                      std::vector<std::string>* errors) {
     if (records.size() > 0xffffu) {
-        AddError(errors, "region file exceeds the 65535-record limit: " + path.string());
+        AddError(errors,
+                 "region file exceeds the 65535-record limit: " +
+                     Filesystem::GenericUtf8PathString(path));
         return false;
     }
 
@@ -781,7 +1032,8 @@ bool WriteRegionFile(const std::filesystem::path& path,
     if (InterruptBeforeRegionReplaceForTesting().exchange(false, std::memory_order_acq_rel)) {
         RemoveTemporaryFile(temp_path);
         AddError(errors,
-                 "region replacement interrupted by test seam before replacing: " + path.string());
+                 "region replacement interrupted by test seam before replacing: " +
+                     Filesystem::GenericUtf8PathString(path));
         return false;
     }
 
@@ -813,17 +1065,22 @@ std::shared_ptr<Chunk> DecodeChunkRecord(const RegionRecord& record,
         for (std::string& error : load_errors) {
             AddError(errors, std::move(error));
         }
-        AddError(errors, "failed to decode chunk record payload: " + path.string());
+        AddError(errors,
+                 "failed to decode chunk record payload: " +
+                     Filesystem::GenericUtf8PathString(path));
         return nullptr;
     }
     const auto chunks = single.snapshot_chunks();
     if (chunks.size() != 1 || !chunks.front()) {
         AddError(errors,
-                 "chunk record payload does not contain exactly one chunk: " + path.string());
+                 "chunk record payload does not contain exactly one chunk: " +
+                     Filesystem::GenericUtf8PathString(path));
         return nullptr;
     }
     if (chunks.front()->get_id() != record.id) {
-        AddError(errors, "chunk record id does not match its payload: " + path.string());
+        AddError(errors,
+                 "chunk record id does not match its payload: " +
+                     Filesystem::GenericUtf8PathString(path));
         return nullptr;
     }
     // Save-dirty is transient, but the container's sticky edited flag is the
@@ -854,7 +1111,7 @@ std::uint8_t ChunkRecordFlags(const Chunk& chunk, std::uint8_t previous_flags) {
 bool ParseRegionFileName(const std::filesystem::path& path, int& rx, int& rz) {
     if (path.extension() != kRegionFileExtension)
         return false;
-    const std::string stem = path.stem().string();
+    const std::string stem = Filesystem::GenericUtf8PathString(path.stem());
     if (stem.rfind("r.", 0) != 0)
         return false;
     const auto split = stem.find('.', 2);
@@ -1053,11 +1310,11 @@ bool WorldSaveService::save_plant_entities(const Luminumbra::Ecs::EntityRegistry
         std::filesystem::remove(path, ec);
         if (ec) {
             AddError(errors,
-                     "failed to remove plant entities file: " + path.string() + ": " +
-                         ec.message());
+                     "failed to remove plant entities file: " +
+                         Filesystem::GenericUtf8PathString(path) + ": " + ec.message());
             return false;
         }
-        return true;
+        return FlushRemovalDirectory(path, errors);
     }
     std::filesystem::create_directories(path.parent_path(), ec);
     if (ec) {
@@ -1079,7 +1336,8 @@ bool WorldSaveService::load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapsh
     }
     const std::ifstream in(path, std::ios::binary);
     if (!in) {
-        AddError(errors, "failed to open plant entities file: " + path.string());
+        AddError(errors,
+                 "failed to open plant entities file: " + Filesystem::GenericUtf8PathString(path));
         return false;
     }
     std::ostringstream ss;
@@ -1437,42 +1695,37 @@ namespace {
 bool WriteFileDurably(const std::filesystem::path& destination,
                       const std::string& bytes,
                       const std::filesystem::path& staging,
-                      std::vector<std::string>* errors) {
-    // Both callers hold SaveGuard and reclaim staging before reaching this helper.
+                      std::vector<std::string>* errors,
+                      FileIdentity* published_identity) {
+    // Callers hold SaveGuard and reclaim staging before reaching this helper.
     std::error_code directory_error;
     if (destination.has_parent_path()) {
         std::filesystem::create_directories(destination.parent_path(), directory_error);
     }
     if (directory_error) {
         AddError(errors,
-                 "cannot create directory " + destination.parent_path().string() + ": " +
+                 "cannot create directory " +
+                     Filesystem::GenericUtf8PathString(destination.parent_path()) + ": " +
                      directory_error.message());
         return false;
     }
-#if !defined(_WIN32)
-    // Flush the entry of every ancestor directory, deepest first. A retry after a
-    // failed flush finds the directories already present, so the chain is flushed
-    // on every call rather than only for directories this call created. The
-    // replacement helper flushes the destination directory itself.
-    for (std::filesystem::path ancestor = destination.parent_path();
-         !ancestor.empty() && ancestor != ancestor.root_path();
-         ancestor = ancestor.parent_path()) {
-        const std::filesystem::path holder =
-            ancestor.has_parent_path() ? ancestor.parent_path() : std::filesystem::path(".");
-        if (!FlushDirectoryEntry(holder, errors)) {
-            return false;
-        }
-    }
-#endif
+
     std::filesystem::path temp_path;
     if (!WriteDurableRegionTemp(staging, bytes, temp_path, errors)) {
+        return false;
+    }
+    // Capture the exclusive staging file's identity before publication. Alias
+    // rollback later checks this identity at replacement under SaveGuard.
+    if (published_identity && !ReadFileIdentity(temp_path, *published_identity)) {
+        RemoveTemporaryFile(temp_path);
+        AddError(errors, "cannot retain replacement identity");
         return false;
     }
     if (InterruptBeforeRegionReplaceForTesting().exchange(false, std::memory_order_acq_rel)) {
         RemoveTemporaryFile(temp_path);
         AddError(errors,
                  "file replacement interrupted by test seam before replacing: " +
-                     destination.string());
+                     Filesystem::GenericUtf8PathString(destination));
         return false;
     }
     if (!ReplaceRegionFileAtomically(temp_path, destination, errors)) {
@@ -1491,6 +1744,141 @@ bool WorldSaveService::write_file_durably(const std::filesystem::path& destinati
     return WriteFileDurably(destination, bytes, destination, errors);
 }
 
+bool WorldSaveService::create_file_durably(const std::filesystem::path& destination,
+                                           const std::string& bytes,
+                                           std::vector<std::string>* errors) {
+    const SaveGuard guard;
+    ReclaimAbandonedStaging(destination);
+    std::error_code error;
+    if (destination.has_parent_path())
+        std::filesystem::create_directories(destination.parent_path(), error);
+    if (error) {
+        AddError(errors, "cannot create publication directory: " + error.message());
+        return false;
+    }
+    std::filesystem::path temp;
+    if (!WriteDurableRegionTemp(destination, bytes, temp, errors))
+        return false;
+    NewFilePublication publication(temp, destination);
+    if (InterruptBeforeRegionReplaceForTesting().exchange(false, std::memory_order_acq_rel))
+        return false;
+    if (!publication.Publish(errors))
+        return false;
+    publication.Commit();
+    return true;
+}
+
+bool WorldSaveService::rename_file_durably(const std::filesystem::path& source,
+                                           const std::filesystem::path& destination,
+                                           const std::string& expected_bytes,
+                                           const std::string& bytes,
+                                           std::vector<std::string>* errors) {
+    const SaveGuard guard;
+    // Revalidate the parsed source under ownership so another persistence writer
+    // cannot change the source between the caller's parse and this transaction.
+    {
+        std::ifstream input(source, std::ios::binary);
+        std::ostringstream contents;
+        contents << input.rdbuf();
+        if (!input || input.bad() || contents.bad() || contents.str() != expected_bytes) {
+            AddError(errors, "rename source changed or cannot be read");
+            return false;
+        }
+    }
+    std::error_code error;
+    const auto status = std::filesystem::symlink_status(destination, error);
+    const bool missing = status.type() == std::filesystem::file_type::not_found &&
+                         (!error || error == std::errc::no_such_file_or_directory);
+    bool alias = false;
+    if (!missing) {
+        if (error || !(alias = std::filesystem::equivalent(source, destination, error)) || error) {
+            AddError(errors, "rename destination is occupied or cannot be inspected");
+            return false;
+        }
+    }
+    error.clear();
+    ReclaimAbandonedStaging(destination);
+    if (alias) {
+        std::filesystem::path backup;
+        struct BackupCleanup {
+            const std::filesystem::path& path;
+            ~BackupCleanup() {
+                if (!path.empty())
+                    RemoveTemporaryFile(path);
+            }
+        } cleanup{backup};
+        const auto links = std::filesystem::hard_link_count(destination, error);
+        if (error) {
+            AddError(errors, "cannot inspect rename alias: " + error.message());
+            return false;
+        }
+        if (links > 1 || status.type() == std::filesystem::file_type::symlink) {
+            // A separate hard-link destination must be restorable if source
+            // retirement fails. Keep the original entry (including a symlink's
+            // own spelling) beside the destination until the transaction ends.
+            // Like payload staging, exclusive allocation is bounded to 128 tries.
+            for (int attempt = 0; attempt < 128; ++attempt) {
+                const auto candidate = NextRegionTempPath(destination);
+                std::filesystem::create_hard_link(destination, candidate, error);
+                if (!error) {
+                    backup = candidate;
+                    break;
+                }
+                if (error != std::errc::file_exists) {
+                    AddError(errors, "cannot retain rename alias: " + error.message());
+                    return false;
+                }
+            }
+            if (backup.empty()) {
+                AddError(errors, "cannot allocate rename alias staging");
+                return false;
+            }
+        }
+        FileIdentity published_identity;
+        if (!WriteFileDurably(destination, bytes, destination, errors, &published_identity)) {
+            // A final directory-flush failure may follow replacement. Restore a
+            // separate hard-link entry so retry can still recognize the alias.
+            if (!backup.empty() && MatchesFileIdentity(destination, published_identity))
+                ReplaceRegionFileAtomically(backup, destination, errors);
+            return false;
+        }
+        // Case and directory aliases still name the replacement. A separate hard
+        // link names the original inode and must be retired after publication.
+        if (std::filesystem::equivalent(source, destination, error) && !error)
+            return true;
+        if (error)
+            return false;
+        if (!std::filesystem::remove(source, error) || error) {
+            if (!backup.empty() && MatchesFileIdentity(destination, published_identity))
+                ReplaceRegionFileAtomically(backup, destination, errors);
+            AddError(errors, "cannot remove rename source: " + error.message());
+            return false;
+        }
+        return FlushRemovalDirectory(source, errors);
+    }
+    std::filesystem::path temp;
+    // Create the destination hierarchy using the same lexical spelling as the
+    // existing writer; parent aliases and UNC roots must retain their meaning.
+    if (destination.has_parent_path())
+        std::filesystem::create_directories(destination.parent_path(), error);
+    if (error || !WriteDurableRegionTemp(destination, bytes, temp, errors))
+        return false;
+    NewFilePublication publication(temp, destination);
+    if (InterruptBeforeRegionReplaceForTesting().exchange(false, std::memory_order_acq_rel))
+        return false;
+    if (!publication.Publish(errors))
+        return false;
+    if (!std::filesystem::remove(source, error) || error) {
+        AddError(errors, "cannot remove rename source: " + error.message());
+        return false;
+    }
+    // The destination now owns the content; a post-unlink flush failure must
+    // retain it. Like replacement-directory failures this reports incomplete
+    // durability even though the complete new file is visible.
+    publication.Commit();
+    return FlushRemovalDirectory(source, errors);
+}
+
 bool WorldSaveService::remove_file_and_staging(const std::filesystem::path& destination,
                                                std::vector<std::string>* errors) {
     const SaveGuard guard;
@@ -1498,10 +1886,12 @@ bool WorldSaveService::remove_file_and_staging(const std::filesystem::path& dest
     std::error_code error;
     std::filesystem::remove(destination, error);
     if (error) {
-        AddError(errors, "cannot remove file: " + destination.string() + ": " + error.message());
+        AddError(errors,
+                 "cannot remove file: " + Filesystem::GenericUtf8PathString(destination) + ": " +
+                     error.message());
         return false;
     }
-    return true;
+    return FlushRemovalDirectory(destination, errors);
 }
 
 std::size_t WorldSaveService::waiting_save_writers() {
@@ -1579,7 +1969,7 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                 return reject("Saved-world validation cancelled.");
             if (entry.path() != region_dir || !entry.is_directory())
                 return reject("corrupt or unknown world persistence artifact: " +
-                              entry.path().string());
+                              Filesystem::GenericUtf8PathString(entry.path()));
         }
         if (!std::filesystem::exists(region_dir))
             return false;
@@ -1590,7 +1980,8 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                 return reject("Saved-world validation cancelled.");
             int rx = 0, rz = 0;
             if (!entry.is_regular_file())
-                return reject("corrupt world persistence artifact: " + entry.path().string());
+                return reject("corrupt world persistence artifact: " +
+                              Filesystem::GenericUtf8PathString(entry.path()));
             if (entry.path() == world_manifest_path(save_dir) ||
                 entry.path() == plant_entities_path(save_dir) ||
                 entry.path() == active_regions_path(save_dir)) {
@@ -1599,7 +1990,8 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                 region_files.push_back(entry.path());
                 present = true;
             } else {
-                return reject("corrupt or unknown region file: " + entry.path().string());
+                return reject("corrupt or unknown region file: " +
+                              Filesystem::GenericUtf8PathString(entry.path()));
             }
         }
         if (!present)
@@ -1658,11 +2050,12 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                     region_coords_for_chunk(chunk->get_coords(), chunk_rx, chunk_rz);
                     if (chunk_rx != rx || chunk_rz != rz || !state.insert_chunk(chunk))
                         return reject("corrupt chunk region identity or duplicate id: " +
-                                      path.string());
+                                      Filesystem::GenericUtf8PathString(path));
                 } else {
                     const auto tier = static_cast<World::FarLodTier>(record.lod_level);
                     if (record.id != World::FarLodStore::tile_record_id(tier, rx, rz))
-                        return reject("corrupt far-LOD region identity: " + path.string());
+                        return reject("corrupt far-LOD region identity: " +
+                                      Filesystem::GenericUtf8PathString(path));
                     std::string payload;
                     World::FarLodTile tile;
                     if (!DecompressPayload(record, payload, &errors) ||

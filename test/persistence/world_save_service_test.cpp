@@ -100,6 +100,160 @@ void PopulateFixtureWorld(WorldStreamingState& state) {
 
 } // namespace
 
+namespace {
+std::string ReadFileBytes(const std::filesystem::path& path) {
+    const std::ifstream input(path, std::ios::binary);
+    std::ostringstream bytes;
+    bytes << input.rdbuf();
+    return bytes.str();
+}
+
+class DirectoryFlushReset {
+public:
+    ~DirectoryFlushReset() {
+        WorldSaveService::set_directory_flush_failure_for_testing(-1);
+        WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
+    }
+};
+} // namespace
+
+TEST(WorldSaveService, NoReplacePublicationPreservesOccupiedEntriesAndRetries) {
+    const TempSaveDir save_dir("no_replace");
+    const auto destination = save_dir.path() / std::filesystem::path(u8"preset-\u4e16\u754c.json");
+    const std::string original("exact\0bytes\r\n", 13);
+    const DirectoryFlushReset reset;
+    WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
+    EXPECT_FALSE(WorldSaveService::create_file_durably(destination, "interrupted"));
+    WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
+    EXPECT_FALSE(std::filesystem::exists(destination));
+    ASSERT_TRUE(WorldSaveService::create_file_durably(destination, original));
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        EXPECT_FALSE(WorldSaveService::create_file_durably(destination, "replacement"));
+        EXPECT_EQ(ReadFileBytes(destination), original);
+    }
+    EXPECT_FALSE(WorldSaveService::create_file_durably(destination / "child", "refused"));
+    EXPECT_EQ(ReadFileBytes(destination), original);
+    ASSERT_TRUE(WorldSaveService::remove_file_and_staging(destination));
+    ASSERT_TRUE(WorldSaveService::create_file_durably(destination, "retry"));
+    EXPECT_EQ(ReadFileBytes(destination), "retry");
+    const auto blocked = save_dir.path() / "blocked";
+    std::filesystem::create_directory(blocked);
+    EXPECT_FALSE(WorldSaveService::create_file_durably(blocked, "refused"));
+    EXPECT_TRUE(std::filesystem::is_directory(blocked));
+#ifndef _WIN32
+    // Native Windows coverage needs no symlink privilege; the POSIX branch also
+    // checks the occupied entry for a dangling link, which exists() would miss.
+    const auto dangling = save_dir.path() / "dangling";
+    std::filesystem::create_symlink(save_dir.path() / "missing", dangling);
+    EXPECT_FALSE(WorldSaveService::create_file_durably(dangling, "refused"));
+    EXPECT_TRUE(std::filesystem::is_symlink(dangling));
+#endif
+    for (const auto& entry : std::filesystem::directory_iterator(save_dir.path()))
+        EXPECT_EQ(
+            Luminumbra::Filesystem::GenericUtf8PathString(entry.path().filename()).find(".tmp."),
+            std::string::npos);
+}
+
+TEST(WorldSaveService, ConcurrentNoReplacePublicationHasExactlyOneWinner) {
+    const TempSaveDir save_dir("no_replace_race");
+    const auto destination = save_dir.path() / "winner";
+    std::barrier<> ready{3};
+    std::array<bool, 2> saved{};
+    const std::array<std::string, 2> payloads{"first exact bytes", "second exact bytes"};
+    auto publish = [&](std::size_t index) {
+        ready.arrive_and_wait();
+        saved[index] = WorldSaveService::create_file_durably(destination, payloads[index]);
+    };
+    std::jthread first(publish, 0u);
+    std::jthread second(publish, 1u);
+    ready.arrive_and_wait();
+    first.join();
+    second.join();
+    ASSERT_NE(saved[0], saved[1]);
+    EXPECT_EQ(ReadFileBytes(destination), saved[0] ? payloads[0] : payloads[1]);
+    for (const auto& entry : std::filesystem::directory_iterator(save_dir.path()))
+        EXPECT_EQ(entry.path(), destination);
+}
+
+TEST(WorldSaveService, CheckedRenameRefusesChangedSourceBeforePublishing) {
+    const TempSaveDir save_dir("stale_rename");
+    const auto source = save_dir.path() / "source";
+    const auto destination = save_dir.path() / "destination";
+    ASSERT_TRUE(WorldSaveService::write_file_durably(source, "newer source"));
+    EXPECT_FALSE(WorldSaveService::rename_file_durably(source, destination, "old source", "new"));
+    EXPECT_EQ(ReadFileBytes(source), "newer source");
+    EXPECT_FALSE(std::filesystem::exists(destination));
+    ASSERT_TRUE(WorldSaveService::rename_file_durably(source, destination, "newer source", "new"));
+    EXPECT_FALSE(std::filesystem::exists(source));
+    EXPECT_EQ(ReadFileBytes(destination), "new");
+}
+
+#ifndef _WIN32
+TEST(WorldSaveService, FirstSnapshotRefusesUnflushedAncestorAndRepeatsOnRetry) {
+    const TempSaveDir save_dir("snapshot_ancestor");
+    const WorldSaveService service;
+    WorldStreamingState state;
+    AddFixtureChunk(state, IVec3(0, 0, 0), ChunkState::Ready, 1u);
+    const DirectoryFlushReset reset;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        WorldSaveService::set_directory_flush_failure_for_testing(0);
+        std::vector<std::string> errors;
+        EXPECT_FALSE(service.save_world(state, save_dir.path(), &errors));
+        ASSERT_EQ(errors.size(), 1u);
+        EXPECT_EQ(errors.front(),
+                  "directory flush failed (test seam): " + (save_dir.path() / "chunks").string());
+        EXPECT_FALSE(
+            std::filesystem::exists(WorldSaveService::region_file_path(save_dir.path(), 0, 0)));
+        EXPECT_FALSE(
+            std::filesystem::exists(WorldSaveService::world_manifest_path(save_dir.path())));
+    }
+    ASSERT_TRUE(service.save_world(state, save_dir.path()));
+    WorldStreamingState loaded;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(service.load_world(loaded, save_dir.path(), errors));
+    EXPECT_EQ(service.world_hash(state), service.world_hash(loaded));
+}
+
+TEST(WorldSaveService, NewPublicationFlushFailureRollsBackAndCanRetry) {
+    const TempSaveDir save_dir("publication_flush");
+    const auto destination = save_dir.path() / "destination";
+    const DirectoryFlushReset reset;
+    int ancestors = 0;
+    for (auto ancestor = destination.parent_path();
+         !ancestor.empty() && ancestor != ancestor.root_path();
+         ancestor = ancestor.parent_path())
+        ++ancestors;
+    WorldSaveService::set_directory_flush_failure_for_testing(ancestors);
+    EXPECT_FALSE(WorldSaveService::create_file_durably(destination, "complete bytes"));
+    EXPECT_FALSE(std::filesystem::exists(destination));
+    EXPECT_TRUE(WorldSaveService::create_file_durably(destination, "retry"));
+    EXPECT_EQ(ReadFileBytes(destination), "retry");
+}
+
+TEST(WorldSaveService, SourceRetirementFlushFailureKeepsPublishedContentAndCanReflush) {
+    const TempSaveDir save_dir("retirement_flush");
+    const auto source = save_dir.path() / "source";
+    const auto destination = save_dir.path() / "destination";
+    ASSERT_TRUE(WorldSaveService::create_file_durably(source, "original bytes"));
+    const DirectoryFlushReset reset;
+    int before_source_flush = 1; // The destination's publication-directory flush.
+    for (auto ancestor = destination.parent_path();
+         !ancestor.empty() && ancestor != ancestor.root_path();
+         ancestor = ancestor.parent_path())
+        ++before_source_flush;
+    WorldSaveService::set_directory_flush_failure_for_testing(before_source_flush);
+    EXPECT_FALSE(
+        WorldSaveService::rename_file_durably(source, destination, "original bytes", "new"));
+    EXPECT_FALSE(std::filesystem::exists(source));
+    EXPECT_EQ(ReadFileBytes(destination), "new");
+    // Source unlink has completed; repeat its parent flush even on an absent-file retry.
+    WorldSaveService::set_directory_flush_failure_for_testing(0);
+    EXPECT_FALSE(WorldSaveService::remove_file_and_staging(source));
+    EXPECT_TRUE(WorldSaveService::remove_file_and_staging(source));
+    EXPECT_EQ(ReadFileBytes(destination), "new");
+}
+#endif
+
 TEST(WorldSaveService, SaveThenLoadRoundTripPreservesWorldHash) {
     const TempSaveDir save_dir("roundtrip");
     const WorldSaveService service;
@@ -279,7 +433,9 @@ TEST(WorldSaveService, DurableContainerStagingHandlesParentComponentsAndInterrup
         EXPECT_EQ(records.front().payload, changed.payload);
     }
     for (const auto& entry : std::filesystem::recursive_directory_iterator(save_dir.path()))
-        EXPECT_EQ(entry.path().filename().string().find(".tmp."), std::string::npos);
+        EXPECT_EQ(
+            Luminumbra::Filesystem::GenericUtf8PathString(entry.path().filename()).find(".tmp."),
+            std::string::npos);
 }
 
 namespace {
@@ -287,11 +443,14 @@ struct OverlapObservation {
     std::barrier<> staged{2};
     std::barrier<> release{2};
 };
-OverlapObservation* overlap_observation = nullptr;
+OverlapObservation*& ActiveOverlapObservation() {
+    static OverlapObservation* observation = nullptr;
+    return observation;
+}
 
 bool HoldStagedLedger() {
-    overlap_observation->staged.arrive_and_wait();
-    overlap_observation->release.arrive_and_wait();
+    ActiveOverlapObservation()->staged.arrive_and_wait();
+    ActiveOverlapObservation()->release.arrive_and_wait();
     return true;
 }
 
@@ -311,7 +470,7 @@ TEST(WorldSaveService, OverlappingRegionReclaimWaitsUntilStagedOwnerCompletes) {
         Luminumbra::world::ActiveRegionLedger ledger;
         ledger.set_local_anchor(Vec3(1, 2, 3));
         OverlapObservation observation;
-        overlap_observation = &observation;
+        ActiveOverlapObservation() = &observation;
         WorldSaveService::set_before_active_regions_replace_for_testing(&HoldStagedLedger);
         bool ledger_saved = false;
         bool region_saved = false;
@@ -350,7 +509,7 @@ TEST(WorldSaveService, OverlappingRegionReclaimWaitsUntilStagedOwnerCompletes) {
         ledger_writer.join();
         region_writer.join();
         WorldSaveService::set_before_active_regions_replace_for_testing(nullptr);
-        overlap_observation = nullptr;
+        ActiveOverlapObservation() = nullptr;
         EXPECT_TRUE(ledger_saved);
         EXPECT_TRUE(region_saved);
         EXPECT_EQ(WorldSaveService::waiting_save_writers(), 0u);
@@ -371,7 +530,9 @@ TEST(WorldSaveService, OverlappingRegionReclaimWaitsUntilStagedOwnerCompletes) {
             EXPECT_FALSE(std::filesystem::exists(region));
         }
         for (const auto& entry : std::filesystem::directory_iterator(save_dir.path()))
-            EXPECT_EQ(entry.path().filename().string().find(".tmp."), std::string::npos);
+            EXPECT_EQ(Luminumbra::Filesystem::GenericUtf8PathString(entry.path().filename())
+                          .find(".tmp."),
+                      std::string::npos);
     }
 }
 
@@ -386,7 +547,7 @@ TEST(WorldSaveService, OverlappingRegionMergesRetainBothWritersRecords) {
     Luminumbra::world::ActiveRegionLedger ledger;
     ledger.set_local_anchor(Vec3(1, 2, 3));
     OverlapObservation observation;
-    overlap_observation = &observation;
+    ActiveOverlapObservation() = &observation;
     WorldSaveService::set_before_active_regions_replace_for_testing(&HoldStagedLedger);
     bool ledger_saved = false;
     std::array<bool, 2> merged{false, false};
@@ -413,7 +574,7 @@ TEST(WorldSaveService, OverlappingRegionMergesRetainBothWritersRecords) {
     first_writer.join();
     second_writer.join();
     WorldSaveService::set_before_active_regions_replace_for_testing(nullptr);
-    overlap_observation = nullptr;
+    ActiveOverlapObservation() = nullptr;
     EXPECT_TRUE(ledger_saved);
     EXPECT_TRUE(merged[0]);
     EXPECT_TRUE(merged[1]);
@@ -469,21 +630,41 @@ TEST(WorldSaveService, EmptyLedgerAndMetadataSavesReclaimBeforeTheirWriteOrNoop)
     EXPECT_TRUE(std::filesystem::is_empty(save_dir.path()));
 
     const auto metadata_staging = save_dir.path() / "world_info.json.tmp.abandoned";
+    // Exercise cleanup with supported clock metadata; opaque legacy bytes have
+    // a separate compatibility contract and do not test the clock writer.
+    nlohmann::json metadata = {{"container_version", WorldSaveService::kContainerVersion},
+                               {"extension", {{"unknown", "preserved"}}}};
+    clock.write_metadata(metadata);
+    const auto valid = metadata.dump();
     ASSERT_TRUE(WorldSaveService::write_file_durably(metadata_staging, "partial metadata"));
-    ASSERT_TRUE(WorldSaveService::save_metadata("{}", save_dir.path()));
+    ASSERT_TRUE(WorldSaveService::save_metadata(valid, save_dir.path()));
     EXPECT_FALSE(std::filesystem::exists(metadata_staging));
     ASSERT_TRUE(WorldSaveService::write_file_durably(metadata_staging, "partial metadata"));
-    EXPECT_FALSE(
-        WorldSaveService::save_metadata(R"({"simulationTick":"invalid"})", save_dir.path()));
+    for (const auto* invalid : {R"({"simulationTick":"invalid"})",
+                                R"({"calendar":{"dayLengthTicks":12000}})",
+                                R"({"simulationTick":18446744073709551615})"}) {
+        SCOPED_TRACE(invalid);
+        EXPECT_FALSE(WorldSaveService::save_metadata(invalid, save_dir.path()));
+        EXPECT_EQ(ReadFileBytes(save_dir.path() / "world_info.json"), valid);
+        EXPECT_EQ(ReadFileBytes(metadata_staging), "partial metadata");
+    }
     // Refusal happens before cleanup or publication; prior bytes remain complete.
     EXPECT_TRUE(std::filesystem::exists(metadata_staging));
     std::ifstream input(save_dir.path() / "world_info.json", std::ios::binary);
     std::ostringstream bytes;
     bytes << input.rdbuf();
-    EXPECT_EQ(bytes.str(), "{}");
+    EXPECT_EQ(bytes.str(), valid);
     input.close();
-    ASSERT_TRUE(WorldSaveService::save_metadata("{}", save_dir.path()));
+    EXPECT_FALSE(WorldSaveService::save_metadata("{}", save_dir.path()));
+    EXPECT_TRUE(std::filesystem::exists(metadata_staging));
+    EXPECT_EQ(ReadFileBytes(save_dir.path() / "world_info.json"), valid);
+    ASSERT_TRUE(WorldSaveService::save_metadata(valid, save_dir.path()));
     EXPECT_FALSE(std::filesystem::exists(metadata_staging));
+    EXPECT_EQ(ReadFileBytes(save_dir.path() / "world_info.json"), valid);
+    ASSERT_TRUE(WorldSaveService::write_file_durably(ledger_staging, "partial ledger"));
+    ASSERT_TRUE(WorldSaveService::save_active_regions(ledger, clock, save_dir.path()));
+    EXPECT_FALSE(std::filesystem::exists(ledger_staging));
+    EXPECT_FALSE(std::filesystem::exists(WorldSaveService::region_directory(save_dir.path())));
 }
 
 TEST(WorldSaveService, LoadFromEmptySaveDirIsCleanMissWithoutErrors) {
@@ -642,7 +823,7 @@ TEST(WorldSaveService, LegacyMetadataWriterPreservesOpaqueBytesAndMissingDirecto
     const auto missing = root.path() / "missing";
     EXPECT_FALSE(WorldSaveService::save_metadata(R"({"container_version":2})", missing));
     EXPECT_FALSE(std::filesystem::exists(missing));
-    for (const std::string bytes : {"{", "[]", "null", "opaque legacy input"}) {
+    for (const std::string bytes : {"{}", "{", "[]", "null", "opaque legacy input"}) {
         SCOPED_TRACE(bytes);
         const TempSaveDir destination("opaque_metadata");
         ASSERT_TRUE(WorldSaveService::save_metadata(bytes, destination.path()));

@@ -52,36 +52,203 @@ class RuntimeConfigSourceContract(unittest.TestCase):
 
     def test_ui_watchers_use_runtime_root(self):
         for extension in ("rml", "rcss"):
-            self.assertIn('uiHotReload.WatchDirectory(root_path_str+"data/ui","' +
+            self.assertIn('uiHotReload.WatchDirectory(root_dir/"data/ui","' +
                           extension + '");', self.client)
             self.assertNotIn('uiHotReload.WatchDirectory("data/ui","' + extension + '");',
                              self.client)
 
-    def test_preset_rename_refuses_removal_errors_before_reporting_success(self):
+    def test_preset_rename_refuses_occupied_targets_before_publication(self):
         writer = compact_cpp((ROOT / "src/luminumbra_client/world/WorldgenOverride.cpp")
                              .read_text(encoding="utf-8"))
         self.assertIn("Luminumbra::Client::RenameUserPreset(src,dst,newDisplayName)", self.client)
-        rename = writer[writer.index("boolRenameUserPreset("):]
-        publish = rename.index("if(!Persistence::WorldSaveService::write_file_durably(")
-        removal = rename.index("std::filesystem::remove(source,error);")
-        self.assertLess(publish, removal)
-        identity = rename.index("std::filesystem::equivalent(source,destination,error)")
-        self.assertLess(publish, identity)
-        self.assertLess(identity, removal)
-        self.assertIn("returnfalse;", rename[publish:removal])
-        self.assertIn("returnremoved&&!error;", rename[removal:])
+        self.assertIn("WorldSaveService::rename_file_durably("
+                      "source,destination,original,preset.dump(2))", writer)
+        service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
+                              .read_text(encoding="utf-8"))
+        rename = service[service.index("boolWorldSaveService::rename_file_durably("):]
+        rename = rename[:rename.index("boolWorldSaveService::remove_file_and_staging(")]
+        self.assertIn("{constSaveGuardguard;", rename)
+        self.assertLess(rename.index("contents.str()!=expected_bytes"),
+                        rename.index("ReclaimAbandonedStaging(destination)"))
+        self.assertLess(rename.index("std::filesystem::equivalent(source,destination,error)"),
+                        rename.index("WriteFileDurably(destination,bytes,destination,errors,&published_identity)"))
+        self.assertIn('AddError(errors,"renamedestinationisoccupiedorcannotbeinspected");'
+                      'returnfalse;', rename)
+        self.assertLess(rename.index("publication.Publish(errors)"),
+                        rename.rindex("std::filesystem::remove(source,error)"))
+        self.assertLess(rename.rindex("std::filesystem::remove(source,error)"),
+                        rename.index("publication.Commit()"))
+        self.assertIn("returnFlushRemovalDirectory(source,errors);", rename)
+        self.assertIn("std::filesystem::create_hard_link(destination,candidate,error)", rename)
+        self.assertIn("MatchesFileIdentity(destination,published_identity)", rename)
+        self.assertIn("ReplaceRegionFileAtomically(backup,destination,errors)", rename)
+
+    def test_no_replace_publication_is_atomic_on_both_platforms(self):
+        service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
+                              .read_text(encoding="utf-8"))
+        publish = service[service.index("classNewFilePublication{"):]
+        publish = publish[:publish.index("boolCompressPayload(")]
+        self.assertIn("::link(m_temp.c_str(),m_destination.c_str())", publish)
+        self.assertIn("::syscall(SYS_renameat2,AT_FDCWD,m_temp.c_str(),AT_FDCWD,"
+                      "m_destination.c_str(),RENAME_NOREPLACE)", publish)
+        self.assertIn("::renamex_np(m_temp.c_str(),m_destination.c_str(),RENAME_EXCL)", publish)
+        self.assertIn("errno==ENOSYS||errno==EINVAL||errno==EOPNOTSUPP", publish)
+        self.assertIn("::MoveFileExW(m_temp.c_str(),m_destination.c_str(),"
+                      "MOVEFILE_WRITE_THROUGH)", publish)
+        self.assertNotIn("MOVEFILE_REPLACE_EXISTING", publish)
+        self.assertNotIn("std::rename(", publish)
+        self.assertIn("::fstat(m_descriptor,&published)==0", publish)
+        self.assertIn("::lstat(m_destination.c_str(),&named)==0", publish)
+        self.assertIn("published.st_dev==named.st_dev&&published.st_ino==named.st_ino", publish)
+        self.assertIn("m_published&&!m_committed", publish)
+        self.assertIn("::SetFileInformationByHandle(m_handle,FileDispositionInfo,", publish)
+        self.assertIn("returnFlushRemovalDirectory(m_destination,errors);", publish)
+
+    def test_every_replacement_flushes_ancestor_entries_before_publication(self):
+        service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
+                              .read_text(encoding="utf-8"))
+        parts = service.split("boolReplaceRegionFileAtomically(")[1:]
+        self.assertEqual(len(parts), 2)
+        for implementation, syscall in zip(parts, ("::GetFileAttributesW(", "std::rename(")):
+            self.assertLess(implementation.index("if(!FlushAncestorEntries(destination,errors))"),
+                            implementation.index(syscall))
+        remove = service[service.index("boolWorldSaveService::remove_file_and_staging("):]
+        self.assertIn("returnFlushRemovalDirectory(destination,errors);", remove)
+        flush = service[service.index("boolFlushRemovalDirectory(",
+                                      service.index("boolFlushRemovalDirectory(") + 1):]
+        self.assertIn("return!exists||FlushDirectoryEntry(parent,errors);", flush)
+
+    def test_config_io_retains_native_paths(self):
+        header = compact_cpp((ROOT / "src/luminumbra_common/core/SystemConfig.h")
+                             .read_text(encoding="utf-8"))
+        source = compact_cpp((ROOT / "src/luminumbra_common/core/SystemConfig.cpp")
+                             .read_text(encoding="utf-8"))
+        for name, argument in (("LoadFromFile", "path"), ("TryLoadFromFile", "path"),
+                               ("SaveUserOverlay", "path"), ("LoadLayered", "defaults_path")):
+            self.assertIn(name + "(conststd::filesystem::path&" + argument, header)
+            self.assertIn("SystemConfig::" + name + "(conststd::filesystem::path&" + argument,
+                          source)
+        self.assertIn('returnLoadLayered(root/"data/common/systems.json",overlay_path);', source)
+        self.assertNotIn("LoadLayered(Luminumbra::Filesystem::GenericPathString(", source)
+        self.assertIn("std::ifstreamfile(path);", source)
+        self.assertIn("std::ifstreamoverlay(overlay_path,std::ios::binary);", source)
+        self.assertIn("::GetEnvironmentVariableW(L\"APPDATA\"", source)
+        service = (ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp").read_text(
+            encoding="utf-8")
+        self.assertNotIn(".string()", service)
+        watcher = compact_cpp((ROOT / "src/luminumbra_client/ui/core/UIHotReload.cpp")
+                              .read_text(encoding="utf-8"))
+        self.assertIn("WatchDirectory(conststd::filesystem::path&directoryPath", watcher)
+        self.assertIn("constautopath=entry.path();", watcher)
+        self.assertNotIn("entry.path().string()", watcher)
+
+    def test_saver_consent_is_bound_to_confirmed_name(self):
+        ui = compact_cpp((ROOT / "src/luminumbra_client/ui/Rml_UIManager.cpp")
+                         .read_text(encoding="utf-8"))
+        start = ui.index('if(auto*confirm=document->GetElementById("confirm_overwrite_btn"))')
+        confirm = ui[start:ui.index('if(auto*cancel=', start)]
+        self.assertIn("if(!m_pendingPresetOverwrite)return;", confirm)
+        self.assertIn("conststd::stringname=*m_pendingPresetOverwrite;", confirm)
+        self.assertIn("CommitSavePreset(document,name,true)", confirm)
+        self.assertNotIn("ReadFormControlValue", confirm)
+        self.assertIn("m_worldPresetSaver(name,baseType,CollectWorldGenParams(document),"
+                      "overwrite_confirmed)", ui)
+        self.assertIn("overwrite_confirmed?Writer::write_file_durably(destination,bytes):"
+                      "Writer::create_file_durably(destination,bytes)", self.client)
 
     def test_preset_and_settings_writers_use_checked_atomic_publication(self):
         start = self.client.index("g_uiManager->SetWorldPresetSaver(")
         end = self.client.index("g_uiManager->SetWorldPresetList(", start)
-        self.assertIn("WorldSaveService::write_file_durably(", self.client[start:end])
+        self.assertIn("Writer::write_file_durably(", self.client[start:end])
+        self.assertIn("Writer::create_file_durably(", self.client[start:end])
         self.assertNotIn("std::ofstream", self.client[start:end])
         self.assertLess(self.client[start:end].index("in.close();"),
-                        self.client[start:end].index("WorldSaveService::write_file_durably("))
+                        self.client[start:end].index("Writer::write_file_durably("))
         settings = compact_cpp((ROOT / "src/luminumbra_common/core/SystemConfig.cpp")
                                .read_text(encoding="utf-8"))
         save = settings[settings.index("boolSystemConfig::SaveUserOverlay("):]
         self.assertIn("WorldSaveService::write_file_durably(path,serialized)", save)
+
+    def test_overlay_failure_regression_reaches_the_owned_staging_writer(self):
+        service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
+                              .read_text(encoding="utf-8"))
+        start = service.index("boolWriteFileDurably(", service.index("boolWriteFileDurably(") + 1)
+        write = service[start:service.index("boolWorldSaveService::write_file_durably(", start)]
+        interrupt = "InterruptBeforeRegionReplaceForTesting().exchange(false,std::memory_order_acq_rel)"
+        self.assertLess(write.index("WriteDurableRegionTemp(staging,bytes,temp_path,errors)"),
+                        write.index(interrupt))
+        self.assertLess(write.index(interrupt), write.index("ReplaceRegionFileAtomically("))
+        interrupted = write[write.index(interrupt):write.index("ReplaceRegionFileAtomically(")]
+        self.assertIn("RemoveTemporaryFile(temp_path);", interrupted)
+        self.assertIn("returnfalse;", interrupted)
+        fixture = compact_cpp((ROOT / "test/common/GraphicsPresets_test.cpp")
+                              .read_text(encoding="utf-8"))
+        start = fixture.index("TEST(GraphicsPresets,SaveFailuresPreserveExistingFileAndCleanTemporaryOutput)")
+        failure = fixture[start:fixture.index("TEST(GraphicsPresets,EveryPreset", start)]
+        self.assertIn("constOverlayWriteResetreset;", failure)
+        armed = failure.index("set_interrupt_before_region_replace_for_testing(true)")
+        refused = failure.index("EXPECT_FALSE(config.SaveUserOverlay(", armed)
+        disarmed = failure.index("set_interrupt_before_region_replace_for_testing(false)", refused)
+        self.assertLess(armed, refused)
+        self.assertLess(refused, disarmed)
+        self.assertIn("EXPECT_EQ(ReadText(file.Path()),original);", failure[disarmed:])
+        self.assertIn("ASSERT_TRUE(config.SaveUserOverlay(file.Path()));", failure[disarmed:])
+        self.assertIn("ExpectNoOverlayStaging(file.Path());", failure[disarmed:])
+        self.assertIn('prefix+=".tmp.";', fixture)
+        self.assertIn("entry.path().filename().native().find(prefix.native())", fixture)
+
+    def test_metadata_cleanup_fixture_exercises_validated_clock_bytes(self):
+        service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
+                              .read_text(encoding="utf-8"))
+        start = service.index("boolWorldSaveService::save_metadata(")
+        metadata = service[start:service.index("boolWorldSaveService::save_metadata_and_active_regions(", start)]
+        reclaim = metadata.index("ReclaimAbandonedStaging(destination);")
+        for validation in ("validate_save(save_dir,errors)",
+                           "world::WorldClock::from_metadata(metadata,clock,clock_error)",
+                           "ReadAmbientAnchor(metadata,ambient_anchor,clock_error)",
+                           "read_clock_metadata(save_dir,previous_clock,requires_active_regions,errors)",
+                           "if(requires_active_regions&&!has_clock)"):
+            self.assertLess(metadata.index(validation), reclaim)
+        self.assertLess(reclaim, metadata.index("WriteDurableRegionTemp("))
+        fixture = compact_cpp((ROOT / "test/persistence/world_save_service_test.cpp")
+                              .read_text(encoding="utf-8"))
+        start = fixture.index("TEST(WorldSaveService,EmptyLedgerAndMetadataSavesReclaimBeforeTheirWriteOrNoop)")
+        cleanup = fixture[start:fixture.index("TEST(WorldSaveService,LoadFromEmpty", start)]
+        self.assertIn("clock.write_metadata(metadata);", cleanup)
+        self.assertEqual(cleanup.count("ASSERT_TRUE(WorldSaveService::save_metadata(valid,save_dir.path()));"), 2)
+        self.assertNotIn('ASSERT_TRUE(WorldSaveService::save_metadata("{}",', cleanup)
+        self.assertIn('EXPECT_FALSE(WorldSaveService::save_metadata("{}",save_dir.path()));', cleanup)
+        self.assertIn('EXPECT_EQ(ReadFileBytes(metadata_staging),"partialmetadata");', cleanup)
+
+    def test_recursive_watcher_regression_uses_native_paths_and_observed_parent_time(self):
+        watcher = compact_cpp((ROOT / "src/luminumbra_client/ui/core/UIHotReload.cpp")
+                              .read_text(encoding="utf-8"))
+        self.assertIn("extensions.insert(extension);", watcher)
+        self.assertIn("std::filesystem::recursive_directory_iterator(directoryPath)", watcher)
+        self.assertIn("if(m_watchedFiles.contains(path))continue;", watcher)
+        self.assertIn("m_reloadCallback(Filesystem::GenericUtf8PathString(filePath));", watcher)
+        fixture = compact_cpp((ROOT / "test/persistence/world_open_refusal_test.cpp")
+                              .read_text(encoding="utf-8"))
+        start = fixture.index("TEST_F(WorldOpenRefusal,DirectoryWatchesRetainBothFiltersAndDiscoverNestedFiles)")
+        discovery = fixture[start:fixture.index("TEST_F(WorldOpenRefusal,DirectoryWatchWildcard", start)]
+        self.assertIn("ASSERT_EQ(fs::last_write_time(ui),parent_time);", discovery)
+        self.assertNotIn("fs::last_write_time(ui,", discovery)
+        self.assertIn('reload.WatchDirectory(ui,"rml");', discovery)
+        self.assertIn('reload.WatchDirectory(ui,".rcss");', discovery)
+        self.assertIn("Filesystem::GenericUtf8PathString(documents[0])", discovery)
+        self.assertIn("Filesystem::GenericUtf8PathString(documents[1])", discovery)
+        wildcard = fixture[fixture.index("TEST_F(WorldOpenRefusal,DirectoryWatchWildcard", start):]
+        self.assertIn('Filesystem::GenericUtf8PathString(ui/"new.txt")', wildcard)
+
+    def test_cancelled_validation_fixture_owns_a_mutable_stop_source(self):
+        fixture = compact_cpp((ROOT / "test/persistence/world_open_refusal_test.cpp")
+                              .read_text(encoding="utf-8"))
+        start = fixture.index("TEST_F(WorldOpenRefusal,CancelledValidationNeverReportsAValidSaveOrLeavesPartialAuthority)")
+        cancellation = fixture[start:fixture.index("TEST_F(WorldOpenRefusal,InvalidMetadata", start)]
+        self.assertIn("std::stop_sourcecancellation;", cancellation)
+        self.assertNotIn("conststd::stop_sourcecancellation;", cancellation)
+        self.assertIn("ASSERT_TRUE(cancellation.request_stop());", cancellation)
+        self.assertIn("ASSERT_TRUE(cancellation.stop_requested());", cancellation)
 
     def test_plant_staging_is_reclaimed_outside_the_strict_region_scan(self):
         service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
@@ -120,7 +287,8 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                               .read_text(encoding="utf-8"))
         for name in ("save_metadata", "save_metadata_and_active_regions", "save_plant_entities",
                      "save_active_regions", "upsert_container_records", "save_dirty_chunks",
-                     "write_snapshot", "write_file_durably", "remove_file_and_staging"):
+                     "write_snapshot", "write_file_durably", "remove_file_and_staging",
+                     "create_file_durably", "rename_file_durably"):
             start = service.index("WorldSaveService::" + name + "(")
             body = service.index("{", start)
             self.assertTrue(service[body:].startswith("{constSaveGuardguard;"), name)
@@ -179,10 +347,11 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
                               .read_text(encoding="utf-8"))
         start = service.index("if(snapshot.entities.empty()){")
-        end = service.index("returntrue;", start)
+        end = service.index("returnFlushRemovalDirectory(path,errors);", start)
         empty_roster = service[start:end]
         self.assertIn("std::filesystem::remove(path,ec);if(ec){", empty_roster)
         self.assertIn("returnfalse;", empty_roster)
+        self.assertIn("returnFlushRemovalDirectory(path,errors);", service[end:])
 
 
 if __name__ == "__main__":

@@ -50,6 +50,37 @@ entt::entity barePlant(entt::registry& r, float x, std::uint8_t stage, std::uint
     return e;
 }
 
+#if !defined(_WIN32)
+TEST(PlantPersistence, EmptyRosterRemovalFlushesParentEvenAfterFailedFlush) {
+    namespace SS = ::Luminumbra::Persistence;
+    const auto directory = Luminumbra::TestSupport::CreateUniqueTempDirectory("plant-unlink-");
+    struct Cleanup {
+        const std::filesystem::path& path;
+        ~Cleanup() {
+            SS::WorldSaveService::set_directory_flush_failure_for_testing(-1);
+            std::error_code error;
+            std::filesystem::remove_all(path, error);
+        }
+    } cleanup{directory};
+    const auto path = SS::WorldSaveService::plant_entities_path(directory);
+    entt::registry plants;
+    barePlant(plants, 1.0f, 0, 5);
+    ASSERT_TRUE(
+        SS::WorldSaveService::save_plant_entities(F::BuildPlantEntitySnapshot(plants), directory));
+    const Luminumbra::Ecs::EntityRegistrySnapshot empty;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        SS::WorldSaveService::set_directory_flush_failure_for_testing(0);
+        std::vector<std::string> errors;
+        EXPECT_FALSE(SS::WorldSaveService::save_plant_entities(empty, directory, &errors));
+        EXPECT_FALSE(std::filesystem::exists(path));
+        ASSERT_EQ(errors.size(), 1u);
+        EXPECT_EQ(errors.front(),
+                  "directory flush failed (test seam): " + path.parent_path().string());
+    }
+    EXPECT_TRUE(SS::WorldSaveService::save_plant_entities(empty, directory));
+}
+#endif
+
 TEST(PlantPersistence, EmptyRosterIsEmptySnapshot) {
     entt::registry r;
     EXPECT_TRUE(F::BuildPlantEntitySnapshot(r).entities.empty());

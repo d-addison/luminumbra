@@ -8,6 +8,7 @@
 #include "luminumbra/core/Types.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/components/PlantComponents.h"
+#include "luminumbra_common/core/FilesystemPath.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/fields/EnergyFieldState.h"
@@ -677,8 +678,9 @@ TEST_F(WorldOpenRefusal, CatalogSeparatesEmptyUnavailableAndRealMetadataWithoutW
 
 TEST_F(WorldOpenRefusal, CancelledValidationNeverReportsAValidSaveOrLeavesPartialAuthority) {
     const auto before = DiskBytes(root);
-    const std::stop_source cancellation;
-    cancellation.request_stop();
+    std::stop_source cancellation;
+    ASSERT_TRUE(cancellation.request_stop());
+    ASSERT_TRUE(cancellation.stop_requested());
     const auto inspected =
         Persistence::InspectSavedWorld(root, "fixture", cancellation.get_token());
     EXPECT_FALSE(inspected.error.empty());
@@ -1647,8 +1649,13 @@ public:
                                nullptr);
         ASSERT_NE(handle, INVALID_HANDLE_VALUE);
 #else
-        // One resident region and its manifest each flush once before plants.
+        // One resident region and its manifest each flush all ancestor entries
+        // and then their own directory before the selected sibling writer.
         int flushes = 2;
+        for (auto ancestor = WorldSaveService::region_directory(destination);
+             !ancestor.empty() && ancestor != ancestor.root_path();
+             ancestor = ancestor.parent_path())
+            flushes += 2;
         if (energy) {
             const auto plants = WorldSaveService::plant_entities_path(destination);
             // The plant writer flushes every ancestor entry and its replacement.
@@ -1898,7 +1905,12 @@ TEST_F(WorldOpenRefusal, PartialChunkReplacementKeepsMetadataAndDirtyChunksPendi
     WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
 #else
     // A post-replacement flush failure leaves the new complete region in place.
-    WorldSaveService::set_directory_flush_failure_for_testing(0);
+    int ancestor_flushes = 0;
+    for (auto ancestor = WorldSaveService::region_directory(destination);
+         !ancestor.empty() && ancestor != ancestor.root_path();
+         ancestor = ancestor.parent_path())
+        ++ancestor_flushes;
+    WorldSaveService::set_directory_flush_failure_for_testing(ancestor_flushes);
 #endif
     EXPECT_FALSE(session->SaveWorldState());
     WorldSaveService::set_directory_flush_failure_for_testing(-1);
@@ -2087,16 +2099,18 @@ TEST_F(WorldOpenRefusal, DirectoryWatchesRetainBothFiltersAndDiscoverNestedFiles
     fs::create_directories(ui / "nested");
     UIHotReload reload;
     reload.SetEnabled(true);
-    reload.WatchDirectory(ui.string(), "rml");
-    reload.WatchDirectory(ui.string(), ".rcss");
-    reload.WatchDirectory(ui.string(), "rml"); // duplicate registration is harmless
+    reload.WatchDirectory(ui, "rml");
+    reload.WatchDirectory(ui, ".rcss");
+    reload.WatchDirectory(ui, "rml"); // duplicate registration is harmless
     std::vector<std::string> changes;
     reload.SetReloadCallback([&](const std::string& path) { changes.push_back(path); });
     const auto parent_time = fs::last_write_time(ui);
     Write(ui / "nested/new.rml", "document");
     Write(ui / "nested/new.rcss", "style");
     Write(ui / "nested/ignored.txt", "ignored");
-    fs::last_write_time(ui, parent_time);
+    // Nested file creation changes nested/, not its parent. Observe that property
+    // directly: setting directory timestamps requires different rights on Windows.
+    ASSERT_EQ(fs::last_write_time(ui), parent_time);
     reload.Update();
     EXPECT_TRUE(changes.empty()); // Polling remains throttled before the interval expires.
     reload.SetEnabled(false);
@@ -2106,24 +2120,26 @@ TEST_F(WorldOpenRefusal, DirectoryWatchesRetainBothFiltersAndDiscoverNestedFiles
     reload.SetEnabled(true);
     reload.Update();
     std::sort(changes.begin(), changes.end());
-    const std::vector<std::string> expected = {(ui / "nested/new.rcss").string(),
-                                               (ui / "nested/new.rml").string()};
+    const std::array<fs::path, 2> documents{ui / "nested/new.rcss", ui / "nested/new.rml"};
+    const std::vector<std::string> expected = {Filesystem::GenericUtf8PathString(documents[0]),
+                                               Filesystem::GenericUtf8PathString(documents[1])};
     EXPECT_EQ(changes, expected);
+    EXPECT_EQ(fs::last_write_time(ui), parent_time);
     changes.clear();
-    for (const auto& path : expected)
+    for (const auto& path : documents)
         fs::last_write_time(path, fs::last_write_time(path) + std::chrono::seconds(2));
     std::this_thread::sleep_for(std::chrono::milliseconds(1010));
     reload.Update();
     std::sort(changes.begin(), changes.end());
     EXPECT_EQ(changes, expected);
-    reload.StopWatching(ui.string());
+    reload.StopWatching(ui);
     changes.clear();
     Write(ui / "nested/later.rml", "later");
     std::this_thread::sleep_for(std::chrono::milliseconds(1010));
     reload.Update();
     EXPECT_TRUE(changes.empty());
     reload.ClearAllWatches();
-    for (const auto& path : expected)
+    for (const auto& path : documents)
         fs::last_write_time(path, fs::last_write_time(path) + std::chrono::seconds(2));
     std::this_thread::sleep_for(std::chrono::milliseconds(1010));
     reload.Update();
@@ -2135,16 +2151,16 @@ TEST_F(WorldOpenRefusal, DirectoryWatchWildcardAndMissingDirectoryRemainSafe) {
     const auto ui = root / "ui";
     UIHotReload reload;
     reload.SetEnabled(true);
-    EXPECT_NO_THROW(reload.WatchDirectory(ui.string(), "rml"));
+    EXPECT_NO_THROW(reload.WatchDirectory(ui, "rml"));
     fs::create_directory(ui);
-    reload.WatchDirectory(ui.string());
-    reload.WatchDirectory(ui.string(), "rcss");
+    reload.WatchDirectory(ui);
+    reload.WatchDirectory(ui, "rcss");
     std::vector<std::string> changes;
     reload.SetReloadCallback([&](const std::string& path) { changes.push_back(path); });
     Write(ui / "new.txt", "wildcard");
     std::this_thread::sleep_for(std::chrono::milliseconds(1010));
     reload.Update();
-    EXPECT_EQ(changes, std::vector<std::string>{(ui / "new.txt").string()});
+    EXPECT_EQ(changes, std::vector<std::string>{Filesystem::GenericUtf8PathString(ui / "new.txt")});
     fs::remove_all(ui);
     std::this_thread::sleep_for(std::chrono::milliseconds(1010));
     EXPECT_NO_THROW(reload.Update());

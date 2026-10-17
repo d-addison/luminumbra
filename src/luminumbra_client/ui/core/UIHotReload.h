@@ -16,6 +16,7 @@ namespace Luminumbra::Client::UI {
  */
 class UIHotReload {
 public:
+    // Callback paths are UTF-8 presentation strings; filesystem operations stay native.
     using ReloadCallback = std::function<void(const std::string& filePath)>;
 
     UIHotReload();
@@ -30,9 +31,10 @@ public:
     }
 
     // File watching
-    void WatchFile(const std::string& filePath);
-    void WatchDirectory(const std::string& directoryPath, const std::string& extension = "");
-    void StopWatching(const std::string& path);
+    void WatchFile(const std::filesystem::path& filePath);
+    void WatchDirectory(const std::filesystem::path& directoryPath,
+                        const std::string& extension = "");
+    void StopWatching(const std::filesystem::path& path);
     void ClearAllWatches();
 
     // Callbacks
@@ -44,18 +46,18 @@ public:
     void Update();
 
     // Manual triggers
-    void TriggerReload(const std::string& filePath);
+    void TriggerReload(const std::filesystem::path& filePath);
     void ReloadAll();
 
 private:
     struct WatchedFile {
-        std::string path;
+        std::filesystem::path path;
         std::filesystem::file_time_type lastWriteTime;
     };
 
     bool m_enabled = false;
-    std::unordered_map<std::string, WatchedFile> m_watchedFiles;
-    std::unordered_map<std::string, std::unordered_set<std::string>> m_watchedDirectories;
+    std::unordered_map<std::filesystem::path, WatchedFile> m_watchedFiles;
+    std::unordered_map<std::filesystem::path, std::unordered_set<std::string>> m_watchedDirectories;
     ReloadCallback m_reloadCallback;
 
     std::chrono::steady_clock::time_point m_lastCheck;
@@ -63,11 +65,11 @@ private:
 
     // Internal methods
     bool CheckFileChanged(WatchedFile& watchedFile);
-    void ScanDirectory(const std::string& directoryPath,
+    void ScanDirectory(const std::filesystem::path& directoryPath,
                        const std::unordered_set<std::string>& extensions,
-                       std::vector<std::string>* added = nullptr);
-    std::filesystem::file_time_type GetFileWriteTime(const std::string& filePath);
-    bool FileExists(const std::string& filePath);
+                       std::vector<std::filesystem::path>* added = nullptr);
+    std::filesystem::file_time_type GetFileWriteTime(const std::filesystem::path& filePath);
+    bool FileExists(const std::filesystem::path& filePath);
 };
 
 } // namespace Luminumbra::Client::UI

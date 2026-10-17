@@ -36,6 +36,7 @@
 #endif
 
 #include "audio/NullAudioManager.h"
+#include "core/FilesystemPath.h"
 #include "luminumbra_common/core/FramePacing.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/world/KnobLayer.h"
@@ -45,6 +46,7 @@
 #include "ui/components/common/Panel.h"
 #include "ui/components/game/WorldList.h"
 #include "ui/core/UIComponent.h"
+#include "ui/core/UIHotReload.h"
 #include "ui/core/UIStateManager.h"
 #include "world/WorldgenOverride.h"
 
@@ -80,9 +82,38 @@ protected:
     }
     void ExpectNoStaging() const {
         for (const auto& entry : fs::recursive_directory_iterator(m_directory))
-            EXPECT_EQ(entry.path().filename().string().find(".tmp."), std::string::npos);
+            EXPECT_EQ(Luminumbra::Filesystem::GenericUtf8PathString(entry.path().filename())
+                          .find(".tmp."),
+                      std::string::npos);
     }
 };
+
+TEST_F(UserPresetPersistence, NativeWatcherPathsReachFilesystemAndEmitUtf8) {
+    const auto directory = Directory() / fs::path(u8"ui-\u4e16\u754c");
+    fs::create_directory(directory);
+    const auto document = directory / fs::path(u8"page-\u03a9.rml");
+    ASSERT_NO_FATAL_FAILURE(Write(document, "initial"));
+    ASSERT_NO_FATAL_FAILURE(Write(directory / fs::path(u8"other.\u4e16\u754c"), "ignored"));
+    Luminumbra::Client::UI::UIHotReload watcher;
+    watcher.SetEnabled(true);
+    std::vector<std::string> changed;
+    watcher.SetReloadCallback([&](const std::string& path) { changed.push_back(path); });
+    watcher.WatchDirectory(directory, "rml");
+    const auto stamp = fs::last_write_time(document);
+    fs::last_write_time(document, stamp + std::chrono::seconds(2));
+    // One watcher interval, independent of timestamp resolution and renderer state.
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    watcher.Update();
+    ASSERT_EQ(changed.size(), 1u);
+    EXPECT_EQ(changed.front(), Luminumbra::Filesystem::GenericUtf8PathString(document));
+    watcher.StopWatching(document);
+    watcher.ClearAllWatches();
+    changed.clear();
+    watcher.WatchFile(directory / "absent");
+    watcher.WatchDirectory(directory / "absent", "rml");
+    watcher.Update();
+    EXPECT_TRUE(changed.empty());
+}
 
 TEST_F(UserPresetPersistence, InterruptedRenamePreservesSourceAndDestinationThenRetries) {
     const auto source = Directory() / "user_source.json";
@@ -93,7 +124,7 @@ TEST_F(UserPresetPersistence, InterruptedRenamePreservesSourceAndDestinationThen
         ASSERT_NO_FATAL_FAILURE(Write(destination, R"({"name":"Existing destination"})"));
         const auto source_bytes = Read(source);
         const auto destination_bytes = Read(destination);
-        const auto target = same_name ? source : destination;
+        const auto target = same_name ? source : Directory() / "new_destination.json";
         Luminumbra::Persistence::WorldSaveService::set_interrupt_before_region_replace_for_testing(
             true);
         const bool renamed = Luminumbra::Client::RenameUserPreset(source, target, "Renamed");
@@ -109,6 +140,26 @@ TEST_F(UserPresetPersistence, InterruptedRenamePreservesSourceAndDestinationThen
         EXPECT_EQ(fs::exists(source), same_name);
         ExpectNoStaging();
     }
+}
+
+TEST_F(UserPresetPersistence, OccupiedDestinationRefusesExactBytesAndThenRetries) {
+    const auto source = Directory() / "user_source.json";
+    const auto destination = Directory() / "user_destination.json";
+    const std::string source_bytes = "{ \"name\": \"Source\", \"unknown\": 17 }\n";
+    const std::string occupied_bytes = "{ \"name\": \"Occupied\" }\r\n";
+    ASSERT_NO_FATAL_FAILURE(Write(source, source_bytes));
+    ASSERT_NO_FATAL_FAILURE(Write(destination, occupied_bytes));
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        EXPECT_FALSE(Luminumbra::Client::RenameUserPreset(source, destination, "Renamed"));
+        EXPECT_EQ(Read(source), source_bytes);
+        EXPECT_EQ(Read(destination), occupied_bytes);
+        ExpectNoStaging();
+    }
+    ASSERT_TRUE(fs::remove(destination));
+    ASSERT_TRUE(Luminumbra::Client::RenameUserPreset(source, destination, "Renamed"));
+    EXPECT_FALSE(fs::exists(source));
+    EXPECT_EQ(nlohmann::json::parse(Read(destination)).at("unknown"), 17);
+    ExpectNoStaging();
 }
 
 TEST_F(UserPresetPersistence, InvalidSourceAndPublicationFailurePreserveExistingFiles) {
@@ -167,6 +218,30 @@ TEST_F(UserPresetPersistence, AliasedDestinationKeepsThePublishedPreset) {
     ExpectNoStaging();
 }
 
+#ifndef _WIN32
+TEST_F(UserPresetPersistence, HardLinkSourceRemovalFailureRestoresAliasAndRetries) {
+    const auto source = Directory() / "source.json";
+    const auto destination = Directory() / "alias.json";
+    const std::string original = R"({"name":"Original","unknown":17})";
+    ASSERT_NO_FATAL_FAILURE(Write(source, original));
+    fs::create_hard_link(source, destination);
+    const int descriptor = ::open(source.c_str(), O_RDONLY);
+    ASSERT_GE(descriptor, 0);
+    const auto held_source = fs::path("/dev/fd") / std::to_string(descriptor);
+    const bool renamed = Luminumbra::Client::RenameUserPreset(held_source, destination, "Renamed");
+    EXPECT_EQ(::close(descriptor), 0);
+    EXPECT_FALSE(renamed);
+    EXPECT_EQ(Read(source), original);
+    EXPECT_EQ(Read(destination), original);
+    EXPECT_TRUE(fs::equivalent(source, destination));
+    ExpectNoStaging();
+    ASSERT_TRUE(Luminumbra::Client::RenameUserPreset(source, destination, "Renamed"));
+    EXPECT_FALSE(fs::exists(source));
+    EXPECT_EQ(nlohmann::json::parse(Read(destination)).at("name"), "Renamed");
+    ExpectNoStaging();
+}
+#endif
+
 TEST_F(UserPresetPersistence, SourceRemovalFailureKeepsBothCompletePresets) {
     const auto source = Directory() / "original/user_source.json";
     const auto destination = Directory() / "user_destination.json";
@@ -192,7 +267,7 @@ TEST_F(UserPresetPersistence, SourceRemovalFailureKeepsBothCompletePresets) {
 #endif
     EXPECT_FALSE(renamed);
     EXPECT_EQ(nlohmann::json::parse(Read(source)).at("name"), "Source");
-    EXPECT_EQ(nlohmann::json::parse(Read(destination)).at("name"), "Renamed");
+    EXPECT_FALSE(fs::exists(destination));
     ExpectNoStaging();
     ASSERT_TRUE(Luminumbra::Client::RenameUserPreset(source, destination, "Renamed"));
     EXPECT_FALSE(fs::exists(source));
@@ -1492,13 +1567,14 @@ TEST(UiSmokeTest, SaveAndListUserPresetsAreFunctional) {
         std::size_t count = 0;
     };
     std::optional<Saved> saved;
-    ui.SetWorldPresetSaver(
-        [&](const std::string& name,
-            const std::string& base,
-            const std::vector<Luminumbra::Client::WorldGenParam>& p) -> std::string {
-            saved = Saved{name, base, p.size()};
-            return "user_test_type";
-        });
+    ui.SetWorldPresetSaver([&](const std::string& name,
+                               const std::string& base,
+                               const std::vector<Luminumbra::Client::WorldGenParam>& p,
+                               bool overwrite_confirmed) -> std::string {
+        EXPECT_FALSE(overwrite_confirmed);
+        saved = Saved{name, base, p.size()};
+        return "user_test_type";
+    });
     ui.SetWorldPresetList([&]() -> std::vector<std::pair<std::string, std::string>> {
         return {{"My Canyon", "user_my_canyon"}};
     });
@@ -1716,24 +1792,26 @@ TEST(UiSmokeTest, UserPresetDeleteRenameAndOverwriteConfirmAreFunctional) {
     std::string last_saved_name;
     ui.SetWorldParamGetter([&](const std::string&, const std::string&) { return std::string(); });
     ui.SetWorldPresetList([&]() { return store; });
-    ui.SetWorldPresetSaver(
-        [&](const std::string& name,
-            const std::string&,
-            const std::vector<Luminumbra::Client::WorldGenParam>&) -> std::string {
-            const std::string type = "user_" + slug(name);
-            // overwrite-or-insert by id (mirrors the on-disk saver).
-            for (auto& e : store)
-                if (e.second == type) {
-                    e.first = name;
-                    ++save_count;
-                    last_saved_name = name;
-                    return type;
-                }
-            store.emplace_back(name, type);
-            ++save_count;
-            last_saved_name = name;
-            return type;
-        });
+    ui.SetWorldPresetSaver([&](const std::string& name,
+                               const std::string&,
+                               const std::vector<Luminumbra::Client::WorldGenParam>&,
+                               bool overwrite_confirmed) -> std::string {
+        const std::string type = "user_" + slug(name);
+        // overwrite-or-insert by id (mirrors the on-disk saver).
+        for (auto& e : store)
+            if (e.second == type) {
+                EXPECT_TRUE(overwrite_confirmed);
+                e.first = name;
+                ++save_count;
+                last_saved_name = name;
+                return type;
+            }
+        EXPECT_FALSE(overwrite_confirmed);
+        store.emplace_back(name, type);
+        ++save_count;
+        last_saved_name = name;
+        return type;
+    });
     ui.SetWorldPresetExists([&](const std::string& name) -> bool {
         const std::string type = "user_" + slug(name);
         for (const auto& e : store)
@@ -1787,7 +1865,9 @@ TEST(UiSmokeTest, UserPresetDeleteRenameAndOverwriteConfirmAreFunctional) {
     // Re-trigger and CONFIRM -> the save proceeds (the overwrite the user opted into).
     ClickAndUpdate(ui, wc->GetElementById("save_preset_btn"));
     EXPECT_FALSE(ow_modal->IsClassSet("hidden"));
+    SetControlValue(wc, "save_preset_name", "Unconfirmed name");
     ClickAndUpdate(ui, wc->GetElementById("confirm_overwrite_btn"));
+    EXPECT_EQ(last_saved_name, "My Canyon");
     EXPECT_TRUE(ow_modal->IsClassSet("hidden"));
     EXPECT_EQ(save_count, 1) << "confirming overwrite must commit the save";
     EXPECT_EQ(store.size(), 1u) << "overwriting must not add a second preset";

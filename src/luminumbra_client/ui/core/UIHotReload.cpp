@@ -1,4 +1,5 @@
 #include "UIHotReload.h"
+#include "core/FilesystemPath.h"
 #include "core/Log.h"
 #include <chrono>
 #include <filesystem>
@@ -17,9 +18,10 @@ UIHotReload::~UIHotReload() {
     ClearAllWatches();
 }
 
-void UIHotReload::WatchFile(const std::string& filePath) {
+void UIHotReload::WatchFile(const std::filesystem::path& filePath) {
     if (!FileExists(filePath)) {
-        LUMINUMBRA_CORE_WARN("[UI HotReload] File does not exist: {}", filePath);
+        LUMINUMBRA_CORE_WARN("[UI HotReload] File does not exist: {}",
+                             Filesystem::GenericUtf8PathString(filePath));
         return;
     }
 
@@ -29,13 +31,16 @@ void UIHotReload::WatchFile(const std::string& filePath) {
 
     m_watchedFiles[filePath] = watchedFile;
 
-    LUMINUMBRA_CORE_INFO("[UI HotReload] Watching file: {}", filePath);
+    LUMINUMBRA_CORE_INFO("[UI HotReload] Watching file: {}",
+                         Filesystem::GenericUtf8PathString(filePath));
 }
 
-void UIHotReload::WatchDirectory(const std::string& directoryPath, const std::string& extension) {
+void UIHotReload::WatchDirectory(const std::filesystem::path& directoryPath,
+                                 const std::string& extension) {
     std::error_code error;
     if (!std::filesystem::is_directory(directoryPath, error)) {
-        LUMINUMBRA_CORE_WARN("[UI HotReload] Directory does not exist: {}", directoryPath);
+        LUMINUMBRA_CORE_WARN("[UI HotReload] Directory does not exist: {}",
+                             Filesystem::GenericUtf8PathString(directoryPath));
         return;
     }
     auto& extensions = m_watchedDirectories[directoryPath];
@@ -43,14 +48,15 @@ void UIHotReload::WatchDirectory(const std::string& directoryPath, const std::st
     ScanDirectory(directoryPath, extensions);
 
     LUMINUMBRA_CORE_INFO("[UI HotReload] Watching directory: {} (extension: {})",
-                         directoryPath,
+                         Filesystem::GenericUtf8PathString(directoryPath),
                          extension.empty() ? "*" : extension);
 }
 
-void UIHotReload::StopWatching(const std::string& path) {
+void UIHotReload::StopWatching(const std::filesystem::path& path) {
     m_watchedFiles.erase(path);
     m_watchedDirectories.erase(path);
-    LUMINUMBRA_CORE_INFO("[UI HotReload] Stopped watching: {}", path);
+    LUMINUMBRA_CORE_INFO("[UI HotReload] Stopped watching: {}",
+                         Filesystem::GenericUtf8PathString(path));
 }
 
 void UIHotReload::ClearAllWatches() {
@@ -71,7 +77,7 @@ void UIHotReload::Update() {
 
     m_lastCheck = now;
 
-    std::vector<std::string> changedFiles;
+    std::vector<std::filesystem::path> changedFiles;
     // Scan separately: discovering files can rehash the file map. Scanning each
     // directory also discovers nested additions whose parent timestamp is unchanged.
     for (const auto& [path, extensions] : m_watchedDirectories)
@@ -87,10 +93,11 @@ void UIHotReload::Update() {
     }
 }
 
-void UIHotReload::TriggerReload(const std::string& filePath) {
+void UIHotReload::TriggerReload(const std::filesystem::path& filePath) {
     if (m_reloadCallback) {
-        LUMINUMBRA_CORE_INFO("[UI HotReload] File changed, triggering reload: {}", filePath);
-        m_reloadCallback(filePath);
+        LUMINUMBRA_CORE_INFO("[UI HotReload] File changed, triggering reload: {}",
+                             Filesystem::GenericUtf8PathString(filePath));
+        m_reloadCallback(Filesystem::GenericUtf8PathString(filePath));
     }
 }
 
@@ -116,19 +123,19 @@ bool UIHotReload::CheckFileChanged(WatchedFile& watchedFile) {
     return false;
 }
 
-void UIHotReload::ScanDirectory(const std::string& directoryPath,
+void UIHotReload::ScanDirectory(const std::filesystem::path& directoryPath,
                                 const std::unordered_set<std::string>& extensions,
-                                std::vector<std::string>* added) {
+                                std::vector<std::filesystem::path>* added) {
     try {
         for (const auto& entry : std::filesystem::recursive_directory_iterator(directoryPath)) {
             if (!entry.is_regular_file())
                 continue;
-            const auto extension = entry.path().extension().string();
+            const auto extension = Filesystem::GenericUtf8PathString(entry.path().extension());
             const auto bare = extension.empty() ? extension : extension.substr(1);
             if (!extensions.contains("") && !extensions.contains(extension) &&
                 !extensions.contains(bare))
                 continue;
-            const auto path = entry.path().string();
+            const auto path = entry.path();
             if (m_watchedFiles.contains(path))
                 continue;
             m_watchedFiles.emplace(path, WatchedFile{path, GetFileWriteTime(path)});
@@ -136,12 +143,14 @@ void UIHotReload::ScanDirectory(const std::string& directoryPath,
                 added->push_back(path);
         }
     } catch (const std::filesystem::filesystem_error& e) {
-        LUMINUMBRA_CORE_ERROR(
-            "[UI HotReload] Error scanning directory {}: {}", directoryPath, e.what());
+        LUMINUMBRA_CORE_ERROR("[UI HotReload] Error scanning directory {}: {}",
+                              Filesystem::GenericUtf8PathString(directoryPath),
+                              e.what());
     }
 }
 
-std::filesystem::file_time_type UIHotReload::GetFileWriteTime(const std::string& filePath) {
+std::filesystem::file_time_type
+UIHotReload::GetFileWriteTime(const std::filesystem::path& filePath) {
     try {
         return std::filesystem::last_write_time(filePath);
     } catch (const std::filesystem::filesystem_error&) {
@@ -149,7 +158,7 @@ std::filesystem::file_time_type UIHotReload::GetFileWriteTime(const std::string&
     }
 }
 
-bool UIHotReload::FileExists(const std::string& filePath) {
+bool UIHotReload::FileExists(const std::filesystem::path& filePath) {
     std::error_code error;
     return std::filesystem::exists(filePath, error);
 }

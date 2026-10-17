@@ -7,6 +7,7 @@
 #include <fstream>
 #include <ios>
 #include <limits>
+#include <sstream>
 #include <system_error>
 
 #include "luminumbra_common/persistence/WorldSaveService.h"
@@ -74,29 +75,23 @@ bool RenameUserPreset(const std::filesystem::path& source,
                       const std::filesystem::path& destination,
                       const std::string& display_name) {
     try {
-        nlohmann::json preset;
+        std::string original;
         {
             std::ifstream input(source, std::ios::binary);
             if (!input)
                 return false;
-            preset = nlohmann::json::parse(input);
-            if (input.bad() || !preset.is_object())
+            std::ostringstream contents;
+            contents << input.rdbuf();
+            if (input.bad() || contents.bad())
                 return false;
+            original = contents.str();
         }
+        auto preset = nlohmann::json::parse(original);
+        if (!preset.is_object())
+            return false;
         preset["name"] = display_name.empty() ? std::string("Custom") : display_name;
-        if (!Persistence::WorldSaveService::write_file_durably(destination, preset.dump(2)))
-            return false;
-        if (source == destination)
-            return true;
-        // Check after replacement: directory/case aliases now name the new file,
-        // while a separate hard link still names the original and can be removed.
-        std::error_code error;
-        if (std::filesystem::equivalent(source, destination, error))
-            return true;
-        if (error)
-            return false;
-        const bool removed = std::filesystem::remove(source, error);
-        return removed && !error;
+        return Persistence::WorldSaveService::rename_file_durably(
+            source, destination, original, preset.dump(2));
     } catch (const std::exception&) {
         return false;
     }
