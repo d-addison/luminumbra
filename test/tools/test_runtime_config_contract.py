@@ -29,15 +29,26 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         self.assertIn(load, self.client)
         self.assertLess(self.client.index(load),
                         self.client.index("if(scenario_config.systems_config_override){"))
-        self.assertIn("constautouser_settings=g_systemConfig.user();"
-                      "g_systemConfig=*scenario_config.systems_config_override;"
-                      "g_systemConfig.user()=user_settings;", self.client)
+        override = "if(scenario_config.systems_config_override){"
+        self.assertIn(override +
+                      "g_systemConfig.ReplaceSystemsFrom(*scenario_config.systems_config_override);}",
+                      self.client)
+        self.assertNotIn("g_systemConfig=*scenario_config.systems_config_override;", self.client)
 
     def test_server_boot_and_admission_share_root_loader(self):
         for source, root in ((self.runner, "m_config.root_path"), (self.admission, "root")):
             self.assertIn("luminumbra::core::SystemConfig::LoadFromRuntimeRoot(" + root + ")",
                           source)
             self.assertNotIn('"data/common/systems.json"', source)
+
+    def test_scenario_host_uses_runtime_defaults_unless_explicitly_overridden(self):
+        host = compact_cpp((ROOT / "src/luminumbra_client/core/scenarios/NetworkedSessionDriver.cpp")
+                           .read_text(encoding="utf-8"))
+        self.assertIn("m_impl->host_session->ApplySystemConfig("
+                      "config.systems_config_override?*config.systems_config_override:"
+                      "luminumbra::core::SystemConfig::LoadFromRuntimeRoot(config.root_path));", host)
+        self.assertNotIn('"data/common/systems.json"', host)
+        self.assertNotIn("SystemConfig::LoadFromFile(", host)
 
     def test_ui_watchers_use_runtime_root(self):
         for extension in ("rml", "rcss"):

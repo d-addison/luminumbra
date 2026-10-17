@@ -250,14 +250,10 @@ bool NetworkedSessionDriver::Begin(Luminumbra::world::GameSession* client_sessio
     m_impl->host_session->SetJobSystem(&m_impl->host_job_system);
     m_impl->host_session->SetRootPath(config.root_path);
     m_impl->host_session->SetSaveRootPath(client_session->GetSaveRootPath());
-    auto systems_path = std::filesystem::path(config.root_path) / "data/common/systems.json";
-    std::error_code systems_error;
-    if (!std::filesystem::exists(systems_path, systems_error))
-        systems_path = std::filesystem::path("data/common/systems.json");
     m_impl->host_session->ApplySystemConfig(
         config.systems_config_override
             ? *config.systems_config_override
-            : luminumbra::core::SystemConfig::LoadFromFile(systems_path.string()));
+            : luminumbra::core::SystemConfig::LoadFromRuntimeRoot(config.root_path));
     if (!m_impl->host_session->CreateWorld(
             "Networked Host",
             std::to_string(config.seed),

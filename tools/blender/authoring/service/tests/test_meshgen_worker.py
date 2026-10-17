@@ -384,7 +384,7 @@ class WorkerSupervision(unittest.TestCase):
         def query(job, kind, value, size, unused):
             queries.append(job); value._obj.active = 1; return 1
         kernel.QueryInformationJobObject = Function(query)
-        with patch.object(owner.os, 'name', 'nt'), patch.object(ctypes, 'WinDLL', return_value=kernel, create=True):
+        with patch.object(owner.os, 'name', 'nt'), patch.object(owner.sys, 'platform', 'win32'), patch.object(ctypes, 'WinDLL', return_value=kernel, create=True):
             tree = ProcessTree(Mock(_handle=42), 4096)
             self.assertEqual(flags, [0x2000 | 0x200])
             self.assertEqual(flags[0] & (0x800 | 0x1000), 0)  # both breakaway flags absent
@@ -421,7 +421,7 @@ class WorkerSupervision(unittest.TestCase):
                 process.kill.side_effect = kill
                 process.wait.side_effect = lambda **kwargs: events.append('wait')
                 handle.Close.side_effect = lambda: events.append('handle close')
-                with patch.object(owner.os, 'name', 'nt'), patch.object(ctypes, 'WinDLL', return_value=kernel, create=True), patch.object(ctypes, 'get_last_error', return_value=5, create=True), patch.object(ctypes, 'WinError', side_effect=lambda code: OSError('injected Job setup failure'), create=True), patch.object(owner.subprocess, 'Popen', return_value=process), patch.object(owner.threading, 'Thread') as thread, patch.object(owner, '_enable_subreaper') as subreaper, patch.object(owner, '_require_pidfds') as pidfds:
+                with patch.object(owner.os, 'name', 'nt'), patch.object(owner.sys, 'platform', 'win32'), patch.object(ctypes, 'WinDLL', return_value=kernel, create=True), patch.object(ctypes, 'get_last_error', return_value=5, create=True), patch.object(ctypes, 'WinError', side_effect=lambda code: OSError('injected Job setup failure'), create=True), patch.object(owner.subprocess, 'Popen', return_value=process), patch.object(owner.threading, 'Thread') as thread, patch.object(owner, '_enable_subreaper') as subreaper, patch.object(owner, '_require_pidfds') as pidfds:
                     with self.assertRaises(Refusal) as caught:
                         run_owned(['fake'], b'handshake', timeout=2, clock=lambda: 10)
                 self.assertEqual(caught.exception.finding['rule_id'], 'worker.unavailable')
@@ -455,7 +455,7 @@ class WorkerSupervision(unittest.TestCase):
             return 1
         kernel.QueryInformationJobObject.side_effect = query
         kernel.CloseHandle.side_effect = lambda job: events.append(('close', job)) or 1
-        with patch.object(owner.os, 'name', 'nt'), patch.object(ctypes, 'WinDLL', return_value=kernel, create=True), patch.object(owner, '_require_pidfds') as pidfds, patch.object(owner, '_enable_subreaper') as subreaper, patch.object(owner.os, 'kill') as kill, patch.object(owner.os, 'waitpid', create=True) as waitpid, patch.object(owner.threading, 'Event') as event:
+        with patch.object(owner.os, 'name', 'nt'), patch.object(owner.sys, 'platform', 'win32'), patch.object(ctypes, 'WinDLL', return_value=kernel, create=True), patch.object(owner, '_require_pidfds') as pidfds, patch.object(owner, '_enable_subreaper') as subreaper, patch.object(owner.os, 'kill') as kill, patch.object(owner.os, 'waitpid', create=True) as waitpid, patch.object(owner.threading, 'Event') as event:
             tree = ProcessTree(Mock(_handle=42), 4096)
             tree.stop()
             tree.reap(deadline=10, clock=lambda: 9)
@@ -489,7 +489,7 @@ class WorkerSupervision(unittest.TestCase):
                     def start(self): self.target(*self.args)
                     def join(self, timeout): self.joined.append(timeout)
                 readings = iter((0, .1, .2, .3, .4, .5, .6))
-                with patch.object(owner.os, 'name', 'nt'), patch.object(owner.subprocess, 'Popen', return_value=process), patch.object(owner, 'ProcessTree', return_value=tree), patch.object(owner.threading, 'Thread', Thread):
+                with patch.object(owner.os, 'name', 'nt'), patch.object(owner.sys, 'platform', 'win32'), patch.object(owner.subprocess, 'Popen', return_value=process), patch.object(owner, 'ProcessTree', return_value=tree), patch.object(owner.threading, 'Thread', Thread):
                     with self.assertRaises(OSError if mode == 'stop' else subprocess.TimeoutExpired):
                         run_owned(['fake'], b'{}\n', timeout=2, clock=lambda: next(readings))
                 self.assertEqual([call.kwargs['timeout'] for call in process.wait.call_args_list], [1.8, 1.7])
@@ -517,16 +517,22 @@ class WorkerSupervision(unittest.TestCase):
         tree._pidfd_signal, tree._pidfd_close = Mock(), Mock()
         replies = iter(((0, 0), (101, 9), (0, 0), (102, 9), ChildProcessError()))
         def reaped(selector, options):
-            self.assertEqual((selector, options), (-1, os.WNOHANG))
+            self.assertEqual((selector, options), (-1, 1))
             value = next(replies)
             if isinstance(value, BaseException): raise value
             return value
-        with patch.object(owner.os, 'name', 'posix'), patch.object(owner.os, 'kill') as kill, patch.object(owner.os, 'waitpid', side_effect=reaped), patch.object(owner.threading, 'Event') as event:
+        with patch.object(owner.os, 'name', 'posix'), \
+                patch.object(owner.sys, 'platform', 'linux'), \
+                patch.object(owner.signal, 'SIGKILL', 9, create=True), \
+                patch.object(owner.os, 'WNOHANG', 1, create=True), \
+                patch.object(owner.os, 'kill') as kill, \
+                patch.object(owner.os, 'waitpid', side_effect=reaped, create=True), \
+                patch.object(owner.threading, 'Event') as event:
             tree.reap(deadline=1, clock=lambda: 0)
         self.assertEqual(tree._descendants.call_count, 3)
         kill.assert_not_called()
         self.assertEqual({call.args[0] for call in tree._pidfd_signal.call_args_list}, {1101, 1102})
-        self.assertTrue(all(call.args[1] == owner.signal.SIGKILL for call in tree._pidfd_signal.call_args_list))
+        self.assertTrue(all(call.args[1] == 9 for call in tree._pidfd_signal.call_args_list))
         self.assertEqual(tree._pidfds, {})
         self.assertEqual(event.return_value.wait.call_count, 2)
 
