@@ -81,11 +81,12 @@ def _receipts_by_source(root):
         for element in testcase.iter("system-out"):
             lines.update(_receipt_lines("".join(element.itertext())))
         found.update(lines)
-        if any(child.tag in FAILURE_TAGS for child in testcase):
+        if (testcase.get("status") not in (None, "run")
+                or any(child.tag in FAILURE_TAGS for child in testcase)):
             failed.update(lines)
             any_unsuccessful = True
     # Suite-level output cannot be attributed to a testcase, so it is trusted only when no
-    # testcase in the report failed, errored or was skipped.
+    # testcase in the report failed, errored or was unevaluated.
     unattributed = set()
     for element in root.iter("system-out"):
         unattributed.update(_receipt_lines("".join(element.itertext())))
@@ -155,8 +156,8 @@ def _validate_probe(label, root, receipt):
     if len(cases) != 1:
         raise InputError(f"{label}: requires exactly one {PROBE_TEST} testcase")
     case = cases[0]
-    if any(child.tag in FAILURE_TAGS for child in case):
-        raise InputError(f"{label}: unpadded guard-page probe failed, errored or was skipped")
+    if case.get("status") not in (None, "run") or any(child.tag in FAILURE_TAGS for child in case):
+        raise InputError(f"{label}: unpadded guard-page probe failed, errored or was skipped or unevaluated")
     statuses = set()
     levels = set()
     for key, values in (("probe_status", statuses), ("noise_simd_level", levels)):
@@ -196,7 +197,7 @@ def _load_receipt(label, path, require_probe=False):
     line = next(iter(lines))
     if line in failed:
         raise InputError(
-            f"{label}: receipt in {path} comes from a failed, errored or skipped testcase"
+            f"{label}: receipt in {path} comes from a failed, errored or skipped or unevaluated testcase"
         )
     receipt = _parse_receipt(label, line)
     _validate_lane(label, receipt)

@@ -58,12 +58,14 @@ class CTestSkipAuditTests(unittest.TestCase):
         )
         self.assertFalse(MODULE.skip_is_allowed(case))
 
-    def audit_required_tests(self, names, required, expected, skipped=False):
+    def audit_required_tests(self, names, required, expected, skipped=False, status=None):
         root = ET.Element("testsuite")
         for name in names:
             case = ET.SubElement(root, "testcase")
             if name is not None:
                 case.set("name", name)
+            if status is not None:
+                case.set("status", status)
             if skipped:
                 ET.SubElement(case, "skipped")
         with tempfile.TemporaryDirectory() as directory:
@@ -104,6 +106,20 @@ class CTestSkipAuditTests(unittest.TestCase):
             ["Developer.First"], ["Developer.First"], 1, skipped=True)
         self.assertEqual(output, "")
         self.assertIn("Unexpected unevaluated tests:\n  - Developer.First\n", errors)
+
+    def test_explicit_run_status_passes_inventory_and_required_name_checks(self):
+        output, errors = self.audit_required_tests(
+            ["Developer.First"], ["Developer.First"], 0, status="run")
+        self.assertIn("1 tests; 0 approved skips", output)
+        self.assertEqual(errors, "")
+
+    def test_unevaluated_status_cannot_satisfy_inventory_or_required_name_checks(self):
+        for status in ("disabled", "notrun", "", "unknown"):
+            with self.subTest(status=status):
+                output, errors = self.audit_required_tests(
+                    ["Developer.First"], ["Developer.First"], 1, status=status)
+                self.assertEqual(output, "")
+                self.assertIn("Unexpected unevaluated tests:\n  - Developer.First\n", errors)
 
     def test_required_target_passes_when_registered(self):
         self.check_required_test("DeveloperConsoleUi.ScopedContextRestoresPreviousContext", 0)

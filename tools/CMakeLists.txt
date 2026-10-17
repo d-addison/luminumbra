@@ -116,6 +116,18 @@ if(BUILD_TESTING)
     set_tests_properties(QualificationRunnerPython
         PROPERTIES LABELS "perf;tools" TIMEOUT 120)
     add_test(
+        NAME GlDebugLogCheckerPython
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/perf/test_check_gl_debug_log.py")
+    set_tests_properties(GlDebugLogCheckerPython
+        PROPERTIES LABELS "perf;tools" TIMEOUT 60)
+    add_test(
+        NAME ProcessReceiptSummaryPython
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/perf/test_summarize_process_receipts.py")
+    set_tests_properties(ProcessReceiptSummaryPython
+        PROPERTIES LABELS "perf;tools" TIMEOUT 60)
+    add_test(
         NAME PerformanceMeasurementValidatorContract
         COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_validate_performance_measurement.py")
@@ -223,6 +235,21 @@ if(BUILD_TESTING)
                 "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_compare_ambient_receipts.py")
     set_tests_properties(AmbientReceiptComparatorContract
         PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AsanShardContract
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_asan_shards.py")
+    set_tests_properties(AsanShardContract
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME CTestShardContract
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_ctest_shards.py")
+    set_tests_properties(CTestShardContract
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME WorkflowPolicyContract
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py")
+    set_tests_properties(WorkflowPolicyContract
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
     add_test(
         NAME QualificationCaptureContract
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_qualification_capture.py")

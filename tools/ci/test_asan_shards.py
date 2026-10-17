@@ -5,6 +5,7 @@ import importlib.util
 import json
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -62,6 +63,43 @@ class AsanShardTests(unittest.TestCase):
         self.assertTrue({"setup", "consumer", "render", "cleanup"} <= set(owners[0]))
         self.assertEqual(sorted(sum(result, [])), sorted(names))
 
+    def joined_fixture_chains(self, reverse_groups, conflicting_heavy=False):
+        first = [test(self.names[1] if conflicting_heavy else "setup", FIXTURES_SETUP=["ab"]),
+                 test("consumer", FIXTURES_REQUIRED=["ab"], FIXTURES_SETUP=["bc"])]
+        second = [test(self.names[2], FIXTURES_CLEANUP=["cd"]),
+                  test("other-setup", FIXTURES_SETUP=["cd"], FIXTURES_REQUIRED=["bc"])]
+        # Form A-B and C-D before the final B-C join in either registration order.
+        chains = second + first if reverse_groups else first + second
+        prefix = [] if conflicting_heavy else [test(self.names[1]), test("padding")]
+        return prefix + chains
+
+    def test_three_chain_join_keeps_every_member_with_heavy_test_in_both_orders(self):
+        for reverse_groups in (False, True):
+            with self.subTest(reverse_groups=reverse_groups):
+                tests = self.joined_fixture_chains(reverse_groups)
+                names = [row["name"] for row in tests]
+                selected = self.planned_selection(tests, tests)
+                group = {"setup", "consumer", "other-setup", self.names[2]}
+                # The early ordinary members would choose shard 0 by registration
+                # order; the second heavy test forces the entire joined group to 1.
+                self.assertEqual(selected, [[self.names[1]],
+                                            [name for name in names if name != self.names[1]]])
+                self.assertTrue(group <= set(selected[1]))
+                self.assertEqual(shards.partition(tests, names), selected)
+
+    def test_three_chain_join_refuses_conflicting_heavy_owners_before_writing(self):
+        for reverse_groups in (False, True):
+            for shard in (1, 2):
+                with self.subTest(reverse_groups=reverse_groups, shard=shard):
+                    tests = self.joined_fixture_chains(reverse_groups, conflicting_heavy=True)
+                    for filename in ("ctest.all.json", "ctest.inventory.json"):
+                        (self.root / filename).write_text(json.dumps({"tests": tests}), encoding="utf-8")
+                    selection = self.root / "ctest.shard-index.txt"
+                    selection.write_text("previous selection\n", encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "prevents balanced"):
+                        shards.plan(self.root, shard)
+                    self.assertEqual(selection.read_text(encoding="utf-8"), "previous selection\n")
+
     def planned_selection(self, all_tests, eligible):
         (self.root / "ctest.all.json").write_text(json.dumps({"tests": all_tests}))
         (self.root / "ctest.inventory.json").write_text(json.dumps({"tests": eligible}))
@@ -98,6 +136,53 @@ class AsanShardTests(unittest.TestCase):
                 shards.merge(self.root, self.root / "merged.xml")
                 cases = list(ET.parse(self.root / "merged.xml").getroot().iter("testcase"))
                 self.assertEqual(sorted(case.get("name") for case in cases), sorted(self.names))
+
+    def test_real_ctest_executes_exact_planned_index_file_selections(self):
+        ctest = shutil.which("ctest")
+        self.assertIsNotNone(ctest, "CTest is required for the shard index file integration check")
+        for heavy_count in (2, 4):
+            with self.subTest(heavy_count=heavy_count):
+                project = self.root / f"ctest project {heavy_count}"
+                project.mkdir()
+                heavy = [f"ActiveRegions/SimBudgetWorldParity.Replay/{n}" for n in range(heavy_count)]
+                literal = r"Suite.Literal[0](a+b)?^$|*\path{2} with space"
+                names = ["manual-before", "ordinary", heavy[0], "manual-between",
+                         *heavy[1:], "last", literal]
+                commands = []
+                for name in names:
+                    commands.append(f"add_test([==[{name}]==] [==[{Path(sys.executable).as_posix()}]==] "
+                                    "-I -B -c [==[print('executed')]==])")
+                    if name.startswith("manual-"):
+                        commands.append(f"set_tests_properties([==[{name}]==] "
+                                        "PROPERTIES LABELS [==[tools;manual-gpu]==])")
+                (project / "CTestTestfile.cmake").write_text("\n".join(commands) + "\n", encoding="utf-8")
+                command = [ctest, "--test-dir", str(project)]
+                for filename, arguments in (("ctest.all.json", []),
+                                            ("ctest.inventory.json", ["-LE", "manual"])):
+                    discovery = subprocess.run([*command, *arguments, "--show-only=json-v1"],
+                                               capture_output=True, text=True, timeout=10)
+                    self.assertEqual(discovery.returncode, 0, discovery.stdout + discovery.stderr)
+                    (project / filename).write_text(discovery.stdout, encoding="utf-8")
+                expected = [[*heavy[::2], literal], ["ordinary", *heavy[1::2], "last"]]
+                for shard, planned in enumerate(expected, 1):
+                    shards.plan(project, shard)
+                    report = project / f"shard-{shard}.xml"
+                    result = subprocess.run(
+                        [*command, "-LE", "manual", "--no-tests=error", "-I",
+                         str(project / "ctest.shard-index.txt"), "--parallel", "2",
+                         "--output-junit", str(report)],
+                        capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    cases = list(ET.parse(report).getroot().iter("testcase"))
+                    self.assertEqual(sorted(case.get("name") for case in cases), sorted(planned))
+                    self.assertTrue(all(case.get("status") == "run" for case in cases))
+                    self.assertTrue(all(case.findtext("system-out").strip() == "executed" for case in cases))
+
+    def test_ctest_integration_fails_clearly_when_ctest_is_missing(self):
+        with patch.object(shutil, "which", return_value=None) as locate:
+            with self.assertRaisesRegex(AssertionError, "CTest is required"):
+                self.test_real_ctest_executes_exact_planned_index_file_selections()
+        locate.assert_called_once_with("ctest")
 
     def test_mismatched_filtered_roster_or_order_refuses(self):
         manual = test("manual-first", LABELS=["manual"])
@@ -198,6 +283,30 @@ class AsanShardTests(unittest.TestCase):
         self.assertEqual({case.get("name") for case in cases}, set(self.names))
         self.assertEqual(len(cases), len(self.names))
         self.assertTrue(all(case.findtext("system-out").startswith("receipt from ") for case in cases))
+
+    def test_merge_accepts_explicit_run_status(self):
+        self.reports()
+        for shard in (1, 2):
+            path = self.root / f"shard-{shard}/ctest.junit.xml"
+            tree = ET.parse(path)
+            for case in tree.getroot().iter("testcase"):
+                case.set("status", "run")
+            tree.write(path)
+        shards.merge(self.root, self.root / "merged.xml")
+
+    def test_merge_rejects_unevaluated_status_without_skipped_child(self):
+        for shard in (1, 2):
+            for status in ("disabled", "notrun", "", "unknown"):
+                with self.subTest(shard=shard, status=status):
+                    self.reports()
+                    path = self.root / f"shard-{shard}/ctest.junit.xml"
+                    tree = ET.parse(path)
+                    tree.getroot()[0].set("status", status)
+                    tree.write(path)
+                    output = self.root / "merged.xml"
+                    with self.assertRaisesRegex(ValueError, "unevaluated"):
+                        shards.merge(self.root, output)
+                    self.assertFalse(output.exists())
 
     def test_merge_rejects_executed_addition_or_removal_against_planned_roster(self):
         for change in ("append", "remove"):

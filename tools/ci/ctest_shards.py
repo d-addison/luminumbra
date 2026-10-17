@@ -350,7 +350,8 @@ def collect(directory, prefix, attempt, full=False):
             raise
 
 
-def gate(result, cpp, cancelled, event, draft, qualification, enabled):
+def gate(result, cpp, cancelled, event, draft, qualification, enabled, classification):
+    require(classification == "success", "path classification did not succeed")
     require(event != "pull_request" or draft == "false", "draft or missing draft metadata")
     require(cancelled == "false", "workflow cancelled or cancellation status missing")
     if enabled == "false":
@@ -383,7 +384,7 @@ def main(default_profile="gcc", legacy_evidence=False):
     sub.add_argument("--attempt", type=int, required=True)
     sub.add_argument("--full", action="store_true")
     sub = commands.add_parser("gate")
-    for key in ("result", "cpp", "cancelled", "event", "draft", "qualification", "enabled"):
+    for key in ("result", "cpp", "cancelled", "event", "draft", "qualification", "enabled", "classification"):
         sub.add_argument("--" + key, required=True)
     args = parser.parse_args()
     try:
@@ -398,7 +399,7 @@ def main(default_profile="gcc", legacy_evidence=False):
         elif args.mode == "collect":
             collect(args.directory, args.prefix, args.attempt, args.full)
         else:
-            route = gate(args.result, args.cpp, args.cancelled, args.event, args.draft, args.qualification, args.enabled)
+            route = gate(args.result, args.cpp, args.cancelled, args.event, args.draft, args.qualification, args.enabled, args.classification)
             print(f"route: {route}")
             if os.environ.get("GITHUB_STEP_SUMMARY"):
                 with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as handle:

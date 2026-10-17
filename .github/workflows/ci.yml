@@ -975,11 +975,17 @@ jobs:
           fi
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Reject cancelled workflow
+        if: ${{ cancelled() }}
+        run: |
+          echo "Native test workflow was cancelled" >&2
+          exit 1
       - name: Require expected producers and route
         env:
+          CI_PATHS_RESULT: ${{ needs.changes.result }}
           SHARD_RESULT: ${{ needs.linux.result }}
           NEEDS_CPP: ${{ needs.changes.outputs.needs_cpp }}
-          CI_CANCELLED: ${{ cancelled() }}
+          CI_CANCELLED: "false"
           CI_EVENT: ${{ github.event_name }}
           CI_DRAFT: ${{ github.event.pull_request.draft }}
           CI_QUALIFICATION: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture }}
@@ -987,7 +993,7 @@ jobs:
         run: >-
           python3 tools/ci/ctest_shards.py gate --result "$SHARD_RESULT" --cpp "$NEEDS_CPP"
           --cancelled "$CI_CANCELLED" --event "$CI_EVENT" --draft "$CI_DRAFT"
-          --qualification "$CI_QUALIFICATION" --enabled "$CI_ENABLED"
+          --qualification "$CI_QUALIFICATION" --enabled "$CI_ENABLED" --classification "$CI_PATHS_RESULT"
       - name: Download shard JUnit
         if: needs.linux.result == 'success' && needs.changes.outputs.needs_cpp != 'false'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
@@ -1052,11 +1058,17 @@ jobs:
           fi
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Reject cancelled workflow
+        if: ${{ cancelled() }}
+        run: |
+          echo "Native test workflow was cancelled" >&2
+          exit 1
       - name: Require expected producers and route
         env:
+          CI_PATHS_RESULT: ${{ needs.changes.result }}
           SHARD_RESULT: ${{ needs.windows-msvc.result }}
           NEEDS_CPP: ${{ needs.changes.outputs.needs_cpp }}
-          CI_CANCELLED: ${{ cancelled() }}
+          CI_CANCELLED: "false"
           CI_EVENT: ${{ github.event_name }}
           CI_DRAFT: ${{ github.event.pull_request.draft }}
           CI_QUALIFICATION: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture }}
@@ -1064,7 +1076,7 @@ jobs:
         run: >-
           python3 tools/ci/ctest_shards.py gate --result "$SHARD_RESULT" --cpp "$NEEDS_CPP"
           --cancelled "$CI_CANCELLED" --event "$CI_EVENT" --draft "$CI_DRAFT"
-          --qualification "$CI_QUALIFICATION" --enabled "$CI_ENABLED"
+          --qualification "$CI_QUALIFICATION" --enabled "$CI_ENABLED" --classification "$CI_PATHS_RESULT"
       - name: Download shard JUnit
         if: needs.windows-msvc.result == 'success' && needs.changes.outputs.needs_cpp != 'false'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
@@ -1111,11 +1123,17 @@ jobs:
           fi
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Reject cancelled workflow
+        if: ${{ cancelled() }}
+        run: |
+          echo "Native test workflow was cancelled" >&2
+          exit 1
       - name: Require expected producers and route
         env:
+          CI_PATHS_RESULT: ${{ needs.changes.result }}
           SHARD_RESULT: ${{ needs.windows-ucrt64.result }}
           NEEDS_CPP: ${{ needs.changes.outputs.needs_cpp }}
-          CI_CANCELLED: ${{ cancelled() }}
+          CI_CANCELLED: "false"
           CI_EVENT: ${{ github.event_name }}
           CI_DRAFT: ${{ github.event.pull_request.draft }}
           CI_QUALIFICATION: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture }}
@@ -1123,7 +1141,7 @@ jobs:
         run: >-
           python3 tools/ci/ctest_shards.py gate --result "$SHARD_RESULT" --cpp "$NEEDS_CPP"
           --cancelled "$CI_CANCELLED" --event "$CI_EVENT" --draft "$CI_DRAFT"
-          --qualification "$CI_QUALIFICATION" --enabled "$CI_ENABLED"
+          --qualification "$CI_QUALIFICATION" --enabled "$CI_ENABLED" --classification "$CI_PATHS_RESULT"
       - name: Download shard JUnit
         if: needs.windows-ucrt64.result == 'success' && needs.changes.outputs.needs_cpp != 'false'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
