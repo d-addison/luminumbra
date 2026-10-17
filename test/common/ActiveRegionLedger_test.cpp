@@ -129,10 +129,12 @@ TEST(ActiveRegionLedgerTest, ReductionFreezeRecoveryAndHoldsSurviveReload) {
             EXPECT_EQ(r.frozen_at, 5u);
             EXPECT_EQ(r.frozen_digest, 0x123456789abcdef0ull);
         }
-        if (tick == 8)
+        if (tick == 8) {
             EXPECT_EQ(r.state, RegionState::Reduced);
-        if (tick == 10)
+        }
+        if (tick == 10) {
             EXPECT_EQ(r.state, RegionState::Active);
+        }
     }
 }
 
@@ -142,8 +144,9 @@ TEST(ActiveRegionLedgerTest, RestoringNewerClockPreservesHoldsAndFrozenSimulatio
     for (std::uint64_t tick = 2; tick <= 6; ++tick) {
         Step(ledger, tick, tick < 6 ? 11 : 0);
         const auto& record = ledger.records().at(kFar);
-        if (tick == 2)
+        if (tick == 2) {
             ASSERT_EQ(record.over_hold, 1u);
+        }
         if (tick == 6) {
             ASSERT_EQ(record.state, RegionState::Frozen);
             ASSERT_EQ(record.under_hold, 1u);
@@ -372,7 +375,7 @@ TEST(ActiveRegionLedgerTest, CorruptTruncatedAndFuturePayloadsRefuseTransactiona
         EXPECT_EQ(error, ActiveRegionLedger::kCorruptMessage);
     }
     auto future = good;
-    future[4] = 3;
+    future[4] = 4;
     EXPECT_FALSE(ActiveRegionLedger::decode(future, destination, error));
     EXPECT_EQ(error, ActiveRegionLedger::kFutureMessage);
     EXPECT_EQ(destination.encode(), before);
@@ -642,7 +645,7 @@ TEST(ActiveRegionLedgerTest, V2RefusalMatrix) {
     ExpectRefused(edited(ext + 6, 2), ActiveRegionLedger::kCorruptMessage);
     ExpectRefused(edited(ext + 10, 1), ActiveRegionLedger::kCorruptMessage);
     ExpectRefused(edited(ext + 10, 3), ActiveRegionLedger::kProjectionMessage);
-    ExpectRefused(edited(4, 3), ActiveRegionLedger::kFutureMessage);
+    ExpectRefused(edited(4, 4), ActiveRegionLedger::kFutureMessage);
     {
         // Duplicate type 2 with ext_len 14.
         auto bytes = good.substr(0, ext) + std::string("\x0e\0\0\0", 4) + good.substr(ext + 4, 7) +
@@ -1429,7 +1432,7 @@ TEST(ActiveRegionLedgerTest, ContentIdentityIsImmutableAndHasAnExactVersionedWir
     ASSERT_TRUE(ledger.adopt_content_identity(identity));
     ASSERT_TRUE(ledger.adopt_content_identity(identity));
     EXPECT_FALSE(ledger.canonical_bytes().empty());
-    EXPECT_EQ(Version(ledger.encode()), 2u);
+    EXPECT_EQ(Version(ledger.encode()), 3u);
     const auto restored = Reload(ledger);
     const auto restored_identity = restored.content_identity();
     ASSERT_TRUE(restored_identity.has_value());
@@ -1447,6 +1450,19 @@ TEST(ActiveRegionLedgerTest, ContentIdentityIsImmutableAndHasAnExactVersionedWir
     EXPECT_FALSE(historical.validate_content_identity(identity, error));
     EXPECT_EQ(error, ActiveRegionLedger::kContentVersionMessage);
 }
+TEST(ActiveRegionLedgerTest, ContentIdentityRequiresItsOwnEnvelopeVersion) {
+    ActiveRegionLedger ledger;
+    ASSERT_TRUE(ledger.adopt_content_identity(SimulationContentIdentity{}));
+    auto legacy_envelope = ledger.encode();
+    legacy_envelope[4] = 2;
+    Seal(legacy_envelope);
+    ExpectRefused(legacy_envelope, ActiveRegionLedger::kCorruptMessage);
+    auto missing_identity = Distant().encode();
+    missing_identity[4] = 3;
+    Seal(missing_identity);
+    ExpectRefused(missing_identity, ActiveRegionLedger::kCorruptMessage);
+}
+
 TEST(ActiveRegionLedgerTest, ContentIdentityPrecedesCompletedWorkAndPreservesNextDecision) {
     auto ledger = Distant();
     SimulationContentIdentity identity;

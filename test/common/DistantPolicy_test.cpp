@@ -27,6 +27,7 @@
 #endif
 
 #include "luminumbra_common/ai/CreatureSpeciesRegistry.h"
+#include "luminumbra_common/core/FilesystemPath.h"
 #include "luminumbra_common/foliage/SpeciesRegistry.h"
 #include "luminumbra_common/world/DistantPolicy.h"
 #include "nlohmann/json.hpp"
@@ -198,7 +199,7 @@ public:
     }
     [[nodiscard]] fs::path species(bool creature, std::string_view name) const {
         return root / "data/common" / (creature ? "creatures/species" : "foliage/species") /
-               fs::u8path(std::string(name) + ".json");
+               Luminumbra::Filesystem::PathFromUtf8(std::string(name) + ".json");
     }
     fs::path root;
 };
@@ -621,6 +622,24 @@ TEST(DistantPolicyTest, PolicyLeafReplacedBySymlinkBeforeOpenRefuses) {
     EXPECT_TRUE(read.bytes.empty());
 }
 #else
+TEST(DistantPolicyTest, PolicyWindowsExtendedLocalPathPreservesRootAndRefusals) {
+    const ContentFixture fixture;
+    const auto bytes = Document(FullPolicy());
+    Write(fixture.policy(), bytes);
+    const auto absolute = Luminumbra::Filesystem::AbsolutePath(fixture.policy());
+    const auto& native = absolute.native();
+    const fs::path extended(Luminumbra::Filesystem::IsWindowsUncPath(absolute)
+                                ? L"\\\\?\\UNC\\" + native.substr(2)
+                                : L"\\\\?\\" + native);
+    const auto read = ReadSimulationDocument(extended);
+    ASSERT_EQ(read.status, ContentReadStatus::Found) << read.error;
+    EXPECT_EQ(read.bytes, bytes);
+    fs::remove(fixture.policy());
+    EXPECT_EQ(ReadSimulationDocument(extended, true).status, ContentReadStatus::Absent);
+    EXPECT_EQ(ReadSimulationDocument(extended).status, ContentReadStatus::Error);
+    fs::create_directory(fixture.policy());
+    EXPECT_EQ(ReadSimulationDocument(extended, true).status, ContentReadStatus::Error);
+}
 TEST(DistantPolicyTest, PolicyWindowsReadAccessDeniedRefuses) {
     const ContentFixture fixture;
     Write(fixture.policy(), Document(FullPolicy()));
@@ -1053,6 +1072,19 @@ TEST(DistantPolicyTest, DefinitionResourceCapsAndDirectoryChangesRefuseAtomicall
     EXPECT_NE(error.find("directory changed"), std::string::npos);
     EXPECT_EQ(content.identity, before);
 }
+TEST(DistantPolicyTest, NonDefinitionEntriesCannotBypassDirectoryWorkBound) {
+    const ContentFixture fixture;
+    auto content = Admit(fixture);
+    const auto original = content;
+    const auto directory = fixture.species(true, "unused").parent_path();
+    for (std::size_t index = 0; index < kMaxSpeciesDirectoryEntries; ++index)
+        Write(directory / ("ignored_" + std::to_string(index) + ".txt"), "");
+    std::string error;
+    EXPECT_FALSE(AdmitSimulationContent(fixture.root, content, error));
+    EXPECT_NE(error.find("512 entries"), std::string::npos);
+    ExpectUnchangedContent(content, original);
+}
+
 TEST(DistantPolicyTest, OverrideCanonicalRoundTripAndSemanticDefaults) {
     DistantPolicyOverrides policy, restored;
     std::string error;

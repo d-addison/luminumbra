@@ -123,6 +123,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -198,9 +199,17 @@ bool SimulationSpeciesMatchSnapshot(const Luminumbra::world::SimulationContent& 
         const auto digits = static_cast<std::size_t>(converted.ptr - hex.data());
         expected.insert(std::string(hex.size() - digits, '0') + std::string(hex.data(), digits));
     }
-    for (const auto& entry : snapshot.manifest) {
-        if (!entry.front().starts_with("common/creatures/species/"))
-            continue;
+    constexpr std::string_view species_prefix = "common/creatures/species/";
+    // The published manifest is path-sorted. Visit only its species range: at most
+    // 256 matches plus one rejected extra entry, independent of structure content.
+    auto entry_it = std::lower_bound(
+        snapshot.manifest.begin(),
+        snapshot.manifest.end(),
+        species_prefix,
+        [](const auto& entry, std::string_view prefix) { return entry.front() < prefix; });
+    for (; entry_it != snapshot.manifest.end() && entry_it->front().starts_with(species_prefix);
+         ++entry_it) {
+        const auto& entry = *entry_it;
         const auto found = expected.find(entry[1]);
         if (found == expected.end())
             return false;
@@ -323,10 +332,11 @@ void GameSession::ApplyWeatherRainWiring() {
 
 // Apply the same simulation gates and tuning before client/server world boot.
 void GameSession::ApplySystemConfig(const luminumbra::core::SystemConfig& config) {
+    // Refuse an incompatible live-world gate before changing any effective tuning.
+    SetActiveRegionsEnabled(config.enabled(luminumbra::core::SysKey::SimActiveRegions));
     m_appliedSystemConfig = config;
     SetEcologyTuning(luminumbra::ai::ResolveEcologyTuning(config));
     SetWeatherRainEnabled(config.enabled(luminumbra::core::SysKey::SimHydrologyWeather));
-    SetActiveRegionsEnabled(config.enabled(luminumbra::core::SysKey::SimActiveRegions));
     SetWaterHighResEnabled(config.enabled(luminumbra::core::SysKey::SimWaterHighRes));
     SetWeatherEventsEnabled(config.enabled(luminumbra::core::SysKey::SimWeatherEvents));
     SetAetherStateEnabled(config.enabled(luminumbra::core::SysKey::SimAetherState));
@@ -434,6 +444,13 @@ std::string GameSession::SystemConfigIdentity() const {
         m_foragingTuning.goal_weight;
     values.scalars[static_cast<std::size_t>(SysParam::CircadianAmplitude)] = m_circadianAmplitude;
     return values.ComputeIdentity();
+}
+
+std::string GameSession::SessionConfigIdentity() const {
+    const auto identity = SystemConfigIdentity();
+    return m_activeRegionsEnabled && m_simulationContent
+               ? BindSimulationContentIdentity(identity, m_simulationContent->identity)
+               : identity;
 }
 
 // apply the session water-sim resolution when the owner opted in
@@ -1303,9 +1320,9 @@ GameSession::ValidateWorldConfig(const std::string& root_path,
         AddValidationError(result, "missing world preset: " + result.preset_path.string());
     }
 
-    // simulation needs only the preset. Any further runtime assets
-    // are caller-supplied (the client registers shaders/RML/fonts; a headless
-    // host registers none).
+    // Preset loading below validates simulation dependencies. Further runtime
+    // assets are caller-supplied (the client registers shaders/RML/fonts; a
+    // headless host registers none).
     for (const fs::path& relative : required_assets) {
         const fs::path path = root / relative;
         if (!fs::exists(path)) {
