@@ -411,6 +411,8 @@ public:
 private:
     Client::Attribution::FoliageRebuild m_rebuild_attribution{};
     Client::Attribution::ScatterSignature m_attributed_signature{};
+    // Cache invalidation by live settings must retain diagnostic build history.
+    bool m_attributed_signature_valid = false;
     Client::Attribution::FallbackReason m_last_fallback =
         Client::Attribution::FallbackReason::GpuDisabled;
     void map_instances_for_frame();
