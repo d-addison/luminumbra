@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -283,8 +284,16 @@ void WorldgenPreview::build_world_pending() {
     m_pending_water =
         std::make_unique<Systems::WaterSystem>(/*job_system*/ nullptr, m_pending_world.get());
     m_pending_world->SetWaterSystem(m_pending_water.get());
-    m_pending_world->EnsureSurfaceReadyNear(
-        look_at_center(), m_physics.get(), kSurfaceRadius, kCollisionRadius, kRenderLod0Radius);
+    if (!m_pending_world->EnsureSurfaceReadyNear(look_at_center(),
+                                                 m_physics.get(),
+                                                 kSurfaceRadius,
+                                                 kCollisionRadius,
+                                                 kRenderLod0Radius)) {
+        // Publish a refused candidate without updating it or replacing the live world.
+        m_pending_water.reset();
+        m_pending_world.reset();
+        return;
+    }
     // Pull the streamed chunks into the renderable set (into the PENDING registry).
     m_pending_world->update(m_pending_registry, look_at_center(), m_physics.get());
 }
@@ -302,20 +311,28 @@ void WorldgenPreview::swap_pending_into_live(Rendering::RenderPipeline& pipeline
     // reintroduces the create-screen pan use-after-free. prepare_world_swap waits
     // the FarLodSystem build handles + the  far pass, then nulls their
     // world pointer; the next render_frame re-adopts the freshly-swapped world.
-    pipeline.prepare_world_swap();
+    if (m_pending_world) {
+        pipeline.prepare_world_swap();
 
-    m_water.reset();
-    m_world = std::move(m_pending_world);
-    m_water = std::move(m_pending_water);
-    m_registry = std::move(m_pending_registry);
-    m_pending_registry.clear();
-    m_pending_world.reset();
-    m_pending_water.reset();
+        m_water.reset();
+        m_world = std::move(m_pending_world);
+        m_water = std::move(m_pending_water);
+        m_registry = std::move(m_pending_registry);
+        m_pending_registry.clear();
+        m_pending_world.reset();
+        m_pending_water.reset();
 
-    m_built_once = true;
-    m_last_build_failed = false;
-    m_last_error.clear();
-    ++m_rebuild_generation; // render-only: the foliage rebuild + tests key off this
+        m_built_once = true;
+        m_last_build_failed = false;
+        m_last_error.clear();
+        ++m_rebuild_generation; // render-only: the foliage rebuild + tests key off this
+    } else {
+        m_last_build_failed = true;
+        m_last_error = "Surface preparation exceeds the supported work budget";
+        // A first-candidate refusal waits for an explicit new candidate, just like
+        // a refused replacement; rendering must not repeatedly enqueue it.
+        m_first_build_requested = true;
+    }
 
     // Release the worker: clear done + wake it so it may start any queued build
     // (it only resumes touching pending now that we've moved it out). A build is

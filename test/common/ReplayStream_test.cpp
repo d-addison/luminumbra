@@ -11,10 +11,21 @@
 #include "../support/SystemConfigVariants.h"
 #include <gtest/gtest.h>
 
+#include <array>
+#include <atomic>
+#include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
+#include <limits>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <string_view>
+#include <thread>
+#include <utility>
 #include <vector>
 
 #include "luminumbra_common/replay/ReplayStream.h"
@@ -70,6 +81,451 @@ protected:
 
     std::string m_path;
 };
+
+struct RecorderGate {
+    std::mutex mutex;
+    std::condition_variable condition;
+    bool entered = false;
+    bool released = false;
+    const std::thread::id simulation_thread = std::this_thread::get_id();
+    std::atomic<std::size_t> simulation_sink_calls{0};
+    std::atomic<std::size_t> written_ticks{0};
+    std::atomic<std::size_t> digest_bytes{0};
+    std::atomic<std::size_t> closes{0};
+    std::uint64_t fail_tick = 0;      // configured before Open, never changed by the producer
+    std::vector<std::uint64_t> ticks; // inspected only after Flush/Close joins
+    const std::uint8_t* first_input = nullptr;
+};
+
+void WaitForRecorderWorker(const std::shared_ptr<RecorderGate>& gate) {
+    std::unique_lock lock(gate->mutex);
+    gate->condition.wait(lock, [&gate] { return gate->entered; });
+}
+
+void ReleaseRecorder(const std::shared_ptr<RecorderGate>& gate) {
+    const std::lock_guard lock(gate->mutex);
+    gate->released = true;
+    gate->condition.notify_all();
+}
+
+// Declared after the recorder so any fatal assertion releases the worker before
+// recorder destruction joins it. No sleeps or wall-clock deadlines are involved.
+class ReleaseRecorderGate {
+public:
+    explicit ReleaseRecorderGate(std::shared_ptr<RecorderGate> gate)
+        : m_gate(std::move(gate)) {}
+    ~ReleaseRecorderGate() {
+        ReleaseRecorder(m_gate);
+    }
+
+private:
+    std::shared_ptr<RecorderGate> m_gate;
+};
+
+class GatedReplaySink final : public replay::ReplayTickSink {
+public:
+    explicit GatedReplaySink(std::shared_ptr<RecorderGate> gate)
+        : m_gate(std::move(gate)) {}
+
+    bool Configure(std::size_t bytes, std::uint64_t ticks) override {
+        return m_disk.Configure(bytes, ticks);
+    }
+    bool Open(const std::string& destination, const replay::ReplayHeader& header) override {
+        return m_disk.Open(destination, header);
+    }
+    bool RecordTick(std::uint64_t tick,
+                    const std::vector<std::uint8_t>& inputs,
+                    const std::array<std::string_view, 4>* hashes,
+                    std::uint64_t confirmed_tick) override {
+        if (std::this_thread::get_id() == m_gate->simulation_thread)
+            ++m_gate->simulation_sink_calls;
+        {
+            std::unique_lock lock(m_gate->mutex);
+            m_gate->entered = true;
+            m_gate->condition.notify_all();
+            m_gate->condition.wait(lock, [this] { return m_gate->released; });
+        }
+        if (m_gate->ticks.empty())
+            m_gate->first_input = inputs.data();
+        m_gate->ticks.push_back(tick);
+        const bool ok =
+            tick != m_gate->fail_tick && m_disk.RecordTick(tick, inputs, hashes, confirmed_tick);
+        ++m_gate->written_ticks;
+        m_gate->digest_bytes += inputs.size();
+        return ok;
+    }
+    bool Finalize(const std::string& destination,
+                  std::uint64_t ticks,
+                  std::uint64_t divergence) override {
+        return m_disk.Finalize(destination, ticks, divergence);
+    }
+    void Close() override {
+        m_disk.Close();
+        ++m_gate->closes;
+    }
+    std::size_t RetainedBytes() const override {
+        return m_disk.RetainedBytes();
+    }
+    std::size_t ByteLimit() const override {
+        return m_disk.ByteLimit();
+    }
+    std::size_t SegmentCount() const override {
+        return m_disk.SegmentCount();
+    }
+
+private:
+    std::shared_ptr<RecorderGate> m_gate;
+    replay::BoundedReplayRecorder m_disk;
+};
+
+TEST_F(ReplayStreamTest, QueuedTickOnlyRetainsImmutableDataWhileSinkIsBlocked) {
+    auto gate = std::make_shared<RecorderGate>();
+    replay::QueuedReplayRecorder recorder(std::make_unique<GatedReplaySink>(gate));
+    const ReleaseRecorderGate release{gate};
+    ASSERT_TRUE(recorder.Configure(1024, 0));
+    ASSERT_TRUE(recorder.Open(m_path, MakeHeader()));
+    const auto inputs = std::make_shared<const std::vector<std::uint8_t>>(512, 0xab);
+    const std::weak_ptr<const std::vector<std::uint8_t>> lifetime = inputs;
+    ASSERT_TRUE(recorder.RecordTick(1, inputs, nullptr, 1));
+    WaitForRecorderWorker(gate);
+    ASSERT_TRUE(recorder.RecordTick(2, inputs, nullptr, 2));
+    EXPECT_EQ(recorder.PendingTicks(), 2u); // includes the active, blocked sink tick
+    EXPECT_EQ(gate->written_ticks.load(), 0u);
+    EXPECT_EQ(gate->digest_bytes.load(), 0u);
+    EXPECT_EQ(gate->simulation_sink_calls.load(), 0u);
+    EXPECT_EQ(inputs.use_count(), 3); // caller, active tick, queued tick: no blob copy
+    EXPECT_FALSE(lifetime.expired());
+    ReleaseRecorder(gate);
+    ASSERT_TRUE(recorder.Flush());
+    EXPECT_EQ(gate->first_input, inputs->data());
+    EXPECT_EQ(gate->written_ticks.load(), 2u);
+    EXPECT_EQ(gate->digest_bytes.load(), 1024u);
+    EXPECT_EQ(gate->simulation_sink_calls.load(), 0u);
+    EXPECT_EQ(inputs.use_count(), 1);
+    EXPECT_EQ(recorder.PendingBytes(), 0u);
+}
+
+TEST_F(ReplayStreamTest, QueuedRecorderLatchesCountAndByteOverloadAndDrainsAcceptedTicks) {
+    for (const bool byte_limit : {false, true}) {
+        SCOPED_TRACE(byte_limit);
+        auto gate = std::make_shared<RecorderGate>();
+        replay::QueuedReplayRecorder recorder(std::make_unique<GatedReplaySink>(gate));
+        const ReleaseRecorderGate release{gate};
+        // Each input frame costs 18 bytes. Both limits include the active tick.
+        ASSERT_TRUE(recorder.Configure(
+            18, 0, {.bytes = byte_limit ? 36u : 1024u, .ticks = byte_limit ? 4u : 2u}));
+        ASSERT_TRUE(recorder.Open(m_path, MakeHeader()));
+        const auto inputs = std::make_shared<const std::vector<std::uint8_t>>(1, 0xab);
+        ASSERT_TRUE(recorder.RecordTick(1, inputs, nullptr, 1));
+        WaitForRecorderWorker(gate);
+        ASSERT_TRUE(recorder.RecordTick(2, inputs, nullptr, 2));
+        EXPECT_FALSE(recorder.RecordTick(3, inputs, nullptr, 3));
+        EXPECT_EQ(recorder.PendingTicks(), 2u);
+        EXPECT_EQ(recorder.PendingBytes(), 36u);
+        EXPECT_STREQ(recorder.FailureReason(), "recorder queue capacity exceeded");
+        EXPECT_EQ(gate->written_ticks.load(), 0u);
+        ReleaseRecorder(gate);
+        EXPECT_FALSE(recorder.Flush());
+        EXPECT_EQ(gate->ticks, (std::vector<std::uint64_t>{1, 2}));
+        EXPECT_EQ(recorder.PendingTicks(), 0u);
+        EXPECT_FALSE(recorder.RecordTick(4, inputs, nullptr, 4)); // sticky failure
+        EXPECT_FALSE(recorder.Finalize(m_path, 3, 3));
+        EXPECT_FALSE(fs::exists(m_path));
+        const auto reason_path = m_path + ".incomplete";
+        std::ifstream reason(reason_path);
+        EXPECT_EQ(std::string(std::istreambuf_iterator<char>(reason), {}),
+                  "Incomplete replay at tick 3: recorder queue capacity exceeded\n");
+        reason.close(); // close before removal on Windows
+        fs::remove(reason_path);
+        recorder.Close();
+        EXPECT_EQ(gate->closes.load(), 1u);
+    }
+}
+
+TEST_F(ReplayStreamTest, QueuedRecorderChargesRetainedCapacityBeforeEnqueue) {
+    auto gate = std::make_shared<RecorderGate>();
+    replay::QueuedReplayRecorder recorder(std::make_unique<GatedReplaySink>(gate));
+    const ReleaseRecorderGate release{gate};
+    ASSERT_TRUE(recorder.Configure(18, 0, {.bytes = 1024, .ticks = 2}));
+    ASSERT_TRUE(recorder.Open(m_path, MakeHeader()));
+    std::vector<std::uint8_t> storage;
+    storage.reserve(2048);
+    storage.push_back(0xab);
+    const auto inputs = std::make_shared<const std::vector<std::uint8_t>>(std::move(storage));
+    ASSERT_GE(inputs->capacity(), 2048u);
+    EXPECT_FALSE(recorder.RecordTick(1, inputs, nullptr, 1));
+    EXPECT_STREQ(recorder.FailureReason(), "recorder queue capacity exceeded");
+    EXPECT_EQ(recorder.PendingTicks(), 0u);
+    EXPECT_EQ(recorder.PendingBytes(), 0u);
+    EXPECT_EQ(gate->written_ticks.load(), 0u);
+}
+
+TEST_F(ReplayStreamTest, QueuedRecorderPreservesOrderingDigestAndDesyncArtifactBytes) {
+    const auto expected_path = m_path + ".expected";
+    replay::BoundedReplayRecorder expected;
+    ASSERT_TRUE(expected.Configure(256, 64));
+    ASSERT_TRUE(expected.Open(expected_path, MakeHeader()));
+    auto gate = std::make_shared<RecorderGate>();
+    replay::QueuedReplayRecorder recorder(std::make_unique<GatedReplaySink>(gate));
+    const ReleaseRecorderGate release{gate};
+    ASSERT_TRUE(recorder.Configure(256, 64));
+    ASSERT_TRUE(recorder.Open(m_path, MakeHeader()));
+    constexpr std::uint64_t ticks = 5000;
+    constexpr std::uint64_t divergence = 4970;
+    for (std::uint64_t tick = 1; tick <= ticks; ++tick) {
+        const auto inputs =
+            std::make_shared<const std::vector<std::uint8_t>>(1, static_cast<std::uint8_t>(tick));
+        std::shared_ptr<const replay::CheckpointRecord> checkpoint;
+        std::array<std::string_view, 4> hashes{};
+        if (tick % 30 == 0) {
+            checkpoint = std::make_shared<const replay::CheckpointRecord>(
+                replay::CheckpointRecord{.tick = tick,
+                                         .world_hash = "world",
+                                         .terrain = "terrain",
+                                         .water = "water",
+                                         .entities = "entities"});
+            hashes = {checkpoint->world_hash,
+                      checkpoint->terrain,
+                      checkpoint->water,
+                      checkpoint->entities};
+        }
+        ASSERT_TRUE(expected.RecordTick(tick, *inputs, checkpoint ? &hashes : nullptr, tick - 1));
+        ASSERT_TRUE(recorder.RecordTick(tick, inputs, checkpoint, tick - 1));
+        if (tick == 1)
+            WaitForRecorderWorker(gate);
+        if (tick == 256)
+            ReleaseRecorder(gate);
+        if (tick % 256 == 0) {
+            ASSERT_TRUE(recorder.Flush());
+        }
+    }
+    ASSERT_TRUE(expected.Finalize(expected_path, ticks, divergence));
+    // Finalize itself flushes the last partial batch, with checkpoints cut off at
+    // the desync tick just like the synchronous artifact used by both drivers.
+    ASSERT_TRUE(recorder.Finalize(m_path, ticks, divergence));
+    ASSERT_EQ(gate->ticks.size(), ticks);
+    for (std::size_t index = 0; index < gate->ticks.size(); ++index)
+        EXPECT_EQ(gate->ticks[index], index + 1);
+    EXPECT_EQ(gate->simulation_sink_calls.load(), 0u);
+    std::ifstream actual(m_path, std::ios::binary);
+    std::ifstream original(expected_path, std::ios::binary);
+    EXPECT_EQ(std::string(std::istreambuf_iterator<char>(actual), {}),
+              std::string(std::istreambuf_iterator<char>(original), {}));
+    actual.close();
+    original.close();
+    fs::remove(expected_path);
+}
+
+TEST_F(ReplayStreamTest, QueuedSinkFailureIsReportedAfterAcceptedWorkDrains) {
+    auto gate = std::make_shared<RecorderGate>();
+    gate->fail_tick = 2;
+    replay::QueuedReplayRecorder recorder(std::make_unique<GatedReplaySink>(gate));
+    const ReleaseRecorderGate release{gate};
+    ASSERT_TRUE(recorder.Configure(18, 0));
+    ASSERT_TRUE(recorder.Open(m_path, MakeHeader()));
+    const auto inputs = std::make_shared<const std::vector<std::uint8_t>>(1, 0xab);
+    ASSERT_TRUE(recorder.RecordTick(1, inputs, nullptr, 1));
+    WaitForRecorderWorker(gate);
+    ASSERT_TRUE(recorder.RecordTick(2, inputs, nullptr, 2));
+    ASSERT_TRUE(recorder.RecordTick(3, inputs, nullptr, 3));
+    ReleaseRecorder(gate);
+    EXPECT_FALSE(recorder.Flush());
+    EXPECT_EQ(gate->ticks, (std::vector<std::uint64_t>{1, 2, 3}));
+    EXPECT_EQ(recorder.PendingTicks(), 0u);
+    EXPECT_STREQ(recorder.FailureReason(), "recorder sink write failed");
+    EXPECT_FALSE(recorder.RecordTick(4, inputs, nullptr, 4));
+    EXPECT_FALSE(recorder.Finalize(m_path, 3, 3));
+    const auto reason_path = m_path + ".incomplete";
+    std::ifstream reason(reason_path);
+    EXPECT_EQ(std::string(std::istreambuf_iterator<char>(reason), {}),
+              "Incomplete replay at tick 2: recorder sink write failed\n");
+    reason.close();
+    fs::remove(reason_path);
+}
+
+TEST_F(ReplayStreamTest, QueuedShutdownDrainsBeforeRemovingAllWorkingFiles) {
+    const auto directory = fs::path(m_path + ".working");
+    ASSERT_TRUE(fs::create_directory(directory));
+    const auto destination = (directory / "shutdown.lrec1").string();
+    auto gate = std::make_shared<RecorderGate>();
+    {
+        replay::QueuedReplayRecorder recorder(std::make_unique<GatedReplaySink>(gate));
+        const ReleaseRecorderGate release{gate};
+        ASSERT_TRUE(recorder.Configure(18, 0));
+        ASSERT_TRUE(recorder.Open(destination, MakeHeader()));
+        for (std::uint64_t tick = 1; tick <= 128; ++tick) {
+            ASSERT_TRUE(recorder.RecordTick(
+                tick, std::make_shared<const std::vector<std::uint8_t>>(1, 0xab), nullptr, tick));
+        }
+        WaitForRecorderWorker(gate);
+        EXPECT_EQ(gate->written_ticks.load(), 0u);
+        // The gate guard releases first; recorder destruction must then drain all
+        // 128 accepted ticks before closing the sink and deleting its directory.
+    }
+    EXPECT_EQ(gate->written_ticks.load(), 128u);
+    EXPECT_EQ(gate->closes.load(), 1u);
+    ASSERT_EQ(gate->ticks.size(), 128u);
+    EXPECT_EQ(gate->ticks.back(), 128u);
+    EXPECT_TRUE(fs::is_empty(directory));
+    fs::remove(directory);
+}
+
+TEST_F(ReplayStreamTest, BoundedRecorderRejectsOverflowAndOversizedTicksBeforeWriting) {
+    replay::BoundedReplayRecorder recorder;
+    EXPECT_FALSE(recorder.Configure((std::numeric_limits<std::size_t>::max)(), 1));
+    EXPECT_FALSE(recorder.Configure(17, (std::numeric_limits<std::uint64_t>::max)()));
+    ASSERT_TRUE(recorder.Configure(17, 0));
+    ASSERT_TRUE(recorder.Open(m_path, MakeHeader()));
+    EXPECT_FALSE(recorder.RecordTick(1, {1}, nullptr, 1));
+    EXPECT_EQ(recorder.RetainedBytes(), 0u);
+    EXPECT_EQ(recorder.SegmentCount(), 0u);
+    ASSERT_TRUE(recorder.RecordTick(1, {}, nullptr, 1));
+    EXPECT_FALSE(recorder.RecordTick(1, {}, nullptr, 1));
+    EXPECT_FALSE(recorder.Configure(17, 0));
+}
+
+TEST_F(ReplayStreamTest, BoundedRecorderKeepsCompleteReplayEncodingBeforeRotation) {
+    const auto expected_path = m_path + ".expected";
+    auto header = MakeHeader();
+    ASSERT_EQ(header.version, 3u);
+    header.start_world_hash = "boot";
+    replay::ReplayWriter expected;
+    ASSERT_TRUE(expected.Open(expected_path, header));
+    replay::BoundedReplayRecorder recorder;
+    ASSERT_TRUE(recorder.Configure(128, 3));
+    ASSERT_TRUE(recorder.Open(m_path, header));
+    for (std::uint64_t tick = 1; tick <= 3; ++tick) {
+        const std::vector<std::uint8_t> inputs{static_cast<std::uint8_t>(tick)};
+        const replay::CheckpointRecord checkpoint{.tick = tick,
+                                                  .world_hash = "world",
+                                                  .terrain = "terrain",
+                                                  .water = "water",
+                                                  .entities = "entities"};
+        const std::array<std::string_view, 4> hashes{
+            checkpoint.world_hash, checkpoint.terrain, checkpoint.water, checkpoint.entities};
+        ASSERT_TRUE(recorder.RecordTick(tick, inputs, &hashes, tick - 1));
+        expected.RecordInput(tick, inputs);
+        expected.RecordCheckpoint(checkpoint);
+    }
+    ASSERT_TRUE(expected.Finalize(3));
+    ASSERT_TRUE(recorder.Finalize(m_path, 3, 3));
+    const auto parsed = replay::ReadReplay(m_path);
+    if (!parsed.has_value()) {
+        FAIL() << "complete version-3 recording could not be read";
+    }
+    const auto& contents = *parsed;
+    EXPECT_EQ(contents.header.version, 3u);
+    EXPECT_EQ(contents.header.start_world_hash, "boot");
+    EXPECT_EQ(contents.elided_through_tick, 0u);
+    {
+        std::ifstream actual(m_path, std::ios::binary);
+        std::ifstream original(expected_path, std::ios::binary);
+        EXPECT_EQ(std::string(std::istreambuf_iterator<char>(actual), {}),
+                  std::string(std::istreambuf_iterator<char>(original), {}));
+    }
+    fs::remove(expected_path);
+}
+
+TEST_F(ReplayStreamTest, BoundedRecorderPrefixDigestMatchesElidedWireBytes) {
+    replay::BoundedReplayRecorder recorder;
+    ASSERT_TRUE(recorder.Configure(18, 0));
+    ASSERT_TRUE(recorder.Open(m_path, MakeHeader()));
+    std::string prefix;
+    for (std::uint64_t tick = 1; tick <= 2048; ++tick) {
+        const auto byte = static_cast<std::uint8_t>(tick);
+        ASSERT_TRUE(recorder.RecordTick(tick, {byte}, nullptr, tick));
+        if (tick <= 1024) {
+            prefix.push_back(static_cast<char>(replay::RecordType::Input));
+            for (int shift = 0; shift < 64; shift += 8)
+                prefix.push_back(static_cast<char>((tick >> shift) & 0xff));
+            // Input frame payload size = u32 blob length + one byte.
+            prefix.append({5, 0, 0, 0, 1, 0, 0, 0, static_cast<char>(byte)});
+        }
+    }
+    ASSERT_TRUE(recorder.Finalize(m_path, 2048, 2048));
+    const auto parsed = replay::ReadReplay(m_path);
+    if (!parsed.has_value()) {
+        FAIL() << "bounded replay header did not round-trip";
+    }
+    const auto& contents = *parsed;
+    EXPECT_FALSE(contents.truncated);
+    EXPECT_TRUE(contents.trailer_present);
+    EXPECT_EQ(contents.header.version, 4u);
+    EXPECT_TRUE(replay::ConfigurationMatches(contents.header,
+                                             contents.header.system_config_identity,
+                                             contents.header.preset_content_hash));
+    EXPECT_EQ(contents.elided_through_tick, 1024u);
+    EXPECT_EQ(contents.elided_prefix_digest, std::stoull(replay::Fnv1a64Hex(prefix), nullptr, 16));
+    ASSERT_EQ(contents.inputs.size(), 1024u);
+    EXPECT_EQ(contents.inputs.front().tick, 1025u);
+    EXPECT_EQ(contents.inputs.back().tick, 2048u);
+    EXPECT_EQ(contents.tick_count, 2048u);
+    // Earlier version-3 readers reject this tag. It must not be accepted under
+    // that header even by a reader that also supports diagnostic version 4.
+    {
+        std::fstream stream(m_path, std::ios::binary | std::ios::in | std::ios::out);
+        ASSERT_TRUE(stream.is_open());
+        stream.seekp(6); // magic + reserved byte, then little-endian u16 version
+        stream.put(3);
+        stream.put(0);
+        ASSERT_TRUE(stream.good());
+    }
+    const auto downgraded = replay::ReadReplay(m_path);
+    if (!downgraded.has_value()) {
+        FAIL() << "version-3 header should be accepted before record validation";
+    }
+    const auto& invalid_contents = *downgraded;
+    EXPECT_TRUE(invalid_contents.truncated);
+    EXPECT_EQ(invalid_contents.elided_through_tick, 0u);
+}
+
+TEST_F(ReplayStreamTest, VersionFourHeaderPreservesIdentityAndCompleteRecordLayout) {
+    auto header = MakeHeader();
+    header.version = 4;
+    replay::ReplayWriter writer;
+    ASSERT_TRUE(writer.Open(m_path, header));
+    writer.RecordInput(1, {0xab});
+    ASSERT_TRUE(writer.Finalize(1));
+    const auto parsed = replay::ReadReplay(m_path);
+    if (!parsed.has_value()) {
+        FAIL() << "version-4 recording could not be read";
+    }
+    const auto& contents = *parsed;
+    EXPECT_EQ(contents.header.version, 4u);
+    EXPECT_TRUE(replay::ConfigurationMatches(
+        contents.header, header.system_config_identity, header.preset_content_hash));
+    EXPECT_FALSE(contents.truncated);
+    EXPECT_TRUE(contents.trailer_present);
+    EXPECT_EQ(contents.elided_through_tick, 0u);
+    ASSERT_EQ(contents.inputs.size(), 1u);
+    EXPECT_EQ(contents.inputs.front().tick, 1u);
+    EXPECT_EQ(contents.inputs.front().inputs, (std::vector<std::uint8_t>{0xab}));
+}
+
+TEST_F(ReplayStreamTest, BoundedRecorderRotatesOnByteLimitAndRetainsMaximumTick) {
+    replay::BoundedReplayRecorder recorder;
+    constexpr std::size_t payload_bytes = replay::BoundedReplayRecorder::kSegmentBytes;
+    ASSERT_TRUE(recorder.Configure(payload_bytes + 17, 0));
+    ASSERT_TRUE(recorder.Open(m_path, MakeHeader()));
+    const std::vector<std::uint8_t> inputs(payload_bytes, 0xab);
+    for (std::uint64_t tick = 1; tick <= 3; ++tick) {
+        ASSERT_TRUE(recorder.RecordTick(tick, inputs, nullptr, tick));
+        EXPECT_EQ(recorder.SegmentCount(), 1u);
+        EXPECT_EQ(recorder.RetainedBytes(), payload_bytes + 17);
+        EXPECT_LE(recorder.RetainedBytes(), recorder.ByteLimit());
+    }
+    ASSERT_TRUE(recorder.Finalize(m_path, 3, 3));
+    const auto parsed = replay::ReadReplay(m_path);
+    if (!parsed.has_value()) {
+        FAIL() << "large bounded replay could not be read";
+    }
+    const auto& contents = *parsed;
+    EXPECT_FALSE(contents.truncated);
+    EXPECT_EQ(contents.elided_through_tick, 2u);
+    ASSERT_EQ(contents.inputs.size(), 1u);
+    EXPECT_EQ(contents.inputs.front().tick, 3u);
+    EXPECT_EQ(contents.inputs.front().inputs, inputs);
+}
 
 // Header fields survive a write/read round-trip exactly.
 TEST_F(ReplayStreamTest, HeaderRoundtrip) {

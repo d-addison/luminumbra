@@ -12,6 +12,15 @@ SHIPPING = ROOT / "worlds/atlas/presets"
 FIXTURE = ROOT / "test/fixtures/saves/revision6-hills"
 
 
+def preset_checksum(preset):
+    """Identity of authored/resolved preset bytes, shared with fixture regeneration."""
+    canonical = json.dumps(preset, sort_keys=True, separators=(",", ":")).encode()
+    checksum = 14695981039346656037
+    for byte in canonical:
+        checksum = ((checksum ^ byte) * 1099511628211) & ((1 << 64) - 1)
+    return f"{checksum:016x}"
+
+
 class FrozenTerrainPresetsTests(unittest.TestCase):
     def test_original_bytes_match_manifest(self):
         manifest = json.loads((FROZEN / "sha256.json").read_text())
@@ -38,7 +47,7 @@ class FrozenTerrainPresetsTests(unittest.TestCase):
     def test_cave_dense_follows_caverns_migration_without_losing_density(self):
         old = json.loads((FROZEN / "cave_dense.json").read_text())
         new = json.loads((SHIPPING / "cave_dense.json").read_text())
-        self.assertEqual(new["schema_rev"], 7)
+        self.assertEqual(new["schema_rev"], 8)
         self.assertIs(new["generation_params"]["terrain"]["island_mask_enabled"], True)
         self.assertEqual(new["generation_params"]["terrain"]["hydro"]["iterations"], 4)
         self.assertIs(new["generation_params"]["biomes"]["relief_enabled"], True)
@@ -46,6 +55,7 @@ class FrozenTerrainPresetsTests(unittest.TestCase):
         # These are the only authored changes, including metadata and cave tuning.
         restored = json.loads(json.dumps(new))
         restored["schema_rev"] = 6
+        self.assertEqual(restored["generation_params"]["terrain"].pop("surface_sampling_revision"), 2)
         restored["generation_params"]["terrain"]["island_mask_enabled"] = False
         restored["generation_params"]["terrain"]["hydro"]["iterations"] = 8
         restored["generation_params"]["biomes"]["relief_enabled"] = False
@@ -64,18 +74,15 @@ class FrozenTerrainPresetsTests(unittest.TestCase):
 
     def test_cave_dense_preset_identity_pins(self):
         for directory, expected in ((FROZEN, "e70158a4777ee36b"),
-                                    (SHIPPING, "5d081f382b2d5d0d")):
+                                    (SHIPPING, "a9296ce03a5d9f33")):
             preset = json.loads((directory / "cave_dense.json").read_text())
-            canonical = json.dumps(preset, sort_keys=True, separators=(",", ":")).encode()
-            checksum = 14695981039346656037
-            for byte in canonical:
-                checksum = ((checksum ^ byte) * 1099511628211) & ((1 << 64) - 1)
-            self.assertEqual(f"{checksum:016x}", expected)
+            self.assertEqual(preset_checksum(preset), expected)
 
     def test_historical_and_new_world_revisions_stay_separate(self):
         for path in SHIPPING.glob("*.json"):
             with self.subTest(preset=path.name):
-                self.assertEqual(json.loads(path.read_text())["schema_rev"], 7)
+                self.assertEqual(json.loads(path.read_text())["schema_rev"], 8)
+                self.assertEqual(json.loads(path.read_text())["generation_params"]["terrain"]["surface_sampling_revision"], 2)
                 self.assertEqual(json.loads((FROZEN / path.name).read_text())["schema_rev"], 6)
 
     def test_old_hills_keeps_its_island_mask_off(self):
@@ -83,14 +90,16 @@ class FrozenTerrainPresetsTests(unittest.TestCase):
         new = json.loads((SHIPPING / "default.json").read_text())
         self.assertFalse(old["generation_params"]["terrain"]["island_mask_enabled"])
         self.assertTrue(new["generation_params"]["terrain"]["island_mask_enabled"])
-        # Hills changed only its island mask and revision; every other old value survives.
+        # Hills changed its island mask, schema and sampling revision; other old values survive.
         new["schema_rev"] = 6
+        self.assertEqual(new["generation_params"]["terrain"].pop("surface_sampling_revision"), 2)
         new["generation_params"]["terrain"]["island_mask_enabled"] = False
         self.assertEqual(old, new)
 
     def test_flat_lands_keeps_its_minimal_generation_identity(self):
         old = json.loads((FROZEN / "flat_lands.json").read_text())["generation_params"]
         new = json.loads((SHIPPING / "flat_lands.json").read_text())["generation_params"]
+        self.assertEqual(new["terrain"].pop("surface_sampling_revision"), 2)
         self.assertEqual(new["terrain"], old["terrain"])
         self.assertEqual(new["biomes"].pop("table"), "")
         self.assertIs(new["biomes"].pop("relief_enabled"), False)
@@ -101,12 +110,8 @@ class FrozenTerrainPresetsTests(unittest.TestCase):
         traversal = (ROOT / "tools/perf/fixtures/surface-flight.traversal").read_text()
         fields = dict(line.split(maxsplit=1) for line in traversal.splitlines()[1:])
         preset = json.loads((SHIPPING / (fields["preset"] + ".json")).read_text())
-        canonical = json.dumps(preset, sort_keys=True, separators=(",", ":")).encode()
-        checksum = 14695981039346656037
-        for byte in canonical:
-            checksum = ((checksum ^ byte) * 1099511628211) & ((1 << 64) - 1)
         self.assertEqual(int(fields["preset_revision"]), preset["schema_rev"])
-        self.assertEqual(fields["preset_identity"], f"{checksum:016x}")
+        self.assertEqual(fields["preset_identity"], preset_checksum(preset))
 
     def test_non_embedded_fixture_pins_original_identity(self):
         metadata = json.loads((FIXTURE / "world_info.json").read_text())
@@ -114,11 +119,7 @@ class FrozenTerrainPresetsTests(unittest.TestCase):
         self.assertEqual(metadata["worldType"], "default")
         self.assertEqual(metadata["seed"], "424242")
         preset = json.loads((FROZEN / "default.json").read_text())
-        canonical = json.dumps(preset, sort_keys=True, separators=(",", ":")).encode()
-        checksum = 14695981039346656037
-        for byte in canonical:
-            checksum = ((checksum ^ byte) * 1099511628211) & ((1 << 64) - 1)
-        self.assertEqual(metadata["presetIdentity"], f"{checksum:016x}")
+        self.assertEqual(metadata["presetIdentity"], preset_checksum(preset))
         self.assertEqual(metadata["presetIdentity"], "026f24207a8ffc7e")
 
 

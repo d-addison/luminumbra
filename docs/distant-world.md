@@ -192,7 +192,7 @@ deep interiors and distant mouths beyond the noise-cave cutoff, not only within
 it.
 
 Qualification must pin the cave-dense revision and identity. The packaged
-`worlds/atlas/presets/cave_dense.json` now uses revision 7; the revision-6 fixture
+`worlds/atlas/presets/cave_dense.json` now uses revision 8; the revision-6 fixture
 is frozen in `worlds/atlas/presets-rev6/cave_dense.json`. See the
 shipping preset identities under "Shipping defaults" in the [engine guide](engine-guide.md) before comparing
 captures or synchronizing the game repository's fixture and identity sidecar.
@@ -377,10 +377,11 @@ nights; a calendar-relative lunar period needs a separate pacing decision.
 ## Persistence and format contract
 
 Preset revision 7 retains revision 6 omission compatibility; current-format saves
-without embedded packaged presets use frozen revision-6 copies. Lockstep protocol
-and LREC1 replay layout are version 3 and bind effective configuration plus
-resolved preset/dependency content; older layouts are refused. See the
-[identity contract](development/system-config-identity.md).
+without embedded packaged presets use frozen revision-6 copies. Lockstep
+Hello is version 4; LREC1 uses version 3 for complete streams and version 4 for
+diagnostic suffixes with an elided prefix. Both replay versions bind effective
+configuration plus resolved preset/dependency content; older layouts are refused.
+See the [identity contract](development/system-config-identity.md).
 
 Unchanged: LMR1 container v2 for `chunks/region/*.lmr`
 including its lod-level and flag validation, the

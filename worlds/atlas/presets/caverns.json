@@ -1,9 +1,10 @@
 {
   "name": "Caverns",
   "description": "A pitted karst highland riddled with caves that open to the sky through sinkholes and cave-mouths — built to chase light shafts underground",
-  "schema_rev": 7,
+  "schema_rev": 8,
   "generation_params": {
     "terrain": {
+      "surface_sampling_revision": 2,
       "base_frequency": 0.009,
       "base_amplitude": 58.0,
       "octaves": 6,

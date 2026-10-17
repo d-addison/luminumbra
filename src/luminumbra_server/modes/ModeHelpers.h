@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <optional>
 #include <ratio>
 #include <thread>
 
@@ -52,6 +53,10 @@ struct RuntimeTcpClientSlot {
 };
 
 Luminumbra::Server::ServerWorldRunnerConfig RunnerConfigFrom(const ServerCliOptions& options);
+// Refuses invalid or unmatched identities before playback can create a world.
+std::optional<Luminumbra::Server::ServerWorldRunnerConfig>
+ReplayRunnerConfigFrom(const ServerCliOptions& options,
+                       const Luminumbra::Replay::ReplayHeader& header);
 std::uint32_t ExpectedNetworkClients(const ServerCliOptions& options);
 std::uint32_t LocalNetworkPlayerId(const ServerCliOptions& options);
 bool ResolveNetworkClientPort(std::uint16_t base_port,

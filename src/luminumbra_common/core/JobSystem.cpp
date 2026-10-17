@@ -89,9 +89,9 @@ void JobSystem::run_slot(PooledJob& slot) {
     LUMIN_PROFILE_ZONE_N("Worker job execution");
 #if defined(LUMINUMBRA_ENABLE_TRACY)
     LUMIN_PROFILE_PLOT("Job queue delay (ms)",
-                       std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
-                                                                 slot.enqueued_at)
-                           .count());
+                       (std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                                  slot.enqueued_at)
+                            .count()));
 #endif
     // Take ownership locally so the slot can be cleared even if job throws.
     Job job = std::move(slot.job);
