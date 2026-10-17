@@ -444,9 +444,9 @@ nlohmann::json& WriteKnobLayer(nlohmann::json& preset,
                                const KnobVector& knobs,
                                const std::vector<KnobOverride>& overrides) {
     // Fully resolve the params first (so non-knob loaders see the real world).
-    const auto resolved_baseline = ResolveTerrainPresetDefaults(baseline);
+    const auto resolved_baseline = ResolveEffectivePreset(baseline);
     nlohmann::json resolved = ResolveKnobLayer(resolved_baseline, knobs, overrides);
-    preset["schema_rev"] = kTerrainPresetSchemaRevision;
+    preset["schema_rev"] = resolved_baseline.at("schema_rev");
     if (resolved.contains("generation_params") && resolved["generation_params"].is_object())
         preset["generation_params"] = resolved["generation_params"];
     else if (!preset.contains("generation_params"))
