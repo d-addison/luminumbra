@@ -2,6 +2,43 @@
 
 from __future__ import annotations
 
+import sys
+
+
+_PHASE_LIMIT = 768
+_phase_records = 0
+
+
+def _phase(token: str, *, selector: int | None = None, case: str = "") -> None:
+    # At most 768 attempted records per process, each below 256 ASCII bytes.
+    # Slice before encoding/filtering; no paths, payloads, retries or stack scans.
+    global _phase_records
+    if _phase_records >= _PHASE_LIMIT or token not in (
+            "entry", "imports-start", "imports-finish", "checker-import-start", "checker-import-finish",
+            "public-import-start", "public-import-finish", "module-ready", "selection-start",
+            "selection-finish", "case-start", "case-finish"):
+        return
+    record = "acceptance-phase=" + token
+    if type(selector) is int and 0 <= selector < 8:
+        record += " selector=" + str(selector)
+    if case:
+        record += " case=" + "".join(char if char.isascii() and (char.isalnum() or char in "._")
+                                   else "?" for char in case[:128])
+    record += "\n"
+    _phase_records += 1
+    try:
+        if sys.stderr.write(record) != len(record):
+            _phase_records = _PHASE_LIMIT
+            return
+        sys.stderr.flush()
+    except (OSError, ValueError, AttributeError):
+        # A closed/absent/broken capture stream must not change test outcomes.
+        _phase_records = _PHASE_LIMIT
+
+
+_phase("entry")
+_phase("imports-start")
+
 import contextlib
 import copy
 import ctypes
@@ -15,7 +52,6 @@ import re
 import shutil
 import stat
 import subprocess
-import sys
 import tempfile
 import time
 import unittest
@@ -26,19 +62,42 @@ from pathlib import Path
 from typing import Any
 
 
+_phase("imports-finish")
+_phase("checker-import-start")
 MODULE_PATH = Path(__file__).with_name("check_acceptance_matrix.py")
 SPEC = importlib.util.spec_from_file_location("check_acceptance_matrix", MODULE_PATH)
 assert SPEC and SPEC.loader
 MODULE = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
+_phase("checker-import-finish")
 
+_phase("public-import-start")
 PUBLIC_SPEC = importlib.util.spec_from_file_location(
     "acceptance_public_tree", MODULE_PATH.with_name("validate_public_tree.py"))
 assert PUBLIC_SPEC and PUBLIC_SPEC.loader
 PUBLIC_TREE = importlib.util.module_from_spec(PUBLIC_SPEC)
 sys.modules[PUBLIC_SPEC.name] = PUBLIC_TREE
 PUBLIC_SPEC.loader.exec_module(PUBLIC_TREE)
+_phase("public-import-finish")
+
+
+class _PhaseCase(unittest.TestCase):
+    def run(self, result: Any = None) -> Any:
+        # Keep the original result, setup/teardown, assertions and exit behavior.
+        identity = (type(self).__name__[:128] + "." + self._testMethodName[:128])[:128]
+        _phase("case-start", case=identity)
+        try:
+            return super().run(result)
+        finally:
+            _phase("case-finish", case=identity)
+
+
+class _PhaseProgram(unittest.TestProgram):
+    def createTests(self, *args: Any, **kwargs: Any) -> None:
+        _phase("selection-start")
+        super().createTests(*args, **kwargs)
+        _phase("selection-finish")
 
 
 @lru_cache(maxsize=1)
@@ -176,7 +235,7 @@ def row_of(matrix: dict[str, Any], row_id: str) -> dict[str, Any]:
     raise KeyError(row_id)
 
 
-class AcceptanceFixture(unittest.TestCase):
+class AcceptanceFixture(_PhaseCase):
     @classmethod
     def setUpClass(cls) -> None:
         super().setUpClass()
@@ -6134,7 +6193,7 @@ raise SystemExit(module["main"](sys.argv[3:]))
         self.assertTrue(MODULE._same_transaction_identity(displaced, identity))
 
 
-class ProductionAcceptanceMatrixTests(unittest.TestCase):
+class ProductionAcceptanceMatrixTests(_PhaseCase):
     def test_production_inputs_allow_refresh_and_standard_document_write(self) -> None:
         root = MODULE.DEFAULT_ROOT
         doc = root / "docs/acceptance-matrix.md"
@@ -6208,7 +6267,7 @@ class ProductionAcceptanceMatrixTests(unittest.TestCase):
         self.assertNotRegex(rendered, r"(?i)\b(?:PR|pull request|change)\s*#?\s*\d+")
 
 
-class AcceptanceMatrixPublishabilityTests(unittest.TestCase):
+class AcceptanceMatrixPublishabilityTests(_PhaseCase):
     def test_inventory_and_generated_matrix_are_publishable(self) -> None:
         public_documents = ("tools/ci/acceptance_requirements.json", "tools/ci/acceptance_matrix.json",
                             "docs/acceptance-matrix.md", *MODULE.CONTRACT_DOCUMENTS)
@@ -6234,7 +6293,7 @@ class AcceptanceMatrixPublishabilityTests(unittest.TestCase):
         self.assertEqual(len(paths), len(set(paths)))
 
 
-class AcceptanceMatrixPublicTreeTests(unittest.TestCase):
+class AcceptanceMatrixPublicTreeTests(_PhaseCase):
     # The complete public tree is much broader than the matrix fixtures. Keep
     # its four disjoint scans in separate CTest entries under the same timeout.
     def check_partition(self, number: int) -> None:
@@ -6256,7 +6315,7 @@ class AcceptanceMatrixPublicTreeTests(unittest.TestCase):
         self.check_partition(3)
 
 
-class PublicTreeScanTests(unittest.TestCase):
+class PublicTreeScanTests(_PhaseCase):
     def test_binary_files_only_read_the_classification_prefix(self) -> None:
         reads: list[int] = []
 
@@ -6426,13 +6485,139 @@ _MATRIX_CLASSES = (AcceptanceMatrixTests, ProductionAcceptanceMatrixTests,
 def contract_suite(number: int) -> unittest.TestSuite:
     if type(number) is not int or not 0 <= number < _CONTRACT_PARTITIONS:
         raise ValueError("invalid contract partition")
+    _phase("selection-start", selector=number)
     loader = unittest.TestLoader()
     cases = [case(name) for case in (*_MATRIX_CLASSES, AcceptanceSelectionTests)
              for name in loader.getTestCaseNames(case)]
-    return unittest.TestSuite(cases[number::_CONTRACT_PARTITIONS])
+    suite = unittest.TestSuite(cases[number::_CONTRACT_PARTITIONS])
+    _phase("selection-finish", selector=number)
+    return suite
 
 
-class AcceptanceSelectionTests(unittest.TestCase):
+class AcceptanceSelectionTests(_PhaseCase):
+    def assert_phase_contract(self) -> None:
+        source = Path(__file__).read_text(encoding="utf-8")
+        prefix = source.split("\nimport contextlib\n", 1)[0]
+        events = []
+        class Capture(io.StringIO):
+            def write(self, value: str) -> int:
+                events.append(("write", value))
+                return super().write(value)
+            def flush(self) -> None:
+                events.append(("flush", self.getvalue()))
+        namespace: dict[str, Any] = {}
+        output = Capture()
+        with contextlib.redirect_stderr(output):
+            exec(compile(prefix, "<phase-prefix>", "exec"), namespace)
+        early = "acceptance-phase=entry\nacceptance-phase=imports-start\n"
+        self.assertEqual(output.getvalue(), early)
+        self.assertEqual([event[0] for event in events], ["write", "flush"] * 2)
+        # The executed prefix has no imports except the future directive and sys.
+        import ast
+        imports = [node for node in ast.parse(prefix).body if isinstance(node, (ast.Import, ast.ImportFrom))]
+        self.assertEqual([(getattr(node, "module", None), [name.name for name in node.names])
+                          for node in imports], [("__future__", ["annotations"]), (None, ["sys"])])
+        for start, operation, finish in (
+                ('_phase("imports-start")', "import contextlib", '_phase("imports-finish")'),
+                ('_phase("checker-import-start")', "SPEC.loader.exec_module(MODULE)",
+                 '_phase("checker-import-finish")'),
+                ('_phase("public-import-start")', "PUBLIC_SPEC.loader.exec_module(PUBLIC_TREE)",
+                 '_phase("public-import-finish")')):
+            self.assertLess(source.index(start), source.index(operation))
+            self.assertLess(source.index(operation), source.index(finish))
+        self.assertLess(source.index('_phase("module-ready")'), source.index('if __name__ == "__main__":'))
+        self.assertIn("    _PhaseProgram()\n", source.split('if __name__ == "__main__":', 1)[1])
+        self.assertEqual(namespace["_PHASE_LIMIT"], 768)
+        emit = namespace["_phase"]
+        namespace["_phase_records"] = 0
+        events.clear()
+        output = Capture()
+        with contextlib.redirect_stdout(io.StringIO()) as stdout, contextlib.redirect_stderr(output):
+            emit("unknown")
+            self.assertEqual(namespace["_phase_records"], 0)
+            emit("selection-start", selector=7)
+            for selector in (-1, 8, True, "private-selector", None):
+                emit("selection-finish", selector=selector)
+            emit("case-start", case="a/\n\r\u96ea" * 256)
+            for _ in range(800):
+                emit("case-finish", case="AcceptanceSelectionTests.test_contract_partition_refuses_invalid_selection")
+        records = output.getvalue().splitlines(keepends=True)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(len(records), 768)
+        self.assertEqual(namespace["_phase_records"], 768)
+        self.assertEqual(len(events), 2 * 768)
+        self.assertEqual([event[0] for event in events], ["write", "flush"] * 768)
+        self.assertEqual(records[:6], ["acceptance-phase=selection-start selector=7\n"] +
+                         ["acceptance-phase=selection-finish\n"] * 5)
+        self.assertEqual(records[6], "acceptance-phase=case-start case=" + "a????" * 25 + "a??\n")
+        for record in records:
+            self.assertLessEqual(len(record.encode("ascii")), 256)
+            self.assertRegex(record, r"^acceptance-phase=[a-z-]+(?: selector=[0-7])?(?: case=[A-Za-z0-9._?]{1,128})?\n$")
+        # Failed/partial writes and failed flushes disable further diagnostics.
+        # Neither retries nor stream errors may replace a test's result/exception.
+        for stream in (None, object(), mock.Mock(write=mock.Mock(return_value=0)),
+                       mock.Mock(write=mock.Mock(side_effect=OSError("denied"))),
+                       mock.Mock(write=mock.Mock(side_effect=ValueError("closed")))):
+            namespace["_phase_records"] = 0
+            with mock.patch.object(sys, "stderr", stream):
+                emit("entry")
+                emit("entry")
+            self.assertEqual(namespace["_phase_records"], 768)
+            if isinstance(stream, mock.Mock):
+                stream.write.assert_called_once_with("acceptance-phase=entry\n")
+                stream.flush.assert_not_called()
+        stream = mock.Mock(write=mock.Mock(return_value=len("acceptance-phase=entry\n")),
+                           flush=mock.Mock(side_effect=OSError("flush denied")))
+        namespace["_phase_records"] = 0
+        with mock.patch.object(sys, "stderr", stream):
+            emit("entry")
+            emit("entry")
+        self.assertEqual(namespace["_phase_records"], 768)
+        stream.write.assert_called_once()
+        stream.flush.assert_called_once()
+        for cls in (AcceptanceFixture, ProductionAcceptanceMatrixTests, AcceptanceMatrixPublishabilityTests,
+                    AcceptanceMatrixPublicTreeTests, PublicTreeScanTests, AcceptanceSelectionTests):
+            self.assertEqual(cls.__bases__, (_PhaseCase,))
+        # Delegate the same instance/result exactly once and retain return values
+        # and raised exceptions, including an interrupted run's final record.
+        case, result = _PhaseCase(), object()
+        for failure in (None, RuntimeError("case interrupted"), KeyboardInterrupt()):
+            output = io.StringIO()
+            def original(actual_case: Any, actual_result: Any) -> Any:
+                self.assertIs(actual_case, case)
+                self.assertIs(actual_result, result)
+                self.assertEqual(output.getvalue(), "acceptance-phase=case-start case=_PhaseCase.runTest\n")
+                if failure is not None:
+                    raise failure
+                return result
+            with mock.patch.dict(globals(), _phase_records=0), contextlib.redirect_stderr(output), \
+                    mock.patch.object(unittest.TestCase, "run", autospec=True, side_effect=original) as delegated:
+                if failure is None:
+                    self.assertIs(case.run(result), result)
+                else:
+                    with self.assertRaises(type(failure)) as raised:
+                        case.run(result)
+                    self.assertIs(raised.exception, failure)
+            delegated.assert_called_once_with(case, result)
+            self.assertEqual(output.getvalue(), "acceptance-phase=case-start case=_PhaseCase.runTest\n"
+                             "acceptance-phase=case-finish case=_PhaseCase.runTest\n")
+        output = io.StringIO()
+        selected = "AcceptanceSelectionTests.test_contract_partition_refuses_invalid_selection"
+        with mock.patch.dict(globals(), _phase_records=0), contextlib.redirect_stderr(output):
+            program = _PhaseProgram(module=sys.modules[__name__], argv=["tests", selected], exit=False,
+                                    testRunner=unittest.TextTestRunner(stream=io.StringIO()))
+        self.assertTrue(program.result.wasSuccessful())
+        self.assertEqual(program.result.testsRun, 1)
+        self.assertEqual(output.getvalue().splitlines(), ["acceptance-phase=selection-start",
+                         "acceptance-phase=selection-finish", "acceptance-phase=case-start case=" + selected,
+                         "acceptance-phase=case-finish case=" + selected])
+        output = io.StringIO()
+        with mock.patch.dict(globals(), _phase_records=0), contextlib.redirect_stderr(output):
+            suite = contract_suite(7)
+        self.assertEqual(suite.countTestCases(), 32)
+        self.assertEqual(output.getvalue(), "acceptance-phase=selection-start selector=7\n"
+                         "acceptance-phase=selection-finish selector=7\n")
+
     def assert_artifact_discoverable(self, artifact: Path, authority: bytes) -> None:
         # Preparation JSON lines and transaction JSON use default string encoding.
         # Require the complete quoted path, even when a later record is partial;
@@ -7304,6 +7489,8 @@ deep(10)
         self.assertEqual(len(selected), len(set(selected)))
         discovered = loader.loadTestsFromModule(sys.modules[__name__])
         self.assertEqual(discovered.countTestCases(), len(expected))
+        self.assertEqual(len(expected), 285)
+        self.assert_phase_contract()
 
     def test_partition_entrypoint_refuses_invalid_selection(self) -> None:
         for value in ("-1", "8", "unknown"):
@@ -7322,6 +7509,9 @@ deep(10)
                 contract_suite(number)
 
 
+_phase("module-ready")
+
+
 if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "--contract-partition":
         try:
@@ -7329,4 +7519,4 @@ if __name__ == "__main__":
         except ValueError as error:
             raise SystemExit(str(error)) from error
         raise SystemExit(not unittest.TextTestRunner().run(suite).wasSuccessful())
-    unittest.main()
+    _PhaseProgram()
