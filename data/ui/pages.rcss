@@ -652,3 +652,8 @@ body#gallery {
 .pager-dot-active {
     background-color: #C9A86A;
 }
+
+body.backdrop-half .pause-overlay,
+body.backdrop-half .pause-panel { backdrop-filter: blur(5px); }
+body.backdrop-off .pause-overlay,
+body.backdrop-off .pause-panel { backdrop-filter: none; }
