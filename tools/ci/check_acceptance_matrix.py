@@ -222,28 +222,37 @@ def load_required_ids(path: Path) -> frozenset[str]:
     return frozenset(required)
 
 
-def _cmake_files(root: Path) -> list[Path]:
-    files: set[Path] = set()
+def _discovery_files(
+    root: Path, *, cmake: bool = True, gtest: bool = True,
+) -> tuple[list[Path], list[Path]]:
+    # One traversal per source tree and one file-status query per candidate.
+    # Both result sets are bounded by the number of source-tree entries.
+    cmake_files: set[Path] = set()
+    gtest_files: list[Path] = []
     top = root / "CMakeLists.txt"
-    if top.is_file():
-        files.add(top)
-    for sub in ("test", "tools"):
+    if cmake and top.is_file():
+        cmake_files.add(top)
+    for sub in ("test", "tools") if cmake else ("test",):
         base = root / sub
         if not base.is_dir():
             continue
         for path in base.rglob("*"):
-            if path.is_file() and (path.name == "CMakeLists.txt" or path.suffix == ".cmake"):
-                files.add(path)
-    return sorted(files)
+            is_cmake = cmake and (path.name == "CMakeLists.txt" or path.suffix == ".cmake")
+            is_gtest = gtest and sub == "test" and path.suffix in {".cpp", ".h"}
+            if (is_cmake or is_gtest) and path.is_file():
+                if is_cmake:
+                    cmake_files.add(path)
+                if is_gtest:
+                    gtest_files.append(path)
+    return sorted(cmake_files), sorted(gtest_files)
+
+
+def _cmake_files(root: Path) -> list[Path]:
+    return _discovery_files(root, gtest=False)[0]
 
 
 def _gtest_sources(root: Path) -> list[Path]:
-    base = root / "test"
-    if not base.is_dir():
-        return []
-    return sorted(
-        path for path in base.rglob("*") if path.is_file() and path.suffix in {".cpp", ".h"}
-    )
+    return _discovery_files(root, cmake=False)[1]
 
 
 def _read_text(path: Path) -> str:
@@ -413,15 +422,16 @@ def _is_ctest_name(name: str | None) -> bool:
 
 
 def index_tests(root: Path) -> TestIndex:
+    cmake_files, gtest_files = _discovery_files(root)
     ctest_names: set[str] = set()
-    for path in _cmake_files(root):
+    for path in cmake_files:
         text = _drop_disabled_cmake(_strip_cmake(_read_text(path)))
         for match in ADD_TEST_RE.finditer(text):
             name = match.group("quoted") if match.group("quoted") is not None else match.group("bare")
             if _is_ctest_name(name):
                 ctest_names.add(name)
     gtest_cases: set[tuple[str, str]] = set()
-    for path in _gtest_sources(root):
+    for path in gtest_files:
         text = _drop_disabled_c(_strip_c(_read_text(path)))
         gtest_cases.update((match.group(1), match.group(2)) for match in GTEST_RE.finditer(text))
     return TestIndex(
@@ -982,7 +992,8 @@ class _RefreshSnapshot:
         self.add([*paths, *sorted(self.discovery), *(root / path for path in CONTRACT_DOCUMENTS)])
 
     def _discover(self) -> set[Path]:
-        return set(_cmake_files(self.root) + _gtest_sources(self.root))
+        cmake_files, gtest_files = _discovery_files(self.root)
+        return set(cmake_files + gtest_files)
 
     @staticmethod
     def _fingerprint(path: Path) -> bytes | None:
@@ -1480,6 +1491,7 @@ def _check_item(
     base: Path,
     index: TestIndex,
     require_landed: bool,
+    path_problem: Callable[..., str | None],
 ) -> None:
     if not isinstance(item, dict):
         add("evidence item must be an object")
@@ -1500,7 +1512,7 @@ def _check_item(
         if not is_planned and not _ctest_exists(ref, index):
             add(f"ctest not found: {ref}")
     else:
-        problem = _path_problem(base, ref, must_exist=not is_planned)
+        problem = path_problem(base, ref, must_exist=not is_planned)
         if problem:
             add(problem)
 
@@ -1513,7 +1525,7 @@ def _check_item(
             if entry_point is None:
                 add("native command must invoke a repository script entry point")
             else:
-                problem = _path_problem(base, entry_point, must_exist=not is_planned)
+                problem = path_problem(base, entry_point, must_exist=not is_planned)
                 if problem:
                     add(f"native command entry point {problem}")
                 if entry_point != ref:
@@ -1561,6 +1573,10 @@ def validate(
 ) -> list[str]:
     """Validate disk inputs, or a prospective inventory before publishing it."""
     base = root.resolve()
+    # Evidence and native entry points often repeat across rows. Bound this
+    # invocation's path-result cache to 256 entries; never retain disk answers
+    # across validation calls, even when another process edits the same path.
+    path_problem = lru_cache(maxsize=256)(_path_problem)
     problems: list[tuple[str, str]] = []
     try:
         if inventory is None:
@@ -1639,7 +1655,7 @@ def validate(
         else:
             for item in evidence:
                 item_messages: list[str] = []
-                _check_item(item_messages.append, item, base, index, require_landed)
+                _check_item(item_messages.append, item, base, index, require_landed, path_problem)
                 messages.extend(item_messages)
             dict_items = [item for item in evidence if isinstance(item, dict)]
             if isinstance(status, str) and status in VALID_STATUSES and len(dict_items) == len(evidence):
@@ -1854,20 +1870,22 @@ def _matrix_input_paths(matrix: dict[str, Any], root: Path) -> tuple[list[Path],
     Retain that reference in snapshots, including its unresolved alias identity.
     Source uses, other evidence kinds and alias spellings remain protected.
     """
-    references: list[tuple[str, bool]] = []
+    references: dict[tuple[str, bool], None] = {}
     rows = matrix.get("rows", [])
     for row in rows if isinstance(rows, list) else []:
         if not isinstance(row, dict):
             continue
         source = row.get("source")
         if _is_nonempty_str(source):
-            references.append((source.partition("#")[0], False))
+            references[source.partition("#")[0], False] = None
         evidence = row.get("evidence", [])
         for item in evidence if isinstance(evidence, list) else []:
             if isinstance(item, dict) and item.get("kind") != "ctest" and _is_nonempty_str(item.get("ref")):
                 generated = item.get("kind") == "doc" and item["ref"] == "docs/acceptance-matrix.md"
-                references.append((item["ref"], generated))
+                references[item["ref"], generated] = None
     inputs, protected = [], []
+    # Repeated row references have the same role, but alternate spellings and
+    # protected/generated roles remain distinct. Work is linear in unique references.
     for ref, generated in references:
         path = root / ref
         if not _path_problem(root, ref, must_exist=False) and not path.is_dir():
@@ -1877,14 +1895,44 @@ def _matrix_input_paths(matrix: dict[str, Any], root: Path) -> tuple[list[Path],
     return inputs, protected
 
 
+class _PathComparisons:
+    """Reuse metadata only within a single prepublication overlap check.
+
+    Storage is bounded by that check's distinct input and output paths. Never
+    reuse it for snapshots, publication, rollback or a later CLI invocation.
+    Path.stat (rather than DirEntry.stat) supplies Windows file identities.
+    """
+
+    def __init__(self) -> None:
+        self.resolved: dict[Path, Path] = {}
+        self.metadata: dict[Path, os.stat_result | None] = {}
+
+    def _resolve(self, path: Path) -> Path:
+        if path not in self.resolved:
+            self.resolved[path] = path.resolve()
+        return self.resolved[path]
+
+    def _stat(self, path: Path) -> os.stat_result | None:
+        if path not in self.metadata:
+            try:
+                self.metadata[path] = path.stat()
+            except FileNotFoundError:
+                self.metadata[path] = None
+        return self.metadata[path]
+
+    def same(self, left: Path, right: Path) -> bool:
+        if self._resolve(left) == self._resolve(right):
+            return True
+        first = self._stat(left)
+        if first is None:
+            return False
+        second = self._stat(right)
+        return second is not None and os.path.samestat(first, second)
+
+
 def _same_path(left: Path, right: Path) -> bool:
     """Compare names and file identities, including hard links and short names."""
-    if left.resolve() == right.resolve():
-        return True
-    try:
-        return left.samefile(right)
-    except FileNotFoundError:
-        return False
+    return _PathComparisons().same(left, right)
 
 
 def _check_output_paths(args: argparse.Namespace, root: Path, matrix_path: Path, inputs: list[Path]) -> None:
@@ -1894,13 +1942,15 @@ def _check_output_paths(args: argparse.Namespace, root: Path, matrix_path: Path,
         targets.append(args.write_doc)
     if args.execution_receipt is not None:
         targets.append(args.execution_receipt)
-    if any(_same_path(path, other) for index, path in enumerate(targets) for other in targets[:index]):
+    comparisons = _PathComparisons()
+    if any(comparisons.same(path, other) for index, path in enumerate(targets) for other in targets[:index]):
         raise MatrixError("refresh output paths must be distinct" if args.refresh_inventory
                           else "output paths must be distinct")
     if not targets:
         return
+    cmake_files, gtest_files = _discovery_files(root)
     protected = [*(root / path for path in CONTRACT_DOCUMENTS),
-                 *_cmake_files(root), *_gtest_sources(root), *inputs, *args.junit,
+                 *cmake_files, *gtest_files, *inputs, *args.junit,
                  *([args.discovery] if args.discovery is not None else [])]
     lock = _refresh_lock_path(root)
     protected.extend([lock, lock.with_suffix(".transaction"), lock.with_suffix(".pending")])
@@ -1911,7 +1961,7 @@ def _check_output_paths(args: argparse.Namespace, root: Path, matrix_path: Path,
         extra = [] if args.refresh_inventory else [matrix_path, inventory]
         if path != doc or path == args.execution_receipt:
             extra.append(doc)
-        if any(_same_path(path, source) for source in [*protected, *extra]):
+        if any(comparisons.same(path, source) for source in dict.fromkeys([*protected, *extra])):
             raise MatrixError(f"output path overlaps an input: {path}")
 
 

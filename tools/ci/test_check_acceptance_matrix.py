@@ -51,6 +51,9 @@ def immutable_repository_reads() -> Any:
     # answers (at most 256 per operation) for the sweep, then discard them before
     # any other test runs.
     with contextlib.ExitStack() as stack:
+        # Strict contract/JSON readers also use Path.read_text directly. Their
+        # bytes are immutable during these in-memory mutation sweeps too.
+        stack.enter_context(mock.patch.object(Path, "read_text", lru_cache(maxsize=256)(Path.read_text)))
         for name in ("_read_text", "_path_problem", "load_required_ids"):
             cached = lru_cache(maxsize=256)(getattr(MODULE, name))
             stack.enter_context(mock.patch.object(MODULE, name, cached))
@@ -900,6 +903,114 @@ raise SystemExit(module["main"](["--root", sys.argv[2], "--matrix", sys.argv[3],
         source.unlink()
         with self.assertRaisesRegex(MODULE.MatrixError, "input snapshot changed"):
             snapshot.verify({})
+
+    def test_discovery_stats_only_candidate_names_in_both_source_scans(self) -> None:
+        noise = {self.root / directory / f"unrelated-{number}.txt"
+                 for directory in ("test", "tools") for number in range(12)}
+        for path in noise:
+            path.touch()
+        # Candidate-looking directories must still be filtered by file type.
+        for name in ("directory.cpp", "directory.h", "directory.cmake", "CMakeLists.txt"):
+            (self.root / "tools" / name).mkdir()
+        (self.root / "test/directory.cpp").mkdir()
+        is_file = Path.is_file
+        checked: list[Path] = []
+        def check(path: Path) -> bool:
+            checked.append(path)
+            return is_file(path)
+        with mock.patch.object(Path, "is_file", check):
+            cmake = MODULE._cmake_files(self.root)
+            cpp = MODULE._gtest_sources(self.root)
+        self.assertEqual(cmake, [self.root / "CMakeLists.txt", self.root / "test/CMakeLists.txt"])
+        self.assertEqual(cpp, [self.root / "test/x_test.cpp"])
+        self.assertTrue(noise.isdisjoint(checked))
+        with mock.patch.object(Path, "rglob", autospec=True, side_effect=Path.rglob) as scan:
+            self.assertEqual(MODULE._discovery_files(self.root), (cmake, cpp))
+        self.assertEqual([call.args[0] for call in scan.call_args_list],
+                         [self.root / "test", self.root / "tools"])
+        self.assertEqual(MODULE._discovery_files(self.tmp / "missing"), ([], []))
+
+    def test_matrix_inputs_deduplicate_exact_references_without_losing_roles_or_aliases(self) -> None:
+        matrix = self.prepare_refresh()
+        alias = self.root / "tools/alias.py"
+        alias.hardlink_to(self.root / "tools/script.py")
+        matrix["rows"][0]["evidence"].append({"kind": "script", "ref": "tools/alias.py"})
+        matrix["rows"].append(dict(matrix["rows"][0], source="docs/acceptance-matrix.md"))
+        expected = MODULE._matrix_input_paths(matrix, self.root)
+        matrix["rows"] *= 12
+        with mock.patch.object(MODULE, "_path_problem", wraps=MODULE._path_problem) as check:
+            actual = MODULE._matrix_input_paths(matrix, self.root)
+        self.assertEqual(actual, expected)
+        self.assertLessEqual(check.call_count, len(expected[0]))
+        doc = self.root / "docs/acceptance-matrix.md"
+        self.assertEqual(actual[0].count(doc), 2)  # Source and generated evidence.
+        self.assertIn(doc, actual[1])
+        for path in (alias, self.root / "tools/script.py"):
+            self.assertIn(path, actual[0])
+            self.assertIn(path, actual[1])
+        self.assertEqual(MODULE._matrix_input_paths({"rows": []}, self.root), ([], []))
+
+    def overlap_args(self) -> Any:
+        return MODULE.argparse.Namespace(
+            inventory=self.root / "tools/ci/acceptance_requirements.json",
+            generated_doc=self.root / "docs/acceptance-matrix.md", refresh_inventory=True,
+            write_doc=self.tmp / "export.md", execution_receipt=self.tmp / "receipt.json",
+            junit=[], discovery=None)
+
+    def test_overlap_metadata_work_is_bounded_by_distinct_paths(self) -> None:
+        self.prepare_refresh()
+        args = self.overlap_args()
+        inputs = [self.root / "tools/script.py", self.root / "docs/d.md"] * 24
+        resolve = Path.resolve
+        resolved: list[Path] = []
+        def record(path: Path, *args: Any, **kwargs: Any) -> Path:
+            resolved.append(path)
+            return resolve(path, *args, **kwargs)
+        with mock.patch.object(Path, "resolve", record):
+            MODULE._check_output_paths(args, self.root, self.matrix_path, inputs)
+        self.assertEqual(len(resolved), len(set(resolved)))
+        # Real hard links must use the same comparison path as resolved names.
+        args.write_doc.hardlink_to(inputs[0])
+        before = inputs[0].read_bytes()
+        with self.assertRaisesRegex(MODULE.MatrixError, "overlaps an input"):
+            MODULE._check_output_paths(args, self.root, self.matrix_path, inputs)
+        self.assertEqual(inputs[0].read_bytes(), before)
+        args.write_doc.unlink()
+        with mock.patch.object(Path, "stat", side_effect=PermissionError("metadata denied")):
+            with self.assertRaisesRegex(PermissionError, "metadata denied"):
+                MODULE._same_path(args.write_doc, inputs[0])
+
+    def test_external_edits_invalidate_path_discovery_and_evidence_answers(self) -> None:
+        self.prepare_refresh()
+        args = self.overlap_args()
+        script = self.root / "tools/script.py"
+        snapshot = MODULE._RefreshSnapshot(self.root, [script])
+        MODULE._check_output_paths(args, self.root, self.matrix_path, [script])
+        self.assertEqual(self.errors(baseline_matrix()), [])
+        self.assertNotIn("ExternalContract", MODULE.index_tests(self.root).ctest_names)
+        # A real child changes the actual paths read by the parent; no mock is
+        # expected to cross the process boundary. Hard links need no symlink privilege.
+        program = """
+import pathlib, sys
+root, export = map(pathlib.Path, sys.argv[1:])
+script = root / 'tools/script.py'
+export.hardlink_to(script)
+script.write_text('changed input', encoding='utf-8')
+(root / 'test/new.cmake').write_text('add_test(NAME ExternalContract COMMAND external)', encoding='utf-8')
+(root / 'tools/run.ps1').unlink()
+"""
+        child = subprocess.run([sys.executable, "-I", "-B", "-c", program,
+                                str(self.root), str(args.write_doc)],
+                               capture_output=True, text=True, timeout=5)
+        self.assertEqual(child.returncode, 0, (child.stdout, child.stderr))
+        self.assertIn("ExternalContract", MODULE.index_tests(self.root).ctest_names)
+        self.assertErrorContains(baseline_matrix(), "file not found: tools/run.ps1")
+        with self.assertRaisesRegex(MODULE.MatrixError, "input snapshot changed"):
+            snapshot.verify({})
+        with self.assertRaisesRegex(MODULE.MatrixError, "overlaps an input"):
+            MODULE._check_output_paths(args, self.root, self.matrix_path, [script])
+        args.write_doc.unlink()
+        MODULE._check_output_paths(args, self.root, self.matrix_path, [script])
 
     def test_refresh_aliased_inputs_and_standard_document_share_one_identity(self) -> None:
         self.prepare_refresh()
@@ -2497,6 +2608,31 @@ raise SystemExit(module["main"](["--root", sys.argv[2], "--matrix", sys.argv[3],
         doc.unlink()
         self.assertErrorContains(matrix, "source file not found: docs/d.md")
 
+    def test_evidence_path_checks_are_shared_only_within_one_validation(self) -> None:
+        matrix = baseline_matrix()
+        evidence = matrix["rows"][0]["evidence"]
+        evidence.extend([{"kind": "script", "ref": "tools/script.py"}] * 24)
+        with mock.patch.object(MODULE, "_path_problem", wraps=MODULE._path_problem) as check:
+            self.assertEqual(self.errors(matrix), [])
+        self.assertEqual(sum(call.args[1] == "tools/script.py" for call in check.call_args_list), 1)
+        self.assertEqual(sum(call.args[1] == "tools/run.ps1" for call in check.call_args_list), 1)
+        (self.root / "tools/script.py").unlink()
+        self.assertErrorContains(matrix, "file not found: tools/script.py")
+        # A planned reference must not seed an existence answer for a landed
+        # reference, in either order, including native command entry points.
+        for kind, ref in (("script", "tools/script.py"), ("native", "tools/run.ps1")):
+            (self.root / ref).unlink(missing_ok=True)
+            item = {"kind": kind, "ref": ref}
+            if kind == "native":
+                item.update(command=NATIVE_COMMAND, receipt_schema=RECEIPT)
+            for reverse in (False, True):
+                items = [dict(item, planned="Future check; owner: fw"), item]
+                if reverse:
+                    items.reverse()
+                matrix["rows"][0]["evidence"] = items
+                with self.subTest(kind=kind, reverse=reverse):
+                    self.assertErrorContains(matrix, f"file not found: {ref}")
+
     def test_document_read_counts_accept_platform_root_spellings(self) -> None:
         root = self.root.resolve()
         resolve = Path.resolve
@@ -2525,16 +2661,25 @@ raise SystemExit(module["main"](["--root", sys.argv[2], "--matrix", sys.argv[3],
 
     def test_immutable_read_cache_is_discarded_after_each_sweep(self) -> None:
         doc = self.root / "docs/d.md"
-        with mock.patch.object(MODULE, "_read_text", wraps=MODULE._read_text) as read:
+        with mock.patch.object(MODULE, "_read_text", wraps=MODULE._read_text) as read, \
+                mock.patch.object(Path, "read_text", autospec=True, side_effect=Path.read_text) as strict_read:
             with immutable_repository_reads():
                 for _ in range(3):
                     self.assertEqual(MODULE._read_text(doc), "# Doc\n\n## Section\n")
                     self.assertIsNone(MODULE._path_problem(self.root, "docs/d.md", True))
+                    self.assertEqual(doc.read_text(encoding="utf-8"), "# Doc\n\n## Section\n")
                 self.assertEqual(read.call_count, 1)
+                # _read_text's errors='replace' read and the strict UTF-8 read
+                # each touch disk once despite repeated mutation validations.
+                self.assertEqual(strict_read.call_count, 2)
             doc.write_text("# Changed\n", encoding="utf-8")
             with immutable_repository_reads():
                 self.assertEqual(MODULE._read_text(doc), "# Changed\n")
                 self.assertEqual(read.call_count, 2)
+            doc.write_bytes(b"\xff")
+            with immutable_repository_reads():
+                with self.assertRaises(UnicodeDecodeError):
+                    doc.read_text(encoding="utf-8")
             doc.unlink()
             with immutable_repository_reads():
                 self.assertEqual(MODULE._path_problem(self.root, "docs/d.md", True),
