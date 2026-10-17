@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "core/Environment.h"
+#include "core/FramePacing.h"
 #include "core/Log.h"
 #include "nlohmann/json.hpp"
 #include "persistence/WorldPersistenceRoundtrip.h" // Luminumbra::Persistence::StableChecksum
@@ -338,6 +339,16 @@ void ParseUserSection(const nlohmann::json& data, UserSettings& user) {
             user.window_mode = v["window_mode"].get<std::string>();
         if (v.contains("vsync") && v["vsync"].is_boolean())
             user.vsync = v["vsync"].get<bool>();
+        if (v.contains("frame_cap") && v["frame_cap"].is_number_integer()) {
+            // Compare before conversion: oversized JSON integers must not wrap to
+            // an accepted cap. Invalid fields keep the current/default value.
+            for (const int cap : kFrameCaps) {
+                if (v["frame_cap"] == cap) {
+                    user.frame_cap = cap;
+                    break;
+                }
+            }
+        }
         if (v.contains("fov") && v["fov"].is_number())
             user.fov = v["fov"].get<float>();
         if (v.contains("render_scale") && v["render_scale"].is_number())
@@ -650,6 +661,7 @@ bool SystemConfig::SaveUserOverlay(const std::string& path) const {
         {"resolution", m_user.resolution},
         {"window_mode", m_user.window_mode},
         {"vsync", m_user.vsync},
+        {"frame_cap", IsValidFrameCap(m_user.frame_cap) ? m_user.frame_cap : 0},
         {"fov", m_user.fov},
         {"render_scale", m_user.render_scale},
         {"ui_scale", m_user.ui_scale},

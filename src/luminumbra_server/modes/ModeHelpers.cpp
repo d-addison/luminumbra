@@ -1,12 +1,21 @@
 #include "ModeHelpers.h"
 
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <string>
 #include <system_error>
 
+#include "../ServerCliOptions.h"
+#include "luminumbra_common/core/Log.h"
 #include "luminumbra_common/core/SystemConfig.h"
+#include "luminumbra_common/net/LockstepSession.h"
+#include "luminumbra_common/network/NetworkLoopbackAuthority.h"
+#include "luminumbra_common/simulation/SimBudgetProfile.h"
+#include "luminumbra_common/world/DistantPolicy.h"
+#include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
-#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
 
 std::string CapturedSimulationIdentityForHello(const Luminumbra::world::GameSession& session) {
     if (!session.ActiveRegionsEnabled())
