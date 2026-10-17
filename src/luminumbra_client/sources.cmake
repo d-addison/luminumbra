@@ -8,6 +8,7 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/app/CrashHandler.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/HangWatchdog.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/DebugOverlays.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/app/RegionPanel.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/FrameAudio.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/GameAssets.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/InputCallbacks.cpp

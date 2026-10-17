@@ -209,6 +209,8 @@ void GameSession::ResetWorldSystems(bool keep_admitted_chunk_facts) {
     m_groundObjects.clear();
     m_fieldPages.clear();
     m_regionSchedule = {};
+    m_regionTransitions = {};
+    m_cachedRegionHashes = {};
     m_replicatedSimulationAnchors.reset();
     m_regionWork.clear();
     m_regionCompletedWork.clear();
@@ -951,6 +953,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
         } catch (...) {
             if (!m_activeRegionsEnabled)
                 throw;
+            m_worldClock.set_tick(current_tick);
             LatchRegionFault(current_tick, "Unknown simulation consumer fault");
             return i + 1;
         }
@@ -2674,6 +2677,7 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                                           m_regionSchedule.rejected.capacity,
                                           m_regionSchedule.digest);
             }
+            m_regionTransitions.Append(m_regionSchedule);
             m_regionWork.clear();
         } catch (const std::exception& error) {
             LatchRegionFault(current_tick, error.what());
@@ -2993,6 +2997,8 @@ void GameSession::SetRegionSchedulerConfig(RegionSchedulerConfig config) {
         throw std::logic_error("Set region scheduler configuration before creating a world");
     ReplaceActiveRegionLedger(ActiveRegionLedger(config));
     m_regionSchedulerOverride = config;
+    m_regionTransitions = {};
+    m_cachedRegionHashes = {};
     m_groundObjects.clear();
     m_fieldPages.clear();
 }
@@ -3004,6 +3010,7 @@ void GameSession::ReplaceActiveRegionLedger(ActiveRegionLedger ledger) {
 void GameSession::LatchRegionFault(std::uint64_t tick, std::string message) {
     if (m_regionFault)
         return; // first fault wins
+    m_cachedRegionHashes.valid = false;
     ObserveRegionActivity();
     m_simBudgetTelemetry.Regions().RecordFault(tick, message);
     m_regionFault = RegionSchedulerFault{tick, message};
@@ -3247,6 +3254,17 @@ void GameSession::AttachRegionEditObserver() {
     }
 }
 
+RegionWaterDiagnostics GameSession::ObserveRegionalWaterWork() const noexcept {
+    if (!m_waterSystem || !m_activeRegionsEnabled)
+        return {};
+    const auto& work = m_waterSystem->regional_work();
+    return {work.border_windows + work.allocated_windows,
+            work.border_windows + work.used_windows,
+            work.unused_windows,
+            work.unallocated_windows,
+            work.total_cells};
+}
+
 PersistenceStatus GameSession::GetPersistenceStatus() const {
     PersistenceStatus status;
     if (!m_activeRegionsEnabled || !m_worldSystem)
@@ -3398,6 +3416,8 @@ bool GameSession::ComputeNetworkWorldHashes(const luminumbra::core::SystemConfig
     const bool authority = configuration.enabled(luminumbra::core::SysKey::SimActiveRegions);
     if (!m_worldSystem || authority != m_activeRegionsEnabled)
         return false;
+    if (authority && (m_regionFault || !IsSimulationTickBoundary()))
+        return ComputeAuthorityWorldHashes(world_hash, sub_hashes);
     m_worldSystem->wait_for_streaming_jobs();
     if (authority)
         return ComputeAuthorityWorldHashes(world_hash, sub_hashes);
@@ -3486,6 +3506,10 @@ GameSession::CaptureAuthorityStateImpl(const std::string& avatar_snapshot) const
     if (!m_worldSystem)
         return {std::nullopt, "Authority capture requires an open world"};
     try {
+        if (m_pendingStatePreparation) {
+            m_pendingStatePreparation("events");
+            m_pendingStatePreparation("deposits");
+        }
         return CaptureAuthorityHashState(AuthorityHashInputs{
             .directory =
                 m_regionDurableDirectory.empty() ? GetWorldSaveDir() : m_regionDurableDirectory,
@@ -3506,6 +3530,8 @@ GameSession::CaptureAuthorityStateImpl(const std::string& avatar_snapshot) const
             .pending_events = &m_simulationEventBus});
     } catch (const std::exception& error) {
         return {std::nullopt, error.what()};
+    } catch (...) {
+        return {std::nullopt, "Unknown authority preparation fault"};
     }
 }
 
@@ -3514,6 +3540,7 @@ bool GameSession::ComputeAuthorityWorldHashes(std::string& world_hash,
                                               const std::string& avatar_snapshot) {
     world_hash.clear();
     sub_hashes = {};
+    m_cachedRegionHashes.valid = false;
     if (!m_activeRegionsEnabled || m_regionFault)
         return false;
     const auto capture = CaptureAuthorityState(avatar_snapshot);
@@ -3524,11 +3551,23 @@ bool GameSession::ComputeAuthorityWorldHashes(std::string& world_hash,
     try {
         Persistence::ComputeAuthorityWorldHashes(
             *capture.state, m_ambientFieldAnchor, world_hash, sub_hashes);
+        m_cachedRegionHashes = {true,
+                                m_worldClock.tick(),
+                                world_hash,
+                                sub_hashes.regions,
+                                sub_hashes.creatures,
+                                sub_hashes.items,
+                                sub_hashes.pages};
         return true;
     } catch (const std::exception& error) {
         world_hash.clear();
         sub_hashes = {};
         LatchRegionFault(m_worldClock.tick(), error.what());
+        return false;
+    } catch (...) {
+        world_hash.clear();
+        sub_hashes = {};
+        LatchRegionFault(m_worldClock.tick(), "Unknown authority hash fault");
         return false;
     }
 }
@@ -3652,7 +3691,7 @@ StartOuterSave(const fs::path& save_dir, std::uint64_t tick, const std::optional
 
 } // namespace
 
-bool GameSession::RunInSnapshotTransaction(const std::function<bool()>& body) {
+bool GameSession::RunInSnapshotTransaction(const std::function<bool()>& body) try {
     const Persistence::ChunkValidationCache::Scope validation_scope(*m_chunkValidationCache);
     const fs::path save_dir = GetWorldSaveDir();
     if (!m_activeRegionsEnabled || save_dir.empty() || m_transientWorld ||
@@ -3672,6 +3711,18 @@ bool GameSession::RunInSnapshotTransaction(const std::function<bool()>& body) {
     if (!committed)
         RecordPersistenceSaveOutcome(false, 0);
     return committed;
+} catch (const std::exception& error) {
+    if (!m_activeRegionsEnabled)
+        throw;
+    LatchRegionFault(m_worldClock.tick(), error.what());
+    RecordPersistenceSaveOutcome(false, 0);
+    return false;
+} catch (...) {
+    if (!m_activeRegionsEnabled)
+        throw;
+    LatchRegionFault(m_worldClock.tick(), "Unknown snapshot transaction fault");
+    RecordPersistenceSaveOutcome(false, 0);
+    return false;
 }
 
 Persistence::SavedWorld GameSession::InspectCurrentSavedWorld() {
@@ -3736,7 +3787,7 @@ bool PersistSavedPreset(const fs::path& save_dir, const std::string& canonical) 
 }
 } // namespace
 
-bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
+bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) try {
     const Persistence::ChunkValidationCache::Scope validation_scope(*m_chunkValidationCache);
     if (!CanSaveWorldNow() || save_dir.empty() || !ClockConfigurationCompatible(save_dir) ||
         m_transientWorld || m_metadata.worldId.empty() || !m_worldOpenError.empty() ||
@@ -3744,6 +3795,7 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
         return false;
     std::optional<Ecs::EntityRegistrySnapshot> plants;
     std::optional<luminumbra::ai::CreatureSnapshot> creatures;
+    Persistence::SimulationPendingState pending;
     if (m_activeRegionsEnabled) {
         try {
             if (!m_regionFault)
@@ -3760,12 +3812,22 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
                 if (!m_simulationContent || !m_simulationContent->creatures->Find(species))
                     throw std::runtime_error("Unknown persistent creature species");
             }
+            if (m_pendingStatePreparation)
+                m_pendingStatePreparation("events");
+            pending.events = m_simulationEventBus.snapshot();
+            if (m_energyFieldState) {
+                if (m_pendingStatePreparation)
+                    m_pendingStatePreparation("deposits");
+                pending.energy_channels = m_energyFieldState->channels();
+                pending.deposits = m_energyFieldState->PendingDeposits();
+            }
             std::string error;
             if (!luminumbra::foliage::ValidatePlantEntitySnapshot(
                     *plants, m_activeRegionLedger, m_groundObjects, error, creature_ids) ||
                 !luminumbra::ai::ValidateCreatureSnapshot(
                     *creatures, m_activeRegionLedger, m_groundObjects, *plants, error)) {
                 LUMINUMBRA_CORE_ERROR("Entity save refused: {}", error);
+                LatchRegionFault(m_worldClock.tick(), error);
                 return false;
             }
         } catch (const std::exception& e) {
@@ -3847,14 +3909,11 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
         }
         if (!SaveEnergyFieldRecord(save_dir))
             return false;
-        Persistence::SimulationPendingState pending;
-        pending.events = m_simulationEventBus.snapshot();
-        if (m_energyFieldState) {
-            pending.energy_channels = m_energyFieldState->channels();
-            pending.deposits = m_energyFieldState->PendingDeposits();
+        if (!pending.validate_activations(m_activeRegionLedger)) {
+            LatchRegionFault(m_worldClock.tick(), "Pending activation save preparation failed");
+            return false;
         }
-        if (!pending.validate_activations(m_activeRegionLedger) ||
-            !Persistence::WorldSaveService::save_pending_state(pending, save_dir))
+        if (!Persistence::WorldSaveService::save_pending_state(pending, save_dir))
             return false;
         const auto expected_ledger = m_activeRegionLedger.canonical_bytes();
         auto persisted_ledger = m_activeRegionLedger;
@@ -3882,6 +3941,18 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
         return false;
     }
     return true;
+} catch (const std::exception& error) {
+    if (!m_activeRegionsEnabled)
+        throw;
+    LatchRegionFault(m_worldClock.tick(), error.what());
+    RecordPersistenceSaveOutcome(false, 0);
+    return false;
+} catch (...) {
+    if (!m_activeRegionsEnabled)
+        throw;
+    LatchRegionFault(m_worldClock.tick(), "Unknown metadata save preparation fault");
+    RecordPersistenceSaveOutcome(false, 0);
+    return false;
 }
 
 std::filesystem::path GameSession::GetWorldSaveDir() const {
@@ -3905,7 +3976,7 @@ bool GameSession::SaveWorldState(WorldStateSaveReport* report, WorldStateSaveSco
 
 bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
                                    WorldStateSaveReport* report,
-                                   WorldStateSaveScope scope) {
+                                   WorldStateSaveScope scope) try {
     const Persistence::ChunkValidationCache::Scope validation_scope(*m_chunkValidationCache);
     const auto save_started = std::chrono::steady_clock::now();
     const auto elapsed_ms = [&save_started]() {
@@ -4027,6 +4098,7 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
         if (!luminumbra::foliage::ValidatePlantEntitySnapshot(
                 plant_snapshot, m_activeRegionLedger, m_groundObjects, plant_error)) {
             LUMINUMBRA_CORE_ERROR("Plant save refused: {}", plant_error);
+            LatchRegionFault(m_worldClock.tick(), plant_error);
             RecordPersistenceSaveOutcome(false, elapsed_ms());
             return false;
         }
@@ -4172,6 +4244,18 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
         *report = result;
     }
     return ok;
+} catch (const std::exception& error) {
+    if (!m_activeRegionsEnabled)
+        throw;
+    LatchRegionFault(m_worldClock.tick(), error.what());
+    RecordPersistenceSaveOutcome(false, 0);
+    return false;
+} catch (...) {
+    if (!m_activeRegionsEnabled)
+        throw;
+    LatchRegionFault(m_worldClock.tick(), "Unknown world save preparation fault");
+    RecordPersistenceSaveOutcome(false, 0);
+    return false;
 }
 
 bool GameSession::LoadWorldState() {
@@ -4477,6 +4561,8 @@ bool GameSession::AdoptWorldState(const std::filesystem::path& save_dir,
         m_regionDurableDirectory = save_dir;
         m_worldSystem->remember_durable_chunks(durable_inventory);
         m_regionSchedule = {};
+        m_regionTransitions = {};
+        m_cachedRegionHashes = {};
         m_regionWork.clear();
         m_regionCompletedWork.clear();
         m_regionFault.reset();
