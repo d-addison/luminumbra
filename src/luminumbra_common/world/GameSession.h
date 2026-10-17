@@ -478,6 +478,7 @@ public:
         if (m_worldSystem && enabled != m_activeRegionsEnabled)
             throw std::logic_error("Set active regions before creating or opening a world");
         m_activeRegionsEnabled = enabled;
+        m_simulationEventBus.set_durable(enabled);
     }
     [[nodiscard]] bool ActiveRegionsEnabled() const {
         return m_activeRegionsEnabled;
@@ -802,7 +803,8 @@ private:
     std::function<void()> m_activationEnqueuePreparation;
     PopulationActivity m_populationActivity;
     [[nodiscard]] luminumbra::simulation::OrderedEventBus::PreparedBatch
-    PrepareRegionActivations(const ActiveRegionLedger& ledger) const;
+    PrepareRegionActivations(const ActiveRegionLedger& ledger,
+                             const luminumbra::simulation::OrderedEventBus* source = nullptr) const;
     void QueueRegionActivations();
     void DrainSimulationEvents(std::uint64_t current_tick);
     bool PrepareRegionTick(std::uint64_t current_tick);

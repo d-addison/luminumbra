@@ -9,6 +9,10 @@
 #include <string>
 #include <utility>
 
+namespace luminumbra::simulation {
+class OrderedEventBus;
+}
+
 namespace luminumbra::fields {
 class EnergyFieldState;
 }
@@ -31,6 +35,7 @@ struct AuthorityHashInputs {
     std::string identity_bytes;
     // The host supplies its existing canonical avatar snapshot; empty means no avatars.
     std::string avatar_bytes;
+    const luminumbra::simulation::OrderedEventBus* pending_events = nullptr;
 };
 
 struct AuthorityHashCapture;
@@ -62,6 +67,12 @@ public:
     [[nodiscard]] const std::string& authority_bytes() const {
         return m_authority;
     }
+    [[nodiscard]] const std::string& pending_event_bytes() const {
+        return m_pendingEvents;
+    }
+    [[nodiscard]] const std::string& pending_deposit_bytes() const {
+        return m_pendingDeposits;
+    }
     // Raw complete content, before Frozen stamp selection.
     [[nodiscard]] const std::map<RegionKey, std::uint64_t>& region_content() const {
         return m_regionContent;
@@ -77,6 +88,7 @@ private:
     AuthorityHashState() = default;
     std::string m_chunkHash, m_terrainHash, m_waterHash;
     std::string m_creatures, m_plants, m_energy, m_scent, m_authority;
+    std::string m_pendingEvents, m_pendingDeposits;
     std::map<RegionKey, std::uint64_t> m_regionContent, m_regionContributions;
     std::map<std::pair<std::uint8_t, bool>, std::string> m_ambient;
 };

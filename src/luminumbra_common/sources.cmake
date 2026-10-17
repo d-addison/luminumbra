@@ -68,6 +68,7 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/scripting/LuaState.cpp
 
     # Simulation
+    ${CMAKE_CURRENT_LIST_DIR}/persistence/SimulationPendingState.cpp
     ${CMAKE_CURRENT_LIST_DIR}/simulation/SimulationEventBus.cpp
     ${CMAKE_CURRENT_LIST_DIR}/simulation/SimBudgetProfile.cpp
 

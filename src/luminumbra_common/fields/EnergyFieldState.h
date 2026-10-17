@@ -105,6 +105,18 @@ public:
     static constexpr std::size_t kMaxRegionalRecordBytes = 16u * 1024u * 1024u;
     static constexpr std::size_t kMaxRegionalValueBytes = 64u * 1024u * 1024u;
     static constexpr std::size_t kMaxRegionalDeposits = kMaxRegionalRecordBytes / 32;
+    struct PendingDeposit {
+        std::int64_t cell_key = 0;
+        int channel = 0;
+        std::uint64_t emitter_id = 0;
+        std::uint32_t amount = 0;
+        bool operator==(const PendingDeposit&) const = default;
+    };
+    [[nodiscard]] std::vector<PendingDeposit> PendingDeposits() const;
+    // Validated replacement only; values/cadence are untouched.
+    bool RestorePendingDeposits(std::vector<PendingDeposit> deposits);
+    [[nodiscard]] static bool ValidPendingDeposit(const PendingDeposit& deposit, int channels);
+
     struct RegionalResult {
         EnergyAges ages;
         // page_updates counts distinct (owner, physical page) actually processed;
@@ -231,13 +243,6 @@ private:
         std::vector<std::uint16_t> values;
         std::uint64_t last_step = 0; // cadence step this page was last current at
         [[nodiscard]] bool all_zero() const noexcept;
-    };
-
-    struct PendingDeposit {
-        std::int64_t cell_key = 0;
-        int channel = 0;
-        std::uint64_t emitter_id = 0;
-        std::uint32_t amount = 0;
     };
 
     [[nodiscard]] static std::int64_t PackPageKey(int px, int pz) noexcept;

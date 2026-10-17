@@ -1,6 +1,7 @@
 #pragma once
 
 #include "SaveTransaction.h"
+#include "SimulationPendingState.h"
 #include "ai/CreaturePersistence.h"
 #include "ecs/EntitySnapshot.h"
 #include "fields/FieldPageState.h"
@@ -58,6 +59,9 @@ struct WorldSaveRecords {
     Ecs::EntityRegistrySnapshot plants;
     luminumbra::ai::CreatureSnapshot creatures;
     bool has_ledger = false;
+    // Engaged when continuation reading is enabled, including historical member absence.
+    std::optional<SimulationPendingState> pending;
+    bool has_pending = false;
 };
 
 struct WorldSaveAdmission {
@@ -177,6 +181,9 @@ public:
                                      std::vector<std::string>* errors,
                                      world::FieldPageState* validated = nullptr);
 
+    static bool save_pending_state(const SimulationPendingState& state,
+                                   const std::filesystem::path& save_dir,
+                                   std::vector<std::string>* errors = nullptr);
     static std::filesystem::path active_regions_path(const std::filesystem::path& save_dir);
     static bool save_active_regions(world::ActiveRegionLedger& ledger,
                                     const world::WorldClock& clock,
@@ -361,6 +368,9 @@ public:
                                         std::vector<std::string>* errors = nullptr);
     // Number of full load_world decodes since process start (single-decode contract tests).
     static std::uint64_t decode_count_for_testing();
+    static std::uint64_t ledger_load_count_for_testing();
+    static std::uint64_t pending_reader_count_for_testing();
+    static std::uint64_t pending_probe_count_for_testing();
     // Number of field-page file parses, excluding absent members (observational only).
     static std::uint64_t field_page_decode_count_for_testing();
     static std::uint64_t chunk_decode_count_for_testing();
@@ -392,7 +402,8 @@ public:
     // post-commit actions (dirty-flag clearing) are deferred until the owning transaction commits.
     class SaveFactsScope {
     public:
-        explicit SaveFactsScope(const std::filesystem::path& save_dir);
+        explicit SaveFactsScope(const std::filesystem::path& save_dir,
+                                std::optional<bool> active_regions_enabled = std::nullopt);
         SaveFactsScope(const SaveFactsScope&) = delete;
         SaveFactsScope& operator=(const SaveFactsScope&) = delete;
         ~SaveFactsScope();
@@ -405,9 +416,11 @@ public:
         // Drops the deferred actions (rollback).
         void discard_deferred();
         void invalidate_presence_facts();
+        void invalidate_member_facts(const std::filesystem::path& path);
 
     private:
         friend class WorldSaveService;
+        friend class SaveTransaction;
         std::filesystem::path m_save_dir;
         SaveFactsScope* m_previous = nullptr;
         bool m_validated = false;
@@ -416,6 +429,13 @@ public:
         bool m_presence_known = false;
         bool m_snapshot_present = false;
         bool m_chunk_snapshot_present = false;
+        bool m_pending_enabled = false;
+        std::optional<bool> m_active_regions_enabled;
+        std::optional<world::ActiveRegionLedger> m_ledger;
+        MemberDigest m_ledger_digest;
+        std::optional<MemberDigest> m_pending_digest;
+        std::unique_ptr<SimulationPendingState> m_pending_activations;
+        void remember_pending(const SimulationPendingState& state, MemberDigest digest);
         std::vector<std::function<void()>> m_deferred;
     };
 
@@ -429,14 +449,28 @@ public:
     // Loads a previously saved snapshot into state. A missing snapshot file is
     // a clean miss (fresh world): returns false WITHOUT appending an error.
     // Malformed or unreadable snapshots return false with diagnostics. Optional validated
-    // siblings publish only on success; clean misses return empty siblings.
+    // siblings, including pending continuation, publish only on success; clean misses
+    // return empty siblings. Session callers supply their active-regions flag;
+    // standalone readers infer it from metadata without probing pending state.
     bool load_world(WorldStreamingState& state,
                     const std::filesystem::path& save_dir,
                     std::vector<std::string>& errors,
                     const std::stop_token& stop = {},
                     const std::function<bool(const IVec3&)>& retain_chunk = {},
                     std::vector<IVec3>* authoritative_inventory = nullptr,
-                    WorldSaveRecords* validated_records = nullptr) const;
+                    WorldSaveRecords* validated_records = nullptr,
+                    std::optional<bool> active_regions_enabled = std::nullopt) const;
+
+    // Compatibility output form for callers requesting only the pending continuation.
+    bool load_world(WorldStreamingState& state,
+                    const std::filesystem::path& save_dir,
+                    std::vector<std::string>& errors,
+                    const std::stop_token& stop,
+                    const std::function<bool(const IVec3&)>& retain_chunk,
+                    std::vector<IVec3>* authoritative_inventory,
+                    SimulationPendingState* pending_state,
+                    bool* has_pending_state,
+                    std::optional<bool> active_regions_enabled = std::nullopt) const;
 
     // Deterministic hash of the streaming state, reusing the persistence hash
     // machinery (fnv1a_64 over the canonical snapshot bytes). Format

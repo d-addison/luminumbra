@@ -897,6 +897,25 @@ class AcceptanceMatrixTests(unittest.TestCase):
         watchdog = row_of(matrix, "em.client-hang")
         self.assertIn("HangWatchdog.RearmsAfterHeartbeatResumes", {e["ref"] for e in watchdog["evidence"]})
 
+    def test_repository_pending_state_retains_combined_contract_inventory(self) -> None:
+        matrix = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_matrix.json")
+        inventory = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_requirements.json")
+        row = row_of(matrix, "contract.simulation-pending-state")
+        pending = {entry["id"]: entry for entry in inventory["requirements"]
+                   if entry["id"].startswith("ar.pending.")}
+        self.assertEqual(len(pending), 51)
+        self.assertEqual(set(row["requirements"]), set(pending))
+        texts = " ".join(entry["text"] for entry in pending.values())
+        for phrase in ("16,384 events", "8 MiB", "64 MiB", "without clearing the scheduler fault",
+                       "Disabled sessions do not probe", "original presence", "existing energy slot"):
+            self.assertIn(phrase, texts)
+        refs = {item["ref"] for item in row["evidence"]}
+        for name in ("IndexedFirstLedgerValidatesPendingIndexFacts",
+                     "RetainedEnergyDepositsSurviveFaultSaveLoad",
+                     "FlagOffEventBehaviorAndSaveBytesUnchanged"):
+            self.assertIn("SimulationPendingState." + name, refs)
+        self.assertEqual(row["status"], "partial")
+
     def test_repository_frozen_projection_adoption_retains_authority_evidence(self) -> None:
         matrix = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_matrix.json")
         inventory = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_requirements.json")

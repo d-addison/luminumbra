@@ -4340,6 +4340,156 @@
           "planned": "Qualify the complete activation envelope against independent byte oracles; owner: persistence"
         }
       ]
+    },
+    {
+      "id": "contract.simulation-pending-state",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "statement": "Enabled snapshots retain pending events, sequence and energy deposits with bounded admission, atomic indexed publication, activation reconciliation and observational hashes; disabled paths retain their existing behavior.",
+      "status": "partial",
+      "requirements": [
+        "ar.pending.001",
+        "ar.pending.002",
+        "ar.pending.003",
+        "ar.pending.004",
+        "ar.pending.005",
+        "ar.pending.006",
+        "ar.pending.007",
+        "ar.pending.008",
+        "ar.pending.009",
+        "ar.pending.010",
+        "ar.pending.011",
+        "ar.pending.012",
+        "ar.pending.013",
+        "ar.pending.014",
+        "ar.pending.015",
+        "ar.pending.016",
+        "ar.pending.017",
+        "ar.pending.018",
+        "ar.pending.019",
+        "ar.pending.020",
+        "ar.pending.021",
+        "ar.pending.022",
+        "ar.pending.023",
+        "ar.pending.024",
+        "ar.pending.025",
+        "ar.pending.026",
+        "ar.pending.027",
+        "ar.pending.028",
+        "ar.pending.029",
+        "ar.pending.030",
+        "ar.pending.031",
+        "ar.pending.032",
+        "ar.pending.033",
+        "ar.pending.034",
+        "ar.pending.035",
+        "ar.pending.036",
+        "ar.pending.037",
+        "ar.pending.038",
+        "ar.pending.039",
+        "ar.pending.040",
+        "ar.pending.041",
+        "ar.pending.042",
+        "ar.pending.043",
+        "ar.pending.044",
+        "ar.pending.045",
+        "ar.pending.046",
+        "ar.pending.047",
+        "ar.pending.048",
+        "ar.pending.049",
+        "ar.pending.050",
+        "ar.pending.051"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.FutureEventsAndSequenceRoundtrip"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.DurableAdmissionCountLimitPreservesRecoverySaveability"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.DurableAdmissionTextTickAndActivationBounds"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.ActivationReconciliationDefersAtCountAndTextLimits"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.PreparedQueueAccountingVisitsOnlyBatchEvents"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.FutureQueueAccountingDoesNotScanOnSessionTicks"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.FailedDeliveryRetainsFailedEventAndSuffix"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.RetainedEnergyDepositsSurviveFaultSaveLoad"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.PendingStateMissingAdoptsPresentMalformedRefuses"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.AboveCapacityHistoricalOutboxAdoptsAndDeliversExactlyOnce"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.StandaloneFirstPendingPublicationIsIndexed"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.FirstLedgerWritersRequireIndexedTransactions"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.RawAuthorityRemovalFromLegacyDestinationIsIndexed"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.FirstLedgerValidatesPreviouslyDisabledPendingMember"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.IndexedFirstLedgerValidatesPendingIndexFacts"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.IndexedPendingTransactionsValidateOriginalIndexFacts"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.LedgerOnlyAcknowledgementRefusesAtomically"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.PendingMemberCommitRollbackAndRecovery"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.FlagOffEventBehaviorAndSaveBytesUnchanged"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.PendingReaderRefusesUnsafeFilesBeforeDecode"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.PendingDigestDescribesTheValidatedRead"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Complete independent native format, refusal, recovery and endpoint qualification for the pending-state contract; owner: ds"
+        }
+      ]
     }
   ]
 }

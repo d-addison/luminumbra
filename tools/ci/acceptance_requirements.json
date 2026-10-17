@@ -4901,6 +4901,312 @@
       "source": "docs/active-regions.md#checked-authority-hash-capture",
       "quote": "The ledger tests also cover atomic adoption when a later owner's authority read fails.",
       "text": "The ledger tests also cover atomic adoption when a later owner's authority read fails."
+    },
+    {
+      "id": "ar.pending.001",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Enabled snapshots also contain `chunks/region/simulation-pending.spn`, an indexed authoritative member committed with the clock, ledger, entities and energy values.",
+      "text": "Enabled snapshots also contain `chunks/region/simulation-pending.spn`, an indexed authoritative member committed with the clock, ledger, entities and energy values."
+    },
+    {
+      "id": "ar.pending.002",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "It stores future and undelivered simulation events, the next event sequence, and retained energy deposits.",
+      "text": "It stores future and undelivered simulation events, the next event sequence, and retained energy deposits."
+    },
+    {
+      "id": "ar.pending.003",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "An empty queue still preserves its sequence.",
+      "text": "An empty queue still preserves its sequence."
+    },
+    {
+      "id": "ar.pending.004",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "The member uses SPN1 version 1, fixed-width little-endian integers, length-framed topic/payload bytes and a trailing FNV-1a-64 checksum.",
+      "text": "The member uses SPN1 version 1, fixed-width little-endian integers, length-framed topic/payload bytes and a trailing FNV-1a-64 checksum."
+    },
+    {
+      "id": "ar.pending.005",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Events sort by `(tick, signed lane, sequence)`;",
+      "text": "Events sort by `(tick, signed lane, sequence)`;"
+    },
+    {
+      "id": "ar.pending.006",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "deposits preserve multiplicity and sort by `(packed cell key, channel, emitter ID, amount)`.",
+      "text": "deposits preserve multiplicity and sort by `(packed cell key, channel, emitter ID, amount)`."
+    },
+    {
+      "id": "ar.pending.007",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Decode checks the 64 MiB file cap, 16,384 events, 8 MiB combined event text and the existing regional deposit cap before allocating decoded payloads.",
+      "text": "Decode checks the 64 MiB file cap, 16,384 events, 8 MiB combined event text and the existing regional deposit cap before allocating decoded payloads."
+    },
+    {
+      "id": "ar.pending.008",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Unknown versions, noncanonical order, duplicate event sequences, invalid channels, trailing bytes and checksum failures refuse the candidate atomically.",
+      "text": "Unknown versions, noncanonical order, duplicate event sequences, invalid channels, trailing bytes and checksum failures refuse the candidate atomically."
+    },
+    {
+      "id": "ar.pending.009",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Enabled event admission shares the codec's count, text, tick and activation-key bounds.",
+      "text": "Enabled event admission shares the codec's count, text, tick and activation-key bounds."
+    },
+    {
+      "id": "ar.pending.010",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Publish and ordinary batch preparation refuse before consuming a sequence;",
+      "text": "Publish and ordinary batch preparation refuse before consuming a sequence;"
+    },
+    {
+      "id": "ar.pending.011",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "refused publication leaves the queue unchanged.",
+      "text": "refused publication leaves the queue unchanged."
+    },
+    {
+      "id": "ar.pending.012",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Queued text is accounted for incrementally, including successful delivery and queue replacement.",
+      "text": "Queued text is accounted for incrementally, including successful delivery and queue replacement."
+    },
+    {
+      "id": "ar.pending.013",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "These limits apply only with active regions enabled: the legacy bus admitted events without these bounds and retains that behavior when the flag is off.",
+      "text": "These limits apply only with active regions enabled: the legacy bus admitted events without these bounds and retains that behavior when the flag is off."
+    },
+    {
+      "id": "ar.pending.014",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Enabled prepared batches carry count and text totals with only inserted and removed deliveries.",
+      "text": "Enabled prepared batches carry count and text totals with only inserted and removed deliveries."
+    },
+    {
+      "id": "ar.pending.015",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Ordered queue nodes transfer at commit without copying or recounting retained future events;",
+      "text": "Ordered queue nodes transfer at commit without copying or recounting retained future events;"
+    },
+    {
+      "id": "ar.pending.016",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "activation reconciliation visits its activation index rather than the ordinary queue.",
+      "text": "activation reconciliation visits its activation index rather than the ordinary queue."
+    },
+    {
+      "id": "ar.pending.017",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Full queue validation occurs at restore.",
+      "text": "Full queue validation occurs at restore."
+    },
+    {
+      "id": "ar.pending.018",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Within one save, validated ledger state and pending-member fingerprints are reused.",
+      "text": "Within one save, validated ledger state and pending-member fingerprints are reused."
+    },
+    {
+      "id": "ar.pending.019",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Pending activation facts are checked against the final ledger outbox whenever either member changes, including ledger-only replacement or removal;",
+      "text": "Pending activation facts are checked against the final ledger outbox whenever either member changes, including ledger-only replacement or removal;"
+    },
+    {
+      "id": "ar.pending.020",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "member replacement invalidates the corresponding facts.",
+      "text": "member replacement invalidates the corresponding facts."
+    },
+    {
+      "id": "ar.pending.021",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Commit and initial index enumeration do not decode writer-produced pending payloads again.",
+      "text": "Commit and initial index enumeration do not decode writer-produced pending payloads again."
+    },
+    {
+      "id": "ar.pending.022",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Pending-state and ledger publication and removal always join or open an indexed transaction, including raw member writes and first standalone publication.",
+      "text": "Pending-state and ledger publication and removal always join or open an indexed transaction, including raw member writes and first standalone publication."
+    },
+    {
+      "id": "ar.pending.023",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "An allocator-only ledger also requires indexing;",
+      "text": "An allocator-only ledger also requires indexing;"
+    },
+    {
+      "id": "ar.pending.024",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "an empty legacy ledger save remains a no-op.",
+      "text": "an empty legacy ledger save remains a no-op."
+    },
+    {
+      "id": "ar.pending.025",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Installing the first ledger makes any existing pending member applicable to the final snapshot;",
+      "text": "Installing the first ledger makes any existing pending member applicable to the final snapshot;"
+    },
+    {
+      "id": "ar.pending.026",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "if baseline validation ignored it, commit performs one bounded decode and reuses its verified facts.",
+      "text": "if baseline validation ignored it, commit performs one bounded decode and reuses its verified facts."
+    },
+    {
+      "id": "ar.pending.027",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Before publishing, commit also checks the pending member's original presence, index membership, size and fingerprint.",
+      "text": "Before publishing, commit also checks the pending member's original presence, index membership, size and fingerprint."
+    },
+    {
+      "id": "ar.pending.028",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Replacements and removals use the journal's original fingerprint;",
+      "text": "Replacements and removals use the journal's original fingerprint;"
+    },
+    {
+      "id": "ar.pending.029",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "retained members reuse their validated digest.",
+      "text": "retained members reuse their validated digest."
+    },
+    {
+      "id": "ar.pending.030",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "An indexed mismatch refuses and restores the original snapshot bytes.",
+      "text": "An indexed mismatch refuses and restores the original snapshot bytes."
+    },
+    {
+      "id": "ar.pending.031",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Disabled sessions do not probe, read, fingerprint or validate the pending member;",
+      "text": "Disabled sessions do not probe, read, fingerprint or validate the pending member;"
+    },
+    {
+      "id": "ar.pending.032",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "clock compatibility uses the existing metadata and ledger indicators.",
+      "text": "clock compatibility uses the existing metadata and ledger indicators."
+    },
+    {
+      "id": "ar.pending.033",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "A v0.3.0 snapshot without this member adopts an empty queue and deposit buffer;",
+      "text": "A v0.3.0 snapshot without this member adopts an empty queue and deposit buffer;"
+    },
+    {
+      "id": "ar.pending.034",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "activation deliveries are derived from its validated ledger outbox in bounded prefixes ordered by durable activation key.",
+      "text": "activation deliveries are derived from its validated ledger outbox in bounded prefixes ordered by durable activation key."
+    },
+    {
+      "id": "ar.pending.035",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Excess deliveries remain in that outbox and are admitted on later ticks as queue capacity becomes available;",
+      "text": "Excess deliveries remain in that outbox and are admitted on later ticks as queue capacity becomes available;"
+    },
+    {
+      "id": "ar.pending.036",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "historical outboxes may exceed the general event queue's capacity.",
+      "text": "historical outboxes may exceed the general event queue's capacity."
+    },
+    {
+      "id": "ar.pending.037",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "The next enabled save writes the member.",
+      "text": "The next enabled save writes the member."
+    },
+    {
+      "id": "ar.pending.038",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "A present member restores the exact event queue and sequence without enqueuing additional deliveries during load.",
+      "text": "A present member restores the exact event queue and sequence without enqueuing additional deliveries during load."
+    },
+    {
+      "id": "ar.pending.039",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Queued activation deliveries must match the separate ledger outbox;",
+      "text": "Queued activation deliveries must match the separate ledger outbox;"
+    },
+    {
+      "id": "ar.pending.040",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "activations not yet enqueued remain in that outbox for the next tick.",
+      "text": "activations not yet enqueued remain in that outbox for the next tick."
+    },
+    {
+      "id": "ar.pending.041",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Missing indexed members and unlisted present members remain integrity failures.",
+      "text": "Missing indexed members and unlisted present members remain integrity failures."
+    },
+    {
+      "id": "ar.pending.042",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "The outbox is not merged with or replaced by the general event queue.",
+      "text": "The outbox is not merged with or replaced by the general event queue."
+    },
+    {
+      "id": "ar.pending.043",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Enabled delivery acknowledges only completed events.",
+      "text": "Enabled delivery acknowledges only completed events."
+    },
+    {
+      "id": "ar.pending.044",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "A throwing handler or a stop requested during delivery retains the failed event and its undelivered suffix, including future work.",
+      "text": "A throwing handler or a stop requested during delivery retains the failed event and its undelivered suffix, including future work."
+    },
+    {
+      "id": "ar.pending.045",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Subscribers must be observational, idempotent, or transactional: callback side effects already performed cannot be rolled back by the bus.",
+      "text": "Subscribers must be observational, idempotent, or transactional: callback side effects already performed cannot be rolled back by the bus."
+    },
+    {
+      "id": "ar.pending.046",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "A recovery save preserves these events and deposits retained by a refused energy tick, without clearing the scheduler fault.",
+      "text": "A recovery save preserves these events and deposits retained by a refused energy tick, without clearing the scheduler fault."
+    },
+    {
+      "id": "ar.pending.047",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Rollback and crash recovery restore the pending member with the rest of the snapshot.",
+      "text": "Rollback and crash recovery restore the pending member with the rest of the snapshot."
+    },
+    {
+      "id": "ar.pending.048",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "The immutable authority capture exposes framed pending event and deposit projections for regional and page diagnostic consumers, and includes both in composed authority.",
+      "text": "The immutable authority capture exposes framed pending event and deposit projections for regional and page diagnostic consumers, and includes both in composed authority."
+    },
+    {
+      "id": "ar.pending.049",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Nonempty retained deposits also enter the existing energy slot.",
+      "text": "Nonempty retained deposits also enter the existing energy slot."
+    },
+    {
+      "id": "ar.pending.050",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Hash reads do not deliver events or consume deposits.",
+      "text": "Hash reads do not deliver events or consume deposits."
+    },
+    {
+      "id": "ar.pending.051",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Disabled delivery, hash recipes, saves and artifacts retain their existing paths and bytes.",
+      "text": "Disabled delivery, hash recipes, saves and artifacts retain their existing paths and bytes."
     }
   ],
   "exclusions": [
