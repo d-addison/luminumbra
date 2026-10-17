@@ -8,6 +8,10 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/ai/InstinctLocomotionSystem.cpp
     ${CMAKE_CURRENT_LIST_DIR}/ai/StimulusChannels.cpp
 
+    # Game items
+    ${CMAKE_CURRENT_LIST_DIR}/game/ItemCatalogue.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/game/ItemDrop.cpp
+
     # Fields
     ${CMAKE_CURRENT_LIST_DIR}/fields/ScalarFieldDiffusion.cpp
     ${CMAKE_CURRENT_LIST_DIR}/fields/EnergyFieldState.cpp

@@ -51,6 +51,7 @@ void window_focus_callback(GLFWwindow* window, int focused);
 void cursor_enter_callback(GLFWwindow* window, int entered);
 void framebuffer_size_callback(GLFWwindow* window, int width, int height);
 void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods);
+bool FarmDropSeedInputAllowed(GLFWwindow* window);
 void mouse_callback(GLFWwindow* window, double xpos, double ypos);
 void scroll_callback(GLFWwindow* window, double xoffset, double yoffset);
 // Menu-state scroll callback — forwards to RmlUi (so menu lists still scroll)

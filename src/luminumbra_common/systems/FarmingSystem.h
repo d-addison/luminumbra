@@ -16,6 +16,7 @@
 #include "PlantGrowthSystem.h"          // ExpressGenome, BreedPlants, Comp alias, namespace
 
 #include <cstdint>
+#include <limits>
 
 namespace luminumbra::foliage {
 // `Comp` (=::Luminumbra::Components) is already aliased in PlantGrowthSystem.h.
@@ -186,7 +187,7 @@ struct FarmingController {
 
     // Harvest a mature plant: bank yield + returned seeds, then remove the plant (annual). Returns
     // the HarvestResult (harvestable=false if the target is not ready / invalid).
-    HarvestResult Harvest(entt::registry& reg, entt::entity e) {
+    HarvestResult Harvest(entt::registry& reg, entt::entity e, bool bounded_seeds = false) {
         HarvestResult r;
         if (!reg.valid(e) || !reg.all_of<Comp::PlantGrowthComponent, Comp::PlantGenomeComponent>(e))
             return r;
@@ -196,7 +197,10 @@ struct FarmingController {
             return r;
         ++harvests;
         total_yield += r.yield;
-        seeds += r.seeds;
+        if (bounded_seeds && seeds > std::numeric_limits<int>::max() - r.seeds)
+            seeds = std::numeric_limits<int>::max();
+        else
+            seeds += r.seeds;
         // Perennial (e.g. a promoted wild tree / oak) REGROWS: reset to a vegetative stage instead
         // of dying, bumping the generation. Annual is removed. (CropLifecycleSystem owns the
         // senescence loop; this is the player-harvest counterpart so harvesting a perennial doesn't

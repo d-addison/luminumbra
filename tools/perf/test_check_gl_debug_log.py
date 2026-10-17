@@ -4,6 +4,8 @@ import codecs
 import contextlib
 import io
 import json
+import os
+import stat
 from pathlib import Path
 import sys
 import tempfile
@@ -12,7 +14,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import check_gl_debug_log as checker  # noqa: E402
+import check_gl_debug_log as checker
 
 MARKER = 'GL KHR_debug output installed (synchronous); routing driver messages\n'
 HEADER = 'Engine start\n'
@@ -71,6 +73,23 @@ class GlDebugLogTest(unittest.TestCase):
                                        side_effect=AssertionError('source reopened')):
                     self.assertEqual(reader(path, source=source), expected)
                 self.assertFalse(source.closed)
+
+    def test_replaced_nonregular_input_is_refused_through_opened_descriptor(self):
+        path = self.write_log(MARKER)
+        for mode in (stat.S_IFIFO, stat.S_IFCHR, stat.S_IFDIR):
+            with self.subTest(mode=mode):
+                descriptor = os.open(path, os.O_RDONLY)
+                info = mock.Mock(st_mode=mode, st_size=0)
+                with mock.patch.object(checker.os, 'open', return_value=descriptor) as opener, \
+                        mock.patch.object(checker.os, 'fstat', return_value=info), \
+                        mock.patch.object(Path, 'open', side_effect=AssertionError('path reopened')):
+                    with self.assertRaises(checker.InputError):
+                        checker.open_input(path)
+                    flags = opener.call_args.args[1]
+                    self.assertEqual(flags & getattr(os, 'O_NONBLOCK', 0),
+                                     getattr(os, 'O_NONBLOCK', 0))
+                with self.assertRaises(OSError):
+                    os.fstat(descriptor)
 
     def test_fail_by_error_type(self):
         code, document = self.verdict(MARKER + INFO + BAD_TYPE)

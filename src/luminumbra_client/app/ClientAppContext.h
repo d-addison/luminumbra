@@ -17,6 +17,7 @@
 #include "luminumbra_common/ai/CreatureSpeciesRegistry.h"
 #include "luminumbra_common/animation/AnimationRuntime.h"
 #include "luminumbra_common/core/JobSystem.h"
+#include "luminumbra_common/game/ItemDrop.h"
 #include "luminumbra_common/game/Objectives.h"
 #include "luminumbra_common/game/PhotoMode.h"
 #include "luminumbra_common/systems/FarmingSystem.h"
@@ -96,9 +97,8 @@ struct HudState {
     // binding.
     bool paused = false; //  in-game pause overlay active
     int rebindCaptureAction = -1;
-    //  player farming state. The controller holds the seed/harvest inventory;
-    // the species registry is loaded once for player seeding. Interactive-only
-    // (never touched by gates).
+    // With regional items enabled this mirrors the session's authoritative controller;
+    // otherwise it retains the legacy player inventory. Species load once for player seeding.
     luminumbra::foliage::FarmingController farming;
     luminumbra::foliage::SpeciesRegistry farmSpecies;
     bool farmSpeciesLoaded = false;
@@ -346,6 +346,7 @@ struct InteractionEdgeState {
     bool farmWater = false;
     bool farmFertilize = false;
     bool farmHarvest = false;
+    luminumbra::game::FarmDropSeedEdge farmDropSeed;
     bool farmCycleSpecies = false;
     bool terraformDig = false;
     bool terraformFill = false;

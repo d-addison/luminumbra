@@ -10,9 +10,11 @@
 #include "../core/SimulationClock.h"
 #include "../core/SystemConfig.h"
 #include "../fields/FieldPageState.h"
+#include "../game/ItemCatalogue.h"
 #include "../persistence/ChunkValidationCache.h"
 #include "../simulation/SimBudgetTelemetry.h"
 #include "../simulation/SimulationEventBus.h"
+#include "../systems/FarmingSystem.h"
 #include "../systems/PollinationSystem.h"
 #include "ActiveRegionLedger.h"
 #include "GroundObjectStore.h"
@@ -195,9 +197,15 @@ public:
     // generates fresh state: loaded chunks are adopted into the streaming map,
     // and generation skips chunks that already carry voxel data, so loaded
     // edits are never clobbered by regeneration. A missing snapshot is a clean
-    // miss (returns true). A refusal returns false and disables saving.
+    // miss (returns true). An operational restore failure disables saving; candidate item
+    // admission refusals leave the live session usable and report a separate diagnostic.
     const std::string& GetWorldOpenError() const {
         return m_worldOpenError;
+    }
+    // Item-enabled candidate admission errors, cleared on the next open/restore attempt.
+    // This diagnostic never gates live operations.
+    const std::string& GetLastWorldOpenAttemptError() const {
+        return m_lastWorldOpenAttemptError;
     }
     bool LoadWorldState();
     bool LoadWorldStateFrom(const std::filesystem::path& save_dir);
@@ -456,6 +464,20 @@ public:
     [[nodiscard]] const RegionSchedule& GetRegionSchedule() const {
         return m_regionSchedule;
     }
+    // Game hosts enable this before create/open. Generic ground-store callers can stay independent.
+    void SetItemConsumerEnabled(bool enabled);
+    [[nodiscard]] bool ItemConsumerEnabled() const {
+        return m_activeRegionsEnabled && m_itemConsumerEnabled;
+    }
+    [[nodiscard]] const luminumbra::game::ItemCatalogue* GetItemCatalogue() const {
+        return ItemConsumerEnabled() ? m_itemCatalogue.get() : nullptr;
+    }
+    [[nodiscard]] luminumbra::foliage::FarmingController& GetFarmingController() {
+        return m_farmingController;
+    }
+    [[nodiscard]] const luminumbra::foliage::FarmingController& GetFarmingController() const {
+        return m_farmingController;
+    }
     [[nodiscard]] const GroundObjectStore& GetGroundObjects() const {
         return m_groundObjects;
     }
@@ -579,6 +601,17 @@ private:
     float m_circadianAmplitude = 1.0f;
     float m_plantMutationRate = luminumbra::foliage::kPollinationMutationFrac;
     WorldMetadata m_metadata;
+    bool m_itemConsumerEnabled = false;
+    std::shared_ptr<const luminumbra::game::ItemCatalogue> m_itemCatalogue;
+    luminumbra::foliage::FarmingController m_farmingController;
+    bool PrepareItemCatalogue(std::shared_ptr<const luminumbra::game::ItemCatalogue>& candidate,
+                              std::string& error);
+    bool PrepareSavedItems(const std::filesystem::path& save_dir,
+                           const luminumbra::game::ItemCatalogue* catalogue,
+                           int& seeds,
+                           std::string& error,
+                           const GroundObjectStore* admitted_objects = nullptr);
+
     bool m_transientWorld = false;
     void ResetWorldSystems(bool keep_admitted_chunk_facts = false);
     bool AdoptWorldState(const std::filesystem::path& save_dir,
@@ -706,6 +739,7 @@ private:
     std::string GenerateWorldId();
     std::unique_ptr<Systems::PhysicsSystem> m_physicsSystem;
     std::string m_worldOpenError;
+    std::string m_lastWorldOpenAttemptError;
     std::size_t m_lastLoadedChunkCount = 0;
     std::vector<std::filesystem::path> m_requiredClientAssets;
 

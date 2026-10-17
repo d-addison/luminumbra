@@ -16,8 +16,8 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import check_gl_debug_log as checker
-import render_runner_process as runner  # noqa: E402
-import summarize_process_receipts as summary  # noqa: E402
+import render_runner_process as runner
+import summarize_process_receipts as summary
 
 RECEIPT = dict(schema=runner.RECEIPT_SCHEMA, command=['luminumbra_client_app.exe'],
                cwd='/work', binary_path='/bin/luminumbra_client_app.exe',

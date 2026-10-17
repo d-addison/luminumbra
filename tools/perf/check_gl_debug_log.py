@@ -52,17 +52,20 @@ def open_input(path):
         candidate = Path(path)
         if not stat.S_ISREG(candidate.stat().st_mode):
             raise InputError(f'input is not a regular file: {path}')
-        source = candidate.open('rb')
+        # A path check cannot prevent replacement by a FIFO before open. Open
+        # nonblocking, validate the owning descriptor, then read that same file.
+        flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NONBLOCK', 0)
+        descriptor = os.open(candidate, flags)
         try:
-            info = os.fstat(source.fileno())
+            info = os.fstat(descriptor)
             if not stat.S_ISREG(info.st_mode):
                 raise InputError(f'input is not a regular file: {path}')
             if info.st_size > MAX_FILE_BYTES:
                 raise InputError(f'input exceeds {MAX_FILE_BYTES} byte cap: {path}')
-        except (OSError, InputError):
-            source.close()
+            return os.fdopen(descriptor, 'rb')
+        except BaseException:
+            os.close(descriptor)
             raise
-        return source
     except (OSError, ValueError) as error:
         raise InputError(f'input unreadable: {path}: {str(error)[:MAX_ERROR_CHARS]}') from error
 

@@ -67,6 +67,19 @@ class PathGateTests(unittest.TestCase):
             with self.assertRaises(subprocess.CalledProcessError):
                 gate.main()
 
+    def test_graphics_and_qualification_suites_are_in_standalone_plan(self):
+        commands = gate.python_test_commands(ROOT)
+        for suite in (
+            "tools/ci/test_check_acceptance_matrix.py",
+            "tools/perf/test_check_gl_debug_log.py",
+            "tools/perf/test_summarize_process_receipts.py",
+            "tools/perf/test_plan_qualification.py",
+            "tools/perf/test_run_qualification.py",
+            "test/tools/test_graphics_ui_contract.py",
+        ):
+            with self.subTest(suite=suite):
+                self.assertEqual(commands.count((suite,)), 1)
+
     def test_docs_and_covered_python_skip_builds(self):
         for path in (
             "docs/development.md", "docs/assets/example.png", "README.md", "Doxyfile",

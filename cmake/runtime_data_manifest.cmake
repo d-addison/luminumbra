@@ -27,6 +27,7 @@ set(LUMINUMBRA_RUNTIME_DATA_MANIFEST
     "common/foliage/species/oak.json"
     "common/foliage/species/sungourd.json"
     "common/foliage/species/wheat.json"
+    "common/items/items.json"
     "common/materials.json"
     "common/particles/ambient_motes.json"
     "common/particles/fixture_sparkle.json"

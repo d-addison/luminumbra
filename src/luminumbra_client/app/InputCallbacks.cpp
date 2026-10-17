@@ -3,6 +3,7 @@
 #include <glad/glad.h>
 
 #include "app/DeveloperKeyDispatch.h"
+#include "app/FarmDropSeedInput.h"
 #include "app/GameplayBindingCapture.h"
 #include "app/InputCallbacks.h"
 
@@ -31,7 +32,46 @@ InputCallbackBindings& CallbackBindings(GLFWwindow* window) {
     return *static_cast<InputCallbackBindings*>(glfwGetWindowUserPointer(window));
 }
 
+struct FarmDropSeedRuntimeInput {
+    GLFWwindow* window;
+    const PlayerController* player;
+    Rml_UIManager* ui;
+
+    bool WindowFocused() const {
+        return glfwGetWindowAttrib(window, GLFW_FOCUSED) == GLFW_TRUE;
+    }
+    bool GameplayKeyAllowed() const {
+        const auto& bindings = CallbackBindings(window);
+        const auto action = InputAction::FarmDropSeed;
+        const int key = player ? player->key(action)
+                               : kInputActionDefs[static_cast<std::size_t>(action)].default_key;
+        return !bindings.router || bindings.router->GameplayKeyAllowed(key);
+    }
+    bool DeveloperPanelVisible(const char* id) const {
+        const auto& bindings = CallbackBindings(window);
+        auto* console = bindings.developerConsole;
+        return DeveloperUiAllowed(*bindings.app) && console && console->Widgets().Visible(id);
+    }
+    bool PlayerPhotoModeActive() const {
+        return player && player->photo_mode_active();
+    }
+    bool ImGuiCapturesKeyboard() const {
+        return ImGui::GetCurrentContext() && ImGui::GetIO().WantCaptureKeyboard;
+    }
+    const Rml::Element* GetFocusElement() const {
+        return ui && ui->GetContext() ? ui->GetContext()->GetFocusElement() : nullptr;
+    }
+};
+
 } // namespace
+
+bool FarmDropSeedInputAllowed(GLFWwindow* window) {
+    const auto& bindings = CallbackBindings(window);
+    const auto& app = *bindings.app;
+    const auto* player = bindings.playerController->get();
+    auto* ui = bindings.uiManager->get();
+    return FarmDropSeedInputAllowed(app, FarmDropSeedRuntimeInput{window, player, ui});
+}
 
 void InstallInputCallbacks(GLFWwindow* window) {
     glfwSetKeyCallback(window, key_callback);
@@ -103,6 +143,7 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
 }
 void window_focus_callback(GLFWwindow* window, int focused) {
     auto& b = CallbackBindings(window);
+    b.app->interactions.farmDropSeed.Invalidate();
     if (b.app->overlay.imgui_enabled && ImGui::GetCurrentContext())
         ImGui_ImplGlfw_WindowFocusCallback(window, focused);
     b.window_focused = focused != 0;
@@ -124,6 +165,8 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
     if (app.overlay.imgui_enabled && ImGui::GetCurrentContext())
         ImGui_ImplGlfw_KeyCallback(window, key, scancode, action, mods);
     RefreshInputOwnership(window);
+    if (!FarmDropSeedInputAllowed(window))
+        app.interactions.farmDropSeed.Invalidate();
     auto* console = DeveloperUiAllowed(app) ? bindings.developerConsole : nullptr;
     const bool photo = playerController && playerController->photo_mode_active();
     const bool worldShortcuts =
@@ -235,13 +278,18 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
         SetGamePaused(window, !app.hud.paused);
         return;
     }
-    if (playerController)
+    if (playerController) {
+        if (action == GLFW_PRESS && (key == playerController->key(InputAction::TogglePhotoMode) ||
+                                     key == playerController->key(InputAction::ToggleCodex)))
+            app.interactions.farmDropSeed.Invalidate();
         playerController->ProcessKeyInput(key, action);
+    }
 }
 
 void SetGameState(GLFWwindow* window, GameStateManager& gameStateManager, GameState newState) {
     InputCallbackBindings& bindings = CallbackBindings(window);
     gameStateManager.SetState(newState);
+    bindings.app->interactions.farmDropSeed.Invalidate();
     bindings.in_world = newState == GameState::IN_GAME;
     if (bindings.developerConsole)
         bindings.developerConsole->RefreshAvailability();
@@ -253,6 +301,7 @@ void SetGamePaused(GLFWwindow* window, bool paused) {
     ClientAppContext& app = *bindings.app;
     Luminumbra::Client::Rml_UIManager* uiManager = bindings.uiManager->get();
     app.hud.paused = paused;
+    app.interactions.farmDropSeed.Invalidate();
     app.hud.photoModeUiShown = false;
     if (uiManager)
         uiManager->RequestLoadDocument(paused ? "pause.rml" : "hud.rml");

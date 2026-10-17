@@ -268,6 +268,7 @@ bool ServerWorldRunner::Boot() {
                 ? *m_config.systems_config_override
                 : luminumbra::core::SystemConfig::LoadFromFile(systems_json.string());
         m_session->ApplySystemConfig(sys_cfg);
+        m_session->SetItemConsumerEnabled(true);
         m_session->SetParkedBytesLimit(static_cast<std::size_t>(m_config.parked_bytes_limit));
     }
     m_session->SetFiniteHydrologyEnabled(m_config.finite_hydrology);
@@ -285,7 +286,9 @@ bool ServerWorldRunner::Boot() {
             m_config.preset_json_override ? &*m_config.preset_json_override : nullptr);
     }
     if (!world_ready) {
-        m_bootError = m_session->GetWorldOpenError();
+        m_bootError = m_session->GetLastWorldOpenAttemptError();
+        if (m_bootError.empty())
+            m_bootError = m_session->GetWorldOpenError();
         LUMINUMBRA_CORE_ERROR("ServerWorldRunner: world boot failed (preset='{}', world_id='{}')",
                               m_config.preset,
                               m_config.world_id);
@@ -299,7 +302,9 @@ bool ServerWorldRunner::Boot() {
     // fills gaps and can never clobber authoritative saved voxel data. A
     // fresh world is a clean miss here.
     if (m_config.world_id.empty() && !m_session->LoadWorldState()) {
-        m_bootError = m_session->GetWorldOpenError();
+        m_bootError = m_session->GetLastWorldOpenAttemptError();
+        if (m_bootError.empty())
+            m_bootError = m_session->GetWorldOpenError();
         LUMINUMBRA_CORE_ERROR("ServerWorldRunner: world open refused: {}", m_bootError);
         m_session.reset();
         m_jobSystem.shutdown();
