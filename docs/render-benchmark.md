@@ -586,6 +586,18 @@ uninstrumented benchmark results and determinism gates. The shared worker librar
 and client/server consumers inherit the same profiling definition in a profile
 build.
 
+Enabled-build qualification is pending a successful native CI run. The existing
+`GNS transport / compile probe` job configures the `profile` preset and builds
+the common library, server, shipping client and QA client against the pinned
+Tracy source, plus compile-only fixtures for enabled and disabled macro forms.
+This checks Linux/GCC compilation and linking, including loader/world jobs,
+capture presentation and inline rendering headers. Source-contract checks alone
+do not qualify the enabled build. No local profile configure or application
+build has been run for this change. Windows/MSVC, Windows/GCC and macOS enabled
+builds, profiler connection/capture behaviour and GPU execution remain
+unqualified by this compile check. Release/perf determinism and measurement
+lanes continue to use Tracy disabled.
+
 Stable timeline names include `Client frame` (scope begin/end, including early
 exit), the `Client` frame mark, `Worker job execution`, and `Job queue delay (ms)`.
 Capture-only rendering uses `Client capture frame` and `Client capture` marks.

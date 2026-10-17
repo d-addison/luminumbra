@@ -17,14 +17,16 @@ static_assert(sizeof(PROFILE_STRING(LUMIN_PROFILE_MSG(unknown_text, unknown_size
 static_assert(sizeof(PROFILE_STRING(LUMIN_PROFILE_THREAD(unknown_name))) == 1);
 
 namespace {
-struct CompileLock {
-    int& acquisitions;
+class CompileLock {
+    int& m_acquisitions;
+
+public:
     constexpr explicit CompileLock(int& count)
-        : acquisitions(count) {
-        ++acquisitions;
+        : m_acquisitions(count) {
+        ++m_acquisitions;
     }
     constexpr ~CompileLock() {
-        --acquisitions;
+        --m_acquisitions;
     }
 };
 
@@ -32,7 +34,7 @@ static_assert([] {
     int held = 0;
     int evaluations = 0;
     {
-        LUMIN_PROFILE_LOCK(CompileLock, lock, held, unknown_name);
+        LUMIN_PROFILE_LOCK(const CompileLock, lock, held, unknown_name);
         if (held != 1 || LUMIN_PROFILE_WAIT(unknown_name, ++evaluations) != 1)
             return false;
     }

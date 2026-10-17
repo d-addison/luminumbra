@@ -1,5 +1,6 @@
 """Offline source contracts for the optional profile build (issue #395)."""
 
+import ast
 import hashlib
 import json
 from pathlib import Path
@@ -83,6 +84,82 @@ def check_disabled():
     require(re.search(r"#if defined\(LUMINUMBRA_ENABLE_TRACY\)\s+"
                       r"std::chrono::steady_clock::time_point enqueued_at\{\};\s+#endif", job_header),
             "Queue timestamp storage must disappear when disabled")
+
+
+def check_enabled_compile():
+    tests = read("test/CMakeLists.txt")
+    code = re.sub(r"(?m)#.*$", "", tests)
+    enabled = re.search(r"if\(LUMINUMBRA_ENABLE_TRACY\)(.*?)endif\(\)", code, re.DOTALL)
+    require(enabled, "Missing enabled compile fixture gate")
+    for command in (
+            "add_library(profiler_enabled_compile OBJECT core/profiler_enabled_compile.cpp)",
+            "target_include_directories(profiler_enabled_compile PRIVATE ../src/luminumbra_common)",
+            "target_link_libraries(profiler_enabled_compile PRIVATE luminumbra_profiler)",
+            "luminumbra_configure_first_party_target(profiler_enabled_compile)"):
+        require(command in enabled[1], f"Missing enabled compile contract: {command}")
+    fixture = read("test/core/profiler_enabled_compile.cpp")
+    for definition in ("LUMINUMBRA_ENABLE_TRACY", "TRACY_ENABLE", "TRACY_ON_DEMAND"):
+        require(f"!defined({definition})" in fixture,
+                f"Enabled fixture must refuse missing {definition}")
+    for macro in ("FRAME", "FRAME_N", "ZONE", "ZONE_N", "PLOT", "MSG", "THREAD", "LOCK", "WAIT"):
+        require(re.search(r"\bLUMIN_PROFILE_" + macro + r"\(", fixture),
+                f"Missing enabled compile coverage for {macro}")
+    for form in ("std::lock_guard<std::mutex>", "std::unique_lock",
+                 "std::shared_lock<std::shared_mutex>", "lock.unlock()", "lock.owns_lock()",
+                 "[&mutex, &shared_mutex]"):
+        require(form in fixture, f"Missing lock/wait compile form: {form}")
+
+    workflow = read(".github/workflows/ci.yml")
+    job = workflow.split("\n  gns-compile-probe:\n", 1)[1].split("\n  diligent-rhi:", 1)[0]
+    require("    runs-on: ubuntu-24.04\n" in job and "    timeout-minutes: 45\n" in job,
+            "Profile qualification must retain the existing hosted runner and timeout")
+    require("!cancelled() && needs.changes.outputs.needs_cpp != 'false'" in job,
+            "Profile qualification must fail open when path classification fails")
+    commands = []
+    for step in re.split(r"(?=^      - name: )", job, flags=re.MULTILINE)[1:]:
+        if "        run:" not in step:
+            continue
+        require(not re.search(r"^        (?:if|continue-on-error):", step, re.MULTILINE),
+                "Profile qualification steps must neither skip nor ignore failure")
+        # Compare executable commands only, allowing YAML indentation and shell continuations.
+        script = step.split("        run:", 1)[1]
+        script = re.sub(r"(?m)^\s*#.*$", "", script).replace("\\\n", " ")
+        commands.append(" ".join(script.split()).removeprefix("| "))
+    require("cmake --preset profile -B build/gns-probe -DBUILD_TESTING=ON "
+            "-DLUMINUMBRA_ENABLE_GNS=ON" in commands,
+            "CI must configure the enabled profile preset with both compile fixtures available")
+    require(any(command.startswith(
+        "cmake --build build/gns-probe --parallel 4 --target "
+        "luminumbra_common luminumbra_server_app luminumbra_client_app luminumbra_client_qa_app "
+        "profiler_enabled_compile profiler_disabled_compile ") for command in commands),
+        "CI must compile and link every production consumer, plus both macro fixtures")
+    require("ctest --test-dir build/gns-probe --no-tests=error -R '^ProfilerSourceContract$' "
+            "--output-on-failure" in commands, "CI must execute the registered source contract")
+    require("-DFETCHCONTENT_SOURCE_DIR_TRACY" not in job,
+            "CI qualification must use the real pinned FetchContent dependency")
+
+    # Sweep all instrumented production TUs, including the QA capture source;
+    # each must remain in the actual application/library source manifests.
+    for component in ("luminumbra_common", "luminumbra_client", "luminumbra_server"):
+        manifest = re.sub(r"(?m)#.*$", "", read(f"src/{component}/sources.cmake"))
+        # A path in set_source_files_properties alone does not compile it.
+        sources = "\n".join(re.findall(
+            r"\bset\((?:COMMON_SOURCES|CLIENT_INTERNAL_SOURCES|CLIENT_VENDOR_SOURCES|"
+            r"CLIENT_QA_SOURCES|CLIENT_APP_SOURCES|SERVER_APP_SOURCES)\b(.*?)\n\)",
+            manifest, re.DOTALL))
+        for source in (ROOT / "src" / component).rglob("*.cpp"):
+            if re.search(r"\bLUMIN_PROFILE_\w+\(", source.read_text(encoding="utf-8")):
+                relative = source.relative_to(ROOT / "src" / component).as_posix()
+                require("${CMAKE_CURRENT_LIST_DIR}/" + relative in sources,
+                        f"Instrumented production TU missing from native build: {relative}")
+    tree = ast.parse(read("tools/ci/ci_paths.py"))
+    suites = next(ast.literal_eval(node.value) for node in tree.body
+                  if isinstance(node, ast.Assign)
+                  and any(isinstance(target, ast.Name) and target.id == "PYTHON_TESTS"
+                          for target in node.targets))
+    require("test/tools/check_profiler_contract.py" in suites,
+            "Standalone CI must execute profiler regressions as well as CTest")
+    require("ci_paths.py python-tests" in workflow, "CI must execute the Python suite plan")
 
 
 def check_disabled_gate():
@@ -292,6 +369,7 @@ def check_zones():
 if __name__ == "__main__":
     check_configuration()
     check_disabled()
+    check_enabled_compile()
     check_disabled_gate()
     check_sampling_zones()
     check_zones()

@@ -2419,6 +2419,12 @@ target_include_directories(profiler_disabled_compile PRIVATE ../src/luminumbra_c
 luminumbra_configure_first_party_target(profiler_disabled_compile)
 # Deliberately no link to luminumbra_common/luminumbra_profiler: this target
 # checks disabled macro expansion even when the rest of the build is profiled.
+if(LUMINUMBRA_ENABLE_TRACY)
+    add_library(profiler_enabled_compile OBJECT core/profiler_enabled_compile.cpp)
+    target_include_directories(profiler_enabled_compile PRIVATE ../src/luminumbra_common)
+    target_link_libraries(profiler_enabled_compile PRIVATE luminumbra_profiler)
+    luminumbra_configure_first_party_target(profiler_enabled_compile)
+endif()
 add_test(NAME ProfilerSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/test/tools/check_profiler_contract.py)
 

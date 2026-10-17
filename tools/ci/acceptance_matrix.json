@@ -3,6 +3,27 @@
   "description": "Requirement-to-evidence matrix for the expanded v0.3 contract. Rows are statements; evidence items are executable tests, scripts, native commands or documents. The planned field is descriptive text naming outstanding work and its owner; planned items are visible but never count as covered.",
   "rows": [
     {
+      "id": "profiler.build-contract",
+      "source": "issue #433",
+      "statement": "Static source contracts require the existing Linux/GCC GNS compile job to configure the profile preset and build the common library, server, shipping client, QA client and both macro fixtures against pinned Tracy. Enabled native compile/link qualification is pending a successful CI run; no local profile configure or application build is claimed. Windows and macOS enabled builds, profiler captures and GPU execution remain outside this check. Release/perf lanes retain Tracy disabled.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "ProfilerSourceContract"
+        },
+        {
+          "kind": "script",
+          "ref": "test/tools/check_profiler_contract.py"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/render-benchmark.md"
+        }
+      ],
+      "requirements": []
+    },
+    {
       "id": "iss.482",
       "source": "issue #482",
       "statement": "Synthetic v2 and v3 report-frame captures accept float rotation rounding at large camera positions with a bounded position-scaled translation allowance, and reject wrong matrices while preserving the small-position tolerance. Receipt evidence retains testcase attribution and requires successful execution metadata; software rendering evidence requires exact testcase identities.",
