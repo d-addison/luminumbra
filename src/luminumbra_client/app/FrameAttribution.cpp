@@ -1,9 +1,16 @@
 #include "FrameAttribution.h"
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
+#include <ios>
 #include <locale>
+#include <optional>
 #include <ostream>
+#include <system_error>
 
 namespace Luminumbra::Client::Attribution {
 std::uint32_t classify_rebuild(const ScatterSignature& previous,
@@ -113,6 +120,7 @@ void record_foliage_rebuild(const FoliageRebuild& rebuild,
     total.reasons |= rebuild.reasons;
     total.admitted_columns += rebuild.admitted_columns;
     total.surface_misses += rebuild.surface_misses;
+    total.surface_samples += rebuild.surface_samples;
     total.deferred_columns += rebuild.deferred_columns;
     total.copied_bytes += rebuild.copied_bytes;
     total.hashed_bytes += rebuild.hashed_bytes;
@@ -123,6 +131,8 @@ void record_foliage_rebuild(const FoliageRebuild& rebuild,
     total.worker_stale_rejected += rebuild.worker_stale_rejected;
     total.worker_queue_age_frames =
         std::max(total.worker_queue_age_frames, rebuild.worker_queue_age_frames);
+    total.uploads += rebuild.uploads;
+    total.stale_results += rebuild.stale_results;
     total.scratch_bytes += rebuild.scratch_bytes;
     total.backlog = total.backlog || rebuild.backlog;
     frame.rebuild_ms += milliseconds;

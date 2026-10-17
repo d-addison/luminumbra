@@ -1,4 +1,8 @@
-"""Portable request ownership, replay, orphan recovery and EOF/cancel races."""
+"""Portable request ownership, replay, orphan recovery and EOF/cancel races.
+
+Job result waits observe drained completion, not machine throughput. Production
+backend deadlines and the CI job watchdog remain the fail-safes for hangs.
+"""
 from concurrent.futures import Executor, FIRST_COMPLETED, Future, wait
 from contextlib import contextmanager
 from copy import deepcopy
@@ -535,10 +539,12 @@ class BrokerTests(RuleAssertions, unittest.TestCase):
                 raise hook_errors[0]
         finally:
             release.set()
-            broker.executor.shutdown(wait=True)
-            completed_result(broker.futures[record["job_id"]], "submission drain after release")
-            if cancelling is not None:
-                join_worker(cancelling)
+            try:
+                broker.executor.shutdown(wait=True)
+                completed_result(broker.futures[record["job_id"]], "submission drain after release")
+            finally:
+                if cancelling is not None:
+                    join_worker(cancelling)
         self.assertFalse(cancelling.is_alive())
         broker.on_eof()
         self.assertEqual(set(cancelled), {digest(self.request["request_id"].encode())[:32]})
@@ -703,11 +709,27 @@ class BrokerTests(RuleAssertions, unittest.TestCase):
             self.configure(f"http://127.0.0.1:{server.server_port}")
             request = deepcopy(self.request)
             request["overrides"]["candidates"] = {"count": 4}
-            with managed_broker(self.project, client_factory=client_factory(server),
+            factory = client_factory(server)
+            def checked_client(*args, **kwargs):
+                backend = factory(*args, **kwargs)
+                submit = backend.submit
+                def checked_submit(body, **kwargs):
+                    # Ownership must already be durable before POST.
+                    expected = digest(body["request_id"].encode())[:32]
+                    self.assertEqual(broker.ledger.status(broker.ledger.active)["backend_job_id"], expected)
+                    return submit(body, **kwargs)
+                backend.submit = checked_submit
+                return backend
+            with managed_broker(self.project, client_factory=checked_client,
                                clock=fixed_clock, executor=SynchronousExecutor()) as broker:
                 plan = broker.plan(request)
-                record = broker.start(plan["plan_id"], plan["plan_digest"])
-                self.assert_completed(broker, record["job_id"])
+                with patch.object(broker.ledger, 'update', wraps=broker.ledger.update) as update:
+                    record = broker.start(plan["plan_id"], plan["plan_digest"])
+                    self.assert_completed(broker, record["job_id"])
+                publications = [call.kwargs["backend_job_id"] for call in update.call_args_list
+                                if "backend_job_id" in call.kwargs]
+                self.assertEqual(len(publications), 4)
+                self.assertEqual(len(set(publications)), 4)
                 self.assertEqual(server.submissions, 4)
                 self.assertEqual([item["seed"] for item in broker.raw[record["job_id"]]["candidates"]], [7, 8, 9, 10])
                 self.assertEqual(broker.ledger.status(record["job_id"])["seeds"], [7, 8, 9, 10])

@@ -1,15 +1,19 @@
 #include <gtest/gtest.h>
 
+#include "luminumbra/core/Types.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/world/ActiveRegionLedger.h"
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -124,10 +128,12 @@ TEST(ActiveRegionLedgerTest, ReductionFreezeRecoveryAndHoldsSurviveReload) {
             EXPECT_EQ(r.frozen_at, 5u);
             EXPECT_EQ(r.frozen_digest, 0x123456789abcdef0ull);
         }
-        if (tick == 8)
+        if (tick == 8) {
             EXPECT_EQ(r.state, RegionState::Reduced);
-        if (tick == 10)
+        }
+        if (tick == 10) {
             EXPECT_EQ(r.state, RegionState::Active);
+        }
     }
 }
 
@@ -137,8 +143,9 @@ TEST(ActiveRegionLedgerTest, RestoringNewerClockPreservesHoldsAndFrozenSimulatio
     for (std::uint64_t tick = 2; tick <= 6; ++tick) {
         Step(ledger, tick, tick < 6 ? 11 : 0);
         const auto& record = ledger.records().at(kFar);
-        if (tick == 2)
+        if (tick == 2) {
             ASSERT_EQ(record.over_hold, 1u);
+        }
         if (tick == 6) {
             ASSERT_EQ(record.state, RegionState::Frozen);
             ASSERT_EQ(record.under_hold, 1u);
@@ -793,9 +800,12 @@ TEST(ActiveRegionLedgerTest, EvictedRegionStartsFreshWhenVisitedAgain) {
 
 TEST(ActiveRegionLedgerTest, RetentionKeepsTheLedgerBounded) {
     std::vector<Vec3> grid;
-    for (int i = 0; i < 600; ++i)
+    grid.reserve(600);
+    for (int i = 0; i < 600; ++i) {
+        const int row = i / 30;
         grid.emplace_back(
-            static_cast<float>((i % 30) * 2048), 0.0f, static_cast<float>((i / 30) * 2048));
+            static_cast<float>((i % 30) * 2048), 0.0f, static_cast<float>(row * 2048));
+    }
     ActiveRegionLedger ledger;
     ledger.schedule(WorldClock(1), std::span<const Vec3>(grid));
     EXPECT_GT(ledger.records().size(), 1000u);

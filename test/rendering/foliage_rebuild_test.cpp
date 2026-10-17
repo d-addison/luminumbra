@@ -1,18 +1,31 @@
+#include "../support/DeterministicWorkBudget.h"
+#include "luminumbra/core/Types.h"
+#include "luminumbra_client/app/FrameAttribution.h"
 #include "luminumbra_client/rendering/Camera.h"
+#include "luminumbra_client/rendering/FoliageGroundMesh.h"
+#include "luminumbra_client/rendering/FoliageSurfaceSlots.h"
+#include "luminumbra_client/rendering/RenderContext.h"
 #include "luminumbra_client/rendering/RenderPipeline.h"
+#include "luminumbra_client/rendering/RenderResourceHandles.h"
+#include "luminumbra_client/rendering/Shader.h"
 #include "luminumbra_client/rendering/passes/FoliagePass.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
+#include "luminumbra_common/world/Chunk.h"
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 #include <glad/glad.h>
+#include <glm/ext/vector_float3.hpp>
+#include <glm/ext/vector_float4.hpp>
+#include <glm/ext/vector_int3.hpp>
 #include <gtest/gtest.h>
 
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -91,7 +104,8 @@ protected:
     static void Rebuild(FoliagePass& pass,
                         const std::vector<FoliagePass::ChunkScatter>& chunks,
                         std::uint64_t frame,
-                        FoliagePass::Preparation preparation = FoliagePass::Preparation::Deferred) {
+                        FoliagePass::Preparation preparation = FoliagePass::Preparation::Deferred,
+                        const glm::vec3& camera = kCamera) {
         pass.set_evidence_frame(frame, 1);
         pass.rebuild_instances(
             chunks,
@@ -99,16 +113,17 @@ protected:
                 return FoliagePass::SurfaceSample{10.0f + x * 0.01f + z * 0.02f, 0.1f, 0.7f, true};
             },
             nullptr,
-            kCamera,
+            camera,
             preparation);
     }
     static Attribution::FoliageRebuild
     RebuildAttributed(FoliagePass& pass,
                       const std::vector<FoliagePass::ChunkScatter>& chunks,
                       std::uint64_t frame_id,
-                      FoliagePass::Preparation preparation = FoliagePass::Preparation::Deferred) {
+                      FoliagePass::Preparation preparation = FoliagePass::Preparation::Deferred,
+                      const glm::vec3& camera = kCamera) {
         Attribution::FoliageFrameScope frame(true);
-        Rebuild(pass, chunks, frame_id, preparation);
+        Rebuild(pass, chunks, frame_id, preparation, camera);
         return frame.snapshot().rebuild;
     }
     static void ExpectReused(const Attribution::FoliageRebuild& rebuild, bool gpu) {
@@ -195,8 +210,8 @@ protected:
             glGetNamedBufferParameteri64v(Binding(binding), GL_BUFFER_SIZE, &size);
             return size;
         };
-        EXPECT_EQ(storage_bytes(0), 512 * 8 * static_cast<GLint64>(sizeof(float)));
-        EXPECT_EQ(storage_bytes(7), 512 * static_cast<GLint64>(sizeof(std::uint32_t)));
+        EXPECT_EQ(storage_bytes(0), GLint64{512} * (8 * static_cast<GLint64>(sizeof(float)) + 4));
+        EXPECT_EQ(storage_bytes(7), storage_bytes(0));
         EXPECT_GT(storage_bytes(1), 0);
         EXPECT_LE(storage_bytes(1), 4 * 8192 * static_cast<GLint64>(sizeof(glm::vec4)));
         EXPECT_GT(pass.archetype_count(), 0u);
@@ -208,8 +223,10 @@ protected:
             Binding(0), 0, static_cast<GLsizeiptr>(params.size()), params.data());
         hash = Fnv(params.data(), params.size(), hash);
         std::vector<std::uint32_t> slots(count);
-        glGetNamedBufferSubData(
-            Binding(7), 0, static_cast<GLsizeiptr>(count * sizeof(slots[0])), slots.data());
+        glGetNamedBufferSubData(Binding(7),
+                                std::size_t{512} * 8 * sizeof(float),
+                                static_cast<GLsizeiptr>(count * sizeof(slots[0])),
+                                slots.data());
         std::vector<unsigned char> surface(FoliagePass::kMaxCandidatesPerChunk * sizeof(glm::vec4));
         for (const auto slot : slots) {
             EXPECT_LT(slot, Luminumbra::Rendering::FoliageSurfaceSlots::kCapacity);
@@ -252,11 +269,13 @@ public:
         glad_glBufferData = BufferData;
         glad_glBufferSubData = BufferSubData;
         glad_glGetUniformLocation = UniformLocation;
+        glad_glFenceSync = FenceSync;
     }
     ~RebuildGlCalls() {
         glad_glBufferData = original_buffer_data;
         glad_glBufferSubData = original_buffer_sub_data;
         glad_glGetUniformLocation = original_uniform_location;
+        glad_glFenceSync = original_fence_sync;
         current = nullptr;
     }
     RebuildGlCalls(const RebuildGlCalls&) = delete;
@@ -264,8 +283,10 @@ public:
     std::size_t scratch_allocations = 0;
     std::size_t uniform_queries = 0;
     std::size_t uploaded_bytes = 0;
+    std::size_t uploads = 0;
     std::size_t surface_upload_bytes = 0;
     std::size_t surface_uploads = 0;
+    std::size_t fences = 0;
 
 private:
     static void GLAPIENTRY BufferData(GLenum target,
@@ -275,8 +296,10 @@ private:
         if (target == GL_SHADER_STORAGE_BUFFER && data == nullptr) {
             ++current->scratch_allocations;
         }
-        if (data != nullptr)
+        if (data != nullptr && size > 0) {
             current->uploaded_bytes += static_cast<std::size_t>(size);
+            ++current->uploads;
+        }
         current->original_buffer_data(target, size, data, usage);
     }
     static void GLAPIENTRY BufferSubData(GLenum target,
@@ -284,6 +307,8 @@ private:
                                          GLsizeiptr size,
                                          const void* data) {
         current->uploaded_bytes += static_cast<std::size_t>(size);
+        if (size > 0)
+            ++current->uploads;
         if (size ==
             static_cast<GLsizeiptr>(FoliagePass::kMaxCandidatesPerChunk * sizeof(glm::vec4))) {
             current->surface_upload_bytes += static_cast<std::size_t>(size);
@@ -295,11 +320,264 @@ private:
         ++current->uniform_queries;
         return current->original_uniform_location(program, name);
     }
+    static GLsync GLAPIENTRY FenceSync(GLenum condition, GLbitfield flags) {
+        ++current->fences;
+        return current->original_fence_sync(condition, flags);
+    }
     inline static RebuildGlCalls* current = nullptr;
     PFNGLBUFFERDATAPROC original_buffer_data = glad_glBufferData;
     PFNGLBUFFERSUBDATAPROC original_buffer_sub_data = glad_glBufferSubData;
     PFNGLGETUNIFORMLOCATIONPROC original_uniform_location = glad_glGetUniformLocation;
+    PFNGLFENCESYNCPROC original_fence_sync = glad_glFenceSync;
 };
+
+// Inject readiness failures at the public GL boundary without changing the
+// ring's zero-timeout polling or relying on device speed. Storage stays real.
+class ScopedReadbackNotReady {
+public:
+    explicit ScopedReadbackNotReady(GLenum result)
+        : m_result(result) {
+        current = this;
+        glad_glClientWaitSync = Wait;
+    }
+    ~ScopedReadbackNotReady() {
+        glad_glClientWaitSync = m_original_wait;
+        current = nullptr;
+    }
+    ScopedReadbackNotReady(const ScopedReadbackNotReady&) = delete;
+    ScopedReadbackNotReady& operator=(const ScopedReadbackNotReady&) = delete;
+    std::size_t polls = 0;
+
+private:
+    static GLenum GLAPIENTRY Wait(GLsync, GLbitfield, GLuint64 timeout) {
+        EXPECT_EQ(timeout, 0u);
+        ++current->polls;
+        return current->m_result;
+    }
+    inline static ScopedReadbackNotReady* current = nullptr;
+    PFNGLCLIENTWAITSYNCPROC m_original_wait = glad_glClientWaitSync;
+    GLenum m_result;
+};
+
+TEST_F(FoliageRebuildTest, CompletedCountIsUnknownAcrossOrdinaryAndFrozenGenerationRollover) {
+    for (const bool frozen : {false, true}) {
+        SCOPED_TRACE(frozen);
+        ScopedPass scoped;
+        auto& pass = scoped.pass;
+        ASSERT_NO_FATAL_FAILURE(Initialize(pass));
+        pass.set_readback_enabled(true);
+        pass.set_evidence_enabled(true);
+        const auto chunks = Chunks(1);
+        Rebuild(pass, chunks, 1);
+        glFinish();
+        Rebuild(pass, chunks, 2);
+        ASSERT_TRUE(pass.frame_instance_count_known());
+        ASSERT_GT(pass.frame_instance_count(), 0u);
+        const auto first_generation = pass.build_generation();
+        const auto first_count = pass.frame_instance_count();
+        {
+            Attribution::FoliageFrameScope frame(true);
+            if (frozen) {
+                pass.set_evidence_frame(3, 1);
+                ASSERT_TRUE(pass.begin_qualification());
+            } else {
+                pass.set_wind({1, 0});
+                Rebuild(pass, chunks, 3);
+            }
+            EXPECT_EQ(pass.build_generation(), first_generation + 1);
+            EXPECT_FALSE(pass.frame_instance_count_known());
+            EXPECT_EQ(pass.frame_instance_count(), 0u);
+            EXPECT_FALSE(frame.snapshot().count_known);
+            EXPECT_EQ(frame.snapshot().generated_count, 0u);
+            EXPECT_EQ(frame.snapshot().rebuild.rebuild_calls, 1u);
+        }
+        // The old blade snapshot is still identifiable for qualification, but
+        // cannot stand in for the current command's as-yet-unknown count.
+        EXPECT_EQ(pass.instance_generation(), first_generation);
+        EXPECT_EQ(pass.instances().size(), first_count);
+        glFinish();
+        std::uint64_t frame_id = 4;
+        for (const auto readiness : {GL_TIMEOUT_EXPIRED, GL_WAIT_FAILED}) {
+            ScopedReadbackNotReady unavailable(readiness);
+            Attribution::FoliageFrameScope frame(true);
+            Rebuild(pass, chunks, frame_id++);
+            EXPECT_GT(unavailable.polls, 0u);
+            EXPECT_EQ(pass.build_generation(), first_generation + 1);
+            EXPECT_FALSE(pass.frame_instance_count_known());
+            EXPECT_EQ(pass.frame_instance_count(), 0u);
+            EXPECT_FALSE(frame.snapshot().count_known);
+            EXPECT_EQ(frame.snapshot().rebuild.copied_bytes, 0u);
+        }
+        {
+            Attribution::FoliageFrameScope frame(true);
+            Rebuild(pass, chunks, frame_id++);
+            EXPECT_TRUE(pass.frame_instance_count_known());
+            EXPECT_EQ(pass.frame_instance_count(), first_count);
+            EXPECT_EQ(pass.frame_instance_count_generation(), pass.build_generation());
+            EXPECT_TRUE(frame.snapshot().count_known);
+            EXPECT_EQ(frame.snapshot().generated_count, first_count);
+            EXPECT_EQ(frame.snapshot().count_generation, pass.build_generation());
+        }
+        if (frozen) {
+            // The other frozen caller rebuilds on wind changes after the
+            // independent qualification rebuild has already completed.
+            ASSERT_TRUE(pass.qualification_rebuild_complete());
+            pass.set_wind({1, 0});
+            ScopedReadbackNotReady unavailable(GL_TIMEOUT_EXPIRED);
+            Attribution::FoliageFrameScope frame(true);
+            Rebuild(pass, chunks, frame_id);
+            EXPECT_GT(unavailable.polls, 0u);
+            EXPECT_EQ(pass.build_generation(), first_generation + 2);
+            EXPECT_FALSE(pass.frame_instance_count_known());
+            EXPECT_FALSE(frame.snapshot().count_known);
+        }
+    }
+}
+
+TEST_F(FoliageRebuildTest, EmptyAndInactiveGenerationsCannotReadBackThePreviousCommand) {
+    for (const int empty_kind : {0, 1, 2, 3}) {
+        SCOPED_TRACE(empty_kind);
+        ScopedPass scoped;
+        auto& pass = scoped.pass;
+        ASSERT_NO_FATAL_FAILURE(Initialize(pass));
+        pass.set_readback_enabled(true);
+        auto chunks = Chunks(1);
+        Rebuild(pass, chunks, 1);
+        glFinish();
+        Rebuild(pass, chunks, 2);
+        ASSERT_TRUE(pass.frame_instance_count_known());
+        ASSERT_GT(pass.frame_instance_count(), 0u);
+        const auto old_generation = pass.build_generation();
+        if (empty_kind == 0)
+            chunks.clear();
+        else if (empty_kind == 1)
+            chunks.front().density = 0;
+        else if (empty_kind == 2)
+            pass.set_enabled(false);
+        else
+            pass.set_wind({1, 0}); // Force the null-query build through admission.
+        for (std::uint64_t frame_id = 3; frame_id <= 5; ++frame_id) {
+            Attribution::FoliageFrameScope frame(true);
+            if (empty_kind == 3) {
+                pass.set_evidence_frame(frame_id, 1);
+                pass.rebuild_instances(chunks, nullptr, nullptr, kCamera);
+            } else {
+                Rebuild(pass, chunks, frame_id);
+            }
+            EXPECT_EQ(pass.build_generation(), old_generation + 1);
+            EXPECT_TRUE(pass.frame_instance_count_known());
+            EXPECT_EQ(pass.frame_instance_count(), 0u);
+            EXPECT_EQ(pass.frame_instance_count_generation(), pass.build_generation());
+            EXPECT_TRUE(frame.snapshot().count_known);
+            EXPECT_EQ(frame.snapshot().generated_count, 0u);
+            EXPECT_TRUE(pass.instances().empty());
+            glFinish();
+        }
+        chunks = Chunks(1);
+        pass.set_enabled(true);
+        pass.set_wind({2, 0});
+        Rebuild(pass, chunks, 6);
+        EXPECT_FALSE(pass.frame_instance_count_known());
+        glFinish();
+        Rebuild(pass, chunks, 7);
+        EXPECT_TRUE(pass.frame_instance_count_known());
+        EXPECT_GT(pass.frame_instance_count(), 0u);
+        EXPECT_EQ(pass.frame_instance_count_generation(), pass.build_generation());
+    }
+}
+
+TEST_F(FoliageRebuildTest, RecreationAndWorldClearRetireCountAndRebuildUnchangedInputs) {
+    for (const int reset_kind : {0, 1, 2}) {
+        SCOPED_TRACE(reset_kind);
+        ScopedPass scoped;
+        auto& pass = scoped.pass;
+        ASSERT_NO_FATAL_FAILURE(Initialize(pass));
+        pass.set_readback_enabled(true);
+        const auto chunks = Chunks(1);
+        Rebuild(pass, chunks, 1);
+        glFinish();
+        Rebuild(pass, chunks, 2);
+        ASSERT_TRUE(pass.frame_instance_count_known());
+        ASSERT_GT(pass.frame_instance_count(), 0u);
+        const auto generation = pass.build_generation();
+        if (reset_kind == 2) {
+            pass.clear_ground_meshes();
+        } else {
+            pass.destroy_compute();
+            if (reset_kind == 1) {
+                pass.destroy_buffers();
+                pass.init_buffers();
+            }
+            pass.init_compute(LUMINUMBRA_SOURCE_ROOT);
+            ASSERT_TRUE(pass.gpu_scatter_active());
+        }
+        EXPECT_TRUE(pass.frame_instance_count_known());
+        EXPECT_EQ(pass.frame_instance_count(), 0u);
+        EXPECT_TRUE(pass.instances().empty());
+        // Same phase, wind, camera and chunks: resource retirement itself must
+        // invalidate the scatter cache rather than requiring a settings change.
+        Rebuild(pass, chunks, 3);
+        EXPECT_EQ(pass.build_generation(), generation + 1);
+        EXPECT_FALSE(pass.frame_instance_count_known());
+        glFinish();
+        Rebuild(pass, chunks, 4);
+        EXPECT_TRUE(pass.frame_instance_count_known());
+        EXPECT_GT(pass.frame_instance_count(), 0u);
+        EXPECT_EQ(pass.frame_instance_count_generation(), pass.build_generation());
+    }
+}
+
+TEST_F(FoliageRebuildTest, ReenabledReadbackRetriesOrdinaryAndFrozenSnapshots) {
+    for (const int mode : {0, 1, 2}) {
+        SCOPED_TRACE(mode);
+        ScopedPass scoped;
+        auto& pass = scoped.pass;
+        ASSERT_NO_FATAL_FAILURE(Initialize(pass));
+        pass.set_readback_enabled(true);
+        pass.set_evidence_enabled(true);
+        const auto chunks = Chunks(1);
+        Rebuild(pass, chunks, 1);
+        glFinish();
+        Rebuild(pass, chunks, 2);
+        ASSERT_TRUE(pass.frame_instance_count_known());
+        ASSERT_GT(pass.frame_instance_count(), 0u);
+        if (mode != 0) {
+            ASSERT_TRUE(pass.begin_qualification());
+            glFinish();
+            Rebuild(pass, chunks, 3);
+            ASSERT_TRUE(pass.frame_instance_count_known());
+        }
+        auto generation = pass.build_generation();
+        pass.set_readback_enabled(false);
+        EXPECT_FALSE(pass.frame_instance_count_known());
+        if (mode == 2) {
+            // Frozen wind rebuilds and subsequent retries must obey the
+            // disabled readback policy as well as ordinary GPU builds do.
+            RebuildGlCalls calls;
+            pass.set_wind({1, 0});
+            Rebuild(pass, chunks, 4);
+            Rebuild(pass, chunks, 5);
+            EXPECT_EQ(calls.fences, 0u);
+            EXPECT_EQ(pass.build_generation(), generation + 1);
+            ++generation;
+        }
+        pass.set_readback_enabled(true);
+        {
+            ScopedReadbackNotReady unavailable(GL_TIMEOUT_EXPIRED);
+            RebuildGlCalls calls;
+            Rebuild(pass, chunks, 6);
+            EXPECT_EQ(calls.fences, 1u);
+            EXPECT_GT(unavailable.polls, 0u);
+            EXPECT_FALSE(pass.frame_instance_count_known());
+            EXPECT_EQ(pass.build_generation(), generation);
+        }
+        glFinish();
+        Rebuild(pass, chunks, 7);
+        EXPECT_TRUE(pass.frame_instance_count_known());
+        EXPECT_GT(pass.frame_instance_count(), 0u);
+        EXPECT_EQ(pass.frame_instance_count_generation(), generation);
+    }
+}
 
 TEST_F(FoliageRebuildTest, EvidenceIsExplicitAndPreservesLegacyHashAndGpuInstanceBytes) {
     ScopedPass scoped;
@@ -502,10 +780,11 @@ TEST_F(FoliageRebuildTest, FullResourceRecreationRestoresSupportAndMatchesFreshB
         EXPECT_EQ(rebuilt.surface_misses, 2u);
         EXPECT_EQ(rebuilt.dirty_columns, 2u);
         EXPECT_EQ(calls.surface_uploads, 2u);
-        EXPECT_EQ(calls.surface_upload_bytes, 2u * 8192u * sizeof(glm::vec4));
+        EXPECT_EQ(calls.surface_upload_bytes, sizeof(glm::vec4) * 2u * 8192u);
         EXPECT_EQ(calls.scratch_allocations, 3u);
         EXPECT_EQ(calls.uploaded_bytes,
-                  2u * (8192u * sizeof(glm::vec4) + 8u * sizeof(float) + sizeof(std::uint32_t)) +
+                  sizeof(glm::vec4) * 2u * 8192u +
+                      512u * (8u * sizeof(float) + sizeof(std::uint32_t)) +
                       pass.archetype_count() * 8u * sizeof(float) + 5u * sizeof(GLuint));
         EXPECT_EQ(rebuilt.uploaded_bytes, calls.uploaded_bytes);
     }
@@ -573,33 +852,40 @@ TEST_F(FoliageRebuildTest, QualificationRequiresCollectedInputsAndKeepsLegacyIde
 }
 
 TEST_F(FoliageRebuildTest, PaletteReloadUsesOnlyCurrentArchetypeBytes) {
-    ScopedPass reused;
-    ASSERT_NO_FATAL_FAILURE(Initialize(reused.pass));
-    reused.pass.set_evidence_enabled(true);
-    const auto root = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT);
-    const auto full_palette = root / "data/common/foliage/scatter_set.json";
-    const auto small_palette = root / "test/rendering/fixtures/foliage_palette_small.json";
-    std::uint64_t frame_id = 1;
-    for (const std::size_t columns : {2u, 1u, 2u}) {
-        const auto& palette = columns == 1 ? small_palette : full_palette;
-        ASSERT_TRUE(reused.pass.load_scatter_set(palette));
-        const auto chunks = Chunks(columns); // Changed input forces the existing rebuild policy.
+    for (const bool gpu : {false, true}) {
+        SCOPED_TRACE(gpu);
+        ScopedPass reused;
+        ASSERT_NO_FATAL_FAILURE(Initialize(reused.pass, gpu));
+        reused.pass.set_evidence_enabled(true);
+        const auto root = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT);
+        const auto full_palette = root / "data/common/foliage/scatter_set.json";
+        const auto small_palette = root / "test/rendering/fixtures/foliage_palette_small.json";
+        const auto chunks = Chunks(2);
+        std::uint64_t frame_id = 1;
         Rebuild(reused.pass, chunks, frame_id++);
-        const auto records = GpuRecords();
-        ASSERT_FALSE(records.empty());
-        const auto hash = reused.pass.uploaded_input_hash();
-        EXPECT_EQ(hash, LegacyUploadedHash(reused.pass, chunks.size()));
-        GLint64 palette_size = 0;
-        glGetNamedBufferParameteri64v(Binding(4), GL_BUFFER_SIZE, &palette_size);
-        EXPECT_EQ(palette_size,
-                  static_cast<GLint64>(reused.pass.archetype_count() * 8 * sizeof(float)));
-        ScopedPass fresh;
-        ASSERT_NO_FATAL_FAILURE(Initialize(fresh.pass));
-        ASSERT_TRUE(fresh.pass.load_scatter_set(palette));
-        fresh.pass.set_evidence_enabled(true);
-        Rebuild(fresh.pass, chunks, frame_id);
-        EXPECT_EQ(hash, fresh.pass.uploaded_input_hash());
-        ExpectSame(records, GpuRecords());
+        for (const auto& palette : {small_palette, full_palette}) {
+            const auto generation = reused.pass.build_generation();
+            ASSERT_TRUE(reused.pass.load_scatter_set(palette));
+            Rebuild(reused.pass, chunks, frame_id++);
+            EXPECT_EQ(reused.pass.build_generation(), generation + 1);
+            const auto records = Records(reused.pass, gpu);
+            ASSERT_FALSE(records.empty());
+            const auto hash = reused.pass.uploaded_input_hash();
+            if (gpu) {
+                EXPECT_EQ(hash, LegacyUploadedHash(reused.pass, chunks.size()));
+                GLint64 palette_size = 0;
+                glGetNamedBufferParameteri64v(Binding(4), GL_BUFFER_SIZE, &palette_size);
+                EXPECT_EQ(palette_size,
+                          static_cast<GLint64>(reused.pass.archetype_count() * 8 * sizeof(float)));
+            }
+            ScopedPass fresh;
+            ASSERT_NO_FATAL_FAILURE(Initialize(fresh.pass, gpu));
+            ASSERT_TRUE(fresh.pass.load_scatter_set(palette));
+            fresh.pass.set_evidence_enabled(true);
+            Rebuild(fresh.pass, chunks, frame_id);
+            EXPECT_EQ(hash, fresh.pass.uploaded_input_hash());
+            ExpectSame(records, Records(fresh.pass, gpu));
+        }
     }
 }
 
@@ -962,6 +1248,7 @@ TEST_F(FoliageRebuildTest, StableSlotsUploadOnlyDirtySurfacesAndRetainMetadataAn
         EXPECT_EQ(calls.surface_upload_bytes, 8192u * sizeof(glm::vec4));
         EXPECT_EQ(calls.uploaded_bytes, 8192u * sizeof(glm::vec4) + 5u * sizeof(GLuint));
         EXPECT_EQ(edited.uploaded_bytes, calls.uploaded_bytes);
+        EXPECT_EQ(edited.uploads, calls.uploads);
         EXPECT_EQ(calls.scratch_allocations, 0u);
     }
     EXPECT_EQ(pass.uploaded_input_hash(), LegacyUploadedHash(pass, chunks.size()));
@@ -974,7 +1261,7 @@ TEST_F(FoliageRebuildTest, SlotReuseAfterEditsAndHorizonMotionMatchesFreshFullBu
     reused.pass.set_evidence_enabled(true);
     const auto all = SupportedChunks(3);
     for (int column = 0; column < 3; ++column)
-        UploadGround(reused.pass, static_cast<Luminumbra::ChunkID>(column + 1), {column, 0, 0});
+        UploadGround(reused.pass, (static_cast<Luminumbra::ChunkID>(column) + 1), {column, 0, 0});
     std::uint64_t frame = 1;
     constexpr std::array<std::array<std::size_t, 2>, 5> horizons{
         {{0, 1}, {0, 1}, {1, 2}, {2, 0}, {0, 1}}};
@@ -995,7 +1282,7 @@ TEST_F(FoliageRebuildTest, SlotReuseAfterEditsAndHorizonMotionMatchesFreshFullBu
         fresh.pass.set_evidence_enabled(true);
         for (int column = 0; column < 3; ++column)
             UploadGround(fresh.pass,
-                         static_cast<Luminumbra::ChunkID>(column + 1),
+                         (static_cast<Luminumbra::ChunkID>(column) + 1),
                          {column, 0, 0},
                          edited && column == 1 ? 6.0f : 8.0f);
         Rebuild(fresh.pass, chunks, frame++);
@@ -1105,8 +1392,9 @@ TEST_F(FoliageRebuildTest, WorkerResultsMatchSynchronousInstanceBytesAndInputHas
         const auto records = Records(pass, gpu);
         ASSERT_FALSE(records.empty());
         const auto hash = pass.uploaded_input_hash();
-        if (gpu)
+        if (gpu) {
             EXPECT_EQ(hash, LegacyUploadedHash(pass, chunks.size()));
+        }
 
         ScopedPass fresh;
         ASSERT_NO_FATAL_FAILURE(Initialize(fresh.pass, gpu));
@@ -1310,8 +1598,9 @@ TEST_F(FoliageRebuildTest,
         const auto records = Records(pass, gpu);
         ASSERT_FALSE(records.empty());
         const auto hash = pass.uploaded_input_hash();
-        if (gpu)
+        if (gpu) {
             ASSERT_TRUE(hash.has_value());
+        }
 
         ScopedPass fresh;
         ASSERT_NO_FATAL_FAILURE(Initialize(fresh.pass, gpu));
@@ -1356,8 +1645,9 @@ TEST_F(FoliageRebuildTest, CompleteCaptureMatchesFreshBuildWithBlockedAndStaleWo
         const auto records = Records(pass, gpu);
         ASSERT_FALSE(records.empty());
         const auto hash = pass.uploaded_input_hash();
-        if (gpu)
+        if (gpu) {
             ASSERT_TRUE(hash.has_value());
+        }
         EXPECT_EQ(executor.jobs.get_runtime_stats().queue_depth, 4u);
 
         executor.drain();
@@ -1488,4 +1778,274 @@ TEST_F(FoliageRebuildTest, WorkerAdmissionBoundsEveryFrameAndLeavesAFloodedExecu
     EXPECT_EQ(executor.jobs.get_runtime_stats().queue_depth, 64u);
 }
 
+TEST_F(FoliageRebuildTest, DirtyBatchesStopAtCleanSlotsAndMatchFreshBuild) {
+    ScopedPass reused;
+    ASSERT_NO_FATAL_FAILURE(Initialize(reused.pass));
+    reused.pass.use_rendered_ground();
+    auto chunks = SupportedChunks(9);
+    for (std::size_t index = 0; index < chunks.size(); ++index) {
+        const auto x = static_cast<int>(index % 3);
+        const auto z = static_cast<int>(index / 3);
+        chunks[index].chunk_xz = {x, z};
+        chunks[index].origin = {
+            static_cast<float>(x) * kColumnExtent, 0, static_cast<float>(z) * kColumnExtent};
+        UploadGround(reused.pass, static_cast<Luminumbra::ChunkID>(index + 1), {x, 0, z});
+    }
+    for (std::uint64_t frame = 1; frame <= 3; ++frame)
+        Rebuild(reused.pass, chunks, frame);
+    ASSERT_FALSE(GpuRecords().empty());
+    // Read the physical ownership map rather than assuming distance-sort order.
+    std::array<std::uint32_t, 9> slots{};
+    std::array<float, 9 * 8> params{};
+    glGetNamedBufferSubData(
+        Binding(7), std::size_t{512} * 8 * sizeof(float), sizeof(slots), slots.data());
+    glGetNamedBufferSubData(Binding(0), 0, sizeof(params), params.data());
+    std::array<bool, 9> edited{};
+    for (std::size_t index = 0; index < slots.size(); ++index) {
+        if (slots[index] <= 2 || slots[index] == 4) {
+            const auto x = static_cast<int>(params[index * 8 + 4]);
+            const auto z = static_cast<int>(params[index * 8 + 5]);
+            ASSERT_GE(x, 0);
+            ASSERT_LT(x, 3);
+            ASSERT_GE(z, 0);
+            ASSERT_LT(z, 3);
+            const auto source = static_cast<std::size_t>(x) + static_cast<std::size_t>(z) * 3;
+            edited[source] = true;
+            UploadGround(reused.pass, static_cast<Luminumbra::ChunkID>(source + 1), {x, 0, z}, 6);
+        }
+    }
+    ASSERT_EQ(std::count(edited.begin(), edited.end(), true), 4);
+    // A clean gap must neither join the transfer nor be copied into batch scratch.
+    {
+        RebuildGlCalls calls;
+        const auto work = RebuildAttributed(reused.pass, chunks, 4);
+        EXPECT_EQ(work.surface_misses, 4u);
+        EXPECT_EQ(work.dirty_columns, 4u);
+        EXPECT_FALSE(work.backlog);
+        EXPECT_EQ(work.uploads, 3u); // Three adjacent slots, one isolated slot, command.
+        EXPECT_EQ(work.uploads, calls.uploads);
+        EXPECT_EQ(work.uploaded_bytes, sizeof(glm::vec4) * 4u * 8192u + 5u * sizeof(GLuint));
+        EXPECT_EQ(work.uploaded_bytes, calls.uploaded_bytes);
+        EXPECT_EQ(work.copied_bytes,
+                  chunks.size() * (sizeof(FoliagePass::ChunkScatter) + 8u * sizeof(float) +
+                                   sizeof(std::uint32_t)) +
+                      sizeof(glm::vec4) * 3u * 8192u);
+    }
+    const auto records = GpuRecords();
+    ScopedPass fresh;
+    ASSERT_NO_FATAL_FAILURE(Initialize(fresh.pass));
+    fresh.pass.use_rendered_ground();
+    for (std::size_t index = 0; index < chunks.size(); ++index)
+        UploadGround(fresh.pass,
+                     static_cast<Luminumbra::ChunkID>(index + 1),
+                     {static_cast<int>(index % 3), 0, static_cast<int>(index / 3)},
+                     edited[index] ? 6.0f : 8.0f);
+    for (std::uint64_t frame = 1; frame <= 3; ++frame)
+        Rebuild(fresh.pass, chunks, frame);
+    ExpectSame(records, GpuRecords());
+}
+
+TEST_F(FoliageRebuildTest, DeterministicWorkBudgetMovementEditDrainAndIdle) {
+    using namespace Luminumbra::TestSupport;
+    for (const bool gpu : {false, true}) {
+        SCOPED_TRACE(gpu);
+        ScopedPass scoped;
+        auto& pass = scoped.pass;
+        ASSERT_NO_FATAL_FAILURE(Initialize(pass, gpu));
+        pass.use_rendered_ground();
+        // Nine supported columns exceed the production four-column admission
+        // bound. Fixture storage is bounded to 9 * 8192 candidate records.
+        auto chunks = SupportedChunks(9);
+        for (std::size_t index = 0; index < chunks.size(); ++index) {
+            const auto x = static_cast<int>(index % 3);
+            const auto z = static_cast<int>(index / 3);
+            chunks[index].chunk_xz = {x, z};
+            chunks[index].origin = {
+                static_cast<float>(x) * kColumnExtent, 0, static_cast<float>(z) * kColumnExtent};
+            UploadGround(pass, static_cast<Luminumbra::ChunkID>(index + 1), {x, 0, z});
+        }
+        const auto limits = WorkLimits("foliage");
+        WorkCounts peak;
+        std::uint64_t frame_id = 0;
+        std::uint64_t previous_backlog = 0;
+        const auto measure = [&](const glm::vec3& camera, std::uint64_t step) {
+            RebuildGlCalls calls;
+            const auto work = RebuildAttributed(
+                pass, chunks, ++frame_id, FoliagePass::Preparation::Deferred, camera);
+            if (gpu) {
+                EXPECT_EQ(work.uploads, calls.uploads);
+                EXPECT_EQ(work.uploaded_bytes, calls.uploaded_bytes);
+            }
+            const auto growth = work.deferred_columns > previous_backlog
+                                    ? work.deferred_columns - previous_backlog
+                                    : 0;
+            previous_backlog = work.deferred_columns;
+            const WorkCounts observed{{"surface_misses", work.surface_misses},
+                                      {"surface_samples", work.surface_samples},
+                                      {"uploaded_bytes", work.uploaded_bytes},
+                                      {"uploads", work.uploads},
+                                      {"copied_bytes", work.copied_bytes},
+                                      {"hashed_bytes", work.hashed_bytes},
+                                      {"deferred_columns", work.deferred_columns},
+                                      {"backlog_growth", growth},
+                                      {"drain_steps", step}};
+            EXPECT_TRUE(CheckWork(observed, "foliage"));
+            PeakWork(peak, observed);
+            EXPECT_EQ(work.backlog, work.deferred_columns != 0);
+            return work;
+        };
+        Attribution::FoliageRebuild work{};
+        for (std::uint64_t step = 1; step <= limits.at("drain_steps"); ++step) {
+            work = measure(kCamera, step);
+            if (step == 1) {
+                EXPECT_EQ(work.surface_misses, 4u);
+                EXPECT_GT(work.surface_samples, 0u);
+                EXPECT_EQ(work.deferred_columns, 5u);
+                EXPECT_EQ(work.uploads, gpu ? 4u : 1u);
+            }
+            if (!work.backlog)
+                break;
+        }
+        ASSERT_FALSE(work.backlog) << "foliage failed to converge in the pinned step bound";
+        ASSERT_EQ(work.deferred_columns, 0u);
+        EXPECT_EQ(pass.gpu_scatter_active(), gpu);
+        EXPECT_FALSE(Records(pass, gpu).empty());
+
+        // Cross a signature cell while reusing the same column support.
+        const glm::vec3 moved_camera{kCamera.x + 16, kCamera.y, kCamera.z};
+        const auto moved = measure(moved_camera, 1);
+        EXPECT_EQ(moved.surface_misses, 0u);
+        EXPECT_GT(moved.uploaded_bytes, 0u);
+        EXPECT_EQ(moved.uploads, 1u);
+        EXPECT_FALSE(moved.backlog);
+        // A real support revision must invalidate exactly one column.
+        UploadGround(pass, 1, {0, 0, 0}, 6);
+        const auto edited = measure(moved_camera, 1);
+        EXPECT_EQ(edited.surface_misses, 1u);
+        EXPECT_GT(edited.surface_samples, 0u);
+        EXPECT_GT(edited.uploaded_bytes, 0u);
+        EXPECT_EQ(edited.uploads, gpu ? 2u : 1u);
+        EXPECT_FALSE(edited.backlog);
+
+        // A standing camera after settlement must do precisely zero work for
+        // every idle counter, including a single upload/hash byte.
+        for (int idle_step = 0; idle_step < 8; ++idle_step) {
+            const auto idle = RebuildAttributed(
+                pass, chunks, ++frame_id, FoliagePass::Preparation::Deferred, moved_camera);
+            EXPECT_TRUE(CheckWork({{"uploaded_bytes", idle.uploaded_bytes},
+                                   {"hashed_bytes", idle.hashed_bytes},
+                                   {"uploads", idle.uploads},
+                                   {"surface_misses", idle.surface_misses},
+                                   {"surface_samples", idle.surface_samples},
+                                   {"deferred_columns", idle.deferred_columns}},
+                                  "idle"));
+            ExpectReused(idle, gpu);
+        }
+        EXPECT_TRUE(CheckWork(peak, "foliage"));
+    }
+}
+
+// Fixed 64x64 color storage for exercising the public draw path.
+struct ScopedDrawTarget {
+    GLuint framebuffer = 0;
+    GLuint color = 0;
+    ScopedDrawTarget() {
+        glGenRenderbuffers(1, &color);
+        glBindRenderbuffer(GL_RENDERBUFFER, color);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, 64, 64);
+        glGenFramebuffers(1, &framebuffer);
+        glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, color);
+    }
+    ~ScopedDrawTarget() {
+        glDeleteFramebuffers(1, &framebuffer);
+        glDeleteRenderbuffers(1, &color);
+    }
+};
+
+TEST_F(FoliageRebuildTest, GpuDrawsSurviveChurnBeforeFirstSnapshotAndAfterEmptySnapshot) {
+    ScopedPass scoped;
+    auto& pass = scoped.pass;
+    ASSERT_NO_FATAL_FAILURE(Initialize(pass));
+    pass.init_shader(LUMINUMBRA_SOURCE_ROOT);
+    ASSERT_TRUE(pass.shader()->IsValid());
+    pass.set_readback_enabled(true);
+    ScopedDrawTarget target;
+    ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER),
+              static_cast<GLenum>(GL_FRAMEBUFFER_COMPLETE));
+    Luminumbra::Rendering::RenderContext context;
+    context.screen_width = context.screen_height = 64;
+    context.lit_scene = Luminumbra::Rendering::FboHandle{target.framebuffer};
+    const Luminumbra::Rendering::Camera camera(kCamera);
+    auto chunks = Chunks(1);
+    // Retire each result, then invalidate it before adoption. CPU counts remain
+    // unknown while the current indirect GPU command must still be submitted.
+    for (std::uint64_t frame = 1; frame <= 4; ++frame) {
+        pass.set_wind({static_cast<float>(frame), 0});
+        Rebuild(pass, chunks, frame);
+        ASSERT_FALSE(GpuRecords().empty());
+        EXPECT_TRUE(pass.instances().empty());
+        EXPECT_FALSE(pass.frame_instance_count_known());
+        pass.execute(context, camera);
+        EXPECT_EQ(pass.last_draw_calls(), 1u);
+        glFinish();
+    }
+    // A valid zero snapshot must not prevent a later nonempty GPU draw either.
+    // A zero scale normalizes to 1.0f. Chunks(1) sets every chunk's density to
+    // 0.5f; with kMaxCandidatesPerChunk == 8192 this positive scale gives exactly
+    // 0.5 * 8192 / 16384 == 0.25. Both CPU std::lround and GPU round therefore
+    // yield zero candidates for every chunk, without a rounding tie.
+    pass.set_density_scale(1.0f / 16384.0f);
+    Rebuild(pass, chunks, 5);
+    glFinish();
+    Rebuild(pass, chunks, 6);
+    ASSERT_TRUE(pass.frame_instance_count_known());
+    EXPECT_EQ(pass.frame_instance_count(), 0u);
+    pass.execute(context, camera);
+    EXPECT_EQ(pass.last_draw_calls(), 1u); // The indirect command owns the zero count.
+    pass.set_density_scale(1.6f);
+    Rebuild(pass, chunks, 7);
+    ASSERT_FALSE(GpuRecords().empty());
+    EXPECT_TRUE(pass.instances().empty());
+    pass.execute(context, camera);
+    EXPECT_EQ(pass.last_draw_calls(), 1u);
+    glFinish();
+    Rebuild(pass, chunks, 8);
+    EXPECT_FALSE(pass.instances().empty());
+    EXPECT_EQ(pass.frame_instance_count_generation(), pass.build_generation());
+    // Empty input clears the draw guard even with a previously held snapshot.
+    chunks.clear();
+    Rebuild(pass, chunks, 9);
+    pass.execute(context, camera);
+    EXPECT_EQ(pass.last_draw_calls(), 0u);
+}
+
+TEST_F(FoliageRebuildTest, OutdatedRevisionReadbackIsDiscardedBeforeAdoption) {
+    ScopedPass scoped;
+    auto& pass = scoped.pass;
+    ASSERT_NO_FATAL_FAILURE(Initialize(pass));
+    pass.use_rendered_ground();
+    pass.set_readback_enabled(true);
+    const auto chunks = SupportedChunks(1);
+    UploadGround(pass, 1, {0, 0, 0});
+    Rebuild(pass, chunks, 1);
+    const auto outdated_generation = pass.build_generation();
+    // Finish commands without consuming the public asynchronous result. This
+    // makes readiness deterministic; no timing value participates in the test.
+    glFinish();
+    ASSERT_FALSE(GpuRecords().empty());
+    ASSERT_TRUE(pass.instances().empty());
+    UploadGround(pass, 1, {0, 0, 0}, 6);
+    const auto changed = RebuildAttributed(pass, chunks, 2);
+    EXPECT_EQ(changed.stale_results, 1u);
+    EXPECT_EQ(pass.build_generation(), outdated_generation + 1);
+    EXPECT_TRUE(pass.instances().empty());
+    EXPECT_NE(pass.frame_instance_count_generation(), outdated_generation);
+    glFinish();
+    Rebuild(pass, chunks, 3);
+    ASSERT_FALSE(pass.instances().empty());
+    EXPECT_EQ(pass.frame_instance_count_generation(), pass.build_generation());
+    for (const auto& record : pass.instances())
+        EXPECT_LT(record.pos[1], 8.0f);
+}
 } // namespace

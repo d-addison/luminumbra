@@ -95,8 +95,9 @@ TEST_F(SavedWorldCatalogResponsiveness, LargeFixtureNeverBlocksTheOwningThread) 
 
     AsyncSavedWorldCatalog catalog;
     const auto scan_start = std::chrono::steady_clock::now();
-    catalog.Request(
-        [root](const std::stop_token& stop) { return EnumerateSavedWorlds(root, stop); });
+    catalog.Request([root](const std::stop_token& stop) {
+        return EnumerateSavedWorlds(root, fs::path(LUMINUMBRA_SOURCE_ROOT), stop);
+    });
     const double request_ms = ElapsedMs(scan_start);
     EXPECT_LT(request_ms, 1000.0);
 
@@ -173,12 +174,12 @@ TEST_F(SavedWorldCatalogResponsiveness, CorruptRegionFileIsRefusedAndStaleReques
     const auto intact_report = WriteSyntheticSave(Spec("catalog-intact", 8), intact_root);
     ASSERT_TRUE(intact_report.ok) << intact_report.error;
 
-    const auto corrupt = EnumerateSavedWorlds(corrupt_root);
+    const auto corrupt = EnumerateSavedWorlds(corrupt_root, fs::path(LUMINUMBRA_SOURCE_ROOT));
     ASSERT_EQ(corrupt.worlds.size(), 1u);
     const std::string corrupt_error = corrupt.worlds.front().error;
     EXPECT_FALSE(corrupt_error.empty());
 
-    const auto intact = EnumerateSavedWorlds(intact_root);
+    const auto intact = EnumerateSavedWorlds(intact_root, fs::path(LUMINUMBRA_SOURCE_ROOT));
     ASSERT_EQ(intact.worlds.size(), 1u);
     EXPECT_TRUE(intact.worlds.front().error.empty()) << intact.worlds.front().error;
     EXPECT_NE(corrupt_error, intact.worlds.front().error);

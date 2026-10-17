@@ -1,5 +1,7 @@
 # src/CMakeLists.txt
 
+luminumbra_baseline_startup("${CMAKE_CURRENT_SOURCE_DIR}/startup/RuntimeEntry.cpp")
+
 # --- Common Library (Core Engine Logic) ---
 add_subdirectory(luminumbra_common)
 
@@ -45,6 +47,11 @@ target_link_libraries(luminumbra_client PUBLIC
     imgui
     stb_headers
 )
+
+if(WIN32)
+    # SteadyFrameTiming pairs the coarse fallback's timer-resolution request.
+    target_link_libraries(luminumbra_client PUBLIC winmm)
+endif()
 
 # --- Client QA Library (RuntimeScenarioHarness) ---
 # The QA scenario harness (the gate/scenario driver behind

@@ -239,6 +239,13 @@ resident chunk data; far terrain uses region tiles and reduced SDF authority.
 The [SHIELD SDF contract](shield/sdf-contract.md) defines sign convention,
 sample ownership, shared borders, and LOD behavior.
 
+Legacy far snapshots track world/region authority publication separately from
+each captured chunk's voxel revision and provenance. A direct edit to a resident
+chunk's SDF followed by `mark_voxel_data_dirty()` advances the chunk revision and
+stales an earlier capture without advancing the publication counters. Shrinking
+or growing the graphics horizon changes derived mesh admission, preserving
+edited authority and rejection of stale captures.
+
 Generation and meshing may execute through `JobSystem`, which has high and
 normal priority lanes plus starvation protection. Completion timing is not
 publication timing: batches become visible in deterministic dispatch/tick order.
@@ -594,13 +601,65 @@ zero constant rain/evaporation rates. Explicit false water resolution selects
 Medium; lower-level session setters can retain disabled compatibility workloads.
 Diagnostic rosters and telemetry remain opt-in.
 
+TCP Hello admission, the lockstep handshake and replay playback compare the same
+`GameSession::PresetContentHash()` alongside the effective configuration identity.
+The content hash binds the resolved preset and its biome/structure dependencies,
+plus every immediate regular `data/common/creatures/species/*.json` file, including
+inline `brain` and `genome_ranges` overrides (issue #338). Species apply even with
+biomes and structures disabled. All dependencies use one manifest: sorted generic
+UTF-8 logical paths with `/` separators and exact-byte FNV-1a-64 file hashes, folded
+with the canonical preset JSON. Absolute runtime roots and clocks are excluded.
+The loader captures the species registry from those same bytes and GameSession
+adopts it on create/load; it never rereads species after computing the hash.
+Malformed JSON warns and skips the entry while its bytes remain bound; present
+unreadable files/directories refuse resolution without replacing a running world.
+Directory-open, entry-status and iteration failures are reported by the registry
+without escaping to client metadata callers; a failed scan adds no species. Logical
+dependency names must be well-formed UTF-8, and an invalid species filename refuses
+the scan before any reads. Resolver exceptions, including JSON serialization
+failures, return diagnostics without publishing an identity or dependency snapshot;
+failed create/load leaves the live world unchanged.
+
+Protocol-v3 Hello and LREC1-v3 headers retain their layouts. A species mismatch
+refuses TCP admission, lockstep handshake and replay verification before simulation
+advances. Existing content-mismatch diagnostics apply; lockstep and replay name
+`preset/species` content. Older v0.3.0-era preset-only replay hashes mismatch when
+species records are present, in either engine direction, following the existing
+preset dependency compatibility rule. With no species directory, no new records
+are added. Current-format saves store no session content identity and adopt the
+loading installation's species content; the optional historical `presetIdentity`
+check still checks frozen preset JSON only. Older world-format refusals and save
+container versions are unchanged. See the full
+[identity contract](development/system-config-identity.md).
+
 Playback, vsync, TAAU, tier-1 froxel volumetrics, cave AO, scent decals and aether
 material gain 1 are on. `--no-audio`, `--volumetric-quality 0`, `LUMIN_CAVE_AO=0`,
 `LUMIN_SCENT_DECAL=0`, explicit config values and renderer setters remain available.
-User overlays still contain only `user.*`: saved false vsync and saved volumes
-win over defaults without a settings version bump. Locations are
+User overlays contain only `user.*` plus `settings_schema_version` (currently 1,
+independent of world, save and protocol formats). Saved false vsync and saved
+volumes win over defaults. `user.graphics` owns presentation settings: a
+`base_preset`, its `preset_revision`, explicit `overrides` and optional detection
+metadata. A file without a schema version migrates to Ultra plus its explicit
+values, including `user.video.render_scale`. A malformed, unreadable or future
+version file is reported as Recovery: defaults apply for the session and saves
+are refused so the original file is never overwritten. Locations are
 `%APPDATA%/Luminumbra/settings.json`, `$XDG_CONFIG_HOME/luminumbra/settings.json`,
 or `$HOME/.config/luminumbra/settings.json`.
+
+Settings → Graphics offers Low, Medium, High and Ultra, with Custom displayed when
+overrides differ from the retained base. Reset overrides restores that base;
+selecting a preset clears overrides. Controls show session-only CLI/environment
+values and identify and disable those overridden controls. They never save those
+temporary values. Graphics edits apply together on the render thread, invalidate
+temporal history, and save after a 500 ms debounce. Save failures remain visible;
+Save graphics retries, and leaving settings or exiting flushes pending changes.
+
+Detect & Apply recollects the active GPU, logical CPU threads and available
+dedicated VRAM, displays the recommendation, and applies it with overrides cleared.
+`--detect-and-apply-graphics` performs the same explicit action at startup. Only
+a first launch automatically selects and saves a recommendation. Existing and
+migrated selections remain intact across GPU/driver changes. Recovery continues
+to protect malformed or unsupported overlays from writes, including explicit saves.
 
 Replication defaults to acknowledged deltas and radius-3 chunk AOI with a 16,000 mm
 chunk edge. Millimeter AOI is an alternative: disable chunk AOI before selecting it.
