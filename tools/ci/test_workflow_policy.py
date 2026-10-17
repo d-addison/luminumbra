@@ -71,6 +71,34 @@ def value(block, key, indent):
     return " ".join(body.split()) if result == ">-" else body
 
 
+def aggregate_invalid_expression(producer):
+    return ("needs.changes.result != 'success' || "
+            f"(needs.{producer}.result != 'success' && needs.{producer}.result != 'skipped')")
+
+
+def evaluate_condition(expression, dependencies, *, cancelled=False, failed=None):
+    """Evaluate this workflow's status/result conditions in their Actions context.
+
+    At job admission/re-evaluation cancelled is workflow cancellation. At step
+    evaluation it is the current job's cancellation, which can still be false
+    when a job condition kept it running during workflow cancellation.
+    """
+    expression = (expression or "success()").removeprefix("${{ ").removesuffix(" }}")
+    if failed is None:
+        failed = "failure" in dependencies.values()
+    status = {"always": True, "cancelled": cancelled, "failure": failed,
+              "success": not cancelled and not failed and
+              all(result == "success" for result in dependencies.values())}
+    expression, count = re.subn(r"\b(always|cancelled|success|failure)\(\)",
+                               lambda match: repr(status[match[1]]), expression)
+    expression = re.sub(r"needs\.([\w-]+)\.result",
+                        lambda match: repr(dependencies[match[1]]), expression)
+    expression = re.sub(r"!(?!=)", "not ", expression)
+    expression = expression.replace("&&", " and ").replace("||", " or ")
+    return bool((count or status["success"]) and
+                eval(expression, {"__builtins__": {}}, {}))
+
+
 def guarded_jobs(workflows):
     for filename, (job_id, check_name) in GUARDED.items():
         yield filename, job_id, check_name, jobs(workflows[filename])[job_id]
@@ -177,7 +205,9 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                 self.assertEqual(value(job, "needs", 4),
                                  "[changes, asan-shard]" if job_id == "asan" else
                                  f"[changes, {job_id.removesuffix('-result')}]" if job_id.endswith("-result") else "changes")
-                condition = "always()" if job_id == "asan" or job_id.endswith("-result") else "!cancelled()"
+                condition = ("!cancelled() || " + aggregate_invalid_expression(
+                    "asan-shard" if job_id == "asan" else job_id.removesuffix("-result"))
+                    if job_id == "asan" or job_id.endswith("-result") else "!cancelled()")
                 if filename == "performance.yml" or job_id == "asan-shard":
                     condition += (
                         " && ((github.event_name == 'pull_request' && "
@@ -227,8 +257,9 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             for step in steps(job)[1:]:
                 with self.subTest(workflow=filename, job=job_id, step=step.splitlines()[0]):
                     condition = value(step, "if", 8) or ""
-                    if (job_id == "asan" or job_id.endswith("-result")) and step.startswith("      - name: Reject cancelled workflow\n"):
-                        self.assertEqual(condition, "${{ cancelled() }}")
+                    if (job_id == "asan" or job_id.endswith("-result")) and step.startswith("      - name: Reject invalid dependencies\n"):
+                        self.assertEqual(condition, "${{ always() && (" + aggregate_invalid_expression(
+                            "asan-shard" if job_id == "asan" else job_id.removesuffix("-result")) + ") }}")
                         self.assertIsNone(value(step, "continue-on-error", 8))
                         self.assertEqual(value(step, "run", 8).splitlines()[-1], "exit 1")
                         self.assertEqual(len(value(step, "run", 8).splitlines()), 2)
@@ -269,7 +300,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         self.assertEqual(value(ci["windows-msvc"], "needs", 4), "changes")
         self.assertEqual(value(ci["windows-msvc"], "if", 4), "${{ !cancelled() && (" + READY + ") }}")
         self.assertEqual(value(ci["tidy"], "needs", 4), "[changes, tidy-shard]")
-        self.assertEqual(value(ci["tidy"], "if", 4), "always() && (" + READY + ")")
+        self.assertEqual(value(ci["tidy"], "if", 4), "${{ (!cancelled() || " + aggregate_invalid_expression("tidy-shard") + ") && (" + READY + ") }}")
         self.assertEqual(value(ci["windows-ucrt64"], "if", 4), "${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && " + f"({READY}) && ({UCRT_ROUTE})" + " }}")
         perf = jobs(self.workflows["performance.yml"])
         self.assertEqual(value(perf["server-smoke-comparison"], "if", 4), "!cancelled() && needs.changes.outputs.needs_cpp != 'false' && " + f"({READY}) && {SERVER_ROUTE}")
@@ -373,7 +404,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                 self.assertIn(title + " full qualification", value(producer, "name", 4))
                 self.assertIn(title + " shard {0}/2", value(producer, "name", 4))
                 self.assertEqual(value(aggregate, "name", 4), title)
-                self.assertEqual(value(aggregate, "if", 4), "${{ always() }}")
+                self.assertEqual(value(aggregate, "if", 4), "${{ !cancelled() || " + aggregate_invalid_expression(job_id) + " }}")
                 self.assertEqual(value(aggregate, "needs", 4), f"[changes, {job_id}]")
                 self.assertEqual(value(aggregate, "timeout-minutes", 4), "5")
                 self.assertEqual(self.workflows["ci.yml"].count("    name: " + title + "\n"), 1)
@@ -686,33 +717,63 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             "build/debug-asan/qualification-shard.json",
         ])
 
-    def test_asan_aggregate_schedules_under_cancellation_and_every_dependency_result(self):
-        aggregate = jobs(self.workflows["asan.yml"])["asan"]
-        self.assert_aggregate_schedules(aggregate)
+    def test_aggregate_status_conditions_use_valid_contexts(self):
+        # jobs.<id>.if and jobs.<id>.steps.if permit status functions and needs;
+        # env/with/run do not permit status functions (checked separately).
+        for filename, workflow in self.workflows.items():
+            for job_id, job in jobs(workflow).items():
+                if "name: Reject invalid dependencies" not in job:
+                    continue
+                declared = set(value(job, "needs", 4).strip("[]").split(", "))
+                for block, indent in [(job, 4)] + [(step, 8) for step in steps(job)]:
+                    condition = value(block, "if", indent)
+                    if condition is None:
+                        continue
+                    with self.subTest(workflow=filename, job=job_id, condition=condition):
+                        self.assertLessEqual(set(re.findall(r"needs\.([\w-]+)\.", condition)), declared)
+                        functions = set(re.findall(r"\b(\w+)\(", condition))
+                        self.assertLessEqual(functions, {"always", "cancelled", "failure", "success"})
+                        self.assertNotIn("steps.", value(job, "if", 4))
 
-    def test_native_aggregates_schedule_under_cancellation_and_every_dependency_result(self):
+    def test_aggregates_cancel_at_each_phase_and_fail_invalid_dependencies(self):
+        aggregates = [("asan-shard", jobs(self.workflows["asan.yml"])["asan"])]
         ci = jobs(self.workflows["ci.yml"])
-        for job in ("linux-result", "windows-msvc-result", "windows-ucrt64-result"):
-            with self.subTest(job=job):
-                self.assert_aggregate_schedules(ci[job])
-
-    def assert_aggregate_schedules(self, aggregate):
-        expression = value(aggregate, "if", 4).removeprefix("${{ ").removesuffix(" }}")
-        # Evaluate the workflow's status-only condition, including Actions'
-        # implicit success() if no status function is present. A regression to
-        # !cancelled() or the default success() must refuse these scenarios.
-        for cancelled in (False, True):
-            for changes in ("success", "failure", "cancelled", "skipped"):
-                for shard in ("success", "failure", "cancelled", "skipped"):
-                    with self.subTest(cancelled=cancelled, changes=changes, shard=shard):
-                        status = {"always": True, "cancelled": cancelled,
-                                  "success": not cancelled and changes == shard == "success",
-                                  "failure": "failure" in (changes, shard)}
-                        rendered, count = re.subn(r"\b(always|cancelled|success|failure)\(\)",
-                                                 lambda match: str(status[match[1]]), expression)
-                        rendered = rendered.replace("!", "not ").replace("&&", " and ").replace("||", " or ")
-                        runs = (count > 0 or status["success"]) and eval(rendered, {"__builtins__": {}}, {})
-                        self.assertTrue(runs, expression)
+        aggregates += [(producer, ci[producer + "-result"])
+                       for producer in ("linux", "windows-msvc", "windows-ucrt64")]
+        aggregates.append(("tidy-shard", ci["tidy"]))
+        for producer, aggregate in aggregates:
+            condition = value(aggregate, "if", 4).replace(READY, "True")
+            refusal = next(step for step in steps(aggregate)
+                           if step.startswith("      - name: Reject invalid dependencies\n"))
+            self.assertIsNone(value(refusal, "continue-on-error", 8))
+            for classification in ("success", "failure", "cancelled", "skipped", "", "unknown"):
+                for result in ("success", "failure", "cancelled", "skipped", "", "unknown"):
+                    dependencies = {"changes": classification, producer: result}
+                    invalid = classification != "success" or result not in ("success", "skipped")
+                    for cancelled in (False, True):
+                        with self.subTest(producer=producer, classification=classification,
+                                          result=result, cancelled=cancelled):
+                            admitted = evaluate_condition(condition, dependencies, cancelled=cancelled)
+                            self.assertEqual(admitted, not cancelled or invalid)
+                            # Kept-running jobs have not received job cancellation:
+                            # cancelled() at step level is false, despite workflow cancellation.
+                            for earlier_step_failed in (False, True):
+                                refuses = evaluate_condition(value(refusal, "if", 8), dependencies,
+                                                             failed=earlier_step_failed)
+                                self.assertEqual(refuses, invalid)
+                            if admitted and invalid:
+                                process = subprocess.run(
+                                    ["bash", "--noprofile", "--norc", "-e", "-c", value(refusal, "run", 8)],
+                                    capture_output=True, text=True, timeout=10)
+                                self.assertNotEqual(process.returncode, 0)
+            # Re-evaluate admission after each actual step, including download,
+            # validation and uploads. A completed early guard offers no protection.
+            for result in ("success", "skipped"):
+                dependencies = {"changes": "success", producer: result}
+                self.assertTrue(evaluate_condition(condition, dependencies))
+                for phase in steps(aggregate):
+                    with self.subTest(producer=producer, phase=phase.splitlines()[0], result=result):
+                        self.assertFalse(evaluate_condition(condition, dependencies, cancelled=True))
 
     def test_asan_aggregate_accepts_only_success_or_the_original_path_skip(self):
         aggregate = jobs(self.workflows["asan.yml"])["asan"]
@@ -728,8 +789,8 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
     def check_asan_aggregate_results(self, script):
         aggregate = jobs(self.workflows["asan.yml"])["asan"]
         refusal = next(step for step in steps(aggregate)
-                       if step.startswith("      - name: Reject cancelled workflow\n"))
-        self.assertEqual(value(refusal, "if", 8), "${{ cancelled() }}")
+                       if step.startswith("      - name: Reject invalid dependencies\n"))
+        self.assertEqual(value(refusal, "if", 8), "${{ always() && (" + aggregate_invalid_expression("asan-shard") + ") }}")
         self.assertIsNone(value(refusal, "continue-on-error", 8))
         refusal_script = value(refusal, "run", 8)
         self.assertIsNotNone(refusal_script)
@@ -740,31 +801,40 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                         for result in ("success", "failure", "cancelled", "skipped", "", "unknown"):
                             with self.subTest(cancelled=cancelled, classification=classification,
                                               cpp=cpp, result=result):
+                                dependencies = {"changes": classification, "asan-shard": result}
+                                admitted = evaluate_condition(value(aggregate, "if", 4), dependencies,
+                                                              cancelled=cancelled)
+                                if not admitted:
+                                    self.assertTrue(cancelled)
+                                    self.assertEqual(classification, "success")
+                                    self.assertIn(result, ("success", "skipped"))
+                                    continue
+                                refuses = evaluate_condition(value(refusal, "if", 8), dependencies, failed=False)
                                 process = subprocess.run(
                                     ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c",
-                                     (refusal_script + "\n" if cancelled else "") + script],
+                                     (refusal_script + "\n" if refuses else "") + script],
                                     env=dict(os.environ, NEEDS_CPP=cpp, ASAN_SHARD_RESULT=result,
                                              CI_PATHS_RESULT=classification,
                                              GITHUB_STEP_SUMMARY=str(Path(directory) / "summary")),
                                     capture_output=True, text=True, timeout=10,
                                 )
-                                accepted = not cancelled and (
+                                accepted = not cancelled and classification == "success" and (
                                     result == "success" or (classification == "success" and
                                                             cpp == "false" and result == "skipped"))
                                 self.assertEqual(process.returncode == 0, accepted, process.stdout + process.stderr)
                                 if cancelled:
-                                    self.assertIn("ASan workflow was cancelled", process.stderr)
+                                    self.assertIn("Aggregate dependencies did not pass", process.stderr)
 
-    def test_native_aggregates_refuse_cancellation_before_the_route_gate(self):
+    def test_native_aggregates_refuse_invalid_dependencies_before_the_route_gate(self):
         ci = jobs(self.workflows["ci.yml"])
         for job in ("linux-result", "windows-msvc-result", "windows-ucrt64-result"):
             with self.subTest(job=job):
                 aggregate = ci[job]
                 refusal = next(step for step in steps(aggregate)
-                               if step.startswith("      - name: Reject cancelled workflow\n"))
+                               if step.startswith("      - name: Reject invalid dependencies\n"))
                 gate = next(step for step in steps(aggregate)
                             if step.startswith("      - name: Require expected producers and route\n"))
-                self.assertEqual(value(refusal, "if", 8), "${{ cancelled() }}")
+                self.assertEqual(value(refusal, "if", 8), "${{ always() && (" + aggregate_invalid_expression(job.removesuffix("-result")) + ") }}")
                 self.assertIsNone(value(refusal, "continue-on-error", 8))
                 self.assertIsNone(value(gate, "if", 8))
                 self.assertIsNone(value(gate, "continue-on-error", 8))
@@ -773,7 +843,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                     ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c",
                      value(refusal, "run", 8)], capture_output=True, text=True, timeout=10)
                 self.assertNotEqual(result.returncode, 0)
-                self.assertIn("Native test workflow was cancelled", result.stderr)
+                self.assertIn("Aggregate dependencies did not pass", result.stderr)
 
     def test_ucrt_route_seeds_devel_and_preserves_other_event_and_path_guards(self):
         ci = jobs(self.workflows["ci.yml"])

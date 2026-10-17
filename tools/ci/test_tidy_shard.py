@@ -217,7 +217,8 @@ class ShardWorkflowTests(unittest.TestCase):
         guard = "github.event_name != 'pull_request' || github.event.pull_request.draft == false"
         self.assertIn("    name: Static analysis / clang-tidy\n", aggregate)
         self.assertIn("    needs: [changes, tidy-shard]\n", aggregate)
-        self.assertIn("    if: always() && (" + guard + ")\n", aggregate)
+        self.assertIn("&& (" + guard + ") }}\n", aggregate)
+        self.assertIn("!cancelled()", aggregate)
         self.assertIn("    needs: changes\n", self.jobs["tidy-shard"])
         self.assertIn("    if: ${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && (" + guard + ") }}\n",
                       self.jobs["tidy-shard"])
@@ -227,36 +228,50 @@ class ShardWorkflowTests(unittest.TestCase):
         self.assertIn("    timeout-minutes: 5\n", aggregate)
         self.assertIn("TIDY_SHARD_RESULT: ${{ needs.tidy-shard.result }}", aggregate)
 
+    def aggregate_script(self, classification, status):
+        scripts = []
+        for step in re.split(r"(?=^      - name: )", self.jobs["tidy"], flags=re.MULTILINE)[1:]:
+            condition = re.search(r"^        if: (.*)$", step, re.MULTILINE)
+            if condition:
+                expression = condition[1].removeprefix("${{ ").removesuffix(" }}")
+                expression = expression.replace("always()", "True")
+                expression = expression.replace("needs.changes.result", repr(classification))
+                expression = expression.replace("needs.tidy-shard.result", repr(status))
+                expression = expression.replace("&&", "and").replace("||", "or")
+                if not eval(expression, {"__builtins__": {}}):
+                    continue
+            script = step.split("        run: |\n", 1)[1]
+            scripts.append("\n".join(line[10:] for line in script.splitlines()
+                                     if line.startswith("          ")))
+        return "\n".join(scripts)
+
     def test_aggregate_shell_accepts_only_success(self):
-        script = self.jobs["tidy"].split("        run: |\n", 1)[1]
-        script = "\n".join(line[10:] for line in script.splitlines() if line.startswith("          "))
+        script = self.aggregate_script("success", "success")
         self.assertTrue(script.strip())
-        for status in ("success", "failure", "cancelled", "skipped", ""):
+        for status in ("success", "failure", "cancelled", "skipped", "", "unknown"):
             with self.subTest(status=status):
-                result = subprocess.run(["bash", "-e", "-c", script],
+                result = subprocess.run(["bash", "-e", "-c", self.aggregate_script("success", status)],
                                         env=dict(os.environ, TIDY_SHARD_RESULT=status, CI_PATHS_RESULT="success", NEEDS_CPP="true"),
                                         capture_output=True, text=True, check=False)
                 self.assertEqual(result.returncode == 0, status == "success", result.stderr)
 
     def test_routed_skip_requires_successful_explicit_non_native_classification(self):
-        script = self.jobs["tidy"].split("        run: |\n", 1)[1]
-        script = "\n".join(line[10:] for line in script.splitlines() if line.startswith("          "))
         with tempfile.TemporaryDirectory() as directory:
             summary = Path(directory) / "summary"
-            for classification in ("success", "failure", "cancelled", "skipped", ""):
+            for classification in ("success", "failure", "cancelled", "skipped", "", "unknown"):
                 for cpp in ("true", "false", ""):
-                    for status in ("success", "failure", "cancelled", "skipped", ""):
+                    for status in ("success", "failure", "cancelled", "skipped", "", "unknown"):
                         routed = classification == "success" and cpp == "false" and status == "skipped"
                         with self.subTest(classification=classification, cpp=cpp, status=status):
                             summary.unlink(missing_ok=True)
                             result = subprocess.run(
-                                ["bash", "-e", "-c", script],
+                                ["bash", "-e", "-c", self.aggregate_script(classification, status)],
                                 env=dict(os.environ, TIDY_SHARD_RESULT=status,
                                          CI_PATHS_RESULT=classification, NEEDS_CPP=cpp,
                                          GITHUB_STEP_SUMMARY=str(summary)),
                                 capture_output=True, text=True, check=False,
                             )
-                            self.assertEqual(result.returncode == 0, status == "success" or routed,
+                            self.assertEqual(result.returncode == 0, classification == "success" and (status == "success" or routed),
                                              result.stderr)
                             self.assertEqual(summary.exists(), routed)
                             if routed:
