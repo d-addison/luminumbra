@@ -23,6 +23,15 @@ GUARDED = {
     "performance.yml": ("preview-frame", "Preview frame / software OpenGL"),
 }
 READY = "github.event_name != 'pull_request' || github.event.pull_request.draft == false"
+ASAN_MINIMUM_TESTS = 2320
+ASAN_REQUIRED_TESTS = (
+    "ConsoleFixture.CompleteInventoryDefaultsBindingsAndUnavailableRows",
+    "UiFixture.DefaultPassiveHudRendersWithoutShellOrFocusAndCanBeDisabled",
+    "DeveloperPersistence.DirectConstructionMatchesFactoryDefaultsAndInitializesRecords",
+)
+ASAN_MERGE_COMMAND = ('python3 tools/ci/ctest_shards.py merge --profile asan --directory build/asan-shards '
+                      '--output build/debug-asan/ctest.junit.xml --needs-heavy "$CI_NEEDS_HEAVY" '
+                      '--reason "$CI_HEAVY_REASON"')
 UCRT_ROUTE = (
     "github.event_name == 'pull_request' || github.event_name == 'push' || "
     "github.event_name == 'workflow_dispatch'"
@@ -149,18 +158,18 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         # Freeze existing routing, limits, required names and authoritative gates.
         expected = {
             "changes": "5036f79eb4004d8774c166590fc35c97ac1419a9ad8e8f99516c395851bd7b1e",
-            "linux": "40f5546575cd0ac371fb59d6f6105be4323a3095b053a296181de8f073c666e8",
+            "linux": "ccac7d74f95a26f6fbba79025406000c1ddb00a99e0ec3eb9a50712fb7f8099a",
             "gns-compile-probe": "1d4756914d1a7d2e276e12d7b142c2b5e2496561d02dbab3e7d5c8bc5fa75648",
             "diligent-rhi": "2a28a0e5b3c072291b194e931261e96328280d6e589f7d2478e61d6fa70afed9",
             "windows-msvc": "36777df3b85f98b6d30df59a0b6abe10db0e33d5b46bc7f3f059c3ca9366a814",
-            "windows-ucrt64": "41079be7c1b40dd04a0f50ac7f9d605f06a0dd11b507b45b215143096812294b",
-            "linux-result": "16d04388f64d0f82e3b931f13c29b5e2a674537ecc3501c2fd079d8908861d6c",
+            "windows-ucrt64": "28f7bcfedb219f7e1fc2ee1a206b3f925b84b1b368dc028a046fb2f8c0e954c0",
+            "linux-result": "4aeb6e73309e09d77a55c4572b18366c931c4ce1843e2f7f5f2fd9212fec521d",
             "windows-msvc-result": "b99ed57798a2dfa8c1e1ea971bda2937fde6770741fb8705c6ad499ab455ce6d",
             "windows-ucrt64-result": "a7c80ef66651d666674aeb9ac356df6a97c7cdf7910303dcc5c199e84ad42a50",
             "lint": "dd5aa1be75b2a7139dc2fc676293422207c80c6b031b5df0d21e60dc615faa32",
             "tidy-shard": "522c626dce80dc98e1f474bea381d9eaac93eb17979a2d5389e2d4358ca2ded6",
             "tidy": "70a305de68fecb52c83bbd649f1b34279a598c5d4bc03e254bc945024e4703eb",
-            "public-tree": "2165b92c169b45ec8c9be7f0bf0760d176bf829dc7dc7202f71700d598f6c771",
+            "public-tree": "f9f59910f6674d861330ee21b21acdf61043b00dfee998939f8c59564cdd58e2",
         }
         actual = jobs(self.workflows["ci.yml"])
         self.assertEqual(set(actual), set(expected) | {"fast-compile"})
@@ -313,10 +322,37 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         self.assertNotIn("compare_ambient_receipts.py", shard)
         check = aggregate_steps["Merge shard JUnit and check inventory"]
         self.assertEqual(value(check, "id", 8), "tests")
-        self.assertIn("python3 tools/ci/ctest_shards.py merge --profile asan --directory build/asan-shards --output build/debug-asan/ctest.junit.xml", check)
-        self.assertIn('--needs-heavy "$CI_NEEDS_HEAVY" --reason "$CI_HEAVY_REASON"', check)
-        self.assertIn("check_ctest_junit.py build/debug-asan/ctest.junit.xml --minimum-tests 1", check)
-        self.assertIn("--expect-labels asan --require-probe asan", check)
+        commands = value(check, "run", 8).splitlines()
+        merge_command = ASAN_MERGE_COMMAND
+        inventory_prefix = "python3 tools/ci/check_ctest_junit.py build/debug-asan/ctest.junit.xml --minimum-tests "
+        inventory_commands = [command for command in commands if command.startswith(inventory_prefix)]
+        self.assertIn(merge_command, commands)
+        self.assertEqual(len(inventory_commands), 1, inventory_commands)
+        inventory_command = inventory_commands[0]
+        self.assertRegex(inventory_command,
+                         rf'^{re.escape(inventory_prefix)}"\$minimum_tests"(?: --require-test [\w./-]+)*$')
+        floor_commands = [command for command in commands if re.fullmatch(r"minimum_tests=[0-9]+", command)]
+        self.assertEqual(len(floor_commands), 1, floor_commands)
+        floor_command = floor_commands[0]
+        self.assertGreaterEqual(int(floor_command.split("=", 1)[1]), ASAN_MINIMUM_TESTS)
+        floor_index = commands.index(floor_command)
+        self.assertEqual(commands[floor_index + 1:floor_index + 4], [
+            'if [ "$CI_NEEDS_HEAVY" = false ]; then',
+            '  minimum_tests=$((minimum_tests - 2))',
+            'fi',
+        ])
+        self.assertLess(commands.index(merge_command), floor_index)
+        self.assertLess(floor_index + 3, commands.index(inventory_command))
+        self.assertEqual(sum("minimum_tests=" in command for command in commands), 2)
+        required_tests = set(re.findall(r" --require-test ([\w./-]+)", inventory_command))
+        self.assertLessEqual(set(ASAN_REQUIRED_TESTS), required_tests)
+        self.assertLess(commands.index(merge_command), commands.index(inventory_command))
+        coverage_command = "python3 tools/ci/compare_ambient_receipts.py asan=build/debug-asan/ctest.junit.xml \\"
+        self.assertIn(coverage_command, commands)
+        self.assertLess(commands.index(inventory_command), commands.index(coverage_command))
+        coverage_index = commands.index(coverage_command)
+        self.assertEqual(commands[coverage_index + 1:coverage_index + 2],
+                         ["  --expect-labels asan --require-probe asan"])
         for name in ("Download shard JUnit", "Merge shard JUnit and check inventory"):
             self.assertEqual(value(aggregate_steps[name], "if", 8), "needs.asan-shard.result == 'success'")
             self.assertIsNone(value(aggregate_steps[name], "continue-on-error", 8))
@@ -579,6 +615,162 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                         result = subprocess.run(["bash", "--noprofile", "--norc", "-n", "-c", script],
                                                 capture_output=True, text=True, timeout=10)
                         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_asan_inventory_floor_only_defers_the_reviewed_two_cases(self):
+        aggregate = jobs(self.workflows["asan.yml"])["asan"]
+        step = next(step for step in steps(aggregate) if "name: Merge shard JUnit and check inventory\n" in step)
+        script = value(step, "run", 8).split(ASAN_MERGE_COMMAND + "\n", 1)[1].split("# This lane", 1)[0]
+        for needs_heavy, expected in (("false", "2318"), ("true", "2320"), ("", "2320"),
+                                      ("False", "2320"), ("0", "2320"), ("unknown", "2320")):
+            with self.subTest(needs_heavy=needs_heavy):
+                result = subprocess.run(
+                    ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c",
+                     'python3() { printf "%s\\n" "$@"; }\n' + script],
+                    env=dict(os.environ, CI_NEEDS_HEAVY=needs_heavy), capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                arguments = result.stdout.splitlines()
+                self.assertEqual(arguments[:4], ["tools/ci/check_ctest_junit.py", "build/debug-asan/ctest.junit.xml",
+                                                 "--minimum-tests", expected])
+                for name in ASAN_REQUIRED_TESTS:
+                    self.assertIn(name, arguments)
+
+    def test_asan_aggregate_rejects_changed_selection_or_floor_setup(self):
+        workflow = self.workflows["asan.yml"]
+        setup = "          minimum_tests=2320\n"
+        for original, replacement in (
+            (setup, ""),
+            (setup, setup.replace("minimum_tests=", "# minimum_tests=")),
+            (setup, setup.replace("2320", "unknown")),
+            ('if [ "$CI_NEEDS_HEAVY" = false ]; then', 'if [ "$CI_NEEDS_HEAVY" != true ]; then'),
+            ("minimum_tests - 2", "minimum_tests - 3"),
+            ("minimum_tests - 2", "minimum_tests - 1"),
+            (' --needs-heavy "$CI_NEEDS_HEAVY" --reason "$CI_HEAVY_REASON"', ""),
+        ):
+            with self.subTest(original=original, replacement=replacement):
+                mutated = workflow.replace(original, replacement, 1)
+                self.assertNotEqual(mutated, workflow)
+                case = WorkflowDraftPolicyTests("test_asan_matrix_and_aggregate_preserve_limits_coverage_and_evidence")
+                case.workflows = {**self.workflows, "asan.yml": mutated}
+                result = unittest.TestResult()
+                case.run(result)
+                self.assertEqual(len(result.errors), 0, result.errors)
+                self.assertEqual(len(result.failures), 1, result.failures)
+
+    def test_asan_aggregate_requires_inventory_floor_after_merge(self):
+        workflow = self.workflows["asan.yml"]
+        merge = "          " + ASAN_MERGE_COMMAND + "\n"
+        inventory = next(line for line in workflow.splitlines(keepends=True)
+                         if line.startswith("          python3 tools/ci/check_ctest_junit.py "
+                                            "build/debug-asan/ctest.junit.xml --minimum-tests "))
+        for mutation in ("removed", "lowered", "commented", "before-merge"):
+            with self.subTest(mutation=mutation):
+                replacement = {
+                    "removed": "",
+                    "lowered": inventory,
+                    "commented": inventory.replace("python3", "# python3", 1),
+                    "before-merge": "",
+                }[mutation]
+                mutated = workflow.replace(inventory, replacement, 1)
+                if mutation == "lowered":
+                    mutated = re.sub(r"(?m)^          minimum_tests=[0-9]+$",
+                                     f"          minimum_tests={ASAN_MINIMUM_TESTS - 1}", mutated, count=1)
+                if mutation == "before-merge":
+                    mutated = mutated.replace(merge, inventory + merge, 1)
+                self.assertNotEqual(mutated, workflow)
+                case = WorkflowDraftPolicyTests(
+                    "test_asan_matrix_and_aggregate_preserve_limits_coverage_and_evidence")
+                case.workflows = {**self.workflows, "asan.yml": mutated}
+                result = unittest.TestResult()
+                case.run(result)
+                self.assertEqual(len(result.errors), 0, result.errors)
+                self.assertEqual(len(result.failures), 1, result.failures)
+
+    def test_asan_aggregate_accepts_stronger_inventory_checks_after_merge(self):
+        workflow = self.workflows["asan.yml"]
+        for floor in (ASAN_MINIMUM_TESTS, ASAN_MINIMUM_TESTS + 1):
+            with self.subTest(floor=floor):
+                strengthened, count = re.subn(
+                    r"(?m)^          minimum_tests=[0-9]+$",
+                    f"          minimum_tests={floor}", workflow,
+                )
+                self.assertEqual(count, 1)
+                strengthened, count = re.subn(
+                    r'(?m)^(          python3 tools/ci/check_ctest_junit.py '
+                    r'build/debug-asan/ctest.junit.xml --minimum-tests "\$minimum_tests"[^\n]*)$',
+                    r"\g<1> --require-test AmbientDeterminismReceipt.EmitsConstructorAndEvolvedHashes"
+                    " --require-test AmbientInputBounds.UnpaddedTwoElementInputFaultsAtActiveIsa",
+                    strengthened,
+                )
+                self.assertEqual(count, 1)
+                for method in (
+                    "test_asan_matrix_and_aggregate_preserve_limits_coverage_and_evidence",
+                    "test_asan_aggregate_requires_inventory_floor_after_merge",
+                ):
+                    case = WorkflowDraftPolicyTests(method)
+                    case.workflows = {**self.workflows, "asan.yml": strengthened}
+                    result = unittest.TestResult()
+                    case.run(result)
+                    self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
+
+    def test_asan_aggregate_rejects_removed_or_replaced_required_tests(self):
+        workflow = self.workflows["asan.yml"]
+        mutations = []
+        for index, name in enumerate(ASAN_REQUIRED_TESTS):
+            argument = f" --require-test {name}"
+            self.assertIn(argument, workflow)
+            mutations.extend((
+                (f"removed-{name}", workflow.replace(argument, "", 1)),
+                (f"replaced-{name}", workflow.replace(
+                    argument, " --require-test AmbientDeterminismReceipt.EmitsConstructorAndEvolvedHashes", 1)),
+                (f"duplicated-instead-of-{name}", workflow.replace(
+                    argument, f" --require-test {ASAN_REQUIRED_TESTS[(index + 1) % len(ASAN_REQUIRED_TESTS)]}", 1)),
+            ))
+        mutations.append(("removed-all", re.sub(r" --require-test [\w./-]+", "", workflow)))
+        for mutation, mutated in mutations:
+            with self.subTest(mutation=mutation):
+                self.assertNotEqual(mutated, workflow)
+                case = WorkflowDraftPolicyTests(
+                    "test_asan_matrix_and_aggregate_preserve_limits_coverage_and_evidence")
+                case.workflows = {**self.workflows, "asan.yml": mutated}
+                result = unittest.TestResult()
+                case.run(result)
+                self.assertEqual(len(result.errors), 0, result.errors)
+                self.assertEqual(len(result.failures), 1, result.failures)
+                self.assertIn("not less than or equal", result.failures[0][1])
+
+    def test_asan_aggregate_rejects_invalid_inventory_and_coverage_commands(self):
+        workflow = self.workflows["asan.yml"]
+        inventory = next(line for line in workflow.splitlines(keepends=True)
+                         if line.startswith("          python3 tools/ci/check_ctest_junit.py "
+                                            "build/debug-asan/ctest.junit.xml --minimum-tests "))
+        coverage = ('          python3 tools/ci/compare_ambient_receipts.py '
+                    'asan=build/debug-asan/ctest.junit.xml \\\n'
+                    '            --expect-labels asan --require-probe asan\n')
+        for mutation, original, replacement in (
+            ("missing-floor", inventory, inventory.replace(' --minimum-tests "$minimum_tests"', "")),
+            ("invalid-floor", inventory, inventory.replace('--minimum-tests "$minimum_tests"', "--minimum-tests unknown")),
+            ("ignored-failure", inventory, inventory.rstrip() + " || true\n"),
+            ("partial-report", inventory, inventory.replace("build/debug-asan/", "build/asan-shards/shard-1/")),
+            ("empty-required-test", inventory, inventory.rstrip() + " --require-test\n"),
+            ("missing-coverage", coverage, ""),
+            ("commented-coverage", coverage, coverage.replace("python3", "# python3", 1)),
+            ("missing-probe", coverage, coverage.replace(" --require-probe asan", "")),
+            ("missing-coverage-options", coverage,
+             coverage.replace("            --expect-labels asan --require-probe asan\n", "")),
+            ("coverage-before-floor", coverage, ""),
+        ):
+            with self.subTest(mutation=mutation):
+                mutated = workflow.replace(original, replacement, 1)
+                if mutation == "coverage-before-floor":
+                    mutated = mutated.replace(inventory, coverage + inventory, 1)
+                self.assertNotEqual(mutated, workflow)
+                case = WorkflowDraftPolicyTests(
+                    "test_asan_matrix_and_aggregate_preserve_limits_coverage_and_evidence")
+                case.workflows = {**self.workflows, "asan.yml": mutated}
+                result = unittest.TestResult()
+                case.run(result)
+                self.assertEqual(len(result.errors), 0, result.errors)
+                self.assertEqual(len(result.failures), 1, result.failures)
 
     def assert_asan_rerun_artifacts(self, rerun_shards):
         blocks = jobs(self.workflows["asan.yml"])
