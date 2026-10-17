@@ -990,3 +990,26 @@ body#world_creation {
 .param-row {
     margin-bottom: 12px;
 }
+
+/* Graphics quality changes only backdrop filters; other filters and shadows retain their rules. */
+body.backdrop-half button { backdrop-filter: blur(6px); }
+body.backdrop-half .settings-panel { backdrop-filter: blur(11px); }
+body.backdrop-half .list-item { backdrop-filter: blur(7px); }
+body.backdrop-half .creation-panel { backdrop-filter: blur(11px); }
+body.backdrop-off button,
+body.backdrop-off .settings-panel,
+body.backdrop-off .list-item,
+body.backdrop-off .creation-panel { backdrop-filter: none; }
+
+/* Keep the full settings form reachable at smaller window sizes and larger UI scales. */
+body#settings .settings-panel {
+    box-sizing: border-box;
+    max-height: 72vh;
+    overflow-y: auto;
+}
+.graphics-section { margin-top: 28px; }
+#graphics_hardware, #graphics_status, #graphics_state {
+    margin-top: 10px;
+    margin-bottom: 10px;
+    font-size: 14px;
+}
