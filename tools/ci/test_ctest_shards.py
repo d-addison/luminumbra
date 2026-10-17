@@ -459,18 +459,46 @@ class CTestShardTests(unittest.TestCase):
                     "msvc": ("release", 4, 180), "ucrt64": ("release", 4, 360)}
         self.assertEqual(shards.PROFILES, expected)
         for profile in ("gcc", "msvc", "ucrt64"):
-            preset, parallel, timeout = expected[profile]
-            self.write_plan(self.root, 1)
-            shards.plan(self.root, 1, profile=profile)
+            for shard in (0, 1, 2):
+                with self.subTest(profile=profile, shard=shard):
+                    self.write_plan(self.root, shard, profile=profile)
+                    self.assert_execution_context(self.root, profile, shard, expected[profile])
+
+    def assert_execution_context(self, directory, profile, shard, limits):
+        resolved = directory.resolve()
+        preset, parallel, timeout = limits
+        selection = [] if shard == 0 else ["-I", str(resolved / "ctest.shard-index.txt")]
+        for status in (0, 8):
             response = subprocess.CompletedProcess([], 0, stdout=json.dumps({"tests": self.tests}))
-            with self.subTest(profile=profile), patch.object(shards.subprocess, "run", side_effect=[response, subprocess.CompletedProcess([], 8)]) as invoke:
-                self.assertEqual(shards.run(self.root, profile), 8)
+            with self.subTest(status=status), patch.object(shards.subprocess, "run", side_effect=[response, subprocess.CompletedProcess([], status)]) as invoke:
+                self.assertEqual(shards.run(directory, profile), status)
                 check, execute = invoke.call_args_list
-                base = ["ctest", "--preset", preset, "--test-dir", str(self.root), "-LE", "manual"]
+                base = ["ctest", "--preset", preset, "--test-dir", str(resolved), "-LE", "manual"]
                 self.assertEqual(check.args[0], [*base, "--show-only=json-v1"])
-                self.assertEqual(execute.args[0], [*base, "--no-tests=error", "-I", str(self.root / "ctest.shard-index.txt"),
+                self.assertEqual(check.kwargs, {"check": True, "capture_output": True, "text": True, "encoding": "utf-8"})
+                self.assertEqual(execute.args[0], [*base, "--no-tests=error", *selection,
                                                   "--parallel", str(parallel), "--timeout", str(timeout),
                                                   "--output-junit", "ctest.junit.xml"])
+                # Both calls inherit the wrapper's cwd and environment.
+                self.assertEqual(execute.kwargs, {})
+
+    def test_windows_short_alias_uses_exact_resolved_full_and_shard_contexts(self):
+        resolved = self.root.resolve()
+
+        # Model the filesystem's short-name expansion without requiring Windows
+        # symlink privilege or enabled 8.3 names. All reads use real plan files.
+        class WindowsBuildAlias(type(self.root)):
+            def resolve(self):
+                return resolved
+
+        alias = WindowsBuildAlias("C:/Users/RUNNER~1/AppData/Local/Temp/build")
+        self.assertNotEqual(str(alias), str(resolved))
+        for profile, limits in (("gcc", ("release", 4, 180)), ("msvc", ("release", 4, 180)),
+                                ("ucrt64", ("release", 4, 360))):
+            for shard in (0, 1, 2):
+                with self.subTest(profile=profile, shard=shard):
+                    self.write_plan(self.root, shard, profile=profile)
+                    self.assert_execution_context(alias, profile, shard, limits)
 
     def test_index_tampering_and_failed_discovery_never_launch_execution(self):
         self.write_plan(self.root, 1)
