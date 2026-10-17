@@ -330,9 +330,9 @@ void ExpectTerminalReceiveFloodBounded(bool check_bytes) {
         ASSERT_TRUE(peer->SendFrame(net::EncodeInput({tick, 1, {}})));
         const auto result = session.PumpTick(budget);
         const auto usage = session.AdmissionStatus();
-        if (check_bytes)
+        if (check_bytes) {
             EXPECT_LE(usage.retained_bytes, bounds.byte_limit);
-        else
+        } else
             EXPECT_LE(usage.peer_inputs + usage.peer_hashes, bounds.message_limit);
         EXPECT_LE(usage.local_hashes, window + 2);
         if (result.outcome == net::TickOutcome::PeerDisconnected)
@@ -2328,9 +2328,9 @@ void VerifyLateDesyncArtifact(const net::LockstepSession& session,
         EXPECT_EQ(checkpoint.world_hash,
                   replay::Fnv1a64Hex(checkpoint.terrain + checkpoint.water + checkpoint.entities));
     }
-    if (divergence == 1050)
+    if (divergence == 1050) {
         EXPECT_EQ(contents.elided_through_tick, 0u);
-    else {
+    } else {
         EXPECT_GT(contents.elided_through_tick, 0u);
         EXPECT_NE(contents.elided_prefix_digest, 0u);
         EXPECT_LE(contents.inputs.size(), 2 * replay::BoundedReplayRecorder::kSegmentTicks);
@@ -2371,9 +2371,9 @@ void CheckAutomaticReplayAfterLateDesync(std::uint64_t divergence) {
         } else {
             ASSERT_EQ(ra.outcome, net::TickOutcome::Desync);
         }
-        if (tick < divergence)
+        if (tick < divergence) {
             ASSERT_EQ(rb.outcome, net::TickOutcome::Advanced);
-        else
+        } else
             ASSERT_EQ(rb.outcome, net::TickOutcome::Desync);
         if (tick % 256 == 0 && tick < divergence) {
             ASSERT_TRUE(a.FlushReplayRecorder());

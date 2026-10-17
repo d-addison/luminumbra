@@ -295,8 +295,9 @@ TEST_F(ReplayStreamTest, QueuedRecorderPreservesOrderingDigestAndDesyncArtifactB
             WaitForRecorderWorker(gate);
         if (tick == 256)
             ReleaseRecorder(gate);
-        if (tick % 256 == 0)
+        if (tick % 256 == 0) {
             ASSERT_TRUE(recorder.Flush());
+        }
     }
     ASSERT_TRUE(expected.Finalize(expected_path, ticks, divergence));
     // Finalize itself flushes the last partial batch, with checkpoints cut off at

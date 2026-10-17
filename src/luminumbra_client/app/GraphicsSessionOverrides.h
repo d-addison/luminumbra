@@ -13,8 +13,8 @@ namespace Luminumbra::Client {
 // over the profile. Explicit CLI volumetrics wins over the selected preset.
 inline luminumbra::core::GraphicsOverrides
 GraphicsSessionOverrides(std::string_view profile,
-                         std::optional<float> environment_scale,
-                         std::optional<int> volumetrics) {
+                         const std::optional<float>& environment_scale,
+                         const std::optional<int>& volumetrics) {
     luminumbra::core::GraphicsOverrides overrides;
     if (!profile.empty())
         overrides["render_scale"] = profile == "quality" ? 1.0 : 0.67;
