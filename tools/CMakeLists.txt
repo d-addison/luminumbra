@@ -148,6 +148,13 @@ if(BUILD_TESTING)
     set_tests_properties(AcceptanceMatrixContract
         PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
     add_test(
+        NAME AcceptanceRecoveryContract
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                AcceptanceRecoveryTests)
+    set_tests_properties(AcceptanceRecoveryContract
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
         NAME AcceptanceMatrixPublicTreeContract1
         COMMAND "${Python3_EXECUTABLE}"
                 -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"

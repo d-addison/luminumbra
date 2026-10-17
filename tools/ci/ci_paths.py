@@ -16,6 +16,7 @@ PYTHON_TESTS = (
     "tools/ci/test_ci_paths.py",
     "tools/ci/test_cache_retention.py",
     "tools/ci/test_check_docs.py",
+    "tools/ci/test_check_acceptance_matrix.py",
     "tools/ci/test_check_ctest_junit.py",
     "tools/ci/test_qualification_capture.py",
     "tools/ci/test_slowest_tests.py",
@@ -43,7 +44,7 @@ PYTHON_TESTS = (
     "tools/rendering/acceptance/test_scene_matrix.py",
 )
 PYTHON_MODULES = {
-    "tools/ci/ci_paths.py", "tools/ci/check_docs.py",
+    "tools/ci/ci_paths.py", "tools/ci/check_docs.py", "tools/ci/check_acceptance_matrix.py",
     "tools/ci/check_ctest_junit.py", "tools/ci/slowest_tests.py",
     "tools/ci/validate_performance_measurement.py",
     "tools/ci/validate_public_tree.py", "tools/ci/validate_visual_catalog.py",

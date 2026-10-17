@@ -863,7 +863,7 @@ def refresh_inventory(
     return refreshed, updated_matrix, decisions
 
 
-def _refresh_lock_path(root: Path) -> Path:
+def _refresh_lock_path(root: Path, *, required: bool = True) -> Path | None:
     """Keep the persistent lock outside the public tree, including worktrees."""
     metadata = root / ".git"
     if metadata.is_file():
@@ -874,6 +874,8 @@ def _refresh_lock_path(root: Path) -> Path:
         if metadata.is_relative_to(root):
             raise MatrixError("refresh lock requires Git metadata outside the public tree")
     if not metadata.is_dir():
+        if not required:
+            return None
         raise MatrixError("inventory refresh requires a Git metadata directory")
     return metadata / "acceptance-refresh.lock"
 
@@ -913,13 +915,18 @@ def _try_refresh_lock(handle: Any, *, shared: bool = False) -> None:
 def _refresh_lock(root: Path, *, shared: bool = False, timeout: float = 2.0) -> Iterator[None]:
     # Kernel ownership, rather than a PID or age check, makes a crashed holder
     # harmless and prevents stealing a live holder's lock. Closing releases it.
-    path = _refresh_lock_path(root)
+    path = _refresh_lock_path(root, required=not shared)
+    if path is None:
+        yield
+        return
     try:
-        # Readers need no metadata writes once either participant creates the
-        # persistent file. Never bypass locking when that file is absent.
+        # Readers use an existing persistent file without metadata writes.
         handle = path.open("rb" if shared else "a+b")
     except FileNotFoundError:
-        handle = path.open("a+b")
+        if not shared:
+            raise
+        yield
+        return
     with handle:
         deadline = time.monotonic() + timeout
         while True:
@@ -966,20 +973,242 @@ class _RefreshSnapshot:
             raise MatrixError("refresh input snapshot changed; retry after source edits finish")
 
 
+# Recovery has at most five destinations (three defaults, document, receipt),
+# a 64 KiB journal and 16 MiB per file. No directory scan or retry loop is used.
+_TRANSACTION_OUTPUTS = 5
+_TRANSACTION_BYTES = 16 * 1024 * 1024
+_JOURNAL_BYTES = 64 * 1024
+
+
+def _transaction_metadata(handle: Any) -> os.stat_result:
+    metadata = os.fstat(handle.fileno())
+    if os.name != "nt":
+        return metadata
+    # CRT fstat can report zero identity/link fields. Query the owning handle,
+    # including the full 128-bit file ID used by modern Windows filesystems.
+    import ctypes
+    from ctypes import wintypes
+    import msvcrt
+
+    class FileIdentity(ctypes.Structure):
+        _fields_ = [("volume", ctypes.c_ulonglong), ("identity", ctypes.c_ubyte * 16)]
+
+    class FileStandard(ctypes.Structure):
+        _fields_ = [("allocation", ctypes.c_longlong), ("size", ctypes.c_longlong),
+                    ("links", wintypes.DWORD), ("deleted", ctypes.c_ubyte),
+                    ("directory", ctypes.c_ubyte)]
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    query = kernel.GetFileInformationByHandleEx
+    query.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    query.restype = wintypes.BOOL
+    identity, standard = FileIdentity(), FileStandard()
+    native = msvcrt.get_osfhandle(handle.fileno())
+    if (not query(native, 18, ctypes.byref(identity), ctypes.sizeof(identity))
+            or not query(native, 1, ctypes.byref(standard), ctypes.sizeof(standard))):
+        raise ctypes.WinError(ctypes.get_last_error())
+    values = list(metadata)
+    values[1] = int.from_bytes(bytes(identity.identity), "little")
+    values[2], values[3] = identity.volume, standard.links
+    return os.stat_result(values, {"st_mtime_ns": metadata.st_mtime_ns,
+                                   "st_ctime_ns": metadata.st_ctime_ns})
+
+
+def _same_transaction_identity(path: Path, expected: os.stat_result) -> bool:
+    before = path.lstat()
+    if not stat.S_ISREG(before.st_mode):
+        return False
+    if os.name != "nt":
+        return os.path.samestat(before, expected)
+    # Use the same handle representation on both sides, independent of Python's
+    # lstat ID width. No handle remains open across rename/unlink on Windows.
+    with os.fdopen(os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)), "rb") as handle:
+        actual = _transaction_metadata(handle)
+        return os.path.samestat(actual, expected) and os.path.samestat(before, path.lstat())
+
+
+def _read_transaction_file(path: Path, limit: int) -> tuple[bytes, os.stat_result]:
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    with os.fdopen(os.open(path, flags), "rb") as handle:
+        before = _transaction_metadata(handle)
+        if not stat.S_ISREG(before.st_mode) or not before.st_ino or before.st_size > limit:
+            raise MatrixError(f"invalid recovery file or size: {path}")
+        data = handle.read(limit + 1)
+        after = _transaction_metadata(handle)
+        same_identity = _same_transaction_identity(path, before)
+    if (len(data) > limit or len(data) != before.st_size
+            or (before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+            != (after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+            or not same_identity):
+        raise MatrixError(f"recovery file changed: {path}")
+    return data, before
+
+
+def _transaction_record(path: Path) -> dict[str, Any]:
+    data, metadata = _read_transaction_file(path, _TRANSACTION_BYTES)
+    return {"path": str(path), "device": metadata.st_dev, "inode": metadata.st_ino,
+            "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+
+
+def _verify_transaction_file(record: dict[str, Any]) -> Path:
+    path = Path(record["path"])
+    actual = _transaction_record(path)
+    if actual != record:
+        raise MatrixError(f"recovery file identity or content changed: {path}")
+    return path
+
+
+def _write_transaction(journal: Path, entries: list[dict[str, Any]], *, committed: bool) -> None:
+    if not 1 <= len(entries) <= _TRANSACTION_OUTPUTS:
+        raise MatrixError("recovery transaction exceeds its bound")
+    data = json.dumps({"version": 1, "committed": committed, "outputs": entries},
+                      sort_keys=True).encode("utf-8")
+    if len(data) > _JOURNAL_BYTES:
+        raise MatrixError("recovery transaction exceeds its bound")
+    candidate = journal.with_suffix(".pending")
+    # The lock serializes this fixed scratch name. Open without truncation,
+    # reject special files/aliases, then write through the verified handle.
+    flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    metadata = None
+    created = False
+    try:
+        try:
+            descriptor = os.open(candidate, flags | os.O_EXCL, 0o600)
+            created = True
+        except FileExistsError:
+            descriptor = os.open(candidate, flags & ~os.O_CREAT)
+        with os.fdopen(descriptor, "wb") as handle:
+            metadata = _transaction_metadata(handle)
+            if (not stat.S_ISREG(metadata.st_mode) or not metadata.st_ino
+                    or metadata.st_nlink != 1 or not _same_transaction_identity(candidate, metadata)):
+                metadata = None
+                raise MatrixError("invalid recovery journal candidate")
+            handle.truncate(0)
+            if handle.write(data) != len(data):
+                raise OSError("incomplete recovery journal write")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(candidate, journal)
+    finally:
+        if created and metadata is not None and candidate.exists() and _same_transaction_identity(candidate, metadata):
+            candidate.unlink()
+
+
+def _recover_outputs(journal: Path | None) -> None:
+    if journal is None or not journal.exists():
+        return
+    if _same_path(journal, journal.with_suffix(".lock")):
+        raise MatrixError("recovery journal aliases refresh lock")
+    raw, journal_identity = _read_transaction_file(journal, _JOURNAL_BYTES)
+    try:
+        transaction = json.loads(raw)
+        if (not isinstance(transaction, dict) or set(transaction) != {"version", "committed", "outputs"}
+                or type(transaction["version"]) is not int or transaction["version"] != 1
+                or type(transaction["committed"]) is not bool):
+            raise ValueError("unknown transaction metadata")
+        entries = transaction["outputs"]
+        if not isinstance(entries, list) or not 1 <= len(entries) <= _TRANSACTION_OUTPUTS:
+            raise ValueError("invalid output count")
+        names: set[Path] = {journal, journal.with_suffix(".pending")}
+        for entry in entries:
+            if not isinstance(entry, dict) or set(entry) != {"path", "old", "backup", "new"}:
+                raise ValueError("invalid output metadata")
+            path = Path(entry["path"])
+            if not path.is_absolute() or path in names or path.resolve() != path:
+                raise ValueError("invalid output path")
+            names.add(path)
+            old = entry["old"]
+            if old is not None and (not isinstance(old, str) or not re.fullmatch(r"[0-9a-f]{64}", old)):
+                raise ValueError("invalid original digest")
+            if (old is None) != (entry["backup"] is None):
+                raise ValueError("invalid backup metadata")
+            if not isinstance(entry["new"], dict):
+                raise ValueError("missing publication metadata")
+            for record in (entry["new"], entry["backup"]):
+                if record is None:
+                    continue
+                if not isinstance(record, dict) or set(record) != {"path", "device", "inode", "size", "sha256"}:
+                    raise ValueError("invalid recovery metadata")
+                artifact = Path(record["path"])
+                if (artifact.parent != path.parent or artifact in names
+                        or not re.fullmatch(r"\.acceptance-[0-9a-f]{32}", artifact.name)
+                        or any(type(record[key]) is not int for key in ("device", "inode", "size"))
+                        or record["device"] < 0 or record["inode"] <= 0
+                        or not 0 <= record["size"] <= _TRANSACTION_BYTES
+                        or not isinstance(record["sha256"], str)
+                        or not re.fullmatch(r"[0-9a-f]{64}", record["sha256"])):
+                    raise ValueError("invalid recovery identity")
+                names.add(artifact)
+            if entry["backup"] is not None and entry["backup"]["sha256"] != old:
+                raise ValueError("backup digest differs from original")
+    except (ValueError, TypeError, KeyError) as exc:
+        raise MatrixError(f"invalid recovery journal: {exc}") from exc
+
+    restore: list[dict[str, Any]] = []
+    # Validate the entire bounded transaction before restoring any destination.
+    for entry in entries:
+        for record in (entry["new"], entry["backup"]):
+            if record is not None and Path(record["path"]).exists():
+                _verify_transaction_file(record)
+        if transaction["committed"]:
+            continue
+        path = Path(entry["path"])
+        try:
+            current = _transaction_record(path)
+        except FileNotFoundError:
+            current = None
+        if (current["sha256"] if current is not None else None) == entry["old"]:
+            continue  # Unpublished, or already restored by an interrupted recovery.
+        expected = dict(entry["new"], path=str(path))
+        if current != expected:
+            raise MatrixError(f"recovery output changed; recovery copies retained: {path}")
+        if entry["backup"] is not None:
+            _verify_transaction_file(entry["backup"])
+        restore.append(entry)
+    for entry in reversed(restore):
+        path = Path(entry["path"])
+        _verify_transaction_file(dict(entry["new"], path=str(path)))
+        if entry["backup"] is None:
+            # Recheck identity at removal; only remove our published candidate.
+            path.unlink()
+        else:
+            backup = _verify_transaction_file(entry["backup"])
+            _verify_transaction_file(dict(entry["new"], path=str(path)))
+            os.replace(backup, path)  # Closed handles on Windows; restartable.
+    for entry in entries:
+        for record in (entry["new"], entry["backup"]):
+            if record is not None and Path(record["path"]).exists():
+                artifact = _verify_transaction_file(record)
+                try:
+                    artifact.unlink()
+                except PermissionError:
+                    # Windows read-only candidates cannot be unlinked directly.
+                    artifact = _verify_transaction_file(record)
+                    artifact.chmod(stat.S_IRUSR | stat.S_IWUSR)
+                    _verify_transaction_file(record).unlink()
+    if not _same_transaction_identity(journal, journal_identity):
+        raise MatrixError("recovery journal identity changed")
+    journal.unlink()
+
+
 def _replace_outputs(
     outputs: list[tuple[Path, str]], *, private_output: Path | None = None,
     verify: Callable[[dict[Path, bytes]], None] | None = None,
+    journal: Path | None = None,
 ) -> None:
     """Stage closed files and rollback copies before publishing on either OS."""
     staged: list[tuple[Path, Path]] = []
     backups: dict[Path, Path | None] = {}
     temporary_paths: list[Path] = []
+    temporary_identities: dict[Path, os.stat_result] = {}
     replaced: list[Path] = []
     digests: dict[Path, bytes] = {}
     backup_digests: dict[Path, bytes] = {}
     identities: dict[Path, tuple[Path, os.stat_result]] = {}
     published: dict[Path, bytes] = {}
     keep_backups = False
+    transaction: list[dict[str, Any]] = []
+    journal_published = False
 
     def stage(path: Path, data: bytes, mode: int | None, private: bool) -> Path:
         # A 128-bit random name plus exclusive creation prevents clobbering
@@ -988,10 +1217,21 @@ def _replace_outputs(
         creation_mode = 0o600 if mode is not None or private else 0o666
         with open(temporary, "xb", opener=lambda name, flags: os.open(name, flags, creation_mode)) as handle:
             temporary_paths.append(temporary)
-            handle.write(data)
+            temporary_identities[temporary] = _transaction_metadata(handle)
+            if handle.write(data) != len(data):
+                raise OSError("incomplete staged output write")
+            handle.flush()
+            os.fsync(handle.fileno())
         if mode is not None:
             temporary.chmod(mode)
         return temporary
+
+    def verify_temporary(path: Path) -> None:
+        expected = temporary_identities.get(path)
+        actual = path.lstat()
+        if (expected is None or not expected.st_ino or not stat.S_ISREG(actual.st_mode)
+                or not _same_transaction_identity(path, expected)):
+            raise MatrixError(f"temporary output identity changed: {path}")
 
     def verify_publication(path: Path) -> None:
         target, identity = identities[path]
@@ -999,7 +1239,7 @@ def _replace_outputs(
         if (path.resolve() != target or not stat.S_ISREG(before.st_mode)
                 or not identity.st_ino or not os.path.samestat(before, identity)):
             raise MatrixError("output changed since publication or its identity cannot be verified")
-        fingerprint = _RefreshSnapshot._fingerprint(path)
+        fingerprint = hashlib.sha256(_read_transaction_file(path, _TRANSACTION_BYTES)[0]).digest()
         after = path.lstat()
         if (path.resolve() != target or not os.path.samestat(before, after) or fingerprint != digests[path]
                 or (before.st_mode, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
@@ -1007,15 +1247,28 @@ def _replace_outputs(
             raise MatrixError("output changed since publication or its identity cannot be verified")
 
     try:
+        if len(outputs) > _TRANSACTION_OUTPUTS:
+            raise MatrixError("too many transaction outputs")
         for path, text in outputs:
             # --write-doc may explicitly name the standard generated document.
             if path in backups:
                 continue
+            if len(text) > _TRANSACTION_BYTES or (path.exists() and path.stat().st_size > _TRANSACTION_BYTES):
+                raise MatrixError("transaction output exceeds size bound")
+            # Count UTF-8 bytes before allocating the encoded candidate. The
+            # character pass is bounded by the file limit and runs only on writes.
+            encoded_size = sum(1 if point < 0x80 else 2 if point < 0x800 else 3 if point < 0x10000 else 4
+                               for point in map(ord, text))
+            if encoded_size > _TRANSACTION_BYTES:
+                raise MatrixError("transaction output exceeds size bound")
             data = text.encode("utf-8")
-            original = path.read_bytes() if path.exists() else None
+            try:
+                original, original_metadata = _read_transaction_file(path, _TRANSACTION_BYTES)
+                mode = stat.S_IMODE(original_metadata.st_mode)
+            except FileNotFoundError:
+                original, mode = None, None
             if original == data:
                 continue
-            mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else None
             backups[path] = stage(path, original, mode, True) if original is not None else None
             if original is not None:
                 backup_digests[path] = hashlib.sha256(original).digest()
@@ -1023,6 +1276,13 @@ def _replace_outputs(
             digests[path] = hashlib.sha256(data).digest()
         if verify is not None:
             verify(published)
+        if journal is not None and staged:
+            transaction = [{"path": str(path),
+                            "old": backup_digests[path].hex() if path in backup_digests else None,
+                            "backup": _transaction_record(backups[path]) if backups[path] is not None else None,
+                            "new": _transaction_record(temporary)} for temporary, path in staged]
+            _write_transaction(journal, transaction, committed=False)
+            journal_published = True
         for temporary, path in staged:
             target, identity = path.resolve(), temporary.stat()
             if verify is not None:
@@ -1033,6 +1293,8 @@ def _replace_outputs(
             published[target] = digests[path]
         if verify is not None:
             verify(published)
+        if journal_published:
+            _write_transaction(journal, transaction, committed=True)
     except BaseException as failure:
         keep_backups = True
         conflicts = []
@@ -1043,12 +1305,12 @@ def _replace_outputs(
                 if backup is None:
                     path.unlink()
                 else:
-                    original = backup.read_bytes()
+                    original, backup_metadata = _read_transaction_file(backup, _TRANSACTION_BYTES)
                     if hashlib.sha256(original).digest() != backup_digests[path]:
                         raise MatrixError(f"recovery copy changed: {backup}")
                     # Restore from a separate closed candidate. Every backup
                     # must survive even if a later output cannot be restored.
-                    candidate = stage(path, original, stat.S_IMODE(backup.stat().st_mode), True)
+                    candidate = stage(path, original, stat.S_IMODE(backup_metadata.st_mode), True)
                     # Portable rename/unlink has no compare-and-swap operation.
                     # Recheck bytes and identity immediately before replacement;
                     # all handles are closed so Windows can replace the file.
@@ -1070,16 +1332,24 @@ def _replace_outputs(
                 continue
             try:
                 try:
-                    temporary.unlink(missing_ok=True)
+                    verify_temporary(temporary)
+                except FileNotFoundError:
+                    continue
+                try:
+                    temporary.unlink()
                 except PermissionError:
                     # Windows refuses to unlink a read-only replacement candidate.
+                    verify_temporary(temporary)
                     temporary.chmod(stat.S_IRUSR | stat.S_IWUSR)
+                    verify_temporary(temporary)
                     temporary.unlink()
-            except OSError as cleanup_error:
+            except (MatrixError, OSError) as cleanup_error:
                 if not keep_backups:
                     raise
                 # Cleanup must not hide the conflict and recovery-copy paths.
                 print(f"error: cannot remove temporary output {temporary}: {cleanup_error}", file=sys.stderr)
+        if journal_published and not keep_backups:
+            journal.unlink()
 
 
 def _check_planned(add: Any, planned: Any) -> None:
@@ -1554,28 +1824,42 @@ def _matrix_input_paths(matrix: dict[str, Any], root: Path) -> list[Path]:
             if not _path_problem(root, ref, must_exist=False) and not (root / ref).is_dir()]
 
 
+def _same_path(left: Path, right: Path) -> bool:
+    """Compare names and file identities, including hard links and short names."""
+    if left.resolve() == right.resolve():
+        return True
+    try:
+        return left.samefile(right)
+    except FileNotFoundError:
+        return False
+
+
 def _check_output_paths(args: argparse.Namespace, root: Path, matrix_path: Path, inputs: list[Path]) -> None:
-    inventory = args.inventory
-    doc = args.generated_doc
+    inventory, doc = args.inventory, args.generated_doc
     targets = [inventory, matrix_path, doc] if args.refresh_inventory else []
-    if args.write_doc is not None and (not args.refresh_inventory or args.write_doc.resolve() != doc.resolve()):
+    if args.write_doc is not None and (not args.refresh_inventory or args.write_doc != doc):
         targets.append(args.write_doc)
     if args.execution_receipt is not None:
         targets.append(args.execution_receipt)
-    if len({path.resolve() for path in targets}) != len(targets):
+    if any(_same_path(path, other) for index, path in enumerate(targets) for other in targets[:index]):
         raise MatrixError("refresh output paths must be distinct" if args.refresh_inventory
                           else "output paths must be distinct")
-    if args.write_doc is None and args.execution_receipt is None:
+    if not targets:
         return
-    protected = {path.resolve() for path in (
-        matrix_path, inventory, *(root / path for path in CONTRACT_DOCUMENTS),
-        *_cmake_files(root), *_gtest_sources(root), *inputs, *args.junit,
-        *([args.discovery] if args.discovery is not None else []), _refresh_lock_path(root))}
-    for path in (args.write_doc, args.execution_receipt):
-        if path is not None and path.resolve() in protected and path.resolve() != doc.resolve():
+    protected = [*(root / path for path in CONTRACT_DOCUMENTS),
+                 *_cmake_files(root), *_gtest_sources(root), *inputs, *args.junit,
+                 *([args.discovery] if args.discovery is not None else [])]
+    lock = _refresh_lock_path(root)
+    protected.extend([lock, lock.with_suffix(".transaction"), lock.with_suffix(".pending")])
+    for path in targets:
+        # Refresh may replace its own matrix/inventory, but neither may alias
+        # another output or any contract/evidence input. Document aliases get
+        # exactly the same checks as explicitly supplied destinations.
+        extra = [] if args.refresh_inventory else [matrix_path, inventory]
+        if path == args.execution_receipt:
+            extra.append(doc)
+        if any(_same_path(path, source) for source in [*protected, *extra]):
             raise MatrixError(f"output path overlaps an input: {path}")
-    if args.execution_receipt is not None and args.execution_receipt.resolve() == doc.resolve():
-        raise MatrixError("output path overlaps an input: generated document")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1601,11 +1885,21 @@ def main(argv: list[str] | None = None) -> int:
         print("error: --junit and --discovery are required together for execution evidence", file=sys.stderr)
         return 2
     try:
-        # Every reader and writer holds the same kernel lock for the complete
-        # read/validate/publish operation. Shared acquisition uses the existing
-        # bounded wait, including Windows mandatory byte-range locking.
+        # Readers coordinate through an existing lock, without requiring Git
+        # metadata or creating files in source archives/read-only checkouts.
         writing = args.refresh_inventory or args.write_doc is not None or args.execution_receipt is not None
         with _refresh_lock(root, shared=not writing):
+            lock = _refresh_lock_path(root, required=writing)
+            journal = lock.with_suffix(".transaction") if lock is not None else None
+            if writing:
+                _recover_outputs(journal)
+                return _run_locked(args, root)
+            if journal is None or not journal.exists():
+                return _run_locked(args, root)
+        # Recovery needs exclusive ownership. Recheck under that lock before
+        # reading inputs; another writer may have completed recovery meanwhile.
+        with _refresh_lock(root):
+            _recover_outputs(journal)
             return _run_locked(args, root)
     except (MatrixError, OSError, UnicodeError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -1626,11 +1920,14 @@ def _run_locked(args: argparse.Namespace, root: Path) -> int:
         if path is not None:
             setattr(args, name, path.resolve())
     args.junit = [path.resolve() for path in args.junit]
-    lock = _refresh_lock_path(root).resolve()
-    if any(path == lock for path in (args.write_doc, args.execution_receipt)):
+    lock_path = _refresh_lock_path(root, required=False)
+    lock = lock_path.resolve() if lock_path is not None else None
+    if lock is not None and any(path is not None and _same_path(path, lock)
+                                for path in (args.write_doc, args.execution_receipt)):
         raise MatrixError("output path overlaps an input: refresh lock")
-    if any(path == lock for path in (args.matrix, args.inventory, args.generated_doc,
-                                     args.discovery, args.check_doc, *args.junit)):
+    if lock is not None and any(path is not None and _same_path(path, lock)
+                                for path in (args.matrix, args.inventory, args.generated_doc,
+                                             args.discovery, args.check_doc, *args.junit)):
         raise MatrixError("refresh lock cannot be used as an input")
     snapshot = None
     if args.refresh_inventory:
@@ -1712,7 +2009,8 @@ def _run(args: argparse.Namespace, root: Path, snapshot: _RefreshSnapshot | None
             return 2
     try:
         _replace_outputs(outputs, private_output=args.execution_receipt,
-                         verify=snapshot.verify if snapshot is not None else None)
+                         verify=snapshot.verify if snapshot is not None else None,
+                         journal=(_refresh_lock_path(root).with_suffix(".transaction") if outputs else None))
     except (MatrixError, OSError) as exc:
         print(f"error: cannot replace output: {exc}", file=sys.stderr)
         return 2

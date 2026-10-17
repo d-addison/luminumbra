@@ -163,7 +163,7 @@ def row_of(matrix: dict[str, Any], row_id: str) -> dict[str, Any]:
     raise KeyError(row_id)
 
 
-class AcceptanceMatrixTests(unittest.TestCase):
+class AcceptanceFixture(unittest.TestCase):
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -217,13 +217,6 @@ class AcceptanceMatrixTests(unittest.TestCase):
         (self.root / "tools/ci/acceptance_requirements.json").write_text(
             json.dumps(self.inventory), encoding="utf-8")
 
-    def errors(self, matrix: dict[str, Any], require_landed: bool = False) -> list[str]:
-        return MODULE.validate(matrix, self.index, self.root, require_landed)
-
-    def assertErrorContains(self, matrix: dict[str, Any], fragment: str) -> None:
-        errors = self.errors(matrix)
-        self.assertTrue(any(fragment in error for error in errors), errors)
-
     def write_matrix(self, matrix: Any) -> None:
         if isinstance(matrix, str):
             self.matrix_path.write_text(matrix, encoding="utf-8")
@@ -239,14 +232,6 @@ class AcceptanceMatrixTests(unittest.TestCase):
     def base_args(self) -> list[str]:
         return ["--root", str(self.root), "--matrix", str(self.matrix_path)]
 
-    def test_baseline_is_valid_and_covers_all_statuses(self) -> None:
-        matrix = baseline_matrix()
-        self.assertEqual(self.errors(matrix), [])
-        self.assertEqual(
-            {row["status"] for row in matrix["rows"]},
-            {"covered", "partial", "needs-native-run", "planned"},
-        )
-
     def prepare_refresh(self) -> dict[str, Any]:
         matrix = baseline_matrix()
         matrix["rows"][0]["requirements"].remove("ar.synthetic")
@@ -260,6 +245,76 @@ class AcceptanceMatrixTests(unittest.TestCase):
         doc = self.root / "docs/acceptance-matrix.md"
         doc.write_bytes(MODULE.render_doc(matrix).encode("utf-8"))
         return matrix
+
+    def prepare_rollback(self) -> tuple[tuple[Path, ...], dict[Path, bytes]]:
+        self.write_inventory()
+        self.prepare_refresh()
+        (self.root / MODULE.CONTRACT_DOCUMENTS[1]).write_text(
+            "# Moved\nEvery requirement has evidence.\n", encoding="utf-8")
+        paths = (self.root / "docs/acceptance-matrix.md", self.matrix_path,
+                 self.root / "tools/ci/acceptance_requirements.json")
+        return paths, {path: path.read_bytes() for path in paths}
+
+    def crash_publication(self, count: int, options: list[str]) -> None:
+        program = """
+import os, pathlib, runpy, sys
+module = runpy.run_path(sys.argv[1])["main"].__globals__
+replace = pathlib.Path.replace
+remaining = int(sys.argv[2])
+def publish(path, target):
+    global remaining
+    result = replace(path, target)
+    remaining -= 1
+    if remaining == 0:
+        os._exit(73)
+    return result
+pathlib.Path.replace = publish
+raise SystemExit(module["main"](sys.argv[3:]))
+"""
+        child = subprocess.run([sys.executable, "-I", "-B", "-c", program,
+                                str(MODULE_PATH), str(count), *self.base_args(), *options],
+                               capture_output=True, text=True, timeout=5)
+        self.assertEqual(child.returncode, 73, (child.stdout, child.stderr))
+
+    def execution_inputs(self, cases: list[dict[str, Any]] | None = None) -> tuple[Path, Path]:
+        discovery = self.tmp / "discovery.json"
+        discovery.write_text(json.dumps({"kind": "ctestInfo", "tests": [
+            {"name": name} for name in ("AlphaContract", "Alpha.One", "Instances/Param.Three/0",
+                                        "Instances/Param.Three/1", "Unrelated")
+        ]}), encoding="utf-8")
+        report = self.tmp / "ctest.junit.xml"
+        if cases is None:
+            cases = [{"name": name, "status": "run"} for name in
+                     ("AlphaContract", "Alpha.One", "Instances/Param.Three/0", "Instances/Param.Three/1")]
+        self.write_junit(report, cases)
+        return discovery, report
+
+    def write_junit(self, path: Path, cases: list[dict[str, Any]]) -> None:
+        suite = ET.Element("testsuite")
+        for spec in cases:
+            spec = dict(spec)
+            adverse = spec.pop("adverse", None)
+            case = ET.SubElement(suite, "testcase", spec)
+            if adverse:
+                ET.SubElement(case, adverse)
+        ET.ElementTree(suite).write(path, encoding="utf-8", xml_declaration=True)
+
+
+class AcceptanceMatrixTests(AcceptanceFixture):
+    def errors(self, matrix: dict[str, Any], require_landed: bool = False) -> list[str]:
+        return MODULE.validate(matrix, self.index, self.root, require_landed)
+
+    def assertErrorContains(self, matrix: dict[str, Any], fragment: str) -> None:
+        errors = self.errors(matrix)
+        self.assertTrue(any(fragment in error for error in errors), errors)
+
+    def test_baseline_is_valid_and_covers_all_statuses(self) -> None:
+        matrix = baseline_matrix()
+        self.assertEqual(self.errors(matrix), [])
+        self.assertEqual(
+            {row["status"] for row in matrix["rows"]},
+            {"covered", "partial", "needs-native-run", "planned"},
+        )
 
     def refresh_decisions(self, output: str) -> list[dict[str, Any]]:
         return [json.loads(line.removeprefix("inventory decision: "))
@@ -381,13 +436,17 @@ raise SystemExit(module["main"](["--root", sys.argv[2], "--matrix", sys.argv[3],
             self.assertEqual(code, 2, err)
             self.assertIn("within deadline", err)
 
-    def test_reader_creates_missing_lock_and_opens_existing_lock_read_only(self) -> None:
+    def test_validation_never_creates_missing_lock_and_uses_existing_lock_read_only(self) -> None:
         self.prepare_refresh()
         lock = MODULE._refresh_lock_path(self.root)
         lock.unlink()
-        code, _, err = self.run_main(*self.base_args())
-        self.assertEqual(code, 0, err)
-        self.assertEqual(lock.read_bytes(), b"")
+        doc = self.root / "docs/acceptance-matrix.md"
+        for options in ([], ["--check-doc", str(doc)]):
+            code, out, err = self.run_main(*self.base_args(), *options)
+            self.assertEqual(code, 0, err)
+            self.assertIn("static references ok", out)
+            self.assertFalse(lock.exists())
+        lock.touch()
         identity, opened = lock.stat(), []
         open_path = Path.open
         def read_only(path: Path, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
@@ -401,14 +460,6 @@ raise SystemExit(module["main"](["--root", sys.argv[2], "--matrix", sys.argv[3],
         self.assertEqual(code, 0, err)
         self.assertEqual(opened, ["rb"])
         self.assertTrue(os.path.samestat(identity, lock.stat()))
-        lock.unlink()
-        with mock.patch.object(Path, "open", side_effect=[FileNotFoundError(),
-                                                         PermissionError("lock creation denied")]), \
-                mock.patch.object(MODULE, "load_matrix") as load:
-            code, _, err = self.run_main(*self.base_args())
-        self.assertEqual(code, 2, err)
-        self.assertIn("lock creation denied", err)
-        load.assert_not_called()
 
     def test_overlapping_refresh_is_refused_without_stealing_live_lock(self) -> None:
         self.prepare_refresh()
@@ -804,15 +855,6 @@ raise SystemExit(module["main"](["--root", sys.argv[2], "--matrix", sys.argv[3],
                 finally:
                     source.write_bytes(original)
 
-    def prepare_rollback(self) -> tuple[tuple[Path, ...], dict[Path, bytes]]:
-        self.write_inventory()
-        self.prepare_refresh()
-        (self.root / MODULE.CONTRACT_DOCUMENTS[1]).write_text(
-            "# Moved\nEvery requirement has evidence.\n", encoding="utf-8")
-        paths = (self.root / "docs/acceptance-matrix.md", self.matrix_path,
-                 self.root / "tools/ci/acceptance_requirements.json")
-        return paths, {path: path.read_bytes() for path in paths}
-
     def assert_concurrent_output_edits_survive_rollback(self, changed_indices: tuple[int, ...]) -> None:
         paths, before = self.prepare_rollback()
         changed = {paths[index]: b"editor save: " + paths[index].name.encode("utf-8")
@@ -895,6 +937,7 @@ raise SystemExit(module["main"](["--root", sys.argv[2], "--matrix", sys.argv[3],
                 metadata, resolve, chmod, create = Path.stat, Path.resolve, Path.chmod, open
                 unlink = Path.unlink
                 verify = MODULE._RefreshSnapshot.verify
+                bounded_read = MODULE._read_transaction_file
                 copies: dict[Path, bytes] = {}
                 published: dict[Path, bytes] = {}
                 active = False
@@ -953,10 +996,15 @@ raise SystemExit(module["main"](["--root", sys.argv[2], "--matrix", sys.argv[3],
                         if failure == "changed-before-replace":
                             matrix.write_bytes(b"editor save while preparing restore\n")
                     return read(file)
+                def faulted_bounded_read(file: Path, limit: int) -> Any:
+                    data, file_metadata = bounded_read(file, limit)
+                    if active and (file == matrix or file in copies):
+                        data = faulted_read(file)
+                    return data, file_metadata
                 def unknown_identity(file: Path, *args: Any, **kwargs: Any) -> os.stat_result:
                     result = metadata(file, *args, **kwargs)
-                    if failure == "unknown-identity" and file.parent == matrix.parent \
-                            and file.name.startswith(".acceptance-"):
+                    if failure == "unknown-identity" and kwargs.get("follow_symlinks", True) \
+                            and file.parent == matrix.parent and file.name.startswith(".acceptance-"):
                         values = list(result)
                         values[1] = 0
                         return os.stat_result(values)
@@ -984,6 +1032,7 @@ raise SystemExit(module["main"](["--root", sys.argv[2], "--matrix", sys.argv[3],
                         mock.patch.object(MODULE._RefreshSnapshot, "verify", begin_rollback), \
                         mock.patch.object(os, "replace", locked_restore), \
                         mock.patch.object(Path, "read_bytes", faulted_read), \
+                        mock.patch.object(MODULE, "_read_transaction_file", faulted_bounded_read), \
                         mock.patch.object(Path, "stat", unknown_identity), \
                         mock.patch.object(Path, "resolve", changed_resolution), \
                         mock.patch.object(Path, "chmod", failed_mode), \
@@ -1017,6 +1066,7 @@ raise SystemExit(module["main"](["--root", sys.argv[2], "--matrix", sys.argv[3],
                     self.assertIn(str(copy), err)
                     copy.unlink()
                 displaced.unlink(missing_ok=True)
+                MODULE._refresh_lock_path(self.root).with_suffix(".transaction").unlink(missing_ok=True)
 
     def test_receipt_rollback_guards_existing_and_created_outputs_for_every_writer(self) -> None:
         for refresh, existing, failure in ((refresh, existing, failure)
@@ -1090,6 +1140,7 @@ raise SystemExit(module["main"](["--root", sys.argv[2], "--matrix", sys.argv[3],
                         self.assertEqual(copy.read_bytes(), data)
                         self.assertIn(str(copy), err)
                         copy.unlink()
+                MODULE._refresh_lock_path(self.root).with_suffix(".transaction").unlink(missing_ok=True)
 
     def test_refresh_moves_statement_and_clears_only_derived_inventory_error(self) -> None:
         matrix = self.prepare_refresh()
@@ -3130,29 +3181,6 @@ raise SystemExit(module["main"](["--root", sys.argv[2], "--matrix", sys.argv[3],
         self.assertEqual(code, 2)
         self.assertTrue(err.startswith("error: "), err)
 
-    def execution_inputs(self, cases: list[dict[str, Any]] | None = None) -> tuple[Path, Path]:
-        discovery = self.tmp / "discovery.json"
-        discovery.write_text(json.dumps({"kind": "ctestInfo", "tests": [
-            {"name": name} for name in ("AlphaContract", "Alpha.One", "Instances/Param.Three/0",
-                                        "Instances/Param.Three/1", "Unrelated")
-        ]}), encoding="utf-8")
-        report = self.tmp / "ctest.junit.xml"
-        if cases is None:
-            cases = [{"name": name, "status": "run"} for name in
-                     ("AlphaContract", "Alpha.One", "Instances/Param.Three/0", "Instances/Param.Three/1")]
-        self.write_junit(report, cases)
-        return discovery, report
-
-    def write_junit(self, path: Path, cases: list[dict[str, Any]]) -> None:
-        suite = ET.Element("testsuite")
-        for spec in cases:
-            spec = dict(spec)
-            adverse = spec.pop("adverse", None)
-            case = ET.SubElement(suite, "testcase", spec)
-            if adverse:
-                ET.SubElement(case, adverse)
-        ET.ElementTree(suite).write(path, encoding="utf-8", xml_declaration=True)
-
     def execution(self, discovery: Path, *reports: Path, matrix: dict[str, Any] | None = None) -> dict[str, Any]:
         return MODULE.validate_execution(matrix or baseline_matrix(), self.index, list(reports), discovery)
 
@@ -3291,6 +3319,560 @@ raise SystemExit(module["main"](["--root", sys.argv[2], "--matrix", sys.argv[3],
                 event.write_text(json.dumps(invalid), encoding="utf-8")
                 with self.subTest(event=invalid), self.assertRaises(MODULE.MatrixError):
                     MODULE._ci_identity(self.root)
+
+
+class AcceptanceRecoveryTests(AcceptanceFixture):
+    def test_static_validation_reads_source_archive_without_git_or_any_writes(self) -> None:
+        self.prepare_refresh()
+        metadata = self.root / ".git"
+        (metadata / "acceptance-refresh.lock").unlink()
+        metadata.rmdir()
+        doc = self.root / "docs/acceptance-matrix.md"
+        open_path, system_open = Path.open, os.open
+        def read_only(path: Path, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+            self.assertFalse(any(flag in mode for flag in "wax+"), (path, mode))
+            return open_path(path, mode, *args, **kwargs)
+        def no_write(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+            self.assertEqual(flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC), 0)
+            return system_open(path, flags, *args, **kwargs)
+        with mock.patch.object(Path, "open", read_only), mock.patch.object(os, "open", no_write), \
+                mock.patch.object(MODULE.time, "monotonic", side_effect=OSError("timer unavailable")):
+            for options in ([], ["--check-doc", str(doc)]):
+                code, out, err = self.run_main(*self.base_args(), *options)
+                self.assertEqual(code, 0, err)
+                self.assertIn("static references ok", out)
+        self.assertFalse(metadata.exists())
+
+    def test_termination_at_every_publication_boundary_recovers_before_reading(self) -> None:
+        for refresh in (False, True):
+            for existing in (False, True):
+                for count in range(1, 6 if refresh else 3):
+                    with self.subTest(refresh=refresh, existing=existing, count=count):
+                        paths, before = self.prepare_rollback()
+                        if not refresh:
+                            (self.root / MODULE.CONTRACT_DOCUMENTS[1]).write_text(
+                                "# Contract\nEvery requirement has evidence.\n", encoding="utf-8")
+                        discovery, report = self.execution_inputs()
+                        doc, receipt = self.tmp / "additional.md", self.tmp / "receipt.json"
+                        doc.write_bytes(b"previous document\n")
+                        before[doc] = doc.read_bytes()
+                        receipt.unlink(missing_ok=True)
+                        if existing:
+                            receipt.write_bytes(b"previous receipt\n")
+                            before[receipt] = receipt.read_bytes()
+                        options = ["--write-doc", str(doc), "--junit", str(report),
+                                   "--discovery", str(discovery), "--execution-receipt", str(receipt)]
+                        if refresh:
+                            options.append("--refresh-inventory")
+                        self.crash_publication(count, options)
+                        self.assertTrue(any(path.read_bytes() != data for path, data in before.items())
+                                        or receipt.exists() != existing)
+                        # Stop at the very first input read: recovery must have
+                        # restored all outputs, rather than hiding damage by regenerating.
+                        with mock.patch.object(MODULE, "load_matrix",
+                                               side_effect=MODULE.MatrixError("stop after recovery")):
+                            code, _, err = self.run_main(*self.base_args())
+                        self.assertEqual(code, 2, err)
+                        self.assertIn("stop after recovery", err)
+                        self.assertEqual({path: path.read_bytes() for path in before}, before)
+                        self.assertEqual(receipt.exists(), existing)
+                        self.assertEqual(list(self.tmp.rglob(".acceptance-*")), [])
+                        self.assertFalse(MODULE._refresh_lock_path(self.root).with_suffix(".transaction").exists())
+                        code, _, err = self.run_main(*self.base_args(), *options)
+                        self.assertEqual(code, 0, err)
+
+    def test_recovery_rejects_damaged_or_unknown_journal_before_any_input_read(self) -> None:
+        paths, _ = self.prepare_rollback()
+        self.crash_publication(1, ["--refresh-inventory"])
+        journal = MODULE._refresh_lock_path(self.root).with_suffix(".transaction")
+        original = journal.read_bytes()
+        baseline = json.loads(original)
+        current = {path: path.read_bytes() for path in paths}
+        mutations = [b"", b"{", b"\xff", b" " * (MODULE._JOURNAL_BYTES + 1)]
+        changes = [
+            lambda value: value.update(version=2),
+            lambda value: value.update(version=True),
+            lambda value: value.update(committed=None),
+            lambda value: value.update(extra="unknown"),
+            lambda value: value.update(outputs=[]),
+            lambda value: value.update(outputs=[value["outputs"][0]] * 6),
+            lambda value: value.update(outputs={}),
+            lambda value: value["outputs"].__setitem__(0, None),
+            lambda value: value["outputs"][0].update(path="relative"),
+            lambda value: value["outputs"][0].update(path=str(journal)),
+            lambda value: value["outputs"][1].update(path=value["outputs"][0]["path"]),
+            lambda value: value["outputs"][0].update(old="unknown"),
+            lambda value: value["outputs"][0].update(backup=None),
+            lambda value: value["outputs"][0].update(new=None),
+            lambda value: value["outputs"][0]["new"].update(extra="unknown"),
+            lambda value: value["outputs"][0]["new"].update(path=str(self.tmp / "foreign")),
+            lambda value: value["outputs"][0]["new"].update(inode=0),
+            lambda value: value["outputs"][0]["new"].update(device=-1),
+            lambda value: value["outputs"][0]["new"].update(size=-1),
+            lambda value: value["outputs"][0]["new"].update(size=MODULE._TRANSACTION_BYTES + 1),
+            lambda value: value["outputs"][0]["new"].update(inode="unknown"),
+            lambda value: value["outputs"][0]["new"].update(sha256="unknown"),
+            lambda value: value["outputs"][0]["backup"].update(sha256="0" * 64),
+        ]
+        for change in changes:
+            value = copy.deepcopy(baseline)
+            change(value)
+            mutations.append(json.dumps(value).encode("utf-8"))
+        for index, data in enumerate(mutations):
+            with self.subTest(index=index):
+                journal.write_bytes(data)
+                with mock.patch.object(MODULE, "load_matrix") as load:
+                    code, _, err = self.run_main(*self.base_args())
+                self.assertEqual(code, 2, err)
+                load.assert_not_called()
+                self.assertEqual({path: path.read_bytes() for path in paths}, current)
+                self.assertEqual(journal.read_bytes(), data)
+        journal.write_bytes(original)
+        read = MODULE._read_transaction_file
+        def denied(path: Path, limit: int) -> Any:
+            if path == journal:
+                raise PermissionError("journal unreadable")
+            return read(path, limit)
+        with mock.patch.object(MODULE, "_read_transaction_file", denied), \
+                mock.patch.object(MODULE, "load_matrix") as load:
+            code, _, err = self.run_main(*self.base_args())
+        self.assertEqual(code, 2, err)
+        self.assertIn("journal unreadable", err)
+        load.assert_not_called()
+        self.assertEqual({path: path.read_bytes() for path in paths}, current)
+        journal.unlink()
+        os.link(MODULE._refresh_lock_path(self.root), journal)
+        with mock.patch.object(MODULE, "load_matrix") as load:
+            code, _, err = self.run_main(*self.base_args())
+        self.assertEqual(code, 2, err)
+        self.assertIn("aliases refresh lock", err)
+        load.assert_not_called()
+
+    def test_recovery_faults_preserve_files_and_retry_without_consuming_inputs(self) -> None:
+        for failure in ("edited", "missing-output", "replaced-output", "missing-backup", "partial-backup",
+                        "unreadable-backup", "unknown-identity", "restore-denied", "cleanup-denied"):
+            with self.subTest(failure=failure):
+                paths, before = self.prepare_rollback()
+                self.crash_publication(3, ["--refresh-inventory"])
+                journal = MODULE._refresh_lock_path(self.root).with_suffix(".transaction")
+                value = json.loads(journal.read_bytes())
+                backup = Path(value["outputs"][1]["backup"]["path"])
+                saved_backup = backup.read_bytes()
+                current = {path: path.read_bytes() for path in paths}
+                displaced = self.tmp / "displaced"
+                if failure == "edited":
+                    paths[1].write_bytes(b"external edit\n")
+                elif failure == "missing-output":
+                    paths[1].rename(displaced)
+                elif failure == "replaced-output":
+                    paths[1].rename(displaced)
+                    paths[1].write_bytes(current[paths[1]])
+                elif failure == "missing-backup":
+                    backup.rename(displaced)
+                elif failure == "partial-backup":
+                    backup.write_bytes(saved_backup[:8])
+                at_failure = {path: path.read_bytes() if path.exists() else None for path in paths}
+                read, replace, unlink = MODULE._read_transaction_file, os.replace, Path.unlink
+                def faulted_read(path: Path, limit: int) -> Any:
+                    if path == backup and failure == "unreadable-backup":
+                        raise PermissionError("backup unreadable")
+                    data, metadata = read(path, limit)
+                    if path == paths[1] and failure == "unknown-identity":
+                        fields = list(metadata)
+                        fields[1] = 0
+                        metadata = os.stat_result(fields)
+                    return data, metadata
+                def denied_restore(source: Any, target: Any) -> None:
+                    if Path(target) == paths[1] and failure == "restore-denied":
+                        raise PermissionError("restore denied")
+                    replace(source, target)
+                def denied_cleanup(path: Path, *args: Any, **kwargs: Any) -> None:
+                    if path == journal and failure == "cleanup-denied":
+                        raise PermissionError("journal cleanup denied")
+                    unlink(path, *args, **kwargs)
+                with mock.patch.object(MODULE, "_read_transaction_file", faulted_read), \
+                        mock.patch.object(os, "replace", denied_restore), \
+                        mock.patch.object(Path, "unlink", denied_cleanup), \
+                        mock.patch.object(MODULE, "load_matrix") as load:
+                    code, _, err = self.run_main(*self.base_args())
+                self.assertEqual(code, 2, err)
+                load.assert_not_called()
+                self.assertTrue(journal.exists())
+                if failure not in ("restore-denied", "cleanup-denied"):
+                    self.assertEqual({path: path.read_bytes() if path.exists() else None for path in paths}, at_failure)
+                # Repair only the injected external damage, then retry recovery.
+                if failure == "edited":
+                    paths[1].write_bytes(current[paths[1]])
+                elif failure in ("missing-output", "replaced-output"):
+                    paths[1].unlink(missing_ok=True)
+                    displaced.rename(paths[1])
+                elif failure == "missing-backup":
+                    displaced.rename(backup)
+                elif failure == "partial-backup":
+                    backup.write_bytes(saved_backup)
+                with mock.patch.object(MODULE, "load_matrix",
+                                       side_effect=MODULE.MatrixError("stop after recovery")):
+                    code, _, err = self.run_main(*self.base_args())
+                self.assertEqual(code, 2, err)
+                self.assertIn("stop after recovery", err)
+                self.assertEqual({path: path.read_bytes() for path in paths}, before)
+                self.assertFalse(journal.exists())
+                self.assertEqual(list(self.tmp.rglob(".acceptance-*")), [])
+
+    def test_recovery_can_itself_be_terminated_between_restores(self) -> None:
+        program = """
+import os, pathlib, runpy, sys
+module = runpy.run_path(sys.argv[1])["main"].__globals__
+replace = os.replace
+remaining = int(sys.argv[2])
+def restore(source, target):
+    global remaining
+    result = replace(source, target)
+    remaining -= 1
+    if remaining == 0:
+        os._exit(73)
+    return result
+os.replace = restore
+raise SystemExit(module["main"](sys.argv[3:]))
+"""
+        for count in (1, 2, 3):
+            with self.subTest(count=count):
+                paths, before = self.prepare_rollback()
+                self.crash_publication(3, ["--refresh-inventory"])
+                child = subprocess.run([sys.executable, "-I", "-B", "-c", program,
+                                        str(MODULE_PATH), str(count), *self.base_args()],
+                                       capture_output=True, text=True, timeout=5)
+                self.assertEqual(child.returncode, 73, (child.stdout, child.stderr))
+                with mock.patch.object(MODULE, "load_matrix",
+                                       side_effect=MODULE.MatrixError("stop after recovery")):
+                    code, _, err = self.run_main(*self.base_args())
+                self.assertEqual(code, 2, err)
+                self.assertIn("stop after recovery", err)
+                self.assertEqual({path: path.read_bytes() for path in paths}, before)
+                self.assertEqual(list(self.tmp.rglob(".acceptance-*")), [])
+
+    def test_committed_recovery_keeps_new_outputs_and_handles_windows_readonly_cleanup(self) -> None:
+        paths, before = self.prepare_rollback()
+        self.crash_publication(3, ["--refresh-inventory"])
+        journal = MODULE._refresh_lock_path(self.root).with_suffix(".transaction")
+        value = json.loads(journal.read_bytes())
+        value["committed"] = True
+        journal.write_text(json.dumps(value), encoding="utf-8")
+        current = {path: path.read_bytes() for path in paths}
+        self.assertTrue(all(current[path] != before[path] for path in paths))
+        backup = Path(value["outputs"][0]["backup"]["path"])
+        unlink = Path.unlink
+        denied = False
+        def readonly(path: Path, *args: Any, **kwargs: Any) -> None:
+            nonlocal denied
+            if path == backup and not denied:
+                denied = True
+                raise PermissionError("read-only candidate")
+            unlink(path, *args, **kwargs)
+        with mock.patch.object(Path, "unlink", readonly), \
+                mock.patch.object(MODULE, "load_matrix", side_effect=MODULE.MatrixError("stop after recovery")):
+            code, _, err = self.run_main(*self.base_args())
+        self.assertEqual(code, 2, err)
+        self.assertIn("stop after recovery", err)
+        self.assertTrue(denied)
+        self.assertEqual({path: path.read_bytes() for path in paths}, current)
+        self.assertFalse(journal.exists())
+        self.assertEqual(list(self.tmp.rglob(".acceptance-*")), [])
+
+    def test_transaction_bounds_and_special_files_fail_before_publication(self) -> None:
+        output, journal = self.tmp / "output", self.tmp / "journal.transaction"
+        output.write_bytes(b"original")
+        with mock.patch.object(Path, "replace") as publish:
+            with self.assertRaisesRegex(MODULE.MatrixError, "too many"):
+                MODULE._replace_outputs([(output, "new")] * 6, journal=journal)
+            for text in ("x" * 9, "é" * 5):
+                with self.subTest(text=text), mock.patch.object(MODULE, "_TRANSACTION_BYTES", 8):
+                    with self.assertRaisesRegex(MODULE.MatrixError, "size bound"):
+                        MODULE._replace_outputs([(output, text)], journal=journal)
+            with mock.patch.object(MODULE, "_TRANSACTION_BYTES", 4):
+                with self.assertRaisesRegex(MODULE.MatrixError, "size bound"):
+                    MODULE._replace_outputs([(output, "new")], journal=journal)
+            publish.assert_not_called()
+        self.assertEqual(output.read_bytes(), b"original")
+        self.assertEqual(list(self.tmp.rglob(".acceptance-*")), [])
+        for entries in ([], [{}] * 6):
+            with self.subTest(entries=entries):
+                with self.assertRaisesRegex(MODULE.MatrixError, "bound"):
+                    MODULE._write_transaction(journal, entries, committed=False)
+        with mock.patch.object(MODULE, "_JOURNAL_BYTES", 8):
+            with self.assertRaisesRegex(MODULE.MatrixError, "bound"):
+                MODULE._write_transaction(journal, [{}], committed=False)
+        metadata = output.stat()
+        for kind in ("identity", "special", "size", "changed"):
+            fields = list(metadata)
+            if kind == "identity":
+                fields[1] = 0
+            elif kind == "special":
+                fields[0] = stat.S_IFIFO | 0o600
+            elif kind == "size":
+                fields[6] = MODULE._TRANSACTION_BYTES + 1
+            else:
+                fields[6] += 1
+            changed = os.stat_result(fields)
+            values = [metadata, changed, metadata] if kind == "changed" else [changed]
+            with self.subTest(kind=kind), mock.patch.object(MODULE, "_transaction_metadata", side_effect=values):
+                with self.assertRaises(MODULE.MatrixError):
+                    MODULE._read_transaction_file(output, MODULE._TRANSACTION_BYTES)
+        with self.assertRaisesRegex(MODULE.MatrixError, "size"):
+            MODULE._read_transaction_file(output, 4)
+
+    def test_journal_write_flush_and_publication_failures_preserve_outputs(self) -> None:
+        for failure in ("write", "flush", "sync", "replace", "commit", "candidate-identity"):
+            with self.subTest(failure=failure):
+                paths, before = self.prepare_rollback()
+                journal = MODULE._refresh_lock_path(self.root).with_suffix(".transaction")
+                candidate = journal.with_suffix(".pending")
+                fdopen, replace, sync, metadata = os.fdopen, os.replace, os.fsync, MODULE._transaction_metadata
+                calls = 0
+                unknown_reported = False
+                def faulted_fdopen(descriptor: int, mode: str) -> Any:
+                    handle = fdopen(descriptor, mode)
+                    if mode == "wb" and failure in ("write", "flush"):
+                        if failure == "write":
+                            handle.write = lambda data: 0
+                        else:
+                            handle.flush = mock.Mock(side_effect=OSError("journal flush denied"))
+                    return handle
+                def faulted_replace(source: Any, target: Any) -> None:
+                    nonlocal calls
+                    if Path(target) == journal:
+                        calls += 1
+                        if failure == "replace" or (failure == "commit" and calls == 2):
+                            raise PermissionError("journal publication denied")
+                    replace(source, target)
+                def faulted_sync(descriptor: int) -> None:
+                    if failure == "sync":
+                        raise OSError("sync denied")
+                    sync(descriptor)
+                def unknown_candidate(handle: Any) -> Any:
+                    nonlocal unknown_reported
+                    result = metadata(handle)
+                    if failure == "candidate-identity" and candidate.exists() and not unknown_reported:
+                        unknown_reported = True
+                        fields = list(result)
+                        fields[1] = 0
+                        return os.stat_result(fields)
+                    return result
+                with mock.patch.object(os, "fdopen", faulted_fdopen), \
+                        mock.patch.object(os, "replace", faulted_replace), \
+                        mock.patch.object(os, "fsync", faulted_sync), \
+                        mock.patch.object(MODULE, "_transaction_metadata", unknown_candidate):
+                    code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+                self.assertEqual(code, 2, err)
+                self.assertEqual({path: path.read_bytes() for path in paths}, before)
+                self.assertFalse(journal.exists())
+                self.assertEqual(list(self.tmp.rglob(".acceptance-*")), [])
+                # An unidentifiable candidate is retained rather than unlinked.
+                self.assertEqual(candidate.exists(), failure == "candidate-identity")
+                candidate.unlink(missing_ok=True)
+
+    def test_pending_recovery_exclusive_lock_still_obeys_deadline(self) -> None:
+        self.prepare_rollback()
+        self.crash_publication(1, ["--refresh-inventory"])
+        with MODULE._refresh_lock(self.root, shared=True), \
+                mock.patch.object(MODULE.time, "monotonic", side_effect=[0.0, 0.0, 3.0]), \
+                mock.patch.object(MODULE, "load_matrix") as load:
+            code, _, err = self.run_main(*self.base_args())
+        self.assertEqual(code, 2, err)
+        self.assertIn("within deadline", err)
+        load.assert_not_called()
+        with mock.patch.object(MODULE.time, "monotonic", side_effect=OSError("timer unavailable")), \
+                mock.patch.object(MODULE, "load_matrix") as load:
+            code, _, err = self.run_main(*self.base_args())
+        self.assertEqual(code, 2, err)
+        self.assertIn("timer unavailable", err)
+        load.assert_not_called()
+
+    def test_refresh_defaults_and_optional_outputs_reject_all_input_aliases(self) -> None:
+        self.prepare_refresh()
+        doc = self.root / "docs/acceptance-matrix.md"
+        inventory = self.root / "tools/ci/acceptance_requirements.json"
+        discovery, report = self.execution_inputs()
+        for destination in (doc, inventory, self.matrix_path):
+            for source in (self.root / MODULE.CONTRACT_DOCUMENTS[0], self.root / "docs/d.md",
+                           self.root / "test/x_test.cpp", self.root / "tools/script.py",
+                           self.root / "CMakeLists.txt", discovery, report):
+                for alias in ("resolved", "hardlink"):
+                    with self.subTest(destination=destination, source=source, alias=alias):
+                        original, protected = destination.read_bytes(), source.read_bytes()
+                        resolve = Path.resolve
+                        def resolved(path: Path, *args: Any, **kwargs: Any) -> Path:
+                            result = resolve(path, *args, **kwargs)
+                            return source if result == destination else result
+                        with contextlib.ExitStack() as stack:
+                            if alias == "hardlink":
+                                destination.unlink()
+                                os.link(source, destination)
+                                def restore() -> None:
+                                    destination.unlink()
+                                    destination.write_bytes(original)
+                                stack.callback(restore)
+                            else:
+                                # Resolution models symlinks and Windows 8.3 aliases
+                                # on runners that cannot create symbolic links.
+                                stack.enter_context(mock.patch.object(Path, "resolve", resolved))
+                            with mock.patch.object(Path, "replace") as publish:
+                                code, _, err = self.run_main(*self.base_args(), "--refresh-inventory",
+                                                             "--junit", str(report), "--discovery", str(discovery))
+                            self.assertEqual(code, 2, err)
+                            publish.assert_not_called()
+                            self.assertEqual(source.read_bytes(), protected)
+                        self.assertEqual(destination.read_bytes(), original)
+        # Optional destinations and output/output aliases use the same identity rule.
+        for option in ("--write-doc", "--execution-receipt"):
+            for source in (inventory, self.matrix_path, self.root / MODULE.CONTRACT_DOCUMENTS[0], doc):
+                if option == "--write-doc" and source == doc:
+                    continue
+                with self.subTest(option=option, source=source):
+                    target = self.tmp / "alias-output"
+                    os.link(source, target)
+                    before = source.read_bytes()
+                    try:
+                        code, _, err = self.run_main(*self.base_args(), option, str(target),
+                                                     "--junit", str(report), "--discovery", str(discovery))
+                        self.assertEqual(code, 2, err)
+                        self.assertIn("output path overlaps an input", err)
+                        self.assertEqual(source.read_bytes(), before)
+                    finally:
+                        target.unlink()
+
+    def test_default_document_symlinks_and_output_hardlinks_are_refused(self) -> None:
+        self.prepare_refresh()
+        doc = self.root / "docs/acceptance-matrix.md"
+        source = self.root / MODULE.CONTRACT_DOCUMENTS[0]
+        original, protected = doc.read_bytes(), source.read_bytes()
+        resolve = Path.resolve
+        for denied in (False, True):
+            with self.subTest(symlink_denied=denied), contextlib.ExitStack() as stack:
+                doc.unlink()
+                if denied:
+                    stack.enter_context(mock.patch.object(Path, "symlink_to", side_effect=PermissionError("denied")))
+                try:
+                    doc.symlink_to(source)
+                except OSError:
+                    # Exercise equivalent resolution even without Windows
+                    # symlink privileges. Neither case skips the refusal check.
+                    doc.write_bytes(original)
+                    def resolved(path: Path, *args: Any, **kwargs: Any) -> Path:
+                        result = resolve(path, *args, **kwargs)
+                        return source if result == doc else result
+                    stack.enter_context(mock.patch.object(Path, "resolve", resolved))
+                code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+                self.assertEqual(code, 2, err)
+                self.assertIn("output path overlaps an input", err)
+                self.assertEqual(source.read_bytes(), protected)
+                doc.unlink()
+                doc.write_bytes(original)
+        inventory = self.root / "tools/ci/acceptance_requirements.json"
+        for destination, target in ((doc, inventory), (doc, self.matrix_path), (inventory, self.matrix_path)):
+            with self.subTest(destination=destination, target=target):
+                original = destination.read_bytes()
+                destination.unlink()
+                os.link(target, destination)
+                before = target.read_bytes()
+                try:
+                    code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+                    self.assertEqual(code, 2, err)
+                    self.assertIn("output paths must be distinct", err)
+                    self.assertEqual(target.read_bytes(), before)
+                finally:
+                    destination.unlink()
+                    destination.write_bytes(original)
+
+    def test_temporary_cleanup_rechecks_identity_and_preserves_replaced_candidates(self) -> None:
+        output = self.tmp / "output"
+        output.write_bytes(b"original")
+        replaced: list[Path] = []
+        def refuse_after_edit(published: Any) -> None:
+            self.assertEqual(published, {})
+            for path in self.tmp.glob(".acceptance-*"):
+                if path.read_bytes() == b"candidate":
+                    path.rename(self.tmp / "displaced-candidate")
+                    path.write_bytes(b"external replacement")
+                    replaced.append(path)
+            raise OSError("source edited")
+        with self.assertRaisesRegex(MODULE.MatrixError, "temporary output identity changed"):
+            MODULE._replace_outputs([(output, "candidate")], verify=refuse_after_edit)
+        self.assertEqual(len(replaced), 1)
+        self.assertEqual(replaced[0].read_bytes(), b"external replacement")
+        self.assertEqual(output.read_bytes(), b"original")
+
+    def test_partial_pending_journal_is_reused_without_reading_it_as_input(self) -> None:
+        self.prepare_rollback()
+        journal = MODULE._refresh_lock_path(self.root).with_suffix(".transaction")
+        pending = journal.with_suffix(".pending")
+        pending.write_bytes(b"{partial unpublished metadata")
+        code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+        self.assertEqual(code, 0, err)
+        self.assertFalse(pending.exists())
+        self.assertFalse(journal.exists())
+
+    def test_windows_recovery_identity_uses_full_handle_ids_when_crt_fields_are_zero(self) -> None:
+        path = self.tmp / "identity"
+        path.write_bytes(b"data")
+        metadata = path.stat()
+        fields = list(metadata)
+        fields[1] = fields[2] = fields[3] = 0
+        incomplete = os.stat_result(fields, {"st_mtime_ns": metadata.st_mtime_ns,
+                                            "st_ctime_ns": metadata.st_ctime_ns})
+        for failure in (None, 18, 1):
+            with self.subTest(failure=failure), path.open("rb") as handle:
+                kernel = mock.Mock()
+                queried = []
+                def query(native: Any, kind: int, pointer: Any, size: int) -> int:
+                    self.assertEqual(size, ctypes.sizeof(pointer._obj))
+                    queried.append(kind)
+                    if kind == failure:
+                        return 0
+                    if kind == 18:
+                        pointer._obj.volume = (1 << 48) + 3
+                        pointer._obj.identity[0] = 7
+                        pointer._obj.identity[15] = 1
+                    else:
+                        pointer._obj.links = 2
+                    return 1
+                kernel.GetFileInformationByHandleEx.side_effect = query
+                platform = mock.Mock(wraps=os)
+                platform.name = "nt"
+                platform.fstat.return_value = incomplete
+                with mock.patch.object(MODULE, "os", platform), \
+                        mock.patch.dict(sys.modules, {"msvcrt": mock.Mock()}), \
+                        mock.patch.object(ctypes, "WinDLL", return_value=kernel, create=True), \
+                        mock.patch.object(ctypes, "get_last_error", return_value=6, create=True), \
+                        mock.patch.object(ctypes, "WinError", return_value=OSError("identity query denied"),
+                                          create=True):
+                    if failure is None:
+                        result = MODULE._transaction_metadata(handle)
+                        self.assertEqual(result.st_ino, (1 << 120) + 7)
+                        self.assertEqual(result.st_dev, (1 << 48) + 3)
+                        self.assertEqual(result.st_nlink, 2)
+                        self.assertEqual(result.st_mtime_ns, metadata.st_mtime_ns)
+                        self.assertEqual(queried, [18, 1])
+                    else:
+                        with self.assertRaisesRegex(OSError, "identity query denied"):
+                            MODULE._transaction_metadata(handle)
+                        self.assertEqual(queried, [18] if failure == 18 else [18, 1])
+        opened = []
+        def identity(handle: Any) -> Any:
+            self.assertFalse(handle.closed)
+            opened.append(handle)
+            return metadata
+        platform = mock.Mock(wraps=os)
+        platform.name = "nt"
+        platform.O_RDONLY = os.O_RDONLY
+        platform.O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+        with mock.patch.object(MODULE, "os", platform), \
+                mock.patch.object(MODULE, "_transaction_metadata", identity):
+            self.assertTrue(MODULE._same_transaction_identity(path, metadata))
+            fields = list(metadata)
+            fields[1] += 1
+            self.assertFalse(MODULE._same_transaction_identity(path, os.stat_result(fields)))
+        self.assertTrue(all(handle.closed for handle in opened))
 
 
 class ProductionAcceptanceMatrixTests(unittest.TestCase):
