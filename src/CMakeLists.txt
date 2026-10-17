@@ -1,5 +1,7 @@
 # src/CMakeLists.txt
 
+luminumbra_baseline_startup("${CMAKE_CURRENT_SOURCE_DIR}/startup/RuntimeEntry.cpp")
+
 # --- Common Library (Core Engine Logic) ---
 add_subdirectory(luminumbra_common)
 
