@@ -44,6 +44,11 @@ target_link_libraries(luminumbra_client PUBLIC
     stb_headers
 )
 
+if(WIN32)
+    # SteadyFrameTiming pairs the coarse fallback's timer-resolution request.
+    target_link_libraries(luminumbra_client PUBLIC winmm)
+endif()
+
 # --- Client QA Library (RuntimeScenarioHarness) ---
 # The QA scenario harness (the gate/scenario driver behind
 # `luminumbra_client_qa_app --scenario <name>`) lives in its own static library
