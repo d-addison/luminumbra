@@ -146,6 +146,28 @@ class CTestShardTests(unittest.TestCase):
         self.assertEqual(sorted(case.get("name") for case in cases), sorted(self.names))
         self.assertTrue(all(case.findtext("system-out") == "receipt: " + case.get("name") for case in cases))
 
+    def test_result_metadata_refuses_on_every_native_route_without_overwriting(self):
+        output = self.root / "merged.xml"
+        for profile in ("gcc", "msvc", "ucrt64"):
+            for full in (False, True):
+                for shard in ((0,) if full else (1, 2)):
+                    for result in (None, "completed", "suppressed", "skipped", "failed", "unknown", ""):
+                        with self.subTest(profile=profile, full=full, shard=shard, result=result):
+                            self.reports(full=full, profile=profile)
+                            path = self.root / f"shard-{shard}/ctest.junit.xml"
+                            tree = ET.parse(path)
+                            if result is not None:
+                                tree.getroot()[0].set("result", result)
+                            tree.write(path)
+                            output.write_bytes(b"unchanged")
+                            if result in (None, "completed"):
+                                self.merge(full=full, profile=profile)
+                                self.assertNotEqual(output.read_bytes(), b"unchanged")
+                            else:
+                                with self.assertRaisesRegex(ValueError, "unevaluated"):
+                                    self.merge(full=full, profile=profile)
+                                self.assertEqual(output.read_bytes(), b"unchanged")
+
     def test_report_write_failure_keeps_existing_output_and_cleans_staging(self):
         self.reports()
         output = self.root / "merged.xml"

@@ -1716,12 +1716,8 @@ class RealCheckerTests(RunnerTestBase):
                     internal_width=display['width'], internal_height=display['height'])
         data['profile'].update(width=display['width'], height=display['height'])
         position = [POSE[key] for key in ('x', 'y', 'z')]
-        right, up, forward = capture_checker.camera_basis(POSE['yaw'], POSE['pitch'])
-        dot = capture_checker.dot
-        view = [right[0], up[0], -forward[0], 0, right[1], up[1], -forward[1], 0,
-                right[2], up[2], -forward[2], 0,
-                -dot(right, position), -dot(up, position), dot(forward, position), 1]
-        inverse = right + [0] + up + [0] + [-x for x in forward] + [0] + position + [1]
+        view = capture_checker.camera_view(position, POSE['yaw'], POSE['pitch'])
+        inverse = capture_checker.inverse_view(view)
         scale = 1 / math.tan(math.radians(45) / 2)
         projection = [scale / (data['width'] / data['height']), 0, 0, 0,
                       0, scale, 0, 0, 0, 0, -1, -1, 0, 0, -0.2, 0]

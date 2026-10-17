@@ -775,6 +775,108 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                     with self.subTest(producer=producer, phase=phase.splitlines()[0], result=result):
                         self.assertFalse(evaluate_condition(condition, dependencies, cancelled=True))
 
+    def test_required_aggregates_cancel_running_jobs_but_fail_cancelled_dependencies(self):
+        # At job level cancelled() reads workflow cancellation. At step level
+        # it reads the current job status, which can still be successful while
+        # the server re-evaluates the job's condition during artifact download.
+        # Read both conditions from the workflow and never treat a job skip as
+        # an acceptable substitute for an explicit dependency refusal.
+        aggregates = (("asan.yml", "asan", "asan-shard"),
+                      ("ci.yml", "tidy", "tidy-shard"),
+                      ("ci.yml", "linux-result", "linux"),
+                      ("ci.yml", "windows-msvc-result", "windows-msvc"),
+                      ("ci.yml", "windows-ucrt64-result", "windows-ucrt64"))
+        self.check_required_aggregates(aggregates)
+
+    def check_required_aggregates(self, aggregates):
+        results = ("success", "failure", "cancelled", "skipped", "", "unknown")
+        for filename, job_id, shard_id in aggregates:
+            aggregate = jobs(self.workflows[filename])[job_id]
+            self.assertEqual(value(aggregate, "needs", 4), f"[changes, {shard_id}]")
+            self.assertIsNone(value(aggregate, "continue-on-error", 4))
+            refusal = next(step for step in steps(aggregate)
+                           if step.startswith("      - name: Reject invalid dependencies\n"))
+            self.assertIsNone(value(refusal, "continue-on-error", 8))
+            # This must be an unconditional failure whenever the refusal runs.
+            process = subprocess.run(
+                ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c",
+                 value(refusal, "run", 8)], capture_output=True, text=True, timeout=10,
+            )
+            self.assertNotEqual(process.returncode, 0, process.stdout + process.stderr)
+            for cancelled in (False, True):
+                for changes in results:
+                    for shard in results:
+                        with self.subTest(job=job_id, cancelled=cancelled, changes=changes, shard=shard):
+                            dependency_invalid = changes != "success" or shard not in ("success", "skipped")
+                            # Ready PRs and pushes retain their existing routing.
+                            for event in ("pull_request", "push", "workflow_dispatch"):
+                                self.assertEqual(
+                                    self.aggregate_condition(value(aggregate, "if", 4), shard_id,
+                                                             cancelled, changes, shard, event),
+                                    not cancelled or dependency_invalid,
+                                )
+                            # Even if the current job is still successful, any
+                            # invalid dependency must run the failure step.
+                            for job_cancelled in (False, True):
+                                self.assertEqual(
+                                    self.aggregate_condition(value(refusal, "if", 8), shard_id,
+                                                             job_cancelled, changes, shard, step=True),
+                                    dependency_invalid,
+                                )
+
+    @staticmethod
+    def aggregate_condition(expression, shard_id, cancelled, changes, shard, event="pull_request", step=False):
+        expression = expression.removeprefix("${{ ").removesuffix(" }}")
+        status = {"always": True, "cancelled": cancelled,
+                  "success": not cancelled and (step or changes == shard == "success"),
+                  "failure": not step and "failure" in (changes, shard)}
+        rendered, count = re.subn(r"\b(always|cancelled|success|failure)\(\)",
+                                 lambda match: str(status[match[1]]), expression)
+        for key, item in (("needs.changes.result", changes), (f"needs.{shard_id}.result", shard),
+                          ("github.event_name", event), ("github.event.pull_request.draft", False)):
+            rendered = rendered.replace(key, repr(item))
+        rendered = re.sub(r"!(?!=)", "not ", rendered.replace("false", "False"))
+        rendered = rendered.replace("&&", " and ").replace("||", " or ")
+        return bool((count > 0 or status["success"]) and eval(rendered, {"__builtins__": {}}, {}))
+
+    def test_required_aggregate_graph_rejects_cancellation_regressions(self):
+        method = "test_required_aggregates_cancel_running_jobs_but_fail_cancelled_dependencies"
+        for filename, job_id, shard_id in (("asan.yml", "asan", "asan-shard"),
+                                           ("ci.yml", "tidy", "tidy-shard"),
+                                           ("ci.yml", "linux-result", "linux"),
+                                           ("ci.yml", "windows-msvc-result", "windows-msvc"),
+                                           ("ci.yml", "windows-ucrt64-result", "windows-ucrt64")):
+            workflow = self.workflows[filename]
+            aggregate = jobs(workflow)[job_id]
+            job_if = value(aggregate, "if", 4)
+            refusal = next(step for step in steps(aggregate)
+                           if step.startswith("      - name: Reject invalid dependencies\n"))
+            for mutation, original, replacement in (
+                ("uncancellable-job", job_if, "${{ always() }}"),
+                ("skipped-cancelled-dependencies", job_if, "${{ !cancelled() }}"),
+                ("implicit-success", job_if, "${{ github.event_name == 'pull_request' }}"),
+                ("missed-classifier-cancellation", job_if,
+                 "${{ !cancelled() || needs." + shard_id + ".result == 'cancelled' }}"),
+                ("missed-shard-cancellation", job_if,
+                 "${{ !cancelled() || needs.changes.result == 'cancelled' }}"),
+                ("job-status-refusal", value(refusal, "if", 8), "${{ cancelled() }}"),
+                ("implicit-success-refusal", value(refusal, "if", 8),
+                 "${{ needs.changes.result == 'cancelled' || needs." + shard_id + ".result == 'cancelled' }}"),
+                ("successful-refusal", "          exit 1", "          exit 0"),
+            ):
+                with self.subTest(job=job_id, mutation=mutation):
+                    # Apply only inside this job, not the classifier or shards.
+                    mutated = aggregate.replace(original, replacement)
+                    self.assertNotEqual(mutated, aggregate)
+                    case = WorkflowDraftPolicyTests(method)
+                    case.workflows = {**self.workflows, filename: workflow.replace(aggregate, mutated, 1)}
+                    result = unittest.TestResult()
+                    unittest.FunctionTestCase(
+                        lambda: case.check_required_aggregates(((filename, job_id, shard_id),))
+                    ).run(result)
+                    self.assertEqual(result.errors, [], result.errors)
+                    self.assertTrue(result.failures)
+
     def test_asan_aggregate_accepts_only_success_or_the_original_path_skip(self):
         aggregate = jobs(self.workflows["asan.yml"])["asan"]
         step = next(step for step in steps(aggregate) if step.splitlines()[0].removeprefix("      - name: ") == "Require all ASan shards to pass")
@@ -795,8 +897,8 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         refusal_script = value(refusal, "run", 8)
         self.assertIsNotNone(refusal_script)
         with tempfile.TemporaryDirectory() as directory:
-            for cancelled in (False, True):
-                for classification in ("success", "failure", "cancelled", "skipped", "", "unknown"):
+            for classification in ("success", "failure", "cancelled", "skipped", "", "unknown"):
+                for cancelled in (False, True):
                     for cpp in ("true", "false", ""):
                         for result in ("success", "failure", "cancelled", "skipped", "", "unknown"):
                             with self.subTest(cancelled=cancelled, classification=classification,

@@ -295,7 +295,7 @@ def merge(directory, output, profile="gcc", evidence=True, full=False):
             if element.tag in ("testsuite", "testsuites"):
                 for attribute in ("failures", "errors", "skipped", "disabled"):
                     require(int(element.get(attribute, "0")) == 0, "JUnit has failed or unevaluated totals")
-        require(all(case.get("status", "run") == "run" and case.get("result") != "suppressed" for case in cases),
+        require(all(case.get("status", "run") == "run" and case.get("result") in (None, "completed") for case in cases),
                 "JUnit has unevaluated test status")
         if evidence:
             require(set(executed) == set(parts[0 if full else shard - 1]), "report differs from assigned partition")

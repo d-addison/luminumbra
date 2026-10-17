@@ -5,8 +5,8 @@ Each input is a CTest/JUnit XML file written by the ambient determinism receipt 
 is the single distinct line starting with ``AMBIENT_RECEIPT `` found in a ``system-out`` element, in
 an ``ambient_receipt`` property (child element form), or in an ``ambient_receipt`` attribute on a
 ``testcase`` element (the form GoogleTest writes for RecordProperty). A receipt taken from a
-testcase that has a failure, error or skipped child is rejected. Every key in COMPARED_KEYS must be
-identical across labels. Each lane must report its expected ``active_simd`` level and a CPU
+testcase with unsuccessful execution metadata or a failure, error or skipped child is rejected.
+Every key in COMPARED_KEYS must be identical across labels. Each lane must report its expected ``active_simd`` level and a CPU
 capability that supports it; higher CPU capabilities are allowed under the dispatch ceiling.
 ``--require-probe`` also requires a successful unpadded guard-page probe from the named lane.
 
@@ -68,30 +68,52 @@ def _receipt_lines(text):
     }
 
 
+def _unsuccessful(case):
+    # JUnit may omit execution attributes; CTest and GoogleTest use run/completed.
+    # Explicit unevaluated or unknown metadata must never qualify evidence.
+    return (case.get("status") not in (None, "run")
+            or case.get("result") not in (None, "completed")
+            or any(child.tag in FAILURE_TAGS for child in case))
+
+
+def _unsuccessful_suite(suite):
+    # Summaries are optional, but explicit empty, unsuccessful or unknown
+    # execution metadata cannot qualify unattributed suite output.
+    tests = suite.get("tests")
+    return (_unsuccessful(suite)
+            or (tests is not None and not re.fullmatch(r"0*[1-9][0-9]*", tests))
+            or any(suite.get(key) is not None and not re.fullmatch(r"0+", suite.get(key))
+                   for key in ("failures", "errors", "skipped", "disabled")))
+
+
 def _receipts_by_source(root):
     """Return (every receipt line, receipt lines taken from a failed testcase)."""
     found = set()
     failed = set()
-    any_unsuccessful = False
+    attributed = set()
+    any_unsuccessful = any(_unsuccessful_suite(element) for element in root.iter()
+                           if element.tag in ("testsuite", "testsuites"))
     for testcase in root.iter("testcase"):
         lines = _receipt_lines(testcase.get(PROPERTY_NAME) or "")
         for element in testcase.iter("property"):
             if element.get("name") == PROPERTY_NAME:
                 lines.update(_receipt_lines(element.get("value") or ""))
+                attributed.add(element)
         for element in testcase.iter("system-out"):
             lines.update(_receipt_lines("".join(element.itertext())))
+            attributed.add(element)
         found.update(lines)
-        if (testcase.get("status") not in (None, "run")
-                or any(child.tag in FAILURE_TAGS for child in testcase)):
+        if _unsuccessful(testcase):
             failed.update(lines)
             any_unsuccessful = True
     # Suite-level output cannot be attributed to a testcase, so it is trusted only when no
-    # testcase in the report failed, errored or was unevaluated.
+    # testcase or suite in the report failed, errored or was skipped/unevaluated.
     unattributed = set()
     for element in root.iter("system-out"):
-        unattributed.update(_receipt_lines("".join(element.itertext())))
+        if element not in attributed:
+            unattributed.update(_receipt_lines("".join(element.itertext())))
     for element in root.iter("property"):
-        if element.get("name") == PROPERTY_NAME:
+        if element not in attributed and element.get("name") == PROPERTY_NAME:
             unattributed.update(_receipt_lines(element.get("value") or ""))
     if any_unsuccessful:
         failed.update(unattributed)
@@ -156,8 +178,8 @@ def _validate_probe(label, root, receipt):
     if len(cases) != 1:
         raise InputError(f"{label}: requires exactly one {PROBE_TEST} testcase")
     case = cases[0]
-    if case.get("status") not in (None, "run") or any(child.tag in FAILURE_TAGS for child in case):
-        raise InputError(f"{label}: unpadded guard-page probe failed, errored or was skipped or unevaluated")
+    if _unsuccessful(case):
+        raise InputError(f"{label}: unpadded guard-page probe failed, errored or was skipped/unevaluated")
     statuses = set()
     levels = set()
     for key, values in (("probe_status", statuses), ("noise_simd_level", levels)):
@@ -197,7 +219,7 @@ def _load_receipt(label, path, require_probe=False):
     line = next(iter(lines))
     if line in failed:
         raise InputError(
-            f"{label}: receipt in {path} comes from a failed, errored or skipped or unevaluated testcase"
+            f"{label}: receipt in {path} comes from a failed, errored or skipped/unevaluated testcase"
         )
     receipt = _parse_receipt(label, line)
     _validate_lane(label, receipt)

@@ -109,6 +109,162 @@ def add_probe(path, status="ran", level="256", carrier="output", outcome=None):
 
 
 class CompareAmbientReceiptsTests(unittest.TestCase):
+    def test_attributed_receipt_keeps_its_producers_execution_status(self):
+        for carrier in ("attribute", "property", "output"):
+            for outcome in (None, "failure", "error", "skipped", "disabled", "unknown"):
+                with self.subTest(carrier=carrier, outcome=outcome), tempfile.TemporaryDirectory() as directory:
+                    lane = write_junit(directory, "a.xml")
+                    tree = ET.parse(lane)
+                    suite = tree.getroot().find("testsuite")
+                    producer = suite.find("testcase")
+                    producer.attrib.update(status="run", result="completed")
+                    if carrier == "attribute":
+                        producer.set("ambient_receipt", receipt_line())
+                    elif carrier == "property":
+                        ET.SubElement(producer.find("properties"), "property",
+                                      name="ambient_receipt", value=receipt_line())
+                    else:
+                        ET.SubElement(producer, "system-out").text = receipt_line()
+                    if outcome in ("disabled", "unknown"):
+                        producer.set("status", outcome)
+                    elif outcome:
+                        ET.SubElement(producer, outcome)
+                    ET.SubElement(suite, "testcase", name="Unrelated", status="disabled")
+                    tree.write(lane)
+                    code, out, err = run_main([f"avx2={lane}"])
+                    self.assertEqual(code, 0 if outcome is None else 2, out + err)
+
+    def test_unattributed_receipt_still_uses_report_execution_status(self):
+        for carrier in ("property", "output"):
+            for outcome in (None, "failure", "error", "skipped", "disabled", "unknown"):
+                with self.subTest(carrier=carrier, outcome=outcome), tempfile.TemporaryDirectory() as directory:
+                    # An identical good attributed receipt must not hide a suite-level copy.
+                    lane = write_junit(directory, "a.xml", attribute_value=receipt_line())
+                    tree = ET.parse(lane)
+                    suite = tree.getroot().find("testsuite")
+                    if carrier == "property":
+                        properties = ET.SubElement(suite, "properties")
+                        ET.SubElement(properties, "property", name="ambient_receipt", value=receipt_line())
+                    else:
+                        ET.SubElement(suite, "system-out").text = receipt_line()
+                    other = ET.SubElement(suite, "testcase", name="Unrelated", status="run", result="completed")
+                    if outcome in ("disabled", "unknown"):
+                        other.set("status", outcome)
+                    elif outcome:
+                        ET.SubElement(other, outcome)
+                    tree.write(lane)
+                    code, out, err = run_main([f"avx2={lane}"])
+                    self.assertEqual(code, 0 if outcome is None else 2, out + err)
+
+    def test_unevaluated_receipts_and_probes_are_rejected(self):
+        metadata = (("status", "disabled"), ("status", "notrun"),
+                    ("status", "skipped"), ("status", "unknown"), ("status", ""),
+                    ("result", "suppressed"), ("result", "skipped"),
+                    ("result", "unknown"), ("result", ""))
+        for field, value in metadata:
+            for source in ("attribute", "property", "output", "suite", "probe", "duplicate"):
+                with self.subTest(field=field, value=value, source=source), tempfile.TemporaryDirectory() as directory:
+                    line = receipt_line()
+                    lane = write_junit(directory, "a.xml", attribute_value=line)
+                    tree = ET.parse(lane)
+                    suite = tree.getroot().find("testsuite")
+                    case = suite.find("testcase")
+                    if source == "property":
+                        case.attrib.pop("ambient_receipt")
+                        ET.SubElement(case.find("properties"), "property", name="ambient_receipt", value=line)
+                    elif source in ("output", "suite"):
+                        case.attrib.pop("ambient_receipt")
+                        ET.SubElement(case if source == "output" else suite, "system-out").text = line
+                    elif source == "duplicate":
+                        # A good duplicate must never hide an unevaluated producer.
+                        case = ET.SubElement(suite, "testcase", name="Other", ambient_receipt=line)
+                    if source != "probe":
+                        case.set(field, value)
+                    tree.write(lane)
+                    if source == "probe":
+                        add_probe(lane)
+                        tree = ET.parse(lane)
+                        tree.getroot().find("testsuite")[-1].set(field, value)
+                        tree.write(lane)
+                    code, out, err = run_main([f"asan={lane}"] + (["--require-probe", "asan"] if source == "probe" else []))
+                    self.assertEqual(code, 2, out)
+                    self.assertIn("unevaluated", err)
+
+    def test_explicit_success_execution_metadata_is_accepted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            lane = write_junit(directory, "a.xml", attribute_value=receipt_line())
+            add_probe(lane)
+            tree = ET.parse(lane)
+            for case in tree.getroot().iter("testcase"):
+                case.attrib.update(status="run", result="completed")
+            tree.write(lane)
+            code, out, err = run_main([f"asan={lane}", "--require-probe", "asan"])
+            self.assertEqual(code, 0, err)
+
+    def test_suite_only_receipts_require_successful_suite_metadata(self):
+        metadata = (None, ("status", "run"), ("result", "completed"), ("tests", "1"),
+                    ("failures", "0"), ("errors", "0"), ("skipped", "0"), ("disabled", "0"),
+                    ("status", "disabled"), ("status", "notrun"), ("status", "skipped"),
+                    ("status", "unknown"), ("status", ""), ("result", "suppressed"),
+                    ("result", "skipped"), ("result", "unknown"), ("result", ""),
+                    ("tests", "0"), ("tests", "-1"), ("tests", "unknown"), ("tests", ""))
+        metadata += tuple((key, value) for key in ("failures", "errors", "skipped", "disabled")
+                          for value in ("1", "unknown", ""))
+        for carrier in ("output", "property"):
+            for wrapper in (False, True):
+                for attributes in metadata:
+                    with self.subTest(carrier=carrier, wrapper=wrapper, metadata=attributes), \
+                            tempfile.TemporaryDirectory() as directory:
+                        suite = ET.Element("testsuite")
+                        root = ET.Element("testsuites") if wrapper else suite
+                        if wrapper:
+                            root.append(suite)
+                        if attributes:
+                            root.set(*attributes)
+                        if carrier == "output":
+                            ET.SubElement(suite, "system-out").text = receipt_line()
+                        else:
+                            properties = ET.SubElement(suite, "properties")
+                            ET.SubElement(properties, "property", name="ambient_receipt", value=receipt_line())
+                        path = Path(directory) / "receipt.xml"
+                        ET.ElementTree(root).write(path, encoding="utf-8")
+                        code, out, err = run_main([f"avx2={path}"])
+                        successful = attributes in metadata[:8]
+                        self.assertEqual(code, 0 if successful else 2, out + err)
+                        if not successful:
+                            self.assertEqual(out, "")
+                            self.assertIn("unevaluated", err)
+        for body, message in (("", "cannot read"), ("<testsuite>", "cannot read"),
+                              ("<testsuite/>", "no receipt"), ("<testsuites/>", "no receipt")):
+            with self.subTest(body=body), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "receipt.xml"
+                path.write_text(body, encoding="utf-8")
+                code, out, err = run_main([f"avx2={path}"])
+                self.assertEqual(code, 2, out + err)
+                self.assertIn(message, err)
+
+    def test_suite_outcomes_and_nested_suites_cannot_qualify_unattributed_receipts(self):
+        for carrier in ("output", "property"):
+            for outcome in ("failure", "error", "skipped"):
+                for nested in (False, True):
+                    with self.subTest(carrier=carrier, outcome=outcome, nested=nested), \
+                            tempfile.TemporaryDirectory() as directory:
+                        root = ET.Element("testsuites")
+                        suite = ET.SubElement(root, "testsuite", tests="1", failures="0")
+                        if carrier == "output":
+                            ET.SubElement(suite, "system-out").text = receipt_line()
+                        else:
+                            properties = ET.SubElement(suite, "properties")
+                            ET.SubElement(properties, "property", name="ambient_receipt", value=receipt_line())
+                        if nested:
+                            suite = ET.SubElement(suite, "testsuite")
+                        ET.SubElement(suite, outcome)
+                        path = Path(directory) / "receipt.xml"
+                        ET.ElementTree(root).write(path, encoding="utf-8")
+                        code, out, err = run_main([f"avx2={path}"])
+                        self.assertEqual(code, 2, out + err)
+                        self.assertIn("unevaluated", err)
+
     def test_agree_when_lane_simd_levels_match(self):
         with tempfile.TemporaryDirectory() as directory:
             lane_a = write_junit(

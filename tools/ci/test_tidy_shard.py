@@ -219,6 +219,9 @@ class ShardWorkflowTests(unittest.TestCase):
         self.assertIn("    needs: [changes, tidy-shard]\n", aggregate)
         self.assertIn("&& (" + guard + ") }}\n", aggregate)
         self.assertIn("!cancelled()", aggregate)
+        self.assertIn("    if: ${{ (!cancelled() || needs.changes.result != 'success' || "
+                      "(needs.tidy-shard.result != 'success' && needs.tidy-shard.result != 'skipped')) "
+                      "&& (" + guard + ") }}\n", aggregate)
         self.assertIn("    needs: changes\n", self.jobs["tidy-shard"])
         self.assertIn("    if: ${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && (" + guard + ") }}\n",
                       self.jobs["tidy-shard"])
