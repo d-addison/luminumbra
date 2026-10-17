@@ -260,10 +260,11 @@ void ExpectSiblingOverlap(SiblingSave operation) {
     EXPECT_EQ(overlap.sharing_violations.load(), 0u);
     EXPECT_EQ(overlap.publications.load(), 1u);
     EXPECT_EQ(overlap.readers.load(), 0u);
-    if (operation == SiblingSave::DeletePlants)
+    if (operation == SiblingSave::DeletePlants) {
         EXPECT_FALSE(std::filesystem::exists(target));
-    else
+    } else {
         EXPECT_NE(Bytes(target), before);
+    }
     EXPECT_TRUE(WorldSaveService::validate_save(world.path()));
     ExpectNoTemps(world.path());
 }

@@ -4,14 +4,20 @@
 #include "WorldPersistenceRoundtrip.h"
 #include "WorldSaveService.h"
 #include "world/TerrainPresetLoader.h"
+#include "world/WorldClock.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
 #include <nlohmann/json_fwd.hpp>
+#include <stop_token>
+#include <string>
+#include <vector>
 
 namespace Luminumbra::Persistence {
 namespace {
@@ -102,6 +108,7 @@ SavedWorld InspectSavedWorld(const fs::path& root,
             const detail::FilePublicationReadGuard read(metadata_path);
             if (!fs::is_regular_file(metadata_path))
                 return result;
+            // Bound metadata to 1 MiB before parsing.
             constexpr auto kMaxMetadataBytes = std::uintmax_t{1024} * 1024;
             if (fs::file_size(metadata_path) > kMaxMetadataBytes) {
                 result.error = "Corrupt world metadata: exceeds the 1 MiB limit.";
