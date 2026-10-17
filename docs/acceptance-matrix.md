@@ -6,11 +6,11 @@ Statuses declare the available evidence. Static validation requires a mapping fo
 
 | Status | Rows |
 | --- | ---: |
-| covered | 21 |
+| covered | 22 |
 | partial | 8 |
 | needs-native-run | 17 |
 | planned | 85 |
-| Total | 131 |
+| Total | 132 |
 
 | Row | Status | Source | Requirements | Statement | Evidence |
 | --- | --- | --- | --- | --- | --- |
@@ -145,3 +145,4 @@ Statuses declare the available evidence. Static validation requires a mapping fo
 | render.benchmark-output-completion | covered | `docs/render-benchmark.md#compatibility-and-commands` |  | Both benchmark schemas reject incomplete artifact output. Registered regressions cover directory creation and file-open errors plus partial stream writes and flush failure; the writer also checks file-close completion. | ctest: `RenderBenchmarkOutput.BothSchemasRejectPartialWritesAndFlushFailures`<br>ctest: `RenderBenchmarkOutput.BothSchemasCheckFileOpenAndDirectoryCreation` |
 | render.benchmark-workload-assignments | covered | `docs/render-benchmark.md#compatibility-and-commands` |  | Assignment-form workload options do not become debug overrides or consume successor arguments; non-workload options remain observable overrides. | ctest: `RenderBenchmarkOverrides.WorkloadAssignmentsDoNotConsumeSuccessorsOrHideOverrides` |
 | content.foliage-directory-recovery | covered | `issue #412` |  | Foliage skips unencodable filenames with a diagnostic and loads valid neighbours in UTF-8 order. Scan and file I/O failures roll back, report failure to the gameplay cache, and allow retry; valid empty directories succeed. Creature dependency loading contains conversion exceptions and refuses incomplete identity. | ctest: `GameSessionHeadlessWorldTest.FoliageSkipsUnencodableNamesAndLoadsBothValidNeighbours`<br>ctest: `GameSessionHeadlessWorldTest.FoliageScanFailuresRemainRetryable`<br>ctest: `GameSessionHeadlessWorldTest.FoliageFileIoFailureRollsBackBeforeRetry`<br>ctest: `GameSessionHeadlessWorldTest.FoliageDirectoryProviderExceptionsAreContained`<br>ctest: `GameSessionHeadlessWorldTest.FoliageUnavailableAndEmptyDirectoriesHaveDistinctResults`<br>ctest: `GameSessionHeadlessWorldTest.FoliageSpeciesUsePortableFilenameOrderForDuplicateIds` |
+| graphics.horizon-authority | covered | `docs/engine-guide.md#world-generation-and-streaming` |  | Legacy graphics horizon changes preserve edited chunk authority and reject stale captures through the chunk voxel revision even when world/region publication revisions are unchanged. This row covers the owner-thread snapshot and admission regression, not native rendering qualification. | ctest: `GraphicsRuntimePure.ShrinkingAndGrowingHorizonRetainsEditedAuthorityAndRejectsStaleCapture`<br>ctest: `StreamingHardening.FarLodSnapshotOwnsBytesAndRejectsStaleLiveData`<br>ctest: `FarLodWorker.AuthoritativeCaptureBuildsPersistsAndStales` |

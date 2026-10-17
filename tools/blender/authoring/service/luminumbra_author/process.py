@@ -55,9 +55,6 @@ def supervise(command, result_path, timeout):
     log = bytearray()
     cancelled = threading.Event()
     timed_out = False
-    process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                               stderr=subprocess.STDOUT, start_new_session=os.name != "nt")
-
     def stop():
         if process.poll() is None:
             try:
@@ -86,9 +83,13 @@ def supervise(command, result_path, timeout):
 
     watcher = threading.Thread(target=watch_parent, daemon=True)
     reader = threading.Thread(target=drain, daemon=True)
-    watcher.start()
-    reader.start()
+    reader_started = False
+    process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, start_new_session=os.name != "nt")
     try:
+        watcher.start()
+        reader.start()
+        reader_started = True
         try:
             process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -96,9 +97,16 @@ def supervise(command, result_path, timeout):
             stop()
             process.wait()
     finally:
-        stop()
-        reader.join(timeout=5)
-        process.stdout.close()
+        primary_error = sys.exc_info()[0] is not None
+        cleanup_errors = []
+        def cleanup(action):
+            try: action()
+            except BaseException as error: cleanup_errors.append(error)
+        cleanup(stop)
+        cleanup(lambda: process.wait(timeout=5))
+        if reader_started: cleanup(lambda: reader.join(timeout=5))
+        cleanup(process.stdout.close)
+        if cleanup_errors and not primary_error: raise cleanup_errors[0]
     atomic_json(Path(result_path), {
         "returncode": process.returncode, "cancelled": cancelled.is_set(), "timed_out": timed_out,
         "log": log.decode("utf-8", errors="replace"), "log_truncated": total > LOG_LIMIT,
@@ -454,18 +462,6 @@ def run_owned(command, payload, *, timeout, readiness_timeout=5, cancel=None,
     # Leave cleanup time inside the original deadline, never add a new window.
     work_deadline = deadline-min(.5, timeout/2)
     control_read = control_write = None
-    if own_tree and os.name == 'posix':
-        command, control_read, control_write = _owned_command(command, max(0, deadline-clock()), memory_mib)
-    try:
-        extra = {'pass_fds': (control_read,)} if control_read is not None else {}
-        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                   start_new_session=own_tree and os.name != 'nt', close_fds=True, env=environment, cwd=cwd, bufsize=0, **extra)
-        if control_write is not None: process._ownership_control = control_write
-    except BaseException:
-        if control_write is not None: os.close(control_write)
-        raise
-    finally:
-        if control_read is not None: os.close(control_read)
     tree = None
     output, log = bytearray(), bytearray()
     ready, eof, stderr_done, writer_done, overflow = (threading.Event() for _ in range(5))
@@ -504,7 +500,26 @@ def run_owned(command, payload, *, timeout, readiness_timeout=5, cancel=None,
         except (OSError, ValueError) as error: failures.append(error)
         finally: writer_done.set()
 
+    def close_control_read():
+        nonlocal control_read
+        fd, control_read = control_read, None
+        if fd is not None: os.close(fd)
+
     try:
+        if own_tree and os.name == 'posix':
+            command, control_read, control_write = _owned_command(command, max(0, deadline-clock()), memory_mib)
+        extra = {'pass_fds': (control_read,)} if control_read is not None else {}
+        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   start_new_session=own_tree and os.name != 'nt', close_fds=True, env=environment, cwd=cwd, bufsize=0, **extra)
+    except BaseException:
+        try:
+            if control_write is not None: os.close(control_write)
+        finally:
+            close_control_read()
+        raise
+    try:
+        if control_write is not None: process._ownership_control = control_write
+        close_control_read()
         try:
             tree = (ProcessTree(process, memory_mib) if own_tree else
                     ProcessTree(process, memory_mib, same_group=True) if os.name == 'posix' else None)
@@ -547,6 +562,7 @@ def run_owned(command, payload, *, timeout, readiness_timeout=5, cancel=None,
             try: action()
             except BaseException as error: cleanup_errors.append(error)
         try:
+            cleanup(close_control_read)
             if tree is not None: cleanup(lambda: tree.stop(deadline=deadline, clock=clock))
             else:
                 if control_write is not None:
