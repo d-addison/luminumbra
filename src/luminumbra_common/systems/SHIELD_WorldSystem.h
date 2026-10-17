@@ -1019,6 +1019,7 @@ private:
             std::shared_ptr<::Luminumbra::Chunk> chunk;
             bool terrain_mesh_required = true;
             u8 transition_faces = 0;
+            u32 water_revision = 0;
         };
         struct MeshingBatch {
             JobHandle handle;      // Normal lane

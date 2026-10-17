@@ -1,24 +1,37 @@
-#include "luminumbra_client/rendering/FarWorldWaterMesh.h"
+#include "luminumbra/core/Types.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/Chunk.h"
 #include "luminumbra_common/world/FarFrozenObservation.h"
 #include "luminumbra_common/world/FarLodStore.h"
+#include "world/FarEditedBake.h"
+#include "world/FarTierTable.h"
+#include "world/FarVolume.h"
+#include "world/FarVolumeMemory.h"
+#include "world/FarVolumeTile.h"
 
+#include <array>
+#include <cstddef>
+#include <cstdint>
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <bit>
 #include <future>
 #include <limits>
+#include <memory>
+#include <optional>
+#include <span>
 #include <stdexcept>
 #include <tuple>
 #include <utility>
+#include <vector>
 
 namespace {
 using namespace Luminumbra::World;
 using Error = FarFrozenCaptureError;
 
 FarFrozenCaptureLimits Limits() {
-    return {64, 2'000'000, 8'000'000, 6'000'000, 64 * 1024 * 1024};
+    return {64, 2'000'000, 8'000'000, 6'000'000, 64ULL * 1024 * 1024};
 }
 FarFrozenCaptureSource Source() {
     FarFrozenCaptureSource source;
@@ -32,17 +45,25 @@ FarFrozenCaptureSource Source() {
     source.pristine.density = [](const FarVolumePosition& p, float h, std::uint32_t, FarCaveMode) {
         return FarVolumeSample{float(p.y) - h, 3};
     };
+    source.committed = [](std::uint8_t, const FarVolumePosition&) {
+        return FarFrozenOverride<FarVolumeSample>{};
+    };
     source.water = [](std::int64_t, std::int64_t) {
         return FarFrozenWaterSample{false, 0};
     };
     return source;
 }
 FarFrozenRegion SmallRegion(std::uint8_t tier = 1) {
-    const auto edge = std::int64_t(FarTierAt(tier)->brick_edge_meters);
+    const auto dimensions = FarTierAt(tier);
+    if (!dimensions.has_value()) {
+        ADD_FAILURE() << "Invalid region tier: " << int(tier);
+        return {};
+    }
+    const auto edge = std::int64_t(dimensions->brick_edge_meters);
     return {tier, {{-edge, -edge, -edge}, {edge, edge, edge}}};
 }
 std::shared_ptr<FarVolumeMemoryPool> Pool() {
-    return std::make_shared<FarVolumeMemoryPool>(64 * 1024 * 1024);
+    return std::make_shared<FarVolumeMemoryPool>(64ULL * 1024 * 1024);
 }
 FarFrozenTerrainOverride Constant(float value) {
     return [value](std::uint8_t, const FarVolumePosition&) {
@@ -50,10 +71,12 @@ FarFrozenTerrainOverride Constant(float value) {
     };
 }
 template<class Callback>
-struct CopyCountingCallback {
+class CopyCountingCallback {
     Callback callback;
     std::size_t& copies;
     std::size_t& calls;
+
+public:
     CopyCountingCallback(Callback value, std::size_t& copy_count, std::size_t& call_count)
         : callback(std::move(value))
         , copies(copy_count)
@@ -81,15 +104,19 @@ FarEditedBakeLimits BakeLimits() {
     limits.max_source_samples = 10000;
     limits.max_source_probes = 1000000;
     limits.max_density_samples = 1000000;
-    limits.max_scratch_bytes = 16 * 1024 * 1024;
-    limits.max_output_bytes = 16 * 1024 * 1024;
+    limits.max_scratch_bytes = 16ULL * 1024 * 1024;
+    limits.max_output_bytes = 16ULL * 1024 * 1024;
     return limits;
 }
 class EditedImage final : public FarEditedSourceView {
-public:
     std::array<float, 8> density{-1, -1, -1, -1, -1, -1, -1, -1};
     FarEditedLattice record{{0, 0, 0}, 1, {2, 2, 2}, density, {}, 6};
     FarEditedImageIdentity identity{7, FarEditedImageState::Committed};
+
+public:
+    void SetIdentity(FarEditedImageIdentity value) {
+        identity = value;
+    }
     FarEditedImageIdentity Identity() const override {
         return identity;
     }
@@ -103,14 +130,14 @@ TEST(FarFrozenObservation, WorkerCompilationRetainsOnlyFrozenMemoryAfterOwnerRel
     auto source = Source();
     std::size_t owner_calls = 0;
     auto owner = std::make_shared<float>(0.25f);
-    std::weak_ptr<float> weak_owner = owner;
+    std::weak_ptr<float> const weak_owner = owner;
     source.pristine.height = [owner, &owner_calls](std::int64_t, std::int64_t) {
         ++owner_calls;
         return *owner;
     };
     const FarVolumeRequest request{{5, -1, -1}, {-256, 256}, 42};
     auto pool = Pool();
-    std::weak_ptr<FarVolumeMemoryPool> weak_pool = pool;
+    std::weak_ptr<FarVolumeMemoryPool> const weak_pool = pool;
     std::shared_ptr<const FarFrozenObservation> frozen;
     ASSERT_EQ(CaptureFarVolumeObservation(request, source, Limits(), pool, frozen), Error::None);
     const auto observed_calls = owner_calls;
@@ -125,9 +152,10 @@ TEST(FarFrozenObservation, WorkerCompilationRetainsOnlyFrozenMemoryAfterOwnerRel
     EXPECT_TRUE(weak_owner.expired());
     EXPECT_FALSE(weak_pool.expired());
     FarVolumeCompilation output;
-    const FarVolumeCompilationLimits limits{{131 * 131, 1'000'000},
-                                            {2 * 32 * 32, 32 * 32},
-                                            {32 * 32 * 64, 300'000, 129 * 129, 128 * 128 * 6}};
+    const FarVolumeCompilationLimits limits{
+        {131ULL * 131, 1'000'000},
+        {2ULL * 32ULL * 32, 32ULL * 32},
+        {32ULL * 32 * 64, 300'000, 129ULL * 129, 128ULL * 128 * 6}};
     auto worker = std::async(std::launch::async, [&] {
         return CompileFarVolume({request.key, {}}, authority, limits, output);
     });
@@ -152,7 +180,11 @@ TEST(FarFrozenObservation, AllTiersIncludeEveryAxisNormalHaloAndRefuseOutsideSup
     std::shared_ptr<const FarFrozenObservation> frozen;
     ASSERT_EQ(CaptureFarFrozenObservation(regions, source, Limits(), Pool(), frozen), Error::None);
     for (const auto& region : regions) {
-        const auto step = std::int64_t(FarTierAt(region.tier)->sample_spacing_meters);
+        const auto tier = FarTierAt(region.tier);
+        ASSERT_TRUE(tier.has_value());
+        if (!tier.has_value())
+            return;
+        const auto step = std::int64_t(tier->sample_spacing_meters);
         for (auto z = region.support.min.z; z <= region.support.max.z; z += step)
             for (auto y = region.support.min.y; y <= region.support.max.y; y += step)
                 for (auto x = region.support.min.x; x <= region.support.max.x; x += step) {
@@ -166,7 +198,9 @@ TEST(FarFrozenObservation, AllTiersIncludeEveryAxisNormalHaloAndRefuseOutsideSup
                                                                                {0, 0, -step}}}) {
                         const FarVolumePosition q{p.x + offset.x, p.y + offset.y, p.z + offset.z};
                         const auto sample = frozen->Sample(region.tier, q, true);
-                        ASSERT_TRUE(sample);
+                        ASSERT_TRUE(sample.has_value());
+                        if (!sample.has_value())
+                            return;
                         EXPECT_EQ(sample->density, float(q.y) - 0.25f);
                         ASSERT_TRUE(frozen->Height(region.tier, q.x, q.z));
                     }
@@ -200,26 +234,62 @@ TEST(FarFrozenObservation, PreviewResolvesLiveThenParkedThenCommittedThenPristin
     std::shared_ptr<const FarFrozenObservation> preview, committed;
     ASSERT_EQ(CaptureFarFrozenObservation({&region, 1}, source, Limits(), Pool(), preview),
               Error::None);
-    EXPECT_EQ(preview->Sample(1, {-4, 0, 0})->density, -30);
-    EXPECT_EQ(preview->Sample(1, {0, 0, 0})->density, -20);
-    EXPECT_EQ(preview->Sample(1, {4, 0, 0})->density, -10);
-    EXPECT_EQ(preview->WaterSample(0, -4, 0)->surface_height, 30);
-    EXPECT_EQ(preview->WaterSample(0, 0, 0)->surface_height, 20);
-    EXPECT_FALSE(preview->WaterSample(0, 4, 0)->wet);
+    const auto live_sample = preview->Sample(1, {-4, 0, 0});
+    const auto parked_sample = preview->Sample(1, {0, 0, 0});
+    const auto committed_sample = preview->Sample(1, {4, 0, 0});
+    ASSERT_TRUE(live_sample.has_value());
+    if (!live_sample.has_value())
+        return;
+    ASSERT_TRUE(parked_sample.has_value());
+    if (!parked_sample.has_value())
+        return;
+    ASSERT_TRUE(committed_sample.has_value());
+    if (!committed_sample.has_value())
+        return;
+    EXPECT_EQ(live_sample->density, -30);
+    EXPECT_EQ(parked_sample->density, -20);
+    EXPECT_EQ(committed_sample->density, -10);
+    const auto live_water = preview->WaterSample(0, -4, 0);
+    const auto parked_water = preview->WaterSample(0, 0, 0);
+    const auto committed_water = preview->WaterSample(0, 4, 0);
+    ASSERT_TRUE(live_water.has_value());
+    if (!live_water.has_value())
+        return;
+    ASSERT_TRUE(parked_water.has_value());
+    if (!parked_water.has_value())
+        return;
+    ASSERT_TRUE(committed_water.has_value());
+    if (!committed_water.has_value())
+        return;
+    EXPECT_EQ(live_water->surface_height, 30);
+    EXPECT_EQ(parked_water->surface_height, 20);
+    EXPECT_FALSE(committed_water->wet);
     source.use = FarFrozenUse::Committed;
     source.live = [](std::uint8_t, const FarVolumePosition&) -> FarFrozenOverride<FarVolumeSample> {
         throw std::runtime_error("unexpected preview read");
     };
     ASSERT_EQ(CaptureFarFrozenObservation({&region, 1}, source, Limits(), Pool(), committed),
               Error::None);
-    EXPECT_EQ(committed->Sample(1, {-4, 0, 0})->density, -10);
-    EXPECT_FALSE(committed->WaterSample(0, -4, 0)->wet);
+    const auto terrain = committed->Sample(1, {-4, 0, 0});
+    const auto water = committed->WaterSample(0, -4, 0);
+    ASSERT_TRUE(terrain.has_value());
+    if (!terrain.has_value())
+        return;
+    ASSERT_TRUE(water.has_value());
+    if (!water.has_value())
+        return;
+    EXPECT_EQ(terrain->density, -10);
+    EXPECT_FALSE(water->wet);
     EXPECT_EQ(committed->durable_identity().generation, preview->durable_identity().generation);
     EXPECT_NE(committed->content_identity(), preview->content_identity());
-    source.committed = {};
+    source.committed = Source().committed;
     ASSERT_EQ(CaptureFarFrozenObservation({&region, 1}, source, Limits(), Pool(), committed),
               Error::None);
-    EXPECT_EQ(committed->Sample(1, {4, 0, 0})->density, -0.25f);
+    const auto pristine = committed->Sample(1, {4, 0, 0});
+    ASSERT_TRUE(pristine.has_value());
+    if (!pristine.has_value())
+        return;
+    EXPECT_EQ(pristine->density, -0.25f);
 }
 
 TEST(FarFrozenObservation, BakeUsesExistingDurableImageAndNeverPreviewSamples) {
@@ -254,12 +324,12 @@ TEST(FarFrozenObservation, BakeUsesExistingDurableImageAndNeverPreviewSamples) {
         EXPECT_EQ(baked.tiles[i].max_member_generation, 6u);
     }
     const auto previous = baked.tiles.front().bytes;
-    edited.identity.generation = 8;
+    edited.SetIdentity({8, FarEditedImageState::Committed});
     EXPECT_EQ(BakeFarEditedTilesFrozen(edited, {&changed, 1}, *frozen, BakeLimits(), baked),
               FarEditedBakeError::IdentityMismatch);
     EXPECT_EQ(baked.tiles.front().bytes, previous);
-    edited.identity = {7, FarEditedImageState::Prepared};
-    source.durable = edited.identity;
+    edited.SetIdentity({7, FarEditedImageState::Prepared});
+    source.durable = edited.Identity();
     source.use = FarFrozenUse::Committed;
     ASSERT_EQ(CaptureFarFrozenObservation(regions, source, Limits(), Pool(), frozen), Error::None);
     ASSERT_EQ(BakeFarEditedTilesFrozen(edited, {&changed, 1}, *frozen, BakeLimits(), baked),
@@ -272,6 +342,93 @@ TEST(FarFrozenObservation, BakeUsesExistingDurableImageAndNeverPreviewSamples) {
               FarEditedBakeError::IdentityMismatch);
 }
 
+TEST(FarFrozenObservation, MissingCommittedResolverRefusesWithoutLosingDurableEdits) {
+    auto source = Source();
+    source.committed = Constant(-10);
+    const auto region = SmallRegion();
+    auto pool = Pool();
+    std::shared_ptr<const FarFrozenObservation> output;
+    ASSERT_EQ(CaptureFarFrozenObservation({&region, 1}, source, Limits(), pool, output),
+              Error::None);
+    EXPECT_EQ(output->Sample(1, {0, 0, 0}), (std::optional<FarVolumeSample>{{-10, 9}}));
+    const auto previous = output;
+    const auto held = pool->used(), attempts = pool->attempts();
+    std::size_t calls = 0;
+    source.pristine.height = [&calls](std::int64_t, std::int64_t) {
+        ++calls;
+        return 0.25f;
+    };
+    source.committed = {};
+    // Preview authority cannot substitute for missing durable authority.
+    source.live = Constant(-30);
+    source.parked = Constant(-20);
+    for (const auto use : {FarFrozenUse::Committed, FarFrozenUse::Preview}) {
+        source.use = use;
+        EXPECT_EQ(CaptureFarFrozenObservation({&region, 1}, source, Limits(), pool, output),
+                  Error::InvalidSource);
+        EXPECT_EQ(
+            CaptureFarVolumeObservation({{1, 0, 0}, {-16, 16}, 42}, source, Limits(), pool, output),
+            Error::InvalidSource);
+        EXPECT_EQ(output, previous);
+        EXPECT_EQ(pool->used(), held);
+        EXPECT_EQ(pool->attempts(), attempts);
+        EXPECT_EQ(calls, 0u);
+    }
+}
+
+TEST(FarFrozenObservation, WaterWorkCapIncludesAllRegionsHalosAndPreviewLayers) {
+    const std::array<FarFrozenRegion, 2> regions{
+        {{1, {{0, 0, 0}, {0, 0, 0}}}, {1, {{4, 0, 0}, {4, 0, 0}}}}};
+    for (const auto use : {FarFrozenUse::Committed, FarFrozenUse::Preview}) {
+        auto source = Source();
+        source.use = use;
+        std::size_t height_calls = 0, water_calls = 0;
+        source.pristine.height = [&height_calls](std::int64_t, std::int64_t) {
+            ++height_calls;
+            return 0.25f;
+        };
+        source.water = [&water_calls](std::int64_t, std::int64_t) {
+            ++water_calls;
+            return FarFrozenWaterSample{false, 0};
+        };
+        source.live_water = source.parked_water = [&water_calls](std::int64_t, std::int64_t) {
+            ++water_calls;
+            return FarFrozenOverride<FarFrozenWaterSample>{};
+        };
+        // Each point support has a 3 by 3 horizontal halo. Overlaps are sampled
+        // separately; preview falls through both override layers to base water.
+        const std::uint64_t per_region = 9ULL * (use == FarFrozenUse::Preview ? 3 : 1);
+        const auto total = 2 * per_region;
+        auto limits = Limits();
+        limits.max_water_samples = per_region;
+        auto pool = Pool();
+        std::shared_ptr<const FarFrozenObservation> output;
+        for (const auto& region : regions) {
+            water_calls = 0;
+            ASSERT_EQ(CaptureFarFrozenObservation({&region, 1}, source, limits, pool, output),
+                      Error::None);
+            EXPECT_EQ(water_calls, per_region);
+        }
+        const auto previous = output;
+        const auto held = pool->used(), attempts = pool->attempts();
+        height_calls = water_calls = 0;
+        for (const auto cap : {per_region, total - 1}) {
+            limits.max_water_samples = cap;
+            EXPECT_EQ(CaptureFarFrozenObservation(regions, source, limits, pool, output),
+                      Error::WorkLimit);
+            EXPECT_EQ(output, previous);
+            EXPECT_EQ(pool->used(), held);
+            EXPECT_EQ(pool->attempts(), attempts);
+            EXPECT_EQ(height_calls, 0u);
+            EXPECT_EQ(water_calls, 0u);
+        }
+        limits.max_water_samples = total;
+        ASSERT_EQ(CaptureFarFrozenObservation(regions, source, limits, pool, output), Error::None);
+        EXPECT_EQ(height_calls, 18u);
+        EXPECT_EQ(water_calls, total);
+    }
+}
+
 TEST(FarFrozenObservation, ExplicitWetDryUnavailableAndNonFiniteRefusals) {
     auto source = Source();
     const auto region = SmallRegion();
@@ -280,7 +437,11 @@ TEST(FarFrozenObservation, ExplicitWetDryUnavailableAndNonFiniteRefusals) {
     ASSERT_EQ(CaptureFarFrozenObservation({&region, 1}, source, Limits(), pool, frozen),
               Error::None);
     EXPECT_EQ(frozen->WaterCapability(0), FarFrozenWaterCapability::ExplicitlyDry);
-    EXPECT_TRUE(frozen->WaterBound(0)->known_dry);
+    const auto dry_bound = frozen->WaterBound(0);
+    ASSERT_TRUE(dry_bound.has_value());
+    if (!dry_bound.has_value())
+        return;
+    EXPECT_TRUE(dry_bound->known_dry);
     source.water = [](std::int64_t x, std::int64_t) {
         return FarFrozenWaterSample{x <= 0, float(x) / 4};
     };
@@ -411,7 +572,11 @@ TEST(FarFrozenObservation, CanonicalOrderingAndVolatileFingerprintAreRepeatable)
     std::reverse(regions.begin(), regions.end());
     ASSERT_EQ(CaptureFarFrozenObservation(regions, source, Limits(), Pool(), second), Error::None);
     EXPECT_EQ(first->content_identity(), second->content_identity());
-    EXPECT_EQ(first->Region(0)->tier, 1);
+    const auto first_region = first->Region(0);
+    ASSERT_TRUE(first_region.has_value());
+    if (!first_region.has_value())
+        return;
+    EXPECT_EQ(first_region->tier, 1);
     source.live = Constant(9);
     ASSERT_EQ(CaptureFarFrozenObservation(regions, source, Limits(), Pool(), second), Error::None);
     EXPECT_NE(first->content_identity(), second->content_identity());
@@ -512,8 +677,9 @@ TEST(FarFrozenObservation, ProductionCaptureNeverCopiesTargetsOnRefusalOrSuccess
                   cap < 4 ? Error::WorkLimit : Error::ByteLimit);
         EXPECT_EQ(output, previous);
         EXPECT_EQ(pool->used(), 0u);
-        if (cap < 5)
+        if (cap < 5) {
             EXPECT_EQ(pool->attempts(), 0u);
+        }
         for (std::size_t i = 0; i < copies.size(); ++i) {
             EXPECT_EQ(copies[i], 0u) << i;
             EXPECT_EQ(calls[i], 0u) << i;
@@ -521,6 +687,9 @@ TEST(FarFrozenObservation, ProductionCaptureNeverCopiesTargetsOnRefusalOrSuccess
     }
     ASSERT_EQ(CaptureWorldFarVolumeObservation(*world, request, source, Limits(), Pool(), output),
               Error::None);
+    const auto live_height = world->GetTerrainHeightAt(0, 0);
+    const auto live_density =
+        world->SamplePristineFarDensity({0, 0, 0}, live_height, 64, source.pristine.caves);
     EXPECT_NE(output, previous);
     for (std::size_t i = 0; i < copies.size(); ++i) {
         EXPECT_EQ(copies[i], 0u) << i;
@@ -531,8 +700,11 @@ TEST(FarFrozenObservation, ProductionCaptureNeverCopiesTargetsOnRefusalOrSuccess
     world.reset();
     EXPECT_EQ(output->Sample(5, {0, 0, 0}), (std::optional<FarVolumeSample>{{-10, 9}}));
     const auto pristine = output->Sample(5, {0, 0, 0}, true);
-    ASSERT_TRUE(pristine);
-    EXPECT_EQ(pristine->density, -0.25f);
+    ASSERT_TRUE(pristine.has_value());
+    if (!pristine.has_value())
+        return;
+    EXPECT_EQ(std::bit_cast<std::uint32_t>(pristine->density),
+              std::bit_cast<std::uint32_t>(live_density));
     EXPECT_EQ(output->WaterSample(0, 0, 0), (std::optional<FarFrozenWaterSample>{{false, 0}}));
     EXPECT_EQ(calls, captured_calls);
 }
@@ -628,48 +800,17 @@ TEST(FarFrozenObservation, ProductionCaptureLeavesSimulationStateUnchangedAndSur
     EXPECT_EQ(ComputeTerrainParamsHash(world->get_params(), world->get_seed()), params_hash);
     EXPECT_EQ(world->get_seed(), 1337);
     EXPECT_EQ(world->get_params().height_offset, params.height_offset);
+    const auto live_height = world->GetTerrainHeightAt(0, 0);
     world.reset();
     source = {};
     chunk->water_depth_mm.front() = 0;
-    EXPECT_EQ(frozen->Height(5, 0, 0), 0.25f);
+    const auto captured_height = frozen->Height(5, 0, 0);
+    ASSERT_TRUE(captured_height.has_value());
+    if (!captured_height.has_value())
+        return;
+    EXPECT_EQ(std::bit_cast<std::uint32_t>(*captured_height),
+              std::bit_cast<std::uint32_t>(live_height));
     ASSERT_TRUE(frozen->Sample(5, {0, 0, 0}));
     EXPECT_EQ(frozen->WaterCapability(0), FarFrozenWaterCapability::Wet);
     EXPECT_EQ(frozen->WaterSample(0, 0, 0), (std::optional<FarFrozenWaterSample>{{true, -0.75f}}));
-}
-
-TEST(FarFrozenObservation, RendererWaterBridgeUsesFrozenCombinedIdentityAndRefusesPartialSupport) {
-    using namespace Luminumbra::Rendering;
-    auto source = Source();
-    source.water = [](std::int64_t, std::int64_t) {
-        return FarFrozenWaterSample{true, 0};
-    };
-    std::shared_ptr<const FarFrozenObservation> frozen;
-    ASSERT_EQ(
-        CaptureFarVolumeObservation({{1, 0, -1}, {-16, 16}, 42}, source, Limits(), Pool(), frozen),
-        Error::None);
-    FarWorldFrozenWaterObservation water(frozen, {1, 0, -1});
-    EXPECT_EQ(water.content_identity(), frozen->Authority(1).field_identity);
-    ASSERT_TRUE(water.WaterBound({1, 0, -1}));
-    EXPECT_FALSE(water.WaterBound({1, 1, -1}));
-    FarVolumeRenderMesh terrain, output;
-    terrain.request = {{1, 0, -1}, {-16, 16}, frozen->content_identity()};
-    terrain.origin_meters = {0, -16, -512};
-    terrain.sampled_max_meters = {512, 16, 0};
-    FarVolumeMemoryPool mesh_pool(16 * 1024 * 1024);
-    FarVolumeMemoryLease retained(mesh_pool);
-    ASSERT_TRUE(BuildFarWorldWaterMesh(terrain,
-                                       water,
-                                       *water.WaterBound({1, 0, -1}),
-                                       {129 * 129, 128 * 128, 100000, 200000, 8 * 1024 * 1024},
-                                       {&mesh_pool, &retained, nullptr},
-                                       output));
-    EXPECT_TRUE(output.water_complete);
-    EXPECT_EQ(output.water_indices, 128u * 128u * 6);
-    FarWorldFrozenWaterObservation missing(frozen, {1, 1, -1});
-    EXPECT_EQ(missing.WaterCapability(), FarWorldWaterCapability::Unavailable);
-    const auto region = SmallRegion();
-    ASSERT_EQ(CaptureFarFrozenObservation({&region, 1}, source, Limits(), Pool(), frozen),
-              Error::None);
-    FarWorldFrozenWaterObservation partial(frozen, {1, 0, 0});
-    EXPECT_EQ(partial.WaterCapability(), FarWorldWaterCapability::Unavailable);
 }

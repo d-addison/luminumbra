@@ -64,7 +64,7 @@ FarFrozenCaptureError
 CaptureFarVolumeObservation(const FarVolumeRequest& request,
                             const FarFrozenCaptureSource& source,
                             const FarFrozenCaptureLimits& limits,
-                            std::shared_ptr<FarVolumeMemoryPool> pool,
+                            const std::shared_ptr<FarVolumeMemoryPool>& pool,
                             std::shared_ptr<const FarFrozenObservation>& output);
 
 // Production pristine terrain is sampled under one world-generation scope.
@@ -75,7 +75,7 @@ CaptureWorldFarVolumeObservation(const Systems::SHIELD_WorldSystem& world,
                                  const FarVolumeRequest& request,
                                  const FarFrozenCaptureSource& source,
                                  const FarFrozenCaptureLimits& limits,
-                                 std::shared_ptr<FarVolumeMemoryPool> pool,
+                                 const std::shared_ptr<FarVolumeMemoryPool>& pool,
                                  std::shared_ptr<const FarFrozenObservation>& output);
 
 struct FarVolumeAuthorityLimits {

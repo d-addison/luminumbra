@@ -1,5 +1,7 @@
 #include "CreaturePersistence.h"
 
+#include "InstinctPlanner.h"
+#include "StimulusChannels.h"
 #include "components/AlarmComponents.h"
 #include "components/CircadianComponents.h"
 #include "components/CombustionComponents.h"
@@ -20,16 +22,35 @@
 #include "components/ThirstComponents.h"
 #include "core/WaterComponents.h"
 #include "persistence/PlantPersistence.h"
+#include "world/ActiveRegionLedger.h"
+#include "world/GroundObjectStore.h"
+#include <luminumbra/core/Types.h>
+
+#include <entt/entity/entity.hpp>
+#include <entt/entity/fwd.hpp>
+#include <entt/entt.hpp>
+#include <nlohmann/detail/exceptions.hpp>
+#include <nlohmann/detail/input/json_sax.hpp>
+#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <initializer_list>
 #include <limits>
 #include <map>
 #include <set>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace luminumbra::ai {
 namespace {
@@ -125,10 +146,17 @@ class BoundedCreatureJson : public nlohmann::json_sax<Json> {
         return true;
     }
 
-public:
     Json result;
     std::size_t controller_bytes = 0;
     std::size_t controller_nodes = 0;
+
+public:
+    Json& Result() {
+        return result;
+    }
+    std::size_t ControllerByteCount() const {
+        return controller_bytes;
+    }
     bool null() override {
         return Value(nullptr);
     }
@@ -179,45 +207,71 @@ public:
 
 // Apply the same budgets to writer input without parsing or allocating a second DOM.
 void CheckJsonBudgets(const Json& document) {
-    std::size_t nodes = 0, controller_nodes = 0;
+    std::size_t nodes = 0, controller_nodes = 0, stamp_nodes = 0;
     const auto count = document.at("entities").size();
-    const auto node = [&](std::size_t* member_nodes) {
-        if (member_nodes && *member_nodes < kCreatureControllerStampNodes) {
-            ++*member_nodes;
+    const auto node = [&](bool controller) {
+        if (controller && stamp_nodes < kCreatureControllerStampNodes) {
+            ++stamp_nodes;
             ++controller_nodes;
         }
         Require(++nodes <= CreatureNodeLimit(count, controller_nodes), "creature node limit");
     };
-    const auto visit = [&](const auto& self,
-                           const Json& value,
-                           std::size_t depth,
-                           bool entities,
-                           std::size_t* member_nodes) -> void {
-        node(member_nodes);
-        if (value.is_structured())
-            Require(depth < 32, "creature nesting limit");
-        if (value.is_object()) {
-            Require(value.size() <= kMaxCreatureObjectKeys, "creature object key limit");
-            for (auto it = value.begin(); it != value.end(); ++it) {
-                std::size_t stamp_nodes = 0;
-                auto* child_nodes =
-                    depth == 3 && it.key() == "Controller" ? &stamp_nodes : member_nodes;
-                node(child_nodes);
-                Require(it.key().size() <= kMaxCreatureString, "creature string limit");
-                self(
-                    self, it.value(), depth + 1, depth == 0 && it.key() == "entities", child_nodes);
-            }
-        } else if (value.is_array()) {
-            Require(value.size() <= (entities ? kMaxCreatures : kMaxCreatureVector),
-                    "creature array count limit");
-            for (const auto& child : value)
-                self(self, child, depth + 1, false, member_nodes);
-        } else if (value.is_string()) {
-            Require(value.get_ref<const std::string&>().size() <= kMaxCreatureString,
-                    "creature string limit");
-        }
+    struct Frame {
+        const Json* value = nullptr;
+        Json::const_iterator next{};
+        bool entities = false, controller = false, entered = false;
     };
-    visit(visit, document, 0, false, nullptr);
+    // At most 32 structured levels, plus a scalar leaf at depth 32.
+    std::array<Frame, 33> frames{};
+    frames[0].value = &document;
+    std::size_t depth = 0;
+    for (;;) {
+        auto& frame = frames[depth];
+        const auto& value = *frame.value;
+        if (!frame.entered) {
+            node(frame.controller);
+            frame.entered = true;
+            if (value.is_structured()) {
+                Require(depth < 32, "creature nesting limit");
+                if (value.is_object())
+                    Require(value.size() <= kMaxCreatureObjectKeys, "creature object key limit");
+                else
+                    Require(value.size() <= (frame.entities ? kMaxCreatures : kMaxCreatureVector),
+                            "creature array count limit");
+                frame.next = value.begin();
+            } else {
+                if (value.is_string())
+                    Require(value.get_ref<const std::string&>().size() <= kMaxCreatureString,
+                            "creature string limit");
+                if (depth == 0)
+                    break;
+                --depth;
+                continue;
+            }
+        }
+        if (frame.next == value.end()) {
+            if (depth == 0)
+                break;
+            --depth;
+            continue;
+        }
+        const auto it = frame.next++;
+        bool controller = frame.controller;
+        if (value.is_object()) {
+            if (depth == 3 && it.key() == "Controller") {
+                stamp_nodes = 0;
+                controller = true;
+            }
+            node(controller);
+            Require(it.key().size() <= kMaxCreatureString, "creature string limit");
+        }
+        const bool entities = depth == 0 && value.is_object() && it.key() == "entities";
+        frames[++depth] = {.value = &it.value(),
+                           .next = {},
+                           .entities = entities,
+                           .controller = controller,
+                           .entered = false};
+    }
 }
 
 void Keys(const Json& j, std::initializer_list<const char*> keys) {
@@ -273,16 +327,26 @@ Json Encode(T value, const Context& context);
 template<class T>
 void Decode(const Json& j, T& value, const Context& context);
 
-struct Archive {
+class Archive {
     Json& data;
     bool reading;
     const Context& context;
     std::size_t fields = 0;
+
+public:
+    Archive(Json& value, bool read, const Context& references)
+        : data(value)
+        , reading(read)
+        , context(references) {}
+    bool IsReading() const {
+        return reading;
+    }
+    bool Contains(const char* key) const {
+        return data.contains(key);
+    }
     template<class T>
     void operator()(const char* name, T& value) {
-        std::string key = name;
-        if constexpr (std::is_floating_point_v<T>)
-            key += "_bits";
+        const std::string key = std::string(name) + (std::is_floating_point_v<T> ? "_bits" : "");
         ++fields;
         if (reading)
             Decode(data.at(key), value, context);
@@ -407,7 +471,7 @@ void Fields(Archive& a, C::CreatureCoarseComponent& c) {
 
 void Fields(Archive& a, C::CreatureControllerComponent& c) {
     // Legacy v1 records carried no controller participation metadata.
-    if (!a.reading || a.data.contains("physics_controlled"))
+    if (!a.IsReading() || a.Contains("physics_controlled"))
         a("physics_controlled", c.physics_controlled);
 }
 
@@ -1080,7 +1144,7 @@ CreatureSnapshot BuildCreatureSnapshot(const entt::registry& registry) {
         CheckComponents(registry, e);
         CreatureRecord record{registry.get<C::CreatureRegionComponent>(e).persistent_id};
         const auto* saved_controller = registry.try_get<C::CreatureControllerComponent>(e);
-        C::CreatureControllerComponent controller{
+        const C::CreatureControllerComponent controller{
             registry.all_of<C::CreaturePhysicsComponent>(e) ||
             (saved_controller && saved_controller->physics_controlled)};
         Require(!controller.physics_controlled ||
@@ -1207,12 +1271,12 @@ bool LoadCreatureSnapshot(std::string_view bytes, CreatureSnapshot& out, std::st
         Require(bytes.size() <= kMaxStampedCreatureBytes, "creature byte limit");
         BoundedCreatureJson decoder;
         Require(Json::sax_parse(bytes.begin(), bytes.end(), &decoder), "invalid creature JSON");
-        Json& j = decoder.result;
+        Json& j = decoder.Result();
         Keys(j, {"schema", "entities"});
         Require(j.at("schema") == kCreatureSchema, "unsupported creature schema");
         auto& records = j.at("entities");
         Require(records.is_array() && records.size() <= kMaxCreatures, "creature count limit");
-        Require(bytes.size() <= CreatureByteLimit(records.size(), decoder.controller_bytes),
+        Require(bytes.size() <= CreatureByteLimit(records.size(), decoder.ControllerByteCount()),
                 "creature byte limit");
         CreatureSnapshot candidate;
         std::uint64_t previous = 0;
@@ -1232,20 +1296,39 @@ bool LoadCreatureSnapshot(std::string_view bytes, CreatureSnapshot& out, std::st
         // against the actual plant snapshot during cross-store validation.
         entt::registry scratch;
         std::set<std::uint64_t> plants;
-        const auto collect = [&](const auto& self, const Json& value) -> void {
-            if (value.is_object() && value.contains("kind") && value.contains("id") &&
-                value.at("kind") == "plant") {
-                std::uint64_t id = 0;
-                Scalar(value.at("id"), id);
-                Require(id > 0 && id < (1ull << 63), "invalid plant reference");
-                plants.insert(id);
+        // The SAX decoder has already enforced at most 32 structured levels.
+        std::array<Json::const_iterator, 32> next{}, end{};
+        for (const auto& record : candidate.entities) {
+            std::size_t depth = 0;
+            const Json* value = &record.components;
+            while (value != nullptr) {
+                if (value->is_object() && value->contains("kind") && value->contains("id") &&
+                    value->at("kind") == "plant") {
+                    std::uint64_t id = 0;
+                    Scalar(value->at("id"), id);
+                    Require(id > 0 && id < (1ull << 63), "invalid plant reference");
+                    plants.insert(id);
+                }
+                if (value->is_structured() && !value->empty()) {
+                    Require(depth < next.size(), "creature nesting limit");
+                    next[depth] = value->begin();
+                    end[depth] = value->end();
+                    value = &*next[depth];
+                    ++next[depth];
+                    ++depth;
+                } else {
+                    value = nullptr;
+                    while (depth > 0) {
+                        if (next[depth - 1] != end[depth - 1]) {
+                            value = &*next[depth - 1];
+                            ++next[depth - 1];
+                            break;
+                        }
+                        --depth;
+                    }
+                }
             }
-            if (value.is_structured())
-                for (const auto& child : value)
-                    self(self, child);
-        };
-        for (const auto& record : candidate.entities)
-            collect(collect, record.components);
+        }
         for (const auto id : plants) {
             auto e = scratch.create();
             scratch.emplace<C::PlantTag>(e);

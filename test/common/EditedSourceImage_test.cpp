@@ -832,6 +832,7 @@ TEST(EditedSourceImage, DecodeLengthAdmissionRefusesBeforeAnyChunkVisitor) {
 
 TEST(EditedSourceImage, SessionCaptureIsOwnerThreadOnlyAndSimulationNeutralAfterClose) {
     SaveRoot runtime;
+    SaveRoot storage;
     fs::create_directories(runtime.path / "worlds/atlas/presets");
     fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets/default.json",
                   runtime.path / "worlds/atlas/presets/default.json");
@@ -846,7 +847,10 @@ TEST(EditedSourceImage, SessionCaptureIsOwnerThreadOnlyAndSimulationNeutralAfter
         session.SetJobSystem(&jobs);
         session.SetRootPath(runtime.path.string() +
                             static_cast<char>(fs::path::preferred_separator));
+        session.SetSaveRootPath(storage.path);
         ASSERT_TRUE(session.CreateWorld("Source capture", "12345", "default"));
+        EXPECT_EQ(session.GetWorldSaveDir().parent_path(), storage.path / "worlds/saves");
+        EXPECT_FALSE(fs::exists(runtime.path / "worlds/saves"));
         ASSERT_NE(session.GetWorldSystem(), nullptr);
         WorldStreamingState state;
         const auto chunk = EditedChunk(state);
