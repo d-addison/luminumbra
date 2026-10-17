@@ -1279,7 +1279,7 @@ def gtest_report_problem(path: Path, expected: int) -> str | None:
     tests = data.get("tests")
     failures = data.get("failures")
     errors = data.get("errors")
-    skipped = sum(1 for case in cases if case.get("result") == "SKIPPED" or case.get("status") == "NOTRUN")
+    skipped = sum(1 for case in cases if case.get("result") != "COMPLETED" or case.get("status") != "RUN")
     if tests != expected or len(cases) != expected:
         return f"expected {expected} executed test(s), gtest reported tests={tests} with {len(cases)} entries"
     if failures != 0 or errors != 0:
