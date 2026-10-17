@@ -504,7 +504,7 @@ class CTestShardTests(unittest.TestCase):
         return tests
 
     def test_full_light_heavy_exact_unions_and_quick_refusals_preserved(self):
-        self.assertEqual(shards.FLOORS, {"gcc": 2280, "msvc": 2260, "ucrt64": 2260, "asan": 2320})
+        self.assertEqual(shards.FLOORS, {"gcc": 2340, "msvc": 2320, "ucrt64": 2320, "asan": 2320})
         for profile in shards.PROFILES:
             tests = self.policy_roster(profile) + [test("WorldOpenRefusal.QuickCatalogCheck")]
             full = shards.select_tests(tests, profile, "full")
@@ -519,43 +519,45 @@ class CTestShardTests(unittest.TestCase):
                     parts = shards.partition(tests, selection, profile)
                     shards.validate_union(selection, parts)
 
-    def test_asan_full_and_light_unions_preserve_floor_and_required_cases(self):
-        workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/asan.yml").read_text(encoding="utf-8")
-        command = next(line for line in workflow.splitlines()
-                       if line.strip().startswith("python3 tools/ci/check_ctest_junit.py "))
-        arguments = shlex.split(command)[3:]
-        required = [arguments[index + 1] for index, argument in enumerate(arguments)
-                    if argument == "--require-test"]
-        self.assertGreaterEqual(len(required), 3)
-        tests = self.policy_roster("asan")
-        tests[:len(required)] = [test(name) for name in required]
-        output = self.root / "merged.xml"
-        checker = str(Path(__file__).with_name("check_ctest_junit.py"))
-        for selection, minimum in (("full", 2320), ("light", 2318)):
-            with self.subTest(selection=selection):
-                for shard in (1, 2):
-                    directory = self.root / f"shard-{shard}"
-                    manifest = self.write_plan(directory, shard, tests=tests, profile="asan", selection=selection)
-                    report = ET.Element("testsuite", failures="0", errors="0", skipped="0")
-                    for name in manifest["partitions"][shard - 1]:
-                        ET.SubElement(report, "testcase", name=name, status="run")
-                    ET.ElementTree(report).write(directory / "ctest.junit.xml")
-                shards.merge(self.root, output, profile="asan", selection=selection)
-                arguments[1] = str(minimum)
-                result = subprocess.run([sys.executable, "-I", "-B", checker, str(output), *arguments],
-                                        capture_output=True, text=True, timeout=10)
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                self.assertEqual(len(list(ET.parse(output).iter("testcase"))), minimum)
-                complete = output.read_bytes()
-                for missing in required:
-                    report = ET.fromstring(complete)
-                    next(case for case in report.iter("testcase") if case.get("name") == missing).set(
-                        "name", "Unrelated.Replacement")
-                    ET.ElementTree(report).write(output)
+    def test_all_full_and_light_unions_preserve_floors_and_required_cases(self):
+        for profile, filename in (("asan", "asan.yml"), ("gcc", "ci.yml"),
+                                  ("msvc", "ci.yml"), ("ucrt64", "ci.yml")):
+            workflow = (Path(__file__).resolve().parents[2] / ".github/workflows" / filename).read_text(encoding="utf-8")
+            command = next(line for line in workflow.splitlines()
+                           if line.strip().startswith("python3 tools/ci/check_ctest_junit.py "))
+            arguments = shlex.split(command)[3:]
+            required = [arguments[index + 1] for index, argument in enumerate(arguments)
+                        if argument == "--require-test"]
+            self.assertGreaterEqual(len(required), 3)
+            tests = self.policy_roster(profile)
+            tests[:len(required)] = [test(name) for name in required]
+            output = self.root / "merged.xml"
+            checker = str(Path(__file__).with_name("check_ctest_junit.py"))
+            for selection, minimum in (("full", shards.FLOORS[profile]), ("light", shards.FLOORS[profile] - 2)):
+                with self.subTest(profile=profile, selection=selection):
+                    for shard in (1, 2):
+                        directory = self.root / f"shard-{shard}"
+                        manifest = self.write_plan(directory, shard, tests=tests, profile=profile, selection=selection)
+                        report = ET.Element("testsuite", failures="0", errors="0", skipped="0")
+                        for name in manifest["partitions"][shard - 1]:
+                            ET.SubElement(report, "testcase", name=name, status="run")
+                        ET.ElementTree(report).write(directory / "ctest.junit.xml")
+                    shards.merge(self.root, output, profile=profile, selection=selection)
+                    arguments[1] = str(minimum)
                     result = subprocess.run([sys.executable, "-I", "-B", checker, str(output), *arguments],
                                             capture_output=True, text=True, timeout=10)
-                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-                    self.assertIn(f"Required CTest cases are missing:\n  - {missing}\n", result.stderr)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertEqual(len(list(ET.parse(output).iter("testcase"))), minimum)
+                    complete = output.read_bytes()
+                    for missing in required:
+                        report = ET.fromstring(complete)
+                        next(case for case in report.iter("testcase") if case.get("name") == missing).set(
+                            "name", "Unrelated.Replacement")
+                        ET.ElementTree(report).write(output)
+                        result = subprocess.run([sys.executable, "-I", "-B", checker, str(output), *arguments],
+                                                capture_output=True, text=True, timeout=10)
+                        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                        self.assertIn(f"Required CTest cases are missing:\n  - {missing}\n", result.stderr)
 
     def test_floor_precedes_selection_and_refusal_does_not_replace_existing_plan(self):
         for selection in ("full", "light", "heavy"):

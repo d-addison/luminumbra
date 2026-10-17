@@ -1023,10 +1023,10 @@
       "source": "Luminumbra first-party runtime data"
     },
     {
-      "bytes": 1547,
+      "bytes": 1552,
       "license": "MIT",
       "path": "data/ui/base.rcss",
-      "sha256": "6170b904975638801c36e08c915392e8ae9f4eb130c8008e993c507a8cf3aa4b",
+      "sha256": "4c961a80364e36d38a4af919a594d6153d4968cd6c396c979cd21a70859d547e",
       "source": "Luminumbra first-party runtime data"
     },
     {
@@ -1114,10 +1114,10 @@
       "source": "Luminumbra first-party runtime data"
     },
     {
-      "bytes": 7832,
+      "bytes": 9220,
       "license": "MIT",
       "path": "data/ui/settings.rml",
-      "sha256": "92240f1d34220a1a17f40a6da825b7791ec161c1a62b716f363a1e6ee6a23914",
+      "sha256": "00916862070f2af0a5a9841e4fdb6a1a576072f8f4b8d460608531d9f1ff0516",
       "source": "Luminumbra first-party runtime data"
     },
     {

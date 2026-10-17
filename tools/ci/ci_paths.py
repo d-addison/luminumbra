@@ -22,6 +22,7 @@ PYTHON_TESTS = (
     "tools/ci/test_validate_performance_measurement.py",
     "tools/ci/test_validate_public_tree.py",
     "tools/ci/test_validate_visual_catalog.py",
+    "tools/ci/test_tidy_cache.py",
     "tools/perf/test_capture_sim_budget.py",
     "tools/perf/test_check_residency.py",
     "tools/perf/test_fixture_hash.py",
@@ -41,8 +42,6 @@ PYTHON_TESTS = (
     "tools/persistence/test_save_receipt.py",
     "tools/rendering/acceptance/test_scene_matrix.py",
 )
-# This suite executes POSIX shebang fixtures and was not registered with CTest.
-POSIX_PYTHON_TESTS = ("tools/ci/test_tidy_cache.py",)
 PYTHON_MODULES = {
     "tools/ci/ci_paths.py", "tools/ci/check_docs.py",
     "tools/ci/check_ctest_junit.py", "tools/ci/slowest_tests.py",
@@ -106,7 +105,7 @@ DOC_SUFFIXES = {".md", ".rst", ".txt", ".json", ".yaml", ".yml", ".png", ".jpg",
 
 
 COVERED_PYTHON_FILES = (
-    set(PYTHON_TESTS) | set(POSIX_PYTHON_TESTS) | PYTHON_MODULES
+    set(PYTHON_TESTS) | PYTHON_MODULES
     | AUTHORING_PYTHON_FILES | PYTHON_SELF_CHECKS.keys()
 )
 
@@ -114,7 +113,7 @@ COVERED_PYTHON_FILES = (
 # themselves from native qualification. Keep this ahead of the Python allowlist.
 CI_PREFIXES = ("tools/ci/", ".github/workflows/", "scripts/")
 CI_ENTRYPOINTS = (
-    set(PYTHON_TESTS) | set(POSIX_PYTHON_TESTS)
+    set(PYTHON_TESTS)
     | {command[0] for command in PYTHON_SELF_CHECKS.values()}
     | {
         "tools/assets/acquire.py", "tools/blender/authoring/probes/run.py",
@@ -218,8 +217,6 @@ def classify(root: Path, event: str, base: str, head: str,
 
 def python_test_commands(root: Path) -> list[tuple[str, ...]]:
     commands = [(test,) for test in PYTHON_TESTS]
-    if os.name != "nt":
-        commands.extend((test,) for test in POSIX_PYTHON_TESTS)
     commands.extend(sorted(set(PYTHON_SELF_CHECKS.values())))
     return commands
 

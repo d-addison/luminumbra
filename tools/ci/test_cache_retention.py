@@ -223,8 +223,7 @@ class CacheRetentionTests(unittest.TestCase):
         # workflow_run must protect the completed run's A SHA, even if the
         # workflow itself executes on the default branch at a different SHA.
         workflow = (ROOT / ".github/workflows/cache-cleanup.yml").read_text(encoding="utf-8")
-        self.assertIn("TRIGGER_SHA: ${{ github.event_name == 'workflow_run' && "
-                      "github.event.workflow_run.head_sha || github.sha }}", workflow)
+        self.assertIn("TRIGGER_SHA: ${{ github.event.workflow_run.head_sha }}", workflow)
         caches = [self.cache(1, "tidy-cache-Linux-shard1of3-A"),
                   self.cache(2, "tidy-cache-Linux-shard1of3-B"),
                   self.cache(3, "tidy-cache-Linux-shard1of3-A"),
@@ -381,7 +380,7 @@ class CacheRetentionTests(unittest.TestCase):
     def test_cleanup_only_uses_trusted_triggers_and_serialized_deletion_permissions(self):
         cleanup = (ROOT / ".github/workflows/cache-cleanup.yml").read_text(encoding="utf-8")
         triggers = cleanup.split("on:\n", 1)[1].split("\npermissions:", 1)[0]
-        self.assertIn("  push:\n    branches: [devel, main]", triggers)
+        self.assertNotIn("  push:", triggers)
         self.assertNotIn("pull_request", triggers)
         self.assertIn("  workflow_run:", triggers)
         self.assertIn("  group: cache-cleanup\n  cancel-in-progress: false", cleanup)

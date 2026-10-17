@@ -17,7 +17,7 @@ import xml.etree.ElementTree as ET
 
 PROFILES = {"asan": ("debug-asan", 2, 300), "gcc": ("release", 4, 180),
             "msvc": ("release", 4, 180), "ucrt64": ("release", 4, 360)}
-FLOORS = {"gcc": 2280, "msvc": 2260, "ucrt64": 2260, "asan": 2320}
+FLOORS = {"gcc": 2340, "msvc": 2320, "ucrt64": 2320, "asan": 2320}
 HEAVY_NAMES = frozenset(
     "ActiveRegions/SimBudgetWorldParity.Populated3600TicksPreserveWorldHashAndReplayWork/" + variant
     for variant in ("Disabled", "Enabled")

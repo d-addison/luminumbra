@@ -44,7 +44,8 @@ def build_plan(matrix, *, client, out_dir, root, python, only=None):
             command = matrix_lib.build_command(cell, client=client, artifact=artifact,
                                                root=root)
             checker = matrix_lib.checker_command(
-                cell, artifact=artifact, qualified_renderer=matrix['qualified_renderer'],
+                cell, artifact=artifact, verdict=artifact.with_suffix('.verdict.json'),
+                qualified_renderer=matrix['qualified_renderer'],
                 root=root, python=python)
         entries.append(dict(id=cell['id'], workload=cell['workload'], kind=cell['kind'],
                             profile=cell['profile'], display=cell['display'], state=state,
