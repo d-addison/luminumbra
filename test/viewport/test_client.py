@@ -82,7 +82,7 @@ class DeadlineClock:
 
     def __init__(self, project):
         self.path = project / 'deadline-clock.json'
-        self.observed = project / 'broker-clock-observed.json'
+        self.project = project
         self._lock = threading.Lock()
         self.value, self.samples = 0., 0
         wire.atomic_write(self.path, wire.canonical(self.value))
@@ -107,9 +107,10 @@ class DeadlineClock:
         with self._lock:
             value, samples = self.value, self.samples
         # Two samples ensure a complete watchdog iteration after advancing.
-        if samples < 2 or not self.observed.exists():
+        observed = self.project / ('broker-clock-observed-' + client.status['session'] + '.json')
+        if samples < 2 or not observed.exists():
             return False
-        row = json.loads(wire.read_record_file(self.observed, 256))
+        row = json.loads(wire.read_record_file(observed, 256))
         return row == {'value': value, 'session': client.status['session'],
                        'broker_pid': client.status['broker_pid']}
 
@@ -141,6 +142,7 @@ class PhaseTime:
 class ClientTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix='viewport-client-test-')
+        self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.sdk, self.project = self.root / 'sdk', self.root / 'project'
         self.sdk.mkdir(); self.project.mkdir()
@@ -153,7 +155,12 @@ class ClientTests(unittest.TestCase):
         phase_time = PhaseTime()
         original_loop, original_stop = ViewportClient._session_loop, ViewportClient._stop
 
+        original_process = client_module.OwnedProcess
+        def process(command, env, cwd):
+            return original_process(command, {**env, 'CLIENT_FIXTURE_MODE': phase_time.local.mode}, cwd)
+
         def session_loop(client, *arguments):
+            phase_time.local.mode = self.modes[client]
             with phase_time.using(self.clock.monotonic):
                 return original_loop(client, *arguments)
 
@@ -182,6 +189,7 @@ class ClientTests(unittest.TestCase):
             with phase_time.using(shutdown_time):
                 return original_stop(client, process, root, key, session)
 
+        self.patches.enter_context(mock.patch.object(client_module, 'OwnedProcess', process))
         self.patches.enter_context(mock.patch.object(client_module, 'time', phase_time))
         self.patches.enter_context(mock.patch.object(installation, 'time', PhaseTime()))
         self.patches.enter_context(mock.patch.object(ViewportClient, '_session_loop', session_loop))
@@ -233,40 +241,11 @@ if clock.exists():
         clock_samples=clock_samples+1 if value==clock_value else 1
         clock_value=value
         if clock_samples==2:
-            atomic_write(project/'broker-clock-observed.json',canonical({
+            atomic_write(project/('broker-clock-observed-'+config['session']+'.json'),canonical({
                 'value':value,'session':config['session'],'broker_pid':os.getpid()}))
         return value
     broker_module.time=SimpleNamespace(monotonic=monotonic,sleep=time.sleep)
-    # Exercise the real broker's bounded waits with the same virtual clock on
-    # Windows and POSIX. Zero-time probes never grant extra product time; the
-    # unchanged five-second test watchdog still detects missing child progress.
-    def completed(done,timeout):
-        until=monotonic()+timeout
-        watchdog=time.monotonic()+5
-        while not done():
-            if monotonic()>=until:
-                return False
-            if time.monotonic()>=watchdog:
-                raise AssertionError('Timed out waiting for actual child-process wait')
-            time.sleep(.01)
-        return True
-    class Child(subprocess.Popen):
-        def wait(self,timeout=None):
-            if timeout is None:
-                return super().wait(timeout)
-            if not completed(lambda:self.poll() is not None,timeout):
-                raise subprocess.TimeoutExpired(self.args,timeout)
-            return super().wait(0)
-    class Thread(threading.Thread):
-        def join(self,timeout=None):
-            if timeout is None:
-                return super().join(timeout)
-            completed(lambda:not self.is_alive(),timeout)
-            return super().join(0)
-    broker_module.subprocess=SimpleNamespace(Popen=Child,PIPE=subprocess.PIPE,
-        TimeoutExpired=subprocess.TimeoutExpired)
-    broker_module.threading=SimpleNamespace(Thread=Thread)
-mode=(project/'mode.txt').read_text()
+mode=os.environ.pop('CLIENT_FIXTURE_MODE')
 os.environ['CLIENT_FIXTURE_EVIDENCE']=str(Path(config['root'])/'host-evidence')
 os.environ['CLIENT_FIXTURE_IDENTITY']=str(project/'fixture-identity.json')
 starts=project/'starts.json'
@@ -296,28 +275,30 @@ except BaseException as error:
     raise
 '''.replace('WIRE_PATH', repr(str(AUTHORING / 'viewport')))
            .replace('FIXTURE_PATH', repr(str(ROOT / 'test/viewport/client_fixture.py'))))
-        (self.project / 'mode.txt').write_text('echo')
         native['visual_approved'] = False
         (self.project / 'fixture-identity.json').write_text(json.dumps(native))
 
-    def tearDown(self):
-        try:
-            for client in self.clients:
-                self.assertTrue(client.close(wait=True, timeout=8), client.status)
-        finally:
-            self.cleaning_up = True
-            for client in self.clients:
-                client.close(wait=True, timeout=8)
-            self.patches.close()
-            self.temporary.cleanup()
+    def close_client(self, client):
+        # Cleanup is registered before the worker can launch a broker. Every
+        # client gets its own finalizer even when another client's close fails.
+        self.cleaning_up = True
+        self.assertTrue(client.close(wait=True, timeout=8), self.diagnostics())
 
     def client(self, mode='echo', **options):
-        (self.project / 'mode.txt').write_text(mode)
         arguments = dict(startup_timeout=2, frame_timeout=2, shutdown_timeout=.5, max_restarts=0)
         arguments.update(options)
-        client = ViewportClient(sys.executable, self.broker, self.host, self.project, self.manifest, **arguments)
+        # Register ownership and immutable launch mode before starting the worker.
+        pending = []
+        class DeferredThread(threading.Thread):
+            def start(thread): pending.append(thread)
+        thread_api = types.SimpleNamespace(**{**vars(threading), 'Thread': DeferredThread})
+        with mock.patch.object(client_module, 'threading', thread_api):
+            client = ViewportClient(sys.executable, self.broker, self.host, self.project, self.manifest, **arguments)
         self.modes[client] = mode
         self.clients.append(client)
+        self.addCleanup(self.close_client, client)
+        for thread in pending:
+            threading.Thread.start(thread)
         return client
 
     @contextmanager
@@ -349,6 +330,24 @@ except BaseException as error:
         return values
 
     def wait(self, function, timeout=5):
+        client = getattr(function, '__self__', None)
+        if isinstance(client, ViewportClient) and function.__name__ == 'poll':
+            # Give each observable protocol phase its own unchanged deadlock
+            # watchdog. Interpreter startup and frame publication are distinct
+            # handshakes; their combined wall time is not a product deadline.
+            def phase(condition):
+                def observed():
+                    return condition()
+                return wait_for(observed, timeout, diagnostics=self.diagnostics)
+            phase(lambda: client.status['broker_pid'])
+            child = phase(lambda: self.child(client))
+            session = child['session']
+            root = Path(client.status['session_directory'])
+            phase(lambda: wire.read_readiness(root / 'broker-ready.json', session,
+                                             pid=child['pid'], broker_pid=child['broker_pid']))
+            phase(lambda: (self.project / ('frame-received-' + session)).exists())
+            phase(lambda: (self.project / ('frame-sent-' + session)).exists())
+            phase(lambda: any((root / f'frame-{index}.json').exists() for index in (0, 1)))
         return wait_for(function, timeout, diagnostics=self.diagnostics)
 
     def child(self, client):
@@ -380,37 +379,44 @@ except BaseException as error:
         self.assertTrue(client.status['last_result']['child_reaped'])
 
     def test_draw_poll_and_latest_submit_do_not_wait_for_frame_validation(self):
-        entered, release = threading.Event(), threading.Event()
+        entered, release, callbacks_done = (threading.Event() for _ in range(3))
+        self.addCleanup(release.set)
         original = wire.Slots.read
-        threads = []
+        threads, errors = [], []
         def blocked(slots, index):
             threads.append(threading.get_ident())
             entered.set()
             release.wait()
             return original(slots, index)
-        with self.controlled_deadlines(), mock.patch.object(wire.Slots, 'read', blocked):
-            client = self.client()
-            child = self.wait(lambda: self.child(client))
-            root = Path(client.status['session_directory'])
-            self.wait(lambda: wire.read_readiness(root / 'broker-ready.json', child['session'],
-                      pid=child['pid'], broker_pid=client.status['broker_pid']))
-            client.submit(state())
-            controller = threading.Timer(3, release.set)
+        def callbacks(client):
             try:
-                self.assertTrue(entered.wait(3))
-                # Start only after validation enters. The timer needs no client
-                # lock, so even a callback blocked by validation can finish and
-                # fail the release assertion below instead of deadlocking.
-                controller.start()
                 for revision in range(2, 52):
                     client.submit(state(revision))
                     self.assertIsNone(client.poll())
-                self.assertFalse(release.is_set())  # All callbacks returned while read was blocked.
+            except BaseException as error:
+                errors.append(error)
+            finally:
+                callbacks_done.set()
+        worker = None
+        with self.controlled_deadlines(), mock.patch.object(wire.Slots, 'read', blocked):
+            try:
+                client = self.client()
+                child = self.wait(lambda: self.child(client))
+                root = Path(client.status['session_directory'])
+                self.wait(lambda: wire.read_readiness(root / 'broker-ready.json', child['session'],
+                          pid=child['pid'], broker_pid=client.status['broker_pid']))
+                client.submit(state())
+                self.assertTrue(entered.wait(3))
+                worker = threading.Thread(target=callbacks, args=(client,), daemon=True)
+                worker.start()
+                self.assertTrue(callbacks_done.wait(3), 'Callbacks waited for held frame validation')
+                self.assertFalse(release.is_set())
+                self.assertFalse(errors, errors)
             finally:
                 release.set()
-                controller.cancel()
-                if controller.ident is not None:
-                    controller.join(3)
+                if worker is not None:
+                    worker.join(3)
+                    self.assertFalse(worker.is_alive())
             header, payload = self.wait(client.poll)
             self.assertEqual(header['state']['camera_revision'], 51)
             self.assertEqual(payload[0], 51)
@@ -643,7 +649,7 @@ except BaseException as error:
         client.submit(state())
         self.wait(lambda: client.status['state'] == 'failed')
         previous = client.status['session']
-        (self.project / 'mode.txt').write_text('echo')
+        self.modes[client] = 'echo'
         client.restart()
         header, _ = self.wait(client.poll)
         self.assertNotEqual(header['session'], previous)
@@ -761,6 +767,7 @@ except BaseException as error:
 
     def test_invalid_startup_paths_close_worker_and_refuse_new_submissions(self):
         client = ViewportClient(self.root / 'missing-python', self.broker, self.host, self.project, self.manifest)
+        self.addCleanup(self.close_client, client)
         self.clients.append(client)
         self.wait(lambda: client.status['closed'])
         self.assertEqual(client.status['state'], 'failed')
