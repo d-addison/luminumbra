@@ -1594,6 +1594,48 @@ std::string ComputeRegionContentHash(const WorldStreamingState& state) {
         nlohmann::json{{"hash_scope", "region_content_v2"}, {"chunks", std::move(contents)}}));
 }
 
+WorldStreamingStateSubHashes ComputeAuthoritativeChunkSubHashes(const WorldStreamingState& state) {
+    auto chunks = state.snapshot_chunks();
+    std::sort(chunks.begin(), chunks.end(), [](const auto& a, const auto& b) {
+        return a->get_id() < b->get_id();
+    });
+    std::string terrain = "authority_terrain:v1:", water = "authority_water:v1:";
+    const auto append = [](std::string& bytes, std::uint64_t value) {
+        for (unsigned i = 0; i < 8; ++i)
+            bytes.push_back(static_cast<char>((value >> (8 * i)) & 255));
+    };
+    append(terrain, chunks.size());
+    append(water, chunks.size());
+    const auto record = [&append](std::string& bytes, const nlohmann::json& value) {
+        const auto encoded = StableDump(value);
+        append(bytes, encoded.size());
+        bytes += encoded;
+    };
+    for (const auto& chunk : chunks) {
+        record(terrain,
+               {{"chunk_id", chunk->get_id()},
+                {"coords", IVec3ToJson(chunk->get_coords())},
+                {"sdf_data", chunk->sdf_data},
+                {"heightmap_data", chunk->heightmap_data},
+                {"material_data", chunk->material_data}});
+        record(water,
+               {{"chunk_id", chunk->get_id()},
+                {"water_depth_mm", chunk->water_depth_mm},
+                {"water_bed_mm", chunk->water_bed_mm},
+                {"water_edge_flux", chunk->water_edge_flux},
+                {"has_water_sim", chunk->has_water_sim.load(std::memory_order_acquire)},
+                {"current_water_resolution",
+                 chunk->current_water_resolution.load(std::memory_order_acquire)},
+                {"is_water_sleeping", chunk->is_water_sleeping.load(std::memory_order_acquire)},
+                {"max_water_delta_last_tick", chunk->max_water_delta_last_tick},
+                {"ticks_below_threshold", chunk->ticks_below_threshold}});
+    }
+    WorldStreamingStateSubHashes sub;
+    sub.terrain = Checksum(terrain);
+    sub.water = Checksum(water);
+    return sub;
+}
+
 WorldStreamingStateSubHashes ComputeWorldStreamingStateSubHashes(const WorldStreamingState& state) {
     // project the SAME canonical snapshot the top-level hash uses into
     // per-subsystem field groups, then checksum each group with the SAME

@@ -173,6 +173,8 @@ struct WorldStreamingStateSubHashes {
 // projection of the same snapshot the top-level hash uses; does not touch
 // ComputeWorldStreamingStateHash. The entities field is left empty.
 WorldStreamingStateSubHashes ComputeWorldStreamingStateSubHashes(const WorldStreamingState& state);
+// Resolved enabled inventory only. Excludes lifecycle, residency and render fields.
+WorldStreamingStateSubHashes ComputeAuthoritativeChunkSubHashes(const WorldStreamingState& state);
 
 // Overload that also fills the entities sub-hash from a serialized ECS entity
 // snapshot (the canonical SerializeEntityRegistrySnapshotJson output), checksummed

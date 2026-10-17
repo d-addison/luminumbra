@@ -4631,6 +4631,156 @@
       "source": "docs/active-regions.md#file-and-compatibility",
       "quote": "Region containers have a shared read and write bound of 268,435,456 bytes, checked before writer allocation.",
       "text": "Region containers have a shared read and write bound of 268,435,456 bytes, checked before writer allocation."
+    },
+    {
+      "id": "ar.authority-capture.001",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "`GameSession::CaptureAuthorityState` reads a completed simulation boundary and returns either an immutable `AuthorityHashState` or an error with no state.",
+      "text": "`GameSession::CaptureAuthorityState` reads a completed simulation boundary and returns either an immutable `AuthorityHashState` or an error with no state."
+    },
+    {
+      "id": "ar.authority-capture.002",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "It does not synchronize water, admit entities, allocate persistent identities, wake owners, sample controllers, recover a journal or save.",
+      "text": "It does not synchronize water, admit entities, allocate persistent identities, wake owners, sample controllers, recover a journal or save."
+    },
+    {
+      "id": "ar.authority-capture.003",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Water authority is synchronized at simulation boundaries;",
+      "text": "Water authority is synchronized at simulation boundaries;"
+    },
+    {
+      "id": "ar.authority-capture.004",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "pending water divergence is represented in a copied hash projection without changing its source.",
+      "text": "pending water divergence is represented in a copied hash projection without changing its source."
+    },
+    {
+      "id": "ar.authority-capture.005",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "The enabled inventory validates committed snapshot membership and expected records before selecting ready resident, then parked, then committed durable content.",
+      "text": "The enabled inventory validates committed snapshot membership and expected records before selecting ready resident, then parked, then committed durable content."
+    },
+    {
+      "id": "ar.authority-capture.006",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Pristine and Loading candidates cannot shadow edited disk records.",
+      "text": "Pristine and Loading candidates cannot shadow edited disk records."
+    },
+    {
+      "id": "ar.authority-capture.007",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Disk-only records are discovered independently of residency hints.",
+      "text": "Disk-only records are discovered independently of residency hints."
+    },
+    {
+      "id": "ar.authority-capture.008",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Owners sort by signed `(x, z)` and chunks by `ChunkID`.",
+      "text": "Owners sort by signed `(x, z)` and chunks by `ChunkID`."
+    },
+    {
+      "id": "ar.authority-capture.009",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Items, plants, complete creatures, ambient and foliage pages, and regional energy also contribute owners;",
+      "text": "Items, plants, complete creatures, ambient and foliage pages, and regional energy also contribute owners;"
+    },
+    {
+      "id": "ar.authority-capture.010",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "visits and pristine chunks alone do not contribute content.",
+      "text": "visits and pristine chunks alone do not contribute content."
+    },
+    {
+      "id": "ar.authority-capture.011",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Each non-Frozen owner uses the existing `region_content_v2` composition, followed by its ground-and-plant, page-and-energy, and complete creature extensions in that order.",
+      "text": "Each non-Frozen owner uses the existing `region_content_v2` composition, followed by its ground-and-plant, page-and-energy, and complete creature extensions in that order."
+    },
+    {
+      "id": "ar.authority-capture.012",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Frozen owners select their complete stamped digest.",
+      "text": "Frozen owners select their complete stamped digest."
+    },
+    {
+      "id": "ar.authority-capture.013",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "The complete ledger codec stays outside that regional digest;",
+      "text": "The complete ledger codec stays outside that regional digest;"
+    },
+    {
+      "id": "ar.authority-capture.014",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "existing regional water-debt and energy-age extensions retain their established ordering.",
+      "text": "existing regional water-debt and energy-age extensions retain their established ordering."
+    },
+    {
+      "id": "ar.authority-capture.015",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "New authority envelopes frame tags, counts, little-endian integers and variable-length bytes explicitly.",
+      "text": "New authority envelopes frame tags, counts, little-endian integers and variable-length bytes explicitly."
+    },
+    {
+      "id": "ar.authority-capture.016",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Seed, generator identity and effective simulation settings are included;",
+      "text": "Seed, generator identity and effective simulation settings are included;"
+    },
+    {
+      "id": "ar.authority-capture.017",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "presentation settings, runtime handles, cache generations and save receipts are excluded.",
+      "text": "presentation settings, runtime handles, cache generations and save receipts are excluded."
+    },
+    {
+      "id": "ar.authority-capture.018",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "The host can supply its canonical avatar snapshot to the capture envelope.",
+      "text": "The host can supply its canonical avatar snapshot to the capture envelope."
+    },
+    {
+      "id": "ar.authority-capture.019",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Freeze stamping reads only the requested owner's durable region and projects only that owner's entities and regional content.",
+      "text": "Freeze stamping reads only the requested owner's durable region and projects only that owner's entities and regional content."
+    },
+    {
+      "id": "ar.authority-capture.020",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "It shares the regional recipe and chunk projection with full capture, without constructing world diagnostics or serializing unrelated entity stores on the scheduler path.",
+      "text": "It shares the regional recipe and chunk projection with full capture, without constructing world diagnostics or serializing unrelated entity stores on the scheduler path."
+    },
+    {
+      "id": "ar.authority-capture.021",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Enabled session hash helpers use these checked projections.",
+      "text": "Enabled session hash helpers use these checked projections."
+    },
+    {
+      "id": "ar.authority-capture.022",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "The chunk helper returns an empty string and latches a fault on capture failure;",
+      "text": "The chunk helper returns an empty string and latches a fault on capture failure;"
+    },
+    {
+      "id": "ar.authority-capture.023",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "const helpers report failure by exception.",
+      "text": "const helpers report failure by exception."
+    },
+    {
+      "id": "ar.authority-capture.024",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Consumers of the checked API must require a state before composing or publishing a checksum.",
+      "text": "Consumers of the checked API must require a state before composing or publishing a checksum."
+    },
+    {
+      "id": "ar.authority-capture.025",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Disabled hashes, save codecs, checkpoint layouts and artifact serialization retain their legacy paths.",
+      "text": "Disabled hashes, save codecs, checkpoint layouts and artifact serialization retain their legacy paths."
     }
   ],
   "exclusions": [

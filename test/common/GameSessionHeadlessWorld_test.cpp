@@ -35,6 +35,7 @@
 // SIMULATION requirements only (world preset readable/parseable); renderer/UI
 // asset requirements are caller-supplied by the client. Enabled headless creation
 // also validates simulation content inventories and the optional policy parent.
+#include "../fixtures/smoke_artifact/FixedInputs.h"
 #include "../support/LegacyCreatureTickOracle.h"
 #include "../support/SimulationContentFixture.h"
 #include "../support/UniqueTempPath.h"
@@ -52,6 +53,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <limits>
 #include <map>
 #include <memory>
@@ -115,6 +117,7 @@
 #include <entt/entt.hpp>
 #include <nlohmann/json.hpp>
 
+#include "luminumbra_common/core/FilesystemPath.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/fields/EnergyFieldState.h"
@@ -131,6 +134,7 @@
 #include "luminumbra_common/world/TerrainPresetLoader.h"
 #include "luminumbra_common/world/WorldStreamingState.h"
 #include "luminumbra_server/SimBudgetArtifact.h"
+#include "luminumbra_server/modes/SmokeArtifact.h"
 
 namespace fs = std::filesystem;
 
@@ -10504,6 +10508,107 @@ TEST(CreatureHostAcceptance, SaveLoadContinuationIncludesCompletedWorkAndActivat
 
 } // namespace
 
+TEST(GameSessionHeadlessWorldTest, FlagOffWorldHashesUnchanged) {
+    const HeadlessRoot root;
+    {
+        const auto path = root.path() / "worlds/atlas/presets/default.json";
+        std::ifstream input(path);
+        auto preset = nlohmann::json::parse(input);
+        input.close();
+        preset["generation_params"]["terrain"]["island_mask_enabled"] = false;
+        std::ofstream output(path);
+        output << preset.dump(2);
+    }
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(false);
+    session.SetAetherStateEnabled(false);
+    session.SetWaterHighResEnabled(false);
+    session.SetWeatherRainEnabled(false);
+    session.SetWeatherEventsEnabled(false);
+    session.SetFiniteHydrologyEnabled(false);
+    ASSERT_TRUE(session.CreateWorld("Region golden", "1337", "default"));
+    ASSERT_NO_FATAL_FAILURE(AdoptRegionGoldenChunk(session, 0));
+    for (int i = 0; i < 7; ++i)
+        ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+    // Baseline region fixture, projected with sim_truth_no_render_mesh_v1 and FNV-1a-64.
+    // Ambient FastNoise auto-dispatch differs across ISAs, so those slots use this build's
+    // field samples. The empty participant slots and chunk recipe are pinned independently.
+    const std::string baseline_chunk = "3efa127826e435c3";
+    const nlohmann::json legacy{{"chunk", baseline_chunk},
+                                {"wind", session.GetWindFieldSystem()->ComputeWindSubHash()},
+                                {"weather", session.GetWeatherSystem()->ComputeWeatherSubHash()},
+                                {"aether", session.GetAetherFieldSystem()->ComputeAetherSubHash()},
+                                {"scents", ""},
+                                {"ecology", ""},
+                                {"plants", ""}};
+    EXPECT_EQ(SessionWorldSubHashes(session), legacy);
+    const std::string envelope = baseline_chunk + "|wind:" + legacy.at("wind").get<std::string>() +
+                                 "|weather:" + legacy.at("weather").get<std::string>() +
+                                 "|aether:" + legacy.at("aether").get<std::string>() +
+                                 "|scents:|ecology:|plants:";
+    std::uint64_t baseline_world = 14695981039346656037ull;
+    for (const unsigned char byte : envelope)
+        baseline_world = (baseline_world ^ byte) * 1099511628211ull;
+    std::ostringstream expected_world;
+    expected_world << std::hex << std::setw(16) << std::setfill('0') << baseline_world;
+    EXPECT_EQ(SessionWorldHash(session), expected_world.str());
+    EXPECT_EQ(session.ComputeChunkStateHash(), legacy.at("chunk").get<std::string>());
+    EXPECT_EQ(session.FoldClockIntoEcologyHash("legacy-ecology"), "legacy-ecology");
+    const auto capture = session.CaptureAuthorityState();
+    EXPECT_FALSE(capture.state);
+    EXPECT_FALSE(capture.error.empty());
+    EXPECT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(P::ComposeWorldHash(session.ComputeChunkStateHash(),
+                                  legacy.at("wind"),
+                                  legacy.at("weather"),
+                                  legacy.at("aether"),
+                                  legacy.at("scents"),
+                                  legacy.at("ecology"),
+                                  legacy.at("plants")),
+              SessionWorldHash(session));
+    const auto save = root.path() / "authority-off-save";
+    ASSERT_TRUE(session.SaveWorldStateTo(save));
+    const auto fixture =
+        fs::path(LUMINUMBRA_SOURCE_ROOT) / "test/fixtures/active-regions/devel-off";
+    std::size_t files = 0;
+    for (const auto& entry : fs::recursive_directory_iterator(save)) {
+        if (!entry.is_regular_file())
+            continue;
+        ++files;
+        EXPECT_EQ(ReadClockTestFile(entry.path()),
+                  ReadClockTestFile(fixture / entry.path().filename()));
+    }
+    EXPECT_EQ(files, 2u);
+    EXPECT_FALSE(P::snapshot_index_exists(save));
+    for (int scenario = 0; scenario < 3; ++scenario) {
+        SCOPED_TRACE(scenario);
+        ServerCliOptions options;
+        Luminumbra::Server::SmokeRunResult first, replay;
+        FixedSmokeInputs(scenario, options, first, replay);
+        const auto output = root.path() / ("authority-off-" + std::to_string(scenario) + ".json");
+        options.artifact_path = Luminumbra::Filesystem::GenericPathString(output);
+        EXPECT_EQ(Luminumbra::Server::WriteSmokeArtifact(options, first, replay),
+                  scenario == 2 ? 1 : 0);
+        auto expected =
+            ReadClockTestFile(fs::path(LUMINUMBRA_SOURCE_ROOT) / "test/fixtures/smoke_artifact" /
+                              ("devel-" + std::to_string(scenario) + ".json"));
+#ifdef _WIN32
+        std::string native;
+        for (const char c : expected) {
+            if (c == '\n')
+                native += '\r';
+            native += c;
+        }
+        expected = std::move(native);
+#endif
+        EXPECT_EQ(ReadClockTestFile(output), expected);
+    }
+}
+
 namespace {
 // Preserve every file byte, including compressed records and index member order.
 // Only transaction header fields vary on repeated successful commits; their
@@ -10669,6 +10774,9 @@ TEST(GameSessionHeadlessWorldTest, SharedSystemConfigPreservesExplicitOff) {
 }
 
 TEST(GameSessionHeadlessWorldTest, WaterRuleIdentitiesObserveIndependentSetters) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
     GameSession first, second;
     EXPECT_EQ(first.SystemConfigIdentity(), second.SystemConfigIdentity());
     first.SetFiniteHydrologyEnabled(false);
@@ -10681,6 +10789,20 @@ TEST(GameSessionHeadlessWorldTest, WaterRuleIdentitiesObserveIndependentSetters)
     EXPECT_NE(first.SystemConfigIdentity(), second.SystemConfigIdentity());
     second.SetWeatherRainEnabled(true, 26);
     EXPECT_EQ(first.SystemConfigIdentity(), second.SystemConfigIdentity());
+
+    first.SetFiniteHydrologyEnabled(false);
+    for (auto* session : {&first, &second}) {
+        session->SetRootPath(root.root_string());
+        session->SetJobSystem(&jobs);
+        ASSERT_TRUE(session->CreateWorld("Water rule authority", "1337", "default"));
+    }
+    const auto finite_off = first.CaptureAuthorityState();
+    const auto finite_on = second.CaptureAuthorityState();
+    ASSERT_TRUE(finite_off.state) << finite_off.error;
+    ASSERT_TRUE(finite_on.state) << finite_on.error;
+    EXPECT_EQ(finite_off.state->terrain_hash(), finite_on.state->terrain_hash());
+    EXPECT_EQ(finite_off.state->water_hash(), finite_on.state->water_hash());
+    EXPECT_NE(finite_off.state->chunk_hash(), finite_on.state->chunk_hash());
 }
 
 TEST(GameSessionHeadlessWorldTest, EffectiveIdentityUsesDefaultsAndCurrentSetters) {

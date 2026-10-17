@@ -518,3 +518,41 @@ or misordered TLVs are corrupt. Load compares identity before adopting loaded le
 a refusal prevents saving. A legacy flag-off world may opt in and adopt current content for the
 first time. With the flag disabled, strict policy/species adoption is bypassed,
 identity is absent, and the existing lenient species, save, hash and artifact paths remain unchanged.
+
+## Checked authority hash capture
+
+`GameSession::CaptureAuthorityState` reads a completed simulation boundary and
+returns either an immutable `AuthorityHashState` or an error with no state.
+It does not synchronize water, admit entities, allocate persistent identities,
+wake owners, sample controllers, recover a journal or save. Water authority is
+synchronized at simulation boundaries; pending water divergence is represented
+in a copied hash projection without changing its source.
+
+The enabled inventory validates committed snapshot membership and expected
+records before selecting ready resident, then parked, then committed durable
+content. Pristine and Loading candidates cannot shadow edited disk records.
+Disk-only records are discovered independently of residency hints. Owners sort
+by signed `(x, z)` and chunks by `ChunkID`. Items, plants, complete creatures,
+ambient and foliage pages, and regional energy also contribute owners; visits
+and pristine chunks alone do not contribute content.
+
+Each non-Frozen owner uses the existing `region_content_v2` composition, followed
+by its ground-and-plant, page-and-energy, and complete creature extensions in
+that order. Frozen owners select their complete stamped digest. The complete
+ledger codec stays outside that regional digest; existing regional water-debt
+and energy-age extensions retain their established ordering. New authority envelopes frame tags,
+counts, little-endian integers and variable-length bytes explicitly. Seed,
+generator identity and effective simulation settings are included; presentation
+settings, runtime handles, cache generations and save receipts are excluded.
+The host can supply its canonical avatar snapshot to the capture envelope.
+
+Freeze stamping reads only the requested owner's durable region and projects only
+that owner's entities and regional content. It shares the regional recipe and
+chunk projection with full capture, without constructing world diagnostics or
+serializing unrelated entity stores on the scheduler path.
+
+Enabled session hash helpers use these checked projections. The chunk helper
+returns an empty string and latches a fault on capture failure; const helpers
+report failure by exception. Consumers of the checked API must require a state
+before composing or publishing a checksum. Disabled hashes, save codecs,
+checkpoint layouts and artifact serialization retain their legacy paths.

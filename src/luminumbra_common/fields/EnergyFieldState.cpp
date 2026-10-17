@@ -672,6 +672,41 @@ std::string EnergyFieldState::RegionBytes(RegionKey owner) const {
     return bytes.str();
 }
 
+std::map<EnergyFieldState::RegionKey, std::string> EnergyFieldState::RegionalProjections() const {
+    std::map<RegionKey, std::ostringstream> grouped;
+    for (const auto& [key, page] : m_pages) {
+        int px = 0, pz = 0;
+        UnpackCellKey(key, px, pz);
+        std::set<RegionKey> page_owners;
+        for (std::size_t i = 0; i < page.values.size(); ++i) {
+            if (page.values[i] == 0)
+                continue;
+            const auto cell = i / static_cast<std::size_t>(m_channels);
+            const auto cx = std::int64_t{px} * kEnergyPageCells +
+                            static_cast<std::int64_t>(cell % kEnergyPageCells);
+            const auto cz = std::int64_t{pz} * kEnergyPageCells +
+                            static_cast<std::int64_t>(cell / kEnergyPageCells);
+            if (cx < std::numeric_limits<int>::min() || cx > std::numeric_limits<int>::max() ||
+                cz < std::numeric_limits<int>::min() || cz > std::numeric_limits<int>::max())
+                throw std::runtime_error("Invalid regional energy cell");
+            const auto owner = OwnerOfCell(static_cast<int>(cx), static_cast<int>(cz));
+            const auto [found, inserted] = grouped.try_emplace(owner);
+            auto& bytes = found->second;
+            if (inserted) {
+                bytes.imbue(std::locale::classic());
+                bytes << "aether_state:v1:" << m_channels << ':';
+            }
+            if (page_owners.insert(owner).second)
+                bytes << 'P' << px << ',' << pz << ",0:";
+            bytes << i << '=' << page.values[i] << ';';
+        }
+    }
+    std::map<RegionKey, std::string> result;
+    for (const auto& [key, bytes] : grouped)
+        result.emplace(key, bytes.str());
+    return result;
+}
+
 std::string EnergyFieldState::CanonicalRegionalBytes() const {
     std::ostringstream bytes;
     bytes.imbue(std::locale::classic());

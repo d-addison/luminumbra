@@ -171,6 +171,8 @@ public:
     // Stored values only; ages are projected by ARL4. No legacy page epochs.
     [[nodiscard]] std::string CanonicalRegionalBytes() const;
     [[nodiscard]] std::string RegionBytes(RegionKey key) const;
+    // Complete stored values grouped once; preserves packed-page and cell/channel order.
+    [[nodiscard]] std::map<RegionKey, std::string> RegionalProjections() const;
     // Empty layer => absent record (empty string). Nonempty EFS1 header has 0
     // in the legacy phase slot, since all regional cadence lives in ARL4.
     // An incompatible/oversized legacy object throws length_error, never absence.

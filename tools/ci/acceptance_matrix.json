@@ -4116,6 +4116,138 @@
           "ref": "docs/creature-entities.md"
         }
       ]
+    },
+    {
+      "id": "contract.ar.authority-capture.observational",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "statement": "Checked capture returns immutable state or an error without mutating simulation authority; pending water divergence is copied.",
+      "status": "covered",
+      "requirements": [
+        "ar.authority-capture.001",
+        "ar.authority-capture.002",
+        "ar.authority-capture.003",
+        "ar.authority-capture.004"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashState.HashCaptureDoesNotMutateAuthority"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashState.CaptureFailureProducesNoDigest"
+        }
+      ]
+    },
+    {
+      "id": "contract.ar.authority-capture.inventory",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "statement": "Capture validates committed membership, applies live/parked/durable precedence, orders owners and chunks, and includes complete consumer owners.",
+      "status": "covered",
+      "requirements": [
+        "ar.authority-capture.005",
+        "ar.authority-capture.006",
+        "ar.authority-capture.007",
+        "ar.authority-capture.008",
+        "ar.authority-capture.009",
+        "ar.authority-capture.010"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashState.AuthorityCaptureLiveParkedDurablePrecedence"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashState.PristineAndLoadingCannotShadowAuthority"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashState.DiskOnlyAuthorityIncludedAndMissingExpectedRecordRefuses"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashState.CompleteConsumerOwnersUseUniformFrozenProjection"
+        }
+      ]
+    },
+    {
+      "id": "contract.ar.authority-capture.composition",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "statement": "Regional digests retain their composition and frozen projection; authority envelopes frame identity, settings and optional avatar bytes.",
+      "status": "covered",
+      "requirements": [
+        "ar.authority-capture.011",
+        "ar.authority-capture.012",
+        "ar.authority-capture.013",
+        "ar.authority-capture.014",
+        "ar.authority-capture.015",
+        "ar.authority-capture.016",
+        "ar.authority-capture.017",
+        "ar.authority-capture.018"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashState.RegionalFreezeDigestMatchesFullCaptureAcrossChunkPrecedence"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashState.CompleteConsumerOwnersUseUniformFrozenProjection"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashState.AuthorityEnvelopeFramesIdentityAndAvatars"
+        }
+      ]
+    },
+    {
+      "id": "contract.ar.authority-capture.freeze",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "statement": "Scheduler freeze capture reads and projects only the requested owner and matches full capture.",
+      "status": "covered",
+      "requirements": [
+        "ar.authority-capture.019",
+        "ar.authority-capture.020"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashState.SchedulerFreezeReadsOnlyRequestedOwnerAndMatchesFullCapture"
+        }
+      ]
+    },
+    {
+      "id": "contract.ar.authority-capture.helpers",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "statement": "Enabled helpers propagate checked capture failures and disabled hashes retain their legacy projection. Requiring checked state at every publishing consumer remains an integration obligation.",
+      "status": "partial",
+      "requirements": [
+        "ar.authority-capture.021",
+        "ar.authority-capture.022",
+        "ar.authority-capture.023",
+        "ar.authority-capture.024",
+        "ar.authority-capture.025"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashState.HashCaptureDoesNotMutateAuthority"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashState.CaptureFailureProducesNoDigest"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FlagOffWorldHashesUnchanged"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashConsumers.RequireStateBeforePublishing",
+          "planned": "Named future integration oracle: every host checksum publisher refuses capture errors without a state; disabled save codecs, checkpoint layouts and artifact bytes retain their legacy paths. No consumer integration execution is claimed; owner: ds"
+        }
+      ]
     }
   ]
 }

@@ -1130,13 +1130,20 @@ IdMap ExistingIdentities(const entt::registry& registry) {
     }
     return ids;
 }
-} // namespace
 
-CreatureSnapshot BuildCreatureSnapshot(const entt::registry& registry) {
+CreatureSnapshot BuildCreatureSnapshotImpl(const entt::registry& registry,
+                                           const Luminumbra::world::RegionKey* key) {
     CreatureSnapshot snapshot;
-    const auto ids = ExistingIdentities(registry);
+    // Encoding references uses the source registry directly. Full captures also validate the
+    // global identity inventory; a regional projection touches only selected payloads/references.
+    const auto ids = key ? IdMap{} : ExistingIdentities(registry);
     const Context context{&registry, &ids};
     for (auto e : registry.view<const C::CreatureComponent>()) {
+        if (key) {
+            const auto* owner = registry.try_get<C::CreatureRegionComponent>(e);
+            if (!owner || owner->owner_x != key->x || owner->owner_z != key->z)
+                continue;
+        }
         Require(registry.all_of<C::TransformComponent,
                                 C::CreatureRegionComponent,
                                 C::CreatureCoarseComponent>(e),
@@ -1241,6 +1248,12 @@ CreatureSnapshot BuildCreatureSnapshot(const entt::registry& registry) {
         return a.id < b.id;
     });
     return snapshot;
+}
+
+} // namespace
+
+CreatureSnapshot BuildCreatureSnapshot(const entt::registry& registry) {
+    return BuildCreatureSnapshotImpl(registry, nullptr);
 }
 
 std::string SerializeCreatureSnapshot(const CreatureSnapshot& snapshot) {
@@ -1486,11 +1499,21 @@ bool ValidateCreatureSnapshot(const CreatureSnapshot& snapshot,
 
 std::string CreatureRegionProjection(const entt::registry& registry,
                                      Luminumbra::world::RegionKey key) {
-    auto snapshot = BuildCreatureSnapshot(registry);
-    std::erase_if(snapshot.entities, [key](const CreatureRecord& record) {
-        const auto& owner = record.components.at("Region").at("data");
-        return owner.at("owner_x") != key.x || owner.at("owner_z") != key.z;
-    });
+    const auto snapshot = BuildCreatureSnapshotImpl(registry, &key);
     return snapshot.entities.empty() ? std::string{} : SerializeCreatureSnapshot(snapshot);
+}
+std::map<Luminumbra::world::RegionKey, std::string>
+CreatureRegionProjections(const CreatureSnapshot& snapshot) {
+    std::map<Luminumbra::world::RegionKey, CreatureSnapshot> grouped;
+    for (const auto& record : snapshot.entities) {
+        const auto& owner = record.components.at("Region").at("data");
+        const Luminumbra::world::RegionKey key{owner.at("owner_x").get<std::int32_t>(),
+                                               owner.at("owner_z").get<std::int32_t>()};
+        grouped[key].entities.push_back(record);
+    }
+    std::map<Luminumbra::world::RegionKey, std::string> result;
+    for (const auto& [key, part] : grouped)
+        result.emplace(key, SerializeCreatureSnapshot(part));
+    return result;
 }
 } // namespace luminumbra::ai

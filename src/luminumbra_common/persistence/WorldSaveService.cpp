@@ -107,6 +107,24 @@ void ValidateRegionDigestKey(world::RegionKey key) {
     }
 }
 
+std::shared_ptr<Chunk> CopyAuthorityChunk(const std::shared_ptr<Chunk>& chunk) {
+    auto copy = std::make_shared<Chunk>(chunk->get_coords());
+    copy->sdf_data = chunk->sdf_data;
+    copy->heightmap_data = chunk->heightmap_data;
+    copy->material_data = chunk->material_data;
+    copy->water_depth_mm = chunk->water_depth_mm;
+    copy->water_bed_mm = chunk->water_bed_mm;
+    copy->water_edge_flux = chunk->water_edge_flux;
+    copy->has_water_sim.store(chunk->has_water_sim.load(std::memory_order_acquire));
+    copy->current_water_resolution.store(
+        chunk->current_water_resolution.load(std::memory_order_acquire));
+    copy->is_water_sleeping.store(chunk->is_water_sleeping.load(std::memory_order_acquire));
+    copy->max_water_delta_last_tick = chunk->max_water_delta_last_tick;
+    copy->ticks_below_threshold = chunk->ticks_below_threshold;
+    copy->mark_sdf_loaded_or_edited();
+    return copy;
+}
+
 std::atomic<std::uint64_t>& ChunkDecodeCounter() {
     static std::atomic<std::uint64_t> counter{0};
     return counter;
@@ -154,6 +172,12 @@ bool ConsumeDirectoryFlushFailureForTesting() {
     return false;
 }
 #endif
+
+using RegionReadHook = void (*)(const std::filesystem::path&);
+RegionReadHook& RegionReadHookForTesting() {
+    static thread_local RegionReadHook hook = nullptr;
+    return hook;
+}
 
 using ActiveRegionsReplaceHook = bool (*)();
 ActiveRegionsReplaceHook& BeforeActiveRegionsReplaceForTesting() {
@@ -658,6 +682,8 @@ bool ReadRegionFile(const std::filesystem::path& path,
                     const std::stop_token& stop = {}) {
     out_records.clear();
 
+    if (const auto hook = RegionReadHookForTesting())
+        hook(path);
     std::string bytes;
     if (!read_bounded_save_file(path, bytes, kMaxSaveMemberBytes, errors, stop))
         return false;
@@ -2178,7 +2204,7 @@ std::uint64_t WorldSaveService::region_simulation_digest(const std::filesystem::
     // Filtering precedes insertion: a live pristine or Loading chunk must not shadow a durable
     // edited record with the same id. insert_chunk preserves the first record per id.
     const auto qualifies = [&key](const std::shared_ptr<Chunk>& chunk) {
-        if (!chunk || chunk->sdf_provenance() != ChunkSdfProvenance::LoadedOrEdited)
+        if (!chunk || !chunk->needs_authority())
             return false;
         int rx = 0, rz = 0;
         region_coords_for_chunk(chunk->get_coords(), rx, rz);
@@ -2186,12 +2212,13 @@ std::uint64_t WorldSaveService::region_simulation_digest(const std::filesystem::
     };
     for (const auto& chunk : inputs.live) {
         if (qualifies(chunk) && chunk->get_state() != ChunkState::Loading)
-            region.insert_chunk(chunk);
+            region.insert_chunk(CopyAuthorityChunk(chunk));
     }
     for (const auto& chunk : inputs.parked) {
         if (qualifies(chunk) && chunk->get_state() != ChunkState::Loading)
-            region.insert_chunk(chunk);
+            region.insert_chunk(CopyAuthorityChunk(chunk));
     }
+    std::set<ChunkID> committed_ids;
     if (!save_dir.empty()) {
         if (!inputs.durable.empty() && !snapshot_index_exists(save_dir))
             throw std::runtime_error("inconsistent snapshot: index missing");
@@ -2208,20 +2235,86 @@ std::uint64_t WorldSaveService::region_simulation_digest(const std::filesystem::
                                                     : errors.front());
         for (const auto& chunk : durable_chunks) {
             // Durable edited content is complete even if its saved lifecycle was Loading.
-            if (qualifies(chunk))
-                region.insert_chunk(chunk);
+            if (qualifies(chunk)) {
+                committed_ids.insert(chunk->get_id());
+                region.insert_chunk(CopyAuthorityChunk(chunk));
+            }
         }
     }
+    for (const auto& coords : inputs.durable) {
+        int rx = 0, rz = 0;
+        region_coords_for_chunk(coords, rx, rz);
+        if (rx != key.x || rz != key.z)
+            continue;
+        if (!committed_ids.contains(Chunk::calculate_id(coords)))
+            throw std::runtime_error("Expected durable authority is missing");
+    }
+    return compose_region_simulation_digest(
+        region, inputs.ground_object_bytes, inputs.field_page_bytes, inputs.creature_bytes);
+}
+
+std::uint64_t WorldSaveService::compose_region_simulation_digest(const WorldStreamingState& region,
+                                                                 const std::string& ground,
+                                                                 const std::string& pages,
+                                                                 const std::string& creatures) {
     // Optional extensions compose in a fixed order: ground, pages, then creatures. Empty
     // inputs preserve the preceding projection, including the content-only hash.
     std::string composed = ComputeRegionContentHash(region);
-    if (!inputs.ground_object_bytes.empty())
-        composed = StableChecksum(composed + "|ground:" + inputs.ground_object_bytes);
-    if (!inputs.field_page_bytes.empty())
-        composed = StableChecksum(composed + "|pages:" + inputs.field_page_bytes);
-    if (!inputs.creature_bytes.empty())
-        composed = StableChecksum(composed + "|creatures:" + inputs.creature_bytes);
+    if (!ground.empty())
+        composed = StableChecksum(composed + "|ground:" + ground);
+    if (!pages.empty())
+        composed = StableChecksum(composed + "|pages:" + pages);
+    if (!creatures.empty())
+        composed = StableChecksum(composed + "|creatures:" + creatures);
     return std::stoull(composed, nullptr, 16);
+}
+
+std::vector<std::shared_ptr<Chunk>>
+WorldSaveService::capture_authoritative_chunks(const std::filesystem::path& save_dir,
+                                               const RegionDigestInputs& inputs) {
+    WorldStreamingState disk;
+    std::vector<std::string> errors;
+    if (!save_dir.empty()) {
+        // Recovery writes authority and belongs to world open, never to hash capture.
+        if (journal_pending(save_dir))
+            throw std::runtime_error("Authority capture requires a committed snapshot");
+        WorldSaveService{}.load_world(disk, save_dir, errors);
+        if (!errors.empty())
+            throw std::runtime_error(errors.front());
+    }
+    if (!inputs.durable.empty() && (save_dir.empty() || !snapshot_index_exists(save_dir)))
+        throw std::runtime_error("inconsistent snapshot: index missing");
+    std::map<ChunkID, std::shared_ptr<Chunk>> committed;
+    for (const auto& chunk : disk.snapshot_chunks())
+        if (chunk && chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited)
+            committed.emplace(chunk->get_id(), chunk);
+    for (const auto& coords : inputs.durable) {
+        const auto found = committed.find(Chunk::calculate_id(coords));
+        if (found == committed.end() || found->second->get_coords() != coords)
+            throw std::runtime_error("Expected durable authority is missing");
+    }
+    std::map<ChunkID, std::shared_ptr<Chunk>> resolved;
+    const auto admit = [&resolved](const auto& candidates) {
+        for (const auto& chunk : candidates) {
+            if (!chunk || chunk->get_state() == ChunkState::Loading || !chunk->needs_authority())
+                continue;
+            resolved.emplace(chunk->get_id(), chunk);
+        }
+    };
+    admit(inputs.live);
+    admit(inputs.parked);
+    // A committed record's saved lifecycle does not describe its completeness.
+    for (const auto& [id, chunk] : committed)
+        resolved.emplace(id, chunk);
+    std::vector<std::shared_ptr<Chunk>> result;
+    result.reserve(resolved.size());
+    for (const auto& [id, chunk] : resolved) {
+        (void)id;
+        // Copy only simulation truth. A pending water divergence is already authority;
+        // represent it in the copy without promoting or clearing dirty state in the source.
+        result.push_back(CopyAuthorityChunk(chunk));
+    }
+    return result;
 }
 
 std::uint64_t
@@ -2237,7 +2330,8 @@ WorldSaveService::region_simulation_digest(const std::filesystem::path& save_dir
                                                        .parked = {},
                                                        .durable = {},
                                                        .ground_object_bytes = {},
-                                                       .field_page_bytes = {}});
+                                                       .field_page_bytes = {},
+                                                       .creature_bytes = {}});
 }
 
 std::uint64_t WorldSaveService::region_simulation_digest(
@@ -2987,6 +3081,11 @@ bool WorldSaveService::write_file_durably(const std::filesystem::path& destinati
 
 void WorldSaveService::set_directory_flush_failure_for_testing(int flushes_to_skip) {
     DirectoryFlushFailureCountdownForTesting().store(flushes_to_skip, std::memory_order_release);
+}
+
+void WorldSaveService::set_region_read_hook_for_testing(
+    void (*hook)(const std::filesystem::path&)) {
+    RegionReadHookForTesting() = hook;
 }
 
 void WorldSaveService::set_before_active_regions_replace_for_testing(bool (*hook)()) {

@@ -15,6 +15,7 @@
 #include "../simulation/SimulationEventBus.h"
 #include "../systems/PollinationSystem.h"
 #include "ActiveRegionLedger.h"
+#include "AuthorityHashState.h"
 #include "GroundObjectStore.h"
 #include "RegionPopulator.h"
 #include "WorldClock.h"
@@ -561,6 +562,10 @@ public:
     // Enabled chunk slot hashes authoritative truth across residency/save history. The default
     // path retains the existing streamed-state projection and wire/checkpoint slots.
     [[nodiscard]] std::string ComputeChunkStateHash();
+    // Checked read at a completed boundary. The host may supply its canonical avatar snapshot.
+    // Success owns only immutable projections; failure contains no digest and changes no state.
+    [[nodiscard]] AuthorityHashCapture
+    CaptureAuthorityState(const std::string& avatar_snapshot = {}) const;
     [[nodiscard]] bool IsSimulationTickBoundary() const {
         return !m_activeRegionsEnabled || (!m_simulationBatchInProgress && m_regionWork.empty());
     }
@@ -666,6 +671,9 @@ private:
     FieldPageState::ScheduledScratch m_fieldScheduleScratch;
     void LatchRegionFault(std::uint64_t tick, std::string message);
     void RunRegionScheduler(std::uint64_t current_tick);
+    [[nodiscard]] AuthorityHashCapture
+    CaptureAuthorityStateImpl(const std::string& avatar_snapshot = {}) const;
+    [[nodiscard]] std::string AuthorityIdentityBytes() const;
     // Sorted, de-duplicated due regions of the current schedule.
     [[nodiscard]] const std::vector<RegionKey>& SortedDueRegions() const;
     // Ages the due, owned regions' ground objects by one tick and publishes despawns.
@@ -725,14 +733,12 @@ private:
     [[nodiscard]] luminumbra::foliage::PlantEnvSample
     SamplePlantEnvironment(const Components::TransformComponent& transform,
                            std::uint64_t tick) const;
-    [[nodiscard]] std::string PlantRegionProjection(RegionKey key) const;
     std::map<RegionKey, std::uint64_t> m_foliagePreviousTicks;
 
     void BindRegionalFieldQueries();
     [[nodiscard]] std::uint16_t SampleRegionalChannel(int channel, const Vec3& position) const;
     [[nodiscard]] std::string RegionalAmbientHash(std::uint8_t channels, bool weather) const;
     void ProjectRegionalWeather(bool restoring = false);
-    [[nodiscard]] std::string RegionalFieldProjection(RegionKey key) const;
     void AdvanceRegionalWeather(std::uint64_t tick);
     [[nodiscard]] float ScentDomainOrigin(bool x_axis) const;
     [[nodiscard]] RegionKey ScentCellOwner(int x, int z) const;
