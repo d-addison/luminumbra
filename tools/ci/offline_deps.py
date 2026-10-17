@@ -161,7 +161,9 @@ def config_has_includes(text: str) -> bool:
     Skip variable values as a whole, respecting comments, quotes and escaped
     newlines so header-like text in a value cannot become a directive.
     """
-    section = re.compile(r'\[[ \t]*([\w.-]+)(?:[ \t]+"(?:\\.|[^"\\\n])*")?[ \t]*\]')
+    # Use Git's ASCII whitespace, not Unicode \s. Some Git versions accept
+    # vertical tab and form feed here; refuse includes before any Git runs.
+    section = re.compile(r'\[[ \t\r\v\f]*([\w.-]+)(?:[ \t\r\v\f]+"(?:\\.|[^"\\\n])*")?[ \t\r\v\f]*\]')
     index = 0
     statement = True
     quoted = False
@@ -176,7 +178,7 @@ def config_has_includes(text: str) -> bool:
             continue
         if char == "\n":
             statement, quoted = True, False
-        elif statement and char in " \t\r":
+        elif statement and char in " \t\r\v\f":
             pass
         elif statement and char == "[":
             match = section.match(text, index)
@@ -185,7 +187,7 @@ def config_has_includes(text: str) -> bool:
                     return True
                 index = match.end()
                 continue
-            statement = False
+            raise DependencyError("unsupported Git config section")
         else:
             statement = False
             if char == '"':
@@ -275,7 +277,9 @@ def git_metadata(source: Path, cache: Path) -> None:
 
 
 def git(source: Path, *args: str, cache: Path, network=False) -> str:
-    if args != ("init", "--quiet"):
+    # Reinitialization reads existing metadata too. Only a fresh repository
+    # can omit validation; lexists also catches dangling metadata links.
+    if args != ("init", "--quiet") or os.path.lexists(source / ".git"):
         git_metadata(source, cache)
     # Do not inherit config injection, repository redirection, tracing, helpers
     # or transport commands from the caller. Local config is still read by Git,

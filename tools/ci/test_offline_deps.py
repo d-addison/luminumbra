@@ -23,6 +23,41 @@ deps = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(deps)
 
 
+class GitConfigScannerTests(unittest.TestCase):
+    def test_include_sections_cover_ascii_whitespace_and_quoted_conditions(self):
+        for whitespace in (" ", "\t", "\r", "\v", "\f"):
+            for section in ("include", 'includeIf "gitdir:never-matches"',
+                            'INCLUDEIF "onbranch:a]b"', 'includeIf "gitdir:a\\"b"',
+                            "include.path"):
+                for text in (f'{whitespace}[{section}]\npath = outside\n',
+                             f'[core]{whitespace}[{section}]\r\npath = outside\r\n',
+                             f'[{section}{whitespace}]\npath = outside\n'):
+                    with self.subTest(text=text):
+                        self.assertTrue(deps.config_has_includes(text))
+            self.assertTrue(deps.config_has_includes(
+                f'[includeIf{whitespace}"gitdir:*"]\npath = outside\n'))
+
+    def test_values_comments_and_continuations_do_not_create_sections(self):
+        for text in ('[fixture]\ntext = "[include]"\n',
+                     '[fixture]\ntext = "a\\\n[include]"\n',
+                     '[fixture]\ntext = a\\\n[include]\n',
+                     '[fixture "a]b"]\ntext = "escaped \\" [include]"\n',
+                     '[fixture]\ntext = "#;[includeIf]" ; [include]\n',
+                     '# [include]\n; [includeIf "gitdir:*"]\n', ""):
+            with self.subTest(text=text):
+                self.assertFalse(deps.config_has_includes(text))
+        self.assertTrue(deps.config_has_includes(
+            '[fixture]\ntext = "a\\\n[include]"\n\f[include]\npath = outside\n'))
+
+    def test_partial_and_unsupported_sections_fail_closed(self):
+        for text in ('[', '[include', '[includeIf "unterminated]',
+                     '[includeIf\n"gitdir:*"]', '[core] [include\\\n]',
+                     '[core] [include\x00]', '[core] [include\u00a0]'):
+            with self.subTest(text=text):
+                with self.assertRaisesRegex(deps.DependencyError, "unsupported Git config section"):
+                    deps.config_has_includes(text)
+
+
 class OfflineDependenciesTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="offline deps ")
@@ -1011,6 +1046,90 @@ class CachedGitSafetyTests(unittest.TestCase):
             handle.write('\n# [include] and [includeIf "gitdir:*"]\n'
                          '[fixture]\n\ttext = "[include]"\n')
         deps.verify(self.root, self.cache, self.lock)
+
+    def test_control_whitespace_includes_refuse_every_cached_git_entry_point(self):
+        outside = self.base / "outside config"
+        outside.write_text(f'[core]\nfsmonitor = {self.command}\n')
+        metadata = self.source / ".git"
+        for relative in ("config", "config.worktree", "worktrees/linked/config.worktree",
+                         "modules/nested/config"):
+            config = metadata / relative
+            config.parent.mkdir(parents=True, exist_ok=True)
+            original = config.read_bytes() if config.exists() else b""
+            for section in ('\v[include]', '\f[include]', '[core]\f[include]',
+                            '\f[includeIf "gitdir:never-matches"]',
+                            '[includeIf\v"gitdir:never-matches"]',
+                            '[include\f]', '[includeIf "unterminated]'):
+                with self.subTest(config=relative, section=section):
+                    config.write_bytes(original +
+                                       f'\r\n{section}\r\npath = "{outside.as_posix()}"\r\n'.encode())
+                    before = outside.read_bytes()
+                    with patch.object(deps.subprocess, "check_output",
+                                      side_effect=AssertionError("Git ran")):
+                        with self.assertRaises(deps.DependencyError):
+                            deps.git_metadata(self.source, self.cache)
+                        self.assert_refused_without_writes()
+                        for args in (("status", "--porcelain"), ("init", "--quiet")):
+                            with self.assertRaises(deps.DependencyError):
+                                self.git(self.source, *args)
+                    self.assertEqual(outside.read_bytes(), before)
+                    self.assertFalse(self.marker.exists())
+            if original:
+                config.write_bytes(original)
+            else:
+                config.unlink()
+        deps.verify(self.root, self.cache, self.lock)
+
+    def test_real_git_external_include_control_and_guarded_refusal(self):
+        outside = self.base / "outside config"
+        outside.write_text('[fixture]\noutside = external-value\n'
+                           f'[core]\nfsmonitor = {self.command}\n')
+        config = self.source / ".git/config"
+        original = config.read_bytes()
+        # Git actually follows the quoted, continued path with CRLF. This
+        # control uses only a temporary fixture, never an ambient config.
+        path = outside.as_posix().replace("outside config", "out\\\r\nside config")
+        env = {key: value for key, value in os.environ.items()
+               if not key.upper().startswith("GIT_")}
+        env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+        for section in ('\r\t[include]', '[includeIf "gitdir:**"]'):
+            with self.subTest(section=section):
+                config.write_bytes(original +
+                                   f'\r\n{section}\r\npath = "{path}"\r\n'.encode())
+                result = subprocess.check_output(
+                    ["git", "config", "--file", str(config), "--includes", "--get", "fixture.outside"],
+                    cwd=self.source, env=env)
+                self.assertEqual(result.strip(), b"external-value")
+                with patch.object(deps.subprocess, "check_output",
+                                  side_effect=AssertionError("Git ran")):
+                    self.assert_refused_without_writes()
+                    for args in (("status", "--porcelain"), ("init", "--quiet")):
+                        with self.assertRaisesRegex(deps.DependencyError, "config includes"):
+                            self.git(self.source, *args)
+                self.assertFalse(self.marker.exists())
+        config.write_bytes(original)
+        self.git(self.source, "init", "--quiet")
+        deps.verify(self.root, self.cache, self.lock)
+
+    def test_unreadable_config_refuses_before_git_or_stage_writes(self):
+        config = self.source / ".git/config"
+        read_text = Path.read_text
+
+        def unreadable(path, *args, **kwargs):
+            if path == config:
+                raise PermissionError("unreadable Git config")
+            return read_text(path, *args, **kwargs)
+
+        with patch.object(Path, "read_text", unreadable), \
+                patch.object(deps.subprocess, "check_output", side_effect=AssertionError("Git ran")):
+            for action in (*self.actions(),
+                           lambda: self.git(self.source, "status", "--porcelain"),
+                           lambda: self.git(self.source, "init", "--quiet")):
+                with self.assertRaisesRegex(PermissionError, "unreadable Git config"):
+                    action()
+                self.assertFalse((self.root / "scratch/staged").exists())
+                self.assertFalse((self.root / "scratch/init.cmake").exists())
+                self.assertFalse(self.marker.exists())
 
     @unittest.skipIf(os.name == "nt", "POSIX metadata symlinks")
     def test_escaping_symlinked_git_config_is_refused_before_git_runs(self):

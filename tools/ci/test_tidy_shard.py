@@ -219,7 +219,8 @@ class ShardWorkflowTests(unittest.TestCase):
         guard = "github.event_name != 'pull_request' || github.event.pull_request.draft == false"
         self.assertIn("    name: Static analysis / clang-tidy\n", aggregate)
         self.assertIn("    needs: [changes, tidy-shard]\n", aggregate)
-        self.assertIn("    if: always() && (" + guard + ")\n", aggregate)
+        self.assertIn("    if: ${{ (!cancelled() || needs.changes.result == 'cancelled' || "
+                      "needs.tidy-shard.result == 'cancelled') && (" + guard + ") }}\n", aggregate)
         self.assertIn("    needs: changes\n", self.jobs["tidy-shard"])
         self.assertIn("    if: ${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && (" + guard + ") }}\n",
                       self.jobs["tidy-shard"])
@@ -230,7 +231,8 @@ class ShardWorkflowTests(unittest.TestCase):
         self.assertIn("TIDY_SHARD_RESULT: ${{ needs.tidy-shard.result }}", aggregate)
 
     def test_aggregate_shell_accepts_only_success(self):
-        script = self.jobs["tidy"].split("        run: |\n", 1)[1]
+        verdict = self.jobs["tidy"].split("      - name: Require all clang-tidy shards to pass\n", 1)[1]
+        script = verdict.split("        run: |\n", 1)[1]
         script = "\n".join(line[10:] for line in script.splitlines() if line.startswith("          "))
         self.assertTrue(script.strip())
         for status in ("success", "failure", "cancelled", "skipped", ""):
@@ -241,7 +243,8 @@ class ShardWorkflowTests(unittest.TestCase):
                 self.assertEqual(result.returncode == 0, status == "success", result.stderr)
 
     def test_routed_skip_requires_successful_explicit_non_native_classification(self):
-        script = self.jobs["tidy"].split("        run: |\n", 1)[1]
+        verdict = self.jobs["tidy"].split("      - name: Require all clang-tidy shards to pass\n", 1)[1]
+        script = verdict.split("        run: |\n", 1)[1]
         script = "\n".join(line[10:] for line in script.splitlines() if line.startswith("          "))
         with tempfile.TemporaryDirectory() as directory:
             summary = Path(directory) / "summary"
