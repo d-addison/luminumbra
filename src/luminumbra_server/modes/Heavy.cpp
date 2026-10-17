@@ -2,6 +2,8 @@
 #include "ModeHelpers.h"
 #include "Modes.h"
 
+#include <stdexcept>
+
 using Luminumbra::Server::AuthoritativeStateEqual;
 using Luminumbra::Server::CaptureGroundObjects;
 using Luminumbra::Server::GroundObjectDifference;
@@ -32,14 +34,23 @@ HeavyHashes CaptureHashes(Luminumbra::Server::ServerWorldRunner& runner) {
     if (runner.Session()) {
         h.ground_objects = CaptureGroundObjects(runner.Session()->GetGroundObjects());
     }
-    h.world_hash = runner.ComputeWorldHash();
-    h.sub = runner.ComputeWorldSubHashes();
-    h.scent_hash = runner.Session() ? runner.Session()->ComputeScentSubHash() : std::string();
+    if (h.active_regions) {
+        runner.ComputeWorldHashAndSubHashes(h.world_hash, h.sub);
+        if (h.world_hash.empty() || runner.Session()->GetRegionSchedulerFault())
+            throw std::runtime_error("Heavy production authority capture failed");
+        h.scent_hash = h.sub.scents;
+        h.reference = Luminumbra::Server::HeavyAuthorityReference::Capture(*runner.Session(),
+                                                                           runner.Avatars());
+    } else {
+        h.world_hash = runner.ComputeWorldHash();
+        h.sub = runner.ComputeWorldSubHashes();
+        h.scent_hash = runner.Session() ? runner.Session()->ComputeScentSubHash() : std::string();
+    }
     return h;
 }
 
 // Equality (AuthoritativeStateEqual / MeshEqual) and the subsystem table, with the
-// rationale for excluding mesh from the oracle's equality, live in
+// enabled authority contract, live in
 // luminumbra_server/HeavyComparison.h.
 
 nlohmann::json HeavyHashJson(const HeavyHashes& h) {
@@ -56,7 +67,7 @@ nlohmann::json HeavyHashJson(const HeavyHashes& h) {
                                   {"payload", object.payload},
                                   {"flags", object.flags}});
     }
-    return nlohmann::json{
+    nlohmann::json result{
         {"world_hash", h.world_hash},
         {"ground_objects", std::move(ground_objects)},
         {"sub_hashes",
@@ -72,11 +83,21 @@ nlohmann::json HeavyHashJson(const HeavyHashes& h) {
              {"scents", h.scent_hash},
          }},
     };
+    if (h.active_regions) {
+        auto& sub = result["sub_hashes"];
+        sub["regions"] = h.sub.regions;
+        sub["creatures"] = h.sub.creatures;
+        sub["items"] = h.sub.items;
+        sub["pages"] = h.sub.pages;
+        sub["ecology"] = h.sub.ecology;
+        sub["plants"] = h.sub.plants;
+    }
+    return result;
 }
 
 } // namespace
 
-int RunHeavy(const ServerCliOptions& options) {
+int RunHeavy(const ServerCliOptions& options) try {
     LUMINUMBRA_CORE_INFO(
         "Headless server HEAVY oracle: preset={} seed={} ticks={} resim={} radius={}/{}",
         options.preset,
@@ -98,6 +119,14 @@ int RunHeavy(const ServerCliOptions& options) {
         return 1;
     }
     const auto pre_save_ticks = original.RunFixedTicks(options.ticks);
+    const bool enabled = original.Session()->ActiveRegionsEnabled();
+    std::optional<HeavyHashes> original_before_save;
+    if (enabled) {
+        if (pre_save_ticks.ticks_executed != options.ticks ||
+            original.Session()->GetRegionSchedulerFault())
+            throw std::runtime_error("Heavy original did not reach the requested boundary");
+        original_before_save = CaptureHashes(original);
+    }
 
     // Persist the COMPLETE streamed-chunk set (a never-edited world has no dirty
     // chunks, so the dirty-gated GameSession::SaveWorldState would write
@@ -114,12 +143,18 @@ int RunHeavy(const ServerCliOptions& options) {
         return 1;
     }
     const HeavyHashes orig_at_save = CaptureHashes(original);
+    const bool save_unchanged =
+        !enabled ||
+        (original_before_save && AuthoritativeStateEqual(*original_before_save, orig_at_save));
 
     // --- : LOAD a FRESH session from the saved world_id. ---
     Luminumbra::Server::ServerWorldRunnerConfig cfgLoad = RunnerConfigFrom(options);
     cfgLoad.world_id = world_id;
     cfgLoad.world_name = "Heavy Loaded";
     cfgLoad.autosave_interval_ticks = 0;
+    // Enabled plants are restored authority; seeding the synthetic roster again duplicates it.
+    if (enabled)
+        cfgLoad.planted_roster = false;
 
     Luminumbra::Server::ServerWorldRunner loaded(std::move(cfgLoad));
     if (!loaded.Boot()) {
@@ -131,7 +166,7 @@ int RunHeavy(const ServerCliOptions& options) {
         loaded.Session()->GetWorldSystem()->GetWaterSimWindowCursor();
 
     // The loaded session, immediately after load, must match the original at
-    // save on AUTHORITATIVE sim state (terrain/water/entities/ground objects). Mesh is tracked
+    // save on every enabled authority domain. Mesh is tracked
     // informationally (see AuthoritativeStateEqual rationale).
     const bool roundtrip_ok = AuthoritativeStateEqual(orig_at_save, loaded_at_load);
     const bool roundtrip_mesh_match = MeshEqual(orig_at_save, loaded_at_load);
@@ -239,7 +274,7 @@ int RunHeavy(const ServerCliOptions& options) {
     const auto& settle_loaded = loaded.GetBootSettleStats();
     const bool settle_ok = settle_orig.contract_ok() && settle_loaded.contract_ok() &&
                            settle_loaded.water_settle_skipped;
-    const bool passed = roundtrip_ok && resim_ok && settle_ok &&
+    const bool passed = save_unchanged && roundtrip_ok && resim_ok && settle_ok &&
                         pre_save_ticks.ticks_executed == options.ticks &&
                         orig_resim.ticks_executed == options.heavy_resim &&
                         loaded_resim.ticks_executed == options.heavy_resim;
@@ -292,6 +327,34 @@ int RunHeavy(const ServerCliOptions& options) {
         {"passed", passed},
     };
 
+    if (enabled) {
+        if (!original_before_save || !orig_at_save.reference || !loaded_at_load.reference ||
+            !orig_final.reference || !loaded_final.reference)
+            throw std::runtime_error("Heavy missing independent authority capture");
+        artifact["save_unchanged"] = save_unchanged;
+        artifact["original_before_save"] = HeavyHashJson(*original_before_save);
+        if (!original_before_save->reference)
+            throw std::runtime_error("Heavy missing pre-save reference");
+        artifact["save_reference_difference"] =
+            original_before_save->reference->Difference(*orig_at_save.reference);
+        artifact["roundtrip_reference_difference"] =
+            orig_at_save.reference->Difference(*loaded_at_load.reference);
+        artifact["resim_reference_difference"] =
+            orig_final.reference->Difference(*loaded_final.reference);
+        artifact["authoritative_sections"] = nlohmann::json::array({"world_hash",
+                                                                    "terrain",
+                                                                    "water",
+                                                                    "entities",
+                                                                    "regions",
+                                                                    "creatures",
+                                                                    "items",
+                                                                    "pages",
+                                                                    "ecology",
+                                                                    "plants",
+                                                                    "independent_reference"});
+        artifact["mesh_excluded_reason"] = "derived render geometry; world_hash excludes mesh";
+    }
+
     // Tear down both and clean up the throwaway save directory.
     original.Shutdown();
     loaded.Shutdown();
@@ -341,4 +404,7 @@ int RunHeavy(const ServerCliOptions& options) {
                          options.heavy_resim,
                          orig_final.world_hash);
     return 0;
+} catch (const std::exception& error) {
+    LUMINUMBRA_CORE_ERROR("heavy: authority comparison refused: {}", error.what());
+    return 1;
 }

@@ -195,6 +195,15 @@ public:
     [[nodiscard]] bool ValidateRegionalOwners(const RegionRecords& records,
                                               const EnergyAges& ages) const;
 
+    // Offline observation of stored values, including dormant pages. Ages live in the ledger.
+    // The callback cannot mutate pages and must not retain the borrowed span.
+    template<class Visitor>
+    void VisitStoredRegionalPages(Visitor&& visitor) const {
+        for (const auto& [key, page] : m_pages)
+            if (!page.all_zero())
+                visitor(key, std::span<const std::uint16_t>{page.values});
+    }
+
     // Point read at world cell coords (any page, frozen or active; 0 when the
     // cell/page does not exist). Frozen pages are read AS STORED — catch-up
     // happens on window re-entry, not on read (reads must not mutate).

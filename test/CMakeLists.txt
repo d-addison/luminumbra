@@ -1565,6 +1565,8 @@ target_link_libraries(frontier_gates_test PRIVATE
 add_executable(world_open_refusal_test
     persistence/world_open_refusal_test.cpp
     common/AuthorityHashIntegration_test.cpp
+    common/HeavyAuthorityReference_test.cpp
+    ../src/luminumbra_server/HeavyAuthorityReference.cpp
     ../src/luminumbra_server/modes/SmokeArtifact.cpp
     common/SimBudgetWorldParity_test.cpp
     common/CreatureHostAcceptance_test.cpp

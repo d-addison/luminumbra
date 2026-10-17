@@ -1,7 +1,10 @@
 #pragma once
 
+#include "HeavyAuthorityReference.h"
+
 #include <array>
 #include <cstddef>
+#include <optional>
 #include <span>
 #include <string>
 #include <utility>
@@ -20,9 +23,9 @@ struct HeavyHashes {
     bool active_regions = false;
     std::string clock_bytes;
     std::string ledger_bytes;
-    // All durable object fields, in ascending persistent-id order. Compare independently
-    // of world_hash: the composite also includes derived mesh state and is exempt below.
+    // All durable object fields, in ascending persistent-id order.
     std::vector<world::GroundObject> ground_objects;
+    std::optional<HeavyAuthorityReference> reference;
 };
 
 inline std::vector<world::GroundObject>
@@ -81,15 +84,8 @@ inline std::string ScentDifference(const HeavyHashes& a, const HeavyHashes& b) {
 // least one side. `mutate` changes exactly that field; it exists so the
 // comparison table can be exercised by tests.
 //
-// Why mesh is excluded from the heavy oracle's equality: mesh is a
-// deterministically-regenerated DERIVED render artifact. The async re-meshing of
-// chunks adopted across a save/load boundary legitimately reaches the same
-// geometry via a different in-memory pending-mesh/version snapshot than the
-// originating session held. The sub-hashes localize this precisely (only `mesh`
-// differs; terrain/water/entities are byte-identical), which is exactly the
-// desync-localization the sub-hashes exist to provide. The top-level world_hash
-// (which DOES include mesh) is reported but not asserted on across the
-// round-trip for this reason; it is still asserted run==replay in --smoke.
+// Mesh is a derived render artifact. Enabled world hashes already exclude mesh, so the
+// composed hash and every enabled diagnostic are required alongside the raw reference.
 struct HeavySubsystem {
     const char* name;
     bool compared;
@@ -99,7 +95,7 @@ struct HeavySubsystem {
 };
 
 inline std::span<const HeavySubsystem> HeavySubsystemTable() {
-    static const std::array<HeavySubsystem, 14> kTable{{
+    static const std::array<HeavySubsystem, 23> kTable{{
         {"terrain",
          true,
          false,
@@ -197,27 +193,94 @@ inline std::span<const HeavySubsystem> HeavySubsystemTable() {
              h.scent_hash += "x";
          }},
         {"world_hash",
-         false,
-         false,
-         "composite includes the mesh sub-hash; asserted run==replay in --smoke instead",
+         true,
+         true,
+         nullptr,
          [](HeavyHashes& h) {
              h.world_hash += "x";
+         }},
+        {"sub_active_regions",
+         true,
+         true,
+         nullptr,
+         [](HeavyHashes& h) {
+             h.sub.active_regions = !h.sub.active_regions;
+         }},
+        {"regions",
+         true,
+         true,
+         nullptr,
+         [](HeavyHashes& h) {
+             h.sub.regions += "x";
+         }},
+        {"creatures",
+         true,
+         true,
+         nullptr,
+         [](HeavyHashes& h) {
+             h.sub.creatures += "x";
+         }},
+        {"items",
+         true,
+         true,
+         nullptr,
+         [](HeavyHashes& h) {
+             h.sub.items += "x";
+         }},
+        {"pages",
+         true,
+         true,
+         nullptr,
+         [](HeavyHashes& h) {
+             h.sub.pages += "x";
+         }},
+        {"authority_scents",
+         true,
+         true,
+         nullptr,
+         [](HeavyHashes& h) {
+             h.sub.scents += "x";
+         }},
+        {"ecology",
+         true,
+         true,
+         nullptr,
+         [](HeavyHashes& h) {
+             h.sub.ecology += "x";
+         }},
+        {"plants",
+         true,
+         true,
+         nullptr,
+         [](HeavyHashes& h) {
+             h.sub.plants += "x";
+         }},
+        {"reference",
+         true,
+         true,
+         nullptr,
+         [](HeavyHashes& h) {
+             h.reference.reset();
          }},
     }};
     return kTable;
 }
 
-// Equality over AUTHORITATIVE SIMULATION STATE (terrain SDF + water sim +
-// entities + ground objects). Legacy loads restart at tick zero. With the persisted clock on,
-// ambient fields, durable regional scent and the clock must also agree at save and after
-// continuation. Without active regions, scent is a transient field that is not persisted,
-// so its hash remains excluded from round-trip and resim equality.
+// Legacy comparisons retain their historical output contract. Enabled comparisons require
+// both complete production captures and independent raw observations at the same boundary.
 inline bool AuthoritativeStateEqual(const HeavyHashes& a, const HeavyHashes& b) {
     if (a.active_regions || b.active_regions) {
         if (a.active_regions != b.active_regions || a.clock_bytes != b.clock_bytes ||
             a.ledger_bytes != b.ledger_bytes || a.sub.wind != b.sub.wind ||
             a.sub.weather != b.sub.weather || a.sub.aether != b.sub.aether ||
-            a.sub.aether_state != b.sub.aether_state || a.scent_hash != b.scent_hash) {
+            a.sub.aether_state != b.sub.aether_state || a.scent_hash != b.scent_hash ||
+            a.world_hash.empty() || a.world_hash != b.world_hash || !a.sub.active_regions ||
+            !b.sub.active_regions || a.sub.regions.empty() || a.sub.creatures.empty() ||
+            a.sub.items.empty() || a.sub.pages.empty() || a.sub.regions != b.sub.regions ||
+            a.sub.creatures != b.sub.creatures || a.sub.items != b.sub.items ||
+            a.sub.pages != b.sub.pages || a.sub.scents != b.sub.scents ||
+            a.sub.ecology != b.sub.ecology || a.sub.plants != b.sub.plants || !a.reference ||
+            !b.reference || *a.reference != *b.reference) {
             return false;
         }
     }
