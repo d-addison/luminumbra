@@ -459,6 +459,12 @@ public:
     void SetRootPath(const std::string& root_path) {
         m_rootPath = root_path;
     }
+    // Set before opening a world. Empty preserves storage beneath the runtime root.
+    // World saves and catalog APIs share the <root>/worlds/saves layout.
+    void SetSaveRootPath(const std::filesystem::path& save_root) {
+        m_saveRootPath = save_root;
+    }
+    std::filesystem::path GetSaveRootPath() const;
 
 private:
     luminumbra::simulation::SimBudgetTelemetry m_simBudgetTelemetry;
@@ -564,6 +570,7 @@ private:
     bool HasScentParticipants() const;
     bool HasPlantParticipants() const; //  opt-in gate
     std::string m_rootPath;
+    std::filesystem::path m_saveRootPath;
 };
 
 } // namespace Luminumbra::world

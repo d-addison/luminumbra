@@ -239,6 +239,13 @@ resident chunk data; far terrain uses region tiles and reduced SDF authority.
 The [SHIELD SDF contract](shield/sdf-contract.md) defines sign convention,
 sample ownership, shared borders, and LOD behavior.
 
+Legacy far snapshots track world/region authority publication separately from
+each captured chunk's voxel revision and provenance. A direct edit to a resident
+chunk's SDF followed by `mark_voxel_data_dirty()` advances the chunk revision and
+stales an earlier capture without advancing the publication counters. Shrinking
+or growing the graphics horizon changes derived mesh admission, preserving
+edited authority and rejection of stale captures.
+
 Generation and meshing may execute through `JobSystem`, which has high and
 normal priority lanes plus starvation protection. Completion timing is not
 publication timing: batches become visible in deterministic dispatch/tick order.
@@ -731,10 +738,31 @@ container versions are unchanged. See the full
 Playback, vsync, TAAU, tier-1 froxel volumetrics, cave AO, scent decals and aether
 material gain 1 are on. `--no-audio`, `--volumetric-quality 0`, `LUMIN_CAVE_AO=0`,
 `LUMIN_SCENT_DECAL=0`, explicit config values and renderer setters remain available.
-User overlays still contain only `user.*`: saved false vsync and saved volumes
-win over defaults without a settings version bump. Locations are
+User overlays contain only `user.*` plus `settings_schema_version` (currently 1,
+independent of world, save and protocol formats). Saved false vsync and saved
+volumes win over defaults. `user.graphics` owns presentation settings: a
+`base_preset`, its `preset_revision`, explicit `overrides` and optional detection
+metadata. A file without a schema version migrates to Ultra plus its explicit
+values, including `user.video.render_scale`. A malformed, unreadable or future
+version file is reported as Recovery: defaults apply for the session and saves
+are refused so the original file is never overwritten. Locations are
 `%APPDATA%/Luminumbra/settings.json`, `$XDG_CONFIG_HOME/luminumbra/settings.json`,
 or `$HOME/.config/luminumbra/settings.json`.
+
+Settings → Graphics offers Low, Medium, High and Ultra, with Custom displayed when
+overrides differ from the retained base. Reset overrides restores that base;
+selecting a preset clears overrides. Controls show session-only CLI/environment
+values and identify and disable those overridden controls. They never save those
+temporary values. Graphics edits apply together on the render thread, invalidate
+temporal history, and save after a 500 ms debounce. Save failures remain visible;
+Save graphics retries, and leaving settings or exiting flushes pending changes.
+
+Detect & Apply recollects the active GPU, logical CPU threads and available
+dedicated VRAM, displays the recommendation, and applies it with overrides cleared.
+`--detect-and-apply-graphics` performs the same explicit action at startup. Only
+a first launch automatically selects and saves a recommendation. Existing and
+migrated selections remain intact across GPU/driver changes. Recovery continues
+to protect malformed or unsupported overlays from writes, including explicit saves.
 
 Replication defaults to acknowledged deltas and radius-3 chunk AOI with a 16,000 mm
 chunk edge. Millimeter AOI is an alternative: disable chunk AOI before selecting it.

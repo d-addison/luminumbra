@@ -249,6 +249,7 @@ bool NetworkedSessionDriver::Begin(Luminumbra::world::GameSession* client_sessio
     m_impl->host_session = std::make_unique<Luminumbra::world::GameSession>();
     m_impl->host_session->SetJobSystem(&m_impl->host_job_system);
     m_impl->host_session->SetRootPath(config.root_path);
+    m_impl->host_session->SetSaveRootPath(client_session->GetSaveRootPath());
     auto systems_path = std::filesystem::path(config.root_path) / "data/common/systems.json";
     std::error_code systems_error;
     if (!std::filesystem::exists(systems_path, systems_error))

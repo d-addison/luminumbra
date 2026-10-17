@@ -126,6 +126,9 @@ std::string TerrainPresetContentHash(const nlohmann::json& preset);
 // meaningful when ok=true. Absent optional worldgen inputs bind fallback markers;
 // present but unreadable inputs are errors.
 TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path);
+// Saved presets may live outside the runtime tree; resolve their dependencies here.
+TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path,
+                                          const std::filesystem::path& data_root);
 
 // Explicit CLI preset override, validated against the runtime data root. Failure leaves
 // json_text unchanged; successful text is passed to GameSession::CreateWorld.

@@ -866,15 +866,28 @@ class AcceptanceMatrixTests(unittest.TestCase):
         rows = [row for row in matrix["rows"] if "ar.activation.050" in row.get("requirements", [])]
         self.assertEqual(len(rows), 1)
         row = rows[0]
-        self.assertEqual(row["status"], "covered")
-        self.assertNotIn("discrepancy", row)
+        self.assertEqual(row["status"], "partial")
+        self.assertEqual(row["source"], "docs/active-regions.md#activation-and-ordering")
         self.assertIn("outside -2^24 <= x,z < 2^24", row["statement"])
-        self.assertEqual(row["evidence"], [
+        self.assertIn("observational, never hashed or saved", row["statement"])
+        self.assertIn("ActiveRegionLedgerTest.ValidAnchorBoundaries", row["discrepancy"])
+        self.assertIn("[-2^24, 2^24)", row["discrepancy"])
+        self.assertIn("issue #250", row["discrepancy"])
+        self.assertEqual(row["evidence"][:3], [
             {"kind": "ctest", "ref": "ActiveRegionLedgerTest.ValidAnchorBoundaries"},
             {"kind": "ctest", "ref": "ActiveRegionLedgerTest.InvalidSchedulerInputsAreSkippedAndCounted"},
             {"kind": "ctest", "ref": "GameSessionHeadlessWorldTest.InvalidHostInputsNeverThrowAndAreCounted"},
         ])
+        self.assertEqual(len(row["evidence"]), 4)
+        planned = row["evidence"][3]
+        self.assertEqual(planned["kind"], "ctest")
+        self.assertEqual(planned["ref"], "ActiveRegionLedgerTest.SymmetricAnchorBoundaries")
+        self.assertIn("owner: ds", planned["planned"])
+        self.assertIn("accept -2^24", planned["planned"])
+        self.assertIn("reject +2^24", planned["planned"])
+        self.assertIn("walking anchors, ground-object edits and pins", planned["planned"])
         self.assertIn(MODULE._escape_cell(row["statement"]), MODULE.render_doc(matrix))
+        self.assertIn(MODULE._escape_cell("Discrepancy: " + row["discrepancy"]), MODULE.render_doc(matrix))
         watchdog = row_of(matrix, "em.client-hang")
         self.assertIn("HangWatchdog.RearmsAfterHeartbeatResumes", {e["ref"] for e in watchdog["evidence"]})
 

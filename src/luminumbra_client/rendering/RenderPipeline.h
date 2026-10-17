@@ -10,6 +10,7 @@
 #include "FarWorldReplay.h"
 #include "FrameBufferObject.h" // FrameBufferObject (extracted)
 #include "GBuffer.h"           // GBuffer (extracted)
+#include "GraphicsRuntimeConfig.h"
 #include "Mesh.h"
 #include "RenderContext.h"          // pass contract (make_ssao_context returns by value)
 #include "RenderFrameTypes.h"       // light/weather/cloud PODs (extracted)
@@ -422,6 +423,11 @@ public:
         m_benchmark_gpu_queries = queries;
     }
     void set_render_scale(float scale);
+    // Render-thread startup/live application. Session overrides are resolved by
+    // the host before entry. Unchanged values do not allocate or reset history.
+    bool apply_graphics(const luminumbra::core::ResolvedGraphics& resolved);
+    // Narrow const diagnostic of the values the passes actually receive.
+    GraphicsRuntimeConfig graphics_runtime_config() const;
 
     //   (ADDITIVE offscreen render-target redirect for the
     // create-world live preview diorama). When an offscreen target is set, the
@@ -1166,10 +1172,12 @@ private:
 
     //  render-scale seam. The scene is rendered at m_internal_* (= output x
     // m_render_scale) into the scaled G-buffer/lighting/SSAO intermediates, then upscaled
-    // to output (m_screen_*) for post/UI/backbuffer; the shadow atlas, TAAU history and
-    // the backbuffer stay at output resolution. user.render_scale configures the
-    // scale; at 1.0 m_internal_* == m_screen_* (lround(N*1.0f) == N).
+    // to output (m_screen_*) for post/UI/backbuffer. TAAU history stays at output
+    // resolution; shadow atlases use their independently resolved size. Resolved
+    // graphics configures the scale; at 1.0 m_internal_* == m_screen_*.
+    bool resize_graphics_targets(float scale, u32 shadow_resolution);
     float m_render_scale = 1.0f;
+    luminumbra::core::UiBlurQuality m_ui_blur = luminumbra::core::UiBlurQuality::Full;
     u32 m_internal_width = 0;
     u32 m_internal_height = 0;
     //  (Group K): one glfwGetTime snapshot per frame (set at render_frame
@@ -1717,9 +1725,9 @@ private:
         glm::vec3 max;
 
         AABB() = default;
-        AABB(const glm::vec3& min, const glm::vec3& max)
-            : min(min)
-            , max(max) {}
+        AABB(const glm::vec3& minimum, const glm::vec3& maximum)
+            : min(minimum)
+            , max(maximum) {}
     };
 
     struct ChunkCullEntry {
@@ -1735,8 +1743,8 @@ private:
         bool is_leaf = true;
 
         CullingNode() = default;
-        CullingNode(const AABB& bounds)
-            : bounds(bounds) {}
+        CullingNode(const AABB& node_bounds)
+            : bounds(node_bounds) {}
     };
 
     class HierarchicalCuller {

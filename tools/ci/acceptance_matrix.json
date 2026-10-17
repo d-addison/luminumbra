@@ -1133,10 +1133,11 @@
       "id": "contract.region-symmetric-boundary",
       "source": "docs/active-regions.md#activation-and-ordering",
       "statement": "Non-finite or out-of-range (outside -2^24 <= x,z < 2^24) walking anchors, ground-object edit positions and region pins are ignored and counted (observational, never hashed or saved).",
-      "status": "covered",
+      "status": "partial",
       "requirements": [
         "ar.activation.050"
       ],
+      "discrepancy": "The contract and ledger specify [-2^24, 2^24). ActiveRegionLedgerTest.ValidAnchorBoundaries covers the ledger predicate; exact endpoint coverage across walking anchors, ground-object edits and pins remains tracked in issue #250.",
       "evidence": [
         {
           "kind": "ctest",
@@ -1149,6 +1150,11 @@
         {
           "kind": "ctest",
           "ref": "GameSessionHeadlessWorldTest.InvalidHostInputsNeverThrowAndAreCounted"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedgerTest.SymmetricAnchorBoundaries",
+          "planned": "Cover both X and Z endpoints for walking anchors, ground-object edits and pins: accept -2^24 and the adjacent interior coordinates, and reject +2^24 and the adjacent exterior coordinates.; owner: ds"
         }
       ]
     },
@@ -2921,6 +2927,26 @@
           "kind": "doc",
           "ref": "docs/active-regions.md",
           "planned": "map discriminating regression and qualification evidence for the updated contract; owner: ac"
+        }
+      ]
+    },
+    {
+      "id": "graphics.horizon-authority",
+      "source": "docs/engine-guide.md#world-generation-and-streaming",
+      "statement": "Legacy graphics horizon changes preserve edited chunk authority and reject stale captures through the chunk voxel revision even when world/region publication revisions are unchanged. This row covers the owner-thread snapshot and admission regression, not native rendering qualification.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GraphicsRuntimePure.ShrinkingAndGrowingHorizonRetainsEditedAuthorityAndRejectsStaleCapture"
+        },
+        {
+          "kind": "ctest",
+          "ref": "StreamingHardening.FarLodSnapshotOwnsBytesAndRejectsStaleLiveData"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarLodWorker.AuthoritativeCaptureBuildsPersistsAndStales"
         }
       ]
     }
