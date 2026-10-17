@@ -4,6 +4,7 @@
 #include "entt/entt.hpp"
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <unordered_map>
 #include <vector>
 
@@ -73,18 +74,26 @@ public:
 
      * @param registry The main ECS registry.
 
-     * @param active_chunks A map of currently loaded chunks from the SHIELD system.
+     * @param active_chunks The admitted simulation chunks, or loaded chunks in legacy mode.
+     * @param deterministic_authority Selects ordered admission and resize processing.
 
      */
 
+    // Authority callers sort pending admissions; legacy callers retain historical
+    // streaming selection and resize cadence. The solver is shared.
     void update(entt::registry& registry,
-                const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>& active_chunks);
+                const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>& active_chunks,
+                bool deterministic_authority = false);
 
     /**
      * @brief Sets the ECS entity whose TransformComponent drives camera-relative water LOD.
      * @param camera_entity The active camera entity, or entt::null to clear it.
      */
     void set_camera_entity(EntityID camera_entity);
+
+    // Pure seed/coordinates/generation initialization. Does not step the solver,
+    // inspect renderer residency, or mutate selection state. Safe on generation workers.
+    void InitializeGeneratedWater(Chunk& chunk, std::span<const float> terrain = {}) const;
 
     // --- Public Queries ---
 
@@ -124,7 +133,10 @@ public:
     // TERRAFORM the water bed: adjust water_bed_mm by delta_mm (dig<0 / dam>0) for
     // cells within radius_m of world_pos + wake them; the fixed-point solver then drains/pools for
     // free. Deterministic (replicate as a command for host==peer). Returns cells edited.
-    int EditTerrainBed(const Vec3& world_pos, std::int32_t delta_mm, float radius_m);
+    int EditTerrainBed(const Vec3& world_pos,
+                       std::int32_t delta_mm,
+                       float radius_m,
+                       const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>* chunks = nullptr);
 
     //  FINITE HYDROLOGY: configure the conserved-water cycle. finite=true removes the perpetual
     // river source (water becomes finite/drainable); rain_mm_per_tick adds uniform rainfall (the
@@ -233,12 +245,18 @@ public:
     // derived window. At Medium it retains the historical flat rotation byte-for-byte. At High it
     // drives the fair-share portion of the deterministic activity-priority budget. It stays in
     // sorted CHUNK-INDEX space and is persisted as world_info.json waterSimCursor, so a loaded
-    // session resumes the same selection sequence from the same water state. Not itself hashed.
+    // session resumes the same selection sequence from the same water state. Live revision-4
+    // authority binds its raw u64 value once in water and world, outside per-chunk caches.
     [[nodiscard]] std::size_t GetSimWindowCursor() const {
         return m_water_sim_cursor;
     }
     void SetSimWindowCursor(std::size_t cursor) {
         m_water_sim_cursor = cursor;
+    }
+
+    // Discard derived selection data when replacing a world snapshot.
+    void ResetActivityCache() {
+        m_water_activity_cache.clear();
     }
 
     // --- Adaptive Water Grid System ---
@@ -261,6 +279,8 @@ public:
     void ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level);
 
 private:
+    std::vector<Chunk*> PrepareWaterGrids(bool deterministic_authority);
+
     // (water performance contract) The float render-mirror sim (dispatch_simulation_jobs /
     // simulate_chunk_water + its WaterChunkSnapshot/Output/Neighbors structs) was DEAD CODE — zero
     // callers; the live path is the integer  StepChunkWaterFixed. Removed.
@@ -353,14 +373,13 @@ private:
     std::size_t m_cells_stepped_last_update = 0;
     DbgWaterTimings m_dbg_water; // sub-phase telemetry (see dbg_water_timings())
 
+    // Historical resize window is used only by the legacy streaming path.
+    std::size_t m_water_resize_cursor = 0;
     std::size_t m_water_sim_cursor = 0;
     // Derived acceleration structure only: entries are reconstructed from persisted integer water
     // arrays on first use and refreshed after every selected simulation pass. Point lookups never
     // contribute container iteration order to scheduling.
     std::unordered_map<ChunkID, std::uint64_t> m_water_activity_cache;
-    //  implementation note: rotating cursor for the per-tick water-grid RESIZE budget (see
-    // MAX_WATER_RESIZES_PER_TICK). Same deterministic-window amortization as m_water_sim_cursor.
-    std::size_t m_water_resize_cursor = 0;
     EntityID m_camera_entity = entt::null;
 };
 

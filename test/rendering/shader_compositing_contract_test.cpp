@@ -10,7 +10,7 @@
 namespace {
 
 std::string ReadShader(const std::filesystem::path& relative_path) {
-    std::ifstream input(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) / relative_path);
+    const std::ifstream input(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) / relative_path);
     std::ostringstream buffer;
     buffer << input.rdbuf();
     return buffer.str();
@@ -483,6 +483,9 @@ TEST(FarWorldWaterContract, ProductionWaterUsesIndependentReadinessAndCombinedSu
     const auto fragment = ReadShader("res/shaders/g_buffer.frag");
     ExpectContains(fragment, "materialId == 200u ? 2 : 1");
     ExpectContains(fragment, "farLiveOwns(local, fs_in.MaterialID)");
+    ExpectContains(fragment, "if (materialId != 200u || cell.y == 0) return false;");
+    ExpectContains(fragment, "cell.y = 0;");
+    ExpectContains(fragment, "return farLiveCellReady(cell, readiness);");
     ExpectContains(fragment, "(u_farLiveCells[lo].w & readiness) != 0");
     ExpectContains(fragment, "case 200u: albedo = vec3(0.018, 0.065, 0.11);");
     const auto pipeline = ReadShader("src/luminumbra_client/rendering/RenderPipeline.cpp");

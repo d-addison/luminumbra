@@ -18,6 +18,18 @@ def rules(path):
 
 
 class GraphicsUiContract(unittest.TestCase):
+    def test_world_entry_refuses_every_failed_collision_horizon(self):
+        main = (ROOT / "src/luminumbra_client/main_client.cpp").read_text(encoding="utf-8")
+        calls = list(re.finditer(r"const bool horizon_ready = gameSession->EnsureWorldEntryReady\([^;]*;", main))
+        self.assertEqual(len(calls), 2)
+        for call in calls:
+            with self.subTest(call=call.start()):
+                before_camera = main[call.end():main.index("g_camera =", call.end())]
+                self.assertRegex(before_camera, r"if \(!horizon_ready\)\s*\{")
+                self.assertIn('refuse_world_entry("World collision horizon could not be prepared.", false)',
+                              before_camera)
+                self.assertRegex(before_camera, r"(?:return|break);")
+
     def test_every_authored_backdrop_has_off_and_half_rules(self):
         authored = 0
         for name in ("game_theme.rcss", "pages.rcss"):

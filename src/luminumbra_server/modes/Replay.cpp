@@ -293,18 +293,7 @@ int RunReplay(const ServerCliOptions& options) {
                 divergence_tick = executed;
                 expected_hash = recorded->world_hash;
                 actual_hash = live.world_hash;
-                if (live.terrain != recorded->terrain) {
-                    divergence_section = "terrain";
-                } else if (live.water != recorded->water) {
-                    divergence_section = "water";
-                } else if (live.entities != recorded->entities) {
-                    divergence_section = "entities";
-                } else {
-                    // Authoritative sub-hashes all match but the top-level hash
-                    // differs -> the divergence is in the mesh (derived render
-                    // artifact) or another non-authoritative component.
-                    divergence_section = "world_hash";
-                }
+                divergence_section = Luminumbra::CheckpointMismatchSection(live, *recorded);
                 break;
             }
             ++checkpoints_verified;

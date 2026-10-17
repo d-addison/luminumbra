@@ -4,8 +4,11 @@
 #include "world/WorldStreamingState.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <string>
+#include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace Luminumbra::Persistence {
@@ -76,10 +79,37 @@ const char* WorldHashSchema();
 const char* WorldHashAlgorithm();
 const char* EntitySnapshotArtifactSchema();
 
-std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& state);
+// Authority snapshots retain ownership explicitly. Legacy callers keep their byte protocol.
+std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& state,
+                                                     bool preserve_authority = false);
+struct ChunkAuthorityLoadPolicy {
+    bool terrain_edited = false;
+    bool migrate_legacy_water = false;
+    bool validate_record_authority = false;
+};
+// Owner-thread eviction snapshot. Omits worker-owned staging arrays, which are
+// discarded on admission; live simulation and render fields remain intact.
+std::string SerializeChunkAuthoritySnapshotJson(const Chunk& chunk, bool omit_water = false);
+// Decodes the same snapshot contract without boxing terrain samples as JSON values.
+// The const diagnostic counts samples decoded directly in the last successful load;
+// it is zero after failure or when a noncanonical input needs the general decoder.
+class WorldStreamingSnapshotDecoder {
+public:
+    bool load(const std::string& json_text,
+              WorldStreamingState& out_state,
+              std::vector<std::string>& errors,
+              ChunkAuthorityLoadPolicy authority = {});
+    [[nodiscard]] std::size_t direct_terrain_samples() const {
+        return m_directTerrainSamples;
+    }
+
+private:
+    std::size_t m_directTerrainSamples = 0;
+};
 bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
                                          WorldStreamingState& out_state,
-                                         std::vector<std::string>& errors);
+                                         std::vector<std::string>& errors,
+                                         ChunkAuthorityLoadPolicy authority = {});
 bool ValidateWorldStreamingChunkFormatJson(const std::string& chunk_json,
                                            std::vector<std::string>& errors);
 // Deterministic world hash over the canonical snapshot bytes (same
@@ -90,6 +120,32 @@ std::string ComputeWorldStreamingStateHash(const WorldStreamingState& state);
 // Caller filters incomplete live/parked inputs; durable edited records allow every lifecycle.
 // Lifecycle, collider and render bookkeeping are excluded. Legacy hashes and
 // persistence continue to use their existing projections.
+// Incremental version of the same canonical region_content_v2 JSON projection.
+// Append authoritative chunks in strictly increasing id order. Only one chunk's
+// JSON is materialized at a time, including when reading a large durable region.
+class RegionContentHasher {
+public:
+    RegionContentHasher();
+    void append(const Chunk& chunk);
+    [[nodiscard]] std::uint64_t value() const;
+    [[nodiscard]] std::uint64_t terrain_value() const {
+        return m_terrainHash;
+    }
+    [[nodiscard]] std::uint64_t water_value() const {
+        return m_waterHash;
+    }
+    [[nodiscard]] bool empty() const {
+        return !m_hasChunks;
+    }
+
+private:
+    void feed(std::string_view bytes);
+    std::uint64_t m_hash = 14695981039346656037ull;
+    std::uint64_t m_waterHash = 14695981039346656037ull;
+    std::uint64_t m_terrainHash = 14695981039346656037ull;
+    ChunkID m_lastId = 0;
+    bool m_hasChunks = false;
+};
 std::string ComputeRegionContentHash(const WorldStreamingState& state);
 
 //  determinism contract: per-system sub-hashes for desync localization.
@@ -139,6 +195,48 @@ struct WorldStreamingStateSubHashes {
     // LREC1 localization) when sim.aether_state is ON. Empty when the layer is
     // off/absent/all-zero (the default world: always empty, byte-identical).
     std::string aether_state;
+};
+
+// Production chunk oracle. Active regions use versioned authority projections;
+// Flag-off worlds use the historical snapshot primitive before scheduler composition.
+struct WorldAuthorityHashes {
+    std::string world;
+    WorldStreamingStateSubHashes sub;
+    std::uint64_t water_scheduler_cursor = 0;
+};
+
+// Revision-4 live authority: bind one completed-boundary raw cursor to both water
+// and authority. Constant work outside chunk caches; legacy primitives stay exact.
+[[nodiscard]] WorldAuthorityHashes BindWaterScheduler(WorldAuthorityHashes hashes,
+                                                      std::uint64_t raw_cursor);
+
+// Owner-thread cache of small per-chunk identities, never chunk payloads. Modular
+// sums permit constant-time replacement; ids are included in each contribution.
+// The cold durable scan and the incremental path use exactly this projection.
+class AuthorityHashCache {
+public:
+    void update(const std::shared_ptr<Chunk>& incoming);
+    // Owner-thread retirement only after the durable record no longer owns authority.
+    // A regenerable resident alone must never mask an older durable owner.
+    void erase(ChunkID id);
+    [[nodiscard]] WorldAuthorityHashes hashes() const;
+    // Number of chunk projections, for checking incremental capture work.
+    [[nodiscard]] std::uint64_t projection_count() const {
+        return m_projections;
+    }
+
+private:
+    struct Contribution {
+        std::weak_ptr<Chunk> owner;
+        u32 terrain_revision = 0;
+        std::uint64_t terrain = 0;
+        std::uint64_t water = 0;
+        Chunk::AuthorityStamp stamp;
+    };
+    std::unordered_map<ChunkID, Contribution> m_chunks;
+    std::uint64_t m_projections = 0;
+    std::uint64_t m_terrain = 0;
+    std::uint64_t m_water = 0;
 };
 
 // Computes the chunk-derived per-system sub-hashes (terrain/mesh/water). Pure

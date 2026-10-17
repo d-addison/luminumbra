@@ -12,6 +12,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <nlohmann/json.hpp>
 #include <nlohmann/json_fwd.hpp>
 #include <stop_token>
@@ -137,7 +138,9 @@ SavedWorld InspectSavedWorld(const fs::path& root,
                 return result;
             }
         }
-        if (json.contains("waterSimCursor") && (!json.at("waterSimCursor").is_number_unsigned())) {
+        if (json.contains("waterSimCursor") && (!json.at("waterSimCursor").is_number_unsigned() ||
+                                                json.at("waterSimCursor").get<std::uint64_t>() >
+                                                    std::numeric_limits<std::size_t>::max())) {
             result.error = "Corrupt world metadata: invalid water simulation cursor.";
             return result;
         }

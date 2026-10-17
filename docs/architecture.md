@@ -91,3 +91,5 @@ Third-party revisions are pinned in CMake dependency declarations or the vendor
 build. First-party code includes third-party APIs at narrow adapter seams. Optional
 integrations, such as Tracy or alternative rendering backends, default off and must
 not change the normal deterministic build.
+
+Current live authority revision 4 captures the global water scheduler cursor once at the completed owner-thread boundary and binds it to water and chunk authority outside the per-chunk cache, with explicit legacy projections retained for historical inspection.

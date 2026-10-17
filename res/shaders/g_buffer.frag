@@ -152,6 +152,19 @@ bool farCellLess(ivec3 a, ivec3 b) {
     if (a.y != b.y) return a.y < b.y;
     return a.z < b.z;
 }
+bool farLiveCellReady(ivec3 cell, int readiness) {
+    int lo = 0;
+    int hi = u_farLiveCellCount;
+    // 8192 cells need at most 14 lower-bound steps, including the final cell.
+    for (int stepIndex = 0; stepIndex < 14 && lo < hi; ++stepIndex) {
+        int middle = lo + (hi - lo) / 2;
+        if (farCellLess(u_farLiveCells[middle].xyz, cell)) lo = middle + 1;
+        else hi = middle;
+    }
+    return lo < u_farLiveCellCount && all(equal(u_farLiveCells[lo].xyz, cell)) &&
+           (u_farLiveCells[lo].w & readiness) != 0;
+}
+
 bool farLiveOwns(vec3 local, uint materialId) {
     // Canonical tile/span origins are integer multiples of 16 (remainder=0).
     // Adding zero preserves the stored float local; /16 is exact binary scaling.
@@ -161,17 +174,12 @@ bool farLiveOwns(vec3 local, uint materialId) {
     // CPU mirror: FarWorldChunkCell(FarWorldCellOrigin, local). Never use camera
     // relative round trips or view rotation to decide a chunk or child boundary.
     ivec3 cell = u_farOriginChunk + ivec3(floor((u_farOriginRemainder + local) / 16.0));
-    int lo = 0;
-    int hi = u_farLiveCellCount;
-    // 8192 cells need at most 14 lower-bound steps, including the final cell.
-    for (int stepIndex = 0; stepIndex < 14 && lo < hi; ++stepIndex) {
-        int middle = lo + (hi - lo) / 2;
-        if (farCellLess(u_farLiveCells[middle].xyz, cell)) lo = middle + 1;
-        else hi = middle;
-    }
     int readiness = materialId == 200u ? 2 : 1;
-    return lo < u_farLiveCellCount && all(equal(u_farLiveCells[lo].xyz, cell)) &&
-           (u_farLiveCells[lo].w & readiness) != 0;
+    if (farLiveCellReady(cell, readiness)) return true;
+    // A water surface can lie above or below its Y=0 column owner.
+    if (materialId != 200u || cell.y == 0) return false;
+    cell.y = 0;
+    return farLiveCellReady(cell, readiness);
 }
 
 // Input from the vertex shader, with "flat" interpolation for the integer ID

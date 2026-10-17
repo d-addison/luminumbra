@@ -1,5 +1,7 @@
 #include "Chunk.h"
 #include "../core/Log.h"
+#include <algorithm>
+#include <cmath>
 
 namespace Luminumbra {
 
@@ -7,6 +9,81 @@ Chunk::Chunk(const IVec3& coords)
     : m_coords(coords)
     , m_id(calculate_id(coords))
     , m_state(ChunkState::Unloaded) {}
+
+bool Chunk::has_complete_water_state() const {
+    const auto& chunk = *this;
+    const int resolution = chunk.current_water_resolution.load();
+    if (!chunk.has_water_sim.load() ||
+        (resolution != 4 && resolution != 8 && resolution != 16 && resolution != 32))
+        return false;
+    // Validated before multiplication: at most 1,024 cells / 2,048 flux entries.
+    const auto cells = static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
+    if (chunk.water_depth_mm.size() != cells || chunk.water_bed_mm.size() != cells ||
+        chunk.water_edge_flux.size() != 2u * cells || chunk.ticks_below_threshold < 0 ||
+        !std::isfinite(chunk.max_water_delta_last_tick))
+        return false;
+    if (chunk.water_level_data.size() != cells || chunk.water_flow_data.size() != cells ||
+        chunk.water_sim_terrain_height.size() != cells)
+        return false;
+    for (const auto* mirror :
+         {&chunk.water_level_data, &chunk.water_sim_terrain_height, &chunk.water_rest_level}) {
+        if ((!mirror->empty() && mirror->size() != cells) ||
+            !std::all_of(
+                mirror->begin(), mirror->end(), [](float value) { return std::isfinite(value); }))
+            return false;
+    }
+    if ((!chunk.water_flow_data.empty() && chunk.water_flow_data.size() != cells) ||
+        !std::all_of(
+            chunk.water_flow_data.begin(), chunk.water_flow_data.end(), [](const Vec2& value) {
+                return std::isfinite(value.x) && std::isfinite(value.y);
+            }))
+        return false;
+    return std::all_of(chunk.water_depth_mm.begin(),
+                       chunk.water_depth_mm.end(),
+                       [](std::int32_t depth) { return depth >= 0; });
+}
+
+bool Chunk::same_water_state(const Chunk& rhs) const {
+    const auto& lhs = *this;
+    // Legacy containers have no per-layer water revision or precedence. Only
+    // equal evolution-relevant state can represent duplicate copies of a column.
+    // Persisted mirrors gate queries/sources and resizing, so ambiguous mirrors
+    // also refuse migration. Render counters and source masks are accelerators.
+    return lhs.water_depth_mm == rhs.water_depth_mm && lhs.water_bed_mm == rhs.water_bed_mm &&
+           lhs.water_edge_flux == rhs.water_edge_flux &&
+           lhs.water_level_data == rhs.water_level_data &&
+           lhs.water_flow_data == rhs.water_flow_data &&
+           lhs.water_sim_terrain_height == rhs.water_sim_terrain_height &&
+           lhs.current_water_resolution.load() == rhs.current_water_resolution.load() &&
+           lhs.has_water_sim.load() == rhs.has_water_sim.load() &&
+           lhs.is_water_sleeping.load() == rhs.is_water_sleeping.load() &&
+           lhs.ticks_below_threshold == rhs.ticks_below_threshold &&
+           std::bit_cast<u32>(lhs.max_water_delta_last_tick) ==
+               std::bit_cast<u32>(rhs.max_water_delta_last_tick);
+}
+
+void Chunk::clear_water_data() {
+    water_level_data.clear();
+    water_flow_data.clear();
+    water_sim_terrain_height.clear();
+    water_rest_level.clear();
+    water_depth_mm.clear();
+    water_bed_mm.clear();
+    water_edge_flux.clear();
+    water_src_mm.clear();
+    water_mesh_vertices.clear();
+    water_mesh_indices.clear();
+    has_water_sim.store(false, std::memory_order_release);
+    water_mesh_generated.store(false, std::memory_order_release);
+    current_water_resolution.store(8, std::memory_order_release);
+    is_water_sleeping.store(false, std::memory_order_release);
+    max_water_delta_last_tick = 0.0f;
+    ticks_below_threshold = 0;
+    water_mesh_dirty_ticks = 0;
+    m_water_authority.store(false, std::memory_order_release);
+    m_hash_revision.fetch_add(1u, std::memory_order_acq_rel);
+    m_voxel_data_dirty.store(true, std::memory_order_release);
+}
 
 bool Chunk::is_valid_state_transition(ChunkState from, ChunkState to) {
     if (from == to) {

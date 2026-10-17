@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <nlohmann/json.hpp>
@@ -261,6 +262,160 @@ TEST(WorldSaveService, ClockMetadataValidationPrecedesEveryWrite) {
     EXPECT_EQ(read(), damaged);
 }
 
+TEST(WorldSaveService, LedgerClockMismatchRefusesEmptyAndPopulatedSavesBeforeWriting) {
+    using Luminumbra::world::ActiveRegionLedger;
+    using Luminumbra::world::WorldClock;
+    for (const bool populated : {false, true}) {
+        SCOPED_TRACE(populated);
+        TempSaveDir destination("ledger_clock");
+        const auto read = [](const std::filesystem::path& path) {
+            std::ifstream file(path, std::ios::binary);
+            std::ostringstream bytes;
+            bytes << file.rdbuf();
+            return bytes.str();
+        };
+        ActiveRegionLedger ledger({}, WorldClock(1));
+        if (populated)
+            ledger.mark_edited({0, 0}, WorldClock(1));
+        nlohmann::json metadata = {{"container_version", 2}};
+        WorldClock(1).write_metadata(metadata);
+        const auto original_ledger = ledger.encode();
+        // Exercise refusal before the no-file/empty-ledger shortcut as well.
+        for (const std::uint64_t tick : {0u, 2u}) {
+            WorldClock(tick).write_metadata(metadata);
+            EXPECT_FALSE(
+                WorldSaveService::save_active_regions(ledger, WorldClock(tick), destination.path));
+            EXPECT_FALSE(WorldSaveService::save_metadata_and_active_regions(
+                metadata.dump(), ledger, destination.path));
+            EXPECT_EQ(ledger.encode(), original_ledger);
+            EXPECT_FALSE(std::filesystem::exists(destination.path / "world_info.json"));
+            EXPECT_FALSE(
+                std::filesystem::exists(WorldSaveService::active_regions_path(destination.path)));
+        }
+        if (!populated) {
+            EXPECT_TRUE(
+                WorldSaveService::save_active_regions(ledger, WorldClock(1), destination.path));
+            EXPECT_FALSE(
+                std::filesystem::exists(WorldSaveService::active_regions_path(destination.path)));
+        }
+        // An anchor-only ledger must be installed even without region records.
+        ledger.set_local_anchor({8, 0, 8});
+        WorldClock(1).write_metadata(metadata);
+        ASSERT_TRUE(WorldSaveService::save_metadata_and_active_regions(
+            metadata.dump(), ledger, destination.path));
+        const auto saved_metadata = read(destination.path / "world_info.json");
+        const auto saved_ledger = read(WorldSaveService::active_regions_path(destination.path));
+        for (const std::uint64_t tick : {0u, 2u}) {
+            WorldClock(tick).write_metadata(metadata);
+            EXPECT_FALSE(WorldSaveService::save_metadata_and_active_regions(
+                metadata.dump(), ledger, destination.path));
+            EXPECT_FALSE(
+                WorldSaveService::save_active_regions(ledger, WorldClock(tick), destination.path));
+            EXPECT_EQ(read(destination.path / "world_info.json"), saved_metadata);
+            EXPECT_EQ(read(WorldSaveService::active_regions_path(destination.path)), saved_ledger);
+            EXPECT_EQ(ledger.encode(), saved_ledger);
+        }
+        // Recovery may acknowledge a newer clock without changing the canonical tick.
+        ledger.restore_clock(WorldClock(2));
+        WorldClock(2).write_metadata(metadata);
+        ASSERT_TRUE(WorldSaveService::save_metadata_and_active_regions(
+            metadata.dump(), ledger, destination.path));
+        EXPECT_EQ(ledger.tick(), 1u);
+        EXPECT_EQ(ledger.header_tick(), 2u);
+    }
+}
+
+TEST(WorldSaveService, WaterCursorValidationPrecedesMetadataAndLedgerReplacement) {
+    using Luminumbra::world::ActiveRegionLedger;
+    using Luminumbra::world::WorldClock;
+    TempSaveDir destination("water_cursor_metadata");
+    nlohmann::json metadata = {{"container_version", 2}, {"waterSimCursor", 7u}};
+    WorldClock(2).write_metadata(metadata);
+    ActiveRegionLedger ledger({}, WorldClock(2));
+    ledger.set_local_anchor({8, 0, 8});
+    ASSERT_TRUE(WorldSaveService::save_metadata_and_active_regions(
+        metadata.dump(), ledger, destination.path));
+    const auto read = [](const std::filesystem::path& path) {
+        std::ifstream file(path, std::ios::binary);
+        std::ostringstream bytes;
+        bytes << file.rdbuf();
+        return bytes.str();
+    };
+    const auto metadata_path = destination.path / "world_info.json";
+    const auto ledger_path = WorldSaveService::active_regions_path(destination.path);
+    const auto metadata_bytes = read(metadata_path);
+    const auto ledger_bytes = read(ledger_path);
+    WorldClock saved_clock;
+    bool saved_required = false;
+    std::size_t saved_cursor = 0;
+    ASSERT_TRUE(WorldSaveService::read_clock_metadata(
+        destination.path, saved_clock, saved_required, nullptr, nullptr, &saved_cursor));
+    EXPECT_EQ(saved_cursor, 7u);
+    ActiveRegionLedger rewound({}, WorldClock(1));
+    rewound.set_local_anchor({8, 0, 8});
+    const auto rewound_bytes = rewound.encode();
+    WorldClock(1).write_metadata(metadata);
+    for (const auto& invalid : {nlohmann::json(nullptr),
+                                nlohmann::json(-1),
+                                nlohmann::json(1.5),
+                                nlohmann::json(true),
+                                nlohmann::json("unknown"),
+                                nlohmann::json::parse("18446744073709551616"),
+                                nlohmann::json::object(),
+                                nlohmann::json::array()}) {
+        SCOPED_TRACE(invalid.dump());
+        metadata["waterSimCursor"] = invalid;
+        EXPECT_FALSE(WorldSaveService::save_metadata(metadata.dump(), destination.path));
+        EXPECT_EQ(read(metadata_path), metadata_bytes);
+        ASSERT_TRUE(WorldSaveService::write_file_durably(metadata_path, metadata_bytes));
+        // A rewind writes the ledger first, so validation must precede both writers.
+        auto candidate = rewound;
+        EXPECT_FALSE(WorldSaveService::save_metadata_and_active_regions(
+            metadata.dump(), candidate, destination.path));
+        EXPECT_EQ(read(metadata_path), metadata_bytes);
+        EXPECT_EQ(read(ledger_path), ledger_bytes);
+        EXPECT_EQ(candidate.encode(), rewound_bytes);
+        ASSERT_TRUE(WorldSaveService::write_file_durably(ledger_path, ledger_bytes));
+        auto damaged = metadata;
+        WorldClock(2).write_metadata(damaged);
+        ASSERT_TRUE(WorldSaveService::write_file_durably(metadata_path, damaged.dump()));
+        WorldClock clock;
+        bool required = false;
+        EXPECT_FALSE(WorldSaveService::read_clock_metadata(destination.path, clock, required));
+        EXPECT_FALSE(WorldSaveService::validate_save(destination.path));
+        ASSERT_TRUE(WorldSaveService::write_file_durably(metadata_path, metadata_bytes));
+    }
+    for (const std::string& partial : {std::string("{"), std::string("[]")}) {
+        EXPECT_FALSE(
+            WorldSaveService::save_metadata_and_active_regions(partial, rewound, destination.path));
+        EXPECT_EQ(read(metadata_path), metadata_bytes);
+        EXPECT_EQ(read(ledger_path), ledger_bytes);
+    }
+    for (const auto valid : {std::size_t{0}, std::numeric_limits<std::size_t>::max()}) {
+        metadata["waterSimCursor"] = valid;
+        metadata["unknownSchedulerNote"] = "preserved";
+        ASSERT_TRUE(WorldSaveService::save_metadata_and_active_regions(
+            metadata.dump(), rewound, destination.path));
+        std::size_t accepted = 9;
+        WorldClock accepted_clock;
+        bool accepted_required = false;
+        ASSERT_TRUE(WorldSaveService::read_clock_metadata(
+            destination.path, accepted_clock, accepted_required, nullptr, nullptr, &accepted));
+        EXPECT_EQ(accepted, valid);
+        EXPECT_EQ(nlohmann::json::parse(read(metadata_path)).at("unknownSchedulerNote"),
+                  "preserved");
+    }
+    metadata.erase("waterSimCursor");
+    ASSERT_TRUE(WorldSaveService::save_metadata_and_active_regions(
+        metadata.dump(), rewound, destination.path));
+    WorldClock clock;
+    bool required = false;
+    std::size_t cursor = 9;
+    ASSERT_TRUE(WorldSaveService::read_clock_metadata(
+        destination.path, clock, required, nullptr, nullptr, &cursor));
+    EXPECT_EQ(cursor, 0u);
+}
+
 TEST(WorldSaveService, LegacyMetadataWriterPreservesOpaqueBytesAndMissingDirectoryFailure) {
     TempSaveDir root("legacy_metadata");
     const auto missing = root.path / "missing";
@@ -497,4 +652,273 @@ TEST(WorldSaveServiceTest, PublicRegionDigestRejectsUnsupportedKeysBeforeDurable
                   expected_digest);
     }
     EXPECT_FALSE(std::filesystem::exists(missing_save));
+}
+
+TEST(WorldSaveService, SaveBatchRefusesCorruptInputsAndPoisonsFailedPayloads) {
+    const TempSaveDir root("save-batch");
+    EXPECT_FALSE(WorldSaveService::SaveBatch::begin({}));
+    auto batch = WorldSaveService::SaveBatch::begin(root.path);
+    if (!batch) {
+        ADD_FAILURE() << "Could not begin a fresh save operation";
+        return;
+    }
+    EXPECT_FALSE(batch->has_world_save());
+    EXPECT_FALSE(batch->has_chunk_snapshot());
+    WorldStreamingState state;
+    auto chunk = state.get_or_create_chunk({0, 0, 0});
+    chunk->heightmap_data = {12.0f};
+    chunk->mark_voxel_data_dirty();
+    ASSERT_TRUE(batch->save_world(state, nullptr, true));
+    auto existing = WorldSaveService::SaveBatch::begin(root.path);
+    if (!existing) {
+        ADD_FAILURE() << "Could not begin an existing save operation";
+        return;
+    }
+    EXPECT_TRUE(existing->has_chunk_snapshot());
+    EXPECT_TRUE(existing->has_world_save());
+    WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
+    EXPECT_FALSE(existing->save_world(state, nullptr, true));
+    EXPECT_FALSE(existing->save_metadata("{}"));
+    EXPECT_FALSE(std::filesystem::exists(root.path / "world_info.json"));
+    // A fresh operation validates the installed image and can write metadata.
+    auto retry = WorldSaveService::SaveBatch::begin(root.path);
+    if (!retry) {
+        ADD_FAILURE() << "Could not retry the save operation";
+        return;
+    }
+    EXPECT_TRUE(retry->save_metadata(R"({"container_version":2})"));
+    const auto region = WorldSaveService::region_file_path(root.path, 0, 0);
+    std::ofstream(region, std::ios::binary | std::ios::trunc) << "partial";
+    std::vector<std::string> errors;
+    EXPECT_FALSE(WorldSaveService::SaveBatch::begin(root.path, &errors));
+    ASSERT_FALSE(errors.empty());
+    EXPECT_NE(errors.front().find("corrupt region file length"), std::string::npos);
+}
+
+TEST(WorldSaveService, SaveBatchEmptyDirtySetAndMoveKeepMetadataOrdering) {
+    const TempSaveDir root("save-batch-empty");
+    auto batch = WorldSaveService::SaveBatch::begin(root.path);
+    if (!batch) {
+        ADD_FAILURE() << "Could not begin an empty save operation";
+        return;
+    }
+    WorldStreamingState state;
+    EXPECT_FALSE(batch->save_dirty_chunks(state, nullptr, true).saved);
+    auto moved = std::move(*batch);
+    EXPECT_FALSE(batch->save_metadata("{}"));
+    EXPECT_TRUE(moved.save_metadata("{}"));
+    EXPECT_TRUE(std::filesystem::exists(root.path / "world_info.json"));
+}
+
+TEST(WorldSaveService, AuthoritySavesRefuseRegenerableReplacementOfDurableOwners) {
+    for (const bool incremental : {false, true}) {
+        SCOPED_TRACE(incremental);
+        const TempSaveDir root("authority-replacement");
+        WorldStreamingState state;
+        auto owner = state.get_or_create_chunk({0, 0, 0});
+        owner->heightmap_data = {12.0f};
+        owner->mark_voxel_data_dirty();
+        WorldSaveService service;
+        ASSERT_TRUE(service.save_world(state, root.path, nullptr, true));
+        const auto path = WorldSaveService::region_file_path(root.path, 0, 0);
+        std::vector<WorldSaveService::ContainerRecord> before;
+        ASSERT_TRUE(WorldSaveService::read_container_records(path, before));
+        state.clear();
+        const auto generated = state.get_or_create_chunk({0, 0, 0});
+        generated->heightmap_data = {3.0f};
+        auto dirty = state.get_or_create_chunk({1, 0, 0});
+        dirty->heightmap_data = {4.0f};
+        dirty->mark_voxel_data_dirty();
+        EXPECT_FALSE(WorldSaveService::persist_chunk_authority(root.path, nullptr));
+        EXPECT_FALSE(WorldSaveService::persist_chunk_authority(root.path, generated));
+        EXPECT_FALSE(WorldSaveService::persist_chunk_authority({}, dirty));
+        if (incremental)
+            EXPECT_FALSE(service.save_dirty_chunks(state, root.path, nullptr, true).saved);
+        else
+            EXPECT_FALSE(service.save_world(state, root.path, nullptr, true));
+        EXPECT_TRUE(dirty->is_voxel_data_dirty());
+        std::vector<WorldSaveService::ContainerRecord> after;
+        ASSERT_TRUE(WorldSaveService::read_container_records(path, after));
+        ASSERT_EQ(after.size(), before.size());
+        ASSERT_EQ(after.size(), 1u);
+        EXPECT_EQ(after.front().payload, before.front().payload);
+        EXPECT_EQ(after.front().flags, before.front().flags);
+        EXPECT_TRUE(WorldSaveService::validate_save(root.path));
+    }
+}
+
+TEST(WorldSaveService, ExplicitOwnershipRejectsContradictoryContainerFlags) {
+    for (const bool owned : {false, true}) {
+        SCOPED_TRACE(owned);
+        const TempSaveDir root("authority-header");
+        WorldStreamingState state;
+        const auto chunk = state.get_or_create_chunk({0, 0, 0});
+        chunk->heightmap_data = {12.0f};
+        if (owned)
+            chunk->mark_voxel_data_dirty();
+        const WorldSaveService::ContainerRecord record{
+            chunk->get_id(),
+            0,
+            static_cast<std::uint8_t>(owned ? 0 : 1),
+            Luminumbra::Persistence::SerializeWorldStreamingStateSnapshotJson(state, true)};
+        const auto path = WorldSaveService::region_file_path(root.path, 0, 0);
+        ASSERT_TRUE(WorldSaveService::upsert_container_records(path, {record}));
+        WorldStreamingState loaded;
+        std::vector<std::string> errors;
+        EXPECT_FALSE(WorldSaveService{}.load_world(loaded, root.path, errors));
+        EXPECT_TRUE(loaded.empty());
+        EXPECT_FALSE(errors.empty());
+        EXPECT_FALSE(WorldSaveService::SaveBatch::begin(root.path));
+        EXPECT_FALSE(WorldSaveService::validate_save(root.path));
+    }
+}
+
+TEST(WorldSaveService, InterruptedInitialPayloadLeavesNoDirectoriesAndRetrySucceeds) {
+    // All callers share the actual durable producer, including flush/close,
+    // and refuse only after it finishes. No destination directories may leak.
+    for (const int kind : {0, 1, 2, 3}) {
+        SCOPED_TRACE(kind);
+        const TempSaveDir root("initial-payload-refusal");
+        auto chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
+        chunk->heightmap_data = {42.0f};
+        chunk->mark_voxel_data_dirty();
+        WorldStreamingState state;
+        if (kind == 2)
+            state.insert_chunk(chunk);
+        const auto destination = kind == 0   ? root.path / "nested" / "payload.bin"
+                                 : kind == 3 ? WorldSaveService::world_manifest_path(root.path)
+                                             : WorldSaveService::region_file_path(root.path, 0, 0);
+        const auto write = [&] {
+            if (kind == 0)
+                return WorldSaveService::write_file_durably(destination, "payload");
+            if (kind == 1)
+                return WorldSaveService::persist_chunk_authority(root.path, chunk);
+            return WorldSaveService{}.save_world(state, root.path);
+        };
+        WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
+        const bool saved = write();
+        WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
+        EXPECT_FALSE(saved);
+        EXPECT_TRUE(std::filesystem::is_empty(root.path));
+        EXPECT_TRUE(chunk->is_voxel_data_dirty());
+        ASSERT_TRUE(write());
+        EXPECT_TRUE(std::filesystem::is_regular_file(destination));
+        if (kind == 1) {
+            EXPECT_FALSE(chunk->is_voxel_data_dirty());
+        }
+    }
+}
+
+TEST(WorldSaveService, AuthorityPersistenceRejectsEmptyAndRegenerableOwnersWithoutWrites) {
+    const TempSaveDir root("authority-admission");
+    EXPECT_FALSE(WorldSaveService::persist_chunk_authority(root.path, nullptr));
+    auto chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
+    EXPECT_FALSE(WorldSaveService::persist_chunk_authority(root.path, chunk));
+    EXPECT_TRUE(std::filesystem::is_empty(root.path));
+    chunk->heightmap_data = {42.0f};
+    chunk->mark_voxel_data_dirty();
+    EXPECT_FALSE(WorldSaveService::persist_chunk_authority({}, chunk));
+    EXPECT_TRUE(chunk->is_voxel_data_dirty());
+    EXPECT_TRUE(std::filesystem::is_empty(root.path));
+    ASSERT_TRUE(WorldSaveService::persist_chunk_authority(root.path, chunk));
+    EXPECT_FALSE(chunk->is_voxel_data_dirty());
+}
+
+TEST(WorldSaveService, DurablePayloadRefusesNondirectoryParentsAndPreservesEmptyFiles) {
+    const TempSaveDir root("payload-path-refusal");
+    const auto blocker = root.path / "blocker";
+    std::ofstream(blocker, std::ios::binary) << "keep";
+    std::vector<std::string> errors;
+    EXPECT_FALSE(
+        WorldSaveService::write_file_durably(blocker / "child" / "file", "payload", &errors));
+    EXPECT_FALSE(errors.empty());
+    std::ifstream input(blocker, std::ios::binary);
+    EXPECT_EQ(std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>{}),
+              "keep");
+    input.close();
+    const auto destination = root.path / "nested" / "empty.bin";
+    ASSERT_TRUE(WorldSaveService::write_file_durably(destination, ""));
+    ASSERT_EQ(std::filesystem::file_size(destination), 0u);
+    WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
+    const bool saved = WorldSaveService::write_file_durably(destination, "replacement");
+    WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
+    EXPECT_FALSE(saved);
+    EXPECT_EQ(std::filesystem::file_size(destination), 0u);
+    EXPECT_EQ(std::distance(std::filesystem::directory_iterator(destination.parent_path()),
+                            std::filesystem::directory_iterator{}),
+              1);
+}
+
+TEST(WorldSaveService, WaterColumnMigrationRejectsInvalidInputsBeforeReplacingRecords) {
+    const TempSaveDir root("water-column-refusal");
+    const auto make_water = [](const IVec3& coords) {
+        auto chunk = std::make_shared<Chunk>(coords);
+        chunk->has_water_sim.store(true);
+        chunk->current_water_resolution.store(4);
+        chunk->water_level_data.assign(16, 0.8f);
+        chunk->water_flow_data.assign(16, Vec2(0.0f));
+        chunk->water_sim_terrain_height.assign(16, -0.2f);
+        chunk->water_depth_mm.assign(16, 1000);
+        chunk->water_bed_mm.assign(16, -200);
+        chunk->water_edge_flux.assign(32, 7);
+        chunk->mark_water_data_dirty();
+        return chunk;
+    };
+    const auto destination = make_water({10, 0, 10});
+    const auto source = make_water({10, 7, 10});
+    ASSERT_TRUE(WorldSaveService::persist_chunk_authority(root.path, source));
+    const auto path = WorldSaveService::region_file_path(root.path, 0, 0);
+    const auto bytes = [&path] {
+        std::ifstream input(path, std::ios::binary);
+        std::ostringstream contents;
+        contents << input.rdbuf();
+        return contents.str();
+    };
+    const auto before = bytes();
+    const auto refuse = [&](const std::filesystem::path& directory,
+                            const std::shared_ptr<Chunk>& target,
+                            const std::vector<std::shared_ptr<Chunk>>& originals) {
+        EXPECT_FALSE(
+            WorldSaveService::persist_water_column_migration(directory, target, originals));
+        EXPECT_EQ(bytes(), before);
+        EXPECT_TRUE(source->has_water_authority());
+        EXPECT_EQ(source->water_depth_mm, std::vector<std::int32_t>(16, 1000));
+    };
+    refuse({}, destination, {source});
+    refuse(root.path, nullptr, {source});
+    refuse(root.path, source, {source});
+    refuse(root.path, std::make_shared<Chunk>(IVec3(10, 0, 10)), {source});
+    const auto incomplete_target = make_water({10, 0, 10});
+    incomplete_target->water_edge_flux.pop_back();
+    refuse(root.path, incomplete_target, {source});
+    refuse(root.path, destination, {});
+    refuse(root.path, destination, {nullptr});
+    refuse(root.path, destination, {destination});
+    refuse(root.path, destination, {source, source});
+    refuse(root.path, destination, {make_water({11, 7, 10})});
+    refuse(root.path, destination, {make_water({10, 7, 11})});
+    const auto conflict = make_water({10, -3, 10});
+    ++conflict->water_edge_flux[0];
+    refuse(root.path, destination, {source, conflict});
+    conflict->water_edge_flux.clear();
+    refuse(root.path, destination, {source, conflict});
+    refuse(root.path,
+           destination,
+           std::vector<std::shared_ptr<Chunk>>(std::numeric_limits<std::uint16_t>::max(), source));
+    // Successful retirement writes an explicit empty-water record, including
+    // when the source had water-only ownership and its header must become zero.
+    ASSERT_TRUE(WorldSaveService::persist_water_column_migration(root.path, destination, {source}));
+    WorldStreamingState loaded;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(WorldSaveService{}.load_world(loaded, root.path, errors, {}, 8192, false, true));
+    const auto retired = loaded.find_chunk(source->get_id());
+    const auto canonical = loaded.find_chunk(destination->get_id());
+    ASSERT_NE(retired, nullptr);
+    ASSERT_NE(canonical, nullptr);
+    EXPECT_FALSE(retired->has_simulation_authority());
+    EXPECT_FALSE(retired->has_water_sim.load());
+    EXPECT_TRUE(retired->water_depth_mm.empty());
+    EXPECT_EQ(canonical->water_depth_mm, destination->water_depth_mm);
+    EXPECT_EQ(canonical->water_bed_mm, destination->water_bed_mm);
+    EXPECT_EQ(canonical->water_edge_flux, destination->water_edge_flux);
 }

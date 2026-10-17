@@ -3,31 +3,6 @@
   "description": "Requirement-to-evidence matrix for the expanded v0.3 contract. Rows are statements; evidence items are executable tests, scripts, native commands or documents. The planned field is descriptive text naming outstanding work and its owner; planned items are visible but never count as covered.",
   "rows": [
     {
-      "id": "iss.482",
-      "source": "issue #482",
-      "statement": "Synthetic v2 and v3 report-frame captures accept float rotation rounding at large camera positions with a bounded position-scaled translation allowance, and reject wrong matrices while preserving the small-position tolerance. Receipt evidence retains testcase attribution and requires successful execution metadata; software rendering evidence requires exact testcase identities.",
-      "status": "covered",
-      "evidence": [
-        {
-          "kind": "ctest",
-          "ref": "RenderContractPython"
-        },
-        {
-          "kind": "ctest",
-          "ref": "AmbientReceiptComparatorContract"
-        },
-        {
-          "kind": "ctest",
-          "ref": "QualificationCaptureContract"
-        },
-        {
-          "kind": "ctest",
-          "ref": "SoftwareGlEvidenceContract"
-        }
-      ],
-      "requirements": []
-    },
-    {
       "id": "render.frame-scan-schema",
       "source": "docs/render-benchmark.md#continuous-cpu-attribution-issue-387",
       "statement": "Frame scans declare luminumbra.frame_scan.v2 for nullable foliage.instances: integers include known zero, null means unknown, and instance_capacity is never a substitute count. The source wiring regression checks the shared writer used by direct captures and scene surveys, including the schema and known/unknown serialization branches; it does not execute the renderer. Registered rendering regressions check that ordinary and frozen generation rollover, delayed readback, empty and inactive builds, and resource recreation cannot publish a previous generation's count. Readback re-enabling retries a cleared snapshot, and disabled frozen rebuilds do not submit readbacks.",
@@ -1260,12 +1235,20 @@
     {
       "id": "contract.region-content",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "statement": "The frozen-content projection selects authoritative live, parked and durable edited records in that priority order, and excludes render/lifecycle normalization.",
+      "statement": "Frozen content merges complete resident authority over durable edited records, including complete authority being remeshed in Loading state. Generic incomplete live/parked inputs exclude Loading chunks; generated caches are filtered before merging. The versioned content projection excludes render/lifecycle normalization and is hashed incrementally without changing its canonical JSON bytes.",
       "status": "covered",
       "requirements": [
         "ar.file.090",
         "ar.file.091",
-        "ar.file.092"
+        "ar.file.092",
+        "ar.file.114",
+        "ar.file.115",
+        "ar.file.116",
+        "ar.file.117",
+        "ar.file.118",
+        "ar.file.167",
+        "ar.file.200",
+        "ar.file.201"
       ],
       "evidence": [
         {
@@ -1291,6 +1274,14 @@
         {
           "kind": "ctest",
           "ref": "GameSessionHeadlessWorldTest.RegionDigestIsIndependentOfResidencyAndSaveHistory"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FrozenDigestSurvivesDurableCameraEviction"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegions.IncrementalRegionDigestPreservesCanonicalJsonBytes"
         }
       ]
     },
@@ -1362,7 +1353,7 @@
     {
       "id": "contract.dw.scope.01",
       "source": "docs/distant-world.md#scope",
-      "statement": "Acceptance obligations: - The view radius is **16 km from the camera** and the world has **no fixed edge**: terrain streams procedurally in every direction. / The addressable extent is set by the packed chunk identity (`Chunk.h`, ±2^20 chunks of 16 m, about ±16,777 km on each horizontal axis; / coordinates are masked, never range checked). / World positions are 32-bit floats. / By owner decision (September 8, 2026) the contract requires qualification within 32 km of the world origin, where positions keep sub-centimetre precision; / the camera-relative (floating-origin) precision work that would qualify the full addressable extent is deliberately residual scope, not an open contract gap.",
+      "statement": "Acceptance obligations: - The view radius is **16 km from the camera** and the world has **no fixed edge**: terrain streams procedurally in every direction. / The addressable extent is set by the packed chunk identity (`Chunk.h`, \u00b12^20 chunks of 16 m, about \u00b116,777 km on each horizontal axis; / coordinates are masked, never range checked). / World positions are 32-bit floats. / By owner decision (September 8, 2026) the contract requires qualification within 32 km of the world origin, where positions keep sub-centimetre precision; / the camera-relative (floating-origin) precision work that would qualify the full addressable extent is deliberately residual scope, not an open contract gap.",
       "status": "planned",
       "requirements": [
         "dw.scope.001",
@@ -1464,7 +1455,7 @@
     {
       "id": "contract.dw.tiers.01",
       "source": "docs/distant-world.md#tier-ladder",
-      "statement": "Acceptance obligations: Far terrain is a ladder of five nested, world-origin-aligned volumetric tiers. / Each tier stores sparse 5×5×5 signed-distance bricks and is polygonised per tile with Marching Cubes; / a brick record exists where the field crosses zero. / Multi-tier residency and draw ownership are new machinery with an explicit arrival-state rule: the coarser tier is always resident and drawn beneath the finer one with a one-brick overlap; / a finer tile replaces the coarser surface inside its band only once it is built and uploaded, and until then the coarser surface stays visible, so a missing or late tile is never a hole; / ownership at the live edge is decided against the live chunks that are actually meshed and uploaded (including cave ceilings and floors), replacing today's camera-region skip;",
+      "statement": "Acceptance obligations: Far terrain is a ladder of five nested, world-origin-aligned volumetric tiers. / Each tier stores sparse 5\u00d75\u00d75 signed-distance bricks and is polygonised per tile with Marching Cubes; / a brick record exists where the field crosses zero. / Multi-tier residency and draw ownership are new machinery with an explicit arrival-state rule: the coarser tier is always resident and drawn beneath the finer one with a one-brick overlap; / a finer tile replaces the coarser surface inside its band only once it is built and uploaded, and until then the coarser surface stays visible, so a missing or late tile is never a hole; / ownership at the live edge is decided against the live chunks that are actually meshed and uploaded (including cave ceilings and floors), replacing today's camera-region skip;",
       "status": "planned",
       "requirements": [
         "dw.tiers.001",
@@ -1856,7 +1847,7 @@
     {
       "id": "contract.dw.policy.04",
       "source": "docs/distant-world.md#per-system-distant-policy",
-      "statement": "Acceptance obligations: no catch-up (this deliberately replaces the energy field's catch-up rule) | / | Existing energy layer (`aether_state.efs`) | Unchanged | Under active regions its window policy is replaced by region activation with the same no-catch-up rule; / its serializer never mutates state, the per-owner cadence and active-age metadata live in the ledger record (the EFS1 payload is unchanged), frozen pages hash as their stored bytes, and an all-zero layer writes no record while the snapshot index records the record as intentionally absent | Frozen pages kept | / | Scent and foraging | Spawn-anchored near facility; / the scent grid is historical state and is persisted with the page records so near consumers resume continuously | Not simulated at distance; / distant creatures do not use scent | — |",
+      "statement": "Acceptance obligations: no catch-up (this deliberately replaces the energy field's catch-up rule) | / | Existing energy layer (`aether_state.efs`) | Unchanged | Under active regions its window policy is replaced by region activation with the same no-catch-up rule; / its serializer never mutates state, the per-owner cadence and active-age metadata live in the ledger record (the EFS1 payload is unchanged), frozen pages hash as their stored bytes, and an all-zero layer writes no record while the snapshot index records the record as intentionally absent | Frozen pages kept | / | Scent and foraging | Spawn-anchored near facility; / the scent grid is historical state and is persisted with the page records so near consumers resume continuously | Not simulated at distance; / distant creatures do not use scent | \u2014 |",
       "status": "planned",
       "requirements": [
         "dw.policy.019",
@@ -1877,7 +1868,7 @@
     {
       "id": "contract.dw.policy.05",
       "source": "docs/distant-world.md#per-system-distant-policy",
-      "statement": "Acceptance obligations: | Ground objects | Settle, persist, despawn | Despawn deadlines are active-age counters, advancing only while the owning region is due | Nothing advances | / | Scheduled game events | Not implemented | Deferred to a later milestone | — | / Authority is server-only on the deterministic fixed tick with per-region seeded random streams; / clients render coarse results only, and delivering coarse state to remote clients is outside v0.3 (host-local evidence). / Distant water simulates only where its millimetre arrays are resident; / a simulation-only residency class is not part of this contract and would be a separate decision.",
+      "statement": "Acceptance obligations: | Ground objects | Settle, persist, despawn | Despawn deadlines are active-age counters, advancing only while the owning region is due | Nothing advances | / | Scheduled game events | Not implemented | Deferred to a later milestone | \u2014 | / Authority is server-only on the deterministic fixed tick with per-region seeded random streams; / clients render coarse results only, and delivering coarse state to remote clients is outside v0.3 (host-local evidence). / Distant water simulates only where its millimetre arrays are resident; / a simulation-only residency class is not part of this contract and would be a separate decision.",
       "status": "planned",
       "requirements": [
         "dw.policy.025",
@@ -2127,7 +2118,7 @@
     {
       "id": "contract.dw.perf.01",
       "source": "docs/distant-world.md#performance-measurement-contract",
-      "statement": "Acceptance obligations: Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840×1600 and 3440×1440. / Both profiles must meet the release floor on every workload; / the Performance profile exists to report the 120 fps target. / | Quality | 1.0 | p99 frame time at most 16.67 ms | p50 against 8.33 ms | / | Performance | 0.67 | p99 frame time at most 16.67 ms | p50 and p99 against 8.33 ms | / Workloads are settled fixed views (400 warm-up, 240 measured frames) and 60 s scripted traversals (surface flight, cave walk, edited-world tour) with pinned seeds, preset and content revisions, camera paths and speeds, expected simulation ticks and cold-cache state.",
+      "statement": "Acceptance obligations: Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840\u00d71600 and 3440\u00d71440. / Both profiles must meet the release floor on every workload; / the Performance profile exists to report the 120 fps target. / | Quality | 1.0 | p99 frame time at most 16.67 ms | p50 against 8.33 ms | / | Performance | 0.67 | p99 frame time at most 16.67 ms | p50 and p99 against 8.33 ms | / Workloads are settled fixed views (400 warm-up, 240 measured frames) and 60 s scripted traversals (surface flight, cave walk, edited-world tour) with pinned seeds, preset and content revisions, camera paths and speeds, expected simulation ticks and cold-cache state.",
       "status": "planned",
       "requirements": [
         "dw.perf.001",
@@ -2221,7 +2212,7 @@
     {
       "id": "contract.ar.scope.01",
       "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
-      "statement": "Acceptance obligations: The host ledger implements the persistent-active scheduling foundation in [distant-world.md](distant-world.md). / It is gated by the existing `sim.active_regions` switch, enabled in compiled and packaged defaults for v0.3.0. / Explicit false selects the legacy clock path. / Budgets remain unlimited in shipped configuration. / No distant system consumes this schedule yet; / field pages, creature records, water shares, diagnostics and measured budget activation remain separate work. / Indexed authority durability/rehydration, durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water continuation (issue #242), and strict distant policy and distant creatures (S8) are planned for v0.3.1. / Regional continuation performance/default enablement is planned for v0.4.0 as [issue #320](https://github.com/d-addison/luminumbra/issues/320). / These consumers are outside the shipping scheduler foundation. / The dedicated server autosaves every five minutes; / this does not implement those continuation consumers.",
+      "statement": "Acceptance obligations: The host ledger implements the persistent-active scheduling foundation in [distant-world.md](distant-world.md). / It is gated by the existing `sim.active_regions` switch, enabled in compiled and packaged defaults for v0.3.0. / Explicit false selects the legacy clock path. / Budgets remain unlimited in shipped configuration. / No distant system consumes this schedule yet; / field pages, creature records, water shares, diagnostics and measured budget activation remain separate work. / Durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water continuation (issue #242), and strict distant policy and distant creatures (S8) are planned for v0.3.1. / Regional continuation performance/default enablement is planned for v0.4.0 as [issue #320](https://github.com/d-addison/luminumbra/issues/320). / These consumers are outside the shipping scheduler foundation. / The dedicated server autosaves every five minutes; / this does not implement those continuation consumers.",
       "status": "planned",
       "requirements": [
         "ar.scope.001",
@@ -2289,11 +2280,12 @@
     {
       "id": "contract.ar.activation.03",
       "source": "docs/active-regions.md#activation-and-ordering",
-      "statement": "Acceptance obligations: The telemetry v2 `events` timer ends after the ordered event drain, before region scheduling. / The server's physics timer ends before anchor submission. / Scheduler measurement remains part of the later diagnostics work; / it does not change the existing telemetry stage identities or units. / recovery reverses those steps after the under-hold. / Queued work makes a host tick incomplete for snapshot purposes: metadata and world saves refuse until the next simulation tick consumes it.",
+      "statement": "Acceptance obligations: The telemetry v2 `events` timer ends after the ordered event drain, before region scheduling. / The server publishes workload anchors and prepares collision before advancing physics; / its physics timer includes that preparation. / Scheduler measurement remains part of the later diagnostics work; / it does not change the existing telemetry stage identities or units. / recovery reverses those steps after the under-hold. / Queued work makes a host tick incomplete for snapshot purposes: metadata and world saves refuse until the next simulation tick consumes it.",
       "status": "planned",
       "requirements": [
         "ar.activation.027",
         "ar.activation.028",
+        "ar.activation.065",
         "ar.activation.029",
         "ar.activation.030",
         "ar.activation.037",
@@ -2928,26 +2920,46 @@
     {
       "id": "contract.region-retention",
       "source": "docs/active-regions.md#activation-and-ordering",
-      "statement": "Idle retention must preserve scheduling history for pending work and all resident chunks, then release consumed work on the next tick.",
-      "status": "planned",
+      "statement": "Idle retention uses simulation anchors and current-tick work independently of camera, rendering, chunk lifecycle and streamed residency. Otherwise unowned records expire after 108,000 ticks without proximity; consumed work releases ownership on the next tick. Future consumers must supply simulation ownership.",
+      "status": "partial",
       "requirements": [
         "ar.activation.061",
         "ar.activation.062",
         "ar.activation.063",
-        "ar.activation.064"
+        "ar.activation.064",
+        "ar.activation.066",
+        "ar.activation.067",
+        "ar.activation.068",
+        "ar.activation.069"
       ],
       "evidence": [
         {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.IdleRetentionUsesWorkRegardlessOfStreamedResidency"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.EmptyReplicatedAnchorsNeverUseLocalSpawnFallback"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedgerTest.RetentionKeepsPinnedEditedPopulatedWaterAndOwnedRecords"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedgerTest.RetentionDropsOnlyIdleUnownedRecords"
+        },
+        {
           "kind": "doc",
           "ref": "docs/active-regions.md",
-          "planned": "map discriminating regression and qualification evidence for the updated contract; owner: ac"
+          "planned": "Extend the ownership probe when regional continuation consumers are installed; owner: ds"
         }
       ]
     },
     {
       "id": "contract.ledger-extensions",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "statement": "Version 2 extensions, legacy digest preservation and authoritative frozen-content selection require dedicated acceptance evidence review.",
+      "statement": "Version 2 extensions, legacy digest preservation and flag-off compatibility require dedicated acceptance evidence review.",
       "status": "planned",
       "requirements": [
         "ar.file.095",
@@ -2968,12 +2980,7 @@
         "ar.file.110",
         "ar.file.111",
         "ar.file.112",
-        "ar.file.113",
-        "ar.file.114",
-        "ar.file.115",
-        "ar.file.116",
-        "ar.file.117",
-        "ar.file.118"
+        "ar.file.113"
       ],
       "evidence": [
         {
@@ -2982,6 +2989,624 @@
           "planned": "map discriminating regression and qualification evidence for the updated contract; owner: ac"
         }
       ]
+    },
+    {
+      "id": "contract.authority-admission",
+      "source": "docs/active-regions.md#activation-and-ordering",
+      "statement": "Collision/authority admission precedes the world-clock commit. Failure retains the last completed tick; later scheduler failure retains its already simulated tick. Headless failure regressions are landed; integrated qualification remains pending.",
+      "status": "partial",
+      "requirements": [
+        "ar.activation.070",
+        "ar.activation.071",
+        "ar.activation.072"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.AdmissionFailureDoesNotCommitAnUnsimulatedTick"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.SchedulerFaultStopsTheFrameAndLeavesASavableConsistentSession"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Qualify failure and recovery through production client, server and replay entry points; owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.authority-durability",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "statement": "Render eviction persists complete authority, including acknowledged clean chunks with later water changes, before release. Restoration precedes generation; failure retains the owner and stops the session. Transient worlds use private storage. Headless regressions are landed; integrated storage qualification remains pending.",
+      "status": "partial",
+      "requirements": [
+        "ar.file.120",
+        "ar.file.121",
+        "ar.file.122",
+        "ar.file.123",
+        "ar.file.124",
+        "ar.file.206",
+        "ar.file.207",
+        "ar.file.208",
+        "ar.file.209",
+        "ar.file.210",
+        "ar.file.211",
+        "ar.file.212",
+        "ar.file.214",
+        "ar.file.215"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FrozenDigestSurvivesDurableCameraEviction"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.SuccessiveEditedRegionsReleaseChunksAndRestoreCompleteAuthority"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.EvictionPersistenceFailureRetainsAuthorityAndStopsSession"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Qualify eviction durability and transient-storage teardown through production client and replay lifecycles; owner: ds"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.AuthoritySnapshotsKeepTerrainWaterAndRegenerableOwnership"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.MalformedAuthorityOwnershipRefusesTheWholeSnapshot"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.UnchangedDurableOwnersEvictWithoutAnotherRegionWrite"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.DurableWaterBookkeepingChangesStillRequireAnEvictionWrite"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.EvictionSnapshotExcludesWorkerStagingAndPreservesAuthority"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FirstEnabledChunkSaveIncludesCleanResidentRegions"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.SaveBatchRefusesCorruptInputsAndPoisonsFailedPayloads"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.SaveBatchEmptyDirtySetAndMoveKeepMetadataOrdering"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.ActiveFullSnapshotPreservesCleanOwnershipAndRefusesFailedPayload"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.ExplicitFullSnapshotHandlesAnEmptyCleanWorld"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.FailedPlantPayloadDoesNotWritePendingEnergy"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.AuthoritySavesRefuseRegenerableReplacementOfDurableOwners"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.ExplicitOwnershipRejectsContradictoryContainerFlags"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RegionAuthorityWiringPython"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.ExpiredAuthorityOwnerCannotAcknowledgeReplacementOrEmptyInput"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.AuthorityPersistenceRejectsEmptyAndRegenerableOwnersWithoutWrites"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.InterruptedInitialPayloadLeavesNoDirectoriesAndRetrySucceeds"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.DurablePayloadRefusesNondirectoryParentsAndPreservesEmptyFiles"
+        }
+      ]
+    },
+    {
+      "id": "contract.water-authority",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "statement": "Fixed-tick water uses a camera-independent natural horizon with one Y=0 owner per column and separate terrain colliders, active-region edited authority and explicit sources. Generated water has sticky ownership independent of terrain provenance; admission restores durable state; initialization uses canonical inputs, including sampled authoritative heightmaps for pending edited water. Departures freeze and returns resume integer state. Sorted admission, initialization, resizing, restored cursors and activity-cache pruning have headless regressions; production qualification remains pending.",
+      "status": "partial",
+      "requirements": [
+        "ar.file.125",
+        "ar.file.126",
+        "ar.file.128",
+        "ar.file.129",
+        "ar.file.130",
+        "ar.file.131",
+        "ar.file.132",
+        "ar.file.133",
+        "ar.file.134",
+        "ar.file.135",
+        "ar.file.136",
+        "ar.file.137",
+        "ar.file.138",
+        "ar.file.139",
+        "ar.file.141",
+        "ar.file.142",
+        "ar.file.150",
+        "ar.file.177",
+        "ar.file.178",
+        "ar.file.179",
+        "ar.file.202"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.GeneratedWaterAuthoritySurvivesAcknowledgementAndEviction"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.WaterAuthorityMetadataRefusesUnknownAndPartialValues"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.BoundaryWaterAndFreezeIgnoreCameraFramesAndRestore"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.ExplicitWaterSourcesOwnChunksWithoutRendering"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.WaterInitializationUsesIdsAcrossDifferentInsertionOrders"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.ExplicitReloadRestoresWaterWindowAfterRewind"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FreshNaturalWaterAndFrozenRenderWaterShareInitialization"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldGenerationTest.WaterColumnsConnectAcrossDifferentGroundLayers"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldGenerationTest.AuthoritativeColumnOverridesWetRenderLayers"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WaterfallLiveWater.DammingUpstreamExtinguishesSiteDeterministically"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Qualify fixed-tick water across production rendering, save/load and replay workloads; owner: ds"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.WaterOnlyColumnOwnersRenderAndRemeshAboveDeepSeabeds"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.AuthorityRestoreBatchesReuseIndexesAndDiscardOrphanedJobs"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.IndexedAuthorityLookupRefusesPartialUnknownAndUnreadableData"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarWorldOwnership.TerrainAndWaterVersionsEligibilityAndMergedBitsAreIndependent"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.ColumnWaterSeamsRejectPartialBedsOnEitherSide"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarWorldWaterContract.ProductionWaterUsesIndependentReadinessAndCombinedSubmission"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WaterColumnDiagnostics.CarvabilityUsesBedTerrainAndRejectsMissingOrPartialData"
+        }
+      ]
+    },
+    {
+      "id": "contract.simulation-collision",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "statement": "Simulation admission installs colliders from complete canonical heightmaps in chunk-id order before client entry checks, creature and server-avatar physics. Rendering cannot allocate or invalidate active-mode terrain bodies; the registry removes bodies outside simulation ownership. Creature body horizons, submerged terrain and partial-heightmap regressions are landed; production qualification remains pending.",
+      "status": "partial",
+      "requirements": [
+        "ar.file.127",
+        "ar.file.143",
+        "ar.file.144",
+        "ar.file.145",
+        "ar.file.146",
+        "ar.file.147",
+        "ar.file.148",
+        "ar.file.149"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.StartupAdmissionReadiesCollisionBeforeTheFirstTick"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.SubmergedTerrainCollisionIgnoresRenderSchedule"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.SimulationCollisionPrecedesPhysicsAcrossRenderSchedules"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.PartialAuthorityHasNoSimulationCollisionSurface"
+        },
+        {
+          "kind": "ctest",
+          "ref": "HostSchedulerFault.FailedEntryReleasesRegistryBeforePhysics"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Qualify production creature and server-avatar contacts across render schedules; owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.server-workload-anchors",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "statement": "The zero-avatar server publishes spawn, moving and wet-walk workload anchors from the workload tick before physics and simulation. The runner smoke regression is landed; native workload qualification remains pending.",
+      "status": "partial",
+      "requirements": [
+        "ar.file.151",
+        "ar.file.152"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.ActiveRegionWaterSmokePublishesZeroAvatarWorkloadAnchor"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Qualify production workload captures with the revised anchor and physics timing scopes; owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.authority-legacy-compatibility",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "statement": "Disabling active regions preserves historical map-order water initialization, rotating resize selection, sleep bookkeeping, uncapped snapshot loads and legacy snapshot hashes. Source regressions preserve the disabled-path contract; integrated legacy qualification remains pending.",
+      "status": "partial",
+      "requirements": [
+        "ar.file.153",
+        "ar.file.154",
+        "ar.file.155",
+        "ar.file.170",
+        "ar.file.192"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.DisabledRegionsKeepLegacyStreamedCollisionHash"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.DisabledRegionsMatchDevelWorldHashAndExactSaveBytes"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.LegacySnapshotLoadsEveryEditedRecordBeyondActiveBudget"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Qualify disabled water ordering, resize rotation and sleep state against historical captures; owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.authority-residency",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "statement": "Simulation and rendering share the 8,192 unique resident-chunk bound. Streaming, rehydration and replacement keep bounded intermediate state; simulation displaces render caches through persist-before-release, protects required horizons and faults on capacity exhaustion. Headless regressions are landed; peak-memory qualification remains pending. Pristine terrain participants leave departed horizons; eviction preparation requires admission pressure. Source checks pass independently of native qualification.",
+      "status": "partial",
+      "requirements": [
+        "ar.file.156",
+        "ar.file.157",
+        "ar.file.158",
+        "ar.file.159",
+        "ar.file.160",
+        "ar.file.168",
+        "ar.file.169",
+        "ar.file.171",
+        "ar.file.176",
+        "ar.file.219",
+        "ar.file.220"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.SuccessiveEditedRegionsReleaseChunksAndRestoreCompleteAuthority"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.ExternalChunkAdoptionSharesResidentBudget"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.BoundedSnapshotLoadValidatesRecordsBeyondResidentPrefix"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.ActiveSnapshotKeepsOverflowDurableAndRestoresSavedContents"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.RequiredSpawnHorizonDisplacesFullRetainedSnapshot"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Measure resident and intermediate storage bounds and qualify simulation-only capacity exhaustion; owner: ds"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.PristineTerrainParticipantsForgetDistantHorizonsAcrossReload"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.EvictionPreparationRequiresAdmissionPressure"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RegionAuthorityWiringPython"
+        }
+      ]
+    },
+    {
+      "id": "contract.authority-reader-images",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "statement": "LMR1 readers retain opened images across atomic replacement and measure extents from those handles. Windows deletion sharing and POSIX inode retention support the common flush/close/replace contract. The independent-reader regression is landed; platform qualification remains pending.",
+      "status": "partial",
+      "requirements": [
+        "ar.file.161",
+        "ar.file.162",
+        "ar.file.163",
+        "ar.file.164",
+        "ar.file.165",
+        "ar.file.166"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.RegionReplacementPreservesIndependentReaderImage"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Qualify replacement and far-LOD concurrent readers on Windows and POSIX; owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.authority-save-destination",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "statement": "Changing snapshot destination transfers evicted authority before adoption. Metadata and full saves preflight destination-only edited ids, including siblings and whole regions, so another snapshot cannot alter live authority. Regressions are landed; production qualification remains pending.",
+      "status": "partial",
+      "requirements": [
+        "ar.file.172",
+        "ar.file.173",
+        "ar.file.174",
+        "ar.file.175"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.SnapshotDestinationCannotImportDivergentAuthority"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.SuccessiveEditedRegionsReleaseChunksAndRestoreCompleteAuthority"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Qualify metadata and full snapshot destination changes through production lifecycle entry points; owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.authority-render-promotion",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "statement": "Render promotion preserves authoritative SDF and heightmaps; edited heightfields without complete SDF stay coarse. Loaded and newly edited chunks follow the same rule. The coarse edited-authority regression is landed; production rendering qualification remains pending.",
+      "status": "partial",
+      "requirements": [
+        "ar.file.180",
+        "ar.file.181",
+        "ar.file.182"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.RenderingCannotRegenerateCoarseEditedAuthority"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Qualify loaded and newly edited coarse terrain across production LOD transitions; owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.authority-oracle",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "statement": "Active-region hashes cache per-chunk terrain and water contributions from durable authority, replace bounded resident contributions without durable reads, and compose a versioned aggregate identical to full recomputation. Camera and lifecycle data are excluded; legacy hashes are unchanged. Cold-scan, mutation, eviction, reload and copy regressions are landed; production qualification remains pending.",
+      "status": "partial",
+      "requirements": [
+        "ar.file.183",
+        "ar.file.184",
+        "ar.file.185",
+        "ar.file.186",
+        "ar.file.187",
+        "ar.file.190",
+        "ar.file.191",
+        "ar.file.193",
+        "ar.file.194",
+        "ar.file.195",
+        "ar.file.196",
+        "ar.file.203",
+        "ar.file.204",
+        "ar.file.205",
+        "ar.file.213"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.CachedAuthorityHashMatchesFullRecomputeWithoutDurableReads"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.ProductionChunkOracleIgnoresCameraAndDurableWaterResidency"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.RegionDigestIgnoresRenderAndResidencyState"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Qualify client lockstep captures, production availability digests and rejection of older active-region replay hashes under the new scopes; owner: ds"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.LoadPrimesAuthorityHashesBeforeSchedulerFaultInjection"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.AuthorityHashObservesEverySolverBookkeepingScalar"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.AuthorityHashProjectsOnlyChangedOwnersAndWaterRevisions"
+        }
+      ]
+    },
+    {
+      "id": "contract.authority-rule-identity",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "statement": "Negotiated configuration identity v4 includes authority-rules revision 4 without changing the Hello protocol version, refusing older rules before simulation. Identity regressions are landed; mixed-executable native qualification remains pending.",
+      "status": "partial",
+      "requirements": [
+        "ar.file.188",
+        "ar.file.189"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.PersistedSchedulerIdentityRefusesDifferentAdmissionAndReplayRules"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SystemConfigIdentityPython"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Qualify early refusal between production executables with different authority-rule identities; owner: ds"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SystemConfigIdentityPython"
+        }
+      ]
+    },
+    {
+      "id": "contract.authority-consumer-scope",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "statement": "Plants, creatures and living-world consumers use authoritative ECS participants on fixed ticks. Procedural vegetation remains derived rendering; ground-object and distant water continuation are outside this implementation. Acceptance evidence for these consumer boundaries remains planned.",
+      "status": "planned",
+      "requirements": [
+        "ar.file.140",
+        "ar.file.197",
+        "ar.file.198",
+        "ar.file.199"
+      ],
+      "evidence": [
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Review per-consumer ECS independence and implement distant water and ground-object continuation under their own declared projections; owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "graphics.horizon-authority",
+      "source": "docs/engine-guide.md#world-generation-and-streaming",
+      "statement": "Legacy graphics horizon changes preserve edited chunk authority and reject stale captures through the chunk voxel revision even when world/region publication revisions are unchanged. This row covers the owner-thread snapshot and admission regression, not native rendering qualification.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GraphicsRuntimePure.ShrinkingAndGrowingHorizonRetainsEditedAuthorityAndRejectsStaleCapture"
+        },
+        {
+          "kind": "ctest",
+          "ref": "StreamingHardening.FarLodSnapshotOwnsBytesAndRejectsStaleLiveData"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarLodWorker.AuthoritativeCaptureBuildsPersistsAndStales"
+        }
+      ]
+    },
+    {
+      "id": "iss.482",
+      "source": "issue #482",
+      "statement": "Synthetic v2 and v3 report-frame captures accept float rotation rounding at large camera positions with a bounded position-scaled translation allowance, and reject wrong matrices while preserving the small-position tolerance. Receipt evidence retains testcase attribution and requires successful execution metadata; software rendering evidence requires exact testcase identities.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "RenderContractPython"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AmbientReceiptComparatorContract"
+        },
+        {
+          "kind": "ctest",
+          "ref": "QualificationCaptureContract"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SoftwareGlEvidenceContract"
+        }
+      ],
+      "requirements": []
     },
     {
       "id": "station.architecture",
@@ -3392,22 +4017,46 @@
       ]
     },
     {
-      "id": "graphics.horizon-authority",
-      "source": "docs/engine-guide.md#world-generation-and-streaming",
-      "statement": "Legacy graphics horizon changes preserve edited chunk authority and reject stale captures through the chunk voxel revision even when world/region publication revisions are unchanged. This row covers the owner-thread snapshot and admission regression, not native rendering qualification.",
-      "status": "covered",
+      "id": "contract.water-column-migration",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "statement": "Nonzero-Y water authority migrates complete saved simulation state to Y=0 before replacement admission. Equal column copies coalesce; conflicting or incomplete authority is refused. Atomic region replacement precedes live publication and preserves terrain ownership. Registered regressions cover edits, sources, save/reload, insertion history and write failures; native execution remains pending.",
+      "status": "partial",
+      "requirements": [
+        "ar.file.216",
+        "ar.file.217",
+        "ar.file.218",
+        "ar.file.221",
+        "ar.file.222"
+      ],
       "evidence": [
         {
           "kind": "ctest",
-          "ref": "GraphicsRuntimePure.ShrinkingAndGrowingHorizonRetainsEditedAuthorityAndRejectsStaleCapture"
+          "ref": "GameSessionHeadlessWorldTest.NonzeroLegacyWaterContinuesCompleteStateAcrossSaveAndEdits"
         },
         {
           "kind": "ctest",
-          "ref": "StreamingHardening.FarLodSnapshotOwnsBytesAndRejectsStaleLiveData"
+          "ref": "GameSessionHeadlessWorldTest.EqualWaterColumnDuplicatesCoalesceIndependentOfHistory"
         },
         {
           "kind": "ctest",
-          "ref": "FarLodWorker.AuthoritativeCaptureBuildsPersistsAndStales"
+          "ref": "GameSessionHeadlessWorldTest.ConflictingOrIncompleteColumnWaterRefusesWithoutWrites"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.ColumnWaterReplacementFailurePreservesOwnersAndDurableImage"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.WaterColumnMigrationRejectsInvalidInputsBeforeReplacingRecords"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Qualify legacy column migration and refusals on supported native platforms; owner: ds"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.ColumnWaterMigrationAtCapacityRetiresOnlyWaterOnlySources"
         }
       ]
     },
@@ -3604,6 +4253,79 @@
         {
           "kind": "doc",
           "ref": "docs/engine-guide.md"
+        }
+      ]
+    },
+    {
+      "id": "contract.water-scheduler-authority",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "statement": "Current live authority revision 4 binds the raw scheduler cursor to water and world in both flag modes, preserving explicit revision-3 controls and frozen format layouts. Source and encoder checks do not qualify native continuation, transport or timing behavior.",
+      "status": "partial",
+      "requirements": [
+        "ar.file.scheduler.001",
+        "ar.file.scheduler.002"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "WaterDeterminism.RawSchedulerCursorDistinguishesEqualPresentAndDifferentFuture"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WaterDeterminism.BelowBudgetAndEmptyWorldRetainRawCursorUntilLaterActivation"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.NonzeroSchedulerRoundTripsBothLoadPathsAndChangesContinuation"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.SchedulerCursorBindsAllThreeServerCapturesAndSharedClientAuthority"
+        },
+        {
+          "kind": "ctest",
+          "ref": "LockstepSessionTest.RealCursorOnlyCaptureLocalizesWaterWithoutChangingCheckpointLayout"
+        },
+        {
+          "kind": "ctest",
+          "ref": "LockstepSessionTest.CurrentAndLegacyAuthorityProfilesRefuseBothDirectionsBeforeTicks"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ReplayStreamTest.CurrentAndLegacyProfilesParseFrozenLayoutsAndRefusePlaybackBothWays"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ReplayStreamTest.RealCursorOnlyCheckpointPreservesWaterLocalizationThroughReplay"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RegionAuthorityWiringPython"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SystemConfigIdentityPython"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.AuthorityCaptureRequiresACompletedWorldBoundary"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ReplicationAdmission.AuthorityProfilesRefuseBothDirectionsForEveryRoleBeforeForwarding"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RuntimeTcpHelloTest.CurrentAuthorityRefusesLegacyPeerBeforeAdmission"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RuntimeTcpHelloTest.LegacyAuthorityRefusesCurrentPeerBeforeAdmission"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/development/system-config-identity.md",
+          "planned": "Qualify current scheduler authority through native continuation and mixed-profile transport runs; owner: ds"
         }
       ]
     }

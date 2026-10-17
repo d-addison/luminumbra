@@ -4,14 +4,20 @@
 #include "../components/CoreComponents.h"
 #include "../core/Log.h"
 #include "../core/WaterComponents.h"
+#include "../world/ActiveRegionLedger.h"
 #include "../world/Chunk.h"
 #include "SHIELD_WorldSystem.h"
 #include "WeatherSystem.h" // Weather-driven per-cell rain.
+#include "luminumbra/core/Types.h"
 #include <algorithm>
+#include <atomic>
 #include <chrono> // (water-kernel perf) sub-phase wall timers — telemetry only, never hashed
 #include <cmath>
+#include <cstddef>
 #include <glm/gtx/compatibility.hpp>
+#include <limits>
 #include <numeric>
+#include <span>
 
 namespace Luminumbra::Systems {
 
@@ -24,7 +30,7 @@ constexpr int WATER_MESH_DIRTY_TICK_INTERVAL =
 // cell (resolution^2), so a moving camera that streams in many water chunks at once initialized
 // ALL of them in one tick -> a 300ms+ spike (research: time-slice the streaming integration). The
 // deferred chunks keep has_water_sim=false and init over the next ticks, draining the backlog. The
-// cap is a DETERMINISTIC count (same active-chunk iteration order on host==peer), and each chunk's
+// cap is a DETERMINISTIC count admitted by sorted chunk id, and each chunk's
 // init result is order-independent (pure worldgen samples), so run==replay / host==peer hold.
 constexpr int MAX_WATER_INITS_PER_TICK = 6;
 //  implementation note: cap how much active water is SIMULATED per tick. The sim dispatches
@@ -149,16 +155,24 @@ constexpr std::int32_t EVAP_MM = 1; // cull <1mm films on non-source cells (dete
 namespace {
 
 constexpr std::size_t DeriveSimWindowChunks(std::size_t cells_per_chunk) {
+    if (cells_per_chunk == 0)
+        return 1;
     return std::max<std::size_t>(std::size_t{1}, MAX_WATER_CELLS_PER_TICK / cells_per_chunk);
 }
+
+static_assert(DeriveSimWindowChunks(0) == 1);
+static_assert(DeriveSimWindowChunks(MAX_WATER_CELLS_PER_TICK + 1) == 1);
 
 std::uint64_t WaterActivityScore(const Chunk& chunk) {
     std::uint64_t activity = 0;
     const int resolution = chunk.current_water_resolution.load(std::memory_order_relaxed);
+    // Water detail levels bound all solver grids to 32*32 cells.
+    if (resolution <= 1 || resolution > 32)
+        return activity;
     const std::size_t cells =
         static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
-    if (resolution <= 1 || chunk.water_depth_mm.size() != cells ||
-        chunk.water_bed_mm.size() != cells || chunk.water_edge_flux.size() != 2 * cells) {
+    if (chunk.water_depth_mm.size() != cells || chunk.water_bed_mm.size() != cells ||
+        chunk.water_edge_flux.size() != 2 * cells) {
         return activity;
     }
 
@@ -199,11 +213,15 @@ int GetWaterResolution(const Chunk& chunk) {
 }
 
 size_t GetWaterCellCount(int resolution) {
-    return static_cast<size_t>(resolution) * static_cast<size_t>(resolution);
+    // Reject invalid metadata before multiplication or allocation.
+    return resolution > 1 && resolution <= 32
+               ? static_cast<size_t>(resolution) * static_cast<size_t>(resolution)
+               : 0;
 }
 
 bool HasCompleteWaterGrid(const Chunk& chunk, int resolution) {
-    if (!chunk.has_water_sim.load(std::memory_order_relaxed) || resolution <= 1) {
+    if (!chunk.has_water_sim.load(std::memory_order_relaxed) || resolution <= 1 ||
+        resolution > 32) {
         return false;
     }
 
@@ -256,7 +274,7 @@ void StepChunkWaterFixed(Chunk& c,
                          const WeatherSystem* weather_rain = nullptr,
                          std::int32_t weather_scale_mm = 0) {
     const int res = GetWaterResolution(c);
-    if (res <= 1)
+    if (res <= 1 || res > 32)
         return;
     const int n = res * res;
     if (static_cast<int>(c.water_depth_mm.size()) != n ||
@@ -442,8 +460,10 @@ void StepChunkWaterFixed(Chunk& c,
         for (int x = 0; x < res; ++x) {
             const int i = IDX(x, z);
             if (depth[i] < 0)
-                depth[i] = 0;       // defensive; the K-clamp should already guarantee this
-            if (bed[i] <= sea_mm) { // ocean is an infinite SINK: settle the surface at sea level
+                depth[i] = 0; // defensive; the K-clamp should already guarantee this
+            // A bed at sea level is a shoreline, capable of holding water.
+            // Only submerged beds belong to the infinite ocean sink.
+            if (bed[i] < sea_mm) {
                 const std::int32_t target =
                     sea_mm - bed[i]; // depth giving surface == sea level (>= 0)
                 if (depth[i] > target) {
@@ -578,34 +598,13 @@ Vec3 WaterSystem::get_camera_position(entt::registry& registry) const {
     return Vec3(0.0f);
 }
 
-void WaterSystem::update(entt::registry& registry,
-                         const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>& active_chunks) {
-    m_cells_stepped_last_update = 0;
-    // (water-kernel perf) sub-phase wall timers — RUNTIME TELEMETRY ONLY (never hashed),
-    // the _dbg_split pattern from SHIELD_WorldSystem::update.
-    m_dbg_water = {};
-    auto dbg_prev = std::chrono::steady_clock::now();
-    auto dbg_split = [&](double& slot) {
-        const auto now = std::chrono::steady_clock::now();
-        slot += std::chrono::duration<double, std::milli>(now - dbg_prev).count();
-        dbg_prev = now;
-    };
-
-    m_active_chunks = &active_chunks;
-    if (m_active_chunks->empty())
-        return;
-    // a session booted from a save pauses water for the whole Boot (see
-    // SetBootPaused) — no init, no wake/sleep mutation, no stepping. The loaded
-    // mid-flow water state stays bit-exact until live ticks resume it.
-    if (m_boot_paused)
-        return;
-
+std::vector<Chunk*> WaterSystem::PrepareWaterGrids(bool deterministic_authority) {
     // --- ADAPTIVE WATER GRID SYSTEM INTEGRATION ---
     // Apply adaptive resolution to active water chunks.  implementation note: each resolution
     // change re-samples GetTerrainHeightAt per cell (~30us, up to 1024 cells at Ultra), so a burst
     // of chunks crossing LOD boundaries at once when moving spiked this loop to ~180ms. Collect the
     // chunks that actually need a resize, then apply a DETERMINISTIC per-tick budget (sorted by
-    // chunk id, rotating window via m_water_resize_cursor) — identical amortization to the init/sim
+    // chunk id, taking the first pending ids) — bounded like the init/sim
     // caps. Deferred chunks keep their current resolution one more tick and resize over the next
     // few ticks; the selection is timing-independent (id-sorted), so run==replay / host==peer hold
     // (WaterDeterminism gate).
@@ -615,8 +614,8 @@ void WaterSystem::update(entt::registry& registry,
     // require has_water_sim==true, init candidates require it false) and the map is not mutated
     // between the old passes (a resize touches chunk contents, never map membership, and only
     // chunks already has_water_sim==true), so ONE pass fills both lists with the exact same
-    // membership AND the same capped first-N init selection (same map, same iteration order) —
-    // byte-identical, half the map-walk cost. The old per-chunk camera-distance math is dropped:
+    // membership; sorting before admission makes the first-N selection independent of storage
+    // order. The old per-chunk camera-distance math is dropped:
     // CalculateRequiredDetail deterministically ignores its distance/interaction arguments (the
     // hashed sim grid is camera-independent — see its body), so the computed detail level is
     // unchanged.
@@ -628,14 +627,14 @@ void WaterSystem::update(entt::registry& registry,
     std::vector<ResizeRequest> resize_requests;
     // (water-perf-200fps init follow-on) First-time water INIT is the dominant water-frame cost:
     // per cell it samples the worldgen (WaterLevelAt + GetTerrainHeightAt), time-sliced to
-    // MAX_WATER_INITS_PER_TICK chunks/tick. Collect THIS tick's chunks in the SAME
-    // selection order + cap as before, then SEED THEM IN PARALLEL. Each chunk writes ONLY its own
+    // MAX_WATER_INITS_PER_TICK chunks/tick. Select by sorted chunk id before
+    // seeding in parallel. Each chunk writes ONLY its own
     // arrays from read-only worldgen queries — already thread-safe (the streamer generates chunks
-    // on these same workers and terrain is byte-identical run-to-run) — so parallel seeding is
-    // BYTE-IDENTICAL to sequential. run==replay / host==peer hold (validated by --smoke).
+    // on these same workers and terrain is byte-identical run-to-run). Each seed therefore
+    // depends only on the chunk's canonical inputs, independently of worker execution order.
     std::vector<Chunk*> to_init;
     bool init_cap_reached = false;
-    for (const auto& active_chunk : active_chunks) {
+    for (const auto& active_chunk : *m_active_chunks) {
         const auto& chunk_ptr = active_chunk.second;
         if (!chunk_ptr) {
             continue;
@@ -649,34 +648,80 @@ void WaterSystem::update(entt::registry& registry,
                 static_cast<int>(required_detail) != chunk_ptr->current_water_resolution.load()) {
                 resize_requests.push_back({chunk_ptr.get(), chunk_ptr->get_id(), required_detail});
             }
+        } else if (deterministic_authority) {
+            to_init.push_back(chunk_ptr.get());
         } else if (!init_cap_reached) {
-            //  boot-settle mode: no init cap — seed the ENTIRE pending backlog this
-            // call so the boot settle can reach its fixed point (see SetBootSettleMode).
+            // Legacy streaming keeps the historical first-six map iteration order.
             if (!m_boot_settle_mode &&
                 static_cast<int>(to_init.size()) >= MAX_WATER_INITS_PER_TICK) {
-                init_cap_reached = true; // same cap as the old water_inits_this_tick counter
+                init_cap_reached = true;
             } else {
                 to_init.push_back(chunk_ptr.get());
             }
         }
     }
+    // Admission order must survive different render insertion orders and disk
+    // restoration. Cap the sorted ids, never unordered-map iteration order.
+    if (deterministic_authority)
+        std::sort(to_init.begin(), to_init.end(), [](const Chunk* lhs, const Chunk* rhs) {
+            return lhs->get_id() < rhs->get_id();
+        });
+    if (deterministic_authority && !m_boot_settle_mode && to_init.size() > MAX_WATER_INITS_PER_TICK)
+        to_init.resize(MAX_WATER_INITS_PER_TICK);
     if (!resize_requests.empty()) {
         std::sort(resize_requests.begin(),
                   resize_requests.end(),
                   [](const ResizeRequest& a, const ResizeRequest& b) { return a.id < b.id; });
         const std::size_t total = resize_requests.size();
-        m_water_resize_cursor %= total;
+        const std::size_t start = deterministic_authority ? 0 : m_water_resize_cursor % total;
         const std::size_t budget = std::min<std::size_t>(MAX_WATER_RESIZES_PER_TICK, total);
         for (std::size_t i = 0; i < budget; ++i) {
-            const ResizeRequest& req = resize_requests[(m_water_resize_cursor + i) % total];
+            const ResizeRequest& req = resize_requests[(start + i) % total];
             ResizeSimulationGrid(*req.chunk, req.level);
         }
-        m_water_resize_cursor = (m_water_resize_cursor + budget) % total;
+        if (!deterministic_authority)
+            m_water_resize_cursor = (start + budget) % total;
     }
 
-    auto source_view =
-        registry
-            .view<const Components::TransformComponent, const Components::WaterSourceComponent>();
+    return to_init;
+}
+
+void WaterSystem::update(entt::registry& registry,
+                         const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>& active_chunks,
+                         bool deterministic_authority) {
+    m_cells_stepped_last_update = 0;
+    // (water-kernel perf) sub-phase wall timers — RUNTIME TELEMETRY ONLY (never hashed),
+    // the _dbg_split pattern from SHIELD_WorldSystem::update.
+    m_dbg_water = {};
+    auto dbg_prev = std::chrono::steady_clock::now();
+    auto dbg_split = [&](double& slot) {
+        const auto now = std::chrono::steady_clock::now();
+        slot += std::chrono::duration<double, std::milli>(now - dbg_prev).count();
+        dbg_prev = now;
+    };
+
+    m_active_chunks = &active_chunks;
+    // Derived cache shares the bounded simulation set's lifetime. Restored
+    // chunks reconstruct activity from their persisted integer flux.
+    for (auto it = m_water_activity_cache.begin();
+         deterministic_authority && it != m_water_activity_cache.end();) {
+        if (!active_chunks.contains(it->first))
+            it = m_water_activity_cache.erase(it);
+        else
+            ++it;
+    }
+    if (m_active_chunks->empty())
+        return;
+    // a session booted from a save pauses water for the whole Boot (see
+    // SetBootPaused) — no init, no wake/sleep mutation, no stepping. The loaded
+    // mid-flow water state stays bit-exact until live ticks resume it.
+    if (m_boot_paused)
+        return;
+
+    auto to_init = PrepareWaterGrids(deterministic_authority);
+
+    auto source_view = registry.view<const Components::TransformComponent,
+                                     const Components::FlowingWaterSourceComponent>();
 
     // (worst-frame fix) The dominant moving cost is INIT re-sampling worldgen per cell
     // (~16ms/frame, profiled). The terrain half (GetTerrainHeightAt) is BYTE-IDENTICAL to the
@@ -714,7 +759,12 @@ void WaterSystem::update(entt::registry& registry,
             // seed_chunk_water falls back to the pure sampler, which yields the SAME bits the LOD0
             // heightmap would — so water_bed_mm is deterministic regardless of streaming timing,
             // while LOD0 chunks (the common settled case) keep the cheap heightmap-reuse fast path.
-            if (cp->current_lod.load(std::memory_order_acquire) != 0)
+            // Edited heightmaps are complete authority at every render LOD.
+            // Choosing the analytic fallback by render LOD would discard an
+            // edit on just the peer rendering a coarser chunk.
+            if ((!deterministic_authority ||
+                 cp->sdf_provenance() != ChunkSdfProvenance::LoadedOrEdited) &&
+                cp->current_lod.load(std::memory_order_acquire) != 0)
                 continue;
             if (static_cast<int>(cp->heightmap_data.size()) != hm_stride * hm_stride)
                 continue;
@@ -732,53 +782,21 @@ void WaterSystem::update(entt::registry& registry,
         }
     }
 
-    auto seed_chunk_water = [this](Chunk* cp, const std::vector<float>& terrain) {
-        //  init directly at the fixed camera-independent sim resolution (no later
-        // camera-driven resize -> the hashed grid is uniform + stable on every peer).
-        const int initial_resolution = m_sim_resolution;
-        cp->current_water_resolution.store(initial_resolution);
-        const size_t sim_size = static_cast<size_t>(initial_resolution) * initial_resolution;
-        cp->water_level_data.assign(sim_size, SEA_LEVEL);
-        cp->water_flow_data.assign(sim_size, Vec2(0.0f));
-        cp->water_sim_terrain_height.resize(sim_size);
-        cp->water_rest_level.assign(sim_size, SEA_LEVEL);
-        // fixed-point flowing-water state (HASHED). bed = terrain, depth = standing water
-        // above bed; lakes/sea start filled, dry land + perched channels fill from the sources.
-        cp->water_depth_mm.assign(sim_size, 0);
-        cp->water_bed_mm.assign(sim_size, 0);
-        cp->water_edge_flux.assign(2 * sim_size, 0);
-        const IVec3 c_coords = cp->get_coords();
-        const float cell_width_x = CHUNK_SIZE_X / (float)initial_resolution;
-        const float cell_width_z = CHUNK_SIZE_Z / (float)initial_resolution;
-        const bool have_terrain =
-            (terrain.size() == sim_size); // main thread pre-read the heightmap
-        for (int z = 0; z < initial_resolution; ++z) {
-            for (int x = 0; x < initial_resolution; ++x) {
-                float world_x = c_coords.x * CHUNK_SIZE_X + (x + 0.5f) * cell_width_x;
-                float world_z = c_coords.z * CHUNK_SIZE_Z + (z + 0.5f) * cell_width_z;
-                const int cell = z * initial_resolution + x;
-                // Seed the resting surface from worldgen: sea level, raised to the local lake
-                // surface inside basins so perched lakes start (and stay) filled.
-                const float rest = m_shield_system->WaterLevelAt(world_x, world_z);
-                // Reuse the mesher's heightmap (byte-identical) when the main thread provided it;
-                // else sample GetTerrainHeightAt directly — same bits, so water_bed_mm is identical
-                // either way.
-                const float terrain_h = have_terrain
-                                            ? terrain[cell]
-                                            : m_shield_system->GetTerrainHeightAt(world_x, world_z);
-                cp->water_level_data[cell] = rest;
-                cp->water_rest_level[cell] = rest;
-                cp->water_sim_terrain_height[cell] = terrain_h;
-                cp->water_bed_mm[cell] =
-                    static_cast<std::int32_t>(std::lround(terrain_h * MM_PER_M));
-                const long depth0 = std::lround(static_cast<double>(rest - terrain_h) * MM_PER_M);
-                cp->water_depth_mm[cell] = static_cast<std::int32_t>(depth0 > 0 ? depth0 : 0);
-            }
+    auto seed_chunk_water = [this, deterministic_authority](Chunk* cp,
+                                                            const std::vector<float>& terrain) {
+        const bool sleeping = cp->is_water_sleeping.load();
+        const auto threshold_ticks = cp->ticks_below_threshold;
+        const auto last_delta = cp->max_water_delta_last_tick;
+        InitializeGeneratedWater(*cp, terrain);
+        if (deterministic_authority)
+            cp->mark_water_data_dirty();
+        if (!deterministic_authority) {
+            // Legacy initialization never reset existing sleep bookkeeping.
+            cp->is_water_sleeping.store(sleeping);
+            cp->ticks_below_threshold = threshold_ticks;
+            cp->max_water_delta_last_tick = last_delta;
         }
-        cp->has_water_sim.store(true);
         m_water_activity_cache.erase(cp->get_id());
-        cp->water_mesh_generated.store(false);
-        cp->water_mesh_dirty_ticks = 0;
     };
     // (worst-frame fix) Seed INLINE on the main thread — NOT dispatch_batch + wait. With the
     // terrain half now a free heightmap read, the per-chunk compute is cheap (WaterLevelAt +
@@ -814,9 +832,17 @@ void WaterSystem::update(entt::registry& registry,
 
     for (auto entity : source_view) {
         auto& transform = source_view.get<const Components::TransformComponent>(entity);
-        auto& source = source_view.get<const Components::WaterSourceComponent>(entity);
+        auto& source = source_view.get<const Components::FlowingWaterSourceComponent>(entity);
         ++m_debug_sources_seen; // water-source diagnostics
+        if (deterministic_authority &&
+            (!world::ActiveRegionLedger::valid_anchor(transform.position) ||
+             transform.position.y < static_cast<float>(Chunk::kPackedMinY) * CHUNK_SIZE_Y ||
+             transform.position.y >=
+                 (static_cast<float>(Chunk::kPackedMaxY) + 1.0f) * CHUNK_SIZE_Y))
+            continue;
         IVec3 chunk_coords = SHIELD_WorldSystem::world_to_chunk_coords(transform.position);
+        if (deterministic_authority)
+            chunk_coords.y = 0;
         auto it = m_active_chunks->find(Chunk::calculate_id(chunk_coords));
         // water-source FINDING (empirical): water grids live on the 2.5D COLUMN's y=0
         // chunk, but a spring standing on sub-sea-level terrain (river beds carve
@@ -861,6 +887,8 @@ void WaterSystem::update(entt::registry& registry,
                                            chunk.water_depth_mm[index]) /
                         1000.0f;
                 }
+                if (deterministic_authority || chunk.has_water_authority())
+                    chunk.mark_water_data_dirty();
                 // WAKE UP: An internal event occurred in this chunk.
                 chunk.is_water_sleeping.store(false, std::memory_order_relaxed);
                 m_water_activity_cache.erase(chunk.get_id());
@@ -926,6 +954,8 @@ void WaterSystem::update(entt::registry& registry,
         }
     }
     for (Chunk* chunk : chunks_to_wake) {
+        if (deterministic_authority || chunk->has_water_authority())
+            chunk->mark_water_data_dirty();
         chunk->is_water_sleeping.store(false, std::memory_order_relaxed);
     }
 
@@ -1089,10 +1119,11 @@ void WaterSystem::update(entt::registry& registry,
         0; // CONTINUITY proof: seam cell-pairs with water on BOTH sides of the border
     for (Chunk* A : chunks_to_sim) {
         const int res = GetWaterResolution(*A);
-        if (res <= 1)
+        if (res <= 1 || res > 32)
             continue;
         const int nA = res * res;
         if (static_cast<int>(A->water_depth_mm.size()) != nA ||
+            static_cast<int>(A->water_bed_mm.size()) != nA ||
             static_cast<int>(A->water_edge_flux.size()) != 2 * nA)
             continue;
         const IVec3 ac = A->get_coords();
@@ -1105,7 +1136,8 @@ void WaterSystem::update(entt::registry& registry,
         auto step_face = [&](Chunk* B, bool isX) {
             if (GetWaterResolution(*B) != res)
                 return; // uniform-res only -> cells align cell-for-cell
-            if (static_cast<int>(B->water_depth_mm.size()) != nA)
+            if (static_cast<int>(B->water_depth_mm.size()) != nA ||
+                static_cast<int>(B->water_bed_mm.size()) != nA)
                 return;
             const bool have_mirror_B = (static_cast<int>(B->water_level_data.size()) == nA);
             for (int t = 0; t < res; ++t) {
@@ -1176,6 +1208,8 @@ void WaterSystem::update(entt::registry& registry,
     const float SLEEP_THRESHOLD = 0.0001f; // The max water level change to be considered "calm"
 
     for (Chunk* chunk : chunks_to_sim) {
+        if (deterministic_authority || chunk->has_water_authority())
+            chunk->mark_water_data_dirty();
         if (chunk->max_water_delta_last_tick < SLEEP_THRESHOLD) {
             chunk->ticks_below_threshold++;
             if (chunk->ticks_below_threshold >= TICKS_TO_SLEEP) {
@@ -1192,6 +1226,63 @@ void WaterSystem::update(entt::registry& registry,
         }
     }
     dbg_split(m_dbg_water.bookkeeping);
+}
+
+void WaterSystem::InitializeGeneratedWater(Chunk& chunk, std::span<const float> terrain) const {
+    auto* cp = &chunk;
+    //  init directly at the fixed camera-independent sim resolution (no later
+    // camera-driven resize -> the hashed grid is uniform + stable on every peer).
+    if (chunk.has_water_authority())
+        chunk.mark_water_data_dirty();
+    const int initial_resolution = m_sim_resolution;
+    cp->current_water_resolution.store(initial_resolution);
+    // The private resolution is a validated divisor of the 16x16 chunk:
+    // at most 256 cells and 512 edge-flux entries, with no size overflow.
+    const auto side = static_cast<std::size_t>(initial_resolution);
+    const std::size_t sim_size = side * side;
+    cp->water_level_data.assign(sim_size, SEA_LEVEL);
+    cp->water_flow_data.assign(sim_size, Vec2(0.0f));
+    cp->water_sim_terrain_height.resize(sim_size);
+    cp->water_rest_level.assign(sim_size, SEA_LEVEL);
+    // fixed-point flowing-water state (HASHED). bed = terrain, depth = standing water
+    // above bed; lakes/sea start filled, dry land + perched channels fill from the sources.
+    cp->water_depth_mm.assign(sim_size, 0);
+    cp->water_bed_mm.assign(sim_size, 0);
+    cp->water_edge_flux.assign(2 * sim_size, 0);
+    const IVec3 c_coords = cp->get_coords();
+    const float cell_width_x = CHUNK_SIZE_X / static_cast<float>(initial_resolution);
+    const float cell_width_z = CHUNK_SIZE_Z / static_cast<float>(initial_resolution);
+    const bool have_terrain = (terrain.size() == sim_size); // main thread pre-read the heightmap
+    for (int z = 0; z < initial_resolution; ++z) {
+        for (int x = 0; x < initial_resolution; ++x) {
+            const float world_x = static_cast<float>(c_coords.x * CHUNK_SIZE_X) +
+                                  (static_cast<float>(x) + 0.5f) * cell_width_x;
+            const float world_z = static_cast<float>(c_coords.z * CHUNK_SIZE_Z) +
+                                  (static_cast<float>(z) + 0.5f) * cell_width_z;
+            const int cell = z * initial_resolution + x;
+            // Seed the resting surface from worldgen: sea level, raised to the local lake
+            // surface inside basins so perched lakes start (and stay) filled.
+            const float rest = m_shield_system->WaterLevelAt(world_x, world_z);
+            // Reuse the mesher's heightmap (byte-identical) when the main thread provided it;
+            // else sample GetTerrainHeightAt directly — same bits, so water_bed_mm is identical
+            // either way.
+            const float terrain_h = have_terrain
+                                        ? terrain[cell]
+                                        : m_shield_system->GetTerrainHeightAt(world_x, world_z);
+            cp->water_level_data[cell] = rest;
+            cp->water_rest_level[cell] = rest;
+            cp->water_sim_terrain_height[cell] = terrain_h;
+            cp->water_bed_mm[cell] = static_cast<std::int32_t>(std::lround(terrain_h * MM_PER_M));
+            const long depth0 = std::lround(static_cast<double>(rest - terrain_h) * MM_PER_M);
+            cp->water_depth_mm[cell] = static_cast<std::int32_t>(depth0 > 0 ? depth0 : 0);
+        }
+    }
+    cp->is_water_sleeping.store(false);
+    cp->max_water_delta_last_tick = 0.0f;
+    cp->ticks_below_threshold = 0;
+    cp->has_water_sim.store(true);
+    cp->water_mesh_generated.store(false);
+    cp->water_mesh_dirty_ticks = 0;
 }
 
 f32 WaterSystem::get_water_level_at(float world_x, float world_z) const {
@@ -1291,7 +1382,8 @@ void WaterSystem::apply_displacement(const Vec3& world_pos, f32 volume) {
     const int radius = 2;
     const float total_cells = (2 * radius + 1) * (2 * radius + 1);
 
-    IVec3 chunk_coords = SHIELD_WorldSystem::world_to_chunk_coords(world_pos);
+    IVec3 chunk_coords =
+        SHIELD_WorldSystem::world_to_chunk_coords({world_pos.x, 0.0f, world_pos.z});
     auto source_it = m_active_chunks->find(Chunk::calculate_id(chunk_coords));
     if (source_it == m_active_chunks->end() || !source_it->second) {
         return;
@@ -1365,6 +1457,8 @@ void WaterSystem::apply_displacement(const Vec3& world_pos, f32 volume) {
                         target_chunk.water_level_data[index] =
                             static_cast<float>(target_chunk.water_bed_mm[index] + d) / 1000.0f;
                     }
+                    if (target_chunk.has_water_authority())
+                        target_chunk.mark_water_data_dirty();
                     // WAKE UP: An external event disturbed this chunk.
                     target_chunk.is_water_sleeping.store(false, std::memory_order_relaxed);
                     m_water_activity_cache.erase(target_chunk.get_id());
@@ -1381,18 +1475,24 @@ void WaterSystem::apply_displacement(const Vec3& world_pos, f32 volume) {
 // drain path. The edit is deterministic (integer delta, applied in the sim tick; replicate the edit
 // as a command for host==peer). The VOXEL/SDF terrain + its render mesh are a separate concern;
 // this couples WATER to a bed change. Returns the number of cells edited.
-int WaterSystem::EditTerrainBed(const Vec3& world_pos, std::int32_t delta_mm, float radius_m) {
-    if (!m_active_chunks || delta_mm == 0)
+int WaterSystem::EditTerrainBed(const Vec3& world_pos,
+                                std::int32_t delta_mm,
+                                float radius_m,
+                                const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>* chunks) {
+    const auto* owners = chunks ? chunks : m_active_chunks;
+    if (!owners || delta_mm == 0 || !std::isfinite(radius_m) || radius_m <= 0.0f ||
+        !std::isfinite(world_pos.x) || !std::isfinite(world_pos.z))
         return 0;
     const float r2 = radius_m * radius_m;
     int edited_total = 0;
-    for (const auto& kv : *m_active_chunks) {
+    for (const auto& kv : *owners) {
         const std::shared_ptr<Chunk>& cptr = kv.second;
         if (!cptr)
             continue;
         Chunk& c = *cptr;
         const int res = GetWaterResolution(c);
-        if (res <= 1 || static_cast<int>(c.water_bed_mm.size()) != res * res)
+        if (res <= 1 || res > 32 ||
+            c.water_bed_mm.size() != static_cast<std::size_t>(res) * static_cast<std::size_t>(res))
             continue;
         const IVec3 cc = c.get_coords();
         const float cw_x = static_cast<float>(CHUNK_SIZE_X) / static_cast<float>(res);
@@ -1405,13 +1505,22 @@ int WaterSystem::EditTerrainBed(const Vec3& world_pos, std::int32_t delta_mm, fl
                 const float dx = wx - world_pos.x;
                 const float dz = wz - world_pos.z;
                 if (dx * dx + dz * dz <= r2) {
-                    c.water_bed_mm[z * res + x] += delta_mm;
-                    edited = true;
-                    ++edited_total;
+                    auto& bed = c.water_bed_mm[z * res + x];
+                    const auto next = static_cast<std::int32_t>(
+                        std::clamp<std::int64_t>(static_cast<std::int64_t>(bed) + delta_mm,
+                                                 std::numeric_limits<std::int32_t>::min(),
+                                                 std::numeric_limits<std::int32_t>::max()));
+                    if (next != bed) {
+                        bed = next;
+                        edited = true;
+                        ++edited_total;
+                    }
                 }
             }
         }
         if (edited) {
+            if (chunks || c.has_water_authority())
+                c.mark_water_data_dirty();
             c.is_water_sleeping.store(false, std::memory_order_relaxed);
             c.water_mesh_generated.store(false);
             c.water_mesh_dirty_ticks = 0;
@@ -1479,11 +1588,16 @@ void WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
     int new_resolution = static_cast<int>(new_level);
     int current_resolution = chunk.current_water_resolution.load();
 
+    if (new_resolution > 32 || (new_resolution > 0 && new_resolution <= 1))
+        return;
+
     if (new_resolution == current_resolution) {
         return; // No change needed
     }
 
     m_water_activity_cache.erase(chunk.get_id());
+    if (chunk.has_water_authority())
+        chunk.mark_water_data_dirty();
 
     if (new_resolution <= 0) { // Disable simulation
         chunk.water_level_data.clear();
@@ -1499,7 +1613,7 @@ void WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
     // Store old data for interpolation
     std::vector<f32> old_water_levels = chunk.water_level_data;
     std::vector<Vec2> old_flow_data = chunk.water_flow_data;
-    const bool can_interpolate = current_resolution > 1 &&
+    const bool can_interpolate = current_resolution > 1 && current_resolution <= 32 &&
                                  old_water_levels.size() >= GetWaterCellCount(current_resolution) &&
                                  old_flow_data.size() >= GetWaterCellCount(current_resolution);
     // fixed-point water: the HASHED depth interpolates NATIVELY in the mm
@@ -1512,7 +1626,8 @@ void WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
         can_interpolate && old_depth_mm.size() >= GetWaterCellCount(current_resolution);
 
     // Resize arrays
-    const size_t new_sim_size = new_resolution * new_resolution;
+    // Supported detail levels bound these allocations to 32*32 cells.
+    const size_t new_sim_size = GetWaterCellCount(new_resolution);
     chunk.water_level_data.resize(new_sim_size);
     chunk.water_flow_data.resize(new_sim_size);
     chunk.water_sim_terrain_height.resize(new_sim_size);

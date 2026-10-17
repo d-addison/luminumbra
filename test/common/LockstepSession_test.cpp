@@ -3315,3 +3315,95 @@ TEST(LockstepSessionTest, CleanDisconnect) {
     EXPECT_TRUE(a.Status().peer_disconnected);
     EXPECT_FALSE(a.Status().desynced) << "a clean disconnect must NOT be reported as a desync";
 }
+
+#include "../support/WaterSchedulerFixture.h"
+
+namespace {
+void CaptureSchedulerCheckpoint(std::uint64_t tick, net::HashMsg& out, void* user) {
+    const auto* world = static_cast<const Luminumbra::TestSupport::SchedulerWorld*>(user);
+    const auto hashes = world->world.compute_chunk_hashes();
+    out = {.tick = tick,
+           .world_hash = hashes.world,
+           .terrain = hashes.sub.terrain,
+           .water = hashes.sub.water,
+           .entities = Luminumbra::Persistence::StableChecksum("empty scheduler fixture entities")};
+}
+
+bool StepPausedScheduler(std::uint64_t, const std::vector<std::uint8_t>&, void* user) {
+    auto* world = static_cast<Luminumbra::TestSupport::SchedulerWorld*>(user);
+    world->Step();
+    return true;
+}
+} // namespace
+
+TEST(LockstepSessionTest, RealCursorOnlyCaptureLocalizesWaterWithoutChangingCheckpointLayout) {
+    for (const bool regions : {false, true}) {
+        for (const auto& [resolution, count] :
+             {std::pair{8, std::size_t{65}}, std::pair{16, std::size_t{17}}}) {
+            Luminumbra::TestSupport::SchedulerWorld world(regions, resolution, count);
+            Luminumbra::TestSupport::SchedulerWorld remote(regions, resolution, count);
+            remote.water.SetSimWindowCursor(count - 1);
+            // Pause retains equal grids and unequal raw scheduler state at capture.
+            world.water.SetBootPaused(true);
+            remote.water.SetBootPaused(true);
+            auto [local, peer] = net::MakeLoopbackPair();
+            auto config = MakeConfig(0, 1);
+            config.hash_cadence_ticks = 1;
+            net::LockstepHooks hooks;
+            hooks.collect_local_input = &CollectEmpty;
+            hooks.apply_and_step = &StepPausedScheduler;
+            hooks.capture_hashes = &CaptureSchedulerCheckpoint;
+            hooks.user = &world;
+            net::LockstepSession session(config, local.get(), hooks);
+            const auto dump = LockstepTempDir() / ("scheduler-water-" + std::to_string(regions) +
+                                                   "-" + std::to_string(resolution) + ".lrec1");
+            session.SetDumpPath(dump.string());
+            ASSERT_TRUE(SendPeerHello(*peer, config));
+            ASSERT_TRUE(session.Handshake());
+            net::HashMsg expected, actual;
+            CaptureSchedulerCheckpoint(1, expected, &remote);
+            CaptureSchedulerCheckpoint(1, actual, &world);
+            ASSERT_EQ(actual.terrain, expected.terrain);
+            ASSERT_NE(actual.water, expected.water);
+            ASSERT_NE(actual.world_hash, expected.world_hash);
+            ASSERT_TRUE(peer->SendFrame(net::EncodeInput({1, 1, {}})));
+            ASSERT_TRUE(peer->SendFrame(net::EncodeHash(expected)));
+            EXPECT_EQ(session.PumpTick(10).outcome, net::TickOutcome::Desync);
+            EXPECT_EQ(session.Status().desync_section, "water");
+            const auto replay_contents = replay::ReadReplay(dump.string());
+            ASSERT_TRUE(replay_contents.has_value());
+            if (replay_contents) {
+                ASSERT_EQ(replay_contents->checkpoints.size(), 1u);
+                EXPECT_EQ(replay_contents->checkpoints.front().water, actual.water);
+            }
+            std::error_code error;
+            fs::remove(dump, error);
+        }
+    }
+}
+
+TEST(LockstepSessionTest, CurrentAndLegacyAuthorityProfilesRefuseBothDirectionsBeforeTicks) {
+    Luminumbra::world::GameSession defaults;
+    for (const bool legacy_host : {false, true}) {
+        auto [local, peer] = net::MakeLoopbackPair();
+        auto config = MakeConfig(0, 1);
+        config.system_config_identity = legacy_host ? defaults.LegacyRevision3SystemConfigIdentity()
+                                                    : defaults.SystemConfigIdentity();
+        auto remote_config = config;
+        remote_config.system_config_identity = legacy_host
+                                                   ? defaults.SystemConfigIdentity()
+                                                   : defaults.LegacyRevision3SystemConfigIdentity();
+        FakeWorld world{0, "same", 0};
+        net::LockstepSession session(config, local.get(), MakeHooks(&world));
+        ASSERT_TRUE(SendPeerHello(*peer, remote_config));
+        EXPECT_FALSE(session.Handshake());
+        EXPECT_FALSE(session.Status().handshaken);
+        EXPECT_EQ(world.tick, 0u);
+        EXPECT_EQ(session.PumpTick(10).outcome, net::TickOutcome::PeerDisconnected);
+        EXPECT_EQ(world.tick, 0u);
+        const auto first = net::MakeLockstepHello(config);
+        const auto second = net::MakeLockstepHello(remote_config);
+        EXPECT_FALSE(net::HelloMatches(first, second));
+        EXPECT_FALSE(net::HelloMatches(second, first));
+    }
+}

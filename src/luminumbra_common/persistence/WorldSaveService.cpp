@@ -2,13 +2,21 @@
 
 #include "../ecs/EntitySnapshot.h" //  plant entity snapshot persistence
 #include "WorldPersistenceRoundtrip.h"
+#include "core/FilesystemPath.h"
+#include "luminumbra/core/Types.h"
+#include "world/ActiveRegionLedger.h"
+#include "world/Chunk.h"
 #include "world/FarLodStore.h"
+#include "world/WorldClock.h"
+#include "world/WorldStreamingState.h"
 
-#include "nlohmann/json.hpp"
+#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
 
 #include <lz4.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cassert>
 #include <cerrno>
@@ -17,15 +25,24 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <exception>
+#include <filesystem>
 #include <fstream>
-#include <iomanip>
+#include <initializer_list>
+#include <ios>
 #include <limits>
 #include <map>
+#include <memory>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <stop_token>
+#include <string>
+#include <string_view>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -59,6 +76,8 @@ constexpr std::size_t kRegionFileHeaderSize = 8;
 // Record header: u64 id | u8 lod_level | u8 flags | u32 uncompressed_size |
 // u32 compressed_size.
 constexpr std::size_t kRecordHeaderSize = 18;
+// Existing LMR1 decompression bound, shared by streaming readers and writers.
+constexpr std::uint32_t kMaxRecordBytes = 64u * 1024u * 1024u;
 
 constexpr std::uint8_t kRecordFlagEdited = 0x01;
 constexpr std::uint8_t kRecordFlagWaterPresent = 0x02;
@@ -221,6 +240,24 @@ bool ReadAmbientAnchor(const nlohmann::json& metadata,
     return true;
 }
 
+bool ReadWaterCursor(const nlohmann::json& metadata,
+                     std::size_t* water_cursor,
+                     std::string& error) {
+    if (water_cursor)
+        *water_cursor = 0;
+    if (!metadata.contains("waterSimCursor"))
+        return true;
+    const auto& cursor = metadata.at("waterSimCursor");
+    if (!cursor.is_number_unsigned() ||
+        cursor.get<std::uint64_t>() > std::numeric_limits<std::size_t>::max()) {
+        error = "Corrupt world metadata: invalid water simulation cursor.";
+        return false;
+    }
+    if (water_cursor)
+        *water_cursor = cursor.get<std::size_t>();
+    return true;
+}
+
 std::uint64_t CurrentProcessIdValue() {
 #if defined(_WIN32)
     return static_cast<std::uint64_t>(::GetCurrentProcessId());
@@ -253,7 +290,7 @@ std::size_t ReclaimAbandonedStaging(const std::filesystem::path& destination) {
     const auto directory = destination.parent_path();
     const auto prefix = destination.filename().string() + ".tmp.";
     std::size_t reclaimed = 0;
-    std::filesystem::directory_iterator it(directory, list_error);
+    const std::filesystem::directory_iterator it(directory, list_error);
     if (list_error)
         return 0;
     for (const auto& entry : it) {
@@ -275,11 +312,41 @@ std::string WindowsErrorMessage(DWORD error) {
     return std::error_code(static_cast<int>(error), std::system_category()).message();
 }
 
-bool WriteDurableRegionTemp(const std::filesystem::path& destination,
-                            const std::string& bytes,
-                            std::filesystem::path& out_temp,
-                            std::vector<std::string>* errors) {
-    HANDLE file = INVALID_HANDLE_VALUE;
+bool WriteRegionBytes(HANDLE file, std::string_view bytes, std::vector<std::string>* errors) {
+    std::size_t offset = 0;
+    while (offset < bytes.size()) {
+        const std::size_t remaining = bytes.size() - offset;
+        const DWORD requested = static_cast<DWORD>(
+            std::min<std::size_t>(remaining, static_cast<std::size_t>(0xffffffffu)));
+        DWORD written = 0;
+        if (!::WriteFile(file, bytes.data() + offset, requested, &written, nullptr) ||
+            written == 0) {
+            DWORD error = ::GetLastError();
+            if (error == ERROR_SUCCESS) {
+                error = ERROR_WRITE_FAULT;
+            }
+            AddError(errors,
+                     "failed to write temporary region file: " + WindowsErrorMessage(error));
+            return false;
+        }
+        offset += written;
+    }
+
+    return true;
+}
+
+bool RewindRegionFile(HANDLE file) {
+    LARGE_INTEGER beginning{};
+    return ::SetFilePointerEx(file, beginning, nullptr, FILE_BEGIN) != 0;
+}
+
+using RegionFileHandle = HANDLE;
+
+bool OpenDurableRegionTemp(const std::filesystem::path& destination,
+                           HANDLE& file,
+                           std::filesystem::path& out_temp,
+                           std::vector<std::string>* errors) {
+    file = INVALID_HANDLE_VALUE;
     for (int attempt = 0; attempt < 128; ++attempt) {
         out_temp = NextRegionTempPath(destination);
         file = ::CreateFileW(out_temp.c_str(),
@@ -306,28 +373,16 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
         return false;
     }
 
-    std::size_t offset = 0;
-    while (offset < bytes.size()) {
-        const std::size_t remaining = bytes.size() - offset;
-        const DWORD requested = static_cast<DWORD>(
-            std::min<std::size_t>(remaining, static_cast<std::size_t>(0xffffffffu)));
-        DWORD written = 0;
-        if (!::WriteFile(file, bytes.data() + offset, requested, &written, nullptr) ||
-            written == 0) {
-            DWORD error = ::GetLastError();
-            if (error == ERROR_SUCCESS) {
-                error = ERROR_WRITE_FAULT;
-            }
-            ::CloseHandle(file);
-            RemoveTemporaryFile(out_temp);
-            AddError(errors,
-                     "failed to write temporary region file: " + out_temp.string() + ": " +
-                         WindowsErrorMessage(error));
-            return false;
-        }
-        offset += written;
-    }
+    return true;
+}
 
+void CloseRegionFile(HANDLE file) {
+    ::CloseHandle(file);
+}
+
+bool FinishDurableRegionTemp(HANDLE file,
+                             const std::filesystem::path& out_temp,
+                             std::vector<std::string>* errors) {
     if (!::FlushFileBuffers(file)) {
         const DWORD error = ::GetLastError();
         ::CloseHandle(file);
@@ -391,11 +446,40 @@ std::string PosixErrorMessage(int error) {
     return std::error_code(error, std::generic_category()).message();
 }
 
-bool WriteDurableRegionTemp(const std::filesystem::path& destination,
-                            const std::string& bytes,
-                            std::filesystem::path& out_temp,
-                            std::vector<std::string>* errors) {
-    int file = -1;
+bool WriteRegionBytes(int file, std::string_view bytes, std::vector<std::string>* errors) {
+    std::size_t offset = 0;
+    while (offset < bytes.size()) {
+        const std::size_t remaining = bytes.size() - offset;
+        const std::size_t requested = std::min<std::size_t>(
+            remaining,
+            static_cast<std::size_t>(
+                (std::numeric_limits<decltype(::write(file, bytes.data(), 0))>::max)()));
+        const auto written = ::write(file, bytes.data() + offset, requested);
+        if (written < 0 && errno == EINTR) {
+            continue;
+        }
+        if (written <= 0) {
+            const int error = written < 0 ? errno : EIO;
+            AddError(errors, "failed to write temporary region file: " + PosixErrorMessage(error));
+            return false;
+        }
+        offset += static_cast<std::size_t>(written);
+    }
+
+    return true;
+}
+
+bool RewindRegionFile(int file) {
+    return ::lseek(file, 0, SEEK_SET) == 0;
+}
+
+using RegionFileHandle = int;
+
+bool OpenDurableRegionTemp(const std::filesystem::path& destination,
+                           int& file,
+                           std::filesystem::path& out_temp,
+                           std::vector<std::string>* errors) {
+    file = -1;
     for (int attempt = 0; attempt < 128; ++attempt) {
         out_temp = NextRegionTempPath(destination);
         file = ::open(out_temp.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0666);
@@ -416,27 +500,16 @@ bool WriteDurableRegionTemp(const std::filesystem::path& destination,
         return false;
     }
 
-    std::size_t offset = 0;
-    while (offset < bytes.size()) {
-        const std::size_t remaining = bytes.size() - offset;
-        const std::size_t requested = std::min<std::size_t>(
-            remaining, static_cast<std::size_t>((std::numeric_limits<ssize_t>::max)()));
-        const ssize_t written = ::write(file, bytes.data() + offset, requested);
-        if (written < 0 && errno == EINTR) {
-            continue;
-        }
-        if (written <= 0) {
-            const int error = written < 0 ? errno : EIO;
-            ::close(file);
-            RemoveTemporaryFile(out_temp);
-            AddError(errors,
-                     "failed to write temporary region file: " + out_temp.string() + ": " +
-                         PosixErrorMessage(error));
-            return false;
-        }
-        offset += static_cast<std::size_t>(written);
-    }
+    return true;
+}
 
+void CloseRegionFile(int file) {
+    ::close(file);
+}
+
+bool FinishDurableRegionTemp(int file,
+                             const std::filesystem::path& out_temp,
+                             std::vector<std::string>* errors) {
     while (::fsync(file) != 0) {
         if (errno == EINTR) {
             continue;
@@ -464,8 +537,8 @@ bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
                                  const std::filesystem::path& destination,
                                  std::vector<std::string>* errors) {
     // POSIX rename replaces an existing same-filesystem destination atomically.
-    // LMR1 staging is beside the live file; ledger staging is in the save root,
-    // outside the chunks scan. A cross-filesystem rename fails without replacing.
+    // Payload staging uses an existing ancestor; ledger staging stays outside
+    // the chunks scan. A cross-filesystem rename fails without replacing.
     if (std::rename(temp.c_str(), destination.c_str()) != 0) {
         const int error = errno;
         AddError(errors,
@@ -561,19 +634,95 @@ bool FlushDirectoryEntry(const std::filesystem::path& directory_path,
 
 #endif
 
+bool RegionStagingDestination(const std::filesystem::path& destination,
+                              std::filesystem::path& staging,
+                              std::vector<std::string>* errors) {
+    // Walk at most the path's component count. Stage on the same filesystem in
+    // an existing ancestor; refusal before publication must not create directories.
+    auto parent = destination.parent_path();
+    while (!parent.empty()) {
+        std::error_code error;
+        const bool exists = std::filesystem::exists(parent, error);
+        if (error) {
+            AddError(errors, "cannot inspect staging directory: " + error.message());
+            return false;
+        }
+        if (exists)
+            break;
+        const auto next = parent.parent_path();
+        if (next == parent)
+            return false;
+        parent = next;
+    }
+    staging = parent / destination.filename();
+    return true;
+}
+
+bool CreatePayloadDirectory(const std::filesystem::path& destination,
+                            std::vector<std::string>* errors) {
+    std::error_code error;
+    if (destination.has_parent_path())
+        std::filesystem::create_directories(destination.parent_path(), error);
+    if (!error)
+        return true;
+    AddError(errors,
+             "cannot create directory " + destination.parent_path().string() + ": " +
+                 error.message());
+    return false;
+}
+
+template<typename Producer>
+bool WriteDurableRegionTempWithProducer(const std::filesystem::path& destination,
+                                        Producer&& produce,
+                                        std::filesystem::path& out_temp,
+                                        std::vector<std::string>* errors) {
+    std::filesystem::path staging;
+    if (!RegionStagingDestination(destination, staging, errors))
+        return false;
+    RegionFileHandle file{};
+    if (!OpenDurableRegionTemp(staging, file, out_temp, errors))
+        return false;
+    bool produced = false;
+    try {
+        produced = produce(file);
+    } catch (...) {
+        CloseRegionFile(file);
+        RemoveTemporaryFile(out_temp);
+        throw;
+    }
+    if (!produced) {
+        CloseRegionFile(file);
+        RemoveTemporaryFile(out_temp);
+        AddError(errors, "failed to produce temporary region contents");
+        return false;
+    }
+    return FinishDurableRegionTemp(file, out_temp, errors);
+}
+
+bool WriteDurableRegionTemp(const std::filesystem::path& destination,
+                            const std::string& bytes,
+                            std::filesystem::path& out_temp,
+                            std::vector<std::string>* errors) {
+    return WriteDurableRegionTempWithProducer(
+        destination,
+        [&](auto file) { return WriteRegionBytes(file, bytes, errors); },
+        out_temp,
+        errors);
+}
+
 bool CompressPayload(const std::string& payload,
                      RegionRecord& record,
                      std::vector<std::string>* errors) {
-    if (payload.size() > static_cast<std::size_t>(LZ4_MAX_INPUT_SIZE)) {
-        AddError(errors, "region record payload exceeds the LZ4 input limit");
+    if (payload.empty() || payload.size() > kMaxRecordBytes) {
+        AddError(errors, "region record payload exceeds the 64 MiB container bound");
         return false;
     }
     const int bound = LZ4_compressBound(static_cast<int>(payload.size()));
     std::string compressed(static_cast<std::size_t>(bound), '\0');
     const int written = LZ4_compress_default(
         payload.data(), compressed.data(), static_cast<int>(payload.size()), bound);
-    if (written <= 0) {
-        AddError(errors, "LZ4 compression of a region record failed");
+    if (written <= 0 || static_cast<std::size_t>(written) > kMaxRecordBytes) {
+        AddError(errors, "LZ4 compression of a region record failed or exceeded its bound");
         return false;
     }
     compressed.resize(static_cast<std::size_t>(written));
@@ -586,7 +735,6 @@ bool DecompressPayload(const RegionRecord& record,
                        std::string& out_payload,
                        std::vector<std::string>* errors) {
     // Bound allocation before trusting an on-disk length or narrowing to LZ4's int API.
-    constexpr std::uint32_t kMaxRecordBytes = 64u * 1024u * 1024u;
     if (record.uncompressed_size == 0 || record.uncompressed_size > kMaxRecordBytes ||
         record.compressed_payload.empty() || record.compressed_payload.size() > kMaxRecordBytes) {
         AddError(errors, "corrupt region record payload length");
@@ -604,162 +752,118 @@ bool DecompressPayload(const RegionRecord& record,
     return true;
 }
 
-bool ReadRegionFile(const std::filesystem::path& path,
-                    std::vector<RegionRecord>& out_records,
-                    std::vector<std::string>* errors,
-                    const std::stop_token& stop = {}) {
-    out_records.clear();
+struct RegionIndex {
+    struct Record {
+        u64 id = 0;
+        u8 lod_level = 0;
+        u8 flags = 0;
+        u32 raw_size = 0;
+        u32 compressed_size = 0;
+        std::streamoff offset = 0;
+    };
+    std::filesystem::path path;
+    Filesystem::ReplacementSafeInputFile input;
+    // LMR1's u16 count bounds the manifest to 65,535 entries.
+    std::vector<Record> records;
+    std::size_t next = 0;
+};
 
-    std::ifstream input(path, std::ios::binary);
-    if (!input.is_open()) {
-        AddError(errors, "failed to open region file for reading: " + path.string());
+bool ReadRegionIndex(const std::filesystem::path& path,
+                     RegionIndex& index,
+                     std::vector<std::string>* errors,
+                     const std::stop_token& stop = {}) {
+    index = {};
+    index.path = path;
+    index.input.open(path);
+    const auto reject = [&](const char* message) {
+        AddError(errors, std::string(message) + ": " + path.string());
         return false;
-    }
-    std::ostringstream buffer;
-    char read_buffer[64 * 1024];
-    while (input) {
-        if (stop.stop_requested()) {
-            AddError(errors, "Saved-world validation cancelled.");
-            return false;
-        }
-        input.read(read_buffer, sizeof(read_buffer));
-        buffer.write(read_buffer, input.gcount());
-    }
-    if (input.bad()) {
-        AddError(errors, "failed to read region file: " + path.string());
-        return false;
-    }
-    const std::string bytes = buffer.str();
-
-    if (bytes.size() < kRegionFileHeaderSize ||
-        std::memcmp(bytes.data(), kRegionMagic, sizeof(kRegionMagic)) != 0) {
-        AddError(errors, "region file is missing the LMR1 magic: " + path.string());
-        return false;
-    }
-    const auto* data = reinterpret_cast<const unsigned char*>(bytes.data());
-    const std::uint16_t version = ReadU16(data + 4);
+    };
+    if (!index.input.is_open())
+        return reject("failed to open region file");
+    std::error_code size_error;
+    const auto file_bytes = index.input.size(size_error);
+    if (size_error)
+        return reject("failed to read region file extent");
+    if (file_bytes < kRegionFileHeaderSize ||
+        file_bytes > static_cast<std::uintmax_t>(std::numeric_limits<std::streamoff>::max()))
+        return reject("corrupt region file length");
+    std::array<unsigned char, kRegionFileHeaderSize> header{};
+    if (!index.input.read(reinterpret_cast<char*>(header.data()), header.size()) ||
+        std::memcmp(header.data(), kRegionMagic, sizeof(kRegionMagic)) != 0)
+        return reject("region file is missing the LMR1 magic");
+    const auto version = ReadU16(header.data() + 4);
     if (version != kRegionVersion) {
         AddError(errors,
                  version < kRegionVersion ? WorldSaveService::kObsoleteWorldMessage
-                                          : "unsupported future LMR1 container version " +
-                                                std::to_string(version) + ": " + path.string());
+                                          : "unsupported future LMR1 container version");
         return false;
     }
-    const std::uint16_t record_count = ReadU16(data + 6);
-
-    const std::size_t manifest_bytes = static_cast<std::size_t>(record_count) * kRecordHeaderSize;
-    if (bytes.size() < kRegionFileHeaderSize + manifest_bytes) {
-        AddError(errors, "region file record manifest is truncated: " + path.string());
-        return false;
-    }
-
+    const auto count = ReadU16(header.data() + 6);
+    // The u16 record count bounds this manifest to 65,535 entries. Payload
+    // lengths and the file extent are checked before allocating any payload.
+    std::uintmax_t offset =
+        kRegionFileHeaderSize + static_cast<std::size_t>(count) * kRecordHeaderSize;
+    if (offset > file_bytes)
+        return reject("region file record manifest is truncated");
+    index.records.resize(count);
     std::set<std::pair<u8, u64>> keys;
-    out_records.resize(record_count);
-    std::size_t payload_offset = kRegionFileHeaderSize + manifest_bytes;
-    for (std::uint16_t i = 0; i < record_count; ++i) {
-        if (stop.stop_requested()) {
-            AddError(errors, "Saved-world validation cancelled.");
-            out_records.clear();
-            return false;
-        }
-        const unsigned char* header =
-            data + kRegionFileHeaderSize + static_cast<std::size_t>(i) * kRecordHeaderSize;
-        RegionRecord& record = out_records[i];
-        record.id = ReadU64(header);
-        record.lod_level = header[8];
-        record.flags = header[9];
-        if (record.lod_level > 2 || (record.flags & ~3u) != 0u ||
-            !keys.emplace(record.lod_level, record.id).second) {
-            AddError(errors, "corrupt or unknown region record header: " + path.string());
-            out_records.clear();
-            return false;
-        }
-        record.uncompressed_size = ReadU32(header + 10);
-        const std::uint32_t compressed_size = ReadU32(header + 14);
-        if (payload_offset > bytes.size() || compressed_size > bytes.size() - payload_offset) {
-            AddError(errors, "region file record payload is truncated: " + path.string());
-            out_records.clear();
-            return false;
-        }
-        record.compressed_payload.assign(bytes.data() + payload_offset, compressed_size);
-        payload_offset += compressed_size;
+    for (auto& record : index.records) {
+        if (stop.stop_requested())
+            return reject("Saved-world validation cancelled.");
+        std::array<unsigned char, kRecordHeaderSize> record_header{};
+        if (!index.input.read(reinterpret_cast<char*>(record_header.data()), record_header.size()))
+            return reject("region file record manifest is truncated");
+        record.id = ReadU64(record_header.data());
+        record.lod_level = record_header[8];
+        record.flags = record_header[9];
+        record.raw_size = ReadU32(record_header.data() + 10);
+        record.compressed_size = ReadU32(record_header.data() + 14);
+        if (record.lod_level > 2 || (record.flags & ~3u) != 0 ||
+            !keys.emplace(record.lod_level, record.id).second)
+            return reject("corrupt or unknown region record header");
+        if (record.compressed_size > file_bytes - offset)
+            return reject("region file record payload is truncated");
+        if (record.raw_size == 0 || record.raw_size > kMaxRecordBytes ||
+            record.compressed_size == 0 || record.compressed_size > kMaxRecordBytes)
+            return reject("corrupt region record payload length");
+        record.offset = static_cast<std::streamoff>(offset);
+        offset += record.compressed_size;
     }
-    if (payload_offset != bytes.size()) {
-        AddError(errors, "region file has trailing bytes after the last record: " + path.string());
-        out_records.clear();
-        return false;
-    }
-    return true;
+    return offset == file_bytes || reject("region file has trailing bytes after the last record");
 }
 
-bool WriteRegionFile(const std::filesystem::path& path,
-                     std::vector<RegionRecord>& records,
-                     std::vector<std::string>* errors) {
-    if (records.size() > 0xffffu) {
-        AddError(errors, "region file exceeds the 65535-record limit: " + path.string());
+bool ReadIndexedRecord(RegionIndex& index,
+                       const RegionIndex::Record& entry,
+                       RegionRecord& record,
+                       std::vector<std::string>* errors) {
+    if (entry.compressed_size == 0 || entry.compressed_size > kMaxRecordBytes ||
+        entry.raw_size == 0 || entry.raw_size > kMaxRecordBytes) {
+        AddError(errors, "corrupt region record payload length");
         return false;
     }
-
-    // Deterministic record order: lod_level ascending, then id ascending.
-    std::sort(records.begin(), records.end(), [](const RegionRecord& lhs, const RegionRecord& rhs) {
-        if (lhs.lod_level != rhs.lod_level) {
-            return lhs.lod_level < rhs.lod_level;
-        }
-        return lhs.id < rhs.id;
-    });
-
-    std::string bytes;
-    std::size_t payload_bytes = 0;
-    for (const RegionRecord& record : records) {
-        payload_bytes += record.compressed_payload.size();
-    }
-    bytes.reserve(kRegionFileHeaderSize + records.size() * kRecordHeaderSize + payload_bytes);
-
-    bytes.append(kRegionMagic, sizeof(kRegionMagic));
-    AppendU16(bytes, kRegionVersion);
-    AppendU16(bytes, static_cast<std::uint16_t>(records.size()));
-    for (const RegionRecord& record : records) {
-        AppendU64(bytes, record.id);
-        bytes.push_back(static_cast<char>(record.lod_level));
-        bytes.push_back(static_cast<char>(record.flags));
-        AppendU32(bytes, record.uncompressed_size);
-        AppendU32(bytes, static_cast<std::uint32_t>(record.compressed_payload.size()));
-    }
-    for (const RegionRecord& record : records) {
-        bytes.append(record.compressed_payload);
-    }
-
-    std::filesystem::path temp_path;
-    if (!WriteDurableRegionTemp(path, bytes, temp_path, errors)) {
-        return false;
-    }
-
-    // Test-only crash seam: at this point the replacement bytes are complete
-    // and durable, while the prior live LMR1 file has not been touched.
-    if (InterruptBeforeRegionReplaceForTesting().exchange(false, std::memory_order_acq_rel)) {
-        RemoveTemporaryFile(temp_path);
-        AddError(errors,
-                 "region replacement interrupted by test seam before replacing: " + path.string());
-        return false;
-    }
-
-    if (!ReplaceRegionFileAtomically(temp_path, path, errors)) {
-        RemoveTemporaryFile(temp_path);
+    record = {entry.id, entry.lod_level, entry.flags, entry.raw_size, {}};
+    record.compressed_payload.resize(entry.compressed_size);
+    if (!index.input.seek(static_cast<std::uint64_t>(entry.offset)) ||
+        !index.input.read(record.compressed_payload.data(), entry.compressed_size)) {
+        AddError(errors, "failed to read region record: " + index.path.string());
         return false;
     }
     return true;
 }
 
 // Current lod-0 records retain canonical in-memory chunk serialization.
-std::string SerializeSingleChunkSnapshot(const std::shared_ptr<Chunk>& chunk) {
+std::string SerializeSingleChunkSnapshot(const std::shared_ptr<Chunk>& chunk,
+                                         bool preserve_authority) {
     WorldStreamingState single;
     single.insert_chunk(chunk);
-    return SerializeWorldStreamingStateSnapshotJson(single);
+    return SerializeWorldStreamingStateSnapshotJson(single, preserve_authority);
 }
 
 std::shared_ptr<Chunk> DecodeChunkRecord(const RegionRecord& record,
                                          const std::filesystem::path& path,
-                                         std::vector<std::string>* errors) {
+                                         std::vector<std::string>* errors,
+                                         bool migrate_legacy_water = false) {
     std::string payload;
     if (!DecompressPayload(record, payload, errors)) {
         return nullptr;
@@ -767,7 +871,13 @@ std::shared_ptr<Chunk> DecodeChunkRecord(const RegionRecord& record,
 
     WorldStreamingState single;
     std::vector<std::string> load_errors;
-    if (!LoadWorldStreamingStateSnapshotJson(payload, single, load_errors)) {
+    if (!LoadWorldStreamingStateSnapshotJson(
+            payload,
+            single,
+            load_errors,
+            {.terrain_edited = (record.flags & kRecordFlagEdited) != 0u,
+             .migrate_legacy_water = migrate_legacy_water,
+             .validate_record_authority = true})) {
         for (std::string& error : load_errors) {
             AddError(errors, std::move(error));
         }
@@ -784,13 +894,6 @@ std::shared_ptr<Chunk> DecodeChunkRecord(const RegionRecord& record,
         AddError(errors, "chunk record id does not match its payload: " + path.string());
         return nullptr;
     }
-    // Save-dirty is transient, but the container's sticky edited flag is the
-    // durable authority bit. Pristine cached chunks stay regenerable.
-    if ((record.flags & kRecordFlagEdited) != 0u) {
-        chunks.front()->mark_sdf_loaded_or_edited();
-    } else {
-        chunks.front()->mark_sdf_generated_current_params();
-    }
     return chunks.front();
 }
 
@@ -799,14 +902,170 @@ std::uint8_t ChunkRecordFlags(const Chunk& chunk, std::uint8_t previous_flags) {
     // Edited/authoritative is sticky: once a chunk record was persisted with
     // post-generation edits it stays authoritative even after the in-memory
     // dirty flag is cleared by the save.
-    if (chunk.sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited ||
-        (previous_flags & kRecordFlagEdited) != 0) {
+    if (chunk.has_simulation_authority() || (previous_flags & kRecordFlagEdited) != 0) {
         flags |= kRecordFlagEdited;
     }
     if (chunk.has_water_sim.load(std::memory_order_acquire) || !chunk.water_mesh_vertices.empty()) {
         flags |= kRecordFlagWaterPresent;
     }
     return flags;
+}
+
+struct RegionReplacement {
+    u64 id = 0;
+    u8 lod_level = 0;
+    bool preserve_authority = false;
+    std::shared_ptr<Chunk> chunk;
+    const WorldSaveService::ContainerRecord* container = nullptr;
+    RegionIndex* source = nullptr;
+    std::size_t source_record = 0;
+    bool omit_water = false;
+};
+
+bool RewriteRegionFile(const std::filesystem::path& path,
+                       const std::vector<RegionReplacement>& replacements,
+                       std::vector<std::string>* errors) {
+    RegionIndex previous;
+    if (std::filesystem::exists(path) && !ReadRegionIndex(path, previous, errors))
+        return false;
+    struct Entry {
+        RegionIndex::Record record;
+        std::optional<std::size_t> replacement;
+    };
+    // LMR1's u16 manifest bounds both maps; no historical payload is retained.
+    std::map<std::pair<u8, u64>, Entry> entries;
+    for (const auto& record : previous.records)
+        entries.emplace(std::pair{record.lod_level, record.id}, Entry{record, std::nullopt});
+    for (std::size_t i = 0; i < replacements.size(); ++i) {
+        const auto& replacement = replacements[i];
+        const auto key = std::pair{replacement.lod_level, replacement.id};
+        auto found = entries.find(key);
+        if (found != entries.end() && (found->second.record.flags & kRecordFlagEdited) != 0 &&
+            replacement.preserve_authority && replacement.chunk &&
+            !replacement.chunk->has_simulation_authority()) {
+            AddError(errors, "regenerable chunk cannot replace durable simulation authority");
+            return false;
+        }
+        if (found == entries.end()) {
+            if (entries.size() == std::numeric_limits<u16>::max()) {
+                AddError(errors, "region file exceeds the 65535-record limit");
+                return false;
+            }
+            found = entries
+                        .emplace(key,
+                                 Entry{RegionIndex::Record{.id = replacement.id,
+                                                           .lod_level = replacement.lod_level},
+                                       std::nullopt})
+                        .first;
+        }
+        found->second.replacement = i;
+    }
+    std::filesystem::path temp;
+    const bool written = WriteDurableRegionTempWithProducer(
+        path,
+        [&](auto file) {
+            // At most 8 + 65,535 * 18 bytes. Reserve the manifest, stream each
+            // bounded payload, then backpatch its exact compressed lengths.
+            std::string manifest(kRegionFileHeaderSize + entries.size() * kRecordHeaderSize, '\0');
+            if (!WriteRegionBytes(file, manifest, errors))
+                return false;
+            std::uintmax_t total_bytes = manifest.size();
+            manifest.clear();
+            manifest.append(kRegionMagic, sizeof(kRegionMagic));
+            AppendU16(manifest, kRegionVersion);
+            AppendU16(manifest, static_cast<u16>(entries.size()));
+            for (const auto& [key, entry] : entries) {
+                RegionRecord record;
+                if (!entry.replacement) {
+                    if (!ReadIndexedRecord(previous, entry.record, record, errors))
+                        return false;
+                } else {
+                    const auto& replacement = replacements[*entry.replacement];
+                    if (replacement.source) {
+                        if (!ReadIndexedRecord(
+                                *replacement.source,
+                                replacement.source->records[replacement.source_record],
+                                record,
+                                errors))
+                            return false;
+                    } else {
+                        record.id = key.second;
+                        record.lod_level = key.first;
+                        if (replacement.chunk) {
+                            record.flags =
+                                replacement.omit_water
+                                    ? (replacement.chunk->sdf_provenance() ==
+                                               ChunkSdfProvenance::LoadedOrEdited
+                                           ? kRecordFlagEdited
+                                           : 0)
+                                    : ChunkRecordFlags(*replacement.chunk, entry.record.flags);
+                            const auto payload =
+                                replacement.omit_water
+                                    ? SerializeChunkAuthoritySnapshotJson(*replacement.chunk, true)
+                                    : SerializeSingleChunkSnapshot(replacement.chunk,
+                                                                   replacement.preserve_authority);
+                            if (!CompressPayload(payload, record, errors))
+                                return false;
+                        } else {
+                            record.flags = replacement.container->flags;
+                            if (!CompressPayload(replacement.container->payload, record, errors))
+                                return false;
+                        }
+                    }
+                }
+                const auto size = record.compressed_payload.size();
+                if (size > static_cast<std::uintmax_t>(std::numeric_limits<std::streamoff>::max()) -
+                               total_bytes) {
+                    AddError(errors, "region file exceeds the supported stream extent");
+                    return false;
+                }
+                total_bytes += size;
+                if (!WriteRegionBytes(file, record.compressed_payload, errors))
+                    return false;
+                AppendU64(manifest, record.id);
+                manifest.push_back(static_cast<char>(record.lod_level));
+                manifest.push_back(static_cast<char>(record.flags));
+                AppendU32(manifest, record.uncompressed_size);
+                AppendU32(manifest, static_cast<u32>(record.compressed_payload.size()));
+            }
+            return RewindRegionFile(file) && WriteRegionBytes(file, manifest, errors);
+        },
+        temp,
+        errors);
+    // Release this writer's source descriptors. Independent readers finish their
+    // immutable old image; all LMR1 readers share deletion on Windows.
+    previous.input.close();
+    for (const auto& replacement : replacements) {
+        if (replacement.source && replacement.source->input.is_open())
+            replacement.source->input.close();
+    }
+    if (!written)
+        return false;
+    if (InterruptBeforeRegionReplaceForTesting().exchange(false, std::memory_order_acq_rel)) {
+        RemoveTemporaryFile(temp);
+        AddError(errors, "region replacement interrupted by test seam before replacing");
+        return false;
+    }
+    if (!CreatePayloadDirectory(path, errors)) {
+        RemoveTemporaryFile(temp);
+        return false;
+    }
+    if (!ReplaceRegionFileAtomically(temp, path, errors)) {
+        RemoveTemporaryFile(temp);
+        return false;
+    }
+#if !defined(_WIN32)
+    // Persist newly created ancestor entries too. On failure the complete live
+    // file may already be installed, but its in-memory owner must be retained.
+    for (auto parent = path.parent_path(); !parent.empty() && parent != parent.root_path();
+         parent = parent.parent_path()) {
+        const auto holder =
+            parent.has_parent_path() ? parent.parent_path() : std::filesystem::path(".");
+        if (!FlushDirectoryEntry(holder, errors))
+            return false;
+    }
+#endif
+    return true;
 }
 
 bool ParseRegionFileName(const std::filesystem::path& path, int& rx, int& rz) {
@@ -836,10 +1095,70 @@ bool WriteWorldManifest(const std::filesystem::path& manifest_path,
     std::filesystem::path temp;
     if (!WriteDurableRegionTemp(manifest_path, bytes, temp, errors))
         return false;
+    if (InterruptBeforeRegionReplaceForTesting().exchange(false, std::memory_order_acq_rel)) {
+        RemoveTemporaryFile(temp);
+        AddError(errors, "interrupted before world manifest replacement");
+        return false;
+    }
+    if (!CreatePayloadDirectory(manifest_path, errors)) {
+        RemoveTemporaryFile(temp);
+        return false;
+    }
     if (!ReplaceRegionFileAtomically(temp, manifest_path, errors)) {
         RemoveTemporaryFile(temp);
         return false;
     }
+    return true;
+}
+
+bool OpenAuthorityIndex(const std::filesystem::path& region_file, RegionIndex& reader) {
+    reader = {};
+    reader.path = region_file;
+    std::error_code error;
+    const bool exists = std::filesystem::exists(region_file, error);
+    if (error)
+        return false;
+    if (!exists)
+        return true;
+    if (!ReadRegionIndex(region_file, reader, nullptr))
+        return false;
+    int expected_x = 0, expected_z = 0;
+    if (!ParseRegionFileName(region_file, expected_x, expected_z))
+        return false;
+    // Old saves have no water-authority marker. Their initialized simulation
+    // grids are durable input too; a water mesh alone is only a render cache.
+    // This cold index pass is bounded by LMR1's 65,535 records per region.
+    bool valid = true;
+    std::erase_if(reader.records, [&](const auto& entry) {
+        if (entry.lod_level != 0)
+            return true;
+        if ((entry.flags & kRecordFlagEdited) != 0)
+            return false;
+        if ((entry.flags & kRecordFlagWaterPresent) == 0)
+            return true;
+        RegionRecord raw;
+        if (!ReadIndexedRecord(reader, entry, raw, nullptr)) {
+            valid = false;
+            return true;
+        }
+        const auto chunk = DecodeChunkRecord(raw, reader.path, nullptr, true);
+        if (!chunk) {
+            valid = false;
+            return true;
+        }
+        return !chunk->has_simulation_authority();
+    });
+    if (!valid)
+        return false;
+    for (const auto& record : reader.records) {
+        int actual_x = 0, actual_z = 0;
+        WorldSaveService::region_coords_for_chunk(Chunk::decode_id(record.id), actual_x, actual_z);
+        if (actual_x != expected_x || actual_z != expected_z)
+            return false;
+    }
+    std::sort(reader.records.begin(), reader.records.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs.id < rhs.id;
+    });
     return true;
 }
 
@@ -848,17 +1167,22 @@ bool WriteWorldManifest(const std::filesystem::path& manifest_path,
 bool WorldSaveService::save_metadata(const std::string& bytes,
                                      const std::filesystem::path& save_dir,
                                      std::vector<std::string>* errors) {
-    if (!validate_save(save_dir, errors))
-        return false;
+    return validate_save(save_dir, errors) && save_metadata_validated(bytes, save_dir, errors);
+}
+
+bool WorldSaveService::save_metadata_validated(const std::string& bytes,
+                                               const std::filesystem::path& save_dir,
+                                               std::vector<std::string>* errors) {
     world::WorldClock clock;
     std::string clock_error;
     const auto metadata = nlohmann::json::parse(bytes, nullptr, false);
-    // Legacy metadata is opaque input to this helper. Only clock-bearing input
-    // opts into the new validation; the existing destination is still validated.
+    // Clock and water cursor fields opt into structured validation. Other legacy
+    // input remains opaque; the existing destination is still validated.
     const bool has_clock = metadata.contains("simulationTick") || metadata.contains("calendar");
     std::optional<Vec3> ambient_anchor;
-    if (has_clock && (!world::WorldClock::from_metadata(metadata, clock, clock_error) ||
-                      !ReadAmbientAnchor(metadata, ambient_anchor, clock_error))) {
+    if ((has_clock && (!world::WorldClock::from_metadata(metadata, clock, clock_error) ||
+                       !ReadAmbientAnchor(metadata, ambient_anchor, clock_error))) ||
+        !ReadWaterCursor(metadata, nullptr, clock_error)) {
         AddError(errors, clock_error);
         return false;
     }
@@ -890,6 +1214,13 @@ bool WorldSaveService::save_metadata_and_active_regions(const std::string& bytes
                                                         world::ActiveRegionLedger& ledger,
                                                         const std::filesystem::path& save_dir,
                                                         std::vector<std::string>* errors) {
+    return validate_save(save_dir, errors) && save_pair_validated(bytes, ledger, save_dir, errors);
+}
+
+bool WorldSaveService::save_pair_validated(const std::string& bytes,
+                                           world::ActiveRegionLedger& ledger,
+                                           const std::filesystem::path& save_dir,
+                                           std::vector<std::string>* errors) {
 #ifndef NDEBUG
     const PairedSaveGuard guard;
 #endif
@@ -898,15 +1229,20 @@ bool WorldSaveService::save_metadata_and_active_regions(const std::string& bytes
     std::optional<Vec3> ambient_anchor;
     std::string error;
     if (!world::WorldClock::from_metadata(metadata, clock, error) ||
-        !ReadAmbientAnchor(metadata, ambient_anchor, error)) {
+        !ReadAmbientAnchor(metadata, ambient_anchor, error) ||
+        !ReadWaterCursor(metadata, nullptr, error)) {
         AddError(errors, error);
+        return false;
+    }
+    // Decode validates record stamps; empty ledgers need the same clock check explicitly.
+    if (ledger.header_tick() != clock.tick()) {
+        AddError(errors, world::ActiveRegionLedger::kCorruptMessage);
         return false;
     }
     auto saved = ledger;
     saved.mark_saved(clock);
     world::ActiveRegionLedger checked;
-    if (!world::ActiveRegionLedger::decode(saved.encode(), checked, error) ||
-        ledger.header_tick() > clock.tick()) {
+    if (!world::ActiveRegionLedger::decode(saved.encode(), checked, error)) {
         AddError(errors, world::ActiveRegionLedger::kCorruptMessage);
         return false;
     }
@@ -917,21 +1253,24 @@ bool WorldSaveService::save_metadata_and_active_regions(const std::string& bytes
     // Each writer validates the installed pair. On rewind, replace the ledger
     // first so it cannot be newer than the clock, even if metadata writing fails.
     if (clock.tick() < previous_clock.tick())
-        return save_active_regions(ledger, clock, save_dir, errors) &&
-               save_metadata(bytes, save_dir, errors);
-    return save_metadata(bytes, save_dir, errors) &&
-           save_active_regions(ledger, clock, save_dir, errors);
+        return save_regions_validated(ledger, clock, save_dir, errors) &&
+               save_metadata_validated(bytes, save_dir, errors);
+    return save_metadata_validated(bytes, save_dir, errors) &&
+           save_regions_validated(ledger, clock, save_dir, errors);
 }
 
 bool WorldSaveService::read_clock_metadata(const std::filesystem::path& save_dir,
                                            world::WorldClock& clock,
                                            bool& requires_active_regions,
                                            std::vector<std::string>* errors,
-                                           std::optional<Vec3>* ambient_anchor) {
+                                           std::optional<Vec3>* ambient_anchor,
+                                           std::size_t* water_cursor) {
     clock = world::WorldClock{};
     requires_active_regions = false;
     if (ambient_anchor)
         ambient_anchor->reset();
+    if (water_cursor)
+        *water_cursor = 0;
     try {
         requires_active_regions = std::filesystem::exists(active_regions_path(save_dir));
         const auto path = save_dir / "world_info.json";
@@ -942,7 +1281,8 @@ bool WorldSaveService::read_clock_metadata(const std::filesystem::path& save_dir
         std::string error;
         std::optional<Vec3> anchor;
         if (!world::WorldClock::from_metadata(metadata, clock, error) ||
-            !ReadAmbientAnchor(metadata, anchor, error)) {
+            !ReadAmbientAnchor(metadata, anchor, error) ||
+            !ReadWaterCursor(metadata, water_cursor, error)) {
             AddError(errors, error);
             return false;
         }
@@ -982,28 +1322,24 @@ std::filesystem::path WorldSaveService::plant_entities_path(const std::filesyste
 bool WorldSaveService::save_plant_entities(const Luminumbra::Ecs::EntityRegistrySnapshot& snapshot,
                                            const std::filesystem::path& save_dir,
                                            std::vector<std::string>* errors) {
-    if (!validate_save(save_dir, errors))
-        return false;
+    return validate_save(save_dir, errors) && save_plants_validated(snapshot, save_dir, errors);
+}
+
+bool WorldSaveService::save_plants_validated(
+    const Luminumbra::Ecs::EntityRegistrySnapshot& snapshot,
+    const std::filesystem::path& save_dir,
+    std::vector<std::string>* errors) {
     const std::filesystem::path path = plant_entities_path(save_dir);
     std::error_code ec;
     if (snapshot.entities.empty()) {
         // No plants -> no file (a no-plant save is byte-identical). Retire any stale file.
         std::filesystem::remove(path, ec);
-        return true;
+        if (ec)
+            AddError(errors, "failed to remove plant entities file: " + ec.message());
+        return !ec;
     }
-    std::filesystem::create_directories(path.parent_path(), ec);
-    std::ofstream output(path, std::ios::binary | std::ios::trunc);
-    if (!output.is_open()) {
-        AddError(errors, "failed to open plant entities file for writing: " + path.string());
-        return false;
-    }
-    output << Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(snapshot);
-    output.flush();
-    if (!output.good()) {
-        AddError(errors, "failed to write plant entities file: " + path.string());
-        return false;
-    }
-    return true;
+    return write_file_durably(
+        path, Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(snapshot), errors);
 }
 
 bool WorldSaveService::load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapshot& out,
@@ -1015,7 +1351,7 @@ bool WorldSaveService::load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapsh
     if (!std::filesystem::exists(path, ec)) {
         return true; // clean miss: a fresh / no-plant world
     }
-    std::ifstream in(path, std::ios::binary);
+    const std::ifstream in(path, std::ios::binary);
     if (!in) {
         AddError(errors, "failed to open plant entities file: " + path.string());
         return false;
@@ -1069,8 +1405,20 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
                                            const world::WorldClock& clock,
                                            const std::filesystem::path& save_dir,
                                            std::vector<std::string>* errors) {
-    if (!validate_save(save_dir, errors))
+    return validate_save(save_dir, errors) &&
+           save_regions_validated(ledger, clock, save_dir, errors);
+}
+
+bool WorldSaveService::save_regions_validated(world::ActiveRegionLedger& ledger,
+                                              const world::WorldClock& clock,
+                                              const std::filesystem::path& save_dir,
+                                              std::vector<std::string>* errors) {
+    // Empty ledgers have no last_save stamps to validate against the ceiling.
+    // Require the acknowledged clock before either writing or taking the no-op path.
+    if (ledger.header_tick() != clock.tick()) {
+        AddError(errors, world::ActiveRegionLedger::kCorruptMessage);
         return false;
+    }
     // Keep an anchor-only ledger: it restores last walking feet before activation.
     if (ledger.records().empty() && !ledger.local_anchor() &&
         !std::filesystem::exists(active_regions_path(save_dir)))
@@ -1080,14 +1428,12 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
     const auto bytes = saved.encode();
     world::ActiveRegionLedger checked;
     std::string error;
-    if (!world::ActiveRegionLedger::decode(bytes, checked, error) ||
-        ledger.header_tick() > clock.tick()) {
+    if (!world::ActiveRegionLedger::decode(bytes, checked, error)) {
         AddError(errors, world::ActiveRegionLedger::kCorruptMessage);
         return false;
     }
     try {
         const auto path = active_regions_path(save_dir);
-        std::filesystem::create_directories(path.parent_path());
         std::filesystem::path temp;
         // Keep abandoned staging files outside the strict region integrity scan.
         // The save root is on the save filesystem; replacement refuses EXDEV
@@ -1099,6 +1445,10 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
         if (const auto hook = BeforeActiveRegionsReplaceForTesting(); hook && !hook()) {
             RemoveTemporaryFile(temp);
             AddError(errors, "interrupted before active-region ledger replacement");
+            return false;
+        }
+        if (!CreatePayloadDirectory(path, errors)) {
+            RemoveTemporaryFile(temp);
             return false;
         }
         if (!ReplaceRegionFileAtomically(temp, path, errors)) {
@@ -1113,47 +1463,58 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
     }
 }
 
-std::uint64_t WorldSaveService::region_simulation_digest(const std::filesystem::path& save_dir,
-                                                         world::RegionKey key,
-                                                         const RegionDigestInputs& inputs) {
+RegionContentHasher WorldSaveService::region_content_hasher(const std::filesystem::path& save_dir,
+                                                            world::RegionKey key,
+                                                            const RegionDigestInputs& inputs) {
     ValidateRegionDigestKey(key);
     WorldStreamingState region;
-    // Filtering precedes insertion: a live pristine or Loading chunk must not shadow a durable
-    // edited record with the same id. insert_chunk preserves the first record per id.
+    // Filtering precedes insertion: incomplete streaming inputs must not shadow
+    // durable edits. Complete retained authority is independent of render lifecycle.
+    // insert_chunk preserves the first record per id.
     const auto qualifies = [&key](const std::shared_ptr<Chunk>& chunk) {
-        if (!chunk || chunk->sdf_provenance() != ChunkSdfProvenance::LoadedOrEdited)
+        if (!chunk || !chunk->has_simulation_authority())
             return false;
         int rx = 0, rz = 0;
         region_coords_for_chunk(chunk->get_coords(), rx, rz);
         return rx == key.x && rz == key.z;
     };
     for (const auto& chunk : inputs.live) {
-        if (qualifies(chunk) && chunk->get_state() != ChunkState::Loading)
+        if (qualifies(chunk) &&
+            (inputs.complete_authority || chunk->get_state() != ChunkState::Loading))
             region.insert_chunk(chunk);
     }
     for (const auto& chunk : inputs.parked) {
-        if (qualifies(chunk) && chunk->get_state() != ChunkState::Loading)
+        if (qualifies(chunk) &&
+            (inputs.complete_authority || chunk->get_state() != ChunkState::Loading))
             region.insert_chunk(chunk);
     }
-    if (!save_dir.empty()) {
-        std::vector<std::shared_ptr<Chunk>> durable_chunks;
-        std::vector<std::string> errors;
-        if (!read_authoritative_region_chunks(region_file_path(save_dir, key.x, key.z),
-                                              key.x * kRegionChunkSpan,
-                                              key.x * kRegionChunkSpan + kRegionChunkSpan - 1,
-                                              key.z * kRegionChunkSpan,
-                                              key.z * kRegionChunkSpan + kRegionChunkSpan - 1,
-                                              durable_chunks,
-                                              &errors))
-            throw std::runtime_error(errors.empty() ? "Cannot read durable region records"
-                                                    : errors.front());
-        for (const auto& chunk : durable_chunks) {
-            // Durable edited content is complete even if its saved lifecycle was Loading.
-            if (qualifies(chunk))
-                region.insert_chunk(chunk);
-        }
+    auto live = region.snapshot_chunks();
+    std::sort(live.begin(), live.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs->get_id() < rhs->get_id();
+    });
+    AuthorityReader reader;
+    if (!save_dir.empty() &&
+        !open_region_authority(region_file_path(save_dir, key.x, key.z), reader))
+        throw std::runtime_error("Cannot read durable region records");
+    RegionContentHasher hasher;
+    std::size_t live_index = 0;
+    while (auto durable = read_next_authority(reader)) {
+        while (live_index < live.size() && live[live_index]->get_id() < durable->get_id())
+            hasher.append(*live[live_index++]);
+        if (live_index < live.size() && live[live_index]->get_id() == durable->get_id())
+            hasher.append(*live[live_index++]);
+        else
+            hasher.append(*durable);
     }
-    return std::stoull(ComputeRegionContentHash(region), nullptr, 16);
+    while (live_index < live.size())
+        hasher.append(*live[live_index++]);
+    return hasher;
+}
+
+std::uint64_t WorldSaveService::region_simulation_digest(const std::filesystem::path& save_dir,
+                                                         world::RegionKey key,
+                                                         const RegionDigestInputs& inputs) {
+    return region_content_hasher(save_dir, key, inputs).value();
 }
 
 std::uint64_t
@@ -1183,13 +1544,13 @@ void WorldSaveService::region_coords_for_chunk(const IVec3& chunk_coords,
 bool WorldSaveService::has_world_save(const std::filesystem::path& save_dir) {
     WorldStreamingState state;
     std::vector<std::string> errors;
-    return WorldSaveService{}.load_world(state, save_dir, errors);
+    return WorldSaveService{}.load_world(state, save_dir, errors, {}, 0);
 }
 
 bool WorldSaveService::has_chunk_snapshot(const std::filesystem::path& save_dir) {
     WorldStreamingState state;
     std::vector<std::string> errors;
-    return WorldSaveService{}.load_world(state, save_dir, errors) && !state.empty();
+    return WorldSaveService{}.load_world(state, save_dir, errors, {}, 1) && !state.empty();
 }
 
 bool WorldSaveService::validate_save(const std::filesystem::path& save_dir,
@@ -1197,10 +1558,63 @@ bool WorldSaveService::validate_save(const std::filesystem::path& save_dir,
                                      const std::stop_token& stop) {
     WorldStreamingState state;
     std::vector<std::string> diagnostics;
-    WorldSaveService{}.load_world(state, save_dir, diagnostics, stop);
+    WorldSaveService{}.load_world(state, save_dir, diagnostics, stop, 0);
     for (const auto& message : diagnostics)
         AddError(errors, message);
     return diagnostics.empty();
+}
+
+std::optional<WorldSaveService::SaveBatch>
+WorldSaveService::SaveBatch::begin(const std::filesystem::path& directory,
+                                   std::vector<std::string>* errors) {
+    if (directory.empty())
+        return std::nullopt;
+    WorldStreamingState probe;
+    std::vector<std::string> diagnostics;
+    const bool present = WorldSaveService{}.load_world(probe, directory, diagnostics, {}, 1);
+    if (!diagnostics.empty()) {
+        for (const auto& message : diagnostics)
+            AddError(errors, message);
+        return std::nullopt;
+    }
+    return SaveBatch(directory, present, !probe.empty());
+}
+
+bool WorldSaveService::SaveBatch::save_world(const WorldStreamingState& state,
+                                             std::vector<std::string>* errors,
+                                             bool preserve_authority) {
+    m_valid =
+        m_valid && WorldSaveService{}.write_snapshot(
+                       state.snapshot_chunks(), m_directory, errors, nullptr, preserve_authority);
+    return m_valid;
+}
+
+WorldSaveDirtyReport WorldSaveService::SaveBatch::save_dirty_chunks(
+    WorldStreamingState& state, std::vector<std::string>* errors, bool preserve_authority) {
+    if (!m_valid)
+        return {};
+    auto report =
+        WorldSaveService{}.save_dirty_validated(state, m_directory, errors, preserve_authority);
+    m_valid = report.saved || report.chunks_dirty == 0;
+    return report;
+}
+
+bool WorldSaveService::SaveBatch::save_plant_entities(const Ecs::EntityRegistrySnapshot& snapshot,
+                                                      std::vector<std::string>* errors) {
+    m_valid = m_valid && save_plants_validated(snapshot, m_directory, errors);
+    return m_valid;
+}
+
+bool WorldSaveService::SaveBatch::save_metadata(const std::string& bytes,
+                                                std::vector<std::string>* errors) {
+    m_valid = m_valid && save_metadata_validated(bytes, m_directory, errors);
+    return m_valid;
+}
+
+bool WorldSaveService::SaveBatch::save_metadata_and_active_regions(
+    const std::string& bytes, world::ActiveRegionLedger& ledger, std::vector<std::string>* errors) {
+    m_valid = m_valid && save_pair_validated(bytes, ledger, m_directory, errors);
+    return m_valid;
 }
 
 bool WorldSaveService::read_container_records(const std::filesystem::path& region_file,
@@ -1216,12 +1630,17 @@ bool WorldSaveService::read_container_records(const std::filesystem::path& regio
     if (!exists)
         return true; // clean miss
 
-    std::vector<RegionRecord> raw_records;
-    if (!ReadRegionFile(region_file, raw_records, errors)) {
+    RegionIndex index;
+    if (!ReadRegionIndex(region_file, index, errors)) {
         return false;
     }
-    out_records.reserve(raw_records.size());
-    for (const RegionRecord& raw : raw_records) {
+    out_records.reserve(index.records.size());
+    for (const auto& entry : index.records) {
+        RegionRecord raw;
+        if (!ReadIndexedRecord(index, entry, raw, errors)) {
+            out_records.clear();
+            return false;
+        }
         ContainerRecord record;
         record.id = raw.id;
         record.lod_level = raw.lod_level;
@@ -1248,13 +1667,18 @@ bool WorldSaveService::read_region_chunks(const std::filesystem::path& region_fi
     if (!exists)
         return true; // clean miss
 
-    std::vector<RegionRecord> raw_records;
-    if (!ReadRegionFile(region_file, raw_records, errors)) {
+    RegionIndex index;
+    if (!ReadRegionIndex(region_file, index, errors)) {
         return false;
     }
-    for (const RegionRecord& record : raw_records) {
-        if (record.lod_level != 0u)
+    for (const auto& entry : index.records) {
+        if (entry.lod_level != 0u)
             continue;
+        RegionRecord record;
+        if (!ReadIndexedRecord(index, entry, record, errors)) {
+            out_chunks.clear();
+            return false;
+        }
         std::shared_ptr<Chunk> chunk = DecodeChunkRecord(record, region_file, errors);
         if (!chunk) {
             out_chunks.clear();
@@ -1292,17 +1716,22 @@ bool WorldSaveService::read_authoritative_region_chunks(
     if (!exists)
         return true; // clean miss
 
-    std::vector<RegionRecord> raw_records;
-    if (!ReadRegionFile(region_file, raw_records, errors)) {
+    RegionIndex index;
+    if (!ReadRegionIndex(region_file, index, errors)) {
         return false;
     }
-    for (const RegionRecord& record : raw_records) {
-        if (record.lod_level != 0u || (record.flags & kRecordFlagEdited) == 0u)
+    for (const auto& entry : index.records) {
+        if (entry.lod_level != 0u || (entry.flags & kRecordFlagEdited) == 0u)
             continue;
-        const IVec3 indexed_coords = Chunk::decode_id(record.id);
+        const IVec3 indexed_coords = Chunk::decode_id(entry.id);
         if (indexed_coords.x < min_chunk_x || indexed_coords.x > max_chunk_x ||
             indexed_coords.z < min_chunk_z || indexed_coords.z > max_chunk_z) {
             continue;
+        }
+        RegionRecord record;
+        if (!ReadIndexedRecord(index, entry, record, errors)) {
+            out_chunks.clear();
+            return false;
         }
         std::shared_ptr<Chunk> chunk = DecodeChunkRecord(record, region_file, errors);
         if (!chunk) {
@@ -1319,46 +1748,235 @@ bool WorldSaveService::read_authoritative_region_chunks(
     return true;
 }
 
+WorldAuthorityHashes
+WorldSaveService::authority_hashes(const std::filesystem::path& save_dir,
+                                   const std::vector<std::shared_ptr<Chunk>>& live_chunks) {
+    auto cache = load_authority_hash_cache(save_dir);
+    for (const auto& chunk : live_chunks)
+        if (chunk)
+            cache.update(chunk);
+    return cache.hashes();
+}
+
+AuthorityHashCache
+WorldSaveService::load_authority_hash_cache(const std::filesystem::path& save_dir) {
+    AuthorityHashCache cache;
+    const auto directory = region_directory(save_dir);
+    if (save_dir.empty() || !std::filesystem::exists(directory))
+        return cache;
+    for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+        int rx = 0, rz = 0;
+        if (!entry.is_regular_file() || !ParseRegionFileName(entry.path(), rx, rz))
+            continue;
+        AuthorityReader reader;
+        if (!open_region_authority(entry.path(), reader))
+            throw std::runtime_error("Cannot read durable authority for hashing");
+        while (auto chunk = read_next_authority(reader))
+            cache.update(chunk);
+    }
+    return cache;
+}
+
+struct WorldSaveService::AuthorityReader::Impl {
+    RegionIndex index;
+};
+
+WorldSaveService::AuthorityReader::AuthorityReader() = default;
+WorldSaveService::AuthorityReader::~AuthorityReader() = default;
+WorldSaveService::AuthorityReader::AuthorityReader(AuthorityReader&&) noexcept = default;
+WorldSaveService::AuthorityReader&
+WorldSaveService::AuthorityReader::operator=(AuthorityReader&&) noexcept = default;
+
+bool WorldSaveService::AuthorityReader::open(const std::filesystem::path& region_file) {
+    m_impl = std::make_unique<Impl>();
+    if (OpenAuthorityIndex(region_file, m_impl->index))
+        return true;
+    m_impl.reset();
+    return false;
+}
+
+std::optional<u64> WorldSaveService::AuthorityReader::next_id() const {
+    if (!m_impl || m_impl->index.next >= m_impl->index.records.size())
+        return std::nullopt;
+    return m_impl->index.records[m_impl->index.next].id;
+}
+
+void WorldSaveService::AuthorityReader::skip() {
+    if (next_id())
+        ++m_impl->index.next;
+}
+
+std::shared_ptr<Chunk> WorldSaveService::AuthorityReader::read(u64 id) {
+    if (!m_impl)
+        return nullptr;
+    auto& index = m_impl->index;
+    const auto entry = std::lower_bound(
+        index.records.begin(), index.records.end(), id, [](const auto& record, u64 value) {
+            return record.id < value;
+        });
+    if (entry == index.records.end() || entry->id != id)
+        return nullptr;
+    RegionRecord raw;
+    if (!ReadIndexedRecord(index, *entry, raw, nullptr))
+        throw std::runtime_error("Cannot read durable chunk authority");
+    auto chunk = DecodeChunkRecord(raw, index.path, nullptr, true);
+    if (!chunk)
+        throw std::runtime_error("Cannot decode durable chunk authority");
+    // Runtime jobs and collider handles belong to the previous process.
+    chunk->reset_pending_jobs();
+    chunk->has_collision.store(false, std::memory_order_release);
+    chunk->set_state(ChunkState::Idle);
+    return chunk;
+}
+
+std::shared_ptr<Chunk> WorldSaveService::AuthorityReader::read_next() {
+    const auto id = next_id();
+    if (!id)
+        return nullptr;
+    auto chunk = read(*id);
+    skip();
+    return chunk;
+}
+
+bool WorldSaveService::open_region_authority(const std::filesystem::path& region_file,
+                                             AuthorityReader& reader) {
+    return reader.open(region_file);
+}
+
+std::shared_ptr<Chunk> WorldSaveService::read_next_authority(AuthorityReader& reader) {
+    return reader.read_next();
+}
+
+bool WorldSaveService::persist_chunk_authority(const std::filesystem::path& save_dir,
+                                               const std::shared_ptr<Chunk>& chunk) {
+    if (save_dir.empty() || !chunk || !chunk->has_simulation_authority())
+        return false;
+    int rx = 0, rz = 0;
+    region_coords_for_chunk(chunk->get_coords(), rx, rz);
+    const ContainerRecord record{chunk->get_id(),
+                                 0,
+                                 ChunkRecordFlags(*chunk, 0),
+                                 SerializeChunkAuthoritySnapshotJson(*chunk)};
+    if (!upsert_container_records(region_file_path(save_dir, rx, rz), {record}))
+        return false;
+    chunk->clear_voxel_data_dirty();
+    return true;
+}
+
+bool WorldSaveService::persist_water_column_migration(
+    const std::filesystem::path& save_dir,
+    const std::shared_ptr<Chunk>& destination,
+    const std::vector<std::shared_ptr<Chunk>>& sources) {
+    if (save_dir.empty() || !destination || destination->get_coords().y != 0 ||
+        !destination->has_water_authority() || !destination->has_complete_water_state() ||
+        sources.empty() || sources.size() >= std::numeric_limits<u16>::max())
+        return false;
+    // LMR1 bounds this list, including the destination, to 65,535 records.
+    std::vector<RegionReplacement> replacements;
+    replacements.reserve(sources.size() + 1u);
+    replacements.push_back(
+        {.id = destination->get_id(), .preserve_authority = true, .chunk = destination});
+    std::set<ChunkID> seen;
+    for (const auto& source : sources) {
+        if (!source || source->get_coords().x != destination->get_coords().x ||
+            source->get_coords().z != destination->get_coords().z || source->get_coords().y == 0 ||
+            !source->has_water_authority() || !source->has_complete_water_state() ||
+            !source->same_water_state(*destination) || !seen.insert(source->get_id()).second)
+            return false;
+        replacements.push_back({.id = source->get_id(),
+                                .preserve_authority = true,
+                                .chunk = source,
+                                .omit_water = true});
+    }
+    int rx = 0, rz = 0;
+    region_coords_for_chunk(destination->get_coords(), rx, rz);
+    return RewriteRegionFile(region_file_path(save_dir, rx, rz), replacements, nullptr);
+}
+
+bool WorldSaveService::copy_chunk_authority(const std::filesystem::path& source,
+                                            const std::filesystem::path& destination) {
+    if (source == destination)
+        return true;
+    try {
+        if (!source.empty() && std::filesystem::exists(source) &&
+            std::filesystem::exists(destination) &&
+            std::filesystem::equivalent(source, destination))
+            return true;
+        // Preflight every destination region before writing anything. Region
+        // replacement preserves siblings, so adopting destination-only edited
+        // records would import another snapshot's authority into the live world.
+        // Both manifests are bounded by LMR1's 65,535-record limit per region.
+        const auto destination_regions = region_directory(destination);
+        if (std::filesystem::exists(destination_regions)) {
+            for (const auto& entry : std::filesystem::directory_iterator(destination_regions)) {
+                int rx = 0, rz = 0;
+                if (!entry.is_regular_file() || !ParseRegionFileName(entry.path(), rx, rz))
+                    continue;
+                RegionIndex previous, incoming;
+                if (!OpenAuthorityIndex(entry.path(), previous) ||
+                    (!source.empty() &&
+                     !OpenAuthorityIndex(region_file_path(source, rx, rz), incoming)))
+                    return false;
+                if (!std::includes(
+                        incoming.records.begin(),
+                        incoming.records.end(),
+                        previous.records.begin(),
+                        previous.records.end(),
+                        [](const auto& lhs, const auto& rhs) { return lhs.id < rhs.id; }))
+                    return false;
+            }
+        }
+        if (source.empty())
+            return true;
+        const auto directory = region_directory(source);
+        if (!std::filesystem::exists(directory))
+            return true;
+        for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+            int rx = 0, rz = 0;
+            if (!entry.is_regular_file() || !ParseRegionFileName(entry.path(), rx, rz))
+                continue;
+            RegionIndex index;
+            if (!OpenAuthorityIndex(entry.path(), index))
+                return false;
+            std::vector<RegionReplacement> replacements;
+            replacements.reserve(index.records.size());
+            for (std::size_t i = 0; i < index.records.size(); ++i)
+                replacements.push_back({.id = index.records[i].id,
+                                        .lod_level = 0,
+                                        .chunk = {},
+                                        .source = &index,
+                                        .source_record = i});
+            if (!replacements.empty() &&
+                !RewriteRegionFile(region_file_path(destination, rx, rz), replacements, nullptr))
+                return false;
+        }
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
 bool WorldSaveService::upsert_container_records(const std::filesystem::path& region_file,
                                                 const std::vector<ContainerRecord>& records,
                                                 std::vector<std::string>* errors) {
     try {
-        const std::filesystem::path parent = region_file.parent_path();
-        if (!parent.empty()) {
-            std::filesystem::create_directories(parent);
+        if (records.size() > std::numeric_limits<u16>::max()) {
+            AddError(errors, "region file exceeds the 65535-record limit");
+            return false;
         }
-
-        std::vector<RegionRecord> raw_records;
-        std::error_code exists_error;
-        if (std::filesystem::exists(region_file, exists_error) && !exists_error) {
-            if (!ReadRegionFile(region_file, raw_records, errors)) {
+        std::vector<RegionReplacement> replacements;
+        replacements.reserve(records.size());
+        for (const auto& record : records) {
+            if (record.lod_level > 2 || (record.flags & ~3u) != 0) {
+                AddError(errors, "corrupt or unknown region record header");
                 return false;
             }
+            replacements.push_back({.id = record.id,
+                                    .lod_level = record.lod_level,
+                                    .chunk = {},
+                                    .container = &record});
         }
-
-        std::map<std::pair<std::uint8_t, std::uint64_t>, std::size_t> record_index;
-        for (std::size_t i = 0; i < raw_records.size(); ++i) {
-            record_index[{raw_records[i].lod_level, raw_records[i].id}] = i;
-        }
-
-        for (const ContainerRecord& record : records) {
-            RegionRecord raw;
-            raw.id = record.id;
-            raw.lod_level = record.lod_level;
-            raw.flags = record.flags;
-            if (!CompressPayload(record.payload, raw, errors)) {
-                return false;
-            }
-            const auto existing = record_index.find({raw.lod_level, raw.id});
-            if (existing != record_index.end()) {
-                raw_records[existing->second] = std::move(raw);
-            } else {
-                record_index[{raw.lod_level, raw.id}] = raw_records.size();
-                raw_records.push_back(std::move(raw));
-            }
-        }
-
-        return WriteRegionFile(region_file, raw_records, errors);
+        return RewriteRegionFile(region_file, replacements, errors);
     } catch (const std::exception& e) {
         AddError(errors, std::string("failed to upsert region records: ") + e.what());
         return false;
@@ -1372,14 +1990,18 @@ void WorldSaveService::set_interrupt_before_region_replace_for_testing(bool enab
 bool WorldSaveService::write_file_durably(const std::filesystem::path& destination,
                                           const std::string& bytes,
                                           std::vector<std::string>* errors) {
-    std::error_code directory_error;
-    if (destination.has_parent_path()) {
-        std::filesystem::create_directories(destination.parent_path(), directory_error);
-    }
-    if (directory_error) {
+    std::filesystem::path temp_path;
+    if (!WriteDurableRegionTemp(destination, bytes, temp_path, errors))
+        return false;
+    if (InterruptBeforeRegionReplaceForTesting().exchange(false, std::memory_order_acq_rel)) {
+        RemoveTemporaryFile(temp_path);
         AddError(errors,
-                 "cannot create directory " + destination.parent_path().string() + ": " +
-                     directory_error.message());
+                 "file replacement interrupted by test seam before replacing: " +
+                     destination.string());
+        return false;
+    }
+    if (!CreatePayloadDirectory(destination, errors)) {
+        RemoveTemporaryFile(temp_path);
         return false;
     }
 #if !defined(_WIN32)
@@ -1393,21 +2015,11 @@ bool WorldSaveService::write_file_durably(const std::filesystem::path& destinati
         const std::filesystem::path holder =
             ancestor.has_parent_path() ? ancestor.parent_path() : std::filesystem::path(".");
         if (!FlushDirectoryEntry(holder, errors)) {
+            RemoveTemporaryFile(temp_path);
             return false;
         }
     }
 #endif
-    std::filesystem::path temp_path;
-    if (!WriteDurableRegionTemp(destination, bytes, temp_path, errors)) {
-        return false;
-    }
-    if (InterruptBeforeRegionReplaceForTesting().exchange(false, std::memory_order_acq_rel)) {
-        RemoveTemporaryFile(temp_path);
-        AddError(errors,
-                 "file replacement interrupted by test seam before replacing: " +
-                     destination.string());
-        return false;
-    }
     if (!ReplaceRegionFileAtomically(temp_path, destination, errors)) {
         RemoveTemporaryFile(temp_path);
         return false;
@@ -1425,14 +2037,19 @@ void WorldSaveService::set_before_active_regions_replace_for_testing(bool (*hook
 
 bool WorldSaveService::save_world(const WorldStreamingState& state,
                                   const std::filesystem::path& save_dir,
-                                  std::vector<std::string>* errors) const {
-    return write_snapshot(state.snapshot_chunks(), save_dir, errors);
+                                  std::vector<std::string>* errors,
+                                  bool preserve_authority) const {
+    return validate_save(save_dir, errors) &&
+           write_snapshot(state.snapshot_chunks(), save_dir, errors, nullptr, preserve_authority);
 }
 
 bool WorldSaveService::load_world(WorldStreamingState& state,
                                   const std::filesystem::path& save_dir,
                                   std::vector<std::string>& errors,
-                                  const std::stop_token& stop) const {
+                                  const std::stop_token& stop,
+                                  std::size_t max_resident_chunks,
+                                  bool require_full_sdf_lattice,
+                                  bool migrate_legacy_water) const {
     state.clear();
     const auto reject = [&state, &errors](const std::string& message) {
         state.clear();
@@ -1472,6 +2089,9 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                     !ReadAmbientAnchor(metadata, anchor, error))
                     return reject(error);
             }
+            std::string cursor_error;
+            if (!ReadWaterCursor(metadata, nullptr, cursor_error))
+                return reject(cursor_error);
         }
         const auto chunks_dir = save_dir / kChunksDirectoryName;
         const auto region_dir = region_directory(save_dir);
@@ -1546,26 +2166,44 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
             }
         }
         std::sort(region_files.begin(), region_files.end());
+        std::set<std::pair<int, int>> seen_regions;
         for (const auto& path : region_files) {
             if (stop.stop_requested())
                 return reject("Saved-world validation cancelled.");
             int rx = 0, rz = 0;
             ParseRegionFileName(path, rx, rz);
-            std::vector<RegionRecord> records;
-            if (!ReadRegionFile(path, records, &errors, stop))
+            if (!seen_regions.emplace(rx, rz).second)
+                return reject("corrupt duplicate region identity: " + path.string());
+            RegionIndex index;
+            if (!ReadRegionIndex(path, index, &errors, stop))
                 return reject("");
-            for (const auto& record : records) {
+            for (const auto& entry : index.records) {
+                RegionRecord record;
+                if (!ReadIndexedRecord(index, entry, record, &errors))
+                    return reject("");
                 if (stop.stop_requested())
                     return reject("Saved-world validation cancelled.");
                 if (record.lod_level == 0) {
-                    const auto chunk = DecodeChunkRecord(record, path, &errors);
+                    const auto chunk =
+                        DecodeChunkRecord(record, path, &errors, migrate_legacy_water);
                     if (!chunk)
                         return reject("");
                     int chunk_rx = 0, chunk_rz = 0;
                     region_coords_for_chunk(chunk->get_coords(), chunk_rx, chunk_rz);
-                    if (chunk_rx != rx || chunk_rz != rz || !state.insert_chunk(chunk))
+                    if (chunk_rx != rx || chunk_rz != rz)
                         return reject("corrupt chunk region identity or duplicate id: " +
                                       path.string());
+                    // Preserve the runtime loader's full-lattice validation,
+                    // including records beyond its bounded resident prefix.
+                    constexpr std::size_t lattice = static_cast<std::size_t>(CHUNK_SIZE_X + 1) *
+                                                    (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+                    if (require_full_sdf_lattice && !chunk->sdf_data.empty() &&
+                        chunk->sdf_data.size() != lattice)
+                        return reject("corrupt world chunk SDF lattice");
+                    // Manifest keys are unique within a region; region identity
+                    // validation above also excludes duplicates across files.
+                    if (state.size() < max_resident_chunks && !state.insert_chunk(chunk))
+                        return reject("corrupt duplicate chunk id: " + path.string());
                 } else {
                     const auto tier = static_cast<World::FarLodTier>(record.lod_level);
                     if (record.id != World::FarLodStore::tile_record_id(tier, rx, rz))
@@ -1607,7 +2245,17 @@ std::string WorldSaveService::world_hash(const WorldStreamingState& state) const
 
 WorldSaveDirtyReport WorldSaveService::save_dirty_chunks(WorldStreamingState& state,
                                                          const std::filesystem::path& save_dir,
-                                                         std::vector<std::string>* errors) const {
+                                                         std::vector<std::string>* errors,
+                                                         bool preserve_authority) const {
+    if (state.dirty_chunk_ids().empty() || !validate_save(save_dir, errors))
+        return {.chunks_total = state.size(), .chunks_dirty = state.dirty_chunk_ids().size()};
+    return save_dirty_validated(state, save_dir, errors, preserve_authority);
+}
+
+WorldSaveDirtyReport WorldSaveService::save_dirty_validated(WorldStreamingState& state,
+                                                            const std::filesystem::path& save_dir,
+                                                            std::vector<std::string>* errors,
+                                                            bool preserve_authority) const {
     WorldSaveDirtyReport report;
     report.chunks_total = state.size();
 
@@ -1642,7 +2290,8 @@ WorldSaveDirtyReport WorldSaveService::save_dirty_chunks(WorldStreamingState& st
         }
     }
 
-    if (!write_snapshot(chunks_to_write, save_dir, errors, &report.regions_written)) {
+    if (!write_snapshot(
+            chunks_to_write, save_dir, errors, &report.regions_written, preserve_authority)) {
         return report;
     }
 
@@ -1658,13 +2307,9 @@ WorldSaveDirtyReport WorldSaveService::save_dirty_chunks(WorldStreamingState& st
 bool WorldSaveService::write_snapshot(const std::vector<std::shared_ptr<Chunk>>& chunks,
                                       const std::filesystem::path& save_dir,
                                       std::vector<std::string>* errors,
-                                      std::size_t* regions_written) const {
+                                      std::size_t* regions_written,
+                                      bool preserve_authority) const {
     try {
-        if (!validate_save(save_dir, errors))
-            return false;
-        const std::filesystem::path region_dir = region_directory(save_dir);
-        std::filesystem::create_directories(region_dir);
-
         // Group the chunks to persist by region (deterministic order).
         std::map<std::pair<int, int>, std::vector<std::shared_ptr<Chunk>>> regions;
         for (const auto& chunk : chunks) {
@@ -1682,48 +2327,19 @@ bool WorldSaveService::write_snapshot(const std::vector<std::shared_ptr<Chunk>>&
             const std::filesystem::path path =
                 region_file_path(save_dir, region_coords.first, region_coords.second);
 
-            // Merge with existing on-disk records: chunks absent from memory
-            // and far-LOD tile records (lod_level > 0) are preserved
-            // verbatim; records for the chunks being written are replaced.
-            std::vector<RegionRecord> records;
-            std::error_code exists_error;
-            if (std::filesystem::exists(path, exists_error) && !exists_error) {
-                if (!ReadRegionFile(path, records, errors)) {
-                    return false;
-                }
-            }
-            std::map<std::pair<std::uint8_t, std::uint64_t>, std::size_t> record_index;
-            for (std::size_t i = 0; i < records.size(); ++i) {
-                record_index[{records[i].lod_level, records[i].id}] = i;
-            }
-
-            for (const auto& chunk : region_chunks) {
-                RegionRecord record;
-                record.id = chunk->get_id();
-                record.lod_level = 0;
-
-                std::uint8_t previous_flags = 0;
-                const auto existing = record_index.find({record.lod_level, record.id});
-                if (existing != record_index.end()) {
-                    previous_flags = records[existing->second].flags;
-                }
-                record.flags = ChunkRecordFlags(*chunk, previous_flags);
-
-                if (!CompressPayload(SerializeSingleChunkSnapshot(chunk), record, errors)) {
-                    return false;
-                }
-
-                if (existing != record_index.end()) {
-                    records[existing->second] = std::move(record);
-                } else {
-                    record_index[{record.lod_level, record.id}] = records.size();
-                    records.push_back(std::move(record));
-                }
-            }
-
-            if (!WriteRegionFile(path, records, errors)) {
+            if (region_chunks.size() > std::numeric_limits<u16>::max()) {
+                AddError(errors, "region file exceeds the 65535-record limit");
                 return false;
             }
+            std::vector<RegionReplacement> replacements;
+            replacements.reserve(region_chunks.size());
+            for (const auto& chunk : region_chunks)
+                replacements.push_back({.id = chunk->get_id(),
+                                        .lod_level = 0,
+                                        .preserve_authority = preserve_authority,
+                                        .chunk = chunk});
+            if (!RewriteRegionFile(path, replacements, errors))
+                return false;
             ++written;
         }
 

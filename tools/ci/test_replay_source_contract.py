@@ -183,7 +183,8 @@ class ReplaySourceContract(unittest.TestCase):
         self.assertRegex(writer, r'SurfaceRadiiSupported\(header.surface_radius, '
                          r'header.collision_radius\)\)\s*return false;')
         primitive = read_source("src/luminumbra_common/systems/SHIELD_WorldSystem.cpp").split(
-            "bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(", 1)[1]
+            "bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(", 1)[1].split(
+                "\nfloat SHIELD_WorldSystem::GetTerrainHeightAt(", 1)[0]
         self.assertIn("World::SurfaceColumnCount(static_cast<std::uint64_t>(radius))", primitive)
         self.assertRegex(primitive, r'if \(!physics_system \|\| !column_count \|\|\s*'
                          r'!World::SurfaceRadiiSupported\(radius, collision_range\)\)\s*\{'
@@ -215,6 +216,77 @@ class ReplaySourceContract(unittest.TestCase):
                       "diameter > max_size / diameter",
                       "count > kMaxSurfaceChunks - total"):
             self.assertIn(check, budget)
+
+    def test_surface_exact_admission_precedes_all_publication_drains(self):
+        source = read_source("src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        primitive = source.split("bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(", 1)[1].split(
+            "\nfloat SHIELD_WorldSystem::GetTerrainHeightAt(", 1)[0]
+        # The real function must finish every admission check before any drain;
+        # searching the rest of the translation unit could accept a later call.
+        admissions = [re.search(
+            r'if \(!World::AddSurfaceColumnChunks\('
+            r'span.min_y, span.max_y, surface_capacity\)\)\s*return false;', primitive)]
+        for vector in ("chunks_to_build", "chunks_to_consider_for_collision"):
+            admissions.append(re.search(
+                rf'if \(surface_capacity > {vector}\.max_size\(\)\)\s*return false;',
+                primitive))
+        for admission in admissions:
+            self.assertIsNotNone(admission)
+        drains = list(re.finditer(r'wait_for_(?:generation|meshing|promotion)_jobs\(\);',
+                                  primitive))
+        self.assertEqual([drain[0] for drain in drains], [
+            "wait_for_generation_jobs();", "wait_for_meshing_jobs();",
+            "wait_for_promotion_jobs();", "wait_for_meshing_jobs();"])
+        for admission in admissions:
+            self.assertLess(admission.end(), drains[0].start())
+        self.assertLess(primitive.index("JobWatchdogEnabled()"), drains[0].start())
+        for vector in ("chunks_to_build", "chunks_to_consider_for_collision"):
+            self.assertLess(drains[-1].end(), primitive.index(f"{vector}.reserve(surface_capacity)"))
+        self.assertLess(drains[-1].end(), primitive.index("m_streaming_state.chunks.emplace"))
+
+        native = read_source("test/common/SurfaceWorkBudget_test.cpp")
+        self.assertIn('#include "luminumbra_common/core/JobSystem.h"', native)
+        for lane in ("Mesh", "Generation", "Promotion"):
+            name = f"TallSurfaceRefusalRetainsUnpublished{lane}Batch"
+            marker = f"TEST(SurfaceWorkBudget, {name})"
+            self.assertEqual(native.count(marker), 1)
+            case = native.split(marker, 1)[1].split("\nTEST(", 1)[0]
+            for token in ("jobs.startup(1);", "world.begin_tick(0);",
+                          "world.quiesce_streaming_jobs_for_save();",
+                          "ASSERT_EQ(world.pending_publication_chunks(), 1u);",
+                          "EXPECT_FALSE(world.EnsureSurfaceReadyNear(anchor, &physics, 0, 0));",
+                          "EXPECT_FALSE(world.EnsureCollisionReadyNear(anchor, &physics, 0));",
+                          "EXPECT_EQ(world.EditTerrainVoxel(anchor, 1.0f, false, &physics), 0);",
+                          "EXPECT_EQ(world.pending_publication_chunks(), 1u);",
+                          "EXPECT_EQ(chunk->current_lod.load(), original_lod);",
+                          "EXPECT_EQ(chunk->mesh_version.load(), original_version);",
+                          "EXPECT_EQ(chunk->sdf_data, original_sdf);",
+                          "EXPECT_EQ(world.find_streamed_chunk(Luminumbra::IVec3(0)), chunk);",
+                          "EXPECT_EQ(world.snapshot_streamed_chunks().size(), 1u);",
+                          "EXPECT_EQ(world.far_lod_authority_revision(), original_revision);",
+                          "world.begin_tick(8);", "world.activate_due(8);",
+                          "EXPECT_EQ(world.pending_publication_chunks(), 0u);"):
+                self.assertIn(token, case)
+            self.assertLess(case.index("world.quiesce_streaming_jobs_for_save();"),
+                            case.index("EXPECT_FALSE(world.EnsureSurfaceReadyNear("))
+            if lane == "Generation":
+                self.assertIn("world.dispatch_generation_jobs(", case)
+                self.assertIn("ASSERT_TRUE(chunk->pending_generation_ready.load());", case)
+            else:
+                self.assertIn("world.update(registry, anchor, nullptr);", case)
+                self.assertIn("ASSERT_TRUE(world.adopt_streamed_chunk(chunk));", case)
+                ready = "mesh" if lane == "Mesh" else "promotion"
+                self.assertIn(f"ASSERT_TRUE(chunk->pending_{ready}_ready.load());", case)
+                self.assertIn("EXPECT_EQ(chunk->mesh_version.load(), original_version + 1u);", case)
+        cmake = read_source("test/CMakeLists.txt")
+        target = re.search(r'add_executable\(world_open_refusal_test\s+(.*?)\)',
+                           cmake, re.DOTALL)
+        self.assertIsNotNone(target)
+        self.assertEqual(target[1].split().count("common/SurfaceWorkBudget_test.cpp"), 1)
+        targets = cmake.split("set(LUMINUMBRA_GTEST_TARGETS", 1)[1].split("\n)", 1)[0]
+        self.assertEqual(targets.split().count("world_open_refusal_test"), 1)
+        self.assertIn("foreach(_lum_gtest_target ${LUMINUMBRA_GTEST_TARGETS})", cmake)
+        self.assertIn("gtest_discover_tests(${_lum_gtest_target}", cmake)
 
     def test_surface_cli_and_direct_siblings_share_admission_and_native_owners(self):
         server = read_source("src/luminumbra_server/main_server.cpp")
@@ -345,9 +417,21 @@ class ReplaySourceContract(unittest.TestCase):
                          r'[^;]*, 4, 2\)\)\s*\{[^}]*return 2;')
         loading = main.split('"CONSTRUCTING WORLD GEOMETRY..."', 1)[1].split(
             '"World generation phase complete. Entering world."', 1)[0]
-        self.assertRegex(loading, r'if \(!gameSession->GetWorldSystem\(\)->'
-                         r'EnsureSurfaceReadyNear\([\s\S]*?\)\)\s*\{[\s\S]*'
-                         r'refuse_world_entry\([^;]*;\s*break;')
+        self.assertIn("const bool horizon_ready = gameSession->EnsureWorldEntryReady(12, 4);", loading)
+        self.assertRegex(loading, r'if \(!horizon_ready\)\s*\{[\s\S]*?'
+                         r'refuse_world_entry\([^;]*;[\s\S]*?break;')
+        session = read_source("src/luminumbra_common/world/GameSession.cpp")
+        ready = session.split("bool GameSession::EnsureWorldEntryReady(", 1)[1].split(
+            "std::string GameSession::SystemConfigIdentity()", 1)[0]
+        self.assertRegex(ready, r'if \(!World::SurfaceRadiiSupported\('
+                         r'horizon_radius, collision_radius\)[\s\S]*?return false;')
+        self.assertLess(ready.index("SurfaceRadiiSupported"),
+                        ready.index("PrepareSimulationCollisions();"))
+        self.assertRegex(ready, r'return !m_regionFault &&\s*'
+                         r'm_worldSystem->EnsureSurfaceReadyNear\(\s*'
+                         r'm_metadata.spawnPoint, m_physicsSystem.get\(\), '
+                         r'horizon_radius, collision_radius\);')
+        self.assertLess(loading.index("if (!horizon_ready)"), loading.index("break;"))
         self.assertIn('g_uiManager->RequestLoadDocument("main_menu.rml");', loading)
         backdrop = main.split('CreateTransientWorld("Menu Vista"', 1)[1].split(
             "int exit_code = 0;", 1)[0]

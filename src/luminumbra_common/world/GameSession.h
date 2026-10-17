@@ -9,6 +9,7 @@
 #include "../ai/WildlifeFoliageSystem.h"      // ai::WildlifeFoliageTuning (full-control)
 #include "../core/SimulationClock.h"
 #include "../core/SystemConfig.h"
+#include "../persistence/WorldSaveService.h"
 #include "../simulation/SimBudgetTelemetry.h"
 #include "../simulation/SimulationEventBus.h"
 #include "../systems/PollinationSystem.h"
@@ -128,10 +129,12 @@ public:
     // no chunk carries unsaved voxel edits, so a never-edited world stays
     // byte-for-byte on the fresh-world path. The first write of an edited
     // world emits a full snapshot; later writes flush through
-    // WorldSaveService::save_dirty_chunks.
-    bool SaveWorldState(WorldStateSaveReport* report = nullptr);
+    // WorldSaveService::save_dirty_chunks. Explicit full snapshots also write
+    // clean resident chunks, through the same validation and metadata ordering.
+    bool SaveWorldState(WorldStateSaveReport* report = nullptr, bool full_snapshot = false);
     bool SaveWorldStateTo(const std::filesystem::path& save_dir,
-                          WorldStateSaveReport* report = nullptr);
+                          WorldStateSaveReport* report = nullptr,
+                          bool full_snapshot = false);
 
     // Loads a previously saved snapshot into the live streaming state. Must be
     // called AFTER the world systems initialize but BEFORE chunk streaming
@@ -187,6 +190,13 @@ public:
     Systems::WaterSystem* GetWaterSystem() {
         return m_waterSystem.get();
     }
+    // Owner-thread simulation preparation. Call after publishing anchors and before
+    // external avatar physics; TickSimulation also calls this before creature physics.
+    void PrepareSimulationCollisions();
+    // Owner-thread entry barrier: admit collision before building the visible
+    // spawn horizon. Returns false on missing systems or an admission fault.
+    bool EnsureWorldEntryReady(int horizon_radius, int collision_radius);
+
     Systems::PhysicsSystem* GetPhysicsSystem() {
         return m_physicsSystem.get();
     }
@@ -263,6 +273,9 @@ public:
     void ApplySystemConfig(const luminumbra::core::SystemConfig& config);
     // Computed on demand from the current effective simulation gates and tuning.
     [[nodiscard]] std::string SystemConfigIdentity() const;
+    [[nodiscard]] std::string LegacyRevision3SystemConfigIdentity() const;
+    // Immutable value captured on the owner thread at a completed tick boundary.
+    [[nodiscard]] Persistence::WorldAuthorityHashes CaptureAuthorityHashes() const;
     // Resolved preset, biome/structure dependencies and captured species bytes.
     // Shared by TCP Hello, lockstep and replay; never re-reads content.
     [[nodiscard]] const std::string& PresetContentHash() const {
@@ -492,6 +505,8 @@ private:
     void ResetWorldSystems();
     void RestoreWorldClock(const WorldClock& clock);
     bool SaveWorldMetadataTo(const std::filesystem::path& save_dir);
+    bool SaveWorldMetadata(Persistence::WorldSaveService::SaveBatch& batch);
+    [[nodiscard]] luminumbra::core::SimulationIdentityValues EffectiveIdentityValues() const;
     bool ClockConfigurationCompatible(const std::filesystem::path& save_dir) const;
     WorldClock m_worldClock;
     void AttachRegionEditObserver();
@@ -571,6 +586,7 @@ private:
     // Persist the layer's record beside the chunk save (null/all-zero -> no
     // file). Serialize normalizes, which is state-idempotent at save time.
     bool SaveEnergyFieldRecord(const std::filesystem::path& save_dir);
+    bool LoadEnergyFieldRecord(const std::filesystem::path& save_dir);
     void ApplyWeatherRainWiring();     // Wires weather to rain when opted in.
     void ApplyWaterResolutionWiring(); // Raises the water solver to High when opted in.
     bool m_finiteHydrologyEnabled = true;

@@ -1,11 +1,39 @@
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <string>
 #include <string_view>
 #include <system_error>
 
 namespace Luminumbra::Filesystem {
+
+// An opened regular file image; directories and devices are refused without
+// reading, and FIFOs are opened without blocking. Windows readers share deletion so atomic
+// replacement can publish a new image while existing readers finish the old one.
+// POSIX readers have the same semantics through their open descriptor.
+class ReplacementSafeInputFile {
+public:
+    ReplacementSafeInputFile() = default;
+    ~ReplacementSafeInputFile();
+    ReplacementSafeInputFile(const ReplacementSafeInputFile&) = delete;
+    ReplacementSafeInputFile& operator=(const ReplacementSafeInputFile&) = delete;
+    ReplacementSafeInputFile(ReplacementSafeInputFile&& other) noexcept;
+    ReplacementSafeInputFile& operator=(ReplacementSafeInputFile&& other) noexcept;
+    bool open(const std::filesystem::path& path);
+    void close();
+    [[nodiscard]] bool is_open() const {
+        return m_file != nullptr;
+    }
+    [[nodiscard]] std::uint64_t size(std::error_code& error) const;
+    bool seek(std::uint64_t offset);
+    bool read(char* destination, std::size_t bytes);
+
+private:
+    std::FILE* m_file = nullptr;
+};
 
 // MinGW libstdc++ before GCC 16 does not recognize UNC root names. Keep the
 // native path intact rather than converting a network share to the current drive.

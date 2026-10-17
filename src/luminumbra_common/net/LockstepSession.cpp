@@ -1385,14 +1385,7 @@ bool LockstepSession::ComparePeerHash(PeerCheckpoint& checkpoint) {
         checkpoint.compared = true;
         return true;
     }
-    // Localize via authoritative sub-hashes, then fall back to world_hash.
-    std::string section = "world_hash";
-    if (local->second->terrain != peer.terrain)
-        section = "terrain";
-    else if (local->second->water != peer.water)
-        section = "water";
-    else if (local->second->entities != peer.entities)
-        section = "entities";
+    const std::string section = CheckpointMismatchSection(*local->second, peer);
     EmitDesyncDump(peer.tick, section);
     return false;
 }

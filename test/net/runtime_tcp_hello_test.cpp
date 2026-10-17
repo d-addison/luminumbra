@@ -169,6 +169,34 @@ TEST_F(RuntimeTcpHelloTest, MismatchedIdentityBeforeDeadlineStillReleasesSlot) {
     ExpectReleased();
 }
 
+TEST_F(RuntimeTcpHelloTest, CurrentAuthorityRefusesLegacyPeerBeforeAdmission) {
+    Luminumbra::world::GameSession session;
+    expected.system_config_identity = session.SystemConfigIdentity();
+    auto hello = expected;
+    hello.system_config_identity = session.LegacyRevision3SystemConfigIdentity();
+    ASSERT_NE(hello.system_config_identity, expected.system_config_identity);
+    ASSERT_TRUE(peer.SendFrame(EncodeHello(hello)));
+    ASSERT_TRUE(WaitUntil([&]() {
+        EXPECT_FALSE(PollRuntimeTcpAccept(slot, expected, accepted_at + 1s));
+        return slot.transport == nullptr;
+    }));
+    ExpectReleased();
+}
+
+TEST_F(RuntimeTcpHelloTest, LegacyAuthorityRefusesCurrentPeerBeforeAdmission) {
+    Luminumbra::world::GameSession session;
+    expected.system_config_identity = session.LegacyRevision3SystemConfigIdentity();
+    auto hello = expected;
+    hello.system_config_identity = session.SystemConfigIdentity();
+    ASSERT_NE(hello.system_config_identity, expected.system_config_identity);
+    ASSERT_TRUE(peer.SendFrame(EncodeHello(hello)));
+    ASSERT_TRUE(WaitUntil([&]() {
+        EXPECT_FALSE(PollRuntimeTcpAccept(slot, expected, accepted_at + 1s));
+        return slot.transport == nullptr;
+    }));
+    ExpectReleased();
+}
+
 TEST_F(RuntimeTcpHelloTest, SpeciesBrainMismatchRefusesAdmissionAndClosesPeer) {
     const Luminumbra::TestSupport::SpeciesIdentityFixture content;
     const auto baseline = content.Resolve();

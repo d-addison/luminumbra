@@ -8,9 +8,12 @@
 #include <cstdint>
 #include <filesystem>
 #include <initializer_list>
+#include <limits>
+#include <memory>
 #include <optional>
 #include <stop_token>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace Luminumbra::Ecs {
@@ -18,6 +21,10 @@ struct EntityRegistrySnapshot;
 }
 
 namespace Luminumbra::Persistence {
+
+class RegionContentHasher;
+class AuthorityHashCache;
+struct WorldAuthorityHashes;
 
 // Counters describing one incremental save pass over the streaming state.
 struct WorldSaveDirtyReport {
@@ -28,11 +35,14 @@ struct WorldSaveDirtyReport {
 };
 
 // Inputs of the region simulation digest. Priority when ids collide: live over
-// parked over durable edited records. Parked is the dirty-chunk parking area
-// introduced by a later slice; it is empty until then.
+// parked over durable edited records. The scheduler supplies the complete
+// resident region authority in live; durable-only records are merged separately.
 struct RegionDigestInputs {
     std::vector<std::shared_ptr<Chunk>> live;
     std::vector<std::shared_ptr<Chunk>> parked;
+    // Complete authoritative content retained independently of streaming. Its
+    // lifecycle can be Loading during a render rebuild without losing authority.
+    bool complete_authority = false;
 };
 
 // Persists WorldStreamingState snapshots beneath a world save directory.
@@ -84,7 +94,7 @@ public:
                                     std::vector<std::string>* errors = nullptr,
                                     const world::WorldClock& absent_clock = world::WorldClock{});
     // Content-only projection region_content_v2: live over parked over durable records flagged
-    // edited; pristine chunks excluded. Loading is excluded only for live/parked inputs.
+    // edited; pristine chunks excluded. Loading is excluded for incomplete live/parked inputs.
     static std::uint64_t region_simulation_digest(const std::filesystem::path& save_dir,
                                                   world::RegionKey key,
                                                   const RegionDigestInputs& inputs);
@@ -98,6 +108,12 @@ public:
     region_simulation_digest(const std::filesystem::path& save_dir,
                              world::RegionKey key,
                              std::initializer_list<std::shared_ptr<Chunk>> live_chunks);
+
+    // Same complete live-over-durable merge as freeze digests. Streams one
+    // decoded durable chunk at a time; no second resident voxel collection.
+    static WorldAuthorityHashes
+    authority_hashes(const std::filesystem::path& save_dir,
+                     const std::vector<std::shared_ptr<Chunk>>& live_chunks);
 
     // Region addressing: rx = floor(chunk_x / 32), rz = floor(chunk_z / 32).
     static constexpr int kRegionChunkSpan = 32;
@@ -134,7 +150,8 @@ public:
                                     world::WorldClock& clock,
                                     bool& requires_active_regions,
                                     std::vector<std::string>* errors = nullptr,
-                                    std::optional<Vec3>* ambient_anchor = nullptr);
+                                    std::optional<Vec3>* ambient_anchor = nullptr,
+                                    std::size_t* water_cursor = nullptr);
 
     // --- Raw LMR1 record access (far-LOD tiles, ) ---
     // Non-chunk payloads (lod_level 1/2 far tier records) share the chunk
@@ -147,6 +164,46 @@ public:
         u8 flags = 0;
         std::string payload; // uncompressed payload bytes
     };
+    // Owner-thread cursor: keeps the bounded manifest for one region, decoding at
+    // most one complete chunk at a time. Render caches are never restored.
+    class AuthorityReader {
+    public:
+        AuthorityReader();
+        ~AuthorityReader();
+        AuthorityReader(AuthorityReader&&) noexcept;
+        AuthorityReader& operator=(AuthorityReader&&) noexcept;
+        bool open(const std::filesystem::path& region_file);
+        std::shared_ptr<Chunk> read_next();
+        // Indexed lookup leaves the sequential cursor unchanged. Missing IDs
+        // return null; malformed payloads throw without publishing a chunk.
+        std::shared_ptr<Chunk> read(u64 id);
+        std::optional<u64> next_id() const;
+        void skip();
+
+    private:
+        struct Impl;
+        std::unique_ptr<Impl> m_impl;
+    };
+    // Cold scan only, at load or after replacement of the durable authority root.
+    static AuthorityHashCache load_authority_hash_cache(const std::filesystem::path& save_dir);
+    static bool open_region_authority(const std::filesystem::path& region_file,
+                                      AuthorityReader& reader);
+    static std::shared_ptr<Chunk> read_next_authority(AuthorityReader& reader);
+    // Atomic replacement of one complete simulation owner, preserving sibling records.
+    // Regenerable chunks are refused before writing.
+    // Unlike incremental saves this writes even when dirty was acknowledged.
+    static bool persist_chunk_authority(const std::filesystem::path& save_dir,
+                                        const std::shared_ptr<Chunk>& chunk);
+    // Atomically install a Y=0 water owner and retire its validated equal-state
+    // nonzero-Y sources. Preserves each source's terrain and every sibling record.
+    // Inputs remain unchanged, including dirty flags, on failure.
+    static bool persist_water_column_migration(const std::filesystem::path& save_dir,
+                                               const std::shared_ptr<Chunk>& destination,
+                                               const std::vector<std::shared_ptr<Chunk>>& sources);
+    // Transfer durable authority for an explicit snapshot destination. Refuses
+    // destination-only authority before writing; processes one region at a time.
+    static bool copy_chunk_authority(const std::filesystem::path& source,
+                                     const std::filesystem::path& destination);
     // Reads and decompresses every record of a region file. A missing file is
     // a clean miss: returns true with out_records empty.
     static bool read_container_records(const std::filesystem::path& region_file,
@@ -217,15 +274,22 @@ public:
     // errors when provided) if the snapshot could not be written.
     bool save_world(const WorldStreamingState& state,
                     const std::filesystem::path& save_dir,
-                    std::vector<std::string>* errors = nullptr) const;
+                    std::vector<std::string>* errors = nullptr,
+                    bool preserve_authority = false) const;
 
     // Loads a previously saved snapshot into state. A missing snapshot file is
     // a clean miss (fresh world): returns false WITHOUT appending an error.
-    // Malformed or unreadable snapshots return false with diagnostics.
+    // Malformed or unreadable snapshots return false with diagnostics. A bounded
+    // runtime load retains at most max_resident_chunks complete chunks; all
+    // remaining records are still decoded/validated one at a time and stay on
+    // disk for region rehydration. Zero selects validation without residency.
     bool load_world(WorldStreamingState& state,
                     const std::filesystem::path& save_dir,
                     std::vector<std::string>& errors,
-                    const std::stop_token& stop = {}) const;
+                    const std::stop_token& stop = {},
+                    std::size_t max_resident_chunks = std::numeric_limits<std::size_t>::max(),
+                    bool require_full_sdf_lattice = false,
+                    bool migrate_legacy_water = false) const;
 
     // Deterministic hash of the streaming state, reusing the persistence hash
     // machinery (fnv1a_64 over the canonical snapshot bytes). Format
@@ -241,9 +305,81 @@ public:
     // existing save to refuse obsolete, mixed-format, or corrupt durable data.
     WorldSaveDirtyReport save_dirty_chunks(WorldStreamingState& state,
                                            const std::filesystem::path& save_dir,
-                                           std::vector<std::string>* errors = nullptr) const;
+                                           std::vector<std::string>* errors = nullptr,
+                                           bool preserve_authority = false) const;
+
+    // One synchronous owner-thread save operation. Begin validates every durable
+    // record once and retains at most one chunk to determine snapshot presence.
+    // No other writer may change the destination until this operation finishes.
+    // A failed payload poisons the operation: metadata cannot acknowledge it.
+    class SaveBatch {
+    public:
+        static std::optional<SaveBatch> begin(const std::filesystem::path& directory,
+                                              std::vector<std::string>* errors = nullptr);
+        SaveBatch(SaveBatch&& other) noexcept
+            : m_directory(std::move(other.m_directory))
+            , m_hasWorldSave(other.m_hasWorldSave)
+            , m_hasChunkSnapshot(other.m_hasChunkSnapshot)
+            , m_valid(std::exchange(other.m_valid, false)) {}
+        SaveBatch& operator=(SaveBatch&&) noexcept = delete;
+        SaveBatch(const SaveBatch&) = delete;
+        SaveBatch& operator=(const SaveBatch&) = delete;
+        const std::filesystem::path& directory() const {
+            return m_directory;
+        }
+        bool has_world_save() const {
+            return m_hasWorldSave;
+        }
+        bool has_chunk_snapshot() const {
+            return m_hasChunkSnapshot;
+        }
+        bool save_world(const WorldStreamingState& state,
+                        std::vector<std::string>* errors,
+                        bool preserve_authority);
+        WorldSaveDirtyReport save_dirty_chunks(WorldStreamingState& state,
+                                               std::vector<std::string>* errors,
+                                               bool preserve_authority);
+        bool save_plant_entities(const Ecs::EntityRegistrySnapshot& snapshot,
+                                 std::vector<std::string>* errors = nullptr);
+        bool save_metadata(const std::string& bytes, std::vector<std::string>* errors = nullptr);
+        bool save_metadata_and_active_regions(const std::string& bytes,
+                                              world::ActiveRegionLedger& ledger,
+                                              std::vector<std::string>* errors = nullptr);
+
+    private:
+        SaveBatch(std::filesystem::path directory, bool has_world, bool has_chunks)
+            : m_directory(std::move(directory))
+            , m_hasWorldSave(has_world)
+            , m_hasChunkSnapshot(has_chunks) {}
+        std::filesystem::path m_directory;
+        bool m_hasWorldSave = false;
+        bool m_hasChunkSnapshot = false;
+        bool m_valid = true;
+    };
 
 private:
+    static bool save_metadata_validated(const std::string& bytes,
+                                        const std::filesystem::path& directory,
+                                        std::vector<std::string>* errors);
+    static bool save_pair_validated(const std::string& bytes,
+                                    world::ActiveRegionLedger& ledger,
+                                    const std::filesystem::path& directory,
+                                    std::vector<std::string>* errors);
+    static bool save_regions_validated(world::ActiveRegionLedger& ledger,
+                                       const world::WorldClock& clock,
+                                       const std::filesystem::path& directory,
+                                       std::vector<std::string>* errors);
+    static bool save_plants_validated(const Ecs::EntityRegistrySnapshot& snapshot,
+                                      const std::filesystem::path& directory,
+                                      std::vector<std::string>* errors);
+    WorldSaveDirtyReport save_dirty_validated(WorldStreamingState& state,
+                                              const std::filesystem::path& directory,
+                                              std::vector<std::string>* errors,
+                                              bool preserve_authority) const;
+    static RegionContentHasher region_content_hasher(const std::filesystem::path& save_dir,
+                                                     world::RegionKey key,
+                                                     const RegionDigestInputs& inputs);
+
     // The single v2 write seam: serializes the given chunks into LMR1 region
     // files, merging with on-disk records, and refreshes the world manifest.
     // regions_written receives the
@@ -251,7 +387,8 @@ private:
     bool write_snapshot(const std::vector<std::shared_ptr<Chunk>>& chunks,
                         const std::filesystem::path& save_dir,
                         std::vector<std::string>* errors,
-                        std::size_t* regions_written = nullptr) const;
+                        std::size_t* regions_written = nullptr,
+                        bool preserve_authority = false) const;
 };
 
 } // namespace Luminumbra::Persistence

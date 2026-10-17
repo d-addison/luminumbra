@@ -6,20 +6,28 @@
 #include "../support/UniqueTempPath.h"
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
 
+#include <cstddef>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <utility>
 
-#include <glm/glm.hpp>
+#include <glm/ext/vector_float3.hpp>
 #include <iomanip>
 
+#include "luminumbra_client/rendering/FarWorldCaveSelection.h"
 #include "luminumbra_client/rendering/FarWorldRenderer.h"
-#include "luminumbra_common/core/FramePacing.h"
+#include "luminumbra_client/rendering/FarWorldSelection.h"
+#include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/SystemConfig.h"
+#include "luminumbra_common/core/SystemConfigRegistry.gen.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h" // StableChecksum
+#include "luminumbra_common/world/FarVolume.h"
+#include "luminumbra_common/world/GameSession.h"
 
 using luminumbra::core::SysKey;
 using luminumbra::core::SysParam;
@@ -72,11 +80,16 @@ std::string ConfigIdentity(const SystemConfig& config) {
 TEST(SystemConfig, SimulationIdentityPinsShippingDefaults) {
     // Exact little-endian scalar serialization, independently computed with stdlib Python.
     // See docs/development/system-config-identity.md for the complete computation.
-    EXPECT_EQ(ConfigIdentity(SystemConfig::Defaults()), "60ab3c242d54ce89");
+    EXPECT_EQ(Luminumbra::world::GameSession{}.LegacyRevision3SystemConfigIdentity(),
+              "09fd7346c6a3c38d");
+    EXPECT_EQ(ConfigIdentity(SystemConfig::Defaults()), "2a0d6f2dc4028dda");
     const auto path = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() /
                       "data/common/systems.json";
     ASSERT_TRUE(std::filesystem::exists(path));
-    EXPECT_EQ(ConfigIdentity(SystemConfig::LoadFromFile(path.string())), "60ab3c242d54ce89");
+    Luminumbra::world::GameSession legacy;
+    legacy.ApplySystemConfig(SystemConfig::LoadFromFile(path.string()));
+    EXPECT_EQ(legacy.LegacyRevision3SystemConfigIdentity(), "09fd7346c6a3c38d");
+    EXPECT_EQ(ConfigIdentity(SystemConfig::LoadFromFile(path.string())), "2a0d6f2dc4028dda");
     EXPECT_EQ(luminumbra::core::SimulationIdentityValues{}.ComputeIdentity(),
               ConfigIdentity(SystemConfig::Defaults()));
 }
@@ -159,7 +172,7 @@ TEST(SystemConfig, ExplicitOverrideLoadsHistoricalConfiguration) {
     EXPECT_TRUE(error.empty());
 #define EXPECT_HISTORICAL_KEY(ENUM, SECTION, JSON_SECTION, JSON_NAME, RESIDENCY)                   \
     if (std::string(JSON_SECTION) == "sim") {                                                      \
-        EXPECT_FALSE(config.enabled(SysKey::ENUM)) << JSON_NAME;                                   \
+        EXPECT_FALSE(config.enabled(SysKey::ENUM)) << (JSON_NAME);                                 \
     }
     LUMIN_CONFIG_KEY_TABLE(EXPECT_HISTORICAL_KEY)
 #undef EXPECT_HISTORICAL_KEY
@@ -530,7 +543,7 @@ TEST(SystemConfig, UserOverlaySaveReload) {
     std::filesystem::remove_all(dir, rm_ec); // non-throwing pre-clean
     const std::filesystem::path path = dir / "settings.json";
 
-    SystemConfig cfg = SystemConfig::FromJsonString(R"({
+    const SystemConfig cfg = SystemConfig::FromJsonString(R"({
       "sim": { "erosion": { "enabled": true } },
       "user": { "video": { "fov": 95.0, "window_mode": "windowed" },
                 "controls": { "Sprint": 340 } }
@@ -541,7 +554,7 @@ TEST(SystemConfig, UserOverlaySaveReload) {
     // its handle is closed before cleanup (Windows can't delete an open file).
     std::string text;
     {
-        std::ifstream in(path);
+        const std::ifstream in(path);
         std::ostringstream ss;
         ss << in.rdbuf();
         text = ss.str();
@@ -592,7 +605,7 @@ TEST(SystemConfig, EnabledMissingTrueFalseAndMalformed) {
                               "{\"enabled\":null}",
                               "false"}) {
         auto json = nlohmann::json::parse(entry);
-        nlohmann::json document = {{"sim", {{"erosion", json}}}};
+        const nlohmann::json document = {{"sim", {{"erosion", json}}}};
         const auto cfg = SystemConfig::FromJsonString(document.dump());
         const bool expected = !(json.is_object() && json.contains("enabled") &&
                                 json["enabled"].is_boolean() && !json["enabled"].get<bool>());
@@ -609,7 +622,7 @@ TEST(SystemConfig, PackagedFlagsAgreeWithCompiledDefaults) {
 #define CHECK_PACKAGED_FLAG(name, section, json_section, json_name, residency)                     \
     EXPECT_EQ(document.at(json_section).at(json_name).at("enabled").get<bool>(),                   \
               SystemConfig::Defaults().enabled(SysKey::name))                                      \
-        << json_name;
+        << (json_name);
     LUMIN_CONFIG_KEY_TABLE(CHECK_PACKAGED_FLAG)
 #undef CHECK_PACKAGED_FLAG
     const auto packaged = SystemConfig::LoadFromFile(path.string());
