@@ -653,6 +653,16 @@ class AcceptanceMatrixTests(unittest.TestCase):
         self.assertEqual(set(requirements), mapped)
         self.assertTrue(MODULE._doc_matches(root / "docs/acceptance-matrix.md", MODULE.render_doc(matrix)))
 
+    def test_station_numeric_evidence_includes_floating_point_refusal_controls(self) -> None:
+        matrix = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_matrix.json")
+        row = row_of(matrix, "station.numeric-inputs")
+        self.assertEqual(row["status"], "covered")
+        self.assertIn("independent MXCSR rounding, FTZ and DAZ states", row["statement"])
+        self.assertIn({"kind": "ctest", "ref": "StationDiscoveryNumericRefusals"}, row["evidence"])
+        self.assertIn("missing FMA, disabled OS AVX state", row["statement"])
+        self.assertIn({"kind": "ctest", "ref": "CommonLibraryIsaContract"}, row["evidence"])
+        self.assertIn({"kind": "ctest", "ref": "StationDiscoveryCliSmoke"}, row["evidence"])
+
     def test_path_escape_is_rejected(self) -> None:
         matrix = baseline_matrix()
         matrix["rows"][0]["evidence"][2]["ref"] = "../secret.py"

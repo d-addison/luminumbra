@@ -1305,12 +1305,14 @@ public:
 
     void Rewrite(const char* changed) const {
         SCOPED_TRACE(directory.generic_string());
-        if (std::string(changed) != "identity")
+        if (std::string(changed) != "identity") {
             ASSERT_NO_FATAL_FAILURE(
                 WriteSavedPresetTestJson(directory / "preset.json", other_preset));
-        if (std::string(changed) != "preset")
+        }
+        if (std::string(changed) != "preset") {
             ASSERT_NO_FATAL_FAILURE(
                 WriteSavedPresetTestJson(directory / "world_info.json", other_metadata));
+        }
     }
 
     void Restore() const {
@@ -2600,6 +2602,71 @@ TEST(GameSessionHeadlessWorldTest, UnmarkedSnapshotOverwriteRemovesRenderCalenda
                              .contains("renderCalendar"));
             ASSERT_TRUE(loaded.LoadWorldStateFrom(snapshot));
             EXPECT_EQ(loaded.GetRenderCalendar(), Luminumbra::world::WorldCalendar::Legacy());
+        }
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, EnergyWriteFailurePreservesCalendarMetadataOnEverySavePath) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    for (const bool marked_source : {false, true}) {
+        SCOPED_TRACE(marked_source);
+        GameSession session;
+        session.SetRootPath(root.root_string());
+        session.SetJobSystem(&jobs);
+        session.SetActiveRegionsEnabled(false);
+        session.SetAetherStateEnabled(true);
+        ASSERT_TRUE(session.CreateWorld(
+            marked_source ? "Marked energy failure" : "Legacy energy failure", "1337", "default"));
+        if (!marked_source) {
+            ASSERT_TRUE(session.LoadWorldStateFrom(root.path() / "absent-calendar"));
+        }
+        auto* energy = session.GetEnergyFieldState();
+        ASSERT_NE(energy, nullptr);
+        energy->SetAnchorCell(0, 0);
+        energy->QueueDeposit(1, 0, 0, 0, 60000);
+        energy->Tick(0);
+        ASSERT_GT(energy->page_count(), 0u);
+        auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+        chunk->set_state(Luminumbra::ChunkState::Idle);
+        for (int save_path = 0; save_path < 3; ++save_path) {
+            SCOPED_TRACE(save_path);
+            if (save_path == 1) {
+                ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+            }
+            for (const bool marked_destination : {false, true}) {
+                SCOPED_TRACE(marked_destination);
+                const auto snapshot = root.path() / "failed-energy-snapshot";
+                fs::remove_all(snapshot);
+                ASSERT_TRUE(fs::create_directories(snapshot));
+                auto metadata = nlohmann::json::parse(
+                    ReadClockTestFile(session.GetWorldSaveDir() / "world_info.json"));
+                metadata.erase("renderCalendar");
+                if (marked_destination) {
+                    metadata["renderCalendar"] =
+                        Luminumbra::world::WorldClock(0, {101, 3, 3, 5, 9}).calendar_metadata();
+                }
+                ASSERT_TRUE(P::WorldSaveService::save_metadata(metadata.dump(), snapshot));
+                if (save_path == 2) {
+                    Luminumbra::WorldStreamingState state;
+                    state.insert_chunk(chunk);
+                    ASSERT_TRUE(P::WorldSaveService{}.save_world(state, snapshot));
+                }
+                chunk->mark_voxel_data_dirty();
+                ASSERT_EQ(P::WorldSaveService::has_world_save(snapshot), save_path == 2);
+                ASSERT_TRUE(P::WorldSaveService::validate_save(snapshot));
+                const auto before = ReadClockTestFile(snapshot / "world_info.json");
+                // A directory at the record path denies opening a file on both platforms,
+                // independently of privileges, symlink support or permission bits.
+                ASSERT_TRUE(fs::create_directory(snapshot / "aether_state.efs"));
+                ASSERT_TRUE(P::WorldSaveService::validate_save(snapshot));
+                Luminumbra::world::WorldStateSaveReport report;
+                EXPECT_FALSE(session.SaveWorldStateTo(snapshot, &report));
+                EXPECT_FALSE(report.saved);
+                EXPECT_EQ(ReadClockTestFile(snapshot / "world_info.json"), before);
+                EXPECT_TRUE(fs::is_directory(snapshot / "aether_state.efs"));
+            }
         }
     }
 }
@@ -3914,9 +3981,9 @@ void RunSchedulerFaultCase(std::uint64_t k, std::uint64_t start) {
 } // namespace
 
 TEST(GameSessionHeadlessWorldTest, SchedulerFaultStopsTheFrameAndLeavesASavableConsistentSession) {
-    for (const auto [k, start] : {std::pair<std::uint64_t, std::uint64_t>{3, 3},
-                                  std::pair<std::uint64_t, std::uint64_t>{3, 2},
-                                  std::pair<std::uint64_t, std::uint64_t>{4, 4}}) {
+    for (const auto& [k, start] : {std::pair<std::uint64_t, std::uint64_t>{3, 3},
+                                   std::pair<std::uint64_t, std::uint64_t>{3, 2},
+                                   std::pair<std::uint64_t, std::uint64_t>{4, 4}}) {
         ASSERT_NO_FATAL_FAILURE(RunSchedulerFaultCase(k, start));
     }
 }

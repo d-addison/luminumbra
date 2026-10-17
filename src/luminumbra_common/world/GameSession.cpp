@@ -1842,7 +1842,7 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
         const bool plants_ok =
             Persistence::WorldSaveService::save_plant_entities(plant_snapshot, save_dir, nullptr);
         const bool energy_ok = SaveEnergyFieldRecord(save_dir);
-        if ((m_activeRegionsEnabled || m_renderCalendar) && (!plants_ok || !energy_ok))
+        if (!plants_ok || !energy_ok)
             return false;
         if (report) {
             *report = result;
@@ -1895,7 +1895,7 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
     // persist the stateful energy layer alongside (null/
     // all-zero layer -> no file -> byte-identical; the plant discipline).
     const bool energy_ok = SaveEnergyFieldRecord(save_dir);
-    if (m_activeRegionsEnabled && !energy_ok)
+    if (!energy_ok)
         ok = false;
 
     for (const std::string& error : errors) {
