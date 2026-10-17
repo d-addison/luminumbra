@@ -167,6 +167,8 @@ C_DIRECTIVE_RE = re.compile(
 )
 C_STATIC_FALSE = frozenset({"0", "(0)"})
 CMAKE_FLOW_RE = re.compile(r"(elseif|else|endif|if)\s*\(", re.IGNORECASE)
+CMAKE_TOKEN_RE = re.compile(r'"|(?:elseif|else|endif|if)\s*\(', re.IGNORECASE)
+CMAKE_COMMENT_TOKEN_RE = re.compile(r'["#]')
 CMAKE_STRING_RE = re.compile(r'"(?:[^"\\\n]|\\.)*"')
 CMAKE_STATIC_FALSE = frozenset({"FALSE", "0", "OFF"})
 
@@ -265,7 +267,13 @@ def _strip_cmake(text: str) -> str:
     i = 0
     n = len(text)
     while i < n:
-        ch = text[i]
+        token = CMAKE_COMMENT_TOKEN_RE.search(text, i)
+        if token is None:
+            out.append(text[i:])
+            break
+        out.append(text[i:token.start()])
+        i = token.start()
+        ch = token.group()
         if ch == '"':
             j = i + 1
             while j < n and text[j] not in '"\n':
@@ -285,8 +293,6 @@ def _strip_cmake(text: str) -> str:
             end = text.find("\n", i)
             i = n if end == -1 else end
             continue
-        out.append(ch)
-        i += 1
     return "".join(out)
 
 
@@ -358,7 +364,11 @@ def _cmake_flow_commands(text: str) -> list[tuple[str, str, int, int]]:
     found: list[tuple[str, str, int, int]] = []
     i = 0
     while i < len(text):
-        if text[i] == '"':
+        token = CMAKE_TOKEN_RE.search(text, i)
+        if token is None:
+            break
+        i = token.start()
+        if token.group() == '"':
             string = CMAKE_STRING_RE.match(text, i)
             if string:
                 i = string.end()
@@ -425,20 +435,39 @@ def index_tests(root: Path) -> TestIndex:
     cmake_files, gtest_files = _discovery_files(root)
     ctest_names: set[str] = set()
     for path in cmake_files:
-        text = _drop_disabled_cmake(_strip_cmake(_read_text(path)))
-        for match in ADD_TEST_RE.finditer(text):
-            name = match.group("quoted") if match.group("quoted") is not None else match.group("bare")
-            if _is_ctest_name(name):
-                ctest_names.add(name)
+        ctest_names.update(_source_names(_read_text(path), cmake=True))
     gtest_cases: set[tuple[str, str]] = set()
     for path in gtest_files:
-        text = _drop_disabled_c(_strip_c(_read_text(path)))
-        gtest_cases.update((match.group(1), match.group(2)) for match in GTEST_RE.finditer(text))
+        gtest_cases.update(_source_names(_read_text(path), cmake=False))
     return TestIndex(
         frozenset(ctest_names),
         frozenset(gtest_cases),
         frozenset(suite for suite, _ in gtest_cases),
     )
+
+
+def _source_names(text: str, *, cmake: bool) -> frozenset[Any]:
+    # Always read and discover sources afresh. Only immutable parsing results
+    # are shared; equal size/timestamps or a rebound name cannot hide new text.
+    # Retain at most 256 texts of 64 Ki characters (16 Mi source characters).
+    if len(text) > 64 * 1024:
+        return _parse_source_names(text, cmake=cmake)
+    return _cached_source_names(text, cmake=cmake)
+
+
+@lru_cache(maxsize=256)
+def _cached_source_names(text: str, *, cmake: bool) -> frozenset[Any]:
+    return _parse_source_names(text, cmake=cmake)
+
+
+def _parse_source_names(text: str, *, cmake: bool) -> frozenset[Any]:
+    if cmake:
+        text = _drop_disabled_cmake(_strip_cmake(text))
+        names = (match.group("quoted") if match.group("quoted") is not None else match.group("bare")
+                 for match in ADD_TEST_RE.finditer(text))
+        return frozenset(name for name in names if _is_ctest_name(name))
+    text = _drop_disabled_c(_strip_c(text))
+    return frozenset((match.group(1), match.group(2)) for match in GTEST_RE.finditer(text))
 
 
 def _ctest_exists(ref: str, index: TestIndex) -> bool:
@@ -461,12 +490,14 @@ def _string_problem(value: Any, field: str) -> str | None:
     return None if _is_nonempty_str(value) else f"{field} must be a non-empty string"
 
 
-def _path_problem(base: Path, ref: str, must_exist: bool) -> str | None:
+def _path_problem(
+    base: Path, ref: str, must_exist: bool, *, resolved_base: Path | None = None,
+) -> str | None:
     if ref.startswith("/") or re.match(r"^[A-Za-z]:", ref) or PurePosixPath(ref).is_absolute():
         return f"path must be repo-relative: {ref}"
     if ".." in re.split(r"[\\/]", ref):
         return f"path escapes root: {ref}"
-    base = base.resolve()
+    base = base.resolve() if resolved_base is None else resolved_base
     target = base / ref
     try:
         target.resolve().relative_to(base)
@@ -598,6 +629,7 @@ def validate_inventory(
 ) -> tuple[dict[str, dict[str, Any]], list[str]]:
     """Require an explicit requirement or justified exclusion for every unit."""
     errors: list[str] = []
+    base = root.resolve()
     requirements: dict[str, dict[str, Any]] = {}
     expected: Counter[tuple[str, str]] = Counter()
     descriptive: set[tuple[str, str]] = set()
@@ -606,7 +638,7 @@ def validate_inventory(
     if inventory.get("documents") != list(CONTRACT_DOCUMENTS):
         errors.append("inventory documents must name both reviewed contract documents")
     for path in CONTRACT_DOCUMENTS:
-        problem = _path_problem(root, path, must_exist=True)
+        problem = _path_problem(root, path, must_exist=True, resolved_base=base)
         if problem:
             errors.append(problem)
             continue
@@ -710,8 +742,9 @@ def _audited_locator(
 
 def _inventory_units(root: Path) -> Counter[tuple[str, str]]:
     units: Counter[tuple[str, str]] = Counter()
+    base = root.resolve()
     for path in CONTRACT_DOCUMENTS:
-        problem = _path_problem(root, path, must_exist=True)
+        problem = _path_problem(root, path, must_exist=True, resolved_base=base)
         if problem:
             raise MatrixError(problem)
         try:
@@ -1611,7 +1644,9 @@ def validate(
     # Evidence and native entry points often repeat across rows. Bound this
     # invocation's path-result cache to 256 entries; never retain disk answers
     # across validation calls, even when another process edits the same path.
-    path_problem = lru_cache(maxsize=256)(_path_problem)
+    @lru_cache(maxsize=256)
+    def path_problem(directory: Path, ref: str, must_exist: bool) -> str | None:
+        return _path_problem(directory, ref, must_exist, resolved_base=base)
     problems: list[tuple[str, str]] = []
     try:
         if inventory is None:
@@ -1919,11 +1954,12 @@ def _matrix_input_paths(matrix: dict[str, Any], root: Path) -> tuple[list[Path],
                 generated = item.get("kind") == "doc" and item["ref"] == "docs/acceptance-matrix.md"
                 references[item["ref"], generated] = None
     inputs, protected = [], []
+    base = root.resolve()
     # Repeated row references have the same role, but alternate spellings and
     # protected/generated roles remain distinct. Work is linear in unique references.
     for ref, generated in references:
         path = root / ref
-        if not _path_problem(root, ref, must_exist=False) and not path.is_dir():
+        if not _path_problem(root, ref, must_exist=False, resolved_base=base) and not path.is_dir():
             inputs.append(path)
             if not generated:
                 protected.append(path)
@@ -2000,7 +2036,8 @@ def _check_output_paths(args: argparse.Namespace, root: Path, matrix_path: Path,
             raise MatrixError(f"output path overlaps an input: {path}")
 
 
-def main(argv: list[str] | None = None) -> int:
+@lru_cache(maxsize=1)
+def _argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Check the acceptance matrix.")
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--matrix", type=Path, default=None)
@@ -2013,8 +2050,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--discovery", type=Path)
     parser.add_argument("--execution-receipt", type=Path)
     parser.add_argument("--ci-context", action="store_true")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
     try:
-        args = parser.parse_args(argv)
+        args = _argument_parser().parse_args(argv)
     except SystemExit as exc:
         return int(exc.code or 0)
 

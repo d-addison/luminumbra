@@ -433,6 +433,247 @@ raise SystemExit(module["main"](sys.argv[3:]))
 
 
 class AcceptanceMatrixTests(AcceptanceFixture):
+    def test_cmake_scans_visit_tokens_and_preserve_mutated_source_branches(self) -> None:
+        path = self.root / "tools/token-scan.cmake"
+        original = ("set(padding " + "x" * 70000 + ")\n"
+                    'message("if(FALSE) # quoted")\n'
+                    '#[=[ add_test(NAME CommentGhost COMMAND x) ]=]\n'
+                    'if(FALSE)\nadd_test(NAME TokenBranch COMMAND x)\nendif()\n'
+                    'add_test(NAME TokenLive COMMAND x) # trailing\n')
+        reads = []
+        class ObservedText(str):
+            def __getitem__(self, key: Any) -> Any:
+                if isinstance(key, int):
+                    reads.append(key)
+                return super().__getitem__(key)
+        read, flow = MODULE._read_text, MODULE.CMAKE_FLOW_RE
+        def observed(file: Path) -> str:
+            text = read(file)
+            return ObservedText(text) if file == path else text
+        path.write_text(original, encoding="utf-8")
+        try:
+            for active in (False, True):
+                with self.subTest(active=active):
+                    text = original.replace("\nif(FALSE)", "\nif(TRUE )") if active else original
+                    path.write_text(text, encoding="utf-8")
+                    reads.clear()
+                    with mock.patch.object(MODULE, "_read_text", observed), \
+                            mock.patch.object(MODULE, "CMAKE_FLOW_RE", wraps=flow) as matched:
+                        index = MODULE.index_tests(self.root)
+                    self.assertIn("TokenLive", index.ctest_names)
+                    self.assertEqual("TokenBranch" in index.ctest_names, active)
+                    self.assertNotIn("CommentGhost", index.ctest_names)
+                    self.assertLessEqual(matched.match.call_count, 8)
+                    self.assertLess(len(reads), 256)
+            for text in ("", '#[=[ unterminated\nadd_test(NAME CommentGhost COMMAND x)',
+                         'message("unterminated\n'):
+                path.write_text(text, encoding="utf-8")
+                index = MODULE.index_tests(self.root)
+                self.assertNotIn("CommentGhost", index.ctest_names)
+                self.assertNotIn("TokenLive", index.ctest_names)
+        finally:
+            path.write_text(original, encoding="utf-8")
+        self.assertEqual(path.read_bytes(), original.encode("utf-8"))
+
+    def test_source_index_shares_only_immutable_parses_and_reads_current_bytes(self) -> None:
+        for relative, parser, original, changed, first, second in (
+            ("tools/parsed.cmake", "_strip_cmake",
+             "add_test(NAME ParseAlpha COMMAND x)\n", "add_test(NAME ParseBravo COMMAND x)\n",
+             "ParseAlpha", "ParseBravo"),
+            ("test/parsed.cpp", "_strip_c",
+             "TEST(ParseAlpha, Case) {}\n", "TEST(ParseBravo, Case) {}\n",
+             ("ParseAlpha", "Case"), ("ParseBravo", "Case")),
+        ):
+            with self.subTest(source=relative):
+                path = self.root / relative
+                path.write_text(original, encoding="utf-8")
+                metadata = path.stat()
+                parse, read = getattr(MODULE, parser), MODULE._read_text
+                def names() -> Any:
+                    index = MODULE.index_tests(self.root)
+                    return index.ctest_names if relative.endswith("cmake") else index.gtest_cases
+                with mock.patch.object(MODULE, parser, wraps=parse) as parsed, \
+                        mock.patch.object(MODULE, "_read_text", wraps=read) as reads:
+                    for _ in range(3):
+                        self.assertIn(first, names())
+                    self.assertEqual(sum(call.args == (original,) for call in parsed.call_args_list), 1)
+                    try:
+                        # Size and timestamps alone cannot bind a parse result.
+                        self.assertEqual(len(original), len(changed))
+                        path.write_text(changed, encoding="utf-8")
+                        os.utime(path, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+                        self.assertIn(second, names())
+                        self.assertNotIn(first, names())
+                        # Same-byte rebinding must still be read, without link privileges.
+                        replacement = self.tmp / "replacement-source"
+                        replacement.write_text(original, encoding="utf-8")
+                        replacement.replace(path)
+                        self.assertIn(first, names())
+                        self.assertNotIn(second, names())
+                    finally:
+                        path.write_text(original, encoding="utf-8")
+                    self.assertEqual(path.read_bytes(), original.encode("utf-8"))
+                    self.assertEqual(sum(call.args == (changed,) for call in parsed.call_args_list), 1)
+                    self.assertEqual(sum(call.args == (path,) for call in reads.call_args_list), 7)
+
+    def test_source_parse_cache_bounds_and_grammar_survive_file_mutations(self) -> None:
+        cmake = self.root / "tools/cache-bound.cmake"
+        cpp = self.root / "test/cache-bound.cpp"
+        text = ("add_test(NAME CacheBound COMMAND x)\n// TEST(CacheBound, Case) {}\n"
+                "TEST(CacheLive, Case) {}\n")
+        cmake.write_text(text, encoding="utf-8")
+        cpp.write_text(text, encoding="utf-8")
+        parse = MODULE._strip_cmake
+        with mock.patch.object(MODULE, "_strip_cmake", wraps=parse) as parsed:
+            self.assertIn("CacheBound", MODULE.index_tests(self.root).ctest_names)
+            self.assertIn(("CacheLive", "Case"), MODULE.index_tests(self.root).gtest_cases)
+            self.assertNotIn(("CacheBound", "Case"), MODULE.index_tests(self.root).gtest_cases)
+            self.assertEqual(sum(call.args == (text,) for call in parsed.call_args_list), 1)
+            # Oversized sources still receive every check, without retaining keys.
+            large = text + "# padding\n" * 7000
+            try:
+                cmake.write_text(large, encoding="utf-8")
+                for _ in range(2):
+                    self.assertIn("CacheBound", MODULE.index_tests(self.root).ctest_names)
+                self.assertEqual(sum(call.args == (large,) for call in parsed.call_args_list), 2)
+                cmake.write_bytes(b"")
+                self.assertNotIn("CacheBound", MODULE.index_tests(self.root).ctest_names)
+                cmake.unlink()
+                self.assertNotIn("CacheBound", MODULE.index_tests(self.root).ctest_names)
+                cmake.write_text(text, encoding="utf-8")
+                read = MODULE._read_text
+                def denied(path: Path) -> str:
+                    if path == cmake:
+                        raise PermissionError("source parse denied")
+                    return read(path)
+                with mock.patch.object(MODULE, "_read_text", denied):
+                    with self.assertRaisesRegex(PermissionError, "source parse denied"):
+                        MODULE.index_tests(self.root)
+            finally:
+                cmake.write_text(text, encoding="utf-8")
+            self.assertEqual(cmake.read_bytes(), text.encode("utf-8"))
+        large_cpp = text + "// padding\n" * 7000 + "TEST(CacheLarge, Case) {}\n"
+        try:
+            cpp.write_text(large_cpp, encoding="utf-8")
+            with mock.patch.object(MODULE, "_strip_c", wraps=MODULE._strip_c) as parsed:
+                for _ in range(2):
+                    self.assertIn(("CacheLarge", "Case"), MODULE.index_tests(self.root).gtest_cases)
+                self.assertEqual(sum(call.args == (large_cpp,) for call in parsed.call_args_list), 2)
+        finally:
+            cpp.write_text(text, encoding="utf-8")
+        self.assertEqual(cpp.read_bytes(), text.encode("utf-8"))
+        try:
+            # Feed actual source versions through discovery, exceeding the entry cap.
+            for number in range(257):
+                cmake.write_text(f"add_test(NAME CacheVersion{number} COMMAND x)\n", encoding="utf-8")
+                self.assertIn(f"CacheVersion{number}", MODULE.index_tests(self.root).ctest_names)
+            cmake.write_text(text, encoding="utf-8")
+            with mock.patch.object(MODULE, "_strip_cmake", wraps=parse) as parsed:
+                self.assertIn("CacheBound", MODULE.index_tests(self.root).ctest_names)
+                self.assertEqual(sum(call.args == (text,) for call in parsed.call_args_list), 1)
+        finally:
+            cmake.write_text(text, encoding="utf-8")
+        self.assertEqual(cmake.read_bytes(), text.encode("utf-8"))
+
+    def test_evidence_checks_resolve_the_validation_root_once_and_recheck_edits(self) -> None:
+        root = self.root.resolve()
+        matrix = baseline_matrix()
+        resolve = Path.resolve
+        roots = []
+        def resolution(path: Path, *values: Any, **options: Any) -> Path:
+            if path == root:
+                roots.append(path)
+            return resolve(path, *values, **options)
+        # Each extra, distinct reference needs a target check, not another root check.
+        for number in range(24):
+            matrix["rows"][0]["evidence"].append({"kind": "script", "ref": f"tools/entry{number}.py",
+                "planned": "Supply evidence; owner: fw"})
+        matrix["rows"][0]["status"] = "partial"
+        with mock.patch.object(Path, "resolve", resolution):
+            self.assertEqual(MODULE.validate(matrix, self.index, self.root, False), [])
+        self.assertLess(len(roots), 12)
+        script = self.root / "tools/script.py"
+        original = script.read_bytes()
+        try:
+            script.unlink()
+            self.assertIn("file not found: tools/script.py",
+                          "\n".join(MODULE.validate(matrix, self.index, self.root, False)))
+        finally:
+            script.write_bytes(original)
+        self.assertEqual(MODULE.validate(matrix, self.index, self.root, False), [])
+
+    def test_inventory_and_input_scans_reuse_only_the_current_root(self) -> None:
+        root, resolve = self.root.resolve(), Path.resolve
+        calls = []
+        def resolution(path: Path, *values: Any, **options: Any) -> Path:
+            if path == root:
+                calls.append(path)
+            return resolve(path, *values, **options)
+        matrix = baseline_matrix()
+        for operation, bound in ((lambda: MODULE.validate_inventory(self.inventory, root), 3),
+                                 (lambda: MODULE._inventory_units(root), 1),
+                                 (lambda: MODULE._matrix_input_paths(matrix, root), 1)):
+            with self.subTest(bound=bound):
+                calls.clear()
+                with mock.patch.object(Path, "resolve", resolution):
+                    operation()
+                self.assertLessEqual(len(calls), bound)
+        source = root / MODULE.CONTRACT_DOCUMENTS[1]
+        original = source.read_bytes()
+        try:
+            source.write_bytes(b"# Changed\nActual new statement.\n")
+            self.assertIn("inventory unaccounted statement",
+                          "\n".join(MODULE.validate_inventory(self.inventory, root)[1]))
+            self.assertIn((MODULE.CONTRACT_DOCUMENTS[1] + "#changed", "Actual new statement."),
+                          MODULE._inventory_units(root))
+            source.unlink()
+            self.assertIn("file not found", "\n".join(MODULE.validate_inventory(self.inventory, root)[1]))
+            with self.assertRaisesRegex(MODULE.MatrixError, "file not found"):
+                MODULE._inventory_units(root)
+        finally:
+            source.write_bytes(original)
+        self.assertEqual(source.read_bytes(), original)
+        script = root / "tools/script.py"
+        original_script = script.read_bytes()
+        try:
+            self.assertIn(script, MODULE._matrix_input_paths(matrix, root)[0])
+            script.unlink()
+            script.mkdir()
+            self.assertNotIn(script, MODULE._matrix_input_paths(matrix, root)[0])
+        finally:
+            if script.is_dir():
+                script.rmdir()
+            script.write_bytes(original_script)
+        self.assertEqual(script.read_bytes(), original_script)
+        self.assertEqual(MODULE.validate_inventory(self.inventory, root)[1], [])
+        self.assertIn(script, MODULE._matrix_input_paths(matrix, root)[0])
+
+    def test_cli_parser_setup_is_shared_without_sharing_invocation_inputs(self) -> None:
+        self.prepare_refresh()
+        discovery, report = self.execution_inputs()
+        cached_parser = getattr(MODULE, "_argument_parser", None)
+        if cached_parser is not None:
+            cached_parser.cache_clear()
+            self.addCleanup(cached_parser.cache_clear)
+        with mock.patch.object(MODULE.argparse.ArgumentParser, "__init__", autospec=True,
+                               side_effect=MODULE.argparse.ArgumentParser.__init__) as parser:
+            self.assertEqual(self.run_main(*self.base_args(), "--junit", str(report),
+                             "--discovery", str(discovery))[0], 0)
+            self.assertEqual(self.run_main(*self.base_args(), "--invalid-option")[0], 2)
+            self.assertEqual(self.run_main(*self.base_args())[0], 0)
+            original = self.matrix_path.read_bytes()
+            try:
+                self.matrix_path.write_bytes(b"{")
+                code, _, err = self.run_main(*self.base_args())
+                self.assertEqual(code, 2, err)
+                self.assertIn("cannot parse", err)
+            finally:
+                self.matrix_path.write_bytes(original)
+            code, out, err = self.run_main(*self.base_args())
+            self.assertEqual(code, 0, err)
+            self.assertIn("static references ok", out)
+            parser.assert_called_once()
+
     def test_mutable_fixture_is_created_once_on_first_use(self) -> None:
         self.assertNotIn("root", self.__dict__)
         self.assertNotIn("tmp", self.__dict__)
