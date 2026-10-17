@@ -3,7 +3,9 @@
 #include "../support/LegacyCreatureTickOracle.h"
 #include "../support/SimulationContentFixture.h"
 #include "../support/UniqueTempPath.h"
+#include "../support/WorldgenTestData.h"
 #include "luminumbra_common/ai/CreaturePersistence.h"
+#include "luminumbra_common/core/FilesystemPath.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/fields/EnergyFieldState.h"
 #include "luminumbra_common/fields/FieldPageState.h"
@@ -29,6 +31,8 @@ struct SessionFixture {
         fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets/default.json",
                       root / "worlds/atlas/presets/default.json");
         Luminumbra::TestSupport::WriteSimulationContentFixture(root);
+        fs::remove(root / "data/common/biomes.json");
+        Luminumbra::TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, root);
     }
     ~SessionFixture() {
         jobs.shutdown();
@@ -36,7 +40,7 @@ struct SessionFixture {
         fs::remove_all(root, ec);
     }
     void Configure(W::GameSession& s) {
-        s.SetRootPath(root.string() + static_cast<char>(fs::path::preferred_separator));
+        s.SetRootPath(Luminumbra::Filesystem::GenericUtf8PathString(root) + "/");
         s.SetJobSystem(&jobs);
         s.SetActiveRegionsEnabled(true);
         s.SetAetherStateEnabled(true);
@@ -133,8 +137,12 @@ TEST(CreatureFieldContinuation, SavedReferencesProduceTheSamePlansAndTargets) {
     entt::registry reordered;
     const auto unused = reordered.create();
     reordered.destroy(unused);
-    reordered.create();
+    const auto runtime_entity = reordered.create();
+    reordered.emplace<C::TransformComponent>(runtime_entity).position = {12, 34, 56};
     A::ApplyCreatureSnapshot(reordered, A::BuildCreatureSnapshot(original.GetRegistry()));
+    ASSERT_TRUE(reordered.valid(runtime_entity));
+    EXPECT_EQ(reordered.get<C::TransformComponent>(runtime_entity).position,
+              Luminumbra::Vec3(12, 34, 56));
     EXPECT_EQ(A::SerializeCreatureSnapshot(A::BuildCreatureSnapshot(reordered)),
               Snapshot(original));
 }
@@ -250,11 +258,12 @@ TEST(CreatureFieldContinuation, PriorScentSurvivesEmitterFreezeWithoutNewDeposit
     EXPECT_EQ(after, loaded.GetFieldPages().scent_cells());
     bool decayed = false;
     for (const auto& [cell, value] : before) {
-        if (W::FieldPageState::region_of_scent_cell(cell) == W::RegionKey{-1, 0})
+        if (W::FieldPageState::region_of_scent_cell(cell) == W::RegionKey{-1, 0}) {
             EXPECT_EQ(after.at(cell), value);
-        else if (std::bit_cast<double>(value[0]) > 1e-8 &&
-                 std::bit_cast<double>(after.at(cell)[0]) < std::bit_cast<double>(value[0]))
+        } else if (std::bit_cast<double>(value[0]) > 1e-8 &&
+                   std::bit_cast<double>(after.at(cell)[0]) < std::bit_cast<double>(value[0])) {
             decayed = true;
+        }
     }
     EXPECT_TRUE(decayed);
 }

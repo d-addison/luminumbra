@@ -563,7 +563,7 @@ std::string ActiveRegionLedger::encode() const {
     const bool extension = declare_projection || allocator_advanced || !m_waterDebts.empty() ||
                            !m_energyAges.empty() || m_contentIdentity || !m_completedWork.empty();
     std::string bytes = "ARL1";
-    Append(bytes, extension ? 2 : 1, 2);
+    Append(bytes, m_contentIdentity ? 3 : extension ? 2 : 1, 2);
     Append(bytes, 0, 2);
     bytes += payload(true);
     if (extension) {
@@ -628,12 +628,12 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
         return false;
     Reader version_reader(bytes.substr(4));
     const auto version = version_reader.read(2);
-    if (version > 2) {
+    if (version > 3) {
         error = kFutureMessage;
         return false;
     }
-    // Version 2 carries a u32 extension length between the records and the checksum.
-    const std::size_t extension_prefix = version == 2 ? 4 : 0;
+    // Versions 2 and 3 carry a u32 extension length between records and checksum.
+    const std::size_t extension_prefix = version >= 2 ? 4 : 0;
     if (version == 0 || bytes.size() < kHeaderBytes + extension_prefix + 8 ||
         bytes.size() > kMaxFileBytes)
         return false;
@@ -665,7 +665,7 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
         const auto count = in.read(4);
         if (count > kMaxRegions)
             return false;
-        // Records end here; a version 2 extension length (checked below) follows them.
+        // Records end here; a version 2/3 extension length (checked below) follows them.
         const std::uint64_t records_end = kHeaderBytes + count * kRecordBytes;
         if (bytes.size() < records_end + extension_prefix + 8 ||
             (version == 1 && bytes.size() != records_end + 8))
@@ -721,7 +721,7 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
             result.m_records.emplace(key, r);
         }
         bool declared_projection = false;
-        if (version == 2) {
+        if (version >= 2) {
             const auto extension_length = in.read(4);
             const auto extension_begin = records_end + 4;
             if (extension_length == 0 || bytes.size() != extension_begin + extension_length + 8)
@@ -802,6 +802,8 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
                     continue;
                 }
                 if (type == 5) {
+                    if (version != 3)
+                        return false;
                     SimulationContentIdentity identity;
                     if (!SimulationContentIdentity::decode(value, identity))
                         return false;
@@ -854,6 +856,8 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
         // until each has been recomputed at a later freeze or evicted.
         // Also refuses alternate encodings (negative zero, reserved bytes).
         if (result.encode() != bytes)
+            return false;
+        if (version == 3 && !result.m_contentIdentity)
             return false;
         out = std::move(result);
         error.clear();

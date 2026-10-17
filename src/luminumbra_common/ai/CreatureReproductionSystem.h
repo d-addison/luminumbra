@@ -127,7 +127,7 @@ inline entt::entity CreateCreatureBirthEntity(entt::registry& reg,
 
         auto& cr = reg.emplace<Comp::CreatureComponent>(child);
         cr.is_predator = false;
-        cr.species_id = b.species_id; // inherit codex species from the mother
+        cr.species_id = b.species_id; // inherit catalog species from the mother
         cr.hunger = 0.5f;
         cr.stamina = 1.0f;
         cr.move_speed = b.genome.move_speed;
@@ -391,7 +391,7 @@ RunMatingResolveOnTick(entt::registry& reg,
                            ? generation
                            : generation + 1u;
         b.female = childFemale;
-        b.species_id = cr.species_id; // offspring inherit the mother's codex species identity
+        b.species_id = cr.species_id; // offspring inherit the mother's catalog species identity
         births.push_back(b);
 
         parents.emplace_back(e, maleE);

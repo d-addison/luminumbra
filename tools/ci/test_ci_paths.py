@@ -40,6 +40,18 @@ def run_block(workflow: str, step: str) -> str:
 
 
 class PathGateTests(unittest.TestCase):
+    def test_graphics_and_qualification_contracts_are_in_standalone_plan(self):
+        expected = {
+            "tools/perf/test_check_gl_debug_log.py",
+            "tools/perf/test_summarize_process_receipts.py",
+            "tools/perf/test_plan_qualification.py",
+            "tools/perf/test_run_qualification.py",
+            "test/tools/test_graphics_ui_contract.py",
+        }
+        self.assertTrue(expected.issubset(gate.PYTHON_TESTS))
+        planned = {command[0] for command in gate.python_test_commands(ROOT)}
+        self.assertTrue(expected.issubset(planned))
+
     def setUp(self):
         history = patch.object(gate.subprocess, "check_output", return_value="false\n")
         self.history = history.start()

@@ -2669,6 +2669,21 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
                                      std::string_view relative_path,
                                      MemberDigest& out,
                                      std::string& error) {
+    return member_digest_impl(save_dir, relative_path, out, error, false);
+}
+
+bool WorldSaveService::indexed_member_digest(const std::filesystem::path& save_dir,
+                                             std::string_view relative_path,
+                                             MemberDigest& out,
+                                             std::string& error) {
+    return member_digest_impl(save_dir, relative_path, out, error, true);
+}
+
+bool WorldSaveService::member_digest_impl(const std::filesystem::path& save_dir,
+                                          std::string_view relative_path,
+                                          MemberDigest& out,
+                                          std::string& error,
+                                          bool strict_water) {
     if (auto* cache = ChunkValidationCache::active())
         cache->exclude_save_directory(save_dir);
     out = MemberDigest{};
@@ -2702,7 +2717,8 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
             }
             for (const RegionRecord& record : records) {
                 if (record.lod_level == 0) {
-                    const auto validated = ValidateChunkRecord(record, path, &diagnostics, false);
+                    const auto validated =
+                        ValidateChunkRecord(record, path, &diagnostics, strict_water);
                     if (!validated) {
                         error = first_error("corrupt chunk record");
                         return false;

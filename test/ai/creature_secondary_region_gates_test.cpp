@@ -107,13 +107,14 @@ TEST(CreatureSecondaryRegionGates, InstinctGatesNeedGrowthStimuliPlanningAndOppo
             const auto stats = A::RunInstinctSystemOnTick(f.reg, 7, &stimuli, substrate, f.Gate());
             EXPECT_EQ(stats.agents_seen, actor_blocked ? 0u : 1u);
             EXPECT_EQ(stats.stimulus_subscribers_applied, actor_blocked ? 0u : 1u);
-            if (actor_blocked)
+            if (actor_blocked) {
                 EXPECT_EQ(Fields(f.reg, actor), before);
-            else {
+            } else {
                 EXPECT_GT(f.reg.get<C::NeedsComponent>(actor).needs.front().pressure, .41f);
                 EXPECT_EQ(f.reg.get<C::ActionPlanComponent>(actor).plan.empty(), source_blocked);
-                if (!source_blocked)
+                if (!source_blocked) {
                     EXPECT_EQ(f.reg.get<C::ActionPlanComponent>(actor).plan.front().target, source);
+                }
             }
             EXPECT_EQ(Fields(f.reg, source), before_source);
         }
@@ -160,9 +161,9 @@ TEST(CreatureSecondaryRegionGates, LocomotionGatesActorsTargetsNeighborsAndPathP
             f.BlockEntity(target, b);
         const auto before = Fields(f.reg, actor);
         A::RunInstinctLocomotionOnTick(f.reg, f.Gate());
-        if (actor_blocked)
+        if (actor_blocked) {
             EXPECT_EQ(Fields(f.reg, actor), before);
-        else {
+        } else {
             EXPECT_EQ(path.index, target_blocked ? 0u : 1u);
             EXPECT_EQ(f.reg.get<C::ActionPlanComponent>(actor).current_action_index, 0u);
             EXPECT_EQ(f.reg.get<C::ActionPlanComponent>(actor).time_in_current_action, .25f);
@@ -200,11 +201,11 @@ TEST(CreatureSecondaryRegionGates, PerceptionGatesSensablesAndPerceivers) {
             f.BlockEntity(source, b);
         const auto before = Fields(f.reg, actor);
         A::RunPerceptionSystemOnTick(f.reg, .1f, f.Gate());
-        if (actor_blocked)
+        if (actor_blocked) {
             EXPECT_EQ(Fields(f.reg, actor), before);
-        else if (source_blocked)
+        } else if (source_blocked) {
             EXPECT_LT(f.reg.get<C::AwarenessComponent>(actor).awareness.meter, .4f);
-        else {
+        } else {
             EXPECT_GT(f.reg.get<C::AwarenessComponent>(actor).awareness.meter, .4f);
             EXPECT_EQ(f.reg.get<C::AwarenessComponent>(actor).awareness.last_known_x, 5);
         }
@@ -270,8 +271,9 @@ TEST(CreatureSecondaryRegionGates, ForagingGatesActorsFoodAndDestinationCells) {
             EXPECT_EQ(Fields(f.reg, ant), before);
             EXPECT_EQ(field.Sample(3, 4, 4), 0);
         }
-        if (food_blocked)
+        if (food_blocked) {
             EXPECT_EQ(Fields(f.reg, food), source_before);
+        }
     });
     for (int sealed : {0, 1, 2})
         for (bool carrying : {false, true}) {

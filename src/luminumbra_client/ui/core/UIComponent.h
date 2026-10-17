@@ -246,8 +246,8 @@ void UIComponent::BindVisibility(Property<T>& property, Predicate&& visibilityFu
     // Subscribe to changes
     auto binding = [this, predicate = std::move(predicate)](const T&, const T& newValue) {
         if (m_element) {
-            bool visible = predicate(newValue);
-            m_element->SetProperty("display", visible ? "block" : "none");
+            const bool updated_visible = predicate(newValue);
+            m_element->SetProperty("display", updated_visible ? "block" : "none");
         }
     };
 

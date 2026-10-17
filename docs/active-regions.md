@@ -12,7 +12,7 @@ snapshot compatibility are specified in [creature-entities.md](creature-entities
 
 Strict distant policy and simulation content identity are adopted before enabled
 world creation or loading. Distant creature simulation remains planned for v0.3.1.
-Regional continuation performance qualification is planned for v0.4.0 as
+Regional continuation performance/default enablement is planned for v0.4.0 as
 [issue #320](https://github.com/d-addison/luminumbra/issues/320). The dedicated
 server autosaves every five minutes by default.
 
@@ -160,7 +160,7 @@ ceiling starts at the restored WorldClock tick without executing a tick, so
 an immediate edit or pin can be saved before simulation advances.
 No old-world migration occurs. Corrupt, truncated, oversized, duplicate,
 misordered or inconsistent records refuse with `Corrupt active-region ledger.`
-A valid magic followed by a version greater than 2 refuses distinctly with
+A valid magic followed by a version greater than 3 refuses distinctly with
 `Unsupported future active-region ledger version.` Version zero is corrupt.
 A save containing the ledger requires `sim.active_regions`; opening or writing
 with it off refuses as incompatible configuration. Older engine builds refuse
@@ -181,7 +181,7 @@ The header is exactly 56 bytes:
 | Offset | Bytes | Value |
 |---|---:|---|
 | 0 | 4 | ASCII ARL1 |
-| 4 | 2 | version = 1 or 2 |
+| 4 | 2 | version = 1, 2 or 3 |
 | 6 | 2 | reserved zero |
 | 8 | 8 | canonical scheduler tick; advances only when scheduling runs |
 | 16 | 8 | validation ceiling; observational restored clock bound |
@@ -211,7 +211,7 @@ Each record is exactly 104 bytes, sorted uniquely by signed X then Z:
 | 88 | 8 | u64 water cursor |
 | 96 | 8 | u64 frozen simulation content digest |
 
-Version 1 has no extensions. Version 2 uses the same header and records, then
+Version 1 has no extensions. Versions 2 and 3 use the same header and records, then
 a LE u32 `ext_len` followed by exactly that many extension bytes. Each extension
 is a TLV: LE u16 type, LE u32 value length, then the value bytes. Types must be
 strictly ascending, with no duplicates; unknown types, truncated values and
@@ -223,7 +223,7 @@ strictly ascending, with no duplicates; unknown types, truncated values and
 | 2 | `digest_projection`: one byte equal to 2. |
 | 3 | Water debt: LE u32 count, then sorted (LE i32 x, LE i32 z, LE u64 positive Q32 debt) entries, at most one per owned region. |
 | 4 | Energy ages: LE u32 count, then sorted (LE i32 x, LE i32 z, LE u64 absolute tick) entries, at most one per owned region. |
-| 5 | Simulation content identity: 40 bytes containing LE u16 encoding, defaults and algorithm versions, LE u16 zero reserved, then LE u64 policy, creature definitions, plant definitions and population digests. |
+| 5 | Version 3 simulation content identity: 40 bytes containing LE u16 encoding, defaults and algorithm versions, LE u16 zero reserved, then LE u64 policy, creature definitions, plant definitions and population digests. |
 | 6 | Completed work: LE u32 count, then sorted (LE i32 x, LE i32 z, LE u64 positive work) entries, at most one per owned region. |
 
 Map extensions are emitted only when nonempty.
@@ -233,14 +233,14 @@ The digest declaration is emitted whenever a record is frozen
 or retains a nonzero freeze stamp or frozen digest, including after waking,
 provided no legacy historical digest remains. A version 1 reload conservatively
 treats all historical digests as legacy, including any refreshed before saving.
-The encoder emits version 2 whenever any supported extension is present; otherwise it emits version 1.
+The encoder emits version 3 when content identity is present, version 2 for other extensions; otherwise it emits version 1.
 The digest declaration belongs only to the persistence envelope and adds no canonical
 hash term.
 
 The footer is one LE u64 FNV-1a-64 checksum over every preceding byte, including
 the extension length and TLVs (offset basis 14695981039346656037, multiplier
 1099511628211). Total length must be exactly 56 + count * 104 + 8 for version 1,
-or 56 + count * 104 + 4 + ext_len + 8 for version 2. Files are capped at
+or 56 + count * 104 + 4 + ext_len + 8 for versions 2 and 3. Files are capped at
 159,383,717 bytes before allocation. No trailing bytes, padding, native structs,
 section omission or alternate encodings are accepted. Stamps cannot exceed the
 validation ceiling, counters cannot exceed the hold or both be nonzero, phases
@@ -416,7 +416,7 @@ artifact grants permission to alter another checkout.
 
 With `sim.active_regions` enabled, create and load capture and validate both required species
 inventories before constructing world systems. Each inventory must contain 1–256 JSON definitions;
-each document is capped at 1 MiB and the captured inventories together at 16 MiB. Names are nonempty
+each document is capped at 1 MiB and the captured inventories together at 16 MiB, with each directory scan capped at 512 entries including ignored files. Names are nonempty
 UTF-8 strings of at most 256 bytes without NUL. Duplicate names or folded 16-bit IDs refuse within
 each species domain, including the zero-to-one ID remap. Creature IDs use `CreatureSpeciesId16`
 with its existing offset basis, folding and constants; plant IDs use `SpeciesId16`. Policy names
@@ -437,8 +437,8 @@ and registries. Later file edits cannot change an open world's policy.
 
 Biome tables, terrain presets, structure placement and piece documents, and species registry text
 also refuse raw NUL before parsing. Biome and preset loads report an error without adopting a table
-or preset; structure loads retain their existing per-file error handling. Malformed systems
-configuration, including raw NUL, selects defaults; malformed operator budget profiles refuse.
+or preset; structure loads retain their existing per-file error handling. Syntax errors and raw NUL in systems
+configuration select defaults; malformed operator budget profiles refuse.
 Population configuration is caller-supplied identity framing, not a parsed document.
 
 The policy root has exactly `schema`, `creature_species` and `plant_species`;
@@ -456,7 +456,7 @@ cap discards catch-up. A coarse cadence means one accepted owner due step, rathe
 fixed tick interval. Algorithm version 1 seals this interpretation. Consumer enforcement of these
 policies belongs to the corresponding simulation systems.
 
-TLV 5 is always present in newly created enabled worlds, even with no regions or creatures.
+TLV 5 requires ledger version 3 and is always present in newly created enabled worlds, even with no regions or creatures.
 Its value is exactly 40 bytes, without padding:
 
 | Offset | Bytes | Value |
@@ -506,14 +506,14 @@ versioned when its behavior changes.
 
 The ledger canonical projection appends `|content_identity:` and the exact identity record before
 `|completed_work:`. This feeds the existing enabled ecology/world hash at boot, including an empty
-creature world, without changing network or replay layouts. TLV 5 precedes existing TLV 6 in the
+creature world, and binds the opaque network/replay configuration identity to the same captured content without changing message layouts. TLV 5 precedes existing TLV 6 in the
 persistence envelope; completed-work encoding and next-decision behavior are unchanged. Identity
 adoption is immutable; repeated identical adoption is allowed, changing it refuses.
 
 Opening an enabled world without TLV 5 adopts the current resolved content, including historical
 enabled or indexed state. Adoption must succeed; the next save writes TLV 5. A present identity
 must match newly captured content exactly or open refuses with `Simulation content identity mismatch.`
-Unsupported identity/default/algorithm versions, nonzero reserved fields, wrong lengths and duplicate
+Unsupported identity/default/algorithm versions, nonzero reserved fields, wrong lengths, content identity in version 2, missing identity in version 3 and duplicate
 or misordered TLVs are corrupt. Load compares identity before adopting loaded ledger/consumer state;
 a refusal prevents saving. A legacy flag-off world may opt in and adopt current content for the
 first time. With the flag disabled, strict policy/species adoption is bypassed,

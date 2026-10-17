@@ -101,6 +101,7 @@ uniform int u_forceFlat = 0;
 // close range, where shadow/SSAO render it near-black). Default 0.0 disables
 // the clip; live chunk and static mesh draws never set it.
 uniform float u_farClipInnerRadius;
+uniform float u_farClipFarRadius;
 
 // Worldgen-preview far-field: a CENTER-relative (world-space XZ) variant of the
 // inner clip above. The preview is an external orbit camera looking at a fixed
@@ -377,6 +378,14 @@ void main()
                     discard;
             }
         }
+    }
+    // The vertex band bounds rasterization; retain exact fragment ownership
+    // for both far terrain and its water sheets at a reduced horizon. The
+    // shipping 3050 m horizon keeps its original vertex-only outer boundary
+    // exactly, including rasterization at that boundary (Ultra parity).
+    if (u_farWorldLadder != 1 && u_farClipFarRadius > 0.0 && u_farClipFarRadius < 3050.0 &&
+        dot(fs_in.FragPos, fs_in.FragPos) > u_farClipFarRadius * u_farClipFarRadius) {
+        discard;
     }
     if (u_farWorldLadder != 1 && u_farClipInnerRadius > 0.0 &&
         dot(fs_in.FragPos, fs_in.FragPos) < u_farClipInnerRadius * u_farClipInnerRadius) {
