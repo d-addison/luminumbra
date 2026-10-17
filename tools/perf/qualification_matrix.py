@@ -23,7 +23,7 @@ WORLD_KEYS = frozenset(('kind', 'note'))
 FLOOR_MS = 16.67
 TARGET_MS = 8.33
 FIXED_KEYS = frozenset(('id', 'kind', 'pose', 'pose_provenance'))
-TRAVERSAL_KEYS = frozenset(('id', 'kind', 'script', 'blocked_by'))
+TRAVERSAL_KEYS = frozenset(('id', 'kind', 'script', 'script_sha256', 'blocked_by'))
 POSE_KEYS = ('x', 'y', 'z', 'yaw', 'pitch')
 WORKLOAD_ID = re.compile(r'[a-z0-9-]+')
 VALIDATOR = 'tools/perf/validate_render_capture.py'
@@ -232,6 +232,14 @@ def _validate_traversal(workload):
     for label, value in (('script', script), ('blocked_by', blocked_by)):
         if value is not None and not isinstance(value, str):
             raise MatrixError(f'matrix: traversal {workload["id"]!r} {label} must be a string')
+    digest = workload['script_sha256']
+    if script is None:
+        if digest is not None:
+            raise MatrixError(f'matrix: traversal {workload["id"]!r} script_sha256 must be '
+                              'null when script is null')
+    elif not isinstance(digest, str) or re.fullmatch(r'[0-9a-f]{64}', digest) is None:
+        raise MatrixError(f'matrix: traversal {workload["id"]!r} script_sha256 must be '
+                          '64 lowercase hexadecimal digits')
 
 
 def cells(matrix):
@@ -254,6 +262,7 @@ def cells(matrix):
                     pose=None if pose is None else dict(pose),
                     pose_provenance=workload['pose_provenance'] if fixed else None,
                     script=None if fixed else workload['script'],
+                    script_sha256=None if fixed else workload['script_sha256'],
                     blocked_by=None if fixed else workload['blocked_by'],
                     warmup_frames=matrix['warmup_frames'],
                     measured_frames=matrix['fixed_view_measured_frames'] if fixed else None,
@@ -298,12 +307,11 @@ def build_command(cell, *, client, artifact, root):
     return command
 
 
-def checker_command(cell, *, artifact, qualified_renderer, root, python):
+def checker_command(cell, *, artifact, verdict, qualified_renderer, root, python):
     """Return the validate_render_capture.py argv that checks a ready cell's artifact."""
     _require_ready(cell, root)
     command = [str(python), str(Path(root) / VALIDATOR), str(artifact),
                '--qualified-renderer', qualified_renderer,
-               '--enforce-floor',
                '--profile', cell['profile'],
                f"--width={cell['width']}", f"--height={cell['height']}",
                f"--warmup-frames={cell['warmup_frames']}",
@@ -320,4 +328,4 @@ def checker_command(cell, *, artifact, qualified_renderer, root, python):
                     '--require-geometry', '--require-settled']
     else:
         command += ['--traversal', str(Path(root) / cell['script'])]
-    return command
+    return command + ['--enforce-floor', '--verdict-out', str(verdict)]
