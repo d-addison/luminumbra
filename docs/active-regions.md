@@ -140,7 +140,7 @@ only when the scheduler runs and is part of the hash projection. The validation
 ceiling is the latest world time the ledger knows about, bounds every persisted
 record stamp, and is observational bookkeeping excluded from the hash.
 
-Session load raises only the ceiling to the restored clock. The canonical tick,
+Outside missing-projection adoption, session load raises only the ceiling to the restored clock. The canonical tick,
 every region record, hold counter, pressure, simulation cursor, frozen digest,
 configuration and anchor are preserved, and no scheduler tick or catch-up runs.
 Recovery therefore cannot move the hash projection of a state nobody simulated.
@@ -158,7 +158,7 @@ Absent means an empty ledger, with unlimited scheduling defaults and no saved
 local anchor; the host supplies its spawn feet position for a legacy save. Its
 ceiling starts at the restored WorldClock tick without executing a tick, so
 an immediate edit or pin can be saved before simulation advances.
-No old-world migration occurs. Corrupt, truncated, oversized, duplicate,
+Corrupt, truncated, oversized, duplicate,
 misordered or inconsistent records refuse with `Corrupt active-region ledger.`
 A valid magic followed by a version greater than 2 refuses distinctly with
 `Unsupported future active-region ledger version.` Version zero is corrupt.
@@ -166,11 +166,16 @@ A save containing the ledger requires `sim.active_regions`; opening or writing
 with it off refuses as incompatible configuration. Older engine builds refuse
 this file as an unknown region file. Decode failure never changes the destination
 ledger. Unknown extension types cannot be skipped and are corrupt.
-Version 1 ledgers load with or without frozen history. Their historical digest
-values, freeze stamps and canonical bytes are preserved without recomputation.
-Their legacy digest projection remains undeclared until every legacy historical digest has
-been refreshed at a later freeze or its record evicted; waking alone does not
-refresh a digest. This avoids declaring legacy digests as projection 2.
+Version 1 ledgers load with or without frozen history. Standalone decoding preserves
+historical bytes. During enabled session loading, absent projection metadata adopts
+the current projection from validated scratch authority before publishing the world.
+Every historical stamp is recomputed using the shared authority capture, including
+disk-only chunks and all consumer domains. Identities, ages, travel, population and
+freeze times do not advance. The load writes no save members; the next successful
+snapshot transaction writes the projection declaration. A failed adoption publishes
+no candidate state, and a failed save preserves the committed historical bytes.
+This permits v0.3.0 saves to load in v0.3.1 without relabelling opaque old digests.
+Present malformed or unsupported projection metadata still refuses atomically.
 Flag-off legacy saves without a ledger retain their existing load, save and hash
 behaviour, with no new files, bytes or hash terms.
 
@@ -225,6 +230,7 @@ strictly ascending, with no duplicates; unknown types, truncated values and
 | 4 | Energy ages: LE u32 count, then sorted (LE i32 x, LE i32 z, LE u64 absolute tick) entries, at most one per owned region. |
 | 5 | Simulation content identity: 40 bytes containing LE u16 encoding, defaults and algorithm versions, LE u16 zero reserved, then LE u64 policy, creature definitions, plant definitions and population digests. |
 | 6 | Completed work: LE u32 count, then sorted (LE i32 x, LE i32 z, LE u64 positive work) entries, at most one per owned region. |
+| 7 | Activation state: LE u32 intent count, sorted (LE i32 x, LE i32 z, u8 creation-pending, u8 cause) entries, then LE u32 pending count and sorted (LE u64 tick, LE i32 x, LE i32 z, u8 cause) entries. Causes are presence=1, pin=2 and edit=3; combined count is at most 1,048,576 and every entry names an owned region. |
 
 Map extensions are emitted only when nonempty.
 For type 2, a value greater than 2 refuses
@@ -515,7 +521,9 @@ enabled or indexed state. Adoption must succeed; the next save writes TLV 5. A p
 must match newly captured content exactly or open refuses with `Simulation content identity mismatch.`
 Unsupported identity/default/algorithm versions, nonzero reserved fields, wrong lengths and duplicate
 or misordered TLVs are corrupt. Load compares identity before adopting loaded ledger/consumer state;
-a refusal prevents saving. A legacy flag-off world may opt in and adopt current content for the
+an integrity refusal by the direct state loader prevents saving. A failed public world
+replacement preserves the current session and its ability to save, and reports the
+replacement error separately. A legacy flag-off world may opt in and adopt current content for the
 first time. With the flag disabled, strict policy/species adoption is bypassed,
 identity is absent, and the existing lenient species, save, hash and artifact paths remain unchanged.
 
@@ -550,6 +558,26 @@ Freeze stamping reads only the requested owner's durable region and projects onl
 that owner's entities and regional content. It shares the regional recipe and
 chunk projection with full capture, without constructing world diagnostics or
 serializing unrelated entity stores on the scheduler path.
+
+Throughout a Frozen interval, underlying chunk/water, plant, creature, item,
+field-page and energy authority remains stable through unrelated ticks, parking,
+saving and restart. Controller removal discards only the runtime attachment;
+it does not sample new locomotion or change logical controller participation.
+Saving is observational for Frozen continuation. Thaw applies only the bounded,
+one-shot plant resume policy; creatures and regional energy accept ordinary
+updates without multiplying them by elapsed Frozen time.
+
+Enabled disk-only restoration retains the durable water grid and its saved resolution,
+including for Frozen owners. A grid that differs from the session target adapts only
+through a budgeted regional water visit after thaw. Flag-off restoration retains the
+global resolution migration. Missing or invalid expected durable authority still
+latches a fault and suppresses procedural regeneration.
+
+`FrozenAuthority_test.cpp` covers missing metadata adoption and subsequent stamping,
+present malformed metadata refusal, all content domains across residency and restart
+with independent mutation controls, controller cleanup and resumed continuation,
+creature/energy thaw timing, and current-world saveability after failed replacement.
+The ledger tests also cover atomic adoption when a later owner's authority read fails.
 
 Enabled session hash helpers use these checked projections. The chunk helper
 returns an empty string and latches a fault on capture failure; const helpers

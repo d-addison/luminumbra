@@ -4256,8 +4256,41 @@ bool GameSession::AdoptWorldState(const std::filesystem::path& save_dir,
             }
             luminumbra::foliage::ApplyPlantEntitySnapshot(candidate, enabled_plants);
             luminumbra::ai::ApplyCreatureSnapshot(candidate, enabled_creatures);
+            if (ledger.needs_frozen_projection_adoption()) {
+                // This is a cold load boundary: capture validated scratch authority once,
+                // including committed disk-only chunks. Never relabel historical stamps.
+                // Destination placeholders above only validate duplicate IDs and reference
+                // kinds. They are not members of the candidate save's content projection.
+                entt::registry authority;
+                luminumbra::foliage::ApplyPlantEntitySnapshot(authority, enabled_plants);
+                luminumbra::ai::ApplyCreatureSnapshot(authority, enabled_creatures);
+                const AuthorityHashInputs inputs{.directory = save_dir,
+                                                 .chunks = {.live = loaded.snapshot_chunks(),
+                                                            .parked = {},
+                                                            .durable = durable_inventory,
+                                                            .ground_object_bytes = {},
+                                                            .field_page_bytes = {},
+                                                            .creature_bytes = {}},
+                                                 .registry = authority,
+                                                 .ledger = ledger,
+                                                 .ground = ground_objects,
+                                                 .fields = field_pages,
+                                                 .energy = energy ? &*energy : nullptr,
+                                                 .clock_bytes = saved_clock.canonical_bytes(),
+                                                 .identity_bytes = {},
+                                                 .avatar_bytes = {}};
+                const auto capture = CaptureAuthorityHashState(inputs);
+                if (!capture.state)
+                    throw std::runtime_error(capture.error);
+                ledger.adopt_frozen_projection([&](RegionKey key) {
+                    const auto found = capture.state->region_content().find(key);
+                    return found != capture.state->region_content().end()
+                               ? found->second
+                               : CaptureRegionAuthorityDigest(inputs, key);
+                });
+            }
         } catch (const std::exception& e) {
-            m_worldOpenError = std::string("Corrupt creature payload: ") + e.what();
+            m_worldOpenError = std::string("Corrupt candidate authority: ") + e.what();
             return false;
         }
         try {

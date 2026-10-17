@@ -1135,7 +1135,6 @@
       "statement": "Restore raises the validation ceiling without scheduling or changing canonical state; legacy absence and decode refusals are transactional.",
       "status": "covered",
       "requirements": [
-        "ar.file.034",
         "ar.file.035",
         "ar.file.036",
         "ar.file.037",
@@ -2430,7 +2429,6 @@
       "status": "planned",
       "requirements": [
         "ar.file.042",
-        "ar.file.044",
         "ar.file.046",
         "ar.file.047",
         "ar.file.048",
@@ -2899,14 +2897,10 @@
     {
       "id": "contract.ledger-extensions",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "statement": "Version 2 extensions, legacy digest preservation and authoritative frozen-content selection require dedicated acceptance evidence review.",
+      "statement": "Version 2 extensions, standalone legacy digest preservation and authoritative frozen-content selection require dedicated acceptance evidence review.",
       "status": "planned",
       "requirements": [
         "ar.file.095",
-        "ar.file.096",
-        "ar.file.097",
-        "ar.file.098",
-        "ar.file.099",
         "ar.file.100",
         "ar.file.101",
         "ar.file.102",
@@ -3754,7 +3748,6 @@
         "ar.policy.084",
         "ar.policy.085",
         "ar.policy.086",
-        "ar.policy.087",
         "ar.policy.088",
         "ar.policy.089"
       ],
@@ -4027,7 +4020,6 @@
         "ar.policy.084",
         "ar.policy.085",
         "ar.policy.086",
-        "ar.policy.087",
         "ar.policy.088",
         "ar.policy.089",
         "ar.scope.013",
@@ -4246,6 +4238,106 @@
           "kind": "ctest",
           "ref": "AuthorityHashConsumers.RequireStateBeforePublishing",
           "planned": "Named future integration oracle: every host checksum publisher refuses capture errors without a state; disabled save codecs, checkpoint layouts and artifact bytes retain their legacy paths. No consumer integration execution is claimed; owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.frozen-projection-adoption",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "statement": "Enabled loading adopts missing projection stamps atomically from validated authority without advancing continuation or writing save members. Frozen authority remains stable across ticks, residency, saving and restart; malformed metadata refuses and failed replacement preserves the current world. Authored regressions are registered; native execution remains unevaluated.",
+      "status": "covered",
+      "requirements": [
+        "ar.frozen-adoption.001",
+        "ar.frozen-adoption.002",
+        "ar.frozen-adoption.003",
+        "ar.frozen-adoption.004",
+        "ar.frozen-adoption.005",
+        "ar.frozen-adoption.006",
+        "ar.frozen-adoption.007",
+        "ar.frozen-adoption.008",
+        "ar.frozen-adoption.009",
+        "ar.frozen-adoption.010",
+        "ar.frozen-adoption.014",
+        "ar.frozen-adoption.015",
+        "ar.frozen-adoption.016",
+        "ar.frozen-adoption.017",
+        "ar.frozen-adoption.018",
+        "ar.frozen-adoption.019",
+        "ar.frozen-adoption.020",
+        "ar.frozen-adoption.021",
+        "ar.frozen-adoption.022",
+        "ar.frozen-adoption.023",
+        "ar.frozen-adoption.024",
+        "ar.frozen-adoption.025",
+        "ar.frozen-adoption.026",
+        "ar.frozen-adoption.027"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "FrozenAuthority.V030MissingIdentityAndProjectionAdoptThenStamp"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FrozenAuthority.PresentMalformedProjectionRefusesAtomically"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FrozenAuthority.FrozenEveryAuthorityDomainStableAcrossResidencySaveLoad"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FrozenAuthority.EnabledDiskOnlyRestorePreservesFrozenWater"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FrozenAuthority.FlagOffDiskOnlyRestoreStillMigratesWater"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FrozenAuthority.EnabledDiskOnlyRestoreMissingAuthorityStillFaults"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FrozenAuthority.FrozenControllerCleanupPreservesContinuation"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FrozenAuthority.ThawDoesNotApplyCreatureOrEnergyCatchup"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FrozenAuthority.FailedPublicReplacementPreservesCurrentSaveability"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedgerTest.FrozenProjectionAdoptionIsAtomicAcrossAllHistoricalOwners"
+        }
+      ]
+    },
+    {
+      "id": "contract.activation-extension-layout",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "statement": "Activation extension encodes ordered intent and pending delivery maps with bounded owned entries. Complete format qualification remains planned.",
+      "status": "partial",
+      "requirements": [
+        "ar.frozen-adoption.011",
+        "ar.frozen-adoption.012",
+        "ar.frozen-adoption.013"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedger.ActivationIntentAndOutboxRoundTrip"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedger.MalformedActivationExtensionRefusesTransactionally"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Qualify the complete activation envelope against independent byte oracles; owner: persistence"
         }
       ]
     }

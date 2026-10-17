@@ -897,6 +897,46 @@ class AcceptanceMatrixTests(unittest.TestCase):
         watchdog = row_of(matrix, "em.client-hang")
         self.assertIn("HangWatchdog.RearmsAfterHeartbeatResumes", {e["ref"] for e in watchdog["evidence"]})
 
+    def test_repository_frozen_projection_adoption_retains_authority_evidence(self) -> None:
+        matrix = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_matrix.json")
+        inventory = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_requirements.json")
+        requirements, errors = MODULE.validate_inventory(inventory, MODULE.DEFAULT_ROOT)
+        self.assertEqual(errors, [])
+        self.assertIn("contract.frozen-projection-adoption", {row["id"] for row in matrix["rows"]})
+        row = row_of(matrix, "contract.frozen-projection-adoption")
+        self.assertEqual(row["status"], "covered")
+        texts = {requirements[ref]["text"] for ref in row["requirements"]}
+        self.assertIn("Standalone decoding preserves historical bytes.", texts)
+        self.assertIn("During enabled session loading, absent projection metadata adopts "
+                      "the current projection from validated scratch authority before "
+                      "publishing the world.", texts)
+        self.assertIn("The load writes no save members;", texts)
+        self.assertIn("Present malformed or unsupported projection metadata still refuses "
+                      "atomically.", texts)
+        self.assertIn("Saving is observational for Frozen continuation.", texts)
+        self.assertIn("Flag-off restoration retains the global resolution migration.", texts)
+        self.assertIn("A failed public world replacement preserves the current session and "
+                      "its ability to save, and reports the replacement error separately.", texts)
+        self.assertEqual({entry["ref"] for entry in row["evidence"]}, {
+            "FrozenAuthority.V030MissingIdentityAndProjectionAdoptThenStamp",
+            "FrozenAuthority.PresentMalformedProjectionRefusesAtomically",
+            "FrozenAuthority.FrozenEveryAuthorityDomainStableAcrossResidencySaveLoad",
+            "FrozenAuthority.EnabledDiskOnlyRestorePreservesFrozenWater",
+            "FrozenAuthority.FlagOffDiskOnlyRestoreStillMigratesWater",
+            "FrozenAuthority.EnabledDiskOnlyRestoreMissingAuthorityStillFaults",
+            "FrozenAuthority.FrozenControllerCleanupPreservesContinuation",
+            "FrozenAuthority.ThawDoesNotApplyCreatureOrEnergyCatchup",
+            "FrozenAuthority.FailedPublicReplacementPreservesCurrentSaveability",
+            "ActiveRegionLedgerTest.FrozenProjectionAdoptionIsAtomicAcrossAllHistoricalOwners",
+        })
+        layout = row_of(matrix, "contract.activation-extension-layout")
+        self.assertEqual(layout["status"], "partial")
+        layout_texts = " ".join(requirements[ref]["text"] for ref in layout["requirements"])
+        self.assertIn("| 7 | Activation state:", layout_texts)
+        self.assertIn("combined count is at most 1,048,576", layout_texts)
+        self.assertIn("every entry names an owned region", layout_texts)
+        self.assertEqual(MODULE.validate(matrix, repository_index(), MODULE.DEFAULT_ROOT, False), [])
+
     def test_planned_item_skips_existence(self) -> None:
         matrix = baseline_matrix()
         matrix["rows"][1]["evidence"][1]["ref"] = "tools/absent.py"

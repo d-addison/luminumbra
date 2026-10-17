@@ -6055,8 +6055,9 @@ bool SHIELD_WorldSystem::restore_authoritative_chunk(const IVec3& coords) {
         chunk->normalize_for_park();
         if (!adopt_streamed_chunk(chunk))
             throw std::runtime_error("duplicate durable chunk adoption");
-        // Legacy sessions migrate on re-entry. Regional grids retain saved truth until
-        // preparation is charged to a successful budgeted fixed-tick visit.
+        // Regional restoration preserves the saved water grid, including Frozen authority.
+        // Resolution adaptation requires a successful budgeted regional visit after thaw.
+        // Legacy sessions still migrate before exposing restored truth to seams/edits.
         if (m_water_system && !m_water_system->regional_scheduling())
             MigrateWaterSimResolution();
         ++m_dirty_generation;

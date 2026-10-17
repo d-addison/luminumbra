@@ -2197,12 +2197,6 @@
       "text": "The validation ceiling is the latest world time the ledger knows about, bounds every persisted record stamp, and is observational bookkeeping excluded from the hash."
     },
     {
-      "id": "ar.file.034",
-      "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Session load raises only the ceiling to the restored clock.",
-      "text": "Session load raises only the ceiling to the restored clock."
-    },
-    {
       "id": "ar.file.035",
       "source": "docs/active-regions.md#file-and-compatibility",
       "quote": "The canonical tick, every region record, hold counter, pressure, simulation cursor, frozen digest, configuration and anchor are preserved, and no scheduler tick or catch-up runs.",
@@ -2255,12 +2249,6 @@
       "source": "docs/active-regions.md#file-and-compatibility",
       "quote": "Its ceiling starts at the restored WorldClock tick without executing a tick, so an immediate edit or pin can be saved before simulation advances.",
       "text": "Its ceiling starts at the restored WorldClock tick without executing a tick, so an immediate edit or pin can be saved before simulation advances."
-    },
-    {
-      "id": "ar.file.044",
-      "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "No old-world migration occurs.",
-      "text": "No old-world migration occurs."
     },
     {
       "id": "ar.file.045",
@@ -3305,30 +3293,6 @@
       "source": "docs/active-regions.md#file-and-compatibility",
       "quote": "Version 1 ledgers load with or without frozen history.",
       "text": "Version 1 ledgers load with or without frozen history."
-    },
-    {
-      "id": "ar.file.096",
-      "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Their historical digest values, freeze stamps and canonical bytes are preserved without recomputation.",
-      "text": "Their historical digest values, freeze stamps and canonical bytes are preserved without recomputation."
-    },
-    {
-      "id": "ar.file.097",
-      "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "Their legacy digest projection remains undeclared until every legacy historical digest has been refreshed at a later freeze or its record evicted;",
-      "text": "Their legacy digest projection remains undeclared until every legacy historical digest has been refreshed at a later freeze or its record evicted;"
-    },
-    {
-      "id": "ar.file.098",
-      "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "waking alone does not refresh a digest.",
-      "text": "waking alone does not refresh a digest."
-    },
-    {
-      "id": "ar.file.099",
-      "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "This avoids declaring legacy digests as projection 2.",
-      "text": "This avoids declaring legacy digests as projection 2."
     },
     {
       "id": "ar.file.100",
@@ -4501,12 +4465,6 @@
       "text": "Load compares identity before adopting loaded ledger/consumer state;"
     },
     {
-      "id": "ar.policy.087",
-      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
-      "quote": "a refusal prevents saving.",
-      "text": "a refusal prevents saving."
-    },
-    {
       "id": "ar.policy.088",
       "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
       "quote": "A legacy flag-off world may opt in and adopt current content for the first time.",
@@ -4781,6 +4739,168 @@
       "source": "docs/active-regions.md#checked-authority-hash-capture",
       "quote": "Disabled hashes, save codecs, checkpoint layouts and artifact serialization retain their legacy paths.",
       "text": "Disabled hashes, save codecs, checkpoint layouts and artifact serialization retain their legacy paths."
+    },
+    {
+      "id": "ar.frozen-adoption.001",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Outside missing-projection adoption, session load raises only the ceiling to the restored clock.",
+      "text": "Outside missing-projection adoption, session load raises only the ceiling to the restored clock."
+    },
+    {
+      "id": "ar.frozen-adoption.002",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Standalone decoding preserves historical bytes.",
+      "text": "Standalone decoding preserves historical bytes."
+    },
+    {
+      "id": "ar.frozen-adoption.003",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "During enabled session loading, absent projection metadata adopts the current projection from validated scratch authority before publishing the world.",
+      "text": "During enabled session loading, absent projection metadata adopts the current projection from validated scratch authority before publishing the world."
+    },
+    {
+      "id": "ar.frozen-adoption.004",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Every historical stamp is recomputed using the shared authority capture, including disk-only chunks and all consumer domains.",
+      "text": "Every historical stamp is recomputed using the shared authority capture, including disk-only chunks and all consumer domains."
+    },
+    {
+      "id": "ar.frozen-adoption.005",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Identities, ages, travel, population and freeze times do not advance.",
+      "text": "Identities, ages, travel, population and freeze times do not advance."
+    },
+    {
+      "id": "ar.frozen-adoption.006",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "The load writes no save members;",
+      "text": "The load writes no save members;"
+    },
+    {
+      "id": "ar.frozen-adoption.007",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "the next successful snapshot transaction writes the projection declaration.",
+      "text": "the next successful snapshot transaction writes the projection declaration."
+    },
+    {
+      "id": "ar.frozen-adoption.008",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "A failed adoption publishes no candidate state, and a failed save preserves the committed historical bytes.",
+      "text": "A failed adoption publishes no candidate state, and a failed save preserves the committed historical bytes."
+    },
+    {
+      "id": "ar.frozen-adoption.009",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "This permits v0.3.0 saves to load in v0.3.1 without relabelling opaque old digests.",
+      "text": "This permits v0.3.0 saves to load in v0.3.1 without relabelling opaque old digests."
+    },
+    {
+      "id": "ar.frozen-adoption.010",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Present malformed or unsupported projection metadata still refuses atomically.",
+      "text": "Present malformed or unsupported projection metadata still refuses atomically."
+    },
+    {
+      "id": "ar.frozen-adoption.011",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "| 7 | Activation state: LE u32 intent count, sorted (LE i32 x, LE i32 z, u8 creation-pending, u8 cause) entries, then LE u32 pending count and sorted (LE u64 tick, LE i32 x, LE i32 z, u8 cause) entrie",
+      "text": "| 7 | Activation state: LE u32 intent count, sorted (LE i32 x, LE i32 z, u8 creation-pending, u8 cause) entries, then LE u32 pending count and sorted (LE u64 tick, LE i32 x, LE i32 z, u8 cause) entries."
+    },
+    {
+      "id": "ar.frozen-adoption.012",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Causes are presence=1, pin=2 and edit=3;",
+      "text": "Causes are presence=1, pin=2 and edit=3;"
+    },
+    {
+      "id": "ar.frozen-adoption.013",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "combined count is at most 1,048,576 and every entry names an owned region. |",
+      "text": "combined count is at most 1,048,576 and every entry names an owned region. |"
+    },
+    {
+      "id": "ar.frozen-adoption.014",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "an integrity refusal by the direct state loader prevents saving.",
+      "text": "an integrity refusal by the direct state loader prevents saving."
+    },
+    {
+      "id": "ar.frozen-adoption.015",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "quote": "A failed public world replacement preserves the current session and its ability to save, and reports the replacement error separately.",
+      "text": "A failed public world replacement preserves the current session and its ability to save, and reports the replacement error separately."
+    },
+    {
+      "id": "ar.frozen-adoption.016",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Throughout a Frozen interval, underlying chunk/water, plant, creature, item, field-page and energy authority remains stable through unrelated ticks, parking, saving and restart.",
+      "text": "Throughout a Frozen interval, underlying chunk/water, plant, creature, item, field-page and energy authority remains stable through unrelated ticks, parking, saving and restart."
+    },
+    {
+      "id": "ar.frozen-adoption.017",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Controller removal discards only the runtime attachment;",
+      "text": "Controller removal discards only the runtime attachment;"
+    },
+    {
+      "id": "ar.frozen-adoption.018",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "it does not sample new locomotion or change logical controller participation.",
+      "text": "it does not sample new locomotion or change logical controller participation."
+    },
+    {
+      "id": "ar.frozen-adoption.019",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Saving is observational for Frozen continuation.",
+      "text": "Saving is observational for Frozen continuation."
+    },
+    {
+      "id": "ar.frozen-adoption.020",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Thaw applies only the bounded, one-shot plant resume policy;",
+      "text": "Thaw applies only the bounded, one-shot plant resume policy;"
+    },
+    {
+      "id": "ar.frozen-adoption.021",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "creatures and regional energy accept ordinary updates without multiplying them by elapsed Frozen time.",
+      "text": "creatures and regional energy accept ordinary updates without multiplying them by elapsed Frozen time."
+    },
+    {
+      "id": "ar.frozen-adoption.022",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Enabled disk-only restoration retains the durable water grid and its saved resolution, including for Frozen owners.",
+      "text": "Enabled disk-only restoration retains the durable water grid and its saved resolution, including for Frozen owners."
+    },
+    {
+      "id": "ar.frozen-adoption.023",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "A grid that differs from the session target adapts only through a budgeted regional water visit after thaw.",
+      "text": "A grid that differs from the session target adapts only through a budgeted regional water visit after thaw."
+    },
+    {
+      "id": "ar.frozen-adoption.024",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Flag-off restoration retains the global resolution migration.",
+      "text": "Flag-off restoration retains the global resolution migration."
+    },
+    {
+      "id": "ar.frozen-adoption.025",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "Missing or invalid expected durable authority still latches a fault and suppresses procedural regeneration.",
+      "text": "Missing or invalid expected durable authority still latches a fault and suppresses procedural regeneration."
+    },
+    {
+      "id": "ar.frozen-adoption.026",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "`FrozenAuthority_test.cpp` covers missing metadata adoption and subsequent stamping, present malformed metadata refusal, all content domains across residency and restart with independent mutation cont",
+      "text": "`FrozenAuthority_test.cpp` covers missing metadata adoption and subsequent stamping, present malformed metadata refusal, all content domains across residency and restart with independent mutation controls, controller cleanup and resumed continuation, creature/energy thaw timing, and current-world saveability after failed replacement."
+    },
+    {
+      "id": "ar.frozen-adoption.027",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "quote": "The ledger tests also cover atomic adoption when a later owner's authority read fails.",
+      "text": "The ledger tests also cover atomic adoption when a later owner's authority read fails."
     }
   ],
   "exclusions": [
