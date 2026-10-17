@@ -641,6 +641,13 @@ public:
         return m_last_streaming_budget_stats;
     }
 
+    // Each dispatch copies at most 256 KiB, including every terrain and water channel.
+    static constexpr std::size_t kMeshingSnapshotByteBudget = 256u * 1024u;
+    // Main-thread diagnostic for the latest dispatch pass; excluded from world identity.
+    std::size_t last_meshing_snapshot_bytes() const {
+        return m_last_meshing_snapshot_bytes;
+    }
+
     // Per-sub-phase timing from the latest update, retained as runtime telemetry
     // for localizing streaming stalls.
     struct DbgStreamTimings {
@@ -989,6 +996,7 @@ private:
     void shadow_note_promotion_published(ChunkID id);
     void shadow_note_evicted(ChunkID id);
     StreamingBudgetFrameStats m_last_streaming_budget_stats;
+    std::size_t m_last_meshing_snapshot_bytes = 0;
     // debug_set_streaming_radius_cap: 0 = uncapped (production behaviour).
     int m_streaming_radius_cap = 0;
     DbgStreamTimings m_dbg_stream; // runtime telemetry
@@ -1100,7 +1108,8 @@ private:
         // MAX_HIGH_PRIORITY_MESHING_JOBS_PER_DISPATCH in the.cpp).
         bool high_priority = false;
     };
-    void dispatch_meshing_jobs(const std::vector<MeshingWorkItem>& chunks_to_mesh);
+    // Returns the admitted prefix count for streaming-budget telemetry.
+    std::size_t dispatch_meshing_jobs(const std::vector<MeshingWorkItem>& chunks_to_mesh);
     void process_completed_meshing_jobs(bool force);
     bool meshing_jobs_active() const;
     //  promotion lane (see StreamingState). dispatch_promotion_jobs

@@ -9,12 +9,14 @@
 #include <entt/entity/fwd.hpp>
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <future>
 #include <limits>
 #include <memory>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -653,6 +655,339 @@ TEST(AsyncWaterMeshing, InvalidResolutionAndPartialSurfaceRejectBeforeAllocation
         EXPECT_TRUE(chunk.water_mesh_vertices.empty());
         EXPECT_TRUE(chunk.water_mesh_indices.empty());
         EXPECT_FALSE(chunk.water_mesh_generated.load());
+    }
+}
+
+void CheckBudgetedBurst(bool use_workers, bool promotion, bool edit_deferred) {
+    JobSystem jobs;
+    if (use_workers) {
+        jobs.startup(1);
+    }
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.base_amplitude = 0.0f;
+    params.height_offset = 8.0f;
+    params.caves_enabled = false;
+    SHIELD_WorldSystem world(use_workers ? &jobs : nullptr, nullptr, params, 1337);
+    WaterSystem water(use_workers ? &jobs : nullptr, &world);
+    water.SetBootPaused(true);
+    world.SetWaterSystem(&water);
+    world.begin_tick(0);
+
+    // A fixed 5*5 burst exceeds three dispatch budgets, even with every channel
+    // present. Empty anchors keep activation from adding unrelated chunks.
+    constexpr std::size_t kBurstChunks = 25;
+    constexpr std::size_t kSnapshotBytes =
+        std::size_t{17} * 17u * 17u * (sizeof(float) + sizeof(u8)) +
+        std::size_t{17} * 17u * sizeof(float) +
+        std::size_t{32} * 32u * (2u * sizeof(float) + sizeof(Vec2) + sizeof(std::int32_t));
+    static_assert(kBurstChunks * kSnapshotBytes >
+                  3u * SHIELD_WorldSystem::kMeshingSnapshotByteBudget);
+    std::vector<std::shared_ptr<Chunk>> chunks;
+    std::vector<std::unique_ptr<Chunk>> expected;
+    chunks.reserve(kBurstChunks);
+    expected.reserve(kBurstChunks);
+    for (int z = -2; z <= 2; ++z) {
+        for (int x = -2; x <= 2; ++x) {
+            auto chunk = std::make_shared<Chunk>(IVec3(x, 0, z));
+            FillDugPond(world, *chunk, 32);
+            if (promotion) {
+                chunk->material_data.clear();
+                world.GenerateChunkData(*chunk);
+            }
+            expected.push_back(ReferenceMesh(world, water, *chunk));
+            ASSERT_FALSE(expected.back()->mesh_indices.empty());
+            ASSERT_FALSE(expected.back()->water_mesh_indices.empty());
+            // Alternate meshless/high-lane work with active-mesh/normal-lane work.
+            if (chunks.size() % 2u != 0u) {
+                chunk->mesh_vertices = expected.back()->mesh_vertices;
+                chunk->mesh_indices = expected.back()->mesh_indices;
+                chunk->set_state(ChunkState::Ready);
+                chunk->current_lod.store(1);
+            }
+            if (promotion) {
+                chunk->sdf_data.clear();
+            }
+            ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+            chunks.push_back(std::move(chunk));
+        }
+    }
+
+    entt::registry registry;
+    bool saw_deferred = false;
+    bool edited = false;
+    std::size_t completed = 0;
+    std::size_t passes = 0;
+    // At least one item must progress per pass, so the fixed burst is also the
+    // pass bound. All inner scans/comparisons cover only these 25 bounded chunks.
+    for (; passes < kBurstChunks && completed < kBurstChunks; ++passes) {
+        const auto completed_before = completed;
+        world.update(registry, std::vector<Vec3>{}, nullptr);
+        EXPECT_LE(world.last_meshing_snapshot_bytes(),
+                  SHIELD_WorldSystem::kMeshingSnapshotByteBudget);
+        for (std::size_t index = 0; index < chunks.size(); ++index) {
+            auto& chunk = *chunks[index];
+            if (chunk.mesh_version.load() != 0u || chunk.pending_lod.load() >= 0) {
+                continue;
+            }
+            saw_deferred = true;
+            EXPECT_EQ(chunk.get_state(), index % 2u == 0u ? ChunkState::Idle : ChunkState::Ready);
+            EXPECT_EQ(chunk.current_lod.load(), index % 2u == 0u ? -1 : 1);
+            EXPECT_EQ(chunk.pending_lod.load(), -1);
+            EXPECT_EQ(chunk.water_mesh_version.load(), 0u);
+            EXPECT_FALSE(chunk.pending_mesh_ready.load());
+            EXPECT_FALSE(chunk.pending_mesh_failed.load());
+            EXPECT_TRUE(chunk.pending_mesh_vertices.empty());
+            EXPECT_TRUE(chunk.pending_water_mesh_vertices.empty());
+            if (edit_deferred && !edited) {
+                // The next pass must capture this new terrain, material and water
+                // state, rather than an eager snapshot of the deferred suffix.
+                for (auto& density : chunk.sdf_data) {
+                    density += 1.0f;
+                }
+                for (auto& height : chunk.heightmap_data) {
+                    height -= 1.0f;
+                }
+                std::fill(chunk.material_data.begin(),
+                          chunk.material_data.end(),
+                          static_cast<u8>(MaterialType::Soil));
+                std::fill(chunk.water_level_data.begin(), chunk.water_level_data.end(), 7.0f);
+                chunk.mark_voxel_data_dirty();
+                auto edited_reference = ReferenceMesh(world, water, chunk);
+                ASSERT_FALSE(edited_reference->mesh_vertices.empty());
+                ASSERT_NE(edited_reference->mesh_vertices.front().position,
+                          expected[index]->mesh_vertices.front().position);
+                expected[index] = std::move(edited_reference);
+                edited = true;
+            }
+        }
+        world.wait_for_streaming_jobs();
+        completed = 0;
+        for (std::size_t index = 0; index < chunks.size(); ++index) {
+            const auto& chunk = *chunks[index];
+            if (chunk.mesh_version.load() == 0u) {
+                continue;
+            }
+            ++completed;
+            EXPECT_EQ(chunk.mesh_version.load(), 1u);
+            EXPECT_EQ(chunk.water_mesh_version.load(), 1u);
+            EXPECT_EQ(chunk.pending_lod.load(), -1);
+            EXPECT_EQ(chunk.get_state(), ChunkState::Ready);
+            ExpectVerticesEqual(chunk.mesh_vertices, expected[index]->mesh_vertices);
+            EXPECT_EQ(chunk.mesh_indices, expected[index]->mesh_indices);
+            ExpectVerticesEqual(chunk.water_mesh_vertices, expected[index]->water_mesh_vertices);
+            EXPECT_EQ(chunk.water_mesh_indices, expected[index]->water_mesh_indices);
+        }
+        EXPECT_GT(completed, completed_before);
+        EXPECT_EQ(world.get_last_streaming_budget_stats().scheduled_meshing,
+                  completed - completed_before);
+        EXPECT_EQ(world.get_last_streaming_budget_stats().deferred_meshing,
+                  kBurstChunks - completed);
+        const auto copied_per_chunk =
+            kSnapshotBytes - (promotion ? std::size_t{17} * 17u * 17u * sizeof(u8) : 0u);
+        EXPECT_EQ(world.last_meshing_snapshot_bytes(),
+                  (completed - completed_before) * copied_per_chunk);
+        EXPECT_LE(world.last_meshing_snapshot_bytes(),
+                  SHIELD_WorldSystem::kMeshingSnapshotByteBudget);
+    }
+    EXPECT_EQ(completed, kBurstChunks);
+    EXPECT_GE(passes, 3u);
+    EXPECT_TRUE(saw_deferred);
+    EXPECT_EQ(edited, edit_deferred);
+    if (promotion) {
+        EXPECT_EQ(world.promotion_dispatch_totals().chunks, kBurstChunks);
+    }
+    world.update(registry, std::vector<Vec3>{}, nullptr);
+    world.wait_for_streaming_jobs();
+    EXPECT_EQ(world.get_last_streaming_budget_stats().scheduled_meshing, 0u);
+}
+
+TEST(AsyncWaterMeshing, SnapshotByteBudgetDrainsBurstWithIdenticalMeshes) {
+    for (const bool use_workers : {false, true}) {
+        SCOPED_TRACE(use_workers);
+        CheckBudgetedBurst(use_workers, false, false);
+    }
+}
+
+TEST(AsyncWaterMeshing, BudgetDeferredChunkCapturesEditsOnNextPass) {
+    for (const bool use_workers : {false, true}) {
+        SCOPED_TRACE(use_workers);
+        CheckBudgetedBurst(use_workers, false, true);
+    }
+}
+
+TEST(AsyncWaterMeshing, SnapshotByteBudgetPreservesPromotionHandoff) {
+    for (const bool use_workers : {false, true}) {
+        SCOPED_TRACE(use_workers);
+        CheckBudgetedBurst(use_workers, true, false);
+    }
+}
+
+TEST(AsyncWaterMeshing, SnapshotByteAccountingBoundsPartialAndOversizedChannels) {
+    // Each row supplies a fixed 15-chunk burst. Expected byte counts include only
+    // channels the snapshot copies, including short mirrors and rejected tails.
+    struct InputCase {
+        int resolution;
+        bool water_only;
+        std::size_t levels;
+        std::size_t flows;
+        std::size_t beds;
+        std::size_t depths;
+        std::size_t heights;
+        std::size_t materials;
+        std::size_t expected_bytes;
+    };
+    constexpr std::size_t kSdfBytes = 4913u * sizeof(float);
+    constexpr std::size_t kHeightBytes = 289u * sizeof(float);
+    constexpr std::size_t kWaterBytes =
+        1024u * (2u * sizeof(float) + sizeof(Vec2) + sizeof(std::int32_t));
+    constexpr InputCase kCases[] = {
+        {32,
+         false,
+         1024,
+         1024,
+         1024,
+         1024,
+         289,
+         4913,
+         kSdfBytes + kHeightBytes + 4913u + kWaterBytes},
+        {32, false, 3, 2, 1, 1023, 288, 4912, kSdfBytes + 4u * sizeof(float) + 2u * sizeof(Vec2)},
+        {32,
+         false,
+         1025,
+         1025,
+         1025,
+         1025,
+         290,
+         4914,
+         kSdfBytes + kWaterBytes - 1024u * sizeof(std::int32_t)},
+        {0, false, 1024, 1024, 1024, 1024, 0, 0, kSdfBytes},
+        {std::numeric_limits<int>::max(),
+         false,
+         1024,
+         1024,
+         1024,
+         1024,
+         289,
+         4913,
+         kSdfBytes + kHeightBytes + 4913u},
+        {32, true, 1024, 1024, 1024, 1024, 289, 4913, kWaterBytes},
+        {0, true, 0, 0, 0, 0, 0, 0, 0}};
+    for (const bool use_workers : {false, true}) {
+        for (const auto& input : kCases) {
+            SCOPED_TRACE(use_workers);
+            SCOPED_TRACE(input.expected_bytes);
+            JobSystem jobs;
+            if (use_workers) {
+                jobs.startup(1);
+            }
+            auto params = Luminumbra::Test::SyntheticTerrainParams();
+            params.base_amplitude = 0.0f;
+            params.height_offset = 8.0f;
+            params.caves_enabled = false;
+            SHIELD_WorldSystem world(use_workers ? &jobs : nullptr, nullptr, params, 1337);
+            WaterSystem water(use_workers ? &jobs : nullptr, &world);
+            water.SetBootPaused(true);
+            world.SetWaterSystem(&water);
+            constexpr std::size_t kChunks = 15;
+            std::vector<std::shared_ptr<Chunk>> chunks;
+            for (std::size_t index = 0; index < kChunks; ++index) {
+                auto chunk = std::make_shared<Chunk>(
+                    IVec3(static_cast<int>(index % 4u), 0, static_cast<int>(index / 4u)));
+                FillDugPond(world, *chunk, 32);
+                if (input.water_only) {
+                    World::MarchingCubes::PolygoniseTerrain(world, *chunk, 0.0f, 1);
+                    chunk->set_state(ChunkState::Ready);
+                    chunk->current_lod.store(0);
+                }
+                chunk->current_water_resolution.store(input.resolution);
+                chunk->water_level_data.resize(input.levels);
+                chunk->water_flow_data.resize(input.flows);
+                chunk->water_sim_terrain_height.resize(input.beds);
+                chunk->water_depth_mm.resize(input.depths);
+                chunk->heightmap_data.resize(input.heights);
+                chunk->material_data.resize(input.materials);
+                ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+                chunks.push_back(std::move(chunk));
+            }
+            entt::registry registry;
+            world.update(registry, std::vector<Vec3>{}, nullptr);
+            world.wait_for_streaming_jobs();
+            const auto admitted = input.expected_bytes == 0u
+                                      ? kChunks
+                                      : std::min(kChunks,
+                                                 SHIELD_WorldSystem::kMeshingSnapshotByteBudget /
+                                                     input.expected_bytes);
+            EXPECT_EQ(world.last_meshing_snapshot_bytes(), admitted * input.expected_bytes);
+            EXPECT_LE(world.last_meshing_snapshot_bytes(),
+                      SHIELD_WorldSystem::kMeshingSnapshotByteBudget);
+            std::size_t published = 0;
+            for (const auto& chunk : chunks) {
+                if (chunk->water_mesh_version.load() == 1u) {
+                    ++published;
+                    EXPECT_EQ(chunk->mesh_version.load(), input.water_only ? 0u : 1u);
+                }
+                EXPECT_EQ(chunk->pending_lod.load(), -1);
+            }
+            EXPECT_EQ(published, admitted);
+        }
+    }
+}
+
+TEST(AsyncWaterMeshing, SnapshotByteBudgetAdmitsExactFitAndEmptySnapshot) {
+    for (const bool use_workers : {false, true}) {
+        SCOPED_TRACE(use_workers);
+        JobSystem jobs;
+        if (use_workers) {
+            jobs.startup(1);
+        }
+        auto params = Luminumbra::Test::SyntheticTerrainParams();
+        params.base_amplitude = 0.0f;
+        params.height_offset = 8.0f;
+        params.caves_enabled = false;
+        SHIELD_WorldSystem world(use_workers ? &jobs : nullptr, nullptr, params, 1337);
+        WaterSystem water(use_workers ? &jobs : nullptr, &world);
+        water.SetBootPaused(true);
+        world.SetWaterSystem(&water);
+        world.begin_tick(0);
+        std::vector<std::shared_ptr<Chunk>> chunks;
+        // Fifteen nearby active chunks request water-only snapshots. With no
+        // anchors, the existing candidate order is chunk id within this LOD.
+        constexpr std::size_t kChunks = 15;
+        for (std::size_t index = 0; index < kChunks; ++index) {
+            auto chunk = std::make_shared<Chunk>(
+                IVec3(static_cast<int>(index % 4u), 0, static_cast<int>(index / 4u)));
+            FillDugPond(world, *chunk, 32);
+            World::MarchingCubes::PolygoniseTerrain(world, *chunk, 0.0f, 1);
+            chunk->set_state(ChunkState::Ready);
+            chunk->current_lod.store(0);
+            ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+            chunks.push_back(std::move(chunk));
+        }
+        std::sort(chunks.begin(), chunks.end(), [](const auto& left, const auto& right) {
+            return left->get_id() < right->get_id();
+        });
+        // 12 * 20 KiB + 16 KiB = exactly 256 KiB. A zero-byte snapshot still
+        // fits; the following four-byte partial surface must remain untouched.
+        chunks[12]->water_depth_mm.clear();
+        chunks[13]->current_water_resolution.store(0);
+        chunks[14]->water_level_data.resize(1);
+        chunks[14]->water_flow_data.clear();
+        chunks[14]->water_sim_terrain_height.clear();
+        chunks[14]->water_depth_mm.clear();
+        entt::registry registry;
+        world.update(registry, std::vector<Vec3>{}, nullptr);
+        EXPECT_EQ(world.last_meshing_snapshot_bytes(),
+                  SHIELD_WorldSystem::kMeshingSnapshotByteBudget);
+        EXPECT_EQ(chunks.back()->pending_lod.load(), -1);
+        EXPECT_EQ(chunks.back()->water_mesh_version.load(), 0u);
+        world.wait_for_streaming_jobs();
+        for (std::size_t index = 0; index < kChunks - 1u; ++index) {
+            EXPECT_EQ(chunks[index]->water_mesh_version.load(), 1u);
+        }
+        world.update(registry, std::vector<Vec3>{}, nullptr);
+        world.wait_for_streaming_jobs();
+        EXPECT_EQ(chunks.back()->water_mesh_version.load(), 1u);
+        EXPECT_EQ(world.last_meshing_snapshot_bytes(), sizeof(float));
     }
 }
 } // namespace
