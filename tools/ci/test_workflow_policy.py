@@ -334,6 +334,10 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         self.assertIn("build/debug-asan/ctest.junit.xml", upload)
         self.assertIn("build/debug-asan/qualification-shard.json", upload)
         self.assertIn("if-no-files-found: error", upload)
+        diagnostics = shard_steps["Upload sanitizer evidence"]
+        self.assertEqual(value(diagnostics, "name", 10),
+                         "asan-test-evidence-${{ github.sha }}-shard-${{ matrix.shard }}")
+        self.assertEqual(value(diagnostics, "overwrite", 10), "true")
         self.assertEqual(value(shard_steps["Bind manual qualification shard evidence"], "QUALIFICATION_PRODUCERS", 10),
                          "'{\"identity\":\"${{ steps.identity.outcome }}\",\"configure\":\"${{ steps.configure.outcome }}\",\"build\":\"${{ steps.build.outcome }}\",\"tests\":\"${{ steps.tests.outcome }}\"}'")
         for name in ("identity", "configure", "build", "tests"):

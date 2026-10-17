@@ -63,6 +63,43 @@ class AsanShardTests(unittest.TestCase):
         self.assertTrue({"setup", "consumer", "render", "cleanup"} <= set(owners[0]))
         self.assertEqual(sorted(sum(result, [])), sorted(names))
 
+    def joined_fixture_chains(self, reverse_groups, conflicting_heavy=False):
+        first = [test(self.names[1] if conflicting_heavy else "setup", FIXTURES_SETUP=["ab"]),
+                 test("consumer", FIXTURES_REQUIRED=["ab"], FIXTURES_SETUP=["bc"])]
+        second = [test(self.names[2], FIXTURES_CLEANUP=["cd"]),
+                  test("other-setup", FIXTURES_SETUP=["cd"], FIXTURES_REQUIRED=["bc"])]
+        # Form A-B and C-D before the final B-C join in either registration order.
+        chains = second + first if reverse_groups else first + second
+        prefix = [] if conflicting_heavy else [test(self.names[1]), test("padding")]
+        return prefix + chains
+
+    def test_three_chain_join_keeps_every_member_with_heavy_test_in_both_orders(self):
+        for reverse_groups in (False, True):
+            with self.subTest(reverse_groups=reverse_groups):
+                tests = self.joined_fixture_chains(reverse_groups)
+                names = [row["name"] for row in tests]
+                selected = self.planned_selection(tests, tests)
+                group = {"setup", "consumer", "other-setup", self.names[2]}
+                # The early ordinary members would choose shard 0 by registration
+                # order; the second heavy test forces the entire joined group to 1.
+                self.assertEqual(selected, [[self.names[1]],
+                                            [name for name in names if name != self.names[1]]])
+                self.assertTrue(group <= set(selected[1]))
+                self.assertEqual(shards.partition(tests, names), selected)
+
+    def test_three_chain_join_refuses_conflicting_heavy_owners_before_writing(self):
+        for reverse_groups in (False, True):
+            for shard in (1, 2):
+                with self.subTest(reverse_groups=reverse_groups, shard=shard):
+                    tests = self.joined_fixture_chains(reverse_groups, conflicting_heavy=True)
+                    for filename in ("ctest.all.json", "ctest.inventory.json"):
+                        (self.root / filename).write_text(json.dumps({"tests": tests}), encoding="utf-8")
+                    selection = self.root / "ctest.shard-index.txt"
+                    selection.write_text("previous selection\n", encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "prevents balanced"):
+                        shards.plan(self.root, shard)
+                    self.assertEqual(selection.read_text(encoding="utf-8"), "previous selection\n")
+
     def planned_selection(self, all_tests, eligible):
         (self.root / "ctest.all.json").write_text(json.dumps({"tests": all_tests}))
         (self.root / "ctest.inventory.json").write_text(json.dumps({"tests": eligible}))
