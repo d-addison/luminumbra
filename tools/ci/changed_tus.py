@@ -253,7 +253,7 @@ def compiler_header_roots(arguments: list[str], directory: Path) -> tuple[Path, 
             source_seen = True
         index += 2 if option in VALUE_OPTIONS else 1
     probe.extend(["-E", "-v", "-x", language, "-"])
-    environment = tuple(sorted({**os.environ, "LC_ALL": "C", "LANG": "C"}.items()))
+    environment = tuple(sorted(diagnostic_environment().items()))
     # Serialize misses too, so parallel TU variants cannot duplicate a probe.
     with _HEADER_SEARCH_LOCK:
         return _compiler_header_roots(tuple(probe), checked_resolve(directory), environment)
@@ -545,10 +545,15 @@ def parse_arguments(arguments: list[str]) -> tuple[list[str], list[str]]:
     return result, operands
 
 
+def diagnostic_environment() -> dict[str, str]:
+    """Keep parsed tool output in English without changing the caller locale."""
+    return {**os.environ, "LC_ALL": "C", "LANG": "C", "LANGUAGE": "C"}
+
+
 def execute(command, directory: Path, check=True):
     completed = _DEPS.run_process(command, cwd=directory, stdin=subprocess.DEVNULL,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               text=True, timeout=1800)
+                               text=True, timeout=1800, env=diagnostic_environment())
     if check and completed.returncode:
         raise SelectionError(f"command failed ({completed.returncode}): {shlex.join(map(str, command))}\n"
                              + completed.stdout + completed.stderr)

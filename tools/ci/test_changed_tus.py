@@ -1819,6 +1819,128 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
             self.assertIn(": warning:", output.getvalue())
             self.assertNotIn("Accepted", output.getvalue())
 
+    def diagnostic_driver(self):
+        # A real child chooses its diagnostic language from its received locale.
+        # Translate only argv at the runner seam; preserve all launch kwargs.
+        driver = self.build / "diagnostic driver.py"
+        observations = self.build / "driver observations.jsonl"
+        driver.write_text(
+            "import json, os, pathlib, sys\n"
+            "command = json.loads(sys.argv[1])\n"
+            "with open(sys.argv[2], 'a', encoding='utf-8') as stream:\n"
+            "    stream.write(json.dumps(dict(os.environ)) + '\\n')\n"
+            "english = all(os.environ.get(key) == 'C' for key in "
+            "('LC_ALL', 'LANG', 'LANGUAGE'))\n"
+            "if '--version' in command:\n"
+            "    print('gcc (Free Software Foundation)')\n"
+            "elif '-M' in command:\n"
+            "    source = next(arg for arg in command if arg.endswith('.cpp'))\n"
+            "    print('selected-tu: ' + source.replace(' ', '\\\\ '))\n"
+            "elif '-E' in command:\n"
+            "    print('#include <...> search starts here:\\n ' + sys.argv[3] + "
+            "'\\nEnd of search list.', file=sys.stderr)\n"
+            "elif '-DFAIL_NATIVE' in command:\n"
+            "    print('native policy failure', file=sys.stderr)\n"
+            "    sys.exit(7)\n"
+            "elif '-Wconversion' in command:\n"
+            "    fatal = '-Werror' in command\n"
+            "    severity = ('error' if fatal else 'warning') if english else 'avertissement'\n"
+            "    option = '-Werror=conversion' if fatal else '-Wconversion'\n"
+            "    source = next(arg for arg in command if arg.endswith('.cpp'))\n"
+            "    print(f'{source}:1:3: {severity}: value may change [{option}]', file=sys.stderr)\n"
+            "    sys.exit(1 if fatal else 0)\n", encoding="utf-8")
+        run_process = tus._DEPS.run_process
+
+        def run(command, **kwargs):
+            return run_process([sys.executable, "-I", "-B", str(driver), json.dumps(command),
+                                str(observations), str(self.src)], **kwargs)
+
+        return run, observations
+
+    def test_hostile_locale_reaches_english_baseline_capture_and_replay_in_real_child(self):
+        caller = dict(os.environ, LC_ALL="fr_FR.invalid", LANG="de_DE.invalid",
+                      LANGUAGE="fr:de", DIAGNOSTIC_SENTINEL="unchanged", CPATH=str(self.src))
+        original = dict(caller)
+        run, observations = self.diagnostic_driver()
+        with patch.dict(os.environ, caller, clear=True), \
+                patch.object(tus, "execute", side_effect=EXECUTE), \
+                patch.object(tus._DEPS, "run_process", side_effect=run):
+            global_before = dict(os.environ)
+            for fatal in (False, True):
+                with self.subTest(fatal=fatal):
+                    self.raw[0] = self.raw_entry(self.a, ("-Werror",) if fatal else ())
+                    self.save_db()
+                    entry = self.entries()[0]
+                    destination = self.build / f"baseline-{fatal}.json"
+                    args = self.arguments(warning_profile="msvc-approx", write_warning_baseline=destination)
+                    with redirect_stdout(io.StringIO()):
+                        records = tus.run_checks(args, self.root, [entry], self.build)
+                    self.assertEqual(len(records), 1)
+                    self.assertEqual(records[0]["message"], "value may change")
+                    tus.publish_warning_baseline(self.root, destination, records)
+                    baseline = tus.read_warning_baseline(destination)
+                    args = self.arguments(warning_profile="msvc-approx", baseline_records=baseline)
+                    with redirect_stdout(io.StringIO()):
+                        self.assertEqual(tus.run_checks(args, self.root, [entry], self.build), records)
+                    if fatal:
+                        with self.assertRaisesRegex(tus.SelectionError, "value may change"):
+                            tus.run_checks(self.arguments(warning_profile="msvc-approx"),
+                                           self.root, [entry], self.build)
+                    before = destination.read_bytes()
+                    entry["arguments"].insert(1, "-DFAIL_NATIVE")
+                    with self.assertRaisesRegex(tus.SelectionError, "native policy failure"):
+                        tus.run_checks(args, self.root, [entry], self.build)
+                    self.assertEqual(destination.read_bytes(), before)
+                    self.assertEqual(list((self.root / "scratch").glob("local-checks-*")), [])
+            self.assertEqual(dict(os.environ), global_before)
+        self.assertEqual(caller, original)
+        received = [json.loads(line) for line in observations.read_text().splitlines()]
+        self.assertEqual(len(received), 11)
+        for environment in received:
+            for key in ("PATH", "CPATH", "DIAGNOSTIC_SENTINEL"):
+                self.assertEqual(environment[key], caller[key])
+            for key in ("LC_ALL", "LANG", "LANGUAGE"):
+                self.assertEqual(environment[key], "C")
+
+    def test_sibling_tool_invocations_share_real_child_locale_and_preserve_environment(self):
+        run, observations = self.diagnostic_driver()
+        caller = dict(os.environ, LC_ALL="hostile", LANG="hostile", LANGUAGE="hostile",
+                      DIAGNOSTIC_SENTINEL="retained", CPLUS_INCLUDE_PATH=str(self.src))
+        with patch.dict(os.environ, caller, clear=True), \
+                patch.object(tus, "execute", side_effect=EXECUTE), \
+                patch.object(tus._DEPS, "run_process", side_effect=run):
+            entry = self.entries()[0]
+            self.assertEqual(tus.dependencies(entry), {self.a})
+            entry["arguments"][0] = "c++"
+            self.assertEqual(tus.profile_compiler(entry), "gcc")
+            tus._compiler_header_roots.cache_clear()
+            self.addCleanup(tus._compiler_header_roots.cache_clear)
+            self.assertEqual(COMPILER_HEADER_ROOTS(entry["arguments"], self.build), (self.src,))
+            with patch.object(tus.shutil, "which", return_value="clang-tidy-18"), \
+                    redirect_stdout(io.StringIO()):
+                tus.run_checks(self.arguments(command="tidy"), self.root, [entry], self.build)
+            self.assertEqual(dict(os.environ), caller)
+        received = [json.loads(line) for line in observations.read_text().splitlines()]
+        self.assertEqual(len(received), 5)
+        for environment in received:
+            for key in ("PATH", "CPLUS_INCLUDE_PATH", "DIAGNOSTIC_SENTINEL"):
+                self.assertEqual(environment[key], caller[key])
+            for key in ("LC_ALL", "LANG", "LANGUAGE"):
+                self.assertEqual(environment[key], "C")
+
+    def test_locale_setup_preserves_launch_failure_timeout_and_cancellation(self):
+        caller = dict(os.environ, LC_ALL="hostile", LANG="hostile", LANGUAGE="hostile")
+        failures = (OSError("unreadable driver"), subprocess.TimeoutExpired("driver", 1),
+                    tus._DEPS.concurrent.futures.CancelledError())
+        with patch.dict(os.environ, caller, clear=True):
+            for failure in failures:
+                with self.subTest(failure=type(failure)), \
+                        patch.object(tus._DEPS, "run_process", side_effect=failure), \
+                        self.assertRaises(type(failure)) as raised:
+                    EXECUTE(["driver"], self.build)
+                self.assertIs(raised.exception, failure)
+                self.assertEqual(dict(os.environ), caller)
+
     def test_baseline_publication_is_exclusive_and_removes_temporary_on_failure(self):
         destination = self.build / "baseline.json"
         records = self.baseline_records(self.entries()[0])
@@ -2213,6 +2335,29 @@ COMPILER_HEADER_ROOTS = tus.compiler_header_roots
 
 
 class ProcessTimeoutTests(unittest.TestCase):
+    def test_hostile_locale_parallel_failure_reaps_owned_process_tree(self):
+        spec = importlib.util.spec_from_file_location("locale_tree_tests", ROOT / "tools/ci/test_tidy_cache.py")
+        fixtures = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fixtures)
+        with patch.dict(os.environ, {"LC_ALL": "hostile", "LANG": "hostile", "LANGUAGE": "hostile"}):
+            caller = dict(os.environ)
+            for driver_exits in (False, True):
+                with self.subTest(driver_exits=driver_exits):
+                    ready = fixtures.threading.Event()
+
+                    def launch(command, directory):
+                        failure = tus.SelectionError("locale command failed")
+                        error = fixtures.assert_parallel_failure(
+                            self, tus._DEPS, failure, parallel=tus.parallel, ready=ready,
+                            slow=lambda: EXECUTE(command, directory))
+                        self.assertIs(type(error), tus.SelectionError)
+                        self.assertEqual(str(error), str(failure))
+                        raise error
+
+                    fixtures.assert_tree_timeout(self, launch, tus.SelectionError,
+                                                 driver_exits=driver_exits, ready_event=ready)
+            self.assertEqual(dict(os.environ), caller)
+
     def test_collected_later_failure_cancels_and_reaps_owned_processes(self):
         spec = importlib.util.spec_from_file_location("collected_tree_tests", ROOT / "tools/ci/test_tidy_cache.py")
         fixtures = importlib.util.module_from_spec(spec)
