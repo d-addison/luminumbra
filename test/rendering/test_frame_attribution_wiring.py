@@ -185,6 +185,48 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertEqual(compact(block(self.header, "bool active() const")),
                          "return m_out.is_open() && m_out.good();")
 
+    def test_metadata_replacement_does_not_upload_a_redundant_command(self):
+        gpu = block(self.foliage, "bool FoliagePass::rebuild_instances_gpu(")
+        self.assertIn("const bool initialize_command = !m_metadata_valid;", gpu)
+        reset = compact(block(gpu, "if (initialize_command || !metadata_changed)"))
+        for operation in ("glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_count_ssbo);",
+                          "glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(draw_command), draw_command);",
+                          "m_rebuild_attribution.uploaded_bytes += sizeof(draw_command);",
+                          "++m_rebuild_attribution.uploads;"):
+            self.assertIn(operation, reset)
+        self.assertEqual(gpu.count("sizeof(draw_command), draw_command)"), 1)
+        # Count never consumes the old command. Prefix writes every word, then
+        # the storage barrier makes those writes visible before emit/draw.
+        scatter = read(ROOT / "res/shaders/grass_scatter.comp")
+        for name in ("append_count", "draw_vertex_count", "draw_instance_count",
+                     "draw_first_vertex", "draw_base_instance"):
+            self.assertEqual(len(re.findall(r"\b" + name + r"\b", scatter)), 2 if name == "append_count" else 1)
+        prefix = compact(block(read(ROOT / "res/shaders/grass_compact_prefix.comp"), "void main()"))
+        for assignment in ("accepted_count = total;", "vertex_count = 12u;",
+                           "instance_count = min(total, u_max_instances);",
+                           "first_vertex = 0u;", "base_instance = 0u;"):
+            self.assertIn(assignment, prefix)
+        dispatch = compact(block(self.foliage, "void FoliagePass::dispatch_scatter()"))
+        self.assertIn("glDispatchCompute(1, 1, 1); glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT); "
+                      "glUseProgram(m_compute_prog); glUniform1i(m_scatter_uniforms.emit, GL_TRUE);", dispatch)
+
+    def test_csv_schema_keeps_nullable_counts_before_dirty_columns(self):
+        header = block(self.collector, "void write_csv_header(")
+        encoded = "".join(json.loads(literal) for literal in re.findall(r'"(?:\\.|[^"\\])*"', header))
+        self.assertEqual(encoded.rstrip("\n").split(","), [
+            "frame", "frame_ms", "sim_ms", "stream_ms", "render_ms", "present_ms",
+            "foliage_ms", "scatter_ms", "rebake_ms", "poll_ms", "menu_ms", "ui_ms", "other_ms",
+            "signature_ms", "sort_ms", "surface_ms", "repack_ms", "hash_ms", "upload_ms",
+            "palette_scratch_ms", "dispatch_ms", "cpu_fallback_ms", "rebuild_calls", "reason_mask",
+            "admitted_columns", "surface_misses", "deferred_columns", "copied_bytes", "hashed_bytes",
+            "uploaded_bytes", "scratch_bytes", "backlog", "path", "fallback", "instance_capacity",
+            "generated_count", "count_generation", "dirty_columns",
+        ])
+        row = compact(block(self.collector, "bool write_csv_row("))
+        self.assertIn("if (count_known) out << generated_count; out << ','; "
+                      "if (count_known) out << count_generation; "
+                      "out << ',' << foliage.dirty_columns; out << '\\n';", row)
+
     def test_deterministic_work_gates_are_registered_on_standard_targets(self):
         cmake = read(ROOT / "test/CMakeLists.txt")
         for target, source in (

@@ -126,12 +126,22 @@ TEST(FrameAttribution, CsvColumnsMatchHeaderAndUnknownCountsAreEmpty) {
     EXPECT_EQ(fields(header.str()).size(), fields(unknown.str()).size());
     std::ostringstream known;
     write_csv_row(known, 402, 60, buckets, foliage, 262144, true, 123, 7);
+    EXPECT_EQ(known.str(),
+              "402,60.000000,1.000000,2.000000,3.000000,4.000000,5.000000,6.000000,"
+              "7.000000,8.000000,9.000000,10.000000,5.000000,0.125000,0.250000,0.500000,"
+              "0.750000,1.000000,1.250000,1.500000,1.750000,2.000000,1,40,10,4,6,1024,"
+              "2048,4096,8192,1,cpu,column_capacity,262144,123,7,2\n");
     EXPECT_EQ(fields(known.str()).size(), fields(header.str()).size());
     EXPECT_EQ(fields(known.str()).at(35), "123");
     EXPECT_EQ(fields(known.str()).at(36), "7");
     EXPECT_EQ(fields(known.str()).at(37), "2\n");
     std::ostringstream zero;
     write_csv_row(zero, 403, 60, buckets, foliage, 262144, true, 0, 8);
+    EXPECT_EQ(zero.str(),
+              "403,60.000000,1.000000,2.000000,3.000000,4.000000,5.000000,6.000000,"
+              "7.000000,8.000000,9.000000,10.000000,5.000000,0.125000,0.250000,0.500000,"
+              "0.750000,1.000000,1.250000,1.500000,1.750000,2.000000,1,40,10,4,6,1024,"
+              "2048,4096,8192,1,cpu,column_capacity,262144,0,8,2\n");
     EXPECT_EQ(fields(zero.str()).at(35), "0");
 }
 
@@ -457,13 +467,35 @@ TEST_F(FrameRecorderTest, RecordsEveryShortFrameAndDrainsBufferOnClose) {
     std::string line;
     std::string last;
     std::size_t rows = 0;
+    ASSERT_TRUE(std::getline(input, line));
+    EXPECT_EQ(line,
+              "frame,frame_ms,sim_ms,stream_ms,render_ms,present_ms,foliage_ms,scatter_ms,"
+              "rebake_ms,poll_ms,menu_ms,ui_ms,other_ms,signature_ms,sort_ms,surface_ms,"
+              "repack_ms,hash_ms,upload_ms,palette_scratch_ms,dispatch_ms,cpu_fallback_ms,"
+              "rebuild_calls,reason_mask,admitted_columns,surface_misses,deferred_columns,"
+              "copied_bytes,hashed_bytes,uploaded_bytes,scratch_bytes,backlog,path,fallback,"
+              "instance_capacity,generated_count,count_generation,dirty_columns");
+    ++rows;
     while (std::getline(input, line)) {
+        // Pin every value and field, including both unavailable count fields
+        // before the numeric dirty-column field, for every buffered short frame.
+        EXPECT_EQ(line,
+                  std::to_string(rows) +
+                      ",1.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,"
+                      "0.000000,0.000000,0.000000,0.000000,1.000000,0.000000,0.000000,"
+                      "0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,"
+                      "0,0,0,0,0,0,0,0,0,0,not_called,none,262144,,,0");
+        EXPECT_EQ(fields(line).size(), 38u);
         last = line;
         ++rows;
     }
+    EXPECT_TRUE(input.eof());
+    EXPECT_FALSE(input.bad());
     ASSERT_EQ(rows, 502u); // Header and every frame, including beyond 400.
     EXPECT_EQ(last.substr(0, 13), "501,1.000000,");
     EXPECT_EQ(fields(last).at(34), "262144");
-    EXPECT_EQ(last.substr(last.size() - 2), ",,");
+    EXPECT_EQ(fields(last).at(35), "");
+    EXPECT_EQ(fields(last).at(36), "");
+    EXPECT_EQ(fields(last).at(37), "0");
 }
 } // namespace

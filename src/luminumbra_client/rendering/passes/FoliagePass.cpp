@@ -1360,9 +1360,12 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
         LUMIN_PROFILE_ZONE_N("Foliage dirty slot upload");
         const auto param_bytes = chunk_params.size() * sizeof(GpuChunk);
         const auto slot_bytes = m_slot_order.size() * sizeof(std::uint32_t);
-        if (!m_metadata_valid || m_metadata_count != chunk_params.size() ||
+        const bool initialize_command = !m_metadata_valid;
+        const bool metadata_changed =
+            !m_metadata_valid || m_metadata_count != chunk_params.size() ||
             std::memcmp(m_uploaded_metadata.params.data(), chunk_params.data(), param_bytes) != 0 ||
-            std::memcmp(m_uploaded_metadata.slots.data(), m_slot_order.data(), slot_bytes) != 0) {
+            std::memcmp(m_uploaded_metadata.slots.data(), m_slot_order.data(), slot_bytes) != 0;
+        if (metadata_changed) {
             std::copy(chunk_params.begin(), chunk_params.end(), m_uploaded_metadata.params.begin());
             std::copy(m_slot_order.begin(), m_slot_order.end(), m_uploaded_metadata.slots.begin());
             glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_chunk_ssbo);
@@ -1419,9 +1422,7 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
         }
         if (collect_attribution) {
             m_rebuild_attribution.dirty_columns += m_dirty_surfaces.size();
-            m_rebuild_attribution.uploaded_bytes +=
-                m_dirty_surfaces.size() * surface_bytes + 5 * sizeof(GLuint);
-            ++m_rebuild_attribution.uploads;
+            m_rebuild_attribution.uploaded_bytes += m_dirty_surfaces.size() * surface_bytes;
         }
         if (!m_palette_uploaded) {
             glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_arch_ssbo);
@@ -1435,9 +1436,19 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
                 ++m_rebuild_attribution.uploads;
             }
         }
-        const GLuint draw_command[5] = {0u, 12u, 0u, 0u, 0u};
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_count_ssbo);
-        glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(draw_command), draw_command);
+        // A camera reorder really changes metadata, but needs no second transfer
+        // to reset a prior command: the count kernel never reads it, and prefix
+        // overwrites all five words before emit/draw. Retain first-build command
+        // initialization and the command-only submission for unchanged metadata.
+        if (initialize_command || !metadata_changed) {
+            const GLuint draw_command[5] = {0u, 12u, 0u, 0u, 0u};
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_count_ssbo);
+            glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(draw_command), draw_command);
+            if (collect_attribution) {
+                m_rebuild_attribution.uploaded_bytes += sizeof(draw_command);
+                ++m_rebuild_attribution.uploads;
+            }
+        }
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
     }
 

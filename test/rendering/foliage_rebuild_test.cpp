@@ -1245,6 +1245,101 @@ TEST_F(FoliageRebuildTest, StableSlotsUploadOnlyDirtySurfacesAndRetainMetadataAn
     EXPECT_EQ(pass.uploaded_input_hash(), LegacyUploadedHash(pass, chunks.size()));
 }
 
+TEST_F(FoliageRebuildTest, CameraReorderUploadsMetadataOnceAndPrefixReplacesEveryCommandWord) {
+    ScopedPass reused;
+    ASSERT_NO_FATAL_FAILURE(Initialize(reused.pass));
+    reused.pass.set_evidence_enabled(true);
+    const auto chunks = Chunks(3);
+    Rebuild(reused.pass, chunks, 1);
+    const auto count_buffer = Binding(3);
+    struct Metadata {
+        std::array<float, 24> params{};
+        std::array<std::uint32_t, 3> slots{};
+    };
+    const auto metadata = [] {
+        Metadata result;
+        glGetNamedBufferSubData(Binding(0), 0, sizeof(result.params), result.params.data());
+        glGetNamedBufferSubData(Binding(7),
+                                std::size_t{512} * 8 * sizeof(float),
+                                sizeof(result.slots),
+                                result.slots.data());
+        return result;
+    };
+    const auto original = metadata();
+    std::uint64_t frame = 1;
+    for (const glm::vec3 camera : {glm::vec3{kCamera.x + 32, kCamera.y, kCamera.z}, kCamera}) {
+        SCOPED_TRACE(camera.x);
+        // No CPU reset may mask an incomplete prefix write on a metadata upload.
+        const std::array<GLuint, 5> poison{91, 92, 93, 94, 95};
+        glNamedBufferSubData(count_buffer, 0, sizeof(poison), poison.data());
+        {
+            RebuildGlCalls calls;
+            const auto work = RebuildAttributed(reused.pass, chunks, ++frame, camera);
+            EXPECT_EQ(work.reasons, Attribution::CameraCell);
+            EXPECT_EQ(work.surface_misses, 0u);
+            EXPECT_EQ(work.dirty_columns, 0u);
+            EXPECT_FALSE(work.backlog);
+            EXPECT_EQ(work.uploads, 1u);
+            EXPECT_EQ(work.uploads, calls.uploads);
+            EXPECT_EQ(work.uploaded_bytes, 512u * (8u * sizeof(float) + sizeof(std::uint32_t)));
+            EXPECT_EQ(work.uploaded_bytes, calls.uploaded_bytes);
+            EXPECT_EQ(calls.scratch_allocations, 0u);
+        }
+        const auto reordered = metadata();
+        EXPECT_EQ(reordered.params[4], camera.x == kCamera.x ? 0.0f : 1.0f);
+        for (std::size_t before = 0; before < chunks.size(); ++before) {
+            std::size_t matches = 0;
+            for (std::size_t after = 0; after < chunks.size(); ++after) {
+                if (original.params[before * 8 + 4] == reordered.params[after * 8 + 4]) {
+                    EXPECT_EQ(original.slots[before], reordered.slots[after]);
+                    ++matches;
+                }
+            }
+            EXPECT_EQ(matches, 1u);
+        }
+        const auto records = GpuRecords();
+        ASSERT_FALSE(records.empty());
+        std::array<GLuint, 5> command{};
+        glGetNamedBufferSubData(Binding(3), 0, sizeof(command), command.data());
+        EXPECT_EQ(command,
+                  (std::array<GLuint, 5>{static_cast<GLuint>(records.size()),
+                                         12,
+                                         static_cast<GLuint>(records.size()),
+                                         0,
+                                         0}));
+        const auto hash = reused.pass.uploaded_input_hash();
+        EXPECT_EQ(hash, LegacyUploadedHash(reused.pass, chunks.size()));
+        {
+            RebuildGlCalls calls;
+            ExpectReused(RebuildAttributed(reused.pass, chunks, ++frame, camera), true);
+            EXPECT_EQ(calls.uploads, 0u);
+            EXPECT_EQ(calls.uploaded_bytes, 0u);
+        }
+        for (const bool gpu : {false, true}) {
+            ScopedPass fresh;
+            ASSERT_NO_FATAL_FAILURE(Initialize(fresh.pass, gpu));
+            fresh.pass.set_evidence_enabled(true);
+            Rebuild(fresh.pass, chunks, frame, camera);
+            if (gpu) {
+                ExpectSame(records, GpuRecords());
+                EXPECT_EQ(hash, fresh.pass.uploaded_input_hash());
+            } else {
+                // Pin CPU/GPU candidate membership and logical order without
+                // requiring identical floating-point color/size intermediates.
+                const auto& cpu = fresh.pass.instances();
+                ASSERT_EQ(records.size(), cpu.size());
+                for (std::size_t index = 0; index < records.size(); ++index) {
+                    for (std::size_t axis = 0; axis < 3; ++axis) {
+                        EXPECT_EQ(records[index].pos[axis], cpu[index].pos[axis]);
+                    }
+                    EXPECT_EQ(records[index].phase, cpu[index].phase);
+                    EXPECT_EQ(records[index].facing, cpu[index].facing);
+                }
+            }
+        }
+    }
+}
+
 TEST_F(FoliageRebuildTest, SlotReuseAfterEditsAndHorizonMotionMatchesFreshFullBuild) {
     ScopedPass reused;
     ASSERT_NO_FATAL_FAILURE(Initialize(reused.pass));
