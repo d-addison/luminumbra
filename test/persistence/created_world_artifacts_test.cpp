@@ -10,6 +10,8 @@
 #include <string>
 #include <system_error>
 
+#include "luminumbra_common/persistence/ExclusiveRename.h"
+
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -21,7 +23,6 @@
 #include <windows.h>
 #else
 #include <cerrno>
-#include <stdio.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
@@ -34,6 +35,7 @@ namespace NativeRace {
 BOOL WINAPI Inspect(HANDLE file, LPBY_HANDLE_FILE_INFORMATION info);
 BOOL WINAPI Close(HANDLE file);
 BOOL WINAPI Dispose(HANDLE file, FILE_INFO_BY_HANDLE_CLASS kind, LPVOID info, DWORD bytes);
+BOOL WINAPI Publish(LPCWSTR source, LPCWSTR destination, DWORD flags);
 HANDLE WINAPI Open(LPCWSTR path,
                    DWORD access,
                    DWORD share,
@@ -45,22 +47,24 @@ HANDLE WINAPI Open(LPCWSTR path,
 #define CloseHandle NativeRace::Close
 #define SetFileInformationByHandle NativeRace::Dispose
 #define CreateFileW NativeRace::Open
+#define MoveFileExW NativeRace::Publish
 #else
 int Inspect(const char* path, struct stat* info);
 int Describe(int file, struct stat* info);
 int Unlink(int directory, const char* path, int flags);
-#if defined(__linux__)
-int Restore(int from, const char* source, int to, const char* destination, unsigned flags);
-#define renameat2 NativeRace::Restore
-#elif defined(__APPLE__)
-int Restore(int from, const char* source, int to, const char* destination, unsigned flags);
-#define renameatx_np NativeRace::Restore
-#endif
+int Restore(int from, const char* source, int to, const char* destination);
 #define lstat NativeRace::Inspect
 #define fstat NativeRace::Describe
 #define unlinkat NativeRace::Unlink
 #endif
 } // namespace NativeRace
+
+#if !defined(_WIN32)
+namespace Luminumbra::Persistence::Detail {
+int InterceptRename(int from, const char* source, int to, const char* destination);
+}
+#define RenameWithoutReplacement InterceptRename
+#endif
 
 #include "luminumbra_common/persistence/CreatedWorldArtifacts.h"
 
@@ -69,15 +73,12 @@ int Restore(int from, const char* source, int to, const char* destination, unsig
 #undef CloseHandle
 #undef SetFileInformationByHandle
 #undef CreateFileW
+#undef MoveFileExW
 #else
 #undef lstat
 #undef fstat
 #undef unlinkat
-#if defined(__linux__)
-#undef renameat2
-#elif defined(__APPLE__)
-#undef renameatx_np
-#endif
+#undef RenameWithoutReplacement
 #endif
 
 namespace NativeRace {
@@ -88,7 +89,10 @@ enum class Boundary : std::uint8_t {
     BeforePublication,
     AfterCreation,
     IdentificationFailure,
-    UnknownIdentity
+    UnknownIdentity,
+    PublicationSourceMissing,
+    PublicationDenied,
+    PublicationUnavailable
 };
 struct Replacement {
     std::filesystem::path target;
@@ -117,7 +121,37 @@ Replacement*& Active() {
     return replacement;
 }
 
+bool BeforePublish(const std::filesystem::path& source, const std::filesystem::path& destination) {
+    auto* active = Active();
+    if (!active || active->fired || active->target != destination)
+        return true;
+    if (active->boundary == Boundary::BeforePublication)
+        Replace(*active);
+    if (active->boundary == Boundary::PublicationSourceMissing) {
+        active->fired = true;
+        std::filesystem::rename(source, active->moved);
+    }
+    if (active->boundary == Boundary::PublicationDenied ||
+        active->boundary == Boundary::PublicationUnavailable) {
+        active->fired = true;
 #if defined(_WIN32)
+        ::SetLastError(active->boundary == Boundary::PublicationDenied ? ERROR_ACCESS_DENIED
+                                                                       : ERROR_NOT_SUPPORTED);
+#else
+        errno = active->boundary == Boundary::PublicationDenied ? EACCES : ENOSYS;
+#endif
+        return false;
+    }
+    return true;
+}
+
+#if defined(_WIN32)
+BOOL WINAPI Publish(LPCWSTR source, LPCWSTR destination, DWORD flags) {
+    if (!BeforePublish(source, destination))
+        return FALSE;
+    return ::MoveFileExW(source, destination, flags);
+}
+
 bool Matches(const BY_HANDLE_FILE_INFORMATION& info) {
     auto* active = Active();
     return active && info.dwVolumeSerialNumber == active->identity.dwVolumeSerialNumber &&
@@ -219,21 +253,16 @@ int Unlink(int directory, const char* path, int flags) {
     return ::unlinkat(directory, path, flags);
 }
 
-#if defined(__linux__) || defined(__APPLE__)
-int Restore(int from, const char* source, int to, const char* destination, unsigned flags) {
+int Restore(int from, const char* source, int to, const char* destination) {
     auto* active = Active();
-    if (active && !active->fired && active->boundary == Boundary::BeforePublication &&
-        active->target == destination)
-        Replace(*active);
+    if (!BeforePublish(source, destination))
+        return -1;
     if (active && !active->restore_occupant.empty() && !active->restore_blocked) {
         active->restore_blocked = true;
         std::filesystem::rename(active->restore_occupant, active->target);
     }
-#if defined(__linux__)
-    const auto result = ::renameat2(from, source, to, destination, flags);
-#else
-    const auto result = ::renameatx_np(from, source, to, destination, flags);
-#endif
+    const auto result =
+        Luminumbra::Persistence::Detail::RenameWithoutReplacement(from, source, to, destination);
     if (result == 0 && active && !active->fired && active->boundary == Boundary::AfterCreation &&
         active->target == destination) {
         active->fired = true;
@@ -242,8 +271,15 @@ int Restore(int from, const char* source, int to, const char* destination, unsig
     return result;
 }
 #endif
-#endif
 } // namespace NativeRace
+
+#if !defined(_WIN32)
+namespace Luminumbra::Persistence::Detail {
+int InterceptRename(int from, const char* source, int to, const char* destination) {
+    return NativeRace::Restore(from, source, to, destination);
+}
+} // namespace Luminumbra::Persistence::Detail
+#endif
 
 namespace {
 using Luminumbra::Persistence::CreatedWorldArtifacts;
@@ -314,6 +350,87 @@ private:
     std::filesystem::path m_root{};
     NativeRace::Replacement m_race{};
 };
+
+TEST_F(CreatedWorldCleanup, ExclusiveFilePublicationMovesBytesAndRetainsRollbackOwnership) {
+    for (const auto* bytes : {"owned bytes\n", ""}) {
+        CreatedWorldArtifacts artifacts;
+        const auto save = Root() / "created-world";
+        artifacts.create_root(save);
+        const auto temp = save / "preset.tmp";
+        const auto destination = save / "preset.json";
+        artifacts.write_file(temp, bytes);
+        artifacts.reserve_file(destination);
+        artifacts.publish_file(temp, destination);
+        EXPECT_FALSE(std::filesystem::exists(temp));
+        EXPECT_EQ(Read(destination), bytes);
+        EXPECT_TRUE(artifacts.rollback().empty());
+        EXPECT_FALSE(std::filesystem::exists(save));
+    }
+}
+
+TEST_F(CreatedWorldCleanup, FileAppearingAfterPublicationValidationIsNeverOverwritten) {
+    CreatedWorldArtifacts artifacts;
+    const auto save = Root() / "created-world";
+    artifacts.create_root(save);
+    const auto temp = save / "preset.tmp";
+    const auto destination = save / "preset.json";
+    artifacts.write_file(temp, "owned bytes\n");
+    artifacts.reserve_file(destination);
+    Write(Root() / "replacement", "unowned bytes\n");
+    Arm(destination, NativeRace::Boundary::BeforePublication);
+    EXPECT_THROW(artifacts.publish_file(temp, destination), std::system_error);
+    ASSERT_TRUE(Race().fired);
+    EXPECT_EQ(Read(destination), "unowned bytes\n");
+    EXPECT_EQ(Read(temp), "owned bytes\n");
+    EXPECT_FALSE(artifacts.rollback().empty());
+    EXPECT_EQ(Read(destination), "unowned bytes\n");
+    EXPECT_EQ(Read(temp), "owned bytes\n");
+    // Once the other owner withdraws its file, only our original stage remains.
+    ASSERT_TRUE(std::filesystem::remove(destination));
+    EXPECT_TRUE(artifacts.rollback().empty());
+    EXPECT_FALSE(std::filesystem::exists(save));
+}
+
+TEST_F(CreatedWorldCleanup, MissingPublicationSourceCannotClaimAnUncreatedDestination) {
+    CreatedWorldArtifacts artifacts;
+    const auto save = Root() / "created-world";
+    artifacts.create_root(save);
+    const auto temp = save / "preset.tmp";
+    const auto destination = save / "preset.json";
+    artifacts.write_file(temp, "owned bytes\n");
+    artifacts.reserve_file(destination);
+    Arm(destination, NativeRace::Boundary::PublicationSourceMissing);
+    EXPECT_THROW(artifacts.publish_file(temp, destination), std::system_error);
+    ASSERT_TRUE(Race().fired);
+    EXPECT_FALSE(std::filesystem::exists(destination));
+    EXPECT_EQ(Read(Race().moved), "owned bytes\n");
+    EXPECT_TRUE(artifacts.rollback().empty());
+    EXPECT_FALSE(std::filesystem::exists(save));
+    EXPECT_EQ(Read(Race().moved), "owned bytes\n");
+}
+
+TEST_F(CreatedWorldCleanup, FailedExclusivePublicationRetainsTheStageForRollback) {
+    for (const auto boundary :
+         {NativeRace::Boundary::PublicationDenied, NativeRace::Boundary::PublicationUnavailable}) {
+        SCOPED_TRACE(static_cast<unsigned>(boundary));
+        CreatedWorldArtifacts artifacts;
+        const auto save = Root() / "created-world";
+        artifacts.create_root(save);
+        const auto temp = save / "preset.tmp";
+        const auto destination = save / "preset.json";
+        artifacts.write_file(temp, "partial bytes\n");
+        artifacts.reserve_file(destination);
+        Arm(destination, boundary);
+        EXPECT_THROW(artifacts.publish_file(temp, destination), std::system_error);
+        ASSERT_TRUE(Race().fired);
+        EXPECT_FALSE(std::filesystem::exists(destination));
+        EXPECT_EQ(Read(temp), "partial bytes\n");
+        EXPECT_TRUE(artifacts.rollback().empty());
+        EXPECT_FALSE(std::filesystem::exists(save));
+        NativeRace::Active() = nullptr;
+        Race() = {};
+    }
+}
 
 TEST_F(CreatedWorldCleanup, FileReplacedAfterValidationIsRestoredAndNeverDeleted) {
     CreatedWorldArtifacts artifacts;
