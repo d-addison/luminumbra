@@ -2,6 +2,8 @@
 
 #include <gtest/gtest.h>
 
+#include <cstddef>
+
 namespace Luminumbra::Rendering {
 
 TEST(FoliageSurfaceSlots, ReleasesBeforeAdmissionAndReusesDeterministically) {

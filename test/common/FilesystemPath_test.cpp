@@ -1,10 +1,14 @@
+#include "../support/UniqueTempPath.h"
 #include "luminumbra_client/app/RuntimeRoot.h"
 #include "luminumbra_common/core/FilesystemPath.h"
 #include <gtest/gtest.h>
 
 #include <filesystem>
 #include <fstream>
+#include <ios>
+#include <stdexcept>
 #include <string>
+#include <system_error>
 
 namespace fs = std::filesystem;
 namespace paths = Luminumbra::Filesystem;
@@ -52,7 +56,51 @@ TEST(FilesystemPath, RuntimeRootStringKeepsOrdinaryPlatformSpelling) {
     EXPECT_EQ(Luminumbra::Client::App::RuntimeRootString(root), expected);
 }
 
+TEST(FilesystemPath, ExplicitRuntimeRootBypassesDiscoveryAndRefusesIncompleteLayouts) {
+    const Luminumbra::TestSupport::ScopedTempFile temp("runtime-root-", ".tmp");
+    const fs::path directory = temp.Path().parent_path();
+    const auto resolve = [&](const fs::path& root) {
+        return Luminumbra::Client::App::ResolveRuntimeRoot("client", root);
+    };
+    EXPECT_THROW(resolve("relative"), std::invalid_argument);
+    EXPECT_THROW(resolve(directory / "missing"), std::invalid_argument);
+    EXPECT_THROW(resolve(directory), std::invalid_argument);
+    for (const char* sentinel : {"res/shaders/g_buffer.vert",
+                                 "data/audio/music.bank.json",
+                                 "worlds/atlas/presets/default.json"}) {
+        const auto path = directory / sentinel;
+        fs::create_directories(path.parent_path());
+        std::ofstream(path) << "fixture";
+    }
+    EXPECT_EQ(resolve(directory), directory);
+    for (const char* sentinel : {"res/shaders/g_buffer.vert",
+                                 "data/audio/music.bank.json",
+                                 "worlds/atlas/presets/default.json"}) {
+        const auto path = directory / sentinel;
+        fs::remove(path);
+        EXPECT_THROW(resolve(directory), std::invalid_argument);
+        fs::create_directory(path);
+        EXPECT_THROW(resolve(directory), std::invalid_argument);
+        fs::remove(path);
+        std::ofstream(path) << "fixture";
+    }
+    EXPECT_THROW(resolve(directory / "res/shaders/g_buffer.vert"), std::invalid_argument);
+}
+
 #if defined(_WIN32) && !defined(__CYGWIN__)
+TEST(FilesystemPath, UncDataRootNormalizationKeepsDependencyPathsOnTheShare) {
+    for (const fs::path& input : {fs::path(LR"(//server/share/data with spaces/./nested/..)"),
+                                  fs::path(LR"(\\server\share\data with spaces\.\nested\..)"),
+                                  fs::path(LR"(//server/share\data with spaces/nested\..)")}) {
+        const auto root = paths::LexicallyNormalPath(paths::AbsolutePath(input));
+        EXPECT_EQ(root.native(), fs::path(LR"(\\server\share\data with spaces)").native());
+        const auto dependency = root / "common" / "biomes.json";
+        EXPECT_TRUE(paths::IsWindowsUncPath(dependency));
+        EXPECT_EQ(paths::GenericUtf8PathString(dependency),
+                  "//server/share/data with spaces/common/biomes.json");
+    }
+}
+
 TEST(FilesystemPath, UncNormalizationPreservesServerShareAcrossSlashForms) {
     const fs::path expected(LR"(\\server\share\folder with spaces\shader.vert)");
     for (const fs::path& input :

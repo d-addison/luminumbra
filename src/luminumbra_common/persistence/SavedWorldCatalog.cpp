@@ -3,11 +3,20 @@
 #include "WorldPersistenceRoundtrip.h"
 #include "WorldSaveService.h"
 #include "world/TerrainPresetLoader.h"
+#include "world/WorldClock.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <ctime>
+#include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
+#include <stop_token>
+#include <string>
+#include <vector>
 
 namespace Luminumbra::Persistence {
 namespace {
@@ -24,7 +33,7 @@ bool HasFrozenPreset(const std::string& name) {
            name == "temperate_forest";
 }
 
-bool ResolveSavedPreset(const fs::path& root,
+bool ResolveSavedPreset(const fs::path& runtime_root,
                         const fs::path& save,
                         const nlohmann::json& metadata,
                         SavedWorld& result) {
@@ -48,8 +57,8 @@ bool ResolveSavedPreset(const fs::path& root,
     const auto presets = HasFrozenPreset(result.metadata.worldType) ? "worlds/atlas/presets-rev6"
                                                                     : "worlds/atlas/presets";
     result.preset_path =
-        has_embedded ? embedded : root / presets / (result.metadata.worldType + ".json");
-    const auto preset = world::LoadTerrainPreset(result.preset_path);
+        has_embedded ? embedded : runtime_root / presets / (result.metadata.worldType + ".json");
+    const auto preset = world::LoadTerrainPreset(result.preset_path, runtime_root / "data");
     if (!preset.ok) {
         result.error =
             preset.errors.empty() ? "World preset is unavailable." : preset.errors.front();
@@ -69,6 +78,13 @@ bool ResolveSavedPreset(const fs::path& root,
 
 SavedWorld
 InspectSavedWorld(const fs::path& root, const std::string& world_id, const std::stop_token& stop) {
+    return InspectSavedWorld(root, root, world_id, stop);
+}
+
+SavedWorld InspectSavedWorld(const fs::path& root,
+                             const fs::path& runtime_root,
+                             const std::string& world_id,
+                             const std::stop_token& stop) {
     SavedWorld result;
     result.metadata.worldId = world_id;
     result.metadata.name = world_id;
@@ -88,7 +104,9 @@ InspectSavedWorld(const fs::path& root, const std::string& world_id, const std::
         const auto metadata_path = save / "world_info.json";
         if (!fs::is_regular_file(metadata_path))
             return result;
-        if (fs::file_size(metadata_path) > 1024 * 1024) {
+        // Bound metadata to 1 MiB before parsing.
+        constexpr std::uintmax_t kMaxMetadataBytes = 1'048'576;
+        if (fs::file_size(metadata_path) > kMaxMetadataBytes) {
             result.error = "Corrupt world metadata: exceeds the 1 MiB limit.";
             return result;
         }
@@ -132,7 +150,7 @@ InspectSavedWorld(const fs::path& root, const std::string& world_id, const std::
             result.error = "Corrupt world metadata: invalid world type.";
             return result;
         }
-        if (!ResolveSavedPreset(root, save, json, result))
+        if (!ResolveSavedPreset(runtime_root, save, json, result))
             return result;
         result.error.clear();
     } catch (const nlohmann::json::exception& e) {
@@ -144,6 +162,12 @@ InspectSavedWorld(const fs::path& root, const std::string& world_id, const std::
 }
 
 SavedWorldCatalog EnumerateSavedWorlds(const fs::path& root, const std::stop_token& stop) {
+    return EnumerateSavedWorlds(root, root, stop);
+}
+
+SavedWorldCatalog EnumerateSavedWorlds(const fs::path& root,
+                                       const fs::path& runtime_root,
+                                       const std::stop_token& stop) {
     SavedWorldCatalog result;
     if (stop.stop_requested()) {
         result.error = "Saved-world validation cancelled.";
@@ -161,7 +185,7 @@ SavedWorldCatalog EnumerateSavedWorlds(const fs::path& root, const std::stop_tok
             }
             if (entry.is_directory() || entry.is_symlink())
                 result.worlds.push_back(
-                    InspectSavedWorld(root, entry.path().filename().string(), stop));
+                    InspectSavedWorld(root, runtime_root, entry.path().filename().string(), stop));
         }
         std::sort(result.worlds.begin(), result.worlds.end(), [](const auto& a, const auto& b) {
             if (a.metadata.creationTime != b.metadata.creationTime)

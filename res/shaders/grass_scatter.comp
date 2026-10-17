@@ -53,7 +53,10 @@ layout(std430, binding = 4) readonly buffer Archetypes { vec4 pal[]; };
 layout(std430, binding = 5) buffer GroupCounts { uint group_counts[]; };
 layout(std430, binding = 6) readonly buffer GroupOffsets { uint group_offsets[]; };
 // Logical scatter order remains unchanged; only surface addresses use stable slots.
-layout(std430, binding = 7) readonly buffer SurfaceSlots { uint surface_slots[]; };
+layout(std430, binding = 7) readonly buffer SurfaceSlots {
+    GpuChunk metadata_chunks[512];
+    uint surface_slots[];
+};
 uniform bool u_emit;
 shared uint accepted_prefix[64];
 
