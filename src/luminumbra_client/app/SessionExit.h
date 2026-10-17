@@ -25,7 +25,7 @@ void SaveSessionOnExit(world::GameSession* session,
                        MarkSaved mark_saved) {
     if (session) {
         update_spawn();
-        if (session->SaveWorldState())
+        if (session->SaveWorld())
             mark_saved();
     }
 }

@@ -1606,7 +1606,7 @@ void GameSession::RestoreWorldClock(const WorldClock& clock) {
 bool GameSession::SaveWorld() {
     if (m_transientWorld || m_metadata.worldId.empty())
         return false;
-    return SaveWorldState();
+    return SaveWorldStateToImpl(GetWorldSaveDir(), nullptr, false, true);
 }
 
 bool GameSession::SavedPresetCompatible(const fs::path& save_dir) const {
@@ -1742,8 +1742,17 @@ bool GameSession::SaveWorldState(WorldStateSaveReport* report) {
 bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
                                    WorldStateSaveReport* report,
                                    bool full_snapshot) {
+    return SaveWorldStateToImpl(
+        save_dir, report, full_snapshot, m_activeRegionsEnabled || full_snapshot);
+}
+
+bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
+                                       WorldStateSaveReport* report,
+                                       bool full_snapshot,
+                                       bool write_metadata) {
     const bool canonical_save = save_dir == GetWorldSaveDir();
-    full_snapshot = full_snapshot || (!m_transientWorld && !canonical_save);
+    full_snapshot =
+        full_snapshot || (m_activeRegionsEnabled && !m_transientWorld && !canonical_save);
     WorldStateSaveReport result;
     if (report) {
         *report = result;
@@ -1794,7 +1803,12 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
     bool ok = true;
     const bool write_chunks = full_snapshot || !dirty_ids.empty();
     if (write_chunks) {
-        if (full_snapshot || !Persistence::WorldSaveService::has_chunk_snapshot(save_dir))
+        // Legacy plant-only saves already count as containers: their next save
+        // writes only dirty regions, preserving the regions-disabled byte contract.
+        const bool has_snapshot = m_activeRegionsEnabled
+                                      ? Persistence::WorldSaveService::has_chunk_snapshot(save_dir)
+                                      : Persistence::WorldSaveService::has_world_save(save_dir);
+        if (full_snapshot || !has_snapshot)
             ok = service.save_world(state, save_dir, &errors);
         else
             ok = service
@@ -1817,9 +1831,9 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
         ok = Persistence::WorldSaveService::save_plant_entities(plant_snapshot, save_dir, &errors);
     if (ok)
         ok = SaveEnergyFieldRecord(save_dir);
-    // Legacy transient imports preserve opaque metadata. Every persistent save,
-    // including regions-disabled saves, commits metadata only after required state.
-    const bool write_metadata = !m_transientWorld;
+    // Regions-disabled incremental saves preserve legacy metadata and file layout.
+    // Explicit complete saves publish metadata only after all required state.
+    write_metadata = write_metadata && !m_transientWorld;
     if (ok && write_metadata)
         ok = SaveWorldMetadataTo(save_dir);
     for (const auto& error : errors)

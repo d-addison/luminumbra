@@ -2,7 +2,13 @@
 
 #include <charconv>
 #include <cmath>
+#include <exception>
+#include <filesystem>
+#include <fstream>
+#include <ios>
+#include <system_error>
 
+#include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/world/KnobLayer.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
 
@@ -42,6 +48,38 @@ bool ParseInt(const std::string& s, long long& out) {
 }
 
 } // namespace
+
+bool RenameUserPreset(const std::filesystem::path& source,
+                      const std::filesystem::path& destination,
+                      const std::string& display_name) {
+    try {
+        nlohmann::json preset;
+        {
+            std::ifstream input(source, std::ios::binary);
+            if (!input)
+                return false;
+            preset = nlohmann::json::parse(input);
+            if (input.bad() || !preset.is_object())
+                return false;
+        }
+        preset["name"] = display_name.empty() ? std::string("Custom") : display_name;
+        if (!Persistence::WorldSaveService::write_file_durably(destination, preset.dump(2)))
+            return false;
+        if (source == destination)
+            return true;
+        // Check after replacement: directory/case aliases now name the new file,
+        // while a separate hard link still names the original and can be removed.
+        std::error_code error;
+        if (std::filesystem::equivalent(source, destination, error))
+            return true;
+        if (error)
+            return false;
+        const bool removed = std::filesystem::remove(source, error);
+        return removed && !error;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
 
 CustomPresetResult BuildCustomPreset(const nlohmann::json& base,
                                      const std::vector<WorldGenParam>& params) {

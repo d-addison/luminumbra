@@ -65,6 +65,11 @@ constexpr std::size_t kRecordHeaderSize = 18;
 constexpr std::uint8_t kRecordFlagEdited = 0x01;
 constexpr std::uint8_t kRecordFlagWaterPresent = 0x02;
 
+bool WriteFileDurably(const std::filesystem::path& destination,
+                      const std::string& bytes,
+                      const std::filesystem::path& staging,
+                      std::vector<std::string>* errors);
+
 void ValidateRegionDigestKey(world::RegionKey key) {
     // Packed chunk coordinates are [-2^20,2^20); reject unsupported public
     // region keys before multiplying bounds or reading any durable member.
@@ -258,7 +263,9 @@ std::size_t ReclaimAbandonedStaging(const std::filesystem::path& destination) {
     std::filesystem::directory_iterator it(directory, list_error);
     if (list_error)
         return 0;
-    for (const auto& entry : it) {
+    for (const std::filesystem::directory_iterator end; !list_error && it != end;
+         it.increment(list_error)) {
+        const auto& entry = *it;
         std::error_code kind_error;
         if (!entry.is_regular_file(kind_error) || kind_error)
             continue;
@@ -269,6 +276,18 @@ std::size_t ReclaimAbandonedStaging(const std::filesystem::path& destination) {
             ++reclaimed;
     }
     return reclaimed;
+}
+
+std::filesystem::path RegionStagingPath(const std::filesystem::path& destination) {
+    // Every region member lives at save/chunks/region/<filename>. Stage on the
+    // save filesystem outside both strictly scanned directories, like the ledger.
+    const auto normalized = destination.lexically_normal();
+    const auto directory = normalized.parent_path();
+    if (directory.filename() == kRegionDirectoryName &&
+        directory.parent_path().filename() == kChunksDirectoryName)
+        return directory.parent_path().parent_path() / normalized.filename();
+    // Raw container access also supports standalone files outside a world save.
+    return destination;
 }
 
 #if defined(_WIN32)
@@ -466,8 +485,8 @@ bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
                                  const std::filesystem::path& destination,
                                  std::vector<std::string>* errors) {
     // POSIX rename replaces an existing same-filesystem destination atomically.
-    // LMR1 staging is beside the live file; ledger staging is in the save root,
-    // outside the chunks scan. A cross-filesystem rename fails without replacing.
+    // World members stage in the save root outside the chunks scan; standalone
+    // containers stage beside the file. Cross-filesystem rename fails safely.
     if (std::rename(temp.c_str(), destination.c_str()) != 0) {
         const int error = errno;
         AddError(errors,
@@ -732,7 +751,9 @@ bool WriteRegionFile(const std::filesystem::path& path,
     }
 
     std::filesystem::path temp_path;
-    if (!WriteDurableRegionTemp(path, bytes, temp_path, errors)) {
+    const auto staging = RegionStagingPath(path);
+    ReclaimAbandonedStaging(staging);
+    if (!WriteDurableRegionTemp(staging, bytes, temp_path, errors)) {
         return false;
     }
 
@@ -836,7 +857,9 @@ bool WriteWorldManifest(const std::filesystem::path& manifest_path,
 
     const std::string bytes = manifest.dump(4) + "\n";
     std::filesystem::path temp;
-    if (!WriteDurableRegionTemp(manifest_path, bytes, temp, errors))
+    const auto staging = RegionStagingPath(manifest_path);
+    ReclaimAbandonedStaging(staging);
+    if (!WriteDurableRegionTemp(staging, bytes, temp, errors))
         return false;
     if (!ReplaceRegionFileAtomically(temp, manifest_path, errors)) {
         RemoveTemporaryFile(temp);
@@ -987,6 +1010,10 @@ bool WorldSaveService::save_plant_entities(const Luminumbra::Ecs::EntityRegistry
     if (!validate_save(save_dir, errors))
         return false;
     const std::filesystem::path path = plant_entities_path(save_dir);
+    // Like ledger staging, abandoned plant copies must live outside the strict
+    // region scan. Reclaim them even when the new roster is empty.
+    const auto staging = save_dir / path.filename();
+    ReclaimAbandonedStaging(staging);
     std::error_code ec;
     if (snapshot.entities.empty()) {
         // No plants -> no file (a no-plant save is byte-identical). Retire any stale file.
@@ -1004,8 +1031,8 @@ bool WorldSaveService::save_plant_entities(const Luminumbra::Ecs::EntityRegistry
         AddError(errors, "failed to create plant directory: " + ec.message());
         return false;
     }
-    return write_file_durably(
-        path, Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(snapshot), errors);
+    return WriteFileDurably(
+        path, Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(snapshot), staging, errors);
 }
 
 bool WorldSaveService::load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapshot& out,
@@ -1371,9 +1398,11 @@ void WorldSaveService::set_interrupt_before_region_replace_for_testing(bool enab
     InterruptBeforeRegionReplaceForTesting().store(enabled, std::memory_order_release);
 }
 
-bool WorldSaveService::write_file_durably(const std::filesystem::path& destination,
-                                          const std::string& bytes,
-                                          std::vector<std::string>* errors) {
+namespace {
+bool WriteFileDurably(const std::filesystem::path& destination,
+                      const std::string& bytes,
+                      const std::filesystem::path& staging,
+                      std::vector<std::string>* errors) {
     std::error_code directory_error;
     if (destination.has_parent_path()) {
         std::filesystem::create_directories(destination.parent_path(), directory_error);
@@ -1400,7 +1429,7 @@ bool WorldSaveService::write_file_durably(const std::filesystem::path& destinati
     }
 #endif
     std::filesystem::path temp_path;
-    if (!WriteDurableRegionTemp(destination, bytes, temp_path, errors)) {
+    if (!WriteDurableRegionTemp(staging, bytes, temp_path, errors)) {
         return false;
     }
     if (InterruptBeforeRegionReplaceForTesting().exchange(false, std::memory_order_acq_rel)) {
@@ -1415,6 +1444,13 @@ bool WorldSaveService::write_file_durably(const std::filesystem::path& destinati
         return false;
     }
     return true;
+}
+} // namespace
+
+bool WorldSaveService::write_file_durably(const std::filesystem::path& destination,
+                                          const std::string& bytes,
+                                          std::vector<std::string>* errors) {
+    return WriteFileDurably(destination, bytes, destination, errors);
 }
 
 void WorldSaveService::set_directory_flush_failure_for_testing(int flushes_to_skip) {

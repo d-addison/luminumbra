@@ -28,6 +28,7 @@
 #include "core/Log.h"
 #include "nlohmann/json.hpp"
 #include "persistence/WorldPersistenceRoundtrip.h" // Luminumbra::Persistence::StableChecksum
+#include "persistence/WorldSaveService.h"
 
 namespace luminumbra::core {
 namespace {
@@ -927,34 +928,7 @@ bool SystemConfig::SaveUserOverlay(const std::string& path) const {
     if (serialized.size() > kMaxSettingsBytes)
         return false;
 
-    std::error_code ec;
-    const std::filesystem::path out(path);
-    if (out.has_parent_path())
-        std::filesystem::create_directories(out.parent_path(), ec);
-    if (ec)
-        return false;
-
-    // Atomic-ish write: temp file then rename over the target.
-    const std::filesystem::path tmp = out.string() + ".tmp";
-    bool written = false;
-    {
-        std::ofstream file(tmp, std::ios::binary | std::ios::trunc);
-        if (!file)
-            return false;
-        file << serialized;
-        file.close(); // Detect flush/close failures before publishing, on every platform.
-        written = !file.fail();
-    }
-    if (!written) {
-        std::filesystem::remove(tmp, ec);
-        return false;
-    }
-    std::filesystem::rename(tmp, out, ec);
-    if (ec) {
-        std::filesystem::remove(tmp, ec);
-        return false;
-    }
-    return true;
+    return Luminumbra::Persistence::WorldSaveService::write_file_durably(path, serialized);
 }
 
 std::string SystemConfig::DefaultUserOverlayPath() {

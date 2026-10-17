@@ -1656,6 +1656,37 @@ private:
 
 class CompleteSaveFailure : public WorldOpenRefusal {};
 
+TEST_F(WorldOpenRefusal, ClientExitCompleteSavePublishesCapturedSpawnInBothRegionModes) {
+    for (const bool regions : {false, true}) {
+        SCOPED_TRACE(regions);
+        const auto config = SnapshotRunnerConfig(RootString(), regions);
+        Server::ServerWorldRunner runner(config);
+        ASSERT_NO_FATAL_FAILURE(BootSnapshotRunner(runner, regions));
+        auto* session = runner.Session();
+        std::shared_ptr<Chunk> chunk;
+        ASSERT_NO_FATAL_FAILURE(PreparePendingSnapshot(*session, chunk, true));
+        const PendingSnapshotState pending(*session);
+        const Vec3 spawn(29, 31, 37);
+        bool reported = false;
+        Client::SaveSessionOnExit(
+            session,
+            [&] { session->SetSpawnPoint(spawn); },
+            [&] {
+                reported = true;
+                const auto metadata =
+                    nlohmann::json::parse(Read(session->GetWorldSaveDir() / "world_info.json"));
+                EXPECT_EQ(metadata.at("spawnPoint").at("x"), spawn.x);
+                EXPECT_EQ(metadata.at("spawnPoint").at("y"), spawn.y);
+                EXPECT_EQ(metadata.at("spawnPoint").at("z"), spawn.z);
+                EXPECT_FALSE(chunk->is_voxel_data_dirty());
+            });
+        ASSERT_TRUE(reported);
+        ASSERT_NO_FATAL_FAILURE(
+            ExpectSnapshotReloaded(pending, *chunk, config, session->GetMetadata().worldId, jobs));
+        runner.Shutdown();
+    }
+}
+
 TEST_P(CompleteSaveFailure, SiblingWriterFailureKeepsMetadataAndDirtyChunksPending) {
     const auto [regions, failure_and_path] = GetParam();
     const bool energy_failure = failure_and_path % 2 != 0;
@@ -1703,7 +1734,7 @@ TEST_P(CompleteSaveFailure, SiblingWriterFailureKeepsMetadataAndDirtyChunksPendi
     else if (save_path == 2)
         EXPECT_FALSE(session->SaveWorld());
     else if (save_path == 3)
-        EXPECT_FALSE(session->SaveWorldStateTo(destination, &report));
+        EXPECT_FALSE(session->SaveWorldStateTo(destination, &report, /*full_snapshot=*/true));
     else if (save_path == 4) {
         bool spawn_captured = false;
         Client::SaveSessionOnExit(
@@ -1737,7 +1768,10 @@ TEST_P(CompleteSaveFailure, SiblingWriterFailureKeepsMetadataAndDirtyChunksPendi
         EXPECT_EQ(Read(WorldSaveService::plant_entities_path(destination)), old_plants);
     EXPECT_TRUE(WorldSaveService::validate_save(destination));
     if (save_path != 6) {
-        ASSERT_TRUE(session->SaveWorldStateTo(destination));
+        if (save_path == 3)
+            ASSERT_TRUE(session->SaveWorldStateTo(destination, nullptr, /*full_snapshot=*/true));
+        else
+            ASSERT_TRUE(session->SaveWorld());
         EXPECT_EQ(chunk->is_voxel_data_dirty(), save_path == 3);
         EXPECT_NE(Read(destination / "world_info.json"), old_metadata);
         if (save_path == 3) {
@@ -1778,7 +1812,7 @@ TEST_F(WorldOpenRefusal, SaveAsWithTrailingSeparatorRetainsCanonicalPendingEdits
         const auto destination = root / (regions ? "enabled-export" : "legacy-export") / "";
         ASSERT_TRUE(destination.filename().empty());
         world::WorldStateSaveReport report;
-        ASSERT_TRUE(session->SaveWorldStateTo(destination, &report));
+        ASSERT_TRUE(session->SaveWorldStateTo(destination, &report, /*full_snapshot=*/true));
         EXPECT_TRUE(report.saved);
         EXPECT_TRUE(chunk->is_voxel_data_dirty());
         EXPECT_EQ(session->GetActiveRegionLedger().encode(), ledger);
@@ -2007,8 +2041,10 @@ TEST_F(WorldOpenRefusal, LegacyExplicitSessionSnapshotsKeepLargeKeylessMetadata)
     session.SetActiveRegionsEnabled(false); // Legacy keyless snapshots have no clock metadata.
     ASSERT_TRUE(session.CreateTransientWorld("Legacy direct load", "1337", "default"));
     ASSERT_TRUE(session.LoadWorldStateFrom(save)) << session.GetWorldOpenError();
-    EXPECT_TRUE(session.SaveWorldStateTo(save));
-    EXPECT_EQ(Read(save / "world_info.json"), metadata.dump());
+    for (const bool full_snapshot : {false, true}) {
+        EXPECT_TRUE(session.SaveWorldStateTo(save, nullptr, full_snapshot));
+        EXPECT_EQ(Read(save / "world_info.json"), metadata.dump());
+    }
 }
 
 TEST_F(WorldOpenRefusal, DirectoryWatchesRetainBothFiltersAndDiscoverNestedFiles) {

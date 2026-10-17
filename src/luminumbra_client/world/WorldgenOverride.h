@@ -1,10 +1,17 @@
 #pragma once
 
+#include <filesystem>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <vector>
 
 namespace Luminumbra::Client {
+
+// Rewrite the display name through a checked, durable temporary file beside the
+// destination. Remove the source only after successful publication and durable flush.
+bool RenameUserPreset(const std::filesystem::path& source,
+                      const std::filesystem::path& destination,
+                      const std::string& display_name);
 
 // A single overridden world-generation parameter from the create-world "customize" form.
 // `path` is the dotted JSON key under generation_params (e.g. "terrain.base_amplitude"),

@@ -17,10 +17,12 @@
 #include "luminumbra_common/ecs/EntitySnapshot.h"
 #include "luminumbra_common/persistence/PlantPersistence.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
+#include "luminumbra_common/world/WorldStreamingState.h"
 
 #include "support/UniqueTempPath.h"
 #include <filesystem>
 #include <fstream>
+#include <system_error>
 
 namespace {
 
@@ -174,6 +176,91 @@ TEST(PlantPersistence, EmptyRosterWritesNoFile) {
 }
 
 } // namespace
+
+namespace {
+class PlantSaveRecovery : public testing::Test {
+private:
+    std::filesystem::path m_directory;
+
+protected:
+    const std::filesystem::path& Directory() const {
+        return m_directory;
+    }
+    void SetUp() override {
+        m_directory = Luminumbra::TestSupport::CreateUniqueTempDirectory("plant_save_recovery_");
+    }
+    void TearDown() override {
+        Luminumbra::Persistence::WorldSaveService::set_interrupt_before_region_replace_for_testing(
+            false);
+        std::error_code error;
+        std::filesystem::remove_all(m_directory, error);
+    }
+};
+} // namespace
+
+TEST_F(PlantSaveRecovery, AbandonedStagingDoesNotBlockLoadsAndIsReclaimedOnEverySave) {
+    namespace SS = ::Luminumbra::Persistence;
+    namespace fs = std::filesystem;
+    entt::registry plants;
+    barePlant(plants, 1.0f, 0, 5);
+    const auto snapshot = F::BuildPlantEntitySnapshot(plants);
+    const E::EntityRegistrySnapshot empty;
+    const auto abandoned = Directory() / "plant-entities.json.tmp.abandoned";
+    const auto unrelated = Directory() / "unrelated.tmp.abandoned";
+    for (const bool existing_roster : {false, true}) {
+        for (const bool empty_roster : {false, true}) {
+            SCOPED_TRACE(existing_roster);
+            SCOPED_TRACE(empty_roster);
+            ASSERT_TRUE(SS::WorldSaveService::save_plant_entities(
+                existing_roster ? snapshot : empty, Directory()));
+            ASSERT_TRUE(SS::WorldSaveService::write_file_durably(abandoned, "{partial roster"));
+            ASSERT_TRUE(SS::WorldSaveService::write_file_durably(unrelated, "keep"));
+            E::EntityRegistrySnapshot loaded;
+            ASSERT_TRUE(SS::WorldSaveService::load_plant_entities(loaded, Directory()));
+            EXPECT_EQ(loaded.entities.empty(), !existing_roster);
+            Luminumbra::WorldStreamingState chunks;
+            std::vector<std::string> errors;
+            SS::WorldSaveService{}.load_world(chunks, Directory(), errors);
+            EXPECT_TRUE(errors.empty());
+            ASSERT_TRUE(SS::WorldSaveService::validate_save(Directory()));
+            ASSERT_TRUE(SS::WorldSaveService::save_plant_entities(empty_roster ? empty : snapshot,
+                                                                  Directory()));
+            EXPECT_FALSE(fs::exists(abandoned));
+            EXPECT_TRUE(fs::exists(unrelated));
+            ASSERT_TRUE(SS::WorldSaveService::load_plant_entities(loaded, Directory()));
+            EXPECT_EQ(loaded.entities.empty(), empty_roster);
+        }
+    }
+}
+
+TEST_F(PlantSaveRecovery, InterruptedReplacementPreservesRosterAndRetryLeavesNoRegionDebris) {
+    namespace SS = ::Luminumbra::Persistence;
+    namespace fs = std::filesystem;
+    entt::registry plants;
+    const auto plant = barePlant(plants, 1.0f, 0, 5);
+    const auto original = F::BuildPlantEntitySnapshot(plants);
+    ASSERT_TRUE(SS::WorldSaveService::save_plant_entities(original, Directory()));
+    plants.get<C::PlantGrowthComponent>(plant).growth_points = 42;
+    const auto changed = F::BuildPlantEntitySnapshot(plants);
+    SS::WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
+    const bool saved = SS::WorldSaveService::save_plant_entities(changed, Directory());
+    SS::WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
+    EXPECT_FALSE(saved);
+    E::EntityRegistrySnapshot loaded;
+    ASSERT_TRUE(SS::WorldSaveService::load_plant_entities(loaded, Directory()));
+    EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(loaded),
+              E::SerializeEntityRegistrySnapshotJson(original));
+    ASSERT_TRUE(SS::WorldSaveService::validate_save(Directory()));
+    ASSERT_TRUE(SS::WorldSaveService::save_plant_entities(changed, Directory()));
+    ASSERT_TRUE(SS::WorldSaveService::load_plant_entities(loaded, Directory()));
+    EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(loaded),
+              E::SerializeEntityRegistrySnapshotJson(changed));
+    for (const auto& entry : fs::recursive_directory_iterator(Directory()))
+        EXPECT_EQ(entry.path().filename().string().find(".tmp."), std::string::npos);
+    const auto unknown = SS::WorldSaveService::region_directory(Directory()) / "unknown.tmp";
+    ASSERT_TRUE(SS::WorldSaveService::write_file_durably(unknown, "unknown artifact"));
+    EXPECT_FALSE(SS::WorldSaveService::validate_save(Directory()));
+}
 
 TEST(PlantPersistence, EmptyRosterRemovalErrorIsReportedAndCanRetry) {
     namespace SS = ::Luminumbra::Persistence;

@@ -110,6 +110,75 @@ TEST(WorldSaveService, SaveThenLoadRoundTripPreservesWorldHash) {
     EXPECT_EQ(service.world_hash(restored), original_hash);
 }
 
+TEST(WorldSaveService, AbandonedRegionAndManifestStagingAllowsLoadAndIsReclaimedOnRetry) {
+    const TempSaveDir save_dir("abandoned_staging");
+    const WorldSaveService service;
+    WorldStreamingState state;
+    PopulateFixtureWorld(state);
+    ASSERT_TRUE(service.save_world(state, save_dir.path));
+    const auto expected_hash = service.world_hash(state);
+    const auto region = WorldSaveService::region_file_path(save_dir.path, 0, 0);
+    const auto manifest = WorldSaveService::world_manifest_path(save_dir.path);
+    std::vector<std::filesystem::path> abandoned;
+    for (const auto& destination : {region, manifest}) {
+        const auto staging = save_dir.path / (destination.filename().string() + ".tmp.abandoned");
+        ASSERT_TRUE(WorldSaveService::write_file_durably(staging, "partial bytes"));
+        abandoned.push_back(staging);
+    }
+    const auto retained_directory = save_dir.path / "r.0.0.lmr.tmp.directory";
+    std::filesystem::create_directory(retained_directory);
+    WorldStreamingState restored;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(service.load_world(restored, save_dir.path, errors));
+    EXPECT_TRUE(errors.empty());
+    EXPECT_EQ(service.world_hash(restored), expected_hash);
+    ASSERT_TRUE(service.save_world(state, save_dir.path));
+    for (const auto& staging : abandoned)
+        EXPECT_FALSE(std::filesystem::exists(staging));
+    EXPECT_TRUE(std::filesystem::is_directory(retained_directory));
+    ASSERT_TRUE(service.load_world(restored, save_dir.path, errors));
+    EXPECT_EQ(service.world_hash(restored), expected_hash);
+}
+
+TEST(WorldSaveService, StandaloneContainerReclaimsAdjacentStagingAndPreservesRecords) {
+    const TempSaveDir save_dir("standalone_staging");
+    const auto path = save_dir.path / "standalone/records.lmr";
+    const WorldSaveService::ContainerRecord original{
+        .id = 7, .lod_level = 1, .flags = 0, .payload = "original"};
+    ASSERT_TRUE(WorldSaveService::upsert_container_records(path, {original}));
+    auto abandoned = path;
+    abandoned += ".tmp.abandoned";
+    ASSERT_TRUE(WorldSaveService::write_file_durably(abandoned, "partial bytes"));
+    const WorldSaveService::ContainerRecord added{
+        .id = 8, .lod_level = 1, .flags = 0, .payload = "added"};
+    ASSERT_TRUE(WorldSaveService::upsert_container_records(path, {added}));
+    EXPECT_FALSE(std::filesystem::exists(abandoned));
+    std::vector<WorldSaveService::ContainerRecord> records;
+    ASSERT_TRUE(WorldSaveService::read_container_records(path, records));
+    ASSERT_EQ(records.size(), 2u);
+    EXPECT_EQ(records[0].id, original.id);
+    EXPECT_EQ(records[0].payload, original.payload);
+    EXPECT_EQ(records[1].id, added.id);
+    EXPECT_EQ(records[1].payload, added.payload);
+}
+
+TEST(WorldSaveService, ContainerStagingRecognizesNormalizedRegionPaths) {
+    const TempSaveDir save_dir("normalized_staging");
+    const auto canonical = WorldSaveService::region_file_path(save_dir.path, 0, 0);
+    const auto path = canonical.parent_path() / "." / canonical.filename();
+    const WorldSaveService::ContainerRecord original{
+        .id = 7, .lod_level = 1, .flags = 0, .payload = "original"};
+    ASSERT_TRUE(WorldSaveService::upsert_container_records(path, {original}));
+    const auto abandoned = save_dir.path / "r.0.0.lmr.tmp.abandoned";
+    ASSERT_TRUE(WorldSaveService::write_file_durably(abandoned, "partial bytes"));
+    ASSERT_TRUE(WorldSaveService::upsert_container_records(path, {original}));
+    EXPECT_FALSE(std::filesystem::exists(abandoned));
+    std::vector<WorldSaveService::ContainerRecord> records;
+    ASSERT_TRUE(WorldSaveService::read_container_records(canonical, records));
+    ASSERT_EQ(records.size(), 1u);
+    EXPECT_EQ(records.front().payload, original.payload);
+}
+
 TEST(WorldSaveService, LoadFromEmptySaveDirIsCleanMissWithoutErrors) {
     TempSaveDir save_dir("fresh");
     WorldSaveService service;

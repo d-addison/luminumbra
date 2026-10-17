@@ -107,7 +107,7 @@ public:
     // Load an existing world from disk
     bool LoadWorld(const std::string& worldId);
 
-    // Save the current world state
+    // Save current persistent state and metadata, including captured spawn changes.
     bool SaveWorld();
 
     // Read-only destination preset/identity check, before any save writes or acknowledgements.
@@ -116,12 +116,14 @@ public:
     // --- Runtime world-state persistence ---
     // Persists streamed chunk voxel state under the canonical world save dir
     // (worlds/saves/<world_id>). Only dirty chunks trigger chunk snapshot writes;
-    // plants, energy and metadata persist even when no chunks are dirty.
-    // The first chunk write emits a full snapshot; later writes flush through
+    // plants and energy persist even when no chunks are dirty. Active-region saves
+    // also persist metadata; regions-disabled incremental saves preserve its bytes.
+    // A save without a prior container emits a full snapshot; later writes flush through
     // WorldSaveService::save_dirty_chunks. Dirty chunks are acknowledged only after
     // chunks, plants, energy and metadata succeed. Per-file atomic writes can persist
     // partial progress on failure; metadata is saved after the required state.
-    // Explicit full snapshots and save-as destinations include every streamed chunk.
+    // Full snapshots and persistent active-region save-as exports include every streamed chunk
+    // and commit metadata last. Pass full_snapshot=true for a complete regions-disabled export.
     // Save-as exports retain canonical dirty flags and active-region save stamps.
     bool SaveWorldState(WorldStateSaveReport* report = nullptr);
     bool SaveWorldStateTo(const std::filesystem::path& save_dir,
@@ -487,6 +489,10 @@ private:
     void ResetWorldSystems();
     void RestoreWorldClock(const WorldClock& clock);
     bool SaveWorldMetadataTo(const std::filesystem::path& save_dir) const;
+    bool SaveWorldStateToImpl(const std::filesystem::path& save_dir,
+                              WorldStateSaveReport* report,
+                              bool full_snapshot,
+                              bool write_metadata);
     bool ClockConfigurationCompatible(const std::filesystem::path& save_dir) const;
     WorldClock m_worldClock;
     void AttachRegionEditObserver();

@@ -82,6 +82,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "luminumbra_common/network/NetworkLoopbackAuthority.h"
 #include "luminumbra_common/persistence/SavedWorldCatalog.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
+#include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/systems/AetherFieldSystem.h" // Aether-field sampling.
 #include "luminumbra_common/systems/CreatureProcgen.h" // genome -> body-proportion build (procedural silhouette)
 #include "luminumbra_common/systems/FarmingSystem.h" //  MakePlantFromSpecies + SpeciesRegistry
@@ -2737,8 +2738,12 @@ int main(int argc, char* argv[]) {
                     std::ifstream in(presets_dir / (baseType + ".json"));
                     if (!in)
                         return "";
-                    nlohmann::json base;
-                    in >> base;
+                    const auto base = nlohmann::json::parse(in);
+                    // The base may be the preset being overwritten. Release its
+                    // read handle before atomic replacement on Windows.
+                    in.close();
+                    if (in.fail())
+                        return "";
                     //  persist BOTH the knob layer (knob vector +
                     // baseline + override diff) AND the resolved params, so reloading
                     // the saved user preset restores the exact knob positions. Falls
@@ -2757,10 +2762,9 @@ int main(int argc, char* argv[]) {
                     }
                     const std::string worldType = "user_" + UserPresetSlug(displayName);
                     saved["name"] = displayName.empty() ? std::string("Custom") : displayName;
-                    std::ofstream out(presets_dir / (worldType + ".json"), std::ios::binary);
-                    if (!out)
+                    if (!Luminumbra::Persistence::WorldSaveService::write_file_durably(
+                            presets_dir / (worldType + ".json"), saved.dump(2)))
                         return "";
-                    out << saved.dump(2);
                     LUMINUMBRA_CORE_INFO("Saved user world preset: {}", worldType);
                     return worldType;
                 } catch (const std::exception& e) {
@@ -2836,32 +2840,11 @@ int main(int argc, char* argv[]) {
                     const std::filesystem::path dir =
                         std::filesystem::path(root_path_str) / "worlds" / "atlas" / "presets";
                     const std::filesystem::path src = dir / (worldType + ".json");
-                    if (!std::filesystem::exists(src))
-                        return "";
-                    nlohmann::json j;
-                    {
-                        std::ifstream in(src);
-                        if (!in)
-                            return "";
-                        in >> j;
-                    }
-                    j["name"] = newDisplayName.empty() ? std::string("Custom") : newDisplayName;
                     const std::string newType = "user_" + UserPresetSlug(newDisplayName);
                     const std::filesystem::path dst = dir / (newType + ".json");
-                    {
-                        std::ofstream out(dst, std::ios::binary);
-                        if (!out)
-                            return "";
-                        out << j.dump(2);
-                    }
-                    if (newType != worldType) {
-                        std::error_code ec;
-                        std::filesystem::remove(src, ec);
-                        if (ec) {
-                            LUMINUMBRA_CORE_ERROR(
-                                "Could not remove renamed preset {}: {}", worldType, ec.message());
-                            return "";
-                        }
+                    if (!Luminumbra::Client::RenameUserPreset(src, dst, newDisplayName)) {
+                        LUMINUMBRA_CORE_ERROR("Could not rename user preset {}", worldType);
+                        return "";
                     }
                     LUMINUMBRA_CORE_INFO("Renamed user preset {} -> {}", worldType, newType);
                     return newType;
@@ -3033,7 +3016,7 @@ int main(int argc, char* argv[]) {
                                                    ? g_playerController->SavedSpawnAnchor()
                                                    : g_camera->Position);
                 // Synchronous main-thread save; shutdown cannot overlap this callback.
-                if (!gameSession->SaveWorldState()) {
+                if (!gameSession->SaveWorld()) {
                     if (g_uiManager)
                         g_uiManager->ShowMessage("Could not save this world. Check available disk "
                                                  "space and permissions before leaving.");

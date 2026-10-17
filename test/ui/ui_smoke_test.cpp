@@ -1,3 +1,4 @@
+#include "../support/UniqueTempPath.h"
 #include "gtest/gtest.h"
 
 #define GLFW_INCLUDE_NONE
@@ -15,16 +16,26 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <ios>
+#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
 #include <optional>
 #include <regex>
 #include <set>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <vector>
 
+#ifndef _WIN32
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
 #include "audio/NullAudioManager.h"
 #include "luminumbra_common/core/FramePacing.h"
+#include "luminumbra_common/persistence/WorldSaveService.h"
 #include "ui/Rml_UIManager.h"
 #include "ui/components/common/Button.h"
 #include "ui/components/common/Input.h"
@@ -37,6 +48,152 @@
 namespace fs = std::filesystem;
 
 namespace {
+
+class UserPresetPersistence : public testing::Test {
+private:
+    fs::path m_directory;
+
+protected:
+    const fs::path& Directory() const {
+        return m_directory;
+    }
+    void SetUp() override {
+        m_directory = Luminumbra::TestSupport::CreateUniqueTempDirectory("user_preset_write_");
+    }
+    void TearDown() override {
+        Luminumbra::Persistence::WorldSaveService::set_interrupt_before_region_replace_for_testing(
+            false);
+        std::error_code error;
+        fs::remove_all(m_directory, error);
+    }
+    static std::string Read(const fs::path& path) {
+        const std::ifstream input(path, std::ios::binary);
+        std::ostringstream bytes;
+        bytes << input.rdbuf();
+        return bytes.str();
+    }
+    static void Write(const fs::path& path, const std::string& bytes) {
+        ASSERT_TRUE(Luminumbra::Persistence::WorldSaveService::write_file_durably(path, bytes));
+    }
+    void ExpectNoStaging() const {
+        for (const auto& entry : fs::recursive_directory_iterator(m_directory))
+            EXPECT_EQ(entry.path().filename().string().find(".tmp."), std::string::npos);
+    }
+};
+
+TEST_F(UserPresetPersistence, InterruptedRenamePreservesSourceAndDestinationThenRetries) {
+    const auto source = Directory() / "user_source.json";
+    const auto destination = Directory() / "user_destination.json";
+    for (const bool same_name : {false, true}) {
+        SCOPED_TRACE(same_name);
+        ASSERT_NO_FATAL_FAILURE(Write(source, R"({"name":"Source","unknown":17})"));
+        ASSERT_NO_FATAL_FAILURE(Write(destination, R"({"name":"Existing destination"})"));
+        const auto source_bytes = Read(source);
+        const auto destination_bytes = Read(destination);
+        const auto target = same_name ? source : destination;
+        Luminumbra::Persistence::WorldSaveService::set_interrupt_before_region_replace_for_testing(
+            true);
+        const bool renamed = Luminumbra::Client::RenameUserPreset(source, target, "Renamed");
+        Luminumbra::Persistence::WorldSaveService::set_interrupt_before_region_replace_for_testing(
+            false);
+        EXPECT_FALSE(renamed);
+        EXPECT_EQ(Read(source), source_bytes);
+        EXPECT_EQ(Read(destination), destination_bytes);
+        ExpectNoStaging();
+        ASSERT_TRUE(Luminumbra::Client::RenameUserPreset(source, target, "Renamed"));
+        EXPECT_EQ(nlohmann::json::parse(Read(target)).at("name"), "Renamed");
+        EXPECT_EQ(nlohmann::json::parse(Read(target)).at("unknown"), 17);
+        EXPECT_EQ(fs::exists(source), same_name);
+        ExpectNoStaging();
+    }
+}
+
+TEST_F(UserPresetPersistence, InvalidSourceAndPublicationFailurePreserveExistingFiles) {
+    const auto source = Directory() / "user_source.json";
+    const auto destination = Directory() / "user_destination.json";
+    ASSERT_NO_FATAL_FAILURE(Write(destination, R"({"name":"Existing destination"})"));
+    const auto before = Read(destination);
+    EXPECT_FALSE(Luminumbra::Client::RenameUserPreset(source, destination, "Renamed"));
+    fs::create_directory(source);
+    EXPECT_FALSE(Luminumbra::Client::RenameUserPreset(source, destination, "Renamed"));
+    EXPECT_EQ(Read(destination), before);
+    fs::remove(source);
+    for (const auto* bytes : {"", "{", "[]", "null", "{}trailing"}) {
+        SCOPED_TRACE(bytes);
+        ASSERT_NO_FATAL_FAILURE(Write(source, bytes));
+        EXPECT_FALSE(Luminumbra::Client::RenameUserPreset(source, destination, "Renamed"));
+        EXPECT_EQ(Read(source), bytes);
+        EXPECT_EQ(Read(destination), before);
+    }
+    ASSERT_NO_FATAL_FAILURE(Write(source, R"({"name":"Source"})"));
+    EXPECT_FALSE(Luminumbra::Client::RenameUserPreset(source, destination, std::string(1, '\xff')));
+    EXPECT_EQ(nlohmann::json::parse(Read(source)).at("name"), "Source");
+    EXPECT_EQ(Read(destination), before);
+    const auto blocked = Directory() / "blocked.json";
+    fs::create_directory(blocked);
+    ASSERT_NO_FATAL_FAILURE(Write(blocked / "keep", "occupied"));
+    EXPECT_FALSE(Luminumbra::Client::RenameUserPreset(source, blocked, "Renamed"));
+    EXPECT_EQ(nlohmann::json::parse(Read(source)).at("name"), "Source");
+    EXPECT_EQ(Read(blocked / "keep"), "occupied");
+    ExpectNoStaging();
+    fs::remove_all(blocked);
+    ASSERT_TRUE(Luminumbra::Client::RenameUserPreset(source, blocked, ""));
+    EXPECT_EQ(nlohmann::json::parse(Read(blocked)).at("name"), "Custom");
+    EXPECT_FALSE(fs::exists(source));
+}
+
+TEST_F(UserPresetPersistence, AliasedDestinationKeepsThePublishedPreset) {
+    const auto source = Directory() / "user_source.json";
+    ASSERT_NO_FATAL_FAILURE(Write(source, R"({"name":"Source","unknown":17})"));
+    const auto destination = Directory() / "." / source.filename();
+    ASSERT_NE(source, destination);
+    ASSERT_TRUE(Luminumbra::Client::RenameUserPreset(source, destination, "Renamed"));
+    EXPECT_EQ(nlohmann::json::parse(Read(source)).at("name"), "Renamed");
+    EXPECT_EQ(nlohmann::json::parse(Read(destination)).at("unknown"), 17);
+    const auto hard_link = Directory() / "user_hard_link.json";
+    fs::create_hard_link(source, hard_link);
+    ASSERT_TRUE(Luminumbra::Client::RenameUserPreset(source, hard_link, "Separate entry"));
+    EXPECT_FALSE(fs::exists(source));
+    EXPECT_EQ(nlohmann::json::parse(Read(hard_link)).at("name"), "Separate entry");
+#ifdef _WIN32
+    ASSERT_NO_FATAL_FAILURE(Write(source, R"({"name":"Source"})"));
+    const auto case_variant = Directory() / "USER_SOURCE.JSON";
+    ASSERT_TRUE(Luminumbra::Client::RenameUserPreset(source, case_variant, "Case variant"));
+    EXPECT_EQ(nlohmann::json::parse(Read(case_variant)).at("name"), "Case variant");
+#endif
+    ExpectNoStaging();
+}
+
+TEST_F(UserPresetPersistence, SourceRemovalFailureKeepsBothCompletePresets) {
+    const auto source = Directory() / "original/user_source.json";
+    const auto destination = Directory() / "user_destination.json";
+    ASSERT_NO_FATAL_FAILURE(Write(source, R"({"name":"Source"})"));
+#ifdef _WIN32
+    // An open CRT read handle denies deletion on Windows.
+    std::ifstream held_source(source, std::ios::binary);
+    ASSERT_TRUE(held_source);
+    const auto removal_source = source;
+#else
+    // Descriptor entries can be read but not unlinked, even by a privileged runner.
+    const int descriptor = ::open(source.c_str(), O_RDONLY);
+    ASSERT_GE(descriptor, 0);
+    const auto removal_source = fs::path("/dev/fd") / std::to_string(descriptor);
+#endif
+    const bool renamed =
+        Luminumbra::Client::RenameUserPreset(removal_source, destination, "Renamed");
+#ifdef _WIN32
+    held_source.close();
+    EXPECT_FALSE(held_source.fail());
+#else
+    EXPECT_EQ(::close(descriptor), 0);
+#endif
+    EXPECT_FALSE(renamed);
+    EXPECT_EQ(nlohmann::json::parse(Read(source)).at("name"), "Source");
+    EXPECT_EQ(nlohmann::json::parse(Read(destination)).at("name"), "Renamed");
+    ExpectNoStaging();
+    ASSERT_TRUE(Luminumbra::Client::RenameUserPreset(source, destination, "Renamed"));
+    EXPECT_FALSE(fs::exists(source));
+}
 
 #ifndef LUMINUMBRA_SOURCE_ROOT
 #define LUMINUMBRA_SOURCE_ROOT "."

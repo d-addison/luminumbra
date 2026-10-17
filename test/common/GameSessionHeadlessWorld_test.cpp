@@ -1328,12 +1328,8 @@ TEST_P(SavedWorldPresetTest, UnmarkedLegacySaveUsesFrozenPresetAndEmbedsItOnResa
 
 INSTANTIATE_TEST_SUITE_P(ActiveRegionsEnabledAndDisabled, SavedWorldPresetTest, testing::Bool());
 
-// Reads a record that production writes through a text-mode stream, so its bytes
-// carry the host's line endings: the energy record (GameSession writes
-// aether_state.efs with a default-mode ofstream) is LF on Linux and CRLF on
-// Windows. That platform difference predates this change; normalising here keeps
-// the assertions about record CONTENT independent of it. Tests that assert exact
-// bytes written by the test itself use binary streams instead.
+// Normalize historical text-mode energy records and current durable binary
+// records for content assertions. Exact-byte assertions use ReadClockTestFile.
 std::string ReadClockTestTextRecord(const fs::path& path) {
     std::string text = ReadClockTestFile(path);
     text.erase(std::remove(text.begin(), text.end(), '\r'), text.end());
@@ -2104,7 +2100,8 @@ TEST(GameSessionHeadlessWorldTest, ExplicitlyDisabledCallbacksKeepLegacySavesLoa
         EXPECT_TRUE(session.IsSimulationTickBoundary());
         EXPECT_TRUE(session.SaveWorld());
         EXPECT_TRUE(session.SaveWorldState());
-        EXPECT_TRUE(session.SaveWorldStateTo(root.path() / "legacy-explicit"));
+        EXPECT_TRUE(session.SaveWorldStateTo(
+            root.path() / "legacy-explicit", nullptr, /*full_snapshot=*/true));
         EXPECT_EQ(ReadClockTestFile(root.path() / "legacy-explicit/world_info.json"), before);
         EXPECT_TRUE(P::WorldSaveService::validate_save(root.path() / "legacy-explicit"));
         EXPECT_TRUE(session.LoadWorldState());
@@ -2391,6 +2388,8 @@ TEST(GameSessionHeadlessWorldTest, DisabledRegionsMatchDevelWorldHashAndExactSav
     }
     const auto save = root.path() / "golden-save";
     ASSERT_TRUE(session.SaveWorldStateTo(save));
+    EXPECT_FALSE(fs::exists(save / "preset.json"));
+    EXPECT_FALSE(fs::exists(save / "world_info.json"));
     ExpectSameWorldHash(session, expected);
     EXPECT_TRUE(session.GetActiveRegionLedger().records().empty());
     const auto fixture =
@@ -2453,6 +2452,8 @@ TEST(GameSessionHeadlessWorldTest,
     ASSERT_NO_FATAL_FAILURE(AdoptRegionGoldenChunk(expected_live, 32));
     const auto save = root.path() / "plant-golden-save";
     ASSERT_NO_FATAL_FAILURE(SavePlantRosterThenMultiRegionEdit(session, save));
+    EXPECT_FALSE(fs::exists(save / "preset.json"));
+    EXPECT_FALSE(fs::exists(save / "world_info.json"));
     EXPECT_FALSE(session.ActiveRegionsEnabled());
     EXPECT_FALSE(fs::exists(P::WorldSaveService::region_file_path(save, 1, 0)));
     const auto fixture =

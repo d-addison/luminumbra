@@ -22,6 +22,7 @@
 #include "luminumbra_common/core/FramePacing.h"
 #include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h" // StableChecksum
+#include "luminumbra_common/persistence/WorldSaveService.h"
 
 using luminumbra::core::SysKey;
 using luminumbra::core::SysParam;
@@ -64,6 +65,39 @@ private:
     std::filesystem::path runtime;
     std::filesystem::path previous_cwd;
 };
+
+TEST_F(RuntimeSystemConfig, OverlayReplacementFailurePreservesBytesAndRetryOverwrites) {
+    const auto path = Directory() / "settings.json";
+    auto config = SystemConfig::FromJsonString(R"({"user":{"video":{"fov":80}}})");
+    ASSERT_TRUE(config.SaveUserOverlay(path.string()));
+    std::string before;
+    {
+        const std::ifstream input(path, std::ios::binary);
+        std::ostringstream bytes;
+        bytes << input.rdbuf();
+        before = bytes.str();
+    }
+    config.user().fov = 100.0f;
+    Luminumbra::Persistence::WorldSaveService::set_interrupt_before_region_replace_for_testing(
+        true);
+    const bool saved = config.SaveUserOverlay(path.string());
+    Luminumbra::Persistence::WorldSaveService::set_interrupt_before_region_replace_for_testing(
+        false);
+    EXPECT_FALSE(saved);
+    {
+        const std::ifstream input(path, std::ios::binary);
+        std::ostringstream bytes;
+        bytes << input.rdbuf();
+        EXPECT_EQ(bytes.str(), before);
+    }
+    for (const auto& entry : std::filesystem::directory_iterator(Directory()))
+        EXPECT_EQ(entry.path().filename().string().find(".tmp."), std::string::npos);
+    ASSERT_TRUE(config.SaveUserOverlay(path.string()));
+    EXPECT_FLOAT_EQ(SystemConfig::LoadFromFile(path.string()).user().fov, 100.0f);
+    config.user().fov = 110.0f;
+    ASSERT_TRUE(config.SaveUserOverlay(path.string()));
+    EXPECT_FLOAT_EQ(SystemConfig::LoadFromFile(path.string()).user().fov, 110.0f);
+}
 
 TEST_F(RuntimeSystemConfig, DefaultsAndUserOverlayComeFromRuntimeRoot) {
     Write(Runtime() / "data/common/systems.json",
