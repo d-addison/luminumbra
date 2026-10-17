@@ -1760,16 +1760,21 @@ FarTierBudgets RendererHandoffBudgets() {
     budgets.bytes.fill(64ULL * 1024 * 1024);
     return budgets;
 }
-FarHandoffTileInput RendererHandoffInput(FarWorldHandoffRenderer& renderer,
-                                         FarTileKey key,
-                                         std::uint64_t generation,
-                                         bool mixed) {
+FarHandoffTileInput
+RendererHandoffInput(FarWorldHandoffRenderer& renderer,
+                     FarTileKey key,
+                     std::uint64_t generation,
+                     bool mixed,
+                     FarCaveMode caves = FarCaveMode::BandLimited,
+                     FarVolumeNumericProfile numeric = FarVolumeNumericProfile::RawFloat) {
     FarVolumeWantedRequest wanted;
     EXPECT_TRUE(ToFarVolumeTileKey(key, wanted.intent.key));
-    wanted.identity = {1, 100 + generation, 0, key, generation, 1};
+    wanted.identity = {1, 100 + generation, static_cast<std::uint8_t>(caves), key, generation, 1};
     wanted.intent.extra_span = FarVolumeCoverageSpan{-256, 64};
     const auto edge = FarTileEdgeMeters(key.tier);
     FarFrozenCaptureSource source;
+    source.pristine.caves = caves;
+    source.pristine.numeric = numeric;
     source.content_identity = source.pristine.field_identity = wanted.identity.content_hash;
     source.durable = {generation, FarEditedImageState::Committed};
     source.committed = [](std::uint8_t, const FarVolumePosition&) {
@@ -1796,7 +1801,7 @@ FarHandoffTileInput RendererHandoffInput(FarWorldHandoffRenderer& renderer,
     std::shared_ptr<const FarFrozenObservation> image;
     EXPECT_EQ(CaptureFarVolumeObservation(request,
                                           source,
-                                          {1, 100'000, 2'000'000, 100'000, 32ULL * 1024 * 1024},
+                                          {1, 100'000, 20'000'000, 100'000, 32ULL * 1024 * 1024},
                                           renderer.MemoryPool(key.tier),
                                           image),
               FarFrozenCaptureError::None);
@@ -1848,6 +1853,44 @@ private:
     }
 };
 } // namespace
+
+TEST(FarWorldHandoffRenderer, EveryTierAndProfileCapturesInTheBoundMemoryDomain) {
+    JobSystem jobs;
+    for (std::uint8_t tier = 1; tier <= kFarTierCount; ++tier) {
+        SCOPED_TRACE(tier);
+        for (const auto caves : {FarCaveMode::BandLimited, FarCaveMode::BoxFiltered}) {
+            SCOPED_TRACE(static_cast<unsigned>(caves));
+            for (const auto numeric :
+                 {FarVolumeNumericProfile::RawFloat, FarVolumeNumericProfile::LegacySigned16}) {
+                SCOPED_TRACE(static_cast<unsigned>(numeric));
+                DriverState state;
+                state.fixture_released = true;
+                FarWorldHandoffRenderer renderer;
+                renderer.InstallBackend(std::make_unique<Driver>(state));
+                ASSERT_TRUE(renderer.Bind(
+                    jobs, 1, caves, numeric, RendererHandoffBudgets(), RendererHandoffLimits()));
+                const std::array inputs{
+                    RendererHandoffInput(renderer, {tier, -1, 0}, 1, false, caves, numeric),
+                    RendererHandoffInput(renderer, {5, 0, 0}, 1, false, caves, numeric)};
+                ASSERT_TRUE(inputs[0].observation);
+                ASSERT_TRUE(inputs[1].observation);
+                auto manifest = RendererHandoffManifest(1, inputs);
+                manifest.caves = caves;
+                manifest.numeric = numeric;
+                ASSERT_TRUE(renderer.StageTarget(manifest));
+                const auto observed = renderer.Handoff()->Observe({tier, -1, 0});
+                ASSERT_TRUE(observed);
+                if (!observed)
+                    return;
+                ASSERT_TRUE(observed->target);
+                if (!observed->target)
+                    return;
+                EXPECT_EQ(observed->target->identity, inputs[0].wanted.identity);
+                EXPECT_EQ(inputs[0].observation->memory_pool(), renderer.MemoryPool(tier).get());
+            }
+        }
+    }
+}
 
 TEST(FarWorldHandoffRenderer, SameFrameOwnershipAndSubmitExceptionRestoreBindings) {
     JobSystem jobs;

@@ -773,22 +773,27 @@ bool HandoffWait(const std::function<bool()>& predicate) {
     } while (std::chrono::steady_clock::now() < deadline);
     return false;
 }
-FarHandoffTileInput HandoffInput(const std::shared_ptr<FarVolumeTierMemory>& memory,
-                                 FarTileKey key,
-                                 std::uint64_t generation,
-                                 bool drawable,
-                                 float min_y = -256,
-                                 float max_y = 64,
-                                 bool solid = false,
-                                 bool wide = false,
-                                 FarFrozenCaptureError* failure = nullptr,
-                                 bool wet = false,
-                                 FarFrozenUse use = FarFrozenUse::Committed) {
+FarHandoffTileInput
+HandoffInput(const std::shared_ptr<FarVolumeTierMemory>& memory,
+             FarTileKey key,
+             std::uint64_t generation,
+             bool drawable,
+             float min_y = -256,
+             float max_y = 64,
+             bool solid = false,
+             bool wide = false,
+             FarFrozenCaptureError* failure = nullptr,
+             bool wet = false,
+             FarFrozenUse use = FarFrozenUse::Committed,
+             FarCaveMode caves = FarCaveMode::BandLimited,
+             FarVolumeNumericProfile numeric = FarVolumeNumericProfile::RawFloat) {
     auto wanted = Wanted(key);
+    wanted.identity.cave_policy = static_cast<std::uint8_t>(caves);
     wanted.identity.bake_generation = wanted.identity.span_generation = generation;
     wanted.intent.extra_span = FarVolumeCoverageSpan{min_y, max_y};
     FarFrozenCaptureSource source;
     source.pristine = Authority(wanted, drawable);
+    source.pristine.numeric = numeric;
     if (solid)
         source.pristine.density = [](const auto&, float, std::uint32_t, FarCaveMode) {
             return FarVolumeSample{-3, 7};
@@ -818,7 +823,7 @@ FarHandoffTileInput HandoffInput(const std::shared_ptr<FarVolumeTierMemory>& mem
     auto pool = std::shared_ptr<FarVolumeMemoryPool>(memory, memory->Pool(key.tier));
     std::shared_ptr<const FarFrozenObservation> image;
     const auto error = CaptureFarVolumeObservation(
-        request, source, {1, 100'000, 2'000'000, 100'000, 32ULL * 1024 * 1024}, pool, image);
+        request, source, {1, 100'000, 20'000'000, 100'000, 32ULL * 1024 * 1024}, pool, image);
     if (failure)
         *failure = error;
     else
@@ -1724,26 +1729,47 @@ TEST(FarVolumeHandoff, ServingTargetUnionExhaustionIsTransactional) {
     }
 }
 
-class FarVolumeHandoffTraversal : public ::testing::TestWithParam<std::tuple<std::uint8_t, bool>> {
-};
+class FarVolumeHandoffTraversal
+    : public ::testing::TestWithParam<
+          std::tuple<std::uint8_t, bool, std::size_t, FarCaveMode, FarVolumeNumericProfile>> {};
 TEST_P(FarVolumeHandoffTraversal, ReusesRetiredSlotsBeyondCapacityWithoutResettingPublication) {
-    const auto [tier, publish] = GetParam();
+    const auto [tier, publish, capacity, caves, numeric] = GetParam();
     JobSystem jobs;
     jobs.startup(1);
     auto memory = std::make_shared<FarVolumeTierMemory>(Budgets());
     auto limits = Limits();
-    limits.entry_slots.fill(2);
+    limits.entry_slots.fill(capacity);
     FarVolumeHandoff owner(jobs, *memory, limits);
     std::size_t calls = 0;
-    const auto fallback = HandoffInput(memory, {5, 0, 0}, 1, false);
+    const auto input = [&](FarTileKey key) {
+        return HandoffInput(memory,
+                            key,
+                            1,
+                            false,
+                            -256,
+                            64,
+                            false,
+                            false,
+                            nullptr,
+                            false,
+                            FarFrozenUse::Committed,
+                            caves,
+                            numeric);
+    };
+    const auto fallback = input({5, 0, 0});
+    ASSERT_TRUE(fallback.observation);
     // Each tier traverses four times its descriptor capacity, including negative
     // keys and repeated reuse of hash buckets. Captures stay at one generation.
-    for (std::uint64_t serial = 1; serial <= 8; ++serial) {
+    for (std::uint64_t serial = 1; serial <= 4 * capacity; ++serial) {
+        SCOPED_TRACE(serial);
         const FarTileKey key{tier, static_cast<std::int64_t>(serial) - 4, 0};
-        const auto current = HandoffInput(memory, key, 1, false);
+        const auto current = input(key);
+        ASSERT_TRUE(current.observation);
         const std::array inputs{current, fallback};
         auto manifest = HandoffManifest(serial, std::span(inputs).first(tier == 5 ? 1 : 2));
         manifest.committed_generation = 1;
+        manifest.caves = caves;
+        manifest.numeric = numeric;
         const auto previous = owner.State();
         if (serial > 1) {
             // Refusals when reclamation is needed must not retire old entries.
@@ -1759,6 +1785,15 @@ TEST_P(FarVolumeHandoffTraversal, ReusesRetiredSlotsBeyondCapacityWithoutResetti
             EXPECT_FALSE(owner.StageTarget(invalid));
             invalid = manifest;
             invalid.committed_generation = 0;
+            EXPECT_FALSE(owner.StageTarget(invalid));
+            invalid = manifest;
+            invalid.caves = caves == FarCaveMode::BandLimited ? FarCaveMode::BoxFiltered
+                                                              : FarCaveMode::BandLimited;
+            EXPECT_FALSE(owner.StageTarget(invalid));
+            invalid = manifest;
+            invalid.numeric = numeric == FarVolumeNumericProfile::RawFloat
+                                  ? FarVolumeNumericProfile::LegacySigned16
+                                  : FarVolumeNumericProfile::RawFloat;
             EXPECT_FALSE(owner.StageTarget(invalid));
             EXPECT_EQ(owner.State().target_serial, previous.target_serial);
             EXPECT_EQ(owner.State().serving_serial, previous.serving_serial);
@@ -1790,16 +1825,23 @@ TEST_P(FarVolumeHandoffTraversal, ReusesRetiredSlotsBeyondCapacityWithoutResetti
     owner.CancelAndDrain();
     EXPECT_EQ(owner.State().target_serial, 0u);
     auto rebound = HandoffManifest(1, std::span(&fallback, 1));
+    rebound.caves = caves;
+    rebound.numeric = numeric;
     ASSERT_TRUE(owner.StageTarget(rebound));
 }
-INSTANTIATE_TEST_SUITE_P(AllTiers,
-                         FarVolumeHandoffTraversal,
-                         ::testing::Combine(::testing::Values(std::uint8_t{1},
-                                                              std::uint8_t{2},
-                                                              std::uint8_t{3},
-                                                              std::uint8_t{4},
-                                                              std::uint8_t{5}),
-                                            ::testing::Bool()));
+INSTANTIATE_TEST_SUITE_P(
+    AllTiers,
+    FarVolumeHandoffTraversal,
+    ::testing::Combine(::testing::Values(std::uint8_t{1},
+                                         std::uint8_t{2},
+                                         std::uint8_t{3},
+                                         std::uint8_t{4},
+                                         std::uint8_t{5}),
+                       ::testing::Bool(),
+                       ::testing::Values(std::size_t{2}, std::size_t{3}, std::size_t{6}),
+                       ::testing::Values(FarCaveMode::BandLimited, FarCaveMode::BoxFiltered),
+                       ::testing::Values(FarVolumeNumericProfile::RawFloat,
+                                         FarVolumeNumericProfile::LegacySigned16)));
 
 TEST(FarVolumeHandoff, ReclamationPreservesCollidingIncomingKeysAndRetainedSpanHistory) {
     JobSystem jobs;
