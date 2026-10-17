@@ -1444,7 +1444,8 @@ public:
         return m_failure_reason;
     }
 
-    // Sends a clean Bye on both ends and tears down the host world. Idempotent.
+    // Sends Bye and drains both ends in bounded batches. Repeated calls continue
+    // pending closure; a clean artifact requires both session ends to terminate.
     void Disconnect();
 
     // Writes the runtime artifact (schema luminumbra.networked_session.v1) and
