@@ -594,5 +594,8 @@ the default `OFF` setting it adds no profiling definitions or dependencies.
 
 Completed GPU counts are only exposed with readback active and carry their
 source generation (which can precede this frame's rebuild); CPU fallback counts
-are available directly. The frame scan similarly writes a null instance count
-when unavailable, and the overlay labels capacity explicitly.
+are available directly. Frame scans use `luminumbra.frame_scan.v2`:
+`foliage.instances` is a nonnegative integer when known (including zero), or
+`null` when unavailable. Readers must preserve unknown counts rather than
+coercing them to zero. `foliage.instance_capacity` is storage capacity, never a
+substitute count. The overlay labels capacity explicitly.
