@@ -138,7 +138,9 @@ def ambient_receipt(path):
             require(len(lines) <= 1, "duplicate receipt lines in one representation")
             values.extend(lines)
         if values:
-            require(not any(child.tag in ("failure", "error", "skipped") for child in testcase), "ambient testcase failed or skipped")
+            require(testcase.get("status") in (None, "run") and
+                    not any(child.tag in ("failure", "error", "skipped") for child in testcase),
+                    "ambient testcase failed, skipped or unevaluated")
             require(testcase.get("name", "").endswith("AmbientDeterminismReceipt.EmitsConstructorAndEvolvedHashes"), "receipt from an unexpected testcase")
             require(len(set(values)) == 1, "conflicting ambient representations")
             producers.append(values[0])

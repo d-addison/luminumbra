@@ -87,6 +87,7 @@ def run(directory):
                                check=True, capture_output=True, text=True)
     current = [test["name"] for test in json.loads(discovery.stdout)["tests"]]
     require(current == planned, "execution CTest roster or ordering differs from planned inventory")
+    # CTest -I accepts a file whose first line is Start,End,Stride,test#,... (ctest(1)).
     return subprocess.run([*command, "--no-tests=error", "-I", str(directory / "ctest.shard-index.txt"),
                            "--parallel", "2", "--timeout", "300", "--output-junit", "ctest.junit.xml"]).returncode
 
@@ -108,8 +109,9 @@ def merge(directory, output):
         require(names and all(names), f"shard {shard} ran zero tests or unnamed tests")
         require(len(names) == len(set(names)), f"shard {shard} contains duplicate tests")
         require(not observed.intersection(names), "tests ran in both shards")
-        require(not any(case.find(tag) is not None for case in cases
-                        for tag in ("failure", "error", "skipped")), "shard has failed or unevaluated tests")
+        require(not any(case.get("status") not in (None, "run") or
+                        any(case.find(tag) is not None for tag in ("failure", "error", "skipped"))
+                        for case in cases), "shard has failed or unevaluated tests")
         observed.update(names)
         heavy_counts.append(sum("SimBudgetWorldParity." in name for name in names))
         if root.tag == "testsuite":
