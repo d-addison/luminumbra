@@ -9,6 +9,18 @@
 namespace Luminumbra::Rendering {
 
 namespace {
+// GL has a finite set of sticky error flags. Drain them before any mapped
+// write; no GL operation is permitted between the two copies and publication.
+bool pool_gl_error() {
+    bool failed = false;
+    for (unsigned flag = 0; flag < 8; ++flag) {
+        if (glGetError() == GL_NO_ERROR)
+            break;
+        failed = true;
+    }
+    return failed;
+}
+
 bool is_valid_gl_object_name(GLenum identifier, GLuint name) {
     switch (identifier) {
         case GL_BUFFER:
@@ -84,15 +96,20 @@ void ChunkGeometryPool::release_handle(u32 handle) {
     m_free_handles.push_back(handle);
 }
 
-u32 ChunkGeometryPool::add_block(u32 min_vertices, u32 min_indices, const char* label_seed) {
+u32 ChunkGeometryPool::add_block(u32 min_vertices,
+                                 u32 min_indices,
+                                 const char* label_seed,
+                                 bool& capacity_refused) {
     Block block;
     block.vertex_capacity = std::max(kPoolBlockVertexCapacity, round_up_pool(min_vertices));
     block.index_capacity = std::max(kPoolBlockIndexCapacity, round_up_pool(min_indices));
     std::size_t checked_bytes = 0;
     if (!mesh_upload_bytes(
             block.vertex_capacity, sizeof(VoxelVertex), block.index_capacity, checked_bytes) ||
-        checked_bytes > kMaxStorageBytes)
+        checked_bytes > kMaxStorageBytes) {
+        capacity_refused = true;
         return kInvalid;
+    }
 
     // At most kMaxBlocks candidates. Empty blocks may be replaced in place;
     // never compact the vector or change another allocation's block index.
@@ -109,8 +126,10 @@ u32 ChunkGeometryPool::add_block(u32 min_vertices, u32 min_indices, const char* 
             static_cast<std::size_t>(candidate.index_capacity) * sizeof(u32);
     }
     if ((block_index == m_blocks.size() && m_blocks.size() >= kMaxBlocks) ||
-        checked_bytes > kMaxStorageBytes - m_storage_bytes + reclaimable_bytes)
+        checked_bytes > kMaxStorageBytes - m_storage_bytes + reclaimable_bytes) {
+        capacity_refused = true;
         return kInvalid;
+    }
     if (block_index < m_blocks.size())
         release_block(m_blocks[block_index]);
     for (Block& candidate : m_blocks) {
@@ -173,6 +192,14 @@ u32 ChunkGeometryPool::add_block(u32 min_vertices, u32 min_indices, const char* 
     glBindVertexArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 
+    if (label_seed != nullptr) {
+        const std::string base =
+            std::string("terrain.pool.") + label_seed + "." + std::to_string(block_index);
+        label_gl_object(GL_VERTEX_ARRAY, block.vao, base + ".vao");
+        label_gl_object(GL_BUFFER, block.vbo, base + ".vbo");
+        label_gl_object(GL_BUFFER, block.ebo, base + ".ebo");
+    }
+
     // A failed mapping must never enter the pool or reach a memcpy. Release
     // successful partial mappings and all object names before retrying later.
     const auto allocation_error = glGetError();
@@ -196,14 +223,6 @@ u32 ChunkGeometryPool::add_block(u32 min_vertices, u32 min_indices, const char* 
         // GL exposes a finite set of error flags; each read clears one.
         for (unsigned error = 0; error < 8 && glGetError() != GL_NO_ERROR; ++error) {}
         return kInvalid;
-    }
-
-    if (label_seed != nullptr) {
-        const std::string base =
-            std::string("terrain.pool.") + label_seed + "." + std::to_string(block_index);
-        label_gl_object(GL_VERTEX_ARRAY, block.vao, base + ".vao");
-        label_gl_object(GL_BUFFER, block.vbo, base + ".vbo");
-        label_gl_object(GL_BUFFER, block.ebo, base + ".ebo");
     }
 
     if (block_index == m_blocks.size())
@@ -301,15 +320,39 @@ u32 ChunkGeometryPool::allocate(const VoxelVertex* vertices,
                                 const u32* indices,
                                 u32 index_count,
                                 const char* label_seed) {
+    bool capacity_refused = false;
+    return allocate_with_reclaim(vertices,
+                                 vertex_count,
+                                 indices,
+                                 index_count,
+                                 label_seed,
+                                 kTerrainUploadLimits.count,
+                                 capacity_refused);
+}
+
+u32 ChunkGeometryPool::allocate_with_reclaim(const VoxelVertex* vertices,
+                                             u32 vertex_count,
+                                             const u32* indices,
+                                             u32 index_count,
+                                             const char* label_seed,
+                                             std::size_t visits,
+                                             bool& capacity_refused) {
+    capacity_refused = false;
     std::size_t checked_bytes = 0;
     if (!vertices || !indices || vertex_count == 0 || index_count == 0 ||
         vertex_count > std::numeric_limits<u32>::max() - (kPoolSlotAlign - 1u) ||
         index_count > std::numeric_limits<u32>::max() - (kPoolSlotAlign - 1u) ||
         !mesh_upload_bytes(vertex_count, sizeof(VoxelVertex), index_count, checked_bytes))
         return kInvalid;
-    reclaim();
-    if (m_free_handles.empty() && m_allocations.size() >= kMaxAllocations)
+    if (pool_gl_error())
         return kInvalid;
+    reclaim(visits);
+    if (pool_gl_error())
+        return kInvalid;
+    if (m_free_handles.empty() && m_allocations.size() >= kMaxAllocations) {
+        capacity_refused = true;
+        return kInvalid;
+    }
     // Storage and handle caps include retired slices. Pressure fails closed;
     // the caller retains its resident and retries through the upload budget.
 
@@ -328,7 +371,7 @@ u32 ChunkGeometryPool::allocate(const VoxelVertex* vertices,
         }
     }
     if (block_index == kInvalid) {
-        block_index = add_block(vertex_count, index_count, label_seed);
+        block_index = add_block(vertex_count, index_count, label_seed, capacity_refused);
         if (block_index == kInvalid)
             return kInvalid;
         if (!reserve_in_block(m_blocks[block_index],
@@ -376,12 +419,127 @@ u32 ChunkGeometryPool::update(u32 handle,
     if (handle == kInvalid || handle >= m_allocations.size() || !m_allocations[handle].live) {
         return allocate(vertices, vertex_count, indices, index_count, label_seed);
     }
-    // Keep the old slice resident until its replacement has been allocated.
-    return replace_upload(
-        handle,
-        kInvalid,
-        [&] { return allocate(vertices, vertex_count, indices, index_count, label_seed); },
-        [this](u32 resident) { free(resident); });
+    // Leave one of the eight zero-time polls for pressure reuse. Graphics and
+    // input failures must never fall through to a mapped overwrite.
+    bool capacity_refused = false;
+    const u32 replacement = allocate_with_reclaim(vertices,
+                                                  vertex_count,
+                                                  indices,
+                                                  index_count,
+                                                  label_seed,
+                                                  kTerrainUploadLimits.count - 1,
+                                                  capacity_refused);
+    if (replacement == kInvalid) {
+        return capacity_refused
+                   ? reuse_completed(handle, vertices, vertex_count, indices, index_count)
+                   : kInvalid;
+    }
+
+    // A retirement fence is part of the transaction too. On failure, discard
+    // only the unpublished slice; it has never had a GPU consumer.
+    const auto block_index = m_allocations[handle].block_index;
+    GLsync completion =
+        m_blocks[block_index].submitted ? glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0) : nullptr;
+    const bool graphics_failed = pool_gl_error();
+    if (graphics_failed || (m_blocks[block_index].submitted && !completion)) {
+        if (completion)
+            glDeleteSync(completion);
+        m_allocations[replacement].live = false;
+        --m_live_count;
+        recycle(replacement);
+        return kInvalid;
+    }
+    m_allocations[handle].live = false;
+    --m_live_count;
+    if (completion)
+        m_retired.push_back({handle, completion});
+    else
+        recycle(handle);
+    return replacement;
+}
+
+void ChunkGeometryPool::fence_reuse(Block& block) {
+    if (block.reuse_completion)
+        glDeleteSync(block.reuse_completion);
+    block.reuse_completion = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    const bool graphics_failed = pool_gl_error();
+    block.reuse_quarantined = graphics_failed || !block.reuse_completion;
+}
+
+bool ChunkGeometryPool::complete_for_reuse(Block& block) {
+    if (block.reuse_quarantined)
+        return false;
+    if (!block.submitted)
+        return !pool_gl_error();
+    if (!block.reuse_requested) {
+        block.reuse_requested = true;
+        fence_reuse(block);
+    }
+    if (block.reuse_quarantined)
+        return false;
+    const GLenum status = glClientWaitSync(block.reuse_completion, GL_SYNC_FLUSH_COMMANDS_BIT, 0);
+    const bool graphics_failed = pool_gl_error();
+    if (graphics_failed || status == GL_WAIT_FAILED) {
+        block.reuse_quarantined = true;
+        return false;
+    }
+    if (status != GL_ALREADY_SIGNALED && status != GL_CONDITION_SATISFIED)
+        return false;
+    glDeleteSync(block.reuse_completion);
+    block.reuse_completion = nullptr;
+    block.reuse_requested = false;
+    if (pool_gl_error()) {
+        block.reuse_quarantined = true;
+        return false;
+    }
+    return true;
+}
+
+u32 ChunkGeometryPool::reuse_completed(u32 handle,
+                                       const VoxelVertex* vertices,
+                                       u32 vertex_count,
+                                       const u32* indices,
+                                       u32 index_count) {
+    Allocation& alloc = m_allocations[handle];
+    Block& block = m_blocks[alloc.block_index];
+    const u32 vertex_slot = std::max(alloc.vertex_slot, round_up_pool(vertex_count));
+    const u32 index_slot = std::max(alloc.index_slot, round_up_pool(index_count));
+    // A slot can extend only into its adjacent unused bump tail. Plan BOTH
+    // capacities before polling or writing; no other live/retired slot moves.
+    const auto fits = [](u32 offset, u32 old_slot, u32 new_slot, u32 frontier, u32 capacity) {
+        return new_slot == old_slot ||
+               (offset <= capacity && old_slot <= capacity - offset &&
+                offset + old_slot == frontier && new_slot <= capacity - offset);
+    };
+    if (!fits(alloc.vertex_offset,
+              alloc.vertex_slot,
+              vertex_slot,
+              block.vertex_high_water,
+              block.vertex_capacity) ||
+        !fits(alloc.index_offset,
+              alloc.index_slot,
+              index_slot,
+              block.index_high_water,
+              block.index_capacity) ||
+        !complete_for_reuse(block))
+        return kInvalid;
+
+    // All fallible GL work is finished. These coherent mapped stores and the
+    // record update run on the context thread, with no intervening GL calls,
+    // allocation, callback or consumer. Thus neither buffer can fail alone.
+    std::memcpy(block.vertex_ptr + alloc.vertex_offset,
+                vertices,
+                static_cast<std::size_t>(vertex_count) * sizeof(VoxelVertex));
+    std::memcpy(block.index_ptr + alloc.index_offset,
+                indices,
+                static_cast<std::size_t>(index_count) * sizeof(u32));
+    block.vertex_high_water += vertex_slot - alloc.vertex_slot;
+    block.index_high_water += index_slot - alloc.index_slot;
+    alloc.vertex_slot = vertex_slot;
+    alloc.index_slot = index_slot;
+    alloc.vertex_count = vertex_count;
+    alloc.index_count = index_count;
+    return handle;
 }
 
 void ChunkGeometryPool::free(u32 handle) {
@@ -401,13 +559,22 @@ void ChunkGeometryPool::free(u32 handle) {
 }
 
 void ChunkGeometryPool::mark_submitted(u32 block_index) {
-    m_blocks[block_index].submitted = true;
+    Block& block = m_blocks[block_index];
+    block.submitted = true;
+    // Replay/shadow/MDI consumers arriving after a refused update invalidate
+    // its earlier completion. Keep only the final consumer's fence (<=16).
+    if (block.reuse_requested && !block.reuse_quarantined)
+        fence_reuse(block);
 }
 
 void ChunkGeometryPool::reclaim() {
+    reclaim(kTerrainUploadLimits.count);
+}
+
+void ChunkGeometryPool::reclaim(std::size_t limit) {
     // <= eight zero-time polls per upload attempt, charged to its existing
     // preparation/work budget; no wait, world scan or unbounded retirement pass.
-    const auto visits = std::min(kTerrainUploadLimits.count, m_retired.size());
+    const auto visits = std::min(limit, m_retired.size());
     for (std::size_t count = 0; count < visits; ++count) {
         const auto retired = m_retired.front();
         m_retired.pop_front();
@@ -433,6 +600,11 @@ void ChunkGeometryPool::recycle(u32 handle) {
         block.index_high_water = 0;
         block.free_vertex_slices.clear();
         block.free_index_slices.clear();
+        if (block.reuse_completion)
+            glDeleteSync(block.reuse_completion);
+        block.reuse_completion = nullptr;
+        block.reuse_requested = false;
+        block.reuse_quarantined = false;
     } else {
         block.free_vertex_slices.emplace_back(alloc.vertex_offset, alloc.vertex_slot);
         block.free_index_slices.emplace_back(alloc.index_offset, alloc.index_slot);
@@ -446,6 +618,8 @@ void ChunkGeometryPool::release_block(Block& block) {
     // Keep the vector slot for stable indices.
     m_storage_bytes -= static_cast<std::size_t>(block.vertex_capacity) * sizeof(VoxelVertex) +
                        static_cast<std::size_t>(block.index_capacity) * sizeof(u32);
+    if (block.reuse_completion)
+        glDeleteSync(block.reuse_completion);
     glBindVertexArray(0);
     if (block.vao)
         glDeleteVertexArrays(1, &block.vao);

@@ -94,7 +94,9 @@ class UploadBudgetWiring(unittest.TestCase):
     def test_retention_uses_pool_transaction_and_water_staging(self):
         pool = read(RENDERING / "passes/ChunkGeometryPool.cpp")
         update = body(pool, "u32 ChunkGeometryPool::update(")
-        self.assertRegex(update, r"replace_upload\(\s*handle,\s*kInvalid,")
+        self.assertLess(update.index("allocate_with_reclaim("),
+                        update.index("m_allocations[handle].live = false"))
+        self.assertIn("capacity_refused ? reuse_completed(", compact(update))
         water = body(self.pipeline, "void RenderPipeline::upload_water_mesh(")
         self.assertIn("WaterRenderData data;", water)
         self.assertLess(water.index("if (!vertex_uploaded"), water.index("it->second = data;"))
@@ -181,7 +183,7 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("FailedPoolBlock failure", tests)
         self.assertIn("WetToDryAdoptsRemovalInBothWaterModes", tests)
         pool = read(RENDERING / "passes/ChunkGeometryPool.cpp")
-        allocation = body(pool, "u32 ChunkGeometryPool::allocate(")
+        allocation = body(pool, "u32 ChunkGeometryPool::allocate_with_reclaim(")
         self.assertLess(allocation.index("block_index == kInvalid)\n            return kInvalid"),
                         allocation.index("std::memcpy("))
 
@@ -191,7 +193,10 @@ class UploadBudgetWiring(unittest.TestCase):
         update = body(pool, "u32 ChunkGeometryPool::update(")
         self.assertNotIn("std::memcpy", update)
         self.assertNotIn("return handle;", update)
-        self.assertIn("return replace_upload(", update)
+        self.assertIn("allocate_with_reclaim(", update)
+        self.assertIn("capacity_refused ? reuse_completed(", compact(update))
+        self.assertLess(update.index("if (graphics_failed ||"),
+                        update.index("m_allocations[handle].live = false;"))
         release = compact(body(pool, "void ChunkGeometryPool::free("))
         self.assertIn("alloc.live = false;", release)
         self.assertEqual(release.count("recycle(handle)"), 1)
@@ -200,8 +205,10 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("if (!m_blocks[alloc.block_index].submitted)", release)
         self.assertIn("m_retired.push_back({handle, glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0)})", release)
         self.assertNotIn("free_vertex_slices", release)
-        reclaim = compact(body(pool, "void ChunkGeometryPool::reclaim("))
-        self.assertIn("std::min(kTerrainUploadLimits.count, m_retired.size())", reclaim)
+        self.assertIn("reclaim(kTerrainUploadLimits.count)",
+                      body(pool, "void ChunkGeometryPool::reclaim()"))
+        reclaim = compact(body(pool, "void ChunkGeometryPool::reclaim(std::size_t limit)"))
+        self.assertIn("std::min(limit, m_retired.size())", reclaim)
         self.assertIn("count < visits", reclaim)
         self.assertIn("if (!retired.completion) { m_retired.push_back(retired); continue; }", reclaim)
         self.assertIn("glClientWaitSync(retired.completion, GL_SYNC_FLUSH_COMMANDS_BIT, 0)", reclaim)
@@ -209,8 +216,8 @@ class UploadBudgetWiring(unittest.TestCase):
                       "{ m_retired.push_back(retired); continue; }", reclaim)
         self.assertLess(reclaim.index("GL_CONDITION_SATISFIED"), reclaim.index("recycle(retired.handle)"))
         self.assertIn("m_retired.pop_front()", reclaim)
-        allocation = compact(body(pool, "u32 ChunkGeometryPool::allocate("))
-        self.assertIn("reclaim();", allocation)
+        allocation = compact(body(pool, "u32 ChunkGeometryPool::allocate_with_reclaim("))
+        self.assertIn("reclaim(visits);", allocation)
         self.assertIn("m_allocations.size() >= kMaxAllocations", allocation)
         add = compact(body(pool, "u32 ChunkGeometryPool::add_block("))
         self.assertIn("m_blocks.size() >= kMaxBlocks", add)
@@ -248,7 +255,7 @@ class UploadBudgetWiring(unittest.TestCase):
 
     def test_pool_retirement_visits_are_bounded_and_keep_quarantined_handles(self):
         pool = read(RENDERING / "passes/ChunkGeometryPool.cpp")
-        reclaim = compact(body(pool, "void ChunkGeometryPool::reclaim("))
+        reclaim = compact(body(pool, "void ChunkGeometryPool::reclaim(std::size_t limit)"))
         self.assertEqual(reclaim.count("glClientWaitSync("), 1)
         self.assertEqual(reclaim.count("for ("), 1)
         self.assertNotIn("while (", reclaim)
@@ -275,12 +282,13 @@ class UploadBudgetWiring(unittest.TestCase):
 
     def test_reclaimed_blocks_reset_only_after_all_consumers_release(self):
         pool = read(RENDERING / "passes/ChunkGeometryPool.cpp")
-        allocation = compact(body(pool, "u32 ChunkGeometryPool::allocate("))
+        allocation = compact(body(pool, "u32 ChunkGeometryPool::allocate_with_reclaim("))
         recycle = compact(body(pool, "void ChunkGeometryPool::recycle("))
         self.assertIn("++block.allocation_count;", allocation)
         self.assertIn("if (--block.allocation_count == 0) { block.vertex_high_water = 0; "
                       "block.index_high_water = 0; block.free_vertex_slices.clear(); "
-                      "block.free_index_slices.clear(); } else {", recycle)
+                      "block.free_index_slices.clear();", recycle)
+        self.assertIn("} else { block.free_vertex_slices.emplace_back", recycle)
         self.assertEqual(recycle.count("--block.allocation_count"), 1)
         self.assertLess(recycle.index("--block.allocation_count"),
                         recycle.index("release_handle(handle)"))
@@ -314,6 +322,91 @@ class UploadBudgetWiring(unittest.TestCase):
                          "block.index_high_water += i_slot"):
             self.assertGreater(reserve.index(mutation), decision)
         self.assertNotIn("emplace_back", reserve)
+
+    def test_pool_capacity_fallback_observes_final_consumer_before_both_writes(self):
+        pool = read(RENDERING / "passes/ChunkGeometryPool.cpp")
+        update = compact(body(pool, "u32 ChunkGeometryPool::update("))
+        self.assertIn("label_seed, kTerrainUploadLimits.count - 1, capacity_refused)", update)
+        self.assertIn("return capacity_refused ? reuse_completed(handle, vertices, vertex_count, "
+                      "indices, index_count) : kInvalid;", update)
+        allocation = compact(body(pool, "u32 ChunkGeometryPool::allocate_with_reclaim("))
+        self.assertEqual(allocation.count("pool_gl_error()"), 2)
+        self.assertLess(allocation.index("pool_gl_error()"), allocation.index("reclaim(visits)"))
+        self.assertLess(allocation.rindex("pool_gl_error()"), allocation.index("reserve_in_block("))
+        self.assertEqual(allocation.count("if (pool_gl_error()) return kInvalid;"), 2)
+        reuse = compact(body(pool, "u32 ChunkGeometryPool::reuse_completed("))
+        self.assertIn("new_slot == old_slot ||", reuse)
+        self.assertIn("offset + old_slot == frontier && new_slot <= capacity - offset", reuse)
+        for decision in ("fits(alloc.vertex_offset,", "fits(alloc.index_offset,",
+                         "!complete_for_reuse(block)"):
+            self.assertIn(decision, reuse)
+            self.assertLess(reuse.index(decision), reuse.index("std::memcpy("))
+        self.assertIn("block.vertex_capacity) || !fits(alloc.index_offset,", reuse)
+        self.assertIn("block.index_capacity) || !complete_for_reuse(block)", reuse)
+        self.assertEqual(reuse.count("std::memcpy("), 2)
+        for mutation in ("alloc.vertex_slot =", "alloc.index_slot =", "alloc.vertex_count =",
+                         "alloc.index_count =", "block.vertex_high_water +=",
+                         "block.index_high_water +="):
+            self.assertLess(reuse.rindex("std::memcpy("), reuse.index(mutation))
+        # No fallible operation is allowed between the first write and publication.
+        commit = reuse[reuse.index("std::memcpy("):]
+        self.assertNotRegex(commit, r"\bgl[A-Z]|return kInvalid|allocate\(|push_back|emplace_back")
+        self.assertIn("alloc.vertex_count = vertex_count;", commit)
+        self.assertIn("alloc.index_count = index_count;", commit)
+        self.assertIn("return handle;", commit)
+        completion = compact(body(pool, "bool ChunkGeometryPool::complete_for_reuse("))
+        self.assertIn("if (block.reuse_quarantined) return false;", completion)
+        self.assertIn("glClientWaitSync(block.reuse_completion, GL_SYNC_FLUSH_COMMANDS_BIT, 0)",
+                      completion)
+        self.assertIn("graphics_failed || status == GL_WAIT_FAILED", completion)
+        self.assertIn("status != GL_ALREADY_SIGNALED && status != GL_CONDITION_SATISFIED", completion)
+        self.assertEqual(completion.count("glClientWaitSync("), 1)
+        self.assertLess(completion.index("glDeleteSync("), completion.rindex("pool_gl_error()"))
+        self.assertLess(completion.rindex("pool_gl_error()"), completion.rindex("return true;"))
+        submitted = compact(body(pool, "void ChunkGeometryPool::mark_submitted("))
+        self.assertIn("if (block.reuse_requested && !block.reuse_quarantined) fence_reuse(block)",
+                      submitted)
+        fence = compact(body(pool, "void ChunkGeometryPool::fence_reuse("))
+        self.assertIn("glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0)", fence)
+        self.assertIn("block.reuse_quarantined = graphics_failed || !block.reuse_completion", fence)
+        recycle = compact(body(pool, "void ChunkGeometryPool::recycle("))
+        self.assertLess(recycle.index("--block.allocation_count == 0"),
+                        recycle.index("block.reuse_quarantined = false"))
+        release = compact(body(pool, "void ChunkGeometryPool::release_block("))
+        self.assertIn("glDeleteSync(block.reuse_completion)", release)
+
+    def test_pool_replacement_fence_failure_discards_only_unpublished_slice(self):
+        pool = read(RENDERING / "passes/ChunkGeometryPool.cpp")
+        update = compact(body(pool, "u32 ChunkGeometryPool::update("))
+        self.assertIn("if (graphics_failed ||", update)
+        failure = body(update, "if (graphics_failed ||")
+        self.assertIn("m_allocations[replacement].live = false", failure)
+        self.assertIn("recycle(replacement)", failure)
+        self.assertNotIn("recycle(handle)", failure)
+        self.assertNotIn("m_allocations[handle].live = false", failure)
+        self.assertIn("return kInvalid;", failure)
+        self.assertLess(update.index("pool_gl_error()"),
+                        update.index("m_allocations[handle].live = false"))
+        native = read(ROOT / "test/rendering/FarWorldWaterGl_test.cpp")
+        for name in ("FullPoolLiveResidentReplacesRepeatedlyAfterFinalConsumerCompletion",
+                     "FullPoolDualTailGrowthAndOversizedRefusalsAreTransactional",
+                     "FullPoolMissingCompletionKeepsResidentDrawable",
+                     "FullPoolFailedCompletionKeepsResidentDrawable",
+                     "FullPoolFenceErrorKeepsResidentDrawable",
+                     "FullPoolWaitErrorKeepsResidentDrawable",
+                     "FullPoolCompletionCleanupErrorKeepsResidentDrawable",
+                     "FullPoolRetirementAndResidentReuseShareEightPolls",
+                     "ReplacementRetirementFailureKeepsBothResidentStoresAndVersion",
+                     "HandleCapStillAdmitsCompletedResidentReplacement",
+                     "WithinSlotBlockErrorsNeverFallThroughToResidentReuse",
+                     "ExistingSliceInputAndGlErrorsNeverPublishReplacement"):
+            self.assertIn("TEST_F(FarWorldWaterGl, " + name + ")", native)
+        fill = body(native, "void Fill(u32 tail = 0)")
+        self.assertIn("ASSERT_EQ(pool.storage_bytes(), ChunkGeometryPool::kMaxStorageBytes)", fill)
+        self.assertIn("index_capacity * 2 - tail", fill)
+        self.assertIn("PoolDrawableDigest(full.pool, handle)", native)
+        self.assertIn("EXPECT_EQ(completion.polled, latest)", native)
+        self.assertIn("EXPECT_EQ(completion.polls - polls, 8u)", native)
 
     def test_deferred_terrain_owns_only_the_valid_presented_resident(self):
         presented = compact(body(self.header, "void SetPresentedTerrainUpload("))

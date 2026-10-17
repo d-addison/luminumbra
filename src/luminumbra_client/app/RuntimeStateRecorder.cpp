@@ -115,9 +115,9 @@ bool MemoryWatermarkExceeded(const RuntimeScenarioConfig& config,
 }
 
 RuntimeStateRecorder::RuntimeStateRecorder(RuntimeScenarioConfig config,
-                                           std::unique_ptr<Luminumbra::Rendering::Camera>& g_camera)
+                                           std::unique_ptr<Luminumbra::Rendering::Camera>& camera)
     : m_config(std::move(config))
-    , g_camera(g_camera)
+    , g_camera(camera)
     , m_started_at(std::chrono::steady_clock::now()) {
     std::error_code ec;
     std::filesystem::create_directories(m_config.artifact_dir, ec);
@@ -492,11 +492,11 @@ RuntimeScenarioFrameRecorder::RuntimeScenarioFrameRecorder(
     bool enabled,
     int coverage_radius,
     std::filesystem::path output_dir,
-    std::unique_ptr<Luminumbra::Rendering::Camera>& g_camera)
+    std::unique_ptr<Luminumbra::Rendering::Camera>& camera)
     : m_enabled(enabled)
     , m_coverage_radius(std::max(0, coverage_radius))
     , m_output_dir(std::move(output_dir))
-    , g_camera(g_camera)
+    , g_camera(camera)
     , m_started_at(std::chrono::steady_clock::now()) {}
 
 bool RuntimeScenarioFrameRecorder::enabled() const {

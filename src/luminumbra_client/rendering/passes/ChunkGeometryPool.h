@@ -64,6 +64,11 @@ public:
         // resetting frontiers or replacing this block's GL storage.
         std::size_t allocation_count = 0;
         bool submitted = false; // a draw may still consume this block
+        // Pressure reuse covers the latest consumer of the entire block. A
+        // missing/failed completion quarantines reuse, never resident bytes.
+        GLsync reuse_completion = nullptr;
+        bool reuse_requested = false;
+        bool reuse_quarantined = false;
         // Free slices returned by freed chunks, reused best-fit before bumping.
         std::vector<std::pair<u32, u32>> free_vertex_slices; // {offset, size}
         std::vector<std::pair<u32, u32>> free_index_slices;
@@ -80,9 +85,10 @@ public:
                  const u32* indices,
                  u32 index_count,
                  const char* label_seed);
-    // Always stages replacement geometry in a different slice. Coherent mapping
-    // does not permit overwriting bytes still consumed by a previous draw.
-    // Failure returns kInvalid and leaves the resident slice untouched.
+    // Stage in a different slice first. At capacity, reuse the resident only
+    // after observing completion of its final consumers, without waiting. Both
+    // buffers must fit their slots (or adjacent unused tails). Every refusal
+    // leaves drawable bytes, counts and the handle unchanged.
     u32 update(u32 handle,
                const VoxelVertex* vertices,
                u32 vertex_count,
@@ -137,6 +143,21 @@ public:
     }
 
 private:
+    u32 allocate_with_reclaim(const VoxelVertex* vertices,
+                              u32 vertex_count,
+                              const u32* indices,
+                              u32 index_count,
+                              const char* label_seed,
+                              std::size_t visits,
+                              bool& capacity_refused);
+    u32 reuse_completed(u32 handle,
+                        const VoxelVertex* vertices,
+                        u32 vertex_count,
+                        const u32* indices,
+                        u32 index_count);
+    bool complete_for_reuse(Block& block);
+    void fence_reuse(Block& block);
+    void reclaim(std::size_t limit);
     u32 acquire_handle();
     void release_handle(u32 handle);
     bool reserve_in_block(Block& block,
@@ -146,7 +167,8 @@ private:
                           u32& vertex_slot,
                           u32& index_offset,
                           u32& index_slot);
-    u32 add_block(u32 min_vertices, u32 min_indices, const char* label_seed);
+    u32
+    add_block(u32 min_vertices, u32 min_indices, const char* label_seed, bool& capacity_refused);
     void release_block(Block& block);
 
     struct Retired {
