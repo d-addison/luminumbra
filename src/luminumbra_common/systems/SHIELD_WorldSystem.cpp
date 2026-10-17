@@ -764,6 +764,10 @@ void SHIELD_WorldSystem::process_completed_promotion_jobs(bool force) {
             if (it == m_streaming_state.chunks.end() || it->second.get() != item.chunk.get()) {
                 continue;
             }
+            // Stage A reserved this LOD without starting a meshing job. Release
+            // that reservation at the main-thread handoff so the ordinary
+            // in-flight guard admits exactly one stage-B dispatch.
+            item.chunk->pending_lod.store(-1, std::memory_order_release);
             stage_b.push_back(
                 {item.chunk, item.lod_level, /*terrain_mesh_required=*/true, item.high_priority});
         }
@@ -5209,7 +5213,9 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
             copy_mirror(chunk->water_level_data, snapshot.water_level_data);
             copy_mirror(chunk->water_flow_data, snapshot.water_flow_data);
             copy_mirror(chunk->water_sim_terrain_height, snapshot.water_sim_terrain_height);
-            if (chunk->water_depth_mm.size() <= cells) {
+            // The mesher uses depth only for an exact grid; missing, partial
+            // and oversized grids all use the procedural-height fallback.
+            if (chunk->water_depth_mm.size() == cells) {
                 snapshot.water_depth_mm = chunk->water_depth_mm;
             }
             snapshot.has_water_sim.store(chunk->has_water_sim.load(std::memory_order_acquire),
@@ -5378,13 +5384,27 @@ bool SHIELD_WorldSystem::publish_front_meshing_batch(bool force) {
             // subsequent simulation ticks. Comparison is bounded by 32*32 cells;
             // malformed/oversized live grids cannot trigger an unbounded copy.
             const auto& snapshot = *job_chunk.scratch;
+            const int resolution =
+                snapshot.current_water_resolution.load(std::memory_order_acquire);
+            const auto cells =
+                resolution > 1 && resolution <= 32
+                    ? static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution)
+                    : 0u;
             const bool water_unchanged =
-                chunk->current_water_resolution.load(std::memory_order_acquire) ==
-                    snapshot.current_water_resolution.load(std::memory_order_acquire) &&
+                chunk->current_water_resolution.load(std::memory_order_acquire) == resolution &&
                 chunk->has_water_sim.load(std::memory_order_acquire) ==
                     snapshot.has_water_sim.load(std::memory_order_acquire) &&
-                chunk->water_depth_mm == snapshot.water_depth_mm &&
-                chunk->water_level_data == snapshot.water_level_data;
+                cells != 0u && snapshot.water_level_data.size() == cells &&
+                chunk->water_level_data.size() >= cells &&
+                std::equal(snapshot.water_level_data.begin(),
+                           snapshot.water_level_data.end(),
+                           chunk->water_level_data.begin()) &&
+                // Match depth availability as well as values. Unused tails
+                // and unavailable depth values cannot invalidate the mesh.
+                (chunk->water_depth_mm.size() == cells) == !snapshot.water_depth_mm.empty() &&
+                std::equal(snapshot.water_depth_mm.begin(),
+                           snapshot.water_depth_mm.end(),
+                           chunk->water_depth_mm.begin());
             chunk->water_mesh_generated.store(
                 water_unchanged && snapshot.water_mesh_generated.load(std::memory_order_acquire),
                 std::memory_order_release);

@@ -875,12 +875,24 @@
     {
       "id": "iss.483",
       "source": "issue #483",
-      "statement": "Asynchronous meshing captures bounded water and terrain inputs on the main thread. Pending initial meshes, terrain remeshes and water-only remeshes retain dispatch geometry while water simulation advances, including grid resizing, and subsequently mesh the newer water state. Publication rejects superseded chunk generations, mesh versions and voxel revisions; invalid water resolutions and partial surface grids are rejected before allocation. Malformed heightmaps retain the analytic coarse fallback.",
+      "statement": "Asynchronous meshing captures bounded water and terrain inputs on the main thread. Pending initial meshes, terrain remeshes and water-only remeshes retain dispatch geometry while water simulation advances, including grid resizing, and subsequently mesh the newer water state. Publication rejects superseded chunk generations, mesh versions and voxel revisions; invalid water resolutions and partial surface grids are rejected before allocation. Malformed heightmaps retain the analytic coarse fallback. Promotion reservations hand off to stage-B meshing exactly once for meshless and coarse chunks. Staleness compares only consumed level prefixes and exact-grid depth availability and values; ignored tails and unavailable depth do not queue repeated remeshes.",
       "status": "covered",
       "evidence": [
         {
           "kind": "ctest",
           "ref": "AsyncWaterMeshing.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.PromotionStageBPublishesExactlyOnce"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.UnusedWaterInputsDoNotQueueRepeatedRemeshes"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.PendingWaterSnapshotComparesOnlyConsumedInputs"
         }
       ]
     },
