@@ -524,6 +524,16 @@ struct LockstepAdmissionStatus {
     std::size_t replay_segments = 0;
 };
 
+// Allocation-free capacity query for one additional encoded peer frame.
+// Session admission uses the same check before decoding Input or Hash.
+[[nodiscard]] inline bool HasPeerRetentionCapacity(const LockstepAdmissionStatus& usage,
+                                                   std::size_t bytes) {
+    return usage.peer_inputs < usage.message_limit &&
+           usage.peer_hashes < usage.message_limit - usage.peer_inputs &&
+           usage.retained_bytes <= usage.byte_limit &&
+           bytes <= usage.byte_limit - usage.retained_bytes;
+}
+
 // The host side provides per-tick local inputs and applies the agreed input set. These
 // simulation callbacks and optional replay sink keep the session engine-generic.
 // (The headless server passes empty inputs and an apply that just steps the world.)
@@ -632,6 +642,8 @@ private:
 
     // Bounds use subtraction to avoid overflowing near the last representable tick.
     [[nodiscard]] bool IsWithinPeerLookahead(std::uint64_t tick) const;
+    [[nodiscard]] bool IsRetainedPeerCheckpoint(std::uint64_t tick) const;
+    [[nodiscard]] bool CanRetainPeerFrame(std::size_t bytes) const;
     bool ConfigureRetention(const HelloMsg& mine, const HelloMsg& peer);
     void PruneDiagnosticHistory();
     void PruneConfirmedPeerHashes();
@@ -692,6 +704,8 @@ private:
 
     // Only unconfirmed checkpoints plus the bounded diagnostic suffix are kept.
     std::map<std::uint64_t, std::shared_ptr<const HashMsg>> m_local_hashes;
+    // At most the checkpoint window plus both horizons of checkpoint lead,
+    // also subject to the shared peer message-count and encoded-byte budgets.
     std::map<std::uint64_t, PeerCheckpoint> m_peer_hashes;
 
     // Diagnostic suffix: at most kReceiveQueueFrameLimit ticks and
@@ -708,6 +722,7 @@ private:
     LockstepStatus m_status;
     std::string m_dump_path;
     std::optional<std::uint64_t> m_received_bye_tick;
+    std::optional<std::uint64_t> m_transport_close_admission_tick;
     std::uint64_t m_bye_admission_tick = 0;
     bool m_handshaken = false;
     bool m_disconnected = false; // local end issued/observed a disconnect

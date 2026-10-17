@@ -294,6 +294,195 @@ TEST(LockstepSessionTest, RejectsStaleAndFutureInputsAndHashesWithoutRetainingTh
     EXPECT_EQ(world.tick, 1u);
 }
 
+void ExpectTerminalReceiveFloodBounded(bool check_bytes) {
+    auto [local, peer] = net::MakeLoopbackPair();
+    RejectingTransport transport(*local);
+    auto config = MakeConfig(0, 1);
+    config.horizon_min = config.horizon_start = config.horizon_max = 1;
+    config.hash_cadence_ticks = 1;
+    config.max_frame_payload_bytes = check_bytes ? 29 : 128;
+    net::LockstepSession session(config, &transport, {});
+    ASSERT_TRUE(SendPeerHello(*peer, config));
+    ASSERT_TRUE(session.Handshake());
+    const auto bounds = session.AdmissionStatus();
+    const auto window = bounds.checkpoint_window;
+    const auto budget = window + bounds.message_limit + 1;
+    for (std::uint64_t tick = 1; tick <= window; ++tick) {
+        ASSERT_TRUE(peer->SendFrame(net::EncodeInput({tick, 1, {}})));
+        ASSERT_EQ(session.PumpTick(budget).outcome, net::TickOutcome::Advanced);
+    }
+    ASSERT_EQ(session.PumpTick(budget).outcome, net::TickOutcome::WaitingForPeer);
+
+    // A terminal send side can still yield receive frames. Withhold tick 1,
+    // then flood distinct old checkpoints while continuing to supply inputs.
+    transport.State().peer_disconnected = true;
+    for (std::uint64_t tick = 2; tick <= window; ++tick) {
+        net::HashMsg hash;
+        hash.tick = tick;
+        ASSERT_TRUE(peer->SendFrame(net::EncodeHash(hash)));
+    }
+    for (std::uint64_t tick = window + 1; tick <= budget; ++tick) {
+        if (tick > window + 1) {
+            net::HashMsg hash;
+            hash.tick = tick - 1;
+            ASSERT_TRUE(peer->SendFrame(net::EncodeHash(hash)));
+        }
+        ASSERT_TRUE(peer->SendFrame(net::EncodeInput({tick, 1, {}})));
+        const auto result = session.PumpTick(budget);
+        const auto usage = session.AdmissionStatus();
+        if (check_bytes)
+            EXPECT_LE(usage.retained_bytes, bounds.byte_limit);
+        else
+            EXPECT_LE(usage.peer_inputs + usage.peer_hashes, bounds.message_limit);
+        EXPECT_LE(usage.local_hashes, window + 2);
+        if (result.outcome == net::TickOutcome::PeerDisconnected)
+            break;
+        ASSERT_EQ(result.outcome, net::TickOutcome::Advanced);
+    }
+    EXPECT_TRUE(session.Status().peer_disconnected);
+    EXPECT_GT(session.Status().rejected_peer_messages, 0u);
+    EXPECT_EQ(session.AgreedTick(), window + 2);
+    EXPECT_EQ(session.AdmissionStatus().peer_hashes, 0u);
+    EXPECT_EQ(session.AdmissionStatus().retained_bytes, 0u);
+}
+
+TEST(LockstepSessionTest, TerminalReceiveFloodCannotExceedNegotiatedMessageCount) {
+    ExpectTerminalReceiveFloodBounded(false);
+}
+
+TEST(LockstepSessionTest, TerminalReceiveFloodCannotExceedNegotiatedByteSize) {
+    ExpectTerminalReceiveFloodBounded(true);
+}
+
+TEST(LockstepSessionTest, ByeAfterTransportClosureCannotReopenAdmission) {
+    auto [local, peer] = net::MakeLoopbackPair();
+    RejectingTransport transport(*local);
+    auto config = MakeConfig(0, 1);
+    config.horizon_min = config.horizon_start = config.horizon_max = 1;
+    config.hash_cadence_ticks = 1;
+    net::LockstepSession session(config, &transport, {});
+    ASSERT_TRUE(SendPeerHello(*peer, config));
+    ASSERT_TRUE(session.Handshake());
+    transport.State().peer_disconnected = true;
+    ASSERT_TRUE(peer->SendFrame(net::EncodeInput({1, 1, {1}})));
+    ASSERT_EQ(session.PumpTick(10).outcome, net::TickOutcome::Advanced);
+    ASSERT_TRUE(peer->SendFrame(net::EncodeBye({3})));
+    ASSERT_TRUE(peer->SendFrame(net::EncodeInput({2, 1, {2}})));
+    ASSERT_TRUE(peer->SendFrame(net::EncodeInput({3, 1, {3}})));
+    const auto last = session.PumpTick(10);
+    ASSERT_EQ(last.outcome, net::TickOutcome::Advanced);
+    EXPECT_EQ(last.local_inputs, (std::vector<std::uint8_t>{2}));
+    EXPECT_EQ(session.Status().rejected_peer_messages, 1u);
+    EXPECT_EQ(session.PumpTick(10).outcome, net::TickOutcome::PeerDisconnected);
+    EXPECT_EQ(session.AgreedTick(), 2u);
+    EXPECT_EQ(session.AdmissionStatus().retained_bytes, 0u);
+}
+
+TEST(LockstepSessionTest, NegotiatedMessageCapacityRefusesFullAndOverflowedUsage) {
+    auto [local, peer] = net::MakeLoopbackPair();
+    const auto config = MakeConfig(0, 1);
+    net::LockstepSession session(config, local.get(), {});
+    ASSERT_TRUE(SendPeerHello(*peer, config));
+    ASSERT_TRUE(session.Handshake());
+    auto usage = session.AdmissionStatus();
+    ASSERT_GT(usage.message_limit, 1u);
+    usage.peer_inputs = 1;
+    usage.peer_hashes = usage.message_limit - 2;
+    EXPECT_TRUE(net::HasPeerRetentionCapacity(usage, 29));
+    ++usage.peer_hashes;
+    EXPECT_FALSE(net::HasPeerRetentionCapacity(usage, 29));
+    usage.peer_inputs = usage.message_limit;
+    usage.peer_hashes = 0;
+    EXPECT_FALSE(net::HasPeerRetentionCapacity(usage, 29));
+    usage.peer_inputs = (std::numeric_limits<std::size_t>::max)();
+    usage.peer_hashes = (std::numeric_limits<std::size_t>::max)();
+    EXPECT_FALSE(net::HasPeerRetentionCapacity(usage, 29));
+    EXPECT_EQ(session.AdmissionStatus().retained_bytes, 0u);
+    EXPECT_EQ(session.AdmissionStatus().peer_hashes, 0u);
+}
+
+TEST(LockstepSessionTest, NegotiatedByteCapacityRefusesFullAndOverflowedUsage) {
+    auto [local, peer] = net::MakeLoopbackPair();
+    const auto config = MakeConfig(0, 1);
+    net::LockstepSession session(config, local.get(), {});
+    ASSERT_TRUE(SendPeerHello(*peer, config));
+    ASSERT_TRUE(session.Handshake());
+    auto usage = session.AdmissionStatus();
+    ASSERT_GT(usage.byte_limit, 29u);
+    usage.retained_bytes = usage.byte_limit - 29;
+    EXPECT_TRUE(net::HasPeerRetentionCapacity(usage, 29));
+    EXPECT_FALSE(net::HasPeerRetentionCapacity(usage, 30));
+    EXPECT_FALSE(net::HasPeerRetentionCapacity(usage, (std::numeric_limits<std::size_t>::max)()));
+    usage.retained_bytes = usage.byte_limit;
+    EXPECT_FALSE(net::HasPeerRetentionCapacity(usage, 1));
+    usage.retained_bytes = (std::numeric_limits<std::size_t>::max)();
+    EXPECT_FALSE(net::HasPeerRetentionCapacity(usage, 1));
+    EXPECT_EQ(session.AdmissionStatus().retained_bytes, 0u);
+    EXPECT_EQ(session.AdmissionStatus().peer_hashes, 0u);
+}
+
+TEST(LockstepSessionTest, WithheldFirstCheckpointBoundsLateHashFloodAndRefusesSettledTicks) {
+    auto [local, peer] = net::MakeLoopbackPair();
+    auto config = MakeConfig(0, 1);
+    config.hash_cadence_ticks = 1;
+    config.max_frame_payload_bytes = 128;
+    FakeWorld world{0, "agree", 0};
+    net::LockstepSession session(config, local.get(), MakeHooks(&world));
+    ASSERT_TRUE(SendPeerHello(*peer, config));
+    ASSERT_TRUE(session.Handshake());
+    const auto bounds = session.AdmissionStatus();
+    const auto window = bounds.checkpoint_window;
+    for (std::uint64_t tick = 1; tick <= window; ++tick) {
+        ASSERT_TRUE(peer->SendFrame(net::EncodeInput({tick, 1, {}})));
+        ASSERT_EQ(session.PumpTick(window + 1).outcome, net::TickOutcome::Advanced);
+    }
+    ASSERT_EQ(session.PumpTick(window + 1).outcome, net::TickOutcome::WaitingForPeer);
+    // All are distinct past ticks. The first checkpoint remains withheld while
+    // late matches are reduced to bounded markers, never uncomparable strings.
+    for (std::uint64_t tick = 2; tick <= window; ++tick) {
+        net::HashMsg hash;
+        CaptureHashes(tick, hash, &world);
+        ASSERT_TRUE(peer->SendFrame(net::EncodeHash(hash)));
+    }
+    ASSERT_EQ(session.PumpTick(window + 1).outcome, net::TickOutcome::WaitingForPeer);
+    EXPECT_EQ(session.AdmissionStatus().peer_hashes, window - 1);
+    EXPECT_EQ(session.AdmissionStatus().retained_bytes, 29 * (window - 1));
+    EXPECT_EQ(session.AdmissionStatus().confirmed_hash_tick, 0u);
+    // Settled out-of-order ticks cannot be reinserted with fresh payloads.
+    for (std::uint64_t tick = 2; tick <= window; ++tick) {
+        net::HashMsg hash;
+        CaptureHashes(tick, hash, &world);
+        hash.world_hash.assign(99, 'x');
+        hash.terrain.clear();
+        hash.water.clear();
+        hash.entities.clear();
+        ASSERT_TRUE(peer->SendFrame(net::EncodeHash(hash)));
+    }
+    ASSERT_EQ(session.PumpTick(window + 1).outcome, net::TickOutcome::WaitingForPeer);
+    EXPECT_EQ(session.Status().rejected_peer_messages, window - 1);
+    EXPECT_LE(session.AdmissionStatus().peer_hashes, bounds.message_limit);
+    EXPECT_LE(session.AdmissionStatus().retained_bytes, bounds.byte_limit);
+    EXPECT_FALSE(session.Status().desynced);
+
+    net::HashMsg first;
+    CaptureHashes(1, first, &world);
+    ASSERT_TRUE(peer->SendFrame(net::EncodeHash(first)));
+    ASSERT_EQ(session.PumpTick(window).outcome, net::TickOutcome::Finished);
+    EXPECT_EQ(session.AdmissionStatus().peer_hashes, 0u);
+    EXPECT_EQ(session.AdmissionStatus().retained_bytes, 0u);
+    EXPECT_EQ(session.AdmissionStatus().confirmed_hash_tick, window);
+    // Every distinct old checkpoint is now outside retained admission history.
+    for (std::uint64_t tick = 1; tick <= window; ++tick) {
+        net::HashMsg hash;
+        CaptureHashes(tick, hash, &world);
+        ASSERT_TRUE(peer->SendFrame(net::EncodeHash(hash)));
+    }
+    EXPECT_EQ(session.PumpTick(window).outcome, net::TickOutcome::Finished);
+    EXPECT_EQ(session.Status().rejected_peer_messages, 2 * window - 1);
+    EXPECT_EQ(session.AdmissionStatus().peer_hashes, 0u);
+    EXPECT_EQ(session.AdmissionStatus().retained_bytes, 0u);
+}
+
 TEST(LockstepSessionTest, RetentionBudgetsMustFitAllNegotiatedTraffic) {
     for (const bool byte_bound : {false, true}) {
         auto [local, peer] = net::MakeLoopbackPair();

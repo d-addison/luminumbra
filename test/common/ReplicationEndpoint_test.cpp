@@ -6,6 +6,8 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <vector>
@@ -103,6 +105,76 @@ struct FailingSendTransport final : ILockstepTransport {
     bool drain_before_disconnect = false;
     bool terminal_pending = false;
 };
+
+TEST(ReplicationEndpoint, DeltaChainCannotGrowBeyondTheTransportFrameLimit) {
+    auto [server, wire] = MakeLoopbackPair();
+    FailingSendTransport transport(*wire);
+    transport.fail_sends = false;
+    transport.payload_limit = 87; // Header, two entities and one removal id.
+    ReplicationClient client(1, &transport);
+    SnapshotMsg snapshot;
+    snapshot.snapshot_seq = 1;
+    snapshot.entities = {MakeEntity(1, 0, 0, 0), MakeEntity(2, 0, 0, 0)};
+    ASSERT_TRUE(server->SendFrame(EncodeSnapshot(snapshot)));
+    client.PumpInbound();
+    ASSERT_TRUE(client.has_snapshot());
+    ASSERT_EQ(client.snapshot().entities.size(), 2u);
+
+    // Every individual delta fits, but retaining their union would grow forever.
+    for (std::uint32_t seq = 2; seq <= 300; ++seq) {
+        snapshot.snapshot_seq = seq;
+        snapshot.delta_from_seq = seq == 2 ? 1 : seq - 1;
+        snapshot.entities = {MakeEntity(seq + 1, 0, 0, 0)};
+        ASSERT_LE(EncodeSnapshot(snapshot).size(), transport.payload_limit);
+        ASSERT_TRUE(server->SendFrame(EncodeSnapshot(snapshot)));
+        client.PumpInbound();
+        EXPECT_EQ(client.snapshot().snapshot_seq, 1u);
+        EXPECT_EQ(client.snapshot().entities.size(), 2u);
+    }
+    // Updating existing ids remains valid and preserves exact values.
+    snapshot.snapshot_seq = 301;
+    snapshot.delta_from_seq = 1;
+    snapshot.entities = {MakeEntity(2, 7, 8, 9)};
+    ASSERT_TRUE(server->SendFrame(EncodeSnapshot(snapshot)));
+    client.PumpInbound();
+    EXPECT_EQ(client.snapshot().snapshot_seq, 301u);
+    EXPECT_EQ(client.snapshot().entities.back().px_mm, 7);
+
+    // Removal plus insertion fits exactly when the new removal count is included.
+    snapshot.snapshot_seq = 302;
+    snapshot.delta_from_seq = 301;
+    snapshot.removed_ids = {1};
+    snapshot.entities = {MakeEntity(3, 10, 11, 12)};
+    ASSERT_TRUE(server->SendFrame(EncodeSnapshot(snapshot)));
+    client.PumpInbound();
+    EXPECT_EQ(client.snapshot().snapshot_seq, 302u);
+    EXPECT_EQ(client.snapshot().entities.size(), 2u);
+    EXPECT_EQ(client.snapshot().entities.back().entity_id, 3u);
+
+    // Full frames obey the same pre-decode limit and a later valid full recovers.
+    snapshot.snapshot_seq = 303;
+    snapshot.delta_from_seq = 0;
+    snapshot.entities.push_back(MakeEntity(4, 0, 0, 0));
+    snapshot.entities.push_back(MakeEntity(5, 0, 0, 0));
+    ASSERT_TRUE(server->SendFrame(EncodeSnapshot(snapshot)));
+    client.PumpInbound();
+    EXPECT_EQ(client.snapshot().snapshot_seq, 302u);
+    const auto complete = EncodeSnapshot(snapshot);
+    for (const std::size_t bytes : {0u, 5u, 33u, 60u}) {
+        auto partial = complete;
+        partial.resize(bytes);
+        ASSERT_TRUE(server->SendFrame(partial));
+        client.PumpInbound();
+        EXPECT_EQ(client.snapshot().snapshot_seq, 302u);
+    }
+    snapshot.snapshot_seq = 304;
+    snapshot.entities.clear();
+    snapshot.removed_ids.clear();
+    ASSERT_TRUE(server->SendFrame(EncodeSnapshot(snapshot)));
+    client.PumpInbound();
+    EXPECT_EQ(client.snapshot().snapshot_seq, 304u);
+    EXPECT_TRUE(client.snapshot().entities.empty());
+}
 
 TEST(ReplicationEndpoint, UsercmdAndAckSendFailuresCloseTransport) {
     for (const bool send_ack : {false, true}) {

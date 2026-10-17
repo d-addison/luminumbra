@@ -1,5 +1,7 @@
 #include "ReplicationEndpoint.h"
 
+#include "ReplicationDelta.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdlib> // std::llabs
@@ -608,6 +610,9 @@ bool ReplicationClient::DrainInbound() {
         if (!PeekReplMessageType(frame, type))
             continue;
         if (type == ReplMessageType::Snapshot) {
+            const auto limit = std::min(kMaxFramePayloadBytes, m_transport->MaxFramePayloadBytes());
+            if (frame.size() > limit)
+                continue;
             //  reconstruct the full set. delta_from_seq==0 is a complete
             // snapshot (use directly); otherwise apply the delta onto the baseline we
             // reconstructed at that seq. A missing baseline (e.g. heavy loss pruned it)
@@ -623,7 +628,10 @@ bool ReplicationClient::DrainInbound() {
                 const auto it = m_recon_history.find(raw.delta_from_seq);
                 if (it == m_recon_history.end())
                     continue;
-                full = ApplySnapshotDelta(it->second, raw);
+                auto reconstructed = TryApplySnapshotDelta(it->second, raw, limit);
+                if (!reconstructed)
+                    continue;
+                full = std::move(*reconstructed);
             }
             if (m_receiver.Receive(full)) {
                 got_new_snapshot = true;

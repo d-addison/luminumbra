@@ -1340,7 +1340,8 @@ bool LockstepSession::ScheduleLocalInput(std::uint64_t tick) {
     }
     // During closure, buffered remote inputs can outlast our scheduled horizon.
     // Collect the remaining local slots without sending into a closed session.
-    const bool closing = m_handshaken && (m_received_bye_tick || !m_transport->IsPeerConnected());
+    const bool closing = m_handshaken && (m_received_bye_tick || m_transport_close_admission_tick ||
+                                          !m_transport->IsPeerConnected());
     if (!closing) {
         const InputMsg msg{.tick = tick, .client_id = m_config.local_client_id, .inputs = blob};
         if (!SendOrQueueFrame(EncodeInput(msg)))
@@ -1399,9 +1400,42 @@ bool LockstepSession::IsWithinPeerLookahead(std::uint64_t tick) const {
     // ahead), then scheduled its own next horizon. Handshake validates min/start/max.
     const auto lookahead = std::uint64_t{2} * m_config.horizon_max;
     // Closure can execute buffered inputs, but must not open additional hash
-    // slots. Late oracle messages still use the window at receipt of Bye.
-    const auto anchor = m_received_bye_tick ? m_bye_admission_tick : m_agreed_tick;
+    // slots. Late oracle messages use the window at the first observed closure.
+    const auto anchor = m_received_bye_tick
+                            ? m_bye_admission_tick
+                            : m_transport_close_admission_tick.value_or(m_agreed_tick);
     return tick <= anchor || tick - anchor <= lookahead;
+}
+
+bool LockstepSession::IsRetainedPeerCheckpoint(std::uint64_t tick) const {
+    const auto cadence = m_config.hash_cadence_ticks;
+    if (cadence == 0 || tick == 0 || tick % cadence != 0 || tick <= m_confirmed_peer_hash_tick)
+        return false;
+    // Retain only the unconfirmed checkpoint window plus both horizons of
+    // remote lead. Divide before subtracting: neither tick arithmetic nor the
+    // window calculation can overflow, even at the last representable tick.
+    const auto lead = std::uint64_t{2} * m_config.horizon_max;
+    const auto lead_checkpoints = lead / cadence + (lead % cadence != 0);
+    if (tick / cadence - m_confirmed_peer_hash_tick / cadence >
+        m_checkpoint_window + lead_checkpoints)
+        return false;
+    // Executed ticks must still have their local oracle. Never retain a hash
+    // that cannot be compared, even if a missing prefix prevents confirmation.
+    // Local cadence entries form a contiguous suffix; checking its oldest tick
+    // keeps this admission check constant time.
+    return tick > m_agreed_tick ||
+           (!m_local_hashes.empty() && tick >= m_local_hashes.begin()->first);
+}
+
+bool LockstepSession::CanRetainPeerFrame(std::size_t bytes) const {
+    // Shared Input/Hash budget, checked before decoding any peer-owned payload.
+    // Subtraction also refuses inconsistent accounting without overflowing.
+    const LockstepAdmissionStatus usage{.peer_inputs = m_peer_input_count,
+                                        .peer_hashes = m_peer_hashes.size(),
+                                        .retained_bytes = m_retained_peer_bytes,
+                                        .message_limit = m_peer_message_limit,
+                                        .byte_limit = m_peer_byte_limit};
+    return HasPeerRetentionCapacity(usage, bytes);
 }
 
 bool LockstepSession::ConfigureRetention(const HelloMsg& mine, const HelloMsg& peer) {
@@ -1556,6 +1590,10 @@ bool LockstepSession::DrainPeerMessages() {
                         break;
                     }
                 }
+                if (!CanRetainPeerFrame(frame.size())) {
+                    ++m_status.rejected_peer_messages;
+                    break;
+                }
                 InputMsg in;
                 if (DecodeInput(frame, in)) {
                     m_inputs[in.tick][in.client_id] = std::move(in.inputs);
@@ -1568,10 +1606,9 @@ bool LockstepSession::DrainPeerMessages() {
                 std::uint64_t tick = 0;
                 if (frame.size() > m_frame_limit || !InspectHash(frame, tick) ||
                     (m_received_bye_tick && tick > *m_received_bye_tick) ||
-                    m_config.hash_cadence_ticks == 0 || tick == 0 ||
-                    tick % m_config.hash_cadence_ticks != 0 || tick <= m_confirmed_peer_hash_tick ||
-                    !IsWithinPeerLookahead(tick) ||
-                    m_peer_hashes.find(tick) != m_peer_hashes.end()) {
+                    !IsRetainedPeerCheckpoint(tick) || !IsWithinPeerLookahead(tick) ||
+                    m_peer_hashes.find(tick) != m_peer_hashes.end() ||
+                    !CanRetainPeerFrame(frame.size())) {
                     ++m_status.rejected_peer_messages;
                     break;
                 }
@@ -1598,7 +1635,7 @@ bool LockstepSession::DrainPeerMessages() {
                 // still takes precedence over this Bye.
                 if (!m_received_bye_tick) {
                     m_received_bye_tick = bye.tick;
-                    m_bye_admission_tick = m_agreed_tick;
+                    m_bye_admission_tick = m_transport_close_admission_tick.value_or(m_agreed_tick);
                     m_pending_outbound.clear();
                     m_pending_outbound_bytes = 0;
                 }
@@ -1610,6 +1647,14 @@ bool LockstepSession::DrainPeerMessages() {
                 // unknown future message must not crash an older peer).
                 break;
         }
+    }
+    if (!m_transport_close_admission_tick && !m_transport->IsPeerConnected()) {
+        // A send-side closure can precede the last received frames. Drain the
+        // bounded lead already admitted, but never move its admission anchor:
+        // closure bypasses checkpoint pacing and must not open unlimited slots.
+        m_transport_close_admission_tick = m_agreed_tick;
+        m_pending_outbound.clear();
+        m_pending_outbound_bytes = 0;
     }
     return !m_status.desynced && !m_status.peer_disconnected;
 }
@@ -1649,8 +1694,8 @@ TickResult LockstepSession::PumpTick(std::uint64_t budget_ticks) {
     // Keep all unconfirmed hashes without growing with session duration. Reliable
     // receive continues while paused, so a delayed oldest checkpoint always fits
     // and releases this wait. This is pacing only; applied bytes are unchanged.
-    if (m_transport->IsPeerConnected() && !m_received_bye_tick &&
-        m_config.hash_cadence_ticks != 0 &&
+    if (!m_transport_close_admission_tick && m_transport->IsPeerConnected() &&
+        !m_received_bye_tick && m_config.hash_cadence_ticks != 0 &&
         m_agreed_tick / m_config.hash_cadence_ticks -
                 m_confirmed_peer_hash_tick / m_config.hash_cadence_ticks >=
             m_checkpoint_window) {
@@ -1665,7 +1710,8 @@ TickResult LockstepSession::PumpTick(std::uint64_t budget_ticks) {
     const bool have_peer =
         it != m_inputs.end() && it->second.find(m_config.peer_client_id) != it->second.end();
 
-    if (!have_peer && (m_received_bye_tick || !m_transport->IsPeerConnected())) {
+    if (!have_peer && (m_received_bye_tick || m_transport_close_admission_tick ||
+                       !m_transport->IsPeerConnected())) {
         if (m_received_bye_tick) {
             m_status.peer_disconnected = true;
             m_status.disconnect_tick = m_received_bye_tick.value();
@@ -1792,7 +1838,8 @@ TickResult LockstepSession::PumpTick(std::uint64_t budget_ticks) {
     PruneDiagnosticHistory();
 
     // 6) Schedule the local input that is now `horizon` ticks ahead of the new agreed tick.
-    bool send_failed = !m_received_bye_tick && m_transport->IsPeerConnected() &&
+    bool send_failed = !m_received_bye_tick && !m_transport_close_admission_tick &&
+                       m_transport->IsPeerConnected() &&
                        !ScheduleLocalInput(m_agreed_tick + m_horizon);
     if (m_status.desynced)
         return terminal_result();
@@ -1800,7 +1847,8 @@ TickResult LockstepSession::PumpTick(std::uint64_t budget_ticks) {
     // 7) Send the cadence hash and compare any already-received peer hash for this tick.
     if (hash_due) {
         const auto& local = *m_local_hashes.at(want);
-        if (!m_received_bye_tick && m_transport->IsPeerConnected()) {
+        if (!m_received_bye_tick && !m_transport_close_admission_tick &&
+            m_transport->IsPeerConnected()) {
             // Hash frame: type + payload length + tick + four string lengths/data.
             constexpr std::size_t overhead = 1 + 4 + 8 + 4 * 4;
             const auto limit = std::min(m_frame_limit, m_transport->MaxFramePayloadBytes());
