@@ -15,6 +15,7 @@ from unittest import mock
 
 import capture_sim_budget as capture
 from fixture_hash import fixture_hash
+from test_fixture_hash import ROOTED_REFERENCES, ESCAPING_REFERENCES
 
 
 def artifact() -> dict:
@@ -38,6 +39,31 @@ def artifact() -> dict:
 
 
 class SimBudgetCaptureTests(unittest.TestCase):
+    def test_capture_refuses_external_preset_references_before_launch(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "data/common").mkdir(parents=True)
+            presets = root / "worlds/atlas/presets"
+            presets.mkdir(parents=True)
+            binary = root / "server"
+            binary.write_bytes(b"synthetic server")
+            evidence = root / "evidence"
+            for reference in ROOTED_REFERENCES + ESCAPING_REFERENCES:
+                (presets / "default.json").write_text(json.dumps({
+                    "generation_params": {"biomes": {"table": reference}}}))
+                with self.subTest(reference=reference), \
+                        mock.patch.object(capture, "__file__", str(root / "tools/perf/capture_sim_budget.py")), \
+                        mock.patch("sys.argv", ["capture_sim_budget.py", "--binary", str(binary),
+                                                "--evidence-dir", str(evidence)]), \
+                        mock.patch.object(capture.subprocess, "run") as launch, \
+                        contextlib.redirect_stderr(io.StringIO()) as error:
+                    with self.assertRaises(SystemExit) as refused:
+                        capture.main()
+                    self.assertEqual(refused.exception.code, 1)
+                    self.assertIn("fixture reference", error.getvalue())
+                    launch.assert_not_called()
+                    self.assertFalse(evidence.exists())
+
     def validate(self, data: dict) -> None:
         capture.validate_artifact(data, "default", "1337", 2)
 
@@ -67,7 +93,7 @@ class SimBudgetCaptureTests(unittest.TestCase):
         systems = json.loads(path.read_text(encoding="utf-8-sig"))
         data = artifact()
         systems["sim"]["future_system"] = {"enabled": True}
-        with mock.patch.object(Path, "read_text", return_value=json.dumps(systems)):
+        with mock.patch.object(capture, "read_text", return_value=json.dumps(systems)):
             self.assertIn("future_system", capture.shipping_simulation_gates())
             with self.assertRaisesRegex(ValueError, "shipping simulation"):
                 self.validate(data)
@@ -214,11 +240,49 @@ class SimBudgetCaptureTests(unittest.TestCase):
             manifest = json.loads((evidence / "capture.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["fixture_hash"], fixture_hash(root / "data/common",
                                                                    scope="headless-server"))
+            self.assertEqual(manifest["preset_hash"], fixture_hash(root / "worlds/atlas/presets",
+                                                                  reference_root=root / "data"))
             self.assertEqual(manifest["seed"], "1337")
             self.assertEqual(manifest["surface_radius"], 1)
             self.assertEqual(manifest["collision_radius"], 1)
             self.assertEqual([run["command"] for run in manifest["runs"]], commands)
             self.assertEqual([run["preset"] for run in manifest["runs"]], list(capture.PRESETS))
+
+    def test_capture_refuses_fixture_changes_during_runs(self):
+        systems = (Path(capture.__file__).resolve().parents[2] / "data/common/systems.json").read_bytes()
+        data = artifact()
+        for changed in ("data/common/value.json", "worlds/atlas/presets/default.json"):
+            with self.subTest(changed=changed), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                (root / "data/common").mkdir(parents=True)
+                (root / "data/common/systems.json").write_bytes(systems)
+                (root / "worlds/atlas/presets").mkdir(parents=True)
+                (root / changed).write_text('{}')
+                binary = root / "server"
+                binary.write_bytes(b"synthetic server")
+                evidence = root / "evidence"
+                runs = []
+
+                def run(argv, **kwargs):
+                    current = dict(data, preset=argv[argv.index("--preset") + 1])
+                    Path(argv[argv.index("--artifact") + 1]).write_text(json.dumps(current))
+                    runs.append(current["preset"])
+                    if len(runs) == 2:
+                        (root / changed).write_text('{"changed":1}')
+
+                with mock.patch.object(capture, "__file__", str(root / "tools/perf/capture_sim_budget.py")), \
+                        mock.patch("sys.argv", ["capture_sim_budget.py", "--binary", str(binary),
+                                               "--evidence-dir", str(evidence), "--ticks", "2"]), \
+                        mock.patch.object(capture.subprocess, "check_output", side_effect=["a" * 40, ""]), \
+                        mock.patch.object(capture.subprocess, "run", side_effect=run), \
+                        contextlib.redirect_stdout(io.StringIO()), \
+                        contextlib.redirect_stderr(io.StringIO()) as error, \
+                        self.assertRaises(SystemExit) as refused:
+                    capture.main()
+                self.assertEqual(refused.exception.code, 1)
+                self.assertIn("fixture hashes changed during capture", error.getvalue())
+                self.assertEqual(runs, list(capture.PRESETS))
+                self.assertFalse((evidence / "capture.json").exists())
 
     def test_ci_shipping_capture_pins_workload_and_requires_complete_budgets(self) -> None:
         root = Path(__file__).resolve().parents[2]

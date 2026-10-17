@@ -14,6 +14,7 @@ from pathlib import Path
 import shutil
 
 from fixture_hash import fixture_hash
+from fixture_paths import contain_path, open_regular, read_text, resolve_reference
 
 GATES = ("ActiveRegions", "WaterHighRes", "WeatherRain", "WeatherEvents", "AetherState")
 TUNINGS = ("Ecology", "WildlifeFoliage", "Thirst", "Scavenging", "Foraging", "Reproduction")
@@ -21,18 +22,26 @@ MARKER = ".perf-controlled"
 
 
 def identity(root: Path) -> str:
-    inputs = {"common": fixture_hash(root / "data/common", scope="headless-server"),
-              "presets": fixture_hash(root / "worlds/atlas/presets"),
-              "configuration": (root / MARKER).read_text(encoding="utf-8")}
+    data = resolve_reference(root, "data")
+    inputs = {"common": fixture_hash(resolve_reference(root, "data/common"), scope="headless-server"),
+              "presets": fixture_hash(resolve_reference(root, "worlds/atlas/presets"),
+                                      reference_root=data),
+              "configuration": read_text(root.resolve(), resolve_reference(root, MARKER))}
     return hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
 
 
 def prepare(base: Path, head: Path, receipt: Path) -> None:
     # Take the base content once. The source adapters pin lower-layer defaults,
     # including finite hydrology, which systems.json alone cannot configure.
-    common = base / "data/common"
-    presets = base / "worlds/atlas/presets"
-    systems = json.loads((common / "systems.json").read_text(encoding="utf-8-sig"))
+    common = resolve_reference(base, "data/common")
+    presets = resolve_reference(base, "worlds/atlas/presets")
+    data = resolve_reference(base, "data")
+    # Refuse unsafe source trees before copytree follows links or adapters edit
+    # either checkout. Retain dependencies outside common in the copied fixture.
+    fixture_hash(common, scope="headless-server")
+    dependencies: dict[str, Path] = {}
+    fixture_hash(presets, reference_root=data, dependencies=dependencies)
+    systems = json.loads(read_text(common, common / "systems.json", encoding="utf-8-sig"))
     schema = json.loads((head / "src/luminumbra_common/core/ConfigSchema.json").read_text(encoding="utf-8-sig"))
     # Registry fields are authored in the schema; do not omit an absent base key.
     for key in schema["keys"]:
@@ -42,8 +51,26 @@ def prepare(base: Path, head: Path, receipt: Path) -> None:
         root = checkout / "perf-common"
         if root.exists():
             raise ValueError(f"refusing to replace existing fixture: {root}")
-        shutil.copytree(common, root / "data/common")
-        shutil.copytree(presets, root / "worlds/atlas/presets")
+        def copy_fixture(source, destination):
+            source = Path(source)
+            source_root = common if source.is_relative_to(common) else presets
+            with open_regular(source_root, source) as stream, Path(destination).open("wb") as output:
+                shutil.copyfileobj(stream, output)
+            return destination
+
+        shutil.copytree(common, root / "data/common", copy_function=copy_fixture)
+        shutil.copytree(presets, root / "worlds/atlas/presets", copy_function=copy_fixture)
+        for _, path in sorted(dependencies.items()):
+            # Dependencies already carry validated native paths. Reinterpreting
+            # their normalized names would treat literal POSIX backslashes as
+            # authored separators a second time.
+            destination_root = root / "data"
+            destination = contain_path(destination_root, destination_root /
+                                       path.relative_to(data))
+            if not destination.exists() and path.exists():
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                with open_regular(data, path) as stream, destination.open("wb") as output:
+                    shutil.copyfileobj(stream, output)
         (root / "data/common/systems.json").write_text(json.dumps(systems, indent=2) + "\n")
         (root / MARKER).write_text(json.dumps(dict(schema="luminumbra.controlled_server.v1",
             gates=False, finite_hydrology=False, autosave_ticks=0), sort_keys=True) + "\n")
