@@ -1514,9 +1514,10 @@ float SHIELD_WorldSystem::WaterLevelAt(float world_x, float world_z) const {
 }
 
 bool SHIELD_WorldSystem::IsUnderwater(const Vec3& world_pos) const {
-    if (!std::isfinite(world_pos.x) || !std::isfinite(world_pos.y) || !std::isfinite(world_pos.z))
+    if (!world::ActiveRegionLedger::valid_anchor(world_pos))
         return false;
-    const IVec3 column = world_to_chunk_coords(world_pos);
+    // Water ownership is horizontal. Do not narrow an arbitrary query height to a chunk Y.
+    const IVec3 column = world_to_chunk_coords(Vec3(world_pos.x, 0.0f, world_pos.z));
     const auto sample_grid = [&world_pos](const Chunk& chunk) -> std::optional<bool> {
         if (!chunk.has_water_sim.load(std::memory_order_acquire))
             return std::nullopt;

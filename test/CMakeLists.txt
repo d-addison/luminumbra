@@ -186,6 +186,8 @@ add_executable(common_tests
     common/BiomeReverb_test.cpp
     common/DeterministicMath_test.cpp
     common/SystemConfig_test.cpp
+    common/GraphicsPresets_test.cpp
+    ui/graphics_settings_state_test.cpp
     common/FrameLimiter_test.cpp
     common/PlantProcgen_test.cpp
     common/NetworkSim_test.cpp
@@ -966,6 +968,7 @@ add_executable(far_lod_worker_test
     rendering/loading_overlay_test.cpp
     rendering/texture_file_test.cpp
     rendering/render_clock_test.cpp
+    rendering/graphics_runtime_test.cpp
 )
 
 target_include_directories(far_lod_worker_test PRIVATE
@@ -2382,6 +2385,8 @@ add_test(NAME SystemConfigIdentityPython COMMAND "${Python3_EXECUTABLE}" -B
     ${CMAKE_SOURCE_DIR}/test/tools/test_system_config_identity.py)
 add_test(NAME FramePacingSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/test/tools/test_frame_pacing_contract.py)
+add_test(NAME GraphicsUiSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/test/tools/test_graphics_ui_contract.py)
 add_test(NAME RenderRunnerEvidencePython COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_render_runner_evidence.py)
 set_tests_properties(RenderRunnerEvidencePython PROPERTIES TIMEOUT 60)
 add_test(NAME RenderSceneMatrixPython COMMAND "${Python3_EXECUTABLE}" -B ${CMAKE_SOURCE_DIR}/tools/rendering/acceptance/test_scene_matrix.py)

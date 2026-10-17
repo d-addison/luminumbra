@@ -24,9 +24,25 @@
 
 #include "DeveloperBindingSetting.h"
 #include "DeveloperPanelLayout.h"
+#include "GraphicsPresets.h"
 #include "SystemConfigRegistry.gen.h" // X-macro registry GENERATED from ConfigSchema.json
 
 namespace luminumbra::core {
+
+// Settings overlays have their own version, independent of world/save/protocol formats.
+inline constexpr std::uint32_t kSettingsSchemaVersion = 1;
+
+enum class SettingsLoadState : std::uint8_t {
+    FirstLaunch,
+    Loaded,
+    MigratedLegacy,
+    Recovery
+};
+struct SettingsLoadReport {
+    SettingsLoadState state = SettingsLoadState::FirstLaunch;
+    bool needs_first_launch_detection = true; // Hook only; no hardware probing here.
+    std::string recovery_reason;
+};
 
 // Developer records are bounded during parsing; unknown stable ids survive overlays.
 // Runtime effects and session history are deliberately absent from this model.
@@ -56,7 +72,7 @@ struct UserSettings {
     bool vsync = true;                      // Saved user choices override this default.
     int frame_cap = 0;                      // 0 = unlimited; choices in kFrameCaps.
     float fov = 45.0f;
-    float render_scale = 1.0f;
+    float render_scale = 1.0f; // Compatibility mirror on load; graphics owns persistence.
     float ui_scale = 1.0f; // HUD/UI density-independent-pixel ratio (0.5..2.5); 1.0 = native px.
                            // Lets players scale the HUD up on big/4K/ultrawide displays.
     float mouse_sensitivity = 0.025f; // 25% of the prior 0.1 default (owner request 2026-06-18)
@@ -66,6 +82,7 @@ struct UserSettings {
     float audio_music = 1.0f;
     // controls: logical InputAction name -> GLFW key code. Ordered for deterministic save.
     std::map<std::string, int> keybinds;
+    GraphicsSettings graphics;
 };
 
 // Compile-time registry of every system flag. sim.* entries first, then render.*.
@@ -126,8 +143,14 @@ public:
     // Load from disk. Missing/unreadable file -> all-defaults (no throw).
     [[nodiscard]] static SystemConfig LoadFromFile(const std::string& path);
     // Explicit CLI overrides must be readable JSON objects; failure leaves config unchanged.
+    // Success replaces only system flags/tuning, retaining player settings and their load report.
     [[nodiscard]] static bool
     TryLoadFromFile(const std::string& path, SystemConfig& config, std::string& error);
+
+    // Replace all sim/render flags and tuning, including resetting omitted params to fallback.
+    // Keep this config's player settings and load report together, so systems overrides/reloads
+    // cannot clear Recovery protection or first-launch detection state. Ignores source user.*.
+    void ReplaceSystemsFrom(const SystemConfig& source);
 
     // O(1) hot-path query: single bit test on the resolved flag set.
     [[nodiscard]] bool enabled(SysKey key) const {
@@ -154,15 +177,22 @@ public:
     [[nodiscard]] int keybind(const std::string& action, int fallback) const;
 
     // Parse ONLY the `user.*` section from `json_text` and overlay it onto this config
-    // (sim.*/render.* ignored). Malformed -> no change. This is the per-user overlay load.
+    // (sim.*/render.* ignored). Invalid input keeps values unchanged and reports
+    // Recovery, blocking saves to protect the original overlay. Numeric overflow outside
+    // developer layouts also throws, retaining the strict parser refusal.
     void OverlayUserFromJsonString(const std::string& json_text);
+
+    [[nodiscard]] const SettingsLoadReport& settings_load_report() const {
+        return m_settings_load_report;
+    }
 
     // Load layering: FromJsonString(defaults file) then OverlayUserFromJsonString(overlay file).
     [[nodiscard]] static SystemConfig LoadLayered(const std::string& defaults_path,
                                                   const std::string& overlay_path);
 
     // Write ONLY the user.* section to `path` (atomic; creates parent dirs). Returns false on
-    // I/O failure. Deterministic key order (keybinds are an ordered map).
+    // I/O/validation failure, or while in Recovery (protects the original file).
+    // Deterministic key order (keybinds and graphics overrides are ordered maps).
     bool SaveUserOverlay(const std::string& path) const;
 
     // Per-user overlay location: %APPDATA%/Luminumbra/settings.json (Windows) or
@@ -177,6 +207,7 @@ private:
     std::uint64_t m_param_set = 0;                 // which params were explicitly set (<=64 params)
     std::array<glm::vec3, kParamCount> m_params{}; // scalar params live in .x
     UserSettings m_user{};                         // client-only; never hashed
+    SettingsLoadReport m_settings_load_report{};
 };
 
 } // namespace luminumbra::core

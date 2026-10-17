@@ -234,6 +234,24 @@ bool ReadAmbientAnchor(const nlohmann::json& metadata,
     return true;
 }
 
+bool ReadWaterCursor(const nlohmann::json& metadata,
+                     std::size_t* water_cursor,
+                     std::string& error) {
+    if (water_cursor)
+        *water_cursor = 0;
+    if (!metadata.contains("waterSimCursor"))
+        return true;
+    const auto& cursor = metadata.at("waterSimCursor");
+    if (!cursor.is_number_unsigned() ||
+        cursor.get<std::uint64_t>() > std::numeric_limits<std::size_t>::max()) {
+        error = "Corrupt world metadata: invalid water simulation cursor.";
+        return false;
+    }
+    if (water_cursor)
+        *water_cursor = cursor.get<std::size_t>();
+    return true;
+}
+
 std::uint64_t CurrentProcessIdValue() {
 #if defined(_WIN32)
     return static_cast<std::uint64_t>(::GetCurrentProcessId());
@@ -1012,12 +1030,13 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
     world::WorldClock clock;
     std::string clock_error;
     const auto metadata = nlohmann::json::parse(bytes, nullptr, false);
-    // Legacy metadata is opaque input to this helper. Only clock-bearing input
-    // opts into the new validation; the existing destination is still validated.
+    // Clock and water cursor fields opt into structured validation. Other legacy
+    // input remains opaque; the existing destination is still validated.
     const bool has_clock = metadata.contains("simulationTick") || metadata.contains("calendar");
     std::optional<Vec3> ambient_anchor;
-    if (has_clock && (!world::WorldClock::from_metadata(metadata, clock, clock_error) ||
-                      !ReadAmbientAnchor(metadata, ambient_anchor, clock_error))) {
+    if ((has_clock && (!world::WorldClock::from_metadata(metadata, clock, clock_error) ||
+                       !ReadAmbientAnchor(metadata, ambient_anchor, clock_error))) ||
+        !ReadWaterCursor(metadata, nullptr, clock_error)) {
         AddError(errors, clock_error);
         return false;
     }
@@ -1057,15 +1076,20 @@ bool WorldSaveService::save_metadata_and_active_regions(const std::string& bytes
     std::optional<Vec3> ambient_anchor;
     std::string error;
     if (!world::WorldClock::from_metadata(metadata, clock, error) ||
-        !ReadAmbientAnchor(metadata, ambient_anchor, error)) {
+        !ReadAmbientAnchor(metadata, ambient_anchor, error) ||
+        !ReadWaterCursor(metadata, nullptr, error)) {
         AddError(errors, error);
+        return false;
+    }
+    // Decode validates record stamps; empty ledgers need the same clock check explicitly.
+    if (ledger.header_tick() != clock.tick()) {
+        AddError(errors, world::ActiveRegionLedger::kCorruptMessage);
         return false;
     }
     auto saved = ledger;
     saved.mark_saved(clock);
     world::ActiveRegionLedger checked;
-    if (!world::ActiveRegionLedger::decode(saved.encode(), checked, error) ||
-        ledger.header_tick() > clock.tick()) {
+    if (!world::ActiveRegionLedger::decode(saved.encode(), checked, error)) {
         AddError(errors, world::ActiveRegionLedger::kCorruptMessage);
         return false;
     }
@@ -1104,19 +1128,10 @@ bool WorldSaveService::read_clock_metadata(const std::filesystem::path& save_dir
         std::string error;
         std::optional<Vec3> anchor;
         if (!world::WorldClock::from_metadata(metadata, clock, error) ||
-            !ReadAmbientAnchor(metadata, anchor, error)) {
+            !ReadAmbientAnchor(metadata, anchor, error) ||
+            !ReadWaterCursor(metadata, water_cursor, error)) {
             AddError(errors, error);
             return false;
-        }
-        if (metadata.contains("waterSimCursor")) {
-            const auto& cursor = metadata.at("waterSimCursor");
-            if (!cursor.is_number_unsigned() ||
-                cursor.get<std::uint64_t>() > std::numeric_limits<std::size_t>::max()) {
-                AddError(errors, "Corrupt world metadata: invalid water simulation cursor.");
-                return false;
-            }
-            if (water_cursor)
-                *water_cursor = cursor.get<std::size_t>();
         }
         requires_active_regions = requires_active_regions || metadata.contains("simulationTick") ||
                                   metadata.contains("calendar");
@@ -1243,6 +1258,12 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
                                            std::vector<std::string>* errors) {
     if (!validate_save(save_dir, errors))
         return false;
+    // Empty ledgers have no last_save stamps to validate against the ceiling.
+    // Require the acknowledged clock before either writing or taking the no-op path.
+    if (ledger.header_tick() != clock.tick()) {
+        AddError(errors, world::ActiveRegionLedger::kCorruptMessage);
+        return false;
+    }
     // Keep an anchor-only ledger: it restores last walking feet before activation.
     if (ledger.records().empty() && !ledger.local_anchor() &&
         !std::filesystem::exists(active_regions_path(save_dir)))
@@ -1252,8 +1273,7 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
     const auto bytes = saved.encode();
     world::ActiveRegionLedger checked;
     std::string error;
-    if (!world::ActiveRegionLedger::decode(bytes, checked, error) ||
-        ledger.header_tick() > clock.tick()) {
+    if (!world::ActiveRegionLedger::decode(bytes, checked, error)) {
         AddError(errors, world::ActiveRegionLedger::kCorruptMessage);
         return false;
     }
@@ -1801,6 +1821,9 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                     !ReadAmbientAnchor(metadata, anchor, error))
                     return reject(error);
             }
+            std::string cursor_error;
+            if (!ReadWaterCursor(metadata, nullptr, cursor_error))
+                return reject(cursor_error);
         }
         const auto chunks_dir = save_dir / kChunksDirectoryName;
         const auto region_dir = region_directory(save_dir);

@@ -6,11 +6,11 @@ Statuses declare the available evidence. Static validation requires a mapping fo
 
 | Status | Rows |
 | --- | ---: |
-| covered | 17 |
+| covered | 18 |
 | partial | 21 |
 | needs-native-run | 17 |
 | planned | 85 |
-| Total | 140 |
+| Total | 141 |
 
 | Row | Status | Source | Requirements | Statement | Evidence |
 | --- | --- | --- | --- | --- | --- |
@@ -154,3 +154,4 @@ Statuses declare the available evidence. Static validation requires a mapping fo
 | contract.authority-oracle | partial | `docs/active-regions.md#file-and-compatibility` | ar.file.183, ar.file.184, ar.file.185, ar.file.186, ar.file.187, ar.file.190, ar.file.191, ar.file.193, ar.file.194, ar.file.195, ar.file.196, ar.file.203, ar.file.204, ar.file.205 | Active-region hashes cache per-chunk terrain and water contributions from durable authority, replace bounded resident contributions without durable reads, and compose a versioned aggregate identical to full recomputation. Camera and lifecycle data are excluded; legacy hashes are unchanged. Cold-scan, mutation, eviction, reload and copy regressions are landed; production qualification remains pending. | ctest: `GameSessionHeadlessWorldTest.CachedAuthorityHashMatchesFullRecomputeWithoutDurableReads`<br>ctest: `WorldOpenRefusal.ProductionChunkOracleIgnoresCameraAndDurableWaterResidency`<br>ctest: `GameSessionHeadlessWorldTest.RegionDigestIgnoresRenderAndResidencyState`<br>doc: `docs/active-regions.md` (planned: Qualify client lockstep captures, production availability digests and rejection of older active-region replay hashes under the new scopes; owner: ds) |
 | contract.authority-rule-identity | partial | `docs/active-regions.md#file-and-compatibility` | ar.file.188, ar.file.189 | Negotiated configuration identity v4 includes authority-rules revision 2 without changing the Hello protocol version, refusing older rules before simulation. Identity regressions are landed; mixed-executable native qualification remains pending. | ctest: `WorldOpenRefusal.PersistedSchedulerIdentityRefusesDifferentAdmissionAndReplayRules`<br>ctest: `SystemConfigIdentityPython`<br>doc: `docs/active-regions.md` (planned: Qualify early refusal between production executables with different authority-rule identities; owner: ds) |
 | contract.authority-consumer-scope | planned | `docs/active-regions.md#file-and-compatibility` | ar.file.140, ar.file.197, ar.file.198, ar.file.199 | Plants, creatures and living-world consumers use authoritative ECS participants on fixed ticks. Procedural vegetation remains derived rendering; ground-object and distant water continuation are outside this implementation. Acceptance evidence for these consumer boundaries remains planned. | doc: `docs/active-regions.md` (planned: Review per-consumer ECS independence and implement distant water and ground-object continuation under their own declared projections; owner: ds) |
+| graphics.horizon-authority | covered | `docs/engine-guide.md#world-generation-and-streaming` |  | Legacy graphics horizon changes preserve edited chunk authority and reject stale captures through the chunk voxel revision even when world/region publication revisions are unchanged. This row covers the owner-thread snapshot and admission regression, not native rendering qualification. | ctest: `GraphicsRuntimePure.ShrinkingAndGrowingHorizonRetainsEditedAuthorityAndRejectsStaleCapture`<br>ctest: `StreamingHardening.FarLodSnapshotOwnsBytesAndRejectsStaleLiveData`<br>ctest: `FarLodWorker.AuthoritativeCaptureBuildsPersistsAndStales` |

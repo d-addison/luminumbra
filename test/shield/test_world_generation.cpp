@@ -196,6 +196,39 @@ TEST_F(WorldGenerationTest, AuthoritativeColumnOverridesWetRenderLayers) {
     EXPECT_FALSE(world.IsUnderwater({-8, 12, -8}));
 }
 
+TEST_F(WorldGenerationTest, UnderwaterRejectsUnrepresentableColumnsAndHandlesExtremeHeights) {
+    SHIELD_WorldSystem world(nullptr, nullptr, params_underwater_world, 1337);
+    const auto make_grid = [](const IVec3& coords) {
+        auto chunk = std::make_shared<Chunk>(coords);
+        chunk->current_water_resolution.store(2);
+        chunk->water_bed_mm.assign(4, -1000);
+        chunk->water_depth_mm.assign(4, 2000);
+        chunk->has_water_sim.store(true);
+        chunk->mark_water_data_dirty();
+        return chunk;
+    };
+    for (const int x : {Chunk::kPackedMinXz, Chunk::kPackedMaxXz}) {
+        auto owner = make_grid({x, 0, 0});
+        ASSERT_TRUE(world.adopt_streamed_chunk(owner));
+        const float world_x = static_cast<float>(x) * CHUNK_SIZE_X;
+        EXPECT_TRUE(world.IsUnderwater({world_x, 0, 0}));
+    }
+    for (const float coordinate : {std::numeric_limits<float>::quiet_NaN(),
+                                   std::numeric_limits<float>::infinity(),
+                                   std::numeric_limits<float>::max(),
+                                   -std::numeric_limits<float>::max(),
+                                   16777216.0f,
+                                   -16777218.0f}) {
+        EXPECT_FALSE(world.IsUnderwater({coordinate, 0, 0}));
+        EXPECT_FALSE(world.IsUnderwater({0, 0, coordinate}));
+    }
+    for (const float height : {std::numeric_limits<float>::quiet_NaN(),
+                               std::numeric_limits<float>::infinity(),
+                               std::numeric_limits<float>::max(),
+                               -std::numeric_limits<float>::max()})
+        EXPECT_FALSE(world.IsUnderwater({0, height, 0}));
+}
+
 TEST_F(WorldGenerationTest, WaterColumnsConnectAcrossDifferentGroundLayers) {
     auto params = params_guaranteed_surface;
     params.height_offset = 17.0f;

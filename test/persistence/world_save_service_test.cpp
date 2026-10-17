@@ -261,6 +261,145 @@ TEST(WorldSaveService, ClockMetadataValidationPrecedesEveryWrite) {
     EXPECT_EQ(read(), damaged);
 }
 
+TEST(WorldSaveService, LedgerClockMismatchRefusesEmptyAndPopulatedSavesBeforeWriting) {
+    using Luminumbra::world::ActiveRegionLedger;
+    using Luminumbra::world::WorldClock;
+    for (const bool populated : {false, true}) {
+        SCOPED_TRACE(populated);
+        TempSaveDir destination("ledger_clock");
+        const auto read = [](const std::filesystem::path& path) {
+            std::ifstream file(path, std::ios::binary);
+            std::ostringstream bytes;
+            bytes << file.rdbuf();
+            return bytes.str();
+        };
+        ActiveRegionLedger ledger({}, WorldClock(1));
+        if (populated)
+            ledger.mark_edited({0, 0}, WorldClock(1));
+        nlohmann::json metadata = {{"container_version", 2}};
+        WorldClock(1).write_metadata(metadata);
+        const auto original_ledger = ledger.encode();
+        // Exercise refusal before the no-file/empty-ledger shortcut as well.
+        for (const std::uint64_t tick : {0u, 2u}) {
+            WorldClock(tick).write_metadata(metadata);
+            EXPECT_FALSE(
+                WorldSaveService::save_active_regions(ledger, WorldClock(tick), destination.path));
+            EXPECT_FALSE(WorldSaveService::save_metadata_and_active_regions(
+                metadata.dump(), ledger, destination.path));
+            EXPECT_EQ(ledger.encode(), original_ledger);
+            EXPECT_FALSE(std::filesystem::exists(destination.path / "world_info.json"));
+            EXPECT_FALSE(
+                std::filesystem::exists(WorldSaveService::active_regions_path(destination.path)));
+        }
+        if (!populated) {
+            EXPECT_TRUE(
+                WorldSaveService::save_active_regions(ledger, WorldClock(1), destination.path));
+            EXPECT_FALSE(
+                std::filesystem::exists(WorldSaveService::active_regions_path(destination.path)));
+        }
+        // An anchor-only ledger must be installed even without region records.
+        ledger.set_local_anchor({8, 0, 8});
+        WorldClock(1).write_metadata(metadata);
+        ASSERT_TRUE(WorldSaveService::save_metadata_and_active_regions(
+            metadata.dump(), ledger, destination.path));
+        const auto saved_metadata = read(destination.path / "world_info.json");
+        const auto saved_ledger = read(WorldSaveService::active_regions_path(destination.path));
+        for (const std::uint64_t tick : {0u, 2u}) {
+            WorldClock(tick).write_metadata(metadata);
+            EXPECT_FALSE(WorldSaveService::save_metadata_and_active_regions(
+                metadata.dump(), ledger, destination.path));
+            EXPECT_FALSE(
+                WorldSaveService::save_active_regions(ledger, WorldClock(tick), destination.path));
+            EXPECT_EQ(read(destination.path / "world_info.json"), saved_metadata);
+            EXPECT_EQ(read(WorldSaveService::active_regions_path(destination.path)), saved_ledger);
+            EXPECT_EQ(ledger.encode(), saved_ledger);
+        }
+        // Recovery may acknowledge a newer clock without changing the canonical tick.
+        ledger.restore_clock(WorldClock(2));
+        WorldClock(2).write_metadata(metadata);
+        ASSERT_TRUE(WorldSaveService::save_metadata_and_active_regions(
+            metadata.dump(), ledger, destination.path));
+        EXPECT_EQ(ledger.tick(), 1u);
+        EXPECT_EQ(ledger.header_tick(), 2u);
+    }
+}
+
+TEST(WorldSaveService, WaterCursorValidationPrecedesMetadataAndLedgerReplacement) {
+    using Luminumbra::world::ActiveRegionLedger;
+    using Luminumbra::world::WorldClock;
+    TempSaveDir destination("water_cursor_metadata");
+    nlohmann::json metadata = {{"container_version", 2}, {"waterSimCursor", 7u}};
+    WorldClock(2).write_metadata(metadata);
+    ActiveRegionLedger ledger({}, WorldClock(2));
+    ledger.set_local_anchor({8, 0, 8});
+    ASSERT_TRUE(WorldSaveService::save_metadata_and_active_regions(
+        metadata.dump(), ledger, destination.path));
+    const auto read = [](const std::filesystem::path& path) {
+        std::ifstream file(path, std::ios::binary);
+        std::ostringstream bytes;
+        bytes << file.rdbuf();
+        return bytes.str();
+    };
+    const auto metadata_path = destination.path / "world_info.json";
+    const auto ledger_path = WorldSaveService::active_regions_path(destination.path);
+    const auto metadata_bytes = read(metadata_path);
+    const auto ledger_bytes = read(ledger_path);
+    WorldClock saved_clock;
+    bool saved_required = false;
+    std::size_t saved_cursor = 0;
+    ASSERT_TRUE(WorldSaveService::read_clock_metadata(
+        destination.path, saved_clock, saved_required, nullptr, nullptr, &saved_cursor));
+    EXPECT_EQ(saved_cursor, 7u);
+    ActiveRegionLedger rewound({}, WorldClock(1));
+    rewound.set_local_anchor({8, 0, 8});
+    const auto rewound_bytes = rewound.encode();
+    WorldClock(1).write_metadata(metadata);
+    for (const auto& invalid : {nlohmann::json(nullptr),
+                                nlohmann::json(-1),
+                                nlohmann::json(1.5),
+                                nlohmann::json(true),
+                                nlohmann::json("unknown"),
+                                nlohmann::json::object(),
+                                nlohmann::json::array()}) {
+        SCOPED_TRACE(invalid.dump());
+        metadata["waterSimCursor"] = invalid;
+        EXPECT_FALSE(WorldSaveService::save_metadata(metadata.dump(), destination.path));
+        EXPECT_EQ(read(metadata_path), metadata_bytes);
+        ASSERT_TRUE(WorldSaveService::write_file_durably(metadata_path, metadata_bytes));
+        // A rewind writes the ledger first, so validation must precede both writers.
+        auto candidate = rewound;
+        EXPECT_FALSE(WorldSaveService::save_metadata_and_active_regions(
+            metadata.dump(), candidate, destination.path));
+        EXPECT_EQ(read(metadata_path), metadata_bytes);
+        EXPECT_EQ(read(ledger_path), ledger_bytes);
+        EXPECT_EQ(candidate.encode(), rewound_bytes);
+        ASSERT_TRUE(WorldSaveService::write_file_durably(ledger_path, ledger_bytes));
+        auto damaged = metadata;
+        WorldClock(2).write_metadata(damaged);
+        ASSERT_TRUE(WorldSaveService::write_file_durably(metadata_path, damaged.dump()));
+        WorldClock clock;
+        bool required = false;
+        EXPECT_FALSE(WorldSaveService::read_clock_metadata(destination.path, clock, required));
+        EXPECT_FALSE(WorldSaveService::validate_save(destination.path));
+        ASSERT_TRUE(WorldSaveService::write_file_durably(metadata_path, metadata_bytes));
+    }
+    for (const std::string& partial : {std::string("{"), std::string("[]")}) {
+        EXPECT_FALSE(
+            WorldSaveService::save_metadata_and_active_regions(partial, rewound, destination.path));
+        EXPECT_EQ(read(metadata_path), metadata_bytes);
+        EXPECT_EQ(read(ledger_path), ledger_bytes);
+    }
+    metadata.erase("waterSimCursor");
+    ASSERT_TRUE(WorldSaveService::save_metadata_and_active_regions(
+        metadata.dump(), rewound, destination.path));
+    WorldClock clock;
+    bool required = false;
+    std::size_t cursor = 9;
+    ASSERT_TRUE(WorldSaveService::read_clock_metadata(
+        destination.path, clock, required, nullptr, nullptr, &cursor));
+    EXPECT_EQ(cursor, 0u);
+}
+
 TEST(WorldSaveService, LegacyMetadataWriterPreservesOpaqueBytesAndMissingDirectoryFailure) {
     TempSaveDir root("legacy_metadata");
     const auto missing = root.path / "missing";
