@@ -1,5 +1,7 @@
 #pragma once
 
+#include "GraphicsPresets.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -13,12 +15,6 @@ inline constexpr std::uint32_t kGraphicsPresetRulesRevision = 1;
 // Overlong fields are refused rather than matched against a truncated model.
 inline constexpr std::size_t kMaxGraphicsIdentityBytes = 1024;
 
-enum class GraphicsPreset {
-    Low,
-    Medium,
-    High,
-    Ultra
-};
 enum class GraphicsIdentityRule {
     MissingIdentity,
     SoftwareOrGeneric,
@@ -70,7 +66,7 @@ ClassifyGraphicsPreset(const GraphicsHardwareInputs& inputs);
 // Missing advertisement, invalid values and conversion overflow leave capacity unknown.
 [[nodiscard]] std::optional<std::uint64_t>
 DedicatedVideoMemoryBytesFromNvx(bool extensionAdvertised, std::int64_t dedicatedMemoryKB);
-[[nodiscard]] std::string_view GraphicsPresetName(GraphicsPreset preset);
+[[nodiscard]] std::string_view GraphicsPresetDisplayName(GraphicsPreset preset);
 [[nodiscard]] std::string_view GraphicsIdentityRuleName(GraphicsIdentityRule rule);
 
 } // namespace luminumbra::core

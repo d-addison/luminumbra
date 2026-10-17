@@ -186,6 +186,9 @@ add_executable(common_tests
     common/BiomeReverb_test.cpp
     common/DeterministicMath_test.cpp
     common/SystemConfig_test.cpp
+    common/GraphicsPresets_test.cpp
+    ui/graphics_settings_state_test.cpp
+    common/FrameLimiter_test.cpp
     common/PlantProcgen_test.cpp
     common/NetworkSim_test.cpp
     common/ReplicationDelta_test.cpp
@@ -194,6 +197,7 @@ add_executable(common_tests
     common/ResidencyContract_test.cpp
     common/FarLodStore_test.cpp
     common/FarVolumeWorld_test.cpp
+    common/FarFrozenObservation_test.cpp
     common/FarVolumeRuntime_test.cpp
     common/FarVolumeTierMemory_test.cpp
     rendering/FarWorldWaterMesh_test.cpp
@@ -338,6 +342,11 @@ target_link_libraries(common_tests PRIVATE
     luminumbra_common
     luminumbra_save_fixture_support
 )
+
+# Frozen-water rendering exercises the client bridge and mesh implementation.
+add_executable(far_frozen_water_mesh_test rendering/FarFrozenWaterMesh_test.cpp)
+target_link_libraries(far_frozen_water_mesh_test PRIVATE gtest_main luminumbra_client)
+luminumbra_configure_first_party_target(far_frozen_water_mesh_test)
 
 # File-only path contracts run without a GL context or the common-library graph.
 add_executable(filesystem_path_test
@@ -961,6 +970,7 @@ add_executable(far_lod_worker_test
     rendering/loading_overlay_test.cpp
     rendering/texture_file_test.cpp
     rendering/render_clock_test.cpp
+    rendering/graphics_runtime_test.cpp
 )
 
 target_include_directories(far_lod_worker_test PRIVATE
@@ -1900,6 +1910,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     far_volume_mesher_test
     far_volume_facade_test
     far_pristine_field_test
+    far_frozen_water_mesh_test
     world_generation_test
     worldgen_layer_snapshot_test
     asset_processor_round_trip_test
@@ -2389,6 +2400,10 @@ endif()
 add_test(NAME RenderContractPython COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_render_contract.py)
 add_test(NAME SystemConfigIdentityPython COMMAND "${Python3_EXECUTABLE}" -B
     ${CMAKE_SOURCE_DIR}/test/tools/test_system_config_identity.py)
+add_test(NAME FramePacingSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/test/tools/test_frame_pacing_contract.py)
+add_test(NAME GraphicsUiSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/test/tools/test_graphics_ui_contract.py)
 add_test(NAME RenderRunnerEvidencePython COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_render_runner_evidence.py)
 set_tests_properties(RenderRunnerEvidencePython PROPERTIES TIMEOUT 60)
 add_test(NAME RenderSceneMatrixPython COMMAND "${Python3_EXECUTABLE}" -B ${CMAKE_SOURCE_DIR}/tools/rendering/acceptance/test_scene_matrix.py)

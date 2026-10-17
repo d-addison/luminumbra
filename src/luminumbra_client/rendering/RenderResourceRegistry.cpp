@@ -7,7 +7,15 @@
 
 #include "RenderResourceRegistry.h"
 
+#include "luminumbra/core/Types.h"
+
+#include <algorithm>
+#include <cstddef>
 #include <glad/glad.h>
+#include <limits>
+#include <span>
+#include <string>
+#include <utility>
 
 #include "core/Log.h"
 #include "passes/PassGlHelpers.h"
@@ -66,6 +74,82 @@ bool allocate_texture_storage(u32 gl_id, const TextureDesc& desc) {
 }
 
 } // namespace
+
+bool RenderResourceRegistry::replace_targets(std::span<const TargetExtent> extents) {
+    if (extents.empty() || extents.size() > 32)
+        return false;
+    // Validate the complete request before allocating. The maximum scalar
+    // extent fits GLsizei; division checks avoid overflow in width*height*layers.
+    for (std::size_t i = 0; i < extents.size(); ++i) {
+        const auto& e = extents[i];
+        if (e.width == 0 || e.height == 0 ||
+            e.width > static_cast<u32>(std::numeric_limits<GLsizei>::max()) ||
+            e.height > static_cast<u32>(std::numeric_limits<GLsizei>::max()))
+            return false;
+        const auto key = std::string(e.name);
+        const auto texture = m_owned_textures.find(key);
+        const auto buffer = m_owned_renderbuffers.find(key);
+        if (texture == m_owned_textures.end() && buffer == m_owned_renderbuffers.end())
+            return false;
+        const auto layers = texture == m_owned_textures.end() ? 1u : texture->second.desc.layers;
+        if (layers == 0 || layers > static_cast<u32>(std::numeric_limits<GLsizei>::max()) ||
+            static_cast<std::size_t>(e.width) >
+                std::numeric_limits<std::size_t>::max() / e.height / layers / 16u)
+            return false; // At most 16 bytes/texel for these render targets.
+        for (std::size_t j = 0; j < i; ++j)
+            if (e.name == extents[j].name)
+                return false;
+    }
+    RenderResourceRegistry replacement;
+    // Also clean partial allocations when an allocator throws.
+    class Cleanup {
+        RenderResourceRegistry& m_registry;
+
+    public:
+        explicit Cleanup(RenderResourceRegistry& registry)
+            : m_registry(registry) {}
+        ~Cleanup() {
+            m_registry.destroy_all_owned();
+        }
+    };
+    const Cleanup cleanup{replacement};
+    for (const auto& e : extents) {
+        const auto key = std::string(e.name);
+        if (const auto it = m_owned_textures.find(key); it != m_owned_textures.end()) {
+            auto desc = it->second.desc;
+            desc.width = e.width;
+            desc.height = e.height;
+            if (!replacement.create_texture(e.name, desc).id)
+                return false;
+        } else {
+            auto desc = m_owned_renderbuffers.at(key).desc;
+            desc.width = e.width;
+            desc.height = e.height;
+            if (!replacement.create_renderbuffer(e.name, desc).id)
+                return false;
+        }
+    }
+    for (const auto& [name, fbo] : m_owned_fbos) {
+        const auto contained = [&](const FboAttachment& attachment) {
+            return replacement.m_owned_textures.contains(attachment.texture_name) ||
+                   replacement.m_owned_renderbuffers.contains(attachment.texture_name);
+        };
+        if (!std::any_of(fbo.desc.attachments.begin(), fbo.desc.attachments.end(), contained))
+            continue;
+        if (!std::all_of(fbo.desc.attachments.begin(), fbo.desc.attachments.end(), contained) ||
+            !replacement.create_fbo(name, fbo.desc).id)
+            return false;
+    }
+    // No allocations or draws during publication. The replacement registry now
+    // owns the retired objects and deletes FBOs before their attachments.
+    for (auto& [name, value] : replacement.m_owned_textures)
+        std::swap(value, m_owned_textures.at(name));
+    for (auto& [name, value] : replacement.m_owned_renderbuffers)
+        std::swap(value, m_owned_renderbuffers.at(name));
+    for (auto& [name, value] : replacement.m_owned_fbos)
+        std::swap(value, m_owned_fbos.at(name));
+    return true;
+}
 
 TextureHandle RenderResourceRegistry::create_texture(std::string_view name,
                                                      const TextureDesc& desc) {
