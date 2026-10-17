@@ -272,8 +272,9 @@ TEST_P(WorldOpenRefusal, RefusesBeforeGenerationAndPreservesAllDiskBytes) {
         client = std::make_unique<GameSession>();
         client->SetJobSystem(&jobs);
         client->SetRootPath(RootString());
-        if (entry == 1)
+        if (entry == 1) {
             ASSERT_TRUE(client->CreateWorld("Client", "1337", "default"));
+        }
     }
     Damage(kind);
     const auto before = DiskBytes(root);
@@ -325,9 +326,9 @@ TEST_P(WorldOpenRefusal, RefusesBeforeGenerationAndPreservesAllDiskBytes) {
         EXPECT_FALSE(session.LoadWorldStateFrom(save));
     }
     ASSERT_FALSE(error.empty());
-    if (obsolete)
+    if (obsolete) {
         EXPECT_EQ(error, WorldSaveService::kObsoleteWorldMessage);
-    else if (future)
+    } else if (future)
         EXPECT_NE(error.find("future"), std::string::npos);
     else {
         EXPECT_NE(error, WorldSaveService::kObsoleteWorldMessage);
@@ -776,8 +777,9 @@ TEST_F(WorldOpenRefusal, EveryFrozenPresetResolvesHistoricalBytesAndChecksIdenti
                       fs::copy_options::overwrite_existing);
         const auto identity =
             Persistence::StableChecksum(nlohmann::json::parse(Read(historical)).dump());
-        if (std::string(name) == "cave_dense")
+        if (std::string(name) == "cave_dense") {
             EXPECT_EQ(identity, "e70158a4777ee36b");
+        }
         auto metadata = original_metadata;
         metadata["worldType"] = name;
         for (const auto& identity_metadata : {nlohmann::json::object(),
@@ -790,9 +792,9 @@ TEST_F(WorldOpenRefusal, EveryFrozenPresetResolvesHistoricalBytesAndChecksIdenti
             const auto before = DiskBytes(root);
             const auto inspected = Persistence::InspectSavedWorld(root, "fixture");
             EXPECT_EQ(inspected.preset_path, historical);
-            if (saved_metadata.value("presetIdentity", identity) == identity)
+            if (saved_metadata.value("presetIdentity", identity) == identity) {
                 EXPECT_TRUE(inspected.error.empty()) << inspected.error;
-            else
+            } else
                 EXPECT_NE(inspected.error.find("identity"), std::string::npos);
             EXPECT_EQ(DiskBytes(root), before);
         }
@@ -1301,10 +1303,12 @@ public:
 
     void Rewrite(const char* changed) const {
         SCOPED_TRACE(directory.generic_string());
-        if (std::string(changed) != "identity")
+        if (std::string(changed) != "identity") {
             ASSERT_NO_FATAL_FAILURE(Write(directory / "preset.json", other_preset.dump()));
-        if (std::string(changed) != "preset")
+        }
+        if (std::string(changed) != "preset") {
             ASSERT_NO_FATAL_FAILURE(Write(directory / "world_info.json", other_metadata.dump()));
+        }
     }
 
     void Restore() const {
@@ -1477,8 +1481,9 @@ TEST_F(WorldOpenRefusal, ServerFullSnapshotPresetChangeRefusesWithoutWritesOrAck
             }
 
             ASSERT_EQ(runner.SaveFullSnapshot(), 1u);
-            if (active_regions)
+            if (active_regions) {
                 EXPECT_FALSE(chunk->is_voxel_data_dirty());
+            }
             // The legacy full snapshot writes chunks/metadata; flush plants and energy too.
             ASSERT_TRUE(session->SaveWorldState());
             EXPECT_FALSE(chunk->is_voxel_data_dirty());
