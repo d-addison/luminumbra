@@ -89,6 +89,16 @@ RunLifespanOnTick(entt::registry& reg,
             continue;
         auto& mortal = view.get<Comp::MortalComponent>(e);
 
+        if (gate) {
+            if (const auto* cr = reg.try_get<Comp::CreatureComponent>(e); cr && cr->eaten) {
+                if (mortal.dead != 1) {
+                    mortal.dead = 1;
+                    if (completed)
+                        completed(e);
+                }
+                continue;
+            }
+        }
         // A latched-dead entity is inert: it neither ages nor dies again, so its
         // age and death flag stay stable across run==replay.
         if (mortal.dead != 0) {

@@ -282,6 +282,7 @@ void GameSession::ResetWorldSystems(bool keep_admitted_chunk_facts) {
     m_regionWork.clear();
     m_regionCompletedWork.clear();
     m_foliagePreviousTicks.clear();
+    m_creatureTickAdmission = {};
     m_regionFault.reset();
     m_regionInputRejections = {};
     m_regionDurableDirectory.clear();
@@ -551,6 +552,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                 RunRegionScheduler(current_tick);
                 if (m_regionFault)
                     return i + 1;
+                SealCreatureTickAdmission(current_tick);
                 AdvanceGroundObjects(current_tick);
                 if (m_regionFault)
                     return i + 1;
@@ -558,6 +560,26 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                 if (m_regionFault)
                     return i + 1;
             }
+
+            const RegionEntityGate creature_gate =
+                m_activeRegionsEnabled
+                    ? RegionEntityGate([this](auto e) { return CreatureFullEligible(e); })
+                    : RegionEntityGate{};
+            const RegionEntityWork creature_work =
+                m_activeRegionsEnabled
+                    ? RegionEntityWork([this](auto e) { RecordCreatureOperation(e); })
+                    : RegionEntityWork{};
+            const RegionEntityGate decay_gate =
+                m_activeRegionsEnabled ? RegionEntityGate([this](auto e) {
+                    return CreatureFullEligible(e) ||
+                           m_creatureTickAdmission.coarse_corpses.contains(e);
+                })
+                                       : RegionEntityGate{};
+            const luminumbra::ai::CreatureBirthAdmission birth_admission =
+                m_activeRegionsEnabled
+                    ? luminumbra::ai::CreatureBirthAdmission(
+                          [this](const auto& b) { return AdmitCreatureBirth(b); })
+                    : luminumbra::ai::CreatureBirthAdmission{};
 
             // Deterministic per-tick system order. The ordered event bus drains everything
             // published for this tick after simulation systems finish (tick -> lane -> sequence).
@@ -689,20 +711,24 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                         ScentDomainOrigin(false),
                         kScentCellSize,
                         true,
-                        m_speciesTable.get());
+                        m_speciesTable.get(),
+                        creature_gate,
+                        creature_work);
 
                     // 2e-mate: SEXUAL reproduction, phase A. Ready creatures (mature, well-fed,
                     // off cooldown) carrying a CreatureGenomeComponent steer toward the nearest
                     // ready OPPOSITE-SEX mate by overriding the brain's wish velocity (unless
                     // fleeing) — so the physics bridge below actually walks them together. Opt-in
                     // (genome component); no genome -> untouched.
-                    luminumbra::ai::RunMateSeekingOnTick(m_registry, m_reproductionTuning);
+                    luminumbra::ai::RunMateSeekingOnTick(
+                        m_registry, m_reproductionTuning, creature_gate, creature_work);
 
                     // 2e-steer: blend the  bias systems' outputs (computed last tick, slot 7) into
                     // the wish velocity before the physics bridge applies it -- pack flank steer,
                     // migration drift, territory homing. Extracted to ai/SteeringConsumer.h so this
                     // integration layer is unit-tested independently of the producers.
-                    luminumbra::ai::RunSteeringConsumerOnTick(m_registry);
+                    luminumbra::ai::RunSteeringConsumerOnTick(
+                        m_registry, creature_gate, creature_work);
 
                     // 2e-survival: water-seeking (THIRST) + carcass SCAVENGING — built sim
                     // systems wired into the live tick. Opt-in via ThirstComponent /
@@ -714,39 +740,13 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                     luminumbra::ai::RunThirstOnTick(
                         m_registry,
                         static_cast<float>(m_simulationClock.fixed_dt()),
-                        m_thirstTuning);
+                        m_thirstTuning,
+                        creature_gate,
+                        creature_work);
                     luminumbra::ai::RunScavengingOnTick(
-                        m_registry, current_tick, m_scavengingTuning);
-                    {
-                        // Additive blend of the survival wishes into CreatureComponent.wish so a
-                        // thirsty/scavenging creature actually steers to water/carrion. Entities
-                        // without the opt-in components are untouched (try_get -> null), keeping
-                        // the baseline byte-identical; the physics bridge below consumes wish_x/z.
-                        auto sv = m_registry.view<Luminumbra::Components::CreatureComponent>();
-                        for (auto e : sv) {
-                            auto& cr = sv.get<Luminumbra::Components::CreatureComponent>(e);
-                            // the thirst pull applies ONLY when the arbiter
-                            // actually chose Drink — the old unconditional blend let a
-                            // FLEEING creature be simultaneously steered toward water
-                            // (the contract's exact defect). Thirst now competes inside
-                            // DecideCreatureAction; this blend is its motor output.
-                            if (cr.last_action ==
-                                static_cast<int>(luminumbra::ai::CreatureAction::Drink)) {
-                                if (const auto* th =
-                                        m_registry.try_get<Luminumbra::Components::ThirstComponent>(
-                                            e)) {
-                                    cr.wish_x += th->wish_x;
-                                    cr.wish_z += th->wish_z;
-                                }
-                            }
-                            if (const auto* scv =
-                                    m_registry.try_get<Luminumbra::Components::ScavengerComponent>(
-                                        e)) {
-                                cr.wish_x += scv->wish_x;
-                                cr.wish_z += scv->wish_z;
-                            }
-                        }
-                    }
+                        m_registry, current_tick, m_scavengingTuning, creature_gate, creature_work);
+                    luminumbra::ai::RunSurvivalWishBlendOnTick(
+                        m_registry, creature_gate, creature_work);
 
                     // 2e-phys: TRUE-PHYSICS locomotion bridge. Creatures carrying a
                     // CreaturePhysicsComponent are driven by the deterministic Jolt avatar
@@ -801,7 +801,10 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                         current_tick,
                         static_cast<std::uint64_t>(StringToSeed(m_metadata.seed)),
                         m_reproductionTuning,
-                        m_speciesTable.get());
+                        m_speciesTable.get(),
+                        creature_gate,
+                        creature_work,
+                        birth_admission);
                     if (repro.born > 0) {
                         LUMINUMBRA_CORE_INFO(
                             ": {} offspring born (sexual) at tick {}", repro.born, current_tick);
@@ -915,6 +918,19 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
 
             RunRegionalWaterTick();
             RunFoliageTick(budget, current_tick);
+            if (m_activeRegionsEnabled) {
+                const RegionEntityGate mortal_gate = [this](auto e) {
+                    return m_registry.all_of<Components::CreatureComponent>(e) &&
+                           CreatureFullEligible(e);
+                };
+                budget.Next(Stage::Lifespan, [this, &mortal_gate] {
+                    return RegionalParticipantCount<Components::MortalComponent>(m_registry,
+                                                                                 mortal_gate);
+                });
+                luminumbra::ai::RunLifespanOnTick(
+                    m_registry, current_tick, mortal_gate, creature_work);
+            }
+
             {
                 namespace Comp = Luminumbra::Components;
                 // Herd alarm: propagate collective vigilance among same-role creatures. The brain
@@ -927,14 +943,18 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                 });
                 if (!m_registry.view<Comp::AlarmComponent>().empty())
                     luminumbra::ai::RunHerdAlarmOnTick(
-                        m_registry, static_cast<float>(m_simulationClock.fixed_dt()));
+                        m_registry,
+                        static_cast<float>(m_simulationClock.fixed_dt()),
+                        creature_gate,
+                        creature_work);
                 // Decomposition: dead creatures decay + release nutrient (consumed by the soil
                 // loop).
                 budget.Next(Stage::Decay, [&] {
                     return SimParticipantCount<TelemetryComp::DecayComponent>(m_registry);
                 });
                 if (!m_registry.view<Comp::DecayComponent>().empty())
-                    luminumbra::ai::RunDecompositionOnTick(m_registry, current_tick);
+                    luminumbra::ai::RunDecompositionOnTick(
+                        m_registry, current_tick, decay_gate, creature_work);
                 // Circadian: diurnal/nocturnal activity from a tick-derived day fraction.
                 budget.Next(Stage::Circadian, [&] {
                     return SimParticipantCount<TelemetryComp::CircadianComponent>(m_registry);
@@ -947,7 +967,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                             ? static_cast<float>(m_worldClock.day_phase(current_tick))
                             : static_cast<float>(current_tick % kTicksPerDay) /
                                   static_cast<float>(kTicksPerDay);
-                    luminumbra::ai::RunCircadianOnTick(m_registry, tod01, m_circadianAmplitude);
+                    luminumbra::ai::RunCircadianOnTick(
+                        m_registry, tod01, m_circadianAmplitude, creature_gate, creature_work);
                 }
                 // Territory: claim home + emit a homing bias (movement blends it like
                 // mate-seeking).
@@ -956,7 +977,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                                                TelemetryComp::TransformComponent>(m_registry);
                 });
                 if (!m_registry.view<Comp::TerritoryComponent>().empty())
-                    luminumbra::ai::RunTerritoryOnTick(m_registry, current_tick);
+                    luminumbra::ai::RunTerritoryOnTick(
+                        m_registry, current_tick, creature_gate, creature_work);
                 // Predator pack: flanking coordination (a pack surrounds the prey).
                 budget.Next(Stage::Packs, [&] {
                     return SimParticipantCount<TelemetryComp::PackHunterComponent,
@@ -964,7 +986,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                                                TelemetryComp::TransformComponent>(m_registry);
                 });
                 if (!m_registry.view<Comp::PackHunterComponent>().empty())
-                    luminumbra::ai::RunPredatorPackOnTick(m_registry, current_tick);
+                    luminumbra::ai::RunPredatorPackOnTick(
+                        m_registry, current_tick, creature_gate, creature_work);
                 // Migration: seasonal drive toward a moving target (tick-derived year fraction).
                 budget.Next(Stage::Migration, [&] {
                     return SimParticipantCount<TelemetryComp::MigratoryComponent,
@@ -977,7 +1000,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                             ? static_cast<float>(m_worldClock.spring_phase(current_tick))
                             : static_cast<float>(current_tick % kTicksPerYear) /
                                   static_cast<float>(kTicksPerYear);
-                    luminumbra::ai::RunMigrationOnTick(m_registry, season01);
+                    luminumbra::ai::RunMigrationOnTick(
+                        m_registry, season01, creature_gate, creature_work);
                 }
             }
 
@@ -991,6 +1015,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
             if (m_regionFault)
                 return i + 1;
             if (m_activeRegionsEnabled) {
+                CompleteCreatureTickAdmission();
                 PrepareRegionalFoliage();
                 m_activeRegionLedger.publish_completed_work(m_regionCompletedWork);
                 m_regionCompletedWork.clear();
@@ -2215,6 +2240,12 @@ void GameSession::RunRegionalFoliageTickImpl(
             completed_regions.insert(key);
         }
         const RegionEntityGate gate = [this, &windows, step, max_window, subtick](entt::entity e) {
+            // Optional foliage components do not grant creatures positional admission.
+            // Full creature recipients and fire sources run once at the real tick;
+            // historical plant substeps cannot mutate or complete creature work.
+            if (m_registry.all_of<C::CreatureComponent>(e) &&
+                (step + 1 != max_window || !CreatureFullEligible(e)))
+                return false;
             const auto* tf = m_registry.try_get<C::TransformComponent>(e);
             if (!tf || !ActiveRegionLedger::valid_anchor(tf->position))
                 return false;
@@ -2227,6 +2258,10 @@ void GameSession::RunRegionalFoliageTickImpl(
             return it != windows.end() && max_window - step <= it->second;
         };
         const RegionEntityWork completed = [this, &completed_regions](entt::entity e) {
+            if (m_registry.all_of<C::CreatureComponent>(e)) {
+                RecordCreatureOperation(e);
+                return;
+            }
             const auto& tf = m_registry.get<C::TransformComponent>(e);
             const auto key = ActiveRegionLedger::region_at(tf.position);
             RecordActiveRegionWork({key, 0, 1, 0, 0});
@@ -2302,12 +2337,18 @@ void GameSession::RunRegionalFoliageTickImpl(
             return RegionalParticipantCount<C::GrazeableComponent, C::TransformComponent>(
                 m_registry, gate);
         });
+        const RegionEntityGate grazer_gate = [this, step, max_window](auto e) {
+            return step + 1 == max_window && CreatureGrazerEligible(e);
+        };
         luminumbra::ai::RunWildlifeFoliageOnTick(
-            m_registry, subtick, m_wildlifeFoliageTuning, gate, completed);
+            m_registry, subtick, m_wildlifeFoliageTuning, gate, grazer_gate, completed);
         budget.Next(Stage::Lifespan, [this, &gate] {
             return RegionalParticipantCount<C::MortalComponent>(m_registry, gate);
         });
-        luminumbra::ai::RunLifespanOnTick(m_registry, subtick, gate, completed);
+        const RegionEntityGate plant_mortal_gate = [this, &gate](auto e) {
+            return !m_registry.all_of<C::CreatureComponent>(e) && gate(e);
+        };
+        luminumbra::ai::RunLifespanOnTick(m_registry, subtick, plant_mortal_gate, completed);
     }
     budget.Next(Stage::Plants, [] { return 0u; });
     for (const auto& [key, updates] : page_work)
@@ -2336,6 +2377,133 @@ void GameSession::RunRegionalFoliageTickImpl(
             completed_regions.insert(key);
     for (const auto key : completed_regions)
         RecordActiveRegionWork({key, 1, 0, 0, 0});
+}
+
+void GameSession::SealCreatureTickAdmission(std::uint64_t tick) {
+    namespace C = Components;
+    m_creatureTickAdmission = {};
+    auto& admission = m_creatureTickAdmission;
+    admission.tick = tick;
+    const auto due = SortedDueRegions();
+    auto active_due = [this, &due](RegionKey key) {
+        const auto it = m_activeRegionLedger.records().find(key);
+        return it != m_activeRegionLedger.records().end() &&
+               it->second.state == RegionState::Active &&
+               std::binary_search(due.begin(), due.end(), key);
+    };
+    auto positional_due = [this, &due](RegionKey key) {
+        const auto it = m_activeRegionLedger.records().find(key);
+        return it != m_activeRegionLedger.records().end() &&
+               it->second.state != RegionState::Frozen &&
+               std::binary_search(due.begin(), due.end(), key);
+    };
+    for (auto e : m_registry.view<C::TransformComponent>()) {
+        const auto& tf = m_registry.get<C::TransformComponent>(e);
+        const auto* cr = m_registry.try_get<C::CreatureComponent>(e);
+        if (!cr) {
+            if (ActiveRegionLedger::valid_anchor(tf.position) &&
+                positional_due(ActiveRegionLedger::region_at(tf.position)))
+                admission.positional_sources.insert(e);
+            continue;
+        }
+        const auto* owner = m_registry.try_get<C::CreatureRegionComponent>(e);
+        const auto* coarse = m_registry.try_get<C::CreatureCoarseComponent>(e);
+        if (!owner && !coarse && cr->species_id == 0) {
+            if (ActiveRegionLedger::valid_anchor(tf.position) &&
+                positional_due(ActiveRegionLedger::region_at(tf.position)))
+                admission.transient_grazers.insert(e);
+            continue;
+        }
+        if (!owner || !coarse || !owner->persistent_id || !m_speciesTable ||
+            !m_speciesTable->Find(cr->species_id))
+            continue;
+        const RegionKey key{owner->owner_x, owner->owner_z};
+        admission.previous.emplace(
+            e, CreatureTickAdmission::Previous{key, coarse->tier, owner->persistent_id});
+        if (owner->region_stamp >= tick)
+            continue;
+        if (coarse->tier == C::CreatureTier::Full && active_due(key))
+            admission.full.insert(e);
+        if (coarse->tier != C::CreatureTier::Coarse || !luminumbra::ai::DecompIsDead(m_registry, e))
+            continue;
+        const auto it = m_activeRegionLedger.records().find(key);
+        if (it == m_activeRegionLedger.records().end() || it->second.state == RegionState::Frozen ||
+            !std::binary_search(due.begin(), due.end(), key))
+            continue;
+        const auto shift = it->second.cadence_shift;
+        if (owner->region_stamp == 0 || (owner->region_stamp >> shift) < (tick >> shift))
+            admission.coarse_corpses.insert(e);
+    }
+}
+bool GameSession::CreatureFullEligible(entt::entity entity) const {
+    return m_creatureTickAdmission.full.contains(entity) ||
+           m_creatureTickAdmission.positional_sources.contains(entity);
+}
+bool GameSession::CreatureGrazerEligible(entt::entity entity) const {
+    return m_creatureTickAdmission.full.contains(entity) ||
+           m_creatureTickAdmission.transient_grazers.contains(entity);
+}
+void GameSession::RecordCreatureOperation(entt::entity entity) {
+    const auto it = m_creatureTickAdmission.previous.find(entity);
+    if (it != m_creatureTickAdmission.previous.end()) {
+        m_creatureTickAdmission.processed.insert(entity);
+        m_creatureTickAdmission.processed_owners.insert(it->second.owner);
+        RecordActiveRegionWork({it->second.owner, 0, 1, 0, 0});
+    } else if (m_creatureTickAdmission.transient_grazers.contains(entity) ||
+               m_creatureTickAdmission.positional_sources.contains(entity)) {
+        const auto& tf = m_registry.get<Components::TransformComponent>(entity);
+        const auto key = ActiveRegionLedger::region_at(tf.position);
+        m_creatureTickAdmission.processed_owners.insert(key);
+        RecordActiveRegionWork({key, 0, 1, 0, 0});
+    }
+}
+void GameSession::CompleteCreatureTickAdmission() {
+    for (const auto e : m_creatureTickAdmission.processed) {
+        if (!m_registry.valid(e))
+            continue;
+        if (auto* owner = m_registry.try_get<Components::CreatureRegionComponent>(e))
+            owner->region_stamp = m_creatureTickAdmission.tick;
+    }
+    for (const auto key : m_creatureTickAdmission.processed_owners)
+        RecordActiveRegionWork({key, 1, 0, 0, 0});
+}
+bool GameSession::AdmitCreatureBirth(const luminumbra::ai::CreatureBirthProposal& birth) {
+    namespace C = Components;
+    const auto tick = m_creatureTickAdmission.tick;
+    const Vec3 position(birth.x, birth.y, birth.z);
+    if (!m_activeRegionsEnabled || m_regionFault || !m_speciesTable ||
+        !m_speciesTable->Find(birth.species_id) ||
+        !luminumbra::ai::AdmitFullCreatureBirthDestination(
+            m_activeRegionLedger, SortedDueRegions(), position))
+        return false;
+    std::uint64_t id = 0;
+    if (!m_activeRegionLedger.allocate_persistent_id(id))
+        throw std::runtime_error("Creature identity allocation refused");
+    entt::entity child = entt::null;
+    try {
+        child = luminumbra::ai::CreateCreatureBirthEntity(
+            m_registry, birth, m_reproductionTuning.cooldown_ticks);
+        const auto key = ActiveRegionLedger::region_at(position);
+        m_registry.emplace<C::CreatureRegionComponent>(child, id, key.x, key.z, tick);
+        m_registry.emplace<C::CreatureCoarseComponent>(child);
+        m_registry.emplace<C::CreatureControllerComponent>(child); // Explicitly kinematic newborn.
+        // The existing snapshot validation checks all admission bridges and inventory.
+        const auto snapshot = luminumbra::ai::BuildCreatureSnapshot(m_registry);
+        const auto plants = luminumbra::foliage::BuildPlantEntitySnapshot(m_registry, true);
+        std::string error;
+        if (!luminumbra::ai::ValidateCreatureSnapshot(
+                snapshot, m_activeRegionLedger, m_groundObjects, plants, error)) {
+            m_registry.destroy(child);
+            return false;
+        }
+        RecordActiveRegionWork({key, 0, 1, 0, 0});
+        m_creatureTickAdmission.processed_owners.insert(key);
+        return true;
+    } catch (...) {
+        if (child != entt::null && m_registry.valid(child))
+            m_registry.destroy(child);
+        throw;
+    }
 }
 
 void GameSession::RunRegionScheduler(std::uint64_t current_tick) {

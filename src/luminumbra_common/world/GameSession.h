@@ -28,6 +28,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -641,6 +642,24 @@ private:
     void AdvanceFieldPages(std::uint64_t tick);
     bool AdmitPlantAt(entt::entity entity, std::uint64_t fresh_stamp);
     void PrepareRegionalFoliage();
+    struct CreatureTickAdmission {
+        struct Previous {
+            RegionKey owner;
+            Components::CreatureTier tier;
+            std::uint64_t id;
+        };
+        std::uint64_t tick = 0;
+        std::map<entt::entity, Previous> previous;
+        std::set<entt::entity> full, coarse_corpses, positional_sources, transient_grazers;
+        std::set<entt::entity> processed;
+        std::set<RegionKey> processed_owners;
+    } m_creatureTickAdmission;
+    void SealCreatureTickAdmission(std::uint64_t tick);
+    void CompleteCreatureTickAdmission();
+    bool CreatureFullEligible(entt::entity entity) const;
+    bool CreatureGrazerEligible(entt::entity entity) const;
+    void RecordCreatureOperation(entt::entity entity);
+    bool AdmitCreatureBirth(const luminumbra::ai::CreatureBirthProposal& birth);
     void RunRegionalEnergyTick(std::uint64_t tick);
     void CaptureCreatureLocomotionForSave();
     void RunRegionalWaterTick();

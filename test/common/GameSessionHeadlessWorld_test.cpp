@@ -34,6 +34,7 @@
 // asset-manifest split. The engine-side GameSession validates
 // SIMULATION requirements only (preset, worldgen dependencies, species and policy);
 // renderer/UI asset requirements are caller-supplied by the client.
+#include "../support/LegacyCreatureTickOracle.h"
 #include "../support/SimulationContentFixture.h"
 #include "../support/UniqueTempPath.h"
 #include "../support/WorldgenTestData.h"
@@ -159,7 +160,7 @@ public:
     // GameSession::SetRootPath expects a trailing separator (paths are
     // concatenated, not joined).
     [[nodiscard]] std::string root_string() const {
-        return root_.string() + static_cast<char>(fs::path::preferred_separator);
+        return Luminumbra::Filesystem::GenericUtf8PathString(root_) + "/";
     }
 
 private:
@@ -969,7 +970,7 @@ TEST(GameSessionHeadlessWorldTest, MissingRuntimeDependenciesRefuseCreateReloadA
           std::pair{fs::path("common/structures"), true},
           std::pair{fs::path("common/structures/cairn/cairn.json"), false},
           std::pair{fs::path("common/structures/cairn/cairn.json"), true}}) {
-        SCOPED_TRACE(relative.string());
+        SCOPED_TRACE(Luminumbra::Filesystem::GenericUtf8PathString(relative));
         SCOPED_TRACE(empty);
         const auto dependency = assets.path() / "data" / relative;
         const auto hidden = assets.path() / "hidden-dependency";
@@ -1303,8 +1304,9 @@ void WriteSavedPresetTestJson(const fs::path& path, const nlohmann::json& json) 
 std::map<std::string, std::string> SavedPresetTestDiskBytes(const fs::path& root) {
     std::map<std::string, std::string> result;
     for (const auto& entry : fs::recursive_directory_iterator(root)) {
-        result.emplace(entry.path().lexically_relative(root).generic_string(),
-                       entry.is_directory() ? "<directory>" : ReadClockTestFile(entry.path()));
+        result.emplace(
+            Luminumbra::Filesystem::GenericUtf8PathString(entry.path().lexically_relative(root)),
+            entry.is_directory() ? "<directory>" : ReadClockTestFile(entry.path()));
     }
     return result;
 }
@@ -1463,7 +1465,7 @@ public:
     }
 
     void Rewrite(const char* changed) const {
-        SCOPED_TRACE(directory.generic_string());
+        SCOPED_TRACE(Luminumbra::Filesystem::GenericUtf8PathString(directory));
         if (std::string(changed) != "identity") {
             ASSERT_NO_FATAL_FAILURE(
                 WriteSavedPresetTestJson(directory / "preset.json", other_preset));
@@ -1475,7 +1477,7 @@ public:
     }
 
     void Restore() const {
-        SCOPED_TRACE(directory.generic_string());
+        SCOPED_TRACE(Luminumbra::Filesystem::GenericUtf8PathString(directory));
         ASSERT_TRUE(
             P::WorldSaveService::write_file_durably(directory / "preset.json", preset_bytes));
         ASSERT_TRUE(
@@ -1497,7 +1499,7 @@ public:
         , bytes(SavedPresetTestDiskBytes(directory)) {}
 
     void ExpectUnchanged() const {
-        SCOPED_TRACE(directory.generic_string());
+        SCOPED_TRACE(Luminumbra::Filesystem::GenericUtf8PathString(directory));
         EXPECT_EQ(SavedPresetTestDiskBytes(directory), bytes);
     }
 
@@ -1774,12 +1776,29 @@ entt::entity ClockTestPlant(entt::registry& registry, const Luminumbra::Vec3& po
     return plant;
 }
 
-entt::entity ClockTestCreature(entt::registry& registry) {
+entt::entity ClockTestCreature(GameSession& session) {
+    auto& registry = session.GetRegistry();
     const auto creature = registry.create();
     registry.emplace<C::CreatureComponent>(creature);
     registry.emplace<C::CircadianComponent>(creature);
     registry.emplace<C::MigratoryComponent>(creature);
     registry.emplace<C::TransformComponent>(creature).position = Luminumbra::Vec3(0.0f);
+    if (session.ActiveRegionsEnabled()) {
+        auto& ledger =
+            const_cast<Luminumbra::world::ActiveRegionLedger&>(session.GetActiveRegionLedger());
+        std::uint64_t id = 0;
+        if (!ledger.allocate_persistent_id(id))
+            throw std::runtime_error("Clock observer admission refused");
+        session.NotifyGroundObjectEdit(Luminumbra::Vec3(0));
+        if (session.GetRegionSchedulerFault())
+            throw std::runtime_error("Clock observer owner admission refused");
+        registry.get<C::CreatureComponent>(creature).species_id =
+            C::CreatureSpeciesId16("fixture_creature");
+        registry.emplace<C::CreatureRegionComponent>(
+            creature, id, 0, 0, session.GetWorldClock().tick());
+        registry.emplace<C::CreatureCoarseComponent>(creature);
+        registry.emplace<C::CreatureControllerComponent>(creature);
+    }
     registry.emplace<C::InstinctAgentComponent>(creature).actor_id = "clock-observer";
     registry.emplace<C::NeedsComponent>(creature).needs = {{"day", 0.0f, 0.0f},
                                                            {"year", 0.0f, 0.0f}};
@@ -1863,14 +1882,13 @@ TEST(GameSessionHeadlessWorldTest, ActiveClockSaveLoadContinuationMatchesUninter
     EXPECT_NE(SessionWorldHash(absent_energy), before_save);
     EXPECT_NE(SessionWorldHash(wrong_clock), before_save);
 
-    // This slice persists plants and energy, not creature records. Attach the same
-    // observing creature to each independently advanced world at the checkpoint.
+    // Admit the same observing creature to each independently advanced world at the checkpoint.
     std::vector<entt::entity> creatures;
     const std::vector<GameSession*> sessions{
         &original, &control, &loaded, &absent_energy, &wrong_clock};
     creatures.reserve(sessions.size());
     for (auto* session : sessions)
-        creatures.push_back(ClockTestCreature(session->GetRegistry()));
+        creatures.push_back(ClockTestCreature(*session));
     for (int i = 0; i < k; ++i) {
         for (auto* session : sessions)
             ASSERT_EQ(session->TickSimulation(dt), 1u);
@@ -2129,7 +2147,8 @@ TEST(GameSessionHeadlessWorldDeathTest, TerminatedLedgerStagingLeavesLoadableAnd
     const auto save = fs::directory_iterator(root.path() / "worlds/saves")->path();
     std::vector<fs::path> debris;
     for (const auto& entry : fs::recursive_directory_iterator(save)) {
-        if (entry.path().filename().string().find("active-regions.arl.tmp.") == 0)
+        if (Luminumbra::Filesystem::GenericUtf8PathString(entry.path().filename())
+                .find("active-regions.arl.tmp.") == 0)
             debris.push_back(entry.path());
     }
     ASSERT_EQ(debris.size(), 1u);
@@ -2145,14 +2164,15 @@ TEST(GameSessionHeadlessWorldDeathTest, TerminatedLedgerStagingLeavesLoadableAnd
     EXPECT_FALSE(P::WorldSaveService::validate_save(save));
     JobSystem jobs;
     jobs.startup(1);
-    ASSERT_NO_FATAL_FAILURE(
-        CheckCommittedSnapshotReloadAndSave(root, jobs, save.filename().string(), save, 1));
+    ASSERT_NO_FATAL_FAILURE(CheckCommittedSnapshotReloadAndSave(
+        root, jobs, Luminumbra::Filesystem::GenericUtf8PathString(save.filename()), save, 1));
     // Recovery never depends on cleaning the staging file up, but the next
     // successful save must reclaim it. Otherwise every interruption leaks a full
     // ledger copy and repeated crashes exhaust the volume.
     std::size_t remaining = 0;
     for (const auto& entry : fs::recursive_directory_iterator(save))
-        if (entry.path().filename().string().find("active-regions.arl.tmp.") == 0)
+        if (Luminumbra::Filesystem::GenericUtf8PathString(entry.path().filename())
+                .find("active-regions.arl.tmp.") == 0)
             ++remaining;
     EXPECT_EQ(remaining, 0u);
     EXPECT_FALSE(fs::exists(debris.front()));
@@ -2811,7 +2831,7 @@ TEST(GameSessionHeadlessWorldTest, CalendarConsumersUsePinnedPhasesOnTheRealTick
         ASSERT_TRUE(session.LoadWorld(id)) << session.GetWorldOpenError();
         const auto position = session.GetMetadata().spawnPoint;
         const auto plant = ClockTestPlant(session.GetRegistry(), position);
-        const auto creature = ClockTestCreature(session.GetRegistry());
+        const auto creature = ClockTestCreature(session);
         ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
         const auto& clock = session.GetWorldClock();
         EXPECT_FLOAT_EQ(static_cast<float>(clock.day_phase(pin.tick)), pin.day);
@@ -3972,7 +3992,8 @@ TEST(GameSessionHeadlessWorldTest, ReplayScheduleCompanionRoundTripsAndRefusesIn
     EXPECT_EQ(restored, trace);
     EXPECT_FALSE(ReadRegionScheduleTrace(path, 3, restored, error));
     EXPECT_EQ(error, "Corrupt region schedule trace.");
-    const auto companion = path.string() + ".regions.json";
+    auto companion = path;
+    companion += ".regions.json";
     const auto good = nlohmann::json::parse(ReadClockTestFile(companion));
     auto value = good;
     value["ticks"][0]["digest"] = "0000000000000000";
@@ -4479,7 +4500,7 @@ void ExpectSameSaveTree(const fs::path& actual, const fs::path& expected) {
             continue;
         const auto relative = fs::relative(entry.path(), actual);
         EXPECT_EQ(ReadClockTestFile(entry.path()), ReadClockTestFile(expected / relative))
-            << relative.string();
+            << Luminumbra::Filesystem::GenericUtf8PathString(relative);
     }
 }
 
@@ -8678,6 +8699,458 @@ TEST(GameSessionHeadlessWorldTest,
 }
 
 namespace {
+namespace S8A = luminumbra::ai;
+namespace S8O = LegacyCreatureTickOracle;
+
+entt::entity S8Creature(GameSession& session,
+                        const Luminumbra::Vec3& position,
+                        C::CreatureTier tier = C::CreatureTier::Full) {
+    auto& registry = session.GetRegistry();
+    auto& ledger = const_cast<ActiveRegionLedger&>(session.GetActiveRegionLedger());
+    std::uint64_t id = 0;
+    if (!ledger.allocate_persistent_id(id))
+        throw std::runtime_error("Creature fixture admission refused");
+    session.NotifyGroundObjectEdit(position);
+    if (session.GetRegionSchedulerFault())
+        throw std::runtime_error("Creature fixture owner admission refused");
+    const auto e = registry.create();
+    registry.emplace<C::TransformComponent>(e).position = position;
+    registry.emplace<C::CreatureComponent>(e).species_id =
+        C::CreatureSpeciesId16("fixture_creature");
+    const auto key = ActiveRegionLedger::region_at(position);
+    registry.emplace<C::CreatureRegionComponent>(
+        e, id, key.x, key.z, session.GetWorldClock().tick());
+    auto& coarse = registry.emplace<C::CreatureCoarseComponent>(e);
+    coarse.tier = tier;
+    coarse.x_mm = static_cast<std::int64_t>(std::round(static_cast<double>(position.x) * 1000));
+    coarse.y_mm = static_cast<std::int64_t>(std::round(static_cast<double>(position.y) * 1000));
+    coarse.z_mm = static_cast<std::int64_t>(std::round(static_cast<double>(position.z) * 1000));
+    registry.emplace<C::CreatureControllerComponent>(e);
+    return e;
+}
+entt::entity S8FindCreature(GameSession& session, std::uint64_t id) {
+    for (auto e : session.GetRegistry().view<C::CreatureRegionComponent>())
+        if (session.GetRegistry().get<C::CreatureRegionComponent>(e).persistent_id == id)
+            return e;
+    return entt::null;
+}
+void S8InstallLedger(GameSession& base, ActiveRegionLedger ledger) {
+    S7KeepAllocator(ledger, base.GetActiveRegionLedger().next_persistent_id());
+    S7CommitFixture(base, ledger, {}, SF::BuildPlantEntitySnapshot(base.GetRegistry(), true));
+}
+std::map<std::string, std::string> S8SaveFiles(const fs::path& directory) {
+    std::map<std::string, std::string> files;
+    for (const auto& entry : fs::recursive_directory_iterator(directory))
+        if (entry.is_regular_file())
+            files.emplace(Luminumbra::Filesystem::GenericUtf8PathString(
+                              fs::relative(entry.path(), directory)),
+                          ReadClockTestFile(entry.path()));
+    return files;
+}
+} // namespace
+
+TEST(GameSessionHeadlessWorldTest, S8DCreatureSystemsGateFrozenReducedAndFullCohorts) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession base, live;
+    CreateGroundWorld(base, root, jobs, "Creature cohorts");
+    const std::array<RegionKey, 4> keys{{{10, -3}, {11, -3}, {12, -3}, {13, -3}}};
+    for (int i = 0; i < 4; ++i) {
+        const auto e = S8Creature(base,
+                                  {static_cast<float>(keys[i].x * 512 + 16), 0, -1500},
+                                  i == 3 ? C::CreatureTier::Coarse : C::CreatureTier::Full);
+        auto& r = base.GetRegistry();
+        r.emplace<C::CreatureGenomeComponent>(e).age_ticks = 7;
+        r.emplace<C::MortalComponent>(e).age_ticks = 10;
+        r.emplace<C::ThirstComponent>(e).thirst = .5f;
+        r.emplace<C::ScavengerComponent>(e).wish_x = -0.0f;
+        r.emplace<C::CircadianComponent>(e);
+        r.emplace<C::AlarmComponent>(e).level = .7f;
+        r.emplace<C::TerritoryComponent>(e);
+        r.emplace<C::MigratoryComponent>(e);
+        r.emplace<C::PackHunterComponent>(e);
+    }
+    ASSERT_TRUE(base.SaveWorld());
+    auto ledger = FixtureLedger(100,
+                                {{keys[0], RegionState::Active},
+                                 {keys[1], RegionState::Frozen},
+                                 {keys[2], RegionState::Reduced},
+                                 {keys[3], RegionState::Active}});
+    // Make the reduced owner explicitly off-due at 101.
+    auto& records = const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records());
+    records.at(keys[2]).cadence_phase = 2;
+    ASSERT_NO_FATAL_FAILURE(S8InstallLedger(base, ledger));
+    EnableSnapshotSession(live, root, jobs);
+    ASSERT_TRUE(live.LoadWorld(base.GetMetadata().worldId)) << live.GetWorldOpenError();
+    live.SetReplicatedSimulationAnchors({});
+    auto& r = live.GetRegistry();
+    std::map<std::uint64_t, std::string> held;
+    for (auto id : {2u, 3u, 4u})
+        held[id] = S8O::Fields(r, S8FindCreature(live, id));
+    TickOnce(live);
+    ASSERT_FALSE(live.GetRegionSchedulerFault());
+    for (auto id : {2u, 3u, 4u})
+        EXPECT_EQ(S8O::Fields(r, S8FindCreature(live, id)), held.at(id));
+    const auto full = S8FindCreature(live, 1);
+    EXPECT_EQ(r.get<C::CreatureGenomeComponent>(full).age_ticks, 8u);
+    EXPECT_EQ(r.get<C::MortalComponent>(full).age_ticks, 11u);
+    EXPECT_EQ(r.get<C::CreatureCoarseComponent>(full).age_cadences, 0u);
+    EXPECT_EQ(r.get<C::CreatureRegionComponent>(full).region_stamp, 101u);
+    EXPECT_TRUE(r.all_of<C::TerritoryBiasComponent>(full));
+    EXPECT_GT(r.get<C::ThirstComponent>(full).thirst, .5f);
+    EXPECT_TRUE(live.GetActiveRegionLedger().completed_work().contains(keys[0]));
+    EXPECT_FALSE(live.GetActiveRegionLedger().completed_work().contains(keys[1]));
+    // A due Reduced owner still cannot run Full AI. An absent owner cannot either.
+    auto& mutable_ledger = const_cast<ActiveRegionLedger&>(live.GetActiveRegionLedger());
+    auto& mutable_records =
+        const_cast<std::map<RegionKey, ActiveRegionRecord>&>(mutable_ledger.records());
+    mutable_records.at(keys[2]).cadence_phase = 2; // due at tick 102
+    mutable_records.erase(keys[1]);
+    TickOnce(live);
+    ASSERT_FALSE(live.GetRegionSchedulerFault());
+    EXPECT_EQ(S8O::Fields(r, S8FindCreature(live, 2)), held.at(2));
+    EXPECT_EQ(S8O::Fields(r, S8FindCreature(live, 3)), held.at(3));
+}
+
+TEST(GameSessionHeadlessWorldTest, S8DGrazeableCreatureRecipientsRequireSealedFullAdmission) {
+    for (bool resume : {false, true}) {
+        for (bool nearby_grazer : {false, true}) {
+            SCOPED_TRACE(resume);
+            SCOPED_TRACE(nearby_grazer);
+            const HeadlessRoot root;
+            JobSystem jobs;
+            jobs.startup(1);
+            GameSession base, live;
+            CreateGroundWorld(base, root, jobs, "Creature grazing recipients");
+            const Luminumbra::Vec3 position(5200, 0, -1500);
+            auto& registry = base.GetRegistry();
+            for (auto tier : {C::CreatureTier::Coarse, C::CreatureTier::Full}) {
+                const auto recipient = S8Creature(base, position, tier);
+                auto& creature = registry.get<C::CreatureComponent>(recipient);
+                creature.is_predator = true; // recipients do not graze themselves
+                creature.move_speed = 0;
+                auto& biomass = registry.emplace<C::GrazeableComponent>(recipient);
+                biomass.biomass = .5f;
+                biomass.last_grazed_tick = 17;
+            }
+            const auto grazer =
+                S8Creature(base, position + Luminumbra::Vec3(nearby_grazer ? 0 : 64, 0, 0));
+            registry.get<C::CreatureComponent>(grazer).move_speed = 0;
+            registry.get<C::CreatureComponent>(grazer).hunger = .7f;
+            ASSERT_TRUE(base.SaveWorld()); // Grazeable is a valid persisted creature component.
+            auto ledger = FixtureLedger(
+                100, {{kFarGroundRegion, resume ? RegionState::Frozen : RegionState::Active}});
+            if (resume) {
+                auto& record =
+                    const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records())
+                        .at(kFarGroundRegion);
+                record.frozen_at = 90;
+                record.last_ticked = 89;
+            }
+            ASSERT_NO_FATAL_FAILURE(S8InstallLedger(base, ledger));
+            EnableSnapshotSession(live, root, jobs);
+            ASSERT_TRUE(live.LoadWorld(base.GetMetadata().worldId)) << live.GetWorldOpenError();
+            live.SetReplicatedSimulationAnchors({});
+            if (resume)
+                live.PinActiveRegion(kFarGroundRegion, true);
+            S8A::EcologyTuning tuning;
+            tuning.catch_radius = 0; // keep the Full grazer alive beside the recipients
+            tuning.hunger_growth_per_second = 0;
+            tuning.hunger_graze_sate = 0;
+            live.SetEcologyTuning(tuning);
+            auto& actual = live.GetRegistry();
+            const auto coarse = S8FindCreature(live, 1), full = S8FindCreature(live, 2);
+            ASSERT_NE(coarse, static_cast<entt::entity>(entt::null));
+            ASSERT_NE(full, static_cast<entt::entity>(entt::null));
+            const auto held = S8O::Fields(actual, coarse);
+            const auto stamp = actual.get<C::CreatureRegionComponent>(coarse).region_stamp;
+            ASSERT_NO_FATAL_FAILURE(TickOnce(live));
+            ASSERT_FALSE(live.GetRegionSchedulerFault());
+            const auto& blocked = actual.get<C::GrazeableComponent>(coarse);
+            EXPECT_EQ(blocked.biomass, .5f);
+            EXPECT_EQ(blocked.last_grazed_tick, 17u);
+            EXPECT_EQ(actual.get<C::CreatureRegionComponent>(coarse).region_stamp, stamp);
+            EXPECT_EQ(S8O::Fields(actual, coarse), held);
+            const auto& admitted = actual.get<C::GrazeableComponent>(full);
+            EXPECT_EQ(admitted.biomass,
+                      nearby_grazer ? .5f - S8A::kGrazePerCreature : .5f + S8A::kRegrowPerTick);
+            EXPECT_EQ(admitted.last_grazed_tick, nearby_grazer ? 101u : 17u);
+            EXPECT_EQ(actual.get<C::CreatureRegionComponent>(full).region_stamp, 101u);
+            // Only the Full recipient supplies feed, even after a plant resume window.
+            EXPECT_EQ(actual.get<C::CreatureComponent>(S8FindCreature(live, 3)).hunger,
+                      nearby_grazer ? .7f - S8A::kFeedPerGraze : .7f);
+        }
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, S8DFireCreatureSourcesAndRecipientsRequireSealedFullAdmission) {
+    for (bool full_source : {false, true}) {
+        SCOPED_TRACE(full_source);
+        const HeadlessRoot root;
+        JobSystem jobs;
+        jobs.startup(1);
+        GameSession base, live;
+        CreateGroundWorld(base, root, jobs, "Creature fire participants");
+        const Luminumbra::Vec3 position(5200, 0, -1500);
+        for (auto tier : {C::CreatureTier::Coarse, C::CreatureTier::Full}) {
+            const auto recipient = S8Creature(base, position, tier);
+            base.GetRegistry().get<C::CreatureComponent>(recipient).move_speed = 0;
+            base.GetRegistry().emplace<C::CombustibleComponent>(recipient);
+        }
+        const auto source = S8Creature(
+            base, position, full_source ? C::CreatureTier::Full : C::CreatureTier::Coarse);
+        base.GetRegistry().get<C::CreatureComponent>(source).move_speed = 0;
+        base.GetRegistry().emplace<C::IgnitionSourceComponent>(source);
+        ASSERT_TRUE(base.SaveWorld());
+        ASSERT_NO_FATAL_FAILURE(
+            S8InstallLedger(base, FixtureLedger(100, {{kFarGroundRegion, RegionState::Active}})));
+        EnableSnapshotSession(live, root, jobs);
+        ASSERT_TRUE(live.LoadWorld(base.GetMetadata().worldId)) << live.GetWorldOpenError();
+        live.SetReplicatedSimulationAnchors({});
+        auto& actual = live.GetRegistry();
+        const auto coarse = S8FindCreature(live, 1), full = S8FindCreature(live, 2);
+        ASSERT_NE(coarse, static_cast<entt::entity>(entt::null));
+        ASSERT_NE(full, static_cast<entt::entity>(entt::null));
+        const auto held = S8O::Fields(actual, coarse);
+        const auto stamp = actual.get<C::CreatureRegionComponent>(coarse).region_stamp;
+        ASSERT_NO_FATAL_FAILURE(TickOnce(live));
+        ASSERT_FALSE(live.GetRegionSchedulerFault());
+        const auto& blocked = actual.get<C::CombustibleComponent>(coarse);
+        EXPECT_EQ(blocked.state(), C::BurnState::Unburnt);
+        EXPECT_EQ(blocked.burn_ticks_remaining, 0u);
+        EXPECT_EQ(actual.get<C::CreatureRegionComponent>(coarse).region_stamp, stamp);
+        EXPECT_EQ(S8O::Fields(actual, coarse), held);
+        const auto& admitted = actual.get<C::CombustibleComponent>(full);
+        EXPECT_EQ(admitted.state(), full_source ? C::BurnState::Burning : C::BurnState::Unburnt);
+        EXPECT_EQ(admitted.burn_ticks_remaining,
+                  full_source ? luminumbra::sim::kFireBurnTicks : 0u);
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, S8DPlantResumeDoesNotAgeDecayOrRepeatedlyFeedCreatures) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession base, live;
+    CreateGroundWorld(base, root, jobs, "Creature resume lanes");
+    const Luminumbra::Vec3 position(5200, 0, -1500);
+    const auto plant = ClockTestPlant(base.GetRegistry(), position);
+    base.GetRegistry().emplace<C::GrazeableComponent>(plant);
+    const auto living = S8Creature(base, position);
+    auto& r = base.GetRegistry();
+    r.get<C::CreatureComponent>(living).hunger = .7f;
+    r.emplace<C::CreatureGenomeComponent>(living).age_ticks = 20;
+    r.emplace<C::MortalComponent>(living).age_ticks = 30;
+    const auto dead = S8Creature(base, position);
+    r.get<C::CreatureComponent>(dead).eaten = true;
+    r.emplace<C::MortalComponent>(dead).age_ticks = 40;
+    r.emplace<C::DecayComponent>(dead).decay_ticks = 5;
+    ASSERT_TRUE(base.SaveWorld());
+    // The plant is admitted after the creature IDs; retain its existing S7 continuation.
+    auto ledger = FixtureLedger(100, {{kFarGroundRegion, RegionState::Frozen}});
+    auto& record =
+        const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records()).at(kFarGroundRegion);
+    record.frozen_at = 90;
+    record.last_ticked = 89;
+    ASSERT_NO_FATAL_FAILURE(S8InstallLedger(base, ledger));
+    EnableSnapshotSession(live, root, jobs);
+    ASSERT_TRUE(live.LoadWorld(base.GetMetadata().worldId)) << live.GetWorldOpenError();
+    live.SetReplicatedSimulationAnchors({});
+    live.PinActiveRegion(kFarGroundRegion, true);
+    S8A::EcologyTuning tuning;
+    tuning.hunger_growth_per_second = 0;
+    tuning.hunger_graze_sate = 0;
+    live.SetEcologyTuning(tuning);
+    TickOnce(live);
+    ASSERT_FALSE(live.GetRegionSchedulerFault());
+    const auto animal = S8FindCreature(live, 1), corpse = S8FindCreature(live, 2);
+    auto& actual = live.GetRegistry();
+    EXPECT_EQ(actual.get<C::CreatureGenomeComponent>(animal).age_ticks, 21u);
+    EXPECT_EQ(actual.get<C::MortalComponent>(animal).age_ticks, 31u);
+    EXPECT_EQ(actual.get<C::MortalComponent>(corpse).age_ticks, 40u);
+    EXPECT_EQ(actual.get<C::MortalComponent>(corpse).dead, 1u);
+    EXPECT_EQ(actual.get<C::DecayComponent>(corpse).decay_ticks, 6u);
+    EXPECT_EQ(std::bit_cast<std::uint32_t>(actual.get<C::CreatureComponent>(animal).hunger),
+              std::bit_cast<std::uint32_t>(.7f - S8A::kFeedPerGraze));
+    // Exercise corpse cadence windows through transfer, freeze, thaw, and promotion.
+    auto& owner = actual.get<C::CreatureRegionComponent>(corpse);
+    actual.get<C::CreatureCoarseComponent>(corpse).tier = C::CreatureTier::Coarse;
+    auto& mutable_ledger = const_cast<ActiveRegionLedger&>(live.GetActiveRegionLedger());
+    auto& records = const_cast<std::map<RegionKey, ActiveRegionRecord>&>(mutable_ledger.records());
+    auto current = [&]() -> ActiveRegionRecord& {
+        return records.at(kFarGroundRegion);
+    };
+    current().state = RegionState::Reduced;
+    current().cadence_shift = 2;
+    current().cadence_phase = 2;
+    TickOnce(live); // 102, new [100,103] owner window was already completed at 101.
+    ASSERT_FALSE(live.GetRegionSchedulerFault());
+    EXPECT_EQ(actual.get<C::DecayComponent>(corpse).decay_ticks, 6u);
+    EXPECT_EQ(owner.region_stamp, 101u);
+    current().state = RegionState::Frozen;
+    current().frozen_at = 103;
+    current().last_ticked = 102;
+    TickOnce(live);
+    EXPECT_EQ(actual.get<C::DecayComponent>(corpse).decay_ticks, 6u);
+    current().state = RegionState::Active;
+    current().cadence_shift = 0;
+    current().cadence_phase = 0;
+    TickOnce(live); // coarse corpse accepts one step after thaw; plant catch-up cannot multiply it.
+    ASSERT_FALSE(live.GetRegionSchedulerFault());
+    EXPECT_EQ(actual.get<C::DecayComponent>(corpse).decay_ticks, 7u);
+    EXPECT_EQ(owner.region_stamp, 104u);
+    actual.get<C::CreatureCoarseComponent>(corpse).tier = C::CreatureTier::Full;
+    TickOnce(live);
+    ASSERT_FALSE(live.GetRegionSchedulerFault());
+    EXPECT_EQ(actual.get<C::DecayComponent>(corpse).decay_ticks, 8u);
+    EXPECT_EQ(actual.get<C::MortalComponent>(corpse).age_ticks, 40u);
+}
+
+TEST(GameSessionHeadlessWorldTest, S8DNewbornDoesNotParticipateAgainInItsBirthTick) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    CreateGroundWorld(session, root, jobs, "Newborn cohort");
+    for (bool female : {true, false}) {
+        const auto e = S8Creature(session, session.GetMetadata().spawnPoint);
+        auto& r = session.GetRegistry();
+        auto& gn = r.emplace<C::CreatureGenomeComponent>(e);
+        gn.female = female;
+        gn.age_ticks = 120;
+        r.get<C::CreatureComponent>(e).hunger = .05f;
+    }
+    // A real feeding opportunity exists at the child's eventual spawn point.
+    const auto plant = ClockTestPlant(session.GetRegistry(), session.GetMetadata().spawnPoint);
+    session.GetRegistry().emplace<C::GrazeableComponent>(plant);
+    ASSERT_TRUE(session.SaveWorld());
+    S8A::ReproductionTuning tuning;
+    tuning.courtship_ticks = 1;
+    session.SetReproductionTuning(tuning);
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    auto& r = session.GetRegistry();
+    EXPECT_EQ(r.view<C::CreatureComponent>().size(), 3u);
+    // ID 3 belongs to the plant; the session birth uses the shared allocator.
+    const auto child = S8FindCreature(session, 4);
+    ASSERT_NE(child, static_cast<entt::entity>(entt::null));
+    EXPECT_EQ(r.get<C::CreatureRegionComponent>(child).region_stamp, 1u);
+    EXPECT_EQ(r.get<C::CreatureGenomeComponent>(child).age_ticks, 0u);
+    EXPECT_EQ(r.get<C::CreatureGenomeComponent>(child).reproduce_cooldown, tuning.cooldown_ticks);
+    EXPECT_EQ(r.get<C::CreatureComponent>(child).hunger, .5f);
+    EXPECT_EQ(r.get<C::CreatureComponent>(child).wish_x, 0);
+    EXPECT_FALSE(r.get<C::CreatureControllerComponent>(child).physics_controlled);
+    EXPECT_EQ(r.get<C::CreatureCoarseComponent>(child).tier, C::CreatureTier::Full);
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(r.get<C::CreatureGenomeComponent>(child).age_ticks, 1u);
+    EXPECT_LT(r.get<C::CreatureComponent>(child).hunger, .5f);
+
+    GameSession failed;
+    CreateGroundWorld(failed, root, jobs, "Failed newborn admission");
+    std::vector<entt::entity> parents;
+    for (bool female : {true, false}) {
+        const auto parent = S8Creature(failed, failed.GetMetadata().spawnPoint);
+        auto& genome = failed.GetRegistry().emplace<C::CreatureGenomeComponent>(parent);
+        genome.age_ticks = 120;
+        genome.female = female;
+        parents.push_back(parent);
+    }
+    failed.SetReproductionTuning(tuning);
+    // Admission validates the entire candidate inventory after allocation. A malformed
+    // optional payload refuses the child and consumes the ordinary allocated ID.
+    failed.GetRegistry().emplace<C::DecayComponent>(parents.front()).fully_decomposed = 2;
+    const auto next = failed.GetActiveRegionLedger().next_persistent_id();
+    TickOnce(failed);
+    EXPECT_TRUE(failed.GetRegionSchedulerFault());
+    EXPECT_EQ(failed.GetActiveRegionLedger().next_persistent_id(), next + 1);
+    EXPECT_EQ(failed.GetRegistry().view<C::CreatureComponent>().size(), 2u);
+    for (auto parent : parents)
+        EXPECT_EQ(failed.GetRegistry().get<C::CreatureGenomeComponent>(parent).reproduce_cooldown,
+                  0u);
+}
+
+TEST(GameSessionHeadlessWorldTest,
+     S8DFlagOffMatchesIndependentTrajectorySaveFileCountAndArtifactBytes) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    EnableSnapshotSession(session, root, jobs);
+    session.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(session.CreateWorld("Legacy creature trajectory", "1337", "default"));
+    // Identical fixed metadata is input to both recipes; no saved fields are normalized.
+    auto& metadata = const_cast<Luminumbra::world::WorldMetadata&>(session.GetMetadata());
+    metadata.creationTime = 123456789;
+    metadata.spawnPoint = {8, 100, 8};
+    auto& actual = session.GetRegistry();
+    entt::registry expected;
+    S8O::MakeRoster(actual, false);
+    S8O::MakeRoster(expected, false);
+    const auto initial = actual.view<C::CreatureComponent>().size();
+    const auto save = session.GetWorldSaveDir();
+    const nlohmann::json expected_metadata = {
+        {"container_version", 2},
+        {"name", "Legacy creature trajectory"},
+        {"seed", "1337"},
+        {"worldType", "default"},
+        {"creationTime", 123456789},
+        {"spawnPoint", {{"x", 8.0f}, {"y", 100.0f}, {"z", 8.0f}}},
+        {"waterSimCursor", std::size_t{0}}};
+    auto expected_preset = Luminumbra::world::ResolveTerrainPresetDefaults(
+        nlohmann::json::parse(ReadClockTestFile(SourcePresetPath())));
+    expected_preset["schema_rev"] = Luminumbra::world::kTerrainPresetSchemaRevision;
+    const std::map<std::string, std::string> expected_files{
+        {"preset.json", expected_preset.dump(2) + "\n"},
+        {"world_info.json", expected_metadata.dump(4) + "\n"}};
+    for (std::uint64_t tick = 1; tick <= 100; ++tick) {
+        SCOPED_TRACE(tick);
+        if (tick == 50) {
+            for (auto* registry : {&actual, &expected}) {
+                const auto e = static_cast<entt::entity>(6);
+                ASSERT_TRUE(registry->valid(e));
+                registry->destroy(e);
+                S8O::AddCreature(*registry, 600, 0);
+            }
+        }
+        TickOnce(session);
+        S8O::Tick(expected, tick, 1337);
+        EXPECT_EQ(S8O::Fields(actual), S8O::Fields(expected));
+        EXPECT_EQ(S8A::ComputeEcologySubHash(actual), S8O::ComputeEcologySubHash(expected));
+        // D owns the ecology trajectory. Other slots use unchanged field/chunk authority.
+        const auto hashes = SessionWorldSubHashes(session);
+        const auto expected_hash = P::ComposeWorldHash(hashes.at("chunk"),
+                                                       hashes.at("wind"),
+                                                       hashes.at("weather"),
+                                                       hashes.at("aether"),
+                                                       hashes.at("scents"),
+                                                       S8O::ComputeEcologySubHash(expected),
+                                                       hashes.at("plants"));
+        EXPECT_EQ(SessionWorldHash(session), expected_hash);
+        nlohmann::json artifact{{"schema", "luminumbra.server_tick.v1"},
+                                {"world_hash", SessionWorldHash(session)}};
+        const nlohmann::json legacy_artifact{{"schema", "luminumbra.server_tick.v1"},
+                                             {"world_hash", expected_hash}};
+        Luminumbra::Server::AppendSimBudgetArtifact(
+            artifact, session.GetSimBudgetTelemetry(), session.GetSimBudgetTelemetry());
+        EXPECT_EQ(artifact.dump(2) + "\n", legacy_artifact.dump(2) + "\n");
+        EXPECT_FALSE(artifact.contains("regions"));
+        if (tick == 1 || tick == 100) {
+            ASSERT_TRUE(session.SaveWorld());
+            ASSERT_TRUE(session.SaveWorldStateTo(save));
+            EXPECT_EQ(CountRegularFiles(save), expected_files.size());
+            EXPECT_EQ(S8SaveFiles(save), expected_files);
+        }
+    }
+    EXPECT_GT(actual.view<C::CreatureComponent>().size(), initial);
+    EXPECT_FALSE(P::snapshot_index_exists(save));
+    EXPECT_FALSE(fs::exists(P::WorldSaveService::creature_entities_path(save)));
+    EXPECT_FALSE(fs::exists(P::WorldSaveService::active_regions_path(save)));
+    EXPECT_FALSE(session.GetActiveRegionLedger().content_identity());
+}
+
+namespace {
 // Preserve every file byte, including compressed records and index member order.
 // Only transaction header fields vary on repeated successful commits; their
 // generation/transaction progression is checked separately below.
@@ -8686,7 +9159,8 @@ std::map<std::string, std::string> RepeatedSaveBytes(const fs::path& save) {
     for (const auto& entry : fs::recursive_directory_iterator(save)) {
         if (!entry.is_regular_file())
             continue;
-        const auto relative = fs::relative(entry.path(), save).generic_string();
+        const auto relative =
+            Luminumbra::Filesystem::GenericUtf8PathString(fs::relative(entry.path(), save));
         auto bytes = ReadClockTestFile(entry.path());
         if (relative == P::kSnapshotIndexRelativePath) {
             auto index = nlohmann::json::parse(bytes);

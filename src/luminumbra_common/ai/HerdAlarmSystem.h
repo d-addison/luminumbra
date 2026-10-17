@@ -1,4 +1,5 @@
 #pragma once
+#include "../systems/RegionConsumerGate.h"
 
 // sim.herd_alarm: ALARM SIGNALLING / COLLECTIVE VIGILANCE.
 //
@@ -85,7 +86,11 @@ struct HerdAlarmStats {
 // RunHerdAlarmOnTick: maintain the propagating alarm field. id-ordered, two-phase snapshot.
 // `dt` scales the decay/propagation rate so the field is frame-rate independent (the sim
 // runs a fixed dt; the parameter keeps the signature honest and lets tests exercise decay).
-inline HerdAlarmStats RunHerdAlarmOnTick(entt::registry& reg, float dt) {
+inline HerdAlarmStats
+RunHerdAlarmOnTick(entt::registry& reg,
+                   float dt,
+                   const ::Luminumbra::world::RegionEntityGate& gate = {},
+                   const ::Luminumbra::world::RegionEntityWork& completed = {}) {
     HerdAlarmStats stats;
 
     auto view = reg.view<Comp::AlarmComponent, Comp::CreatureComponent, Comp::TransformComponent>();
@@ -95,6 +100,7 @@ inline HerdAlarmStats RunHerdAlarmOnTick(entt::registry& reg, float dt) {
     std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
         return entt::to_integral(a) < entt::to_integral(b);
     });
+    ::Luminumbra::world::FilterRegionEntities(reg, ents, gate);
     if (ents.empty())
         return stats; // empty roster -> pure no-op.
 
@@ -147,6 +153,8 @@ inline HerdAlarmStats RunHerdAlarmOnTick(entt::registry& reg, float dt) {
     const float invR = kAlarmRadius > 0.0f ? (1.0f / kAlarmRadius) : 0.0f;
     for (std::size_t i = 0; i < snap.size(); ++i) {
         const Snap& self = snap[i];
+        if (completed)
+            completed(self.e);
 
         auto& al = view.get<Comp::AlarmComponent>(self.e);
 

@@ -1,4 +1,5 @@
 #pragma once
+#include "../systems/RegionConsumerGate.h"
 
 // sim.day_night_activity: DIURNAL / NOCTURNAL ACTIVITY.
 //
@@ -94,7 +95,11 @@ CircadianActivity(float time_of_day01, bool nocturnal, float amplitude = 1.0f) {
 // id-ordered. `time_of_day01` is the caller-supplied fraction of the day in [0,1] (0/1 =
 // midnight, 0.5 = noon). Returns participation stats. Empty roster -> pure no-op.
 inline CircadianStats
-RunCircadianOnTick(entt::registry& reg, float time_of_day01, float amplitude = 1.0f) {
+RunCircadianOnTick(entt::registry& reg,
+                   float time_of_day01,
+                   float amplitude = 1.0f,
+                   const ::Luminumbra::world::RegionEntityGate& gate = {},
+                   const ::Luminumbra::world::RegionEntityWork& completed = {}) {
     CircadianStats stats;
 
     auto view = reg.view<Comp::CircadianComponent>();
@@ -106,10 +111,13 @@ RunCircadianOnTick(entt::registry& reg, float time_of_day01, float amplitude = 1
     std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
         return entt::to_integral(a) < entt::to_integral(b);
     });
+    ::Luminumbra::world::FilterRegionEntities(reg, ents, gate);
     if (ents.empty())
         return stats; // empty roster -> pure no-op.
 
     for (auto e : ents) {
+        if (completed)
+            completed(e);
         auto& cc = view.get<Comp::CircadianComponent>(e);
         const bool nocturnal = cc.nocturnal != 0;
         cc.activity = CircadianActivity(time_of_day01, nocturnal, amplitude);

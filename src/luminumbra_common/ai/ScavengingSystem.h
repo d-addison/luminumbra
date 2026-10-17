@@ -1,4 +1,5 @@
 #pragma once
+#include "../systems/RegionConsumerGate.h"
 
 // sim.scavenging: SCAVENGERS EAT CARCASSES. Ties death -> food, complementing active
 // hunting: predators (and old age / starvation via MortalComponent) make carcasses; this
@@ -103,9 +104,12 @@ struct ScavengingTuning {
 // RunScavengingOnTick: hungry scavengers seek + eat the nearest carcass. id-ordered,
 // two-phase snapshot (order-independent). Returns telemetry; mutates ScavengerComponent
 // .wish_x/z + .feeding and CreatureComponent.hunger on feeding scavengers.
-inline ScavengingStats RunScavengingOnTick(entt::registry& reg,
-                                           std::uint64_t /*tick*/,
-                                           const ScavengingTuning& tuning = {}) {
+inline ScavengingStats
+RunScavengingOnTick(entt::registry& reg,
+                    std::uint64_t /*tick*/,
+                    const ScavengingTuning& tuning = {},
+                    const ::Luminumbra::world::RegionEntityGate& gate = {},
+                    const ::Luminumbra::world::RegionEntityWork& completed = {}) {
     ScavengingStats stats;
 
     // ---- First pass: snapshot every carcass position. ----
@@ -117,7 +121,9 @@ inline ScavengingStats RunScavengingOnTick(entt::registry& reg,
     std::vector<Carcass> carcasses;
     {
         auto cview = reg.view<Comp::CreatureComponent, Comp::TransformComponent>();
-        for (auto e : cview) {
+        std::vector<entt::entity> sources(cview.begin(), cview.end());
+        ::Luminumbra::world::FilterRegionEntities(reg, sources, gate);
+        for (auto e : sources) {
             const auto& cr = cview.get<Comp::CreatureComponent>(e);
             const auto* mortal = reg.try_get<Comp::MortalComponent>(e);
             if (!ScavengeIsCarcass(cr, mortal))
@@ -135,12 +141,15 @@ inline ScavengingStats RunScavengingOnTick(entt::registry& reg,
     std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
         return entt::to_integral(a) < entt::to_integral(b);
     });
+    ::Luminumbra::world::FilterRegionEntities(reg, ents, gate);
     if (ents.empty())
         return stats; // empty roster -> pure no-op.
     stats.scavengers = static_cast<int>(ents.size());
 
     // ---- Second pass: steer and feed against the frozen carcass list. ----
     for (auto e : ents) {
+        if (completed)
+            completed(e);
         auto& sc = sview.get<Comp::ScavengerComponent>(e);
         auto& cr = sview.get<Comp::CreatureComponent>(e);
         const auto& tf = sview.get<Comp::TransformComponent>(e);

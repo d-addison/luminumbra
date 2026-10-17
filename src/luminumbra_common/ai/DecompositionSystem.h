@@ -1,4 +1,5 @@
 #pragma once
+#include "../systems/RegionConsumerGate.h"
 
 // sim.decomposition: DEAD creatures DECAY and RELEASE NUTRIENTS, closing the
 // death -> soil cycle. A creature that has died (MortalComponent.dead==1, OR
@@ -72,7 +73,11 @@ struct DecompositionStats {
 // participant. id-ordered, pure-integer, deterministic. `tick` is accepted for signature
 // parity with the other sim systems (it is NOT consumed — decomposition is tick-count driven,
 // not absolute-tick driven, so re-running from a snapshot reproduces exactly).
-inline DecompositionStats RunDecompositionOnTick(entt::registry& reg, std::uint64_t /*tick*/) {
+inline DecompositionStats
+RunDecompositionOnTick(entt::registry& reg,
+                       std::uint64_t /*tick*/,
+                       const ::Luminumbra::world::RegionEntityGate& gate = {},
+                       const ::Luminumbra::world::RegionEntityWork& completed = {}) {
     DecompositionStats stats;
 
     auto view = reg.view<Comp::DecayComponent>();
@@ -82,6 +87,7 @@ inline DecompositionStats RunDecompositionOnTick(entt::registry& reg, std::uint6
     std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
         return entt::to_integral(a) < entt::to_integral(b);
     });
+    ::Luminumbra::world::FilterRegionEntities(reg, ents, gate);
     if (ents.empty())
         return stats; // empty roster -> pure no-op.
 
@@ -99,6 +105,8 @@ inline DecompositionStats RunDecompositionOnTick(entt::registry& reg, std::uint6
             continue; // LIVE -> does not decay.
 
         // The pre-tick cumulative release for this corpse (already accounted in the component).
+        if (completed)
+            completed(e);
         const std::uint32_t prev_total = dc.nutrient_released_milli;
 
         // Advance the decomposition clock by one tick, saturating at the duration.
