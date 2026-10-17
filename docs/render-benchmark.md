@@ -304,12 +304,12 @@ additional required evidence is:
 | `settings.gns_enabled` | Actual compiled GNS networking setting, including false on builds without GNS |
 | `settings.active_regions` | Effective enabled flag, uint64 work limit, hold ticks, reduced shift |
 | `settings.far_mode` | Requested/effective far mode and requested/effective cave policy at the measured window end; each frame also records these values |
-| `settings.graphics_preset` | Clearly reserved for a future named settings preset; null on this base, with `graphics_preset_status: "not_exposed"` |
+| `settings.graphics_preset` | Selected base preset name, with `graphics_preset_status: "named"`; the effective graphics block records its revision and saved/session overrides |
 | `settings.effective_render` | Effective dimensions, render scale, uncapped vsync, TAAU, SSAO/cloud/volumetric qualities, camera FOV, UI scale and window mode |
 | `settings.effective_render.systems` | Every `render.*` flag and resolved scalar/vector parameter, enumerated from the shared SystemConfig registry, including sky LUT and live weather; disabled entries retain their resolved inputs |
 | `settings.render_overrides` | Active render override declarations, also covered by the configuration identity |
 | `settings.simulation_identity` | Existing session `SystemConfigIdentity()` for effective simulation gates and tuning, including water resolution and ecology |
-| `settings.content_files` | Binary `fnv1a64:` digests keyed by portable relative paths for every file under `data/`, `res/`, `config/`, `game-assets/` and the optional `assets/audio/` tree, plus logical `inputs/` keys for explicit system-config and preset files and the user settings overlay when present. An absent audio tree is recorded as `"assets/audio": null` |
+| `settings.content_files` | Binary `fnv1a64:` digests, captured after any startup graphics settings save, keyed by portable relative paths for every file under `data/`, `res/`, `config/`, `game-assets/` and the optional `assets/audio/` tree, plus logical `inputs/` keys for explicit system-config and preset files and the user settings overlay when present. An absent audio tree is recorded as `"assets/audio": null` |
 | `render_identity` | Stable `fnv1a64:` identity of the complete resolved `settings` object; recomputed by the validator |
 | `windows.startup` | Monotonic startup `elapsed_ms` through world identity checking and tick-zero preparation; its foliage observation precedes rendering |
 | `windows.warmup` | Every warmup `frame_wall_samples_ms`, plus distribution with p50/p95/p99/max/MAD, sample and unavailable counts |
@@ -478,6 +478,139 @@ Committed and generated evidence has these compatibility rules:
   missing, corrupt or incompatible receipt supplies no acceptance evidence and
   must not be treated as proof of completion.
 
+## Qualification execution record
+
+`tools/perf/run_qualification.py --client <native-client> --out-dir <output>
+--build-manifest <performance-build.json>` writes
+`qualification.json` with schema `luminumbra.render_qualification.v1`.
+The output directory is held exclusively with `.qualification.lock`, created with
+`O_CREAT | O_EXCL`, after the output directory is validated/created and before any
+run files or settings change, through aggregate publication. Directory creation
+and lock creation failures without an existing lock report `cannot write` and
+exit 2. A held lock refuses the run and names the lock file; it is never
+automatically reclaimed. Normal returns and exceptions release the lock. After
+an abrupt termination, the operator must establish that the owner has stopped
+before removing its lock. Aggregate publication uses a sibling temporary file
+and atomic replacement. Prior aggregates and selected cells' captures, verdicts,
+retained captures and receipts are set aside as `.prev-<n>`, including for cells
+that have become unready. An unevaluated cell reports no capture or adapter.
+
+`--host-record <staged-host.json>` validates Windows OS, PowerShell and GPU driver
+identity before execution, then publishes `host.json` with the aggregate under
+the same lock. A run without this option removes any previous `host.json` under
+the lock. If aggregate publication fails, the previous host is restored. Both
+staged and previous host files must be regular files, with no symlinks, and fit
+the shared 16 MiB input cap. Staged JSON must be UTF-8 (an optional BOM is accepted)
+and contain at most 64 object/array levels; invalid inputs refuse with exit 2.
+Dry runs preserve the current pair and write supplied host evidence separately
+as `host-dryrun.json`.
+
+Cell `artifact` paths, and retained `capture_path` values in process receipts, are
+relative to the output directory, such as `cells/surface-flight.quality.3840x1600.json`.
+The private process receipt still records absolute command, cwd and client paths.
+Its `binary_sha256` identifies the launched executable. The qualification runner
+adds `client_path` and a `client` object with the actual client code's `sha256`,
+`kind`, `sha256_verified`, `native_build`, manifest hashes and refusal `reason`.
+For `.py` clients, the executable hash identifies Python and the client hash
+identifies the script. Both script and native client hashes are checked before
+and after execution; a changed or unverifiable client makes the cell fail.
+Existing client paths, including bare `.py` filenames, resolve from the caller's
+directory before the child enters its per-cell working directory.
+
+Every launched cell receives `--systems-config` with the absolute path to the
+selected runtime's `data/common/systems.json`. The client parses this option in
+`src/luminumbra_client/core/RuntimeScenarioConfig.cpp` and strictly loads the
+override in `src/luminumbra_client/main_client.cpp`. Each process receipt records
+`systems_config.path`, `systems_config.sha256` and `systems_config.sha256_verified`.
+A missing/unreadable configuration prevents launch; changed or unreadable bytes
+after execution fail the cell before the checker runs.
+The runner writes a per-cell `render-overrides.json` declaring the exact
+`cli:--systems-config` argument. Runtime and save roots select file locations and
+are excluded from render overrides.
+
+Every launched cell receives an absolute `--runtime-root`. The runner resolves
+the selected client executable before launch and searches only its directory and
+ancestors for `res/shaders/g_buffer.vert`, `data/audio/music.bank.json` and
+`worlds/atlas/presets/default.json`. For other layouts, supply the runner's
+`--runtime-root <absolute-directory>` argument. An incomplete explicit root fails
+without falling back to discovery. The output directory and per-cell working
+directory never select runtime assets, including when output is inside a checkout.
+
+Each cell also receives its own absolute `--save-root` at
+`<out-dir>/work/<cell-id>/storage`, with world saves and the world catalog beneath
+`worlds/saves` there. Its working directory remains `<out-dir>/work/<cell-id>`.
+Process receipts record `runtime_root` and `save_root` alongside the exact command.
+The client refuses relative, empty, missing-value or repeated root options,
+runtime roots missing required files, and save roots that cannot be created.
+`GameSession` uses the save-root override for world creation, loading, saving and
+catalog inspection; runtime assets still come from the runtime root. Ordinary
+client launches without either option retain discovery and runtime-root storage.
+Embedded presets resolve biome and structure dependencies from the runtime's
+`data/` directory. Legacy saves without an embedded preset use the runtime's
+frozen or named atlas preset, even when storage is separate.
+
+Traversal qualification binds both the script path and its expected SHA-256.
+Every traversal entry in `tools/perf/qualification/matrix.json` requires
+`script_sha256`: 64 lowercase hexadecimal digits for the exact script bytes,
+or null for a blocked traversal whose `script` is null. A missing or malformed
+digest is a matrix input error (exit 2). Before launching a traversal, the runner
+compares the fixture bytes with that expected digest; a mismatch records an
+invalid cell and exits 1 without launching the client or checker.
+The runner snapshots each manifest into `work/<cell-id>/workload.traversal`
+(at most 64 KiB) and passes that same file to the client and checker. It verifies
+the snapshot after each process and records its digest and verification status
+in the cell's `traversal` object. Editing the source fixture changes its digest
+and prevents qualification; edits after snapshot creation cannot change that run.
+
+The supplied manifest uses the existing `luminumbra.performance_build.v1` schema:
+compiler (`id`, `version`, `target`), configuration (the existing build options
+and `effective_flags_sha256`), and system (`name`, `processor`). For qualification
+it must additionally contain `"client": {"sha256": "<64 lowercase hex digits>"}`,
+recorded for the final native client binary after the build. The CMake-generated
+manifest currently has no client hash, so it must be extended with that evidence
+before use here. Missing/invalid fields in a supplied manifest are input errors.
+Omitting the manifest or supplying a different executable hash permits diagnostic
+captures but prevents qualification (`build_manifest_missing` or
+`client_build_hash_mismatch`). Executable format checks reject interpreter
+scripts, even if renamed or accompanied by a matching manifest, with
+`client_not_native_build`. Batch and command files are rejected by suffix even
+when they begin with an executable signature. PE images must have a valid DOS,
+PE, optional and section header layout with an executable entry point.
+The manifest is operator-supplied build evidence;
+synthetic controls do not establish a native GPU measurement.
+
+The checker `--verdict-out` contract is the complete
+`luminumbra.render_verdict.v1` envelope returned by `render_budget.evaluate`, with
+workload kind, profile, adapter, frames, `floor`, and `target`. The checker calls
+this envelope `floor` internally; it does not write only its nested floor block.
+The runner reconciles the envelope with the capture and selected cell. A real
+checker success with a passing floor produces a passing cell, even when aggregate
+qualification prerequisites remain unmet.
+
+The child writes to a private per-invocation capture directory. The runner
+publishes and checks that capture only after the process receipt records a
+successful return, successful retention, the exact spawned capture path and a
+SHA-256 matching both the private capture and retained bytes. The published
+artifact must match those bytes. An existing public artifact without this
+ownership evidence fails the cell before the checker runs.
+
+The aggregate records `matrix.sha256`, `matrix.canonical_sha256` and
+`matrix.canonical`. These are SHA-256 hashes of UTF-8 JSON with sorted object keys
+and compact separators, covering every matrix field, including poses and their
+provenance. The canonical hash is computed from the committed repository matrix.
+A different `--matrix` path makes every cell's `matrix_canonical` false, including
+a byte-identical copy; changed content is also noncanonical. Such runs include
+`non_canonical_matrix` in `render_floor_qualified_reasons` and cannot qualify.
+
+`render_floor_qualified` additionally requires all 36 canonical cells, the
+canonical checker, matching RTX 5070 Ti adapter identities, passing capture/floor
+checks, declared display refresh and manifest-bound native clients.
+`expanded_qualified` remains false until the far-world evidence is available.
+Unqualified records retain `qualification_status: "NEEDS-NATIVE-RUN"` and explicit
+`render_floor_qualified_reasons`. The committed matrix still has unrecorded fixed
+poses and blocked traversal workloads; completing diagnostic tests cannot
+qualify it. Missing acceptance evidence is never inferred from passing tests.
+
 ## Process failure and shutdown evidence
 
 Each `test_render_runner.py` child keeps its original 180-second process deadline,
@@ -491,18 +624,36 @@ old outputs are retired before another invocation, preventing stale evidence.
 
 The adjacent `<test-method>-<case>.process.json` has schema
 `luminumbra.render_runner_process.v1`. It records the exact command array, cwd,
-binary path and SHA-256, the 180-second limit, monotonic process elapsed seconds,
+binary path and SHA-256, the 180-second limit, high-resolution process elapsed seconds,
 and outcome `returned`, `timed_out` or `spawn_error`. `return_code` is null when no
 exit status was returned; exception type/message describe timeout or launch
 failure. Binary identity is null if the executable could not be read, and elapsed
-time is null if execution was never attempted. Hashing and evidence finalization
+time is null if execution was never attempted. Elapsed time uses `perf_counter()`
+around the process call. Hashing and evidence finalization
 are outside the recorded process interval. No capture-completion timestamp or
 teardown duration is inferred from these receipts.
+
+Both receipt producers resolve the executable to its real path and verify its
+device/file identifier, size, nanosecond modification/change times and SHA-256
+before and after execution. The original directory preserves runtime library
+discovery. `binary_identity_status` is `verified` after a matching final check;
+a changed or unreadable executable at the final check records `changed`, clears `binary_sha256`,
+adds an evidence error and fails the invocation. Captures remain diagnostic
+evidence on this failure. An existing process exception retains priority.
+Bare executable names search only absolute, nonempty PATH entries.
+
+The parameterized runner holds output locks through executable verification,
+capture retention and receipt publication. Lock identities resolve directory
+aliases and, on Windows, long destination names and case aliases.
+Generated qualification checker commands include `--enforce-floor` for the
+16.67 ms frame-wall p99 limit. Requested poses are rounded to float32 before
+comparison with client camera and streaming positions; the absolute comparison
+tolerance stays unchanged.
 
 `capture_status` is `retained`, `missing`, `invalid_json`, `read_error` or
 `write_error`; retained bytes have a path and SHA-256. A retained document with an
 unsupported schema remains diagnostic evidence and still fails normal validation.
-`evidence_errors` records persistence failures where a receipt can be written;
+`evidence_errors` records verification or persistence failures where a receipt can be written;
 receipt-write failures are reported to stderr. Evidence errors never replace the
 original timeout, launch error or validation assertion. A normally returning
 process cannot silently succeed when required evidence persistence failed.
@@ -527,7 +678,26 @@ diagnostics localize a future wait; they do not establish the cause of the UCRT
 timeouts or a fix for the original `0xCFFFFFFF` incident.
 
 Shipping rendering enables vsync, TAAU and tier-1 volumetrics. Benchmark startup
-continues to force vsync off. Spatial parity, upscale seam and terrain AOV captures
+forces vsync off and the frame cap to unlimited, regardless of saved settings.
+The same presentation override applies throughout `--scenario` and `--profile-fly`
+runs, including live settings edits; it does not modify the saved choices.
+Players can set `user.video.vsync` (boolean, existing default on) and
+`user.video.frame_cap` (integer: 0 for unlimited, 30, 60, 120, 144, 165 or 240; default 0)
+through the settings screen. Invalid fields retain their previous/default values.
+The client limiter uses `steady_clock` and sleeps before spinning to its deadline.
+Windows prefers a high-resolution waitable timer. If unavailable or a wait fails,
+the fallback requests 1 millisecond timer resolution and releases the request at
+shutdown. If that request fails, it uses the queried system timer tick (or a
+15.625 millisecond default). It sleeps in whole coarse quanta that fit before the
+deadline and yields for the final sub-tick remainder. A failed high-resolution
+wait switches to this policy in the same frame. Other platforms and the
+high-resolution timer reserve 200 microseconds. Deterministic virtual-clock tests
+qualify the pacing policy only; native `SteadyFrameTiming` timer and sleep behavior
+remains unqualified until measured on Windows. Its wait runs
+before the frame work timers and is excluded from CPU/work buckets; benchmark
+wall timing has no cap wait because measurement always runs uncapped.
+
+Spatial parity, upscale seam and terrain AOV captures
 explicitly disable TAAU and record zero jitter; normal-default captures retain the
 temporal path. Validators accept preset revisions 6 and 7. The shipping hills
 traversal now declares revision 7; its pinned identities need recapture from CI

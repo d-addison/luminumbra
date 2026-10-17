@@ -1,8 +1,10 @@
 #include "luminumbra_client/app/RenderConfiguration.h"
 #include "luminumbra_client/app/RenderMeasurement.h"
 #include "luminumbra_client/app/RenderWorkload.h"
+#include "luminumbra_common/ai/CreatureSpeciesRegistry.h"
 #include "luminumbra_common/core/CaptureContentPaths.h"
 #include "luminumbra_common/core/FilesystemPath.h"
+#include "luminumbra_common/core/GraphicsPresets.h"
 #include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/WorldgenFileReader.h"
@@ -89,6 +91,61 @@ void configuration() {
     const json oracle = {{"b", {true, false, nullptr, 1, 18446744073709551615ull, 1.5, -0.0}},
                          {"a", "snow \xe2\x98\x83"}};
     require(render_identity(oracle) == "fnv1a64:bd4e71012aed102e");
+}
+
+void graphics_capture_configuration() {
+    luminumbra::core::GraphicsSettings settings;
+    luminumbra::core::ResolvedGraphics resolved;
+    std::string error;
+    require(luminumbra::core::ResolveGraphics(settings, {}, resolved, error));
+    const auto original = render_identity(graphics_configuration(settings, resolved));
+    for (const auto preset : {luminumbra::core::GraphicsPreset::Low,
+                              luminumbra::core::GraphicsPreset::Medium,
+                              luminumbra::core::GraphicsPreset::High}) {
+        settings.base_preset = preset;
+        require(luminumbra::core::ResolveGraphics(settings, {}, resolved, error));
+        const auto captured = graphics_configuration(settings, resolved);
+        require(captured.at("base_preset") == luminumbra::core::GraphicsPresetName(preset));
+        require(render_identity(captured) != original);
+    }
+    settings.overrides = {{"grass_density", 0.5}, {"taau", false}, {"ui_blur", std::string("off")}};
+    const luminumbra::core::GraphicsOverrides session = {{"render_scale", 0.75}};
+    require(luminumbra::core::ResolveGraphics(settings, session, resolved, error));
+    const auto captured = graphics_configuration(settings, resolved);
+    require(captured.at("saved_overrides").at("grass_density") == 0.5);
+    require(captured.at("saved_overrides").at("taau") == false);
+    require(captured.at("saved_overrides").at("ui_blur") == "off");
+    require(captured.at("session_overrides").at("render_scale") == 0.75);
+    require(render_identity(captured) != original);
+    const json assets = {{"data/input.json", "unchanged"}};
+    auto saved = assets;
+    saved["inputs/user_settings.json"] = "created";
+    require(content_after_settings_save(assets, saved) == saved);
+    auto migrated = saved;
+    migrated["inputs/user_settings.json"] = "migrated";
+    require(content_after_settings_save(saved, migrated) == migrated);
+    auto modified_asset = saved;
+    modified_asset["data/input.json"] = "changed";
+    auto added_asset = saved;
+    added_asset["res/new.json"] = "added";
+    auto removed_asset = saved;
+    removed_asset.erase("data/input.json");
+    auto unavailable_settings = saved;
+    unavailable_settings["inputs/user_settings.json"] = nullptr;
+    for (const json& changed : {json::object(),
+                                assets,
+                                modified_asset,
+                                added_asset,
+                                removed_asset,
+                                unavailable_settings}) {
+        bool refused = false;
+        try {
+            (void)content_after_settings_save(saved, changed);
+        } catch (const std::runtime_error&) {
+            refused = true;
+        }
+        require(refused);
+    }
 }
 
 void simulation_configuration() {
@@ -435,6 +492,64 @@ void audio_references() {
     require(policy.refused());
 }
 
+// Reproduce an entry escaping the scan root without privileged filesystem links.
+class EscapingSpeciesDirectoryIterator {
+public:
+    EscapingSpeciesDirectoryIterator() = default;
+    EscapingSpeciesDirectoryIterator(const std::filesystem::path& directory, std::error_code& error)
+        : entry_(directory.parent_path().parent_path() / "external.json", error)
+        , active_(!error) {}
+    const std::filesystem::directory_entry& operator*() const {
+        return entry_;
+    }
+    bool operator!=(const EscapingSpeciesDirectoryIterator& other) const {
+        return active_ != other.active_;
+    }
+    void increment(std::error_code& error) {
+        error.clear();
+        active_ = false;
+    }
+
+private:
+    std::filesystem::directory_entry entry_;
+    bool active_ = false;
+};
+
+void species_capture_references(const TemporaryContent& content) {
+    const auto directory = content.root() / "data/species";
+    content.write("data/species/deer.json", R"({"id":"deer"})");
+    content.write("external.json", R"({"id":"outside"})");
+    luminumbra::ai::CreatureSpeciesRegistry registry;
+    std::string parse_error;
+    require(registry.AddFromJsonText(R"({"id":"retained"})", parse_error));
+    std::size_t reads = 0;
+    const Luminumbra::World::WorldgenFileReader reader = [&](const std::filesystem::path& file,
+                                                             std::string& bytes) {
+        ++reads;
+        return Luminumbra::World::ReadWorldgenFile(file, bytes);
+    };
+    std::vector<std::string> errors;
+    bool io_failed = false;
+    require(registry.LoadFromDirectory(directory, errors, reader, &io_failed) == 1);
+    require(!io_failed && errors.empty() && reads == 1);
+    reads = 0;
+    for (const bool report_failure : {false, true}) {
+        errors.clear();
+        io_failed = false;
+        require(registry.LoadFromDirectory(
+                    content.root(), errors, reader, report_failure ? &io_failed : nullptr) == 0);
+        require(!errors.empty() && io_failed == report_failure && reads == 0);
+        errors.clear();
+        io_failed = false;
+        require(registry.LoadFromDirectory<EscapingSpeciesDirectoryIterator>(
+                    directory, errors, reader, report_failure ? &io_failed : nullptr) == 0);
+        require(!errors.empty() && io_failed == report_failure && reads == 0);
+        require(registry.size() == 2 && registry.FindByName("retained") != nullptr &&
+                registry.FindByName("deer") != nullptr &&
+                registry.FindByName("outside") == nullptr);
+    }
+}
+
 void content_references() {
     const TemporaryContent content;
     content.write("data/texture.ltex", "inventoried bytes");
@@ -467,6 +582,8 @@ void content_references() {
     require(!Luminumbra::World::ReadWorldgenFile(content.root() / "data/../external.ltex", bytes));
     require(bytes.empty());
     require(Luminumbra::Filesystem::capture_content_paths.refused());
+
+    species_capture_references(content);
 
     // Both command arguments include generic separators and shell-sensitive characters.
     content.write("outside & (target)!/nested/included.json", "{}");
@@ -513,6 +630,7 @@ int main(int argc, char** argv) {
         }
         require(argc == 1);
         configuration();
+        graphics_capture_configuration();
         simulation_configuration();
         content_configuration();
         return 0;

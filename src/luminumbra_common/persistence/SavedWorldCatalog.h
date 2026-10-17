@@ -10,9 +10,14 @@
 
 namespace Luminumbra::Persistence {
 
+// Presence of presetFormat opts into mandatory embedded content and identity.
+inline constexpr int kSavedPresetFormat = 1;
+
 struct SavedWorld {
     world::WorldMetadata metadata;
     std::filesystem::path preset_path;
+    // Canonical JSON verified against presetIdentity; retained for subsequent saves.
+    std::string preset_json;
     bool has_spawn_point = false;
     std::size_t water_sim_cursor = 0;
     world::WorldClock clock;
@@ -28,6 +33,15 @@ struct SavedWorldCatalog {
 };
 
 // Read-only. Never creates directories, repairs files or generates terrain.
+// Split roots keep runtime presets and dependencies independent of save storage.
+SavedWorld InspectSavedWorld(const std::filesystem::path& save_root,
+                             const std::filesystem::path& runtime_root,
+                             const std::string& world_id,
+                             const std::stop_token& stop = {});
+SavedWorldCatalog EnumerateSavedWorlds(const std::filesystem::path& save_root,
+                                       const std::filesystem::path& runtime_root,
+                                       const std::stop_token& stop = {});
+// Combined-root callers retain their original resolution semantics.
 SavedWorld InspectSavedWorld(const std::filesystem::path& root,
                              const std::string& world_id,
                              const std::stop_token& stop = {});

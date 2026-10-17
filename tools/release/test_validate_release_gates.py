@@ -377,6 +377,25 @@ class ApiTests(unittest.TestCase):
             self.assertGreater(copied[0], 0)
             self.assertLessEqual(copied[0], 2 * len(data))
 
+    def test_many_check_response_pages_preserve_page_order(self):
+        page_count = 2000
+        response_pages, links = [], []
+        for page_number in range(1, page_count + 1):
+            response_pages.append({"total_count": page_count, "check_runs": [run(page_number)]})
+            relations = []
+            if page_number > 1:
+                relations.append(check_link(page_number - 1, "prev"))
+            if page_number < page_count:
+                relations.append(check_link(page_number + 1, "next"))
+            relations.append(check_link(page_count, "last"))
+            links.append(", ".join(relations))
+        for newline in ("\n", "\r\n"):
+            with self.subTest(newline=newline):
+                data = (b" \t\r\n" + rule_stream(*response_pages, links=tuple(links), newline=newline)
+                        + b" \t\r\n")
+                parsed = gate.parse_check_response_pages(data, COMMIT, REPOSITORY, REPOSITORY_ID)
+                self.assertEqual(parsed, response_pages)
+
     def test_check_response_headers_are_required_and_pagination_must_be_complete(self):
         first, final = ({"total_count": 2, "check_runs": [run(index)]} for index in (1, 2))
         links = (check_link(2, "next"), check_link(1, "prev"))
@@ -996,15 +1015,18 @@ class GitCommandTests(unittest.TestCase):
                      "GIT_CONFIG_SYSTEM": "broken-system", "GIT_CONFIG_COUNT": "1",
                      "GIT_CONFIG_KEY_0": "core.bare", "GIT_CONFIG_VALUE_0": "true",
                      "GIT_DIR": "other", "GIT_WORK_TREE": "other",
-                     "GIT_OBJECT_DIRECTORY": "other", "GIT_REPLACE_REF_BASE": "refs/other/"}
+                     "GIT_OBJECT_DIRECTORY": "other", "GIT_REPLACE_REF_BASE": "refs/other/",
+                     "Git_Dir": "mixed-dir", "git_work_tree": "mixed-work-tree",
+                     "GIT_config_global": "mixed-global"}
         result = subprocess.CompletedProcess([], 0, stdout=b"result\n", stderr=b"warning")
-        with mock.patch.dict(os.environ, overrides):
+        # A plain mapping preserves mixed-case keys even on Windows.
+        with mock.patch.object(gate.os, "environ", dict(os.environ, **overrides)):
             before = dict(os.environ)
             with mock.patch.object(gate.subprocess, "run", return_value=result) as command:
                 self.assertEqual(gate.git(ROOT, "rev-parse", "--verify", "HEAD^0"), b"result\n")
             self.assertEqual(dict(os.environ), before)
         child = command.call_args.kwargs["env"]
-        self.assertEqual({key: value for key, value in child.items() if key.startswith("GIT_")},
+        self.assertEqual({key: value for key, value in child.items() if key.upper().startswith("GIT_")},
                          {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull})
         self.assertEqual(command.call_args.args[0],
                          ["git", "--no-replace-objects", "-C", str(ROOT),

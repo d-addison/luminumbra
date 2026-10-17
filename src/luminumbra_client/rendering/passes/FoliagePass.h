@@ -203,8 +203,11 @@ public:
 
     // --- Distance fade (gate: no foliage beyond the live ring). ---
     void set_fade_distances(float start_m, float end_m) {
+        if (m_fade_start_m == start_m && m_fade_end_m == end_m)
+            return;
         m_fade_start_m = start_m;
         m_fade_end_m = end_m;
+        m_scatter_built = false;
     }
     float fade_start_m() const {
         return m_fade_start_m;
@@ -224,6 +227,7 @@ public:
         if (m_density_scale != effective) {
             m_density_scale = effective;
             ++m_chunk_cache_gen;
+            m_scatter_built = false;
         }
     }
     float density_scale() const {

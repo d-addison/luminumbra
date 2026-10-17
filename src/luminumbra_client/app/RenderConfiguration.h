@@ -1,6 +1,7 @@
 #pragma once
 
 #include "luminumbra_common/core/CaptureContentPaths.h"
+#include "luminumbra_common/core/GraphicsPresets.h"
 #include "luminumbra_common/core/SystemConfig.h"
 
 #include <algorithm>
@@ -16,6 +17,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <variant>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -187,6 +189,44 @@ inline nlohmann::json render_systems(const luminumbra::core::SystemConfig& confi
     LUMIN_CONFIG_PARAM_TABLE(LUMIN_RENDER_PARAM)
 #undef LUMIN_RENDER_PARAM
     return result;
+}
+
+// Preset revision plus both override layers reconstruct every resolved graphics row.
+// Serialize only at the report boundary, alongside renderer-observed values.
+inline nlohmann::json graphics_configuration(const luminumbra::core::GraphicsSettings& settings,
+                                             const luminumbra::core::ResolvedGraphics& resolved) {
+    const auto overrides = [](const luminumbra::core::GraphicsOverrides& values) {
+        auto result = nlohmann::json::object();
+        for (const auto& [key, value] : values) {
+            if (const auto* boolean = std::get_if<bool>(&value))
+                result[key] = *boolean;
+            else if (const auto* number = std::get_if<double>(&value))
+                result[key] = *number;
+            else
+                result[key] = std::get<std::string>(value);
+        }
+        return result;
+    };
+    return {{"base_preset", luminumbra::core::GraphicsPresetName(resolved.base_preset)},
+            {"preset_revision", resolved.preset_revision},
+            {"saved_overrides", overrides(settings.overrides)},
+            {"session_overrides", overrides(resolved.session_overrides)}};
+}
+
+// Startup may persist detected or migrated graphics settings before measurement.
+// Accept only that owned write; every other content input must still match.
+inline nlohmann::json content_after_settings_save(const nlohmann::json& before,
+                                                  const nlohmann::json& after) {
+    if (!after.contains("inputs/user_settings.json") ||
+        !after.at("inputs/user_settings.json").is_string())
+        throw std::runtime_error("saved graphics settings content is unavailable");
+    auto previous_assets = before;
+    auto current_assets = after;
+    previous_assets.erase("inputs/user_settings.json");
+    current_assets.erase("inputs/user_settings.json");
+    if (previous_assets != current_assets)
+        throw std::runtime_error("workload content changed during graphics settings save");
+    return after;
 }
 
 // FNV-1a over a typed canonical stream, independent of JSON whitespace, locale,

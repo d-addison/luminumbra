@@ -1,4 +1,8 @@
-"""Portable request ownership, replay, orphan recovery and EOF/cancel races."""
+"""Portable request ownership, replay, orphan recovery and EOF/cancel races.
+
+Job result waits observe drained completion, not machine throughput. Production
+backend deadlines and the CI job watchdog remain the fail-safes for hangs.
+"""
 from concurrent.futures import Executor, FIRST_COMPLETED, Future, wait
 from contextlib import contextmanager
 from copy import deepcopy
@@ -44,6 +48,12 @@ def phase_reached(phase, task, name):
             raise AssertionError(f"Worker failed before {name}: {error}") from error
         raise AssertionError(f"Worker completed before {name}: {outcome!r}")
     return phase.result(timeout=0)
+
+
+def cancellation_requested(started, completion_wait, task):
+    # Entry into result() follows the durable update, even if its signal is lost.
+    phase_reached(completion_wait, task, "cancellation completion wait")
+    return completed_result(started, "cancellation request")
 
 
 def start_worker(function, *args, **kwargs):
@@ -139,6 +149,47 @@ def broker_server(token, *, mode="normal"):
     server = MemoryMockServer(("127.0.0.1", 0), token, mode=mode)
     server.clock = fixed_clock
     return server
+
+
+class WaitTests(unittest.TestCase):
+    def test_missing_completion_fails_without_waiting(self):
+        future = Future()
+        with patch(__name__ + ".wait", side_effect=AssertionError("Unexpected completion wait")) as waiting, \
+                patch.object(future, "result", side_effect=AssertionError("Unexpected result wait")) as result:
+            with self.assertRaisesRegex(AssertionError, "Missing completion for broker drain"):
+                completed_result(future, "broker drain")
+        waiting.assert_not_called()
+        result.assert_not_called()
+
+    def test_missing_cancellation_signal_fails_after_completion_wait_entry(self):
+        started, completion_wait, task = Future(), Future(), Future()
+        completion_wait.set_result(True)
+        original_wait = wait
+        def bounded_wait(futures, *, timeout, return_when):
+            self.assertEqual(futures, (completion_wait, task))
+            self.assertEqual(timeout, 2)
+            self.assertEqual(return_when, FIRST_COMPLETED)
+            return original_wait(futures, timeout=timeout, return_when=return_when)
+        with patch(__name__ + ".wait", side_effect=bounded_wait) as waiting:
+            with self.assertRaisesRegex(AssertionError, "Missing completion for cancellation request"):
+                cancellation_requested(started, completion_wait, task)
+        waiting.assert_called_once()
+        self.assertFalse(task.done())
+
+    def test_deadlocked_cancellation_has_bounded_detection(self):
+        started, completion_wait, task = Future(), Future(), Future()
+        with patch(__name__ + ".wait", return_value=(set(), {completion_wait, task})) as waiting:
+            with self.assertRaisesRegex(AssertionError, "Deadlock before cancellation completion wait"):
+                cancellation_requested(started, completion_wait, task)
+        waiting.assert_called_once_with((completion_wait, task), timeout=2, return_when=FIRST_COMPLETED)
+
+    def test_failed_cancellation_reports_worker_error(self):
+        started, completion_wait, task = Future(), Future(), Future()
+        error = RuntimeError("Cancellation stopped before completion wait")
+        task.set_exception(error)
+        with self.assertRaisesRegex(AssertionError, "Worker failed before cancellation completion wait") as failure:
+            cancellation_requested(started, completion_wait, task)
+        self.assertIs(failure.exception.__cause__, error)
 
 
 class LedgerTests(RuleAssertions, unittest.TestCase):
@@ -420,7 +471,7 @@ class BrokerTests(RuleAssertions, unittest.TestCase):
     def test_eof_during_submission_cancels_late_backend_id(self):
         self.configure("http://127.0.0.1:1234")
         entered, release, cancel_started = Future(), threading.Event(), Future()
-        completion_wait = threading.Event()
+        completion_wait = Future()
         cancelled = []
         hook_errors = []
         cancelling = None
@@ -449,15 +500,14 @@ class BrokerTests(RuleAssertions, unittest.TestCase):
                     cancel_started.set_result(True)
                     return requested
                 def await_completion(timeout=None):
-                    completion_wait.set()
+                    completion_wait.set_result(True)
                     return DEFAULT
                 with patch.object(broker.ledger, "update", side_effect=update), \
                         patch.object(completed, "result", side_effect=await_completion, wraps=original_result):
                     cancelling = start_worker(broker.cancel, identifier)
                     # Entry follows the cancellation update, even if its signal
                     # is lost. All durable work preceding this wait is finished.
-                    assert completion_wait.wait(timeout=2), "Cancellation did not await completion"
-                    self_case.assertTrue(completed_result(cancel_started, "cancellation request"))
+                    self_case.assertTrue(cancellation_requested(cancel_started, completion_wait, cancelling.future))
                     # Cancellation cannot release ownership while the POST is outstanding.
                     with self_case.assertRaises(Refusal) as refusal:
                         RequestLedger(self_case.project, document="other").begin("generate:contender", digest(b"other"))
@@ -489,10 +539,12 @@ class BrokerTests(RuleAssertions, unittest.TestCase):
                 raise hook_errors[0]
         finally:
             release.set()
-            broker.executor.shutdown(wait=True)
-            completed_result(broker.futures[record["job_id"]], "submission drain after release")
-            if cancelling is not None:
-                join_worker(cancelling)
+            try:
+                broker.executor.shutdown(wait=True)
+                completed_result(broker.futures[record["job_id"]], "submission drain after release")
+            finally:
+                if cancelling is not None:
+                    join_worker(cancelling)
         self.assertFalse(cancelling.is_alive())
         broker.on_eof()
         self.assertEqual(set(cancelled), {digest(self.request["request_id"].encode())[:32]})
@@ -657,11 +709,27 @@ class BrokerTests(RuleAssertions, unittest.TestCase):
             self.configure(f"http://127.0.0.1:{server.server_port}")
             request = deepcopy(self.request)
             request["overrides"]["candidates"] = {"count": 4}
-            with managed_broker(self.project, client_factory=client_factory(server),
+            factory = client_factory(server)
+            def checked_client(*args, **kwargs):
+                backend = factory(*args, **kwargs)
+                submit = backend.submit
+                def checked_submit(body, **kwargs):
+                    # Ownership must already be durable before POST.
+                    expected = digest(body["request_id"].encode())[:32]
+                    self.assertEqual(broker.ledger.status(broker.ledger.active)["backend_job_id"], expected)
+                    return submit(body, **kwargs)
+                backend.submit = checked_submit
+                return backend
+            with managed_broker(self.project, client_factory=checked_client,
                                clock=fixed_clock, executor=SynchronousExecutor()) as broker:
                 plan = broker.plan(request)
-                record = broker.start(plan["plan_id"], plan["plan_digest"])
-                self.assert_completed(broker, record["job_id"])
+                with patch.object(broker.ledger, 'update', wraps=broker.ledger.update) as update:
+                    record = broker.start(plan["plan_id"], plan["plan_digest"])
+                    self.assert_completed(broker, record["job_id"])
+                publications = [call.kwargs["backend_job_id"] for call in update.call_args_list
+                                if "backend_job_id" in call.kwargs]
+                self.assertEqual(len(publications), 4)
+                self.assertEqual(len(set(publications)), 4)
                 self.assertEqual(server.submissions, 4)
                 self.assertEqual([item["seed"] for item in broker.raw[record["job_id"]]["candidates"]], [7, 8, 9, 10])
                 self.assertEqual(broker.ledger.status(record["job_id"])["seeds"], [7, 8, 9, 10])

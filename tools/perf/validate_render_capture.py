@@ -10,6 +10,7 @@ import argparse
 import json
 import math
 from pathlib import Path
+import struct
 import render_budget
 import render_contract
 
@@ -54,6 +55,25 @@ def camera_basis(yaw, pitch):
     return right, up, forward
 
 
+def validate_cell(data, args):
+    """Bind a v3 capture to any expected cell parameters supplied by the caller."""
+    for name, path in (('profile', ('profile', 'name')),
+                       ('width', ('width',)), ('height', ('height',)),
+                       ('warmup_frames', ('warmup_frames',)),
+                       ('frames', ('frames',)), ('workload_kind', ('workload', 'kind'))):
+        expected = getattr(args, name, None)
+        if expected is None:
+            continue
+        option = '--' + name.replace('_', '-')
+        if data.get('schema') != render_contract.SCHEMA:
+            raise ValueError(f'{option} requires a v3 capture')
+        actual = data
+        for key in path:
+            actual = actual[key]
+        if type(actual) is not type(expected) or actual != expected:
+            raise ValueError(f'{option} mismatch: actual={actual!r}, expected={expected!r}')
+
+
 def validate(data, args):
     reference_path = getattr(args, 'reference_capture', None)
     if reference_path is not None:
@@ -66,6 +86,7 @@ def validate(data, args):
     schema = data.get('schema')
     if schema not in ('luminumbra.render_benchmark.v2', *render_contract.SCHEMAS):
         raise ValueError('unsupported render capture schema')
+    validate_cell(data, args)
     if schema == 'luminumbra.render_benchmark.v2':
         missing = ['--' + name for name in ('position', 'yaw', 'pitch', 'tod')
                    if getattr(args, name, None) is None]
@@ -87,6 +108,13 @@ def validate(data, args):
         raise ValueError('v2 has no adapter identity; cannot qualify an adapter')
     finite_vector(args.position, 3, 'requested position')
     finite_vector([args.yaw, args.pitch, args.tod], 3, 'requested angles/time')
+    # The client stores requested camera coordinates and angles as float32.
+    # Keep the absolute tolerance while comparing the values the client can store.
+    try:
+        pose = struct.unpack('<5f', struct.pack('<5f', *args.position, args.yaw, args.pitch))
+        position, angles = list(pose[:3]), list(pose[3:])
+    except OverflowError as error:
+        raise ValueError('requested pose is outside float32 range') from error
     if not 0 <= args.tod < 1:
         raise ValueError('requested TOD must be in [0, 1)')
     if args.fov is not None:
@@ -94,20 +122,20 @@ def validate(data, args):
         if not 0 < args.fov < 180:
             raise ValueError('requested FOV must be in (0, 180)')
     camera = data['camera']
-    close(camera['position'], args.position, 1e-5, 'reported/requested position')
-    close([camera['yaw'], camera['pitch']], [args.yaw, args.pitch], 1e-5, 'reported/requested angles')
+    close(camera['position'], position, 1e-5, 'reported/requested position')
+    close([camera['yaw'], camera['pitch']], angles, 1e-5, 'reported/requested angles')
     if args.fov is not None:
         close([camera['fov']], [args.fov], 1e-5, 'reported/requested FOV')
     context = data['capture_context']
     close([context['time_of_day_at_report']], [args.tod], 1e-6, 'reported/requested TOD')
-    close(context['last_world_streaming_position'], args.position, 1e-5, 'last actual world update position')
+    close(context['last_world_streaming_position'], position, 1e-5, 'last actual world update position')
     if args.require_controller and context['controller_present'] is not True:
         raise ValueError('ordinary-play PlayerController was not present')
     if args.require_controller:
         finite_vector(context['controller_position'], 3, 'controller position')
     if args.require_distinct_controller:
         player = finite_vector(context['controller_position'], 3, 'controller position')
-        if max(abs(a-b) for a,b in zip(player,args.position)) < 1.0:
+        if max(abs(a-b) for a,b in zip(player,position)) < 1.0:
             raise ValueError('controller was not at least 1m away from the capture pose')
     programs = data['render_uniforms']
     if programs['matrix_layout'] != 'column_major':
@@ -179,6 +207,14 @@ def main():
     parser.add_argument('--qualified-vendor', help='Optional exact GL_VENDOR')
     parser.add_argument('--reference-capture', type=Path,
                         help='Validate a reference capture and require the same complete render identity')
+    parser.add_argument('--profile', choices=('legacy', 'quality', 'performance'),
+                        help='Expected v3 performance profile')
+    parser.add_argument('--width', type=int, help='Expected v3 capture width')
+    parser.add_argument('--height', type=int, help='Expected v3 capture height')
+    parser.add_argument('--warmup-frames', type=int, help='Expected v3 warmup frame count')
+    parser.add_argument('--frames', type=int, help='Expected v3 measured frame count')
+    parser.add_argument('--workload-kind', choices=('fixed_view', 'traversal'),
+                        help='Expected v3 workload kind')
     parser.add_argument('--traversal', type=Path, help='Expected committed traversal script')
     parser.add_argument('--workload-manifest', type=Path, help='Expected workload fields as a JSON object')
     parser.add_argument('--enforce-floor', action='store_true',
