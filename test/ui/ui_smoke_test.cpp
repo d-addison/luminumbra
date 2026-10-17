@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "audio/NullAudioManager.h"
+#include "luminumbra_common/core/FramePacing.h"
 #include "ui/Rml_UIManager.h"
 #include "ui/components/common/Button.h"
 #include "ui/components/common/Input.h"
@@ -389,6 +390,10 @@ TEST(UiSmokeTest, AuthoredRmlDocumentsLoadAndExposeRequiredElements) {
           "apply_settings_btn",
           "back_btn",
           "vsync_toggle",
+          "perf_hud_toggle",
+          "open_developer_console",
+          "developer_help_btn",
+          "developer_help",
           "window_mode_prev",
           "window_mode_next",
           "window_mode_value"}},
@@ -712,6 +717,9 @@ TEST(UiSmokeTest, SettingsScreenRoundTripsThroughTheBridge) {
         std::string resolution = "1920x1080";
         std::string window_mode = "borderless";
         bool vsync = true;
+        int frame_cap = 120;
+        bool perf_hud = true;
+        int console_opens = 0;
         float fov = 45.0f;
         float sensitivity = 0.025f;
         float audio_master = 1.0f;
@@ -733,11 +741,30 @@ TEST(UiSmokeTest, SettingsScreenRoundTripsThroughTheBridge) {
     sb.SetWindowMode = [&](const std::string& v) {
         model.window_mode = v;
     };
+    sb.GetPerfHud = [&] {
+        return model.perf_hud;
+    };
+    sb.SetPerfHud = [&](bool visible) {
+        model.perf_hud = visible;
+        ++model.save_count; // The real setter mutates the registry and saves immediately.
+    };
+    sb.OpenDeveloperConsole = [&] {
+        ++model.console_opens;
+    };
+    sb.GetDeveloperHelp = [] {
+        return std::string("console.toggle = F1\nshader.reload = F5");
+    };
     sb.GetVSync = [&] {
         return model.vsync;
     };
     sb.SetVSync = [&](bool v) {
         model.vsync = v;
+    };
+    sb.GetFrameCap = [&] {
+        return model.frame_cap;
+    };
+    sb.SetFrameCap = [&](int cap) {
+        model.frame_cap = cap;
     };
     sb.GetFov = [&] {
         return model.fov;
@@ -792,6 +819,7 @@ TEST(UiSmokeTest, SettingsScreenRoundTripsThroughTheBridge) {
     EXPECT_EQ(control_value("setting_resolution"), "1920x1080");
     EXPECT_EQ(control_value("setting_window_mode"), "borderless");
     EXPECT_EQ(control_value("setting_vsync"), "on");
+    EXPECT_EQ(control_value("setting_frame_cap"), "120");
     EXPECT_EQ(std::stof(control_value("setting_fov")), 45.0f);
     EXPECT_NEAR(std::stof(control_value("setting_mouse_sensitivity")), 0.025f, 1e-4f);
 
@@ -810,8 +838,45 @@ TEST(UiSmokeTest, SettingsScreenRoundTripsThroughTheBridge) {
     change_control("setting_window_mode", "fullscreen");
     EXPECT_EQ(model.window_mode, "fullscreen");
 
+    change_control("setting_vsync", "invalid");
+    EXPECT_TRUE(model.vsync);
     change_control("setting_vsync", "off");
     EXPECT_FALSE(model.vsync);
+
+    for (const int cap : {30, 60, 120, 144, 165, 240, 0}) {
+        change_control("setting_frame_cap", std::to_string(cap));
+        EXPECT_EQ(model.frame_cap, cap);
+        EXPECT_EQ(control_value("setting_frame_cap"), std::to_string(cap));
+    }
+    change_control("setting_frame_cap", "144");
+    change_control("setting_frame_cap", "61");
+    EXPECT_EQ(model.frame_cap, 144);
+
+    // UI edits update the saved choices while each measurement mode keeps
+    // presentation uncapped. Leaving measurement uses the latest live edits.
+    using luminumbra::core::FramePacingOverrides;
+    for (const auto overrides :
+         {FramePacingOverrides{
+              .benchmark_active = true, .scenario_active = false, .profiling_active = false},
+          FramePacingOverrides{
+              .benchmark_active = false, .scenario_active = true, .profiling_active = false},
+          FramePacingOverrides{
+              .benchmark_active = false, .scenario_active = false, .profiling_active = true}}) {
+        for (const bool vsync : {true, false}) {
+            change_control("setting_vsync", vsync ? "on" : "off");
+            change_control("setting_frame_cap", "240");
+            EXPECT_EQ(model.vsync, vsync);
+            EXPECT_EQ(model.frame_cap, 240);
+            const auto pacing =
+                luminumbra::core::ResolveFramePacing(model.vsync, model.frame_cap, overrides);
+            EXPECT_FALSE(pacing.vsync);
+            EXPECT_EQ(pacing.frame_cap, 0);
+            const auto restored =
+                luminumbra::core::ResolveFramePacing(model.vsync, model.frame_cap);
+            EXPECT_EQ(restored.vsync, vsync);
+            EXPECT_EQ(restored.frame_cap, 240);
+        }
+    }
 
     change_control("setting_fov", "90");
     EXPECT_FLOAT_EQ(model.fov, 90.0f);
@@ -826,6 +891,35 @@ TEST(UiSmokeTest, SettingsScreenRoundTripsThroughTheBridge) {
     EXPECT_EQ(model.save_count, 0);
     ClickAndUpdate(ui, settings->GetElementById("apply_settings_btn"));
     EXPECT_EQ(model.save_count, 1) << "Apply & Save must invoke the bridge Save()";
+
+    auto* perf_toggle = settings->GetElementById("perf_hud_toggle");
+    ASSERT_NE(perf_toggle, nullptr);
+    EXPECT_TRUE(perf_toggle->IsClassSet("on"));
+    ClickAndUpdate(ui, perf_toggle);
+    EXPECT_FALSE(model.perf_hud);
+    EXPECT_FALSE(perf_toggle->IsClassSet("on"));
+    EXPECT_EQ(model.save_count, 2);
+    settings = LoadDocumentAndFind(ui, "settings.rml", "settings");
+    ASSERT_NE(settings, nullptr);
+    perf_toggle = settings->GetElementById("perf_hud_toggle");
+    ASSERT_NE(perf_toggle, nullptr);
+    EXPECT_FALSE(perf_toggle->IsClassSet("on"));
+    ClickAndUpdate(ui, settings->GetElementById("open_developer_console"));
+    EXPECT_EQ(model.console_opens, 1);
+    auto* help = settings->GetElementById("developer_help");
+    ASSERT_NE(help, nullptr);
+    EXPECT_NE(help->GetInnerRML().find("console.toggle = F1"), std::string::npos);
+    EXPECT_EQ(help->GetDisplay(), Rml::Style::Display::None);
+    ClickAndUpdate(ui, settings->GetElementById("developer_help_btn"));
+    EXPECT_FALSE(help->IsClassSet("hidden"));
+    EXPECT_EQ(help->GetDisplay(), Rml::Style::Display::Block);
+    ClickAndUpdate(ui, settings->GetElementById("developer_help_btn"));
+    EXPECT_TRUE(help->IsClassSet("hidden"));
+    EXPECT_EQ(help->GetDisplay(), Rml::Style::Display::None);
+    // A change made in the hub refreshes the ordinary settings value from the same getter.
+    model.perf_hud = true;
+    ui.RefreshDeveloperSettings();
+    EXPECT_TRUE(perf_toggle->IsClassSet("on"));
 
     ui.Shutdown();
 }
