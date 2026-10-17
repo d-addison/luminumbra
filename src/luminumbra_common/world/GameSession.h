@@ -119,9 +119,10 @@ public:
     // plants, energy and metadata persist even when no chunks are dirty.
     // The first chunk write emits a full snapshot; later writes flush through
     // WorldSaveService::save_dirty_chunks. Dirty chunks are acknowledged only after
-    // every required writer succeeds and the staged directory is published, so
-    // a failed save preserves the previous complete save and remains retryable.
+    // chunks, plants, energy and metadata succeed. Per-file atomic writes can persist
+    // partial progress on failure; metadata is saved after the required state.
     // Explicit full snapshots and save-as destinations include every streamed chunk.
+    // Save-as exports retain canonical dirty flags and active-region save stamps.
     bool SaveWorldState(WorldStateSaveReport* report = nullptr);
     bool SaveWorldStateTo(const std::filesystem::path& save_dir,
                           WorldStateSaveReport* report = nullptr,

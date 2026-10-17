@@ -2,7 +2,6 @@
 
 #include "../ecs/EntitySnapshot.h" //  plant entity snapshot persistence
 #include "WorldPersistenceRoundtrip.h"
-#include "core/FilesystemPath.h"
 #include "world/FarLodStore.h"
 
 #include "nlohmann/json.hpp"
@@ -848,175 +847,6 @@ bool WriteWorldManifest(const std::filesystem::path& manifest_path,
 
 } // namespace
 
-namespace {
-void RenameSaveDirectory(const std::filesystem::path& source,
-                         const std::filesystem::path& target,
-                         std::error_code& error) {
-#if defined(_WIN32)
-    if (::MoveFileExW(source.c_str(), target.c_str(), MOVEFILE_WRITE_THROUGH))
-        error.clear();
-    else
-        error = std::error_code(static_cast<int>(::GetLastError()), std::system_category());
-#else
-    std::filesystem::rename(source, target, error);
-#endif
-}
-} // namespace
-
-WorldSaveTransaction::WorldSaveTransaction(const std::filesystem::path& destination)
-    : m_destination(destination) {}
-
-WorldSaveTransaction::~WorldSaveTransaction() {
-    if (!m_workspace.empty() && !m_keepBackup) {
-        std::error_code error;
-        std::filesystem::remove_all(m_workspace, error);
-    }
-}
-
-bool WorldSaveTransaction::prepare(std::vector<std::string>* errors) {
-    namespace fs = std::filesystem;
-    try {
-        if (m_destination.has_parent_path())
-            fs::create_directories(m_destination.parent_path());
-        const auto parent =
-            m_destination.has_parent_path() ? m_destination.parent_path() : fs::path(".");
-        // Keep staging outside the world's catalog directory. Other explicit
-        // destinations use a container beneath their writable parent.
-        const auto staging_root =
-            (parent.filename() == "saves" ? parent.parent_path() : parent) / ".world-save-staging";
-        fs::create_directories(staging_root);
-        const auto staging_name =
-            "save." + StableChecksum(Filesystem::GenericPathString(fs::absolute(m_destination)));
-        const auto prefix = staging_name + ".tmp.";
-        // Saves to one destination are serialized. Reclaim only our directory
-        // layout, never another world's metadata or an unrecovered previous save.
-        for (const auto& entry : fs::directory_iterator(staging_root)) {
-            if (!entry.path().filename().string().starts_with(prefix) ||
-                !fs::is_directory(entry.symlink_status()) ||
-                fs::exists(entry.path() / "world_info.json"))
-                continue;
-            const auto previous = entry.path() / "previous";
-            if (fs::exists(previous)) {
-                // Never discard a retained recovery copy automatically.
-                continue;
-            }
-            if (fs::is_directory(entry.path() / "pending")) {
-                std::error_code cleanup_error;
-                fs::remove_all(entry.path(), cleanup_error);
-            }
-        }
-        // Bound collision retries, independently of the number of existing saves.
-        for (int attempt = 0; attempt < 128; ++attempt) {
-            const auto candidate = NextRegionTempPath(staging_root / staging_name);
-            if (fs::create_directory(candidate)) {
-                m_workspace = candidate;
-                break;
-            }
-        }
-        if (m_workspace.empty()) {
-            AddError(errors, "cannot allocate save staging directory");
-            return false;
-        }
-        m_pending = m_workspace / "pending";
-        fs::create_directory(m_pending);
-        if (fs::is_symlink(fs::symlink_status(m_destination))) {
-            AddError(errors, "save directory must not be a symbolic link");
-            return false;
-        }
-        if (fs::exists(m_destination)) {
-            // No following symlinks or duplicating payload buffers. Unchanged region
-            // payloads share storage; atomic replacement gives changed files new storage.
-            for (const auto& entry : fs::recursive_directory_iterator(m_destination)) {
-                const auto target = m_pending / entry.path().lexically_relative(m_destination);
-                const auto status = entry.symlink_status();
-                if (fs::is_directory(status))
-                    fs::create_directory(target);
-                else if (fs::is_regular_file(status)) {
-                    std::error_code link_error;
-                    fs::create_hard_link(entry.path(), target, link_error);
-                    if (link_error)
-                        fs::copy_file(entry.path(), target);
-                } else {
-                    AddError(errors, "unsupported entry in save: " + entry.path().string());
-                    return false;
-                }
-            }
-        }
-        return true;
-    } catch (const fs::filesystem_error& error) {
-        AddError(errors, std::string("cannot stage save: ") + error.what());
-        return false;
-    }
-}
-
-bool WorldSaveTransaction::commit(std::vector<std::string>* errors) {
-    namespace fs = std::filesystem;
-#if !defined(_WIN32)
-    // Persist newly linked entries and removals as well as replaced files before
-    // publication. File writers cannot flush directories they did not modify.
-    try {
-        std::vector<fs::path> directories{m_pending};
-        for (const auto& entry : fs::recursive_directory_iterator(m_pending)) {
-            if (entry.is_directory())
-                directories.push_back(entry.path());
-        }
-        for (auto it = directories.rbegin(); it != directories.rend(); ++it) {
-            if (!FlushDirectoryEntry(*it, errors))
-                return false;
-        }
-        if (!FlushDirectoryEntry(m_workspace, errors) ||
-            !FlushDirectoryEntry(m_workspace.parent_path(), errors))
-            return false;
-    } catch (const fs::filesystem_error& failure) {
-        AddError(errors, std::string("cannot flush staged save: ") + failure.what());
-        return false;
-    }
-#endif
-    const auto previous = m_workspace / "previous";
-    std::error_code error;
-    const bool existed = fs::exists(m_destination, error);
-    if (error) {
-        AddError(errors, "cannot inspect save destination: " + error.message());
-        return false;
-    }
-    if (existed) {
-        RenameSaveDirectory(m_destination, previous, error);
-        if (error) {
-            AddError(errors, "cannot retain previous save: " + error.message());
-            return false;
-        }
-    }
-    RenameSaveDirectory(m_pending, m_destination, error);
-    if (!error) {
-#if !defined(_WIN32)
-        const auto parent =
-            m_destination.has_parent_path() ? m_destination.parent_path() : fs::path(".");
-        if (FlushDirectoryEntry(parent, errors) && FlushDirectoryEntry(m_workspace, errors))
-            return true;
-        RenameSaveDirectory(m_destination, m_pending, error);
-        if (error) {
-            m_keepBackup = true;
-            AddError(errors, "cannot roll back save publication: " + error.message());
-            return false;
-        }
-#else
-        return true;
-#endif
-    } else {
-        AddError(errors, "cannot publish save: " + error.message());
-    }
-    if (existed) {
-        RenameSaveDirectory(previous, m_destination, error);
-        if (error) {
-            // Retain the complete previous save for recovery rather than deleting it.
-            m_keepBackup = true;
-            AddError(errors,
-                     "cannot restore previous save: " + previous.string() + ": " + error.message());
-        }
-    }
-    return false;
-}
-
 bool WorldSaveService::save_metadata(const std::string& bytes,
                                      const std::filesystem::path& save_dir,
                                      std::vector<std::string>* errors) {
@@ -1086,23 +916,13 @@ bool WorldSaveService::save_metadata_and_active_regions(const std::string& bytes
     bool requires_active_regions = false;
     if (!read_clock_metadata(save_dir, previous_clock, requires_active_regions, errors))
         return false;
-    WorldSaveTransaction transaction(save_dir);
-    if (!transaction.prepare(errors))
-        return false;
-    const auto& pending = transaction.directory();
-    // Validation of a rewind requires the older ledger before the older clock;
-    // forward staging requires the newer clock first. Neither becomes live until
-    // the complete pair is ready, so both directions preserve the previous pair.
-    auto pending_ledger = ledger;
-    const bool written = clock.tick() < previous_clock.tick()
-                             ? save_active_regions(pending_ledger, clock, pending, errors) &&
-                                   save_metadata(bytes, pending, errors)
-                             : save_metadata(bytes, pending, errors) &&
-                                   save_active_regions(pending_ledger, clock, pending, errors);
-    if (!written || !transaction.commit(errors))
-        return false;
-    ledger = std::move(pending_ledger);
-    return true;
+    // Each writer validates the installed pair. On rewind, replace the ledger
+    // first so it cannot be newer than the clock, even if metadata writing fails.
+    if (clock.tick() < previous_clock.tick())
+        return save_active_regions(ledger, clock, save_dir, errors) &&
+               save_metadata(bytes, save_dir, errors);
+    return save_metadata(bytes, save_dir, errors) &&
+           save_active_regions(ledger, clock, save_dir, errors);
 }
 
 bool WorldSaveService::read_clock_metadata(const std::filesystem::path& save_dir,

@@ -1068,17 +1068,10 @@ std::size_t ServerWorldRunner::SaveFullSnapshot() {
             "SaveFullSnapshot failed: destination preset or identity is incompatible");
         return 0;
     }
-    auto* world_system = m_session->GetWorldSystem();
-    world_system->wait_for_streaming_jobs();
-
-    WorldStreamingState state;
-    for (const auto& chunk : world_system->snapshot_streamed_chunks()) {
-        state.insert_chunk(chunk);
-    }
-
-    if (!m_session->SaveWorldStateTo(save_dir, nullptr, /*full_snapshot=*/true))
+    world::WorldStateSaveReport report;
+    if (!m_session->SaveWorldStateTo(save_dir, &report, /*full_snapshot=*/true))
         return 0;
-    return state.size();
+    return report.chunks_total;
 }
 
 std::size_t ServerWorldRunner::StreamedChunkCount() {
@@ -1125,7 +1118,7 @@ void ServerWorldRunner::Shutdown(world::WorldStateSaveReport* shutdown_save_repo
     if (m_booted && m_session) {
         // The host tick loop has returned, so this cannot overlap autosave/snapshot.
         // Save on shutdown via WorldSaveService (incremental contract: a
-        // never-edited world writes nothing and stays on the fresh path).
+        // never-edited world writes no chunk snapshot).
         world::WorldStateSaveReport save_report;
         m_session->SaveWorldState(&save_report);
         if (shutdown_save_report) {

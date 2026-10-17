@@ -451,20 +451,25 @@ TEST_F(HostSchedulerFault, ClientMetadataSaveFailureSuppressesSuccessAndAllowsRe
         return bytes;
     };
     const auto previous_save = read_save();
+    const auto retained_metadata = directory / "retained-metadata";
     Luminumbra::Client::SaveSessionOnExit(
         &session,
         [&] {
             EXPECT_TRUE(chunk->is_voxel_data_dirty());
             session.SetSpawnPoint(exit_spawn);
             spawn_updated = true;
-            WorldSaveService::set_before_active_regions_replace_for_testing(+[] { return false; });
+            // An occupied metadata destination refuses the complete save on both
+            // Windows and POSIX, without relying on directory rename publication.
+            fs::rename(directory / "world_info.json", retained_metadata);
+            fs::create_directory(directory / "world_info.json");
         },
         [&] { saved_reported = true; });
-    WorldSaveService::set_before_active_regions_replace_for_testing(nullptr);
+    fs::remove_all(directory / "world_info.json");
+    fs::rename(retained_metadata, directory / "world_info.json");
     ASSERT_TRUE(spawn_updated);
     EXPECT_FALSE(saved_reported);
-    // Failure after metadata staging preserves the prior complete save and
-    // leaves the current chunk edits and save stamps pending.
+    // Metadata refusal preserves the prior save and leaves the current chunk
+    // edits and save stamps pending.
     EXPECT_TRUE(chunk->is_voxel_data_dirty());
     EXPECT_EQ(session.GetActiveRegionLedger().encode(), saved_ledger);
     EXPECT_EQ(read_save(), previous_save);

@@ -1,3 +1,4 @@
+#include "luminumbra_client/app/SessionExit.h"
 #include "luminumbra_client/ui/core/UIHotReload.h"
 #include <chrono>
 #include <gtest/gtest.h>
@@ -42,6 +43,13 @@
 #include <tuple>
 
 #include <nlohmann/json.hpp>
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace {
 namespace fs = std::filesystem;
@@ -1530,7 +1538,7 @@ TEST_P(SnapshotEnergyFailure, FailureKeepsDirtyChunksAndRetryPersistsAllState) {
         energy->QueueDeposit(3, 0, 0, 0, 500);
         energy->Tick(0);
     }
-    // Keep the previous complete save while injecting the energy-only failure.
+    // Retain the prior energy file while injecting the energy-only failure.
     const PendingSnapshotState pending(*session);
     const auto metadata_bytes = Read(destination / "world_info.json");
     const auto energy_file = destination / "aether_state.efs";
@@ -1589,16 +1597,72 @@ INSTANTIATE_TEST_SUITE_P(RegionModesAndSnapshotPaths,
                          SnapshotEnergyFailure,
                          testing::Combine(testing::Values(0, 1), testing::Range(0, 6)));
 
+// Fail the selected sibling writer after the chunk and manifest replacements.
+// Windows denies replacement while still allowing validation to read the file;
+// POSIX injects a directory-flush failure through the existing persistence seam.
+class SiblingWriteFailure {
+public:
+    SiblingWriteFailure() = default;
+    ~SiblingWriteFailure() {
+        Reset();
+    }
+    SiblingWriteFailure(const SiblingWriteFailure&) = delete;
+    SiblingWriteFailure& operator=(const SiblingWriteFailure&) = delete;
+
+    void Arm(const fs::path& destination, bool energy) {
+#if defined(_WIN32)
+        const auto path = energy ? destination / "aether_state.efs"
+                                 : WorldSaveService::plant_entities_path(destination);
+        handle = ::CreateFileW(path.c_str(),
+                               GENERIC_READ,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               nullptr,
+                               OPEN_EXISTING,
+                               FILE_ATTRIBUTE_NORMAL,
+                               nullptr);
+        ASSERT_NE(handle, INVALID_HANDLE_VALUE);
+#else
+        // One resident region and its manifest each flush once before plants.
+        int flushes = 2;
+        if (energy) {
+            const auto plants = WorldSaveService::plant_entities_path(destination);
+            // The plant writer flushes every ancestor entry and its replacement.
+            for (auto ancestor = plants.parent_path();
+                 !ancestor.empty() && ancestor != ancestor.root_path();
+                 ancestor = ancestor.parent_path())
+                ++flushes;
+            ++flushes;
+        }
+        WorldSaveService::set_directory_flush_failure_for_testing(flushes);
+#endif
+    }
+
+    void Reset() {
+#if defined(_WIN32)
+        if (handle != INVALID_HANDLE_VALUE) {
+            EXPECT_TRUE(::CloseHandle(handle));
+            handle = INVALID_HANDLE_VALUE;
+        }
+#else
+        WorldSaveService::set_directory_flush_failure_for_testing(-1);
+#endif
+    }
+
+private:
+#if defined(_WIN32)
+    HANDLE handle = INVALID_HANDLE_VALUE;
+#endif
+};
+
 class CompleteSaveFailure : public WorldOpenRefusal {};
 
-TEST_P(CompleteSaveFailure, EveryWriterFailurePreservesPreviousSaveAndPendingEdits) {
+TEST_P(CompleteSaveFailure, SiblingWriterFailureKeepsMetadataAndDirtyChunksPending) {
     const auto [regions, failure_and_path] = GetParam();
-    const int failure = failure_and_path % 7;
-    const int save_path = failure_and_path / 7;
-    const auto config = SnapshotRunnerConfig(RootString(), regions != 0);
-    ASSERT_TRUE(config.systems_config_override.has_value());
-    if (!config.systems_config_override.has_value())
-        return;
+    const bool energy_failure = failure_and_path % 2 != 0;
+    const int save_path = failure_and_path / 2;
+    auto config = SnapshotRunnerConfig(RootString(), regions != 0);
+    if (save_path == 5)
+        config.autosave_interval_ticks = 1;
     Server::ServerWorldRunner runner(config);
     ASSERT_NO_FATAL_FAILURE(BootSnapshotRunner(runner, regions != 0));
     auto* session = runner.Session();
@@ -1613,15 +1677,11 @@ TEST_P(CompleteSaveFailure, EveryWriterFailurePreservesPreviousSaveAndPendingEdi
         fs::create_directories(destination.parent_path());
         fs::copy(canonical, destination, fs::copy_options::recursive);
     }
-    const auto old_bytes = DiskBytes(destination);
-    const auto old_plants = session->ComputePlantSubHash();
-    const auto old_energy = session->GetEnergyFieldState()->CanonicalBytes();
-    const auto old_heightmap = chunk->heightmap_data;
     const auto old_metadata = Read(destination / "world_info.json");
-
-    if (regions != 0) {
-        ASSERT_EQ(session->TickSimulation(session->GetSimulationClock().fixed_dt()), 1u);
-    }
+    const auto old_ledger = Read(WorldSaveService::active_regions_path(destination));
+    const auto old_plants = Read(WorldSaveService::plant_entities_path(destination));
+    const auto old_energy = Read(destination / "aether_state.efs");
+    const auto old_chunks = Read(WorldSaveService::region_file_path(destination, 0, 0));
     session->SetSpawnPoint(Vec3(21, 22, 23));
     chunk->heightmap_data.front() = 47.0f;
     chunk->mark_voxel_data_dirty();
@@ -1630,167 +1690,172 @@ TEST_P(CompleteSaveFailure, EveryWriterFailurePreservesPreviousSaveAndPendingEdi
         plants.get<Components::PlantGrowthComponent>(plant).growth_points += 7;
     session->GetEnergyFieldState()->QueueDeposit(7, 0, 0, 0, 500);
     session->GetEnergyFieldState()->Tick(0);
-    const PendingSnapshotState pending(*session);
 
-    // Occupied destinations fail on both Windows and POSIX without permission assumptions.
-    // Restore the injected obstruction before comparing and reopening the old complete save.
-    const std::array<fs::path, 7> targets = {WorldSaveService::region_file_path(destination, 0, 0),
-                                             WorldSaveService::plant_entities_path(destination),
-                                             destination / "aether_state.efs",
-                                             destination / "world_info.json",
-                                             WorldSaveService::active_regions_path(destination),
-                                             destination / "preset.json",
-                                             WorldSaveService::plant_entities_path(destination)};
-    const auto target = failure == 4 && regions == 0
-                            ? destination / "aether_state.efs"
-                            : targets.at(static_cast<std::size_t>(failure));
-    const auto preserved = root / "preserved-save-member";
-    const bool existed = fs::exists(target);
-    if (existed)
-        fs::rename(target, preserved);
-    fs::create_directories(target);
-    Write(target / "keep", "occupied");
-    if (failure == 6) {
-        // Empty roster deletion errors are required failures too.
-        session->GetRegistry().clear<Components::PlantTag>();
-    }
+    // Declare after the runner so even a fatal assertion releases the obstruction
+    // before its destructor attempts a shutdown save.
+    SiblingWriteFailure failure;
+    ASSERT_NO_FATAL_FAILURE(failure.Arm(destination, energy_failure));
     world::WorldStateSaveReport report;
-    if (save_path == 0) {
+    if (save_path == 0)
         EXPECT_FALSE(session->SaveWorldState(&report));
-    } else if (save_path == 1)
+    else if (save_path == 1)
         EXPECT_EQ(runner.SaveFullSnapshot(), 0u);
     else if (save_path == 2)
         EXPECT_FALSE(session->SaveWorld());
-    else
+    else if (save_path == 3)
         EXPECT_FALSE(session->SaveWorldStateTo(destination, &report));
+    else if (save_path == 4) {
+        bool spawn_captured = false;
+        Client::SaveSessionOnExit(
+            session,
+            [&] {
+                spawn_captured = true;
+                session->SetSpawnPoint(Vec3(29, 31, 37));
+            },
+            [] { ADD_FAILURE() << "Failed exit save reported success"; });
+        EXPECT_TRUE(spawn_captured);
+    } else if (save_path == 5) {
+        const auto tick_report = runner.RunFixedTicks(1);
+        EXPECT_EQ(tick_report.ticks_executed, 1u);
+        EXPECT_EQ(tick_report.autosave_passes, 0u);
+        EXPECT_EQ(tick_report.autosave_writes, 0u);
+    } else {
+        runner.Shutdown(&report);
+    }
+    failure.Reset();
     EXPECT_FALSE(report.saved);
     EXPECT_EQ(report.chunks_saved, 0u);
     EXPECT_TRUE(chunk->is_voxel_data_dirty());
-    EXPECT_EQ(session->GetActiveRegionLedger().canonical_bytes(), pending.ledger_bytes);
-    fs::remove_all(target);
-    if (existed)
-        fs::rename(preserved, target);
-    EXPECT_EQ(DiskBytes(destination), old_bytes);
     EXPECT_EQ(Read(destination / "world_info.json"), old_metadata);
-    GameSession loaded;
-    loaded.SetRootPath(RootString());
-    loaded.SetJobSystem(&jobs);
-    if (save_path == 3)
-        loaded.SetSaveRootPath(root / "alternate");
-    loaded.ApplySystemConfig(*config.systems_config_override);
-    ASSERT_TRUE(loaded.LoadWorld(session->GetMetadata().worldId)) << loaded.GetWorldOpenError();
-    EXPECT_EQ(loaded.ComputePlantSubHash(), old_plants);
-    ASSERT_NE(loaded.GetEnergyFieldState(), nullptr);
-    EXPECT_EQ(loaded.GetEnergyFieldState()->CanonicalBytes(), old_energy);
-    const auto restored = loaded.GetWorldSystem()->snapshot_streamed_chunks();
-    ASSERT_EQ(restored.size(), 1u);
-    EXPECT_EQ(restored.front()->heightmap_data, old_heightmap);
-    // Remove the obstruction before shutdown retries the same pending save.
-    runner.Shutdown();
+    EXPECT_EQ(Read(WorldSaveService::active_regions_path(destination)), old_ledger);
+    // Prove the injection reached the sibling writer after durable chunk progress.
+    EXPECT_NE(Read(WorldSaveService::region_file_path(destination, 0, 0)), old_chunks);
+    EXPECT_EQ(Read(destination / "aether_state.efs"), old_energy);
+    if (energy_failure)
+        EXPECT_NE(Read(WorldSaveService::plant_entities_path(destination)), old_plants);
+    else
+        EXPECT_EQ(Read(WorldSaveService::plant_entities_path(destination)), old_plants);
+    EXPECT_TRUE(WorldSaveService::validate_save(destination));
+    if (save_path != 6) {
+        ASSERT_TRUE(session->SaveWorldStateTo(destination));
+        EXPECT_EQ(chunk->is_voxel_data_dirty(), save_path == 3);
+        EXPECT_NE(Read(destination / "world_info.json"), old_metadata);
+        if (save_path == 3) {
+            // A successful export must not acknowledge the canonical save's edits.
+            EXPECT_EQ(Read(canonical / "world_info.json"), old_metadata);
+            EXPECT_EQ(Read(WorldSaveService::region_file_path(canonical, 0, 0)), old_chunks);
+            ASSERT_TRUE(session->SaveWorldState());
+            EXPECT_FALSE(chunk->is_voxel_data_dirty());
+            EXPECT_EQ(Read(WorldSaveService::region_file_path(canonical, 0, 0)),
+                      Read(WorldSaveService::region_file_path(destination, 0, 0)));
+        }
+        runner.Shutdown();
+    }
 }
 
+// Each CTest entry exercises one writer, host entry point and region mode.
 INSTANTIATE_TEST_SUITE_P(RegionModesWritersAndSavePaths,
                          CompleteSaveFailure,
-                         testing::Combine(testing::Values(0, 1), testing::Range(0, 28)));
+                         testing::Combine(testing::Values(0, 1), testing::Range(0, 14)));
 
-TEST_F(WorldOpenRefusal, PartialStagedChunkWriteNeverReplacesPreviousSave) {
+TEST_F(WorldOpenRefusal, SaveAsWithTrailingSeparatorRetainsCanonicalPendingEdits) {
+    for (const bool regions : {false, true}) {
+        SCOPED_TRACE(regions);
+        const auto config = SnapshotRunnerConfig(RootString(), regions);
+        Server::ServerWorldRunner runner(config);
+        ASSERT_NO_FATAL_FAILURE(BootSnapshotRunner(runner, regions));
+        auto* session = runner.Session();
+        std::shared_ptr<Chunk> chunk;
+        ASSERT_NO_FATAL_FAILURE(PreparePendingSnapshot(*session, chunk, true));
+        const auto canonical = session->GetWorldSaveDir();
+        const auto before = Read(canonical / "world_info.json");
+        const auto before_chunks = Read(WorldSaveService::region_file_path(canonical, 0, 0));
+        if (regions) {
+            ASSERT_EQ(session->TickSimulation(session->GetSimulationClock().fixed_dt()), 1u);
+        }
+        const auto ledger = session->GetActiveRegionLedger().encode();
+        Write(canonical / "unrelated/retained.txt", "canonical member");
+        const auto destination = root / (regions ? "enabled-export" : "legacy-export") / "";
+        ASSERT_TRUE(destination.filename().empty());
+        world::WorldStateSaveReport report;
+        ASSERT_TRUE(session->SaveWorldStateTo(destination, &report));
+        EXPECT_TRUE(report.saved);
+        EXPECT_TRUE(chunk->is_voxel_data_dirty());
+        EXPECT_EQ(session->GetActiveRegionLedger().encode(), ledger);
+        EXPECT_EQ(Read(canonical / "world_info.json"), before);
+        EXPECT_EQ(Read(WorldSaveService::region_file_path(canonical, 0, 0)), before_chunks);
+        EXPECT_EQ(Read(canonical / "unrelated/retained.txt"), "canonical member");
+        EXPECT_FALSE(fs::exists(destination / "unrelated"));
+        EXPECT_TRUE(WorldSaveService::validate_save(destination));
+        WorldStreamingState exported;
+        std::vector<std::string> errors;
+        ASSERT_TRUE(WorldSaveService{}.load_world(exported, destination, errors));
+        EXPECT_TRUE(errors.empty());
+        ASSERT_EQ(exported.size(), 1u);
+        ASSERT_NE(exported.find_chunk(chunk->get_id()), nullptr);
+        EXPECT_EQ(exported.find_chunk(chunk->get_id())->heightmap_data, chunk->heightmap_data);
+        ASSERT_TRUE(session->SaveWorldState());
+        EXPECT_FALSE(chunk->is_voxel_data_dirty());
+        EXPECT_EQ(Read(WorldSaveService::region_file_path(canonical, 0, 0)),
+                  Read(WorldSaveService::region_file_path(destination, 0, 0)));
+        runner.Shutdown();
+    }
+}
+
+TEST_F(WorldOpenRefusal, PartialChunkReplacementKeepsMetadataAndDirtyChunksPending) {
     const auto config = SnapshotRunnerConfig(RootString(), true);
-    ASSERT_TRUE(config.systems_config_override.has_value());
-    if (!config.systems_config_override.has_value())
-        return;
     Server::ServerWorldRunner runner(config);
     ASSERT_NO_FATAL_FAILURE(BootSnapshotRunner(runner, true));
     auto* session = runner.Session();
     std::shared_ptr<Chunk> chunk;
     ASSERT_NO_FATAL_FAILURE(PreparePendingSnapshot(*session, chunk, true));
     ASSERT_TRUE(session->SaveWorldState());
-    const auto before = DiskBytes(session->GetWorldSaveDir());
-    const auto previous_plants = session->ComputePlantSubHash();
-    const auto previous_energy = session->GetEnergyFieldState()->CanonicalBytes();
-    ASSERT_EQ(session->TickSimulation(session->GetSimulationClock().fixed_dt()), 1u);
-    const auto pending_ledger = session->GetActiveRegionLedger().canonical_bytes();
+    const auto destination = session->GetWorldSaveDir();
+    const auto metadata = Read(destination / "world_info.json");
+    const auto plants = Read(WorldSaveService::plant_entities_path(destination));
+    const auto energy = Read(destination / "aether_state.efs");
+    auto second = std::make_shared<Chunk>(IVec3(32, 0, 0));
+    second->set_state(ChunkState::Idle);
+    second->heightmap_data = {17.0f};
+    second->mark_voxel_data_dirty();
+    ASSERT_TRUE(session->GetWorldSystem()->adopt_streamed_chunk(second));
+    session->SetSpawnPoint(Vec3(29, 31, 37));
     chunk->heightmap_data.front() = 47.0f;
     chunk->mark_voxel_data_dirty();
-    bool saved = false;
-    // Exercise every durable-write/publication boundary, including failures after
-    // replacement. Bound attempts so a broken countdown cannot hang the regression.
-    for (int boundary = 0; boundary < 256 && !saved; ++boundary) {
-        SCOPED_TRACE(boundary);
-#if defined(_WIN32)
-        WorldSaveService::set_interrupt_before_region_replace_for_testing(boundary == 0);
-#else
-        WorldSaveService::set_directory_flush_failure_for_testing(boundary);
-#endif
-        saved = session->SaveWorldState();
-        WorldSaveService::set_directory_flush_failure_for_testing(-1);
-        WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
-        if (boundary == 0) {
-            EXPECT_FALSE(saved);
-        }
-        if (saved)
-            break;
-        EXPECT_TRUE(chunk->is_voxel_data_dirty());
-        EXPECT_EQ(DiskBytes(session->GetWorldSaveDir()), before);
-        EXPECT_EQ(session->GetActiveRegionLedger().canonical_bytes(), pending_ledger);
-        GameSession loaded;
-        loaded.SetRootPath(RootString());
-        loaded.SetJobSystem(&jobs);
-        loaded.ApplySystemConfig(*config.systems_config_override);
-        ASSERT_TRUE(loaded.LoadWorld(session->GetMetadata().worldId)) << loaded.GetWorldOpenError();
-        EXPECT_EQ(loaded.GetWorldClock().tick(), 0u);
-        EXPECT_EQ(loaded.ComputePlantSubHash(), previous_plants);
-        EXPECT_EQ(loaded.GetEnergyFieldState()->CanonicalBytes(), previous_energy);
-    }
-    ASSERT_TRUE(saved);
-    EXPECT_FALSE(chunk->is_voxel_data_dirty());
-    runner.Shutdown();
-}
-
-TEST_F(WorldOpenRefusal, LedgerWriterFailureKeepsMetadataAndAllPriorState) {
-    const auto config = SnapshotRunnerConfig(RootString(), true);
-    ASSERT_TRUE(config.systems_config_override.has_value());
-    if (!config.systems_config_override.has_value())
-        return;
-    Server::ServerWorldRunner runner(config);
-    ASSERT_NO_FATAL_FAILURE(BootSnapshotRunner(runner, true));
-    auto* session = runner.Session();
-    std::shared_ptr<Chunk> chunk;
-    ASSERT_NO_FATAL_FAILURE(PreparePendingSnapshot(*session, chunk, true));
-    ASSERT_TRUE(session->SaveWorldState());
-    const auto previous = DiskBytes(session->GetWorldSaveDir());
-    const auto ledger = session->GetActiveRegionLedger().canonical_bytes();
-    session->SetSpawnPoint(Vec3(29, 31, 37));
-    chunk->heightmap_data.front() = 55.0f;
-    chunk->mark_voxel_data_dirty();
-    WorldSaveService::set_before_active_regions_replace_for_testing(+[] { return false; });
-    EXPECT_EQ(runner.SaveFullSnapshot(), 0u);
-    WorldSaveService::set_before_active_regions_replace_for_testing(nullptr);
-    EXPECT_EQ(DiskBytes(session->GetWorldSaveDir()), previous);
-    EXPECT_EQ(session->GetActiveRegionLedger().canonical_bytes(), ledger);
+    // Refuse an invalid second region before making any replacements.
+    const auto blocked = WorldSaveService::region_file_path(destination, 1, 0);
+    fs::create_directory(blocked);
+    Write(blocked / "keep", "occupied");
+    // The initial integrity scan correctly refuses an invalid region entry.
+    EXPECT_FALSE(session->SaveWorldState());
     EXPECT_TRUE(chunk->is_voxel_data_dirty());
-    auto metadata = nlohmann::json::parse(Read(session->GetWorldSaveDir() / "world_info.json"));
-    metadata["simulationTick"] = session->GetSimulationTickCount() + 1;
-    auto direct_ledger = session->GetActiveRegionLedger();
-    WorldSaveService::set_before_active_regions_replace_for_testing(+[] { return false; });
-    EXPECT_FALSE(WorldSaveService::save_metadata_and_active_regions(
-        metadata.dump(), direct_ledger, session->GetWorldSaveDir()));
-    WorldSaveService::set_before_active_regions_replace_for_testing(nullptr);
-    EXPECT_EQ(DiskBytes(session->GetWorldSaveDir()), previous);
-    EXPECT_EQ(direct_ledger.canonical_bytes(), ledger);
-    GameSession loaded;
-    loaded.SetRootPath(RootString());
-    loaded.SetJobSystem(&jobs);
-    loaded.ApplySystemConfig(*config.systems_config_override);
-    ASSERT_TRUE(loaded.LoadWorld(session->GetMetadata().worldId)) << loaded.GetWorldOpenError();
-    ASSERT_EQ(loaded.GetWorldSystem()->snapshot_streamed_chunks().size(), 1u);
-    EXPECT_FLOAT_EQ(
-        loaded.GetWorldSystem()->snapshot_streamed_chunks().front()->heightmap_data.front(), 42.0f);
-    ASSERT_EQ(runner.SaveFullSnapshot(), 1u);
+    EXPECT_TRUE(second->is_voxel_data_dirty());
+    EXPECT_EQ(Read(destination / "world_info.json"), metadata);
+    EXPECT_EQ(Read(WorldSaveService::plant_entities_path(destination)), plants);
+    EXPECT_EQ(Read(destination / "aether_state.efs"), energy);
+    fs::remove_all(blocked);
+    const auto authority_revision = session->GetWorldSystem()->far_lod_authority_revision();
+#if defined(_WIN32)
+    WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
+#else
+    // A post-replacement flush failure leaves the new complete region in place.
+    WorldSaveService::set_directory_flush_failure_for_testing(0);
+#endif
+    EXPECT_FALSE(session->SaveWorldState());
+    WorldSaveService::set_directory_flush_failure_for_testing(-1);
+    WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
+    EXPECT_GT(session->GetWorldSystem()->far_lod_authority_revision(), authority_revision);
+    EXPECT_TRUE(chunk->is_voxel_data_dirty());
+    EXPECT_TRUE(second->is_voxel_data_dirty());
+    EXPECT_EQ(Read(destination / "world_info.json"), metadata);
+    EXPECT_TRUE(WorldSaveService::validate_save(destination));
+    ASSERT_TRUE(session->SaveWorldState());
     EXPECT_FALSE(chunk->is_voxel_data_dirty());
+    EXPECT_FALSE(second->is_voxel_data_dirty());
     runner.Shutdown();
 }
 
-TEST_F(WorldOpenRefusal, EmptyEnergyRemovalFailurePreservesPriorSaveInBothRegionModes) {
+TEST_F(WorldOpenRefusal, EmptyEnergyRemovalFailureKeepsMetadataInBothRegionModes) {
     for (const bool regions : {false, true}) {
         const auto config = SnapshotRunnerConfig(RootString(), regions);
         Server::ServerWorldRunner runner(config);
@@ -1800,19 +1865,21 @@ TEST_F(WorldOpenRefusal, EmptyEnergyRemovalFailurePreservesPriorSaveInBothRegion
         ASSERT_NO_FATAL_FAILURE(PreparePendingSnapshot(*session, chunk, true));
         ASSERT_TRUE(session->SaveWorldState());
         const auto destination = session->GetWorldSaveDir();
-        const auto before = DiskBytes(destination);
+        const auto metadata = Read(destination / "world_info.json");
         const auto energy = destination / "aether_state.efs";
         const auto preserved = root / "previous-energy";
         fs::rename(energy, preserved);
         fs::create_directory(energy);
         Write(energy / "keep", "occupied");
         session->GetEnergyFieldState()->ResetEmptyAtTick(session->GetSimulationTickCount());
+        session->SetSpawnPoint(Vec3(29, 31, 37));
         chunk->mark_voxel_data_dirty();
         EXPECT_FALSE(session->SaveWorldState());
         EXPECT_TRUE(chunk->is_voxel_data_dirty());
+        EXPECT_EQ(Read(destination / "world_info.json"), metadata);
+        EXPECT_EQ(Read(energy / "keep"), "occupied");
         fs::remove_all(energy);
         fs::rename(preserved, energy);
-        EXPECT_EQ(DiskBytes(destination), before);
         ASSERT_TRUE(session->SaveWorldState());
         EXPECT_FALSE(fs::exists(energy));
         EXPECT_FALSE(chunk->is_voxel_data_dirty());

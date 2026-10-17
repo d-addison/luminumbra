@@ -1521,6 +1521,7 @@ target_compile_definitions(frontier_gates_test PRIVATE
 
 target_include_directories(frontier_gates_test PRIVATE
 ../src
+${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 target_link_libraries(frontier_gates_test PRIVATE
