@@ -861,18 +861,39 @@ class AcceptanceMatrixTests(unittest.TestCase):
         self.assertTrue(any("planned" in item and "tangencies" in item["planned"]
                             for item in rows[0]["evidence"]))
 
-    def test_repository_boundary_discrepancy_and_watchdog_rearming_evidence(self) -> None:
+    def test_repository_input_bounds_and_watchdog_rearming_evidence(self) -> None:
         matrix = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_matrix.json")
         rows = [row for row in matrix["rows"] if "ar.activation.050" in row.get("requirements", [])]
         self.assertEqual(len(rows), 1)
         row = rows[0]
-        self.assertEqual(row["status"], "planned")
-        self.assertIn("docs/active-regions.md:66", row["discrepancy"])
-        self.assertIn("test/common/ActiveRegionLedger_test.cpp:438", row["discrepancy"])
-        self.assertIn("asymmetric", row["discrepancy"])
-        self.assertIn("owner: ds", row["evidence"][0]["planned"])
-        self.assertIn("symmetric-boundary regression", row["evidence"][0]["planned"])
-        self.assertIn(MODULE._escape_cell("Discrepancy: " + row["discrepancy"]), MODULE.render_doc(matrix))
+        self.assertEqual(row["status"], "covered")
+        self.assertEqual(row["id"], "contract.region-input-bounds")
+        self.assertIn("-2^24 <= x,z < 2^24", row["statement"])
+        self.assertIn("-32768 <= x,z < 32768", row["statement"])
+        self.assertNotIn("discrepancy", row)
+        self.assertEqual(row["requirements"], ["ar.activation.050", "ar.activation.065"])
+        self.assertEqual(row["evidence"], [
+            {"kind": "ctest", "ref": "ActiveRegionLedgerTest.ValidAnchorBoundaries"},
+            {"kind": "ctest",
+             "ref": "GameSessionHeadlessWorldTest.InvalidHostInputsNeverThrowAndAreCounted"},
+            {"kind": "ctest", "ref": "ActiveRegionLedgerTest.PinBoundariesOnBothAxes"},
+        ])
+        inventory = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_requirements.json")
+        requirements, errors = MODULE.validate_inventory(inventory, MODULE.DEFAULT_ROOT)
+        self.assertEqual(errors, [])
+        self.assertEqual(requirements["ar.activation.050"]["text"],
+                         "Non-finite or out-of-range (outside -2^24 <= x,z < 2^24) walking "
+                         "anchors and ground-object edit positions are ignored and counted "
+                         "(observational, never hashed or saved).")
+        self.assertEqual(requirements["ar.activation.065"]["text"],
+                         "Region pins outside -32768 <= x,z < 32768 are ignored and counted "
+                         "with the same observational rules.")
+        self.assertIn(MODULE._escape_cell(row["statement"]), MODULE.render_doc(matrix))
+        render_fixture = copy.deepcopy(matrix)
+        fixture_row = row_of(render_fixture, "contract.region-input-bounds")
+        fixture_row["discrepancy"] = "Input-bound qualification remains pending."
+        self.assertIn(MODULE._escape_cell("Discrepancy: " + fixture_row["discrepancy"]),
+                      MODULE.render_doc(render_fixture))
         watchdog = row_of(matrix, "em.client-hang")
         self.assertIn("HangWatchdog.RearmsAfterHeartbeatResumes", {e["ref"] for e in watchdog["evidence"]})
 
