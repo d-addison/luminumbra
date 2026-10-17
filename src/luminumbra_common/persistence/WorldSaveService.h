@@ -177,6 +177,12 @@ public:
                                          const std::vector<ContainerRecord>& records,
                                          std::vector<std::string>* errors = nullptr);
 
+    // Read-only diagnostic of the staging filename base used by region/manifest
+    // writers, before the unique temporary suffix. Region members stage in the
+    // save root outside strict scans; standalone paths retain their spelling.
+    // Normalization preserves Windows UNC roots and performs no filesystem I/O.
+    static std::filesystem::path region_staging_path(const std::filesystem::path& destination);
+
     // Deterministic test seam for failure-atomic LMR1 rewrites. When armed,
     // the next region write stops after its unique temporary file has been
     // durably flushed, immediately before the atomic replacement of the live

@@ -2972,7 +2972,7 @@
     {
       "id": "iss.385",
       "source": "issue #385",
-      "statement": "Complete saves use per-file atomic writes for chunks, plants and energy before the metadata phase in both region modes. Required state-writer failures retain the previous metadata and pending dirty chunks. Regions-disabled incremental saves preserve devel file layout and metadata bytes, including plant-only containers and unchanged server shutdowns. Explicit full snapshots provide complete save-as exports and retain canonical dirty flags and save stamps, including destinations with trailing separators. Plant, region and manifest writers stage outside the strict region scan and reclaim their abandoned staging before replacement; plant cleanup also runs for an empty roster. Client preset and settings writers check durable atomic publication before reporting success or removing a renamed source. Registered regressions cover writer failures, malformed presets, interrupted replacement, retries and partial chunk writes. Native execution remains required.",
+      "statement": "Complete saves use per-file atomic writes for chunks, plants and energy before the metadata phase in both region modes. Required state-writer failures retain the previous metadata and pending dirty chunks. Regions-disabled incremental saves preserve devel file layout and metadata bytes, including plant-only containers and unchanged server shutdowns. Explicit full snapshots provide complete save-as exports and retain canonical dirty flags and save stamps, including destinations with trailing separators. Plant, region and manifest writers stage outside the strict region scan and reclaim their abandoned staging before replacement; plant cleanup also runs for an empty roster. Client preset and settings writers check durable atomic publication before reporting success or removing a renamed source. Registered regressions cover writer failures, malformed presets, interrupted replacement, retries and partial chunk writes. Native execution remains required. The shared region staging calculation preserves Windows UNC roots while recognizing dot and parent components; path diagnostics require no network access, and native Windows durable-save qualification remains required. Bare relative container destinations reclaim abandoned staging in the current directory.",
       "status": "covered",
       "evidence": [
         {
@@ -3086,6 +3086,14 @@
         {
           "kind": "ctest",
           "ref": "WorldSaveService.ContainerStagingRecognizesNormalizedRegionPaths"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.RegionStagingPreservesRootsAndStandaloneSpelling"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.DurableContainerStagingHandlesParentComponentsAndInterruptedRetry"
         }
       ]
     },

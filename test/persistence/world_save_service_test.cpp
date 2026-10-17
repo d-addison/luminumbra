@@ -3,24 +3,33 @@
 
 #include "../support/UniqueTempPath.h"
 
+#include "core/FilesystemPath.h"
+#include "luminumbra/core/Types.h"
 #include "persistence/WorldPersistenceRoundtrip.h"
 #include "persistence/WorldSaveService.h"
 #include "systems/SHIELD_WorldSystem.h"
+#include "world/ActiveRegionLedger.h"
+#include "world/Chunk.h"
 #include "world/MarchingCubes.h"
+#include "world/WorldClock.h"
 #include "world/WorldStreamingState.h"
 
 #include <array>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <limits>
 #include <memory>
 #include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
 #include <span>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <vector>
 
 namespace {
@@ -40,15 +49,21 @@ std::filesystem::path MakeTempSaveDir(const std::string& tag) {
     return dir;
 }
 
-struct TempSaveDir {
+class TempSaveDir {
+public:
     explicit TempSaveDir(const std::string& tag)
-        : path(MakeTempSaveDir(tag)) {}
+        : m_path(MakeTempSaveDir(tag)) {}
     ~TempSaveDir() {
         std::error_code remove_error;
-        std::filesystem::remove_all(path, remove_error);
+        std::filesystem::remove_all(m_path, remove_error);
     }
 
-    std::filesystem::path path;
+    const std::filesystem::path& path() const {
+        return m_path;
+    }
+
+private:
+    std::filesystem::path m_path;
 };
 
 std::shared_ptr<Chunk> AddFixtureChunk(WorldStreamingState& state,
@@ -84,8 +99,8 @@ void PopulateFixtureWorld(WorldStreamingState& state) {
 } // namespace
 
 TEST(WorldSaveService, SaveThenLoadRoundTripPreservesWorldHash) {
-    TempSaveDir save_dir("roundtrip");
-    WorldSaveService service;
+    const TempSaveDir save_dir("roundtrip");
+    const WorldSaveService service;
 
     WorldStreamingState original;
     PopulateFixtureWorld(original);
@@ -93,17 +108,17 @@ TEST(WorldSaveService, SaveThenLoadRoundTripPreservesWorldHash) {
     ASSERT_FALSE(original_hash.empty());
 
     std::vector<std::string> save_errors;
-    ASSERT_TRUE(service.save_world(original, save_dir.path, &save_errors));
+    ASSERT_TRUE(service.save_world(original, save_dir.path(), &save_errors));
     EXPECT_TRUE(save_errors.empty());
     // Persistence v2: the writer emits the LMR1 region container,
     // never the legacy v1 single snapshot.
-    EXPECT_FALSE(std::filesystem::exists(WorldSaveService::world_state_path(save_dir.path)));
-    EXPECT_TRUE(std::filesystem::exists(WorldSaveService::world_manifest_path(save_dir.path)));
-    EXPECT_TRUE(std::filesystem::exists(WorldSaveService::region_file_path(save_dir.path, 0, 0)));
+    EXPECT_FALSE(std::filesystem::exists(WorldSaveService::world_state_path(save_dir.path())));
+    EXPECT_TRUE(std::filesystem::exists(WorldSaveService::world_manifest_path(save_dir.path())));
+    EXPECT_TRUE(std::filesystem::exists(WorldSaveService::region_file_path(save_dir.path(), 0, 0)));
 
     WorldStreamingState restored;
     std::vector<std::string> load_errors;
-    ASSERT_TRUE(service.load_world(restored, save_dir.path, load_errors));
+    ASSERT_TRUE(service.load_world(restored, save_dir.path(), load_errors));
     EXPECT_TRUE(load_errors.empty());
 
     EXPECT_EQ(restored.size(), original.size());
@@ -115,34 +130,34 @@ TEST(WorldSaveService, AbandonedRegionAndManifestStagingAllowsLoadAndIsReclaimed
     const WorldSaveService service;
     WorldStreamingState state;
     PopulateFixtureWorld(state);
-    ASSERT_TRUE(service.save_world(state, save_dir.path));
+    ASSERT_TRUE(service.save_world(state, save_dir.path()));
     const auto expected_hash = service.world_hash(state);
-    const auto region = WorldSaveService::region_file_path(save_dir.path, 0, 0);
-    const auto manifest = WorldSaveService::world_manifest_path(save_dir.path);
+    const auto region = WorldSaveService::region_file_path(save_dir.path(), 0, 0);
+    const auto manifest = WorldSaveService::world_manifest_path(save_dir.path());
     std::vector<std::filesystem::path> abandoned;
     for (const auto& destination : {region, manifest}) {
-        const auto staging = save_dir.path / (destination.filename().string() + ".tmp.abandoned");
+        const auto staging = save_dir.path() / (destination.filename().string() + ".tmp.abandoned");
         ASSERT_TRUE(WorldSaveService::write_file_durably(staging, "partial bytes"));
         abandoned.push_back(staging);
     }
-    const auto retained_directory = save_dir.path / "r.0.0.lmr.tmp.directory";
+    const auto retained_directory = save_dir.path() / "r.0.0.lmr.tmp.directory";
     std::filesystem::create_directory(retained_directory);
     WorldStreamingState restored;
     std::vector<std::string> errors;
-    ASSERT_TRUE(service.load_world(restored, save_dir.path, errors));
+    ASSERT_TRUE(service.load_world(restored, save_dir.path(), errors));
     EXPECT_TRUE(errors.empty());
     EXPECT_EQ(service.world_hash(restored), expected_hash);
-    ASSERT_TRUE(service.save_world(state, save_dir.path));
+    ASSERT_TRUE(service.save_world(state, save_dir.path()));
     for (const auto& staging : abandoned)
         EXPECT_FALSE(std::filesystem::exists(staging));
     EXPECT_TRUE(std::filesystem::is_directory(retained_directory));
-    ASSERT_TRUE(service.load_world(restored, save_dir.path, errors));
+    ASSERT_TRUE(service.load_world(restored, save_dir.path(), errors));
     EXPECT_EQ(service.world_hash(restored), expected_hash);
 }
 
 TEST(WorldSaveService, StandaloneContainerReclaimsAdjacentStagingAndPreservesRecords) {
     const TempSaveDir save_dir("standalone_staging");
-    const auto path = save_dir.path / "standalone/records.lmr";
+    const auto path = save_dir.path() / "standalone/records.lmr";
     const WorldSaveService::ContainerRecord original{
         .id = 7, .lod_level = 1, .flags = 0, .payload = "original"};
     ASSERT_TRUE(WorldSaveService::upsert_container_records(path, {original}));
@@ -164,12 +179,12 @@ TEST(WorldSaveService, StandaloneContainerReclaimsAdjacentStagingAndPreservesRec
 
 TEST(WorldSaveService, ContainerStagingRecognizesNormalizedRegionPaths) {
     const TempSaveDir save_dir("normalized_staging");
-    const auto canonical = WorldSaveService::region_file_path(save_dir.path, 0, 0);
+    const auto canonical = WorldSaveService::region_file_path(save_dir.path(), 0, 0);
     const auto path = canonical.parent_path() / "." / canonical.filename();
     const WorldSaveService::ContainerRecord original{
         .id = 7, .lod_level = 1, .flags = 0, .payload = "original"};
     ASSERT_TRUE(WorldSaveService::upsert_container_records(path, {original}));
-    const auto abandoned = save_dir.path / "r.0.0.lmr.tmp.abandoned";
+    const auto abandoned = save_dir.path() / "r.0.0.lmr.tmp.abandoned";
     ASSERT_TRUE(WorldSaveService::write_file_durably(abandoned, "partial bytes"));
     ASSERT_TRUE(WorldSaveService::upsert_container_records(path, {original}));
     EXPECT_FALSE(std::filesystem::exists(abandoned));
@@ -179,13 +194,99 @@ TEST(WorldSaveService, ContainerStagingRecognizesNormalizedRegionPaths) {
     EXPECT_EQ(records.front().payload, original.payload);
 }
 
+TEST(WorldSaveService, RegionStagingPreservesRootsAndStandaloneSpelling) {
+    namespace paths = Luminumbra::Filesystem;
+    const auto check_root = [](const std::filesystem::path& root, const std::string& expected) {
+        for (const auto& suffix : {std::filesystem::path("chunks/region/r.0.0.lmr"),
+                                   std::filesystem::path("chunks/region/./r.0.0.lmr"),
+                                   std::filesystem::path("chunks/unused/../region/r.0.0.lmr")}) {
+            const auto destination = root / suffix;
+            const auto staging = WorldSaveService::region_staging_path(destination);
+            EXPECT_EQ(paths::GenericUtf8PathString(staging), expected + "/r.0.0.lmr");
+        }
+        for (const auto& suffix : {std::filesystem::path("standalone/./records.lmr"),
+                                   std::filesystem::path("standalone/child/../records.lmr"),
+                                   std::filesystem::path("world-manifest.json")}) {
+            const auto destination = root / suffix;
+            EXPECT_EQ(WorldSaveService::region_staging_path(destination).native(),
+                      destination.native());
+        }
+    };
+    check_root("save", "save");
+    EXPECT_EQ(WorldSaveService::region_staging_path("records.lmr").native(),
+              std::filesystem::path("records.lmr").native());
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    // Path-only checks need neither a live share nor symlink privileges. They
+    // exercise the same staging calculation used by both durable writers.
+    check_root("C:/save", "C:/save");
+    check_root("//server/share/save", "//server/share/save");
+    check_root(LR"(\\server\share\save)", "//server/share/save");
+    check_root(LR"(//server/share\save)", "//server/share/save");
+    check_root("//server/share", "//server/share");
+    check_root(L"\\\\server\\share\\caf\u00e9", "//server/share/caf\xc3\xa9");
+#else
+    check_root("/save", "/save");
+#endif
+}
+
+TEST(WorldSaveService, DurableContainerStagingHandlesParentComponentsAndInterruptedRetry) {
+    const TempSaveDir save_dir("staging_paths");
+    class RestoreDirectory {
+    public:
+        RestoreDirectory() = default;
+        ~RestoreDirectory() {
+            std::error_code error;
+            std::filesystem::current_path(m_previous, error);
+        }
+
+    private:
+        const std::filesystem::path m_previous = std::filesystem::current_path();
+    };
+    const RestoreDirectory restore_directory;
+    std::filesystem::current_path(save_dir.path());
+    // Five destinations bound this pass; each contains just one raw record.
+    for (const auto* relative : {"normal/chunks/region/r.0.0.lmr",
+                                 "dot/chunks/region/./r.0.0.lmr",
+                                 "parent/chunks/unused/../region/r.0.0.lmr",
+                                 "raw/child/../records.lmr",
+                                 "records.lmr"}) {
+        const std::filesystem::path destination(relative);
+        if (destination.has_parent_path())
+            std::filesystem::create_directories(destination.parent_path());
+        const auto staging = WorldSaveService::region_staging_path(destination);
+        auto abandoned = staging;
+        abandoned += ".tmp.abandoned";
+        const WorldSaveService::ContainerRecord original{
+            .id = 7, .lod_level = 1, .flags = 0, .payload = "original"};
+        ASSERT_TRUE(WorldSaveService::upsert_container_records(destination, {original}));
+        ASSERT_TRUE(WorldSaveService::write_file_durably(abandoned, "partial"));
+        const WorldSaveService::ContainerRecord changed{
+            .id = 7, .lod_level = 1, .flags = 0, .payload = "changed"};
+        WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
+        const bool interrupted = WorldSaveService::upsert_container_records(destination, {changed});
+        WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
+        ASSERT_FALSE(interrupted);
+        EXPECT_FALSE(std::filesystem::exists(abandoned));
+        std::vector<WorldSaveService::ContainerRecord> records;
+        ASSERT_TRUE(WorldSaveService::read_container_records(destination, records));
+        ASSERT_EQ(records.size(), 1u);
+        EXPECT_EQ(records.front().payload, original.payload);
+        ASSERT_TRUE(WorldSaveService::upsert_container_records(destination, {changed}));
+        ASSERT_TRUE(WorldSaveService::read_container_records(destination, records));
+        ASSERT_EQ(records.size(), 1u);
+        EXPECT_EQ(records.front().payload, changed.payload);
+    }
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(save_dir.path()))
+        EXPECT_EQ(entry.path().filename().string().find(".tmp."), std::string::npos);
+}
+
 TEST(WorldSaveService, LoadFromEmptySaveDirIsCleanMissWithoutErrors) {
-    TempSaveDir save_dir("fresh");
-    WorldSaveService service;
+    const TempSaveDir save_dir("fresh");
+    const WorldSaveService service;
 
     WorldStreamingState state;
     std::vector<std::string> errors;
-    EXPECT_FALSE(service.load_world(state, save_dir.path, errors));
+    EXPECT_FALSE(service.load_world(state, save_dir.path(), errors));
     EXPECT_TRUE(errors.empty());
     EXPECT_TRUE(state.empty());
 }
@@ -193,7 +294,7 @@ TEST(WorldSaveService, LoadFromEmptySaveDirIsCleanMissWithoutErrors) {
 TEST(WorldSaveService, LoadFromMissingSaveDirIsCleanMissWithoutErrors) {
     const std::filesystem::path missing_dir =
         std::filesystem::temp_directory_path() / "luminumbra_world_save_service_does_not_exist";
-    WorldSaveService service;
+    const WorldSaveService service;
 
     WorldStreamingState state;
     std::vector<std::string> errors;
@@ -226,8 +327,8 @@ TEST(ChunkDirtyTracking, DirectVoxelWritePlusMarkIsVisibleThroughStreamingState)
 }
 
 TEST(ChunkDirtyTracking, SaveDirtyChunksWritesSnapshotAndClearsFlags) {
-    TempSaveDir save_dir("dirty");
-    WorldSaveService service;
+    const TempSaveDir save_dir("dirty");
+    const WorldSaveService service;
 
     WorldStreamingState state;
     PopulateFixtureWorld(state);
@@ -237,18 +338,18 @@ TEST(ChunkDirtyTracking, SaveDirtyChunksWritesSnapshotAndClearsFlags) {
     edited->mark_voxel_data_dirty();
 
     std::vector<std::string> errors;
-    const auto report = service.save_dirty_chunks(state, save_dir.path, &errors);
+    const auto report = service.save_dirty_chunks(state, save_dir.path(), &errors);
     EXPECT_TRUE(errors.empty());
     EXPECT_EQ(report.chunks_total, 3u);
     EXPECT_EQ(report.chunks_dirty, 1u);
     EXPECT_TRUE(report.saved);
     EXPECT_GE(report.regions_written, 1u);
-    EXPECT_TRUE(std::filesystem::exists(WorldSaveService::region_file_path(save_dir.path, 0, 0)));
+    EXPECT_TRUE(std::filesystem::exists(WorldSaveService::region_file_path(save_dir.path(), 0, 0)));
     EXPECT_FALSE(edited->is_voxel_data_dirty());
     EXPECT_TRUE(state.dirty_chunk_ids().empty());
 
     // Second pass with nothing dirty performs no save.
-    const auto clean_report = service.save_dirty_chunks(state, save_dir.path, &errors);
+    const auto clean_report = service.save_dirty_chunks(state, save_dir.path(), &errors);
     EXPECT_TRUE(errors.empty());
     EXPECT_EQ(clean_report.chunks_total, 3u);
     EXPECT_EQ(clean_report.chunks_dirty, 0u);
@@ -256,20 +357,20 @@ TEST(ChunkDirtyTracking, SaveDirtyChunksWritesSnapshotAndClearsFlags) {
 }
 
 TEST(ChunkDirtyTracking, SaveDirtyChunksWithoutDirtyChunksWritesNothing) {
-    TempSaveDir save_dir("clean");
-    WorldSaveService service;
+    const TempSaveDir save_dir("clean");
+    const WorldSaveService service;
 
     WorldStreamingState state;
     PopulateFixtureWorld(state);
 
     std::vector<std::string> errors;
-    const auto report = service.save_dirty_chunks(state, save_dir.path, &errors);
+    const auto report = service.save_dirty_chunks(state, save_dir.path(), &errors);
     EXPECT_TRUE(errors.empty());
     EXPECT_EQ(report.chunks_total, 3u);
     EXPECT_EQ(report.chunks_dirty, 0u);
     EXPECT_FALSE(report.saved);
-    EXPECT_FALSE(std::filesystem::exists(WorldSaveService::world_state_path(save_dir.path)));
-    EXPECT_FALSE(std::filesystem::exists(WorldSaveService::region_directory(save_dir.path)));
+    EXPECT_FALSE(std::filesystem::exists(WorldSaveService::world_state_path(save_dir.path())));
+    EXPECT_FALSE(std::filesystem::exists(WorldSaveService::region_directory(save_dir.path())));
 }
 
 TEST(ChunkDirtyTracking, GenerationAndMeshingLeaveChunkClean) {
@@ -294,27 +395,27 @@ TEST(ChunkDirtyTracking, GenerationAndMeshingLeaveChunkClean) {
 }
 
 TEST(WorldSaveService, ClockMetadataValidationPrecedesEveryWrite) {
-    TempSaveDir save_dir("clock_metadata");
-    const auto metadata_path = save_dir.path / "world_info.json";
+    const TempSaveDir save_dir("clock_metadata");
+    const auto metadata_path = save_dir.path() / "world_info.json";
     const auto read = [&]() {
-        std::ifstream file(metadata_path, std::ios::binary);
+        const std::ifstream file(metadata_path, std::ios::binary);
         std::ostringstream bytes;
         bytes << file.rdbuf();
         return bytes.str();
     };
     std::vector<std::string> errors;
     EXPECT_FALSE(WorldSaveService::save_metadata(
-        R"({"container_version":2,"simulationTick":-1})", save_dir.path, &errors));
+        R"({"container_version":2,"simulationTick":-1})", save_dir.path(), &errors));
     EXPECT_FALSE(std::filesystem::exists(metadata_path));
     nlohmann::json metadata = {{"container_version", 2}};
     Luminumbra::world::WorldClock(123, {12000, 4}).write_metadata(metadata);
     const auto valid = metadata.dump(4) + "\n";
-    ASSERT_TRUE(WorldSaveService::save_metadata(valid, save_dir.path));
+    ASSERT_TRUE(WorldSaveService::save_metadata(valid, save_dir.path()));
     EXPECT_EQ(read(), valid);
-    EXPECT_FALSE(WorldSaveService::save_metadata(R"({"container_version":2})", save_dir.path));
+    EXPECT_FALSE(WorldSaveService::save_metadata(R"({"container_version":2})", save_dir.path()));
     EXPECT_EQ(read(), valid);
     metadata["calendar"]["daysPerYear"] = 0;
-    EXPECT_FALSE(WorldSaveService::save_metadata(metadata.dump(), save_dir.path));
+    EXPECT_FALSE(WorldSaveService::save_metadata(metadata.dump(), save_dir.path()));
     EXPECT_EQ(read(), valid);
     // A pre-existing corrupt clock blocks chunk, entity and metadata writers.
     {
@@ -324,22 +425,22 @@ TEST(WorldSaveService, ClockMetadataValidationPrecedesEveryWrite) {
     const auto damaged = read();
     WorldStreamingState state;
     PopulateFixtureWorld(state);
-    EXPECT_FALSE(WorldSaveService{}.save_world(state, save_dir.path));
-    EXPECT_FALSE(WorldSaveService::save_metadata(valid, save_dir.path));
-    EXPECT_FALSE(std::filesystem::exists(save_dir.path / "chunks"));
+    EXPECT_FALSE(WorldSaveService{}.save_world(state, save_dir.path()));
+    EXPECT_FALSE(WorldSaveService::save_metadata(valid, save_dir.path()));
+    EXPECT_FALSE(std::filesystem::exists(save_dir.path() / "chunks"));
     EXPECT_EQ(read(), damaged);
 }
 
 TEST(WorldSaveService, LegacyMetadataWriterPreservesOpaqueBytesAndMissingDirectoryFailure) {
-    TempSaveDir root("legacy_metadata");
-    const auto missing = root.path / "missing";
+    const TempSaveDir root("legacy_metadata");
+    const auto missing = root.path() / "missing";
     EXPECT_FALSE(WorldSaveService::save_metadata(R"({"container_version":2})", missing));
     EXPECT_FALSE(std::filesystem::exists(missing));
     for (const std::string bytes : {"{", "[]", "null", "opaque legacy input"}) {
         SCOPED_TRACE(bytes);
-        TempSaveDir destination("opaque_metadata");
-        ASSERT_TRUE(WorldSaveService::save_metadata(bytes, destination.path));
-        std::ifstream input(destination.path / "world_info.json", std::ios::binary);
+        const TempSaveDir destination("opaque_metadata");
+        ASSERT_TRUE(WorldSaveService::save_metadata(bytes, destination.path()));
+        const std::ifstream input(destination.path() / "world_info.json", std::ios::binary);
         std::ostringstream saved;
         saved << input.rdbuf();
         EXPECT_EQ(saved.str(), bytes);
@@ -347,19 +448,19 @@ TEST(WorldSaveService, LegacyMetadataWriterPreservesOpaqueBytesAndMissingDirecto
 }
 
 TEST(WorldSaveService, DirectLegacySnapshotsKeepMetadataAboveCatalogSizeLimit) {
-    TempSaveDir destination("large_metadata");
+    const TempSaveDir destination("large_metadata");
     const nlohmann::json metadata = {{"container_version", 2},
-                                     {"extension", std::string(1024 * 1024, 'x')}};
+                                     {"extension", std::string(std::size_t{1024} * 1024u, 'x')}};
     const auto bytes = metadata.dump();
-    ASSERT_TRUE(WorldSaveService::save_metadata(bytes, destination.path));
+    ASSERT_TRUE(WorldSaveService::save_metadata(bytes, destination.path()));
     WorldStreamingState original, loaded;
     PopulateFixtureWorld(original);
-    ASSERT_TRUE(WorldSaveService{}.save_world(original, destination.path));
+    ASSERT_TRUE(WorldSaveService{}.save_world(original, destination.path()));
     std::vector<std::string> errors;
-    ASSERT_TRUE(WorldSaveService{}.load_world(loaded, destination.path, errors));
+    ASSERT_TRUE(WorldSaveService{}.load_world(loaded, destination.path(), errors));
     EXPECT_TRUE(errors.empty());
     EXPECT_EQ(WorldSaveService{}.world_hash(loaded), WorldSaveService{}.world_hash(original));
-    EXPECT_TRUE(WorldSaveService::save_metadata(bytes, destination.path));
+    EXPECT_TRUE(WorldSaveService::save_metadata(bytes, destination.path()));
 }
 
 TEST(WorldSaveServiceTest, ChunkVectorRegionDigestUsesV2AuthorityAndDurableMerge) {
@@ -370,7 +471,7 @@ TEST(WorldSaveServiceTest, ChunkVectorRegionDigestUsesV2AuthorityAndDurableMerge
     const auto retained = AddFixtureChunk(durable, IVec3(1, 0, 0), ChunkState::Idle, 2u);
     stored->mark_voxel_data_dirty();
     retained->mark_voxel_data_dirty();
-    ASSERT_TRUE(WorldSaveService{}.save_world(durable, root.path));
+    ASSERT_TRUE(WorldSaveService{}.save_world(durable, root.path()));
 
     WorldStreamingState resident;
     const auto live = AddFixtureChunk(resident, IVec3(0, 0, 0), ChunkState::Idle, 3u);
@@ -387,23 +488,24 @@ TEST(WorldSaveServiceTest, ChunkVectorRegionDigestUsesV2AuthorityAndDurableMerge
     ASSERT_TRUE(expected.insert_chunk(retained));
     const auto expected_digest =
         std::stoull(Luminumbra::Persistence::ComputeRegionContentHash(expected), nullptr, 16);
-    EXPECT_EQ(WorldSaveService::region_simulation_digest(root.path, {0, 0}, chunks),
+    EXPECT_EQ(WorldSaveService::region_simulation_digest(root.path(), {0, 0}, chunks),
               expected_digest);
     EXPECT_EQ(WorldSaveService::region_simulation_digest(
-                  root.path, {0, 0}, RegionDigestInputs{chunks, {}}),
+                  root.path(), {0, 0}, RegionDigestInputs{chunks, {}}),
               expected_digest);
 
     const std::vector<std::shared_ptr<Chunk>> empty;
     const auto durable_digest =
         std::stoull(Luminumbra::Persistence::ComputeRegionContentHash(durable), nullptr, 16);
-    EXPECT_EQ(WorldSaveService::region_simulation_digest(root.path, {0, 0}, empty), durable_digest);
-    EXPECT_EQ(WorldSaveService::region_simulation_digest(root.path, {0, 0}, {}), durable_digest);
-    EXPECT_EQ(WorldSaveService::region_simulation_digest(root.path, {0, 0}, {live}),
+    EXPECT_EQ(WorldSaveService::region_simulation_digest(root.path(), {0, 0}, empty),
+              durable_digest);
+    EXPECT_EQ(WorldSaveService::region_simulation_digest(root.path(), {0, 0}, {}), durable_digest);
+    EXPECT_EQ(WorldSaveService::region_simulation_digest(root.path(), {0, 0}, {live}),
               expected_digest);
     const std::vector<std::shared_ptr<Chunk>> only_live{live};
     const auto live_digest = WorldSaveService::region_simulation_digest({}, {0, 0}, only_live);
     EXPECT_EQ(WorldSaveService::region_simulation_digest({}, {0, 0}, chunks), live_digest);
-    EXPECT_EQ(WorldSaveService::region_simulation_digest(root.path / "missing", {0, 0}, chunks),
+    EXPECT_EQ(WorldSaveService::region_simulation_digest(root.path() / "missing", {0, 0}, chunks),
               live_digest);
 }
 
@@ -419,11 +521,11 @@ TEST(WorldSaveServiceTest, EditedLoadingRecordKeepsFrozenDigestAcrossResidency) 
     chunk->material_data = {2};
     chunk->mark_voxel_data_dirty();
     chunk->set_state(ChunkState::Loading);
-    ASSERT_TRUE(WorldSaveService{}.save_world(resident, root.path));
+    ASSERT_TRUE(WorldSaveService{}.save_world(resident, root.path()));
 
     std::vector<std::shared_ptr<Chunk>> saved;
     ASSERT_TRUE(WorldSaveService::read_authoritative_region_chunks(
-        WorldSaveService::region_file_path(root.path, key.x, key.z),
+        WorldSaveService::region_file_path(root.path(), key.x, key.z),
         key.x * 32,
         key.x * 32 + 31,
         key.z * 32,
@@ -449,7 +551,7 @@ TEST(WorldSaveServiceTest, EditedLoadingRecordKeepsFrozenDigestAcrossResidency) 
     chunk->set_state(ChunkState::Idle);
     const auto settled = freeze({}, RegionDigestInputs{resident.snapshot_chunks(), {}});
     ASSERT_NE(settled, freeze({}, RegionDigestInputs{}));
-    EXPECT_EQ(freeze(root.path, RegionDigestInputs{resident.snapshot_chunks(), {}}), settled);
+    EXPECT_EQ(freeze(root.path(), RegionDigestInputs{resident.snapshot_chunks(), {}}), settled);
     EXPECT_EQ(freeze({}, RegionDigestInputs{{}, resident.snapshot_chunks()}), settled);
 
     // Incomplete live/parked content must fall back to the edited durable Loading record.
@@ -459,12 +561,12 @@ TEST(WorldSaveServiceTest, EditedLoadingRecordKeepsFrozenDigestAcrossResidency) 
     incomplete->set_state(ChunkState::Loading);
     EXPECT_EQ(freeze({}, RegionDigestInputs{{incomplete}, {}}), freeze({}, RegionDigestInputs{}));
     EXPECT_EQ(freeze({}, RegionDigestInputs{{}, {incomplete}}), freeze({}, RegionDigestInputs{}));
-    EXPECT_EQ(freeze(root.path, RegionDigestInputs{{incomplete}, {incomplete}}), settled);
+    EXPECT_EQ(freeze(root.path(), RegionDigestInputs{{incomplete}, {incomplete}}), settled);
 
     resident.clear();
     chunk.reset();
     saved.clear();
-    EXPECT_EQ(freeze(root.path, RegionDigestInputs{}), settled);
+    EXPECT_EQ(freeze(root.path(), RegionDigestInputs{}), settled);
 }
 
 TEST(WorldSaveServiceTest, RegionDigestAuthorityAndLifecycleMatrix) {
@@ -502,10 +604,10 @@ TEST(WorldSaveServiceTest, RegionDigestAuthorityAndLifecycleMatrix) {
                           {}, {0, 0}, RegionDigestInputs{{}, {chunk}}),
                       in_memory);
 
-            ASSERT_TRUE(WorldSaveService{}.save_world(resident, root.path));
+            ASSERT_TRUE(WorldSaveService{}.save_world(resident, root.path()));
             WorldStreamingState loaded;
             std::vector<std::string> errors;
-            ASSERT_TRUE(WorldSaveService{}.load_world(loaded, root.path, errors));
+            ASSERT_TRUE(WorldSaveService{}.load_world(loaded, root.path(), errors));
             const auto saved = loaded.snapshot_chunks();
             ASSERT_EQ(saved.size(), 1u);
             EXPECT_EQ(saved.front()->get_state(), lifecycle);
@@ -513,7 +615,7 @@ TEST(WorldSaveServiceTest, RegionDigestAuthorityAndLifecycleMatrix) {
                       edited ? ChunkSdfProvenance::LoadedOrEdited
                              : ChunkSdfProvenance::GeneratedCurrentParams);
             // docs/active-regions.md: durable pristine records are regenerable caches.
-            EXPECT_EQ(WorldSaveService::region_simulation_digest(root.path, {0, 0}, {}), settled);
+            EXPECT_EQ(WorldSaveService::region_simulation_digest(root.path(), {0, 0}, {}), settled);
         }
     }
 }
@@ -522,7 +624,7 @@ TEST(WorldSaveServiceTest, PublicRegionDigestRejectsUnsupportedKeysBeforeDurable
     using Luminumbra::world::RegionKey;
     const Luminumbra::Persistence::RegionDigestInputs inputs{};
     const TempSaveDir root("invalid_digest_key");
-    const auto missing_save = root.path / "missing";
+    const auto missing_save = root.path() / "missing";
     for (const RegionKey key : {RegionKey{std::numeric_limits<std::int32_t>::min(), 0},
                                 RegionKey{std::numeric_limits<std::int32_t>::max(), 0},
                                 RegionKey{0, std::numeric_limits<std::int32_t>::min()},

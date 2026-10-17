@@ -2,9 +2,16 @@
 
 #include "../ecs/EntitySnapshot.h" //  plant entity snapshot persistence
 #include "WorldPersistenceRoundtrip.h"
+#include "core/FilesystemPath.h"
+#include "luminumbra/core/Types.h"
+#include "world/ActiveRegionLedger.h"
+#include "world/Chunk.h"
 #include "world/FarLodStore.h"
+#include "world/WorldClock.h"
+#include "world/WorldStreamingState.h"
 
 #include "nlohmann/json.hpp"
+#include "nlohmann/json_fwd.hpp"
 
 #include <lz4.h>
 
@@ -17,13 +24,19 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
+#include <ios>
 #include <limits>
 #include <map>
+#include <memory>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -39,6 +52,7 @@
 #include <windows.h>
 #else
 #include <fcntl.h>
+#include <sys/types.h>
 #include <unistd.h>
 #endif
 
@@ -257,7 +271,8 @@ void RemoveTemporaryFile(const std::filesystem::path& path) {
 // blocks the save, because staging lives outside every scanned directory.
 std::size_t ReclaimAbandonedStaging(const std::filesystem::path& destination) {
     std::error_code list_error;
-    const auto directory = destination.parent_path();
+    const auto directory =
+        destination.has_parent_path() ? destination.parent_path() : std::filesystem::path(".");
     const auto prefix = destination.filename().string() + ".tmp.";
     std::size_t reclaimed = 0;
     std::filesystem::directory_iterator it(directory, list_error);
@@ -276,18 +291,6 @@ std::size_t ReclaimAbandonedStaging(const std::filesystem::path& destination) {
             ++reclaimed;
     }
     return reclaimed;
-}
-
-std::filesystem::path RegionStagingPath(const std::filesystem::path& destination) {
-    // Every region member lives at save/chunks/region/<filename>. Stage on the
-    // save filesystem outside both strictly scanned directories, like the ledger.
-    const auto normalized = destination.lexically_normal();
-    const auto directory = normalized.parent_path();
-    if (directory.filename() == kRegionDirectoryName &&
-        directory.parent_path().filename() == kChunksDirectoryName)
-        return directory.parent_path().parent_path() / normalized.filename();
-    // Raw container access also supports standalone files outside a world save.
-    return destination;
 }
 
 #if defined(_WIN32)
@@ -751,7 +754,7 @@ bool WriteRegionFile(const std::filesystem::path& path,
     }
 
     std::filesystem::path temp_path;
-    const auto staging = RegionStagingPath(path);
+    const auto staging = WorldSaveService::region_staging_path(path);
     ReclaimAbandonedStaging(staging);
     if (!WriteDurableRegionTemp(staging, bytes, temp_path, errors)) {
         return false;
@@ -857,7 +860,7 @@ bool WriteWorldManifest(const std::filesystem::path& manifest_path,
 
     const std::string bytes = manifest.dump(4) + "\n";
     std::filesystem::path temp;
-    const auto staging = RegionStagingPath(manifest_path);
+    const auto staging = WorldSaveService::region_staging_path(manifest_path);
     ReclaimAbandonedStaging(staging);
     if (!WriteDurableRegionTemp(staging, bytes, temp, errors))
         return false;
@@ -869,6 +872,19 @@ bool WriteWorldManifest(const std::filesystem::path& manifest_path,
 }
 
 } // namespace
+
+std::filesystem::path
+WorldSaveService::region_staging_path(const std::filesystem::path& destination) {
+    // Every region member lives at save/chunks/region/<filename>. Stage on the
+    // save filesystem outside both strictly scanned directories, like the ledger.
+    const auto normalized = Filesystem::LexicallyNormalPath(destination);
+    const auto directory = normalized.parent_path();
+    if (directory.filename() == kRegionDirectoryName &&
+        directory.parent_path().filename() == kChunksDirectoryName)
+        return directory.parent_path().parent_path() / normalized.filename();
+    // Raw container access also supports standalone files outside a world save.
+    return destination;
+}
 
 bool WorldSaveService::save_metadata(const std::string& bytes,
                                      const std::filesystem::path& save_dir,
@@ -1044,7 +1060,7 @@ bool WorldSaveService::load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapsh
     if (!std::filesystem::exists(path, ec)) {
         return true; // clean miss: a fresh / no-plant world
     }
-    std::ifstream in(path, std::ios::binary);
+    const std::ifstream in(path, std::ios::binary);
     if (!in) {
         AddError(errors, "failed to open plant entities file: " + path.string());
         return false;

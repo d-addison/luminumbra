@@ -98,14 +98,20 @@ class RuntimeConfigSourceContract(unittest.TestCase):
     def test_region_and_manifest_staging_share_the_unscanned_save_root(self):
         service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
                               .read_text(encoding="utf-8"))
-        self.assertIn("constautonormalized=destination.lexically_normal();", service)
+        self.assertIn("constautonormalized=Filesystem::LexicallyNormalPath(destination);", service)
+        self.assertNotIn(".lexically_normal()", service)
+        start = service.index("std::size_tReclaimAbandonedStaging(")
+        end = service.index("returnreclaimed;", start)
+        self.assertIn('destination.has_parent_path()?destination.parent_path():'
+                      'std::filesystem::path(".")', service[start:end])
         self.assertIn("returndirectory.parent_path().parent_path()/normalized.filename();", service)
         for function, destination in (("WriteRegionFile", "path"),
                                       ("WriteWorldManifest", "manifest_path")):
             start = service.index("bool" + function + "(")
             end = service.index("returntrue;", start)
             write = service[start:end]
-            self.assertIn("constautostaging=RegionStagingPath(" + destination + ");", write)
+            self.assertIn("constautostaging=WorldSaveService::region_staging_path(" +
+                          destination + ");", write)
             self.assertIn("ReclaimAbandonedStaging(staging);", write)
             self.assertIn("WriteDurableRegionTemp(staging,", write)
 
