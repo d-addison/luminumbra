@@ -39,9 +39,112 @@ def candidate(x=0, z=0, cz=0, cx=0, index=0):
 
 
 class ContractTests(unittest.TestCase):
+    def test_capture_bounds_names_and_entries_before_retaining_validated_json(self):
+        source = (HERE.parent / "station_discovery.cpp").read_text(encoding="utf-8")
+        capture = source[source.index("Snapshot CaptureInputs("):
+                         source.index("std::string InputIdentity(")]
+        reserve = source[source.index("std::string ReserveInputPath("):
+                         source.index("using Snapshot =")]
+        self.assertIn("kInputEntryLimit = 4096", source)
+        self.assertIn("kInputPathByteLimit =", source)
+        self.assertIn("budget.remaining_entries == 0", reserve)
+        self.assertIn("budget.remaining_path_bytes", reserve)
+        self.assertIn("IsValidDependencyPathUtf8(name)", reserve)
+        self.assertIn("dependency pathname must be portable UTF-8", reserve)
+        self.assertLess(capture.index("ReserveInputPath("), capture.index("ReadBytes("))
+        self.assertLess(capture.index("StrictJson(bytes)"), capture.index("files.emplace("))
+        self.assertLess(capture.index("CheckStructureInput(data, true)"),
+                        capture.index("files.emplace("))
+        self.assertIn("ReserveInputPath(relative_type, budget)", capture)
+        self.assertNotIn("for (const auto& [name, bytes] : files)", capture)
+
+    def test_all_loader_dependencies_use_the_validated_snapshot_reader(self):
+        root = HERE.parents[1]
+        source = (root / "tools/station_discovery.cpp").read_text(encoding="utf-8")
+        loader = (root / "src/luminumbra_common/world/TerrainPresetLoader.cpp").read_text(
+            encoding="utf-8")
+        capture = source[source.index("Snapshot CaptureInputs("):
+                         source.index("std::string InputIdentity(")]
+        for dependency in ('capture(PathFromUtf8(table))', '"placement.json"',
+                           'piece.path()', '"common/creatures/species"', 'entry.path()'):
+            self.assertIn(dependency, capture)
+        self.assertIn("SnapshotReader(options, files)", source)
+        reader = source[source.index("Luminumbra::World::WorldgenFileReader SnapshotReader("):
+                        source.index("std::string InputIdentity(")]
+        self.assertIn("files.find(", reader)
+        self.assertIn("files.end()", reader)
+        self.assertNotIn("ReadBytes(", reader)
+        self.assertNotIn("ReadWorldgenFile(", reader)
+        self.assertIn("dependency_reader(path, bytes)", loader)
+        manifest = loader[loader.index("bool ResolveDependencyManifest("):
+                          loader.index("void WarnUnknownKeys(")]
+        self.assertNotIn("World::ReadWorldgenFile(path, bytes)", manifest)
+        validation = source[source.index("void ValidateDependencies("):
+                            source.index("void CheckNumerics()")]
+        self.assertNotIn("BiomeTable::Load(", validation)
+        self.assertNotIn("LoadStructureTemplatePool(", validation)
+        self.assertIn("worldgen_dependencies", validation)
+
+    def test_both_dependency_path_guards_reject_root_directory(self):
+        source = (HERE.parent / "station_discovery.cpp").read_text(encoding="utf-8")
+        for variable, start, end in (("table", "void CheckPresetShape(", "void CheckHydroDomain("),
+                                     ("relative", "fs::path DependencyPath(",
+                                      "std::string ReserveInputPath(")):
+            guard = source[source.index(start):source.index(end)]
+            self.assertIn(variable + ".has_root_name()", guard)
+            self.assertIn(variable + ".has_root_directory()", guard)
+
     def refused(self, value):
         with self.assertRaises(contract.ContractError):
             contract.validate(value)
+
+    def test_numeric_bootstrap_precedes_common_library_calls_on_both_platforms(self):
+        source = (HERE.parents[1] / "tools/station_discovery.cpp").read_text(encoding="utf-8")
+        # Both signatures enter the same body. Its first statement must check
+        # capabilities, including before the POSIX common-library signal helper.
+        entry = source[source.index("int wmain("):]
+        self.assertRegex(entry, r"int wmain\(.*?\{\s*#else\s*int main\(.*?\{\s*#endif"
+                               r"\s*try\s*\{\s*(?://[^\n]*\n\s*)*CheckNumerics\(\);")
+        for call in ("IgnoreDefaultSigpipe()", "std::make_shared<", "ParseOptions(argc, argv)"):
+            self.assertLess(entry.index("CheckNumerics();"), entry.index(call))
+        root = HERE.parents[1]
+        numeric_check = source[source.index("void CheckNumerics()"):
+                               source.index("json Document(")]
+        self.assertIn("Luminumbra::Startup::SupportsCommonLibrary()", numeric_check)
+        self.assertNotIn("CPUMaxSIMDLevel", numeric_check)
+        cmake = (root / "tools/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn('luminumbra_baseline_startup("${CMAKE_CURRENT_SOURCE_DIR}/station_discovery.cpp")',
+                      cmake)
+        baseline = (root / "cmake/runtime_isa.cmake").read_text(encoding="utf-8")
+        self.assertIn('if(MSVC)', baseline)
+        self.assertIn('set(_startup_arch "/arch:SSE2")', baseline)
+        self.assertIn('set(_startup_arch "/arch:IA32")', baseline)
+        self.assertIn('COMPILE_OPTIONS "${_startup_arch};/GL-"', baseline)
+        self.assertIn('elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")', baseline)
+        for option in ("-march=x86-64", "-march=i686", "-mno-sse", "-mno-sse2",
+                       "-mno-avx", "-mno-avx2", "-mno-fma",
+                       "-mno-bmi", "-mno-bmi2", "-mno-popcnt", "-mno-lzcnt", "-mno-f16c",
+                       "-mno-movbe", "-fno-lto"):
+            self.assertIn(option, baseline)
+        wrapper = (root / "src/startup/RuntimeEntry.cpp").read_text(encoding="utf-8")
+        self.assertRegex(wrapper, r"int main\(.*?\{\s*if \(!Luminumbra::Startup::"
+                                 r"SupportsCommonLibrary\(\)\) \{")
+        self.assertLess(wrapper.index("SupportsCommonLibrary()"),
+                        wrapper.index("return LuminumbraApplicationMain(argc, argv)"))
+        self.assertIn("return 1;", wrapper)
+        for application in ("client", "server"):
+            app = root / ("src/luminumbra_" + application)
+            implementation = (app / ("main_" + application + ".cpp")).read_text(encoding="utf-8")
+            self.assertIn("int main(int argc, char* argv[])", implementation)
+            manifest = (app / "sources.cmake").read_text(encoding="utf-8")
+            self.assertIn("/../startup/RuntimeEntry.cpp", manifest)
+            self.assertIn('COMPILE_DEFINITIONS "main=LuminumbraApplicationMain"', manifest)
+            self.assertRegex(manifest, r"set_source_files_properties\([^\n]*main_" + application +
+                             r"\.cpp\"? PROPERTIES\s*COMPILE_DEFINITIONS")
+        self.assertIn('luminumbra_baseline_startup("${CMAKE_CURRENT_SOURCE_DIR}/startup/RuntimeEntry.cpp")',
+                      (root / "src/CMakeLists.txt").read_text(encoding="utf-8"))
+        self.assertIn("include(cmake/runtime_isa.cmake)",
+                      (root / "CMakeLists.txt").read_text(encoding="utf-8"))
 
     def test_empty_completed_document(self):
         self.assertEqual(contract.validate(document())["candidates"], [])
@@ -185,7 +288,8 @@ class ContractTests(unittest.TestCase):
         renamed = dict(files)
         renamed["data/renamed.json"] = renamed.pop("data/common/table.json")
         self.assertNotEqual(contract.input_identity(renamed), expected)
-        for name in ("/absolute", "../escape", "data/../escape", "C:/path", "data\\table.json"):
+        for name in ("/absolute", "../escape", "data/../escape", "C:/path", "data\\table.json",
+                     "data/file\0suffix.json"):
             with self.assertRaises(contract.ContractError):
                 contract.input_identity({"preset.json": b"{}", name: b"{}"})
 
@@ -428,6 +532,120 @@ class NativeSmoke(unittest.TestCase):
                         "persistence": 0.5, "lacunarity": 2, "height_offset": 0},
             "features": {"caves_enabled": False, "cave_frequency": 0.02}}}
 
+    def test_snapshot_entry_and_pathname_limits_are_inclusive(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data = root / "data"
+            species = data / "common/creatures/species"
+            species.mkdir(parents=True)
+            preset = root / "flat.json"
+            preset.write_bytes(contract.canonical(self.flat_preset()))
+            command = [self.cli, "--preset-json", str(preset), "--data-root", str(data),
+                       "--seed", "17", "--kind", "mouth", "--origin-mm", "0", "0",
+                       "--radius-m", "1", "--y-range-m", "0", "100",
+                       "--view-distance-m", "0", "--limit", "64"]
+
+            def check(code, message=b""):
+                result = subprocess.run(command, capture_output=True, check=False)
+                self.assertEqual(result.returncode, code, result.stderr)
+                if code:
+                    self.assertEqual(result.stdout, b"")
+                    self.assertIn(message, result.stderr)
+                else:
+                    contract.validate(contract.loads(result.stdout))
+
+            for index in range(4095):  # Plus the preset: exactly 4096 entries.
+                (species / ("%04d.json" % index)).write_bytes(b'{"id":"fixture"}')
+            check(0)
+            extra = species / "extra.json"
+            extra.write_bytes(b'{"id":"extra"}')
+            check(1, b"input-limit: entry limit exceeded")
+            for path in species.iterdir():
+                path.unlink()
+
+            prefix_bytes = len("data/common/creatures/species/")
+            remaining = 1024 * 1024 - len("preset.json")
+            width = prefix_bytes + 250
+            lengths = [250] * (remaining // width)
+            tail = remaining % width
+            if tail < prefix_bytes + len("0000.json"):
+                lengths.pop()
+                tail += width
+                lengths.append(tail // 2 - prefix_bytes)
+                tail -= tail // 2
+            lengths.append(tail - prefix_bytes)
+            for index, length in enumerate(lengths):
+                stem_bytes = length - len("0000.json")
+                # Short native names with long UTF-8 spellings also work on Windows.
+                name = "\u96ea" * (stem_bytes // 3) + "x" * (stem_bytes % 3) + "%04d.json" % index
+                self.assertEqual(len(name.encode("utf-8")), length)
+                (species / name).write_bytes(b'{"id":"fixture"}')
+            check(0)  # Exactly 1 MiB of keys; content bytes are far below 8 MiB.
+            extra.write_bytes(b'{"id":"extra"}')
+            check(1, b"input-limit: pathname byte limit exceeded")
+
+    def test_empty_structure_directories_cannot_evade_entry_limit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data = root / "data"
+            structures = data / "common/structures"
+            structures.mkdir(parents=True)
+            for index in range(4096):
+                (structures / str(index)).mkdir()
+            fields = self.flat_preset()
+            fields["generation_params"]["features"]["structures_enabled"] = True
+            preset = root / "flat.json"
+            preset.write_bytes(contract.canonical(fields))
+            result = subprocess.run([self.cli, "--preset-json", str(preset), "--data-root", str(data),
+                "--seed", "17", "--kind", "mouth", "--origin-mm", "0", "0", "--radius-m", "1",
+                "--y-range-m", "0", "100", "--view-distance-m", "0", "--limit", "64"],
+                capture_output=True, check=False)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertEqual(result.stdout, b"")
+            self.assertIn(b"input-limit: entry limit exceeded", result.stderr)
+
+    def test_rooted_biome_paths_are_refused_before_capture(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data = root / "data"
+            data.mkdir()
+            outside = root / "outside.json"
+            outside.write_bytes(b"{")
+            preset = root / "flat.json"
+            # Windows root-directory-only and drive-relative names both redirect
+            # path append. POSIX has a single rooted form.
+            paths = ([str(outside), "\\" + str(outside.relative_to(outside.anchor)),
+                      outside.drive + "outside.json"] if os.name == "nt" else [str(outside)])
+            for path in paths:
+                fields = self.flat_preset()
+                fields["generation_params"]["biomes"] = {"table": path}
+                preset.write_bytes(contract.canonical(fields))
+                result = subprocess.run([self.cli, "--preset-json", str(preset), "--data-root", str(data),
+                    "--seed", "17", "--kind", "mouth", "--origin-mm", "0", "0", "--radius-m", "1",
+                    "--y-range-m", "0", "100", "--view-distance-m", "0", "--limit", "64"],
+                    capture_output=True, check=False)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertEqual(result.stdout, b"")
+                self.assertIn(b"biome table must name a relative dependency", result.stderr)
+
+    def test_dependency_logical_names_match_the_portable_manifest_contract(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data = root / "data"
+            data.mkdir()
+            preset = root / "flat.json"
+            for name in ("file:stream.json", "file\u0000suffix.json"):
+                fields = self.flat_preset()
+                fields["generation_params"]["biomes"] = {"table": name}
+                preset.write_bytes(contract.canonical(fields))
+                result = subprocess.run([self.cli, "--preset-json", str(preset), "--data-root", str(data),
+                    "--seed", "17", "--kind", "mouth", "--origin-mm", "0", "0", "--radius-m", "1",
+                    "--y-range-m", "0", "100", "--view-distance-m", "0", "--limit", "64"],
+                    capture_output=True, check=False)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertEqual(result.stdout, b"")
+                self.assertIn(b"dependency pathname must be portable UTF-8", result.stderr)
+
     def test_input_file_byte_limit_includes_preset_and_every_dependency_kind(self):
         file_limit = 1024 * 1024
         with tempfile.TemporaryDirectory() as temporary:
@@ -438,6 +656,8 @@ class NativeSmoke(unittest.TestCase):
             table = data / "common" / "biomes.json"
             piece = pool / "piece.json"
             placement = pool / "placement.json"
+            species = data / "common" / "creatures" / "species" / "fixture.json"
+            species.parent.mkdir(parents=True)
             preset = root / "flat.json"
             fields = self.flat_preset()
             fields["generation_params"]["biomes"] = {"table": "common/biomes.json"}
@@ -450,6 +670,7 @@ class NativeSmoke(unittest.TestCase):
                 piece: contract.canonical({"name": "fixture", "boxes": [
                     {"min": [0, 0, 0], "size": [1, 1, 1], "material": 1}]}),
                 placement: contract.canonical({"spacing": 64, "separation": 16, "density": 1}),
+                species: contract.canonical({"id": "fixture"}),
             }
             for path, raw in inputs.items():
                 path.write_bytes(raw)
@@ -476,6 +697,68 @@ class NativeSmoke(unittest.TestCase):
                     self.assertEqual(refused.stdout, b"")
                     self.assertIn(b"input-limit: per-file byte limit exceeded", refused.stderr)
                     path.write_bytes(raw)
+
+    def test_species_capture_without_biomes_or_structures(self):
+        file_limit = 1024 * 1024
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data = root / "data"
+            species = data / "common" / "creatures" / "species"
+            species.parent.mkdir(parents=True)
+            preset = root / "flat.json"
+            raw_preset = contract.canonical(self.flat_preset())
+            preset.write_bytes(raw_preset)
+            command = [self.cli, "--preset-json", str(preset), "--data-root", str(data),
+                       "--seed", "17", "--kind", "mouth", "--origin-mm", "0", "0",
+                       "--radius-m", "1", "--y-range-m", "0", "100",
+                       "--view-distance-m", "0", "--limit", "64"]
+
+            def accepted(files):
+                result = subprocess.run(command, capture_output=True, check=False)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                return contract.validate(contract.loads(result.stdout),
+                                         expected_inputs_sha256=contract.input_identity(files))
+
+            def refused(message):
+                result = subprocess.run(command, capture_output=True, check=False)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertEqual(result.stdout, b"")
+                self.assertIn(message, result.stderr)
+
+            manifest = {"preset.json": raw_preset}
+            accepted(manifest)  # An absent catalogue is valid.
+            species.write_bytes(b"{}")
+            refused(b"species path must be a directory")
+            species.unlink()
+            species.mkdir()
+            accepted(manifest)  # An empty catalogue is valid too.
+            (species / "nested.json").mkdir()
+            (species / "nested.json" / "ignored.json").write_bytes(b"{")
+            with (species / "ignored.txt").open("wb") as output:
+                output.truncate(file_limit + 1)
+            accepted(manifest)  # Match the immediate regular *.json scan.
+            path = species / "fixture.json"
+            for raw, message in ((b'{"id":', b"station discovery refused:"),
+                                 (b'{"id":"a","id":"b"}', b"duplicate JSON field"),
+                                 (b'{"id":"a","rarity":1e39}', b"unsupported input number")):
+                path.write_bytes(raw)
+                refused(message)
+            with path.open("wb") as output:
+                output.truncate(file_limit + 1)
+            refused(b"input-limit: per-file byte limit exceeded")
+            path.write_bytes(contract.canonical({"id": "fixture"}))
+            name = "data/common/creatures/species/fixture.json"
+            manifest[name] = path.read_bytes()
+            first = accepted(manifest)
+            path.write_bytes(contract.canonical({"id": "changed"}))
+            manifest[name] = path.read_bytes()
+            self.assertNotEqual(accepted(manifest)["inputs_sha256"], first["inputs_sha256"])
+            # Species alone must also consume the aggregate budget.
+            for index in range(8):
+                raw = contract.canonical({"id": "fixture-%d" % index})
+                (species / ("species-%d.json" % index)).write_bytes(
+                    raw + b" " * (file_limit - len(raw)))
+            refused(b"input-limit: aggregate byte limit exceeded")
 
     def test_aggregate_input_byte_limit_is_inclusive(self):
         file_limit = 1024 * 1024

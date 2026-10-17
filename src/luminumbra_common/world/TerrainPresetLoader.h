@@ -149,10 +149,13 @@ bool LoadTerrainPresetOverride(const std::filesystem::path& preset_path,
 // DELEGATES here with the file-derived data root. Identity binds the selected
 // biome table and enabled structure placement/piece files through portable paths.
 // The status reader queries links themselves and permits deterministic I/O failure coverage.
+// A supplied dependency reader must provide every consumed biome, structure and
+// species file; bounded hosts can serve validated snapshots without reopening bytes.
 TerrainPresetLoadResult LoadTerrainPresetFromJson(
     const nlohmann::json& data,
     const std::filesystem::path& data_root,
     const std::string& provenance = "<memory>",
-    const World::WorldgenFileStatusReader& read_status = World::ReadWorldgenSymlinkStatus);
+    const World::WorldgenFileStatusReader& read_status = World::ReadWorldgenSymlinkStatus,
+    const World::WorldgenFileReader& dependency_reader = World::ReadWorldgenFile);
 
 } // namespace Luminumbra::world

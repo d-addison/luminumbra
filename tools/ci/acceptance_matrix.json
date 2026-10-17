@@ -3053,7 +3053,7 @@
     {
       "id": "station.input-bytes",
       "source": "docs/distant-world.md#station-discovery-req-e4",
-      "statement": "File lengths are checked before allocation against inclusive 1 MiB per-file and 8 MiB aggregate snapshot limits; typed input-limit refusals exit 1 with empty stdout. CLI regressions cover presets, biome tables, placement files, pieces and exact aggregate equality.",
+      "statement": "Inclusive limits bound each file to 1 MiB, snapshot contents to 8 MiB, captured files and structure directories to 4096 entries, and logical UTF-8 names to 1 MiB. Files are validated before retention; all biome, placement, piece and species loader reads use the captured bytes. Contract and CLI regressions cover bounds, disabled terrain features, rooted and nonportable names, and snapshot-reader failures.",
       "status": "covered",
       "evidence": [
         {
@@ -3063,11 +3063,24 @@
         {
           "kind": "script",
           "ref": "tools/gates/test_station_discovery.py"
+        },
+        {
+          "kind": "ctest",
+          "ref": "StationDiscoveryContract"
+        },
+        {
+          "kind": "ctest",
+          "ref": "TerrainPresetLoaderTest.SnapshotReaderSuppliesEveryDependencyAndRefusesPartialReads"
         }
       ],
       "requirements": [
         "dw.station.028",
-        "dw.station.029"
+        "dw.station.029",
+        "dw.station.101",
+        "dw.station.102",
+        "dw.station.103",
+        "dw.station.104",
+        "dw.station.105"
       ]
     },
     {
@@ -3195,8 +3208,8 @@
     {
       "id": "station.numeric-inputs",
       "source": "docs/distant-world.md#station-discovery-req-e4",
-      "statement": "Discovery checks its ISA/FP environment and preset, hydro and structure integer domains before world construction while preserving existing world generation; exploratory results remain uncertified.",
-      "status": "covered",
+      "statement": "Discovery checks its ISA/FP environment and preset, hydro and structure integer domains before world construction while preserving existing world generation; exploratory results remain uncertified. Compile-time injected CPU profiles cover missing FMA, disabled OS AVX state and every required feature for GNU/Clang and MSVC, including optional Jolt AVX-512. The CLI smoke exercises the supported host profile; floating-point environment refusals lack negative controls.",
+      "status": "partial",
       "evidence": [
         {
           "kind": "ctest",
@@ -3205,6 +3218,15 @@
         {
           "kind": "doc",
           "ref": "tools/station_discovery.cpp"
+        },
+        {
+          "kind": "ctest",
+          "ref": "StationDiscoveryNumericRefusals",
+          "planned": "Add negative controls for floating-point environment refusals; owner: worldgen"
+        },
+        {
+          "kind": "ctest",
+          "ref": "CommonLibraryIsaContract"
         }
       ],
       "requirements": [

@@ -82,7 +82,7 @@ def input_identity(files):
     require(isinstance(files, dict) and "preset.json" in files, "missing preset snapshot")
     manifest = {}
     for name, raw in files.items():
-        require(isinstance(name, str) and name and "\\" not in name and
+        require(isinstance(name, str) and name and "\\" not in name and "\0" not in name and
                 not name.startswith("/") and ":" not in name and
                 all(part not in ("", ".", "..") for part in name.split("/")),
                 "input names must be relative and normalized")

@@ -1,4 +1,5 @@
 // CPU-only discovery. stdout is reserved for the complete canonical document.
+#include "../src/startup/CommonLibraryIsa.h"
 #include "StationDiscoveryArguments.h"
 
 #include <array>
@@ -22,7 +23,9 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 #ifdef _WIN32
@@ -51,6 +54,8 @@
 #include "world/StationDiscovery.h"
 #include "world/StructurePlacement.h"
 #include "world/TerrainPresetLoader.h"
+#include "world/WorldgenDependencySnapshot.h"
+#include "world/WorldgenFileReader.h"
 
 namespace {
 using nlohmann::json;
@@ -173,8 +178,14 @@ Options ParseOptions(int argc, ArgumentChar** argv) {
 // Two simultaneous snapshots plus the initial preset retain at most 17 MiB of bytes.
 constexpr std::size_t kInputFileByteLimit = std::size_t{1024} * 1024;
 constexpr std::size_t kInputSnapshotByteLimit = 8 * kInputFileByteLimit;
+// Bound snapshot nodes and the loader's directory catalogues, including empty
+// structure types: at most 4096 files/types and 1 MiB of logical UTF-8 names.
+constexpr std::size_t kInputEntryLimit = 4096;
+constexpr std::size_t kInputPathByteLimit = std::size_t{1024} * 1024;
 struct InputByteBudget {
     std::size_t remaining = kInputSnapshotByteLimit;
+    std::size_t remaining_entries = kInputEntryLimit;
+    std::size_t remaining_path_bytes = kInputPathByteLimit;
 };
 class InputLimitError final : public std::runtime_error {
 public:
@@ -270,7 +281,7 @@ void CheckPresetShape(const json& preset) {
     }
     if (generation.contains("biomes") && generation.at("biomes").contains("table")) {
         const auto table = PathFromUtf8(generation.at("biomes").at("table").get<std::string>());
-        if (table.is_absolute() || table.has_root_name()) {
+        if (table.is_absolute() || table.has_root_name() || table.has_root_directory()) {
             throw std::runtime_error("biome table must name a relative dependency");
         }
     }
@@ -480,7 +491,8 @@ std::string Sha256(const std::string& bytes) {
 }
 
 fs::path DependencyPath(const fs::path& root, const fs::path& relative) {
-    if (relative.empty() || relative.is_absolute() || relative.has_root_name()) {
+    if (relative.empty() || relative.is_absolute() || relative.has_root_name() ||
+        relative.has_root_directory()) {
         throw std::runtime_error("dependency must have a relative name");
     }
     fs::path path = root;
@@ -496,16 +508,63 @@ fs::path DependencyPath(const fs::path& root, const fs::path& relative) {
     return path;
 }
 
+std::string ReserveInputPath(const fs::path& relative,
+                             InputByteBudget& budget,
+                             std::string_view prefix = "data/") {
+    if (budget.remaining_entries == 0) {
+        throw InputLimitError("entry limit exceeded (4096 files/directories)");
+    }
+    // Bound the conversion temporary before allocating it (UTF-16 needs at most
+    // three UTF-8 bytes per code unit; POSIX paths retain their native bytes).
+    if (relative.native().size() > kInputPathByteLimit / 3) {
+        throw InputLimitError("pathname byte limit exceeded (1048576 bytes)");
+    }
+    const auto name = GenericUtf8PathString(relative);
+    if (!Luminumbra::World::IsValidDependencyPathUtf8(name) ||
+        name.find_first_of("\\:") != std::string::npos || name.find('\0') != std::string::npos) {
+        throw std::runtime_error("dependency pathname must be portable UTF-8");
+    }
+    if (prefix.size() > budget.remaining_path_bytes ||
+        name.size() > budget.remaining_path_bytes - prefix.size()) {
+        throw InputLimitError("pathname byte limit exceeded (1048576 bytes)");
+    }
+    --budget.remaining_entries;
+    budget.remaining_path_bytes -= prefix.size() + name.size();
+    // Check both lengths before addition and allocation of the retained key.
+    std::string key;
+    key.reserve(prefix.size() + name.size());
+    key.append(prefix);
+    key.append(name);
+    return key;
+}
+
 using Snapshot = std::map<std::string, std::string>;
 // Inspect only resolved selectors here: the preset loader itself consumes
 // dependencies, so their bytes and integer domains must be checked before it runs.
 Snapshot CaptureInputs(const Options& options, const json& resolved_preset) {
     InputByteBudget budget;
-    Snapshot files{{"preset.json", ReadBytes(options.preset, budget)}};
-    const auto capture = [&files, &options, &budget](const fs::path& relative) {
-        files.emplace("data/" + GenericUtf8PathString(relative),
-                      ReadBytes(DependencyPath(options.data_root, relative), budget));
+    Snapshot files;
+    const auto capture = [&files, &options, &budget](const fs::path& relative,
+                                                     bool preset = false) {
+        auto name = ReserveInputPath(relative, budget, preset ? "" : "data/");
+        auto bytes = ReadBytes(
+            preset ? options.preset : DependencyPath(options.data_root, relative), budget);
+        const auto data = StrictJson(bytes);
+        if (name.starts_with("data/common/structures/")) {
+            // Case aliases can be consumed as placement and piece data.
+            CheckStructureInput(data, true);
+            CheckStructureInput(data, false);
+        }
+        const auto entry = files.find(name);
+        if (entry != files.end()) {
+            if (entry->second != bytes) {
+                throw std::runtime_error("input changed between capture reads");
+            }
+            return;
+        }
+        files.emplace(std::move(name), std::move(bytes));
     };
+    capture("preset.json", true);
     const auto& generation = resolved_preset.at("generation_params");
     const auto table = generation.at("biomes").at("table").get<std::string>();
     if (!table.empty()) {
@@ -523,6 +582,8 @@ Snapshot CaptureInputs(const Options& options, const json& resolved_preset) {
             if (!type.is_directory()) {
                 continue;
             }
+            const auto relative_type = type.path().lexically_relative(options.data_root);
+            (void)ReserveInputPath(relative_type, budget);
             // Match the loader's explicit optional-file lookup, including on
             // case-insensitive filesystems where the directory spelling differs.
             const auto placement = type.path() / "placement.json";
@@ -530,23 +591,41 @@ Snapshot CaptureInputs(const Options& options, const json& resolved_preset) {
                 capture(placement.lexically_relative(options.data_root));
             }
             for (const auto& piece : fs::directory_iterator(type.path())) {
-                if (piece.path().extension() == ".json" &&
+                if (piece.is_regular_file() && piece.path().extension() == ".json" &&
                     piece.path().filename() != "placement.json") {
                     capture(piece.path().lexically_relative(options.data_root));
                 }
             }
         }
     }
-    for (const auto& [name, bytes] : files) {
-        const auto data = StrictJson(bytes);
-        if (name.starts_with("data/common/structures/")) {
-            // Case aliases can cause the same file to be read as placement and
-            // piece data. Check both integer domains; valid files use disjoint keys.
-            CheckStructureInput(data, true);
-            CheckStructureInput(data, false);
+    // The preset loader always reads species, independently of terrain feature
+    // flags. Match its immediate regular *.json scan, without following links.
+    const auto species = DependencyPath(options.data_root, "common/creatures/species");
+    if (fs::exists(species)) {
+        if (!fs::is_directory(species)) {
+            throw std::runtime_error("species path must be a directory");
+        }
+        for (const auto& entry : fs::directory_iterator(species)) {
+            if (entry.is_regular_file() && entry.path().extension() == ".json") {
+                capture(entry.path().lexically_relative(options.data_root));
+            }
         }
     }
     return files;
+}
+Luminumbra::World::WorldgenFileReader SnapshotReader(const Options& options,
+                                                     const Snapshot& files) {
+    return [&options, &files](const fs::path& path, std::string& bytes) {
+        const auto relative = path.lexically_relative(options.data_root);
+        // Apply the same rooted/traversal/symlink rules on every loader read.
+        (void)DependencyPath(options.data_root, relative);
+        const auto entry = files.find("data/" + GenericUtf8PathString(relative));
+        if (entry == files.end()) {
+            throw std::runtime_error("loader requested an uncaptured dependency");
+        }
+        bytes = entry->second; // Already validated, at most 1 MiB per read.
+        return true;
+    };
 }
 std::string InputIdentity(const Snapshot& files) {
     json manifest = json::object();
@@ -559,9 +638,9 @@ std::string InputIdentity(const Snapshot& files) {
 void ValidateDependencies(const Options& options,
                           const Luminumbra::Systems::TerrainGenParams& params,
                           const Snapshot& files) {
+    const auto& dependencies = *params.worldgen_dependencies;
     if (params.biomes_enabled) {
-        const auto table =
-            Luminumbra::World::BiomeTable::Load(PathFromUtf8(params.biome_table_path));
+        const auto& table = dependencies.biome_table;
         if (!table.ok() || table.empty() || !table.warnings().empty()) {
             throw std::runtime_error("biome table errors or warnings refused");
         }
@@ -586,25 +665,20 @@ void ValidateDependencies(const Options& options,
         }
     }
     if (params.structures_enabled) {
-        const auto root = DependencyPath(options.data_root, "common/structures");
-        std::size_t pools = 0;
-        for (const auto& type : fs::directory_iterator(root)) {
-            if (!type.is_directory()) {
-                continue;
-            }
-            ++pools;
-            const auto pool = Luminumbra::World::LoadStructureTemplatePool(
-                type.path(), GenericUtf8PathString(type.path().filename()));
+        for (const auto& pool : dependencies.structure_pools) {
             if (!pool.ok() || !pool.warnings.empty()) {
                 throw std::runtime_error("structure pool errors or warnings refused");
             }
         }
-        if (pools == 0) {
+        if (dependencies.structure_pools.empty()) {
             throw std::runtime_error("empty structure catalogue refused");
         }
     }
 }
 void CheckNumerics() {
+    if (!Luminumbra::Startup::SupportsCommonLibrary()) {
+        throw std::runtime_error(Luminumbra::Startup::kUnsupportedCommonIsa);
+    }
 #if defined(__FAST_MATH__) || defined(_M_FP_FAST)
     throw std::runtime_error("unsupported fast-math numerics");
 #else
@@ -618,8 +692,7 @@ void CheckNumerics() {
     if ((_mm_getcsr() & ((1u << 15) | (1u << 6) | (3u << 13))) != 0) {
         throw std::runtime_error("unsupported SIMD floating-point environment");
     }
-    if ((FastSIMD::COMPILED_SIMD_LEVELS & FastSIMD::Level_AVX2) == 0 ||
-        FastSIMD::CPUMaxSIMDLevel() < FastSIMD::Level_AVX2) {
+    if ((FastSIMD::COMPILED_SIMD_LEVELS & FastSIMD::Level_AVX2) == 0) {
         throw std::runtime_error("AVX2 world queries unavailable");
     }
 #else
@@ -671,26 +744,28 @@ int wmain(int argc, wchar_t** argv) {
 #else
 int main(int argc, char** argv) {
 #endif
-#if !defined(_WIN32)
-    // Protect stdout and the custom stderr logger before either can write.
-    BoundedConsoleSink::IgnoreDefaultSigpipe();
-#endif
-    // Register before Log's lazy initializer, avoiding stdout and log-file side effects.
-    auto sink = std::make_shared<spdlog::sinks::stderr_color_sink_mt>();
-    sink->set_pattern("%v");
-    auto warnings = std::make_shared<WarningSink>();
-    const std::array<spdlog::sink_ptr, 2> sinks{{sink, warnings}};
-    auto logger = std::make_shared<spdlog::logger>("LUMINUMBRA", sinks.begin(), sinks.end());
-    logger->set_level(spdlog::level::trace);
-    spdlog::register_logger(logger);
     try {
+        // This TU uses the baseline ISA. Check before any common-library call,
+        // including signal handling, logging setup and query validation.
+        CheckNumerics();
+#if !defined(_WIN32)
+        // Protect stdout and the custom stderr logger before either can write.
+        BoundedConsoleSink::IgnoreDefaultSigpipe();
+#endif
+        // Register before Log's lazy initializer, avoiding stdout and log-file side effects.
+        auto sink = std::make_shared<spdlog::sinks::stderr_color_sink_mt>();
+        sink->set_pattern("%v");
+        auto warnings = std::make_shared<WarningSink>();
+        const std::array<spdlog::sink_ptr, 2> sinks{{sink, warnings}};
+        auto logger = std::make_shared<spdlog::logger>("LUMINUMBRA", sinks.begin(), sinks.end());
+        logger->set_level(spdlog::level::trace);
+        spdlog::register_logger(logger);
 #ifdef _WIN32
         if (_setmode(_fileno(stdout), _O_BINARY) == -1) {
             throw std::runtime_error("cannot set binary stdout mode");
         }
 #endif
         auto options = ParseOptions(argc, argv);
-        CheckNumerics();
         options.data_root = Luminumbra::Filesystem::LexicallyNormalPath(
             Luminumbra::Filesystem::AbsolutePath(options.data_root));
         if (!fs::is_directory(options.data_root)) {
@@ -708,7 +783,11 @@ int main(int argc, char** argv) {
         if (files.at("preset.json") != preset_bytes) {
             throw std::runtime_error("preset changed while loading");
         }
-        const auto loaded = LoadTerrainPresetFromJson(preset, options.data_root, "preset.json");
+        const auto loaded = LoadTerrainPresetFromJson(preset,
+                                                      options.data_root,
+                                                      "preset.json",
+                                                      Luminumbra::World::ReadWorldgenSymlinkStatus,
+                                                      SnapshotReader(options, files));
         if (!loaded.ok || !loaded.warnings.empty()) {
             throw std::runtime_error("preset errors, warnings or clamping refused");
         }

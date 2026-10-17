@@ -575,14 +575,22 @@ time, defaulting to the checkout revision when Git is available. Input identity
 is SHA-256 of a compact key-sorted UTF-8 JSON manifest (non-ASCII names remain
 unescaped, no final LF), mapping logical relative names to exact-byte SHA-256
 digests. The preset is `preset.json`;
-consumed biome and structure inputs use `data/<relative-name>`. Structure inputs
+consumed biome, structure and species inputs use `data/<relative-name>`. Structure inputs
 include optional placement files and every consumed piece in each type directory.
+Species files are captured even when biome and structure generation are disabled.
 Absolute paths, timestamps, timings and session content identities are excluded.
 Each input file is limited to 1048576 bytes and each snapshot (preset plus
 dependencies) to 8388608 bytes, checked before allocating file contents.
-Exceeding either byte limit exits 1 with an `input-limit` refusal and empty stdout.
+Captured files and structure type directories share limits of 4096 entries and
+1048576 bytes of logical UTF-8 pathname storage, including the preset key and
+`data/` prefixes.
+Exceeding any byte, entry or pathname limit exits 1 with an `input-limit` refusal and empty stdout.
+Each file is parsed and validated as it is captured, before its bytes enter the snapshot.
 Dependency bytes and structure integer domains are validated before the preset
-loader can consume them. Their names/bytes are checked again after discovery;
+loader can consume them. The loader reads only the validated captured bytes.
+Logical dependency names must be relative portable UTF-8 paths without root names,
+root directories, traversal components, backslashes, colons or NULs.
+Their names/bytes are checked again after discovery;
 observable changes refuse the whole result.
 Run against immutable pinned inputs; these checks do not promise exclusion of
 every concurrent filesystem race.

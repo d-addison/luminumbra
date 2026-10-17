@@ -2081,6 +2081,15 @@ set_tests_properties(ShieldRtSpike PROPERTIES
 
 # Simulation telemetry captures require the standard-library Python validator.
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
+set(_common_isa_compiler_args --compiler "${CMAKE_CXX_COMPILER}")
+if(MSVC)
+    list(APPEND _common_isa_compiler_args --msvc)
+endif()
+add_test(NAME CommonLibraryIsaContract
+    COMMAND "${Python3_EXECUTABLE}" -I -B
+        "${CMAKE_SOURCE_DIR}/tools/gates/test_common_library_isa.py"
+        ${_common_isa_compiler_args} --cmake "${CMAKE_COMMAND}")
+set_tests_properties(CommonLibraryIsaContract PROPERTIES LABELS "world;tools" TIMEOUT 30)
 add_test(NAME StationDiscoveryContract
     COMMAND "${Python3_EXECUTABLE}" -I -B
         "${CMAKE_SOURCE_DIR}/tools/gates/test_station_discovery.py")

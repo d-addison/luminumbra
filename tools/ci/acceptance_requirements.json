@@ -3699,8 +3699,8 @@
     {
       "id": "dw.station.025",
       "source": "docs/distant-world.md#station-discovery-req-e4",
-      "quote": "consumed biome and structure inputs use `data/<relative-name>`.",
-      "text": "consumed biome and structure inputs use `data/<relative-name>`."
+      "quote": "consumed biome, structure and species inputs use `data/<relative-name>`.",
+      "text": "consumed biome, structure and species inputs use `data/<relative-name>`."
     },
     {
       "id": "dw.station.026",
@@ -3723,8 +3723,8 @@
     {
       "id": "dw.station.029",
       "source": "docs/distant-world.md#station-discovery-req-e4",
-      "quote": "Exceeding either byte limit exits 1 with an `input-limit` refusal and empty stdout.",
-      "text": "Exceeding either byte limit exits 1 with an `input-limit` refusal and empty stdout."
+      "quote": "Exceeding any byte, entry or pathname limit exits 1 with an `input-limit` refusal and empty stdout.",
+      "text": "Exceeding any byte, entry or pathname limit exits 1 with an `input-limit` refusal and empty stdout."
     },
     {
       "id": "dw.station.030",
@@ -4151,6 +4151,36 @@
       "source": "docs/distant-world.md#station-discovery-req-e4",
       "quote": "this tool does not complete the game's entire scene set.",
       "text": "this tool does not complete the game's entire scene set."
+    },
+    {
+      "id": "dw.station.101",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Species files are captured even when biome and structure generation are disabled.",
+      "text": "Species files are captured even when biome and structure generation are disabled."
+    },
+    {
+      "id": "dw.station.102",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Captured files and structure type directories share limits of 4096 entries and 1048576 bytes of logical UTF-8 pathname storage, including the preset key and `data/` prefixes.",
+      "text": "Captured files and structure type directories share limits of 4096 entries and 1048576 bytes of logical UTF-8 pathname storage, including the preset key and `data/` prefixes."
+    },
+    {
+      "id": "dw.station.103",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Each file is parsed and validated as it is captured, before its bytes enter the snapshot.",
+      "text": "Each file is parsed and validated as it is captured, before its bytes enter the snapshot."
+    },
+    {
+      "id": "dw.station.104",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "The loader reads only the validated captured bytes.",
+      "text": "The loader reads only the validated captured bytes."
+    },
+    {
+      "id": "dw.station.105",
+      "source": "docs/distant-world.md#station-discovery-req-e4",
+      "quote": "Logical dependency names must be relative portable UTF-8 paths without root names, root directories, traversal components, backslashes, colons or NULs.",
+      "text": "Logical dependency names must be relative portable UTF-8 paths without root names, root directories, traversal components, backslashes, colons or NULs."
     }
   ],
   "exclusions": [

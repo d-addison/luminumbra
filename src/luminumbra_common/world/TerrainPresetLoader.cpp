@@ -1,20 +1,31 @@
 #include "TerrainPresetLoader.h"
 
 #include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstdint>
 #include <exception>
+#include <filesystem>
 #include <fstream>
 #include <initializer_list>
 #include <map>
 #include <memory>
+#include <string>
 #include <string_view>
+#include <system_error>
+#include <utility>
+#include <vector>
 
 #include "nlohmann/json.hpp"
+#include "nlohmann/json_fwd.hpp"
 
 #include "../ai/CreatureSpeciesRegistry.h"
 #include "../core/FilesystemPath.h"
 #include "../core/Log.h"
 #include "BiomeTable.h"
 #include "StructurePlacement.h"
+#include "WorldgenDependencySnapshot.h"
+#include "WorldgenFileReader.h"
 
 namespace Luminumbra::world {
 namespace {
@@ -23,7 +34,7 @@ constexpr std::uint64_t kFnvOffsetBasis = 14695981039346656037ull;
 constexpr std::uint64_t kFnvPrime = 1099511628211ull;
 
 void HashBytes(std::uint64_t& hash, std::string_view bytes) {
-    for (unsigned char byte : bytes) {
+    for (const unsigned char byte : bytes) {
         hash ^= byte;
         hash *= kFnvPrime;
     }
@@ -54,7 +65,8 @@ bool ResolveDependencyManifest(TerrainPresetLoadResult& preset,
                                const std::filesystem::path& data_root,
                                nlohmann::json& manifest,
                                std::vector<std::string>& errors,
-                               const World::WorldgenFileStatusReader& read_status) {
+                               const World::WorldgenFileStatusReader& read_status,
+                               const World::WorldgenFileReader& dependency_reader) {
     // Use the generator's loaders to record their decisions and only the bytes
     // they consume. In particular, a rejected placement stops that pool before
     // any pieces are read; malformed pieces reject a pool after all piece reads.
@@ -94,7 +106,7 @@ bool ResolveDependencyManifest(TerrainPresetLoadResult& preset,
         const auto logical = logical_path(path.lexically_relative(data_root));
         if (logical.empty())
             return false;
-        if (!World::ReadWorldgenFile(path, bytes)) {
+        if (!dependency_reader(path, bytes)) {
             errors.push_back("failed to read worldgen dependency: " + logical);
             return false;
         }
@@ -452,7 +464,8 @@ TerrainPresetLoadResult
 LoadTerrainPresetFromJson(const nlohmann::json& source,
                           const std::filesystem::path& data_root,
                           const std::string& provenance,
-                          const World::WorldgenFileStatusReader& read_status) try {
+                          const World::WorldgenFileStatusReader& read_status,
+                          const World::WorldgenFileReader& dependency_reader) try {
     TerrainPresetLoadResult result;
     // Validate revision type before resolving defaults, retaining the no-throw error path.
     if (source.contains("schema_rev") && !source["schema_rev"].is_number_integer()) {
@@ -757,7 +770,8 @@ LoadTerrainPresetFromJson(const nlohmann::json& source,
                     result.warnings);
 
     nlohmann::json manifest;
-    if (!ResolveDependencyManifest(result, data_root, manifest, result.errors, read_status))
+    if (!ResolveDependencyManifest(
+            result, data_root, manifest, result.errors, read_status, dependency_reader))
         return result;
     result.preset_content_hash = HashPresetIdentity(source, manifest);
     result.ok = true;

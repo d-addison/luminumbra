@@ -5,8 +5,10 @@
 
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 
 namespace fs = std::filesystem;
 namespace paths = Luminumbra::Filesystem;
@@ -55,14 +57,8 @@ TEST(FilesystemPath, RuntimeRootStringKeepsOrdinaryPlatformSpelling) {
 }
 
 TEST(FilesystemPath, ExplicitRuntimeRootBypassesDiscoveryAndRefusesIncompleteLayouts) {
-    const fs::path directory = Luminumbra::TestSupport::CreateUniqueTempDirectory("runtime-root-");
-    struct Cleanup {
-        fs::path path;
-        ~Cleanup() {
-            std::error_code error;
-            fs::remove_all(path, error);
-        }
-    } cleanup{directory};
+    const Luminumbra::TestSupport::ScopedTempFile temp("runtime-root-", ".tmp");
+    const fs::path directory = temp.Path().parent_path();
     const auto resolve = [&](const fs::path& root) {
         return Luminumbra::Client::App::ResolveRuntimeRoot("client", root);
     };

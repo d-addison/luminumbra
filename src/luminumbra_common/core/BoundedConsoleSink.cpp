@@ -1,16 +1,23 @@
 #include "BoundedConsoleSink.h"
 
-#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
+
+#include <spdlog/common.h>
+#include <spdlog/details/log_msg.h>
 
 #ifdef _WIN32
+#include <algorithm>
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -21,7 +28,9 @@
 #else
 #include <cerrno>
 #include <csignal>
+#include <signal.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 #endif
 
@@ -177,7 +186,7 @@ void BoundedConsoleSink::sink_it_(const spdlog::details::log_msg& msg) {
         line.assign(formatted.data(), formatted.size());
     }
 
-    std::lock_guard<std::mutex> lock(m_state->mu);
+    const std::lock_guard<std::mutex> lock(m_state->mu);
     if (m_state->dead || m_state->queue.size() >= m_state->limits.max_messages ||
         m_state->queued_bytes + line.size() > m_state->limits.max_queued_bytes) {
         m_state->dropped.fetch_add(1, std::memory_order_relaxed);
@@ -192,7 +201,7 @@ void BoundedConsoleSink::flush_() {
     // Nothing is buffered outside the queue, and the writer owns delivery, so
     // there is no I/O to perform. Taking the lock only orders this call with
     // queue updates.
-    std::lock_guard<std::mutex> lock(m_state->mu);
+    const std::lock_guard<std::mutex> lock(m_state->mu);
 }
 
 void BoundedConsoleSink::RunWriter(const std::shared_ptr<State>& state) {

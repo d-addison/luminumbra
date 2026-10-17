@@ -27,13 +27,7 @@ if(MINGW)
     # Select the CRT startup that supplies UTF-16 argv to wmain.
     target_link_options(luminumbra_station_discovery PRIVATE -municode)
 endif()
-# The front end must reach its ISA refusal before calling AVX2 world queries.
-# Source options follow transitive Jolt options; keep the common library unchanged.
-if(NOT MSVC AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND
-   CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
-    set_source_files_properties(station_discovery.cpp PROPERTIES
-        COMPILE_OPTIONS "-mno-avx;-mno-avx2;-mno-fma")
-endif()
+luminumbra_baseline_startup("${CMAKE_CURRENT_SOURCE_DIR}/station_discovery.cpp")
 set(LUMINUMBRA_STATION_ENGINE_REVISION "" CACHE STRING "Pinned discovery source revision")
 if(NOT LUMINUMBRA_STATION_ENGINE_REVISION)
     find_package(Git QUIET)
