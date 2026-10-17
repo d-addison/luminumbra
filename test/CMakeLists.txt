@@ -2105,6 +2105,12 @@ set_tests_properties(ShieldRtSpike PROPERTIES
 
 # Simulation telemetry captures require the standard-library Python validator.
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME RegionAuthorityWiringPython COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/test/tools/test_region_authority_wiring.py")
+set_tests_properties(RegionAuthorityWiringPython PROPERTIES LABELS "tools" TIMEOUT 60)
+add_test(NAME SystemConfigIdentityPython COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/test/tools/test_system_config_identity.py")
+set_tests_properties(SystemConfigIdentityPython PROPERTIES LABELS "tools" TIMEOUT 60)
 add_test(NAME FrameAttributionWiringPython COMMAND "${Python3_EXECUTABLE}" -I -B
     "${CMAKE_SOURCE_DIR}/test/rendering/test_frame_attribution_wiring.py")
 set(_common_isa_compiler_args --compiler "${CMAKE_CXX_COMPILER}")

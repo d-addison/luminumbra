@@ -89,7 +89,7 @@ struct ChunkAuthorityLoadPolicy {
 };
 // Owner-thread eviction snapshot. Omits worker-owned staging arrays, which are
 // discarded on admission; live simulation and render fields remain intact.
-std::string SerializeChunkAuthoritySnapshotJson(const Chunk& chunk);
+std::string SerializeChunkAuthoritySnapshotJson(const Chunk& chunk, bool omit_water = false);
 bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
                                          WorldStreamingState& out_state,
                                          std::vector<std::string>& errors,
@@ -193,7 +193,10 @@ struct WorldAuthorityHashes {
 // The cold durable scan and the incremental path use exactly this projection.
 class AuthorityHashCache {
 public:
-    void update(const std::shared_ptr<Chunk>& chunk);
+    void update(const std::shared_ptr<Chunk>& incoming);
+    // Owner-thread retirement only after the durable record no longer owns authority.
+    // A regenerable resident alone must never mask an older durable owner.
+    void erase(ChunkID id);
     [[nodiscard]] WorldAuthorityHashes hashes() const;
     // Number of chunk projections, for checking incremental capture work.
     [[nodiscard]] std::uint64_t projection_count() const {

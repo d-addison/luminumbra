@@ -194,6 +194,12 @@ public:
     // Unlike incremental saves this writes even when dirty was acknowledged.
     static bool persist_chunk_authority(const std::filesystem::path& save_dir,
                                         const std::shared_ptr<Chunk>& chunk);
+    // Atomically install a Y=0 water owner and retire its validated equal-state
+    // nonzero-Y sources. Preserves each source's terrain and every sibling record.
+    // Inputs remain unchanged, including dirty flags, on failure.
+    static bool persist_water_column_migration(const std::filesystem::path& save_dir,
+                                               const std::shared_ptr<Chunk>& destination,
+                                               const std::vector<std::shared_ptr<Chunk>>& sources);
     // Transfer durable authority for an explicit snapshot destination. Refuses
     // destination-only authority before writing; processes one region at a time.
     static bool copy_chunk_authority(const std::filesystem::path& source,

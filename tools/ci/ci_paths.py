@@ -13,6 +13,8 @@ import sys
 # Only reviewed, test-backed files may skip native builds. New files require
 # an explicit coverage decision; directory membership never grants an exemption.
 PYTHON_TESTS = (
+    "test/tools/test_region_authority_wiring.py",
+    "test/tools/test_system_config_identity.py",
     "test/rendering/test_frame_attribution_wiring.py",
     "tools/ci/test_ci_paths.py",
     "tools/ci/test_cache_retention.py",

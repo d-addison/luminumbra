@@ -3801,6 +3801,8 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
                                                 int collision_radius,
                                                 int render_lod0_radius) {
     AuthorityRestoreBatch restore_batch;
+    std::set<ChunkID> required;
+    bool eviction_prepared = false;
     if (!physics_system) {
         return false;
     }
@@ -3871,7 +3873,6 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
     chunks_to_consider_for_collision.reserve(surface_capacity);
 
     if (m_retainRegionAuthority) {
-        std::set<ChunkID> required;
         for (int dz = -radius; dz <= radius; ++dz) {
             for (int dx = -radius; dx <= radius; ++dx) {
                 const int x = center_chunk.x + dx;
@@ -3888,7 +3889,6 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
                 }
             }
         }
-        prepare_authority_eviction(required);
     }
 
     for (int dz = -radius; dz <= radius; ++dz) {
@@ -3913,7 +3913,8 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
 
                 auto it = m_streaming_state.chunks.find(id);
                 if (it == m_streaming_state.chunks.end()) {
-                    if (m_retainRegionAuthority && !make_authority_room(physics_system))
+                    if (m_retainRegionAuthority &&
+                        !make_authority_room(required, eviction_prepared, physics_system))
                         return false;
                     auto chunk = restore_authority(coords, restore_batch);
                     if (m_authorityFault)
@@ -4416,13 +4417,27 @@ bool SHIELD_WorldSystem::admit_water_edit(const Vec3& world_pos, float radius_m)
             coords.z >= lo.z && coords.z <= hi.z)
             protected_chunks.insert(id);
     }
-    prepare_authority_eviction(protected_chunks);
+    bool eviction_prepared = false;
     AuthorityRestoreBatch restore_batch;
+    std::set<std::pair<i32, i32>> edit_regions;
+    for (const auto id : required) {
+        int rx = 0, rz = 0;
+        Persistence::WorldSaveService::region_coords_for_chunk(Chunk::decode_id(id), rx, rz);
+        edit_regions.emplace(rx, rz);
+    }
+    try {
+        restore_simulation_regions(
+            edit_regions, protected_chunks, restore_batch, eviction_prepared, nullptr);
+    } catch (const std::exception& error) {
+        m_authorityFault = error.what();
+        return false;
+    }
     for (const auto id : required) {
         if (m_simulationWaterChunks.contains(id))
             continue;
         const auto coords = Chunk::decode_id(id);
-        if (!m_streaming_state.chunks.contains(id) && !make_authority_room(nullptr))
+        if (!m_streaming_state.chunks.contains(id) &&
+            !make_authority_room(protected_chunks, eviction_prepared))
             return false;
         auto chunk = restore_authority(coords, restore_batch);
         if (m_authorityFault)
@@ -5920,19 +5935,25 @@ std::size_t SHIELD_WorldSystem::resident_chunk_count() const {
     return m_streaming_state.chunks.size();
 }
 
-void SHIELD_WorldSystem::remember_durable_authority(const std::shared_ptr<Chunk>& chunk) {
+void SHIELD_WorldSystem::remember_durable_authority(const std::shared_ptr<Chunk>& incoming) {
+    const auto chunk = incoming;
     if (chunk && chunk->has_simulation_authority() && !chunk->is_voxel_data_dirty())
         m_durableAuthorityOwners.insert_or_assign(
             chunk->get_id(), DurableAuthorityOwner{chunk, chunk->authority_stamp()});
 }
 
-bool SHIELD_WorldSystem::persist_authority(const std::shared_ptr<Chunk>& chunk) {
-    if (m_authorityFault)
+bool SHIELD_WorldSystem::persist_authority(const std::shared_ptr<Chunk>& incoming) {
+    // Pin the admitted owner independently of its container entry. An empty
+    // weak lock must never acknowledge an empty or regenerable incoming owner.
+    const auto chunk = incoming;
+    if (!chunk || !chunk->has_simulation_authority() || m_authorityFault)
         return false;
     const auto durable = m_durableAuthorityOwners.find(chunk->get_id());
-    if (!chunk->is_voxel_data_dirty() && durable != m_durableAuthorityOwners.end() &&
-        durable->second.owner.lock() == chunk && durable->second.stamp == chunk->authority_stamp())
-        return true;
+    if (!chunk->is_voxel_data_dirty() && durable != m_durableAuthorityOwners.end()) {
+        const auto owner = durable->second.owner.lock();
+        if (owner && owner == chunk && durable->second.stamp == owner->authority_stamp())
+            return true;
+    }
     try {
         if (Persistence::WorldSaveService::persist_chunk_authority(m_authorityDirectory, chunk)) {
             notify_far_lod_authority_durable(chunk->get_coords());
@@ -5950,6 +5971,7 @@ bool SHIELD_WorldSystem::persist_authority(const std::shared_ptr<Chunk>& chunk) 
 }
 
 void SHIELD_WorldSystem::prepare_authority_eviction(const std::set<ChunkID>& required) {
+    ++m_authorityEvictionPreparations;
     m_authorityEvictionCandidates.clear();
     for (const auto& [id, chunk] : m_streaming_state.chunks) {
         (void)chunk;
@@ -5959,9 +5981,15 @@ void SHIELD_WorldSystem::prepare_authority_eviction(const std::set<ChunkID>& req
     std::sort(m_authorityEvictionCandidates.rbegin(), m_authorityEvictionCandidates.rend());
 }
 
-bool SHIELD_WorldSystem::make_authority_room(PhysicsSystem* physics_system) {
+bool SHIELD_WorldSystem::make_authority_room(const std::set<ChunkID>& required,
+                                             bool& eviction_prepared,
+                                             PhysicsSystem* physics_system) {
     if (resident_chunk_count() < STREAMING_MAX_ACTIVE_CHUNKS_BUDGET)
         return true;
+    if (!eviction_prepared) {
+        prepare_authority_eviction(required);
+        eviction_prepared = true;
+    }
     // This runs only for deterministic authority admission, never per render
     // candidate. Displace a render cache before allocating another chunk.
     while (!m_authorityEvictionCandidates.empty()) {
@@ -6010,6 +6038,194 @@ std::shared_ptr<Chunk> SHIELD_WorldSystem::restore_authority(const IVec3& coords
 } catch (const std::exception& error) {
     m_authorityFault = error.what();
     return nullptr;
+}
+
+namespace {
+void copy_column_water(const Chunk& source, Chunk& destination) {
+    destination.water_depth_mm = source.water_depth_mm;
+    destination.water_bed_mm = source.water_bed_mm;
+    destination.water_edge_flux = source.water_edge_flux;
+    destination.water_level_data = source.water_level_data;
+    destination.water_flow_data = source.water_flow_data;
+    destination.water_sim_terrain_height = source.water_sim_terrain_height;
+    destination.water_rest_level = source.water_rest_level;
+    destination.water_src_mm.clear();
+    destination.has_water_sim.store(source.has_water_sim.load());
+    destination.current_water_resolution.store(source.current_water_resolution.load());
+    destination.is_water_sleeping.store(source.is_water_sleeping.load());
+    destination.max_water_delta_last_tick = source.max_water_delta_last_tick;
+    destination.ticks_below_threshold = source.ticks_below_threshold;
+    destination.water_mesh_dirty_ticks = source.water_mesh_dirty_ticks;
+    destination.water_mesh_generated.store(false);
+    destination.water_mesh_vertices.clear();
+    destination.water_mesh_indices.clear();
+    destination.mark_water_data_dirty();
+}
+} // namespace
+
+void SHIELD_WorldSystem::migrate_simulation_water(const std::set<std::pair<i32, i32>>& regions,
+                                                  const std::set<ChunkID>& required,
+                                                  AuthorityRestoreBatch& batch,
+                                                  bool& eviction_prepared,
+                                                  PhysicsSystem* physics_system) {
+    using Save = Persistence::WorldSaveService;
+    // Pointer plans share the 8,192 resident bound. No second voxel collection:
+    // only one staged destination exists during each atomic column replacement.
+    std::map<ChunkID, std::vector<std::shared_ptr<Chunk>>> columns;
+    for (const auto& [id, chunk] : m_simulationChunks) {
+        (void)id;
+        int rx = 0, rz = 0;
+        Save::region_coords_for_chunk(chunk->get_coords(), rx, rz);
+        if (chunk->get_coords().y != 0 && chunk->has_water_authority() &&
+            regions.contains({rx, rz})) {
+            auto coords = chunk->get_coords();
+            coords.y = 0;
+            columns[Chunk::calculate_id(coords)].push_back(chunk);
+        }
+    }
+    if (columns.empty())
+        return;
+    // Validate every ambiguous/incomplete column before writing or releasing
+    // any authority. Live residents already superseded their durable same-id image.
+    auto protected_chunks = required;
+    for (auto& [id, sources] : columns) {
+        protected_chunks.insert(id);
+        std::sort(sources.begin(), sources.end(), [](const auto& lhs, const auto& rhs) {
+            return lhs->get_id() < rhs->get_id();
+        });
+        const auto canonical = find_streamed_chunk(Chunk::decode_id(id));
+        const auto& reference =
+            canonical && canonical->has_water_authority() ? canonical : sources.front();
+        if (!reference->has_complete_water_state())
+            throw std::runtime_error("Incomplete legacy column water authority");
+        for (const auto& source : sources) {
+            if (!source->has_complete_water_state() || !source->same_water_state(*reference))
+                throw std::runtime_error("Conflicting or incomplete column water authority");
+        }
+    }
+    // Retiring a grid also retires its rendered water. Settle the bounded mesh
+    // FIFO before clearing it, so an old completion cannot republish that grid.
+    wait_for_meshing_jobs();
+    eviction_prepared = false;
+    for (const auto& [id, sources] : columns) {
+        const auto coords = Chunk::decode_id(id);
+        const auto existing = find_streamed_chunk(coords);
+        const bool releases_source =
+            std::any_of(sources.begin(), sources.end(), [&](const auto& owner) {
+                return owner->sdf_provenance() == ChunkSdfProvenance::GeneratedCurrentParams &&
+                       !required.contains(owner->get_id());
+            });
+        if (!existing && !releases_source &&
+            !make_authority_room(protected_chunks, eviction_prepared, physics_system))
+            throw std::runtime_error(*m_authorityFault);
+        std::shared_ptr<Chunk> destination;
+        if (existing && existing->has_simulation_authority()) {
+            WorldStreamingState staged;
+            std::vector<std::string> errors;
+            if (!Persistence::LoadWorldStreamingStateSnapshotJson(
+                    Persistence::SerializeChunkAuthoritySnapshotJson(*existing), staged, errors))
+                throw std::runtime_error("Cannot stage column water authority");
+            destination = staged.find_chunk(id);
+        } else {
+            destination = std::make_shared<Chunk>(coords);
+            GenerateChunkData(*destination);
+        }
+        // Prefer Y=0 only after proving its state equals every old layer.
+        const auto& source =
+            existing && existing->has_water_authority() ? existing : sources.front();
+        copy_column_water(*source, *destination);
+        if (!Save::persist_water_column_migration(m_authorityDirectory, destination, sources))
+            throw std::runtime_error("Cannot persist column water migration");
+        // The atomic image includes all cleared sources. Publish only afterwards;
+        // a failed write leaves every source and destination owner untouched.
+        for (const auto& retired : sources) {
+            retired->clear_water_data();
+            retired->clear_voxel_data_dirty();
+            m_durableAuthorityOwners.erase(retired->get_id());
+            remember_durable_authority(retired);
+            if (m_authorityHashCache) {
+                if (retired->has_simulation_authority())
+                    m_authorityHashCache->update(retired);
+                else
+                    m_authorityHashCache->erase(retired->get_id());
+            }
+            notify_far_lod_authority_durable(retired->get_coords());
+            if (!retired->has_simulation_authority() && !required.contains(retired->get_id())) {
+                m_simulationChunks.erase(retired->get_id());
+                if (physics_system)
+                    physics_system->remove_chunk_collision(retired->get_id());
+                retired->has_collision.store(false);
+                shadow_note_evicted(retired->get_id());
+                m_streaming_state.chunks.erase(retired->get_id());
+            }
+        }
+        destination->clear_voxel_data_dirty();
+        destination->reset_pending_jobs();
+        destination->set_state(ChunkState::Idle);
+        destination->has_collision.store(false);
+        m_streaming_state.chunks.insert_or_assign(id, destination);
+        m_simulationChunks.insert_or_assign(id, destination);
+        m_simulationWaterChunks.insert_or_assign(id, destination);
+        remember_durable_authority(destination);
+        notify_far_lod_authority_durable(coords);
+        if (m_authorityHashCache)
+            m_authorityHashCache->update(destination);
+        int rx = 0, rz = 0;
+        Save::region_coords_for_chunk(coords, rx, rz);
+        // A batch reader owns the old opened image. Required terrain must not
+        // resurrect retired water from that image after the replacement.
+        batch.readers.erase({rx, rz});
+        m_collision_pass_dirty = true;
+        m_activation_has_run = false;
+        ++m_dirty_generation;
+    }
+}
+
+void SHIELD_WorldSystem::restore_simulation_regions(const std::set<std::pair<i32, i32>>& regions,
+                                                    const std::set<ChunkID>& required,
+                                                    AuthorityRestoreBatch& batch,
+                                                    bool& eviction_prepared,
+                                                    PhysicsSystem* physics_system) {
+    using Save = Persistence::WorldSaveService;
+    for (const auto& [id, chunk] : m_streaming_state.chunks) {
+        int rx = 0, rz = 0;
+        Save::region_coords_for_chunk(chunk->get_coords(), rx, rz);
+        if (chunk->has_simulation_authority() && regions.contains({rx, rz}))
+            m_simulationChunks.insert_or_assign(id, chunk);
+    }
+    bool restored_any = false;
+    for (const auto& [rx, rz] : regions) {
+        if (m_simulationRegions.contains({rx, rz}) || m_authorityDirectory.empty())
+            continue;
+        auto [entry, inserted] = batch.readers.try_emplace(std::pair{rx, rz});
+        auto& reader = entry->second;
+        if (inserted) {
+            ++m_authorityRegionIndexReads;
+            if (!reader.open(Save::region_file_path(m_authorityDirectory, rx, rz)))
+                throw std::runtime_error("Cannot restore simulation region authority");
+        }
+        while (const auto next = reader.next_id()) {
+            const auto id = *next;
+            if (m_simulationChunks.contains(id)) {
+                reader.skip();
+                continue;
+            }
+            if (!m_streaming_state.chunks.contains(id) &&
+                !make_authority_room(required, eviction_prepared, physics_system))
+                throw std::runtime_error(*m_authorityFault);
+            auto chunk = Save::read_next_authority(reader);
+            remember_durable_authority(chunk);
+            chunk->set_state(ChunkState::Idle);
+            chunk->has_collision.store(false, std::memory_order_release);
+            m_streaming_state.chunks.insert_or_assign(id, chunk);
+            m_simulationChunks.emplace(id, std::move(chunk));
+            m_collision_pass_dirty = true;
+            restored_any = true;
+        }
+    }
+    if (restored_any)
+        ++m_dirty_generation;
+    migrate_simulation_water(regions, required, batch, eviction_prepared, physics_system);
 }
 
 void SHIELD_WorldSystem::prepare_region_authority(entt::registry& registry,
@@ -6085,7 +6301,8 @@ void SHIELD_WorldSystem::prepare_region_authority(entt::registry& registry,
             require_chunk(Chunk::calculate_id(coords));
     }
     for (auto it = m_simulationChunks.begin(); it != m_simulationChunks.end();) {
-        if (!regions.contains(region_of(*it->second)) && !required.contains(it->first)) {
+        if (!required.contains(it->first) && (!it->second->has_simulation_authority() ||
+                                              !regions.contains(region_of(*it->second)))) {
             it = m_simulationChunks.erase(it);
             m_activation_has_run = false;
         } else
@@ -6106,39 +6323,13 @@ void SHIELD_WorldSystem::prepare_region_authority(entt::registry& registry,
             m_simulationChunks.insert_or_assign(id, chunk);
         }
     }
-    prepare_authority_eviction(required);
-    for (const auto& [rx, rz] : regions) {
-        if (m_simulationRegions.contains({rx, rz}) || m_authorityDirectory.empty())
-            continue;
-        auto [entry, inserted] = restore_batch.readers.try_emplace(std::pair{rx, rz});
-        auto& reader = entry->second;
-        if (inserted) {
-            ++m_authorityRegionIndexReads;
-            if (!reader.open(Save::region_file_path(m_authorityDirectory, rx, rz)))
-                throw std::runtime_error("Cannot restore simulation region authority");
-        }
-        while (const auto next = reader.next_id()) {
-            const auto id = *next;
-            if (m_simulationChunks.contains(id)) {
-                reader.skip();
-                continue;
-            }
-            if (!m_streaming_state.chunks.contains(id) && !make_authority_room(physics_system))
-                throw std::runtime_error(*m_authorityFault);
-            auto chunk = Save::read_next_authority(reader);
-            remember_durable_authority(chunk);
-            chunk->set_state(ChunkState::Idle);
-            chunk->has_collision.store(false, std::memory_order_release);
-            m_streaming_state.chunks.insert_or_assign(id, chunk);
-            m_simulationChunks.emplace(id, std::move(chunk));
-            m_collision_pass_dirty = true;
-            render_changed = true;
-        }
-    }
+    bool eviction_prepared = false;
+    restore_simulation_regions(regions, required, restore_batch, eviction_prepared, physics_system);
     for (const auto id : required) {
         if (m_simulationChunks.contains(id))
             continue;
-        if (!m_streaming_state.chunks.contains(id) && !make_authority_room(physics_system))
+        if (!m_streaming_state.chunks.contains(id) &&
+            !make_authority_room(required, eviction_prepared, physics_system))
             throw std::runtime_error(*m_authorityFault);
         const auto coords = Chunk::decode_id(id);
         auto chunk = restore_authority(coords, restore_batch);

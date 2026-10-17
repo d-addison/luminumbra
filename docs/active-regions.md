@@ -269,6 +269,10 @@ tick boundary. Both streaming generation and synchronous surface loading restore
 that durable authority before considering generation. Transient replay and
 headless worlds use private temporary authority storage, removed at teardown.
 
+Before horizon or edit admission, initialized authoritative water at nonzero Y migrates to the Y=0 column owner with its complete integer depth, bed, flux and solver bookkeeping.
+Live same-id authority takes precedence over durable records; different Y layers have no historical precedence, so equal simulation states coalesce without summing water and conflicting or incomplete states refuse admission.
+The destination and cleared source water records commit in one atomic region replacement before live ownership changes; source terrain authority remains independent.
+
 Water initialization, depth, flux, wake/sleep state and threshold counters
 advance once per fixed session tick. Natural water is admitted in a fixed 3x3
 surface-column horizon around each simulation anchor, with one Y=0 water owner per column
@@ -295,6 +299,8 @@ resumes from the exact durable integer water state. No distant water continuatio
 is introduced. Pending edited-water initialization and resolution changes select
 chunk ids in order. Snapshot loads preserve the simulation-window cursor and
 pending resizes, and discard derived activity scores.
+
+Pristine terrain leaves the simulation set when it leaves the required horizon, even while its region remains active, so reload restores the same participants and colliders.
 
 Before creature or server-avatar physics and client entry readiness checks, the
 owner thread admits the simulation horizon around every advancing creature body
@@ -338,6 +344,7 @@ both metadata and full snapshot saves refuse destinations containing edited
 chunk ids absent from the current durable authority. This includes extra siblings
 in the same region file and entire destination-only regions; a save cannot import
 another snapshot's edits into the live hash or later restoration.
+Eviction candidates are scanned and sorted only when a missing admission needs space at the 8,192-chunk resident cap, with one prepared list reused within the admission batch.
 Exhausting the budget with simulation authority is a fail-stop capacity fault.
 The water activity cache is pruned to the same simulation set. Simulation-owned
 chunks remain resident until their simulation ownership ends; camera movement
@@ -364,7 +371,7 @@ recompute, with chunk identity included in every contribution. Render caches,
 meshes and lifecycle flags cannot affect this oracle. The server availability
 digest likewise uses sorted fixed-tick simulation participants in this mode.
 
-The negotiated system configuration identity includes authority-rules revision 2
+The negotiated system configuration identity includes authority-rules revision 3
 in its v4 encoding, so earlier executables are refused before simulation rather
 than reaching a hash mismatch. This does not change the Hello protocol version.
 

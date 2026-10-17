@@ -976,11 +976,24 @@ private:
     std::filesystem::path m_temporaryAuthorityDirectory;
     std::optional<std::string> m_authorityFault;
     mutable std::unique_ptr<Persistence::AuthorityHashCache> m_authorityHashCache;
-    // Rebuilt once per fixed tick; at most 8,192 ids, consumed from the back.
+    // Prepared only under admission pressure; at most 8,192 ids, consumed from the back.
     std::vector<ChunkID> m_authorityEvictionCandidates;
     std::size_t resident_chunk_count() const;
     void prepare_authority_eviction(const std::set<ChunkID>& required);
-    bool make_authority_room(PhysicsSystem* physics_system = nullptr);
+    bool make_authority_room(const std::set<ChunkID>& required,
+                             bool& eviction_prepared,
+                             PhysicsSystem* physics_system = nullptr);
+    struct AuthorityRestoreBatch;
+    void restore_simulation_regions(const std::set<std::pair<i32, i32>>& regions,
+                                    const std::set<ChunkID>& required,
+                                    AuthorityRestoreBatch& batch,
+                                    bool& eviction_prepared,
+                                    PhysicsSystem* physics_system);
+    void migrate_simulation_water(const std::set<std::pair<i32, i32>>& regions,
+                                  const std::set<ChunkID>& required,
+                                  AuthorityRestoreBatch& batch,
+                                  bool& eviction_prepared,
+                                  PhysicsSystem* physics_system);
     bool admit_water_edit(const Vec3& world_pos, float radius_m);
     struct DurableAuthorityOwner {
         std::weak_ptr<Chunk> owner;
@@ -988,14 +1001,18 @@ private:
     };
     // At most one small stamp per resident chunk; erase alongside residency.
     std::unordered_map<ChunkID, DurableAuthorityOwner> m_durableAuthorityOwners;
-    void remember_durable_authority(const std::shared_ptr<Chunk>& chunk);
-    bool persist_authority(const std::shared_ptr<::Luminumbra::Chunk>& chunk);
-    struct AuthorityRestoreBatch;
+    void remember_durable_authority(const std::shared_ptr<Chunk>& incoming);
+    bool persist_authority(const std::shared_ptr<::Luminumbra::Chunk>& incoming);
     std::shared_ptr<::Luminumbra::Chunk> restore_authority(const IVec3& coords,
                                                            AuthorityRestoreBatch& batch);
     std::size_t m_authorityRegionIndexReads = 0;
+    std::size_t m_authorityEvictionPreparations = 0;
 
 public:
+    // Const diagnostic: actual pressure-driven candidate scans and sorts.
+    std::size_t authority_eviction_preparations() const {
+        return m_authorityEvictionPreparations;
+    }
     // Cumulative region-index opens for authority restoration, including misses.
     // Measures batch reuse without exposing mutable persistence internals.
     std::size_t authority_region_index_reads() const {

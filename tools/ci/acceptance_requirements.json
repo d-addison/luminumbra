@@ -4011,8 +4011,8 @@
     {
       "id": "ar.file.188",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "quote": "The negotiated system configuration identity includes authority-rules revision 2 in its v4 encoding, so earlier executables are refused before simulation rather than reaching a hash mismatch.",
-      "text": "The negotiated system configuration identity includes authority-rules revision 2 in its v4 encoding, so earlier executables are refused before simulation rather than reaching a hash mismatch."
+      "quote": "The negotiated system configuration identity includes authority-rules revision 3 in its v4 encoding, so earlier executables are refused before simulation rather than reaching a hash mismatch.",
+      "text": "The negotiated system configuration identity includes authority-rules revision 3 in its v4 encoding, so earlier executables are refused before simulation rather than reaching a hash mismatch."
     },
     {
       "id": "ar.file.189",
@@ -4805,6 +4805,48 @@
       "source": "docs/active-regions.md#file-and-compatibility",
       "quote": "A failed payload prevents metadata acknowledgement.",
       "text": "A failed payload prevents metadata acknowledgement."
+    },
+    {
+      "id": "ar.file.216",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Before horizon or edit admission, initialized authoritative water at nonzero Y migrates to the Y=0 column owner with its complete integer depth, bed, flux and solver bookkeeping.",
+      "text": "Before horizon or edit admission, initialized authoritative water at nonzero Y migrates to the Y=0 column owner with its complete integer depth, bed, flux and solver bookkeeping."
+    },
+    {
+      "id": "ar.file.217",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Live same-id authority takes precedence over durable records;",
+      "text": "Live same-id authority takes precedence over durable records;"
+    },
+    {
+      "id": "ar.file.218",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "The destination and cleared source water records commit in one atomic region replacement before live ownership changes;",
+      "text": "The destination and cleared source water records commit in one atomic region replacement before live ownership changes;"
+    },
+    {
+      "id": "ar.file.219",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Pristine terrain leaves the simulation set when it leaves the required horizon, even while its region remains active, so reload restores the same participants and colliders.",
+      "text": "Pristine terrain leaves the simulation set when it leaves the required horizon, even while its region remains active, so reload restores the same participants and colliders."
+    },
+    {
+      "id": "ar.file.220",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "Eviction candidates are scanned and sorted only when a missing admission needs space at the 8,192-chunk resident cap, with one prepared list reused within the admission batch.",
+      "text": "Eviction candidates are scanned and sorted only when a missing admission needs space at the 8,192-chunk resident cap, with one prepared list reused within the admission batch."
+    },
+    {
+      "id": "ar.file.221",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "different Y layers have no historical precedence, so equal simulation states coalesce without summing water and conflicting or incomplete states refuse admission.",
+      "text": "different Y layers have no historical precedence, so equal simulation states coalesce without summing water and conflicting or incomplete states refuse admission."
+    },
+    {
+      "id": "ar.file.222",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "quote": "source terrain authority remains independent.",
+      "text": "source terrain authority remains independent."
     }
   ],
   "exclusions": [

@@ -829,13 +829,37 @@ std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& 
     return StableDump(snapshot);
 }
 
-std::string SerializeChunkAuthoritySnapshotJson(const Chunk& chunk) {
-    const nlohmann::json snapshot = {
-        {"schema", kSnapshotSchema},
-        {"order_contract", kOrderContract},
-        {"chunk_count", 1},
-        {"persisted_fields", PersistedFields()},
-        {"chunks", nlohmann::json::array({ChunkToJson(chunk, false, true, true)})}};
+std::string SerializeChunkAuthoritySnapshotJson(const Chunk& chunk, bool omit_water) {
+    auto contents = ChunkToJson(chunk, false, true, true);
+    if (omit_water) {
+        // A migration clears the old grid in the same atomic region image as
+        // its replacement. Use the ordinary empty-water encoding, without a new tag.
+        const auto empty = ChunkToJson(Chunk(chunk.get_coords()), false, true, true);
+        for (const char* field : {"water_level_data",
+                                  "water_flow_data",
+                                  "water_sim_terrain_height",
+                                  "water_depth_mm",
+                                  "water_bed_mm",
+                                  "water_edge_flux",
+                                  "water_mesh_vertices",
+                                  "water_mesh_indices",
+                                  "has_water_sim",
+                                  "water_mesh_generated",
+                                  "current_water_resolution",
+                                  "is_water_sleeping",
+                                  "max_water_delta_last_tick",
+                                  "ticks_below_threshold",
+                                  "water_mesh_dirty_ticks",
+                                  "water_state"})
+            contents[field] = empty.at(field);
+        contents.erase("water_authority");
+        contents["authority"]["water_owned"] = false;
+    }
+    const nlohmann::json snapshot = {{"schema", kSnapshotSchema},
+                                     {"order_contract", kOrderContract},
+                                     {"chunk_count", 1},
+                                     {"persisted_fields", PersistedFields()},
+                                     {"chunks", nlohmann::json::array({std::move(contents)})}};
     return StableDump(snapshot);
 }
 
@@ -1068,15 +1092,25 @@ void RegionContentHasher::append(const Chunk& chunk) {
     }
 }
 
-void AuthorityHashCache::update(const std::shared_ptr<Chunk>& chunk) {
+void AuthorityHashCache::erase(ChunkID id) {
+    const auto retired = m_chunks.find(id);
+    if (retired != m_chunks.end()) {
+        m_terrain -= retired->second.terrain;
+        m_water -= retired->second.water;
+        m_chunks.erase(retired);
+    }
+}
+
+void AuthorityHashCache::update(const std::shared_ptr<Chunk>& incoming) {
+    const auto chunk = incoming;
     if (!chunk || !chunk->has_simulation_authority())
         return;
     const auto stamp = chunk->authority_stamp();
     const auto found = m_chunks.find(chunk->get_id());
-    if (found != m_chunks.end() && found->second.owner.lock() == chunk &&
-        found->second.stamp == stamp)
+    const auto owner = found != m_chunks.end() ? found->second.owner.lock() : nullptr;
+    const bool same_owner = owner && owner == chunk;
+    if (same_owner && found->second.stamp == stamp)
         return;
-    const bool same_owner = found != m_chunks.end() && found->second.owner.lock() == chunk;
     const auto terrain_revision = chunk->voxel_revision();
     std::uint64_t terrain = 14695981039346656037ull;
     if (same_owner && found->second.terrain_revision == terrain_revision &&

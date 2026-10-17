@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <nlohmann/json.hpp>
@@ -755,4 +756,154 @@ TEST(WorldSaveService, ExplicitOwnershipRejectsContradictoryContainerFlags) {
         EXPECT_FALSE(WorldSaveService::SaveBatch::begin(root.path));
         EXPECT_FALSE(WorldSaveService::validate_save(root.path));
     }
+}
+
+TEST(WorldSaveService, InterruptedInitialPayloadLeavesNoDirectoriesAndRetrySucceeds) {
+    // All callers share the actual durable producer, including flush/close,
+    // and refuse only after it finishes. No destination directories may leak.
+    for (const int kind : {0, 1, 2, 3}) {
+        SCOPED_TRACE(kind);
+        const TempSaveDir root("initial-payload-refusal");
+        auto chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
+        chunk->heightmap_data = {42.0f};
+        chunk->mark_voxel_data_dirty();
+        WorldStreamingState state;
+        if (kind == 2)
+            state.insert_chunk(chunk);
+        const auto destination = kind == 0   ? root.path / "nested" / "payload.bin"
+                                 : kind == 3 ? WorldSaveService::world_manifest_path(root.path)
+                                             : WorldSaveService::region_file_path(root.path, 0, 0);
+        const auto write = [&] {
+            if (kind == 0)
+                return WorldSaveService::write_file_durably(destination, "payload");
+            if (kind == 1)
+                return WorldSaveService::persist_chunk_authority(root.path, chunk);
+            return WorldSaveService{}.save_world(state, root.path);
+        };
+        WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
+        const bool saved = write();
+        WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
+        EXPECT_FALSE(saved);
+        EXPECT_TRUE(std::filesystem::is_empty(root.path));
+        EXPECT_TRUE(chunk->is_voxel_data_dirty());
+        ASSERT_TRUE(write());
+        EXPECT_TRUE(std::filesystem::is_regular_file(destination));
+        if (kind == 1) {
+            EXPECT_FALSE(chunk->is_voxel_data_dirty());
+        }
+    }
+}
+
+TEST(WorldSaveService, AuthorityPersistenceRejectsEmptyAndRegenerableOwnersWithoutWrites) {
+    const TempSaveDir root("authority-admission");
+    EXPECT_FALSE(WorldSaveService::persist_chunk_authority(root.path, nullptr));
+    auto chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
+    EXPECT_FALSE(WorldSaveService::persist_chunk_authority(root.path, chunk));
+    EXPECT_TRUE(std::filesystem::is_empty(root.path));
+    chunk->heightmap_data = {42.0f};
+    chunk->mark_voxel_data_dirty();
+    EXPECT_FALSE(WorldSaveService::persist_chunk_authority({}, chunk));
+    EXPECT_TRUE(chunk->is_voxel_data_dirty());
+    EXPECT_TRUE(std::filesystem::is_empty(root.path));
+    ASSERT_TRUE(WorldSaveService::persist_chunk_authority(root.path, chunk));
+    EXPECT_FALSE(chunk->is_voxel_data_dirty());
+}
+
+TEST(WorldSaveService, DurablePayloadRefusesNondirectoryParentsAndPreservesEmptyFiles) {
+    const TempSaveDir root("payload-path-refusal");
+    const auto blocker = root.path / "blocker";
+    std::ofstream(blocker, std::ios::binary) << "keep";
+    std::vector<std::string> errors;
+    EXPECT_FALSE(
+        WorldSaveService::write_file_durably(blocker / "child" / "file", "payload", &errors));
+    EXPECT_FALSE(errors.empty());
+    std::ifstream input(blocker, std::ios::binary);
+    EXPECT_EQ(std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>{}),
+              "keep");
+    input.close();
+    const auto destination = root.path / "nested" / "empty.bin";
+    ASSERT_TRUE(WorldSaveService::write_file_durably(destination, ""));
+    ASSERT_EQ(std::filesystem::file_size(destination), 0u);
+    WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
+    const bool saved = WorldSaveService::write_file_durably(destination, "replacement");
+    WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
+    EXPECT_FALSE(saved);
+    EXPECT_EQ(std::filesystem::file_size(destination), 0u);
+    EXPECT_EQ(std::distance(std::filesystem::directory_iterator(destination.parent_path()),
+                            std::filesystem::directory_iterator{}),
+              1);
+}
+
+TEST(WorldSaveService, WaterColumnMigrationRejectsInvalidInputsBeforeReplacingRecords) {
+    const TempSaveDir root("water-column-refusal");
+    const auto make_water = [](const IVec3& coords) {
+        auto chunk = std::make_shared<Chunk>(coords);
+        chunk->has_water_sim.store(true);
+        chunk->current_water_resolution.store(4);
+        chunk->water_level_data.assign(16, 0.8f);
+        chunk->water_flow_data.assign(16, Vec2(0.0f));
+        chunk->water_sim_terrain_height.assign(16, -0.2f);
+        chunk->water_depth_mm.assign(16, 1000);
+        chunk->water_bed_mm.assign(16, -200);
+        chunk->water_edge_flux.assign(32, 7);
+        chunk->mark_water_data_dirty();
+        return chunk;
+    };
+    const auto destination = make_water({10, 0, 10});
+    const auto source = make_water({10, 7, 10});
+    ASSERT_TRUE(WorldSaveService::persist_chunk_authority(root.path, source));
+    const auto path = WorldSaveService::region_file_path(root.path, 0, 0);
+    const auto bytes = [&path] {
+        std::ifstream input(path, std::ios::binary);
+        std::ostringstream contents;
+        contents << input.rdbuf();
+        return contents.str();
+    };
+    const auto before = bytes();
+    const auto refuse = [&](const std::filesystem::path& directory,
+                            const std::shared_ptr<Chunk>& target,
+                            const std::vector<std::shared_ptr<Chunk>>& originals) {
+        EXPECT_FALSE(
+            WorldSaveService::persist_water_column_migration(directory, target, originals));
+        EXPECT_EQ(bytes(), before);
+        EXPECT_TRUE(source->has_water_authority());
+        EXPECT_EQ(source->water_depth_mm, std::vector<std::int32_t>(16, 1000));
+    };
+    refuse({}, destination, {source});
+    refuse(root.path, nullptr, {source});
+    refuse(root.path, source, {source});
+    refuse(root.path, std::make_shared<Chunk>(IVec3(10, 0, 10)), {source});
+    const auto incomplete_target = make_water({10, 0, 10});
+    incomplete_target->water_edge_flux.pop_back();
+    refuse(root.path, incomplete_target, {source});
+    refuse(root.path, destination, {});
+    refuse(root.path, destination, {nullptr});
+    refuse(root.path, destination, {destination});
+    refuse(root.path, destination, {source, source});
+    refuse(root.path, destination, {make_water({11, 7, 10})});
+    refuse(root.path, destination, {make_water({10, 7, 11})});
+    const auto conflict = make_water({10, -3, 10});
+    ++conflict->water_edge_flux[0];
+    refuse(root.path, destination, {source, conflict});
+    conflict->water_edge_flux.clear();
+    refuse(root.path, destination, {source, conflict});
+    refuse(root.path,
+           destination,
+           std::vector<std::shared_ptr<Chunk>>(std::numeric_limits<std::uint16_t>::max(), source));
+    // Successful retirement writes an explicit empty-water record, including
+    // when the source had water-only ownership and its header must become zero.
+    ASSERT_TRUE(WorldSaveService::persist_water_column_migration(root.path, destination, {source}));
+    WorldStreamingState loaded;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(WorldSaveService{}.load_world(loaded, root.path, errors, {}, 8192, false, true));
+    const auto retired = loaded.find_chunk(source->get_id());
+    const auto canonical = loaded.find_chunk(destination->get_id());
+    ASSERT_NE(retired, nullptr);
+    ASSERT_NE(canonical, nullptr);
+    EXPECT_FALSE(retired->has_simulation_authority());
+    EXPECT_FALSE(retired->has_water_sim.load());
+    EXPECT_TRUE(retired->water_depth_mm.empty());
+    EXPECT_EQ(canonical->water_depth_mm, destination->water_depth_mm);
+    EXPECT_EQ(canonical->water_bed_mm, destination->water_bed_mm);
+    EXPECT_EQ(canonical->water_edge_flux, destination->water_edge_flux);
 }

@@ -80,11 +80,11 @@ std::string ConfigIdentity(const SystemConfig& config) {
 TEST(SystemConfig, SimulationIdentityPinsShippingDefaults) {
     // Exact little-endian scalar serialization, independently computed with stdlib Python.
     // See docs/development/system-config-identity.md for the complete computation.
-    EXPECT_EQ(ConfigIdentity(SystemConfig::Defaults()), "6a02c73e706e06fc");
+    EXPECT_EQ(ConfigIdentity(SystemConfig::Defaults()), "09fd7346c6a3c38d");
     const auto path = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() /
                       "data/common/systems.json";
     ASSERT_TRUE(std::filesystem::exists(path));
-    EXPECT_EQ(ConfigIdentity(SystemConfig::LoadFromFile(path.string())), "6a02c73e706e06fc");
+    EXPECT_EQ(ConfigIdentity(SystemConfig::LoadFromFile(path.string())), "09fd7346c6a3c38d");
     EXPECT_EQ(luminumbra::core::SimulationIdentityValues{}.ComputeIdentity(),
               ConfigIdentity(SystemConfig::Defaults()));
 }

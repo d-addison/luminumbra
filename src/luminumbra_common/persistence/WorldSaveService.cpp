@@ -537,8 +537,8 @@ bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
                                  const std::filesystem::path& destination,
                                  std::vector<std::string>* errors) {
     // POSIX rename replaces an existing same-filesystem destination atomically.
-    // LMR1 staging is beside the live file; ledger staging is in the save root,
-    // outside the chunks scan. A cross-filesystem rename fails without replacing.
+    // Payload staging uses an existing ancestor; ledger staging stays outside
+    // the chunks scan. A cross-filesystem rename fails without replacing.
     if (std::rename(temp.c_str(), destination.c_str()) != 0) {
         const int error = errno;
         AddError(errors,
@@ -634,13 +634,53 @@ bool FlushDirectoryEntry(const std::filesystem::path& directory_path,
 
 #endif
 
+bool RegionStagingDestination(const std::filesystem::path& destination,
+                              std::filesystem::path& staging,
+                              std::vector<std::string>* errors) {
+    // Walk at most the path's component count. Stage on the same filesystem in
+    // an existing ancestor; refusal before publication must not create directories.
+    auto parent = destination.parent_path();
+    while (!parent.empty()) {
+        std::error_code error;
+        const bool exists = std::filesystem::exists(parent, error);
+        if (error) {
+            AddError(errors, "cannot inspect staging directory: " + error.message());
+            return false;
+        }
+        if (exists)
+            break;
+        const auto next = parent.parent_path();
+        if (next == parent)
+            return false;
+        parent = next;
+    }
+    staging = parent / destination.filename();
+    return true;
+}
+
+bool CreatePayloadDirectory(const std::filesystem::path& destination,
+                            std::vector<std::string>* errors) {
+    std::error_code error;
+    if (destination.has_parent_path())
+        std::filesystem::create_directories(destination.parent_path(), error);
+    if (!error)
+        return true;
+    AddError(errors,
+             "cannot create directory " + destination.parent_path().string() + ": " +
+                 error.message());
+    return false;
+}
+
 template<typename Producer>
 bool WriteDurableRegionTempWithProducer(const std::filesystem::path& destination,
                                         Producer&& produce,
                                         std::filesystem::path& out_temp,
                                         std::vector<std::string>* errors) {
+    std::filesystem::path staging;
+    if (!RegionStagingDestination(destination, staging, errors))
+        return false;
     RegionFileHandle file{};
-    if (!OpenDurableRegionTemp(destination, file, out_temp, errors))
+    if (!OpenDurableRegionTemp(staging, file, out_temp, errors))
         return false;
     bool produced = false;
     try {
@@ -879,6 +919,7 @@ struct RegionReplacement {
     const WorldSaveService::ContainerRecord* container = nullptr;
     RegionIndex* source = nullptr;
     std::size_t source_record = 0;
+    bool omit_water = false;
 };
 
 bool RewriteRegionFile(const std::filesystem::path& path,
@@ -919,8 +960,6 @@ bool RewriteRegionFile(const std::filesystem::path& path,
         }
         found->second.replacement = i;
     }
-    if (path.has_parent_path())
-        std::filesystem::create_directories(path.parent_path());
     std::filesystem::path temp;
     const bool written = WriteDurableRegionTempWithProducer(
         path,
@@ -953,12 +992,19 @@ bool RewriteRegionFile(const std::filesystem::path& path,
                         record.id = key.second;
                         record.lod_level = key.first;
                         if (replacement.chunk) {
-                            record.flags = ChunkRecordFlags(*replacement.chunk, entry.record.flags);
-                            if (!CompressPayload(
-                                    SerializeSingleChunkSnapshot(replacement.chunk,
-                                                                 replacement.preserve_authority),
-                                    record,
-                                    errors))
+                            record.flags =
+                                replacement.omit_water
+                                    ? (replacement.chunk->sdf_provenance() ==
+                                               ChunkSdfProvenance::LoadedOrEdited
+                                           ? kRecordFlagEdited
+                                           : 0)
+                                    : ChunkRecordFlags(*replacement.chunk, entry.record.flags);
+                            const auto payload =
+                                replacement.omit_water
+                                    ? SerializeChunkAuthoritySnapshotJson(*replacement.chunk, true)
+                                    : SerializeSingleChunkSnapshot(replacement.chunk,
+                                                                   replacement.preserve_authority);
+                            if (!CompressPayload(payload, record, errors))
                                 return false;
                         } else {
                             record.flags = replacement.container->flags;
@@ -998,6 +1044,10 @@ bool RewriteRegionFile(const std::filesystem::path& path,
     if (InterruptBeforeRegionReplaceForTesting().exchange(false, std::memory_order_acq_rel)) {
         RemoveTemporaryFile(temp);
         AddError(errors, "region replacement interrupted by test seam before replacing");
+        return false;
+    }
+    if (!CreatePayloadDirectory(path, errors)) {
+        RemoveTemporaryFile(temp);
         return false;
     }
     if (!ReplaceRegionFileAtomically(temp, path, errors)) {
@@ -1045,6 +1095,15 @@ bool WriteWorldManifest(const std::filesystem::path& manifest_path,
     std::filesystem::path temp;
     if (!WriteDurableRegionTemp(manifest_path, bytes, temp, errors))
         return false;
+    if (InterruptBeforeRegionReplaceForTesting().exchange(false, std::memory_order_acq_rel)) {
+        RemoveTemporaryFile(temp);
+        AddError(errors, "interrupted before world manifest replacement");
+        return false;
+    }
+    if (!CreatePayloadDirectory(manifest_path, errors)) {
+        RemoveTemporaryFile(temp);
+        return false;
+    }
     if (!ReplaceRegionFileAtomically(temp, manifest_path, errors)) {
         RemoveTemporaryFile(temp);
         return false;
@@ -1375,7 +1434,6 @@ bool WorldSaveService::save_regions_validated(world::ActiveRegionLedger& ledger,
     }
     try {
         const auto path = active_regions_path(save_dir);
-        std::filesystem::create_directories(path.parent_path());
         std::filesystem::path temp;
         // Keep abandoned staging files outside the strict region integrity scan.
         // The save root is on the save filesystem; replacement refuses EXDEV
@@ -1387,6 +1445,10 @@ bool WorldSaveService::save_regions_validated(world::ActiveRegionLedger& ledger,
         if (const auto hook = BeforeActiveRegionsReplaceForTesting(); hook && !hook()) {
             RemoveTemporaryFile(temp);
             AddError(errors, "interrupted before active-region ledger replacement");
+            return false;
+        }
+        if (!CreatePayloadDirectory(path, errors)) {
+            RemoveTemporaryFile(temp);
             return false;
         }
         if (!ReplaceRegionFileAtomically(temp, path, errors)) {
@@ -1801,6 +1863,36 @@ bool WorldSaveService::persist_chunk_authority(const std::filesystem::path& save
     return true;
 }
 
+bool WorldSaveService::persist_water_column_migration(
+    const std::filesystem::path& save_dir,
+    const std::shared_ptr<Chunk>& destination,
+    const std::vector<std::shared_ptr<Chunk>>& sources) {
+    if (save_dir.empty() || !destination || destination->get_coords().y != 0 ||
+        !destination->has_water_authority() || !destination->has_complete_water_state() ||
+        sources.empty() || sources.size() >= std::numeric_limits<u16>::max())
+        return false;
+    // LMR1 bounds this list, including the destination, to 65,535 records.
+    std::vector<RegionReplacement> replacements;
+    replacements.reserve(sources.size() + 1u);
+    replacements.push_back(
+        {.id = destination->get_id(), .preserve_authority = true, .chunk = destination});
+    std::set<ChunkID> seen;
+    for (const auto& source : sources) {
+        if (!source || source->get_coords().x != destination->get_coords().x ||
+            source->get_coords().z != destination->get_coords().z || source->get_coords().y == 0 ||
+            !source->has_water_authority() || !source->has_complete_water_state() ||
+            !source->same_water_state(*destination) || !seen.insert(source->get_id()).second)
+            return false;
+        replacements.push_back({.id = source->get_id(),
+                                .preserve_authority = true,
+                                .chunk = source,
+                                .omit_water = true});
+    }
+    int rx = 0, rz = 0;
+    region_coords_for_chunk(destination->get_coords(), rx, rz);
+    return RewriteRegionFile(region_file_path(save_dir, rx, rz), replacements, nullptr);
+}
+
 bool WorldSaveService::copy_chunk_authority(const std::filesystem::path& source,
                                             const std::filesystem::path& destination) {
     if (source == destination)
@@ -1898,14 +1990,18 @@ void WorldSaveService::set_interrupt_before_region_replace_for_testing(bool enab
 bool WorldSaveService::write_file_durably(const std::filesystem::path& destination,
                                           const std::string& bytes,
                                           std::vector<std::string>* errors) {
-    std::error_code directory_error;
-    if (destination.has_parent_path()) {
-        std::filesystem::create_directories(destination.parent_path(), directory_error);
-    }
-    if (directory_error) {
+    std::filesystem::path temp_path;
+    if (!WriteDurableRegionTemp(destination, bytes, temp_path, errors))
+        return false;
+    if (InterruptBeforeRegionReplaceForTesting().exchange(false, std::memory_order_acq_rel)) {
+        RemoveTemporaryFile(temp_path);
         AddError(errors,
-                 "cannot create directory " + destination.parent_path().string() + ": " +
-                     directory_error.message());
+                 "file replacement interrupted by test seam before replacing: " +
+                     destination.string());
+        return false;
+    }
+    if (!CreatePayloadDirectory(destination, errors)) {
+        RemoveTemporaryFile(temp_path);
         return false;
     }
 #if !defined(_WIN32)
@@ -1919,21 +2015,11 @@ bool WorldSaveService::write_file_durably(const std::filesystem::path& destinati
         const std::filesystem::path holder =
             ancestor.has_parent_path() ? ancestor.parent_path() : std::filesystem::path(".");
         if (!FlushDirectoryEntry(holder, errors)) {
+            RemoveTemporaryFile(temp_path);
             return false;
         }
     }
 #endif
-    std::filesystem::path temp_path;
-    if (!WriteDurableRegionTemp(destination, bytes, temp_path, errors)) {
-        return false;
-    }
-    if (InterruptBeforeRegionReplaceForTesting().exchange(false, std::memory_order_acq_rel)) {
-        RemoveTemporaryFile(temp_path);
-        AddError(errors,
-                 "file replacement interrupted by test seam before replacing: " +
-                     destination.string());
-        return false;
-    }
     if (!ReplaceRegionFileAtomically(temp_path, destination, errors)) {
         RemoveTemporaryFile(temp_path);
         return false;
@@ -2224,9 +2310,6 @@ bool WorldSaveService::write_snapshot(const std::vector<std::shared_ptr<Chunk>>&
                                       std::size_t* regions_written,
                                       bool preserve_authority) const {
     try {
-        const std::filesystem::path region_dir = region_directory(save_dir);
-        std::filesystem::create_directories(region_dir);
-
         // Group the chunks to persist by region (deterministic order).
         std::map<std::pair<int, int>, std::vector<std::shared_ptr<Chunk>>> regions;
         for (const auto& chunk : chunks) {

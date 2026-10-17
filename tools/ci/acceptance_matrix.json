@@ -3092,6 +3092,26 @@
         {
           "kind": "ctest",
           "ref": "WorldSaveService.ExplicitOwnershipRejectsContradictoryContainerFlags"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RegionAuthorityWiringPython"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.ExpiredAuthorityOwnerCannotAcknowledgeReplacementOrEmptyInput"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.AuthorityPersistenceRejectsEmptyAndRegenerableOwnersWithoutWrites"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.InterruptedInitialPayloadLeavesNoDirectoriesAndRetrySucceeds"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.DurablePayloadRefusesNondirectoryParentsAndPreservesEmptyFiles"
         }
       ]
     },
@@ -3298,7 +3318,7 @@
     {
       "id": "contract.authority-residency",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "statement": "Simulation and rendering share the 8,192 unique resident-chunk bound. Streaming, rehydration and replacement keep bounded intermediate state; simulation displaces render caches through persist-before-release, protects required horizons and faults on capacity exhaustion. Headless regressions are landed; peak-memory qualification remains pending.",
+      "statement": "Simulation and rendering share the 8,192 unique resident-chunk bound. Streaming, rehydration and replacement keep bounded intermediate state; simulation displaces render caches through persist-before-release, protects required horizons and faults on capacity exhaustion. Headless regressions are landed; peak-memory qualification remains pending. Pristine terrain participants leave departed horizons; eviction preparation requires admission pressure. Source checks pass independently of native qualification.",
       "status": "partial",
       "requirements": [
         "ar.file.156",
@@ -3309,7 +3329,9 @@
         "ar.file.168",
         "ar.file.169",
         "ar.file.171",
-        "ar.file.176"
+        "ar.file.176",
+        "ar.file.219",
+        "ar.file.220"
       ],
       "evidence": [
         {
@@ -3336,6 +3358,18 @@
           "kind": "doc",
           "ref": "docs/active-regions.md",
           "planned": "Measure resident and intermediate storage bounds and qualify simulation-only capacity exhaustion; owner: ds"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.PristineTerrainParticipantsForgetDistantHorizonsAcrossReload"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.EvictionPreparationRequiresAdmissionPressure"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RegionAuthorityWiringPython"
         }
       ]
     },
@@ -3470,7 +3504,7 @@
     {
       "id": "contract.authority-rule-identity",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "statement": "Negotiated configuration identity v4 includes authority-rules revision 2 without changing the Hello protocol version, refusing older rules before simulation. Identity regressions are landed; mixed-executable native qualification remains pending.",
+      "statement": "Negotiated configuration identity v4 includes authority-rules revision 3 without changing the Hello protocol version, refusing older rules before simulation. Identity regressions are landed; mixed-executable native qualification remains pending.",
       "status": "partial",
       "requirements": [
         "ar.file.188",
@@ -3489,6 +3523,10 @@
           "kind": "doc",
           "ref": "docs/active-regions.md",
           "planned": "Qualify early refusal between production executables with different authority-rule identities; owner: ds"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SystemConfigIdentityPython"
         }
       ]
     },
@@ -3962,6 +4000,50 @@
       "requirements": [
         "dw.station.099",
         "dw.station.100"
+      ]
+    },
+    {
+      "id": "contract.water-column-migration",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "statement": "Nonzero-Y water authority migrates complete saved simulation state to Y=0 before replacement admission. Equal column copies coalesce; conflicting or incomplete authority is refused. Atomic region replacement precedes live publication and preserves terrain ownership. Registered regressions cover edits, sources, save/reload, insertion history and write failures; native execution remains pending.",
+      "status": "partial",
+      "requirements": [
+        "ar.file.216",
+        "ar.file.217",
+        "ar.file.218",
+        "ar.file.221",
+        "ar.file.222"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.NonzeroLegacyWaterContinuesCompleteStateAcrossSaveAndEdits"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.EqualWaterColumnDuplicatesCoalesceIndependentOfHistory"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.ConflictingOrIncompleteColumnWaterRefusesWithoutWrites"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.ColumnWaterReplacementFailurePreservesOwnersAndDurableImage"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldSaveService.WaterColumnMigrationRejectsInvalidInputsBeforeReplacingRecords"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Qualify legacy column migration and refusals on supported native platforms; owner: ds"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.ColumnWaterMigrationAtCapacityRetiresOnlyWaterOnlySources"
+        }
       ]
     }
   ]

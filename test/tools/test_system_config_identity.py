@@ -17,7 +17,7 @@ SHIPPED = json.loads((ROOT / "data/common/systems.json").read_text(encoding="utf
 
 def canonical_bytes(document, *, finite_hydrology=True, rain_scale_mm=25,
                     region_work_limit=(1 << 64) - 1, region_hold_ticks=30,
-                    region_reduced_shift=1, authority_rules_revision=2):
+                    region_reduced_shift=1, authority_rules_revision=3):
     result = bytearray(b"system-config:v4:")
     for key_id, key in enumerate(SCHEMA["keys"]):
         if key["section"] != "sim" and key["enum"] != "RenderCircadian":
@@ -83,12 +83,15 @@ class SystemConfigIdentityTest(unittest.TestCase):
 
     def test_exact_shipping_pin(self):
         self.assertEqual(len(canonical_bytes(SHIPPED)), 301)
-        self.assertEqual(identity(SHIPPED), "6a02c73e706e06fc")
+        self.assertEqual(identity(SHIPPED), "09fd7346c6a3c38d")
         self.assertEqual(canonical_bytes({}), canonical_bytes(SHIPPED))
 
     def test_authority_rules_revision_is_bound(self):
-        self.assertEqual(canonical_bytes(SHIPPED)[-4:], struct.pack("<I", 2))
+        self.assertEqual(canonical_bytes(SHIPPED)[-4:], struct.pack("<I", 3))
         self.assertNotEqual(identity(SHIPPED), identity(SHIPPED, authority_rules_revision=1))
+        self.assertNotEqual(identity(SHIPPED), identity(SHIPPED, authority_rules_revision=2))
+        header = (ROOT / "src/luminumbra_common/core/SystemConfig.h").read_text(encoding="utf-8")
+        self.assertIn("kAuthorityRulesRevision = 3;", header)
         # The previously admitted shipping rules must fail compatibility.
         self.assertNotEqual(identity(SHIPPED), "60ab3c242d54ce89")
 

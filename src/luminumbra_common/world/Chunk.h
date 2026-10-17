@@ -108,6 +108,13 @@ public:
                 .quiet_ticks = ticks_below_threshold,
                 .max_delta_bits = std::bit_cast<u32>(max_water_delta_last_tick)};
     }
+    // Bounded migration validation and exact comparison of evolution-relevant
+    // water state, including persisted mirrors consumed by queries and sources.
+    bool has_complete_water_state() const;
+    bool same_water_state(const Chunk& other) const;
+    // Owner-thread retirement after a column migration is durably committed.
+    // Terrain ownership and geometry are preserved independently.
+    void clear_water_data();
     bool has_water_authority() const {
         return m_water_authority.load(std::memory_order_acquire);
     }
