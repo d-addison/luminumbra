@@ -265,6 +265,8 @@ add_executable(common_tests
     common/RegionConsumerGate_test.cpp
     common/RegionRng_test.cpp
     common/CreatureCoarse_test.cpp
+    common/GameSessionCreatures_test.cpp
+    physics/creature_avatar_lifecycle_test.cpp
     common/FoliageFieldPages_test.cpp
     common/WaterShare_test.cpp
     common/RegionalWater_test.cpp
