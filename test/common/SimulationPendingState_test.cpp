@@ -106,7 +106,12 @@ State Snapshot(W::GameSession& session) {
     return state;
 }
 bool RawDigest(const fs::path& root, std::string_view member, P::MemberDigest& out, std::string&) {
-    return P::hash_file(root / member, out.bytes, out.fnv64, out.present, nullptr);
+    return P::hash_file(root / member,
+                        out.bytes,
+                        out.fnv64,
+                        out.present,
+                        nullptr,
+                        P::save_member_byte_limit(member));
 }
 void ReindexMember(const fs::path& root, std::string_view path = State::kMember) {
     P::SnapshotIndex index;
@@ -188,6 +193,7 @@ void SaveWithDecodeBudget(W::GameSession& session,
 }
 
 TEST(SimulationPendingState, FutureEventsAndSequenceRoundtrip) {
+    EXPECT_EQ(P::save_member_byte_limit(State::kMember), State::kMaxFileBytes);
     PendingWorld world;
     auto& bus = world.session.GetSimulationEventBus();
     const auto empty = world.session.CaptureAuthorityState();
@@ -652,6 +658,71 @@ TEST(SimulationPendingState, RetainedEnergyDepositsSurviveFaultSaveLoad) {
     EXPECT_EQ(canonical.encode(), encoded);
 }
 
+TEST(SimulationPendingState, PendingDigestDescribesTheValidatedRead) {
+    PendingWorld world;
+    ASSERT_TRUE(world.session.SaveWorldState());
+    const auto dir = world.session.GetWorldSaveDir();
+    const auto member = dir / State::kMember;
+    world.session.GetSimulationEventBus().publish(99, "future", "replacement authority");
+    const auto bytes = Snapshot(world.session).encode();
+    static fs::path selected;
+    static std::string replacement;
+    selected = member;
+    replacement = bytes;
+    const HookGuard guard({});
+    P::set_snapshot_step_hook_for_testing(+[](const char* step, const fs::path& path) {
+        if (std::string_view(step) == "hash-opened" && path == selected) {
+            P::set_snapshot_step_hook_for_testing(nullptr);
+            EXPECT_TRUE(P::WorldSaveService::write_file_durably(path, replacement));
+            selected.clear();
+            replacement.clear();
+        }
+    });
+    P::MemberDigest digest;
+    std::string error;
+    ASSERT_TRUE(P::WorldSaveService::member_digest(dir, State::kMember, digest, error)) << error;
+    EXPECT_TRUE(selected.empty());
+    EXPECT_TRUE(digest.present);
+    EXPECT_EQ(digest.bytes, bytes.size());
+    EXPECT_EQ(digest.fnv64, P::fnv1a64_bytes(bytes.data(), bytes.size()));
+}
+
+TEST(SimulationPendingState, PendingReaderRefusesUnsafeFilesBeforeDecode) {
+    PendingWorld world;
+    ASSERT_TRUE(world.session.SaveWorldState());
+    const auto dir = world.session.GetWorldSaveDir();
+    const auto member = dir / State::kMember;
+    const auto valid = Read(member);
+    const auto before = Snapshot(world.session).encode();
+    const auto refuse_without_decode = [&] {
+        const auto decodes = State::decode_count_for_testing();
+        EXPECT_FALSE(world.session.LoadWorld(world.session.GetMetadata().worldId));
+        EXPECT_EQ(State::decode_count_for_testing(), decodes);
+        EXPECT_EQ(Snapshot(world.session).encode(), before);
+    };
+    ASSERT_TRUE(fs::remove(member));
+    ASSERT_TRUE(fs::create_directory(member));
+    refuse_without_decode();
+    ASSERT_TRUE(fs::remove(member));
+    Write(member, valid);
+    fs::resize_file(member, State::kMaxFileBytes + 1);
+    refuse_without_decode();
+    ASSERT_TRUE(fs::remove(member));
+#ifndef _WIN32
+    // POSIX links need no elevation. Windows denial of link creation is not a reader test.
+    const auto target = world.root / "pending-target";
+    Write(target, valid);
+    fs::create_symlink(target, member);
+    refuse_without_decode();
+    ASSERT_TRUE(fs::remove(member));
+#endif
+    Write(member, valid.substr(0, valid.size() - 1));
+    EXPECT_FALSE(world.session.LoadWorld(world.session.GetMetadata().worldId));
+    EXPECT_EQ(Snapshot(world.session).encode(), before);
+    Write(member, valid);
+    EXPECT_TRUE(world.session.LoadWorld(world.session.GetMetadata().worldId));
+}
+
 TEST(SimulationPendingState, PendingStateMissingAdoptsPresentMalformedRefuses) {
     PendingWorld world;
     // A historical member absence derives activation deliveries from the ledger outbox.
@@ -921,14 +992,15 @@ TEST(SimulationPendingState, StandaloneFirstPendingPublicationIsIndexed) {
         const auto interrupted = world.root / (raw ? "raw-interrupted" : "typed-interrupted");
         {
             HookGuard guard({dir, interrupted, true, true, false, false});
-            if (raw)
+            if (raw) {
                 EXPECT_THROW(publish(dir), std::runtime_error);
-            else
+            } else
                 EXPECT_FALSE(publish(dir));
             EXPECT_TRUE(Hook().seen);
         }
-        if (!raw)
+        if (!raw) {
             EXPECT_FALSE(errors.empty());
+        }
         errors.clear();
         EXPECT_EQ(Tree(dir), baseline);
         EXPECT_FALSE(P::journal_pending(dir));
@@ -1019,14 +1091,15 @@ TEST(SimulationPendingState, FirstLedgerWritersRequireIndexedTransactions) {
             HookState state{dir, interrupted, true, true, false, false};
             state.publication_member = "active-regions.arl";
             HookGuard guard(std::move(state));
-            if (raw)
+            if (raw) {
                 EXPECT_THROW(publish(), std::runtime_error);
-            else
+            } else
                 EXPECT_FALSE(publish());
             EXPECT_TRUE(Hook().seen);
         }
-        if (!raw)
+        if (!raw) {
             EXPECT_FALSE(errors.empty());
+        }
         errors.clear();
         EXPECT_EQ(Tree(dir), baseline);
         EXPECT_EQ(ledger.encode(), caller_ledger);
@@ -1287,11 +1360,12 @@ TEST(SimulationPendingState, IndexedPendingTransactionsValidateOriginalIndexFact
             Copy(original, dir);
             W::ActiveRegionLedger ledger;
             ledger.set_local_anchor({0.0, 0.0, 0.0});
-            if (shape == "remove-ledger")
+            if (shape == "remove-ledger") {
                 ASSERT_TRUE(P::WorldSaveService::save_active_regions(ledger, W::WorldClock{}, dir));
-            if (mutation == "deleted")
+            }
+            if (mutation == "deleted") {
                 ASSERT_TRUE(fs::remove(dir / State::kMember));
-            else if (mutation == "altered") {
+            } else if (mutation == "altered") {
                 auto altered = pending;
                 altered.events.events.front().payload = "other";
                 Write(dir / State::kMember, altered.encode());
@@ -1343,9 +1417,10 @@ TEST(SimulationPendingState, IndexedPendingTransactionsValidateOriginalIndexFact
                     loaded, dir, errors, {}, {}, nullptr, &restored, &present, true));
                 EXPECT_TRUE(errors.empty());
                 EXPECT_EQ(present, shape != "remove-pending");
-                if (present)
+                if (present) {
                     EXPECT_EQ(restored.encode(),
                               shape == "remove-ledger" ? pending.encode() : replacement.encode());
+                }
             }
         }
     }

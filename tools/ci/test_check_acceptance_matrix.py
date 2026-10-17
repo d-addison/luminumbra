@@ -861,20 +861,100 @@ class AcceptanceMatrixTests(unittest.TestCase):
         self.assertTrue(any("planned" in item and "tangencies" in item["planned"]
                             for item in rows[0]["evidence"]))
 
-    def test_repository_boundary_discrepancy_and_watchdog_rearming_evidence(self) -> None:
+    def test_repository_input_bounds_and_watchdog_rearming_evidence(self) -> None:
         matrix = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_matrix.json")
         rows = [row for row in matrix["rows"] if "ar.activation.050" in row.get("requirements", [])]
         self.assertEqual(len(rows), 1)
         row = rows[0]
-        self.assertEqual(row["status"], "planned")
-        self.assertIn("docs/active-regions.md:66", row["discrepancy"])
-        self.assertIn("test/common/ActiveRegionLedger_test.cpp:438", row["discrepancy"])
-        self.assertIn("asymmetric", row["discrepancy"])
-        self.assertIn("owner: ds", row["evidence"][0]["planned"])
-        self.assertIn("symmetric-boundary regression", row["evidence"][0]["planned"])
-        self.assertIn(MODULE._escape_cell("Discrepancy: " + row["discrepancy"]), MODULE.render_doc(matrix))
+        self.assertEqual(row["status"], "covered")
+        self.assertEqual(row["id"], "contract.region-input-bounds")
+        self.assertIn("-2^24 <= x,z < 2^24", row["statement"])
+        self.assertIn("-32768 <= x,z < 32768", row["statement"])
+        self.assertNotIn("discrepancy", row)
+        self.assertEqual(row["requirements"], ["ar.activation.050", "ar.activation.065"])
+        self.assertEqual(row["evidence"], [
+            {"kind": "ctest", "ref": "ActiveRegionLedgerTest.ValidAnchorBoundaries"},
+            {"kind": "ctest",
+             "ref": "GameSessionHeadlessWorldTest.InvalidHostInputsNeverThrowAndAreCounted"},
+            {"kind": "ctest", "ref": "ActiveRegionLedgerTest.PinBoundariesOnBothAxes"},
+        ])
+        inventory = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_requirements.json")
+        requirements, errors = MODULE.validate_inventory(inventory, MODULE.DEFAULT_ROOT)
+        self.assertEqual(errors, [])
+        self.assertEqual(requirements["ar.activation.050"]["text"],
+                         "Non-finite or out-of-range (outside -2^24 <= x,z < 2^24) walking "
+                         "anchors and ground-object edit positions are ignored and counted "
+                         "(observational, never hashed or saved).")
+        self.assertEqual(requirements["ar.activation.065"]["text"],
+                         "Region pins outside -32768 <= x,z < 32768 are ignored and counted "
+                         "with the same observational rules.")
+        self.assertIn(MODULE._escape_cell(row["statement"]), MODULE.render_doc(matrix))
+        render_fixture = copy.deepcopy(matrix)
+        fixture_row = row_of(render_fixture, "contract.region-input-bounds")
+        fixture_row["discrepancy"] = "Input-bound qualification remains pending."
+        self.assertIn(MODULE._escape_cell("Discrepancy: " + fixture_row["discrepancy"]),
+                      MODULE.render_doc(render_fixture))
         watchdog = row_of(matrix, "em.client-hang")
         self.assertIn("HangWatchdog.RearmsAfterHeartbeatResumes", {e["ref"] for e in watchdog["evidence"]})
+
+    def test_repository_pending_state_retains_combined_contract_inventory(self) -> None:
+        matrix = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_matrix.json")
+        inventory = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_requirements.json")
+        row = row_of(matrix, "contract.simulation-pending-state")
+        pending = {entry["id"]: entry for entry in inventory["requirements"]
+                   if entry["id"].startswith("ar.pending.")}
+        self.assertEqual(len(pending), 51)
+        self.assertEqual(set(row["requirements"]), set(pending))
+        texts = " ".join(entry["text"] for entry in pending.values())
+        for phrase in ("16,384 events", "8 MiB", "64 MiB", "without clearing the scheduler fault",
+                       "Disabled sessions do not probe", "original presence", "existing energy slot"):
+            self.assertIn(phrase, texts)
+        refs = {item["ref"] for item in row["evidence"]}
+        for name in ("IndexedFirstLedgerValidatesPendingIndexFacts",
+                     "RetainedEnergyDepositsSurviveFaultSaveLoad",
+                     "FlagOffEventBehaviorAndSaveBytesUnchanged"):
+            self.assertIn("SimulationPendingState." + name, refs)
+        self.assertEqual(row["status"], "partial")
+
+    def test_repository_frozen_projection_adoption_retains_authority_evidence(self) -> None:
+        matrix = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_matrix.json")
+        inventory = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_requirements.json")
+        requirements, errors = MODULE.validate_inventory(inventory, MODULE.DEFAULT_ROOT)
+        self.assertEqual(errors, [])
+        self.assertIn("contract.frozen-projection-adoption", {row["id"] for row in matrix["rows"]})
+        row = row_of(matrix, "contract.frozen-projection-adoption")
+        self.assertEqual(row["status"], "covered")
+        texts = {requirements[ref]["text"] for ref in row["requirements"]}
+        self.assertIn("Standalone decoding preserves historical bytes.", texts)
+        self.assertIn("During enabled session loading, absent projection metadata adopts "
+                      "the current projection from validated scratch authority before "
+                      "publishing the world.", texts)
+        self.assertIn("The load writes no save members;", texts)
+        self.assertIn("Present malformed or unsupported projection metadata still refuses "
+                      "atomically.", texts)
+        self.assertIn("Saving is observational for Frozen continuation.", texts)
+        self.assertIn("Flag-off restoration retains the global resolution migration.", texts)
+        self.assertIn("A failed public world replacement preserves the current session and "
+                      "its ability to save, and reports the replacement error separately.", texts)
+        self.assertEqual({entry["ref"] for entry in row["evidence"]}, {
+            "FrozenAuthority.V030MissingIdentityAndProjectionAdoptThenStamp",
+            "FrozenAuthority.PresentMalformedProjectionRefusesAtomically",
+            "FrozenAuthority.FrozenEveryAuthorityDomainStableAcrossResidencySaveLoad",
+            "FrozenAuthority.EnabledDiskOnlyRestorePreservesFrozenWater",
+            "FrozenAuthority.FlagOffDiskOnlyRestoreStillMigratesWater",
+            "FrozenAuthority.EnabledDiskOnlyRestoreMissingAuthorityStillFaults",
+            "FrozenAuthority.FrozenControllerCleanupPreservesContinuation",
+            "FrozenAuthority.ThawDoesNotApplyCreatureOrEnergyCatchup",
+            "FrozenAuthority.FailedPublicReplacementPreservesCurrentSaveability",
+            "ActiveRegionLedgerTest.FrozenProjectionAdoptionIsAtomicAcrossAllHistoricalOwners",
+        })
+        layout = row_of(matrix, "contract.activation-extension-layout")
+        self.assertEqual(layout["status"], "partial")
+        layout_texts = " ".join(requirements[ref]["text"] for ref in layout["requirements"])
+        self.assertIn("| 7 | Activation state:", layout_texts)
+        self.assertIn("combined count is at most 1,048,576", layout_texts)
+        self.assertIn("every entry names an owned region", layout_texts)
+        self.assertEqual(MODULE.validate(matrix, repository_index(), MODULE.DEFAULT_ROOT, False), [])
 
     def test_planned_item_skips_existence(self) -> None:
         matrix = baseline_matrix()

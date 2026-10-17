@@ -4,7 +4,8 @@
 add_subdirectory(luminumbra_common)
 
 # --- Client Library (Rendering, UI, Input) ---
-# The shared source manifest is the single source of truth for the client.
+# The shared manifest includes the developer registry and widget adapters in every
+# client build configuration, including Release and the QA client.
 include("${CMAKE_CURRENT_LIST_DIR}/luminumbra_client/sources.cmake")
 
 # Create the library from the first-party client source manifest.
@@ -42,6 +43,11 @@ target_link_libraries(luminumbra_client PUBLIC
     imgui
     stb_headers
 )
+
+if(WIN32)
+    # SteadyFrameTiming pairs the coarse fallback's timer-resolution request.
+    target_link_libraries(luminumbra_client PUBLIC winmm)
+endif()
 
 # --- Client QA Library (RuntimeScenarioHarness) ---
 # The QA scenario harness (the gate/scenario driver behind
