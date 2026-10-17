@@ -1,10 +1,15 @@
 #include "luminumbra_client/rendering/Camera.h"
 #include "luminumbra_client/rendering/FarVolumeGlBackend.h"
 #include "luminumbra_client/rendering/FarWorldRenderer.h"
+#include "luminumbra_client/rendering/FrameScan.h"
+#include "luminumbra_client/rendering/PixelIo.h"
 #include "luminumbra_client/rendering/RenderPipeline.h"
 #include "luminumbra_client/rendering/Shader.h"
+#include "luminumbra_client/rendering/UploadBudget.h"
 #include "luminumbra_client/rendering/passes/ChunkGeometryPool.h"
 #include "luminumbra_client/rendering/passes/FarWorldPassUniforms.h"
+
+#include "../support/UniqueTempPath.h"
 
 #include <gtest/gtest.h>
 #define GLFW_INCLUDE_NONE
@@ -12,10 +17,12 @@
 #include <array>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <glad/glad.h>
 #include <glm/geometric.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
+#include <iterator>
 #include <limits>
 #include <thread>
 #include <vector>
@@ -34,6 +41,11 @@ struct WaterUploadTestPeer {
         payload.mesh_version = version;
         payload.vertices.resize(count);
         payload.indices.resize(count);
+        for (std::size_t index = 0; index < count; ++index) {
+            payload.vertices[index].position = {
+                static_cast<float>(version), static_cast<float>(index), 0};
+            payload.indices[index] = static_cast<u32>(index);
+        }
         pipeline.upload_water_mesh(chunk, payload);
     }
     static void AdoptEmpty(RenderPipeline& pipeline, FarWorldMode mode) {
@@ -584,83 +596,80 @@ INSTANTIATE_TEST_SUITE_P(VertexAndIndexWrites,
                          ::testing::Values(static_cast<GLenum>(GL_ARRAY_BUFFER),
                                            static_cast<GLenum>(GL_ELEMENT_ARRAY_BUFFER)));
 
+void CheckPoolGrowthFailure(GLenum target, bool storage_failure) {
+    ChunkGeometryPool pool;
+    std::array<VoxelVertex, 3> original{};
+    original[0].position = {1, 2, 3};
+    const std::array<u32, 3> indices{0, 1, 2};
+    EXPECT_EQ(
+        pool.allocate(original.data(), std::numeric_limits<u32>::max(), indices.data(), 3, nullptr),
+        ChunkGeometryPool::kInvalid);
+    EXPECT_EQ(pool.block_count(), 0u);
+    const auto resident = pool.allocate(original.data(), 3, indices.data(), 3, nullptr);
+    ASSERT_NE(resident, ChunkGeometryPool::kInvalid);
+    const auto allocation = pool.allocation(resident);
+    const auto old_block = pool.blocks().front();
+    // Bounded scratch: one block plus 64 vertices forces pool growth.
+    const u32 replacement_count = old_block.vertex_capacity + 64;
+    std::vector<VoxelVertex> replacement(replacement_count);
+    replacement[0].position = {4, 5, 6};
+    std::array<GLuint, 2> failed_buffers{};
+    GLuint failed_vao = 0;
+    {
+        FailedPoolBlock failure(static_cast<GLenum>(target), storage_failure);
+        EXPECT_EQ(pool.update(
+                      resident, replacement.data(), replacement_count, indices.data(), 3, nullptr),
+                  ChunkGeometryPool::kInvalid);
+        EXPECT_EQ(failure.failures, 1u);
+        failed_buffers = failure.buffers;
+        failed_vao = failure.vao;
+    }
+    EXPECT_EQ(pool.block_count(), 1u);
+    EXPECT_EQ(pool.live_allocation_count(), 1u);
+    EXPECT_TRUE(pool.allocation(resident).live);
+    EXPECT_EQ(pool.allocation(resident).vertex_offset, allocation.vertex_offset);
+    EXPECT_EQ(pool.allocation(resident).index_count, 3u);
+    EXPECT_EQ(glIsBuffer(old_block.vbo), GL_TRUE);
+    EXPECT_EQ(glIsBuffer(old_block.ebo), GL_TRUE);
+    EXPECT_EQ(glIsVertexArray(old_block.vao), GL_TRUE);
+    for (const auto name : failed_buffers)
+        EXPECT_EQ(glIsBuffer(name), GL_FALSE);
+    EXPECT_EQ(glIsVertexArray(failed_vao), GL_FALSE);
+    // Read resident bytes through GL, not just the host-side record.
+    std::array<VoxelVertex, 3> received{};
+    glBindBuffer(GL_ARRAY_BUFFER, old_block.vbo);
+    glGetBufferSubData(GL_ARRAY_BUFFER,
+                       static_cast<GLintptr>(allocation.vertex_offset * sizeof(VoxelVertex)),
+                       static_cast<GLsizeiptr>(sizeof(received)),
+                       received.data());
+    EXPECT_EQ(received[0].position, original[0].position);
+    EXPECT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
+
+    const auto accepted =
+        pool.update(resident, replacement.data(), replacement_count, indices.data(), 3, nullptr);
+    ASSERT_NE(accepted, ChunkGeometryPool::kInvalid);
+    EXPECT_FALSE(pool.allocation(resident).live);
+    EXPECT_EQ(pool.live_allocation_count(), 1u);
+    const auto reused = pool.allocate(original.data(), 3, indices.data(), 3, nullptr);
+    ASSERT_NE(reused, ChunkGeometryPool::kInvalid);
+    EXPECT_EQ(pool.allocation(reused).block_index, allocation.block_index);
+    EXPECT_EQ(pool.allocation(reused).vertex_offset, allocation.vertex_offset);
+    EXPECT_EQ(pool.allocation(reused).index_offset, allocation.index_offset);
+    const auto new_vbo = pool.blocks().back().vbo;
+    pool.destroy();
+    EXPECT_EQ(pool.block_count(), 0u);
+    EXPECT_EQ(pool.live_allocation_count(), 0u);
+    EXPECT_EQ(glIsBuffer(old_block.vbo), GL_FALSE);
+    EXPECT_EQ(glIsBuffer(old_block.ebo), GL_FALSE);
+    EXPECT_EQ(glIsVertexArray(old_block.vao), GL_FALSE);
+    EXPECT_EQ(glIsBuffer(new_vbo), GL_FALSE);
+    EXPECT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
+}
+
 TEST_F(FarWorldWaterGl, PoolGrowthFailurePreservesResidentReusesSlicesAndReleasesObjects) {
     for (const auto target : {GL_ARRAY_BUFFER, GL_ELEMENT_ARRAY_BUFFER}) {
-        for (const bool storage_failure : {false, true}) {
-            ChunkGeometryPool pool;
-            std::array<VoxelVertex, 3> original{};
-            original[0].position = {1, 2, 3};
-            const std::array<u32, 3> indices{0, 1, 2};
-            EXPECT_EQ(
-                pool.allocate(
-                    original.data(), std::numeric_limits<u32>::max(), indices.data(), 3, nullptr),
-                ChunkGeometryPool::kInvalid);
-            EXPECT_EQ(pool.block_count(), 0u);
-            const auto resident = pool.allocate(original.data(), 3, indices.data(), 3, nullptr);
-            ASSERT_NE(resident, ChunkGeometryPool::kInvalid);
-            const auto allocation = pool.allocation(resident);
-            const auto old_block = pool.blocks().front();
-            // Bounded scratch: one block plus 64 vertices forces pool growth.
-            const u32 replacement_count = old_block.vertex_capacity + 64;
-            std::vector<VoxelVertex> replacement(replacement_count);
-            replacement[0].position = {4, 5, 6};
-            std::array<GLuint, 2> failed_buffers{};
-            GLuint failed_vao = 0;
-            {
-                FailedPoolBlock failure(static_cast<GLenum>(target), storage_failure);
-                EXPECT_EQ(pool.update(resident,
-                                      replacement.data(),
-                                      replacement_count,
-                                      indices.data(),
-                                      3,
-                                      nullptr),
-                          ChunkGeometryPool::kInvalid);
-                EXPECT_EQ(failure.failures, 1u);
-                failed_buffers = failure.buffers;
-                failed_vao = failure.vao;
-            }
-            EXPECT_EQ(pool.block_count(), 1u);
-            EXPECT_EQ(pool.live_allocation_count(), 1u);
-            EXPECT_TRUE(pool.allocation(resident).live);
-            EXPECT_EQ(pool.allocation(resident).vertex_offset, allocation.vertex_offset);
-            EXPECT_EQ(pool.allocation(resident).index_count, 3u);
-            EXPECT_EQ(glIsBuffer(old_block.vbo), GL_TRUE);
-            EXPECT_EQ(glIsBuffer(old_block.ebo), GL_TRUE);
-            EXPECT_EQ(glIsVertexArray(old_block.vao), GL_TRUE);
-            for (const auto name : failed_buffers)
-                EXPECT_EQ(glIsBuffer(name), GL_FALSE);
-            EXPECT_EQ(glIsVertexArray(failed_vao), GL_FALSE);
-            // Read resident bytes through GL, not just the host-side record.
-            std::array<VoxelVertex, 3> received{};
-            glBindBuffer(GL_ARRAY_BUFFER, old_block.vbo);
-            glGetBufferSubData(
-                GL_ARRAY_BUFFER,
-                static_cast<GLintptr>(allocation.vertex_offset * sizeof(VoxelVertex)),
-                static_cast<GLsizeiptr>(sizeof(received)),
-                received.data());
-            EXPECT_EQ(received[0].position, original[0].position);
-            EXPECT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
-
-            const auto accepted = pool.update(
-                resident, replacement.data(), replacement_count, indices.data(), 3, nullptr);
-            ASSERT_NE(accepted, ChunkGeometryPool::kInvalid);
-            EXPECT_FALSE(pool.allocation(resident).live);
-            EXPECT_EQ(pool.live_allocation_count(), 1u);
-            const auto reused = pool.allocate(original.data(), 3, indices.data(), 3, nullptr);
-            ASSERT_NE(reused, ChunkGeometryPool::kInvalid);
-            EXPECT_EQ(pool.allocation(reused).block_index, allocation.block_index);
-            EXPECT_EQ(pool.allocation(reused).vertex_offset, allocation.vertex_offset);
-            EXPECT_EQ(pool.allocation(reused).index_offset, allocation.index_offset);
-            const auto new_vbo = pool.blocks().back().vbo;
-            pool.destroy();
-            EXPECT_EQ(pool.block_count(), 0u);
-            EXPECT_EQ(pool.live_allocation_count(), 0u);
-            EXPECT_EQ(glIsBuffer(old_block.vbo), GL_FALSE);
-            EXPECT_EQ(glIsBuffer(old_block.ebo), GL_FALSE);
-            EXPECT_EQ(glIsVertexArray(old_block.vao), GL_FALSE);
-            EXPECT_EQ(glIsBuffer(new_vbo), GL_FALSE);
-            EXPECT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
-        }
+        for (const bool storage_failure : {false, true})
+            CheckPoolGrowthFailure(static_cast<GLenum>(target), storage_failure);
     }
 }
 
@@ -692,6 +701,312 @@ TEST_F(FarWorldWaterGl, FailedIndexReservationCannotOverlapLaterVertexSlices) {
               ChunkGeometryPool::kInvalid);
     EXPECT_TRUE(pool.allocation(resident).live);
     pool.destroy();
+}
+
+// Script completion observation without sleeping or assuming driver timing.
+// Real fences are still created/deleted; the consumer's bytes remain GL-backed.
+class DelayedPoolConsumer {
+public:
+    DelayedPoolConsumer() {
+        active = this;
+        glClientWaitSync = Wait;
+        glFenceSync = Fence;
+    }
+    ~DelayedPoolConsumer() {
+        glClientWaitSync = original_wait;
+        glFenceSync = original_fence;
+        active = nullptr;
+    }
+    GLenum result = GL_TIMEOUT_EXPIRED;
+    bool fail_fence = false;
+    std::size_t polls = 0;
+
+private:
+    static inline DelayedPoolConsumer* active = nullptr;
+    PFNGLCLIENTWAITSYNCPROC original_wait = glClientWaitSync;
+    PFNGLFENCESYNCPROC original_fence = glFenceSync;
+    static GLenum APIENTRY Wait(GLsync, GLbitfield flags, GLuint64 timeout) {
+        EXPECT_EQ(flags, static_cast<GLbitfield>(GL_SYNC_FLUSH_COMMANDS_BIT));
+        EXPECT_EQ(timeout, 0u);
+        ++active->polls;
+        return active->result;
+    }
+    static GLsync APIENTRY Fence(GLenum condition, GLbitfield flags) {
+        return active->fail_fence ? nullptr : active->original_fence(condition, flags);
+    }
+};
+
+TEST_F(FarWorldWaterGl, DelayedConsumerPreventsOverwriteAndSliceReuseUntilCompletion) {
+    ChunkGeometryPool pool;
+    std::array<VoxelVertex, 3> vertices{};
+    vertices[0].position = {1, 2, 3};
+    const std::array<u32, 3> indices{0, 1, 2};
+    const auto resident = pool.allocate(vertices.data(), 3, indices.data(), 3, nullptr);
+    ASSERT_NE(resident, ChunkGeometryPool::kInvalid);
+    const auto old = pool.allocation(resident);
+    const auto block = pool.blocks()[old.block_index];
+    // Queue a GPU consumer of exactly these resident bytes before retirement.
+    GLuint consumed = 0;
+    glGenBuffers(1, &consumed);
+    glBindBuffer(GL_COPY_WRITE_BUFFER, consumed);
+    glBufferData(GL_COPY_WRITE_BUFFER, sizeof(vertices), nullptr, GL_STREAM_READ);
+    glBindBuffer(GL_COPY_READ_BUFFER, block.vbo);
+    glCopyBufferSubData(GL_COPY_READ_BUFFER,
+                        GL_COPY_WRITE_BUFFER,
+                        static_cast<GLintptr>(old.vertex_offset * sizeof(VoxelVertex)),
+                        0,
+                        sizeof(vertices));
+    pool.mark_submitted(old.block_index);
+    DelayedPoolConsumer delayed;
+    vertices[0].position = {4, 5, 6};
+    const auto replacement = pool.update(resident, vertices.data(), 3, indices.data(), 3, nullptr);
+    ASSERT_NE(replacement, ChunkGeometryPool::kInvalid);
+    EXPECT_NE(replacement, resident);
+    EXPECT_FALSE(pool.allocation(resident).live);
+    EXPECT_EQ(pool.retired_count(), 1u);
+    EXPECT_EQ(block.vertex_ptr[old.vertex_offset].position, glm::vec3(1, 2, 3));
+    const auto next = pool.allocate(vertices.data(), 3, indices.data(), 3, nullptr);
+    ASSERT_NE(next, ChunkGeometryPool::kInvalid);
+    EXPECT_NE(pool.allocation(next).vertex_offset, old.vertex_offset);
+    EXPECT_NE(pool.allocation(next).index_offset, old.index_offset);
+    EXPECT_EQ(pool.retired_count(), 1u);
+    delayed.result = GL_WAIT_FAILED;
+    pool.reclaim();
+    EXPECT_EQ(pool.retired_count(), 1u);
+    // GL's readback validates the queued consumer, independent of host records.
+    std::array<VoxelVertex, 3> observed{};
+    glBindBuffer(GL_COPY_READ_BUFFER, consumed);
+    glGetBufferSubData(GL_COPY_READ_BUFFER, 0, sizeof(observed), observed.data());
+    EXPECT_EQ(observed[0].position, glm::vec3(1, 2, 3));
+    // The real consumer has now completed; only its observed completion below
+    // permits retirement. Never fake completion before the GL-backed readback.
+    delayed.result = GL_CONDITION_SATISFIED;
+    pool.reclaim();
+    EXPECT_EQ(pool.retired_count(), 0u);
+    const auto reused = pool.allocate(vertices.data(), 3, indices.data(), 3, nullptr);
+    ASSERT_NE(reused, ChunkGeometryPool::kInvalid);
+    EXPECT_EQ(pool.allocation(reused).vertex_offset, old.vertex_offset);
+    EXPECT_EQ(pool.allocation(reused).index_offset, old.index_offset);
+    pool.free(replacement);
+    delayed.result = GL_ALREADY_SIGNALED;
+    pool.reclaim();
+    EXPECT_EQ(pool.retired_count(), 0u);
+    glDeleteBuffers(1, &consumed);
+    pool.destroy();
+    EXPECT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
+}
+
+TEST_F(FarWorldWaterGl, MissingFenceQuarantinesStorageAndRetirementPollingIsBounded) {
+    ChunkGeometryPool pool;
+    std::array<VoxelVertex, 3> vertices{};
+    const std::array<u32, 3> indices{0, 1, 2};
+    std::array<u32, 9> handles{};
+    for (auto& handle : handles) {
+        handle = pool.allocate(vertices.data(), 3, indices.data(), 3, nullptr);
+        ASSERT_NE(handle, ChunkGeometryPool::kInvalid);
+    }
+    pool.mark_submitted(0);
+    DelayedPoolConsumer delayed;
+    for (const auto handle : handles)
+        pool.free(handle);
+    delayed.result = GL_ALREADY_SIGNALED;
+    pool.reclaim();
+    EXPECT_EQ(delayed.polls, kTerrainUploadLimits.count);
+    EXPECT_EQ(pool.retired_count(), 1u);
+    pool.reclaim();
+    EXPECT_EQ(pool.retired_count(), 0u);
+    const auto reused = pool.allocate(vertices.data(), 3, indices.data(), 3, nullptr);
+    ASSERT_NE(reused, ChunkGeometryPool::kInvalid);
+    const auto old = pool.allocation(reused);
+    delayed.fail_fence = true;
+    pool.free(reused);
+    EXPECT_EQ(pool.retired_count(), 1u);
+    pool.reclaim();
+    EXPECT_EQ(pool.retired_count(), 1u);
+    const auto next = pool.allocate(vertices.data(), 3, indices.data(), 3, nullptr);
+    ASSERT_NE(next, ChunkGeometryPool::kInvalid);
+    EXPECT_NE(pool.allocation(next).vertex_offset, old.vertex_offset);
+    // Oversized requests are rejected before dereferencing either tiny input.
+    const auto too_large =
+        static_cast<u32>(ChunkGeometryPool::kMaxStorageBytes / sizeof(VoxelVertex));
+    EXPECT_EQ(pool.update(next, vertices.data(), too_large, indices.data(), 3, nullptr),
+              ChunkGeometryPool::kInvalid);
+    EXPECT_TRUE(pool.valid_allocation(next, 3));
+    pool.free(ChunkGeometryPool::kInvalid);
+    pool.free(next);
+    pool.free(next);
+    const auto retired_before_swap = pool.retired_count();
+    pool.clear();
+    EXPECT_EQ(pool.retired_count(), retired_before_swap);
+    EXPECT_EQ(pool.live_allocation_count(), 0u);
+    const auto after_swap = pool.allocate(vertices.data(), 3, indices.data(), 3, nullptr);
+    ASSERT_NE(after_swap, ChunkGeometryPool::kInvalid);
+    EXPECT_NE(pool.allocation(after_swap).vertex_offset, old.vertex_offset);
+    pool.clear();
+    EXPECT_GT(pool.retired_count(), retired_before_swap);
+    pool.destroy();
+    EXPECT_EQ(pool.retired_count(), 0u);
+    EXPECT_EQ(pool.block_count(), 0u);
+    // Final destruction must reset storage and its caps for a new pool lifetime.
+    const auto fresh = pool.allocate(vertices.data(), 3, indices.data(), 3, nullptr);
+    EXPECT_NE(fresh, ChunkGeometryPool::kInvalid);
+    pool.destroy();
+}
+
+TEST_F(FarWorldWaterGl, DeferredTerrainSnapshotKeepsPresentedOwnershipBeyondInnerSphere) {
+    ChunkGeometryPool pool;
+    const std::array<VoxelVertex, 3> vertices{};
+    const std::array<u32, 3> indices{0, 1, 2};
+    ChunkRenderData resident;
+    resident.pool_handle = pool.allocate(vertices.data(), 3, indices.data(), 3, nullptr);
+    ASSERT_NE(resident.pool_handle, ChunkGeometryPool::kInvalid);
+    resident.element_count = 3;
+    resident.mesh_version = 7;
+    for (int refusal = 0; refusal < 5; ++refusal) {
+        auto data = resident;
+        if (refusal == 1)
+            data.element_count = 6;
+        if (refusal == 2)
+            data.element_count = 0;
+        if (refusal == 3)
+            data.pool_handle = ChunkGeometryPool::kInvalid;
+        if (refusal == 4)
+            data.pool_handle = 1234;
+        FarWorldLiveUpload upload;
+        upload.cell = {-16, 0, -16, 0};
+        upload.snapshot_version = 8; // newer snapshot deferred by upload admission
+        data.SetPresentedTerrainUpload(upload, pool);
+        EXPECT_EQ(upload.uploaded_version, 7u); // never claim version 8 uploaded
+        FarWorldOwnership ownership;
+        ownership.Begin(1);
+        ASSERT_TRUE(ownership.Add(upload));
+        ASSERT_TRUE(ownership.Finish());
+        const std::array<double, 3> overlap{-248, 8, -248};
+        EXPECT_TRUE(FarWorldFragmentInClip(overlap, 1040));
+        EXPECT_EQ(ownership.Owns(overlap), refusal == 0);
+        EXPECT_FALSE(ownership.OwnsWater(overlap));
+    }
+    pool.free(resident.pool_handle);
+    FarWorldLiveUpload evicted;
+    resident.SetPresentedTerrainUpload(evicted, pool);
+    EXPECT_FALSE(IsFarWorldLiveUploadCurrent(evicted));
+    pool.destroy();
+}
+
+TEST_F(FarWorldWaterGl, RetainedTerrainDrawSuppressesOverlappingFarPixelsDuringDeferral) {
+    const auto root = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) / "res/shaders";
+    Shader shader((root / "g_buffer.vert").string().c_str(),
+                  (root / "g_buffer.frag").string().c_str(),
+                  {},
+                  {"LUMINUMBRA_FAR_WORLD_LADDER 1"});
+    ASSERT_TRUE(shader.IsValid()) << shader.Diagnostic();
+    Configure(shader, {0, 256, 0}, {-248, 8, -248});
+    FarWorldPassUniforms uniforms;
+    uniforms.Cache(shader);
+    ChunkGeometryPool pool;
+    std::array<VoxelVertex, 3> vertices{};
+    vertices[0].position = {-256, 8, -256};
+    vertices[1].position = {-240, 8, -256};
+    vertices[2].position = {-248, 8, -240};
+    for (auto& vertex : vertices) {
+        vertex.normal = {0, 1, 0};
+        vertex.material_id = 3;
+    }
+    const std::array<u32, 3> indices{0, 1, 2};
+    ChunkRenderData resident;
+    resident.pool_handle = pool.allocate(vertices.data(), 3, indices.data(), 3, nullptr);
+    resident.element_count = 3;
+    resident.mesh_version = 7;
+    ASSERT_NE(resident.pool_handle, ChunkGeometryPool::kInvalid);
+    for (auto& vertex : vertices)
+        vertex.material_id = 1;
+    FarVolumeGlDriver driver;
+    FarVolumeRenderMesh far_mesh;
+    far_mesh.content = FarVolumeContent::Mixed;
+    far_mesh.vertices.assign(vertices.begin(), vertices.end());
+    far_mesh.indices.assign(indices.begin(), indices.end());
+    // The production far uploader/draw binds both source SSBOs used for exact
+    // ownership reconstruction; a raw pooled draw cannot supply that contract.
+    auto far_allocation = UploadFarVolumeGpu(far_mesh, driver);
+    ASSERT_NE(far_allocation, nullptr);
+    const auto draw = [&](u32 handle) {
+        const auto& allocation = pool.allocation(handle);
+        glBindVertexArray(pool.blocks()[allocation.block_index].vao);
+        // Uniform model path: this fixture has no instance-origin buffer.
+        glDisableVertexAttribArray(3);
+        glDrawElementsBaseVertex(
+            GL_TRIANGLES,
+            3,
+            GL_UNSIGNED_INT,
+            reinterpret_cast<const void*>(static_cast<std::size_t>(allocation.index_offset) *
+                                          sizeof(u32)),
+            static_cast<GLint>(allocation.vertex_offset));
+        pool.mark_submitted(allocation.block_index);
+    };
+    glDisable(GL_DEPTH_TEST); // overlapping far pixels must be discarded by ownership
+    for (const bool presented : {false, true}) {
+        uniforms.Reset();
+        uniforms.UseInstanceOrigin(false);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        draw(resident.pool_handle); // the old resident is actually presented
+        ASSERT_NEAR(Pixel(1).a * 255, 3, .01f);
+        FarWorldLiveUpload upload;
+        upload.cell = {-16, 0, -16, 0};
+        upload.snapshot_version = 8; // replacement deferred; no version-8 upload
+        upload.uploaded_version = resident.mesh_version;
+        upload.uploaded_indices = resident.element_count;
+        upload.valid_allocation =
+            pool.valid_allocation(resident.pool_handle, resident.element_count);
+        if (presented)
+            resident.SetPresentedTerrainUpload(upload, pool);
+        EXPECT_EQ(upload.uploaded_version, 7u);
+        FarWorldOwnership ownership;
+        ownership.Begin(1);
+        ASSERT_TRUE(ownership.Add(upload));
+        ASSERT_TRUE(ownership.Finish());
+        ASSERT_TRUE(driver.BindLiveOwnership(ownership.cells()));
+        FarWorldDrawCommand command;
+        command.relative_origin = {0, -256, 0};
+        command.horizontal_outer_clip_meters = 1040;
+        command.tile_edge_meters = 1024;
+        command.live_cell_count = static_cast<std::int32_t>(ownership.cells().size());
+        FarWorldPassUniformScope reset(uniforms);
+        ASSERT_TRUE(uniforms.Prepare(command));
+        ASSERT_TRUE(DrawFarVolumeGpu(*far_allocation, driver));
+        // Without presented ownership the far material overwrites the old draw.
+        EXPECT_NEAR(Pixel(1).a * 255, presented ? 3 : 1, .01f);
+        driver.UnbindLiveOwnership();
+    }
+    driver.ReleaseLiveOwnership();
+    glBindVertexArray(0);
+    pool.destroy();
+}
+
+TEST(CaptureArtifacts, UnwritableReportImageInvalidScanAndCompleteOutput) {
+    const Luminumbra::TestSupport::ScopedTempFile scratch("capture-", ".json");
+    const auto directory = scratch.Path().parent_path();
+    // A directory is an unwritable file destination on Windows and POSIX,
+    // independent of privileges, ACLs and symlink support.
+    EXPECT_FALSE(WritePixelBufferPpm(directory, 1, 1, {1, 2, 3}));
+    EXPECT_FALSE(WriteCaptureText(directory, "[]\n"));
+    FrameScanReport report;
+    report.width = report.height = 1;
+    report.total_pixels = 1;
+    const auto scan_path = directory / "scan.json";
+    EXPECT_FALSE(WriteFrameScanReport(report, scan_path));
+    EXPECT_FALSE(std::filesystem::exists(scan_path));
+    report.ok = true;
+    EXPECT_FALSE(WriteFrameScanReport(report, directory));
+    EXPECT_FALSE(WritePixelBufferPpm(directory / "short.ppm", 2, 2, {1, 2, 3}));
+    EXPECT_FALSE(std::filesystem::exists(directory / "short.ppm"));
+    EXPECT_TRUE(WritePixelBufferPpm(directory / "image.ppm", 1, 1, {1, 2, 3}));
+    EXPECT_TRUE(WriteFrameScanReport(report, scan_path));
+    EXPECT_TRUE(WriteCaptureText(directory / "survey.json", "[]\n"));
+    std::ifstream index(directory / "survey.json", std::ios::binary);
+    const std::string contents{std::istreambuf_iterator<char>(index),
+                               std::istreambuf_iterator<char>()};
+    EXPECT_EQ(contents, "[]\n");
+    index.close(); // Windows cannot unlink an open file.
 }
 
 TEST_F(FarWorldWaterGl, WetToDryAdoptsRemovalInBothWaterModes) {
@@ -731,10 +1046,55 @@ TEST_F(FarWorldWaterGl, LegacyUploadDoesNotPublishLadderCertificate) {
     EXPECT_FALSE(data.LadderUploadValid());
 }
 
+struct WaterSnapshot {
+    WaterRenderData data{};
+    std::vector<unsigned char> vertices;
+    std::vector<unsigned char> indices;
+};
+
+void ReadWaterBuffer(GLenum target, GLuint name, std::vector<unsigned char>& bytes) {
+    glBindBuffer(target, name);
+    GLint64 size = 0;
+    glGetBufferParameteri64v(target, GL_BUFFER_SIZE, &size);
+    ASSERT_GT(size, 0);
+    // These fixtures use at most nine vertices/indices per store. Check before
+    // allocating so a corrupt size cannot produce an unbounded test readback.
+    ASSERT_LE(size, static_cast<GLint64>(9 * sizeof(VoxelVertex)));
+    bytes.resize(static_cast<std::size_t>(size));
+    glGetBufferSubData(target, 0, static_cast<GLsizeiptr>(size), bytes.data());
+}
+
+void CaptureWater(const RenderPipeline& pipeline, WaterSnapshot& snapshot) {
+    snapshot.data = WaterUploadTestPeer::Data(pipeline);
+    glBindVertexArray(snapshot.data.vao_id);
+    ReadWaterBuffer(GL_ARRAY_BUFFER, snapshot.data.vbo_id, snapshot.vertices);
+    ReadWaterBuffer(GL_ELEMENT_ARRAY_BUFFER, snapshot.data.ebo_id, snapshot.indices);
+    glBindVertexArray(0);
+    EXPECT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
+}
+
+void ExpectRetainedWater(const RenderPipeline& pipeline, const WaterSnapshot& expected) {
+    WaterSnapshot actual;
+    CaptureWater(pipeline, actual);
+    EXPECT_EQ(actual.data.vao_id, expected.data.vao_id);
+    EXPECT_EQ(actual.data.vbo_id, expected.data.vbo_id);
+    EXPECT_EQ(actual.data.ebo_id, expected.data.ebo_id);
+    EXPECT_EQ(actual.data.mesh_version, expected.data.mesh_version);
+    EXPECT_EQ(actual.data.element_count, expected.data.element_count);
+    EXPECT_EQ(actual.data.vertex_capacity, expected.data.vertex_capacity);
+    EXPECT_EQ(actual.data.index_capacity, expected.data.index_capacity);
+    EXPECT_EQ(actual.data.ladder_upload_version, expected.data.ladder_upload_version);
+    EXPECT_EQ(actual.data.LadderUploadValid(), expected.data.LadderUploadValid());
+    EXPECT_EQ(actual.vertices, expected.vertices);
+    EXPECT_EQ(actual.indices, expected.indices);
+}
+
 TEST_F(FarWorldWaterGl, FailedLegacyReplacementRetainsResidentBuffersAndVersion) {
     RenderPipeline pipeline;
     WaterUploadTestPeer::Upload(pipeline, 9, 3, FarWorldMode::Legacy);
     const auto resident = WaterUploadTestPeer::Data(pipeline);
+    WaterSnapshot original;
+    CaptureWater(pipeline, original);
     {
         FailedWaterUpload failure(true, GL_ELEMENT_ARRAY_BUFFER);
         WaterUploadTestPeer::Upload(pipeline, 10, 6, FarWorldMode::Legacy);
@@ -747,15 +1107,20 @@ TEST_F(FarWorldWaterGl, FailedLegacyReplacementRetainsResidentBuffersAndVersion)
     EXPECT_EQ(retained.mesh_version, 9u);
     EXPECT_EQ(retained.element_count, 3u);
     EXPECT_FALSE(retained.LadderUploadValid());
+    ExpectRetainedWater(pipeline, original);
     EXPECT_EQ(pipeline.get_last_mesh_upload_stats().water_upload_failures, 1u);
     WaterUploadTestPeer::Upload(pipeline, 10, 6, FarWorldMode::Legacy);
     EXPECT_EQ(retained.mesh_version, 10u);
     EXPECT_EQ(retained.element_count, 6u);
     EXPECT_FALSE(retained.LadderUploadValid());
     const auto accepted = retained;
+    WaterSnapshot replacement;
+    CaptureWater(pipeline, replacement);
     {
         FailedWaterUpload failure(true, GL_ELEMENT_ARRAY_BUFFER);
-        WaterUploadTestPeer::Upload(pipeline, 11, 7, FarWorldMode::Legacy);
+        // Nine is a valid triangle count and exceeds both the resident's six
+        // and the spare slot's three elements, so this must reach BufferData.
+        WaterUploadTestPeer::Upload(pipeline, 11, 9, FarWorldMode::Legacy);
         EXPECT_EQ(failure.failures(), 1);
     }
     EXPECT_EQ(retained.vao_id, accepted.vao_id);
@@ -763,7 +1128,72 @@ TEST_F(FarWorldWaterGl, FailedLegacyReplacementRetainsResidentBuffersAndVersion)
     EXPECT_EQ(retained.ebo_id, accepted.ebo_id);
     EXPECT_EQ(retained.mesh_version, 10u);
     EXPECT_EQ(retained.element_count, 6u);
+    ExpectRetainedWater(pipeline, replacement);
+    EXPECT_FALSE(retained.LadderUploadValid());
+    EXPECT_EQ(pipeline.get_last_mesh_upload_stats().water_upload_failures, 2u);
+    WaterUploadTestPeer::Upload(pipeline, 11, 9, FarWorldMode::Legacy);
+    EXPECT_EQ(retained.mesh_version, 11u);
+    EXPECT_EQ(retained.element_count, 9u);
+    EXPECT_FALSE(retained.LadderUploadValid());
     EXPECT_EQ(pipeline.get_last_mesh_upload_stats().water_upload_failures, 2u);
     EXPECT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
+}
+
+TEST_F(FarWorldWaterGl, WithinCapacityReplacementRefusalRetainsBytesAndRetriesInBothModes) {
+    for (const auto mode : {FarWorldMode::Legacy, FarWorldMode::Ladder}) {
+        for (const auto target : {GL_ARRAY_BUFFER, GL_ELEMENT_ARRAY_BUFFER}) {
+            RenderPipeline pipeline;
+            WaterUploadTestPeer::Upload(pipeline, 8, 6, mode);
+            WaterUploadTestPeer::Upload(pipeline, 9, 6, mode);
+            WaterSnapshot resident;
+            CaptureWater(pipeline, resident);
+            {
+                // The spare has capacity six. Three must use BufferSubData;
+                // a growth-only injection would miss this refusal entirely.
+                FailedWaterUpload failure(false, static_cast<GLenum>(target));
+                WaterUploadTestPeer::Upload(pipeline, 10, 3, mode);
+                EXPECT_EQ(failure.failures(), 1);
+            }
+            ExpectRetainedWater(pipeline, resident);
+            EXPECT_EQ(pipeline.get_last_mesh_upload_stats().water_upload_failures, 1u);
+            EXPECT_FALSE(WaterUploadTestPeer::LiveUpload(pipeline, 10).water_pass_eligible);
+            EXPECT_EQ(WaterUploadTestPeer::PresentedUpload(pipeline).water_pass_eligible,
+                      mode == FarWorldMode::Ladder);
+            WaterUploadTestPeer::Upload(pipeline, 10, 3, mode);
+            const auto& accepted = WaterUploadTestPeer::Data(pipeline);
+            EXPECT_EQ(accepted.mesh_version, 10u);
+            EXPECT_EQ(accepted.element_count, 3u);
+            EXPECT_EQ(accepted.LadderUploadValid(), mode == FarWorldMode::Ladder);
+            EXPECT_EQ(WaterUploadTestPeer::LiveUpload(pipeline, 10).water_pass_eligible,
+                      mode == FarWorldMode::Ladder);
+            EXPECT_FALSE(WaterUploadTestPeer::LiveUpload(pipeline, 9).water_pass_eligible);
+            EXPECT_EQ(pipeline.get_last_mesh_upload_stats().water_upload_failures, 1u);
+            EXPECT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
+        }
+    }
+}
+
+TEST_F(FarWorldWaterGl, IncompleteTriangleRefusesBeforeGpuAndPreservesResident) {
+    for (const auto mode : {FarWorldMode::Legacy, FarWorldMode::Ladder}) {
+        RenderPipeline pipeline;
+        WaterUploadTestPeer::Upload(pipeline, 9, 6, mode);
+        WaterSnapshot resident;
+        CaptureWater(pipeline, resident);
+        {
+            FailedWaterUpload failure(true, GL_ELEMENT_ARRAY_BUFFER);
+            WaterUploadTestPeer::Upload(pipeline, 10, 7, mode);
+            EXPECT_EQ(failure.failures(), 0); // Size validation precedes every GPU write.
+        }
+        ExpectRetainedWater(pipeline, resident);
+        EXPECT_EQ(pipeline.get_last_mesh_upload_stats().water_upload_failures, 1u);
+        EXPECT_FALSE(WaterUploadTestPeer::LiveUpload(pipeline, 10).water_pass_eligible);
+        WaterUploadTestPeer::Upload(pipeline, 10, 9, mode);
+        EXPECT_EQ(WaterUploadTestPeer::Data(pipeline).mesh_version, 10u);
+        EXPECT_EQ(WaterUploadTestPeer::Data(pipeline).element_count, 9u);
+        EXPECT_EQ(WaterUploadTestPeer::Data(pipeline).LadderUploadValid(),
+                  mode == FarWorldMode::Ladder);
+        EXPECT_EQ(pipeline.get_last_mesh_upload_stats().water_upload_failures, 1u);
+        EXPECT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
+    }
 }
 } // namespace

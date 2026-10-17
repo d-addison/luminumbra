@@ -186,6 +186,19 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertEqual(compact(block(self.header, "bool active() const")),
                          "return m_out.is_open() && m_out.good();")
 
+    def test_csv_nullable_counts_precede_both_complete_upload_lanes(self):
+        writer = compact(block(self.collector, "bool write_csv_row("))
+        self.assertIn("if (count_known) out << generated_count; out << ','; "
+                      "if (count_known) out << count_generation;", writer)
+        self.assertLess(writer.index("if (count_known)"), writer.index("append_uploads("))
+        self.assertIn("append_uploads(uploads.terrain, uploads.terrain_pending); "
+                      "append_uploads(uploads.water, uploads.water_pending); out << '\\n';",
+                      writer)
+        append = compact(block(writer, "const auto append_uploads ="))
+        self.assertEqual(append, "out << ',' << work.elapsed_ms << ',' << work.overshoot_ms "
+                         "<< ',' << work.attempts << ',' << work.adopted << ',' << work.bytes "
+                         "<< ',' << work.byte_overshoot << ',' << pending;")
+
     def test_deterministic_work_gates_are_registered_on_standard_targets(self):
         cmake = read(ROOT / "test/CMakeLists.txt")
         for target, source in (

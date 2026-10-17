@@ -54,8 +54,8 @@ void label_gl_object(GLenum identifier, GLuint name, const std::string& label) {
 namespace {
 // Per-block capacities. A 16^3 marching-cubes chunk produces at most a few
 // thousand vertices, so a 1M-vertex / 2M-index block (~36 MB) hosts hundreds of
-// live chunks; the pool grows by adding blocks only when the working set
-// outgrows the current blocks. Powers of two keep the bump frontier aligned.
+// live chunks; growth includes slices awaiting completion as well as the live
+// working set. Powers of two keep the bump frontier aligned.
 constexpr u32 kPoolBlockVertexCapacity = 1u << 20; // 1,048,576 vertices (~28 MB)
 constexpr u32 kPoolBlockIndexCapacity = 1u << 21;  // 2,097,152 indices  (~8 MB)
 // Round a slot size up to keep slices loosely aligned and reduce free-list
@@ -90,7 +90,8 @@ u32 ChunkGeometryPool::add_block(u32 min_vertices, u32 min_indices, const char* 
     block.index_capacity = std::max(kPoolBlockIndexCapacity, round_up_pool(min_indices));
     std::size_t checked_bytes = 0;
     if (!mesh_upload_bytes(
-            block.vertex_capacity, sizeof(VoxelVertex), block.index_capacity, checked_bytes))
+            block.vertex_capacity, sizeof(VoxelVertex), block.index_capacity, checked_bytes) ||
+        m_blocks.size() >= kMaxBlocks || checked_bytes > kMaxStorageBytes - m_storage_bytes)
         return kInvalid;
 
     const GLbitfield storage_flags = GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT;
@@ -181,6 +182,7 @@ u32 ChunkGeometryPool::add_block(u32 min_vertices, u32 min_indices, const char* 
     }
 
     m_blocks.push_back(block);
+    m_storage_bytes += checked_bytes;
     return block_index;
 }
 
@@ -270,8 +272,11 @@ u32 ChunkGeometryPool::allocate(const VoxelVertex* vertices,
         index_count > std::numeric_limits<u32>::max() - (kPoolSlotAlign - 1u) ||
         !mesh_upload_bytes(vertex_count, sizeof(VoxelVertex), index_count, checked_bytes))
         return kInvalid;
-    // A fresh block always grows to host any single mesh (add_block uses
-    // std::max(block_cap, rounded_request)), so allocation cannot fail on size.
+    reclaim();
+    if (m_free_handles.empty() && m_allocations.size() >= kMaxAllocations)
+        return kInvalid;
+    // Storage and handle caps include retired slices. Pressure fails closed;
+    // the caller retains its resident and retries through the upload budget.
 
     u32 vertex_offset = 0, vertex_slot = 0, index_offset = 0, index_slot = 0;
     u32 block_index = kInvalid;
@@ -335,21 +340,6 @@ u32 ChunkGeometryPool::update(u32 handle,
     if (handle == kInvalid || handle >= m_allocations.size() || !m_allocations[handle].live) {
         return allocate(vertices, vertex_count, indices, index_count, label_seed);
     }
-    Allocation& alloc = m_allocations[handle];
-    // In-place overwrite when the new geometry fits the reserved slots.
-    if (vertex_count <= alloc.vertex_slot && index_count <= alloc.index_slot && vertex_count != 0 &&
-        index_count != 0) {
-        Block& block = m_blocks[alloc.block_index];
-        std::memcpy(block.vertex_ptr + alloc.vertex_offset,
-                    vertices,
-                    static_cast<std::size_t>(vertex_count) * sizeof(VoxelVertex));
-        std::memcpy(block.index_ptr + alloc.index_offset,
-                    indices,
-                    static_cast<std::size_t>(index_count) * sizeof(u32));
-        alloc.vertex_count = vertex_count;
-        alloc.index_count = index_count;
-        return handle;
-    }
     // Keep the old slice resident until its replacement has been allocated.
     return replace_upload(
         handle,
@@ -363,12 +353,43 @@ void ChunkGeometryPool::free(u32 handle) {
         return;
     }
     Allocation& alloc = m_allocations[handle];
+    alloc.live = false;
+    --m_live_count;
+    if (!m_blocks[alloc.block_index].submitted) {
+        recycle(handle);
+        return;
+    }
+    // Insert after the final submitted consumer, never at upload time. A null
+    // fence remains quarantined, as does GL_WAIT_FAILED in reclaim().
+    m_retired.push_back({handle, glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0)});
+}
+
+void ChunkGeometryPool::mark_submitted(u32 block_index) {
+    m_blocks[block_index].submitted = true;
+}
+
+void ChunkGeometryPool::reclaim() {
+    // <= eight zero-time polls per upload attempt, charged to its existing
+    // preparation/work budget; no wait, world scan or unbounded retirement pass.
+    for (std::size_t count = 0; count < kTerrainUploadLimits.count && !m_retired.empty(); ++count) {
+        const auto retired = m_retired.front();
+        if (!retired.completion)
+            break;
+        const GLenum status = glClientWaitSync(retired.completion, GL_SYNC_FLUSH_COMMANDS_BIT, 0);
+        if (status != GL_ALREADY_SIGNALED && status != GL_CONDITION_SATISFIED)
+            break;
+        glDeleteSync(retired.completion);
+        recycle(retired.handle);
+        m_retired.pop_front();
+    }
+}
+
+void ChunkGeometryPool::recycle(u32 handle) {
+    const Allocation& alloc = m_allocations[handle];
     Block& block = m_blocks[alloc.block_index];
-    // Return the reserved slots to the block free lists for best-fit reuse.
     block.free_vertex_slices.emplace_back(alloc.vertex_offset, alloc.vertex_slot);
     block.free_index_slices.emplace_back(alloc.index_offset, alloc.index_slot);
     release_handle(handle);
-    --m_live_count;
 }
 
 void ChunkGeometryPool::resident_capacity(std::size_t& vertices, std::size_t& indices) const {
@@ -380,17 +401,22 @@ void ChunkGeometryPool::resident_capacity(std::size_t& vertices, std::size_t& in
     }
 }
 
+void ChunkGeometryPool::clear() {
+    // World-swap work is bounded by kMaxAllocations, including retired handles.
+    // Keep pending storage charged to the same caps across successive worlds.
+    for (u32 handle = 0; handle < m_allocations.size(); ++handle)
+        free(handle);
+}
+
 void ChunkGeometryPool::destroy() {
+    for (const auto& retired : m_retired) {
+        if (retired.completion)
+            glDeleteSync(retired.completion);
+    }
+    m_retired.clear();
+    // Delete objects without writing their mappings. GL retains backing stores
+    // referenced by queued draws; world swaps never recycle those stores.
     for (Block& block : m_blocks) {
-        if (block.vbo) {
-            glBindBuffer(GL_ARRAY_BUFFER, block.vbo);
-            glUnmapBuffer(GL_ARRAY_BUFFER);
-        }
-        if (block.ebo) {
-            glBindVertexArray(block.vao);
-            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, block.ebo);
-            glUnmapBuffer(GL_ELEMENT_ARRAY_BUFFER);
-        }
         glBindVertexArray(0);
         if (block.vao)
             glDeleteVertexArrays(1, &block.vao);
@@ -405,6 +431,7 @@ void ChunkGeometryPool::destroy() {
     m_allocations.clear();
     m_free_handles.clear();
     m_live_count = 0;
+    m_storage_bytes = 0;
 }
 
 } // namespace Luminumbra::Rendering

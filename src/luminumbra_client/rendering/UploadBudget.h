@@ -183,6 +183,33 @@ private:
     std::unordered_map<std::uint64_t, typename std::list<Entry>::iterator> m_index;
 };
 
+// Refresh existing FIFO entries without sorting them again. Only arrivals need
+// priority ordering; sorting retained work cannot change its queue position.
+// Two scratch pointer arrays are each bounded by the candidate count, never
+// copying mesh payloads. Each radix sort has eight passes: O(1) per candidate.
+template<typename Item, typename Id, typename Priority>
+void refresh_uploads(UploadQueue<Item>& queue,
+                     const std::vector<Item>& candidates,
+                     Id id,
+                     Priority priority) {
+    queue.begin_refresh();
+    std::vector<const Item*> arrivals;
+    arrivals.reserve(candidates.size());
+    for (const auto& candidate : candidates) {
+        if (queue.contains(id(candidate)))
+            queue.refresh(id(candidate), candidate);
+        else
+            arrivals.push_back(&candidate);
+    }
+    if (arrivals.size() > 1) {
+        order_uploads(arrivals, [&](const Item* item) { return id(*item); });
+        order_uploads(arrivals, [&](const Item* item) { return priority(*item); });
+    }
+    for (const auto* arrival : arrivals)
+        queue.refresh(id(*arrival), *arrival);
+    queue.end_refresh();
+}
+
 // The callback performs copying, ground construction and GPU adoption only
 // after admission. Failure rotates to the tail; each item is tried at most once
 // per frame. Resident resources are owned by the callback, never by the queue.

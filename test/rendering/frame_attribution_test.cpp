@@ -1,11 +1,14 @@
 #include "luminumbra_client/app/FrameAttribution.h"
+#include "luminumbra_client/rendering/PixelIo.h"
 
 #include <gtest/gtest.h>
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <streambuf>
 #include <string>
@@ -404,6 +407,31 @@ protected:
     }
 };
 
+TEST(CaptureArtifacts, TruncatedIndexFlushFailureAndCompleteStreamAreDistinct) {
+    using namespace Luminumbra::Rendering;
+    FailingBuffer short_output;
+    std::ostream truncated(&short_output);
+    EXPECT_FALSE(WriteCaptureStream(truncated, std::string(80, ' ') + "[]\n"));
+    EXPECT_FALSE(truncated.good());
+    FlushFailingBuffer flush_output;
+    std::ostream flush_failure(&flush_output);
+    EXPECT_FALSE(WriteCaptureStream(flush_failure, "[]\n"));
+    std::ofstream unopened;
+    EXPECT_FALSE(CloseCaptureFile(unopened));
+    std::ostringstream complete;
+    EXPECT_TRUE(WriteCaptureStream(complete, "[]\n"));
+    EXPECT_EQ(complete.str(), "[]\n");
+    std::size_t bytes = 19;
+    EXPECT_FALSE(CapturePixelBytes(0, 1, 3, bytes));
+    EXPECT_FALSE(CapturePixelBytes(1, -1, 3, bytes));
+    EXPECT_FALSE(CapturePixelBytes(1, 1, 0, bytes));
+    EXPECT_FALSE(CapturePixelBytes(1, 1, std::numeric_limits<std::size_t>::max(), bytes));
+    EXPECT_FALSE(CapturePixelBytes(std::numeric_limits<int>::max(), 2, 4, bytes));
+    EXPECT_EQ(bytes, 19u); // refusal leaves the caller's allocation size untouched
+    EXPECT_TRUE(CapturePixelBytes(2, 3, 3, bytes));
+    EXPECT_EQ(bytes, 18u);
+}
+
 class FrameRecorderTest : public ::testing::Test {
 protected:
     void SetUp() override {
@@ -491,8 +519,14 @@ TEST_F(FrameRecorderTest, RecordsEveryShortFrameAndDrainsBufferOnClose) {
     {
         FrameRecorder recorder(true, root / "logs");
         ASSERT_TRUE(recorder.active());
-        for (std::uint64_t frame = 1; frame <= 501; ++frame)
-            ASSERT_TRUE(recorder.record(frame, 1, {}, {}, 262144, false, 262144, 0));
+        for (std::uint64_t frame = 1; frame <= 501; ++frame) {
+            // Exercise unavailable, observed zero and observed nonzero counts
+            // across buffer flushes. Capacity is never a generated count.
+            const bool known = frame % 3 != 0;
+            const auto count = frame % 3 == 1 ? 0u : 123u;
+            ASSERT_TRUE(
+                recorder.record(frame, 1, {}, {}, 262144, known, known ? count : 262144, frame));
+        }
         EXPECT_TRUE(recorder.finish());
         EXPECT_FALSE(recorder.active());
         EXPECT_FALSE(recorder.record(502, 1, {}, {}, 262144, false, 262144, 0));
@@ -502,15 +536,34 @@ TEST_F(FrameRecorderTest, RecordsEveryShortFrameAndDrainsBufferOnClose) {
     std::ifstream input(root / "logs/frame-attribution.csv", std::ios::binary);
     ASSERT_TRUE(input.good());
     std::string line;
+    ASSERT_TRUE(std::getline(input, line));
+    const auto header = fields(line);
+    ASSERT_EQ(header.size(), 51u);
+    EXPECT_EQ(header.at(34), "instance_capacity");
+    EXPECT_EQ(header.at(35), "generated_count");
+    EXPECT_EQ(header.at(36), "count_generation");
     std::string last;
-    std::size_t rows = 0;
+    std::size_t rows = 1;
     while (std::getline(input, line)) {
         last = line;
+        const auto columns = fields(line);
+        ASSERT_EQ(columns.size(), header.size());
+        EXPECT_EQ(columns.at(0), std::to_string(rows));
+        EXPECT_EQ(columns.at(1), "1.000000");
+        EXPECT_EQ(columns.at(34), "262144");
+        EXPECT_EQ(columns.at(35), rows % 3 == 0 ? "" : rows % 3 == 1 ? "0" : "123");
+        EXPECT_EQ(columns.at(36), rows % 3 == 0 ? "" : std::to_string(rows));
+        // Upload fields follow the nullable counts; all fourteen must retain
+        // their exact zero values and time precision on every buffered row.
+        for (std::size_t column = 37; column < header.size(); ++column) {
+            SCOPED_TRACE(header.at(column));
+            const bool time = column == 37 || column == 38 || column == 44 || column == 45;
+            EXPECT_EQ(columns.at(column), time ? "0.000000" : "0");
+        }
         ++rows;
     }
     ASSERT_EQ(rows, 502u); // Header and every frame, including beyond 400.
+    EXPECT_TRUE(input.eof());
     EXPECT_EQ(last.substr(0, 13), "501,1.000000,");
-    EXPECT_EQ(fields(last).at(34), "262144");
-    EXPECT_EQ(last.substr(last.size() - 2), ",,");
 }
 } // namespace

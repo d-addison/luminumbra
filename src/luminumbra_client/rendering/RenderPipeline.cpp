@@ -10,6 +10,7 @@
 #include "ImpostorBake.h"  //  far-field tree impostor atlas (opt-in)
 #include "InProcessFlip.h" // Deterministic in-process FLIP image comparison.
 #include "Mesh.h"
+#include "PixelIo.h"
 #include "RenderContext.h" // per-frame pass contract
 #include "RenderGraph.h"   // Declarative frame graph validated against the trace.
 #include "RenderSystem.h"
@@ -56,6 +57,7 @@
 #include <cassert>
 #include <chrono> // CPU per-phase submit cost
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <exception>
 #include <fstream>
@@ -436,9 +438,13 @@ bool RenderPipeline::capture_frame_parity(const Camera& camera,
                               "dispatch idempotence)");
         return false;
     }
+    if (m_screen_width > static_cast<u32>(std::numeric_limits<GLsizei>::max()) ||
+        m_screen_height > static_cast<u32>(std::numeric_limits<GLsizei>::max()))
+        return false;
     const GLsizei w = static_cast<GLsizei>(m_screen_width);
     const GLsizei h = static_cast<GLsizei>(m_screen_height);
-    if (w <= 0 || h <= 0)
+    std::size_t capture_bytes = 0;
+    if (!CapturePixelBytes(w, h, 4, capture_bytes))
         return false;
 
     auto make_target = [&](GLuint& fbo, GLuint& tex) {
@@ -480,7 +486,7 @@ bool RenderPipeline::capture_frame_parity(const Camera& camera,
     m_offscreen_target_h = prev_h;
 
     auto read_rgba = [&](GLuint fbo, std::vector<std::uint8_t>& px) {
-        px.assign(static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 4u, 0u);
+        px.assign(capture_bytes, 0u);
         glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
         glReadBuffer(GL_COLOR_ATTACHMENT0);
         glPixelStorei(GL_PACK_ALIGNMENT, 1);
@@ -490,10 +496,12 @@ bool RenderPipeline::capture_frame_parity(const Camera& camera,
     read_rgba(fboA, pxA);
     read_rgba(fboB, pxB);
 
+    ok = ok && glGetError() == GL_NO_ERROR;
     const auto flip = InProcessFlip::ComputeLumaFlip(pxA.data(), pxB.data(), w, h);
 
     std::error_code ec;
     std::filesystem::create_directories(out_dir, ec);
+    ok = ok && !ec;
     auto write_ppm = [&](const std::vector<std::uint8_t>& px,
                          const std::filesystem::path& path) -> bool {
         std::ofstream f(path, std::ios::binary | std::ios::trunc);
@@ -503,7 +511,7 @@ bool RenderPipeline::capture_frame_parity(const Camera& camera,
         for (std::size_t i = 0; i < px.size(); i += 4u) {
             f.write(reinterpret_cast<const char*>(px.data() + i), 3);
         }
-        return static_cast<bool>(f);
+        return CloseCaptureFile(f);
     };
     ok = ok && write_ppm(pxA, out_dir / "frame_parity_a.ppm");
     ok = ok && write_ppm(pxB, out_dir / "frame_parity_b.ppm");
@@ -518,9 +526,11 @@ bool RenderPipeline::capture_frame_parity(const Camera& camera,
               << "  \"max_error\": " << flip.max_error << ",\n"
               << "  \"width\": " << w << ",\n"
               << "  \"height\": " << h << ",\n"
-              << "  \"passed\": " << ((flip.score == 0.0) ? "true" : "false") << "\n"
+              << "  \"passed\": " << ((ok && flip.score == 0.0) ? "true" : "false") << "\n"
               << "}\n";
         }
+        const bool report_written = CloseCaptureFile(j);
+        ok = report_written && ok;
     }
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -563,9 +573,13 @@ bool RenderPipeline::capture_upscale_seam_parity(const Camera& camera,
     // 3840x1581 -> 2573x1059. Add ~25% headroom for driver-level raster variance
     // while remaining far below the preregistered 0.08 hard ceiling.
     constexpr double kUpscaleSeamLeg2Threshold = 0.0141;
+    if (m_screen_width > static_cast<u32>(std::numeric_limits<GLsizei>::max()) ||
+        m_screen_height > static_cast<u32>(std::numeric_limits<GLsizei>::max()))
+        return false;
     const GLsizei w = static_cast<GLsizei>(m_screen_width);
     const GLsizei h = static_cast<GLsizei>(m_screen_height);
-    if (w <= 0 || h <= 0)
+    std::size_t capture_bytes = 0;
+    if (!CapturePixelBytes(w, h, 4, capture_bytes))
         return false;
 
     auto make_target = [&](GLuint& fbo, GLuint& tex) {
@@ -579,7 +593,7 @@ bool RenderPipeline::capture_upscale_seam_parity(const Camera& camera,
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
     };
     auto read_rgba = [&](GLuint fbo, std::vector<std::uint8_t>& px) {
-        px.assign(static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 4u, 0u);
+        px.assign(capture_bytes, 0u);
         glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
         glReadBuffer(GL_COLOR_ATTACHMENT0);
         glPixelStorei(GL_PACK_ALIGNMENT, 1);
@@ -594,7 +608,7 @@ bool RenderPipeline::capture_upscale_seam_parity(const Camera& camera,
         for (std::size_t i = 0; i < px.size(); i += 4u) {
             f.write(reinterpret_cast<const char*>(px.data() + i), 3);
         }
-        return static_cast<bool>(f);
+        return CloseCaptureFile(f);
     };
 
     GLuint fbo_reference = 0, tex_reference = 0;
@@ -646,6 +660,7 @@ bool RenderPipeline::capture_upscale_seam_parity(const Camera& camera,
     dispatch_stages(camera);
     m_gpu_timers_suppressed = previous_timer_suppression;
 
+    ok = ok && glGetError() == GL_NO_ERROR;
     const auto leg1 = InProcessFlip::ComputeLumaFlip(px_reference.data(), px_scale1.data(), w, h);
     const auto leg2 = InProcessFlip::ComputeLumaFlip(px_reference.data(), px_scale067.data(), w, h);
     const bool leg1_passed = leg1.score == 0.0;
@@ -681,11 +696,13 @@ bool RenderPipeline::capture_upscale_seam_parity(const Camera& camera,
                                    {"threshold", kUpscaleSeamLeg2Threshold},
                                    {"passed", leg2_passed}}},
                                  {"restored_scale", previous_scale},
-                                 {"passed", leg1_passed && leg2_passed}};
+                                 {"passed", ok && leg1_passed && leg2_passed}};
         std::ofstream j(out_dir / "upscale_seam_parity.json", std::ios::trunc);
         ok = ok && static_cast<bool>(j);
         if (j)
             j << report.dump(2) << '\n';
+        const bool report_written = CloseCaptureFile(j);
+        ok = report_written && ok;
     }
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -1192,9 +1209,13 @@ SubmitTerrainChunksFn RenderPipeline::make_terrain_submitter(bool record_coverag
 // the pass-owned blur target, across ssao_quality 0..3 (legacy / GTAO / half-res).
 bool RenderPipeline::capture_ssao_parity(const std::filesystem::path& out_dir,
                                          const Camera& camera) {
+    if (m_screen_width > static_cast<u32>(std::numeric_limits<GLsizei>::max()) ||
+        m_screen_height > static_cast<u32>(std::numeric_limits<GLsizei>::max()))
+        return false;
     const GLsizei w = static_cast<GLsizei>(m_screen_width);
     const GLsizei h = static_cast<GLsizei>(m_screen_height);
-    if (w <= 0 || h <= 0)
+    std::size_t capture_bytes = 0;
+    if (!CapturePixelBytes(w, h, 4, capture_bytes))
         return false;
 
     RenderContext ctx = make_ssao_context(camera);
@@ -1206,7 +1227,7 @@ bool RenderPipeline::capture_ssao_parity(const std::filesystem::path& out_dir,
                       ctx.gbuffer_normal.id == m_gbuffer_pass->gbuffer().normal_texture;
 
     auto readback_blur = [&](std::vector<float>& buf) {
-        buf.assign(static_cast<size_t>(w) * static_cast<size_t>(h), 0.0f);
+        buf.assign(capture_bytes / sizeof(float), 0.0f);
         glBindFramebuffer(GL_READ_FRAMEBUFFER, m_ssao_pass->ssao().blurFBO);
         glReadBuffer(GL_COLOR_ATTACHMENT0);
         glPixelStorei(GL_PACK_ALIGNMENT, 1);
@@ -1231,13 +1252,14 @@ bool RenderPipeline::capture_ssao_parity(const std::filesystem::path& out_dir,
 
     std::error_code ec;
     std::filesystem::create_directories(out_dir, ec);
-    const bool ok = mapping_ok && determinism_ok;
+    const bool ok = mapping_ok && determinism_ok && !ec && glGetError() == GL_NO_ERROR;
     std::ofstream f(out_dir / "ssao_parity.txt", std::ios::trunc);
     if (f) {
         f << "ssao_parity: " << (ok ? "PASS" : "FAIL") << " mapping_ok=" << mapping_ok
           << " determinism_ok=" << determinism_ok << " (" << w << "x" << h << ", quality 0..3)\n";
     }
-    return ok;
+    const bool report_written = CloseCaptureFile(f);
+    return report_written && ok;
 }
 
 void RenderPipeline::attach_farlod_job_system(JobSystem* job_system) {
@@ -2003,7 +2025,7 @@ void RenderPipeline::draw_chunks_mdi(const std::vector<const ChunkCullEntry*>& v
         if (it == m_chunk_render_data.end())
             continue;
         const ChunkRenderData& rd = it->second;
-        if (rd.pool_handle == ChunkRenderData::kInvalidPoolHandle || rd.element_count == 0)
+        if (!m_chunk_geometry_pool.valid_allocation(rd.pool_handle, rd.element_count))
             continue;
         ++per_block_count[m_chunk_geometry_pool.allocation(rd.pool_handle).block_index];
     }
@@ -2026,7 +2048,7 @@ void RenderPipeline::draw_chunks_mdi(const std::vector<const ChunkCullEntry*>& v
         if (it == m_chunk_render_data.end())
             continue;
         const ChunkRenderData& rd = it->second;
-        if (rd.pool_handle == ChunkRenderData::kInvalidPoolHandle || rd.element_count == 0)
+        if (!m_chunk_geometry_pool.valid_allocation(rd.pool_handle, rd.element_count))
             continue;
         const ChunkGeometryPool::Allocation& a = m_chunk_geometry_pool.allocation(rd.pool_handle);
 
@@ -2086,6 +2108,7 @@ void RenderPipeline::draw_chunks_mdi(const std::vector<const ChunkCullEntry*>& v
             reinterpret_cast<const void*>(first * sizeof(DrawElementsIndirectCommand)),
             static_cast<GLsizei>(count),
             static_cast<GLsizei>(sizeof(DrawElementsIndirectCommand)));
+        m_chunk_geometry_pool.mark_submitted(static_cast<u32>(b));
     }
 
     glBindVertexArray(0);
@@ -2647,13 +2670,9 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
             upload.snapshot_version = chunk.mesh_version;
             if (found != m_chunk_render_data.end()) {
                 const auto& data = found->second;
-                upload.uploaded_version = data.mesh_version;
-                upload.uploaded_indices = data.element_count;
-                upload.valid_allocation =
-                    data.pool_handle != ChunkRenderData::kInvalidPoolHandle &&
-                    m_chunk_geometry_pool.allocation(data.pool_handle).live &&
-                    m_chunk_geometry_pool.allocation(data.pool_handle).index_count ==
-                        data.element_count;
+                // Ownership describes the retained surface actually drawn,
+                // even while a newer snapshot waits in the upload queue.
+                data.SetPresentedTerrainUpload(upload, m_chunk_geometry_pool);
             }
             const auto water_found = m_water_render_data.find(chunk.id);
             upload.water_snapshot_version = chunk.water_mesh_version;
@@ -3789,9 +3808,8 @@ void RenderPipeline::clear_offscreen_target() {
 void RenderPipeline::clear_all_chunk_data() {
     m_foliage_pass->clear_ground_meshes();
     // Force clear all cached chunk render data to ensure fresh uploads.
-    // terrain geometry lives in the shared pool; dropping the whole
-    // pool releases every live slice at once. delete_chunk_slot still runs on
-    // each record (a no-op for terrain since vao/vbo/ebo are 0, kept for safety).
+    // Retire the world's pool slices while keeping pending GPU storage charged
+    // to the same caps. delete_chunk_slot remains a no-op for terrain records.
     for (auto& [id, data] : m_chunk_render_data) {
         (void)id;
         delete_chunk_slot(data);
@@ -3802,7 +3820,7 @@ void RenderPipeline::clear_all_chunk_data() {
         delete_chunk_slot(data);
     }
     m_free_chunk_render_slots.clear();
-    m_chunk_geometry_pool.destroy();
+    m_chunk_geometry_pool.clear();
 
     for (auto& [id, data] : m_water_render_data) {
         (void)id;
@@ -4154,8 +4172,8 @@ void RenderPipeline::cleanup_gpu_resources() {
         delete_chunk_slot(d);
     }
     m_free_chunk_render_slots.clear();
-    // release the shared terrain geometry pool (unmaps + deletes all
-    // blocks) and the per-frame MDI scratch buffers so the resource registry is
+    // Delete the shared terrain geometry pool and the per-frame MDI scratch
+    // buffers without rewriting pending storage, so the resource registry is
     // empty after shutdown (RenderHealth empty_after_shutdown invariant).
     m_chunk_geometry_pool.destroy();
     destroy_mdi_buffers();
@@ -4430,17 +4448,16 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
     }
     // New work is nearest first, then new before replacement, then chunk ID.
     // Existing pending work keeps its position regardless of new arrivals.
-    // Radix passes bound ordering work to O(1) per candidate.
-    order_uploads(candidates,
-                  [](const auto& item) { return static_cast<std::uint64_t>(item.chunk.id); });
-    order_uploads(candidates, [](const auto& item) {
-        return (static_cast<std::uint64_t>(std::bit_cast<std::uint32_t>(item.distance_sq)) << 1u) |
-               (item.is_new ? 0u : 1u);
-    });
-    queue.begin_refresh();
-    for (const auto& candidate : candidates)
-        queue.refresh(candidate.chunk.id, candidate);
-    queue.end_refresh();
+    // Order only arrivals: repeated drain frames retain the same FIFO work.
+    refresh_uploads(
+        queue,
+        candidates,
+        [](const auto& item) { return static_cast<std::uint64_t>(item.chunk.id); },
+        [](const auto& item) {
+            return (static_cast<std::uint64_t>(std::bit_cast<std::uint32_t>(item.distance_sq))
+                    << 1u) |
+                   (item.is_new ? 0u : 1u);
+        });
     float farthest_selected = 0;
     const auto work = drain_uploads(
         queue,
@@ -4769,8 +4786,8 @@ void RenderPipeline::upload_chunk_mesh(const ChunkMeshSnapshot& chunk,
 
     // Telemetry parity with the legacy slot accounting: a brand-new record is a
     // "slot created"; an existing chunk whose mesh outgrew its reserved slot
-    // (so the pool reallocated, raising capacity) is a "slot grown"; an in-place
-    // pool overwrite of a recycled/existing record is a "slot reused".
+    // (so the pool reallocated, raising capacity) is a "slot grown"; a
+    // replacement within the prior capacities is a "slot reused".
     const bool grew = had_allocation && (render_data.vertex_capacity > prior_vertex_capacity ||
                                          render_data.index_capacity > prior_index_capacity);
     if (record_created && !had_allocation) {

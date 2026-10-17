@@ -818,7 +818,7 @@ static void ConsumeWorldDressing(ClientAppContext& g_app,
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-static void CaptureTimelapseFrame(ClientAppContext& g_app,
+static bool CaptureTimelapseFrame(ClientAppContext& g_app,
                                   GLFWwindow* window,
                                   GameState currentState,
                                   Luminumbra::world::GameSession* gameSession,
@@ -834,16 +834,20 @@ static void CaptureTimelapseFrame(ClientAppContext& g_app,
         } else {
             int vw = 0, vh = 0;
             glfwGetFramebufferSize(window, &vw, &vh);
-            if (vw > 0 && vh > 0) {
-                std::vector<unsigned char> px(static_cast<std::size_t>(vw) *
-                                              static_cast<std::size_t>(vh) * 3u);
+            std::size_t pixel_bytes = 0;
+            if (Luminumbra::Rendering::CapturePixelBytes(vw, vh, 3, pixel_bytes)) {
+                std::vector<unsigned char> px(pixel_bytes);
                 glReadBuffer(GL_BACK);
                 glPixelStorei(GL_PACK_ALIGNMENT, 1);
                 glReadPixels(0, 0, vw, vh, GL_RGB, GL_UNSIGNED_BYTE, px.data());
                 char nm[32];
                 std::snprintf(nm, sizeof(nm), "frame_%04d.ppm", g_app.capture.timelapse_captured);
-                if (WritePixelBufferPpm(g_app.capture.timelapse_dir / nm, vw, vh, px))
-                    ++g_app.capture.timelapse_captured;
+                if (glGetError() != GL_NO_ERROR ||
+                    !WritePixelBufferPpm(g_app.capture.timelapse_dir / nm, vw, vh, px))
+                    return false;
+                ++g_app.capture.timelapse_captured;
+            } else {
+                return false;
             }
             if (g_app.capture.timelapse_captured >= g_app.capture.timelapse_frames) {
                 LUMINUMBRA_CORE_INFO("Timelapse: captured {} frames -> {}",
@@ -994,6 +998,7 @@ static void CaptureTimelapseFrame(ClientAppContext& g_app,
             }
         }
     }
+    return true;
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
@@ -3569,6 +3574,18 @@ int main(int argc, char* argv[]) {
     UploadSettlingWait scene_upload_wait, survey_upload_wait, scan_upload_wait;
     UploadSettlingWait warmup_upload_wait, capture_upload_wait;
     bool upload_warmup_complete = false;
+    bool frame_scan_complete = false;
+    bool survey_complete = false;
+    bool scene_capture_complete = false;
+    const auto capture_failure = [&](const std::filesystem::path& report, const char* reason) {
+        exit_code = 2;
+        const nlohmann::json failure{
+            {"status", "failed"}, {"capture_complete", false}, {"reason", reason}};
+        if (!Luminumbra::Rendering::WriteCaptureText(report, failure.dump(2) + "\n"))
+            LUMINUMBRA_CORE_ERROR(
+                "Capture failed ({}); cannot retain report: {}", reason, report.string());
+        glfwSetWindowShouldClose(window, GLFW_TRUE);
+    };
     const auto wait_for_uploads = [&](UploadSettlingWait& wait,
                                       const char* phase,
                                       const std::filesystem::path& report) {
@@ -3584,10 +3601,9 @@ int main(int argc, char* argv[]) {
                                          {"settling_frames", wait.frames()},
                                          {"uploads_pending", pending}};
             if (!report.empty()) {
-                std::error_code error;
-                if (!report.parent_path().empty())
-                    std::filesystem::create_directories(report.parent_path(), error);
-                std::ofstream(report) << failure.dump(2) << '\n';
+                if (!Luminumbra::Rendering::WriteCaptureText(report, failure.dump(2) + "\n"))
+                    LUMINUMBRA_CORE_ERROR("Cannot retain upload failure report: {}",
+                                          report.string());
             }
             LUMINUMBRA_CORE_ERROR("Capture failed during {}: render uploads did not settle", phase);
             exit_code = 2;
@@ -4884,18 +4900,24 @@ int main(int argc, char* argv[]) {
                                                     g_app.capture.scene_shot.string() + ".json")) {
                             int vw = 0, vh = 0;
                             glfwGetFramebufferSize(window, &vw, &vh);
-                            if (vw > 0 && vh > 0) {
-                                std::vector<unsigned char> px(static_cast<std::size_t>(vw) *
-                                                              static_cast<std::size_t>(vh) * 3u);
+                            std::size_t pixel_bytes = 0;
+                            if (Luminumbra::Rendering::CapturePixelBytes(vw, vh, 3, pixel_bytes)) {
+                                std::vector<unsigned char> px(pixel_bytes);
                                 glReadBuffer(GL_BACK);
                                 glPixelStorei(GL_PACK_ALIGNMENT, 1);
                                 glReadPixels(0, 0, vw, vh, GL_RGB, GL_UNSIGNED_BYTE, px.data());
-                                WritePixelBufferPpm(g_app.capture.scene_shot, vw, vh, px);
-                                LUMINUMBRA_CORE_INFO("Scene capture written -> {} ({}x{})",
-                                                     g_app.capture.scene_shot.string(),
-                                                     vw,
-                                                     vh);
+                                scene_capture_complete =
+                                    glGetError() == GL_NO_ERROR &&
+                                    WritePixelBufferPpm(g_app.capture.scene_shot, vw, vh, px);
+                                if (scene_capture_complete)
+                                    LUMINUMBRA_CORE_INFO("Scene capture written -> {} ({}x{})",
+                                                         g_app.capture.scene_shot.string(),
+                                                         vw,
+                                                         vh);
                             }
+                            if (!scene_capture_complete)
+                                capture_failure(g_app.capture.scene_shot.string() + ".json",
+                                                "scene_capture_incomplete");
                             glfwSetWindowShouldClose(window, GLFW_TRUE);
                         }
                     }
@@ -4922,13 +4944,17 @@ int main(int argc, char* argv[]) {
                                     root_dir / "data/common/materials.json",
                                     g_app.overlay.wireframe_mode)) {
                                 exit_code = 2;
-                                std::ofstream(std::filesystem::path(g_app.capture.survey_dir) /
-                                              "survey.json")
-                                    << nlohmann::json{{"status", "failed"},
-                                                      {"capture_complete", false},
-                                                      {"reason", "survey_capture_incomplete"}}
-                                           .dump(2)
-                                    << '\n';
+                                const nlohmann::json failure{
+                                    {"status", "failed"},
+                                    {"capture_complete", false},
+                                    {"reason", "survey_capture_incomplete"}};
+                                if (!Luminumbra::Rendering::WriteCaptureText(
+                                        std::filesystem::path(g_app.capture.survey_dir) /
+                                            "survey.json",
+                                        failure.dump(2) + "\n"))
+                                    LUMINUMBRA_CORE_ERROR("Cannot retain survey failure report");
+                            } else {
+                                survey_complete = true;
                             }
                             glfwSetWindowShouldClose(window, GLFW_TRUE);
                         }
@@ -4952,14 +4978,7 @@ int main(int argc, char* argv[]) {
                                               "without a report.",
                                               kFrameScanWatchdogFrames,
                                               static_cast<int>(currentState));
-                        exit_code = 2;
-                        std::ofstream(g_app.capture.frame_scan_path)
-                            << nlohmann::json{{"status", "failed"},
-                                              {"capture_complete", false},
-                                              {"reason", "frame_scan_watchdog"}}
-                                   .dump(2)
-                            << '\n';
-                        glfwSetWindowShouldClose(window, GLFW_TRUE);
+                        capture_failure(g_app.capture.frame_scan_path, "frame_scan_watchdog");
                     }
                     if (g_app.capture.frame_scan_active && currentState == GameState::IN_GAME &&
                         gameSession && !glfwWindowShouldClose(window)) {
@@ -4980,6 +4999,7 @@ int main(int argc, char* argv[]) {
                         } else if (wait_for_uploads(scan_upload_wait,
                                                     "frame_scan",
                                                     g_app.capture.frame_scan_path)) {
+                            bool capture_ok = true;
                             if (g_app.capture.render_parity_active) {
                                 bool parity_ok = false;
                                 if (g_app.capture.render_parity_pass == "ssao" && g_camera)
@@ -5000,9 +5020,11 @@ int main(int argc, char* argv[]) {
                                     LUMINUMBRA_CORE_INFO("{} parity captured -> {}",
                                                          g_app.capture.render_parity_pass,
                                                          g_app.capture.render_parity_dir.string());
-                                else
+                                else {
                                     LUMINUMBRA_CORE_ERROR("{} parity capture FAILED",
                                                           g_app.capture.render_parity_pass);
+                                    capture_ok = false;
+                                }
                             }
                             int vw = 0, vh = 0;
                             glfwGetFramebufferSize(window, &vw, &vh);
@@ -5012,11 +5034,9 @@ int main(int argc, char* argv[]) {
                                                                  vh,
                                                                  root_dir /
                                                                      "data/common/materials.json");
-                            if (rep.ok &&
-                                Luminumbra::Rendering::WriteFrameScanReport(
-                                    rep, std::filesystem::path(g_app.capture.frame_scan_path))) {
+                            if (rep.ok) {
                                 LUMINUMBRA_CORE_INFO(
-                                    "Frame-scan written -> {} ({}x{}): {} materials, water "
+                                    "Frame-scan measured -> {} ({}x{}): {} materials, water "
                                     "{:.1f}%, foliage {} inst (capacity {}), mean luma {:.3f}",
                                     g_app.capture.frame_scan_path,
                                     rep.width,
@@ -5031,17 +5051,21 @@ int main(int argc, char* argv[]) {
                                 // Also dump the scanned back buffer as a PPM next to the JSON,
                                 // so the scan is a full diagnostic (numbers + the exact image
                                 // they describe).
-                                if (vw > 0 && vh > 0) {
-                                    std::vector<unsigned char> px(static_cast<std::size_t>(vw) *
-                                                                  static_cast<std::size_t>(vh) *
-                                                                  3u);
+                                std::size_t pixel_bytes = 0;
+                                if (Luminumbra::Rendering::CapturePixelBytes(
+                                        vw, vh, 3, pixel_bytes)) {
+                                    std::vector<unsigned char> px(pixel_bytes);
                                     glReadBuffer(GL_BACK);
                                     glPixelStorei(GL_PACK_ALIGNMENT, 1);
                                     glReadPixels(0, 0, vw, vh, GL_RGB, GL_UNSIGNED_BYTE, px.data());
                                     std::filesystem::path img(g_app.capture.frame_scan_path);
                                     img.replace_extension(".ppm");
-                                    WritePixelBufferPpm(img, vw, vh, px);
-                                    LUMINUMBRA_CORE_INFO("Frame-scan image -> {}", img.string());
+                                    const bool image_written = glGetError() == GL_NO_ERROR &&
+                                                               WritePixelBufferPpm(img, vw, vh, px);
+                                    capture_ok = image_written && capture_ok;
+                                    if (image_written)
+                                        LUMINUMBRA_CORE_INFO("Frame-scan image -> {}",
+                                                             img.string());
 
                                     // Frame-HEALTH verdict on the SAME settled frame (reuses
                                     // px; render-only, no sim). Auto-flags
@@ -5052,24 +5076,42 @@ int main(int argc, char* argv[]) {
                                     std::vector<unsigned char> albedo_rgb8;
                                     const auto& gb_h = renderPipeline.gbuffer();
                                     if (gb_h.position_texture != 0 &&
-                                        renderPipeline.screen_width() ==
+                                        renderPipeline.internal_width() ==
                                             static_cast<std::uint32_t>(vw) &&
-                                        renderPipeline.screen_height() ==
+                                        renderPipeline.internal_height() ==
                                             static_cast<std::uint32_t>(vh)) {
                                         pos_rgb16f.resize(static_cast<std::size_t>(vw) * vh * 3u);
                                         glBindTexture(GL_TEXTURE_2D, gb_h.position_texture);
                                         glPixelStorei(GL_PACK_ALIGNMENT, 1);
-                                        glGetTexImage(
-                                            GL_TEXTURE_2D, 0, GL_RGB, GL_FLOAT, pos_rgb16f.data());
+                                        glGetTextureSubImage(
+                                            gb_h.position_texture,
+                                            0,
+                                            0,
+                                            0,
+                                            0,
+                                            vw,
+                                            vh,
+                                            1,
+                                            GL_RGB,
+                                            GL_FLOAT,
+                                            static_cast<GLsizei>(pixel_bytes * sizeof(float)),
+                                            pos_rgb16f.data());
                                         if (gb_h.albedo_texture != 0) {
                                             albedo_rgb8.resize(static_cast<std::size_t>(vw) * vh *
                                                                3u);
                                             glBindTexture(GL_TEXTURE_2D, gb_h.albedo_texture);
-                                            glGetTexImage(GL_TEXTURE_2D,
-                                                          0,
-                                                          GL_RGB,
-                                                          GL_UNSIGNED_BYTE,
-                                                          albedo_rgb8.data());
+                                            glGetTextureSubImage(gb_h.albedo_texture,
+                                                                 0,
+                                                                 0,
+                                                                 0,
+                                                                 0,
+                                                                 vw,
+                                                                 vh,
+                                                                 1,
+                                                                 GL_RGB,
+                                                                 GL_UNSIGNED_BYTE,
+                                                                 static_cast<GLsizei>(pixel_bytes),
+                                                                 albedo_rgb8.data());
                                         }
                                         glBindTexture(GL_TEXTURE_2D, 0);
                                     }
@@ -5079,12 +5121,12 @@ int main(int argc, char* argv[]) {
                                         std::filesystem::path hp(g_app.capture.frame_scan_path);
                                         hp.replace_extension(".health.json");
                                         std::ofstream hf(hp, std::ios::binary | std::ios::trunc);
-                                        if (hf) {
-                                            const std::string j =
-                                                Luminumbra::Rendering::FrameHealthToJson(health);
-                                            hf.write(j.data(),
-                                                     static_cast<std::streamsize>(j.size()));
-                                        }
+                                        const std::string j =
+                                            Luminumbra::Rendering::FrameHealthToJson(health);
+                                        hf.write(j.data(), static_cast<std::streamsize>(j.size()));
+                                        const bool health_written =
+                                            Luminumbra::Rendering::CloseCaptureFile(hf);
+                                        capture_ok = health_written && capture_ok;
                                     }
                                     if (health.verdict.anomalous) {
                                         LUMINUMBRA_CORE_ERROR("Frame-health ANOMALY: {} (mean "
@@ -5100,11 +5142,23 @@ int main(int argc, char* argv[]) {
                                                              health.mean_luminance,
                                                              health.gbuffer_coverage * 100.0);
                                     }
+                                    capture_ok = glGetError() == GL_NO_ERROR && capture_ok;
+                                } else {
+                                    capture_ok = false;
                                 }
                             } else {
+                                capture_ok = false;
                                 LUMINUMBRA_CORE_ERROR("Frame-scan failed -> {}",
                                                       g_app.capture.frame_scan_path);
                             }
+                            // Publish the scan only after every required sibling artifact.
+                            if (capture_ok)
+                                capture_ok = Luminumbra::Rendering::WriteFrameScanReport(
+                                    rep, std::filesystem::path(g_app.capture.frame_scan_path));
+                            frame_scan_complete = capture_ok;
+                            if (!capture_ok)
+                                capture_failure(g_app.capture.frame_scan_path,
+                                                "frame_capture_incomplete");
                             glfwSetWindowShouldClose(window, GLFW_TRUE);
                         }
                     }
@@ -5242,27 +5296,36 @@ int main(int argc, char* argv[]) {
             !g_app.capture.render_benchmark_screenshot.empty()) {
             int width = 0, height = 0;
             glfwGetFramebufferSize(window, &width, &height);
-            if (width > 0 && height > 0) {
+            bool screenshot_complete = false;
+            std::size_t pixel_bytes = 0;
+            if (Luminumbra::Rendering::CapturePixelBytes(width, height, 3, pixel_bytes)) {
                 GLint previous_read_fbo = 0, previous_pack_alignment = 0;
                 glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous_read_fbo);
                 glGetIntegerv(GL_PACK_ALIGNMENT, &previous_pack_alignment);
                 glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
                 glReadBuffer(GL_BACK);
                 glPixelStorei(GL_PACK_ALIGNMENT, 1);
-                std::vector<unsigned char> pixels(static_cast<size_t>(width) * height * 3u);
+                std::vector<unsigned char> pixels(pixel_bytes);
                 glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
-                WritePixelBufferPpm(
-                    std::filesystem::path(g_app.capture.render_benchmark_screenshot),
-                    width,
-                    height,
-                    pixels);
+                screenshot_complete =
+                    glGetError() == GL_NO_ERROR &&
+                    WritePixelBufferPpm(
+                        std::filesystem::path(g_app.capture.render_benchmark_screenshot),
+                        width,
+                        height,
+                        pixels);
                 glPixelStorei(GL_PACK_ALIGNMENT, previous_pack_alignment);
                 glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(previous_read_fbo));
-                LUMINUMBRA_CORE_INFO("Render benchmark screenshot -> {} ({}x{}, unmeasured frame)",
-                                     g_app.capture.render_benchmark_screenshot,
-                                     width,
-                                     height);
+                if (screenshot_complete)
+                    LUMINUMBRA_CORE_INFO(
+                        "Render benchmark screenshot -> {} ({}x{}, unmeasured frame)",
+                        g_app.capture.render_benchmark_screenshot,
+                        width,
+                        height);
             }
+            if (!screenshot_complete)
+                capture_failure(g_app.capture.render_benchmark_screenshot + ".json",
+                                "benchmark_screenshot_incomplete");
         }
 
         if (g_rb_active && currentState == GameState::IN_GAME &&
@@ -5276,8 +5339,10 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        CaptureTimelapseFrame(
-            g_app, window, currentState, gameSession.get(), renderPipeline, g_procgen);
+        if (!CaptureTimelapseFrame(
+                g_app, window, currentState, gameSession.get(), renderPipeline, g_procgen))
+            capture_failure(g_app.capture.timelapse_dir / "timelapse.json",
+                            "timelapse_capture_incomplete");
         //  CPU-submit ends here (all GL work for the frame is
         // queued); present begins. With vsync off the swap drains the driver
         // queue, so its duration is the GPU/present wait.
@@ -5904,6 +5969,18 @@ int main(int argc, char* argv[]) {
             }
         }
     }
+    if (g_app.capture.frame_scan_active && !frame_scan_complete && exit_code == 0)
+        capture_failure(g_app.capture.frame_scan_path, "frame_capture_incomplete");
+    if (g_app.capture.survey_active && !survey_complete && exit_code == 0)
+        capture_failure(std::filesystem::path(g_app.capture.survey_dir) / "survey.json",
+                        "survey_capture_incomplete");
+    if (g_app.capture.scene_active && g_app.capture.render_benchmark_path.empty() &&
+        !scene_capture_complete && exit_code == 0)
+        capture_failure(g_app.capture.scene_shot.string() + ".json", "scene_capture_incomplete");
+    if (g_app.capture.timelapse_frames > 0 &&
+        g_app.capture.timelapse_captured < g_app.capture.timelapse_frames && exit_code == 0)
+        capture_failure(g_app.capture.timelapse_dir / "timelapse.json",
+                        "timelapse_capture_incomplete");
     if (!frame_recorder.finish()) {
         LUMINUMBRA_CORE_ERROR("Frame attribution CSV finalization failed");
         if (exit_code == 0)

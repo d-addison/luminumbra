@@ -15,13 +15,12 @@ struct Work {
     int version = 0;
 };
 
-void refresh(UploadQueue<Work>& queue, std::vector<Work> items) {
-    order_uploads(items, [](const Work& item) { return item.id; });
-    order_uploads(items, [](const Work& item) { return item.priority; });
-    queue.begin_refresh();
-    for (const auto& item : items)
-        queue.refresh(item.id, item);
-    queue.end_refresh();
+void refresh(UploadQueue<Work>& queue, const std::vector<Work>& items) {
+    refresh_uploads(
+        queue,
+        items,
+        [](const Work& item) { return item.id; },
+        [](const Work& item) { return item.priority; });
 }
 
 TEST(UploadBudget, ValidatesEveryLimitAndRejectsNonfiniteTime) {
@@ -125,6 +124,59 @@ TEST(UploadBudget, EqualPrioritiesUseStableChunkIdOrderAcrossDiscoveryOrders) {
         first.complete(true);
         second.complete(true);
     }
+}
+
+TEST(UploadBudget, RetainedBacklogIsRefreshedWithoutRepeatedPriorityWork) {
+    UploadQueue<Work> queue;
+    const std::vector<Work> initial{{9, 5, 1, 0, 1}, {2, 5, 1, 0, 1}, {7, 1, 1, 0, 1}};
+    refresh(queue, initial);
+    unsigned priority_calls = 0;
+    const auto priority = [&](const Work& item) {
+        ++priority_calls;
+        return item.priority;
+    };
+    // Changed priority and payload refresh the waiting entry without moving it.
+    const std::vector<Work> changed{{2, 0, 2, 0, 2}, {9, 1, 3, 0, 3}, {7, 9, 4, 0, 4}};
+    refresh_uploads(queue, changed, [](const Work& item) { return item.id; }, priority);
+    EXPECT_EQ(priority_calls, 0u);
+    EXPECT_EQ(queue.front().id, 7u);
+    EXPECT_EQ(queue.front().version, 4);
+    queue.complete(false); // A refused upload rotates exactly once, as before.
+    refresh_uploads(queue, changed, [](const Work& item) { return item.id; }, priority);
+    EXPECT_EQ(priority_calls, 0u);
+    for (const auto expected : {2u, 9u, 7u}) {
+        EXPECT_EQ(queue.front().id, expected);
+        queue.complete(true);
+    }
+    refresh_uploads(queue, {}, [](const Work& item) { return item.id; }, priority);
+    EXPECT_EQ(queue.size(), 0u);
+    EXPECT_EQ(priority_calls, 0u);
+}
+
+TEST(UploadBudget, OnlyArrivalsAreSortedAndTheyFollowRetainedWork) {
+    UploadQueue<Work> queue;
+    refresh(queue, {{99, 100, 1, 0, 1}, {98, 101, 1, 0, 1}});
+    unsigned priority_calls = 0;
+    const auto priority = [&](const Work& item) {
+        ++priority_calls;
+        return item.priority;
+    };
+    const std::vector<Work> mixed{{9, 5, 1, 0, 1}, {99, 200, 1, 0, 2}, {2, 5, 1, 0, 1}};
+    refresh_uploads(queue, mixed, [](const Work& item) { return item.id; }, priority);
+    EXPECT_EQ(priority_calls, 32u); // Two key evaluations, eight passes, two arrivals.
+    EXPECT_FALSE(queue.contains(98));
+    EXPECT_EQ(queue.front().version, 2);
+    for (const auto expected : {99u, 2u, 9u}) {
+        EXPECT_EQ(queue.front().id, expected);
+        queue.complete(true);
+    }
+    // A lone arrival needs no sort; an empty refresh prunes it.
+    refresh_uploads(queue, {{1, 0, 1, 0, 1}}, [](const Work& item) { return item.id; }, priority);
+    EXPECT_EQ(queue.front().id, 1u);
+    EXPECT_EQ(priority_calls, 32u);
+    refresh_uploads(queue, {}, [](const Work& item) { return item.id; }, priority);
+    EXPECT_EQ(queue.size(), 0u);
+    EXPECT_FALSE(queue.contains(1));
 }
 
 TEST(UploadBudget, WaitingReplacementCannotStarveUnderContinuousNearerArrivals) {

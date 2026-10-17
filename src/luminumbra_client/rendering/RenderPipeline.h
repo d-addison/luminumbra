@@ -108,6 +108,14 @@ struct ChunkRenderData {
     //  pool slice. Packs {block_index, vertex/index slot offsets}.
     static constexpr u32 kInvalidPoolHandle = 0xFFFFFFFFu;
     u32 pool_handle = kInvalidPoolHandle;
+
+    void SetPresentedTerrainUpload(FarWorldLiveUpload& upload,
+                                   const ChunkGeometryPool& pool) const noexcept {
+        upload.snapshot_version = mesh_version;
+        upload.uploaded_version = mesh_version;
+        upload.uploaded_indices = element_count;
+        upload.valid_allocation = pool.valid_allocation(pool_handle, element_count);
+    }
 };
 
 struct WaterRenderData {
