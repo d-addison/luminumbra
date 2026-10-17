@@ -38,7 +38,9 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "audio/NullAudioManager.h"
 #include "core/BenchmarkPose.h"
 #include "core/Debug.h"
+#include "core/FrameLimiter.h"
 #include "core/GameState.h"
+#include "core/HardwareInfo.h"
 #include "core/IsolationConfig.h" // ScenarioHarness::ParseIsolationConfig (render-only layer isolation)
 #include "core/Log.h"
 #include "core/NvmlSampler.h" //  optional GPU power/clock sampling
@@ -1374,7 +1376,15 @@ int main(int argc, char* argv[]) {
     Luminumbra::Client::Debug::DeveloperLogAttachment developerLogAttachment(
         developerConsole.Log());
     UiInputRouter uiInputRouter;
-    std::filesystem::path root_dir = ResolveRuntimeRoot(argc > 0 ? argv[0] : nullptr);
+    RuntimePathOptions path_options;
+    std::filesystem::path root_dir;
+    try {
+        path_options = ParseRuntimePathOptions(argc, argv);
+        root_dir = ResolveRuntimeRoot(argc > 0 ? argv[0] : nullptr, path_options.runtime_root);
+    } catch (const std::exception& error) {
+        LUMINUMBRA_CORE_ERROR("{}", error.what());
+        return 2;
+    }
     std::string root_path_str = RuntimeRootString(root_dir);
     LUMINUMBRA_CORE_INFO("Runtime root: {}", root_path_str);
 
@@ -2015,21 +2025,31 @@ int main(int argc, char* argv[]) {
     LUMINUMBRA_ASSERT(window, "Failed to create GLFW window!");
     glfwMakeContextCurrent(window);
 
-    // VSync from user settings (user.video.vsync). This is the ONLY glfwSwapInterval call;
-    // before this the swap interval was never set (driver default = uncapped). Default OFF
-    // preserves the uncapped 300fps target; the settings menu flips it.
-    // the --render-benchmark capture ALWAYS runs uncapped (swap interval 0) regardless
-    // of the persisted user vsync setting — a vsync-capped present leaves the GPU idle between
-    // frames, which downclocks it and inflates every per-pass GPU timer, making the budget gate
-    // unreproducible. The fixed-scenario budget must measure the saturated/boosted GPU state.
-    glfwSwapInterval(
-        (!g_app.capture.render_benchmark_path.empty() || g_systemConfig.user().vsync == false) ? 0
-                                                                                               : 1);
+    // Extend the benchmark's presentation override to scenario/perf captures.
+    // Keep saved player choices intact, including when either settings UI is used.
+    const luminumbra::core::FramePacingOverrides pacing_overrides{
+        .benchmark_active = !g_app.capture.render_benchmark_path.empty(),
+        .scenario_active = scenario_config.active(),
+        .profiling_active = g_app.capture.profile_fly_seconds > 0.0};
+    int applied_swap_interval =
+        luminumbra::core::ResolveFramePacing(
+            g_systemConfig.user().vsync, g_systemConfig.user().frame_cap, pacing_overrides)
+                .vsync
+            ? 1
+            : 0;
+    glfwSwapInterval(applied_swap_interval);
 
     // [[maybe_unused]]: LUMINUMBRA_ASSERT compiles out in release builds, which
     // compile with warnings as errors.
     [[maybe_unused]] const int status = gladLoadGLLoader((GLADloadproc)glfwGetProcAddress);
     LUMINUMBRA_ASSERT(status, "Failed to initialize GLAD!");
+
+    g_app.hardwareInfo = Luminumbra::Client::DetectHardwareInfo(window);
+    if (const auto diagnostics = Luminumbra::Client::FormatHardwareDiagnostics(
+            *g_app.hardwareInfo, HasCommandLineFlag(argc, argv, "--hardware-diagnostics"));
+        !diagnostics.empty()) {
+        LUMINUMBRA_CORE_INFO("{}", diagnostics);
+    }
 
     if (g_app.overlay.imgui_enabled) {
         IMGUI_CHECKVERSION();
@@ -2066,6 +2086,7 @@ int main(int argc, char* argv[]) {
     auto gameSession = std::make_unique<Luminumbra::world::GameSession>();
     gameSession->SetJobSystem(&jobSystem);
     gameSession->SetRootPath(root_path_str);
+    gameSession->SetSaveRootPath(path_options.save_root);
     gameSession->ApplySystemConfig(g_systemConfig);
 
     // Load creature species metadata (display names + rarity) for the codex/discovery
@@ -2579,8 +2600,9 @@ int main(int argc, char* argv[]) {
         }
         g_uiManager->SetWorldCreationCallback(start_world_creation);
         g_uiManager->SetLoadWorldCallback(start_world_load);
-        g_uiManager->SetSavedWorldList([root_path_str](const std::stop_token& stop) {
-            return Luminumbra::Persistence::EnumerateSavedWorlds(root_path_str, stop);
+        g_uiManager->SetSavedWorldList([save_root = gameSession->GetSaveRootPath(),
+                                        root_path_str](const std::stop_token& stop) {
+            return Luminumbra::Persistence::EnumerateSavedWorlds(save_root, root_path_str, stop);
         });
         // Seed the create-world customize form from a preset: read generation_params.<path>.
         g_uiManager->SetWorldParamGetter([root_path_str](const std::string& worldType,
@@ -2816,7 +2838,13 @@ int main(int argc, char* argv[]) {
         };
         sb.SetVSync = [&](bool v) {
             g_systemConfig.user().vsync = v;
-            glfwSwapInterval(v ? 1 : 0);
+        };
+        sb.GetFrameCap = [&] {
+            return g_systemConfig.user().frame_cap;
+        };
+        sb.SetFrameCap = [&](int cap) {
+            if (luminumbra::core::IsValidFrameCap(cap))
+                g_systemConfig.user().frame_cap = cap;
         };
         sb.GetFov = [&] {
             return g_systemConfig.user().fov;
@@ -3441,10 +3469,17 @@ int main(int argc, char* argv[]) {
     if (frame_csv_enabled && !frame_recorder.active())
         LUMINUMBRA_CORE_ERROR("Cannot open logs/frame-attribution.csv");
     std::uint64_t attribution_frame = 0;
+    Luminumbra::Client::FrameLimiter frame_limiter;
+    Luminumbra::Client::SteadyFrameTiming frame_timing;
     while (!glfwWindowShouldClose(window)) {
+        MainLoopHeartbeat().fetch_add(1, std::memory_order_relaxed);
+        const auto pacing = luminumbra::core::ResolveFramePacing(
+            g_systemConfig.user().vsync, g_systemConfig.user().frame_cap, pacing_overrides);
+        // Excluded from work buckets: wait before all frame/CPU/telemetry timers.
+        // Delta time below still includes pacing so simulation follows real time.
+        frame_limiter.pace(pacing.frame_cap, frame_timing);
         const auto _frameStart = std::chrono::steady_clock::now();
         Attribution::FoliageFrameScope foliage_scope(frame_attribution_enabled);
-        MainLoopHeartbeat().fetch_add(1, std::memory_order_relaxed);
         const double observedFrame = glfwGetTime();
         observedFrameSeconds = observedFrame - previousObservedFrame;
         previousObservedFrame = observedFrame;
@@ -3465,8 +3500,10 @@ int main(int argc, char* argv[]) {
         if (benchmark_v3 && !benchmark_world_checked && gameSession &&
             gameStateManager.GetCurrentState() == GameState::IN_GAME) {
             try {
-                const auto saved = Luminumbra::Persistence::InspectSavedWorld(
-                    root_dir, gameSession->GetMetadata().worldId);
+                const auto saved =
+                    Luminumbra::Persistence::InspectSavedWorld(gameSession->GetSaveRootPath(),
+                                                               root_path_str,
+                                                               gameSession->GetMetadata().worldId);
                 if (!saved.error.empty())
                     throw std::runtime_error(saved.error);
                 std::ifstream input(saved.preset_path, std::ios::binary);
@@ -5083,6 +5120,17 @@ int main(int argc, char* argv[]) {
         if (g_rb_active)
             g_rb_before_swap = std::chrono::steady_clock::now();
         const auto _beforeSwap = std::chrono::steady_clock::now();
+        // Resolve again after UI changes; settings callbacks only change the model.
+        const int swap_interval =
+            luminumbra::core::ResolveFramePacing(
+                g_systemConfig.user().vsync, g_systemConfig.user().frame_cap, pacing_overrides)
+                    .vsync
+                ? 1
+                : 0;
+        if (swap_interval != applied_swap_interval) {
+            glfwSwapInterval(swap_interval);
+            applied_swap_interval = swap_interval;
+        }
         glfwSwapBuffers(window);
         const auto benchmark_present_end = benchmark_v3 ? std::chrono::steady_clock::now()
                                                         : std::chrono::steady_clock::time_point{};

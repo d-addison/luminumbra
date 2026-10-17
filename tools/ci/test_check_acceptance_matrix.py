@@ -868,13 +868,18 @@ class AcceptanceMatrixTests(unittest.TestCase):
         row = rows[0]
         self.assertEqual(row["status"], "planned")
         self.assertIn("outside -2^24 <= x,z < 2^24", row["statement"])
-        self.assertIn("ActiveRegionLedgerTest.ValidAnchorBoundaries", row["discrepancy"])
         self.assertIn("integrated boundary regression", row["discrepancy"])
+        self.assertEqual(row["source"], "docs/active-regions.md#activation-and-ordering")
+        self.assertIn("ActiveRegionLedgerTest.ValidAnchorBoundaries", row["discrepancy"])
+        self.assertIn("[-2^24, 2^24)", row["discrepancy"])
+        self.assertIn("issue #250", row["discrepancy"])
         self.assertIn("owner: ds", row["evidence"][0]["planned"])
-        self.assertIn("accepting -2^24 and rejecting +2^24 on X and Z",
-                      row["evidence"][0]["planned"])
-        self.assertIn("walking anchors, ground-object edits and pins",
-                      row["evidence"][0]["planned"])
+        self.assertIn("accept -2^24", row["evidence"][0]["planned"])
+        self.assertIn("reject +2^24", row["evidence"][0]["planned"])
+        self.assertIn("both X and Z endpoints", row["evidence"][0]["planned"])
+        self.assertIn("adjacent interior coordinates", row["evidence"][0]["planned"])
+        self.assertIn("adjacent exterior coordinates", row["evidence"][0]["planned"])
+        self.assertIn("walking anchors, ground-object edits and pins", row["evidence"][0]["planned"])
         self.assertIn(MODULE._escape_cell("Discrepancy: " + row["discrepancy"]), MODULE.render_doc(matrix))
         watchdog = row_of(matrix, "em.client-hang")
         self.assertIn("HangWatchdog.RearmsAfterHeartbeatResumes", {e["ref"] for e in watchdog["evidence"]})

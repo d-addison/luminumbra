@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "audio/NullAudioManager.h"
+#include "luminumbra_common/core/FramePacing.h"
 #include "ui/Rml_UIManager.h"
 #include "ui/components/common/Button.h"
 #include "ui/components/common/Input.h"
@@ -716,6 +717,7 @@ TEST(UiSmokeTest, SettingsScreenRoundTripsThroughTheBridge) {
         std::string resolution = "1920x1080";
         std::string window_mode = "borderless";
         bool vsync = true;
+        int frame_cap = 120;
         bool perf_hud = true;
         int console_opens = 0;
         float fov = 45.0f;
@@ -757,6 +759,12 @@ TEST(UiSmokeTest, SettingsScreenRoundTripsThroughTheBridge) {
     };
     sb.SetVSync = [&](bool v) {
         model.vsync = v;
+    };
+    sb.GetFrameCap = [&] {
+        return model.frame_cap;
+    };
+    sb.SetFrameCap = [&](int cap) {
+        model.frame_cap = cap;
     };
     sb.GetFov = [&] {
         return model.fov;
@@ -811,6 +819,7 @@ TEST(UiSmokeTest, SettingsScreenRoundTripsThroughTheBridge) {
     EXPECT_EQ(control_value("setting_resolution"), "1920x1080");
     EXPECT_EQ(control_value("setting_window_mode"), "borderless");
     EXPECT_EQ(control_value("setting_vsync"), "on");
+    EXPECT_EQ(control_value("setting_frame_cap"), "120");
     EXPECT_EQ(std::stof(control_value("setting_fov")), 45.0f);
     EXPECT_NEAR(std::stof(control_value("setting_mouse_sensitivity")), 0.025f, 1e-4f);
 
@@ -829,8 +838,45 @@ TEST(UiSmokeTest, SettingsScreenRoundTripsThroughTheBridge) {
     change_control("setting_window_mode", "fullscreen");
     EXPECT_EQ(model.window_mode, "fullscreen");
 
+    change_control("setting_vsync", "invalid");
+    EXPECT_TRUE(model.vsync);
     change_control("setting_vsync", "off");
     EXPECT_FALSE(model.vsync);
+
+    for (const int cap : {30, 60, 120, 144, 165, 240, 0}) {
+        change_control("setting_frame_cap", std::to_string(cap));
+        EXPECT_EQ(model.frame_cap, cap);
+        EXPECT_EQ(control_value("setting_frame_cap"), std::to_string(cap));
+    }
+    change_control("setting_frame_cap", "144");
+    change_control("setting_frame_cap", "61");
+    EXPECT_EQ(model.frame_cap, 144);
+
+    // UI edits update the saved choices while each measurement mode keeps
+    // presentation uncapped. Leaving measurement uses the latest live edits.
+    using luminumbra::core::FramePacingOverrides;
+    for (const auto overrides :
+         {FramePacingOverrides{
+              .benchmark_active = true, .scenario_active = false, .profiling_active = false},
+          FramePacingOverrides{
+              .benchmark_active = false, .scenario_active = true, .profiling_active = false},
+          FramePacingOverrides{
+              .benchmark_active = false, .scenario_active = false, .profiling_active = true}}) {
+        for (const bool vsync : {true, false}) {
+            change_control("setting_vsync", vsync ? "on" : "off");
+            change_control("setting_frame_cap", "240");
+            EXPECT_EQ(model.vsync, vsync);
+            EXPECT_EQ(model.frame_cap, 240);
+            const auto pacing =
+                luminumbra::core::ResolveFramePacing(model.vsync, model.frame_cap, overrides);
+            EXPECT_FALSE(pacing.vsync);
+            EXPECT_EQ(pacing.frame_cap, 0);
+            const auto restored =
+                luminumbra::core::ResolveFramePacing(model.vsync, model.frame_cap);
+            EXPECT_EQ(restored.vsync, vsync);
+            EXPECT_EQ(restored.frame_cap, 240);
+        }
+    }
 
     change_control("setting_fov", "90");
     EXPECT_FLOAT_EQ(model.fov, 90.0f);

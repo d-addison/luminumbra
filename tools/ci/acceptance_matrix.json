@@ -1137,12 +1137,12 @@
       "requirements": [
         "ar.activation.050"
       ],
-      "discrepancy": "ActiveRegionLedgerTest.ValidAnchorBoundaries covers the half-open interval on both axes. An integrated boundary regression for walking anchors, ground-object edits and region pins remains planned.",
+      "discrepancy": "The contract and ledger specify [-2^24, 2^24). ActiveRegionLedgerTest.ValidAnchorBoundaries covers the half-open interval on both axes; an integrated boundary regression for exact endpoints across walking anchors, ground-object edits and region pins remains tracked in issue #250.",
       "evidence": [
         {
           "kind": "ctest",
           "ref": "ActiveRegionLedgerTest.SymmetricAnchorBoundaries",
-          "planned": "Add an integrated boundary regression accepting -2^24 and rejecting +2^24 on X and Z for walking anchors, ground-object edits and pins, while checking the adjacent interior and exterior coordinates.; owner: ds"
+          "planned": "Cover both X and Z endpoints for walking anchors, ground-object edits and pins: accept -2^24 and the adjacent interior coordinates, and reject +2^24 and the adjacent exterior coordinates.; owner: ds"
         }
       ]
     },

@@ -1,15 +1,19 @@
 #include <gtest/gtest.h>
 
+#include "luminumbra/core/Types.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/world/ActiveRegionLedger.h"
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -793,9 +797,12 @@ TEST(ActiveRegionLedgerTest, EvictedRegionStartsFreshWhenVisitedAgain) {
 
 TEST(ActiveRegionLedgerTest, RetentionKeepsTheLedgerBounded) {
     std::vector<Vec3> grid;
-    for (int i = 0; i < 600; ++i)
+    grid.reserve(600);
+    for (int i = 0; i < 600; ++i) {
+        const int row = i / 30;
         grid.emplace_back(
-            static_cast<float>((i % 30) * 2048), 0.0f, static_cast<float>((i / 30) * 2048));
+            static_cast<float>((i % 30) * 2048), 0.0f, static_cast<float>(row * 2048));
+    }
     ActiveRegionLedger ledger;
     ledger.schedule(WorldClock(1), std::span<const Vec3>(grid));
     EXPECT_GT(ledger.records().size(), 1000u);
