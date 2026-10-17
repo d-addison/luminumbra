@@ -99,10 +99,11 @@ FarVolumeResidentObservation Observation(const FarVolumeResidency& owner, FarTil
 }
 bool WaitReady(FarVolumeResidency& owner,
                std::span<const FarVolumeWantedRequest> requests,
-               const FarVolumeAuthorityProducer& producer) {
+               const FarVolumeAuthorityProducer& producer,
+               std::size_t builds = 6) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     do {
-        owner.AdvanceFrame(0, 0, {6, 0, 0}, producer, {});
+        owner.AdvanceFrame(0, 0, {builds, 0, 0}, producer, {});
         bool ready = true;
         for (const auto& request : requests) {
             const auto state = owner.Observe(request.identity.key);
@@ -475,14 +476,65 @@ TEST(FarVolumeResidency, PendingResultSlotDoesNotReproduceAuthorityEachFrame) {
     };
     const auto first = owner.AdvanceFrame(0, 0, {2, 0, 0}, producer, {});
     EXPECT_EQ(first.dispatched, 1u);
-    EXPECT_EQ(calls, 2u);
+    EXPECT_EQ(first.build_attempts, 1u);
+    EXPECT_EQ(calls, 1u);
     EXPECT_EQ(Observation(owner, requests[1].identity.key).eligibility,
-              FarVolumeEligibility::Pending);
+              FarVolumeEligibility::Wanted);
     for (int i = 0; i < 3; ++i)
         owner.AdvanceFrame(0, 0, {2, 0, 0}, producer, {});
     EXPECT_EQ(calls, 2u);
     EXPECT_EQ(Observation(owner, requests[1].identity.key).eligibility,
               FarVolumeEligibility::RequestRejected);
+}
+
+TEST(FarVolumeResidency, DeferredUploadReservesResultSlotBeforeBuildAdmission) {
+    JobSystem jobs;
+    jobs.startup(1);
+    FarVolumeTierMemory memory(Budgets());
+    auto limits = Limits();
+    limits.queues[4].result_slots = 1;
+    FarVolumeResidency owner(jobs, memory, limits);
+    std::array requests{Wanted({5, 0, 0}), Wanted({5, 1, 0})};
+    auto* pool = memory.Pool(5);
+    requests[1].build_headroom_bytes = pool->limit() / 2;
+    ASSERT_TRUE(owner.ReplaceWanted(requests));
+    const auto producer = Producer(true);
+    ASSERT_EQ(owner.AdvanceFrame(0, 0, {1, 0, 0}, producer, {}).dispatched, 1u);
+    ASSERT_TRUE(WaitReady(owner, std::span(requests).first(1), producer, 0));
+    const auto ready = Observation(owner, requests[0].identity.key);
+    ASSERT_GT(ready.ready_upload_bytes, 0u);
+    const auto waiting = owner.AdvanceFrame(0, 0, {2, 0, 0}, producer, {});
+    ASSERT_EQ(waiting.dispatched, 0u);
+    EXPECT_EQ(waiting.build_attempts, 0u);
+    EXPECT_EQ(waiting.rejected, 0u);
+    ASSERT_LE(ready.ready_upload_bytes, pool->limit() - pool->used());
+    FarVolumeMemoryLease pressure(*pool);
+    ASSERT_TRUE(pressure.TryCharge(pool->limit() - pool->used() - ready.ready_upload_bytes));
+    for (int frame = 0; frame < 3; ++frame) {
+        const auto deferred = owner.AdvanceFrame(0, 0, {2, 0, 0}, producer, {});
+        EXPECT_EQ(deferred.dispatched, 0u);
+        EXPECT_EQ(deferred.build_attempts, 0u);
+        EXPECT_EQ(deferred.rejected, 0u);
+        EXPECT_EQ(deferred.evicted, 0u);
+        EXPECT_EQ(Observation(owner, requests[0].identity.key).cpu_bytes, ready.cpu_bytes);
+        EXPECT_EQ(Observation(owner, requests[1].identity.key).eligibility,
+                  FarVolumeEligibility::Wanted);
+    }
+    std::size_t calls = 0;
+    const auto backend = Backend(calls);
+    EXPECT_EQ(owner.AdvanceFrame(0, 0, {0, 1, ready.ready_upload_bytes}, {}, backend).uploaded, 1u);
+    pressure.Reset();
+    EXPECT_EQ(owner.AdvanceFrame(0, 0, {1, 0, 0}, producer, {}).dispatched, 1u);
+    ASSERT_TRUE(WaitReady(owner, std::span(requests).last(1), producer, 0));
+    EXPECT_EQ(owner.AdvanceFrame(0, 0, {0, 1, 32ULL * 1024 * 1024}, {}, backend).uploaded, 1u);
+    EXPECT_EQ(calls, 2u);
+    for (const auto& request : requests)
+        EXPECT_TRUE(IsFarTileCovering(Observation(owner, request.identity.key).coverage));
+    owner.CancelAndDrain();
+    const auto drained = owner.Snapshot()[4];
+    EXPECT_EQ(drained.wanted, 0u);
+    EXPECT_EQ(drained.building, 0u);
+    EXPECT_EQ(drained.ready_cpu_bytes, 0u);
 }
 
 TEST(FarVolumeResidency, ProspectiveEvictionRequiresCurrentUnderlayAndKeepsKeyLatch) {
@@ -1320,6 +1372,99 @@ TEST(FarVolumeHandoff, EveryWantedV5PrerequisitePromotesAsOneCohort) {
     EXPECT_EQ(owner.State().serving_serial, 2u);
     EXPECT_FALSE(owner.Observe(a[1].wanted.identity.key));
     EXPECT_TRUE(HandoffDraws(owner).empty());
+}
+
+TEST(FarVolumeHandoff, DeferredUploadReservesResultSlotAndPreservesFallbackPromotion) {
+    JobSystem jobs;
+    jobs.startup(1);
+    auto memory = std::make_shared<FarVolumeTierMemory>(Budgets());
+    auto limits = Limits();
+    limits.queues[4].result_slots = 1;
+    FarVolumeHandoff owner(jobs, *memory, limits);
+    std::array inputs{HandoffInput(memory, {5, 0, 0}, 1, true),
+                      HandoffInput(memory, {5, 1, 0}, 1, true)};
+    auto* pool = memory->Pool(5);
+    inputs[1].wanted.build_headroom_bytes = pool->limit() / 2;
+    ASSERT_TRUE(owner.StageTarget(HandoffManifest(1, inputs)));
+    ASSERT_EQ(owner.AdvanceFrame(0, 0, {1, 0, 0}, {}).dispatched, 1u);
+    ASSERT_TRUE(HandoffWait([&] {
+        owner.AdvanceFrame(0, 0, {}, {});
+        return HandoffObserve(owner, inputs[0].wanted.identity.key).target_eligibility ==
+               FarVolumeEligibility::Ready;
+    }));
+    const auto ready = HandoffObserve(owner, inputs[0].wanted.identity.key);
+    ASSERT_GT(ready.ready_upload_bytes, 0u);
+    const auto deferred_without_pressure = owner.AdvanceFrame(0, 0, {2, 0, 0}, {});
+    ASSERT_EQ(deferred_without_pressure.dispatched, 0u);
+    EXPECT_EQ(deferred_without_pressure.build_attempts, 0u);
+    EXPECT_EQ(deferred_without_pressure.rejected, 0u);
+    ASSERT_LE(ready.ready_upload_bytes, pool->limit() - pool->used());
+    FarVolumeMemoryLease pressure(*pool);
+    ASSERT_TRUE(pressure.TryCharge(pool->limit() - pool->used() - ready.ready_upload_bytes));
+    for (int frame = 0; frame < 3; ++frame) {
+        const auto deferred = owner.AdvanceFrame(0, 0, {2, 0, 0}, {});
+        EXPECT_EQ(deferred.dispatched, 0u);
+        EXPECT_EQ(deferred.build_attempts, 0u);
+        EXPECT_EQ(deferred.rejected, 0u);
+        EXPECT_FALSE(deferred.horizon_refused);
+        EXPECT_EQ(HandoffObserve(owner, inputs[0].wanted.identity.key).ready_cpu_bytes,
+                  ready.ready_cpu_bytes);
+        const auto waiting = HandoffObserve(owner, inputs[1].wanted.identity.key);
+        EXPECT_EQ(waiting.target_eligibility, FarVolumeEligibility::Wanted);
+        EXPECT_FALSE(waiting.target_build_failure);
+        EXPECT_FALSE(waiting.target_upload_failure);
+        EXPECT_FALSE(owner.TryPromote());
+    }
+    std::size_t calls = 0;
+    const auto backend = Backend(calls);
+    EXPECT_EQ(owner.AdvanceFrame(0, 0, {0, 1, ready.ready_upload_bytes}, backend).uploaded, 1u);
+    pressure.Reset();
+    EXPECT_EQ(owner.AdvanceFrame(0, 0, {1, 0, 0}, {}).dispatched, 1u);
+    ASSERT_TRUE(HandoffSettle(owner, inputs, backend));
+    EXPECT_EQ(calls, 2u);
+    EXPECT_TRUE(owner.TryPromote());
+    EXPECT_EQ(owner.State().serving_serial, 1u);
+    EXPECT_FALSE(owner.State().awaiting_initial_fallback);
+}
+
+TEST(FarVolumeHandoff, DiscardedDeferredUploadReleasesResultSlotForNextFallback) {
+    for (const bool byte_refusal : {false, true}) {
+        SCOPED_TRACE(byte_refusal);
+        JobSystem jobs;
+        jobs.startup(1);
+        auto memory = std::make_shared<FarVolumeTierMemory>(Budgets());
+        auto limits = Limits();
+        limits.queues[4].result_slots = 1;
+        FarVolumeHandoff owner(jobs, *memory, limits);
+        const std::array inputs{HandoffInput(memory, {5, 0, 0}, 1, true),
+                                HandoffInput(memory, {5, 1, 0}, 1, false)};
+        ASSERT_TRUE(owner.StageTarget(HandoffManifest(1, inputs)));
+        ASSERT_EQ(owner.AdvanceFrame(0, 0, {1, 0, 0}, {}).dispatched, 1u);
+        ASSERT_TRUE(HandoffWait([&] {
+            owner.AdvanceFrame(0, 0, {}, {});
+            return HandoffObserve(owner, inputs[0].wanted.identity.key).target_eligibility ==
+                   FarVolumeEligibility::Ready;
+        }));
+        const auto bytes = HandoffObserve(owner, inputs[0].wanted.identity.key).ready_upload_bytes;
+        ASSERT_GT(bytes, 0u);
+        const auto rejected =
+            owner.AdvanceFrame(0, 0, {1, 1, byte_refusal ? bytes - 1 : bytes}, {});
+        EXPECT_EQ(rejected.rejected, 1u);
+        EXPECT_EQ(rejected.dispatched, 1u);
+        const auto failed = HandoffObserve(owner, inputs[0].wanted.identity.key);
+        EXPECT_EQ(failed.ready_cpu_bytes, 0u);
+        EXPECT_EQ(failed.target_upload_failure,
+                  byte_refusal ? FarVolumeUploadError::ByteLimit
+                               : FarVolumeUploadError::BackendFailure);
+        std::size_t calls = 0;
+        ASSERT_TRUE(HandoffSettle(owner, std::span(inputs).last(1), Backend(calls)));
+        EXPECT_EQ(calls, 0u);
+        EXPECT_FALSE(owner.TryPromote());
+        owner.CancelAndDrain();
+        ASSERT_TRUE(owner.StageTarget(HandoffManifest(1, std::span(inputs).last(1))));
+        ASSERT_TRUE(HandoffSettle(owner, std::span(inputs).last(1), Backend(calls)));
+        EXPECT_TRUE(owner.TryPromote());
+    }
 }
 
 TEST(FarVolumeHandoff, ValidAirAndSolidEmptyCoverWithoutBackendAllocation) {

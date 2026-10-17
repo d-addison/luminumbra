@@ -590,12 +590,18 @@ FarVolumeFrameResult FarVolumeHandoff::AdvanceFrame(double x,
         if (!slot)
             throw std::logic_error("Far-volume handoff missing tier");
         auto& tier = *slot;
+        // Upload/discard is the only point that releases a taken result's slot.
+        std::size_t held = 0;
+        for (const auto& entry : tier.entries)
+            held += entry.completion.has_value();
         for (auto i : tier.order) {
             auto& entry = tier.entries[i];
             if (!entry.target || result.build_attempts == limits.builds ||
                 (entry.eligibility != FarVolumeEligibility::Wanted &&
                  entry.eligibility != FarVolumeEligibility::Pending))
                 continue;
+            if (tier.queue.ResultCapacity(held) == 0)
+                break;
             ++result.build_attempts;
             const auto& request = entry.target->wanted;
             const std::array key{request.identity.key};
@@ -626,7 +632,7 @@ FarVolumeFrameResult FarVolumeHandoff::AdvanceFrame(double x,
                     continue;
                 }
             }
-            const auto dispatched = tier.queue.Pump(1, key);
+            const auto dispatched = tier.queue.Pump(1, key, held);
             result.dispatched += dispatched;
             entry.eligibility =
                 dispatched ? FarVolumeEligibility::Building : FarVolumeEligibility::Pending;

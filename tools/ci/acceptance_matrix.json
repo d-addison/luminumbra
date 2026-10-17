@@ -2919,7 +2919,7 @@
     {
       "id": "render.committed-residency-handoff",
       "source": "docs/far-volume-memory.md#serving-and-target-handoff",
-      "statement": "The handoff fixture accepts committed frozen terrain/water captures and refuses preview-use captures with committed durable identities. Replacement publication preserves serving coverage until every wanted fallback covers; serving child masks and spans remain tied to the published manifest. Controller, renderer and diagnostic regressions cover overlap admission, supersession, upload failure and drain ownership.",
+      "statement": "The handoff fixture accepts committed frozen terrain/water captures and refuses preview-use captures with committed durable identities. Replacement publication preserves serving coverage until every wanted fallback covers; serving child masks and spans remain tied to the published manifest. Controller, renderer and diagnostic regressions using a fake GPU driver cover software behaviour for result-slot backpressure, overlap admission, supersession, upload failure and drain ownership. Native rendering qualification is still outstanding.",
       "status": "covered",
       "evidence": [
         {
