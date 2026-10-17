@@ -247,6 +247,33 @@ bool AdmittedReplicationTransport::TryReceiveFrameWithDelivery(std::vector<std::
     return false;
 }
 
+FrameReceiveResult AdmittedReplicationTransport::TryReceiveFrameWithDeliveryBounded(
+    std::vector<std::uint8_t>& out, FrameDelivery& delivery, FrameReceiveBudget& budget) {
+    if (!m_transport.IsPeerConnected()) {
+        CloseWithReason("admission disconnected");
+        return FrameReceiveResult::Empty;
+    }
+    m_state.CheckDeadline(m_now);
+    CloseIfFailed();
+    if (m_state.failed())
+        return FrameReceiveResult::Empty;
+    // Unlike the compatibility receive seam, a control-only batch reports Yield.
+    // Endpoint closure must not mistake the adapter's own work cap for an empty
+    // source, and every consumed control frame charges the caller's byte budget.
+    for (std::size_t i = 0; i < kAdmissionDrainLimit; ++i) {
+        const auto result = m_transport.TryReceiveFrameWithDeliveryBounded(out, delivery, budget);
+        if (result != FrameReceiveResult::Frame)
+            return result;
+        const auto action = m_state.OnFrame(out, delivery);
+        Apply(action);
+        if (m_state.failed())
+            return FrameReceiveResult::Empty;
+        if (action == ReplicationAdmissionAction::Forward)
+            return FrameReceiveResult::Frame;
+    }
+    return FrameReceiveResult::Yield;
+}
+
 bool AdmittedReplicationTransport::IsPeerConnected() const {
     return !m_state.failed() && m_transport.IsPeerConnected();
 }

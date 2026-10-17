@@ -71,9 +71,12 @@ void ReplicationServer::RemoveClient(std::uint32_t client_id) {
 }
 
 std::vector<std::uint32_t> ReplicationServer::PruneDisconnectedClients() {
+    FrameReceiveBudget work;
     std::vector<std::uint32_t> removed;
     for (auto it = m_clients.begin(); it != m_clients.end();) {
-        if (it->second.transport && !it->second.transport->IsPeerConnected()) {
+        if (it->second.transport &&
+            (it->second.close_pending || !it->second.transport->IsPeerConnected()) &&
+            CloseClientTransport(it->second, work)) {
             removed.push_back(it->first);
             //  polish: PRUNE-INTO-TICK. Enqueue the leaver's avatar id (id ==
             // client_id) so the very next BroadcastSnapshot folds it into removed_ids
@@ -107,6 +110,7 @@ template<typename EntityRange>
 void ReplicationServer::BroadcastSnapshotEntities(std::uint64_t server_tick,
                                                   const EntityRange& entities,
                                                   const std::vector<std::uint32_t>& removed_ids) {
+    FrameReceiveBudget work;
     m_last_broadcast_total_bytes = 0;
     m_last_broadcast_max_client_bytes = 0;
     m_disconnected_this_broadcast.clear();
@@ -147,6 +151,11 @@ void ReplicationServer::BroadcastSnapshotEntities(std::uint64_t server_tick,
     for (auto& [client_id, link] : m_clients) {
         if (!link.transport)
             continue;
+        if (link.close_pending) {
+            if (CloseClientTransport(link, work))
+                to_disconnect.push_back(client_id);
+            continue;
+        }
 
         // Capture a plain copy: the analyzer cannot track structured bindings captured by lambdas.
         const auto link_id = client_id;
@@ -158,10 +167,10 @@ void ReplicationServer::BroadcastSnapshotEntities(std::uint64_t server_tick,
                 if (oversized ||
                     !link.transport->SendFrame(link.outbound.front(), FrameDelivery::Unreliable)) {
                     // Retry temporary backpressure, but never retain an unsendable frame.
-                    DrainClientInbound(link);
+                    DrainClientInbound(link, work);
                     if (oversized || !link.transport->IsPeerConnected()) {
-                        CloseClientTransport(link);
-                        to_disconnect.push_back(link_id);
+                        if (CloseClientTransport(link, work))
+                            to_disconnect.push_back(link_id);
                     }
                     return;
                 }
@@ -191,8 +200,8 @@ void ReplicationServer::BroadcastSnapshotEntities(std::uint64_t server_tick,
                     // (Close) and mark for server-side removal after the loop. On loopback the
                     // server's own IsPeerConnected would stay true, so the POLICY -- not
                     // PruneDisconnectedClients -- owns this drop.
-                    CloseClientTransport(link);
-                    to_disconnect.push_back(client_id);
+                    if (CloseClientTransport(link, work))
+                        to_disconnect.push_back(client_id);
                     continue;
                 }
                 if (link.over_hwm_streak == kKeyframeResyncStreak) {
@@ -350,15 +359,15 @@ void ReplicationServer::BroadcastSnapshotEntities(std::uint64_t server_tick,
         }
         if (reported_size >
             std::min(kMaxFramePayloadBytes, link.transport->MaxFramePayloadBytes())) {
-            CloseClientTransport(link);
-            to_disconnect.push_back(client_id);
+            if (CloseClientTransport(link, work))
+                to_disconnect.push_back(client_id);
             continue;
         }
         std::vector<std::uint8_t> frame =
             borrowed_entities ? EncodeEntityRange(outgoing, entities) : EncodeSnapshot(outgoing);
         if (frame.empty()) {
-            CloseClientTransport(link);
-            to_disconnect.push_back(client_id);
+            if (CloseClientTransport(link, work))
+                to_disconnect.push_back(client_id);
             continue;
         }
         link.outbound.push_back(std::move(frame));
@@ -395,17 +404,37 @@ void ReplicationServer::BroadcastSnapshotEntities(std::uint64_t server_tick,
 }
 
 void ReplicationServer::PumpInbound() {
-    for (auto& [client_id, link] : m_clients) {
-        (void)client_id;
-        DrainClientInbound(link);
+    FrameReceiveBudget work;
+    auto it =
+        m_last_inbound_client ? m_clients.upper_bound(*m_last_inbound_client) : m_clients.begin();
+    // Rotate the starting link so a continuously refilling peer cannot starve
+    // another client's commands. At most one visit per registered link per call.
+    for (std::size_t remaining = m_clients.size(); remaining != 0 && work.CanPoll(); --remaining) {
+        if (it == m_clients.end())
+            it = m_clients.begin();
+        auto& link = it->second;
+        m_last_inbound_client = it->first;
+        if (link.close_pending)
+            CloseClientTransport(link, work);
+        else
+            DrainClientInbound(link, work);
+        ++it;
     }
 }
 
-void ReplicationServer::DrainClientInbound(ClientLink& link) {
-    if (!link.transport)
-        return;
+bool ReplicationServer::DrainClientInbound(ClientLink& link, FrameReceiveBudget& work) {
+    if (!link.transport || link.closed)
+        return true;
     std::vector<std::uint8_t> frame;
-    while (link.transport->TryReceiveFrame(frame)) {
+    while (work.CanPoll()) {
+        FrameDelivery delivery = FrameDelivery::Reliable;
+        const auto result =
+            link.transport->TryReceiveFrameWithDeliveryBounded(frame, delivery, work);
+        if (result != FrameReceiveResult::Frame)
+            return result == FrameReceiveResult::Empty;
+        if (frame.size() >
+            std::min(kMaxFramePayloadBytes, link.transport->MaxReceiveFramePayloadBytes()))
+            continue;
         ReplMessageType type;
         if (!PeekReplMessageType(frame, type))
             continue;
@@ -420,13 +449,19 @@ void ReplicationServer::DrainClientInbound(ClientLink& link) {
         }
         // Snapshot frames are server->client only; ignore if echoed back.
     }
+    return false; // A quota yield is not an empty receive source.
 }
 
-void ReplicationServer::CloseClientTransport(ClientLink& link) {
-    // Send failure can report disconnect while read-ahead still holds commands/ACKs.
-    // Consume them before Close releases storage and the broadcast removes the link.
-    DrainClientInbound(link);
+bool ReplicationServer::CloseClientTransport(ClientLink& link, FrameReceiveBudget& work) {
+    link.close_pending = true;
+    if (link.closed)
+        return true;
+    // Keep the link and its message storage until commands/ACKs finish draining.
+    if (!DrainClientInbound(link, work))
+        return false;
     link.transport->Close();
+    link.closed = true;
+    return true;
 }
 
 const UsercmdMsg* ReplicationServer::LatestUsercmd(std::uint32_t client_id) const {
@@ -515,15 +550,20 @@ std::uint32_t ReplicationServer::SnapshotAgeP95() const {
 void ReplicationClient::SendUsercmd(const UsercmdMsg& cmd) {
     if (!m_transport || m_disconnected)
         return;
+    FrameReceiveBudget work;
+    if (m_disconnect_pending) {
+        TransportDisconnected(work);
+        return;
+    }
     // Usercmds are UNRELIABLE: newest tick wins on the server (UsercmdReceiver),
     // a dropped one is superseded by the next tick's input.
     const auto frame = EncodeUsercmd(cmd);
     const bool oversized =
         frame.size() > std::min(kMaxFramePayloadBytes, m_transport->MaxFramePayloadBytes());
     if (oversized || !m_transport->SendFrame(frame, FrameDelivery::Unreliable)) {
-        DrainInbound();
+        DrainInbound(work);
         if (oversized || !m_transport->IsPeerConnected())
-            TransportDisconnected();
+            TransportDisconnected(work);
         return;
     }
     m_latest_usercmd_tick = cmd.tick;
@@ -602,15 +642,22 @@ std::vector<ReplEntityState> SnapshotInterpolator::Sample(double tick_time) cons
     return out;
 }
 
-bool ReplicationClient::DrainInbound() {
-    bool got_new_snapshot = false;
+void ReplicationClient::DrainInbound(FrameReceiveBudget& work) {
     std::vector<std::uint8_t> frame;
-    while (m_transport->TryReceiveFrame(frame)) {
+    m_receive_drain_pending = true;
+    while (work.CanPoll()) {
+        FrameDelivery delivery = FrameDelivery::Reliable;
+        const auto result = m_transport->TryReceiveFrameWithDeliveryBounded(frame, delivery, work);
+        if (result != FrameReceiveResult::Frame) {
+            m_receive_drain_pending = result == FrameReceiveResult::Yield;
+            break;
+        }
         ReplMessageType type;
         if (!PeekReplMessageType(frame, type))
             continue;
         if (type == ReplMessageType::Snapshot) {
-            const auto limit = std::min(kMaxFramePayloadBytes, m_transport->MaxFramePayloadBytes());
+            const auto limit =
+                std::min(kMaxFramePayloadBytes, m_transport->MaxReceiveFramePayloadBytes());
             if (frame.size() > limit)
                 continue;
             //  reconstruct the full set. delta_from_seq==0 is a complete
@@ -634,7 +681,7 @@ bool ReplicationClient::DrainInbound() {
                 full = std::move(*reconstructed);
             }
             if (m_receiver.Receive(full)) {
-                got_new_snapshot = true;
+                m_ack_pending = true;
                 m_recon_history[full.snapshot_seq] = full;
                 while (m_recon_history.size() > kClientHistoryCap) {
                     m_recon_history.erase(m_recon_history.begin());
@@ -643,32 +690,45 @@ bool ReplicationClient::DrainInbound() {
         }
         // Usercmd/Ack are client->server only; ignore if echoed back.
     }
-    return got_new_snapshot;
 }
 
-void ReplicationClient::TransportDisconnected() {
-    m_disconnected = true;
+void ReplicationClient::TransportDisconnected(FrameReceiveBudget& work) {
+    m_disconnect_pending = true;
     // A failed usercmd or ACK can leave authoritative snapshots in read-ahead.
     // Apply every available frame before releasing the transport's receive buffer.
-    DrainInbound();
+    DrainInbound(work);
+    if (m_receive_drain_pending)
+        return;
     m_transport->Close();
+    m_disconnected = true;
 }
 
 void ReplicationClient::PumpInbound() {
     if (!m_transport || m_disconnected)
         return;
-    const bool got_new_snapshot = DrainInbound();
+    FrameReceiveBudget work;
+    if (m_disconnect_pending) {
+        TransportDisconnected(work);
+        return;
+    }
+    DrainInbound(work);
+    if (!m_transport->IsPeerConnected()) {
+        TransportDisconnected(work);
+        return;
+    }
     // Ack the newest snapshot applied (carries the newest usercmd we produced so
     // the server can reconcile). Only bother once we have something to report.
-    if (got_new_snapshot || m_sent_any_usercmd) {
+    if (m_ack_pending || m_sent_any_usercmd) {
         // Acks are UNRELIABLE: the newest ack supersedes (monotonic on the server).
         const auto ack = EncodeAck(m_receiver.make_ack(m_latest_usercmd_tick));
         const bool oversized =
             ack.size() > std::min(kMaxFramePayloadBytes, m_transport->MaxFramePayloadBytes());
         if (oversized || !m_transport->SendFrame(ack, FrameDelivery::Unreliable)) {
-            DrainInbound();
+            DrainInbound(work);
             if (oversized || !m_transport->IsPeerConnected())
-                TransportDisconnected();
+                TransportDisconnected(work);
+        } else {
+            m_ack_pending = false;
         }
     }
 }

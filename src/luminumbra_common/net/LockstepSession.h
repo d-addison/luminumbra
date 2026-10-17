@@ -44,6 +44,7 @@
 // blobs, and hash checkpoints. It knows NOTHING about voxels, biomes, cameras, or any
 // game concept. The opaque input blob is exactly the InputRecord payload of LREC1.
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -180,6 +181,24 @@ static_assert(kMaxFramePayloadBytes <=
     return queued_bytes < kReceiveQueueByteBudget && queued_frames < kReceiveQueueFrameLimit;
 }
 
+// Protocol receive work shared through adapters. Backend read-ahead keeps its
+// separate existing bounds. Count empty polls and stop after 256 KiB plus one
+// frame bounded by kMaxFramePayloadBytes, with at most 1024 polls in all.
+struct FrameReceiveBudget {
+    std::size_t polls_left = kReceiveQueueFrameLimit;
+    std::size_t payload_bytes = 0;
+
+    [[nodiscard]] bool CanPoll() const {
+        return polls_left != 0 && payload_bytes < kReceiveQueueByteBudget;
+    }
+};
+
+enum class FrameReceiveResult {
+    Frame,
+    Empty,
+    Yield
+};
+
 class ILockstepTransport {
 public:
     virtual ~ILockstepTransport() = default;
@@ -202,6 +221,12 @@ public:
         return kMaxFramePayloadBytes;
     }
 
+    // Receive/reconstruction capacity. Backends use the same cap in both
+    // directions by default; adapters with directional limits must forward both.
+    [[nodiscard]] virtual std::size_t MaxReceiveFramePayloadBytes() const {
+        return MaxFramePayloadBytes();
+    }
+
     // Non-blocking: pops ONE complete framed message into `out` and returns true, or
     // returns false if none is available right now. A clean peer close is reported via
     // IsPeerConnected==false (NOT via a thrown error / hang).
@@ -212,6 +237,21 @@ public:
                                              FrameDelivery& delivery) {
         delivery = FrameDelivery::Reliable;
         return TryReceiveFrame(out);
+    }
+
+    // Adapters that consume control frames override this method and pass the
+    // same budget to their source. Yield preserves queued data and is not EOF.
+    virtual FrameReceiveResult TryReceiveFrameWithDeliveryBounded(std::vector<std::uint8_t>& out,
+                                                                  FrameDelivery& delivery,
+                                                                  FrameReceiveBudget& budget) {
+        if (!budget.CanPoll())
+            return FrameReceiveResult::Yield;
+        --budget.polls_left;
+        if (!TryReceiveFrameWithDelivery(out, delivery))
+            return FrameReceiveResult::Empty;
+        // Cap the final frame charge to avoid overflow from a broken transport.
+        budget.payload_bytes += (std::min)(out.size(), kReceiveQueueByteBudget);
+        return FrameReceiveResult::Frame;
     }
 
     virtual void CloseWithReason(const std::string&) {

@@ -92,9 +92,15 @@ public:
     [[nodiscard]] std::size_t MaxFramePayloadBytes() const override {
         return m_transport.MaxFramePayloadBytes();
     }
+    [[nodiscard]] std::size_t MaxReceiveFramePayloadBytes() const override {
+        return m_transport.MaxReceiveFramePayloadBytes();
+    }
     bool TryReceiveFrame(std::vector<std::uint8_t>& out) override;
     bool TryReceiveFrameWithDelivery(std::vector<std::uint8_t>& out,
                                      FrameDelivery& delivery) override;
+    FrameReceiveResult TryReceiveFrameWithDeliveryBounded(std::vector<std::uint8_t>& out,
+                                                          FrameDelivery& delivery,
+                                                          FrameReceiveBudget& budget) override;
     [[nodiscard]] bool IsPeerConnected() const override;
     void Close() override;
     void CloseWithReason(const std::string& reason) override;

@@ -883,6 +883,7 @@ class AcceptanceMatrixTests(unittest.TestCase):
         self.assertIn("ActiveRegionLedgerTest.ValidAnchorBoundaries", row["discrepancy"])
         self.assertIn("[-2^24, 2^24)", row["discrepancy"])
         self.assertIn("issue #250", row["discrepancy"])
+        self.assertIn("integrated boundary regression", row["discrepancy"])
         self.assertEqual(row["evidence"][:3], [
             {"kind": "ctest", "ref": "ActiveRegionLedgerTest.ValidAnchorBoundaries"},
             {"kind": "ctest", "ref": "ActiveRegionLedgerTest.InvalidSchedulerInputsAreSkippedAndCounted"},
@@ -900,6 +901,9 @@ class AcceptanceMatrixTests(unittest.TestCase):
         self.assertIn("docs/active-regions.md", row["discrepancy"])
         self.assertIn("coverage remains planned", row["discrepancy"])
         self.assertIn("next representable float below -2^24", planned["planned"])
+        self.assertIn("both X and Z endpoints", planned["planned"])
+        self.assertIn("adjacent interior coordinates", planned["planned"])
+        self.assertIn("adjacent exterior coordinates", planned["planned"])
         self.assertIn(MODULE._escape_cell("Discrepancy: " + row["discrepancy"]), MODULE.render_doc(matrix))
         watchdog = row_of(matrix, "em.client-hang")
         self.assertIn("HangWatchdog.RearmsAfterHeartbeatResumes", {e["ref"] for e in watchdog["evidence"]})

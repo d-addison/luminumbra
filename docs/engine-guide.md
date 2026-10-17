@@ -339,6 +339,20 @@ until status becomes terminal. A finite backlog drains over successive calls.
 A continuously refilling peer can prolong draining, but cannot monopolize one
 call or grow retained storage beyond the negotiated bounds.
 
+Replication server/client public receive and send calls share the same 1024-poll
+and 256 KiB threshold, including nested refusal and close drains. Admission
+control frames consume that budget; a control-batch yield is distinguished from
+an empty source. Closing links and transports stay alive until draining finishes,
+so queued commands, ACKs and authoritative snapshots precede terminal close.
+Server receive pumping rotates its first client after each call. Transport send
+and receive capacities may differ; receive validation and snapshot reconstruction
+use the receive capacity, and adapters forward both caps without raising either.
+The loopback scenario driver uses fixed default horizons of 3–10 ticks and empty
+input payloads, with no configurable backlog injection. Its clean-disconnect
+artifact requires both session ends to be terminal and free of desync, including
+checkpoints processed during disconnect. Registered regressions require native
+execution before qualification is claimed.
+
 On `Bye(T)`, the survivor compares queued hashes and drains buffered inputs only
 through the sender's final executed tick T. Pre-scheduled inputs after T are
 then discarded. Pending outbound retries cannot cut this drain short; closure

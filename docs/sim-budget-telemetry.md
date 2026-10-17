@@ -1,5 +1,8 @@
 # Simulation budget telemetry
 
+The additive time-free work-item traces and standard CI fixture ceilings for
+issue #396 are documented in [Deterministic work budgets](deterministic-work-budgets.md).
+
 `SimBudgetTelemetry` observes the existing fixed tick without scheduling work or
 enforcing a budget. The session switch `SetSimBudgetTelemetryEnabled(true)` and
 the headless CLI switch `--sim-budget` enable it. Both default to off; there is
