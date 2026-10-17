@@ -6524,8 +6524,41 @@ class AcceptanceSelectionTests(unittest.TestCase):
                     MODULE._write_transaction(journal, entries, committed=False)
                     (base / "entries.json").write_bytes(json.dumps(entries).encode())
             program = r'''
-import json, os, pathlib, runpy, sys
+import os, sys
+os.write(2, b"phase=imports\n")
+import atexit, threading
+# Eight constant phases and one stack record: at most nine records, each
+# below 256 bytes (2304 bytes total). No filenames, locals or payload bytes.
+seen = set()
+def mark(value):
+    if value not in seen:
+        seen.add(value)
+        os.write(2, b"phase=" + value + b"\n")
+main_thread = threading.get_ident()
+def dump_stack():
+    # One thread, at most six frames, 24 ASCII name bytes + five line digits
+    # per frame. This Python watchdog cannot preempt a held GIL or OS latency.
+    frame = sys._current_frames().get(main_thread)
+    frames = []
+    try:
+        for _ in range(6):
+            if frame is None:
+                break
+            name = "".join(c if c.isascii() and (c.isalnum() or c in "_<>") else "?"
+                           for c in frame.f_code.co_name[:24])
+            frames.append(name + ":" + str(min(frame.f_lineno, 99999)))
+            frame = frame.f_back
+        os.write(2, ("stack-main-limit6=" + ";".join(frames) + "\n").encode("ascii"))
+    finally:
+        del frame
+watchdog = threading.Timer(3, dump_stack)
+watchdog.daemon = True
+atexit.register(watchdog.cancel)
+watchdog.start()
+import json, pathlib, runpy
+mark(b"runpy")
 g = runpy.run_path(sys.argv[1])["main"].__globals__
+mark(b"ready")
 base, phase, boundary, after, number = pathlib.Path(sys.argv[2]), sys.argv[3], sys.argv[4], int(sys.argv[5]), int(sys.argv[6])
 paths = [base / str(index) for index in range(5)]
 journal = base / "refresh.transaction"
@@ -6535,6 +6568,8 @@ descriptor_selected = None
 creations = 0
 def stop(operation, completed):
     if active and operation == boundary and completed == after:
+        mark(b"selected-exit")
+        watchdog.cancel()
         os._exit(73)
 system_open, fdopen, create, sync = os.open, os.fdopen, open, os.fsync
 replace, publish, unlink = os.replace, pathlib.Path.replace, pathlib.Path.unlink
@@ -6572,6 +6607,8 @@ class Probe:
         if boundary == "partial":
             self.handle.write(data[:3])
             self.handle.flush()
+            mark(b"selected-exit")
+            watchdog.cancel()
             os._exit(73)
         result = self.handle.write(data)
         stop("write", 1)
@@ -6613,6 +6650,7 @@ def recorded(path, *args, **kwargs):
     return result
 write = g["_write_transaction"]
 def metadata(*args, **kwargs):
+    mark(b"metadata")
     stop("metadata", 0)
     result = write(*args, **kwargs)
     stop("metadata", 1)
@@ -6627,6 +6665,7 @@ def renamed(source, target):
     return result
 def published(source, target):
     global active
+    mark(b"publication")
     if phase in ("original", "direct"):
         stop("publication", 0)
     result = publish(source, target)
@@ -6634,6 +6673,7 @@ def published(source, target):
         stop("publication", 1)
     if phase == "rollback" and target == paths[-1]:
         active = True
+        mark(b"rollback")
         raise KeyboardInterrupt("start restoration")
     return result
 def removed(path, *args, **kwargs):
@@ -6652,6 +6692,7 @@ g["_transaction_record"] = recorded
 g["_write_transaction"] = metadata
 pathlib.Path.replace = published
 pathlib.Path.unlink = removed
+mark(b"staging")
 if phase == "recovery":
     g["_recover_outputs"](journal)
 elif phase == "pending":
@@ -6660,9 +6701,19 @@ else:
     g["_replace_outputs"]([(path, "candidate\r\n") for path in paths], journal=None if phase == "direct" else journal)
 raise SystemExit("termination boundary was not reached")
 '''
-            child = subprocess.run([sys.executable, "-I", "-B", "-c", program, str(MODULE_PATH),
-                                    str(base), phase, boundary, str(int(after)), "2" if candidate else "1"],
-                                   capture_output=True, text=True, timeout=5)
+            try:
+                child = subprocess.run([sys.executable, "-I", "-B", "-c", program, str(MODULE_PATH),
+                                        str(base), phase, boundary, str(int(after)), "2" if candidate else "1"],
+                                       capture_output=True, text=True, timeout=5)
+            except subprocess.TimeoutExpired as error:
+                # subprocess.run has killed/reaped the child. Keep the original
+                # exception and streams; expose bounded stderr in hosted logs.
+                captured = error.stderr or b""
+                if isinstance(captured, bytes):
+                    captured = captured[:4096].decode("ascii", errors="replace")
+                captured = captured[:4096].encode("ascii", errors="replace").decode("ascii")
+                print("isolated child diagnostics (stderr, limit 4096):\n" + captured, file=sys.stderr)
+                raise
             self.assertEqual(child.returncode, 73, (child.stdout, child.stderr))
             if phase in ("marker", "pending") or (phase in ("original", "direct") and boundary != "publication"):
                 self.assertEqual({path: path.read_bytes() for path in paths}, before)
@@ -6705,6 +6756,128 @@ except (g["MatrixError"], OSError) as error:
                 self.assertEqual({path: stat.S_IMODE(path.stat().st_mode) for path in paths}, modes)
                 self.assertEqual(list(base.glob(".acceptance-*")), [])
                 self.assertFalse(journal.exists())
+
+    def test_interruption_diagnostics_bound_stderr_and_preserve_selected_exit(self) -> None:
+        run = subprocess.run
+        observed = []
+        def capture(command: list[str], **kwargs: Any) -> Any:
+            result = run(command, **kwargs)
+            observed.append((command, result))
+            return result
+        with mock.patch.object(subprocess, "run", capture):
+            self.preparation_exit("rollback", "write", True)
+        command, child = observed[0]
+        self.assertEqual(command[-4:], ["rollback", "write", "1", "1"])
+        self.assertEqual(child.returncode, 73)
+        self.assertEqual(child.stdout, "")
+        self.assertEqual([line for line in child.stderr.splitlines() if line.startswith("phase=")], [
+            "phase=imports", "phase=runpy", "phase=ready", "phase=staging",
+            "phase=metadata", "phase=publication", "phase=rollback", "phase=selected-exit"])
+        records = child.stderr.encode("ascii").splitlines(keepends=True)
+        self.assertLessEqual(child.stderr.count("stack-main-limit6="), 1)
+        self.assertLessEqual(len(records), 9)
+        self.assertLessEqual(max(map(len, records)), 256)
+        self.assertLessEqual(len(child.stderr.encode("ascii")), 2304)
+        # Exercise the exact diagnostic prefix with a deeper stack and long,
+        # non-ASCII code names; no source lines, paths or locals are printed.
+        prefix = command[4].split("import json, pathlib, runpy\n", 1)[0]
+        control = prefix.replace("watchdog.start()", "watchdog.cancel()\nwatchdog.start()") + r'''
+watchdog.cancel()
+watchdog.join()
+assert not watchdog.is_alive()
+def deep(depth):
+    if depth:
+        deep(depth - 1)
+    else:
+        dump_stack()
+deep.__code__ = deep.__code__.replace(co_name="x\u96ea" * 40)
+deep(10)
+'''
+        bounded = run([sys.executable, "-I", "-B", "-c", control],
+                      capture_output=True, text=True, timeout=5)
+        self.assertEqual(bounded.returncode, 0, bounded.stderr)
+        self.assertEqual(bounded.stdout, "")
+        records = bounded.stderr.encode("ascii").splitlines(keepends=True)
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0], b"phase=imports\n")
+        self.assertEqual(records[1].count(b";"), 5)
+        self.assertIn(b"x?" * 12 + b":", records[1])
+        self.assertLessEqual(max(map(len, records)), 256)
+        self.assertLessEqual(len(bounded.stderr.encode("ascii")), 4096)
+        # Exit handlers run in reverse registration order: observe cancellation
+        # after the real handler, even on ordinary interpreter exit.
+        control = prefix.replace("watchdog.start()", "").replace("atexit.register(watchdog.cancel)",
+                                 'atexit.register(lambda: os.write(2, b"cancelled\\n" '
+                                 'if watchdog.finished.is_set() else b"active\\n"))\n'
+                                 "atexit.register(watchdog.cancel)")
+        control += "main_thread = -1\ndump_stack()\n"
+        normal = run([sys.executable, "-I", "-B", "-c", control],
+                     capture_output=True, text=True, timeout=5)
+        self.assertEqual(normal.returncode, 0, normal.stderr)
+        self.assertEqual(normal.stdout, "")
+        self.assertEqual(normal.stderr, "phase=imports\nstack-main-limit6=\ncancelled\n")
+
+    def test_interruption_timeout_retains_exception_and_captured_stack(self) -> None:
+        run, popen = subprocess.run, subprocess.Popen
+        processes, failures = [], []
+        def started(*args: Any, **kwargs: Any) -> Any:
+            child = popen(*args, **kwargs)
+            processes.append(child)
+            return child
+        def blocked(command: list[str], **kwargs: Any) -> Any:
+            command = list(command)
+            # The block is in the actual child, at the selected stop after the
+            # buffered write. subprocess.run's unchanged timeout kills/reaps it,
+            # including its event waiter and one-shot daemon watchdog.
+            anchor = '\n        mark(b"selected-exit")\n'
+            self.assertEqual(command[4].count(anchor), 1)
+            command[4] = command[4].replace(anchor, "\n        threading.Event().wait()" + anchor, 1)
+            try:
+                return run(command, **kwargs)
+            except subprocess.TimeoutExpired as error:
+                failures.append(error)
+                raise
+        output = io.StringIO()
+        with mock.patch.object(subprocess, "run", blocked), \
+                mock.patch.object(subprocess, "Popen", started), contextlib.redirect_stderr(output):
+            with self.assertRaises(subprocess.TimeoutExpired) as raised:
+                self.preparation_exit("rollback", "write", True)
+        self.assertEqual(len(failures), 1)
+        self.assertIs(raised.exception, failures[0])
+        self.assertEqual(raised.exception.timeout, 5)
+        captured = raised.exception.stderr
+        # Windows run() drains text pipes after kill; POSIX retains bytes.
+        self.assertIsInstance(captured, (bytes, str))
+        if isinstance(captured, str):
+            captured = captured.encode("ascii")
+        self.assertIn(b"phase=rollback\n", captured)
+        self.assertNotIn(b"phase=selected-exit\n", captured)
+        self.assertEqual(captured.count(b"stack-main-limit6="), 1)
+        self.assertIn(b"stop:", captured)
+        self.assertIn(b"wait:", captured)
+        records = captured.splitlines(keepends=True)
+        self.assertLessEqual(len(records), 16)
+        self.assertLessEqual(max(map(len, records)), 256)
+        self.assertLessEqual(len(captured), 4096)
+        self.assertEqual(output.getvalue(), "isolated child diagnostics (stderr, limit 4096):\n" +
+                         captured.decode("ascii") + "\n")
+        self.assertEqual(len(processes), 1)
+        self.assertIsNotNone(processes[0].returncode)
+        for stderr in (None, b"", b"x" * 5000, "x" * 5000, b"\xff" * 5000, "\u96ea" * 5000):
+            with self.subTest(captured_type=type(stderr).__name__):
+                error = subprocess.TimeoutExpired(["fixture"], 5, output=b"retained", stderr=stderr)
+                output = io.StringIO()
+                with mock.patch.object(subprocess, "run", side_effect=error) as invoked, \
+                        contextlib.redirect_stderr(output), self.assertRaises(subprocess.TimeoutExpired) as raised:
+                    self.preparation_exit("rollback", "write", True)
+                self.assertIs(raised.exception, error)
+                self.assertIs(error.stderr, stderr)
+                self.assertEqual(error.stdout, b"retained")
+                self.assertEqual(invoked.call_args.kwargs["timeout"], 5)
+                expected = "?" * 4096 if stderr in (b"\xff" * 5000, "\u96ea" * 5000) else (
+                    "x" * 4096 if stderr else "")
+                self.assertEqual(output.getvalue(), "isolated child diagnostics (stderr, limit 4096):\n" +
+                                 expected + "\n")
 
     def test_initial_backup_creation_is_discoverable_on_both_sides(self) -> None:
         for after in (False, True):
