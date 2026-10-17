@@ -22,7 +22,11 @@ import render_runner_process as runner
 
 parser = argparse.ArgumentParser(add_help=False)
 parser.add_argument('--runner', type=Path, default=Path(__file__).with_name('test_render_runner.py'))
+parser.add_argument('--native-windows-smoke', action='store_true')
+parser.add_argument('--smoke-artifacts', type=Path)
 options, remaining = parser.parse_known_args()
+if options.native_windows_smoke and (os.name != 'nt' or options.smoke_artifacts is None):
+    parser.error('native Windows smoke requires Windows and --smoke-artifacts')
 spec = importlib.util.spec_from_file_location('device_runner', options.runner)
 device = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(device)
@@ -625,6 +629,96 @@ class WiringTests(unittest.TestCase):
         for lane in ('windows-msvc', 'windows-ucrt64'):
             upload = workflow.split('name: ' + lane + '-test-evidence-', 1)[1].split('retention-days:', 1)[0]
             self.assertIn('build/release/test-artifacts', upload)
+
+    def test_native_smoke_is_registered_only_in_the_windows_native_lane(self):
+        root = Path(__file__).resolve().parents[2]
+        cmake = (root / 'test/CMakeLists.txt').read_text(encoding='utf-8')
+        block = cmake.split('if(WIN32)\n    # Exercise real debug events', 1)[1].split('endif()', 1)[0]
+        self.assertIn('RenderCrashCaptureWindows', block)
+        self.assertIn('--native-windows-smoke', block)
+        self.assertIn('--smoke-artifacts ${CMAKE_BINARY_DIR}/test-artifacts/render-debugger', block)
+        self.assertIn('WindowsSmokeTests.${smoke_case}', block)
+        for case in ('test_success_and_expected_refusal', 'test_unhandled_access_violation'):
+            self.assertIn(case, block)
+        self.assertIn('PROPERTIES TIMEOUT 30', block)
+
+
+if options.native_windows_smoke:
+    class WindowsSmokeTests(unittest.TestCase):
+        """Real Win32 events and bounded DbgHelp I/O; never selected by POSIX CI."""
+
+        def launch(self, program, expected_exit=0):
+            options.smoke_artifacts.mkdir(parents=True, exist_ok=True)
+            directory = Path(tempfile.mkdtemp(prefix='debugger-smoke-', dir=options.smoke_artifacts))
+            receipt = dict(binary_path=str(Path(sys.executable).resolve()), evidence_errors=[])
+            try:
+                with runner.verified_binary(receipt), (directory / 'child.log').open('wb') as output:
+                    result = capture.run([receipt['binary_path'], '-I', '-B', '-c', program],
+                        cwd=directory, env=os.environ.copy(), stdout=output, stderr=subprocess.STDOUT,
+                        timeout=8, check=False, receipt=receipt, evidence_parent=directory,
+                        expected_exit=expected_exit)
+            finally:
+                # Keep the smoke's own logs/receipts/dump for both existing
+                # Windows evidence uploads, including a failing smoke assertion.
+                (directory / 'process.json').write_text(json.dumps(receipt, indent=2) + '\n',
+                                                       encoding='utf-8')
+            self.assertEqual(receipt['evidence_errors'], [])
+            self.assertEqual(receipt['binary_identity_status'], 'verified')
+            return result, receipt, directory
+
+        def test_success_and_expected_refusal(self):
+            # Two tiny children, each bounded to eight seconds; no rendering,
+            # host configuration, module retention or dump on an expected exit.
+            for code in (0, 2):
+                with self.subTest(exit_code=code):
+                    result, receipt, directory = self.launch(f'import os; os._exit({code})', code)
+                    self.assertEqual(result.returncode, code)
+                    data = receipt['native_diagnostics']
+                    self.assertEqual(data['status'], 'normal_exit')
+                    self.assertIsNone(data['directory'])
+                    self.assertEqual(data['files'], [])
+                    self.assertEqual(sorted(path.name for path in directory.iterdir()),
+                                     ['child.log', 'process.json'])
+
+        def test_unhandled_access_violation(self):
+            # ctypes catches SEH on the calling Python thread. Call the CRT's
+            # strlen on address 1 from a native thread instead. The valid DLL
+            # entry also works with control-flow protection; no test DLL needed.
+            program = '''import ctypes as C
+k = C.WinDLL('kernel32', use_last_error=True, winmode=0x800)
+k_crt = C.WinDLL('ucrtbase', use_last_error=True, winmode=0x800)
+k.SetErrorMode(2)
+k.CreateThread.restype = C.c_void_p
+k.CreateThread.argtypes = [C.c_void_p, C.c_size_t, C.c_void_p, C.c_void_p, C.c_uint32, C.c_void_p]
+k.WaitForSingleObject.argtypes = [C.c_void_p, C.c_uint32]
+thread = k.CreateThread(None, 0, C.cast(k_crt.strlen, C.c_void_p), C.c_void_p(1), 0, None)
+if not thread:
+    raise C.WinError(C.get_last_error())
+k.WaitForSingleObject(thread, 5000)
+raise RuntimeError('native fault did not terminate the child')
+'''
+            result, receipt, _directory = self.launch(program)
+            self.assertEqual(result.returncode, CRASH)
+            data = receipt['native_diagnostics']
+            self.assertEqual(data['status'], 'retained')
+            self.assertEqual(data['dump_status'], 'retained')
+            self.assertEqual(data['exception_code'], CRASH)
+            self.assertEqual(data['access_type'], 'read')
+            # Optimized strlen can align its first read within the unmapped
+            # first page. It must still fault on the supplied invalid pointer.
+            self.assertGreaterEqual(data['accessed_address'], 0)
+            self.assertLess(data['accessed_address'], 4096)
+            self.assertGreater(data['registers']['rip'], 0)
+            self.assertEqual(data['registers']['rip'], data['exception_address'])
+            self.assertTrue(data['executable_retained'])
+            capture.validate_dump(Path(data['dump_path']), CRASH, data['thread_id'])
+            self.assertLessEqual(Path(data['dump_path']).stat().st_size, capture.MAX_DUMP_BYTES)
+            images = [item for item in data['files'] if item['role'] == 'executable']
+            self.assertEqual(len(images), 1)
+            self.assertEqual(images[0]['sha256'], receipt['binary_sha256'])
+            self.assertEqual(runner.file_sha256(images[0]['path']), receipt['binary_sha256'])
+            self.assertLessEqual(len(data['files']), capture.MAX_FILES)
+            self.assertLessEqual(sum(item['bytes'] for item in data['files']), capture.MAX_IMAGE_BYTES)
 
 
 if __name__ == '__main__':

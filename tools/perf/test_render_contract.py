@@ -70,6 +70,34 @@ def args(**overrides):
 
 
 class RenderContractTests(unittest.TestCase):
+    def test_gallery_capture_omits_only_personal_metadata(self):
+        root = Path(__file__).resolve().parents[2]
+        source = (root / 'src/luminumbra_client/ui/Rml_UIManager.cpp').read_text(encoding='utf-8')
+        gallery = source.split('void Rml_UIManager::PopulateGallery(', 1)[1].split(
+            'void Rml_UIManager::PopulateSettingsForm(', 1)[0]
+        # Check the actual file-open boundary, including the closing brace of
+        # its inactive-only block. A guard around parsing alone still reads
+        # private metadata and is insufficient.
+        guard = 'if (!Filesystem::capture_content_paths.active()) {'
+        self.assertIn(guard, gallery)
+        tail = gallery.split(guard, 1)[1]
+        depth = 1
+        end = None
+        for index, char in enumerate(tail):
+            if char == '{':
+                depth += 1
+            elif char == '}':
+                depth -= 1
+                if depth == 0:
+                    end = index
+                    break
+        self.assertIsNotNone(end)
+        self.assertIn('std::ifstream sf(sidecar);', tail[:end])
+        self.assertNotIn('allows(sidecar)', gallery)
+        self.assertIn('if (!Filesystem::capture_content_paths.allows(thumbs_dir))\n        return;', gallery)
+        self.assertLess(gallery.index('allows(thumbs_dir)'), gallery.index('fs::directory_iterator'))
+        self.assertIn('if (stars >= 4)', gallery)
+
     def test_valid_capture(self):
         self.assertEqual(capture.validate(artifact(), args())['verdict'], 'PASS')
 

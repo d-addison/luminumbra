@@ -2458,6 +2458,19 @@ add_test(NAME GraphicsUiSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
 add_test(NAME RenderCrashCapturePython COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/tools/perf/test_render_crash_capture.py)
 set_tests_properties(RenderCrashCapturePython PROPERTIES TIMEOUT 30)
+if(WIN32)
+    # Exercise real debug events and bounded minidump I/O with tiny child
+    # processes. Keep these out of the device-free Python path classifier.
+    foreach(smoke_case IN ITEMS test_success_and_expected_refusal test_unhandled_access_violation)
+        add_test(NAME RenderCrashCaptureWindows.${smoke_case}
+            COMMAND "${Python3_EXECUTABLE}" -I -B
+            ${CMAKE_SOURCE_DIR}/tools/perf/test_render_crash_capture.py
+            --native-windows-smoke
+            --smoke-artifacts ${CMAKE_BINARY_DIR}/test-artifacts/render-debugger
+            WindowsSmokeTests.${smoke_case})
+        set_tests_properties(RenderCrashCaptureWindows.${smoke_case} PROPERTIES TIMEOUT 30)
+    endforeach()
+endif()
 add_test(NAME RenderRunnerEvidencePython COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_render_runner_evidence.py)
 set_tests_properties(RenderRunnerEvidencePython PROPERTIES TIMEOUT 60)
 add_test(NAME RenderSceneMatrixPython COMMAND "${Python3_EXECUTABLE}" -B ${CMAKE_SOURCE_DIR}/tools/rendering/acceptance/test_scene_matrix.py)

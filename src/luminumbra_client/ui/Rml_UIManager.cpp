@@ -1189,20 +1189,22 @@ void Rml_UIManager::PopulateGallery(Rml::ElementDocument* document) {
     for (int id : ids) {
         if (shown++ >= 12)
             break; // one page of the most recent captures
-        // Star rating from the sidecar (<root>/photos/photo-<N>.photo.json), if it's there.
+        // Personal ratings are optional user data outside the capture inventory.
+        // Capture uses only the validated thumbnails, without consulting ratings
+        // or marking their intentional omission as a content refusal.
         int stars = 0;
-        const auto sidecar =
-            fs::path(m_assetRoot) / "photos" / ("photo-" + std::to_string(id) + ".photo.json");
-        if (!Filesystem::capture_content_paths.allows(sidecar))
-            return;
-        std::ifstream sf(sidecar);
-        if (sf) {
-            try {
-                nlohmann::json j;
-                sf >> j;
-                if (j.contains("stars") && j["stars"].is_number_integer())
-                    stars = j["stars"].get<int>();
-            } catch (...) {}
+        if (!Filesystem::capture_content_paths.active()) {
+            const auto sidecar =
+                fs::path(m_assetRoot) / "photos" / ("photo-" + std::to_string(id) + ".photo.json");
+            std::ifstream sf(sidecar);
+            if (sf) {
+                try {
+                    nlohmann::json j;
+                    sf >> j;
+                    if (j.contains("stars") && j["stars"].is_number_integer())
+                        stars = j["stars"].get<int>();
+                } catch (...) {}
+            }
         }
         html += "<div class=\"photo-card\"><img class=\"photo-thumb\" src=\"" + m_galleryImgPrefix +
                 "cap_" + std::to_string(id) + ".tga\"/>";

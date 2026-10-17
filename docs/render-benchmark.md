@@ -338,6 +338,10 @@ tree are refused even when that tree is absent. A loader's optional-asset fallba
 cannot clear this refusal. Capture mesh loading also disables build/source-tree
 fallbacks.
 
+The gallery keeps thumbnail content under the same validation. During capture it
+omits optional personal ratings from `photos/*.photo.json` without reading those
+sidecars or setting content refusal. Normal play still shows saved ratings.
+
 V4 presentation time starts at zero before UI initialization and holds there
 through startup. Warmup advances by one script tick per captured frame;
 measurement uses `(warmup_frames + tick) / tick_rate` seconds. The same clock
@@ -706,6 +710,15 @@ Windows CI lanes preserve Release optimization, enable compiler debug informatio
 and upload the entire `test-artifacts` tree even after test failure. The original
 native access violation remains unresolved until matching CI evidence locates its
 cause; these diagnostics claim no rendering fix.
+
+Windows CTest also registers `RenderCrashCaptureWindows.test_success_and_expected_refusal`
+and `RenderCrashCaptureWindows.test_unhandled_access_violation`. These use real
+debug events with eight-second child deadlines: expected exits retain no images,
+and an unhandled native-thread read fault requires a validated bounded dump,
+registers and a matching retained executable. Their logs and receipts remain in
+`test-artifacts/render-debugger` for both Windows uploads. Device-free mocks do
+not establish native debugger correctness; native smoke execution and diagnosis
+of the original render crash remain pending Windows evidence.
 
 Terminal shutdown now emits seven timestamped `Shutdown stage:` breadcrumbs:
 `query_cleanup_started`, `query_cleanup_finished`, `world_readers_drain_started`,
