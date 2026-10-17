@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-"""Validate the acceptance matrix and render its generated markdown view."""
+"""Validate the acceptance matrix and render its generated markdown view.
+
+The output/preparation directories are a developer/CI-owned tree.
+Non-cooperating concurrent writers in those directories are outside this tool's
+threat model. The refresh lock serializes cooperating checker processes; it
+does not reserve other names. Identity, content and link checks detect observed
+conflicts, but do not provide identity-conditioned unlink or replacement: a
+writer can substitute a pathname after verification and before mutation.
+Unknown preparation/pending occupants are still refused untouched, without
+adoption. Input snapshot checks and all existing refusal checks still apply.
+"""
 
 from __future__ import annotations
 
@@ -1080,9 +1090,9 @@ class _RefreshSnapshot:
 
 
 # Recovery has at most five destinations (three defaults, document, receipt),
-# a 64 KiB journal and 16 MiB per file. At most three files per destination
-# (backup, publication, restoration) are retained. No directory scan or retry
-# loop is used.
+# a 64 KiB journal/preparation marker and 16 MiB per file. At most three files
+# per destination (backup, publication, restoration) are retained. Fixed markers
+# make incomplete preparation discoverable without a directory scan or retry.
 _TRANSACTION_OUTPUTS = 5
 _TRANSACTION_BYTES = 16 * 1024 * 1024
 _JOURNAL_BYTES = 64 * 1024
@@ -1178,6 +1188,8 @@ def _verify_transaction_file(record: dict[str, Any], limit: int | None = None) -
 
 
 def _remove_transaction_file(record: dict[str, Any], limit: int | None = None) -> None:
+    # Both platform paths below rely on the module's cooperating-writer model.
+    # Verification precedes named mutation; it is not identity-conditioned unlink.
     artifact = _verify_transaction_file(record, limit)
     try:
         artifact.unlink()
@@ -1202,10 +1214,108 @@ def _written_transaction_prefix(
             "size": len(written), "sha256": hashlib.sha256(written).hexdigest()}
 
 
+def _preparation_pending(journal: Path | None) -> bool:
+    # Even an empty marker or a dangling alias must stop readers and writers.
+    # Never open or interpret a pre-existing preparation file as ownership.
+    return journal is not None and any(os.path.lexists(journal.with_suffix(suffix))
+                                       for suffix in (".preparation", ".pending"))
+
+
+class _OutputPreparation:
+    """Write intentions before creation; only this live call can clear them.
+
+    A restart cannot prove ownership across an interrupted exclusive create.
+    Fixed markers therefore refuse recovery, preserving every byte, until the
+    uncertainty is resolved externally. Completed journals remain v1/v2.
+    """
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.identity: os.stat_result | None = None
+        self.data = b""
+        self.uncertain = False
+        self.pending: dict[str, Any] | None = None
+
+    def append(self, event: dict[str, Any]) -> None:
+        # At most fifteen artifacts (including direct-call rollback), with two
+        # records each, share the existing 64 KiB metadata bound. No scan/retry.
+        addition = json.dumps(event, sort_keys=True).encode("utf-8") + b"\n"
+        if len(addition) > _JOURNAL_BYTES - len(self.data):
+            raise MatrixError("recovery preparation exceeds its bound")
+        flags = os.O_RDWR | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+        if self.identity is None:
+            flags |= os.O_CREAT | os.O_EXCL
+        try:
+            descriptor = os.open(self.path, flags, 0o600)
+        except FileExistsError as exc:
+            raise MatrixError(f"uncertain recovery preparation; bytes retained: {self.path}") from exc
+        try:
+            handle = os.fdopen(descriptor, "r+b")
+        except BaseException:
+            os.close(descriptor)
+            self.uncertain = True
+            raise
+        with handle:
+            actual = _transaction_metadata(handle)
+            if (not stat.S_ISREG(actual.st_mode) or not actual.st_ino or actual.st_nlink != 1
+                    or not _same_transaction_identity(self.path, actual)
+                    or (self.identity is not None and not os.path.samestat(actual, self.identity))):
+                self.uncertain = True
+                raise MatrixError("recovery preparation identity changed; bytes retained")
+            if self.identity is None:
+                self.identity = actual
+            if actual.st_size != len(self.data) or handle.read(len(self.data) + 1) != self.data:
+                self.uncertain = True
+                raise MatrixError("recovery preparation content changed; bytes retained")
+            self.data += addition
+            handle.seek(0)
+            if handle.write(self.data) != len(self.data):
+                raise OSError("incomplete recovery preparation write")
+            handle.flush()
+            os.fsync(handle.fileno())
+        _verify_transaction_file(self.record(), _JOURNAL_BYTES)
+
+    def record(self) -> dict[str, Any]:
+        if self.identity is None:
+            raise MatrixError("recovery preparation identity unavailable; bytes retained")
+        return {"path": str(self.path), "device": self.identity.st_dev, "inode": self.identity.st_ino,
+                "size": len(self.data), "sha256": hashlib.sha256(self.data).hexdigest()}
+
+    def intend(self, artifact: Path, destination: Path, data: bytes) -> None:
+        self.append({"create": str(artifact), "destination": str(destination),
+                     "size": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+
+    def bind(self, record: dict[str, Any]) -> None:
+        _verify_transaction_file(record)
+        self.append({"bound": record})
+
+    def clear_marker(self) -> None:
+        if self.uncertain:
+            raise MatrixError(f"uncertain recovery preparation; bytes retained: {self.path}")
+        if self.identity is not None:
+            _remove_transaction_file(_written_transaction_prefix(
+                self.path, self.data, self.identity, _JOURNAL_BYTES), _JOURNAL_BYTES)
+            self.identity = None
+            self.data = b""
+
+    def handoff(self, record: dict[str, Any]) -> None:
+        # A fully bound fixed pending journal takes over discovery BEFORE the
+        # preparation marker is removed. A crash on either side is discoverable.
+        _verify_transaction_file(record, _JOURNAL_BYTES)
+        self.pending = record
+        self.clear_marker()
+
+    def finish(self) -> None:
+        self.clear_marker()
+        if self.pending is not None:
+            _remove_transaction_file(self.pending, _JOURNAL_BYTES)
+            self.pending = None
+
+
 def _write_transaction(
     journal: Path, entries: list[dict[str, Any]], *, committed: bool,
     publications: list[dict[str, Any]] | None = None,
     restorations: list[dict[str, Any] | None] | None = None,
+    preparation: _OutputPreparation | None = None,
 ) -> None:
     if not 1 <= len(entries) <= _TRANSACTION_OUTPUTS:
         raise MatrixError("recovery transaction exceeds its bound")
@@ -1220,8 +1330,8 @@ def _write_transaction(
     if len(data) > _JOURNAL_BYTES:
         raise MatrixError("recovery transaction exceeds its bound")
     candidate = journal.with_suffix(".pending")
-    # The lock serializes this fixed scratch name. Open without truncation,
-    # reject special files/aliases, then write through the verified handle.
+    # This fixed name is itself the write-ahead marker for journal creation.
+    # Its empty/partial state is discoverable. Never truncate/adopt an occupant.
     flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
     metadata = None
     created = False
@@ -1229,9 +1339,14 @@ def _write_transaction(
         try:
             descriptor = os.open(candidate, flags | os.O_EXCL, 0o600)
             created = True
-        except FileExistsError:
-            descriptor = os.open(candidate, flags & ~os.O_CREAT)
-        with os.fdopen(descriptor, "wb") as handle:
+        except FileExistsError as exc:
+            raise MatrixError("uncertain recovery preparation; pending bytes retained") from exc
+        try:
+            handle = os.fdopen(descriptor, "wb")
+        except BaseException:
+            os.close(descriptor)
+            raise
+        with handle:
             metadata = _transaction_metadata(handle)
             if (not stat.S_ISREG(metadata.st_mode) or not metadata.st_ino
                     or metadata.st_nlink != 1 or not _same_transaction_identity(candidate, metadata)):
@@ -1252,21 +1367,37 @@ def _write_transaction(
             # succeed and then deliver a signal without returning to Python.
             publications.append(dict(record, path=str(journal)))
         _verify_transaction_file(record, _JOURNAL_BYTES)
+        if preparation is not None:
+            preparation.handoff(record)
         os.replace(candidate, journal)
     finally:
-        if created and metadata is not None and candidate.exists() and _same_transaction_identity(candidate, metadata):
+        if preparation is not None and preparation.pending is not None:
+            if not os.path.lexists(candidate):
+                # Absence is never ownership: verify the bound identity/bytes
+                # at the rename destination before releasing pending accounting.
+                _verify_transaction_file(dict(preparation.pending, path=str(journal)), _JOURNAL_BYTES)
+                preparation.pending = None
+        elif created and metadata is not None and candidate.exists() and _same_transaction_identity(candidate, metadata):
             _remove_transaction_file(_written_transaction_prefix(candidate, data, metadata, _JOURNAL_BYTES),
                                      _JOURNAL_BYTES)
 
 
-def _stage_recovery_copy(backup: dict[str, Any]) -> dict[str, Any]:
+def _stage_recovery_copy(
+    backup: dict[str, Any], preparation: _OutputPreparation, destination: Path,
+) -> dict[str, Any]:
     source = _verify_transaction_file(backup)
     data, mode = _read_transaction_file(source, _TRANSACTION_BYTES)
     candidate = source.parent / (".acceptance-" + secrets.token_hex(16))
     metadata = None
     record = None
+    attempted = False
+    def create(name: str, flags: int) -> int:
+        nonlocal attempted
+        attempted = True
+        return os.open(name, flags, 0o600)
+    preparation.intend(candidate, destination, data)
     try:
-        with open(candidate, "xb", opener=lambda name, flags: os.open(name, flags, 0o600)) as handle:
+        with open(candidate, "xb", opener=create) as handle:
             metadata = _transaction_metadata(handle)
             record = {"path": str(candidate), "device": metadata.st_dev, "inode": metadata.st_ino,
                       "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
@@ -1278,14 +1409,24 @@ def _stage_recovery_copy(backup: dict[str, Any]) -> dict[str, Any]:
         if record is None or record["sha256"] != backup["sha256"] or not metadata.st_ino:
             raise MatrixError("recovery candidate identity or content changed")
         _verify_transaction_file(record).chmod(stat.S_IMODE(mode.st_mode))
+        preparation.bind(record)
         return record
-    except BaseException:
+    except BaseException as failure:
         if metadata is not None:
-            _remove_transaction_file(_written_transaction_prefix(candidate, data, metadata))
+            try:
+                _remove_transaction_file(_written_transaction_prefix(candidate, data, metadata))
+            except BaseException:
+                preparation.uncertain = True
+                raise
+        elif attempted and not isinstance(failure, FileExistsError):
+            preparation.uncertain = True
         raise
 
 
 def _recover_outputs(journal: Path | None) -> None:
+    if _preparation_pending(journal):
+        raise MatrixError(f"uncertain recovery preparation; outputs and recovery copies retained; inspect "
+                          f"{journal.with_suffix('.preparation')} and {journal.with_suffix('.pending')}")
     if journal is None or not journal.exists():
         return
     if _same_path(journal, journal.with_suffix(".lock")):
@@ -1376,21 +1517,27 @@ def _recover_outputs(journal: Path | None) -> None:
         else:
             record = restorations[index]
             if record is None or not Path(record["path"]).exists():
-                record = _stage_recovery_copy(entry["backup"])
-                restorations[index] = record
+                preparation = _OutputPreparation(journal.with_suffix(".preparation"))
                 publications: list[dict[str, Any]] = []
+                record = None
                 try:
+                    record = _stage_recovery_copy(entry["backup"], preparation, path)
+                    restorations[index] = record
                     _verify_transaction_file(journal_record, _JOURNAL_BYTES)
                     _write_transaction(journal, entries, committed=False,
-                                       restorations=restorations, publications=publications)
+                                       restorations=restorations, publications=publications,
+                                       preparation=preparation)
                 except BaseException:
                     # A completed journal rename owns the candidate even when
                     # its call was interrupted. Otherwise only this call's
                     # verified, unpublished copy may be removed.
-                    if not publications or _transaction_record(journal, _JOURNAL_BYTES) != publications[-1]:
+                    if record is not None and (not publications or
+                            _transaction_record(journal, _JOURNAL_BYTES) != publications[-1]):
                         _remove_transaction_file(record)
+                    preparation.finish()
                     raise
                 journal_record = publications[-1]
+                preparation.finish()
             candidate = _verify_transaction_file(record)
             _verify_transaction_file(dict(entry["new"], path=str(path)))
             os.replace(candidate, path)  # Closed handles on Windows; restartable.
@@ -1431,6 +1578,9 @@ def _replace_outputs(
     keep_backups = False
     transaction: list[dict[str, Any]] = []
     journal_publications: list[dict[str, Any]] = []
+    preparation = _OutputPreparation(journal.with_suffix(".preparation") if journal is not None else
+                                     (outputs[0][0].parent / ".refresh-preparation" if outputs else
+                                      Path(".refresh-preparation")))
 
     def stage(path: Path, data: bytes, mode: int | None, private: bool) -> Path:
         # A 128-bit random name plus exclusive creation prevents clobbering
@@ -1438,8 +1588,14 @@ def _replace_outputs(
         temporary = path.parent / (".acceptance-" + secrets.token_hex(16))
         creation_mode = 0o600 if mode is not None or private else 0o666
         metadata = None
+        attempted = False
+        def create(name: str, flags: int) -> int:
+            nonlocal attempted
+            attempted = True
+            return os.open(name, flags, creation_mode)
+        preparation.intend(temporary, path, data)
         try:
-            with open(temporary, "xb", opener=lambda name, flags: os.open(name, flags, creation_mode)) as handle:
+            with open(temporary, "xb", opener=create) as handle:
                 temporary_paths.append(temporary)
                 metadata = _transaction_metadata(handle)
                 temporary_identities[temporary] = metadata
@@ -1451,12 +1607,15 @@ def _replace_outputs(
                     raise OSError("incomplete staged output write")
                 handle.flush()
                 os.fsync(handle.fileno())
-        except BaseException:
+        except BaseException as failure:
             if metadata is not None:
                 temporary_records[temporary] = _written_transaction_prefix(temporary, data, metadata)
+            elif attempted and not isinstance(failure, FileExistsError):
+                preparation.uncertain = True
             raise
         if mode is not None:
             temporary.chmod(mode)
+        preparation.bind(temporary_records[temporary])
         return temporary
 
     def verify_temporary(path: Path) -> None:
@@ -1507,6 +1666,16 @@ def _replace_outputs(
     try:
         if len(outputs) > _TRANSACTION_OUTPUTS:
             raise MatrixError("too many transaction outputs")
+        markers = {path.parent / ".refresh-preparation" for path, _ in outputs} if journal is None else {
+            preparation.path, journal.with_suffix(".pending")}
+        if any(os.path.lexists(marker) for marker in markers):
+            raise MatrixError("uncertain recovery preparation; outputs and recovery copies retained; inspect "
+                              + ", ".join(str(marker) for marker in sorted(markers)))
+        reserved = list(markers)
+        if journal is not None:
+            reserved.extend((journal, journal.with_suffix(".lock")))
+        if any(_same_path(path, metadata) for path, _ in outputs for metadata in reserved):
+            raise MatrixError("output path overlaps recovery metadata")
         for path, text in outputs:
             # --write-doc may explicitly name the standard generated document.
             if path in backups:
@@ -1546,7 +1715,11 @@ def _replace_outputs(
                                   if backups[path] is not None else None,
                         "new": candidates[path]} for temporary, path in staged]
         if journal is not None and transaction:
-            _write_transaction(journal, transaction, committed=False, publications=journal_publications)
+            _write_transaction(journal, transaction, committed=False, publications=journal_publications,
+                               preparation=preparation)
+            # The published journal now binds every staged file. Until this
+            # point a hard exit leaves the fixed preparation marker in place.
+            preparation.finish()
         for temporary, path in staged:
             target, identity = path.resolve(), temporary.stat()
             identities[path] = (target, identity)
@@ -1643,6 +1816,20 @@ def _replace_outputs(
                 keep_backups = True
                 raise MatrixError("recovery journal identity or content changed")
         recovery_paths = {backup for backup in backups.values() if backup is not None} if keep_backups else set()
+        cleanup_complete = True
+        if journal_record is not None and not preparation.uncertain:
+            recorded = {Path(record["path"]) for entry in transaction
+                        for record in (entry["new"], entry["backup"]) if record is not None}
+            # A completed rollback has verified every restored destination.
+            # Once each extra candidate is bound there, the journal alone can
+            # discover all remaining files even if cleanup is interrupted.
+            extra = set(temporary_paths) - recorded
+            if all(not os.path.lexists(path) and any(
+                    restoration is not None and temporary_records.get(path) is not None
+                    and restoration == dict(temporary_records[path], path=str(target))
+                    and _transaction_record(target) == restoration
+                    for target, restoration in restorations.items()) for path in extra):
+                preparation.finish()
         for temporary in temporary_paths:
             if temporary in recovery_paths:
                 continue
@@ -1656,10 +1843,16 @@ def _replace_outputs(
                     raise MatrixError(f"temporary output content cannot be verified: {temporary}")
                 _remove_transaction_file(record)
             except (MatrixError, OSError) as cleanup_error:
+                cleanup_complete = False
                 if not keep_backups:
                     raise
                 # Cleanup must not hide the conflict and recovery-copy paths.
                 print(f"error: cannot remove temporary output {temporary}: {cleanup_error}", file=sys.stderr)
+        if cleanup_complete and (not keep_backups or (journal_publications and journal is not None
+                and _transaction_record(journal, _JOURNAL_BYTES) in journal_publications)):
+            # Direct calls without a journal retain the marker on incomplete
+            # rollback. No recovery file may become undiscoverable at cleanup.
+            preparation.finish()
         if journal_record is not None:
             _verify_transaction_file(journal_record, _JOURNAL_BYTES).unlink()
 
@@ -2268,7 +2461,7 @@ def main(argv: list[str] | None = None) -> int:
                 if writing:
                     _recover_outputs(journal)
                     return _run_locked(args, root)
-                if journal is not None and journal.exists():
+                if journal is not None and (journal.exists() or _preparation_pending(journal)):
                     break
                 if synchronized:
                     return _run_locked(args, root)

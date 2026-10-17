@@ -356,6 +356,34 @@
           "ref": "AcceptanceMatrixContract"
         },
         {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract2"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract3"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract4"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract5"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract6"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract7"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract8"
+        },
+        {
           "kind": "doc",
           "ref": "docs/acceptance-matrix.md"
         }
@@ -733,6 +761,34 @@
         {
           "kind": "ctest",
           "ref": "AcceptanceMatrixContract"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract2"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract3"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract4"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract5"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract6"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract7"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AcceptanceMatrixContract8"
         },
         {
           "kind": "doc",

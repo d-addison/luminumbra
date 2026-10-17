@@ -6,6 +6,7 @@ import contextlib
 import copy
 import ctypes
 import errno
+import hashlib
 import importlib.util
 import io
 import json
@@ -1004,6 +1005,15 @@ class AcceptanceMatrixTests(AcceptanceFixture):
                 self.assertEqual(len(extras), 1 if failure == "unknown" else 0)
                 for extra in extras:
                     extra.unlink()
+                if failure == "unknown":
+                    marker = journal.with_suffix(".preparation")
+                    retained = marker.read_bytes()
+                    with self.assertRaisesRegex(MODULE.MatrixError, "uncertain recovery preparation"):
+                        MODULE._recover_outputs(journal)
+                    self.assertEqual(marker.read_bytes(), retained)
+                    self.assertEqual([path.read_bytes() for path in paths], [b"candidate 0", b"candidate 1"])
+                    self.assertEqual([backup.read_bytes() for backup in backups], [b"original 0", b"original 1"])
+                    marker.unlink()  # Explicit fixture teardown after resolving its injected uncertainty.
                 MODULE._recover_outputs(journal)
                 self.assertEqual([path.read_bytes() for path in paths], [b"original 0", b"original 1"])
                 self.assertFalse(journal.exists())
@@ -2986,6 +2996,13 @@ script.write_text('changed input', encoding='utf-8')
                 if failure == "restore-and-cleanup":
                     self.assertIn("cannot remove temporary output", err)
                     self.assertIn(str(next(iter(extra_candidates))), err)
+                preparation = MODULE._refresh_lock_path(self.root).with_suffix(".preparation")
+                if extra_candidates:
+                    retained = preparation.read_bytes()
+                    with self.assertRaisesRegex(MODULE.MatrixError, "uncertain recovery preparation"):
+                        MODULE._recover_outputs(MODULE._refresh_lock_path(self.root).with_suffix(".transaction"))
+                    self.assertEqual(preparation.read_bytes(), retained)
+                    preparation.unlink()  # The fixture explicitly owns teardown of this injected conflict.
                 for candidate in extra_candidates:
                     candidate.unlink()
                 for copy, data in copies.items():
@@ -5439,7 +5456,7 @@ raise SystemExit(module["main"](sys.argv[5:]))
         with mock.patch.object(os, "fsync", side_effect=sync):
             code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
         self.assertEqual(code, 0, err)
-        self.assertEqual(len(synced), 8)  # Three payload/backup pairs, two journals.
+        self.assertEqual(len(synced), 20)  # Six payloads, twelve preparation records, two journals.
 
     def test_readonly_first_writer_journal_is_recovered_or_refused_before_retry_inputs(self) -> None:
         lock = MODULE._refresh_lock_path(self.root)
@@ -5980,13 +5997,20 @@ raise SystemExit(module["main"](sys.argv[3:]))
         self.assertEqual(output.read_bytes(), b"original")
 
     def test_partial_pending_journal_is_reused_without_reading_it_as_input(self) -> None:
-        self.prepare_rollback()
+        paths, before = self.prepare_rollback()
         journal = MODULE._refresh_lock_path(self.root).with_suffix(".transaction")
         pending = journal.with_suffix(".pending")
-        pending.write_bytes(b"{partial unpublished metadata")
-        code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
-        self.assertEqual(code, 0, err)
-        self.assertFalse(pending.exists())
+        foreign = b"{partial unpublished metadata"
+        pending.write_bytes(foreign)
+        identity = pending.lstat()
+        with mock.patch.object(MODULE, "load_matrix") as load:
+            code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+        self.assertEqual(code, 2, err)
+        self.assertIn("uncertain recovery preparation", err)
+        load.assert_not_called()
+        self.assertEqual(pending.read_bytes(), foreign)
+        self.assertTrue(os.path.samestat(identity, pending.lstat()))
+        self.assertEqual({path: path.read_bytes() for path in paths}, before)
         self.assertFalse(journal.exists())
 
     def test_windows_recovery_identity_uses_full_handle_ids_when_crt_fields_are_zero(self) -> None:
@@ -6391,5 +6415,683 @@ class PublicTreeScanTests(unittest.TestCase):
                 self.assertFalse(PUBLIC_TREE._may_name_attribution("Ordinary public language."))
 
 
+# Eight disjoint selections bound each native entry's filesystem fault sweeps.
+# Direct execution still discovers the complete module, including recovery and
+# all four public-tree partitions.
+_CONTRACT_PARTITIONS = 8
+_MATRIX_CLASSES = (AcceptanceMatrixTests, ProductionAcceptanceMatrixTests,
+                   AcceptanceMatrixPublishabilityTests, PublicTreeScanTests)
+
+
+def contract_suite(number: int) -> unittest.TestSuite:
+    if type(number) is not int or not 0 <= number < _CONTRACT_PARTITIONS:
+        raise ValueError("invalid contract partition")
+    loader = unittest.TestLoader()
+    cases = [case(name) for case in (*_MATRIX_CLASSES, AcceptanceSelectionTests)
+             for name in loader.getTestCaseNames(case)]
+    return unittest.TestSuite(cases[number::_CONTRACT_PARTITIONS])
+
+
+class AcceptanceSelectionTests(unittest.TestCase):
+    def preparation_exit(self, phase: str, boundary: str, after: bool, *, candidate: bool = False) -> None:
+        # Both the terminating process and its restart load the actual checker.
+        # Five small destinations exercise the complete atomic output set.
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            paths = [base / str(index) for index in range(5)]
+            before = {path: ("original " + path.name + "\r\n").encode() for path in paths}
+            for path, data in before.items():
+                path.write_bytes(data)
+                path.chmod(0o640)
+            modes = {path: stat.S_IMODE(path.stat().st_mode) for path in paths}
+            journal = base / "refresh.transaction"
+            if phase in ("recovery", "pending"):
+                entries = []
+                for index, path in enumerate(paths):
+                    old, new = [base / (".acceptance-" + f"{2 * index + offset:032x}") for offset in (0, 1)]
+                    old.write_bytes(before[path])
+                    old.chmod(modes[path])
+                    new.write_bytes(b"candidate\r\n")
+                    entries.append({"path": str(path), "old": MODULE._transaction_record(old)["sha256"],
+                                    "backup": MODULE._transaction_record(old), "new": MODULE._transaction_record(new)})
+                if phase == "recovery":
+                    MODULE._write_transaction(journal, entries, committed=False)
+                    for entry in entries:
+                        Path(entry["new"]["path"]).replace(entry["path"])
+                else:
+                    MODULE._write_transaction(journal, entries, committed=False)
+                    (base / "entries.json").write_bytes(json.dumps(entries).encode())
+            program = r'''
+import json, os, pathlib, runpy, sys
+g = runpy.run_path(sys.argv[1])["main"].__globals__
+base, phase, boundary, after, number = pathlib.Path(sys.argv[2]), sys.argv[3], sys.argv[4], int(sys.argv[5]), int(sys.argv[6])
+paths = [base / str(index) for index in range(5)]
+journal = base / "refresh.transaction"
+active = phase != "rollback"
+selected = None
+descriptor_selected = None
+creations = 0
+def stop(operation, completed):
+    if active and operation == boundary and completed == after:
+        os._exit(73)
+system_open, fdopen, create, sync = os.open, os.fdopen, open, os.fsync
+replace, publish, unlink = os.replace, pathlib.Path.replace, pathlib.Path.unlink
+def opened(path, flags, *args, **kwargs):
+    global creations, selected, descriptor_selected
+    name = pathlib.Path(path)
+    match = (name.name.startswith(".acceptance-") if phase not in ("marker", "pending") else
+             name == journal.with_suffix(".preparation" if phase == "marker" else ".pending"))
+    chosen = False
+    if active and match and flags & os.O_CREAT:
+        creations += 1
+        chosen = creations == number
+        if chosen:
+            selected = name
+            stop("create", 0)
+    descriptor = system_open(path, flags, *args, **kwargs)
+    if chosen:
+        descriptor_selected = descriptor
+        stop("create", 1)  # Native creation succeeded; no Python identity bookkeeping yet.
+    return descriptor
+class Probe:
+    def __init__(self, handle):
+        self.handle = handle
+    def __getattr__(self, name):
+        return getattr(self.handle, name)
+    def __enter__(self):
+        return self
+    def __exit__(self, *args):
+        stop("close", 0)
+        result = self.handle.__exit__(*args)
+        stop("close", 1)
+        return result
+    def write(self, data):
+        stop("write", 0)
+        if boundary == "partial":
+            self.handle.write(data[:3])
+            self.handle.flush()
+            os._exit(73)
+        result = self.handle.write(data)
+        stop("write", 1)
+        return result
+    def flush(self):
+        stop("flush", 0)
+        result = self.handle.flush()
+        stop("flush", 1)
+        return result
+def payload(*args, **kwargs):
+    handle = create(*args, **kwargs)
+    return Probe(handle) if selected is not None and pathlib.Path(args[0]) == selected else handle
+def journal_handle(descriptor, mode):
+    handle = fdopen(descriptor, mode)
+    return Probe(handle) if phase in ("marker", "pending") and descriptor == descriptor_selected else handle
+def flushed(descriptor):
+    if descriptor == descriptor_selected:
+        stop("sync", 0)
+    sync(descriptor)
+    if descriptor == descriptor_selected:
+        stop("sync", 1)
+preparation_class = g.get("_OutputPreparation")
+bind = preparation_class.bind if preparation_class is not None else None
+def bound(preparation, record):
+    if pathlib.Path(record["path"]) == selected:
+        stop("bind", 0)
+    result = bind(preparation, record)
+    if pathlib.Path(record["path"]) == selected:
+        stop("bind", 1)
+    return result
+record_file = g["_transaction_record"]
+def recorded(path, *args, **kwargs):
+    match = (phase in ("marker", "pending") or preparation_class is None) and path == selected
+    if match:
+        stop("bind", 0)
+    result = record_file(path, *args, **kwargs)
+    if match:
+        stop("bind", 1)
+    return result
+write = g["_write_transaction"]
+def metadata(*args, **kwargs):
+    stop("metadata", 0)
+    result = write(*args, **kwargs)
+    stop("metadata", 1)
+    return result
+def renamed(source, target):
+    match = (pathlib.Path(target) in paths if phase in ("rollback", "recovery") else pathlib.Path(target) == journal)
+    if match:
+        stop("rename", 0)
+    result = replace(source, target)
+    if match:
+        stop("rename", 1)  # Native rename succeeded; caller bookkeeping has not run.
+    return result
+def published(source, target):
+    global active
+    if phase in ("original", "direct"):
+        stop("publication", 0)
+    result = publish(source, target)
+    if phase in ("original", "direct"):
+        stop("publication", 1)
+    if phase == "rollback" and target == paths[-1]:
+        active = True
+        raise KeyboardInterrupt("start restoration")
+    return result
+def removed(path, *args, **kwargs):
+    match = path == journal.with_suffix(".preparation")
+    if match:
+        stop("handoff", 0)
+    result = unlink(path, *args, **kwargs)
+    if match:
+        stop("handoff", 1)
+    return result
+os.open, os.fdopen, os.fsync, os.replace = opened, journal_handle, flushed, renamed
+g["open"] = payload
+if preparation_class is not None:
+    preparation_class.bind = bound
+g["_transaction_record"] = recorded
+g["_write_transaction"] = metadata
+pathlib.Path.replace = published
+pathlib.Path.unlink = removed
+if phase == "recovery":
+    g["_recover_outputs"](journal)
+elif phase == "pending":
+    g["_write_transaction"](journal, json.loads((base / "entries.json").read_bytes()), committed=False)
+else:
+    g["_replace_outputs"]([(path, "candidate\r\n") for path in paths], journal=None if phase == "direct" else journal)
+raise SystemExit("termination boundary was not reached")
+'''
+            child = subprocess.run([sys.executable, "-I", "-B", "-c", program, str(MODULE_PATH),
+                                    str(base), phase, boundary, str(int(after)), "2" if candidate else "1"],
+                                   capture_output=True, text=True, timeout=5)
+            self.assertEqual(child.returncode, 73, (child.stdout, child.stderr))
+            if phase in ("marker", "pending") or (phase in ("original", "direct") and boundary != "publication"):
+                self.assertEqual({path: path.read_bytes() for path in paths}, before)
+                self.assertEqual({path: stat.S_IMODE(path.stat().st_mode) for path in paths}, modes)
+            markers = [journal.with_suffix(suffix) for suffix in (".preparation", ".pending")]
+            if phase == "direct":
+                markers.append(base / ".refresh-preparation")
+            authority = b"\n".join(path.read_bytes() for path in [*markers, journal] if path.exists())
+            for artifact in base.glob(".acceptance-*"):
+                # No prefix/filename inference: each created large-file name
+                # must actually be discoverable in fixed, written metadata.
+                self.assertIn(str(artifact).encode(), authority)
+            snapshot = {path: (path.read_bytes(), path.stat()) for path in base.iterdir() if path.is_file()}
+            restart = r'''
+import pathlib, runpy, sys
+g = runpy.run_path(sys.argv[1])["main"].__globals__
+try:
+    journal = pathlib.Path(sys.argv[2])
+    if sys.argv[3] == "direct":
+        g["_replace_outputs"]([(journal.parent / str(index), "original " + str(index) + "\r\n")
+                               for index in range(5)])
+    else:
+        g["_recover_outputs"](journal)
+except (g["MatrixError"], OSError) as error:
+    print(str(error), file=sys.stderr)
+    raise SystemExit(2)
+'''
+            resumed = subprocess.run([sys.executable, "-I", "-B", "-c", restart, str(MODULE_PATH), str(journal), phase],
+                                     capture_output=True, text=True, timeout=5)
+            if any(path.exists() for path in markers):
+                self.assertEqual(resumed.returncode, 2, (resumed.stdout, resumed.stderr))
+                self.assertIn("uncertain recovery preparation", resumed.stderr)
+                self.assertEqual(set(snapshot), {path for path in base.iterdir() if path.is_file()})
+                for path, (data, identity) in snapshot.items():
+                    self.assertEqual(path.read_bytes(), data)
+                    self.assertTrue(os.path.samestat(identity, path.stat()))
+            else:
+                self.assertEqual(resumed.returncode, 0, (resumed.stdout, resumed.stderr))
+                self.assertEqual({path: path.read_bytes() for path in paths}, before)
+                self.assertEqual({path: stat.S_IMODE(path.stat().st_mode) for path in paths}, modes)
+                self.assertEqual(list(base.glob(".acceptance-*")), [])
+                self.assertFalse(journal.exists())
+
+    def test_initial_backup_creation_is_discoverable_on_both_sides(self) -> None:
+        for after in (False, True):
+            with self.subTest(after=after):
+                self.preparation_exit("original", "create", after)
+
+    def test_initial_candidate_creation_is_discoverable_on_both_sides(self) -> None:
+        for after in (False, True):
+            with self.subTest(after=after):
+                self.preparation_exit("original", "create", after, candidate=True)
+
+    def test_initial_payload_buffer_boundaries_are_discoverable(self) -> None:
+        for operation in ("write", "flush", "close", "sync"):
+            for after in (False, True):
+                with self.subTest(operation=operation, after=after):
+                    self.preparation_exit("original", operation, after)
+
+    def test_initial_candidate_binding_and_partial_writes_are_discoverable(self) -> None:
+        for operation in ("bind", "partial"):
+            for after in (False, True) if operation == "bind" else (True,):
+                with self.subTest(operation=operation, after=after):
+                    self.preparation_exit("original", operation, after, candidate=True)
+
+    def test_initial_candidate_buffer_boundaries_are_discoverable(self) -> None:
+        for operation in ("write", "flush", "close", "sync"):
+            for after in (False, True):
+                with self.subTest(operation=operation, after=after):
+                    self.preparation_exit("original", operation, after, candidate=True)
+
+    def test_initial_metadata_and_publication_bookkeeping_are_restartable(self) -> None:
+        for operation in ("metadata", "rename", "publication", "handoff"):
+            for after in (False, True):
+                with self.subTest(operation=operation, after=after):
+                    self.preparation_exit("original", operation, after)
+
+    def test_rollback_creation_and_binding_are_discoverable(self) -> None:
+        for operation in ("create", "bind"):
+            for after in (False, True):
+                with self.subTest(operation=operation, after=after):
+                    self.preparation_exit("rollback", operation, after)
+
+    def test_rollback_payload_buffer_boundaries_are_discoverable(self) -> None:
+        for operation in ("write", "flush", "close", "sync"):
+            for after in (False, True):
+                with self.subTest(operation=operation, after=after):
+                    self.preparation_exit("rollback", operation, after)
+
+    def test_rollback_partial_writes_and_native_bookkeeping_are_discoverable(self) -> None:
+        for operation in ("partial", "rename"):
+            for after in (False, True) if operation == "rename" else (True,):
+                with self.subTest(operation=operation, after=after):
+                    self.preparation_exit("rollback", operation, after)
+
+    def test_rollback_marker_release_preserves_restart_discovery(self) -> None:
+        for after in (False, True):
+            with self.subTest(after=after):
+                self.preparation_exit("rollback", "handoff", after)
+
+    def test_restart_creation_and_binding_are_discoverable(self) -> None:
+        for operation in ("create", "bind"):
+            for after in (False, True):
+                with self.subTest(operation=operation, after=after):
+                    self.preparation_exit("recovery", operation, after)
+
+    def test_restart_payload_buffer_boundaries_are_discoverable(self) -> None:
+        for operation in ("write", "flush", "close", "sync"):
+            for after in (False, True):
+                with self.subTest(operation=operation, after=after):
+                    self.preparation_exit("recovery", operation, after)
+
+    def test_restart_metadata_and_native_bookkeeping_are_restartable(self) -> None:
+        for operation in ("metadata", "rename", "handoff"):
+            for after in (False, True):
+                with self.subTest(operation=operation, after=after):
+                    self.preparation_exit("recovery", operation, after)
+
+    def test_restart_partial_writes_are_discoverable(self) -> None:
+        self.preparation_exit("recovery", "partial", True)
+
+    def test_pending_journal_creation_and_binding_are_discoverable(self) -> None:
+        for operation in ("create", "bind"):
+            for after in (False, True):
+                with self.subTest(operation=operation, after=after):
+                    self.preparation_exit("pending", operation, after)
+
+    def test_pending_journal_buffer_boundaries_are_discoverable(self) -> None:
+        for operation in ("write", "flush", "close", "sync"):
+            for after in (False, True):
+                with self.subTest(operation=operation, after=after):
+                    self.preparation_exit("pending", operation, after)
+
+    def test_owned_interrupted_journal_native_publication_recovers_successfully(self) -> None:
+        for after in (False, True):
+            with self.subTest(after=after):
+                self.preparation_exit("pending", "rename", after)
+
+    def test_pending_journal_partial_writes_are_discoverable(self) -> None:
+        self.preparation_exit("pending", "partial", True)
+
+    def test_first_marker_creation_is_discoverable_without_changing_outputs(self) -> None:
+        for after in (False, True):
+            with self.subTest(after=after):
+                self.preparation_exit("marker", "create", after)
+
+    def test_first_marker_buffer_boundaries_are_discoverable_without_changing_outputs(self) -> None:
+        for operation in ("write", "flush", "close", "sync", "partial"):
+            for after in (False, True) if operation != "partial" else (True,):
+                with self.subTest(operation=operation, after=after):
+                    self.preparation_exit("marker", operation, after)
+
+    def test_first_marker_binding_is_discoverable_without_changing_outputs(self) -> None:
+        for after in (False, True):
+            with self.subTest(after=after):
+                self.preparation_exit("marker", "bind", after)
+
+    def test_direct_preparation_creation_and_binding_are_discoverable(self) -> None:
+        for operation in ("create", "bind"):
+            for after in (False, True):
+                with self.subTest(operation=operation, after=after):
+                    self.preparation_exit("direct", operation, after)
+
+    def test_direct_preparation_buffer_boundaries_are_discoverable(self) -> None:
+        for operation in ("write", "flush", "close", "sync"):
+            for after in (False, True):
+                with self.subTest(operation=operation, after=after):
+                    self.preparation_exit("direct", operation, after)
+
+    def test_direct_preparation_native_publication_is_discoverable(self) -> None:
+        for after in (False, True):
+            with self.subTest(after=after):
+                self.preparation_exit("direct", "publication", after)
+
+    def test_foreign_preparation_and_pending_occupants_are_never_opened_or_modified(self) -> None:
+        for suffix in (".preparation", ".pending"):
+            for contents in (b"", b"{partial", b'{"version":1,"outputs":[]}', b"x" * (MODULE._JOURNAL_BYTES + 1)):
+                with self.subTest(suffix=suffix, size=len(contents)), tempfile.TemporaryDirectory() as directory:
+                    base = Path(directory).resolve()
+                    journal, output = base / "refresh.transaction", base / "output"
+                    marker = journal.with_suffix(suffix)
+                    output.write_bytes(b"original\r\n")
+                    marker.write_bytes(contents)
+                    identity = marker.stat()
+                    with mock.patch.object(MODULE, "_read_transaction_file") as read:
+                        for action in (lambda: MODULE._recover_outputs(journal),
+                                       lambda: MODULE._replace_outputs([(output, "candidate")], journal=journal)):
+                            with self.assertRaisesRegex(MODULE.MatrixError, "uncertain recovery preparation"):
+                                action()
+                        read.assert_not_called()
+                    if suffix == ".pending":
+                        with self.assertRaisesRegex(MODULE.MatrixError, "pending bytes retained"):
+                            MODULE._write_transaction(journal, [{}], committed=False)
+                    self.assertEqual(marker.read_bytes(), contents)
+                    self.assertTrue(os.path.samestat(identity, marker.stat()))
+                    self.assertEqual(output.read_bytes(), b"original\r\n")
+                    self.assertFalse(journal.exists())
+                    self.assertEqual(list(base.glob(".acceptance-*")), [])
+
+    def test_foreign_preparation_aliases_preserve_the_actual_foreign_file(self) -> None:
+        for suffix in (".preparation", ".pending"):
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory).resolve()
+                journal, output, foreign = base / "refresh.transaction", base / "output", base / "foreign"
+                output.write_bytes(b"original")
+                foreign.write_bytes(b"foreign alias bytes\r\n")
+                marker = journal.with_suffix(suffix)
+                os.link(foreign, marker)  # An actual alias, also available without Windows symlink privilege.
+                identity = foreign.stat()
+                with self.assertRaisesRegex(MODULE.MatrixError, "uncertain recovery preparation"):
+                    MODULE._recover_outputs(journal)
+                if suffix == ".pending":
+                    with self.assertRaisesRegex(MODULE.MatrixError, "pending bytes retained"):
+                        MODULE._write_transaction(journal, [{}], committed=False)
+                self.assertTrue(os.path.samestat(identity, foreign.stat()))
+                self.assertTrue(os.path.samestat(identity, marker.stat()))
+                self.assertEqual(foreign.read_bytes(), b"foreign alias bytes\r\n")
+                self.assertEqual(output.read_bytes(), b"original")
+
+    def test_preparation_and_pending_replacements_preserve_foreign_identity_and_bytes(self) -> None:
+        for suffix in (".preparation", ".pending"):
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory).resolve()
+                output, journal = base / "output", base / "refresh.transaction"
+                output.write_bytes(b"original\r\n")
+                marker, displaced = journal.with_suffix(suffix), base / "displaced"
+                foreign_identity = []
+                bind, replace = MODULE._OutputPreparation.bind, os.replace
+                def substitute() -> None:
+                    data = marker.read_bytes()
+                    marker.rename(displaced)
+                    marker.write_bytes(data)  # Identical contents cannot prove ownership.
+                    foreign_identity.append(marker.stat())
+                def bound(preparation: Any, record: Any) -> None:
+                    if suffix == ".preparation" and not foreign_identity:
+                        substitute()
+                    bind(preparation, record)
+                def renamed(source: Any, target: Any) -> None:
+                    if suffix == ".pending" and Path(target) == journal and not foreign_identity:
+                        substitute()
+                        raise OSError("publication refused")
+                    replace(source, target)
+                with mock.patch.object(MODULE._OutputPreparation, "bind", bound), \
+                        mock.patch.object(os, "replace", renamed), self.assertRaises((MODULE.MatrixError, OSError)):
+                    MODULE._replace_outputs([(output, "candidate")], journal=journal)
+                self.assertEqual(len(foreign_identity), 1)
+                self.assertTrue(os.path.samestat(foreign_identity[0], marker.stat()))
+                self.assertEqual(marker.read_bytes(), displaced.read_bytes())
+                self.assertEqual(output.read_bytes(), b"original\r\n")
+                snapshot = {path: path.read_bytes() for path in base.iterdir() if path.is_file()}
+                with self.assertRaisesRegex(MODULE.MatrixError, "uncertain recovery preparation"):
+                    MODULE._recover_outputs(journal)
+                self.assertEqual({path: path.read_bytes() for path in base.iterdir() if path.is_file()}, snapshot)
+
+    def test_preparation_in_place_edits_and_added_aliases_are_preserved(self) -> None:
+        for edit in ("content", "hardlink"):
+            with self.subTest(edit=edit), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory).resolve()
+                output, journal = base / "output", base / "refresh.transaction"
+                output.write_bytes(b"original")
+                marker, alias = journal.with_suffix(".preparation"), base / "alias"
+                bind = MODULE._OutputPreparation.bind
+                retained = []
+                def changed(preparation: Any, record: Any) -> None:
+                    if not retained:
+                        if edit == "content":
+                            marker.write_bytes(b"external preparation edit\r\n")
+                        else:
+                            os.link(marker, alias)
+                        retained.append((marker.read_bytes(), marker.stat()))
+                    bind(preparation, record)
+                with mock.patch.object(MODULE._OutputPreparation, "bind", changed), \
+                        self.assertRaisesRegex(MODULE.MatrixError, "preparation"):
+                    MODULE._replace_outputs([(output, "candidate")], journal=journal)
+                self.assertEqual(len(retained), 1)
+                data, identity = retained[0]
+                self.assertEqual(marker.read_bytes(), data)
+                self.assertTrue(os.path.samestat(identity, marker.stat()))
+                self.assertEqual(output.read_bytes(), b"original")
+                if edit == "hardlink":
+                    self.assertEqual(alias.read_bytes(), data)
+                    self.assertTrue(os.path.samestat(identity, alias.stat()))
+
+    def test_first_marker_failures_are_closed_and_preserve_all_outputs(self) -> None:
+        for failure in ("create", "fdopen", "identity", "write", "flush", "sync", "close", "unreadable"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory).resolve()
+                output, journal = base / "output", base / "refresh.transaction"
+                output.write_bytes(b"original\r\n")
+                identity = output.stat()
+                marker = journal.with_suffix(".preparation")
+                system_open, fdopen, metadata, sync = os.open, os.fdopen, MODULE._transaction_metadata, os.fsync
+                read = MODULE._read_transaction_file
+                owned = []
+                def opened(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+                    if Path(path) == marker and flags & os.O_CREAT:
+                        if failure == "create":
+                            raise PermissionError("marker creation denied")
+                        descriptor = system_open(path, flags, *args, **kwargs)
+                        owned.append(descriptor)
+                        return descriptor
+                    return system_open(path, flags, *args, **kwargs)
+                def handle(descriptor: int, mode: str) -> Any:
+                    if descriptor in owned and mode == "r+b" and failure == "fdopen":
+                        raise OSError("marker handle denied")
+                    result = fdopen(descriptor, mode)
+                    if descriptor in owned and mode == "r+b":
+                        if failure == "write":
+                            write = result.write
+                            def partial(data: bytes) -> int:
+                                write(data[:3])
+                                return 3
+                            result.write = partial
+                        elif failure == "flush":
+                            result.flush = mock.Mock(side_effect=OSError("marker flush denied"))
+                        elif failure == "close":
+                            close = result.close
+                            def closed() -> None:
+                                close()
+                                raise OSError("marker close interrupted")
+                            result.close = closed
+                    return result
+                def unknown(handle: Any) -> Any:
+                    result = metadata(handle)
+                    if failure == "identity" and handle.fileno() in owned:
+                        fields = list(result)
+                        fields[1] = 0
+                        return os.stat_result(fields)
+                    return result
+                def flushed(descriptor: int) -> None:
+                    if failure == "sync" and descriptor in owned:
+                        raise OSError("marker sync denied")
+                    sync(descriptor)
+                def unreadable(path: Path, limit: int) -> Any:
+                    if failure == "unreadable" and path == marker:
+                        raise PermissionError("marker unreadable")
+                    return read(path, limit)
+                with mock.patch.object(os, "open", opened), mock.patch.object(os, "fdopen", handle), \
+                        mock.patch.object(os, "fsync", flushed), mock.patch.object(MODULE, "_transaction_metadata", unknown), \
+                        mock.patch.object(MODULE, "_read_transaction_file", unreadable), \
+                        self.assertRaises((MODULE.MatrixError, OSError)):
+                    MODULE._replace_outputs([(output, "candidate")], journal=journal)
+                self.assertEqual(output.read_bytes(), b"original\r\n")
+                self.assertTrue(os.path.samestat(identity, output.stat()))
+                self.assertEqual(list(base.glob(".acceptance-*")), [])
+                self.assertFalse(journal.exists())
+                if marker.exists():
+                    retained = marker.read_bytes()
+                    with self.assertRaisesRegex(MODULE.MatrixError, "uncertain recovery preparation"):
+                        MODULE._recover_outputs(journal)
+                    self.assertEqual(marker.read_bytes(), retained)
+                self.assertEqual(marker.exists(), failure in ("fdopen", "identity", "unreadable"))
+                if failure == "fdopen":
+                    with self.assertRaises(OSError):
+                        os.fstat(owned[0])
+
+        # The journal's fixed pending file is also a first marker. If handle
+        # construction fails, close the descriptor and retain the uncertain
+        # file rather than inventing ownership from its name or empty bytes.
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            output, journal = base / "output", base / "refresh.transaction"
+            output.write_bytes(b"original\r\n")
+            pending = journal.with_suffix(".pending")
+            system_open = os.open
+            descriptors = []
+            def created(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+                descriptor = system_open(path, flags, *args, **kwargs)
+                if Path(path) == pending:
+                    descriptors.append(descriptor)
+                return descriptor
+            with mock.patch.object(os, "open", created), \
+                    mock.patch.object(os, "fdopen", side_effect=OSError("journal handle denied")), \
+                    self.assertRaisesRegex(OSError, "journal handle denied"):
+                MODULE._write_transaction(journal, [{}], committed=False)
+            self.assertEqual(len(descriptors), 1)
+            with self.assertRaises(OSError):
+                os.fstat(descriptors[0])
+            identity = pending.stat()
+            self.assertEqual(pending.read_bytes(), b"")
+            with self.assertRaisesRegex(MODULE.MatrixError, "uncertain recovery preparation"):
+                MODULE._recover_outputs(journal)
+            self.assertTrue(os.path.samestat(identity, pending.stat()))
+            self.assertEqual(pending.read_bytes(), b"")
+            self.assertEqual(output.read_bytes(), b"original\r\n")
+            self.assertFalse(journal.exists())
+
+    def test_preparation_bound_is_checked_before_creating_an_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            output, journal = base / "output", base / "refresh.transaction"
+            output.write_bytes(b"original")
+            with mock.patch.object(MODULE, "_JOURNAL_BYTES", 8), \
+                    self.assertRaisesRegex(MODULE.MatrixError, "preparation exceeds its bound"):
+                MODULE._replace_outputs([(output, "candidate")], journal=journal)
+            self.assertEqual({path: path.read_bytes() for path in base.iterdir()}, {output: b"original"})
+
+    def test_direct_preparation_is_detected_in_every_output_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            paths = [base / str(index) / "output" for index in range(5)]
+            for path in paths:
+                path.parent.mkdir()
+                path.write_bytes(b"original\r\n")
+            marker = paths[-1].parent / ".refresh-preparation"
+            marker.write_bytes(b"foreign preparation\r\n")
+            identity = marker.stat()
+            for order in (paths, list(reversed(paths))):
+                with self.subTest(first=order[0]), \
+                        self.assertRaisesRegex(MODULE.MatrixError, "uncertain recovery preparation"):
+                    MODULE._replace_outputs([(path, "candidate") for path in order])
+            self.assertTrue(os.path.samestat(identity, marker.stat()))
+            self.assertEqual(marker.read_bytes(), b"foreign preparation\r\n")
+            self.assertEqual([path.read_bytes() for path in paths], [b"original\r\n"] * 5)
+            self.assertEqual(list(base.rglob(".acceptance-*")), [])
+
+
+
+
+    def test_native_selections_match_complete_python_discovery_once(self) -> None:
+        loader = unittest.TestLoader()
+        expected = [case(name).id() for case in (*_MATRIX_CLASSES, AcceptanceSelectionTests,
+                                                  AcceptanceRecoveryTests, AcceptanceMatrixPublicTreeTests)
+                    for name in loader.getTestCaseNames(case)]
+        original = sorted(case.__name__ + "." + name
+                          for case in (*_MATRIX_CLASSES, AcceptanceRecoveryTests, AcceptanceMatrixPublicTreeTests)
+                          for name in loader.getTestCaseNames(case))
+        self.assertEqual(len(original), 248)
+        self.assertEqual(hashlib.sha256("\n".join(original).encode("utf-8")).hexdigest(),
+                         "57e803ce65b9c5c36a831b47562eb13cd5f1cabb9cb9dff9884a918d2479f483")
+        selected = [test.id() for number in range(_CONTRACT_PARTITIONS) for test in contract_suite(number)]
+        cmake = (MODULE.DEFAULT_ROOT / "tools/CMakeLists.txt").read_text(encoding="utf-8")
+        blocks = re.findall(r'add_test\(\s*NAME (Acceptance\w+Contract\d*)\s+COMMAND(.*?)\)', cmake, re.S)
+        native = []
+        partitions = []
+        for name, command in blocks:
+            if name.startswith("AcceptanceMatrixPublicTreeContract"):
+                selector = re.search(r'AcceptanceMatrixPublicTreeTests\.test_partition_[0-3]', command)
+                self.assertIsNotNone(selector, name)
+                native.extend(test.id() for test in loader.loadTestsFromName(selector[0], sys.modules[__name__]))
+            elif name == "AcceptanceRecoveryContract":
+                self.assertIn("AcceptanceRecoveryTests", command)
+                native.extend(test.id() for test in loader.loadTestsFromTestCase(AcceptanceRecoveryTests))
+            else:
+                partition = re.search(r'--contract-partition ([0-7])\s*$', command)
+                self.assertIsNotNone(partition, name)
+                number = int(partition[1])
+                partitions.append(number)
+                native.extend(test.id() for test in contract_suite(number))
+            self.assertRegex(cmake, rf'set_tests_properties\(\s*{name}\s+PROPERTIES LABELS "hygiene;tools" TIMEOUT 30\)'
+                             if not name.startswith("AcceptanceMatrixPublicTreeContract") else
+                             r'AcceptanceMatrixPublicTreeContract4\s+PROPERTIES LABELS "hygiene;tools" TIMEOUT 30\)')
+        selected.extend(test.id() for case in (AcceptanceRecoveryTests, AcceptanceMatrixPublicTreeTests)
+                        for test in loader.loadTestsFromTestCase(case))
+        matrix = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_matrix.json")
+        names = {"AcceptanceMatrixContract" + (str(number + 1) if number else "")
+                 for number in range(_CONTRACT_PARTITIONS)}
+        for row_id in ("perf.requirement-matrix", "iss.126"):
+            evidence = {item["ref"] for item in row_of(matrix, row_id)["evidence"] if item["kind"] == "ctest"}
+            self.assertEqual(evidence, names)
+        self.assertEqual(sorted(partitions), list(range(_CONTRACT_PARTITIONS)))
+        self.assertTrue(all(contract_suite(number).countTestCases() for number in partitions))
+        self.assertEqual(sorted(native), sorted(expected))
+        self.assertEqual(sorted(selected), sorted(expected))
+        self.assertEqual(len(native), len(set(native)))
+        self.assertEqual(len(selected), len(set(selected)))
+        discovered = loader.loadTestsFromModule(sys.modules[__name__])
+        self.assertEqual(discovered.countTestCases(), len(expected))
+
+    def test_partition_entrypoint_refuses_invalid_selection(self) -> None:
+        for value in ("-1", "8", "unknown"):
+            with self.subTest(value=value):
+                child = subprocess.run([sys.executable, "-I", "-B", str(Path(__file__).resolve()),
+                                        "--contract-partition", value],
+                                       capture_output=True, text=True, timeout=5)
+                self.assertEqual(child.returncode, 1)
+                self.assertIn("invalid contract partition" if value != "unknown" else
+                              "invalid literal for int()", child.stderr)
+                self.assertEqual(child.stdout, "")
+
+    def test_contract_partition_refuses_invalid_selection(self) -> None:
+        for number in (-1, _CONTRACT_PARTITIONS, True, "0", None):
+            with self.subTest(number=number), self.assertRaises(ValueError):
+                contract_suite(number)
+
+
 if __name__ == "__main__":
+    if len(sys.argv) == 3 and sys.argv[1] == "--contract-partition":
+        try:
+            suite = contract_suite(int(sys.argv[2]))
+        except ValueError as error:
+            raise SystemExit(str(error)) from error
+        raise SystemExit(not unittest.TextTestRunner().run(suite).wasSuccessful())
     unittest.main()
