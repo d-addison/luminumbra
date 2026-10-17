@@ -10,6 +10,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace Luminumbra::Client::Measurement {
@@ -24,35 +25,58 @@ inline void require_workload_world_load(bool capture_active,
                                     "only the world created by this capture may be reloaded");
 }
 
-// Allocate before warmup. Appending a fixed record never allocates; each frame
-// and each transition is visited once. Refuse overflow without dropping evidence.
+// Allocate at most Limit elements before warmup. Appending a fixed record never
+// allocates; each frame and each transition is visited once. Refuse overflow
+// without dropping evidence.
 template<class T, std::size_t Limit>
 class ObservationRecords {
     static_assert(Limit <= std::numeric_limits<std::size_t>::max() / sizeof(T));
 
 public:
-    explicit ObservationRecords(std::size_t capacity)
+    constexpr explicit ObservationRecords(std::size_t capacity)
         : records_(checked_capacity(capacity)) {}
-    void append(const T& record) {
-        if (size_ == records_.size())
-            throw std::runtime_error("workload observations exceed bounds");
-        records_[size_++] = record;
+    constexpr ObservationRecords(const ObservationRecords&) = default;
+    constexpr ObservationRecords& operator=(const ObservationRecords&) = default;
+    // Transfer the count with its storage. The source becomes an empty buffer
+    // which refuses append until assigned another preallocated buffer.
+    constexpr ObservationRecords(ObservationRecords&& other) noexcept
+        : records_(std::move(other.records_))
+        , size_(std::exchange(other.size_, 0)) {
+        other.records_.clear();
     }
-    std::size_t size() const {
+    constexpr ObservationRecords& operator=(ObservationRecords&& other) noexcept {
+        if (this != &other) {
+            records_ = std::move(other.records_);
+            size_ = std::exchange(other.size_, 0);
+            other.records_.clear();
+        }
+        return *this;
+    }
+    constexpr void append(const T& record) {
+        if (size_ >= records_.size())
+            throw std::runtime_error("workload observations exceed bounds");
+        // Check the actual storage access as well as the logical count, and
+        // publish the record only after assignment has succeeded.
+        records_.at(size_) = record;
+        ++size_;
+    }
+    constexpr std::size_t size() const {
         return size_;
     }
-    std::size_t remaining() const {
+    constexpr std::size_t remaining() const {
         return records_.size() - size_;
     }
-    const T& at(std::size_t index) const {
+    constexpr const T& at(std::size_t index) const {
         if (index >= size_)
             throw std::out_of_range("missing workload observation");
-        return records_[index];
+        return records_.at(index);
     }
 
 private:
-    static std::size_t checked_capacity(std::size_t capacity) {
-        if (capacity > Limit)
+    static constexpr std::size_t checked_capacity(std::size_t capacity) {
+        // Both the fixed capture limit and the allocator's element/byte bound
+        // are checked before constructing storage, without multiplying sizes.
+        if (capacity > Limit || capacity > std::vector<T>{}.max_size())
             throw std::invalid_argument("workload observation capacity exceeds bounds");
         return capacity;
     }

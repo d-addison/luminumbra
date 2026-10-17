@@ -17,12 +17,14 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <source_location>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -461,6 +463,194 @@ void observation_records() {
     require(missing);
 }
 
+template<class Exception, class Callback>
+void require_exception(Callback callback) {
+    bool refused = false;
+    try {
+        callback();
+    } catch (const Exception&) {
+        refused = true;
+    }
+    require(refused);
+}
+
+template<class T, std::size_t Limit>
+constexpr bool observation_record_values(const T& first, const T& second) {
+    ObservationRecords<T, Limit> records(2);
+    if (records.size() != 0 || records.remaining() != 2)
+        return false;
+    records.append(first);
+    const auto* address = &records.at(0);
+    auto copy = records;
+    records.append(second);
+    if (&records.at(0) != address || records.size() != 2 || records.remaining() != 0 ||
+        copy.size() != 1 || copy.remaining() != 1 || &copy.at(0) == address)
+        return false;
+    copy.append(second);
+    ObservationRecords<T, Limit> partial(2);
+    partial.append(first);
+    const auto& partial_source = partial;
+    auto partial_moved = std::move(partial);
+    if (partial_source.size() != 0 || partial_source.remaining() != 0 ||
+        partial_moved.size() != 1 || partial_moved.remaining() != 1)
+        return false;
+    partial_moved.append(second);
+    ObservationRecords<T, Limit> assigned(0);
+    assigned = copy;
+    if (assigned.size() != 2 || assigned.remaining() != 0)
+        return false;
+    // Observe through an existing const view, including after ownership moves.
+    const auto& source = records;
+    auto moved = std::move(records);
+    if (source.size() != 0 || source.remaining() != 0 || &moved.at(0) != address)
+        return false;
+    const auto& moved_source = moved;
+    assigned = std::move(moved);
+    return moved_source.size() == 0 && moved_source.remaining() == 0 && assigned.size() == 2 &&
+           assigned.remaining() == 0 && &assigned.at(0) == address;
+}
+
+// Exercise the production implementation during compilation as well as in the
+// registered native case. The four record types share the same fixed buffer.
+static_assert(observation_record_values<CameraObservation, kMaxFrames>({}, {}));
+static_assert(observation_record_values<ActionObservation, 64>({}, {}));
+static_assert(observation_record_values<WorkloadObservation, kMaxFrames>({}, {}));
+static_assert(observation_record_values<TransitionObservation, kMaxCaptureTransitions>({}, {}));
+
+struct AssignmentObservation {
+    const ObservationRecords<AssignmentObservation, 1>* records = nullptr;
+    bool* observed_empty = nullptr;
+    constexpr AssignmentObservation& operator=(const AssignmentObservation& record) {
+        *record.observed_empty = record.records->size() == 0;
+        return *this;
+    }
+};
+
+static_assert([] {
+    ObservationRecords<AssignmentObservation, 1> records(1);
+    bool observed_empty = false;
+    records.append({.records = &records, .observed_empty = &observed_empty});
+    return observed_empty && records.size() == 1;
+}());
+
+template<class T, std::size_t Limit, class Make, class Identify>
+void observation_record_bounds(Make make, Identify identify) {
+    using Records = ObservationRecords<T, Limit>;
+    const auto empty = [&](Records& records) {
+        require(records.size() == 0 && records.remaining() == 0);
+        require_exception<std::out_of_range>([&] { (void)records.at(0); });
+        require_refusal([&] { records.append(make(0)); });
+    };
+    const auto full = [&](Records& records, std::size_t capacity) {
+        require(records.size() == capacity && records.remaining() == 0);
+        require_refusal([&] { records.append(make(capacity)); });
+        require_refusal([&] { records.append(make(capacity)); });
+        require(records.size() == capacity && records.remaining() == 0);
+        for (std::size_t index = 0; index < capacity; ++index)
+            require(identify(records.at(index)) == identify(make(index)));
+        require_exception<std::out_of_range>([&] { (void)records.at(capacity); });
+        require_exception<std::out_of_range>(
+            [&] { (void)records.at(std::numeric_limits<std::size_t>::max()); });
+    };
+    // Bound the test work by each actual production limit, including its last
+    // valid slot. A capacity tied to vector allocation rounding must not grow.
+    for (const std::size_t capacity :
+         {std::size_t{0}, std::size_t{1}, std::size_t{2}, Limit - 1, Limit}) {
+        Records records(capacity);
+        require(records.size() == 0 && records.remaining() == capacity);
+        require_exception<std::out_of_range>([&] { (void)records.at(0); });
+        const T* address = nullptr;
+        for (std::size_t index = 0; index < capacity; ++index) {
+            records.append(make(index));
+            if (index == 0)
+                address = &records.at(0);
+            require(&records.at(0) == address);
+            require(records.size() == index + 1 && records.remaining() == capacity - index - 1);
+            require_exception<std::out_of_range>([&] { (void)records.at(index + 1); });
+        }
+        full(records, capacity);
+        auto copy = records;
+        full(copy, capacity);
+        Records assigned(capacity == 0 ? 2 : 0);
+        assigned = records;
+        full(assigned, capacity);
+        // Self assignment must retain the count, capacity and every record.
+        auto& alias = assigned;
+        assigned = alias;
+        full(assigned, capacity);
+        auto moved = std::move(records);
+        empty(records);
+        if (capacity != 0)
+            require(&moved.at(0) == address);
+        full(moved, capacity);
+        assigned = std::move(moved);
+        empty(moved);
+        full(assigned, capacity);
+        assigned = std::move(alias);
+        full(assigned, capacity);
+        // Moved-from buffers can acquire and use fresh preallocated storage.
+        records = Records(1);
+        records.append(make(0));
+        full(records, 1);
+    }
+    for (const std::size_t capacity : {Limit + 1, std::numeric_limits<std::size_t>::max()})
+        require_exception<std::invalid_argument>([&] { (void)Records(capacity); });
+}
+
+struct FailingObservation {
+    int value = 0;
+    bool fail = false;
+    FailingObservation& operator=(const FailingObservation& other) {
+        if (other.fail)
+            throw std::runtime_error("observation assignment failed");
+        value = other.value;
+        return *this;
+    }
+};
+
+void observation_record_boundaries() {
+    observation_record_bounds<CameraObservation, kMaxFrames>(
+        [](std::size_t index) { return CameraObservation{.tick = static_cast<int>(index)}; },
+        [](const CameraObservation& record) { return record.tick; });
+    observation_record_bounds<ActionObservation, 64>(
+        [](std::size_t index) {
+            return ActionObservation{.tick = static_cast<int>(index), .name = "dig"};
+        },
+        [](const ActionObservation& record) { return record.tick; });
+    observation_record_bounds<WorkloadObservation, kMaxFrames>(
+        [](std::size_t index) {
+            WorkloadObservation record;
+            record.frame = index;
+            return record;
+        },
+        [](const WorkloadObservation& record) { return record.frame; });
+    observation_record_bounds<TransitionObservation, kMaxCaptureTransitions>(
+        [](std::size_t index) {
+            return TransitionObservation{
+                .region = {static_cast<int>(index), 0}, .from = 0, .to = 1};
+        },
+        [](const TransitionObservation& record) { return record.region[0]; });
+    ObservationRecords<CameraObservation, 0> no_capacity(0);
+    require_refusal([&] { no_capacity.append({}); });
+    require_exception<std::invalid_argument>(
+        [] { (void)ObservationRecords<CameraObservation, 0>(1); });
+    // This template limit fits size_t, but this allocation cannot fit the
+    // allocator's difference/byte bound. Refuse before attempting allocation.
+    using LargeRecords = ObservationRecords<unsigned char, std::numeric_limits<std::size_t>::max()>;
+    LargeRecords small(1);
+    small.append(7);
+    require(small.at(0) == 7 && small.remaining() == 0);
+    require_exception<std::invalid_argument>(
+        [] { (void)LargeRecords(std::numeric_limits<std::size_t>::max()); });
+    ObservationRecords<FailingObservation, 2> failing(2);
+    failing.append({.value = 7});
+    require_refusal([&] { failing.append({.value = 8, .fail = true}); });
+    require(failing.size() == 1 && failing.remaining() == 1 && failing.at(0).value == 7);
+    require_exception<std::out_of_range>([&] { (void)failing.at(1); });
+    failing.append({.value = 9});
+    require(failing.size() == 2 && failing.remaining() == 0 && failing.at(1).value == 9);
+}
+
 void workload_options() {
     for (const std::string option : {"--render-benchmark",
                                      "--render-benchmark-schema",
@@ -775,6 +965,11 @@ void content_references() {
 
 int main(int argc, char** argv) {
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "observation-records") {
+            observation_records();
+            observation_record_boundaries();
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "saved-authority") {
             saved_authority();
             snapshot_authority();
@@ -795,6 +990,7 @@ int main(int argc, char** argv) {
         require(argc == 1);
         workload_options();
         observation_records();
+        observation_record_boundaries();
         configuration();
         graphics_capture_configuration();
         simulation_configuration();

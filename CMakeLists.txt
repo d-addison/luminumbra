@@ -332,6 +332,10 @@ foreach(PROFILING_TARGET IN ITEMS
   luminumbra_enable_frame_pointers(${PROFILING_TARGET})
 endforeach()
 
+# Apply after every first-party target/variant has been declared, including
+# object libraries, shared tools and tests outside the warning-helper roster.
+include(cmake/first_party_exceptions.cmake)
+
 # Binary packaging is implemented for release dry runs but is dormant by
 # default. Source releases are produced directly from Git and never traverse
 # this install graph.

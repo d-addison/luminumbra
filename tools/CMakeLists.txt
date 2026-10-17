@@ -122,6 +122,12 @@ if(BUILD_TESTING)
     set_tests_properties(ContainmentLinkClosureContract
         PROPERTIES LABELS "ci;tools" TIMEOUT 30)
     add_test(
+        NAME FirstPartyExceptionsContract
+        COMMAND "${Python3_EXECUTABLE}" -I -B
+                "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_first_party_exceptions.py")
+    set_tests_properties(FirstPartyExceptionsContract
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
         NAME WorldgenProbeSmokeValidatorContract
         COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_worldgen_probe_smoke.py")
