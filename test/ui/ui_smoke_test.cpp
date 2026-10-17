@@ -224,8 +224,9 @@ void AwaitWorldCatalog(Luminumbra::Client::Rml_UIManager& ui) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
         ui.Update();
     }
-    if (document)
+    if (document) {
         EXPECT_FALSE(document->HasAttribute("data-worlds-pending"));
+    }
 }
 
 Rml::ElementDocument* LoadDocumentAndFind(Luminumbra::Client::Rml_UIManager& ui,
@@ -1195,8 +1196,9 @@ TEST(UiSmokeTest, RedesignedControlsAreFunctional) {
             jump_row = r;
     }
     ASSERT_NE(jump_row, nullptr);
-    if (auto* chip = settings->GetElementById("kb_Jump"))
+    if (auto* chip = settings->GetElementById("kb_Jump")) {
         EXPECT_EQ(chip->GetInnerRML(), "Space");
+    }
     ClickAndUpdate(ui, jump_row);
     EXPECT_EQ(last_rebind_action, "Jump");
 
@@ -1839,6 +1841,22 @@ TEST(WorldgenOverrideTest, BuildCustomPresetAppliesOnlyRealDeltas) {
     auto rb = BuildCustomPreset(base, bad);
     EXPECT_FALSE(rb.changed);
     EXPECT_EQ(rb.skipped, 1);
+}
+
+TEST(WorldgenOverrideTest, CustomizationKeepsExplicitSamplingAndItsSchemaGate) {
+    for (const int revision : {1, 2}) {
+        const nlohmann::json base = {{"schema_rev", 7},
+                                     {"generation_params",
+                                      {{"terrain", {{"surface_sampling_revision", revision}}},
+                                       {"features", nlohmann::json::object()}}}};
+        const auto custom = Luminumbra::Client::BuildCustomPreset(base, {});
+        const auto knobs = Luminumbra::Client::BuildKnobResolvedPreset(base, {});
+        for (const auto* preset : {&custom.json, &knobs.json}) {
+            EXPECT_EQ(preset->at("schema_rev"), revision == 1 ? 7 : 8);
+            EXPECT_EQ(preset->at("generation_params").at("terrain").at("surface_sampling_revision"),
+                      revision);
+        }
+    }
 }
 
 // Drift guard: every worldgen-param data-path authored in world_creation.rml must be a real

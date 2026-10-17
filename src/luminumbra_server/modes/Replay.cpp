@@ -167,34 +167,35 @@ int RunReplay(const ServerCliOptions& options) {
                               options.replay_path);
         return 1;
     }
+    if (contents->elided_through_tick != 0) {
+        LUMINUMBRA_CORE_ERROR("replay: '{}' is a diagnostic suffix; inputs through tick {} "
+                              "were elided (prefix digest={:016x}); cannot replay from seed",
+                              options.replay_path,
+                              contents->elided_through_tick,
+                              contents->elided_prefix_digest);
+        return 1;
+    }
 
     const Luminumbra::Replay::ReplayHeader& header = contents->header;
     // Refuse a version / engine mismatch loudly (Factorio replays break silently
     // across versions; we refuse instead -- research Area 2 takeaway 8).
     const std::string engine_now(luminumbra::core::GetEngineVersionString());
-    if (header.version != Luminumbra::Replay::kLrec1Version) {
-        LUMINUMBRA_CORE_ERROR("replay: stream LREC version {} != engine {}",
+    if (header.version != Luminumbra::Replay::kLrec1Version &&
+        header.version != Luminumbra::Replay::kLrec1ElidedVersion) {
+        LUMINUMBRA_CORE_ERROR("replay: unsupported LREC version {} (accepted: {}, {})",
                               header.version,
-                              Luminumbra::Replay::kLrec1Version);
+                              Luminumbra::Replay::kLrec1Version,
+                              Luminumbra::Replay::kLrec1ElidedVersion);
         return 1;
     }
 
     // Boot the session from the header parameters (mirror ServerWorldRunnerConfig).
-    Luminumbra::Server::ServerWorldRunnerConfig config;
-    config.root_path = options.root;
-    config.systems_config_override = options.systems_config_override;
-    config.preset_json_override = options.preset_json_override;
-    config.seed = header.seed_string;
-    config.preset = header.preset;
-    config.world_id.clear();
-    config.world_name = "Replay Playback";
-    config.surface_radius = static_cast<int>(header.surface_radius);
-    config.collision_radius = static_cast<int>(header.collision_radius);
-    config.test_streaming_radius_cap = options.test_streaming_radius_cap;
-    config.autosave_interval_ticks = 0;
-    config.region_scheduler = RunnerConfigFrom(options).region_scheduler;
-
-    Luminumbra::Server::ServerWorldRunner runner(std::move(config));
+    auto config = ReplayRunnerConfigFrom(options, header);
+    if (!config) {
+        LUMINUMBRA_CORE_ERROR("replay: invalid preset or incompatible configuration identity");
+        return 1;
+    }
+    Luminumbra::Server::ServerWorldRunner runner(std::move(*config));
     if (!runner.Boot()) {
         LUMINUMBRA_CORE_ERROR("replay: session failed to boot from header");
         return 1;
@@ -444,6 +445,10 @@ int RunMutateReplayFixture(const ServerCliOptions& options) {
     if (!contents.has_value()) {
         LUMINUMBRA_CORE_ERROR("mutate: '{}' is not a valid LREC1 stream",
                               options.mutate_replay_fixture);
+        return 1;
+    }
+    if (contents->elided_through_tick != 0) {
+        LUMINUMBRA_CORE_ERROR("mutate: diagnostic suffix cannot be rewritten as a full replay");
         return 1;
     }
     if (contents->checkpoints.empty()) {

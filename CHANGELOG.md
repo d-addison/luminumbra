@@ -17,8 +17,10 @@
 - Bind TCP admission, lockstep and replay to effective simulation configuration
   and resolved preset content, including exact biome/structure dependency bytes
   consumed from an immutable snapshot. Runtime/soak TCP Hello has a 10-second
-  deadline and releases expired slots (issue #315). Lockstep protocol and LREC1
-  replay layout are version 3; older layouts are refused.
+  deadline and releases expired slots (issue #315). Lockstep Hello is
+  version 4 and validates admission limits. Complete LREC1 output remains byte-identical
+  at version 3; diagnostic suffixes with an elided prefix use version 4. Replay readers
+  accept both versions; older layouts are refused.
 - Add revision-7 preset defaults while retaining revision-6 omission semantics.
   Current-format saves lacking embedded presets for the eight packaged
   names resolve to frozen revision-6 copies; new saves embed resolved choices.

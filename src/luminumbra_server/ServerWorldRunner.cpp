@@ -38,6 +38,7 @@
 #include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_common/systems/WindFieldSystem.h"
 #include "luminumbra_common/world/Chunk.h"
+#include "luminumbra_common/world/SurfaceWorkBudget.h"
 #include "luminumbra_common/world/WorldStreamingState.h"
 
 namespace Luminumbra::Server {
@@ -228,6 +229,10 @@ ServerWorldRunner::~ServerWorldRunner() {
 }
 
 bool ServerWorldRunner::Boot() {
+    if (!World::SurfaceRadiiSupported(m_config.surface_radius, m_config.collision_radius)) {
+        m_bootError = "Surface and collision radii must be between 0 and 12 chunks";
+        return false;
+    }
     if (m_booted) {
         return true;
     }
@@ -282,7 +287,9 @@ bool ServerWorldRunner::Boot() {
             m_config.world_name,
             m_config.seed,
             m_config.preset,
-            m_config.preset_json_override ? &*m_config.preset_json_override : nullptr);
+            m_config.preset_json_override ? &*m_config.preset_json_override : nullptr,
+            m_config.preset_use,
+            m_config.required_preset_content_hash);
     }
     if (!world_ready) {
         m_bootError = m_session->GetWorldOpenError();

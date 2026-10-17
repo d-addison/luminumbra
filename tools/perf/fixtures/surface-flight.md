@@ -20,3 +20,12 @@ These identities describe the unchanged shipping `default` preset, not the
 separately retuned `temperate_forest` or `caverns` presets. The frozen revision-6
 save fixture retains its original identity. No runtime simulation hash was
 inferred from these calculations.
+
+Issue #453 advances the shipping preset to schema 8 with explicit
+`surface_sampling_revision: 2`. The schema gate makes older readers refuse the
+new activation/material sampling contract. The traversal now records preset
+revision 8 and preset identity `56ffbe1771cddfa6`, regenerated with the canonical
+checksum oracle in `tools/test_frozen_terrain_presets.py`. The oracle first
+reproduced the revision-7 identity above. The content identity remains
+`7583622726659997707`: terrain generation and the historical erosion substrate
+are unchanged; the preset identity binds the new activation/material selector.
