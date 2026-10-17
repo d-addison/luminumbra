@@ -6433,6 +6433,68 @@ def contract_suite(number: int) -> unittest.TestSuite:
 
 
 class AcceptanceSelectionTests(unittest.TestCase):
+    def assert_artifact_discoverable(self, artifact: Path, authority: bytes) -> None:
+        # Preparation JSON lines and transaction JSON use default string encoding.
+        # Require the complete quoted path, even when a later record is partial;
+        # discoverability does not establish valid metadata or restart ownership.
+        self.assertIn(json.dumps(str(artifact)).encode("utf-8"), authority)
+
+    def test_artifact_discovery_requires_complete_json_path_tokens(self) -> None:
+        spellings = (
+            r"C:\workspace\.acceptance-00000000000000000000000000000001",
+            r"\\server\share\.acceptance-00000000000000000000000000000001",
+            "C:\\caf\u00e9\\.acceptance-00000000000000000000000000000001",
+            '/work/"quoted"/.acceptance-00000000000000000000000000000001',
+            "/work/back\\slash/.acceptance-00000000000000000000000000000001",
+            "/work/\u96ea\U0001f680/.acceptance-00000000000000000000000000000001",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            payload = base / "payload"
+            payload.write_bytes(b"candidate\r\n")
+            for spelling in spellings:
+                artifact = Path(spelling)
+                record = dict(MODULE._transaction_record(payload), path=str(artifact))
+                preparation = MODULE._OutputPreparation(base / "refresh.preparation")
+                preparation.intend(artifact, base / "destination", payload.read_bytes())
+                entries = [{"path": str(base / "destination"), "old": None, "backup": None, "new": record}]
+                for version in (1, 2):
+                    journal = base / f"refresh{version}.transaction"
+                    MODULE._write_transaction(journal, entries, committed=False,
+                                              restorations=None if version == 1 else [None])
+                metadata = (preparation.path, base / "refresh1.transaction", base / "refresh2.transaction")
+                token = json.dumps(str(artifact)).encode("utf-8")
+                for path in metadata:
+                    with self.subTest(spelling=spelling, metadata=path.name):
+                        original = path.read_bytes()
+                        self.assert_artifact_discoverable(artifact, original)
+                        # The token remains discoverable before a torn suffix.
+                        self.assert_artifact_discoverable(artifact, original + b'\n{"create":')
+                        wrong_paths = (str(artifact) + "-other", "other-" + str(artifact),
+                                       ".acceptance-" + f"{1:032x}")
+                        mutations = (b"", original.replace(token, b'null'),
+                                     original[:original.index(token)] + token[:len(token) // 2],
+                                     original[:original.index(token)] + token[:-1],
+                                     original.replace(token, token[1:-1]),
+                                     original.replace(token, json.dumps(token.decode("utf-8")).encode("utf-8")),
+                                     *(original.replace(token, json.dumps(wrong).encode("utf-8"))
+                                       for wrong in wrong_paths))
+                        try:
+                            for mutated in mutations:
+                                path.write_bytes(mutated)
+                                with self.assertRaises(AssertionError):
+                                    self.assert_artifact_discoverable(artifact, path.read_bytes())
+                        finally:
+                            path.write_bytes(original)
+                        self.assertEqual(path.read_bytes(), original)
+                preparation.finish()
+            # Exercise the shared interruption oracle with real escaped paths
+            # on every host, including hosts without Windows path semantics.
+            unicode_root = base / "caf\u00e9"
+            unicode_root.mkdir()
+            with mock.patch.object(tempfile, "tempdir", str(unicode_root)):
+                self.preparation_exit("original", "create", True)
+
     def preparation_exit(self, phase: str, boundary: str, after: bool, *, candidate: bool = False) -> None:
         # Both the terminating process and its restart load the actual checker.
         # Five small destinations exercise the complete atomic output set.
@@ -6612,7 +6674,7 @@ raise SystemExit("termination boundary was not reached")
             for artifact in base.glob(".acceptance-*"):
                 # No prefix/filename inference: each created large-file name
                 # must actually be discoverable in fixed, written metadata.
-                self.assertIn(str(artifact).encode(), authority)
+                self.assert_artifact_discoverable(artifact, authority)
             snapshot = {path: (path.read_bytes(), path.stat()) for path in base.iterdir() if path.is_file()}
             restart = r'''
 import pathlib, runpy, sys
