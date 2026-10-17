@@ -11,8 +11,9 @@ activation evidence remain separate work.
 `--render-benchmark output.json` continues to write
 `luminumbra.render_benchmark.v2`. The default frame count (120), warmup (60),
 3840×1600 capture size, configured render scale, legacy GPU timer ring and v2
-writer remain the legacy path. Omitting every new option allocates no measurement
-ring and issues no additional GL queries. No system configuration entry is added.
+writer retain their existing behavior. Both benchmark schemas allocate a bounded
+frame ring for far-mode evidence; only v3 issues additional GL queries. Ordinary
+play allocates no measurement ring. No system configuration entry is added.
 World generation, hash order, saves, preset revision 6, LMR1 container v2, world
 manifest v1 and FSD2 payload v3 are unaffected.
 
@@ -46,7 +47,12 @@ measurement starts; disagreement is refused with exit 2. V3 needs
 1..18000 measured frames and 1..18000 warmup frames. It does not silently
 truncate a window, drop overflow samples, or substitute a missing timer with zero.
 V3 writes JSON in binary stream mode; the v2 writer retains its existing mode.
-An incomplete v3 artifact write makes the client exit unsuccessfully.
+An incomplete artifact write makes the client exit unsuccessfully for either
+schema, including open, directory creation, partial write, flush and close errors.
+Workload options accept both separate values and assignment form (for example,
+`--render-benchmark-frames=4`) without becoming debug overrides. Assignment form
+never consumes the following argument; other CLI options still require exact
+override declarations.
 
 Example fixed view (the shader-state checks remain optional for v3):
 

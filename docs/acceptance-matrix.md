@@ -6,11 +6,11 @@ Statuses declare the available evidence. Static validation requires a mapping fo
 
 | Status | Rows |
 | --- | ---: |
-| covered | 17 |
+| covered | 21 |
 | partial | 8 |
 | needs-native-run | 17 |
 | planned | 85 |
-| Total | 127 |
+| Total | 131 |
 
 | Row | Status | Source | Requirements | Statement | Evidence |
 | --- | --- | --- | --- | --- | --- |
@@ -141,3 +141,7 @@ Statuses declare the available evidence. Static validation requires a mapping fo
 | contract.renderer-defaults | planned | `docs/distant-world.md#deferred` | dw.deferred.002, dw.deferred.003, dw.deferred.004, dw.deferred.005, dw.deferred.006 | Default Ladder selection, explicit Legacy opt-out and fallback diagnostics still require native qualification. | doc: `docs/distant-world.md` (planned: map discriminating regression and qualification evidence for the updated contract; owner: ac) |
 | contract.region-retention | planned | `docs/active-regions.md#activation-and-ordering` | ar.activation.061, ar.activation.062, ar.activation.063, ar.activation.064 | Idle retention must preserve scheduling history for pending work and all resident chunks, then release consumed work on the next tick. | doc: `docs/active-regions.md` (planned: map discriminating regression and qualification evidence for the updated contract; owner: ac) |
 | contract.ledger-extensions | planned | `docs/active-regions.md#file-and-compatibility` | ar.file.095, ar.file.096, ar.file.097, ar.file.098, ar.file.099, ar.file.100, ar.file.101, ar.file.102, ar.file.103, ar.file.104, ar.file.105, ar.file.106, ar.file.107, ar.file.108, ar.file.109, ar.file.110, ar.file.111, ar.file.112, ar.file.113, ar.file.114, ar.file.115, ar.file.116, ar.file.117, ar.file.118 | Version 2 extensions, legacy digest preservation and authoritative frozen-content selection require dedicated acceptance evidence review. | doc: `docs/active-regions.md` (planned: map discriminating regression and qualification evidence for the updated contract; owner: ac) |
+| render.benchmark-far-frame-storage | covered | `docs/render-benchmark.md#compatibility-and-commands` |  | Both benchmark schemas allocate a bounded far-mode frame ring; ordinary play allocates none. Only v3 issues additional GL queries. | ctest: `FarWorldDiagnostics.BenchmarkFrameCountStrictlyParsesBeforeApplyingBounds`<br>ctest: `FarWorldDiagnostics.BenchmarkSerializesEveryMeasuredFarStateAndSummary` |
+| render.benchmark-output-completion | covered | `docs/render-benchmark.md#compatibility-and-commands` |  | Both benchmark schemas reject incomplete artifact output. Registered regressions cover directory creation and file-open errors plus partial stream writes and flush failure; the writer also checks file-close completion. | ctest: `RenderBenchmarkOutput.BothSchemasRejectPartialWritesAndFlushFailures`<br>ctest: `RenderBenchmarkOutput.BothSchemasCheckFileOpenAndDirectoryCreation` |
+| render.benchmark-workload-assignments | covered | `docs/render-benchmark.md#compatibility-and-commands` |  | Assignment-form workload options do not become debug overrides or consume successor arguments; non-workload options remain observable overrides. | ctest: `RenderBenchmarkOverrides.WorkloadAssignmentsDoNotConsumeSuccessorsOrHideOverrides` |
+| content.foliage-directory-recovery | covered | `issue #412` |  | Foliage skips unencodable filenames with a diagnostic and loads valid neighbours in UTF-8 order. Scan and file I/O failures roll back, report failure to the gameplay cache, and allow retry; valid empty directories succeed. Creature dependency loading contains conversion exceptions and refuses incomplete identity. | ctest: `GameSessionHeadlessWorldTest.FoliageSkipsUnencodableNamesAndLoadsBothValidNeighbours`<br>ctest: `GameSessionHeadlessWorldTest.FoliageScanFailuresRemainRetryable`<br>ctest: `GameSessionHeadlessWorldTest.FoliageFileIoFailureRollsBackBeforeRetry`<br>ctest: `GameSessionHeadlessWorldTest.FoliageDirectoryProviderExceptionsAreContained`<br>ctest: `GameSessionHeadlessWorldTest.FoliageUnavailableAndEmptyDirectoriesHaveDistinctResults`<br>ctest: `GameSessionHeadlessWorldTest.FoliageSpeciesUsePortableFilenameOrderForDuplicateIds` |

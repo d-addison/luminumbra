@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -100,11 +101,13 @@ struct FarFrameSample {
     std::uint64_t content_identity = 0;
     std::size_t generation_pending = 0, meshing_pending = 0, terrain_uploads_pending = 0;
     bool generation_outstanding = false, meshing_outstanding = false;
-    bool settled() const noexcept {
-        return coverage_settled && generation_pending == 0 && meshing_pending == 0 &&
-               terrain_uploads_pending == 0 && !generation_outstanding && !meshing_outstanding;
-    }
 };
+
+inline bool far_frame_settled(const FarFrameSample& sample) noexcept {
+    return sample.coverage_settled && sample.generation_pending == 0 &&
+           sample.meshing_pending == 0 && sample.terrain_uploads_pending == 0 &&
+           !sample.generation_outstanding && !sample.meshing_outstanding;
+}
 
 struct FrameSample {
     std::uint64_t frame = 0;

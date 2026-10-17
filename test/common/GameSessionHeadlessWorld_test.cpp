@@ -212,6 +212,239 @@ void CheckSpeciesScanFailure(const fs::path& directory, const std::string& diagn
     EXPECT_EQ(registry.size(), 1u);
 }
 
+template<SpeciesScanFailure Failure>
+void CheckFoliageScanFailure(const fs::path& directory, const std::string& diagnostic) {
+    luminumbra::foliage::SpeciesRegistry registry;
+    std::string parse_error;
+    ASSERT_TRUE(registry.AddFromJsonText(R"({"id":"retained"})", parse_error));
+    std::vector<std::string> errors{"previous diagnostic"};
+    bool io_failed = false;
+    EXPECT_EQ(registry.LoadFromDirectory<FailingSpeciesDirectoryIterator<Failure>>(
+                  directory, errors, &io_failed),
+              0u);
+    EXPECT_TRUE(io_failed);
+    ASSERT_EQ(errors.size(), 2u);
+    EXPECT_EQ(errors.front(), "previous diagnostic");
+    EXPECT_NE(errors.back().find(diagnostic), std::string::npos);
+    ASSERT_EQ(registry.size(), 1u);
+    EXPECT_NE(registry.Find("retained"), nullptr);
+    errors.clear();
+    EXPECT_NO_THROW(
+        registry.LoadFromDirectory<FailingSpeciesDirectoryIterator<Failure>>(directory, errors));
+    ASSERT_EQ(errors.size(), 1u);
+    EXPECT_NE(errors.front().find(diagnostic), std::string::npos);
+    // A retry can load valid content exactly once after the failed scan.
+    errors.clear();
+    EXPECT_EQ(registry.LoadFromDirectory(directory, errors, &io_failed), 1u);
+    EXPECT_FALSE(io_failed);
+    EXPECT_TRUE(errors.empty());
+    EXPECT_EQ(registry.size(), 2u);
+}
+
+TEST(GameSessionHeadlessWorldTest, FoliageScanFailuresRemainRetryable) {
+    const Luminumbra::TestSupport::SpeciesIdentityFixture fixture;
+    CheckFoliageScanFailure<SpeciesScanFailure::Open>(fixture.Directory(), "cannot enumerate");
+    CheckFoliageScanFailure<SpeciesScanFailure::Metadata>(fixture.Directory(), "cannot inspect");
+    CheckFoliageScanFailure<SpeciesScanFailure::Increment>(fixture.Directory(), "cannot advance");
+}
+
+// This virtual provider supplies an unencodable filename without requiring a
+// host filesystem that accepts unpaired UTF-16 surrogates. The failure happens
+// when the filename is converted to the filesystem path used by the UTF-8 encoder.
+template<bool Unencodable = true>
+class VirtualSpeciesDirectoryIterator {
+public:
+    class Filename {
+        fs::path path_;
+        bool unencodable_;
+
+    public:
+        Filename(fs::path path, bool unencodable)
+            : path_(std::move(path))
+            , unencodable_(unencodable) {}
+        operator fs::path() const {
+            if (unencodable_)
+                throw fs::filesystem_error("unpaired UTF-16 surrogate",
+                                           std::make_error_code(std::errc::illegal_byte_sequence));
+            return path_;
+        }
+    };
+    class Path {
+        fs::path path_;
+        bool unencodable_;
+
+    public:
+        Path(fs::path path, bool unencodable)
+            : path_(std::move(path))
+            , unencodable_(unencodable) {}
+        fs::path extension() const {
+            return path_.extension();
+        }
+        Filename filename() const {
+            return {path_.filename(), unencodable_};
+        }
+        operator fs::path() const {
+            return path_;
+        }
+    };
+    class Entry {
+        fs::path directory_;
+        std::size_t index_ = 3;
+
+    public:
+        Entry() = default;
+        Entry(fs::path directory, std::size_t index)
+            : directory_(std::move(directory))
+            , index_(index) {}
+        bool is_regular_file(std::error_code& ec) const {
+            ec.clear();
+            return true;
+        }
+        Path path() const {
+            constexpr std::array<const char*, 3> names{"a.json", "invalid.json", "z.json"};
+            return {directory_ / names.at(index_), Unencodable && index_ == 1};
+        }
+    };
+    VirtualSpeciesDirectoryIterator() = default;
+    VirtualSpeciesDirectoryIterator(fs::path directory, std::error_code& ec)
+        : directory_(std::move(directory))
+        , index_(0) {
+        ec.clear();
+    }
+    Entry operator*() const {
+        return {directory_, index_};
+    }
+    bool operator!=(const VirtualSpeciesDirectoryIterator& other) const {
+        return index_ != other.index_;
+    }
+    void increment(std::error_code& ec) {
+        ++index_;
+        ec.clear();
+    }
+
+private:
+    fs::path directory_;
+    std::size_t index_ = 3;
+};
+
+TEST(GameSessionHeadlessWorldTest, FoliageSkipsUnencodableNamesAndLoadsBothValidNeighbours) {
+    const Luminumbra::TestSupport::SpeciesIdentityFixture fixture;
+    fixture.Write("a.json", R"({"id":"first"})");
+    fixture.Write("invalid.json", R"({"id":"excluded"})");
+    fixture.Write("z.json", R"({"id":"last"})");
+    luminumbra::foliage::SpeciesRegistry registry;
+    std::vector<std::string> errors;
+    bool io_failed = true;
+    EXPECT_NO_THROW(EXPECT_EQ(registry.LoadFromDirectory<VirtualSpeciesDirectoryIterator<>>(
+                                  fixture.Directory(), errors, &io_failed),
+                              2u));
+    EXPECT_FALSE(io_failed);
+    ASSERT_EQ(errors.size(), 1u);
+    EXPECT_NE(errors.front().find("filename UTF-8 conversion failed"), std::string::npos);
+    EXPECT_NE(errors.front().find("unpaired UTF-16 surrogate"), std::string::npos);
+    ASSERT_EQ(registry.size(), 2u);
+    EXPECT_EQ(registry.all()[0].id, "first");
+    EXPECT_EQ(registry.all()[1].id, "last");
+    EXPECT_EQ(registry.Find("excluded"), nullptr);
+    // World dependency identity must refuse an incomplete creature roster.
+    luminumbra::ai::CreatureSpeciesRegistry creatures;
+    errors.clear();
+    EXPECT_NO_THROW(
+        EXPECT_EQ(creatures.LoadFromDirectory<VirtualSpeciesDirectoryIterator<>>(
+                      fixture.Directory(), errors, Luminumbra::World::ReadWorldgenFile, &io_failed),
+                  0u));
+    EXPECT_TRUE(io_failed);
+    EXPECT_EQ(creatures.size(), 0u);
+    ASSERT_EQ(errors.size(), 1u);
+    EXPECT_NE(errors.front().find("unpaired UTF-16 surrogate"), std::string::npos);
+}
+
+TEST(GameSessionHeadlessWorldTest, FoliageFileIoFailureRollsBackBeforeRetry) {
+    for (const bool unreadable : {false, true}) {
+        const Luminumbra::TestSupport::SpeciesIdentityFixture fixture;
+        fixture.Write("a.json", R"({"id":"first"})");
+        fixture.Write("z.json", R"({"id":"last"})");
+        // A vanished file fails open; a directory accepted by the virtual metadata
+        // provider fails either open or read, according to the host stream library.
+        if (unreadable)
+            fs::create_directory(fixture.Directory() / "invalid.json");
+        luminumbra::foliage::SpeciesRegistry registry;
+        std::string parse_error;
+        ASSERT_TRUE(registry.AddFromJsonText(R"({"id":"retained"})", parse_error));
+        std::vector<std::string> errors;
+        bool io_failed = false;
+        EXPECT_EQ(registry.LoadFromDirectory<VirtualSpeciesDirectoryIterator<false>>(
+                      fixture.Directory(), errors, &io_failed),
+                  0u);
+        EXPECT_TRUE(io_failed);
+        ASSERT_EQ(errors.size(), 1u);
+        EXPECT_NE(errors.front().find("species file: invalid.json"), std::string::npos);
+        ASSERT_EQ(registry.size(), 1u);
+        EXPECT_NE(registry.Find("retained"), nullptr);
+        if (unreadable)
+            fs::remove(fixture.Directory() / "invalid.json");
+        fixture.Write("invalid.json", R"({"id":"recovered"})");
+        errors.clear();
+        EXPECT_EQ(registry.LoadFromDirectory(fixture.Directory(), errors, &io_failed), 4u);
+        EXPECT_FALSE(io_failed);
+        EXPECT_TRUE(errors.empty());
+        EXPECT_EQ(registry.size(), 5u);
+    }
+}
+
+template<bool StandardException>
+class ThrowingSpeciesDirectoryIterator
+    : public FailingSpeciesDirectoryIterator<SpeciesScanFailure::Open> {
+public:
+    ThrowingSpeciesDirectoryIterator() = default;
+    ThrowingSpeciesDirectoryIterator(const fs::path&, std::error_code&) {
+        if constexpr (StandardException)
+            throw std::runtime_error("directory provider failed");
+        else
+            throw 1;
+    }
+};
+
+TEST(GameSessionHeadlessWorldTest, FoliageDirectoryProviderExceptionsAreContained) {
+    const Luminumbra::TestSupport::SpeciesIdentityFixture fixture;
+    luminumbra::foliage::SpeciesRegistry registry;
+    std::vector<std::string> errors;
+    bool io_failed = false;
+    EXPECT_NO_THROW(EXPECT_EQ(registry.LoadFromDirectory<ThrowingSpeciesDirectoryIterator<true>>(
+                                  fixture.Directory(), errors, &io_failed),
+                              0u));
+    EXPECT_TRUE(io_failed);
+    ASSERT_EQ(errors.size(), 1u);
+    EXPECT_NE(errors.back().find("directory provider failed"), std::string::npos);
+    errors.clear();
+    EXPECT_NO_THROW(EXPECT_EQ(registry.LoadFromDirectory<ThrowingSpeciesDirectoryIterator<false>>(
+                                  fixture.Directory(), errors, &io_failed),
+                              0u));
+    EXPECT_TRUE(io_failed);
+    ASSERT_EQ(errors.size(), 1u);
+    EXPECT_NE(errors.back().find("unknown exception"), std::string::npos);
+    EXPECT_EQ(registry.size(), 0u);
+}
+
+TEST(GameSessionHeadlessWorldTest, FoliageUnavailableAndEmptyDirectoriesHaveDistinctResults) {
+    const HeadlessRoot root;
+    luminumbra::foliage::SpeciesRegistry registry;
+    std::vector<std::string> errors;
+    bool io_failed = false;
+    for (const auto& unavailable : {root.path() / "missing", SourcePresetPath()}) {
+        EXPECT_EQ(registry.LoadFromDirectory(unavailable, errors, &io_failed), 0u);
+        EXPECT_TRUE(io_failed);
+        ASSERT_FALSE(errors.empty());
+        EXPECT_NE(errors.back().find("directory unavailable"), std::string::npos);
+    }
+    const auto empty = root.path() / "empty";
+    fs::create_directory(empty);
+    errors.clear();
+    EXPECT_EQ(registry.LoadFromDirectory(empty, errors, &io_failed), 0u);
+    EXPECT_FALSE(io_failed);
+    EXPECT_TRUE(errors.empty());
+}
+
 TEST(GameSessionHeadlessWorldTest, SpeciesScanFailuresAreContainedBeforeAnyReads) {
     const Luminumbra::TestSupport::SpeciesIdentityFixture fixture;
     CheckSpeciesScanFailure<SpeciesScanFailure::Open>(fixture.Directory(), "cannot enumerate");
@@ -440,8 +673,10 @@ TEST(GameSessionHeadlessWorldTest, InvalidSpeciesFilenameRefusesBeforeRegistryAn
         luminumbra::foliage::SpeciesRegistry foliage;
         ASSERT_TRUE(foliage.AddFromJsonText(R"({"id":"retained"})", parse_error));
         errors.clear();
-        EXPECT_EQ(foliage.LoadFromDirectory(fixture.Directory(), errors), 0u);
-        ASSERT_EQ(foliage.size(), 1u);
+        EXPECT_EQ(foliage.LoadFromDirectory(fixture.Directory(), errors), 1u);
+        ASSERT_EQ(foliage.size(), 2u);
+        EXPECT_NE(foliage.Find("deer"), nullptr);
+        EXPECT_EQ(foliage.Find("invalid_filename"), nullptr);
         EXPECT_NE(foliage.Find("retained"), nullptr);
         ASSERT_EQ(errors.size(), 1u);
         EXPECT_NE(errors.front().find("not valid UTF-8"), std::string::npos);

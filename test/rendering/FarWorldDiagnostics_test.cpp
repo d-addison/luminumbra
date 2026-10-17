@@ -1,13 +1,31 @@
 #include "../fixtures/TerrainFixtureParams.h"
+#include "../support/UniqueTempPath.h"
+#include "entt/entity/fwd.hpp"
+#include "luminumbra/core/Types.h"
 #include "luminumbra_client/app/RenderBenchmarkReport.h"
+#include "luminumbra_client/app/RenderMeasurement.h"
 #include "luminumbra_client/core/IsolationConfig.h"
 #include "luminumbra_client/rendering/FarWorldDiagnostics.h"
+#include "luminumbra_client/rendering/FarWorldSelection.h"
 #include "luminumbra_common/core/JobSystem.h"
+#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 
+#include <cstddef>
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
+#include <ios>
 #include <limits>
 #include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
+#include <optional>
+#include <ostream>
+#include <sstream>
+#include <stdexcept>
+#include <streambuf>
 #include <string>
+#include <system_error>
 #include <type_traits>
 #include <vector>
 
@@ -15,6 +33,103 @@ namespace {
 using namespace Luminumbra::Rendering;
 using namespace Luminumbra::World;
 static_assert(std::is_trivially_copyable_v<FarWorldDiagnosticSnapshot>);
+
+TEST(RenderBenchmarkOverrides, WorkloadAssignmentsDoNotConsumeSuccessorsOrHideOverrides) {
+    for (const char* option : {"--render-benchmark",
+                               "--render-benchmark-schema",
+                               "--render-benchmark-frames",
+                               "--render-benchmark-warmup",
+                               "--render-benchmark-screenshot",
+                               "--capture-size",
+                               "--load-world",
+                               "--perf-profile",
+                               "--traversal",
+                               "--runtime-root",
+                               "--save-root",
+                               "--declare-render-overrides",
+                               "--world-preset",
+                               "--cam-pos",
+                               "--cam-yaw",
+                               "--cam-pitch",
+                               "--window-mode"}) {
+        for (const std::string value : {"4", "", "a=b"}) {
+            SCOPED_TRACE(std::string(option) + "=" + value);
+            std::vector<std::string> arguments{"client",
+                                               std::string(option) + "=" + value,
+                                               "successor",
+                                               "--render-scale=0.5",
+                                               "tail",
+                                               "--systems-config",
+                                               "systems.json"};
+            std::vector<char*> argv;
+            argv.reserve(arguments.size());
+            for (auto& argument : arguments)
+                argv.push_back(argument.data());
+            const auto active = Luminumbra::Client::Measurement::render_overrides(
+                static_cast<int>(argv.size()), argv.data());
+            nlohmann::json cli = nlohmann::json::object();
+            for (const auto& item : active.items())
+                if (item.key().rfind("cli:", 0) == 0)
+                    cli[item.key()] = item.value();
+            const nlohmann::json expected{{"cli:successor", "true"},
+                                          {"cli:--render-scale=0.5", "true"},
+                                          {"cli:tail", "true"},
+                                          {"cli:--systems-config", "systems.json"}};
+            EXPECT_EQ(cli, expected);
+        }
+    }
+}
+
+class IncompleteBenchmarkBuffer : public std::streambuf {
+    bool fail_flush_;
+
+public:
+    explicit IncompleteBenchmarkBuffer(bool fail_flush)
+        : fail_flush_(fail_flush) {}
+    std::streamsize xsputn(const char*, std::streamsize count) override {
+        return fail_flush_ ? count : count - 1;
+    }
+    int sync() override {
+        return fail_flush_ ? -1 : 0;
+    }
+};
+
+TEST(RenderBenchmarkOutput, BothSchemasRejectPartialWritesAndFlushFailures) {
+    using Luminumbra::Client::Measurement::write_render_benchmark;
+    for (const char* schema :
+         {"luminumbra.render_benchmark.v2", "luminumbra.render_benchmark.v3"}) {
+        const nlohmann::json report{{"schema", schema}, {"frames", 4}};
+        std::ostringstream complete;
+        EXPECT_TRUE(write_render_benchmark(complete, report));
+        EXPECT_EQ(nlohmann::json::parse(complete.str()), report);
+        for (const bool fail_flush : {false, true}) {
+            IncompleteBenchmarkBuffer buffer(fail_flush);
+            std::ostream incomplete(&buffer);
+            EXPECT_FALSE(write_render_benchmark(incomplete, report));
+        }
+    }
+}
+
+TEST(RenderBenchmarkOutput, BothSchemasCheckFileOpenAndDirectoryCreation) {
+    using Luminumbra::Client::Measurement::write_render_benchmark;
+    const auto directory = Luminumbra::TestSupport::CreateUniqueTempDirectory("render-report-");
+    for (const bool binary : {false, true}) {
+        const nlohmann::json report{
+            {"schema",
+             binary ? "luminumbra.render_benchmark.v3" : "luminumbra.render_benchmark.v2"}};
+        const auto output = directory / (binary ? "v3" : "v2") / "report.json";
+        EXPECT_TRUE(write_render_benchmark(output, report, binary));
+        {
+            std::ifstream input(output, std::ios::binary);
+            EXPECT_EQ(nlohmann::json::parse(input), report);
+        }
+        EXPECT_FALSE(write_render_benchmark(directory, report, binary));
+        EXPECT_FALSE(write_render_benchmark(output / "child.json", report, binary));
+    }
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    EXPECT_FALSE(error);
+}
 
 TEST(FarWorldDiagnostics, ReportsOnlyModeReasonAndSubmissionTransitions) {
     FarWorldReportingState state;
@@ -37,7 +152,7 @@ TEST(FarWorldDiagnostics, ReportsOnlyModeReasonAndSubmissionTransitions) {
     EXPECT_TRUE(FarWorldReportChanged(previous, state));
     previous = state;
     state.selection.submit = false;
-    EXPECT_TRUE(state.suppressed());
+    EXPECT_TRUE(FarWorldReportSuppressed(state));
     EXPECT_TRUE(FarWorldReportChanged(previous, state));
     previous = state;
     state.selection.submit = true;
@@ -51,7 +166,7 @@ TEST(FarWorldDiagnostics, ReportsOnlyModeReasonAndSubmissionTransitions) {
         previous = state;
         state.submission_refusal = refusal;
         EXPECT_TRUE(FarWorldReportChanged(previous, state));
-        EXPECT_EQ(state.suppressed(), refusal != FarWorldSubmissionRefusal::None);
+        EXPECT_EQ(FarWorldReportSuppressed(state), refusal != FarWorldSubmissionRefusal::None);
         previous = state;
         EXPECT_FALSE(FarWorldReportChanged(previous, state));
     }
@@ -65,13 +180,13 @@ TEST(FarWorldDiagnostics, IsolationReportsSubmissionSuppressionForBothModes) {
         for (const bool captured : {false, true}) {
             snapshot.captured = captured;
             const auto previous = FarWorldReportState(snapshot);
-            EXPECT_FALSE(previous.suppressed());
+            EXPECT_FALSE(FarWorldReportSuppressed(previous));
             for (const char* layers : {"foliage", "farfield", "water,foliage"}) {
                 const auto isolation = SH::ParseIsolationConfig(layers, "");
                 const auto state =
                     FarWorldReportState(snapshot, isolation.renders(SH::IsolationLayer::Terrain));
                 EXPECT_TRUE(state.selection.submit);
-                EXPECT_TRUE(state.suppressed());
+                EXPECT_TRUE(FarWorldReportSuppressed(state));
                 EXPECT_EQ(state.submission_refusal, FarWorldSubmissionRefusal::IsolationSuppressed);
                 EXPECT_STREQ(FarWorldSubmissionRefusalName(state.submission_refusal),
                              "IsolationSuppressed");
@@ -81,7 +196,7 @@ TEST(FarWorldDiagnostics, IsolationReportsSubmissionSuppressionForBothModes) {
             const auto isolation = SH::ParseIsolationConfig("terrain,foliage", "void");
             const auto restored =
                 FarWorldReportState(snapshot, isolation.renders(SH::IsolationLayer::Terrain));
-            EXPECT_FALSE(restored.suppressed());
+            EXPECT_FALSE(FarWorldReportSuppressed(restored));
             EXPECT_FALSE(FarWorldReportChanged(previous, restored));
         }
     }
@@ -91,6 +206,7 @@ TEST(FarWorldDiagnostics, BenchmarkFrameCountStrictlyParsesBeforeApplyingBounds)
     using namespace Luminumbra::Client::Measurement;
     const auto parse = [](std::vector<std::string> args) {
         std::vector<char*> argv;
+        argv.reserve(args.size());
         for (auto& arg : args)
             argv.push_back(arg.data());
         return benchmark_frame_count(static_cast<int>(argv.size()), argv.data());
@@ -123,14 +239,14 @@ TEST(FarWorldDiagnostics, OutstandingBatchesPreventSettlingWithZeroDeferredWork)
     SampleRing ring(1);
     auto& far = ring.append(2).far_world;
     far.coverage_settled = true;
-    ASSERT_TRUE(far.settled());
+    ASSERT_TRUE(far_frame_settled(far));
     for (const bool generation : {true, false}) {
         far.generation_outstanding = generation;
         far.meshing_outstanding = !generation;
         EXPECT_EQ(far.generation_pending, 0u);
         EXPECT_EQ(far.meshing_pending, 0u);
         EXPECT_EQ(far.terrain_uploads_pending, 0u);
-        EXPECT_FALSE(far.settled());
+        EXPECT_FALSE(far_frame_settled(far));
         nlohmann::json report;
         add_far_world_reporting(report, ring);
         EXPECT_EQ(report["far_world"]["summary"]["unsettled_frames"], 1);
@@ -140,7 +256,7 @@ TEST(FarWorldDiagnostics, OutstandingBatchesPreventSettlingWithZeroDeferredWork)
     }
     far.generation_outstanding = false;
     far.meshing_outstanding = false;
-    EXPECT_TRUE(far.settled());
+    EXPECT_TRUE(far_frame_settled(far));
     nlohmann::json report;
     add_far_world_reporting(report, ring);
     EXPECT_EQ(report["far_world"]["summary"]["unsettled_frames"], 0);
@@ -229,7 +345,7 @@ TEST(FarWorldDiagnostics, BenchmarkSerializesEveryMeasuredFarStateAndSummary) {
         pending.generation_pending = control == 0 ? 1u : 0u;
         pending.meshing_pending = control == 1 ? 1u : 0u;
         pending.terrain_uploads_pending = control == 2 ? 1u : 0u;
-        EXPECT_FALSE(pending.settled());
+        EXPECT_FALSE(far_frame_settled(pending));
         add_far_world_reporting(report, ring);
         EXPECT_EQ(report["far_world"]["summary"]["unsettled_frames"], 3);
     }

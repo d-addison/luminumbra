@@ -2,7 +2,10 @@
 
 #include "RenderMeasurement.h"
 #include "luminumbra_common/core/Environment.h"
+#include <filesystem>
+#include <fstream>
 #include <nlohmann/json.hpp>
+#include <ostream>
 
 namespace Luminumbra::Client::Measurement {
 
@@ -55,7 +58,7 @@ inline void add_far_world_reporting(nlohmann::json& report, SampleRing& ring) {
         summary["suppressed_frames"] =
             summary["suppressed_frames"].get<std::size_t>() + far.suppressed;
         summary["unsettled_frames"] =
-            summary["unsettled_frames"].get<std::size_t>() + !far.settled();
+            summary["unsettled_frames"].get<std::size_t>() + !far_frame_settled(far);
     }
     block["summary"] = std::move(summary);
 }
@@ -122,6 +125,28 @@ inline void add_distributions(nlohmann::json& report, SampleRing& ring) {
             : nlohmann::json(nullptr);
 }
 
+// Flush explicitly so buffered/partial output failures are visible to both schemas.
+inline bool write_render_benchmark(std::ostream& output, const nlohmann::json& report) {
+    output << report.dump(2);
+    output.flush();
+    return static_cast<bool>(output);
+}
+
+inline bool write_render_benchmark(const std::filesystem::path& path,
+                                   const nlohmann::json& report,
+                                   bool binary) {
+    std::error_code error;
+    if (path.has_parent_path()) {
+        std::filesystem::create_directories(path.parent_path(), error);
+        if (error)
+            return false;
+    }
+    std::ofstream output(path, binary ? std::ios::binary : std::ios::out);
+    const bool written = write_render_benchmark(output, report);
+    output.close();
+    return written && static_cast<bool>(output);
+}
+
 inline nlohmann::json render_overrides(int argc, char** argv) {
     nlohmann::json result = nlohmann::json::object();
     // Treat every non-workload CLI option as an override requiring an exact declaration.
@@ -149,11 +174,12 @@ inline nlohmann::json render_overrides(int argc, char** argv) {
         const std::string arg = argv[i];
         if (std::find(flags.begin(), flags.end(), arg) != flags.end())
             continue;
-        // Assignment-form roots carry their value in this argument; consume no successor.
-        if (arg.rfind("--runtime-root=", 0) == 0 || arg.rfind("--save-root=", 0) == 0)
-            continue;
-        const bool hasValue = i + 1 < argc && std::string(argv[i + 1]).rfind("--", 0) != 0;
-        if (std::find(options.begin(), options.end(), arg) != options.end()) {
+        const auto assignment = arg.find('=');
+        const std::string option = arg.substr(0, assignment);
+        const bool assigned = assignment != std::string::npos;
+        const bool hasValue =
+            !assigned && i + 1 < argc && std::string(argv[i + 1]).rfind("--", 0) != 0;
+        if (std::find(options.begin(), options.end(), option) != options.end()) {
             if (hasValue)
                 ++i;
             continue;

@@ -56,10 +56,10 @@ struct FarWorldReportingState {
     FarWorldSelection selection;
     FarWorldSubmissionRefusal submission_refusal = FarWorldSubmissionRefusal::None;
     bool coverage_settled = false;
-    bool suppressed() const noexcept {
-        return !selection.submit || submission_refusal != FarWorldSubmissionRefusal::None;
-    }
 };
+inline bool FarWorldReportSuppressed(const FarWorldReportingState& state) noexcept {
+    return !state.selection.submit || state.submission_refusal != FarWorldSubmissionRefusal::None;
+}
 bool FarWorldReportChanged(const std::optional<FarWorldReportingState>& previous,
                            const FarWorldReportingState& current) noexcept;
 // Terrain isolation gates the shared Legacy/Ladder submission path in the G-buffer.

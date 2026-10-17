@@ -1175,8 +1175,12 @@ static void HandlePlayerVerbs(ClientAppContext& g_app,
         !g_app.hud.paused && gameSession && g_camera) {
         if (!g_app.hud.farmSpeciesLoaded) {
             std::vector<std::string> ferr;
-            g_app.hud.farmSpecies.LoadFromDirectory(root_dir / "data/common/foliage/species", ferr);
-            g_app.hud.farmSpeciesLoaded = true;
+            bool io_failed = false;
+            g_app.hud.farmSpecies.LoadFromDirectory(
+                root_dir / "data/common/foliage/species", ferr, &io_failed);
+            g_app.hud.farmSpeciesLoaded = !io_failed;
+            for (const auto& error : ferr)
+                LUMINUMBRA_CORE_WARN("Farm species: {}", error);
         }
         // V cycles the selected species to plant (data-driven; oak/wheat/...).
         {
@@ -2204,7 +2208,7 @@ int main(int argc, char* argv[]) {
                                  FarWorldModeName(state.selection.requested),
                                  FarWorldModeName(state.selection.effective),
                                  FarWorldRefusalName(state.selection.refusal),
-                                 state.suppressed(),
+                                 FarWorldReportSuppressed(state),
                                  FarWorldSubmissionRefusalName(state.submission_refusal));
             previous_far_report = state;
         }
@@ -5158,7 +5162,7 @@ int main(int argc, char* argv[]) {
                     Luminumbra::Rendering::FarWorldModeName(slow_far.selection.requested),
                     Luminumbra::Rendering::FarWorldModeName(slow_far.selection.effective),
                     Luminumbra::Rendering::FarWorldRefusalName(slow_far.selection.refusal),
-                    slow_far.suppressed(),
+                    Luminumbra::Rendering::FarWorldReportSuppressed(slow_far),
                     Luminumbra::Rendering::FarWorldSubmissionRefusalName(
                         slow_far.submission_refusal),
                     slow_far.coverage_settled);
@@ -5287,7 +5291,7 @@ int main(int argc, char* argv[]) {
                 far_sample.submission_refusal =
                     Luminumbra::Rendering::FarWorldSubmissionRefusalName(
                         far_state.submission_refusal);
-                far_sample.suppressed = far_state.suppressed();
+                far_sample.suppressed = Luminumbra::Rendering::FarWorldReportSuppressed(far_state);
                 far_sample.coverage_settled = far_state.coverage_settled;
 #ifdef LUMINUMBRA_ENABLE_GNS
                 far_sample.gns_compiled = true;
@@ -5596,14 +5600,8 @@ int main(int argc, char* argv[]) {
                         j["workload"]["camera_samples"] = traversal_camera_samples;
                     }
                 }
-                std::error_code _rb_ec;
                 const std::filesystem::path rb_path(g_app.capture.render_benchmark_path);
-                if (rb_path.has_parent_path())
-                    std::filesystem::create_directories(rb_path.parent_path(), _rb_ec);
-                std::ofstream out(rb_path, benchmark_v3 ? std::ios::binary : std::ios::out);
-                out << j.dump(2);
-                out.close();
-                if (benchmark_v3 && !out) {
+                if (!Measurement::write_render_benchmark(rb_path, j, benchmark_v3)) {
                     LUMINUMBRA_CORE_ERROR("Could not write complete render benchmark artifact {}",
                                           rb_path.string());
                     exit_code = 1;
