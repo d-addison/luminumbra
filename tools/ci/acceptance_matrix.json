@@ -1279,7 +1279,7 @@
     {
       "id": "contract.dw.scope.01",
       "source": "docs/distant-world.md#scope",
-      "statement": "Acceptance obligations: - The view radius is **16 km from the camera** and the world has **no fixed edge**: terrain streams procedurally in every direction. / The addressable extent is set by the packed chunk identity (`Chunk.h`, \u00b12^20 chunks of 16 m, about \u00b116,777 km on each horizontal axis; / coordinates are masked, never range checked). / World positions are 32-bit floats. / By owner decision (September 8, 2026) the contract requires qualification within 32 km of the world origin, where positions keep sub-centimetre precision; / the camera-relative (floating-origin) precision work that would qualify the full addressable extent is deliberately residual scope, not an open contract gap.",
+      "statement": "Acceptance obligations: - The view radius is **16 km from the camera** and the world has **no fixed edge**: terrain streams procedurally in every direction. / The addressable extent is set by the packed chunk identity (`Chunk.h`, ±2^20 chunks of 16 m, about ±16,777 km on each horizontal axis; / coordinates are masked, never range checked). / World positions are 32-bit floats. / By owner decision (September 8, 2026) the contract requires qualification within 32 km of the world origin, where positions keep sub-centimetre precision; / the camera-relative (floating-origin) precision work that would qualify the full addressable extent is deliberately residual scope, not an open contract gap.",
       "status": "planned",
       "requirements": [
         "dw.scope.001",
@@ -1381,7 +1381,7 @@
     {
       "id": "contract.dw.tiers.01",
       "source": "docs/distant-world.md#tier-ladder",
-      "statement": "Acceptance obligations: Far terrain is a ladder of five nested, world-origin-aligned volumetric tiers. / Each tier stores sparse 5\u00d75\u00d75 signed-distance bricks and is polygonised per tile with Marching Cubes; / a brick record exists where the field crosses zero. / Multi-tier residency and draw ownership are new machinery with an explicit arrival-state rule: the coarser tier is always resident and drawn beneath the finer one with a one-brick overlap; / a finer tile replaces the coarser surface inside its band only once it is built and uploaded, and until then the coarser surface stays visible, so a missing or late tile is never a hole; / ownership at the live edge is decided against the live chunks that are actually meshed and uploaded (including cave ceilings and floors), replacing today's camera-region skip;",
+      "statement": "Acceptance obligations: Far terrain is a ladder of five nested, world-origin-aligned volumetric tiers. / Each tier stores sparse 5×5×5 signed-distance bricks and is polygonised per tile with Marching Cubes; / a brick record exists where the field crosses zero. / Multi-tier residency and draw ownership are new machinery with an explicit arrival-state rule: the coarser tier is always resident and drawn beneath the finer one with a one-brick overlap; / a finer tile replaces the coarser surface inside its band only once it is built and uploaded, and until then the coarser surface stays visible, so a missing or late tile is never a hole; / ownership at the live edge is decided against the live chunks that are actually meshed and uploaded (including cave ceilings and floors), replacing today's camera-region skip;",
       "status": "planned",
       "requirements": [
         "dw.tiers.001",
@@ -2074,7 +2074,7 @@
     {
       "id": "contract.dw.perf.01",
       "source": "docs/distant-world.md#performance-measurement-contract",
-      "statement": "Acceptance obligations: Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840\u00d71600 and 3440\u00d71440. / Both profiles must meet the release floor on every workload; / the Performance profile exists to report the 120 fps target. / | Quality | 1.0 | p99 frame time at most 16.67 ms | p50 against 8.33 ms | / | Performance | 0.67 | p99 frame time at most 16.67 ms | p50 and p99 against 8.33 ms | / Workloads are settled fixed views (400 warm-up, 240 measured frames) and 60 s scripted traversals (surface flight, cave walk, edited-world tour) with pinned seeds, preset and content revisions, camera paths and speeds, expected simulation ticks and cold-cache state.",
+      "statement": "Acceptance obligations: Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840×1600 and 3440×1440. / Both profiles must meet the release floor on every workload; / the Performance profile exists to report the 120 fps target. / | Quality | 1.0 | p99 frame time at most 16.67 ms | p50 against 8.33 ms | / | Performance | 0.67 | p99 frame time at most 16.67 ms | p50 and p99 against 8.33 ms | / Workloads are settled fixed views (400 warm-up, 240 measured frames) and 60 s scripted traversals (surface flight, cave walk, edited-world tour) with pinned seeds, preset and content revisions, camera paths and speeds, expected simulation ticks and cold-cache state.",
       "status": "planned",
       "requirements": [
         "dw.perf.001",
@@ -4574,6 +4574,488 @@
         "ar.named-hashes.028",
         "ar.named-hashes.029",
         "ar.named-hashes.030"
+      ]
+    },
+    {
+      "id": "contract.projection-adoption",
+      "source": "docs/active-regions.md#file-and-compatibility",
+      "statement": "Historical projection adoption preserves clocks and identities, publishes no save members during load and preserves committed bytes on refusal. Registered regressions supply source evidence; complete native and performance qualification remains outstanding.",
+      "status": "partial",
+      "requirements": [
+        "ar.frozen-adoption.004",
+        "ar.frozen-adoption.006",
+        "ar.frozen-adoption.007",
+        "ar.frozen-adoption.008"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "FrozenAuthority.V030MissingIdentityAndProjectionAdoptThenStamp"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FrozenAuthority.PresentMalformedProjectionRefusesAtomically"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedgerTest.FrozenProjectionAdoptionIsAtomicAcrossAllHistoricalOwners"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Review complete requirement boundary coverage and supply current-candidate native, runtime and performance qualification for these obligations; owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.replacement-preservation",
+      "source": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
+      "statement": "Failed public replacement preserves the current session and its saveability while reporting a separate replacement error. Registered regressions supply source evidence; complete native and performance qualification remains outstanding.",
+      "status": "partial",
+      "requirements": [
+        "ar.frozen-adoption.015"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "FrozenAuthority.FailedPublicReplacementPreservesCurrentSaveability"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Review complete requirement boundary coverage and supply current-candidate native, runtime and performance qualification for these obligations; owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.authority-capture",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "statement": "Checked authority capture is observational, resolves all owners with declared precedence and framing, reads only the requested owner for freeze stamping and refuses invalid authority without publishing a checksum. Registered regressions supply source evidence; complete native and performance qualification remains outstanding.",
+      "status": "partial",
+      "requirements": [
+        "ar.authority-capture.001",
+        "ar.authority-capture.002",
+        "ar.authority-capture.003",
+        "ar.authority-capture.004",
+        "ar.authority-capture.005",
+        "ar.authority-capture.006",
+        "ar.authority-capture.007",
+        "ar.authority-capture.008",
+        "ar.authority-capture.009",
+        "ar.authority-capture.010",
+        "ar.authority-capture.011",
+        "ar.authority-capture.012",
+        "ar.authority-capture.013",
+        "ar.authority-capture.014",
+        "ar.authority-capture.015",
+        "ar.authority-capture.016",
+        "ar.authority-capture.017",
+        "ar.authority-capture.018",
+        "ar.authority-capture.019",
+        "ar.authority-capture.020",
+        "ar.authority-capture.021",
+        "ar.authority-capture.022",
+        "ar.authority-capture.023",
+        "ar.authority-capture.024",
+        "ar.authority-capture.025"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashState.AuthorityCaptureLiveParkedDurablePrecedence"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashState.PristineAndLoadingCannotShadowAuthority"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashState.DiskOnlyAuthorityIncludedAndMissingExpectedRecordRefuses"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashState.RegionalFreezeDigestMatchesFullCaptureAcrossChunkPrecedence"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashState.AuthorityEnvelopeFramesIdentityAndAvatars"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashState.CompleteConsumerOwnersUseUniformFrozenProjection"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashState.SchedulerFreezeReadsOnlyRequestedOwnerAndMatchesFullCapture"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashState.HashCaptureDoesNotMutateAuthority"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashState.CaptureFailureProducesNoDigest"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Review complete requirement boundary coverage and supply current-candidate native, runtime and performance qualification for these obligations; owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.frozen-continuation",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "statement": "Frozen authority survives residency changes, saves and restart; controller cleanup preserves logical participation, thaw applies bounded plant resume and water adaptation waits for a budgeted visit. Registered regressions supply source evidence; complete native and performance qualification remains outstanding.",
+      "status": "partial",
+      "requirements": [
+        "ar.frozen-adoption.016",
+        "ar.frozen-adoption.017",
+        "ar.frozen-adoption.018",
+        "ar.frozen-adoption.019",
+        "ar.frozen-adoption.020",
+        "ar.frozen-adoption.021",
+        "ar.frozen-adoption.022",
+        "ar.frozen-adoption.023",
+        "ar.frozen-adoption.024",
+        "ar.frozen-adoption.025",
+        "ar.frozen-adoption.026",
+        "ar.frozen-adoption.027"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "FrozenAuthority.FrozenEveryAuthorityDomainStableAcrossResidencySaveLoad"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FrozenAuthority.EnabledDiskOnlyRestorePreservesFrozenWater"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FrozenAuthority.FlagOffDiskOnlyRestoreStillMigratesWater"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FrozenAuthority.EnabledDiskOnlyRestoreMissingAuthorityStillFaults"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FrozenAuthority.FrozenControllerCleanupPreservesContinuation"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FrozenAuthority.ThawDoesNotApplyCreatureOrEnergyCatchup"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedgerTest.FrozenProjectionAdoptionIsAtomicAcrossAllHistoricalOwners"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Review complete requirement boundary coverage and supply current-candidate native, runtime and performance qualification for these obligations; owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.pending-codec",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "statement": "Indexed SPN1 authority preserves event sequence, order and deposit multiplicity, bounds decoded allocation and refuses malformed candidate state atomically. Registered regressions supply source evidence; complete native and performance qualification remains outstanding.",
+      "status": "partial",
+      "requirements": [
+        "ar.pending.001",
+        "ar.pending.002",
+        "ar.pending.003",
+        "ar.pending.004",
+        "ar.pending.005",
+        "ar.pending.006",
+        "ar.pending.007",
+        "ar.pending.008"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.FutureEventsAndSequenceRoundtrip"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.PendingStateMissingAdoptsPresentMalformedRefuses"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.RetainedEnergyDepositsSurviveFaultSaveLoad"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Review complete requirement boundary coverage and supply current-candidate native, runtime and performance qualification for these obligations; owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.pending-admission",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "statement": "Enabled admission enforces durable bounds without consuming refused sequences; prepared batches account incrementally and transfer only changed deliveries while disabled behavior remains unchanged. Registered regressions supply source evidence; complete native and performance qualification remains outstanding.",
+      "status": "partial",
+      "requirements": [
+        "ar.pending.009",
+        "ar.pending.010",
+        "ar.pending.011",
+        "ar.pending.012",
+        "ar.pending.013",
+        "ar.pending.014",
+        "ar.pending.015",
+        "ar.pending.016",
+        "ar.pending.017"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.DurableAdmissionCountLimitPreservesRecoverySaveability"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.DurableAdmissionTextTickAndActivationBounds"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.ActivationReconciliationDefersAtCountAndTextLimits"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.PreparedQueueAccountingVisitsOnlyBatchEvents"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.FutureQueueAccountingDoesNotScanOnSessionTicks"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.FlagOffEventBehaviorAndSaveBytesUnchanged"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Review complete requirement boundary coverage and supply current-candidate native, runtime and performance qualification for these obligations; owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.pending-transactions",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "statement": "Pending members and ledgers publish and remove through indexed transactions, validate original index facts and the final outbox, reuse validated fingerprints and restore original bytes on refusal. Registered regressions supply source evidence; complete native and performance qualification remains outstanding.",
+      "status": "partial",
+      "requirements": [
+        "ar.pending.018",
+        "ar.pending.019",
+        "ar.pending.020",
+        "ar.pending.021",
+        "ar.pending.022",
+        "ar.pending.023",
+        "ar.pending.024",
+        "ar.pending.025",
+        "ar.pending.026",
+        "ar.pending.027",
+        "ar.pending.028",
+        "ar.pending.029",
+        "ar.pending.030",
+        "ar.pending.031",
+        "ar.pending.032"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.StandaloneFirstPendingPublicationIsIndexed"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.FirstLedgerWritersRequireIndexedTransactions"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.RawAuthorityRemovalFromLegacyDestinationIsIndexed"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.FirstLedgerValidatesPreviouslyDisabledPendingMember"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.IndexedFirstLedgerValidatesPendingIndexFacts"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.IndexedPendingTransactionsValidateOriginalIndexFacts"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.LedgerOnlyAcknowledgementRefusesAtomically"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.PendingMemberCommitRollbackAndRecovery"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.FlagOffEventBehaviorAndSaveBytesUnchanged"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Review complete requirement boundary coverage and supply current-candidate native, runtime and performance qualification for these obligations; owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.pending-recovery",
+      "source": "docs/active-regions.md#checked-authority-hash-capture",
+      "statement": "Historical absence adopts bounded activation prefixes; present queues restore exactly, failed deliveries retain their suffix, fault saves retain deposits and pending authority contributes to hashes without delivery. Registered regressions supply source evidence; complete native and performance qualification remains outstanding.",
+      "status": "partial",
+      "requirements": [
+        "ar.pending.033",
+        "ar.pending.034",
+        "ar.pending.035",
+        "ar.pending.036",
+        "ar.pending.037",
+        "ar.pending.038",
+        "ar.pending.039",
+        "ar.pending.040",
+        "ar.pending.041",
+        "ar.pending.042",
+        "ar.pending.043",
+        "ar.pending.044",
+        "ar.pending.045",
+        "ar.pending.046",
+        "ar.pending.047",
+        "ar.pending.048",
+        "ar.pending.049",
+        "ar.pending.050",
+        "ar.pending.051"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.FutureEventsAndSequenceRoundtrip"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.PendingStateMissingAdoptsPresentMalformedRefuses"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.AboveCapacityHistoricalOutboxAdoptsAndDeliversExactlyOnce"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.FailedDeliveryRetainsFailedEventAndSuffix"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.RetainedEnergyDepositsSurviveFaultSaveLoad"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.PendingMemberCommitRollbackAndRecovery"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimulationPendingState.FlagOffEventBehaviorAndSaveBytesUnchanged"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Review complete requirement boundary coverage and supply current-candidate native, runtime and performance qualification for these obligations; owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.named-checkpoints",
+      "source": "docs/active-regions.md#named-authority-hashes-and-checkpoints",
+      "statement": "The network driver and registered headless regression share production setup, forwarding immutable effective configuration and storage roots before host creation and load. Production peers, hooks, transports and handshake produce three nonempty matching enabled checkpoints per peer with all tuning overrides parsed from params. Registered regressions supply source evidence; complete native and performance qualification remains outstanding.",
+      "status": "partial",
+      "requirements": [
+        "ar.named-hashes.001",
+        "ar.named-hashes.002",
+        "ar.named-hashes.003",
+        "ar.named-hashes.004",
+        "ar.named-hashes.005",
+        "ar.named-hashes.006",
+        "ar.named-hashes.007",
+        "ar.named-hashes.008",
+        "ar.named-hashes.009",
+        "ar.named-hashes.010",
+        "ar.named-hashes.011",
+        "ar.named-hashes.012",
+        "ar.named-hashes.013",
+        "ar.named-hashes.014",
+        "ar.named-hashes.015",
+        "ar.named-hashes.016",
+        "ar.named-hashes.017",
+        "ar.named-hashes.018",
+        "ar.named-hashes.019",
+        "ar.named-hashes.020",
+        "ar.named-hashes.021",
+        "ar.named-hashes.022",
+        "ar.named-hashes.023",
+        "ar.named-hashes.024",
+        "ar.named-hashes.025",
+        "ar.named-hashes.026",
+        "ar.named-hashes.027",
+        "ar.named-hashes.028",
+        "ar.named-hashes.029",
+        "ar.named-hashes.030"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashIntegration.AllHashEntryPointsUseSameAuthorityCapture"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashIntegration.CaptureRefusalDisconnectReachesPeer"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashIntegration.NetworkCheckpointPeersShareEffectiveConfiguration"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashIntegration.NetworkHostFactorySharesEffectiveConfiguration"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashIntegration.NetworkPeerConfigurationRefusesMissingSnapshot"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashIntegration.NetworkHostCreationFailurePreservesPeer"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashIntegration.NamedHashDomainMutationMatrix"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashIntegration.RecordReplayAndLockstepEnabledHashIdentity"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashIntegration.FrameGroupingPreservesCheckpointHashes"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashIntegration.HashMsgAndLREC1EncodingUnchanged"
+        },
+        {
+          "kind": "ctest",
+          "ref": "AuthorityHashIntegration.FlagOffProductionArtifactBytesUnchanged"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/active-regions.md",
+          "planned": "Review complete requirement boundary coverage and supply current-candidate native, runtime and performance qualification for these obligations; owner: ds"
+        }
       ]
     }
   ]

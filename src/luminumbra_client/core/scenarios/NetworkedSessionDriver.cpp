@@ -4,52 +4,24 @@
 
 #include <glad/glad.h>
 
-#include "core/Log.h"
+#include "core/RuntimeScenarioConfig.h"
 #include "core/RuntimeScenarioHarness.h"
-#include "core/scenarios/ScenarioCommon.h"
-#include "luminumbra_common/ai/CreatureSpeciesRegistry.h" //  species base_color -> creature tint
-#include "luminumbra_common/animation/AnimationRuntime.h"
-#include "luminumbra_common/components/CoreComponents.h"
-#include "luminumbra_common/components/InstinctComponents.h"
-#include "luminumbra_common/core/Environment.h"
-#include "luminumbra_common/core/JobSystem.h"
+#include "core/scenarios/NetworkedSessionHooks.h"
+#include "luminumbra/core/Types.h"
 #include "luminumbra_common/core/SystemConfig.h"
-#include "luminumbra_common/ecs/EntitySnapshot.h"
-#include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
-#include "luminumbra_common/persistence/WorldSaveService.h"
-#include "luminumbra_common/systems/CreatureProcgen.h" //  genome -> body-proportion build
-#include "luminumbra_common/systems/PhysicsSystem.h"
-#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
-#include "luminumbra_common/systems/WeatherSystem.h"
-#include "luminumbra_common/systems/WindFieldSystem.h"
-#include "luminumbra_common/world/GameSession.h"
-#include "luminumbra_common/world/WorldStreamingState.h"
-#include "rendering/Camera.h"
-#include "rendering/LightningBolt.h"
-#include "rendering/passes/FoliagePass.h"
-#include "rendering/passes/ParticlePass.h"
-// lockstep transport seam (engine-generic; ILockstepTransport +
-// LoopbackTransport + LockstepSession). Named SendFrame/TryReceiveFrame to dodge
-// the <windows.h> SendMessage macro (see LockstepSession.h note).
 #include "luminumbra_common/net/LockstepSession.h"
-//  (AU1): atmosphere audio telemetry. The harness sweeps the replicated
-// weather/wind state through the REAL EnvironmentalAudioSystem atmosphere model +
-// the AudioPropagationSystem ambience bed and emits the AtmosphereAudio artifact.
-// Client-side dressing only -- no world_hash, no visual-gate dependency.
-#include "audio/AudioPropagationSystem.h"
-#include "audio/EnvironmentalAudioSystem.h"
+#include "luminumbra_common/world/GameSession.h"
+
 #include <algorithm>
-#include <array>
-#include <cmath>
-#include <cstdio>
-#include <cstdlib>
-#include <ctime>
+#include <cstdint>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
-#include <limits>
-#include <sstream>
-#include <stdexcept>
+#include <memory>
+#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
+#include <string>
 #include <system_error>
 
 namespace Luminumbra::Client::ScenarioHarness {
@@ -64,24 +36,9 @@ namespace Luminumbra::Client::ScenarioHarness {
 
 namespace {
 
-// One peer's world-step + hash context the LockstepHooks' void* user points at.
-// Mirrors the headless server's LockstepPeerContext, but a peer here owns a live
-// GameSession (host: a dedicated authority world; client: the caller's render
-// session) plus the physics + spawn anchor it steps from.
-struct NetSessionPeerContext {
-    Luminumbra::world::GameSession* session = nullptr;
-    Luminumbra::Vec3 spawn_anchor{0.0f};
-    double fixed_dt = 1.0 / 30.0;
-    const luminumbra::core::SystemConfig* configuration = nullptr;
-    // The peer owns no
-    // independent wind/weather/aether/scent/ecology field state — it renders the
-    // server-authoritative world via `session`. Enabled hashes use its complete authority. Those
-    // fields are SERVER-side (GameSession::Get*FieldSystem / ComputeScentSubHash /
-    // ai::ComputeEcologySubHash, folded by the server's ComposeWorldHash). If a client-owned copy
-    // of any of them is ever added to this context, the size assert below fails to compile —
-    // forcing a revisit of the server-authoritative hash boundary before the quantities can
-    // diverge.
-};
+using detail::NetSessionCaptureHashes;
+using detail::NetSessionPeerContext;
+
 namespace net_capture_tripwire {
 // Reference layout: session, hashed-step anchor, fixed dt and shared configuration.
 // No wind/weather/aether/scent/ecology field state.
@@ -107,85 +64,12 @@ static_assert(sizeof(Luminumbra::Net::HashMsg) ==
               "Luminumbra::Net::HashMsg shape changed: named diagnostics must remain "
               "outside the checkpoint wire layout.");
 
-// the client's WORLD-AFFECTING input set is EMPTY today (no gameplay
-// inputs yet). The empty blob still travels the lockstep path -- it is collected
-// here, sent through LockstepSession::*Input, merged, and handed to apply_and_step
-// below -- so the round-trip is real and carries real inputs unchanged once
-// gameplay inputs exist. Camera LOOK is deliberately NOT collected here: it is
-// render state applied locally each frame, never round-tripped.
-std::vector<std::uint8_t> NetSessionCollectInput(std::uint64_t /*tick*/, void* /*user*/) {
-    return {};
-}
-
-// Applies the agreed merged input set (empty today) and advances the world by
-// EXACTLY one fixed sim tick from the SPAWN ANCHOR. Identical step shape on both
-// peers (same fixed_dt, same anchor, same quiesce) => byte-identical worlds =>
-// matching hashes. The merged input would be decoded + applied here once gameplay
-// inputs exist; the camera is intentionally absent from this hashed path.
-bool NetSessionApplyStep(std::uint64_t /*tick*/,
-                         const std::vector<std::uint8_t>& /*merged*/,
-                         void* user) {
-    auto* ctx = static_cast<NetSessionPeerContext*>(user);
-    if (!ctx || !ctx->session || !ctx->configuration ||
-        ctx->session->ActiveRegionsEnabled() !=
-            ctx->configuration->enabled(luminumbra::core::SysKey::SimActiveRegions)) {
-        return false;
-    }
-    auto* world_system = ctx->session->GetWorldSystem();
-    auto* physics_system = ctx->session->GetPhysicsSystem();
-    if (!world_system || !physics_system) {
-        return false;
-    }
-    // Same per-tick shape as ServerWorldRunner::RunFixedTicks (one frame == one
-    // fixed tick): physics, then the fixed sim tick, then spawn-anchor streaming,
-    // then quiesce so the next scheduler decision observes the identical settled
-    // state on both peers. The streaming anchor is the spawn point -- NOT the
-    // client camera -- so render-side look can never alter the hashed world.
-    if (ctx->configuration->enabled(luminumbra::core::SysKey::SimActiveRegions))
-        ctx->session->SetReplicatedSimulationAnchors({}); // Same zero-avatar host inputs.
-    physics_system->update(static_cast<float>(ctx->fixed_dt));
-    const std::uint32_t ran = ctx->session->TickSimulation(ctx->fixed_dt);
-    if (ctx->session->GetRegionSchedulerFault())
-        return false;
-    world_system->update(ctx->session->GetRegistry(), ctx->spawn_anchor, physics_system);
-    world_system->wait_for_streaming_jobs();
-    return ran == 1;
-}
-
-// Enabled peers capture the same admitted session authority as the server runner.
-// The disabled scenario retains its historical bare streamed-chunk projection.
-void NetSessionCaptureHashes(std::uint64_t tick, Luminumbra::Net::HashMsg& out, void* user) {
-    auto* ctx = static_cast<NetSessionPeerContext*>(user);
-    out = {};
-    out.tick = tick;
-    if (!ctx || !ctx->session || !ctx->configuration)
-        throw std::runtime_error("Network authority capture requires a configured live session");
-    Luminumbra::Persistence::WorldStreamingStateSubHashes sub;
-    if (!ctx->session->ComputeNetworkWorldHashes(*ctx->configuration, out.world_hash, sub))
-        throw std::runtime_error("Network authority capture failed");
-    out.terrain = sub.terrain;
-    out.water = sub.water;
-    out.entities = sub.entities;
-}
-
 } // namespace
 
-// Hidden state: the host authority world + job system, both transports, both
-// session ends, and the per-peer step contexts. Kept in the.cpp so the header
-// stays free of the Net/JobSystem includes.
-struct NetworkedSessionDriver::Impl {
-    Luminumbra::JobSystem host_job_system;
-    std::unique_ptr<Luminumbra::world::GameSession> host_session;
-
-    std::unique_ptr<Luminumbra::Net::LoopbackTransport> host_transport;
-    std::unique_ptr<Luminumbra::Net::LoopbackTransport> client_transport;
-    std::unique_ptr<Luminumbra::Net::LockstepSession> host;
-    std::unique_ptr<Luminumbra::Net::LockstepSession> client;
-
-    std::shared_ptr<const luminumbra::core::SystemConfig> simulation_configuration;
-    NetSessionPeerContext host_ctx;
-    NetSessionPeerContext client_ctx;
-
+// Share headless construction state with checkpoint regressions; artifact
+// telemetry remains private to the driver. The public driver header stays free
+// of the Net/JobSystem includes.
+struct NetworkedSessionDriver::Impl : detail::NetworkedSessionState {
     NetworkedSessionDriver::Config config;
 
     // Telemetry for the artifact.
@@ -193,43 +77,16 @@ struct NetworkedSessionDriver::Impl {
     std::uint64_t in_sync_exchanges = 0; //... that matched
     std::string last_world_hash;         // host==client end hash
     bool clean_disconnect = false;
-    bool host_booted = false;
 };
 
 NetworkedSessionDriver::NetworkedSessionDriver()
     : m_impl(std::make_unique<Impl>()) {}
 NetworkedSessionDriver::~NetworkedSessionDriver() {
     Disconnect();
-    if (m_impl && m_impl->host_session) {
-        if (auto* ws = m_impl->host_session->GetWorldSystem()) {
-            ws->clear_world(m_impl->host_session->GetPhysicsSystem());
-        }
-    }
-    if (m_impl && m_impl->host_booted) {
-        m_impl->host_session.reset();
-        m_impl->host_job_system.shutdown();
-        m_impl->host_booted = false;
-    }
 }
 
 bool NetworkedSessionDriver::Begin(Luminumbra::world::GameSession* client_session,
                                    const Config& config) {
-    if (!client_session) {
-        m_failure_reason = "client_session_null";
-        return false;
-    }
-    m_impl->simulation_configuration = client_session->GetSimulationConfiguration();
-    if (!m_impl->simulation_configuration) {
-        m_failure_reason = "simulation_configuration_missing";
-        return false;
-    }
-    m_impl->config = config;
-
-    // --- Boot the HOST authority world (a headless GameSession in this process).
-    // Same seed/preset as the client => the two worlds tick identically and their
-    // hashes agree at every cadence. Mirrors ServerWorldRunner::Boot.
-    m_impl->host_job_system.startup(1); // single worker: streamed hash is worker-count invariant
-    m_impl->host_booted = true;
     const Luminumbra::world::GameSession::NetworkHostConfig host_config{
         .root_path = config.root_path,
         .seed = std::to_string(config.seed),
@@ -240,87 +97,15 @@ bool NetworkedSessionDriver::Begin(Luminumbra::world::GameSession* client_sessio
             config.systems_config_override ? &*config.systems_config_override : nullptr,
         .preset_json_override =
             config.preset_json_override ? &*config.preset_json_override : nullptr};
-    m_impl->host_session = Luminumbra::world::GameSession::CreateNetworkHost(
-        *client_session, m_impl->host_job_system, host_config, m_failure_reason);
-    if (!m_impl->host_session)
+    if (!detail::BeginNetworkedSession(*m_impl,
+                                       client_session,
+                                       host_config,
+                                       config.seed,
+                                       config.hash_cadence_ticks,
+                                       m_failure_reason))
         return false;
-    m_spawn_anchor = m_impl->host_session->GetMetadata().spawnPoint;
-
-    const double fixed_dt = m_impl->host_session->GetSimulationClock().fixed_dt();
-    m_impl->host_ctx = NetSessionPeerContext{m_impl->host_session.get(),
-                                             m_spawn_anchor,
-                                             fixed_dt,
-                                             m_impl->simulation_configuration.get()};
-    m_impl->client_ctx = NetSessionPeerContext{
-        client_session, m_spawn_anchor, fixed_dt, m_impl->simulation_configuration.get()};
-
-    // --- Build the loopback pair + both session ends (no sockets/ports). The
-    // client is client_id 1 (one remote) and the host is client_id 0 (authority).
-    auto [host_transport, client_transport] = Luminumbra::Net::MakeLoopbackPair();
-    m_impl->host_transport = std::move(host_transport);
-    m_impl->client_transport = std::move(client_transport);
-
-    Luminumbra::Net::LockstepHooks hooks_template;
-    hooks_template.collect_local_input = &NetSessionCollectInput;
-    hooks_template.apply_and_step = &NetSessionApplyStep;
-    hooks_template.capture_hashes = &NetSessionCaptureHashes;
-
-    Luminumbra::Net::LockstepConfig host_cfg;
-    host_cfg.seed = config.seed;
-    host_cfg.preset = config.preset;
-    host_cfg.tick_rate_hz = 30;
-    host_cfg.local_client_id = 0;
-    host_cfg.peer_client_id = 1;
-    // This driver steps one authoritative host; its client renders that host's state.
-    host_cfg.system_config_identity = m_impl->host_session->SystemConfigIdentity();
-    host_cfg.preset_content_hash = m_impl->host_session->PresetContentHash();
-    host_cfg.hash_cadence_ticks = config.hash_cadence_ticks;
-    Luminumbra::Net::LockstepConfig client_cfg = host_cfg;
-    client_cfg.local_client_id = 1;
-    client_cfg.peer_client_id = 0;
-    client_cfg.system_config_identity = client_session->SystemConfigIdentity();
-    client_cfg.preset_content_hash = client_session->PresetContentHash();
-
-    Luminumbra::Net::LockstepHooks host_hooks = hooks_template;
-    host_hooks.user = &m_impl->host_ctx;
-    Luminumbra::Net::LockstepHooks client_hooks = hooks_template;
-    client_hooks.user = &m_impl->client_ctx;
-
-    m_impl->host = std::make_unique<Luminumbra::Net::LockstepSession>(
-        host_cfg, m_impl->host_transport.get(), host_hooks);
-    m_impl->client = std::make_unique<Luminumbra::Net::LockstepSession>(
-        client_cfg, m_impl->client_transport.get(), client_hooks);
-
-    // Handshake: queue both Hellos first, then complete both ends (single-process
-    // driver order, exactly as RunLockstepLoopback does).
-    {
-        Luminumbra::Net::HelloMsg ch;
-        ch.seed = config.seed;
-        ch.preset = config.preset;
-        ch.tick_rate_hz = 30;
-        ch.client_id = 1;
-        ch.system_config_identity = client_cfg.system_config_identity;
-        ch.preset_content_hash = client_cfg.preset_content_hash;
-        if (!m_impl->client_transport->SendFrame(Luminumbra::Net::EncodeHello(ch))) {
-            m_failure_reason = "handshake_failed";
-            return false;
-        }
-        Luminumbra::Net::HelloMsg hh;
-        hh.seed = config.seed;
-        hh.preset = config.preset;
-        hh.tick_rate_hz = 30;
-        hh.client_id = 0;
-        hh.system_config_identity = host_cfg.system_config_identity;
-        hh.preset_content_hash = host_cfg.preset_content_hash;
-        if (!m_impl->host_transport->SendFrame(Luminumbra::Net::EncodeHello(hh))) {
-            m_failure_reason = "handshake_failed";
-            return false;
-        }
-    }
-    if (!m_impl->host->Handshake() || !m_impl->client->Handshake()) {
-        m_failure_reason = "handshake_failed";
-        return false;
-    }
+    m_impl->config = config;
+    m_spawn_anchor = m_impl->host_ctx.spawn_anchor;
     return true;
 }
 
@@ -429,7 +214,7 @@ bool NetworkedSessionDriver::WriteArtifact(const std::filesystem::path& artifact
 
     const GLDebugRuntimeStats gl_debug = CurrentGLDebugRuntimeStats();
 
-    nlohmann::json artifact{
+    const nlohmann::json artifact{
         {"schema", "luminumbra.networked_session.v1"},
         {"generated_by", "luminumbra_client_qa_app --scenario networked_session_smoke ()"},
         {"preset", m_impl->config.preset},
