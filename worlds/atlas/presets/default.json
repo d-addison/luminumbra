@@ -1,9 +1,10 @@
 {
   "name": "Default",
   "description": "Varied, DEM-grounded foothills with biomes, rivers, and hydraulic drainage relief",
-  "schema_rev": 7,
+  "schema_rev": 8,
   "generation_params": {
     "terrain": {
+      "surface_sampling_revision": 2,
       "base_frequency": 0.01,
       "base_amplitude": 34.0,
       "octaves": 6,
