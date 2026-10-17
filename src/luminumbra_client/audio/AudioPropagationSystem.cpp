@@ -1,5 +1,6 @@
 #include "AudioPropagationSystem.h"
 #include "core/Log.h"
+#include "core/Profiler.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -40,7 +41,8 @@ AudioPropagationResult AudioPropagationSystem::CalculatePropagation(const glm::v
     // Check cache first
     if (ShouldUseCachedResult(source, listener)) {
         uint64_t hash = m_cache.HashPositions(source, listener);
-        std::lock_guard<std::mutex> lock(m_cache.cache_mutex);
+        LUMIN_PROFILE_LOCK(
+            std::lock_guard<std::mutex>, lock, m_cache.cache_mutex, "Audio cache lock wait");
         auto it = m_cache.entries.find(hash);
         if (it != m_cache.entries.end()) {
             UpdatePerformanceMetrics(0.1f, true); // Cache hit
@@ -92,7 +94,8 @@ AudioPropagationResult AudioPropagationSystem::CalculatePropagation(const glm::v
     // Cache the result
     uint64_t hash = m_cache.HashPositions(source, listener);
     {
-        std::lock_guard<std::mutex> lock(m_cache.cache_mutex);
+        LUMIN_PROFILE_LOCK(
+            std::lock_guard<std::mutex>, lock, m_cache.cache_mutex, "Audio cache lock wait");
         PropagationCache::CacheEntry& entry = m_cache.entries[hash];
         entry.result = result;
         entry.timestamp = std::chrono::steady_clock::now();
@@ -114,7 +117,7 @@ void AudioPropagationSystem::CalculatePropagationAsync(
     std::function<void(AudioPropagationResult)> callback,
     float max_distance) {
     {
-        std::lock_guard<std::mutex> lock(m_task_mutex);
+        LUMIN_PROFILE_LOCK(std::lock_guard<std::mutex>, lock, m_task_mutex, "Audio task lock wait");
         m_pending_tasks.push_back({source, listener, max_distance, std::move(callback)});
     }
     m_task_cv.notify_one();
@@ -373,7 +376,8 @@ uint64_t AudioPropagationSystem::PropagationCache::HashPositions(const glm::vec3
 bool AudioPropagationSystem::ShouldUseCachedResult(const glm::vec3& source,
                                                    const glm::vec3& listener) {
     uint64_t hash = m_cache.HashPositions(source, listener);
-    std::lock_guard<std::mutex> lock(m_cache.cache_mutex);
+    LUMIN_PROFILE_LOCK(
+        std::lock_guard<std::mutex>, lock, m_cache.cache_mutex, "Audio cache lock wait");
 
     auto it = m_cache.entries.find(hash);
     if (it == m_cache.entries.end())
@@ -402,13 +406,17 @@ void AudioPropagationSystem::UpdatePerformanceMetrics(float calculation_time_ms,
 }
 
 void AudioPropagationSystem::WorkerThreadFunction() {
+    LUMIN_PROFILE_THREAD("Audio propagation worker");
     while (!m_shutdown) {
         AsyncTask task;
 
         // Wait for task
         {
-            std::unique_lock<std::mutex> lock(m_task_mutex);
-            m_task_cv.wait(lock, [this] { return !m_pending_tasks.empty() || m_shutdown; });
+            LUMIN_PROFILE_LOCK(
+                std::unique_lock<std::mutex>, lock, m_task_mutex, "Audio task lock wait");
+            LUMIN_PROFILE_WAIT("Audio condition wait", m_task_cv.wait(lock, [this] {
+                return !m_pending_tasks.empty() || m_shutdown;
+            }));
 
             if (m_shutdown)
                 break;
@@ -422,6 +430,7 @@ void AudioPropagationSystem::WorkerThreadFunction() {
             }
         }
 
+        LUMIN_PROFILE_ZONE_N("Audio worker job");
         // Process task
         AudioPropagationResult result =
             CalculatePropagation(task.source, task.listener, task.max_distance);

@@ -2,6 +2,7 @@
 #include "../FarWorldReplay.h"
 #include "../GBufferTargets.h"
 #include "StaticDrawPass.h"
+#include "core/Profiler.h"
 #include <luminumbra/rendering/StaticScene.h>
 #include <stdexcept>
 
@@ -271,6 +272,7 @@ void GBufferPass::reset_shaders() {
 GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
                                       entt::registry& registry,
                                       const GBufferPassInput& input) {
+    LUMIN_PROFILE_ZONE_N("GL GBufferPass.execute");
     // ON already populated persistent mesh caches. Keep reused per-dispatch
     // scratch exactly as ON left it, including when a later stage throws.
     auto restore = [this,

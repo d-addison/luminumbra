@@ -2414,6 +2414,20 @@ file(WRITE "${LUMINUMBRA_TEST_ARTIFACT_ROOT}/testing/ctest_manifest.json"
 # on Windows and can exit inside the renderer without diagnostic output.
 
 # Pure CPU measurement contract, also runnable without a GL context.
+add_library(profiler_disabled_compile OBJECT core/profiler_disabled_compile.cpp)
+target_include_directories(profiler_disabled_compile PRIVATE ../src/luminumbra_common)
+luminumbra_configure_first_party_target(profiler_disabled_compile)
+# Deliberately no link to luminumbra_common/luminumbra_profiler: this target
+# checks disabled macro expansion even when the rest of the build is profiled.
+if(LUMINUMBRA_ENABLE_TRACY)
+    add_library(profiler_enabled_compile OBJECT core/profiler_enabled_compile.cpp)
+    target_include_directories(profiler_enabled_compile PRIVATE ../src/luminumbra_common)
+    target_link_libraries(profiler_enabled_compile PRIVATE luminumbra_profiler)
+    luminumbra_configure_first_party_target(profiler_enabled_compile)
+endif()
+add_test(NAME ProfilerSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/test/tools/check_profiler_contract.py)
+
 add_executable(render_measurement_test rendering/render_measurement_test.cpp)
 target_include_directories(render_measurement_test PRIVATE ../src)
 target_compile_definitions(render_measurement_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")

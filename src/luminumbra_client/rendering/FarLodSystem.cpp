@@ -1,4 +1,5 @@
 #include "FarLodSystem.h"
+#include "core/Profiler.h"
 
 #include "Shader.h"
 #include "core/Log.h"
@@ -1232,7 +1233,7 @@ void FarLodSystem::wait_for_builds() {
     }
     m_inflight_handles.clear();
     m_pending.clear();
-    std::lock_guard<std::mutex> lock(m_shared->mutex);
+    LUMIN_PROFILE_LOCK(std::lock_guard<std::mutex>, lock, m_shared->mutex, "Far build lock wait");
     m_shared->completed.clear();
 }
 
@@ -1314,7 +1315,8 @@ std::size_t FarLodSystem::total_resident_bytes() const {
 void FarLodSystem::integrate_completed_builds() {
     std::vector<BuildResult> completed;
     {
-        std::lock_guard<std::mutex> lock(m_shared->mutex);
+        LUMIN_PROFILE_LOCK(
+            std::lock_guard<std::mutex>, lock, m_shared->mutex, "Far build lock wait");
         if (m_shared->completed.empty()) {
             return;
         }
@@ -1655,7 +1657,8 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system,
                 result.rz = rz;
                 result.authority_build_failed = !outcome.ok;
                 if (!outcome.ok) {
-                    std::lock_guard<std::mutex> lock(shared->mutex);
+                    LUMIN_PROFILE_LOCK(
+                        std::lock_guard<std::mutex>, lock, shared->mutex, "Far build lock wait");
                     shared->completed.push_back(std::move(result));
                     return;
                 }
@@ -1678,7 +1681,8 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system,
                 BuildFarLodWaterSheet(tile, result.water_mesh);
                 result.tile = std::move(tile);
 
-                std::lock_guard<std::mutex> lock(shared->mutex);
+                LUMIN_PROFILE_LOCK(
+                    std::lock_guard<std::mutex>, lock, shared->mutex, "Far build lock wait");
                 shared->completed.push_back(std::move(result));
             }},
             JobPriority::Normal);

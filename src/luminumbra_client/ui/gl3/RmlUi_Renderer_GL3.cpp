@@ -26,6 +26,7 @@
  *
  */
 
+#include "core/Profiler.h"
 #include <cstdint>
 
 #include "RmlUi_Renderer_GL3.h"
@@ -558,7 +559,10 @@ static bool CreateShader(GLuint& out_shader_id, GLenum shader_type, const char* 
 
     GLuint id = glCreateShader(shader_type);
     glShaderSource(id, 1, (const GLchar**)&code_string, NULL);
-    glCompileShader(id);
+    {
+        LUMIN_PROFILE_ZONE_N("Shader compile");
+        glCompileShader(id);
+    }
 
     GLint status = 0;
     glGetShaderiv(id, GL_COMPILE_STATUS, &status);
@@ -597,7 +601,11 @@ static bool CreateProgram(GLuint& out_program,
     glAttachShader(id, vertex_shader);
     glAttachShader(id, fragment_shader);
 
-    glLinkProgram(id);
+    {
+        LUMIN_PROFILE_ZONE_N("Shader link");
+
+        glLinkProgram(id);
+    }
 
     glDetachShader(id, vertex_shader);
     glDetachShader(id, fragment_shader);

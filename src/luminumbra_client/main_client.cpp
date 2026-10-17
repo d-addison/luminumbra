@@ -45,6 +45,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "core/IsolationConfig.h" // ScenarioHarness::ParseIsolationConfig (render-only layer isolation)
 #include "core/Log.h"
 #include "core/NvmlSampler.h" //  optional GPU power/clock sampling
+#include "core/Profiler.h"
 #include "core/RuntimeScenarioConfig.h"
 #include "core/ScenarioRunner.h"
 #include "debug/DebugCamera.h" // deterministic feature locator (--debug-goto cave|doline)
@@ -3401,6 +3402,8 @@ int main(int argc, char* argv[]) {
         const int max_capture_attempts = runtime_boot_frames * 6;
         for (int attempt = 0; attempt < max_capture_attempts && !runtime_boot_recorder.complete();
              ++attempt) {
+            LUMIN_PROFILE_FRAME_N("Client capture");
+            LUMIN_PROFILE_ZONE_N("Client capture frame");
             if (gameSession->GetWorldSystem()) {
                 gameSession->GetWorldSystem()->update(
                     gameSession->GetRegistry(), capture_position, nullptr);
@@ -3419,7 +3422,7 @@ int main(int argc, char* argv[]) {
                                             capture_delta_time,
                                             g_app.overlay.wireframe_mode);
                 runtime_boot_recorder.record_frame(capture_delta_time, renderPipeline);
-                glfwSwapBuffers(window);
+                LUMIN_PROFILE_WAIT("Client present wait", glfwSwapBuffers(window));
             }
         }
 
@@ -3562,9 +3565,11 @@ int main(int argc, char* argv[]) {
     if (frame_csv_enabled && !frame_recorder.active())
         LUMINUMBRA_CORE_ERROR("Cannot open logs/frame-attribution.csv");
     std::uint64_t attribution_frame = 0;
+    LUMIN_PROFILE_THREAD("Client main");
     Luminumbra::Client::FrameLimiter frame_limiter;
     Luminumbra::Client::SteadyFrameTiming frame_timing;
     while (!glfwWindowShouldClose(window)) {
+        LUMIN_PROFILE_FRAME_N("Client");
         MainLoopHeartbeat().fetch_add(1, std::memory_order_relaxed);
         apply_pending_graphics();
         if (graphics_state.SavePending() && graphics_state.SaveDue(glfwGetTime()))
@@ -3574,6 +3579,7 @@ int main(int argc, char* argv[]) {
         // Excluded from work buckets: wait before all frame/CPU/telemetry timers.
         // Delta time below still includes pacing so simulation follows real time.
         frame_limiter.pace(pacing.frame_cap, frame_timing);
+        LUMIN_PROFILE_ZONE_N("Client frame");
         const auto _frameStart = std::chrono::steady_clock::now();
         Attribution::FoliageFrameScope foliage_scope(frame_attribution_enabled);
         const double observedFrame = glfwGetTime();
@@ -5238,7 +5244,7 @@ int main(int argc, char* argv[]) {
             glfwSwapInterval(swap_interval);
             applied_swap_interval = swap_interval;
         }
-        glfwSwapBuffers(window);
+        LUMIN_PROFILE_WAIT("Client present wait", glfwSwapBuffers(window));
         const auto benchmark_present_end = benchmark_v3 ? std::chrono::steady_clock::now()
                                                         : std::chrono::steady_clock::time_point{};
         // runtime telemetry ( implementation note): localize slideshow-on-move frames. Logs the

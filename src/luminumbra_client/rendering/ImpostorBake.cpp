@@ -1,4 +1,5 @@
 #include "ImpostorBake.h"
+#include "core/Profiler.h"
 
 #include "Mesh.h"
 #include "RenderPipeline.h"
@@ -81,7 +82,10 @@ void main() {
     auto compile = [&](GLenum type, const char* src) -> GLuint {
         GLuint s = glCreateShader(type);
         glShaderSource(s, 1, &src, nullptr);
-        glCompileShader(s);
+        {
+            LUMIN_PROFILE_ZONE_N("Shader compile");
+            glCompileShader(s);
+        }
         GLint ok = 0;
         glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
         if (!ok) {
@@ -104,7 +108,10 @@ void main() {
     GLuint prog = glCreateProgram();
     glAttachShader(prog, vs);
     glAttachShader(prog, fs);
-    glLinkProgram(prog);
+    {
+        LUMIN_PROFILE_ZONE_N("Shader link");
+        glLinkProgram(prog);
+    }
     glDeleteShader(vs);
     glDeleteShader(fs);
     GLint ok = 0;

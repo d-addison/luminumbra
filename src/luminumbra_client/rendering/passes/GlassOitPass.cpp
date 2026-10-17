@@ -1,5 +1,6 @@
 #include "GlassOitPass.h"
 #include "../FarWorldReplay.h"
+#include "core/Profiler.h"
 
 #include "PassGlHelpers.h"
 #include "core/Log.h"
@@ -12,6 +13,7 @@ GlassOitPass::GlassOitPass() = default;
 GlassOitPass::~GlassOitPass() = default;
 
 void GlassOitPass::execute_accum(const RenderContext& ctx, const GlassOitPassInput& input) {
+    LUMIN_PROFILE_ZONE_N("GL GlassOitPass.execute_accum");
     // WBOIT accumulation — each visible pane writes its
     // depth-weighted premultiplied color into accum (blend ONE/ONE) and its
     // coverage into reveal (ZERO/ONE_MINUS_SRC_ALPHA -> the (1-a) product),
@@ -131,6 +133,7 @@ void GlassOitPass::execute_accum(const RenderContext& ctx, const GlassOitPassInp
 }
 
 void GlassOitPass::execute_resolve(const RenderContext& ctx, const GlassOitPassInput& input) {
+    LUMIN_PROFILE_ZONE_N("GL GlassOitPass.execute_resolve");
     // the WBOIT resolve — the weighted-average glass
     // color composited over the lit scene with coverage = 1 - reveal. Runs
     // BEFORE the weather snapshot so god-rays/weather observe resolved glass.

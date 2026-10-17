@@ -1,4 +1,5 @@
 #include "WaterfallPass.h"
+#include "core/Profiler.h"
 
 #include "ParticlePass.h"
 #include "PassGlHelpers.h"
@@ -43,6 +44,7 @@ void WaterfallPass::destroy_geometry() {
 }
 
 void WaterfallPass::execute(const RenderContext& ctx) {
+    LUMIN_PROFILE_ZONE_N("GL WaterfallPass.execute");
     // 7-W. WATERFALL SHEETS (, ): the animated falling-sheet veil drawn
     // over each detected waterfall site. Render-only dressing on a world-
     // deterministic site set (never hashed). Drawn after water, into the lit FBO,

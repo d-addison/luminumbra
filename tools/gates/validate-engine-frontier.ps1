@@ -6869,8 +6869,8 @@ function Test-ProfilerDeterminismNeutral {
     # three invariants that keep it neutral, failing listing EVERY breach, not just the
     # first:
     #   1. cmake/tracy.cmake declares option(LUMINUMBRA_ENABLE_TRACY...) default OFF.
-    #   2. core/Profiler.h has the #else no-op branch (macros -> ((void)0)) -- the shim
-    #      is not hard-wired active.
+    #   2. core/Profiler.h gates all Tracy code; disabled events expand to nothing,
+    #      while lock/wait wrappers preserve only the original operation.
     #   3. no production TU #defines LUMINUMBRA_ENABLE_TRACY (only CMake may, when ON).
     $repo = (Get-Location).Path
     $violations = New-Object System.Collections.Generic.List[string]
@@ -6891,17 +6891,50 @@ function Test-ProfilerDeterminismNeutral {
         }
     }
 
-    # 2. Profiler.h no-op #else branch.
+    # 2. Check the complete disabled branch, not a no-op token elsewhere in the file.
     $shim = Join-Path $repo "src/luminumbra_common/core/Profiler.h"
     if (-not (Test-Path $shim)) {
         $violations.Add("src/luminumbra_common/core/Profiler.h: MISSING (the profiler shim)")
     } else {
         $shimTxt = Get-Content $shim -Raw
-        if ($shimTxt -notmatch '#else') {
-            $violations.Add("Profiler.h: no #else branch -- the shim must define no-op macros when LUMINUMBRA_ENABLE_TRACY is undefined")
-        }
-        if ($shimTxt -notmatch '\(\(void\)0\)') {
-            $violations.Add("Profiler.h: no ((void)0) expansion found -- the disabled macros must emit nothing")
+        $commentPattern = '(?s)/\*.*?\*/|//[^\r\n]*'
+        $shimCode = [regex]::Replace($shimTxt, $commentPattern, '')
+        # Anchor the whole header so includes or symbols outside the opt-in gate fail.
+        # The enabled branch has no nested conditionals; reject them rather than
+        # accidentally selecting an unrelated #else. Accept both LF and CRLF.
+        $shimPattern = '(?ms)\A\s*#pragma[ \t]+once\s+#if[ \t]+defined\(LUMINUMBRA_ENABLE_TRACY\)[ \t]*\r?\n(?<enabled>.*?)^#else[ \t]*\r?\n(?<disabled>.*?)^#endif[ \t\r\n]*\z'
+        $enabledDirectivePattern = '(?m)^[ \t]*#[ \t]*(?:if|ifdef|ifndef|elif|else|endif)\b'
+        $shimMatch = [regex]::Match($shimCode, $shimPattern)
+        if (-not $shimMatch.Success -or
+            [regex]::IsMatch($shimMatch.Groups['enabled'].Value, $enabledDirectivePattern)) {
+            $violations.Add("Profiler.h: expected one complete LUMINUMBRA_ENABLE_TRACY conditional with no code outside it")
+        } else {
+            # Exact definitions also reject evaluated arguments, continuations,
+            # extra directives/includes, duplicate macros and emitted declarations.
+            $disabledDefinitions = @(
+                '#define LUMIN_PROFILE_FRAME()',
+                '#define LUMIN_PROFILE_FRAME_N(name)',
+                '#define LUMIN_PROFILE_ZONE()',
+                '#define LUMIN_PROFILE_ZONE_N(name)',
+                '#define LUMIN_PROFILE_PLOT(name, val)',
+                '#define LUMIN_PROFILE_MSG(txt, size)',
+                '#define LUMIN_PROFILE_THREAD(name)',
+                '#define LUMIN_PROFILE_LOCK(type, variable, mutex, name) type variable(mutex)',
+                '#define LUMIN_PROFILE_WAIT(name, ...) (__VA_ARGS__)'
+            )
+            $seenDefinitions = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+            foreach ($line in ($shimMatch.Groups['disabled'].Value -split '\r?\n')) {
+                $definition = $line.Trim()
+                if ($definition.Length -eq 0) { continue }
+                if ($definition -cnotin $disabledDefinitions -or -not $seenDefinitions.Add($definition)) {
+                    $violations.Add("Profiler.h: unexpected disabled code: $definition")
+                }
+            }
+            foreach ($definition in $disabledDefinitions) {
+                if (-not $seenDefinitions.Contains($definition)) {
+                    $violations.Add("Profiler.h: missing disabled definition: $definition")
+                }
+            }
         }
     }
 

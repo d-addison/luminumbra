@@ -658,6 +658,106 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                                 if refuse:
                                     self.assertIn("ASan dependencies were cancelled", process.stderr)
 
+    def test_required_aggregate_verdicts_run_after_failure_and_cancellation(self):
+        results = ("success", "failure", "cancelled", "skipped", "", "unknown")
+        with tempfile.TemporaryDirectory() as directory:
+            summary = Path(directory) / "summary"
+            for filename, job_id, shard_id, label in (
+                ("asan.yml", "asan", "asan-shard", "ASan"),
+                ("ci.yml", "tidy", "tidy-shard", "clang-tidy"),
+            ):
+                aggregate = jobs(self.workflows[filename])[job_id]
+                ordered_steps = steps(aggregate)
+                self.assertIn("      - name: Reject cancelled dependencies\n", aggregate)
+                refusal = next(step for step in ordered_steps
+                               if step.startswith("      - name: Reject cancelled dependencies\n"))
+                verdict = next(step for step in ordered_steps
+                               if step.startswith(f"      - name: Require all {label} shards to pass\n"))
+                # Explicit always() also runs after an earlier step fails or is
+                # cancelled. The job condition stops workflow cancellation when
+                # no dependency needs the explicit refusal.
+                expected = "always() && (" + READY + ")" if job_id == "asan" else "always()"
+                self.assertEqual(value(verdict, "if", 8), expected)
+                self.assertIsNone(value(verdict, "continue-on-error", 8))
+                self.assertLess(ordered_steps.index(refusal), ordered_steps.index(verdict))
+                result_key = "ASAN_SHARD_RESULT" if job_id == "asan" else "TIDY_SHARD_RESULT"
+                for key, expression in (
+                    (result_key, "${{ needs." + shard_id + ".result }}"),
+                    ("CI_PATHS_RESULT", "${{ needs.changes.result }}"),
+                    ("NEEDS_CPP", "${{ needs.changes.outputs.needs_cpp }}"),
+                ):
+                    self.assertEqual(value(verdict, key, 10), expression)
+                for classification in results:
+                    for shard in results:
+                        for cpp in ("true", "false", "", "unknown"):
+                            for cancelled in (False, True):
+                                with self.subTest(job=job_id, classification=classification,
+                                                  shard=shard, cpp=cpp, cancelled=cancelled):
+                                    scheduled = self.aggregate_condition(
+                                        value(aggregate, "if", 4), shard_id, cancelled,
+                                        classification, shard,
+                                    )
+                                    if not scheduled:
+                                        self.assertTrue(cancelled)
+                                        self.assertNotIn("cancelled", (classification, shard))
+                                        continue
+                                    summary.unlink(missing_ok=True)
+                                    outcomes = []
+                                    for step in (refusal, verdict):
+                                        if self.aggregate_condition(
+                                            value(step, "if", 8), shard_id, cancelled,
+                                            classification, shard, step=True,
+                                        ):
+                                            process = subprocess.run(
+                                                ["bash", "--noprofile", "--norc", "-e", "-o",
+                                                 "pipefail", "-c", value(step, "run", 8)],
+                                                cwd=directory,
+                                                env=dict(os.environ, **{
+                                                    result_key: shard,
+                                                    "CI_PATHS_RESULT": classification,
+                                                    "NEEDS_CPP": cpp,
+                                                    "GITHUB_STEP_SUMMARY": str(summary),
+                                                }),
+                                                capture_output=True, text=True, timeout=10,
+                                            )
+                                            outcomes.append(process.returncode)
+                                    self.assertTrue(outcomes, "An aggregate cannot pass without validation")
+                                    routed = classification == "success" and cpp == "false" and shard == "skipped"
+                                    accepted = not cancelled and classification != "cancelled" and (
+                                        shard == "success" or routed)
+                                    self.assertEqual(all(code == 0 for code in outcomes), accepted)
+                                    self.assertEqual(summary.exists(), routed)
+                                    if routed:
+                                        self.assertIn("route: skipped", summary.read_text(encoding="utf-8"))
+
+    def test_required_aggregate_verdict_policy_rejects_weakened_conditions(self):
+        method = "test_required_aggregate_verdicts_run_after_failure_and_cancellation"
+        for filename, job_id in (("asan.yml", "asan"), ("ci.yml", "tidy")):
+            condition = "        if: " + ("always() && (" + READY + ")" if job_id == "asan" else "always()") + "\n"
+            workflow = self.workflows[filename]
+            aggregate = jobs(workflow)[job_id]
+            verdict = next(step for step in steps(aggregate)
+                           if step.startswith("      - name: Require all "))
+            for mutation, original, replacement in (
+                ("implicit-success", condition, ""),
+                ("success-only", condition, "        if: success()\n"),
+                ("cancellation-skip", condition, "        if: ${{ !cancelled() }}\n"),
+                ("always-false", condition, "        if: always() && false\n"),
+                ("ignored-verdict", "        env:\n", "        continue-on-error: true\n        env:\n"),
+            ):
+                with self.subTest(job=job_id, mutation=mutation):
+                    mutated = verdict.replace(original, replacement, 1)
+                    self.assertNotEqual(mutated, verdict)
+                    case = WorkflowDraftPolicyTests(method)
+                    case.workflows = {
+                        **self.workflows,
+                        filename: workflow.replace(aggregate, aggregate.replace(verdict, mutated, 1), 1),
+                    }
+                    result = unittest.TestResult()
+                    case.run(result)
+                    self.assertEqual(result.errors, [], result.errors)
+                    self.assertTrue(result.failures)
+
     def test_ucrt_route_seeds_devel_and_preserves_other_event_and_path_guards(self):
         job = jobs(self.workflows["ci.yml"])["windows-ucrt64"]
         self.assertEqual(value(job, "needs", 4), "changes")
