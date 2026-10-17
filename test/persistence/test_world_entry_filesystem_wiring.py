@@ -44,7 +44,8 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
         self.assertLess(binding, identity)
         self.assertLess(identity, rename)
         self.assertNotIn("FILE_SHARE_DELETE", publication[binding:identity])
-        self.assertIn("handle_path(bound.get()) == original_name", publication[rename:])
+        self.assertIn("const auto published_name = handle_path(bound.get());", publication[rename:])
+        self.assertIn("published_name == original_name", publication[rename:])
         self.assertIn("ERROR_ALREADY_EXISTS", publication[rename:])
         caller = body(self.journal, "void publish_file(")
         self.assertLess(caller.index("publish_windows("), caller.index("target.identity ="))
@@ -61,6 +62,28 @@ class WorldEntryFilesystemWiring(unittest.TestCase):
         self.assertNotIn("FILE_SHARE_DELETE", parent)
         for artifact in ("source", "target"):
             self.assertIn(f"bind_publication_parent({artifact}.path.parent_path())", publication)
+
+    def test_native_rename_record_includes_an_explicit_uncounted_terminator(self):
+        publication = body(self.journal, "void publish_windows(")
+        compact = re.sub(r"\s+", " ", publication)
+        self.assertIn("offsetof(FILE_RENAME_INFO, FileName) + name_bytes + sizeof(wchar_t)", compact)
+        self.assertIn("rename_info->FileNameLength = static_cast<DWORD>(name_bytes);", compact)
+        terminator = "rename_info->FileName[name.size()] = L'\\0';"
+        self.assertIn(terminator, publication)
+        self.assertLess(publication.index(terminator),
+                        publication.index("::SetFileInformationByHandle("))
+
+    def test_publication_requires_the_exact_destination_before_claiming_ownership(self):
+        publication = body(self.journal, "void publish_windows(")
+        rename = publication.index("::SetFileInformationByHandle(")
+        self.assertIn("published_name != destination", publication[rename:])
+        self.assertIn("ERROR_INVALID_DATA", publication[rename:])
+        native = (ROOT / "test/persistence/created_world_artifacts_test.cpp").read_text(
+            encoding="utf-8")
+        self.assertIn("UnexpectedPublicationNameNeverClaimsTheDestination", native)
+        self.assertIn("PublicationPreservesExactLeafNamesAcrossRenameBufferLengths", native)
+        self.assertIn("EXPECT_LT(length_in_chars, capacity);", native)
+        self.assertIn("EXPECT_EQ(rename_info->FileName[length_in_chars], L'\\0');", native)
 
     def test_posix_publication_verifies_the_quarantined_entry_before_descriptor_relative_move(self):
         self.assertIn("publish_posix(source, target);", body(self.journal, "void publish_file("))

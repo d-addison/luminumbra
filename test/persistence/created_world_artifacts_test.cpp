@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
@@ -15,6 +16,7 @@
 #include <system_error>
 #include <vector>
 
+#include "luminumbra_common/core/FilesystemPath.h"
 #include "luminumbra_common/persistence/ExclusiveRename.h"
 
 #if defined(_WIN32)
@@ -163,7 +165,8 @@ enum class Boundary : std::uint8_t {
     PublicationRestorationBlocked,
     PublicationParentReplaced,
     PublicationSourceParentReplaced,
-    PublicationParentMissing
+    PublicationParentMissing,
+    PublicationFinalNameMismatch
 };
 struct Replacement {
     std::filesystem::path target;
@@ -369,7 +372,13 @@ DWORD WINAPI ResolveName(HANDLE file, LPWSTR name, DWORD size, DWORD flags) {
     }
     if (Fail(Boundary::PublicationNameTooLong))
         return size;
-    return ::GetFinalPathNameByHandleW(file, name, size, flags);
+    const auto length = ::GetFinalPathNameByHandleW(file, name, size, flags);
+    if (active && !active->fired && active->boundary == Boundary::PublicationFinalNameMismatch &&
+        ++active->inspections == 3 && length > 0 && length < size) {
+        active->fired = true;
+        name[length - 1] = L'!';
+    }
+    return length;
 }
 
 HANDLE WINAPI Retain(HANDLE file, DWORD access, DWORD share, DWORD flags) {
@@ -537,7 +546,28 @@ BOOL WINAPI Close(HANDLE file) {
 BOOL WINAPI Dispose(HANDLE file, FILE_INFO_BY_HANDLE_CLASS kind, LPVOID info, DWORD bytes) {
     auto* active = Active();
     if (kind == FileRenameInfo) {
+        // Validate the complete buffer before reading its counted string or
+        // forwarding it to Win32, which also consumes the terminating null.
+        constexpr auto prefix = offsetof(FILE_RENAME_INFO, FileName);
+        EXPECT_GE(bytes, prefix);
+        if (bytes < prefix) {
+            ::SetLastError(ERROR_INVALID_DATA);
+            return FALSE;
+        }
         const auto* rename_info = static_cast<const FILE_RENAME_INFO*>(info);
+        const auto capacity = (bytes - prefix) / sizeof(wchar_t);
+        const auto length_in_chars = rename_info->FileNameLength / sizeof(wchar_t);
+        EXPECT_EQ(rename_info->FileNameLength % sizeof(wchar_t), 0u);
+        EXPECT_LT(length_in_chars, capacity);
+        if (rename_info->FileNameLength % sizeof(wchar_t) != 0 || length_in_chars >= capacity) {
+            ::SetLastError(ERROR_INVALID_DATA);
+            return FALSE;
+        }
+        EXPECT_EQ(rename_info->FileName[length_in_chars], L'\0');
+        if (rename_info->FileName[length_in_chars] != L'\0') {
+            ::SetLastError(ERROR_INVALID_DATA);
+            return FALSE;
+        }
         const std::filesystem::path destination(
             std::wstring(rename_info->FileName, rename_info->FileNameLength / sizeof(wchar_t)));
         // Read the bound source name through its handle, never a guessed path.
@@ -1174,6 +1204,27 @@ TEST_F(CreatedWorldCleanup, UncertainPublicationNameNeverDeletesThePublishedByte
     EXPECT_EQ(Read(destination), "owned bytes\n");
 }
 
+TEST_F(CreatedWorldCleanup, UnexpectedPublicationNameNeverClaimsTheDestination) {
+    const NativeRace::HandleCapture handles;
+    CreatedWorldArtifacts artifacts;
+    const auto save = Root() / "created-world";
+    const auto temp = save / "preset.tmp";
+    const auto destination = save / "preset.json";
+    artifacts.create_root(save);
+    artifacts.write_file(temp, "owned bytes\n");
+    artifacts.reserve_file(destination);
+    Arm(destination, NativeRace::Boundary::PublicationFinalNameMismatch);
+    EXPECT_THROW(artifacts.publish_file(temp, destination), std::system_error);
+    ASSERT_TRUE(Race().fired);
+    EXPECT_FALSE(std::filesystem::exists(temp));
+    EXPECT_EQ(Read(destination), "owned bytes\n");
+    EXPECT_NE(artifacts.rollback().find("changed identity"), std::string::npos);
+    EXPECT_GE(handles.live(), 3u);
+    artifacts.release();
+    EXPECT_EQ(handles.live(), 0u);
+    EXPECT_EQ(Read(destination), "owned bytes\n");
+}
+
 TEST_F(CreatedWorldCleanup, RefusedPublicationBindingPreservesEveryOwnersBytes) {
     for (const auto boundary : {NativeRace::Boundary::PublicationBindingDenied,
                                 NativeRace::Boundary::PublicationSourceReplaced}) {
@@ -1247,6 +1298,33 @@ TEST_F(CreatedWorldCleanup, StreamBindingFailureKeepsOwnedFileAvailableForRollba
     }
 }
 #endif
+
+TEST_F(CreatedWorldCleanup, PublicationPreservesExactLeafNamesAcrossRenameBufferLengths) {
+    // Exercise both UTF-16 byte-length parities modulo the native alignment,
+    // short names, empty payloads and a non-ASCII leaf without heap-tail luck.
+    for (const auto* leaf : {u8"a", u8"ab", u8"abc", u8"abcd", u8"世界-é.json"}) {
+        for (const auto* bytes : {"exact bytes\n", ""}) {
+            CreatedWorldArtifacts artifacts;
+            const auto save = Root() / "created-world";
+            const auto temp = save / "preset.tmp";
+            const auto destination = save / std::filesystem::path(leaf);
+            SCOPED_TRACE(Luminumbra::Filesystem::GenericUtf8PathString(destination));
+            artifacts.create_root(save);
+            artifacts.write_file(temp, bytes);
+            artifacts.reserve_file(destination);
+            artifacts.publish_file(temp, destination);
+            EXPECT_FALSE(std::filesystem::exists(temp));
+            EXPECT_EQ(Read(destination), bytes);
+            ASSERT_EQ(std::distance(std::filesystem::directory_iterator(save),
+                                    std::filesystem::directory_iterator()),
+                      1);
+            EXPECT_EQ(std::filesystem::directory_iterator(save)->path().filename(),
+                      destination.filename());
+            EXPECT_TRUE(artifacts.rollback().empty());
+            EXPECT_FALSE(std::filesystem::exists(save));
+        }
+    }
+}
 
 TEST_F(CreatedWorldCleanup, ExclusiveFilePublicationMovesBytesAndRetainsRollbackOwnership) {
     for (const auto* bytes : {"owned bytes\n", ""}) {
