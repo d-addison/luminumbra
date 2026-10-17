@@ -1,4 +1,5 @@
 #include "../fixtures/TerrainFixtureParams.h"
+#include "../support/UniqueTempPath.h"
 #include "gtest/gtest.h"
 
 #define GLFW_INCLUDE_NONE
@@ -1061,4 +1062,27 @@ TEST(RuntimeWorldVisualValidationTest, JoinReadinessKeepsCollisionBudgetNearFiel
     EXPECT_EQ(horizon.collision_chunks, 81u);
     EXPECT_GE(horizon.mesh_chunks, 600u);
     EXPECT_GT(horizon.mesh_chunks, horizon.collision_chunks);
+}
+
+TEST(NetworkedSessionDriverTest, MissingOrFailedSessionsCannotAdvertiseCleanDisconnect) {
+    for (const bool begin_failure : {false, true}) {
+        SCOPED_TRACE(begin_failure);
+        Client::ScenarioHarness::NetworkedSessionDriver driver;
+        if (begin_failure) {
+            EXPECT_FALSE(driver.Begin(nullptr, {}));
+            EXPECT_EQ(driver.failure_reason(), "client_session_null");
+        }
+        driver.Disconnect();
+        driver.Disconnect();
+        const TestSupport::ScopedTempFile artifact_file("networked-session-closure", ".json");
+        const auto artifact_dir = artifact_file.Path().parent_path();
+        EXPECT_FALSE(driver.WriteArtifact(artifact_dir, 0.0));
+        std::ifstream input(artifact_dir / "networked-session-analysis.json");
+        ASSERT_TRUE(input.is_open());
+        nlohmann::json artifact;
+        input >> artifact;
+        EXPECT_FALSE(artifact.at("clean_disconnect").get<bool>());
+        EXPECT_FALSE(artifact.at("passed").get<bool>());
+        input.close();
+    }
 }

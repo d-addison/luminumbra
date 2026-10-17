@@ -40,6 +40,7 @@
 #include "../components/PollinationComponents.h"
 #include "../components/SoilComponents.h"
 #include "../components/TerritoryComponents.h"
+#include "../core/FilesystemPath.h"
 #include "../core/JobSystem.h"
 #include "../core/Log.h"
 #include "../fields/EnergyFieldState.h"
@@ -1111,7 +1112,9 @@ GameSession::ValidateWorldConfig(const std::string& root_path,
     const fs::path root = RuntimeRoot(root_path);
     result.preset_path = PresetPathFor(root_path, worldType);
     if (!fs::exists(result.preset_path)) {
-        AddValidationError(result, "missing world preset: " + result.preset_path.string());
+        AddValidationError(result,
+                           "missing world preset: " +
+                               Filesystem::GenericUtf8PathString(result.preset_path));
     }
 
     // Preset loading below validates simulation dependencies. Further runtime
@@ -1120,7 +1123,9 @@ GameSession::ValidateWorldConfig(const std::string& root_path,
     for (const fs::path& relative : required_assets) {
         const fs::path path = root / relative;
         if (!fs::exists(path)) {
-            AddValidationError(result, "missing required runtime asset: " + path.string());
+            AddValidationError(result,
+                               "missing required runtime asset: " +
+                                   Filesystem::GenericUtf8PathString(path));
         }
     }
 
@@ -1373,11 +1378,12 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     }
     for (const auto& asset : m_requiredClientAssets) {
         if (!fs::exists(RuntimeRoot(m_rootPath) / asset)) {
-            m_worldOpenError = "Missing required runtime asset: " + asset.string();
+            m_worldOpenError =
+                "Missing required runtime asset: " + Filesystem::GenericUtf8PathString(asset);
             return false;
         }
     }
-    const std::string worldPath = (GetSaveRootPath() / "worlds/saves" / worldId).string();
+    const fs::path worldPath = GetSaveRootPath() / "worlds/saves" / worldId;
     // Generate from the same canonical bytes whose saved identity was verified.
     const TerrainPresetLoadResult preset = LoadTerrainPresetFromJson(
         nlohmann::json::parse(saved.preset_json), RuntimeRoot(m_rootPath) / "data");
@@ -1434,7 +1440,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     // record is all-zeros by contract. OFF -> null -> byte-identical.
     InitializeEnergyFieldState();
     if (m_energyFieldState) {
-        const std::string recordPath = worldPath + "/aether_state.efs";
+        const fs::path recordPath = worldPath / "aether_state.efs";
         std::ifstream recordFile(recordPath);
         if (recordFile) {
             std::ostringstream recordBytes;
@@ -1445,7 +1451,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
                                      m_energyFieldState->page_count());
             } else {
                 LUMINUMBRA_CORE_WARN("Aether state record UNREADABLE at {} - starting all-zero.",
-                                     recordPath);
+                                     Filesystem::GenericUtf8PathString(recordPath));
             }
         }
     }
@@ -1895,7 +1901,7 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
         LUMINUMBRA_CORE_INFO("World state saved: {} chunks ({} dirty) -> {}",
                              result.chunks_total,
                              result.chunks_dirty,
-                             save_dir.string());
+                             Filesystem::GenericUtf8PathString(save_dir));
     }
     if (report) {
         *report = result;
@@ -2076,7 +2082,7 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
                                      m_energyFieldState->page_count());
             } else {
                 LUMINUMBRA_CORE_WARN("Aether state record UNREADABLE at {} - starting all-zero.",
-                                     recordPath.string());
+                                     Filesystem::GenericUtf8PathString(recordPath));
             }
         }
     }
@@ -2085,7 +2091,7 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
     LUMINUMBRA_CORE_INFO("World state loaded: {} chunks adopted ({} in snapshot) from {}",
                          adopted,
                          loaded.size(),
-                         save_dir.string());
+                         Filesystem::GenericUtf8PathString(save_dir));
     return true;
 }
 
@@ -2239,7 +2245,8 @@ bool GameSession::SaveEnergyFieldRecord(const std::filesystem::path& save_dir) {
     const std::string record = m_energyFieldState->SerializeRecord(GetSimulationTickCount());
     std::ofstream file(save_dir / "aether_state.efs", std::ios::trunc);
     if (!file.is_open()) {
-        LUMINUMBRA_CORE_ERROR("Failed to write aether state record under {}", save_dir.string());
+        LUMINUMBRA_CORE_ERROR("Failed to write aether state record under {}",
+                              Filesystem::GenericUtf8PathString(save_dir));
         return false;
     }
     file << record;

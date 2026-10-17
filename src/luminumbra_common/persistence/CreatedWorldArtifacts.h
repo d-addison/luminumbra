@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../core/FilesystemPath.h"
 #include "ExclusiveRename.h"
 
 #include <algorithm>
@@ -13,6 +14,7 @@
 #include <cstring>
 #include <exception>
 #include <filesystem>
+#include <iterator>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -105,10 +107,7 @@ public:
 #if defined(_WIN32)
         publish_windows(source, target);
 #else
-        if (Detail::RenameWithoutReplacement(
-                AT_FDCWD, temp.c_str(), AT_FDCWD, destination.c_str()) != 0)
-            throw std::system_error(
-                errno, std::generic_category(), "Could not exclusively publish world artifact");
+        publish_posix(source, target);
 #endif
         target.identity = source.identity;
     }
@@ -128,7 +127,7 @@ public:
         if (native.get() == INVALID_HANDLE_VALUE) {
             abandon_file_reservation();
             throw std::runtime_error("Could not exclusively create world artifact: " +
-                                     path.string());
+                                     Filesystem::GenericUtf8PathString(path));
         }
         file_created(path, native.get());
         const auto descriptor =
@@ -147,7 +146,7 @@ public:
         if (!file) {
             abandon_file_reservation();
             throw std::runtime_error("Could not exclusively create world artifact: " +
-                                     path.string());
+                                     Filesystem::GenericUtf8PathString(path));
         }
         bool written = false;
         try {
@@ -161,7 +160,8 @@ public:
         }
         const bool closed = std::fclose(file) == 0;
         if (!written || !closed)
-            throw std::runtime_error("Could not write world artifact: " + path.string());
+            throw std::runtime_error("Could not write world artifact: " +
+                                     Filesystem::GenericUtf8PathString(path));
     }
 
     // Only for a failed exclusive file-create operation, which created nothing.
@@ -195,8 +195,9 @@ public:
                 if (artifact.directory) {
                     for (const auto& child : std::filesystem::directory_iterator(artifact.path)) {
                         if (!tracked(child.path()))
-                            throw std::runtime_error("Untracked world artifact: " +
-                                                     child.path().string());
+                            throw std::runtime_error(
+                                "Untracked world artifact: " +
+                                Filesystem::GenericUtf8PathString(child.path()));
                     }
                 }
             }
@@ -338,11 +339,28 @@ private:
 
     static ScopedFile duplicate_file(NativeFile file) {
 #if defined(_WIN32)
-        // A duplicate shares the writer's file object and its data access,
-        // which prevents renaming an ancestor on Windows even with share-delete.
-        // Reopen the SAME object for metadata only; never reopen its pathname.
-        const auto retained = ::ReOpenFile(
-            file, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0);
+        // Open by ID to retain the object independently of its directory entry.
+        // In particular, never keep the named directory-creation handle alive:
+        // delete sharing alone does not permit moving its open descendants.
+        FILE_ID_INFO identity{};
+        if (!::GetFileInformationByHandleEx(file, FileIdInfo, &identity, sizeof(identity)))
+            throw std::system_error(static_cast<int>(::GetLastError()),
+                                    std::system_category(),
+                                    "Could not inspect world artifact for retention");
+        if (std::all_of(std::begin(identity.FileId.Identifier),
+                        std::end(identity.FileId.Identifier),
+                        [](BYTE value) { return value == 0; }))
+            throw std::runtime_error("Unknown world artifact retention identity.");
+        FILE_ID_DESCRIPTOR descriptor{};
+        descriptor.dwSize = sizeof(descriptor);
+        descriptor.Type = ExtendedFileIdType;
+        descriptor.ExtendedFileId = identity.FileId;
+        const auto retained = ::OpenFileById(file,
+                                             &descriptor,
+                                             FILE_READ_ATTRIBUTES,
+                                             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                             nullptr,
+                                             FILE_FLAG_BACKUP_SEMANTICS);
         if (retained == INVALID_HANDLE_VALUE)
             throw std::system_error(static_cast<int>(::GetLastError()),
                                     std::system_category(),
@@ -357,8 +375,47 @@ private:
     }
 
 #if defined(_WIN32)
-    static void publish_windows(const Artifact& source, const Artifact& target) {
-        const auto& name = target.path.native();
+    static std::filesystem::path handle_path(NativeFile file) {
+        // The Win32 extended path limit includes the terminating UTF-16 null.
+        std::array<wchar_t, 32768> name{};
+        const auto length = ::GetFinalPathNameByHandleW(
+            file, name.data(), static_cast<DWORD>(name.size()), FILE_NAME_NORMALIZED);
+        if (length == 0 || length >= name.size())
+            throw std::system_error(
+                static_cast<int>(length == 0 ? ::GetLastError() : ERROR_FILENAME_EXCED_RANGE),
+                std::system_category(),
+                "Could not resolve bound world artifact name");
+        return std::filesystem::path(std::wstring(name.data(), length));
+    }
+
+    ScopedFile bind_publication_parent(const std::filesystem::path& path) {
+        ScopedFile parent(::CreateFileW(path.c_str(),
+                                        FILE_READ_ATTRIBUTES,
+                                        FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                        nullptr,
+                                        OPEN_EXISTING,
+                                        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                                        nullptr));
+        if (parent.get() == INVALID_HANDLE_VALUE)
+            throw std::system_error(static_cast<int>(::GetLastError()),
+                                    std::system_category(),
+                                    "Could not bind publication directory");
+        if (identity_from(parent.get()) != find_artifact(path).identity)
+            throw std::runtime_error("World artifact publication directory changed identity.");
+        return parent;
+    }
+
+    void publish_windows(const Artifact& source, const Artifact& target) {
+        const auto parent = bind_publication_parent(target.path.parent_path());
+        // Keep both named parents fixed until publication and name inspection
+        // complete, including when the reserved source is in another directory.
+        const auto source_parent = bind_publication_parent(source.path.parent_path());
+        // Use the handle's normalized, extended Win32 name. The caller may
+        // supply forward slashes or an 8.3 ancestor; neither is a native rename
+        // record spelling. Preserve UTF-16 throughout.
+        auto destination = handle_path(parent.get()) / target.path.filename();
+        destination.make_preferred();
+        const auto& name = destination.native();
         // Windows paths contain at most 32767 UTF-16 code units. Check before
         // allocating the variable-length native rename record (less than 65 KiB).
         if (name.size() > 32767)
@@ -374,7 +431,7 @@ private:
         std::memcpy(rename_info->FileName, name.data(), name_bytes);
         const ScopedFile bound(::CreateFileW(source.path.c_str(),
                                              FILE_READ_ATTRIBUTES | DELETE,
-                                             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                             FILE_SHARE_READ | FILE_SHARE_WRITE,
                                              nullptr,
                                              OPEN_EXISTING,
                                              FILE_FLAG_OPEN_REPARSE_POINT,
@@ -384,14 +441,73 @@ private:
                                     std::system_category(),
                                     "Could not bind world artifact for publication");
         if (identity_from(bound.get()) != source.identity)
-            throw std::runtime_error("World artifact changed identity: " + source.path.string());
-        // MoveFileEx can report success for two names of the same file without
-        // moving either. Native no-replace rename must refuse that collision too.
+            throw std::runtime_error("World artifact changed identity: " +
+                                     Filesystem::GenericUtf8PathString(source.path));
+        const auto original_name = handle_path(bound.get());
+        // The DELETE handle denies other delete access while this operation
+        // runs, binding its opened link through both rename and name inspection.
+        // Windows rename can return success for an existing hard-link alias
+        // without moving anything. Such a no-op never conveys ownership.
         if (!::SetFileInformationByHandle(
                 bound.get(), FileRenameInfo, rename_info, static_cast<DWORD>(record_bytes)))
             throw std::system_error(static_cast<int>(::GetLastError()),
                                     std::system_category(),
                                     "Could not exclusively publish world artifact");
+        if (handle_path(bound.get()) == original_name)
+            throw std::system_error(ERROR_ALREADY_EXISTS,
+                                    std::system_category(),
+                                    "Refusing an existing world artifact alias");
+    }
+#endif
+
+#if !defined(_WIN32)
+    void publish_posix(const Artifact& source, const Artifact& target) {
+        const ScopedFile source_parent(::open(source.path.parent_path().c_str(),
+                                              O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+        const ScopedFile target_parent(::open(target.path.parent_path().c_str(),
+                                              O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+        if (source_parent.get() < 0 || target_parent.get() < 0)
+            throw std::system_error(errno, std::generic_category(), "Could not bind save parent");
+        if (identity_from(source_parent.get()) !=
+                find_artifact(source.path.parent_path()).identity ||
+            identity_from(target_parent.get()) != find_artifact(target.path.parent_path()).identity)
+            throw std::runtime_error("World artifact publication directory changed identity.");
+        // Bind the entry in a private, single-entry directory before checking
+        // its ID. Publication then uses that same entry and bound directories,
+        // rather than looking up the public source pathname a second time.
+        const Quarantine quarantine(source_parent.get());
+        const ScopedFile container(::openat(source_parent.get(),
+                                            quarantine.name().c_str(),
+                                            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+        if (container.get() < 0)
+            throw std::system_error(
+                errno, std::generic_category(), "Could not bind publication stage");
+        const auto source_name = source.path.filename();
+        const auto target_name = target.path.filename();
+        if (Detail::RenameWithoutReplacement(
+                source_parent.get(), source_name.c_str(), container.get(), "artifact") != 0)
+            throw std::system_error(
+                errno, std::generic_category(), "Could not bind world artifact for publication");
+        try {
+            struct stat info {};
+            if (::fstatat(container.get(), "artifact", &info, AT_SYMLINK_NOFOLLOW) != 0)
+                throw std::system_error(
+                    errno, std::generic_category(), "Could not identify publication stage");
+            const Identity moved{.device = info.st_dev, .inode = info.st_ino};
+            if (!S_ISREG(info.st_mode) || moved != source.identity)
+                throw std::runtime_error("World artifact changed identity: " +
+                                         Filesystem::GenericUtf8PathString(source.path));
+            if (Detail::RenameWithoutReplacement(
+                    container.get(), "artifact", target_parent.get(), target_name.c_str()) != 0)
+                throw std::system_error(
+                    errno, std::generic_category(), "Could not exclusively publish world artifact");
+        } catch (const std::exception& error) {
+            if (restore_quarantined(container.get(), source_parent.get(), source_name.c_str()) != 0)
+                throw std::runtime_error(std::string(error.what()) + "; retained in quarantine: " +
+                                         Filesystem::GenericUtf8PathString(
+                                             source.path.parent_path() / quarantine.name()));
+            throw;
+        }
     }
 #endif
 
@@ -461,6 +577,7 @@ private:
         m_artifacts[m_count++] = std::move(artifact);
         auto& recorded = m_artifacts[m_count - 1];
         recorded.retained = ScopedFile(handle);
+        recorded.retained = duplicate_file(recorded.retained.get());
         recorded.identity = identity_from(recorded.retained.get());
 #else
         // POSIX mkdir has no creating descriptor. Prepare an unpredictable,
@@ -541,7 +658,8 @@ private:
 
     void remove_owned(const Artifact& artifact) const {
         if (!artifact.identity)
-            throw std::runtime_error("Unowned world artifact: " + artifact.path.string());
+            throw std::runtime_error("Unowned world artifact: " +
+                                     Filesystem::GenericUtf8PathString(artifact.path));
 #if defined(_WIN32)
         // Do not request DELETE_ON_CLOSE before checking the opened object's ID.
         const ScopedFile owned(
@@ -561,7 +679,8 @@ private:
                                     "Could not open world artifact for removal");
         }
         if (identity_from(owned.get()) != *artifact.identity)
-            throw std::runtime_error("World artifact changed identity: " + artifact.path.string());
+            throw std::runtime_error("World artifact changed identity: " +
+                                     Filesystem::GenericUtf8PathString(artifact.path));
         FILE_DISPOSITION_INFO disposition{.DeleteFile = TRUE};
         if (!::SetFileInformationByHandle(
                 owned.get(), FileDispositionInfo, &disposition, sizeof(disposition)))
@@ -578,7 +697,7 @@ private:
             if (candidate.directory && candidate.path == artifact.path.parent_path() &&
                 (!candidate.identity || identity_from(parent.get()) != *candidate.identity))
                 throw std::runtime_error("World artifact parent changed identity: " +
-                                         candidate.path.string());
+                                         Filesystem::GenericUtf8PathString(candidate.path));
         }
 
         const Quarantine quarantine(parent.get());
@@ -603,15 +722,15 @@ private:
             const Identity moved{.device = info.st_dev, .inode = info.st_ino};
             if (moved != *artifact.identity)
                 throw std::runtime_error("World artifact changed identity: " +
-                                         artifact.path.string());
+                                         Filesystem::GenericUtf8PathString(artifact.path));
             if (::unlinkat(container.get(), "artifact", artifact.directory ? AT_REMOVEDIR : 0) != 0)
                 throw std::system_error(
                     errno, std::generic_category(), "Could not remove quarantined artifact");
         } catch (const std::exception& error) {
             if (restore_quarantined(container.get(), parent.get(), name.c_str()) != 0)
-                throw std::runtime_error(
-                    std::string(error.what()) + "; retained in quarantine: " +
-                    (artifact.path.parent_path() / quarantine.name()).string());
+                throw std::runtime_error(std::string(error.what()) + "; retained in quarantine: " +
+                                         Filesystem::GenericUtf8PathString(
+                                             artifact.path.parent_path() / quarantine.name()));
             throw;
         }
 #endif
@@ -622,7 +741,8 @@ private:
         for (std::size_t index = 0; index < m_count; ++index)
             if (m_artifacts[index].path == normalized)
                 return m_artifacts[index];
-        throw std::runtime_error("Unreserved world artifact: " + path.string());
+        throw std::runtime_error("Unreserved world artifact: " +
+                                 Filesystem::GenericUtf8PathString(path));
     }
 
     static bool validate(const Artifact& artifact) {
@@ -631,9 +751,11 @@ private:
             return false;
         if (artifact.directory ? !std::filesystem::is_directory(status)
                                : !std::filesystem::is_regular_file(status))
-            throw std::runtime_error("World artifact changed type: " + artifact.path.string());
+            throw std::runtime_error("World artifact changed type: " +
+                                     Filesystem::GenericUtf8PathString(artifact.path));
         if (!artifact.identity || identity_at(artifact.path) != *artifact.identity)
-            throw std::runtime_error("World artifact changed identity: " + artifact.path.string());
+            throw std::runtime_error("World artifact changed identity: " +
+                                     Filesystem::GenericUtf8PathString(artifact.path));
         return true;
     }
 
@@ -653,7 +775,8 @@ private:
                 }
             }
             if (!owned)
-                throw std::runtime_error("Unowned world artifact parent: " + path.string());
+                throw std::runtime_error("Unowned world artifact parent: " +
+                                         Filesystem::GenericUtf8PathString(path));
             path = path.parent_path();
         }
     }
@@ -671,7 +794,8 @@ private:
         }
         if (!owned_parent || tracked(normalized) ||
             std::filesystem::exists(std::filesystem::symlink_status(normalized)))
-            throw std::runtime_error("Refusing to claim a world artifact: " + normalized.string());
+            throw std::runtime_error("Refusing to claim a world artifact: " +
+                                     Filesystem::GenericUtf8PathString(normalized));
         return {.path = normalized, .directory = directory, .identity = {}, .retained = {}};
     }
 

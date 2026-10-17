@@ -1181,7 +1181,10 @@ target_link_libraries(world_entry_test PRIVATE gtest_main luminumbra_common lumi
 luminumbra_configure_first_party_target(world_entry_test)
 
 # Native-call interception is isolated from engine definitions of the journal.
-add_executable(created_world_artifacts_test persistence/created_world_artifacts_test.cpp)
+add_executable(created_world_artifacts_test
+    persistence/created_world_artifacts_test.cpp
+    ../src/luminumbra_common/core/FilesystemPath.cpp
+)
 target_include_directories(created_world_artifacts_test PRIVATE ../src)
 target_link_libraries(created_world_artifacts_test PRIVATE gtest_main)
 luminumbra_configure_first_party_target(created_world_artifacts_test)
@@ -2120,6 +2123,8 @@ set_tests_properties(ShieldRtSpike PROPERTIES
 
 # Simulation telemetry captures require the standard-library Python validator.
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME WorldEntryFilesystemWiringPython COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/test/persistence/test_world_entry_filesystem_wiring.py")
 add_test(NAME FrameAttributionWiringPython COMMAND "${Python3_EXECUTABLE}" -I -B
     "${CMAKE_SOURCE_DIR}/test/rendering/test_frame_attribution_wiring.py")
 set(_common_isa_compiler_args --compiler "${CMAKE_CXX_COMPILER}")
