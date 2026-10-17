@@ -254,9 +254,9 @@ class PathGateTests(unittest.TestCase):
                         for cancelled in (False, True):
                             ready = event != "pull_request" or draft is False
                             if route == "required-aggregate":
-                                expected = True
+                                expected = not cancelled
                             elif route == "aggregate":
-                                expected = ready
+                                expected = not cancelled and ready
                             elif route == "guarded-python":
                                 expected = not cancelled
                             elif route == "guarded-native":
@@ -271,6 +271,9 @@ class PathGateTests(unittest.TestCase):
                                 "always()", "True"
                             ).replace("github.event_name", repr(event)).replace(
                                 "github.event.pull_request.draft", repr(draft)
+                            ).replace("needs.changes.result", repr("success")).replace(
+                                "needs.asan-shard.result", repr("success")
+                            ).replace("needs.tidy-shard.result", repr("success")
                             ).replace("needs.changes.outputs.needs_cpp", repr(cpp)).replace(
                                 "== false", "== False"
                             ).replace("!= false", "!= False").replace("&&", "and").replace("||", "or")

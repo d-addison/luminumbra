@@ -216,12 +216,13 @@ jobs:
   asan:
     name: Linux / GCC ASan
     needs: [changes, asan-shard]
-    # Cancellation must reach the refusal step, never a successful job skip.
+    # Cancel a running aggregate when the workflow is cancelled. Cancelled
+    # dependencies must still schedule the explicit refusal, never a job skip.
     # The first guard still rejects every draft (including docs-only drafts).
     # A successful classification with needs_cpp=false and a skipped shard
     # preserves the path gate's successful required check. Failed classification
     # or missing output still requires successful shards.
-    if: ${{ always() }}
+    if: ${{ !cancelled() || needs.changes.result == 'cancelled' || needs.asan-shard.result == 'cancelled' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -237,10 +238,10 @@ jobs:
           fi
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Reject cancelled workflow
-        if: ${{ cancelled() }}
+      - name: Reject cancelled dependencies
+        if: ${{ always() && (needs.changes.result == 'cancelled' || needs.asan-shard.result == 'cancelled') }}
         run: |
-          echo "ASan workflow was cancelled" >&2
+          echo "ASan dependencies were cancelled" >&2
           exit 1
       - name: Require all ASan shards to pass
         if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)

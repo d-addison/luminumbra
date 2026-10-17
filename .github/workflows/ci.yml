@@ -976,12 +976,18 @@ jobs:
 
   tidy:
     # Always report the required result on ready runs, including routed skips.
+    # Cancel a running aggregate, but explicitly fail cancelled dependencies.
     name: Static analysis / clang-tidy
     needs: [changes, tidy-shard]
-    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+    if: ${{ (!cancelled() || needs.changes.result == 'cancelled' || needs.tidy-shard.result == 'cancelled') && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
+      - name: Reject cancelled dependencies
+        if: ${{ always() && (needs.changes.result == 'cancelled' || needs.tidy-shard.result == 'cancelled') }}
+        run: |
+          echo "clang-tidy dependencies were cancelled" >&2
+          exit 1
       - name: Require all clang-tidy shards to pass
         env:
           TIDY_SHARD_RESULT: ${{ needs.tidy-shard.result }}
