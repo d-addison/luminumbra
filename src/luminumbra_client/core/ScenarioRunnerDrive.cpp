@@ -476,6 +476,7 @@ bool ScenarioRunnerImpl::onPreRenderFoliage() {
         foliage->set_density_scale(FoliageVisualProfile::density_scale *
                                    scenario_config.foliage_density_scale);
         foliage->set_readback_enabled(true);
+        foliage->set_evidence_enabled(true);
         // Stay calm until a fresh, identified calm frame was actually retained.
         // The bounded run refuses missing evidence instead of manufacturing zero.
         const std::uint32_t phase = foliage_calm.sampled ? 2u : 1u;

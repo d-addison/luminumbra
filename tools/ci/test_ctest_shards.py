@@ -4,6 +4,7 @@
 import importlib.util
 import copy
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -26,8 +27,102 @@ class CTestShardTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
+        environment = patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop("GITHUB_OUTPUT", None)
         self.tests = [test(f"Suite.Case{index}") for index in range(40)]
         self.names = [row["name"] for row in self.tests]
+
+    def test_synthetic_plans_do_not_publish_workflow_outputs(self):
+        self.assertNotIn("GITHUB_OUTPUT", os.environ)
+        output = self.root / "step-output"
+        sentinel = b"sentinel=retained\nprefab=true\n"
+        for profile in ("asan", "gcc", "msvc", "ucrt64"):
+            tests = [*self.tests, test("SimBudgetWorldParity.First"),
+                     test("SimBudgetWorldParity.Second")]
+            for shard in ((1, 2) if profile == "asan" else (0, 1, 2)):
+                with self.subTest(profile=profile, shard=shard):
+                    output.write_bytes(sentinel)
+                    with patch.dict(os.environ, GITHUB_OUTPUT=str(output)):
+                        self.write_plan(self.root, shard, tests=tests, profile=profile)
+                    self.assertEqual(output.read_bytes(), sentinel)
+
+    def test_cli_publishes_only_the_selected_real_plan(self):
+        tests = [*self.tests, test("PrefabRuntimeTest.Installed"), test("PrefabDigest.Content"),
+                 test("SimBudgetWorldParity.First"), test("SimBudgetWorldParity.Second")]
+        output = self.root / "step-output"
+        sentinel = b"sentinel=retained\n"
+        for script, profile in (("asan_shards.py", "asan"), ("ctest_shards.py", "asan"),
+                                ("ctest_shards.py", "gcc"), ("ctest_shards.py", "msvc"),
+                                ("ctest_shards.py", "ucrt64")):
+            for shard in ((1, 2) if profile == "asan" else (0, 1, 2)):
+                with self.subTest(script=script, profile=profile, shard=shard):
+                    manifest = self.write_plan(self.root, shard, tests=tests, profile=profile)
+                    selected = manifest["partitions"][0 if shard == 0 else shard - 1]
+                    expected = any(name.startswith("PrefabRuntimeTest.") for name in selected)
+                    output.write_bytes(sentinel)
+                    result = subprocess.run(
+                        [sys.executable, "-I", "-B", str(Path(__file__).with_name(script)), "plan",
+                         "--directory", str(self.root), "--profile", profile, "--shard", str(shard)],
+                        env=dict(os.environ, GITHUB_OUTPUT=str(output)),
+                        capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    published = f"prefab={str(expected).lower()}{os.linesep}".encode("utf-8")
+                    self.assertEqual(output.read_bytes(), sentinel + published)
+
+    def test_full_capture_prefab_output_survives_both_contract_suites(self):
+        tests = [*self.tests, test("PrefabRuntimeTest.Installed"), test("PrefabDigest.Content")]
+        self.write_plan(self.root, 0, tests=tests)
+        output = self.root / "step-output"
+        output.write_bytes(b"sentinel=retained\n")
+        environment = dict(os.environ, GITHUB_OUTPUT=str(output))
+        result = subprocess.run(
+            [sys.executable, "-I", "-B", str(Path(__file__).with_name("ctest_shards.py")),
+             "plan", "--directory", str(self.root), "--shard", "0", "--require-suite", "PrefabRuntimeTest."],
+            env=environment, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        expected = b"sentinel=retained\n" + f"prefab=true{os.linesep}".encode("utf-8")
+        self.assertEqual(output.read_bytes(), expected)
+        for script, case in (("test_asan_shards.py", "AsanShardTests"),
+                             ("test_ctest_shards.py", "CTestShardTests")):
+            with self.subTest(script=script):
+                result = subprocess.run(
+                    [sys.executable, "-I", "-B", str(Path(__file__).with_name(script)),
+                     case + ".test_synthetic_plans_do_not_publish_workflow_outputs"],
+                    env=environment, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(output.read_bytes(), expected)
+
+    def test_cli_output_absent_empty_unwritable_and_invalid_inventory(self):
+        output = self.root / "step-output"
+        command = [sys.executable, "-I", "-B", str(Path(__file__).with_name("ctest_shards.py")),
+                   "plan", "--directory", str(self.root), "--shard", "0"]
+        self.write_plan(self.root, 0)
+        for value in (None, "", str(self.root)):
+            environment = dict(os.environ)
+            if value is not None:
+                environment["GITHUB_OUTPUT"] = value
+            with self.subTest(output=value):
+                result = subprocess.run(command, env=environment, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 1 if value else 0, result.stdout + result.stderr)
+                self.assertFalse(output.exists())
+                if value:
+                    self.assertIn("CTest plan refused:", result.stderr)
+        sentinel = b"sentinel=retained\nprefab=true\n"
+        for document in ("{", '{"tests": []}', '{"tests": [{"name": "unknown"}]}', None):
+            with self.subTest(document=document):
+                inventory = self.root / "ctest.inventory.json"
+                if document is None:
+                    inventory.unlink()
+                else:
+                    inventory.write_text(document, encoding="utf-8")
+                output.write_bytes(sentinel)
+                result = subprocess.run(command, env=dict(os.environ, GITHUB_OUTPUT=str(output)),
+                                        capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("CTest plan refused:", result.stderr)
+                self.assertEqual(output.read_bytes(), sentinel)
 
     def write_plan(self, directory, shard, tests=None, all_tests=None, profile="gcc", roots=None):
         directory.mkdir(parents=True, exist_ok=True)
