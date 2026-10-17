@@ -108,8 +108,8 @@ class WorkflowShellTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         args, kwargs = calls[0]
         self.assertEqual(args[0][:-1], [executable, "--noprofile", "--norc", "-e", "-c"])
-        self.assertIn('[[ "$OSTYPE" == msys* ]] || exit 1;', args[0][-1])
-        self.assertIn('[[ -n "$BASH_VERSION" ]] || exit 1;', args[0][-1])
+        self.assertIn('[[ "$OSTYPE" == msys* ]] || { ci_bash_observe ostype; exit 12; };', args[0][-1])
+        self.assertIn('[[ -n "$BASH_VERSION" ]] || { ci_bash_observe bash-version; exit 11; };', args[0][-1])
         self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
         self.assertTrue(kwargs["capture_output"])
         self.assertEqual(kwargs["timeout"], 2)
@@ -295,7 +295,7 @@ class WorkflowShellDiagnosticTests(unittest.TestCase):
                 self.assertIn(f"candidate[{index}].probe.returncode=1", message)
                 self.assertEqual(call.args[0][0], candidate)
                 self.assertEqual(call.kwargs["timeout"], 2)
-                self.assertIn('[[ "$OSTYPE" == msys* ]] || exit 1;', call.args[0][-1])
+                self.assertIn('[[ "$OSTYPE" == msys* ]] || { ci_bash_observe ostype; exit 12; };', call.args[0][-1])
 
     def test_validation_failures_name_the_last_stage_without_extra_checks_or_fallback(self):
         for stage in ("is_absolute", "is_file", "access"):
@@ -421,6 +421,154 @@ class WorkflowShellDiagnosticTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         stdout.write.assert_not_called()
         stderr.write.assert_not_called()
+
+    def run_probe_body(self, *, platform="win32", prefix="", replace=None):
+        # Capture the actual production command, then execute it outside mocks.
+        # Prefixes/rewrites force guard inputs; they do not emulate MSYS decoding.
+        _, _, _, _, run = self.failure(platform=platform)
+        command = list(run.call_args.args[0])
+        script = prefix + command[-1]
+        if replace is not None:
+            before, after = replace
+            self.assertIn(before, script)
+            script = script.replace(before, after)
+        command[-1] = script
+        result = subprocess.run(command, **run.call_args.kwargs)
+        return result, script
+
+    def assert_refusal_observations(self, result, script, status, stage):
+        self.assertEqual(result.returncode, status, result.stderr)
+        self.assertEqual(result.stdout, b"BASH_EXECUTION_STRING=" + script[:512].encode("utf-8"))
+        self.assertTrue(result.stderr.startswith(f"stage={stage} BASH_VERSION=".encode("ascii")))
+        self.assertIn(b" OSTYPE=", result.stderr)
+        message, _, _, _, run = self.failure(response=result)
+        self.assertIn(f"candidate[0].probe.returncode={status}", message)
+        self.assertIn(shell._observation("candidate[0].probe.stdout", result.stdout), message)
+        self.assertIn(shell._observation("candidate[0].probe.stderr", result.stderr), message)
+        run.assert_called_once()
+
+    def test_actual_probe_distinguishes_empty_bash_version_on_both_platform_branches(self):
+        for platform in ("linux", "win32"):
+            with self.subTest(platform=platform):
+                result, script = self.run_probe_body(platform=platform, prefix="BASH_VERSION=; ")
+                self.assert_refusal_observations(result, script, 11, "bash-version")
+                self.assertIn(b"BASH_VERSION='' OSTYPE=", result.stderr)
+
+    def test_actual_windows_guard_reports_empty_and_non_msys_intrinsics(self):
+        for prefix, ostype in (("OSTYPE=; ", b"''"), ("OSTYPE=linux-gnu; ", b"linux-gnu")):
+            with self.subTest(prefix=prefix):
+                result, script = self.run_probe_body(prefix=prefix)
+                self.assert_refusal_observations(result, script, 12, "ostype")
+                self.assertRegex(result.stderr, rb"BASH_VERSION=[^\n ]+ OSTYPE=" + re.escape(ostype) + rb"\n$")
+                self.assertIn(ascii(result.stdout), shell._observation("stdout", result.stdout))
+                self.assertIn("truncated=False", shell._observation("stdout", result.stdout))
+
+    def test_actual_refusal_observes_changed_decoded_quotes_without_evaluating_command(self):
+        result, script = self.run_probe_body(prefix="OSTYPE=msys; ",
+                                            replace=('"$OSTYPE"', r'\"$OSTYPE\"'))
+        self.assert_refusal_observations(result, script, 12, "ostype")
+        self.assertIn(rb'\"$OSTYPE\"', result.stdout)
+        self.assertTrue(result.stderr.endswith(b" OSTYPE=msys\n"))
+
+    def test_actual_probe_success_retains_only_exact_magic_on_both_platform_branches(self):
+        for platform, prefix in (("linux", ""), ("win32", "OSTYPE=msys; ")):
+            with self.subTest(platform=platform):
+                result, _ = self.run_probe_body(platform=platform, prefix=prefix)
+                self.assertEqual((result.returncode, result.stdout, result.stderr), (0, b"ci-bash-ready\n", b""))
+                with patch.object(shell.subprocess, "run", return_value=result) as run, patch.object(
+                        shell.sys, "stdout") as stdout, patch.object(shell.sys, "stderr") as stderr:
+                    self.assertEqual(shell.bash_executable(BASH), BASH)
+                run.assert_called_once()
+                stdout.write.assert_not_called()
+                stderr.write.assert_not_called()
+
+    def test_actual_abort_without_guard_observations_leaves_body_stage_unknown(self):
+        result, _ = self.run_probe_body(prefix="exit 1; ")
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (1, b"", b""))
+        message, _, _, _, run = self.failure(response=result)
+        self.assertIn("candidate[0].probe.returncode=1", message)
+        self.assertIn("candidate[0].probe.stdout=b''", message)
+        self.assertIn("candidate[0].probe.stderr=b''", message)
+        self.assertNotIn("stage=", message)
+        run.assert_called_once()
+
+    def test_actual_guard_observation_write_failures_never_reach_success_magic(self):
+        for descriptor in (1, 2):
+            with self.subTest(descriptor=descriptor):
+                result, _ = self.run_probe_body(prefix=f"exec {descriptor}>&-; OSTYPE=refused; ")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn(b"ci-bash-ready\n", result.stdout)
+                _, _, _, _, run = self.failure(response=result)
+                run.assert_called_once()
+
+    def test_actual_guard_observations_filter_hooks_and_do_not_dump_environment(self):
+        private = "private-observation-payload"
+        untrusted = dict(ACCESS_TOKEN=private, BASH_EXECUTION_STRING=private, BASH_ENV=private,
+                         ENV=private, BASH_VERSION=private, OSTYPE="msys", SHELLOPTS=private, BASHOPTS=private)
+        untrusted["BASH_FUNC_ci_bash_observe%%"] = "() { printf " + private + "; }"
+        with patch.dict(os.environ, untrusted):
+            result, script = self.run_probe_body(prefix="OSTYPE=refused; ")
+        self.assert_refusal_observations(result, script, 12, "ostype")
+        for forbidden in (private.encode("ascii"), b"ACCESS_TOKEN", b"BASH_ENV", b"BASH_FUNC_"):
+            self.assertNotIn(forbidden, result.stdout + result.stderr)
+
+    def test_actual_guard_observations_bound_intrinsics_and_decoded_command_and_escape_controls(self):
+        prefix = "BASH_VERSION=" + "v" * 1000 + "; OSTYPE=" + "o" * 1000 + "; "
+        result, script = self.run_probe_body(prefix=prefix)
+        self.assert_refusal_observations(result, script, 12, "ostype")
+        self.assertEqual(result.stderr, b"stage=ostype BASH_VERSION=" + b"v" * 32 + b" OSTYPE=" + b"o" * 32 + b"\n")
+        self.assertEqual(len(result.stdout), len(b"BASH_EXECUTION_STRING=") + 512)
+        result, script = self.run_probe_body(prefix=r"BASH_VERSION=$'ver\n\033'; OSTYPE=$'other\r\033'; ")
+        self.assert_refusal_observations(result, script, 12, "ostype")
+        self.assertIn(rb"ver\n\E", result.stderr)
+        self.assertIn(rb"other\r\E", result.stderr)
+        self.assertNotIn(b"\x1b", result.stderr)
+        self.assertEqual(result.stderr.count(b"\n"), 1)
+        observation = shell._observation("stderr", result.stderr)
+        self.assertTrue(observation.isascii())
+        self.assertNotIn("\x1b", observation)
+        self.assertNotIn("\r", observation)
+
+    def test_byte_observation_keeps_display_bound_before_formatting_and_retains_command_tail(self):
+        class BoundedBytes(bytes):
+            def __repr__(self):
+                raise AssertionError("unsliced output was formatted")
+
+            def __getitem__(self, key):
+                self_test.assertIsInstance(key, slice)
+                self_test.assertLessEqual(key.stop, 640)
+                return super().__getitem__(key)
+
+        self_test = self
+        for payload in (b"x" * 500 + b"command-tail", b"\xff\x00\r\n" * 100000):
+            with self.subTest(length=len(payload)):
+                observation = shell._observation("stdout", BoundedBytes(payload))
+                self.assertTrue(observation.isascii())
+                preview = observation.split("=", 1)[1].rsplit(" (length=", 1)[0]
+                self.assertLessEqual(len(preview), 640)
+                if len(payload) < 640:
+                    self.assertIn("command-tail", observation)
+                    self.assertIn("truncated=False", observation)
+                else:
+                    self.assertIn("truncated=True", observation)
+        partial = b"x" * 200 + b"decoded-command-tail"
+        message, _, _, _, run = self.failure(response=subprocess.TimeoutExpired(
+            ["private-command"], 2, output=partial, stderr=b"stage=ostype"))
+        self.assertIn("decoded-command-tail", message)
+        self.assertNotIn("private-command", message)
+        run.assert_called_once()
+
+    def test_refusal_observations_cannot_make_unknown_output_or_guard_status_successful(self):
+        for status in (0, 11, 12):
+            failures = ((b"BASH_EXECUTION_STRING=command", b"stage=ostype"),
+                        (b"ci-bash-ready\n", b"stage=ostype"),
+                        (b"ci-bash-ready\nextra", b""))
+            if status:
+                failures += ((b"ci-bash-ready\n", b""),)
+            for stdout, stderr in failures:
+                with self.subTest(status=status, stdout=stdout, stderr=stderr):
+                    _, _, _, _, run = self.failure(response=subprocess.CompletedProcess([], status, stdout, stderr))
+                    run.assert_called_once()
 
 
 def jobs(workflow):

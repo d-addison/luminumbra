@@ -13,11 +13,13 @@ _discovery_observations = ContextVar("bash_discovery_observations", default=None
 
 
 def _observation(label, value, preview_units=160):
-    # Slice before escaping: 160 input units / 640 displayed ASCII characters
-    # per value (1024 / 4096 for PATH). Never format whole probe output.
+    # Slice before escaping: 160 characters or 640 bytes, with the same 640
+    # displayed ASCII cap (1024 / 4096 for PATH). The byte preview can show the
+    # fixed decoded probe command without increasing the diagnostic budget.
     if isinstance(value, (str, bytes)):
-        preview = ascii(value[:preview_units])
-        truncated = len(value) > preview_units or len(preview) > 4 * preview_units
+        input_units = 4 * preview_units if isinstance(value, bytes) else preview_units
+        preview = ascii(value[:input_units])
+        truncated = len(value) > input_units or len(preview) > 4 * preview_units
         return f"{label}={preview[:4 * preview_units]} (length={len(value)}, truncated={truncated})"
     return f"{label}={value!r}"
 
@@ -90,9 +92,20 @@ def bash_executable(override=None):
         candidates = (_windows_candidates(git, bash, os.environ.get("MSYSTEM"))
                       if windows else [bash] if bash else [])
     observations.append(f"candidates={len(candidates)}; discovery uses absolute PATH entries only")
-    script = '[[ -n "$BASH_VERSION" ]] || exit 1; '
+    # Only guard refusals emit observations: 32 characters per intrinsic and
+    # 512 of the decoded fixed command, never evaluated as shell code. No body
+    # marker is emitted on success; absent observations cannot prove a pre-body
+    # abort (including failure to decode/install this function).
+    script = (
+        "ci_bash_observe() { "
+        "printf 'stage=%s BASH_VERSION=%q OSTYPE=%q\\n' "
+        '"$1" "${BASH_VERSION:0:32}" "${OSTYPE:0:32}" >&2; '
+        "printf 'BASH_EXECUTION_STRING=%s' "
+        '"${BASH_EXECUTION_STRING:0:512}"; }; '
+        '[[ -n "$BASH_VERSION" ]] || { ci_bash_observe bash-version; exit 11; }; '
+    )
     if windows:
-        script += '[[ "$OSTYPE" == msys* ]] || exit 1; '
+        script += '[[ "$OSTYPE" == msys* ]] || { ci_bash_observe ostype; exit 12; }; '
     script += "printf 'ci-bash-ready\\n'"
     environment = {key: value for key, value in os.environ.items()
                    if key.upper() not in ("BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "OSTYPE", "BASH_VERSION")
