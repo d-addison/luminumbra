@@ -109,6 +109,53 @@ def add_probe(path, status="ran", level="256", carrier="output", outcome=None):
 
 
 class CompareAmbientReceiptsTests(unittest.TestCase):
+    def test_attributed_receipt_keeps_its_producers_execution_status(self):
+        for carrier in ("attribute", "property", "output"):
+            for outcome in (None, "failure", "error", "skipped", "disabled", "unknown"):
+                with self.subTest(carrier=carrier, outcome=outcome), tempfile.TemporaryDirectory() as directory:
+                    lane = write_junit(directory, "a.xml")
+                    tree = ET.parse(lane)
+                    suite = tree.getroot().find("testsuite")
+                    producer = suite.find("testcase")
+                    producer.attrib.update(status="run", result="completed")
+                    if carrier == "attribute":
+                        producer.set("ambient_receipt", receipt_line())
+                    elif carrier == "property":
+                        ET.SubElement(producer.find("properties"), "property",
+                                      name="ambient_receipt", value=receipt_line())
+                    else:
+                        ET.SubElement(producer, "system-out").text = receipt_line()
+                    if outcome in ("disabled", "unknown"):
+                        producer.set("status", outcome)
+                    elif outcome:
+                        ET.SubElement(producer, outcome)
+                    ET.SubElement(suite, "testcase", name="Unrelated", status="disabled")
+                    tree.write(lane)
+                    code, out, err = run_main([f"avx2={lane}"])
+                    self.assertEqual(code, 0 if outcome is None else 2, out + err)
+
+    def test_unattributed_receipt_still_uses_report_execution_status(self):
+        for carrier in ("property", "output"):
+            for outcome in (None, "failure", "error", "skipped", "disabled", "unknown"):
+                with self.subTest(carrier=carrier, outcome=outcome), tempfile.TemporaryDirectory() as directory:
+                    # An identical good attributed receipt must not hide a suite-level copy.
+                    lane = write_junit(directory, "a.xml", attribute_value=receipt_line())
+                    tree = ET.parse(lane)
+                    suite = tree.getroot().find("testsuite")
+                    if carrier == "property":
+                        properties = ET.SubElement(suite, "properties")
+                        ET.SubElement(properties, "property", name="ambient_receipt", value=receipt_line())
+                    else:
+                        ET.SubElement(suite, "system-out").text = receipt_line()
+                    other = ET.SubElement(suite, "testcase", name="Unrelated", status="run", result="completed")
+                    if outcome in ("disabled", "unknown"):
+                        other.set("status", outcome)
+                    elif outcome:
+                        ET.SubElement(other, outcome)
+                    tree.write(lane)
+                    code, out, err = run_main([f"avx2={lane}"])
+                    self.assertEqual(code, 0 if outcome is None else 2, out + err)
+
     def test_unevaluated_receipts_and_probes_are_rejected(self):
         metadata = (("status", "disabled"), ("status", "notrun"),
                     ("status", "skipped"), ("status", "unknown"), ("status", ""),

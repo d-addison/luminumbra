@@ -142,7 +142,10 @@ def ambient_receipt(path):
                     and testcase.get("result") in (None, "completed")
                     and not any(child.tag in ("failure", "error", "skipped") for child in testcase),
                     "ambient testcase failed or skipped/unevaluated")
-            require(testcase.get("name", "").endswith("AmbientDeterminismReceipt.EmitsConstructorAndEvolvedHashes"), "receipt from an unexpected testcase")
+            require(testcase.get("name") == "AmbientDeterminismReceipt.EmitsConstructorAndEvolvedHashes"
+                    or (testcase.get("classname") == "AmbientDeterminismReceipt"
+                        and testcase.get("name") == "EmitsConstructorAndEvolvedHashes"),
+                    "receipt from an unexpected testcase")
             require(len(set(values)) == 1, "conflicting ambient representations")
             producers.append(values[0])
     for element in root.iter():

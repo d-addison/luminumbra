@@ -80,14 +80,17 @@ def _receipts_by_source(root):
     """Return (every receipt line, receipt lines taken from a failed testcase)."""
     found = set()
     failed = set()
+    attributed = set()
     any_unsuccessful = False
     for testcase in root.iter("testcase"):
         lines = _receipt_lines(testcase.get(PROPERTY_NAME) or "")
         for element in testcase.iter("property"):
             if element.get("name") == PROPERTY_NAME:
                 lines.update(_receipt_lines(element.get("value") or ""))
+                attributed.add(element)
         for element in testcase.iter("system-out"):
             lines.update(_receipt_lines("".join(element.itertext())))
+            attributed.add(element)
         found.update(lines)
         if _unsuccessful(testcase):
             failed.update(lines)
@@ -96,9 +99,10 @@ def _receipts_by_source(root):
     # testcase in the report failed, errored or was skipped/unevaluated.
     unattributed = set()
     for element in root.iter("system-out"):
-        unattributed.update(_receipt_lines("".join(element.itertext())))
+        if element not in attributed:
+            unattributed.update(_receipt_lines("".join(element.itertext())))
     for element in root.iter("property"):
-        if element.get("name") == PROPERTY_NAME:
+        if element not in attributed and element.get("name") == PROPERTY_NAME:
             unattributed.update(_receipt_lines(element.get("value") or ""))
     if any_unsuccessful:
         failed.update(unattributed)

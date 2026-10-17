@@ -2,6 +2,7 @@
 """Validate software-render evidence without starting a renderer or display."""
 import importlib.util
 from pathlib import Path
+import re
 import unittest
 import xml.etree.ElementTree as ET
 
@@ -14,9 +15,29 @@ class SoftwareGlEvidenceTests(unittest.TestCase):
     def report(self):
         root = ET.Element("testsuites")
         suite = ET.SubElement(root, "testsuite")
-        for index in range(15):
-            ET.SubElement(suite, "testcase", classname="Rendering", name=f"Case{index}", status="run")
+        for classname, name in sorted(MODULE.EXPECTED_CASES):
+            ET.SubElement(suite, "testcase", classname=classname, name=name, status="run")
         return root
+
+    def test_expected_inventory_matches_rendering_registrations(self):
+        source = Path(__file__).resolve().parents[2] / "test/rendering/static_preview_render_test.cpp"
+        registrations = re.findall(r"^TEST(?:_F)?\(\s*(\w+)\s*,\s*(\w+)\s*\)",
+                                   source.read_text(encoding="utf-8"), re.MULTILINE)
+        self.assertEqual(set(registrations), MODULE.EXPECTED_CASES)
+        self.assertEqual(len(registrations), len(MODULE.EXPECTED_CASES))
+
+    def test_renamed_substituted_and_unknown_identities_are_rejected(self):
+        for field, value in (("name", "UnrelatedCase"), ("classname", "UnrelatedSuite"),
+                             ("name", ""), ("classname", ""),
+                             ("name", None), ("classname", None)):
+            root = self.report()
+            case = next(root.iter("testcase"))
+            if value is None:
+                del case.attrib[field]
+            else:
+                case.set(field, value)
+            with self.subTest(field=field, value=value), self.assertRaises(RuntimeError):
+                MODULE.validate_report(root)
 
     def test_successful_google_test_forms(self):
         root = self.report()
@@ -51,6 +72,7 @@ class SoftwareGlEvidenceTests(unittest.TestCase):
         duplicate = self.report()
         suite = duplicate.find("testsuite")
         suite[-1].set("name", suite[0].get("name"))
+        suite[-1].set("classname", suite[0].get("classname"))
         with self.assertRaises(RuntimeError):
             MODULE.validate_report(duplicate)
 
