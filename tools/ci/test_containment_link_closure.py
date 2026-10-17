@@ -23,6 +23,7 @@ COMMAND = re.compile(r"\b([a-z_][a-z_0-9]*)\s*\(", re.IGNORECASE)
 BRACKET = re.compile(r'\[(=*)\[')
 TOKEN = re.compile(r'"([^"\n]*)"|([^\s]+)')
 VARIABLE = re.compile(r"\$\{([^${}]+)\}")
+OBJECTS = re.compile(r'\$<TARGET_OBJECTS:([^$<>:;\s]+)>')
 INCLUDE = re.compile(r'^\s*#\s*include\s*["<]([^">]+)[">]', re.MULTILINE)
 
 
@@ -159,6 +160,10 @@ def targets_in(root, cmake):
                 target = targets.setdefault(args[0], {"sources": set(), "links": set()})
                 for arg in args[1:]:
                     for source in arg.split(";"):
+                        objects = OBJECTS.fullmatch(source)
+                        if objects:
+                            target.setdefault('objects', set()).add(objects[1])
+                            continue
                         if "${" in source or "$<" in source:
                             raise ValueError(f"unresolved source in {cmake}: {source}")
                         if Path(source).suffix.lower() not in {".cpp", ".cc", ".cxx", ".c", ".h", ".hpp"}:
@@ -170,11 +175,16 @@ def targets_in(root, cmake):
             elif command == "target_link_libraries":
                 target = targets.setdefault(args[0], {"sources": set(), "links": set()})
                 for arg in args[1:]:
-                    # This form is used by the networking runtime fixture.
-                    arg = re.sub(r'\$<TARGET_LINKER_FILE:([^<>]+)>', r'\1', arg)
-                    if '$<' in arg:
-                        raise ValueError(f'unresolved link in {cmake}: {arg}')
-                    target['links'].update(arg.split(';'))
+                    for link in arg.split(';'):
+                        objects = OBJECTS.fullmatch(link)
+                        if objects:
+                            target.setdefault('objects', set()).add(objects[1])
+                        else:
+                            # This form is used by the networking runtime fixture.
+                            link = re.sub(r'\$<TARGET_LINKER_FILE:([^<>]+)>', r'\1', link)
+                            if '$<' in link:
+                                raise ValueError(f'unresolved link in {cmake}: {link}')
+                            target['links'].add(link)
 
     def read(path):
         path = path.resolve()
@@ -231,6 +241,25 @@ class IncludeGraph:
 def audit(targets, graph):
     """Find targets reaching the policy without the implementation in their closure."""
 
+    def candidates(key, name):
+        local = (key[0], name)
+        # Standalone projects may reuse executable and fixture target names.
+        return [local] if local in targets else [
+            candidate for candidate in targets if candidate[1] == name
+        ]
+
+    @lru_cache(maxsize=None)
+    def direct_sources(key):
+        sources = set(targets[key]['sources'])
+        for name in targets[key].get('objects', ()):
+            matches = candidates(key, name)
+            if len(matches) != 1:
+                raise ValueError(f'unresolved CMake object target: {name}')
+            # TARGET_OBJECTS includes only objects compiled by that target,
+            # without its link requirements or other referenced object files.
+            sources.update(targets[matches[0]]['sources'])
+        return frozenset(sources)
+
     @lru_cache(maxsize=None)
     def uses_policy(sources):
         pending = list(sources)
@@ -249,22 +278,16 @@ def audit(targets, graph):
             return set()
         seen.add(key)
         target = targets[key]
-        sources = set(target["sources"])
+        sources = set(direct_sources(key))
         for link in target["links"]:
-            local = (key[0], link)
-            # Standalone projects may reuse executable and fixture target names.
-            candidates = [local] if local in targets else [
-                candidate for candidate in targets
-                if candidate[1] == link and targets[candidate]["sources"]
-            ]
-            for candidate in candidates:
+            for candidate in candidates(key, link):
                 sources.update(closure(candidate, seen))
         return sources
 
     users = {}
     failures = []
     for key, target in targets.items():
-        if uses_policy(frozenset(target["sources"])):
+        if uses_policy(direct_sources(key)):
             users[key] = target
             if OWNER not in closure(key, set()):
                 failures.append(f"{key[0]}: {key[1]} uses containment without {OWNER}")
@@ -346,9 +369,102 @@ add_library(core ${sources} "${CMAKE_CURRENT_LIST_DIR}/local.cpp")
 ''', ('nested/included.cpp', 'local.cpp'))
         self.assertEqual(targets['core']['sources'], {Path('nested/included.cpp'), Path('local.cpp')})
 
+    def test_object_sources_in_all_source_commands_and_forward_references(self):
+        targets = self.sources('''
+set(objects "$<TARGET_OBJECTS:entry>")
+add_executable(app main.cpp ${objects})
+add_library(wrapper STATIC "$<TARGET_OBJECTS:entry>")
+target_sources(app PRIVATE "$<TARGET_OBJECTS:entry>")
+target_link_libraries(wrapper PRIVATE "$<TARGET_OBJECTS:entry>")
+add_library(entry OBJECT object.cpp)
+''', ('main.cpp', 'object.cpp'))
+        self.assertEqual(targets['app']['sources'], {Path('main.cpp')})
+        self.assertEqual(targets['app']['objects'], {'entry'})
+        self.assertEqual(targets['wrapper']['objects'], {'entry'})
+        self.assertEqual(targets['entry']['sources'], {Path('object.cpp')})
+
+    def test_object_sources_do_not_inherit_link_requirements(self):
+        for command in ('target_sources', 'target_link_libraries'):
+            with self.subTest(command=command):
+                self.check_object_link_requirements(command)
+
+    def check_object_link_requirements(self, command):
+        targets = self.sources('''
+add_executable(app main.cpp)
+add_library(entry OBJECT object.cpp)
+add_library(owner src/luminumbra_common/core/FilesystemPath.cpp)
+target_link_libraries(entry PRIVATE owner)
+''' + command + '(app PRIVATE "$<TARGET_OBJECTS:entry>")',
+                               ('main.cpp', 'object.cpp', str(POLICY), str(OWNER)))
+        (self.root / 'object.cpp').write_text(
+            '#include "luminumbra_common/core/CaptureContentPaths.h"\n', encoding='utf-8')
+        indexed = {(Path('CMakeLists.txt'), name): target for name, target in targets.items()}
+        graph = IncludeGraph(self.root)
+        users, failures = audit(indexed, graph)
+        self.assertIn((Path('CMakeLists.txt'), 'app'), users)
+        self.assertEqual(failures, [f'CMakeLists.txt: app uses containment without {OWNER}'])
+        targets['app']['links'].add('owner')
+        self.assertFalse(audit(indexed, graph)[1])
+        targets['owner']['sources'].clear()
+        self.assertEqual(len(audit(indexed, graph)[1]), 2)
+
+    def test_object_sources_from_other_files_and_empty_targets(self):
+        targets = self.sources('''
+add_executable(app "$<TARGET_OBJECTS:entry>" "$<TARGET_OBJECTS:empty>")
+add_library(empty OBJECT)
+target_link_libraries(app PRIVATE forwarding)
+''', ('object.cpp', str(POLICY), str(OWNER)))
+        (self.root / 'object.cpp').write_text(
+            '#include "luminumbra_common/core/CaptureContentPaths.h"\n', encoding='utf-8')
+        indexed = {(Path('CMakeLists.txt'), name): target for name, target in targets.items()}
+        external = Path('nested/CMakeLists.txt')
+        indexed[(external, 'entry')] = {'sources': {Path('object.cpp')}, 'links': {'forwarding'}}
+        indexed[(external, 'forwarding')] = {'sources': set(), 'links': {'owner'}}
+        indexed[(external, 'owner')] = {'sources': {OWNER}, 'links': set()}
+        users, failures = audit(indexed, IncludeGraph(self.root))
+        self.assertIn((Path('CMakeLists.txt'), 'app'), users)
+        self.assertFalse(failures)
+        targets['app']['links'].clear()
+        self.assertEqual(audit(indexed, IncludeGraph(self.root))[1],
+                         [f'CMakeLists.txt: app uses containment without {OWNER}'])
+
+    def test_object_sources_do_not_include_objects_linked_by_referenced_target(self):
+        targets = self.sources('''
+add_executable(app main.cpp "$<TARGET_OBJECTS:entry>")
+add_library(entry OBJECT object.cpp)
+add_library(owner OBJECT src/luminumbra_common/core/FilesystemPath.cpp)
+target_link_libraries(entry PRIVATE "$<TARGET_OBJECTS:owner>")
+''', ('main.cpp', 'object.cpp', str(POLICY), str(OWNER)))
+        (self.root / 'object.cpp').write_text(
+            '#include "luminumbra_common/core/CaptureContentPaths.h"\n', encoding='utf-8')
+        indexed = {(Path('CMakeLists.txt'), name): target for name, target in targets.items()}
+        _, failures = audit(indexed, IncludeGraph(self.root))
+        self.assertEqual(failures, [f'CMakeLists.txt: app uses containment without {OWNER}'])
+
+    def test_unknown_and_ambiguous_object_targets_are_refused(self):
+        targets = self.sources('add_executable(app "$<TARGET_OBJECTS:missing>")')
+        indexed = {(Path('CMakeLists.txt'), name): target for name, target in targets.items()}
+        graph = IncludeGraph(self.root)
+        with self.assertRaisesRegex(ValueError, 'unresolved CMake object target'):
+            audit(indexed, graph)
+        for directory in ('one', 'two'):
+            indexed[(Path(directory) / 'CMakeLists.txt', 'missing')] = {
+                'sources': set(), 'links': set()}
+        with self.assertRaisesRegex(ValueError, 'unresolved CMake object target'):
+            audit(indexed, graph)
+
     def test_unresolved_and_partial_input_is_refused(self):
         for body in ('add_library(core ${missing})',
                      'add_library(core "$<UNKNOWN:main.cpp>")',
+                     'add_library(core "$<TARGET_OBJECTS:>")',
+                     'add_library(core "$<TARGET_OBJECTS:entry")',
+                     'add_library(core "$<TARGET_OBJECTS:${missing}>")',
+                     'add_library(core "$<TARGET_OBJECTS:$<UNKNOWN:entry>>")',
+                     'target_link_libraries(core "$<TARGET_OBJECTS:>")',
+                     'target_link_libraries(core "$<TARGET_OBJECTS:entry")',
+                     'target_link_libraries(core "$<TARGET_OBJECTS:${missing}>")',
+                     'target_link_libraries(core "$<TARGET_OBJECTS:$<UNKNOWN:entry>>")',
+                     'target_link_libraries(core "$<TARGET_OBJECTS:$<TARGET_LINKER_FILE:entry>>")',
                      'target_link_libraries(core "$<UNKNOWN:leaf>")',
                      'add_library(${missing} main.cpp)',
                      'target_link_libraries(${missing} PRIVATE leaf)',
