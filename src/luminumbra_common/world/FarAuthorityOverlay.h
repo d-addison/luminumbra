@@ -95,6 +95,8 @@ FarOverlayError EncodeFarOverlay(const FarOverlayTile& tile, std::string& out);
 // Decodes and validates `bytes` as the overlay for `expected_key`. Never returns
 // a partial tile.
 FarOverlayDecodeResult DecodeFarOverlay(std::string_view bytes, const FarTileKey& expected_key);
+// Observational counter; never affects codec behavior.
+std::uint64_t FarOverlayDecodeCountForTesting();
 
 // `<save_dir>/far/v<tier>.<tx>.<tz>.lmr` with negative indices printed with '-'.
 std::filesystem::path FarOverlayPath(const std::filesystem::path& save_dir, const FarTileKey& key);
@@ -120,7 +122,9 @@ FarOverlayDecodeResult ReadFarOverlay(const std::filesystem::path& save_dir, con
 // any overlay is corrupt, from a newer format, or disagrees with its file name.
 // Files whose name does not parse as an overlay name are ignored.
 bool ValidateFarOverlayDirectory(const std::filesystem::path& save_dir,
-                                 std::vector<std::string>* errors = nullptr);
+                                 std::vector<std::string>* errors = nullptr,
+                                 std::size_t max_entries = 1'048'576,
+                                 std::uint64_t max_total_bytes = 64ull * 1024ull * 1024ull);
 
 // Pure bake derivation. No edited chunks: not due. Edited chunks and no overlay:
 // due (rebuild from chunk records, never pristine). Otherwise due iff the newest

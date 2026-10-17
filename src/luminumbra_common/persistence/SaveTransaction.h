@@ -247,8 +247,45 @@ public:
     bool RemoveDerivedMember(const DerivedGroup& group,
                              std::string_view path,
                              std::vector<std::string>* errors = nullptr);
+    // Adoption may require replacement/removal of legacy generations. Such a group must
+    // survive transaction-level validation before the index can publish. The supplied
+    // member validator must enforce DerivedGroupsAllowCommit during index assembly.
+    bool RequireDerivedGroupForCommit(const DerivedGroup& group, MemberDigestFn validator) {
+        if (!owner_thread() || m_state != State::Open || !validator || m_digest_fn != validator ||
+            !group || group->owner != this || group->index >= m_derived_groups.size() ||
+            m_derived_groups[group->index].identity != group ||
+            m_derived_groups[group->index].rolled_back)
+            return false;
+        m_derived_groups[group->index].commit_required = true;
+        return true;
+    }
+    // The member validator checks this during index assembly, after derived preparation.
+    [[nodiscard]] bool DerivedGroupsAllowCommit() const {
+        if (!owner_thread())
+            return false;
+        for (const auto& group : m_derived_groups)
+            if (group.commit_required && group.rolled_back)
+                return false;
+        return true;
+    }
+    // Commit observers use the final outcome, including a safe validation rollback.
+    [[nodiscard]] bool DerivedGroupCommitted(const DerivedGroup& group) const {
+        return owner_thread() && m_state == State::Committed && group && group->owner == this &&
+               group->index < m_derived_groups.size() &&
+               m_derived_groups[group->index].identity == group &&
+               !m_derived_groups[group->index].rolled_back;
+    }
     // First registration wins. Runs in registration order, after staging and before indexing.
     bool AddFinalizerOnce(std::string key, Finalizer callback);
+    // Owner-thread lookup lets nested writers reuse admitted finalizer storage.
+    [[nodiscard]] bool HasFinalizer(std::string_view key) const {
+        if (!owner_thread() || m_state != State::Open)
+            return false;
+        for (const auto& entry : m_finalizers)
+            if (entry.first == key)
+                return true;
+        return false;
+    }
     // Commits: validates and re-hashes every protected member via digest_fn, publishes the new
     // index (durable commit point), then deletes the journal. Failure before the commit point rolls
     // back.
@@ -304,6 +341,7 @@ private:
         std::vector<std::string> paths;
         MemberDigestFn catalog_digest = nullptr;
         bool rolled_back = false;
+        bool commit_required = false;
     };
     GroupState* writable_group(const DerivedGroup& group, std::string_view path);
     bool prepare_derived_groups(std::vector<std::string>* errors);

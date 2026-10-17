@@ -1,3 +1,4 @@
+#include "../support/FarEditedCacheFixture.h"
 #include "../support/SimulationContentFixture.h"
 #include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/world/ActiveRegionLedger.h"
@@ -16,6 +17,7 @@
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/fields/EnergyFieldState.h"
 #include "luminumbra_common/net/LockstepSession.h"
+#include "luminumbra_common/persistence/SaveTransaction.h"
 #include "luminumbra_common/persistence/SavedWorldCatalog.h"
 #include "luminumbra_common/persistence/SyntheticSaveFixture.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
@@ -26,6 +28,9 @@
 #include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_common/systems/WindFieldSystem.h"
 #include "luminumbra_common/world/Chunk.h"
+#include "luminumbra_common/world/FarAuthorityOverlay.h"
+#include "luminumbra_common/world/FarEditedCache.h"
+#include "luminumbra_common/world/FarEditedCatalog.h"
 #include "luminumbra_common/world/FarLodStore.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
@@ -149,6 +154,8 @@ protected:
         ASSERT_TRUE(WorldSaveService{}.save_world(state, Fixture().save));
     }
     void TearDown() override {
+        Persistence::set_snapshot_step_hook_for_testing(nullptr);
+        WorldSaveService::set_directory_flush_failure_for_testing(-1);
         Fixture().jobs.shutdown();
         std::error_code ec;
         fs::remove_all(Fixture().root, ec);
@@ -294,8 +301,9 @@ TEST_P(WorldOpenRefusal, RefusesBeforeGenerationAndPreservesAllDiskBytes) {
         client = std::make_unique<GameSession>();
         client->SetJobSystem(&Fixture().jobs);
         client->SetRootPath(RootString());
-        if (entry == 1)
+        if (entry == 1) {
             ASSERT_TRUE(client->CreateWorld("Client", "1337", "default"));
+        }
     }
     Damage(kind);
     const auto before = DiskBytes(Fixture().root);
@@ -347,11 +355,11 @@ TEST_P(WorldOpenRefusal, RefusesBeforeGenerationAndPreservesAllDiskBytes) {
         EXPECT_FALSE(session.LoadWorldStateFrom(Fixture().save));
     }
     ASSERT_FALSE(error.empty());
-    if (obsolete)
+    if (obsolete) {
         EXPECT_EQ(error, WorldSaveService::kObsoleteWorldMessage);
-    else if (future)
+    } else if (future) {
         EXPECT_NE(error.find("future"), std::string::npos);
-    else {
+    } else {
         EXPECT_NE(error, WorldSaveService::kObsoleteWorldMessage);
         EXPECT_EQ(error.find("future"), std::string::npos);
     }
@@ -806,8 +814,9 @@ TEST_F(WorldOpenRefusal, EveryFrozenPresetResolvesHistoricalBytesAndChecksIdenti
                       fs::copy_options::overwrite_existing);
         const auto identity =
             Persistence::StableChecksum(nlohmann::json::parse(Read(historical)).dump());
-        if (std::string(name) == "cave_dense")
+        if (std::string(name) == "cave_dense") {
             EXPECT_EQ(identity, "e70158a4777ee36b");
+        }
         auto metadata = original_metadata;
         metadata["worldType"] = name;
         for (const auto& identity_metadata : {nlohmann::json::object(),
@@ -820,10 +829,11 @@ TEST_F(WorldOpenRefusal, EveryFrozenPresetResolvesHistoricalBytesAndChecksIdenti
             const auto before = DiskBytes(Fixture().root);
             const auto inspected = Persistence::InspectSavedWorld(Fixture().root, "fixture");
             EXPECT_EQ(inspected.preset_path, historical);
-            if (saved_metadata.value("presetIdentity", identity) == identity)
+            if (saved_metadata.value("presetIdentity", identity) == identity) {
                 EXPECT_TRUE(inspected.error.empty()) << inspected.error;
-            else
+            } else {
                 EXPECT_NE(inspected.error.find("identity"), std::string::npos);
+            }
             EXPECT_EQ(DiskBytes(Fixture().root), before);
         }
         // Even metadata without an identity must refuse if its frozen file is absent.
@@ -1343,10 +1353,12 @@ public:
 
     void Rewrite(const char* changed) const {
         SCOPED_TRACE(directory.generic_string());
-        if (std::string(changed) != "identity")
+        if (std::string(changed) != "identity") {
             ASSERT_NO_FATAL_FAILURE(Write(directory / "preset.json", other_preset.dump()));
-        if (std::string(changed) != "preset")
+        }
+        if (std::string(changed) != "preset") {
             ASSERT_NO_FATAL_FAILURE(Write(directory / "world_info.json", other_metadata.dump()));
+        }
     }
 
     void Restore() const {
@@ -1522,8 +1534,9 @@ TEST_F(WorldOpenRefusal, ServerFullSnapshotPresetChangeRefusesWithoutWritesOrAck
             }
 
             ASSERT_EQ(runner.SaveFullSnapshot(), 1u);
-            if (active_regions)
+            if (active_regions) {
                 EXPECT_FALSE(chunk->is_voxel_data_dirty());
+            }
             // The legacy full snapshot writes chunks/metadata; flush plants and energy too.
             ASSERT_TRUE(session->SaveWorldState());
             EXPECT_FALSE(chunk->is_voxel_data_dirty());
@@ -1581,6 +1594,345 @@ TEST_F(WorldOpenRefusal, LegacyExplicitSessionSnapshotsKeepLargeKeylessMetadata)
     ASSERT_TRUE(session.LoadWorldStateFrom(Fixture().save)) << session.GetWorldOpenError();
     EXPECT_TRUE(session.SaveWorldStateTo(Fixture().save));
     EXPECT_EQ(Read(Fixture().save / "world_info.json"), metadata.dump());
+}
+
+TEST_F(WorldOpenRefusal, SessionCacheMetadataRetryAndExplicitSaveAsUseOneFinalizer) {
+    GameSession session;
+    session.SetActiveRegionsEnabled(false);
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&Fixture().jobs);
+    ASSERT_TRUE(session.LoadWorld("fixture"));
+    ASSERT_FALSE(session.ActiveRegionsEnabled());
+    session.GetWorldSystem()->quiesce_streaming_jobs_for_save();
+    session.GetWorldSystem()->clear_world(session.GetPhysicsSystem());
+    ASSERT_TRUE(session.LoadWorldState());
+    auto policy = TestSupport::FarCachePolicy();
+    std::vector<World::FarCacheReport> reports;
+    policy->after_commit = [&](const auto& report) {
+        reports.push_back(report);
+    };
+    session.SetFarEditedCachePolicy(policy);
+    ASSERT_TRUE(session.RunInSnapshotTransaction(
+        [&] { return session.SaveWorldState() && session.SaveWorld(); }));
+    ASSERT_EQ(reports.size(), 1u);
+    EXPECT_TRUE(reports.back().authoritative_success);
+    EXPECT_TRUE(reports.back().derived_success);
+    EXPECT_FALSE(session.ActiveRegionsEnabled());
+    const auto source_catalog = Read(Fixture().save / "far/catalog.json");
+    ASSERT_FALSE(source_catalog.empty());
+    ASSERT_TRUE(session.SaveWorld());
+    ASSERT_EQ(reports.size(), 2u);
+    EXPECT_EQ(reports.back().rebuilt_tiles, 0u);
+    EXPECT_EQ(Read(Fixture().save / "far/catalog.json"), source_catalog);
+    const auto destination = Fixture().root / "explicit-destination";
+    const auto chunks = session.GetWorldSystem()->snapshot_streamed_chunks();
+    ASSERT_FALSE(chunks.empty());
+    ASSERT_TRUE(chunks.front());
+    chunks.front()->mark_voxel_data_dirty();
+    ASSERT_TRUE(session.SaveWorldStateTo(destination));
+    ASSERT_EQ(reports.size(), 3u);
+    EXPECT_TRUE(reports.back().derived_success);
+    Persistence::SnapshotIndex index;
+    ASSERT_TRUE(Persistence::read_snapshot_index(destination, index, nullptr));
+    EXPECT_EQ(index.generation, 1u);
+    EXPECT_EQ(Read(Fixture().save / "far/catalog.json"), source_catalog);
+    EXPECT_TRUE(WorldSaveService::validate_save(destination));
+    session.SetFarEditedCachePolicy({});
+}
+
+TEST_F(WorldOpenRefusal, SimulationOffSaveAsTransfersDiskOnlyContributorAndCatalog) {
+    WorldStreamingState disk_state;
+    const IVec3 disk_coords{1, 0, 0};
+    auto disk = TestSupport::FarCacheEditedChunk(disk_state, disk_coords);
+    ASSERT_TRUE(WorldSaveService{}.save_world(disk_state, Fixture().save));
+    GameSession session;
+    session.SetActiveRegionsEnabled(false);
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&Fixture().jobs);
+    ASSERT_TRUE(session.LoadWorld("fixture"));
+    ASSERT_FALSE(session.ActiveRegionsEnabled());
+    auto* world = session.GetWorldSystem();
+    ASSERT_TRUE(world);
+    world->quiesce_streaming_jobs_for_save();
+    world->clear_world(session.GetPhysicsSystem());
+    const auto resident = WorldSaveService::read_chunk(Fixture().save, {0, 0, 0}, false);
+    ASSERT_EQ(resident.status, WorldSaveService::ChunkReadStatus::Found);
+    ASSERT_TRUE(resident.chunk);
+    ASSERT_TRUE(world->adopt_streamed_chunk(resident.chunk));
+    resident.chunk->mark_voxel_data_dirty();
+    const auto streamed = world->snapshot_streamed_chunks();
+    ASSERT_EQ(streamed.size(), 1u);
+    ASSERT_TRUE(streamed.front());
+    EXPECT_NE(streamed.front()->get_id(), disk->get_id());
+    const auto source_index = Read(Persistence::snapshot_index_path(Fixture().save));
+    const auto source_region = Read(WorldSaveService::region_file_path(Fixture().save, 0, 0));
+    auto policy = TestSupport::FarCachePolicy();
+    std::vector<World::FarCacheReport> reports;
+    policy->after_commit = [&](const auto& report) {
+        reports.push_back(report);
+    };
+    session.SetFarEditedCachePolicy(policy);
+    const auto destination = Fixture().root / "disk-only-destination";
+    ASSERT_TRUE(session.SaveWorldStateTo(destination));
+    ASSERT_EQ(reports.size(), 1u);
+    EXPECT_TRUE(reports.back().authoritative_success);
+    EXPECT_TRUE(reports.back().derived_success);
+    const auto transferred = WorldSaveService::read_chunk(destination, disk_coords, true);
+    ASSERT_EQ(transferred.status, WorldSaveService::ChunkReadStatus::Found);
+    ASSERT_TRUE(transferred.chunk);
+    EXPECT_EQ(transferred.chunk->sdf_data, disk->sdf_data);
+    EXPECT_EQ(transferred.chunk->material_data, disk->material_data);
+    EXPECT_EQ(WorldSaveService::read_chunk(destination, {0, 0, 0}, true).status,
+              WorldSaveService::ChunkReadStatus::Found);
+    World::FarEditedCatalog catalog;
+    ASSERT_EQ(World::ReadFarEditedCatalog(destination, policy->limits.catalog, catalog),
+              World::FarCatalogError::None);
+    ASSERT_FALSE(catalog.tiles.empty());
+    bool found_disk = false;
+    for (const auto& tile : catalog.tiles)
+        for (const auto& dependency : tile.dependencies)
+            if (dependency.chunk_id == disk->get_id()) {
+                found_disk = true;
+                EXPECT_EQ(dependency.member_generation, 1u);
+            }
+    EXPECT_TRUE(found_disk);
+    EXPECT_EQ(Read(Persistence::snapshot_index_path(Fixture().save)), source_index);
+    EXPECT_EQ(Read(WorldSaveService::region_file_path(Fixture().save, 0, 0)), source_region);
+    EXPECT_TRUE(WorldSaveService::validate_save(destination));
+    EXPECT_FALSE(session.ActiveRegionsEnabled());
+    session.SetFarEditedCachePolicy({});
+}
+
+TEST_F(WorldOpenRefusal, OrdinaryOpenAdmitsAggregateOverlayBytesBeforeReading) {
+    const auto first = World::FarOverlayPath(Fixture().save, {1, 0, 0});
+    const auto second = World::FarOverlayPath(Fixture().save, {1, 1, 0});
+    Write(first, "bad");
+    Write(second, "bad");
+    // Sparse files cross the aggregate cap while each remains below the per-file cap.
+    fs::resize_file(first, World::kFsv1MaxFileBytes / 2 + 1);
+    fs::resize_file(second, World::kFsv1MaxFileBytes / 2 + 1);
+    const auto decodes = World::FarOverlayDecodeCountForTesting();
+    std::vector<std::string> errors;
+    EXPECT_FALSE(WorldSaveService::validate_save(Fixture().save, &errors));
+    EXPECT_EQ(World::FarOverlayDecodeCountForTesting(), decodes);
+    ASSERT_FALSE(errors.empty());
+    EXPECT_TRUE(std::any_of(errors.begin(), errors.end(), [](const auto& error) {
+        return error.find("overlay byte limit") != std::string::npos;
+    }));
+    EXPECT_FALSE(Persistence::snapshot_index_exists(Fixture().save));
+    EXPECT_FALSE(Persistence::journal_pending(Fixture().save));
+}
+
+struct SaveMemberFailure {
+    fs::path member;
+    std::string step;
+    bool hit = false;
+};
+SaveMemberFailure*& ActiveSaveMemberFailure() {
+    static SaveMemberFailure* failure = nullptr;
+    return failure;
+}
+void FailSaveMemberFlush(const char* step, const fs::path& path) {
+    auto* failure = ActiveSaveMemberFailure();
+    if (failure && !failure->hit && failure->step == step && failure->member == path) {
+        failure->hit = true;
+        WorldSaveService::set_directory_flush_failure_for_testing(0);
+    }
+}
+class SaveMemberFailureScope {
+public:
+    explicit SaveMemberFailureScope(SaveMemberFailure& failure) {
+        ActiveSaveMemberFailure() = &failure;
+        Persistence::set_snapshot_step_hook_for_testing(&FailSaveMemberFlush);
+    }
+    ~SaveMemberFailureScope() {
+        Persistence::set_snapshot_step_hook_for_testing(nullptr);
+        WorldSaveService::set_directory_flush_failure_for_testing(-1);
+        ActiveSaveMemberFailure() = nullptr;
+    }
+    SaveMemberFailureScope(const SaveMemberFailureScope&) = delete;
+    SaveMemberFailureScope& operator=(const SaveMemberFailureScope&) = delete;
+};
+
+TEST_F(WorldOpenRefusal, FarPolicyAuthoritativeFailuresAbortDirtyAndZeroDirtySessionSaves) {
+    GameSession session;
+    session.SetActiveRegionsEnabled(false);
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&Fixture().jobs);
+    session.SetAetherStateEnabled(true);
+    ASSERT_TRUE(session.LoadWorld("fixture"));
+    ASSERT_FALSE(session.ActiveRegionsEnabled());
+    auto* world = session.GetWorldSystem();
+    ASSERT_TRUE(world);
+    world->quiesce_streaming_jobs_for_save();
+    world->clear_world(session.GetPhysicsSystem());
+    ASSERT_TRUE(session.LoadWorldState());
+    auto* energy = session.GetEnergyFieldState();
+    ASSERT_TRUE(energy);
+    energy->SetAnchorCell(0, 0);
+    energy->QueueDeposit(1, 0, 0, 0, 1000);
+    energy->Tick(session.GetSimulationTickCount());
+    ASSERT_GT(energy->page_count(), 0u);
+    auto& registry = session.GetRegistry();
+    const auto plant = registry.create();
+    registry.emplace<Components::PlantTag>(plant);
+    registry.emplace<Components::TransformComponent>(plant).position = Vec3(0, 1, 0);
+    registry.emplace<Components::PlantGenomeComponent>(plant).genes.fill(0.5f);
+    registry.emplace<Components::PlantGrowthComponent>(plant);
+    auto policy = TestSupport::FarCachePolicy();
+    std::vector<World::FarCacheReport> reports;
+    policy->after_commit = [&](const auto& report) {
+        reports.push_back(report);
+    };
+    session.SetFarEditedCachePolicy(policy);
+    ASSERT_TRUE(session.SaveWorldState());
+    reports.clear();
+    for (const bool dirty : {false, true}) {
+        for (const bool fail_energy : {false, true}) {
+            SCOPED_TRACE(testing::PrintToString(std::tuple(dirty, fail_energy)));
+            const auto index = Read(Persistence::snapshot_index_path(Fixture().save));
+            const auto region = Read(WorldSaveService::region_file_path(Fixture().save, 0, 0));
+            const auto catalog = Read(Fixture().save / "far/catalog.json");
+            const auto plants = Read(WorldSaveService::plant_entities_path(Fixture().save));
+            const auto old_energy = Read(Fixture().save / "aether_state.efs");
+            const auto chunks = world->snapshot_streamed_chunks();
+            ASSERT_FALSE(chunks.empty());
+            ASSERT_TRUE(chunks.front());
+            if (dirty)
+                chunks.front()->mark_voxel_data_dirty();
+            SaveMemberFailure failure;
+            failure.member = fail_energy ? Fixture().save / "aether_state.efs"
+                                         : WorldSaveService::plant_entities_path(Fixture().save);
+            failure.step = "before-replace";
+            Luminumbra::world::WorldStateSaveReport report;
+            {
+                const SaveMemberFailureScope hook(failure);
+                EXPECT_FALSE(session.SaveWorldState(&report));
+            }
+            EXPECT_TRUE(failure.hit);
+            EXPECT_FALSE(report.saved);
+            EXPECT_TRUE(reports.empty());
+            EXPECT_EQ(Read(Persistence::snapshot_index_path(Fixture().save)), index);
+            EXPECT_EQ(Read(WorldSaveService::region_file_path(Fixture().save, 0, 0)), region);
+            EXPECT_EQ(Read(Fixture().save / "far/catalog.json"), catalog);
+            EXPECT_EQ(Read(WorldSaveService::plant_entities_path(Fixture().save)), plants);
+            EXPECT_EQ(Read(Fixture().save / "aether_state.efs"), old_energy);
+            EXPECT_FALSE(Persistence::journal_pending(Fixture().save));
+            if (dirty) {
+                EXPECT_TRUE(chunks.front()->is_voxel_data_dirty());
+            }
+        }
+    }
+    session.SetFarEditedCachePolicy({});
+}
+
+TEST_F(WorldOpenRefusal, FarPolicyServerMetadataFailureRollsBackFullSnapshot) {
+    Write(Fixture().root / "data/common/systems.json",
+          R"({"sim":{"active_regions":{"enabled":false}}})");
+    Server::ServerWorldRunnerConfig config;
+    config.root_path = RootString();
+    config.world_id = "fixture";
+    config.surface_radius = 0;
+    config.collision_radius = 0;
+    Server::ServerWorldRunner runner(config);
+    ASSERT_TRUE(runner.Boot()) << runner.GetBootError();
+    ASSERT_TRUE(runner.Session());
+    ASSERT_FALSE(runner.Session()->ActiveRegionsEnabled());
+    auto* world = runner.Session()->GetWorldSystem();
+    ASSERT_TRUE(world);
+    world->quiesce_streaming_jobs_for_save();
+    world->clear_world(runner.Session()->GetPhysicsSystem());
+    ASSERT_TRUE(runner.Session()->LoadWorldState());
+    auto policy = TestSupport::FarCachePolicy();
+    std::vector<World::FarCacheReport> reports;
+    policy->after_commit = [&](const auto& report) {
+        reports.push_back(report);
+    };
+    runner.Session()->SetFarEditedCachePolicy(policy);
+    ASSERT_GT(runner.SaveFullSnapshot(), 0u);
+    reports.clear();
+    const auto index = Read(Persistence::snapshot_index_path(Fixture().save));
+    const auto region = Read(WorldSaveService::region_file_path(Fixture().save, 0, 0));
+    const auto catalog = Read(Fixture().save / "far/catalog.json");
+    const auto metadata = Read(Fixture().save / "world_info.json");
+    const auto chunks = world->snapshot_streamed_chunks();
+    ASSERT_FALSE(chunks.empty());
+    ASSERT_TRUE(chunks.front());
+    chunks.front()->sdf_data[1 + 17 * (1 + 17)] = -7;
+    chunks.front()->mark_voxel_data_dirty();
+    SaveMemberFailure failure;
+    failure.member = Fixture().save / "world_info.json";
+    failure.step = "before-replace";
+    {
+        const SaveMemberFailureScope hook(failure);
+        EXPECT_EQ(runner.SaveFullSnapshot(), 0u);
+    }
+    EXPECT_TRUE(failure.hit);
+    EXPECT_TRUE(reports.empty());
+    EXPECT_EQ(Read(Persistence::snapshot_index_path(Fixture().save)), index);
+    EXPECT_EQ(Read(WorldSaveService::region_file_path(Fixture().save, 0, 0)), region);
+    EXPECT_EQ(Read(Fixture().save / "far/catalog.json"), catalog);
+    EXPECT_EQ(Read(Fixture().save / "world_info.json"), metadata);
+    EXPECT_TRUE(chunks.front()->is_voxel_data_dirty());
+    EXPECT_FALSE(Persistence::journal_pending(Fixture().save));
+    runner.Session()->SetFarEditedCachePolicy({});
+    runner.Shutdown();
+}
+
+TEST_F(WorldOpenRefusal, ServerFullSnapshotAndZeroDirtySaveFinalizeWithoutEnablingSimulation) {
+    Write(Fixture().root / "data/common/systems.json",
+          R"({"sim":{"active_regions":{"enabled":false}}})");
+    Server::ServerWorldRunnerConfig config;
+    config.root_path = RootString();
+    config.world_id = "fixture";
+    config.surface_radius = 0;
+    config.collision_radius = 0;
+    Server::ServerWorldRunner runner(config);
+    ASSERT_TRUE(runner.Boot()) << runner.GetBootError();
+    ASSERT_TRUE(runner.Session());
+    runner.Session()->GetWorldSystem()->clear_world(runner.Session()->GetPhysicsSystem());
+    ASSERT_TRUE(runner.Session()->LoadWorldState());
+    auto policy = TestSupport::FarCachePolicy();
+    std::vector<World::FarCacheReport> reports;
+    policy->after_commit = [&](const auto& report) {
+        reports.push_back(report);
+    };
+    runner.Session()->SetFarEditedCachePolicy(policy);
+    const auto hash = runner.ComputeWorldHash();
+    const auto hashes = [&] {
+        const auto sub = runner.ComputeWorldSubHashes();
+        return std::tuple{sub.terrain,
+                          sub.mesh,
+                          sub.water,
+                          sub.entities,
+                          sub.wind,
+                          sub.weather,
+                          sub.aether,
+                          sub.aether_state,
+                          runner.ComputeEcologySubHash(),
+                          runner.Session()->ComputeScentSubHash(),
+                          runner.Session()->ComputePlantSubHash(),
+                          runner.Session()->GetWorldClock().canonical_bytes()};
+    };
+    const auto before = hashes();
+    ASSERT_GT(runner.SaveFullSnapshot(), 0u);
+    ASSERT_EQ(reports.size(), 1u);
+    EXPECT_TRUE(reports.back().authoritative_success);
+    EXPECT_TRUE(reports.back().derived_success);
+    EXPECT_FALSE(runner.Session()->ActiveRegionsEnabled());
+    EXPECT_EQ(runner.ComputeWorldHash(), hash);
+    EXPECT_EQ(hashes(), before);
+    fs::remove_all(Fixture().save / "far");
+    EXPECT_EQ(runner.ComputeWorldHash(), hash);
+    EXPECT_EQ(hashes(), before);
+    ASSERT_TRUE(runner.Session()->SaveWorldState());
+    ASSERT_EQ(reports.size(), 2u);
+    EXPECT_TRUE(reports.back().derived_success);
+    EXPECT_GT(reports.back().rebuilt_tiles, 0u);
+    EXPECT_EQ(hashes(), before);
+    // Release the observer before runner shutdown may perform another save.
+    runner.Session()->SetFarEditedCachePolicy({});
+    runner.Shutdown();
 }
 
 } // namespace

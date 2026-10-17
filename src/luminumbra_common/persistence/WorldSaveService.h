@@ -5,6 +5,7 @@
 #include "ecs/EntitySnapshot.h"
 #include "fields/FieldPageState.h"
 #include "world/ActiveRegionLedger.h"
+#include "world/FarAuthorityOverlay.h"
 #include "world/GroundObjectStore.h"
 #include "world/TerrainPresetLoader.h"
 #include "world/WorldClock.h"
@@ -40,6 +41,13 @@ enum class DerivedMemberState : std::uint8_t {
     Stale,
     Unreceipted,
     RecoveryPending
+};
+
+// One operation's validated bytes and decoded overlay; consumers may retain the owned tile.
+struct DerivedMemberValidation {
+    DerivedMemberState state = DerivedMemberState::Missing;
+    MemberDigest digest;
+    World::FarOverlayTile overlay;
 };
 
 // Inputs of the region simulation digest. Priority when ids collide: live over
@@ -313,13 +321,15 @@ public:
     static ChunkReadResult read_chunk(const std::filesystem::path& save_dir,
                                       const IVec3& coords,
                                       bool require_index = false);
-    // Save-as transfer of indexed authority. Reads the source index once and copies validated
+    // Save-as transfer of authority. Reads a present source index once and copies validated
     // compressed records in region batches, preserving unrelated destination records.
+    // Unindexed sources require explicit opt-in and complete saved-world validation.
     // The caller must own a destination snapshot transaction covering the entire save-as.
     static bool copy_authoritative_chunks(const std::filesystem::path& source,
                                           const std::filesystem::path& destination,
                                           const std::vector<IVec3>& coords,
-                                          std::vector<std::string>* errors = nullptr);
+                                          std::vector<std::string>* errors = nullptr,
+                                          bool require_index = true);
     // Capture BEFORE serialization; call only after the complete snapshot commits. A changed
     // or saturated revision retains its dirty obligation.
     static std::function<void()>
@@ -381,6 +391,8 @@ public:
                                         std::vector<std::string>* errors = nullptr);
     // Number of full load_world decodes since process start (single-decode contract tests).
     static std::uint64_t decode_count_for_testing();
+    // Number of bounded source-region decode passes (capture reuse regressions).
+    static std::uint64_t edited_source_region_decode_count_for_testing();
     // Number of field-page file parses, excluding absent members (observational only).
     static std::uint64_t field_page_decode_count_for_testing();
     static std::uint64_t chunk_decode_count_for_testing();
@@ -400,23 +412,32 @@ public:
                                             MemberDigest& out,
                                             std::string& error);
     // Structure is validated before currency. Catalog contents are supplied by the catalog
-    // consumer through catalog_digest; a present catalog without that validator refuses.
+    // consumer through catalog_digest. Ordinary load/validation uses the strict engine catalog
+    // validator; low-level derived inspection still requires its explicit validator.
     static bool derived_member_digest(const std::filesystem::path& save_dir,
                                       std::string_view relative_path,
                                       std::uint64_t source_generation_limit,
                                       MemberDigest& out,
                                       std::string& error,
-                                      MemberDigestFn catalog_digest = nullptr);
+                                      MemberDigestFn catalog_digest = nullptr,
+                                      World::FarOverlayTile* overlay = nullptr);
     static bool inspect_derived_member(const std::filesystem::path& save_dir,
                                        std::string_view relative_path,
                                        const SnapshotIndex& index,
                                        DerivedMemberState& state,
                                        std::string& error,
-                                       MemberDigestFn catalog_digest = nullptr);
-    static bool verify_derived_members(const std::filesystem::path& save_dir,
-                                       const SnapshotIndex& index,
-                                       std::vector<std::string>* errors,
-                                       MemberDigestFn catalog_digest = nullptr);
+                                       MemberDigestFn catalog_digest = nullptr,
+                                       DerivedMemberValidation* verified = nullptr);
+    // Admit the complete directory before payload reads. An optional visitor receives the
+    // same owned decode and verification result, with no additional overlay reads.
+    static bool verify_derived_members(
+        const std::filesystem::path& save_dir,
+        const SnapshotIndex& index,
+        std::vector<std::string>* errors,
+        MemberDigestFn catalog_digest = nullptr,
+        std::size_t max_entries = kMaxSnapshotMembers,
+        std::uint64_t max_overlay_bytes = World::kFsv1MaxFileBytes,
+        const std::function<bool(std::string_view, DerivedMemberValidation&&)>& visitor = {});
     // Uses load_world's refusal rules on the installed candidate set, never a validation cache.
     static bool validate_authoritative_relationships(const std::filesystem::path& save_dir,
                                                      std::vector<std::string>& errors,

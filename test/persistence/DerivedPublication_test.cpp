@@ -667,9 +667,19 @@ TEST(DerivedPublication, EmptyAndExpiredHandlesCannotMutateAReplacementTransacti
         EXPECT_FALSE(transaction->RollbackDerivedGroup(invalid));
         EXPECT_FALSE(transaction->WriteDerivedMember(invalid, kOverlay, Overlay(2)));
         EXPECT_FALSE(transaction->RemoveDerivedMember(invalid, kOverlay));
+        EXPECT_FALSE(transaction->RequireDerivedGroupForCommit(invalid, &RawDigest));
+        EXPECT_FALSE(transaction->DerivedGroupCommitted(invalid));
         EXPECT_EQ(ReadTree(root.path()), before);
     }
+    EXPECT_FALSE(transaction->RequireDerivedGroupForCommit(*current, nullptr));
+    EXPECT_FALSE(
+        transaction->RequireDerivedGroupForCommit(*current, &WorldSaveService::member_digest));
+    EXPECT_TRUE(transaction->RequireDerivedGroupForCommit(*current, &RawDigest));
     EXPECT_TRUE(transaction->commit(nullptr));
+    EXPECT_TRUE(transaction->DerivedGroupCommitted(*current));
+    EXPECT_FALSE(transaction->DerivedGroupCommitted(empty));
+    EXPECT_FALSE(transaction->DerivedGroupCommitted(*expired));
+    EXPECT_FALSE(transaction->RequireDerivedGroupForCommit(*current, &RawDigest));
 }
 
 TEST(DerivedPublication, ForeignThreadCannotMutateFinalizeOrPublishTransaction) {
