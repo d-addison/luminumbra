@@ -261,8 +261,10 @@ public:
     // catch). Defaults to the compiled constants -> byte-identical until a caller overrides it from
     // SystemConfig sim.ecology (ai::ResolveEcologyTuning). Set once after construction.
     void ApplySystemConfig(const luminumbra::core::SystemConfig& config);
-    // Computed on demand from the current effective simulation gates and tuning.
+    // Computed on demand from effective simulation gates, tuning and resolved calendar.
     [[nodiscard]] std::string SystemConfigIdentity() const;
+    // Pre-world admission can supply the calendar selected for the intended world.
+    [[nodiscard]] std::string SystemConfigIdentity(const WorldCalendar& calendar) const;
     // Resolved preset, biome/structure dependencies and captured species bytes.
     // Shared by TCP Hello, lockstep and replay; never re-reads content.
     [[nodiscard]] const std::string& PresetContentHash() const {
@@ -393,6 +395,10 @@ public:
     [[nodiscard]] const WorldClock& GetWorldClock() const {
         return m_worldClock;
     }
+    [[nodiscard]] WorldCalendar GetRenderCalendar() const {
+        return m_activeRegionsEnabled ? m_worldClock.calendar()
+                                      : m_renderCalendar.value_or(WorldCalendar::Legacy());
+    }
     [[nodiscard]] const ActiveRegionLedger& GetActiveRegionLedger() const {
         return m_activeRegionLedger;
     }
@@ -492,8 +498,13 @@ private:
     void ResetWorldSystems();
     void RestoreWorldClock(const WorldClock& clock);
     bool SaveWorldMetadataTo(const std::filesystem::path& save_dir);
-    bool ClockConfigurationCompatible(const std::filesystem::path& save_dir) const;
+    bool ReconcileWorldCalendarMetadataTo(const std::filesystem::path& save_dir,
+                                          bool has_saved_render_calendar);
+    bool ClockConfigurationCompatible(const std::filesystem::path& save_dir,
+                                      bool* has_render_calendar = nullptr) const;
     WorldClock m_worldClock;
+    // Presentation persistence bookkeeping; excluded from disabled simulation hashes.
+    std::optional<WorldCalendar> m_renderCalendar;
     void AttachRegionEditObserver();
     RegionSchedulerConfig m_regionSchedulerConfig;
     std::optional<RegionSchedulerConfig> m_regionSchedulerOverride;

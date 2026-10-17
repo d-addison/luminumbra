@@ -264,6 +264,75 @@ TEST_F(EffectivePresetIdentity, ReplayBootRetainsHistoricalAndCurrentPresetIdent
     }
 }
 
+TEST_F(EffectivePresetIdentity, ReplayAdmissionUsesTheCreatedCalendarWithActiveRegionsOnAndOff) {
+    auto source = shipping;
+    source["generation_params"]["terrain"]["hydro"]["enabled"] = false;
+    WriteCatalog(source);
+    const auto effective = LoadTerrainPresetFromJson(
+        ResolveEffectivePreset(source, TerrainPresetUse::NewWorld), root / "data");
+    ASSERT_TRUE(effective.ok);
+    for (const bool active : {false, true}) {
+        SCOPED_TRACE(active);
+        const auto systems = luminumbra::core::SystemConfig::FromJsonString(
+            active ? R"({"sim":{"active_regions":{"enabled":true}}})"
+                   : R"({"sim":{"active_regions":{"enabled":false}}})");
+        options.systems_config_override = systems;
+        for (const bool custom : {false, true}) {
+            SCOPED_TRACE(custom);
+            options.preset_json_override = custom ? std::optional(source.dump()) : std::nullopt;
+            GameSession session;
+            Configure(session);
+            ASSERT_TRUE(session.CreateTransientWorld("Calendar", options.seed, options.preset));
+            Luminumbra::Replay::ReplayHeader header;
+            header.seed_string = options.seed;
+            header.preset = options.preset;
+            header.preset_content_hash = effective.preset_content_hash;
+            header.system_config_identity = session.SystemConfigIdentity();
+            const auto admitted = ReplayRunnerConfigFrom(options, header);
+            ASSERT_TRUE(admitted.has_value());
+            if (!admitted.has_value())
+                return;
+            EXPECT_EQ(admitted->required_preset_content_hash, session.PresetContentHash());
+            EXPECT_EQ(RuntimeHelloFrom(options).system_config_identity,
+                      header.system_config_identity);
+            const auto retained_world = session.GetWorldSystem();
+            header.system_config_identity = "mismatched";
+            EXPECT_FALSE(ReplayRunnerConfigFrom(options, header).has_value());
+            EXPECT_EQ(session.GetWorldSystem(), retained_world);
+            EXPECT_FALSE(fs::exists(root / "worlds/saves"));
+        }
+    }
+}
+
+TEST_F(EffectivePresetIdentity, TransientSnapshotsRetainTheEffectivePresetAndRenderCalendar) {
+    options.systems_config_override = luminumbra::core::SystemConfig::FromJsonString(
+        R"({"sim":{"active_regions":{"enabled":false}}})");
+    for (const int revision : {1, 2}) {
+        SCOPED_TRACE(revision);
+        auto source = shipping;
+        source["generation_params"]["terrain"]["surface_sampling_revision"] = revision;
+        source["generation_params"]["terrain"]["hydro"]["enabled"] = false;
+        WriteCatalog(source);
+        GameSession session;
+        Configure(session);
+        ASSERT_TRUE(session.CreateTransientWorld("Snapshot", options.seed, options.preset));
+        const auto destination = root / ("snapshot-" + std::to_string(revision));
+        ASSERT_TRUE(session.SaveWorldStateTo(destination));
+        std::ifstream input(destination / "preset.json");
+        ASSERT_TRUE(input);
+        const auto saved = nlohmann::json::parse(input);
+        const auto preset = LoadTerrainPresetFromJson(saved, root / "data");
+        ASSERT_TRUE(preset.ok);
+        EXPECT_EQ(preset.params.surface_sampling_revision, revision);
+        EXPECT_EQ(preset.preset_content_hash, session.PresetContentHash());
+        std::ifstream metadata(destination / "world_info.json");
+        ASSERT_TRUE(metadata);
+        EXPECT_EQ(nlohmann::json::parse(metadata).at("renderCalendar"),
+                  Luminumbra::world::WorldClock{}.calendar_metadata());
+        EXPECT_FALSE(fs::exists(root / "worlds/saves"));
+    }
+}
+
 TEST_F(EffectivePresetIdentity, UnstampedRecordingReplaysItsEffectiveRevision) {
     auto source = shipping;
     source["schema_rev"] = 7;
@@ -286,9 +355,9 @@ TEST_F(EffectivePresetIdentity, UnstampedRecordingReplaysItsEffectiveRevision) {
         options.preset_json_override = custom ? std::optional(source.dump()) : std::nullopt;
         ASSERT_EQ(RunRecord(options), 0);
         const auto recorded = Luminumbra::Replay::ReadReplay(options.record_path);
-        if (recorded)
+        if (recorded) {
             EXPECT_EQ(recorded->header.preset_content_hash, effective.preset_content_hash);
-        else
+        } else
             FAIL() << "The recorded replay must be readable";
         ASSERT_EQ(RunReplay(options), 0);
         std::ifstream input(options.artifact_path);

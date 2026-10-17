@@ -883,13 +883,16 @@ class AcceptanceMatrixTests(unittest.TestCase):
         self.assertIn("ActiveRegionLedgerTest.ValidAnchorBoundaries", row["discrepancy"])
         self.assertIn("[-2^24, 2^24)", row["discrepancy"])
         self.assertIn("issue #250", row["discrepancy"])
+        self.assertIn("docs/active-regions.md now agrees", row["discrepancy"])
+        self.assertIn("test/common/ActiveRegionLedger_test.cpp", row["discrepancy"])
+        self.assertIn("asymmetric", row["discrepancy"])
         self.assertIn("integrated boundary regression", row["discrepancy"])
         self.assertEqual(row["evidence"][:3], [
             {"kind": "ctest", "ref": "ActiveRegionLedgerTest.ValidAnchorBoundaries"},
             {"kind": "ctest", "ref": "ActiveRegionLedgerTest.InvalidSchedulerInputsAreSkippedAndCounted"},
             {"kind": "ctest", "ref": "GameSessionHeadlessWorldTest.InvalidHostInputsNeverThrowAndAreCounted"},
         ])
-        self.assertEqual(len(row["evidence"]), 4)
+        self.assertEqual(len(row["evidence"]), 5)
         planned = row["evidence"][3]
         self.assertEqual(planned["kind"], "ctest")
         self.assertEqual(planned["ref"], "ActiveRegionLedgerTest.SymmetricAnchorBoundaries")
@@ -900,6 +903,17 @@ class AcceptanceMatrixTests(unittest.TestCase):
         self.assertIn(MODULE._escape_cell(row["statement"]), MODULE.render_doc(matrix))
         self.assertIn("docs/active-regions.md", row["discrepancy"])
         self.assertIn("coverage remains planned", row["discrepancy"])
+        self.assertIn("owner: ds", row["evidence"][4]["planned"])
+        self.assertIn("host-boundary regression", row["evidence"][4]["planned"])
+        self.assertEqual(row["evidence"][4]["ref"], "GameSessionHeadlessWorldTest.HalfOpenHostInputBoundaries")
+        self.assertIn("rejection counters", row["evidence"][4]["planned"])
+        self.assertIn("accept -2^24", row["evidence"][4]["planned"])
+        self.assertIn("reject +2^24", row["evidence"][4]["planned"])
+        self.assertIn("both X and Z endpoints", row["evidence"][4]["planned"])
+        self.assertIn("adjacent interior coordinates", row["evidence"][4]["planned"])
+        self.assertIn("adjacent exterior coordinates", row["evidence"][4]["planned"])
+        self.assertIn("next representable float below -2^24", row["evidence"][4]["planned"])
+        self.assertIn("walking anchors, ground-object edits and pins", row["evidence"][4]["planned"])
         self.assertIn("next representable float below -2^24", planned["planned"])
         self.assertIn("both X and Z endpoints", planned["planned"])
         self.assertIn("adjacent interior coordinates", planned["planned"])

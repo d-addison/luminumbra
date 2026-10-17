@@ -852,13 +852,15 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
         return false;
     world::WorldClock clock;
     std::string clock_error;
-    const auto metadata = nlohmann::json::parse(bytes, nullptr, false);
-    // Legacy metadata is opaque input to this helper. Only clock-bearing input
-    // opts into the new validation; the existing destination is still validated.
+    auto metadata = nlohmann::json::parse(bytes, nullptr, false);
+    // Legacy metadata is opaque input to this helper. Clock or marker input
+    // opts into calendar validation; the existing destination is still validated.
     const bool has_clock = metadata.contains("simulationTick") || metadata.contains("calendar");
     std::optional<Vec3> ambient_anchor;
-    if (has_clock && (!world::WorldClock::from_metadata(metadata, clock, clock_error) ||
-                      !ReadAmbientAnchor(metadata, ambient_anchor, clock_error))) {
+    const bool has_render_calendar = metadata.contains("renderCalendar");
+    if ((has_clock || has_render_calendar) &&
+        (!world::WorldClock::from_metadata(metadata, clock, clock_error) ||
+         !ReadAmbientAnchor(metadata, ambient_anchor, clock_error))) {
         AddError(errors, clock_error);
         return false;
     }
@@ -870,9 +872,26 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
         AddError(errors, "Incompatible configuration: this world requires sim.active_regions.");
         return false;
     }
+    // Explicit writes normalize supported calendar encodings; reads never rewrite.
+    if (has_clock)
+        clock.write_metadata(metadata);
+    if (has_render_calendar) {
+        std::optional<world::WorldCalendar> calendar;
+        if (!world::WorldClock::read_render_calendar(metadata, calendar, clock_error)) {
+            AddError(errors, clock_error);
+            return false;
+        }
+        if (!calendar.has_value()) {
+            AddError(errors, "Corrupt world metadata: missing renderCalendar.");
+            return false;
+        }
+        metadata["renderCalendar"] = world::WorldClock(0, *calendar).calendar_metadata();
+    }
+    const std::string output_bytes =
+        (has_clock || has_render_calendar) ? metadata.dump(4) + "\n" : bytes;
     const auto destination = save_dir / "world_info.json";
     std::filesystem::path temp;
-    if (!WriteDurableRegionTemp(destination, bytes, temp, errors))
+    if (!WriteDurableRegionTemp(destination, output_bytes, temp, errors))
         return false;
     if (InterruptBeforeRegionReplaceForTesting().exchange(false)) {
         RemoveTemporaryFile(temp);
@@ -902,6 +921,10 @@ bool WorldSaveService::save_metadata_and_active_regions(const std::string& bytes
         AddError(errors, error);
         return false;
     }
+    if (!metadata.contains("simulationTick") && !metadata.contains("calendar")) {
+        AddError(errors, "Corrupt world metadata: active regions require clock metadata.");
+        return false;
+    }
     auto saved = ledger;
     saved.mark_saved(clock);
     world::ActiveRegionLedger checked;
@@ -927,8 +950,11 @@ bool WorldSaveService::read_clock_metadata(const std::filesystem::path& save_dir
                                            world::WorldClock& clock,
                                            bool& requires_active_regions,
                                            std::vector<std::string>* errors,
-                                           std::optional<Vec3>* ambient_anchor) {
-    clock = world::WorldClock{};
+                                           std::optional<Vec3>* ambient_anchor,
+                                           std::optional<world::WorldCalendar>* render_calendar) {
+    clock = world::WorldClock{0, world::WorldCalendar::Legacy()};
+    if (render_calendar)
+        render_calendar->reset();
     requires_active_regions = false;
     if (ambient_anchor)
         ambient_anchor->reset();
@@ -946,6 +972,18 @@ bool WorldSaveService::read_clock_metadata(const std::filesystem::path& save_dir
             AddError(errors, error);
             return false;
         }
+        std::optional<world::WorldCalendar> rendering;
+        if (!world::WorldClock::read_render_calendar(metadata, rendering, error)) {
+            AddError(errors, error);
+            return false;
+        }
+        if (rendering && requires_active_regions) {
+            AddError(errors,
+                     "Corrupt world metadata: renderCalendar conflicts with active regions.");
+            return false;
+        }
+        if (render_calendar)
+            *render_calendar = rendering;
         requires_active_regions = requires_active_regions || metadata.contains("simulationTick") ||
                                   metadata.contains("calendar");
         if (ambient_anchor)
@@ -1071,6 +1109,15 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
                                            std::vector<std::string>* errors) {
     if (!validate_save(save_dir, errors))
         return false;
+    world::WorldClock previous_clock;
+    bool required = false;
+    std::optional<world::WorldCalendar> render_calendar;
+    if (!read_clock_metadata(save_dir, previous_clock, required, errors, nullptr, &render_calendar))
+        return false;
+    if (render_calendar) {
+        AddError(errors, "Corrupt world metadata: renderCalendar conflicts with active regions.");
+        return false;
+    }
     // Keep an anchor-only ledger: it restores last walking feet before activation.
     if (ledger.records().empty() && !ledger.local_anchor() &&
         !std::filesystem::exists(active_regions_path(save_dir)))
@@ -1322,8 +1369,17 @@ bool WorldSaveService::read_authoritative_region_chunks(
 bool WorldSaveService::upsert_container_records(const std::filesystem::path& region_file,
                                                 const std::vector<ContainerRecord>& records,
                                                 std::vector<std::string>* errors) {
+    // A conventional region destination belongs to a save; validate its calendar
+    // before creating directories or replacing raw far-LOD records.
+    const auto parent = region_file.parent_path();
+    if (parent.filename() == kRegionDirectoryName &&
+        parent.parent_path().filename() == kChunksDirectoryName) {
+        world::WorldClock clock;
+        bool required = false;
+        if (!read_clock_metadata(parent.parent_path().parent_path(), clock, required, errors))
+            return false;
+    }
     try {
-        const std::filesystem::path parent = region_file.parent_path();
         if (!parent.empty()) {
             std::filesystem::create_directories(parent);
         }
@@ -1464,7 +1520,8 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                                   version.dump());
                 return reject("corrupt world metadata container version");
             }
-            if (metadata.contains("simulationTick") || metadata.contains("calendar")) {
+            if (metadata.contains("simulationTick") || metadata.contains("calendar") ||
+                metadata.contains("renderCalendar")) {
                 world::WorldClock clock;
                 std::string error;
                 std::optional<Vec3> anchor;

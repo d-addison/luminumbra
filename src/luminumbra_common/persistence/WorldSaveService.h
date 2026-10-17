@@ -82,7 +82,8 @@ public:
     static bool load_active_regions(world::ActiveRegionLedger& ledger,
                                     const std::filesystem::path& save_dir,
                                     std::vector<std::string>* errors = nullptr,
-                                    const world::WorldClock& absent_clock = world::WorldClock{});
+                                    const world::WorldClock& absent_clock = world::WorldClock{
+                                        0, world::WorldCalendar::Legacy()});
     // Content-only projection region_content_v2: live over parked over durable records flagged
     // edited; pristine chunks excluded. Loading is excluded only for live/parked inputs.
     static std::uint64_t region_simulation_digest(const std::filesystem::path& save_dir,
@@ -129,12 +130,13 @@ public:
                                                  std::vector<std::string>* errors = nullptr);
 
     // Shared read-only clock validation for catalog, explicit snapshots and writers.
-    // Missing metadata is a legacy snapshot with a default clock.
+    // Missing metadata is a legacy snapshot with a pinned legacy clock.
     static bool read_clock_metadata(const std::filesystem::path& save_dir,
                                     world::WorldClock& clock,
                                     bool& requires_active_regions,
                                     std::vector<std::string>* errors = nullptr,
-                                    std::optional<Vec3>* ambient_anchor = nullptr);
+                                    std::optional<Vec3>* ambient_anchor = nullptr,
+                                    std::optional<world::WorldCalendar>* render_calendar = nullptr);
 
     // --- Raw LMR1 record access (far-LOD tiles, ) ---
     // Non-chunk payloads (lod_level 1/2 far tier records) share the chunk

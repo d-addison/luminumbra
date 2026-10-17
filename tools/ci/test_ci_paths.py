@@ -40,6 +40,17 @@ def run_block(workflow: str, step: str) -> str:
 
 
 class PathGateTests(unittest.TestCase):
+    def test_asan_shard_suite_is_registered_in_every_test_entrypoint(self):
+        path = "tools/ci/test_asan_shards.py"
+        self.assertIn((path,), gate.python_test_commands(ROOT))
+        self.assertTrue(gate.needs_cpp(path))
+        self.assertTrue(gate.needs_python(path))
+        cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn('add_test(NAME AsanShardContractPython COMMAND "${Python3_EXECUTABLE}" -I -B\n'
+                      '    ${CMAKE_SOURCE_DIR}/' + path + ')', cmake)
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertIn("python3 " + path, workflow)
+
     def setUp(self):
         history = patch.object(gate.subprocess, "check_output", return_value="false\n")
         self.history = history.start()

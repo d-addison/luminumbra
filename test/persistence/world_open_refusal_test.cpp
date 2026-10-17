@@ -1,3 +1,4 @@
+#include "../support/CalendarMetadataCases.h"
 #include "../support/WorldgenTestData.h"
 #include <gtest/gtest.h>
 
@@ -20,6 +21,7 @@
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
 #include "luminumbra_server/ServerWorldRunner.h"
+#include "luminumbra_server/modes/ModeHelpers.h"
 
 #include <algorithm>
 #include <atomic>
@@ -567,6 +569,78 @@ TEST_F(WorldOpenRefusal, CorruptClockMetadataOnlySaveRefusesBeforeFirstChunkSave
     EXPECT_EQ(DiskBytes(root), before);
 }
 
+TEST_F(WorldOpenRefusal, CalendarAndMarkerRefusalMatrixPreservesInitializedAndMetadataOnlySaves) {
+    const auto base = nlohmann::json::parse(Read(save / "world_info.json"));
+    for (const bool metadata_only : {false, true}) {
+        if (metadata_only)
+            fs::remove_all(save / "chunks");
+        for (const auto& patch : TestSupport::InvalidCalendarMetadata()) {
+            SCOPED_TRACE(patch.dump());
+            auto metadata = base;
+            metadata.update(patch);
+            Write(save / "world_info.json", metadata.dump());
+            const auto before = DiskBytes(save);
+            EXPECT_FALSE(Persistence::InspectSavedWorld(root, "fixture").error.empty());
+            const auto catalog = Persistence::EnumerateSavedWorlds(root);
+            ASSERT_EQ(catalog.worlds.size(), 1u);
+            EXPECT_FALSE(catalog.worlds.front().error.empty());
+            EXPECT_FALSE(WorldSaveService::validate_save(save));
+            GameSession session;
+            session.SetJobSystem(&jobs);
+            session.SetRootPath(RootString());
+            session.SetActiveRegionsEnabled(true);
+            EXPECT_FALSE(session.LoadWorld("fixture"));
+            GameSession snapshot;
+            snapshot.SetJobSystem(&jobs);
+            snapshot.SetRootPath(RootString());
+            ASSERT_TRUE(snapshot.CreateTransientWorld("Snapshot reader", "1337", "default"));
+            EXPECT_FALSE(snapshot.LoadWorldStateFrom(save));
+            EXPECT_FALSE(snapshot.SaveWorldStateTo(save));
+            EXPECT_EQ(DiskBytes(save), before);
+        }
+    }
+}
+
+TEST_F(WorldOpenRefusal, SupportedCalendarFormsAreReadOnlyAndMarkerDoesNotRequireFeature) {
+    const auto base = nlohmann::json::parse(Read(save / "world_info.json"));
+    fs::remove_all(save / "chunks");
+    const auto v2 = TestSupport::DefaultCalendarMetadata();
+    const auto v1 = nlohmann::json{{"dayLengthTicks", 36000}, {"daysPerYear", 3}};
+    for (const auto& patch : {nlohmann::json::object(),
+                              nlohmann::json{{"calendar", v1}},
+                              nlohmann::json{{"calendar", v2}},
+                              nlohmann::json{{"renderCalendar", v2}}}) {
+        fs::remove_all(save / "chunks");
+        auto metadata = base;
+        metadata.update(patch);
+        Write(save / "world_info.json", metadata.dump());
+        const auto before = DiskBytes(save);
+        const auto inspected = Persistence::InspectSavedWorld(root, "fixture");
+        ASSERT_TRUE(inspected.error.empty()) << inspected.error;
+        EXPECT_EQ(inspected.requires_active_regions, patch.contains("calendar"));
+        EXPECT_EQ(inspected.render_calendar.has_value(), patch.contains("renderCalendar"));
+        GameSession session;
+        session.SetJobSystem(&jobs);
+        session.SetRootPath(RootString());
+        session.SetActiveRegionsEnabled(patch.contains("calendar"));
+        ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
+        const auto expected =
+            patch.contains("renderCalendar") ||
+                    patch.value("calendar", nlohmann::json::object()).contains("version")
+                ? world::WorldCalendar{}
+            : patch.contains("calendar") ? world::WorldCalendar{36000, 3, 1, 2, 8}
+                                         : world::WorldCalendar::Legacy();
+        EXPECT_EQ(session.GetRenderCalendar(), expected);
+        EXPECT_EQ(DiskBytes(save), before);
+        ASSERT_TRUE(session.SaveWorld());
+        const auto written = nlohmann::json::parse(Read(save / "world_info.json"));
+        if (patch.contains("calendar"))
+            EXPECT_EQ(written.at("calendar"), patch.at("calendar"));
+        else
+            EXPECT_EQ(written.contains("renderCalendar"), patch.contains("renderCalendar"));
+    }
+}
+
 TEST_F(WorldOpenRefusal, CurrentMetadataOnlyWorldLoadsBeforeFirstChunkSave) {
     fs::remove_all(save / "chunks");
     const auto before = DiskBytes(save);
@@ -1026,6 +1100,42 @@ TEST_F(WorldOpenRefusal, AbsentLedgerPreservesSchedulerAndRestoresClockWithoutRe
     EXPECT_FALSE(ledger.local_anchor().has_value());
 }
 
+TEST_F(WorldOpenRefusal, RuntimeHelloMatchesNewWorldCalendarWithActiveRegionsOnAndOff) {
+    for (const bool active_regions : {false, true}) {
+        SCOPED_TRACE(active_regions);
+        const nlohmann::json systems = {
+            {"sim", {{"active_regions", {{"enabled", active_regions}}}}}};
+        Write(root / "data/common/systems.json", systems.dump());
+        for (const bool use_override : {false, true}) {
+            SCOPED_TRACE(use_override);
+            ServerCliOptions options;
+            options.root = RootString();
+            options.seed = "1337";
+            options.preset = "default";
+            if (use_override)
+                options.systems_config_override =
+                    luminumbra::core::SystemConfig::FromJsonString(systems.dump());
+            const auto hello = RuntimeHelloFrom(options);
+            GameSession host;
+            host.SetRootPath(RootString());
+            host.SetJobSystem(&jobs);
+            host.ApplySystemConfig(luminumbra::core::SystemConfig::FromJsonString(systems.dump()));
+            host.SetFiniteHydrologyEnabled(RunnerConfigFrom(options).finite_hydrology);
+            ASSERT_TRUE(host.CreateWorld("Network calendar", options.seed, options.preset));
+            ASSERT_TRUE(host.LoadWorldState());
+            EXPECT_EQ(host.ActiveRegionsEnabled(), active_regions);
+            EXPECT_EQ(host.GetRenderCalendar(), world::WorldCalendar{});
+            EXPECT_EQ(hello.system_config_identity, host.SystemConfigIdentity());
+            auto expected = hello;
+            expected.system_config_identity = host.SystemConfigIdentity();
+            expected.preset_content_hash = host.PresetContentHash();
+            Net::HelloMsg decoded;
+            ASSERT_TRUE(Net::DecodeHello(Net::EncodeHello(hello), decoded));
+            EXPECT_TRUE(Net::HelloMatches(expected, decoded));
+        }
+    }
+}
+
 TEST_F(WorldOpenRefusal, FreshRunnerBootAndAbsentLedgerReloadPreserveSchedulerIdentity) {
     const world::RegionSchedulerConfig scheduler{10, 3, 2};
     Server::ServerWorldRunnerConfig config;
@@ -1067,6 +1177,10 @@ TEST_F(WorldOpenRefusal, FreshRunnerBootAndAbsentLedgerReloadPreserveSchedulerId
 }
 
 TEST_F(WorldOpenRefusal, PersistedSchedulerIdentityRefusesDifferentAdmissionAndReplayRules) {
+    // Keep the calendar identical to fresh sessions so only scheduler rules differ.
+    auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+    world::WorldClock{}.write_metadata(metadata);
+    Write(save / "world_info.json", metadata.dump());
     // Each field changes independently while both sessions start with default member storage.
     // Identity must observe the decoded ledger rather than that original storage.
     world::RegionSchedulerConfig work_limit, hold_ticks, reduced_shift;
@@ -1145,6 +1259,10 @@ TEST_F(WorldOpenRefusal, PersistedSchedulerIdentityRefusesDifferentAdmissionAndR
 }
 
 TEST_F(WorldOpenRefusal, LoadedSchedulerSurvivesTransientCreateAndAbsentLedgerReplacement) {
+    // Fresh and reloaded sessions must resolve the same calendar in this scheduler test.
+    auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+    world::WorldClock{}.write_metadata(metadata);
+    Write(save / "world_info.json", metadata.dump());
     const world::RegionSchedulerConfig scheduler{10, 3, 2};
     world::ActiveRegionLedger persisted(scheduler);
     persisted.set_local_anchor(Vec3(8, 18, 8));
@@ -1176,6 +1294,9 @@ TEST_F(WorldOpenRefusal, LoadedSchedulerSurvivesTransientCreateAndAbsentLedgerRe
 }
 
 TEST_F(WorldOpenRefusal, ExplicitSchedulerConflictRefusesLoadAndRunnerBootWithoutWriting) {
+    auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+    world::WorldClock{}.write_metadata(metadata);
+    Write(save / "world_info.json", metadata.dump());
     const world::RegionSchedulerConfig scheduler{10, 3, 2};
     world::ActiveRegionLedger persisted(scheduler);
     persisted.set_local_anchor(Vec3(8, 18, 8));

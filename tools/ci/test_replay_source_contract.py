@@ -160,6 +160,29 @@ class ReplaySourceContract(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         self.assertIn("tools/ci/ci_paths.py python-tests", workflow)
 
+    def test_replay_calendar_admission_and_transient_snapshots_share_creation_values(self):
+        helper = read_source(MODES + "ModeHelpers.cpp")
+        for body in (helper.split("RuntimeHelloFrom(", 1)[1].split("\nLuminumbra::Server::ServerWorldRunnerConfig RunnerConfigFrom(", 1)[0],
+                     helper.split("ReplayRunnerConfigFrom(", 1)[1]):
+            # A session that has not created a world still has legacy presentation
+            # defaults when active regions are off; admission needs creation values.
+            self.assertRegex(body, r'SystemConfigIdentity\(Luminumbra::world::WorldCalendar\{\}\)')
+        creation = read_source("src/luminumbra_common/world/GameSession.cpp").split(
+            "bool GameSession::CreateWorldInternal(", 1)[1].split(
+                "bool GameSession::LoadWorld(", 1)[0]
+        self.assertIn("std::string saved_preset_json = resolved.dump();", creation)
+        self.assertRegex(creation, r'std::string saved_preset_json = resolved.dump\(\);\s*'
+                         r'if \(!transient\) \{')
+        self.assertLess(creation.index("requiredPresetContentHash"),
+                        creation.index("fs::create_directories(worldPath)"))
+        self.assertLess(creation.index("LoadTerrainPresetFromJson(resolved"),
+                        creation.index("ResetWorldSystems();"))
+        self.assertIn("m_savedPresetJson = std::move(saved_preset_json);", creation)
+        native = read_source("test/common/EffectivePresetIdentity_test.cpp")
+        for name in ("ReplayAdmissionUsesTheCreatedCalendarWithActiveRegionsOnAndOff",
+                     "TransientSnapshotsRetainTheEffectivePresetAndRenderCalendar"):
+            self.assertIn(f"TEST_F(EffectivePresetIdentity, {name})", native)
+
     def test_surface_admission_precedes_boot_output_and_allocation(self):
         helper = read_source(MODES + "ModeHelpers.cpp").split("ReplayRunnerConfigFrom(", 1)[1]
         guard = "SurfaceRadiiSupported(header.surface_radius, header.collision_radius)"
