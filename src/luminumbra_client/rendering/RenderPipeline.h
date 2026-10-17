@@ -643,6 +643,10 @@ public:
     void set_world_clock(const world::WorldClock& clock);
     // Presentation calendar for clock-disabled saves; keeps the legacy noon origin.
     void set_render_calendar(world::WorldCalendar calendar);
+    // Read-only diagnostic of the adopted calendar's celestial period.
+    [[nodiscard]] std::uint64_t get_lunar_period_ticks() const {
+        return m_renderClock.lunar_period_ticks();
+    }
     void set_day_length_ticks(std::uint64_t ticks) {
         m_dayLengthTicks = ticks == 0 ? 1 : ticks;
         m_dayLengthOverride = true;
@@ -1165,7 +1169,7 @@ private:
     bool m_timeOfDayHold = false;   // freeze auto-advance for photo-mode TOD scrub
     double m_dayDurationSeconds = world::WorldCalendar{}.dayLengthTicks /
                                   luminumbra::core::SimulationClock::kCanonicalTickRateHz;
-    world::WorldCalendar m_renderCalendar;
+    world::WorldClock m_renderClock;
     std::uint64_t m_celestialTick = 0;
     // tick-authority state. m_todTickDriven marks "the sim tick fed TOD this
     // frame" so update_time_of_day skips the wall-clock advance; cleared every frame.

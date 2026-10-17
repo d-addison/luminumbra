@@ -185,23 +185,37 @@ inline float ComputeMoonIllumination(std::uint64_t seasonTick,
 inline constexpr std::uint64_t kDefaultDayLengthTicks = world::WorldCalendar{}.dayLengthTicks;
 static_assert(kDefaultDayLengthTicks == 162000, "90 min/day @ 30 Hz");
 
+// A retained clock has already validated its calendar at adoption.
+inline double SolarPhaseFromElapsed(double phase, const world::WorldClock& clock) {
+    return clock.solar_phase_from_day_phase(phase);
+}
 inline double SolarPhaseFromElapsed(double phase, const world::WorldCalendar& calendar) {
-    return world::WorldClock(0, calendar).solar_phase_from_day_phase(phase);
+    return SolarPhaseFromElapsed(phase, world::WorldClock(0, calendar));
+}
+inline double ElapsedPhaseFromSolar(double solarPhase, const world::WorldClock& clock) {
+    return clock.day_phase_from_solar_phase(solarPhase);
 }
 inline double ElapsedPhaseFromSolar(double solarPhase, const world::WorldCalendar& calendar) {
-    return world::WorldClock(0, calendar).day_phase_from_solar_phase(solarPhase);
+    return ElapsedPhaseFromSolar(solarPhase, world::WorldClock(0, calendar));
 }
 inline double WrapDayPhase(double dayPhase) {
     return dayPhase >= 1.0 ? dayPhase - 1.0 : dayPhase;
 }
-inline float SolarTimeFromNoonElapsed(double phase, const world::WorldCalendar& calendar) {
+inline float SolarTimeFromNoonElapsed(double phase, const world::WorldClock& clock) {
+    const auto& calendar = clock.calendar();
     if (calendar.daylightNumerator == 1 && calendar.daylightDenominator == 2)
         return static_cast<float>(phase);
     return static_cast<float>(
-        WrapDayPhase(SolarPhaseFromElapsed(WrapDayPhase(phase + 0.5), calendar) + 0.5));
+        WrapDayPhase(SolarPhaseFromElapsed(WrapDayPhase(phase + 0.5), clock) + 0.5));
+}
+inline float SolarTimeFromNoonElapsed(double phase, const world::WorldCalendar& calendar) {
+    return SolarTimeFromNoonElapsed(phase, world::WorldClock(0, calendar));
+}
+inline double NoonElapsedFromSolarTime(double phase, const world::WorldClock& clock) {
+    return WrapDayPhase(ElapsedPhaseFromSolar(WrapDayPhase(phase + 0.5), clock) + 0.5);
 }
 inline double NoonElapsedFromSolarTime(double phase, const world::WorldCalendar& calendar) {
-    return WrapDayPhase(ElapsedPhaseFromSolar(WrapDayPhase(phase + 0.5), calendar) + 0.5);
+    return NoonElapsedFromSolarTime(phase, world::WorldClock(0, calendar));
 }
 
 // Symmetric compatibility conversion. Calendar-aware readers use the shared

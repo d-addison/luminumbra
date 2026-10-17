@@ -5714,11 +5714,11 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
     // at the shared day length.
     if (!m_timeOfDayHold && !m_todTickDriven) {
         const auto day_ticks =
-            m_dayLengthOverride ? m_dayLengthTicks : m_renderCalendar.dayLengthTicks;
+            m_dayLengthOverride ? m_dayLengthTicks : m_renderClock.calendar().dayLengthTicks;
         m_dayDurationSeconds = static_cast<double>(day_ticks) /
                                luminumbra::core::SimulationClock::kCanonicalTickRateHz;
         m_elapsedDayPhase = std::fmod(m_elapsedDayPhase + deltaTime / m_dayDurationSeconds, 1.0);
-        m_timeOfDay = Rendering::SolarTimeFromNoonElapsed(m_elapsedDayPhase, m_renderCalendar);
+        m_timeOfDay = Rendering::SolarTimeFromNoonElapsed(m_elapsedDayPhase, m_renderClock);
     }
     m_todTickDriven = false;
 
@@ -5751,12 +5751,12 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
         return -1.0f;
     }();
     const float moon_forced = s_moon_env >= 0.0f ? s_moon_env : m_moonIllumOverride;
-    const Rendering::CelestialFrame celestial = Rendering::EvaluateCelestialBodies(
-        m_timeOfDay,
-        m_seasonSunDeclination,
-        m_celestialTick,
-        moon_forced,
-        world::WorldClock(0, m_renderCalendar).lunar_period_ticks());
+    const Rendering::CelestialFrame celestial =
+        Rendering::EvaluateCelestialBodies(m_timeOfDay,
+                                           m_seasonSunDeclination,
+                                           m_celestialTick,
+                                           moon_forced,
+                                           get_lunar_period_ticks());
     const Rendering::SunGeometry& sun_geo = celestial.sun_geometry;
     const float season_tilt_z = sun_geo.tiltZ;
     m_sun.direction = sun_geo.direction;
@@ -5933,22 +5933,22 @@ u32 RenderPipeline::water_caustics_texture() const {
 
 void RenderPipeline::set_time_of_day(float normalized_time) {
     m_timeOfDay = std::clamp(normalized_time, 0.0f, 1.0f);
-    m_elapsedDayPhase = Rendering::NoonElapsedFromSolarTime(m_timeOfDay, m_renderCalendar);
+    m_elapsedDayPhase = Rendering::NoonElapsedFromSolarTime(m_timeOfDay, m_renderClock);
 }
 
 void RenderPipeline::set_render_calendar(world::WorldCalendar calendar) {
     // Validate at this boundary too; rendering never silently repairs a calendar.
     const world::WorldClock checked(0, calendar);
     m_worldClock.reset();
-    if (m_renderCalendar != checked.calendar()) {
-        m_renderCalendar = checked.calendar();
-        m_elapsedDayPhase = Rendering::NoonElapsedFromSolarTime(m_timeOfDay, m_renderCalendar);
+    if (m_renderClock.calendar() != checked.calendar()) {
+        m_renderClock = checked;
+        m_elapsedDayPhase = Rendering::NoonElapsedFromSolarTime(m_timeOfDay, m_renderClock);
     }
 }
 
 void RenderPipeline::set_world_clock(const world::WorldClock& clock) {
     m_worldClock = clock;
-    m_renderCalendar = clock.calendar();
+    m_renderClock = clock;
     m_seasonTick = clock.tick();
     m_celestialTick = clock.tick();
     if (!m_timeOfDayHold) {
@@ -5956,13 +5956,13 @@ void RenderPipeline::set_world_clock(const world::WorldClock& clock) {
             const double phase = static_cast<double>(clock.tick() % m_dayLengthTicks) /
                                  static_cast<double>(m_dayLengthTicks);
             m_elapsedDayPhase = Rendering::WrapDayPhase(phase + 0.5);
-            m_timeOfDay = Rendering::SolarTimeFromNoonElapsed(m_elapsedDayPhase, m_renderCalendar);
+            m_timeOfDay = Rendering::SolarTimeFromNoonElapsed(m_elapsedDayPhase, m_renderClock);
         } else {
             m_elapsedDayPhase = Rendering::WrapDayPhase(clock.day_phase(clock.tick()) + 0.5);
             m_timeOfDay = Rendering::TimeOfDayFromWorldClock(clock);
         }
     } else {
-        m_elapsedDayPhase = Rendering::NoonElapsedFromSolarTime(m_timeOfDay, m_renderCalendar);
+        m_elapsedDayPhase = Rendering::NoonElapsedFromSolarTime(m_timeOfDay, m_renderClock);
     }
     m_todTickDriven = true;
 }
@@ -5973,10 +5973,10 @@ void RenderPipeline::set_time_of_day_tick(std::uint64_t sim_tick) {
     // Photo hold wins; later direct scenario pins retain frame-order precedence.
     if (!m_timeOfDayHold) {
         const auto day_ticks =
-            m_dayLengthOverride ? m_dayLengthTicks : m_renderCalendar.dayLengthTicks;
+            m_dayLengthOverride ? m_dayLengthTicks : m_renderClock.calendar().dayLengthTicks;
         m_elapsedDayPhase =
             static_cast<double>(sim_tick % day_ticks) / static_cast<double>(day_ticks);
-        m_timeOfDay = Rendering::SolarTimeFromNoonElapsed(m_elapsedDayPhase, m_renderCalendar);
+        m_timeOfDay = Rendering::SolarTimeFromNoonElapsed(m_elapsedDayPhase, m_renderClock);
     }
     m_todTickDriven = true;
 }

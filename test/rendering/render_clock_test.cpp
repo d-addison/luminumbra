@@ -1,6 +1,9 @@
 #include "luminumbra_client/rendering/RenderPipeline.h"
 #include "luminumbra_client/rendering/TimeOfDayModel.h"
 
+#include <array>
+#include <stdexcept>
+
 #include <gtest/gtest.h>
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
@@ -163,4 +166,56 @@ TEST(RenderClock, DefaultPacingAndRestoredCustomCalendarPreserveOverrides) {
     EXPECT_FLOAT_EQ(
         pipeline.get_moon_illumination(),
         Rendering::LunarIllumination(asymmetric.tick(), asymmetric.lunar_period_ticks()));
+
+    // Both adoption paths replace the retained calendar, including lunar-only
+    // changes. Boundary products exceed 32 bits but fit exactly in uint64_t.
+    constexpr std::array calendars{world::WorldCalendar{},
+                                   world::WorldCalendar::Legacy(),
+                                   world::WorldCalendar{101, 7, 3, 5, 9},
+                                   world::WorldCalendar{101, 7, 3, 5, 1},
+                                   world::WorldCalendar{1, 1, 1, 65535, 366},
+                                   world::WorldCalendar{2147483647, 366, 65534, 65535, 366}};
+    for (const bool authoritative : {false, true}) {
+        for (const auto calendar : calendars) {
+            const world::WorldClock clock(0, calendar);
+            const auto period = std::uint64_t{calendar.dayLengthTicks} * calendar.lunarCycleDays;
+            ASSERT_EQ(clock.lunar_period_ticks(), period);
+            for (const auto tick : {std::uint64_t{0},
+                                    period / 2,
+                                    period - 1,
+                                    period,
+                                    world::WorldClock::kTickLimit - 1}) {
+                SCOPED_TRACE(tick);
+                if (authoritative) {
+                    pipeline.set_world_clock(world::WorldClock(tick, calendar));
+                } else {
+                    pipeline.set_render_calendar(calendar);
+                    pipeline.set_time_of_day_tick(tick);
+                }
+                EXPECT_EQ(pipeline.get_lunar_period_ticks(), period);
+                // Reading the retained period does not require another adoption.
+                EXPECT_EQ(pipeline.get_lunar_period_ticks(), clock.lunar_period_ticks());
+            }
+        }
+    }
+    // Rejected calendars leave the previous clock authority and period intact.
+    const world::WorldClock retained(317, {101, 7, 3, 5, 9});
+    pipeline.set_world_clock(retained);
+    const float retained_time = pipeline.get_time_of_day();
+    constexpr std::array invalid_calendars{world::WorldCalendar{0, 8, 2, 3, 8},
+                                           world::WorldCalendar{2147483648u, 8, 2, 3, 8},
+                                           world::WorldCalendar{101, 0, 2, 3, 8},
+                                           world::WorldCalendar{101, 367, 2, 3, 8},
+                                           world::WorldCalendar{101, 8, 0, 3, 8},
+                                           world::WorldCalendar{101, 8, 3, 3, 8},
+                                           world::WorldCalendar{101, 8, 2, 4, 8},
+                                           world::WorldCalendar{101, 8, 1, 65536, 8},
+                                           world::WorldCalendar{101, 8, 2, 3, 0},
+                                           world::WorldCalendar{101, 8, 2, 3, 367}};
+    for (const auto calendar : invalid_calendars) {
+        EXPECT_THROW(pipeline.set_render_calendar(calendar), std::invalid_argument);
+        EXPECT_FLOAT_EQ(pipeline.get_time_of_day(), retained_time);
+        EXPECT_EQ(pipeline.get_season_tick(), retained.tick());
+        EXPECT_EQ(pipeline.get_lunar_period_ticks(), retained.lunar_period_ticks());
+    }
 }
