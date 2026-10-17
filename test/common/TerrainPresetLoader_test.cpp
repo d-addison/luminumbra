@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cstddef>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -99,6 +100,33 @@ TEST(TerrainPresetLoaderTest, RawNulRefusesBeforeAdoptingPreset) {
     EXPECT_EQ(restored.warnings, clean.warnings);
 }
 
+TEST(TerrainPresetLoaderTest, DiskAndOverrideLoadsRefuseOversizedPresetsBeforeParsing) {
+    const Luminumbra::TestSupport::ScopedTempFile file("preset_size_", ".json");
+    {
+        std::ofstream output(file.Path(), std::ios::binary | std::ios::trunc);
+        output << kMinimalPreset;
+        // Keep the write buffer at 4 KiB. Valid trailing whitespace isolates the
+        // size refusal from the independent raw-NUL and JSON parsing refusals.
+        const std::string padding(4096, ' ');
+        for (std::size_t bytes = 0; bytes <= Luminumbra::World::kMaxWorldgenFileBytes;
+             bytes += padding.size())
+            output << padding;
+        output.close();
+        ASSERT_TRUE(output.good());
+    }
+    const auto refused = LoadTerrainPreset(file.Path());
+    EXPECT_FALSE(refused.ok);
+    EXPECT_TRUE(refused.preset_content_hash.empty());
+    EXPECT_EQ(refused.params.worldgen_dependencies, nullptr);
+    EXPECT_FALSE(refused.errors.empty());
+    std::string text = "unchanged";
+    std::string error;
+    EXPECT_FALSE(Luminumbra::world::LoadTerrainPresetOverride(
+        file.Path(), file.Path().parent_path() / "data", text, error));
+    EXPECT_EQ(text, "unchanged");
+    EXPECT_FALSE(error.empty());
+}
+
 TEST(TerrainPresetLoaderTest, CapturedDependencyReadersRefuseRawNulBeforeAdoption) {
     const Luminumbra::TestSupport::ScopedTempFile temp("dependency-nul-", ".json");
     const auto root = temp.Path().parent_path();
@@ -138,8 +166,9 @@ TEST(TerrainPresetLoaderTest, CapturedDependencyReadersRefuseRawNulBeforeAdoptio
             EXPECT_FALSE(pool.io_failed);
             ASSERT_EQ(pool.errors.size(), 1u);
             EXPECT_NE(pool.errors.front().find("raw NUL"), std::string::npos);
-            if (invalid_path == placement)
+            if (invalid_path == placement) {
                 EXPECT_TRUE(pool.pieces.empty());
+            }
         }
         EXPECT_EQ(invalid_reads, 1u);
     }

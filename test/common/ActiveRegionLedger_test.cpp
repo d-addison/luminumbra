@@ -138,10 +138,12 @@ TEST(ActiveRegionLedgerTest, ReductionFreezeRecoveryAndHoldsSurviveReload) {
             EXPECT_EQ(r.frozen_at, 5u);
             EXPECT_EQ(r.frozen_digest, 0x123456789abcdef0ull);
         }
-        if (tick == 8)
+        if (tick == 8) {
             EXPECT_EQ(r.state, RegionState::Reduced);
-        if (tick == 10)
+        }
+        if (tick == 10) {
             EXPECT_EQ(r.state, RegionState::Active);
+        }
     }
 }
 
@@ -151,8 +153,9 @@ TEST(ActiveRegionLedgerTest, RestoringNewerClockPreservesHoldsAndFrozenSimulatio
     for (std::uint64_t tick = 2; tick <= 6; ++tick) {
         Step(ledger, tick, tick < 6 ? 11 : 0);
         const auto& record = ledger.records().at(kFar);
-        if (tick == 2)
+        if (tick == 2) {
             ASSERT_EQ(record.over_hold, 1u);
+        }
         if (tick == 6) {
             ASSERT_EQ(record.state, RegionState::Frozen);
             ASSERT_EQ(record.under_hold, 1u);
@@ -312,7 +315,7 @@ TEST(ActiveRegionLedgerTest, FrozenContentsAndCursorDoNotAdvanceAndResumeIsBound
                   .elapsed_ticks,
               36000u);
     EXPECT_EQ(ActiveRegionLedger::resume_window(kFar, 3, WorldClock(100000), 7).elapsed_ticks, 7u);
-    EXPECT_THROW(ActiveRegionLedger::resume_window(kFar, 3, WorldClock(2), 7),
+    EXPECT_THROW(static_cast<void>(ActiveRegionLedger::resume_window(kFar, 3, WorldClock(2), 7)),
                  std::invalid_argument);
 }
 
@@ -449,14 +452,37 @@ TEST(ActiveRegionLedgerTest, ValidAnchorBoundaries) {
     const auto inf = std::numeric_limits<float>::infinity();
     EXPECT_TRUE(ActiveRegionLedger::valid_anchor(Vec3(-16777216.0f, 0, -16777216.0f)));
     EXPECT_TRUE(ActiveRegionLedger::valid_anchor(Vec3(16777215.0f, 5, 16777215.0f)));
+    EXPECT_TRUE(ActiveRegionLedger::valid_anchor(Vec3(-16777216.0f, 0, 0)));
+    EXPECT_TRUE(ActiveRegionLedger::valid_anchor(Vec3(0, 0, -16777216.0f)));
+    EXPECT_TRUE(ActiveRegionLedger::valid_anchor(Vec3(16777215.0f, 5, 0)));
+    EXPECT_TRUE(ActiveRegionLedger::valid_anchor(Vec3(0, 5, 16777215.0f)));
     EXPECT_TRUE(ActiveRegionLedger::valid_anchor(Vec3(0, -1e30f, 0)));
     EXPECT_FALSE(ActiveRegionLedger::valid_anchor(Vec3(16777216.0f, 0, 0)));
     EXPECT_FALSE(ActiveRegionLedger::valid_anchor(Vec3(0, 0, 16777216.0f)));
+    // -2^24 - 1 rounds to -2^24 in binary32; -16777218 is the next lower float.
     EXPECT_FALSE(ActiveRegionLedger::valid_anchor(Vec3(-16777218.0f, 0, 0)));
+    EXPECT_FALSE(ActiveRegionLedger::valid_anchor(Vec3(0, 0, -16777218.0f)));
     EXPECT_FALSE(ActiveRegionLedger::valid_anchor(Vec3(nan, 0, 0)));
     EXPECT_FALSE(ActiveRegionLedger::valid_anchor(Vec3(0, 0, inf)));
     EXPECT_FALSE(ActiveRegionLedger::valid_anchor(Vec3(0, nan, 0)));
     EXPECT_FALSE(ActiveRegionLedger::valid_anchor(Vec3(0, -inf, 0)));
+}
+
+TEST(ActiveRegionLedgerTest, PinBoundariesOnBothAxes) {
+    ActiveRegionLedger ledger;
+    const WorldClock clock;
+    for (const auto key :
+         std::array<RegionKey, 4>{{{-32768, 0}, {32767, 0}, {0, -32768}, {0, 32767}}}) {
+        ledger.pin(key, true, clock);
+        ASSERT_TRUE(ledger.records().contains(key));
+        EXPECT_TRUE(ledger.records().at(key).pinned);
+    }
+    const auto before = ledger.encode();
+    for (const auto key :
+         std::array<RegionKey, 4>{{{-32769, 0}, {32768, 0}, {0, -32769}, {0, 32768}}}) {
+        EXPECT_THROW(ledger.pin(key, true, clock), std::invalid_argument);
+        EXPECT_EQ(ledger.encode(), before);
+    }
 }
 
 TEST(ActiveRegionLedgerTest, TrySetLocalAnchorDoesNotThrowAndKeepsPreviousAnchor) {
@@ -1469,8 +1495,9 @@ TEST(ActiveRegionLedgerTest, ContentIdentityIsImmutableAndHasAnExactVersionedWir
     EXPECT_FALSE(ledger.canonical_bytes().empty());
     EXPECT_EQ(Version(ledger.encode()), 2u);
     const auto restored = Reload(ledger);
-    ASSERT_TRUE(restored.content_identity());
-    EXPECT_EQ(*restored.content_identity(), identity);
+    const auto restored_identity = restored.content_identity();
+    ASSERT_TRUE(restored_identity.has_value());
+    EXPECT_EQ(restored_identity, std::optional{identity});
     EXPECT_EQ(restored.encode(), ledger.encode());
     auto changed = identity;
     ++changed.population_digest;

@@ -2,6 +2,7 @@
 """Tests for the qualification matrix, planner CLI and parametrised process runner."""
 import contextlib
 import copy
+import hashlib
 import io
 import json
 import math
@@ -105,6 +106,21 @@ class MatrixTestBase(unittest.TestCase):
 
 
 class CommittedMatrixTests(MatrixTestBase):
+    def test_committed_traversal_digests_match_fixture_bytes(self):
+        matrix = committed()
+        qm.validate_matrix(matrix)
+        traversals = [workload for workload in matrix['workloads']
+                      if workload['kind'] == 'traversal']
+        self.assertTrue(any(workload['script'] is not None for workload in traversals))
+        for workload in traversals:
+            with self.subTest(workload=workload['id']):
+                expected = (None if workload['script'] is None else hashlib.sha256(
+                    (ROOT / workload['script']).read_bytes()).hexdigest())
+                self.assertEqual(workload['script_sha256'], expected)
+                for cell in qm.cells(matrix):
+                    if cell['workload'] == workload['id']:
+                        self.assertEqual(cell['script_sha256'], expected)
+
     def test_committed_matrix_has_36_unique_cells_in_order(self):
         cells = qm.cells(committed())
         ids = [cell['id'] for cell in cells]
@@ -147,7 +163,8 @@ class CommittedMatrixTests(MatrixTestBase):
                              client='client', artifact='a.json', root=ROOT)
         with self.assertRaisesRegex(qm.MatrixError, 'not ready'):
             qm.checker_command(find_cell(cells, 'cave-walk.quality.3840x1600'),
-                               artifact='a.json', qualified_renderer=RENDERER, root=ROOT,
+                               artifact='a.json', verdict='v.json',
+                               qualified_renderer=RENDERER, root=ROOT,
                                python='python3')
 
 
@@ -181,24 +198,28 @@ class CommandGoldenTests(MatrixTestBase):
     def test_checker_goldens(self):
         cells = qm.cells(with_pose(committed()))
         fixed = qm.checker_command(find_cell(cells, 'forest-settled.quality.3840x1600'),
-                                   artifact='/out/a.json', qualified_renderer=RENDERER,
+                                   artifact='/out/a.json', verdict='/out/v.json',
+                                   qualified_renderer=RENDERER,
                                    root=ROOT, python='/usr/bin/python3')
         self.assertEqual(fixed, [
             '/usr/bin/python3', str(ROOT / 'tools/perf/validate_render_capture.py'),
-            '/out/a.json', '--qualified-renderer', RENDERER, '--enforce-floor',
+            '/out/a.json', '--qualified-renderer', RENDERER,
             '--profile', 'quality', '--width=3840', '--height=1600',
             '--warmup-frames=400', '--workload-kind', 'fixed_view',
             '--position', '100.5', '-2.25', '30.0', '--yaw=45.0', '--pitch=-10.5',
-            '--tod=0.04', '--frames=240', '--require-geometry', '--require-settled'])
+            '--tod=0.04', '--frames=240', '--require-geometry', '--require-settled',
+            '--enforce-floor', '--verdict-out', '/out/v.json'])
         traversal = qm.checker_command(
-            find_cell(cells, 'surface-flight.quality.3840x1600'), artifact='/out/a.json',
+            find_cell(cells, 'surface-flight.quality.3840x1600'),
+            artifact='/out/a.json', verdict='/out/v.json',
             qualified_renderer=RENDERER, root=ROOT, python='/usr/bin/python3')
         self.assertEqual(traversal, [
             '/usr/bin/python3', str(ROOT / 'tools/perf/validate_render_capture.py'),
-            '/out/a.json', '--qualified-renderer', RENDERER, '--enforce-floor',
+            '/out/a.json', '--qualified-renderer', RENDERER,
             '--profile', 'quality', '--width=3840', '--height=1600',
             '--warmup-frames=400', '--workload-kind', 'traversal',
-            '--traversal', str(ROOT / SURFACE_SCRIPT)])
+            '--traversal', str(ROOT / SURFACE_SCRIPT),
+            '--enforce-floor', '--verdict-out', '/out/v.json'])
 
     def test_every_ready_checker_enforces_floor(self):
         for cell in qm.cells(with_pose(committed())):
@@ -206,6 +227,7 @@ class CommandGoldenTests(MatrixTestBase):
                 continue
             with self.subTest(cell=cell['id']):
                 command = qm.checker_command(cell, artifact='capture.json',
+                                             verdict='verdict.json',
                                              qualified_renderer=RENDERER,
                                              root=ROOT, python=sys.executable)
                 self.assertEqual(command.count('--enforce-floor'), 1)
@@ -220,6 +242,7 @@ class CommandGoldenTests(MatrixTestBase):
                 continue
             with self.subTest(cell=cell['id']):
                 command = qm.checker_command(cell, artifact='capture.json',
+                                             verdict='verdict.json',
                                              qualified_renderer=RENDERER,
                                              root=ROOT, python=sys.executable)
                 self.assertEqual(command.count('--require-geometry'), 1)
@@ -247,7 +270,8 @@ class CheckerArgparseTests(MatrixTestBase):
         artifact = self.tmp / 'capture.json'
         artifact.write_text(json.dumps(synthetic_artifact()), encoding='utf-8')
         argv = qm.checker_command(find_cell(cells, 'forest-settled.quality.3840x1600'),
-                                  artifact=artifact, qualified_renderer=RENDERER,
+                                  artifact=artifact, verdict=self.tmp / 'verdict.json',
+                                  qualified_renderer=RENDERER,
                                   root=ROOT, python=sys.executable)
         seen = {}
 
@@ -256,6 +280,8 @@ class CheckerArgparseTests(MatrixTestBase):
             return {'verdict': 'PASS'}
 
         with mock.patch.object(capture, 'validate', fake_validate), \
+                mock.patch.object(capture.render_budget, 'evaluate',
+                                  return_value={'floor': {'verdict': 'pass'}}), \
                 mock.patch.object(sys, 'argv', argv[1:]), \
                 contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(capture.main(), 0)
@@ -273,7 +299,8 @@ class CheckerArgparseTests(MatrixTestBase):
     def test_traversal_checker_argv_has_no_tod(self):
         cells = qm.cells(committed())
         argv = qm.checker_command(find_cell(cells, 'surface-flight.quality.3840x1600'),
-                                  artifact='a.json', qualified_renderer=RENDERER, root=ROOT,
+                                  artifact='a.json', verdict='v.json',
+                                  qualified_renderer=RENDERER, root=ROOT,
                                   python='python3')
         self.assertFalse(any(arg.startswith('--tod') for arg in argv))
 
@@ -310,6 +337,7 @@ class CheckerEvidenceTests(MatrixTestBase):
         cell.update(pose=dict.fromkeys(POSE, 0.0), width=1280, height=720,
                     warmup_frames=2, measured_frames=4)
         argv = qm.checker_command(cell, artifact=self.tmp / 'fixed.json',
+                                  verdict=self.tmp / 'verdict.json',
                                   qualified_renderer=RENDERER, root=ROOT,
                                   python=sys.executable)
         data = self.fixed_capture()
@@ -421,6 +449,32 @@ class CheckerEvidenceTests(MatrixTestBase):
 
 
 class MatrixValidationTests(MatrixTestBase):
+    def test_missing_traversal_digest_refused(self):
+        for workload in committed()['workloads']:
+            if workload['kind'] != 'traversal':
+                continue
+            with self.subTest(workload=workload['id']):
+                matrix = copy.deepcopy(committed())
+                entry = next(entry for entry in matrix['workloads']
+                             if entry['id'] == workload['id'])
+                del entry['script_sha256']
+                self.assert_refused(json.dumps(matrix), 'script_sha256')
+
+    def test_invalid_traversal_digest_refused(self):
+        for digest in (None, '', 'a' * 63, 'a' * 65, 'A' * 64, 'g' * 64, 0, True):
+            with self.subTest(digest=digest):
+                matrix = copy.deepcopy(committed())
+                entry = next(entry for entry in matrix['workloads']
+                             if entry['id'] == 'surface-flight')
+                entry['script_sha256'] = digest
+                self.assert_refused(json.dumps(matrix), 'script_sha256')
+
+    def test_blocked_traversal_digest_must_be_null(self):
+        matrix = copy.deepcopy(committed())
+        entry = next(entry for entry in matrix['workloads'] if entry['id'] == 'cave-walk')
+        entry['script_sha256'] = 'a' * 64
+        self.assert_refused(json.dumps(matrix), 'script_sha256 must be null')
+
     def test_null_renderer_refused(self):
         matrix = copy.deepcopy(committed())
         matrix['qualified_renderer'] = None
@@ -1003,6 +1057,52 @@ class ProcessRunnerTests(MatrixTestBase):
 
     def read_receipt(self):
         return json.loads(self.receipt.read_text(encoding='utf-8'))
+
+    def test_executable_identity_uses_consistent_handle_metadata(self):
+        executable = Path(sys.executable)
+        real_stat = os.stat
+
+        def path_stat(path, *args, **kwargs):
+            metadata = real_stat(path, *args, **kwargs)
+            if not isinstance(path, int) and Path(path) == executable:
+                fields = {key: getattr(metadata, key) for key in
+                          ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns')}
+                fields['st_ctime_ns'] += 1
+                return types.SimpleNamespace(**fields)
+            return metadata
+
+        # Model the Windows path/descriptor timestamp discrepancy without
+        # changing any descriptor metadata or executable bytes.
+        with mock.patch.object(runner.os, 'stat', side_effect=path_stat):
+            identity, digest = runner._binary_identity(executable)
+        metadata = os.stat(executable)
+        self.assertEqual(identity[0], runner._executable_metadata(metadata))
+        self.assertEqual(identity[1], runner._executable_metadata(path_stat(executable)))
+        self.assertEqual(digest, runner.file_sha256(executable))
+
+    def test_executable_path_replaced_with_pipe_is_refused(self):
+        reader, writer = os.pipe()
+        system = types.SimpleNamespace(**vars(os))
+        system.O_NONBLOCK = 1 << 29
+        opens = 0
+
+        def replace_on_reopen(path, flags):
+            nonlocal opens
+            opens += 1
+            self.assertTrue(flags & system.O_NONBLOCK)
+            if opens == 1:
+                return os.open(path, flags & ~system.O_NONBLOCK)
+            return os.dup(pipe.fileno())
+
+        system.open = replace_on_reopen
+        try:
+            with os.fdopen(reader, 'rb') as pipe, \
+                    mock.patch.object(runner, 'os', system), \
+                    self.assertRaisesRegex(OSError, 'executable changed while hashing'):
+                runner._binary_identity(sys.executable)
+            self.assertEqual(opens, 2)
+        finally:
+            os.close(writer)
 
     def test_executable_changes_fail_closed_and_clear_unverified_hash(self):
         executable = self.tmp / Path(sys.executable).name
