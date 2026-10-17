@@ -190,6 +190,239 @@ class WorkflowShellTests(unittest.TestCase):
             self.assertEqual(result.stderr, "")
 
 
+class WorkflowShellDiagnosticTests(unittest.TestCase):
+    @staticmethod
+    def candidate_path(candidate):
+        path = MagicMock()
+        path.is_absolute.return_value = True
+        path.is_file.return_value = True
+        path.resolve.return_value = path
+        path.__str__.return_value = candidate
+        return path
+
+    def failure(self, override=BASH, platform="linux", discoveries=None, path=None,
+                access=True, response=None):
+        if response is None:
+            response = subprocess.CompletedProcess([], 1, b"", b"")
+        run_options = ({"side_effect": response} if isinstance(response, (Exception, list))
+                       else {"return_value": response})
+        access_options = {"side_effect": access} if isinstance(access, Exception) else {"return_value": access}
+        with patch.object(shell.sys, "platform", platform), patch.object(
+                shell, "_absolute_which", side_effect=lambda name: (discoveries or {}).get(name)) as which, patch.object(
+                shell, "Path", side_effect=path or self.candidate_path) as construct, patch.object(
+                shell.os, "access", **access_options) as executable, patch.object(
+                shell.subprocess, "run", **run_options) as run, self.assertRaises(RuntimeError) as caught:
+            shell.bash_executable(override)
+        message = str(caught.exception)
+        self.assertTrue(message.startswith("A usable native Bash is required"))
+        self.assertLess(len(message), 24 * 1024)
+        return message, which, construct, executable, run
+
+    def test_failure_reports_actual_absolute_discovery_and_allowlisted_platform_context(self):
+        environment = {
+            "PATH": os.pathsep.join(("", ".", "relative/bin", str(ROOT / "absolute bin"))),
+            "PATHEXT": ".EXE;.CMD", "MSYSTEM": "UCRT64", "MSYS2_ARG_CONV_EXCL": "*",
+            "MSYS_NO_PATHCONV": "1", "MSYS2_ENV_CONV_EXCL": "PATH", "MSYS2_PATH_TYPE": "minimal",
+            "ACCESS_TOKEN": "private-value", "BASH_ENV": "private-hook", "BASH_FUNC_exit%%": "private-function",
+        }
+        entries = ["", ".", "relative/bin", str(ROOT / "absolute bin")]
+        for found in (None, "bash.exe"):
+            with self.subTest(found=found), patch.dict(os.environ, environment, clear=True), patch.object(
+                    shell.sys, "platform", "linux"), patch.object(shell.sys, "executable", "C:/runtime/python.exe"), patch.object(
+                    shell.os, "get_exec_path", return_value=entries) as get_path, patch.object(
+                    shell.shutil, "which", return_value=found) as which, patch.object(
+                    shell.subprocess, "run") as run, self.assertRaises(RuntimeError) as caught:
+                shell.bash_executable()
+            message = str(caught.exception)
+            for fragment in ("interpreter='C:/runtime/python.exe'", "python=", "sys.platform='linux'",
+                             f"path_module={os.path.__name__!r}", f"pathsep={os.pathsep!r}", "os.name=",
+                             f"discovery.bash.absolute_PATH={entries[-1]!r}", f"discovery.bash.which={found!r}",
+                             "discovery.bash=None", "candidates=0", "absolute PATH entries only"):
+                self.assertIn(fragment, message)
+            for name, value in environment.items():
+                if name not in ("ACCESS_TOKEN", "BASH_ENV", "BASH_FUNC_exit%%"):
+                    self.assertIn(f"{name}={value!r}", message)
+            for private in ("ACCESS_TOKEN", "private-value", "private-hook", "private-function", "BASH_ENV", "BASH_FUNC_"):
+                self.assertNotIn(private, message)
+            get_path.assert_called_once_with()
+            which.assert_called_once_with("bash", path=entries[-1])
+            run.assert_not_called()
+
+    def test_nested_discovery_keeps_failure_observations_isolated(self):
+        outer_path = str(ROOT / "outer bin")
+        inner_path = str(ROOT / "inner bin")
+        inner_messages = []
+
+        def lookup(name, *, path):
+            self.assertEqual(name, "bash")
+            if path == outer_path:
+                with self.assertRaises(RuntimeError) as inner:
+                    shell.bash_executable()
+                inner_messages.append(str(inner.exception))
+            return None
+
+        with patch.object(shell.sys, "platform", "linux"), patch.object(
+                shell.os, "get_exec_path", side_effect=[[outer_path], [inner_path]]) as get_path, patch.object(
+                shell.shutil, "which", side_effect=lookup) as which, patch.object(
+                shell.subprocess, "run") as run, self.assertRaises(RuntimeError) as outer:
+            shell.bash_executable()
+        self.assertEqual(get_path.call_count, 2)
+        self.assertEqual(which.call_count, 2)
+        run.assert_not_called()
+        self.assertEqual(len(inner_messages), 1)
+        for message, included, excluded in ((str(outer.exception), outer_path, inner_path),
+                                            (inner_messages[0], inner_path, outer_path)):
+            self.assertIn(f"discovery.bash.absolute_PATH={included!r}", message)
+            self.assertNotIn(f"discovery.bash.absolute_PATH={excluded!r}", message)
+
+    def test_windows_failure_retains_discovery_order_drive_paths_and_probe_budget(self):
+        git = r"C:\PROGRA~1\Git\cmd\git.exe"
+        bash = r"C:\Windows\System32\bash.exe"
+        for msystem, expected in (("", [r"C:\PROGRA~1\Git\bin\bash.exe", r"C:\PROGRA~1\Git\usr\bin\bash.exe", bash]),
+                                  ("UCRT64", [bash, r"C:\PROGRA~1\Git\bin\bash.exe", r"C:\PROGRA~1\Git\usr\bin\bash.exe"])):
+            with self.subTest(msystem=msystem), patch.dict(os.environ, MSYSTEM=msystem):
+                message, which, construct, executable, run = self.failure(
+                    override=None, platform="win32", discoveries={"bash": bash, "git": git})
+            self.assertIn(f"discovery.git={git!r}", message)
+            self.assertIn(f"discovery.bash={bash!r}", message)
+            self.assertIn("candidates=3", message)
+            self.assertEqual([call.args for call in which.call_args_list], [("bash",), ("git",)])
+            self.assertEqual([call.args[0] for call in construct.call_args_list], expected)
+            self.assertEqual(executable.call_count, 3)
+            self.assertEqual(run.call_count, 3)
+            for index, (candidate, call) in enumerate(zip(expected, run.call_args_list)):
+                self.assertIn(f"candidate[{index}]={candidate!r}", message)
+                self.assertIn(f"candidate[{index}].probe.returncode=1", message)
+                self.assertEqual(call.args[0][0], candidate)
+                self.assertEqual(call.kwargs["timeout"], 2)
+                self.assertIn('[[ "$OSTYPE" == msys* ]] || exit 1;', call.args[0][-1])
+
+    def test_validation_failures_name_the_last_stage_without_extra_checks_or_fallback(self):
+        for stage in ("is_absolute", "is_file", "access"):
+            path = self.candidate_path(BASH)
+            if stage != "access":
+                getattr(path, stage).return_value = False
+            with self.subTest(stage=stage):
+                message, which, construct, executable, run = self.failure(
+                    path=lambda candidate: path, access=stage != "access")
+                field = "executable" if stage == "access" else stage
+                self.assertIn(f"candidate[0].{field}=False", message)
+                self.assertIn("selection=override", message)
+                self.assertEqual(construct.call_count, 1)
+                self.assertEqual(path.is_absolute.call_count, 1)
+                self.assertEqual(path.is_file.call_count, int(stage != "is_absolute"))
+                self.assertEqual(executable.call_count, int(stage == "access"))
+                path.resolve.assert_not_called()
+                which.assert_not_called()
+                run.assert_not_called()
+
+    def test_validation_exceptions_report_stage_and_codes_without_exception_payload(self):
+        for stage in ("path", "is_absolute", "is_file", "access", "resolve"):
+            for error in (PermissionError(13, "private-exception-payload"), RuntimeError("private-exception-payload")):
+                path = self.candidate_path(BASH)
+                if stage not in ("path", "access"):
+                    getattr(path, stage).side_effect = error
+
+                def construct(candidate):
+                    if stage == "path":
+                        raise error
+                    return path
+
+                with self.subTest(stage=stage, error=type(error).__name__):
+                    message, which, _, _, run = self.failure(
+                        path=construct, access=error if stage == "access" else True)
+                    self.assertIn(f"candidate[0].{stage}.exception={type(error).__name__}", message)
+                    self.assertNotIn("private-exception-payload", message)
+                    if isinstance(error, OSError):
+                        self.assertIn("candidate[0].errno=13", message)
+                        self.assertIn("candidate[0].winerror=None", message)
+                    which.assert_not_called()
+                    run.assert_not_called()
+
+    def test_probe_refusals_preserve_raw_bytes_returncode_and_resolved_path(self):
+        failures = (
+            (7, b"ci-bash-ready\n", b""), (0, b"", b""), (0, b"ci-bash", b""),
+            (0, b"ci-bash-ready\r\n", b""), (0, b"ci-bash-ready\n", b"warning\r\n"),
+            (1, "WSL unavailable".encode("utf-16-le"), b"\xff\x00\x1b"),
+        )
+        resolved = self.candidate_path("C:/long directory/bash.exe")
+        for returncode, stdout, stderr in failures:
+            path = self.candidate_path(BASH)
+            path.resolve.return_value = resolved
+            with self.subTest(returncode=returncode, stdout=stdout, stderr=stderr):
+                message, _, _, _, run = self.failure(path=lambda candidate: path,
+                    response=subprocess.CompletedProcess([], returncode, stdout, stderr))
+                self.assertIn(f"candidate[0].probe.returncode={returncode}", message)
+                self.assertIn(f"candidate[0].probe.stdout={stdout!r}", message)
+                self.assertIn(f"candidate[0].probe.stderr={stderr!r}", message)
+                self.assertIn("candidate[0].resolved='C:/long directory/bash.exe'", message)
+                path.resolve.assert_called_once_with(strict=True)
+                run.assert_called_once()
+                self.assertEqual(run.call_args.args[0][0], str(resolved))
+
+    def test_launch_and_deadline_failures_report_codes_and_available_partial_bytes(self):
+        denied = OSError(5, "private-launch-payload")
+        denied.winerror = 193
+        for error in (denied, subprocess.TimeoutExpired(["private-command"], 2),
+                      subprocess.TimeoutExpired(["private-command"], 2, output=b"partial\r\n", stderr=b"\xffwarning")):
+            with self.subTest(error=type(error).__name__, output=getattr(error, "output", None)):
+                message, _, _, _, run = self.failure(response=error)
+                self.assertIn(f"candidate[0].probe.exception={type(error).__name__}", message)
+                self.assertNotIn("private-launch-payload", message)
+                self.assertNotIn("private-command", message)
+                if isinstance(error, subprocess.TimeoutExpired):
+                    self.assertIn(f"candidate[0].probe.stdout={error.output!r}", message)
+                    self.assertIn(f"candidate[0].probe.stderr={error.stderr!r}", message)
+                else:
+                    self.assertIn("candidate[0].errno=5", message)
+                    self.assertIn("candidate[0].winerror=193", message)
+                run.assert_called_once()
+                self.assertEqual(run.call_args.kwargs["timeout"], 2)
+
+    def test_failure_bounds_apply_before_formatting_all_context_candidates_and_output(self):
+        huge = "\U0001f600\n\x1b" * 100000
+        huge_bytes = b"\x00\xff\r\n" * 100000
+        absolute = "//server/share/" + huge
+        environment = dict.fromkeys(("PATH", "PATHEXT", "MSYSTEM", "MSYS2_ARG_CONV_EXCL", "MSYS_NO_PATHCONV",
+                                     "MSYS2_ENV_CONV_EXCL", "MSYS2_PATH_TYPE"), huge)
+        with patch.object(shell.os, "environ", environment), patch.object(shell.sys, "executable", huge), patch.object(
+                shell.sys, "version", huge), patch.object(shell.sys, "platform", "win32"), patch.object(
+                shell.os, "get_exec_path", return_value=[absolute]) as get_path, patch.object(
+                shell.shutil, "which", side_effect=lambda name, **kwargs: absolute + (
+                    "/cmd/git.exe" if name == "git" else "/bash.exe")) as which, patch.object(
+                shell, "Path", side_effect=self.candidate_path) as construct, patch.object(
+                shell.os, "access", return_value=True), patch.object(shell.subprocess, "run",
+                    return_value=subprocess.CompletedProcess([], 1, huge_bytes, huge_bytes)) as run, self.assertRaises(RuntimeError) as caught:
+            shell.bash_executable()
+        message = str(caught.exception)
+        self.assertLess(len(message), 24 * 1024)
+        self.assertEqual(get_path.call_count, 2)
+        self.assertEqual(which.call_count, 2)
+        for name in ("bash", "git"):
+            self.assertIn(f"discovery.{name}.absolute_PATH=", message)
+            self.assertIn(f"discovery.{name}.which=", message)
+        self.assertIn("candidates=3", message)
+        self.assertEqual(construct.call_count, 3)
+        self.assertEqual(run.call_count, 3)
+        self.assertIn(f"length={len(huge_bytes)}, truncated=True", message)
+        self.assertIn(f"length={len(huge)}, truncated=True", message)
+        self.assertIn("candidate[2].probe.stderr=", message)
+        self.assertTrue(message.isascii())
+        self.assertNotIn("\x1b", message)
+        self.assertNotIn("\r", message)
+        self.assertLess(len(message.splitlines()), 50)
+
+    def test_success_stays_silent_after_failed_probe_and_keeps_exact_success_contract(self):
+        failure = subprocess.CompletedProcess([], 0, b"ci-bash-ready\r\n", b"")
+        success = subprocess.CompletedProcess([], 0, b"ci-bash-ready\n", b"")
+        with patch.object(shell.sys, "stdout") as stdout, patch.object(shell.sys, "stderr") as stderr:
+            executable, calls = WorkflowShellTests().windows_resolution("UCRT64", [failure, success])
+        self.assertEqual(executable, r"C:\Program Files\Git\bin\bash.exe")
+        self.assertEqual(len(calls), 2)
+        stdout.write.assert_not_called()
+        stderr.write.assert_not_called()
+
+
 def jobs(workflow):
     body = workflow.split("\njobs:\n", 1)[1]
     headers = list(re.finditer(r"^  ([\w-]+):\n", body, re.MULTILINE))
