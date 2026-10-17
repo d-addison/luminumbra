@@ -658,32 +658,26 @@ TEST(AsyncWaterMeshing, InvalidResolutionAndPartialSurfaceRejectBeforeAllocation
     }
 }
 
-void CheckBudgetedBurst(bool use_workers, bool promotion, bool edit_deferred) {
-    JobSystem jobs;
-    if (use_workers) {
-        jobs.startup(1);
-    }
-    auto params = Luminumbra::Test::SyntheticTerrainParams();
-    params.base_amplitude = 0.0f;
-    params.height_offset = 8.0f;
-    params.caves_enabled = false;
-    SHIELD_WorldSystem world(use_workers ? &jobs : nullptr, nullptr, params, 1337);
-    WaterSystem water(use_workers ? &jobs : nullptr, &world);
-    water.SetBootPaused(true);
-    world.SetWaterSystem(&water);
-    world.begin_tick(0);
+// A fixed 5*5 burst exceeds three dispatch budgets, even with every channel
+// present. Empty anchors keep activation from adding unrelated chunks.
+constexpr std::size_t kBurstChunks = 25;
+constexpr std::size_t kSnapshotBytes =
+    std::size_t{17} * 17u * 17u * (sizeof(float) + sizeof(u8)) +
+    std::size_t{17} * 17u * sizeof(float) +
+    std::size_t{32} * 32u * (2u * sizeof(float) + sizeof(Vec2) + sizeof(std::int32_t));
+static_assert(kBurstChunks * kSnapshotBytes > 3u * SHIELD_WorldSystem::kMeshingSnapshotByteBudget);
 
-    // A fixed 5*5 burst exceeds three dispatch budgets, even with every channel
-    // present. Empty anchors keep activation from adding unrelated chunks.
-    constexpr std::size_t kBurstChunks = 25;
-    constexpr std::size_t kSnapshotBytes =
-        std::size_t{17} * 17u * 17u * (sizeof(float) + sizeof(u8)) +
-        std::size_t{17} * 17u * sizeof(float) +
-        std::size_t{32} * 32u * (2u * sizeof(float) + sizeof(Vec2) + sizeof(std::int32_t));
-    static_assert(kBurstChunks * kSnapshotBytes >
-                  3u * SHIELD_WorldSystem::kMeshingSnapshotByteBudget);
+struct BudgetedBurstMeshes {
     std::vector<std::shared_ptr<Chunk>> chunks;
     std::vector<std::unique_ptr<Chunk>> expected;
+};
+
+void PrepareBudgetedBurst(SHIELD_WorldSystem& world,
+                          WaterSystem& water,
+                          bool promotion,
+                          BudgetedBurstMeshes& burst) {
+    auto& chunks = burst.chunks;
+    auto& expected = burst.expected;
     chunks.reserve(kBurstChunks);
     expected.reserve(kBurstChunks);
     for (int z = -2; z <= 2; ++z) {
@@ -711,6 +705,102 @@ void CheckBudgetedBurst(bool use_workers, bool promotion, bool edit_deferred) {
             chunks.push_back(std::move(chunk));
         }
     }
+}
+
+void EditDeferredBurstChunk(SHIELD_WorldSystem& world,
+                            WaterSystem& water,
+                            Chunk& chunk,
+                            std::unique_ptr<Chunk>& expected) {
+    // The next pass must capture this new terrain, material and water
+    // state, rather than an eager snapshot of the deferred suffix.
+    for (auto& density : chunk.sdf_data) {
+        density += 1.0f;
+    }
+    for (auto& height : chunk.heightmap_data) {
+        height -= 1.0f;
+    }
+    std::fill(chunk.material_data.begin(),
+              chunk.material_data.end(),
+              static_cast<u8>(MaterialType::Soil));
+    std::fill(chunk.water_level_data.begin(), chunk.water_level_data.end(), 7.0f);
+    chunk.mark_voxel_data_dirty();
+    auto edited_reference = ReferenceMesh(world, water, chunk);
+    ASSERT_FALSE(edited_reference->mesh_vertices.empty());
+    ASSERT_NE(edited_reference->mesh_vertices.front().position,
+              expected->mesh_vertices.front().position);
+    expected = std::move(edited_reference);
+}
+
+void InspectDeferredBurst(SHIELD_WorldSystem& world,
+                          WaterSystem& water,
+                          bool edit_deferred,
+                          BudgetedBurstMeshes& burst,
+                          bool& saw_deferred,
+                          bool& edited) {
+    auto& chunks = burst.chunks;
+    auto& expected = burst.expected;
+    // Preparation fixes this scan at 25 chunks, with at most one bounded edit.
+    for (std::size_t index = 0; index < chunks.size(); ++index) {
+        auto& chunk = *chunks[index];
+        if (chunk.mesh_version.load() != 0u || chunk.pending_lod.load() >= 0) {
+            continue;
+        }
+        saw_deferred = true;
+        EXPECT_EQ(chunk.get_state(), index % 2u == 0u ? ChunkState::Idle : ChunkState::Ready);
+        EXPECT_EQ(chunk.current_lod.load(), index % 2u == 0u ? -1 : 1);
+        EXPECT_EQ(chunk.pending_lod.load(), -1);
+        EXPECT_EQ(chunk.water_mesh_version.load(), 0u);
+        EXPECT_FALSE(chunk.pending_mesh_ready.load());
+        EXPECT_FALSE(chunk.pending_mesh_failed.load());
+        EXPECT_TRUE(chunk.pending_mesh_vertices.empty());
+        EXPECT_TRUE(chunk.pending_water_mesh_vertices.empty());
+        if (edit_deferred && !edited) {
+            ASSERT_NO_FATAL_FAILURE(EditDeferredBurstChunk(world, water, chunk, expected[index]));
+            edited = true;
+        }
+    }
+}
+
+std::size_t CheckCompletedBurst(const BudgetedBurstMeshes& burst) {
+    const auto& chunks = burst.chunks;
+    const auto& expected = burst.expected;
+    // Each comparison covers one chunk's bounded terrain and water geometry.
+    std::size_t completed = 0;
+    for (std::size_t index = 0; index < chunks.size(); ++index) {
+        const auto& chunk = *chunks[index];
+        if (chunk.mesh_version.load() == 0u) {
+            continue;
+        }
+        ++completed;
+        EXPECT_EQ(chunk.mesh_version.load(), 1u);
+        EXPECT_EQ(chunk.water_mesh_version.load(), 1u);
+        EXPECT_EQ(chunk.pending_lod.load(), -1);
+        EXPECT_EQ(chunk.get_state(), ChunkState::Ready);
+        ExpectVerticesEqual(chunk.mesh_vertices, expected[index]->mesh_vertices);
+        EXPECT_EQ(chunk.mesh_indices, expected[index]->mesh_indices);
+        ExpectVerticesEqual(chunk.water_mesh_vertices, expected[index]->water_mesh_vertices);
+        EXPECT_EQ(chunk.water_mesh_indices, expected[index]->water_mesh_indices);
+    }
+    return completed;
+}
+
+void CheckBudgetedBurst(bool use_workers, bool promotion, bool edit_deferred) {
+    JobSystem jobs;
+    if (use_workers) {
+        jobs.startup(1);
+    }
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.base_amplitude = 0.0f;
+    params.height_offset = 8.0f;
+    params.caves_enabled = false;
+    SHIELD_WorldSystem world(use_workers ? &jobs : nullptr, nullptr, params, 1337);
+    WaterSystem water(use_workers ? &jobs : nullptr, &world);
+    water.SetBootPaused(true);
+    world.SetWaterSystem(&water);
+    world.begin_tick(0);
+
+    BudgetedBurstMeshes burst;
+    ASSERT_NO_FATAL_FAILURE(PrepareBudgetedBurst(world, water, promotion, burst));
 
     entt::registry registry;
     bool saw_deferred = false;
@@ -724,59 +814,10 @@ void CheckBudgetedBurst(bool use_workers, bool promotion, bool edit_deferred) {
         world.update(registry, std::vector<Vec3>{}, nullptr);
         EXPECT_LE(world.last_meshing_snapshot_bytes(),
                   SHIELD_WorldSystem::kMeshingSnapshotByteBudget);
-        for (std::size_t index = 0; index < chunks.size(); ++index) {
-            auto& chunk = *chunks[index];
-            if (chunk.mesh_version.load() != 0u || chunk.pending_lod.load() >= 0) {
-                continue;
-            }
-            saw_deferred = true;
-            EXPECT_EQ(chunk.get_state(), index % 2u == 0u ? ChunkState::Idle : ChunkState::Ready);
-            EXPECT_EQ(chunk.current_lod.load(), index % 2u == 0u ? -1 : 1);
-            EXPECT_EQ(chunk.pending_lod.load(), -1);
-            EXPECT_EQ(chunk.water_mesh_version.load(), 0u);
-            EXPECT_FALSE(chunk.pending_mesh_ready.load());
-            EXPECT_FALSE(chunk.pending_mesh_failed.load());
-            EXPECT_TRUE(chunk.pending_mesh_vertices.empty());
-            EXPECT_TRUE(chunk.pending_water_mesh_vertices.empty());
-            if (edit_deferred && !edited) {
-                // The next pass must capture this new terrain, material and water
-                // state, rather than an eager snapshot of the deferred suffix.
-                for (auto& density : chunk.sdf_data) {
-                    density += 1.0f;
-                }
-                for (auto& height : chunk.heightmap_data) {
-                    height -= 1.0f;
-                }
-                std::fill(chunk.material_data.begin(),
-                          chunk.material_data.end(),
-                          static_cast<u8>(MaterialType::Soil));
-                std::fill(chunk.water_level_data.begin(), chunk.water_level_data.end(), 7.0f);
-                chunk.mark_voxel_data_dirty();
-                auto edited_reference = ReferenceMesh(world, water, chunk);
-                ASSERT_FALSE(edited_reference->mesh_vertices.empty());
-                ASSERT_NE(edited_reference->mesh_vertices.front().position,
-                          expected[index]->mesh_vertices.front().position);
-                expected[index] = std::move(edited_reference);
-                edited = true;
-            }
-        }
+        ASSERT_NO_FATAL_FAILURE(
+            InspectDeferredBurst(world, water, edit_deferred, burst, saw_deferred, edited));
         world.wait_for_streaming_jobs();
-        completed = 0;
-        for (std::size_t index = 0; index < chunks.size(); ++index) {
-            const auto& chunk = *chunks[index];
-            if (chunk.mesh_version.load() == 0u) {
-                continue;
-            }
-            ++completed;
-            EXPECT_EQ(chunk.mesh_version.load(), 1u);
-            EXPECT_EQ(chunk.water_mesh_version.load(), 1u);
-            EXPECT_EQ(chunk.pending_lod.load(), -1);
-            EXPECT_EQ(chunk.get_state(), ChunkState::Ready);
-            ExpectVerticesEqual(chunk.mesh_vertices, expected[index]->mesh_vertices);
-            EXPECT_EQ(chunk.mesh_indices, expected[index]->mesh_indices);
-            ExpectVerticesEqual(chunk.water_mesh_vertices, expected[index]->water_mesh_vertices);
-            EXPECT_EQ(chunk.water_mesh_indices, expected[index]->water_mesh_indices);
-        }
+        completed = CheckCompletedBurst(burst);
         EXPECT_GT(completed, completed_before);
         EXPECT_EQ(world.get_last_streaming_budget_stats().scheduled_meshing,
                   completed - completed_before);
