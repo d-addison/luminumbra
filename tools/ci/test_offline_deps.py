@@ -3,7 +3,9 @@
 
 import errno
 import ctypes
+from contextlib import redirect_stderr
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -838,6 +840,168 @@ class OfflineDependenciesTests(unittest.TestCase):
     def test_cli_failure_returns_nonzero(self):
         self.lock.write_text(json.dumps(deps.unresolved_lock(self.root)))
         self.assertEqual(deps.main(["stage", "--root", str(self.root), "--cache", str(self.cache), "--lock", str(self.lock)]), 1)
+
+    def assert_cli_refused(self, command):
+        diagnostic = io.StringIO()
+        with redirect_stderr(diagnostic):
+            result = deps.main([command, "--root", str(self.root),
+                                "--cache", str(self.cache), "--lock", str(self.lock)])
+        self.assertEqual(result, 1)
+        self.assertTrue(diagnostic.getvalue().startswith("offline dependencies: "))
+        self.assertNotIn("Traceback", diagnostic.getvalue())
+
+    def test_source_cycle_and_io_errors_refuse_hash_verify_stage_and_cli_without_writes(self):
+        # Model the link at the filesystem boundary on every host. Windows
+        # requires no symlink privilege and still reaches the hashing branch.
+        alias = self.source / "alias"
+        alias.write_text("placeholder")
+        lstat, readlink, resolve = Path.lstat, os.readlink, Path.resolve
+
+        def link_stat(path, *args, **kwargs):
+            info = lstat(path, *args, **kwargs)
+            if path == alias:
+                return SimpleNamespace(st_mode=stat.S_IFLNK | 0o777)
+            return info
+
+        before = self.fixture_state()
+        for failure in (RuntimeError("source cycle"), OSError(errno.ELOOP, "source cycle"),
+                        PermissionError(errno.EACCES, "source denied"), OSError(errno.EIO, "partial lookup")):
+            expected = deps.DependencyError if isinstance(failure, RuntimeError) or failure.errno == errno.ELOOP else OSError
+            for target in (alias, self.source):
+                def failed_resolve(path):
+                    if path == target:
+                        raise failure
+                    return resolve(path)
+
+                with self.subTest(target=target, failure=failure), patch.object(Path, "lstat", link_stat), \
+                        patch.object(os, "readlink", lambda path: "alias" if Path(path) == alias else readlink(path)), \
+                        patch.object(Path, "resolve", failed_resolve):
+                    for action in (lambda: deps.source_digest(self.source), self.verify, self.stage):
+                        with self.subTest(action=action), self.assertRaises(expected):
+                            action()
+                    for command in ("verify", "stage"):
+                        with self.subTest(command=command):
+                            self.assert_cli_refused(command)
+                self.assertEqual(self.fixture_state(), before)
+
+    def test_resolution_siblings_and_cli_refuse_cycles_and_io_errors_without_writes(self):
+        resolve = Path.resolve
+        scratch = self.root / "scratch"
+        dest, init = scratch / "copied sources", scratch / "initial cache.cmake"
+        cases = ((self.source, self.verify), (self.cache, self.verify),
+                 (self.source / ".git", lambda: deps.git_metadata(self.source, self.cache)),
+                 (self.cache, self.stage), (scratch, self.stage), (self.root, self.stage),
+                 (dest, self.stage), (init, self.stage))
+        before = self.fixture_state()
+        for failure in (RuntimeError("cyclic lookup"), OSError(errno.ELOOP, "cyclic lookup"),
+                        PermissionError(errno.EACCES, "lookup denied"), OSError(errno.EIO, "partial lookup")):
+            expected = deps.DependencyError if isinstance(failure, RuntimeError) or failure.errno == errno.ELOOP else OSError
+            for target, action in cases:
+                def failed_resolve(path):
+                    if path == target:
+                        raise failure
+                    return resolve(path)
+
+                with self.subTest(target=target, failure=failure), patch.object(Path, "resolve", failed_resolve):
+                    with self.assertRaises(expected):
+                        action()
+                self.assertEqual(self.fixture_state(), before)
+            for target in (self.root, self.cache, self.source, self.source / ".git", scratch,
+                           scratch / "offline-deps", scratch / "offline-init.cmake"):
+                for command in ("verify", "stage"):
+                    if command == "verify" and target.is_relative_to(scratch):
+                        continue
+
+                    def failed_resolve(path):
+                        if path == target:
+                            raise failure
+                        return resolve(path)
+
+                    with self.subTest(command=command, target=target, failure=failure), \
+                            patch.object(Path, "resolve", failed_resolve):
+                        self.assert_cli_refused(command)
+                    self.assertEqual(self.fixture_state(), before)
+
+    def test_source_links_keep_exact_source_boundary_and_digest_encoding(self):
+        # Pin bytes independently of Windows text newline translation.
+        (self.source / "input with spaces.h").write_bytes(b"source content\n")
+        alias = self.source / "alias"
+        alias.write_text("placeholder")
+        lstat, readlink, resolve, exists = Path.lstat, os.readlink, Path.resolve, Path.exists
+
+        def link_stat(path, *args, **kwargs):
+            return SimpleNamespace(st_mode=stat.S_IFLNK | 0o777) if path == alias else lstat(path, *args, **kwargs)
+
+        # Equality with the source root is allowed for source links, whereas
+        # Git metadata must be strictly inside its cache. A sibling source
+        # inside the same cache is still outside this source's boundary.
+        cases = ((".", self.source, True, None),
+                 ("input with spaces.h", self.source / "input with spaces.h", True, None),
+                 ("../sibling/input.h", self.cache / "sibling/input.h", True, "symlink escapes"),
+                 (str(self.source / "input with spaces.h"), self.source / "input with spaces.h", True, "symlink escapes"),
+                 ("missing.h", self.source / "missing.h", False, "dangling source symlink"))
+        before = self.fixture_state()
+        for target, resolved, present, refusal in cases:
+            with self.subTest(target=target), patch.object(Path, "lstat", link_stat), \
+                    patch.object(os, "readlink", lambda path: target if Path(path) == alias else readlink(path)), \
+                    patch.object(Path, "resolve", lambda path: resolved if path == alias else resolve(path)), \
+                    patch.object(Path, "exists", lambda path: present if path == alias else exists(path)):
+                if refusal:
+                    with self.assertRaisesRegex(deps.DependencyError, refusal):
+                        deps.source_digest(self.source)
+                elif target == ".":
+                    self.assertEqual(deps.source_digest(self.source),
+                                     "2a634b0332bf0a6919181fec1196c7c6263f044965842c95219fbdfb88c9e343")
+                else:
+                    self.assertRegex(deps.source_digest(self.source), r"^[0-9a-f]{64}$")
+            self.assertEqual(self.fixture_state(), before)
+
+    def test_real_source_cycle_and_cli_root_cycle_refuse_without_writes(self):
+        alias = self.source / "alias"
+        root_alias = self.base / "root-cycle"
+        if os.name == "posix":
+            alias.symlink_to("alias")
+            root_alias.symlink_to("root-cycle")
+            for action in (lambda: deps.source_digest(self.source), self.verify, self.stage):
+                with self.subTest(action=action), self.assertRaises(deps.DependencyError):
+                    action()
+            entrypoint = [str(ROOT / "tools/ci/offline_deps.py")]
+        else:
+            alias.write_text("placeholder")
+            # Install mocks inside the child process, rather than assuming
+            # parent mocks cross subprocess boundaries. This exercises the
+            # CLI on Windows even when symlink creation is denied.
+            driver = """import importlib.util, pathlib, os, stat, sys
+from types import SimpleNamespace
+from unittest.mock import patch
+spec = importlib.util.spec_from_file_location('deps', sys.argv[1])
+deps = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(deps)
+alias, root_alias = map(pathlib.Path, sys.argv[2:4])
+resolve, lstat, readlink = pathlib.Path.resolve, pathlib.Path.lstat, os.readlink
+def cyclic(path):
+    if path in (alias, root_alias):
+        raise RuntimeError('cyclic path')
+    return resolve(path)
+def link_stat(path, *args, **kwargs):
+    return SimpleNamespace(st_mode=stat.S_IFLNK | 0o777) if path == alias else lstat(path, *args, **kwargs)
+with patch.object(pathlib.Path, 'resolve', cyclic), patch.object(pathlib.Path, 'lstat', link_stat), patch.object(os, 'readlink', lambda path: 'alias' if pathlib.Path(path) == alias else readlink(path)):
+    sys.exit(deps.main(sys.argv[4:]))
+"""
+            entrypoint = ["-c", driver, str(ROOT / "tools/ci/offline_deps.py"), str(alias), str(root_alias)]
+        before = self.fixture_state()
+        for root in (self.root, root_alias):
+            for command in ("verify", "stage"):
+                with self.subTest(root=root, command=command):
+                    result = subprocess.run(
+                        [sys.executable, "-I", "-B", *entrypoint, command,
+                         "--root", str(root), "--cache", str(self.cache), "--lock", str(self.lock)],
+                        capture_output=True, text=True, check=False)
+                    self.assertEqual(result.returncode, 1)
+                    self.assertTrue(result.stderr.startswith("offline dependencies: "), result.stderr)
+                    self.assertNotIn("Traceback", result.stderr)
+                    self.assertEqual(result.stdout, "")
+                    self.assertEqual(self.fixture_state(), before)
 
 
 class CachedGitSafetyTests(unittest.TestCase):

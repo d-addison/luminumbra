@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import importlib.util
 import json
@@ -33,6 +34,22 @@ def reject_reparse_points(path):
         _PATH_SAFETY.reject_reparse_points(path)
     except OSError as error:
         raise DependencyError(str(error)) from error
+
+
+def resolve_path(path: Path) -> Path:
+    """Normalize pathlib cycle errors, retaining other filesystem errors.
+
+    Python versions report symlink loops as RuntimeError or OSError(ELOOP).
+    Callers and the CLI already handle ordinary OSError refusals.
+    """
+    try:
+        return path.resolve()
+    except OSError as error:
+        if error.errno != errno.ELOOP:
+            raise
+        raise DependencyError(f"cyclic path: {path}") from error
+    except RuntimeError as error:
+        raise DependencyError(f"cyclic path: {path}") from error
 
 
 def declarations(root: Path) -> dict:
@@ -77,11 +94,8 @@ def contained(path: Path, parent: Path) -> Path:
         raise DependencyError(f"path must be strictly inside {parent.name}: {path}")
     reject_reparse_points(path)
     reject_reparse_points(parent)
-    try:
-        resolved = path.resolve()
-        resolved_parent = parent.resolve()
-    except RuntimeError as error:
-        raise DependencyError(f"cyclic path: {path}") from error
+    resolved = resolve_path(path)
+    resolved_parent = resolve_path(parent)
     if resolved == resolved_parent or not resolved.is_relative_to(resolved_parent):
         raise DependencyError(f"path must be strictly inside {parent.name}: {path}")
     return resolved
@@ -113,7 +127,7 @@ def source_digest(source: Path) -> str:
             mode = item.lstat().st_mode
             if stat.S_ISLNK(mode):
                 target = os.readlink(item)
-                if os.path.isabs(target) or not item.resolve().is_relative_to(source.resolve()):
+                if os.path.isabs(target) or not resolve_path(item).is_relative_to(resolve_path(source)):
                     raise DependencyError(f"source symlink escapes: {rel}")
                 if not item.exists():
                     raise DependencyError(f"dangling source symlink: {rel}")
@@ -479,9 +493,10 @@ def stage(root: Path, cache: Path, lock_path: Path, dest: Path, init: Path) -> N
         return contained(path, scratch)
 
     dest, init = destination(dest), destination(init)
+    resolved_cache = resolve_path(cache)
     if (dest.exists() or init.exists() or init.is_relative_to(dest) or dest.is_relative_to(init)
-            or dest.is_relative_to(cache.resolve()) or cache.resolve().is_relative_to(dest)
-            or init.is_relative_to(cache.resolve())):
+            or dest.is_relative_to(resolved_cache) or resolved_cache.is_relative_to(dest)
+            or init.is_relative_to(resolved_cache)):
         raise DependencyError("stage needs fresh, separate destination and initial cache paths")
     lock = verify(root, cache, lock_path)
     dest.mkdir(parents=True)
@@ -545,10 +560,10 @@ def main(argv=None) -> int:
     parser.add_argument("--dest", type=Path, default=Path("scratch/offline-deps"))
     parser.add_argument("--init", type=Path, default=Path("scratch/offline-init.cmake"))
     args = parser.parse_args(argv)
-    root = args.root.resolve()
     cache = args.cache
-    lock = root / args.lock
     try:
+        root = resolve_path(args.root)
+        lock = root / args.lock
         if args.command == "snapshot":
             snapshot(root, cache, lock)
         elif args.command == "verify":
