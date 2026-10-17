@@ -1,7 +1,7 @@
 // asset-manifest split. The engine-side GameSession validates
-// SIMULATION requirements only (world preset readable/parseable); renderer/UI
-// asset requirements are caller-supplied by the client. Headless CreateWorld
-// must succeed in a root containing nothing but the world preset.
+// SIMULATION requirements only (preset and worldgen dependencies); renderer/UI
+// asset requirements are caller-supplied by the client. Worldgen dependencies
+// are simulation assets and must be available even for a headless host.
 #include "../support/UniqueTempPath.h"
 #include "../support/WorldgenTestData.h"
 
@@ -53,6 +53,7 @@
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/Chunk.h"
 #include "luminumbra_common/world/FarAuthorityOverlay.h"
+#include "luminumbra_common/world/FarLodStore.h"
 #include "luminumbra_common/world/FarWantedSet.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
@@ -74,8 +75,8 @@ fs::path SourcePresetPath() {
     return fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds" / "atlas" / "presets" / "default.json";
 }
 
-// Temp root containing ONLY worlds/atlas/presets/default.json — no res/ or
-// data/ client assets anywhere. The root is unique per fixture instance so
+// Temp root containing the preset and worldgen data, with no client assets.
+// The root is unique per fixture instance so
 // concurrent common_tests processes never share (or clobber) a directory; each
 // TEST builds ONE instance and reuses it, so within-run path stability still
 // holds. The destructor removes the tree.
@@ -86,6 +87,7 @@ public:
             Luminumbra::TestSupport::CreateUniqueTempDirectory("luminumbra_headless_world_test_");
         fs::create_directories(root_ / "worlds" / "atlas" / "presets");
         fs::copy_file(SourcePresetPath(), root_ / "worlds" / "atlas" / "presets" / "default.json");
+        Luminumbra::TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, root_);
     }
     ~HeadlessRoot() {
         std::error_code ec;
@@ -669,19 +671,21 @@ TEST(GameSessionHeadlessWorldTest, SpeciesIdentityIsAdoptedOnCreateLoadAndIoRefu
 TEST(GameSessionHeadlessWorldTest, ValidateWorldConfigIsSimulationOnlyByDefault) {
     const HeadlessRoot root;
     ASSERT_FALSE(fs::exists(root.path() / "res"));
-    ASSERT_FALSE(fs::exists(root.path() / "data"));
+    ASSERT_FALSE(fs::exists(root.path() / "data/ui"));
 
     const WorldConfigValidationResult result =
         GameSession::ValidateWorldConfig(root.root_string(), "default");
     EXPECT_TRUE(result.ok) << (result.errors.empty() ? "" : result.errors.front());
     EXPECT_TRUE(result.errors.empty());
 
-    const auto preset_only = Luminumbra::world::LoadTerrainPreset(result.preset_path);
-    ASSERT_TRUE(preset_only.ok);
-    Luminumbra::TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, root.path());
     const auto full_data = Luminumbra::world::LoadTerrainPreset(result.preset_path);
     ASSERT_TRUE(full_data.ok);
-    EXPECT_NE(preset_only.preset_content_hash, full_data.preset_content_hash);
+    ASSERT_GT(fs::remove_all(root.path() / "data"), 0u);
+    const auto preset_only = Luminumbra::world::LoadTerrainPreset(result.preset_path);
+    EXPECT_FALSE(preset_only.ok);
+    EXPECT_FALSE(preset_only.errors.empty());
+    EXPECT_TRUE(preset_only.preset_content_hash.empty());
+    EXPECT_FALSE(GameSession::ValidateWorldConfig(root.root_string(), "default").ok);
 }
 
 TEST(GameSessionHeadlessWorldTest, CallerSuppliedRequiredAssetsAreEnforced) {
@@ -717,18 +721,32 @@ void ExpectRuntimePresetIdentity(const GameSession& session, const fs::path& run
     const auto expected = Luminumbra::world::LoadTerrainPreset(saved, runtime_root / "data");
     const auto without_runtime = Luminumbra::world::LoadTerrainPreset(saved);
     ASSERT_TRUE(expected.ok);
-    ASSERT_TRUE(without_runtime.ok);
-    EXPECT_NE(expected.preset_content_hash, without_runtime.preset_content_hash);
+    ASSERT_FALSE(without_runtime.ok);
+    EXPECT_FALSE(without_runtime.errors.empty());
+    EXPECT_TRUE(without_runtime.preset_content_hash.empty());
     EXPECT_EQ(session.PresetContentHash(), expected.preset_content_hash);
 }
 
 TEST(GameSessionHeadlessWorldTest, SaveRootOverrideRoutesCreateLoadSaveAndCatalog) {
     const HeadlessRoot assets;
     const HeadlessRoot storage;
-    Luminumbra::TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, assets.path());
+    ASSERT_GT(fs::remove_all(storage.path() / "data"), 0u);
+    ASSERT_GT(fs::remove_all(storage.path() / "worlds/atlas"), 0u);
     JobSystem jobs;
     jobs.startup(1);
     std::string world_id;
+    std::string preset_identity;
+    std::uint64_t content_identity = 0;
+    {
+        GameSession baseline;
+        baseline.SetJobSystem(&jobs);
+        baseline.SetRootPath(assets.root_string());
+        ASSERT_TRUE(baseline.CreateTransientWorld("DefaultLocation", "12345", "default"));
+        preset_identity = baseline.PresetContentHash();
+        content_identity = Luminumbra::World::ComputeTerrainParamsHash(
+            baseline.GetWorldSystem()->get_params(), baseline.GetWorldSystem()->get_seed());
+        ASSERT_FALSE(preset_identity.empty());
+    }
     {
         GameSession session;
         session.SetJobSystem(&jobs);
@@ -738,6 +756,12 @@ TEST(GameSessionHeadlessWorldTest, SaveRootOverrideRoutesCreateLoadSaveAndCatalo
         EXPECT_EQ(session.GetSaveRootPath(), storage.path());
         EXPECT_TRUE(session.GetWorldSaveDir().empty());
         ASSERT_TRUE(session.CreateWorld("PrivateWorld", "12345", "default"));
+        EXPECT_EQ(session.PresetContentHash(), preset_identity);
+        EXPECT_EQ(Luminumbra::World::ComputeTerrainParamsHash(
+                      session.GetWorldSystem()->get_params(), session.GetWorldSystem()->get_seed()),
+                  content_identity);
+        EXPECT_TRUE(session.GetWorldSystem()->biomes_enabled());
+        EXPECT_TRUE(session.GetWorldSystem()->structures_enabled());
         ExpectRuntimePresetIdentity(session, assets.path());
         world_id = session.GetMetadata().worldId;
         const auto expected = storage.path() / "worlds/saves" / world_id;
@@ -751,6 +775,7 @@ TEST(GameSessionHeadlessWorldTest, SaveRootOverrideRoutesCreateLoadSaveAndCatalo
         EXPECT_TRUE(catalog.error.empty());
         ASSERT_EQ(catalog.worlds.size(), 1u);
         EXPECT_EQ(catalog.worlds.front().metadata.worldId, world_id);
+        EXPECT_TRUE(catalog.worlds.front().error.empty()) << catalog.worlds.front().error;
         EXPECT_FALSE(fs::exists(assets.path() / "worlds/saves"));
     }
     {
@@ -759,6 +784,12 @@ TEST(GameSessionHeadlessWorldTest, SaveRootOverrideRoutesCreateLoadSaveAndCatalo
         session.SetRootPath(assets.root_string());
         session.SetSaveRootPath(storage.path());
         ASSERT_TRUE(session.LoadWorld(world_id)) << session.GetWorldOpenError();
+        EXPECT_EQ(session.PresetContentHash(), preset_identity);
+        EXPECT_EQ(Luminumbra::World::ComputeTerrainParamsHash(
+                      session.GetWorldSystem()->get_params(), session.GetWorldSystem()->get_seed()),
+                  content_identity);
+        EXPECT_TRUE(session.GetWorldSystem()->biomes_enabled());
+        EXPECT_TRUE(session.GetWorldSystem()->structures_enabled());
         ExpectRuntimePresetIdentity(session, assets.path());
         EXPECT_EQ(session.GetMetadata().name, "PrivateWorld");
         ASSERT_TRUE(session.SaveWorld());
@@ -767,7 +798,193 @@ TEST(GameSessionHeadlessWorldTest, SaveRootOverrideRoutesCreateLoadSaveAndCatalo
     jobs.shutdown();
 }
 
-TEST(GameSessionHeadlessWorldTest, HeadlessCreateWorldSucceedsWithPresetOnly) {
+TEST(GameSessionHeadlessWorldTest, ExistingWorldReloadUsesRuntimeDataWithSeparateStorage) {
+    const HeadlessRoot assets;
+    const HeadlessRoot storage;
+    ASSERT_GT(fs::remove_all(storage.path() / "data"), 0u);
+    JobSystem jobs;
+    jobs.startup(1);
+    std::string world_id;
+    std::string preset_identity;
+    std::uint64_t content_identity = 0;
+    {
+        GameSession baseline;
+        baseline.SetJobSystem(&jobs);
+        baseline.SetRootPath(assets.root_string());
+        ASSERT_TRUE(baseline.CreateWorld("ExistingWorld", "12345", "default"));
+        ASSERT_TRUE(baseline.SaveWorldState());
+        world_id = baseline.GetMetadata().worldId;
+        preset_identity = baseline.PresetContentHash();
+        content_identity = Luminumbra::World::ComputeTerrainParamsHash(
+            baseline.GetWorldSystem()->get_params(), baseline.GetWorldSystem()->get_seed());
+    }
+    const auto destination = storage.path() / "worlds/saves" / world_id;
+    fs::create_directories(destination.parent_path());
+    fs::copy(assets.path() / "worlds/saves" / world_id, destination, fs::copy_options::recursive);
+    {
+        GameSession session;
+        session.SetJobSystem(&jobs);
+        session.SetRootPath(assets.root_string());
+        session.SetSaveRootPath(storage.path());
+        ASSERT_TRUE(session.LoadWorld(world_id)) << session.GetWorldOpenError();
+        EXPECT_EQ(session.PresetContentHash(), preset_identity);
+        EXPECT_EQ(Luminumbra::World::ComputeTerrainParamsHash(
+                      session.GetWorldSystem()->get_params(), session.GetWorldSystem()->get_seed()),
+                  content_identity);
+    }
+    jobs.shutdown();
+}
+
+TEST(GameSessionHeadlessWorldTest, MissingRuntimeDependenciesRefuseCreateReloadAndCatalog) {
+    const HeadlessRoot assets;
+    const HeadlessRoot storage;
+    JobSystem jobs;
+    jobs.startup(1);
+    std::string world_id;
+    {
+        GameSession session;
+        session.SetJobSystem(&jobs);
+        session.SetRootPath(assets.root_string());
+        session.SetSaveRootPath(storage.path());
+        ASSERT_TRUE(session.CreateWorld("DependencyRefusal", "12345", "default"));
+        world_id = session.GetMetadata().worldId;
+        ASSERT_TRUE(session.SaveWorldState());
+    }
+    // Valid data beside the saves must never mask missing runtime dependencies.
+    // An absent biome table supports legacy classification; a present invalid
+    // table and absent/empty structure pools are errors.
+    for (const auto& [relative, empty] :
+         {std::pair{fs::path("common/biomes.json"), true},
+          std::pair{fs::path("common/structures"), false},
+          std::pair{fs::path("common/structures"), true},
+          std::pair{fs::path("common/structures/cairn/cairn.json"), false},
+          std::pair{fs::path("common/structures/cairn/cairn.json"), true}}) {
+        SCOPED_TRACE(relative.string());
+        SCOPED_TRACE(empty);
+        const auto dependency = assets.path() / "data" / relative;
+        const auto hidden = assets.path() / "hidden-dependency";
+        fs::rename(dependency, hidden);
+        if (empty) {
+            if (fs::is_directory(hidden))
+                fs::create_directory(dependency);
+            else
+                std::ofstream(dependency, std::ios::binary) << "{}";
+        }
+        GameSession session;
+        session.SetJobSystem(&jobs);
+        session.SetRootPath(assets.root_string());
+        session.SetSaveRootPath(storage.path());
+        EXPECT_FALSE(session.CreateWorld("Refused", "12345", "default"));
+        EXPECT_FALSE(session.GetWorldOpenError().empty());
+        EXPECT_FALSE(session.CreateTransientWorld("Refused", "12345", "default"));
+        EXPECT_FALSE(session.GetWorldOpenError().empty());
+        EXPECT_FALSE(session.LoadWorld(world_id));
+        EXPECT_FALSE(session.GetWorldOpenError().empty());
+        EXPECT_EQ(session.GetWorldSystem(), nullptr);
+        const auto saved =
+            Luminumbra::Persistence::InspectSavedWorld(storage.path(), assets.path(), world_id);
+        EXPECT_FALSE(saved.error.empty());
+        const auto catalog =
+            Luminumbra::Persistence::EnumerateSavedWorlds(storage.path(), assets.path());
+        ASSERT_EQ(catalog.worlds.size(), 1u);
+        EXPECT_FALSE(catalog.worlds.front().error.empty());
+        fs::remove_all(dependency);
+        fs::rename(hidden, dependency);
+    }
+    jobs.shutdown();
+}
+
+TEST(GameSessionHeadlessWorldTest, MissingBiomeTableUsesLegacyFallbackForCreateReloadAndCatalog) {
+    const HeadlessRoot assets;
+    const HeadlessRoot storage;
+    ASSERT_TRUE(fs::remove(assets.path() / "data/common/biomes.json"));
+    JobSystem jobs;
+    jobs.startup(1);
+    std::string world_id;
+    {
+        GameSession session;
+        session.SetJobSystem(&jobs);
+        session.SetRootPath(assets.root_string());
+        session.SetSaveRootPath(storage.path());
+        ASSERT_TRUE(session.CreateWorld("LegacyBiomes", "12345", "default"))
+            << session.GetWorldOpenError();
+        EXPECT_FALSE(session.GetWorldSystem()->biomes_enabled());
+        EXPECT_TRUE(session.GetWorldSystem()->biome_table().empty());
+        world_id = session.GetMetadata().worldId;
+        ASSERT_TRUE(session.SaveWorldState());
+    }
+    {
+        GameSession session;
+        session.SetJobSystem(&jobs);
+        session.SetRootPath(assets.root_string());
+        session.SetSaveRootPath(storage.path());
+        ASSERT_TRUE(session.CreateTransientWorld("LegacyBiomesTransient", "12345", "default"))
+            << session.GetWorldOpenError();
+        EXPECT_FALSE(session.GetWorldSystem()->biomes_enabled());
+        EXPECT_TRUE(session.GetWorldSystem()->biome_table().empty());
+        ASSERT_TRUE(session.LoadWorld(world_id)) << session.GetWorldOpenError();
+        EXPECT_FALSE(session.GetWorldSystem()->biomes_enabled());
+        EXPECT_TRUE(session.GetWorldSystem()->biome_table().empty());
+    }
+    const auto saved =
+        Luminumbra::Persistence::InspectSavedWorld(storage.path(), assets.path(), world_id);
+    EXPECT_TRUE(saved.error.empty()) << saved.error;
+    const auto catalog =
+        Luminumbra::Persistence::EnumerateSavedWorlds(storage.path(), assets.path());
+    ASSERT_EQ(catalog.worlds.size(), 1u);
+    EXPECT_EQ(catalog.worlds.front().metadata.worldId, world_id);
+    EXPECT_TRUE(catalog.worlds.front().error.empty()) << catalog.worlds.front().error;
+    jobs.shutdown();
+}
+
+TEST(GameSessionHeadlessWorldTest, CatalogResolvesPackagedPresetsUnderRuntimeRoot) {
+    const HeadlessRoot assets;
+    const HeadlessRoot storage;
+    fs::copy(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets-rev6",
+             assets.path() / "worlds/atlas/presets-rev6",
+             fs::copy_options::recursive);
+    JobSystem jobs;
+    jobs.startup(1);
+    {
+        GameSession session;
+        session.SetJobSystem(&jobs);
+        session.SetRootPath(assets.root_string());
+        session.SetSaveRootPath(storage.path());
+        ASSERT_TRUE(session.CreateWorld("PackagedPreset", "12345", "default"));
+        const auto world_id = session.GetMetadata().worldId;
+        const auto metadata = session.GetWorldSaveDir() / "world_info.json";
+        nlohmann::json document;
+        {
+            std::ifstream input(metadata);
+            input >> document;
+        }
+        ASSERT_TRUE(document.contains("presetFormat"));
+        ASSERT_TRUE(document.contains("presetIdentity"));
+        ASSERT_TRUE(fs::remove(session.GetWorldSaveDir() / "preset.json"));
+        const auto refused =
+            Luminumbra::Persistence::InspectSavedWorld(storage.path(), assets.path(), world_id);
+        EXPECT_NE(refused.error.find("required embedded preset.json"), std::string::npos);
+        const auto refused_catalog =
+            Luminumbra::Persistence::EnumerateSavedWorlds(storage.path(), assets.path());
+        ASSERT_EQ(refused_catalog.worlds.size(), 1u);
+        EXPECT_EQ(refused_catalog.worlds.front().error, refused.error);
+        // Historical saves predate the format marker, embedded preset and checksum.
+        document.erase("presetFormat");
+        document.erase("presetIdentity");
+        {
+            std::ofstream output(metadata);
+            output << document.dump();
+        }
+        const auto saved =
+            Luminumbra::Persistence::InspectSavedWorld(storage.path(), assets.path(), world_id);
+        EXPECT_TRUE(saved.error.empty()) << saved.error;
+        EXPECT_EQ(saved.preset_path, assets.path() / "worlds/atlas/presets-rev6/default.json");
+        ASSERT_TRUE(session.LoadWorld(world_id)) << session.GetWorldOpenError();
+    }
+    jobs.shutdown();
+}
+
+TEST(GameSessionHeadlessWorldTest, HeadlessCreateWorldSucceedsWithSimulationAssetsOnly) {
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup();

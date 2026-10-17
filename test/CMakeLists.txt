@@ -21,6 +21,7 @@ target_compile_definitions(world_generation_test PRIVATE
 
 add_executable(preset_schema_rev_test shield/preset_schema_rev_test.cpp)
 target_include_directories(preset_schema_rev_test PRIVATE ../src)
+target_compile_definitions(preset_schema_rev_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
 target_link_libraries(preset_schema_rev_test PRIVATE luminumbra_common)
 luminumbra_configure_first_party_target(preset_schema_rev_test)
 add_test(NAME TerrainPresetSchemaRevision COMMAND preset_schema_rev_test)
@@ -2167,6 +2168,10 @@ if(CAPTURE_VALIDATION_POWERSHELL)
         COMMAND "${CAPTURE_VALIDATION_POWERSHELL}" -NoLogo -NoProfile -NonInteractive
             -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tools/gates/test-capture-artifact-validation.ps1")
     set_tests_properties(CaptureArtifactValidationContract PROPERTIES LABELS "visual;tools" TIMEOUT 60)
+    add_test(NAME RenderQualificationWrapperContract
+        COMMAND "${CAPTURE_VALIDATION_POWERSHELL}" -NoLogo -NoProfile -NonInteractive
+            -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tools/gates/test-render-qualification.ps1")
+    set_tests_properties(RenderQualificationWrapperContract PROPERTIES LABELS "visual;tools" TIMEOUT 60)
     add_test(NAME FarLadderOracleContract
         COMMAND "${CAPTURE_VALIDATION_POWERSHELL}" -NoLogo -NoProfile -NonInteractive
             -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tools/gates/test-far-ladder-oracle.ps1")
@@ -2185,6 +2190,7 @@ if(CAPTURE_VALIDATION_POWERSHELL)
 else()
     message(STATUS "PowerShell unavailable: AcceptancePreflightContract is not registered")
     message(STATUS "PowerShell unavailable: CaptureArtifactValidationContract is not registered")
+    message(STATUS "PowerShell unavailable: RenderQualificationWrapperContract is not registered")
     message(STATUS "PowerShell unavailable: FarLadderOracleContract is not registered")
     message(STATUS "PowerShell unavailable: SavedWorldRoundtripArtifactsContract is not registered")
     message(STATUS "PowerShell unavailable: LuaApiManifestSourceContract is not registered")
