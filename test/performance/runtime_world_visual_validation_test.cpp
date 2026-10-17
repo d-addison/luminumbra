@@ -26,6 +26,7 @@
 #include <glm/gtc/type_ptr.hpp>
 
 #include "core/JobSystem.h"
+#include "luminumbra_client/core/RuntimeScenarioConfig.h"
 #include "luminumbra_client/core/RuntimeScenarioHarness.h"
 #include "systems/PhysicsSystem.h"
 #include "systems/SHIELD_WorldSystem.h"
@@ -36,6 +37,27 @@ namespace fs = std::filesystem;
 
 using namespace Luminumbra;
 using namespace Luminumbra::Systems;
+
+TEST(SurfaceWorkAdmission, DirectScenarioConfigsRefuseBeforeWorldMutation) {
+    using namespace Client::ScenarioHarness;
+    for (const bool collision : {false, true}) {
+        for (const int radius : {-1, 13, 10000, std::numeric_limits<int>::max()}) {
+            NetworkedSessionDriver::Config network;
+            network.surface_radius = collision ? 12 : radius;
+            network.collision_radius = collision ? radius : 4;
+            NetworkedSessionDriver driver;
+            // No live client is necessary: radius admission precedes even the
+            // client-null check and all host jobs, world creation and output.
+            EXPECT_FALSE(driver.Begin(nullptr, network));
+            EXPECT_EQ(driver.failure_reason(), "surface_radius_unsupported");
+            RuntimeScenarioConfig persistence;
+            persistence.horizon_radius = network.surface_radius;
+            persistence.collision_radius = network.collision_radius;
+            const auto result = RunPersistenceRoundtripSavePhase(persistence, nullptr);
+            EXPECT_EQ(result.failure_reason, "surface_radius_unsupported");
+        }
+    }
+}
 
 TEST(PrecipitationAnalysis, CrosswindRaisesSlantWithoutLengtheningStreaks) {
     constexpr int width = 160;

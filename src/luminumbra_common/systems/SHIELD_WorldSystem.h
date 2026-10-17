@@ -650,6 +650,9 @@ public:
     bool EnsureCollisionReadyNear(const Vec3& world_pos,
                                   PhysicsSystem* physics_system,
                                   int horizontal_radius = 1);
+    // Synchronous admission: surface/collision radii <= 12, at most 625 columns
+    // and 8192 chunks including vertical margins; refusal precedes chunk changes.
+    // Negative direct-API radii retain their historical zero normalization.
     // render_lod0_radius (default -1): the ring distance that renders at full-SDF
     // LOD0, decoupled from collision_radius. -1 keeps the historical behaviour
     // (LOD0 boundary == collision_radius) so the GAME path and world_hash are

@@ -1551,6 +1551,7 @@ add_executable(world_open_refusal_test
     persistence/world_open_refusal_test.cpp
     common/SimBudgetWorldParity_test.cpp
     common/EffectivePresetIdentity_test.cpp
+    common/SurfaceWorkBudget_test.cpp
     ../src/luminumbra_client/world/WorldgenOverride.cpp
     persistence/async_saved_world_catalog_test.cpp
     persistence/saved_world_catalog_responsiveness_test.cpp
@@ -1562,6 +1563,22 @@ add_executable(world_open_refusal_test
 target_include_directories(world_open_refusal_test PRIVATE ../src ../src/luminumbra_common ../src/luminumbra_client)
 target_compile_definitions(world_open_refusal_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
 target_link_libraries(world_open_refusal_test PRIVATE gtest_main luminumbra_common luminumbra_save_fixture_support)
+
+# Surface admission exercises both shipping launch parsers without a device.
+add_executable(runtime_surface_options_test
+    client/runtime_surface_options_test.cpp
+    ../src/luminumbra_client/core/RuntimeScenarioConfig.cpp
+)
+target_include_directories(runtime_surface_options_test PRIVATE
+    ../src
+    ../src/luminumbra_client
+)
+target_link_libraries(runtime_surface_options_test PRIVATE
+    gtest_main
+    luminumbra_common
+    nlohmann_json
+    glm
+)
 
 # Second-class adversarial pass: Jolt tunneling / penetration test. A fast
 # dynamic sphere fired at a thin static heightfield floor must not pass through it.
@@ -1966,6 +1983,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     runtime_world_visual_validation_test
     frontier_gates_test
     world_open_refusal_test
+    runtime_surface_options_test
     jolt_tunneling_test
     surface_query_test
     audio_occlusion_test

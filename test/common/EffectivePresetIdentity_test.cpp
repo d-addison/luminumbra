@@ -7,11 +7,13 @@
 #include "luminumbra_common/net/LockstepSession.h"
 #include "luminumbra_common/persistence/SavedWorldCatalog.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
+#include "luminumbra_common/replay/ReplayStream.h"
 #include "luminumbra_common/world/FarLodStore.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/KnobLayer.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
 #include "luminumbra_server/ServerCliOptions.h"
+#include "luminumbra_server/ServerWorldRunner.h"
 #include "luminumbra_server/modes/ModeHelpers.h"
 #include "luminumbra_server/modes/Modes.h"
 
@@ -22,6 +24,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <iterator>
 #include <limits>
 #include <optional>
@@ -589,5 +592,55 @@ TEST_F(EffectivePresetIdentity, SurfaceFlightCaptureMatchesSavedAndGeneratedIden
     EXPECT_EQ(std::to_string(Luminumbra::World::ComputeTerrainParamsHash(world->get_params(),
                                                                          world->get_seed())),
               traversal.contentIdentity);
+}
+TEST_F(EffectivePresetIdentity, ReplayRadiusAdmissionPreservesBothIdentitiesAtBoundary) {
+    for (const bool historical : {true, false}) {
+        auto source = shipping;
+        if (historical) {
+            source["schema_rev"] = 6;
+            source["generation_params"]["terrain"].erase("surface_sampling_revision");
+        }
+        options.preset_json_override = source.dump();
+        const auto original = LoadTerrainPresetFromJson(source, root / "data");
+        ASSERT_TRUE(original.ok);
+        GameSession configured;
+        Configure(configured);
+        Luminumbra::Replay::ReplayHeader header;
+        header.seed_string = options.seed;
+        header.preset = options.preset;
+        header.system_config_identity = configured.SystemConfigIdentity();
+        header.preset_content_hash = original.preset_content_hash;
+        for (const std::uint32_t boundary : {0u, 12u}) {
+            header.surface_radius = boundary;
+            header.collision_radius = boundary;
+            const auto matched = ReplayRunnerConfigFrom(options, header);
+            ASSERT_TRUE(matched.has_value());
+            if (!matched.has_value())
+                return;
+            EXPECT_EQ(matched->surface_radius, static_cast<int>(boundary));
+            EXPECT_EQ(matched->collision_radius, static_cast<int>(boundary));
+            ASSERT_TRUE(matched->preset_json_override.has_value());
+            if (!matched->preset_json_override.has_value())
+                return;
+            EXPECT_EQ(nlohmann::json::parse(*matched->preset_json_override),
+                      ResolveEffectivePreset(source, TerrainPresetUse::Historical));
+            EXPECT_EQ(matched->required_preset_content_hash, original.preset_content_hash);
+            EXPECT_TRUE(Luminumbra::Replay::ConfigurationMatches(
+                header, configured.SystemConfigIdentity(), original.preset_content_hash));
+        }
+        const auto valid = header;
+        for (const std::uint32_t radius : {13u, 10000u, 1073741824u, 0xffffffffu}) {
+            header = valid;
+            header.surface_radius = radius;
+            EXPECT_FALSE(ReplayRunnerConfigFrom(options, header).has_value());
+            header = valid;
+            header.collision_radius = radius;
+            EXPECT_FALSE(ReplayRunnerConfigFrom(options, header).has_value());
+            EXPECT_FALSE(fs::exists(root / "worlds/saves"));
+            EXPECT_EQ(*options.preset_json_override, source.dump());
+            EXPECT_EQ(LoadTerrainPresetFromJson(source, root / "data").preset_content_hash,
+                      original.preset_content_hash);
+        }
+    }
 }
 } // namespace

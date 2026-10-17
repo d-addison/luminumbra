@@ -8,6 +8,7 @@
 #include "WaterSystem.h"
 #include "entt/entt.hpp"
 #include "systems/PhysicsSystem.h"
+#include "world/SurfaceWorkBudget.h"
 #include <algorithm> // Required for std::max and std::min
 #include <array>
 #include <atomic>
@@ -3854,7 +3855,12 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
                                                 int surface_radius,
                                                 int collision_radius,
                                                 int render_lod0_radius) {
-    if (!physics_system) {
+    // Preserve the direct API's historical negative-to-zero normalization.
+    const int radius = std::max(0, surface_radius);
+    const int collision_range = std::max(0, collision_radius);
+    const auto column_count = World::SurfaceColumnCount(static_cast<std::uint64_t>(radius));
+    if (!physics_system || !column_count ||
+        !World::SurfaceRadiiSupported(radius, collision_range)) {
         return false;
     }
 
@@ -3889,8 +3895,19 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
         });
 
     const IVec3 center_chunk = world_to_chunk_coords(world_pos);
-    const int radius = std::max(0, surface_radius);
-    const int collision_range = std::max(0, collision_radius);
+    // Preflight the exact vertical work before allocating or changing chunks.
+    // At most 625 columns and 8192 chunks, including both vertical margins.
+    std::array<ColumnSurfaceSpan, World::kMaxSurfaceColumns> surface_spans{};
+    std::size_t surface_capacity = 0;
+    std::size_t surface_index = 0;
+    for (int dz = -radius; dz <= radius; ++dz) {
+        for (int dx = -radius; dx <= radius; ++dx) {
+            const auto span = column_surface_span(center_chunk.x + dx, center_chunk.z + dz);
+            if (!World::AddSurfaceColumnChunks(span.min_y, span.max_y, surface_capacity))
+                return false;
+            surface_spans[surface_index++] = span;
+        }
+    }
     //  radius, decoupled from collision (preview fidelity implementation note).
     // render_lod0_radius < 0 (the default, every game caller) preserves the
     // historical behaviour exactly: the full-detail LOD0 ring boundary == the
@@ -3913,11 +3930,14 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
     std::vector<SurfaceHorizonChunk> chunks_to_build;
     std::vector<SurfaceHorizonChunk> chunks_to_consider_for_collision;
     std::array<std::size_t, 3> lod_counts{0u, 0u, 0u};
-    const std::size_t surface_capacity =
-        static_cast<std::size_t>((radius * 2 + 1) * (radius * 2 + 1) * 5);
+    if (surface_capacity > chunks_to_build.max_size())
+        return false;
+    if (surface_capacity > chunks_to_consider_for_collision.max_size())
+        return false;
     chunks_to_build.reserve(surface_capacity);
     chunks_to_consider_for_collision.reserve(surface_capacity);
 
+    surface_index = 0;
     for (int dz = -radius; dz <= radius; ++dz) {
         for (int dx = -radius; dx <= radius; ++dx) {
             const int chunk_x = center_chunk.x + dx;
@@ -3926,7 +3946,7 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
             // margin the fixed {-1, 0, 1} band provided on flat terrain;
             // steep columns additionally cover every chunk-Y the isosurface
             // passes through so cliff walls are meshed before world enter.
-            const ColumnSurfaceSpan span = column_surface_span(chunk_x, chunk_z);
+            const ColumnSurfaceSpan& span = surface_spans[surface_index++];
             const int ring_distance = std::max(std::abs(dx), std::abs(dz));
             const int lod = horizon_lod_for_ring(ring_distance, radius, lod0_range);
             const int step = get_lod_step_for_level(lod);
@@ -4544,8 +4564,23 @@ int SHIELD_WorldSystem::EditTerrainVoxel(const Vec3& world_pos,
                                          float radius_m,
                                          bool fill,
                                          PhysicsSystem* physics_system) {
-    if (radius_m <= 0.0f)
+    // The edit must fit its subsequent synchronous remesh before touching SDF.
+    constexpr float max_edit_radius =
+        static_cast<float>((World::kMaxSurfaceRadius - 2) * CHUNK_SIZE_X);
+    if (!std::isfinite(radius_m) || radius_m <= 0.0f || radius_m > max_edit_radius)
         return 0;
+    const int rings = static_cast<int>(radius_m / static_cast<float>(CHUNK_SIZE_X)) + 2;
+    const IVec3 center = world_to_chunk_coords(world_pos);
+    std::size_t remesh_chunks = 0;
+    // At most 625 columns. Check the exact remesh work before changing any SDF;
+    // the subsequent surface call reuses these cached spans.
+    for (int dz = -rings; dz <= rings; ++dz) {
+        for (int dx = -rings; dx <= rings; ++dx) {
+            const auto span = column_surface_span(center.x + dx, center.z + dz);
+            if (!World::AddSurfaceColumnChunks(span.min_y, span.max_y, remesh_chunks))
+                return 0;
+        }
+    }
     constexpr int size_x = CHUNK_SIZE_X + 1;
     constexpr int size_y = CHUNK_SIZE_Y + 1;
     constexpr int size_z = CHUNK_SIZE_Z + 1;
@@ -4609,7 +4644,6 @@ int SHIELD_WorldSystem::EditTerrainVoxel(const Vec3& world_pos,
             }
     if (edited > 0) {
         // Remesh + rebuild colliders for the edited band (rings in chunk units).
-        const int rings = static_cast<int>(radius_m / static_cast<float>(CHUNK_SIZE_X)) + 2;
         EnsureSurfaceReadyNear(world_pos, physics_system, rings, rings);
         // Couple the water: a dig lowers the bed (drain), a fill raises it (dam). The bed
         // delta tracks the carve depth at the sphere center (~radius below the surface).

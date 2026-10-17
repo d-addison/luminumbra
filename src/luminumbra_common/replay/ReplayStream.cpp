@@ -12,6 +12,7 @@
 #include <fstream>
 
 #include "core/Log.h"
+#include "world/SurfaceWorkBudget.h"
 
 namespace Luminumbra::Replay {
 namespace {
@@ -206,6 +207,8 @@ bool ParseHeader(Cursor& c, ReplayHeader& h) {
         return false;
     if (!c.GetU32(h.collision_radius))
         return false;
+    if (!World::SurfaceRadiiSupported(h.surface_radius, h.collision_radius))
+        return false;
     if (!c.GetString(h.seed_string))
         return false;
     if (!c.GetString(h.preset))
@@ -251,6 +254,8 @@ std::string Fnv1a64Hex(const std::string& text) {
 // --- ReplayWriter ------------------------------------------------------------
 
 bool ReplayWriter::Open(const std::string& path, const ReplayHeader& header) {
+    if (!World::SurfaceRadiiSupported(header.surface_radius, header.collision_radius))
+        return false;
     m_path = path;
     m_buffer.clear();
     m_input_count = 0;
