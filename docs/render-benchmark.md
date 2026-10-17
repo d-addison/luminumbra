@@ -532,15 +532,28 @@ Foliage stage times are CPU wall time, including GL submission calls, without
 GPU waits or new readbacks. `signature_ms` includes polling existing evidence
 and early-out handling. `surface_ms` covers complete uncached column builds
 (including CPU placement in fallback), never individual candidate timers.
-`repack_ms` covers aggregate GPU input assembly excluding surface builds.
+`repack_ms` covers GPU column ordering and slot preparation excluding surface builds.
 `cpu_fallback_ms` is inclusive of its surface builds and mapped uploads; do not
 add it to those sub-times. Palette/scratch time includes null-data storage
 allocation; `scratch_bytes` records that allocation separately from actual
-`uploaded_bytes`. Copy bytes include the sorted working copy, aggregate inputs,
-completed readback snapshots and CPU emitted/mapped records; hash bytes describe
+`uploaded_bytes`. The appended `dirty_columns` field counts surface-slot uploads,
+including reconstruction after storage growth or compute-resource recreation.
+Unchanged columns transfer zero surface bytes. Copy bytes include the sorted
+working copy, column metadata, dirty-slot batch scratch, completed readback
+snapshots and CPU emitted/mapped records; hash bytes describe
 the unchanged evidence input hash. Frozen qualification rebuilds are identified
 as `frozen_gpu`; their submission time includes output clears and existing
 readback submission, including the first rebuild started by qualification.
+
+Surface storage uses deterministic free-list reuse and geometric growth up to
+512 slots (64 MiB). Exceeding the admitted-column cap uses the existing CPU
+fallback for that frame. Growth and compute-resource recreation rebuild slots
+from the CPU surface cache. Palette and scratch storage persist between builds;
+column and slot-order metadata share one bounded 18 KiB buffer and upload only
+when changed. Adjacent dirty runs of three or more slots share a transfer using
+bounded CPU scratch; runs of one or two keep direct per-slot transfers. Clean
+slots are never copied or transferred. Evidence hashes retain
+the logical full-build byte order independently of physical slot assignment.
 
 `reason_mask` combines: 1 initial build, 2 config (enabled, evidence phase,
 quantized gate wind, fade or density), 4 camera cell, 8 ground revision,

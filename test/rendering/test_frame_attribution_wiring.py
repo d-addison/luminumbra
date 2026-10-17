@@ -185,6 +185,75 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertEqual(compact(block(self.header, "bool active() const")),
                          "return m_out.is_open() && m_out.good();")
 
+    def test_metadata_replacement_does_not_upload_a_redundant_command(self):
+        gpu = block(self.foliage, "bool FoliagePass::rebuild_instances_gpu(")
+        self.assertIn("const bool initialize_command = !m_metadata_valid;", gpu)
+        reset = compact(block(gpu, "if (initialize_command || !metadata_changed)"))
+        for operation in ("glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_count_ssbo);",
+                          "glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(draw_command), draw_command);",
+                          "m_rebuild_attribution.uploaded_bytes += sizeof(draw_command);",
+                          "++m_rebuild_attribution.uploads;"):
+            self.assertIn(operation, reset)
+        self.assertEqual(gpu.count("sizeof(draw_command), draw_command)"), 1)
+        # Count never consumes the old command. Prefix writes every word, then
+        # the storage barrier makes those writes visible before emit/draw.
+        scatter = read(ROOT / "res/shaders/grass_scatter.comp")
+        for name in ("append_count", "draw_vertex_count", "draw_instance_count",
+                     "draw_first_vertex", "draw_base_instance"):
+            self.assertEqual(len(re.findall(r"\b" + name + r"\b", scatter)), 2 if name == "append_count" else 1)
+        prefix = compact(block(read(ROOT / "res/shaders/grass_compact_prefix.comp"), "void main()"))
+        for assignment in ("accepted_count = total;", "vertex_count = 12u;",
+                           "instance_count = min(total, u_max_instances);",
+                           "first_vertex = 0u;", "base_instance = 0u;"):
+            self.assertIn(assignment, prefix)
+        dispatch = compact(block(self.foliage, "void FoliagePass::dispatch_scatter()"))
+        self.assertIn("glDispatchCompute(1, 1, 1); glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT); "
+                      "glUseProgram(m_compute_prog); glUniform1i(m_scatter_uniforms.emit, GL_TRUE);", dispatch)
+
+    def test_csv_schema_keeps_nullable_counts_before_dirty_columns(self):
+        header = block(self.collector, "void write_csv_header(")
+        encoded = "".join(json.loads(literal) for literal in re.findall(r'"(?:\\.|[^"\\])*"', header))
+        self.assertEqual(encoded.rstrip("\n").split(","), [
+            "frame", "frame_ms", "sim_ms", "stream_ms", "render_ms", "present_ms",
+            "foliage_ms", "scatter_ms", "rebake_ms", "poll_ms", "menu_ms", "ui_ms", "other_ms",
+            "signature_ms", "sort_ms", "surface_ms", "repack_ms", "hash_ms", "upload_ms",
+            "palette_scratch_ms", "dispatch_ms", "cpu_fallback_ms", "rebuild_calls", "reason_mask",
+            "admitted_columns", "surface_misses", "deferred_columns", "copied_bytes", "hashed_bytes",
+            "uploaded_bytes", "scratch_bytes", "backlog", "path", "fallback", "instance_capacity",
+            "generated_count", "count_generation", "dirty_columns",
+        ])
+        row = compact(block(self.collector, "bool write_csv_row("))
+        self.assertIn("if (count_known) out << generated_count; out << ','; "
+                      "if (count_known) out << count_generation; "
+                      "out << ',' << foliage.dirty_columns; out << '\\n';", row)
+
+    def test_camera_transition_fixture_starts_with_an_attributed_baseline(self):
+        native = read(ROOT / "test/rendering/foliage_rebuild_test.cpp")
+        transition = compact(block(native, "TEST_F(FoliageRebuildTest, "
+                                   "CameraReorderUploadsMetadataOnceAndPrefixReplacesEveryCommandWord)"))
+        baseline, movement = transition.split("for (const glm::vec3 camera :", 1)
+        self.assertIn("const auto initial = RebuildAttributed(reused.pass, chunks, 1);", baseline)
+        self.assertIn("EXPECT_EQ(initial.reasons, Attribution::Initial);", baseline)
+        self.assertNotIn("Rebuild(reused.pass, chunks, 1);", baseline)
+        self.assertIn("glm::vec3{kCamera.x + 32, kCamera.y, kCamera.z}, kCamera", movement)
+        self.assertIn("RebuildAttributed(reused.pass, chunks, ++frame, camera)", movement)
+        self.assertIn("EXPECT_EQ(work.reasons, Attribution::CameraCell);", movement)
+        self.assertIn("for (const bool gpu : {false, true})", movement)
+        self.assertIn("Rebuild(fresh.pass, chunks, frame, camera);", movement)
+
+    def test_legacy_hash_oracle_uses_the_callers_camera_and_preserves_the_default(self):
+        native = read(ROOT / "test/rendering/foliage_rebuild_test.cpp")
+        self.assertRegex(compact(native), r"LegacyUploadedHash\(const FoliagePass& pass, "
+                         r"std::size_t count, const glm::vec3& camera = kCamera\)")
+        oracle = compact(block(native, "static std::uint64_t LegacyUploadedHash("))
+        self.assertIn("{camera.x, camera.z, pass.density_scale(), pass.fade_end_m(), total_weight}",
+                      oracle)
+        self.assertNotIn("kCamera", oracle)
+        transition = compact(block(native, "TEST_F(FoliageRebuildTest, "
+                                   "CameraReorderUploadsMetadataOnceAndPrefixReplacesEveryCommandWord)"))
+        self.assertIn("EXPECT_EQ(hash, LegacyUploadedHash(reused.pass, chunks.size(), camera));",
+                      transition)
+
     def test_deterministic_work_gates_are_registered_on_standard_targets(self):
         cmake = read(ROOT / "test/CMakeLists.txt")
         for target, source in (
