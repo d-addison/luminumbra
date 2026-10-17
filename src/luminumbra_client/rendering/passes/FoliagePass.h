@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../AsyncReadbackRing.h"
+#include "../FoliageCountObservation.h"
 #include "../FoliageEvidence.h"
 #include "../FoliageGroundMesh.h"
 #include "../RenderContext.h"
@@ -211,6 +212,14 @@ public:
     // Last collected invocation; timings measure CPU submission, not GPU completion.
     const Client::Attribution::FoliageRebuild& rebuild_attribution() const {
         return m_rebuild_attribution;
+    }
+    using CountObservation = FoliageCountObservation;
+    // Window-boundary diagnostic only. Reads the actual indirect draw count,
+    // never the play-mode capacity marker. May wait for GPU completion; callers
+    // must keep this outside the measured frame intervals.
+    CountObservation observe_counts() const;
+    bool build_pending() const {
+        return m_foliage_build_backlog;
     }
 
     // Loads the scatter archetype set from data/common/foliage/scatter_set.json.
@@ -563,6 +572,8 @@ private:
     std::size_t m_draw_instance_limit = 0;
     std::optional<std::size_t> m_gpu_generated_count;
     std::uint64_t m_gpu_count_generation = 0;
+    std::uint64_t m_candidate_slots = 0;
+    std::uint64_t m_candidate_count = 0;
 
     bool m_enabled = false;
     glm::vec2 m_wind_xz{0.0f, 0.0f};

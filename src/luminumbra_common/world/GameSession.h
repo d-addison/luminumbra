@@ -106,6 +106,9 @@ public:
 
     // Load an existing world from disk
     bool LoadWorld(const std::string& worldId);
+    // Synchronous read of a caller-owned immutable save snapshot. Runtime content
+    // and subsequent persistence retain this session's configured roots.
+    bool LoadWorldFrom(const std::string& worldId, const std::filesystem::path& save_root);
 
     // Save the current world state
     bool SaveWorld();
@@ -495,7 +498,7 @@ private:
     std::vector<RegionWork> m_regionWork;
     std::optional<RegionSchedulerFault> m_regionFault;
     RegionInputRejections m_regionInputRejections;
-    void LatchRegionFault(std::uint64_t tick, std::string message);
+    void LatchRegionFault(std::uint64_t tick, const std::string& message);
     void RunRegionScheduler(std::uint64_t current_tick);
     std::filesystem::path m_regionDurableDirectory;
     // Stable only in the clock slice; world-anchored pages replace this grid in C4.

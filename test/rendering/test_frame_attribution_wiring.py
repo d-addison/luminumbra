@@ -67,6 +67,12 @@ class FrameAttributionWiring(unittest.TestCase):
                          r"if \(collect_attribution\) \{ // Diagnostic[^\n]*? "
                          r"Attribution::ScatterSignature components\{\};")
 
+    def test_const_scope_token_keeps_registered_observations_mutable(self):
+        scope = compact(block(self.header, "class FoliageFrameScope"))
+        self.assertIn("mutable FoliageFrame m_frame{};", scope)
+        self.assertIn("current_foliage_frame() = enabled ? &m_frame : nullptr;", self.collector)
+        self.assertIn("const Attribution::FoliageFrameScope foliage_scope", self.main)
+
     def test_benchmark_does_not_enable_foliage_input_hashing(self):
         update = compact(block(self.main, "static void UpdateFoliageScatter("))
         self.assertIn("foliage->set_evidence_enabled(scenario_config.foliage_visual_smoke() && "

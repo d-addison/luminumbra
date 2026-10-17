@@ -109,7 +109,8 @@ public:
     }
 
 private:
-    FoliageFrame m_frame{};
+    // The registered collector updates observations even when the scope token is const.
+    mutable FoliageFrame m_frame{};
     FoliageFrame* m_previous = nullptr;
 };
 bool foliage_frame_active();

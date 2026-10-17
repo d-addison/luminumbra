@@ -4,7 +4,7 @@
 Checks observed linked-program state against both the requested pose/TOD and
 reported camera. This is a report-frame check, not evidence that every program
 executed a draw or every measured frame had the same state.
-With --enforce-floor a v3 capture is additionally held to the 16.67 ms frame_wall p99 floor (exit 4).
+With --enforce-floor a v3/v4 capture is additionally held to the 16.67 ms frame_wall p99 floor (exit 4).
 """
 import argparse
 import json
@@ -182,8 +182,16 @@ def validate_cell(data, args):
 
 
 def validate(data, args):
+    reference_path = getattr(args, 'reference_capture', None)
+    if reference_path is not None:
+        reference = json.loads(Path(reference_path).read_text(encoding='utf-8-sig'))
+        unpaired_args = argparse.Namespace(**dict(vars(args), reference_capture=None))
+        validate(reference, unpaired_args)
+        result = validate(data, unpaired_args)
+        render_contract.require_matching_render_identity(reference, data)
+        return dict(result, reference_render_identity=reference['render_identity'])
     schema = data.get('schema')
-    if schema not in ('luminumbra.render_benchmark.v2', render_contract.SCHEMA):
+    if schema not in ('luminumbra.render_benchmark.v2', *render_contract.SCHEMAS):
         raise ValueError('unsupported render capture schema')
     validate_cell(data, args)
     if schema == 'luminumbra.render_benchmark.v2':
@@ -192,7 +200,7 @@ def validate(data, args):
         if missing:
             raise ValueError('v2 capture requires missing arguments: ' + ', '.join(missing))
     measurement = None
-    if schema == render_contract.SCHEMA:
+    if schema in render_contract.SCHEMAS:
         manifest_path = getattr(args, 'workload_manifest', None)
         workload = json.loads(Path(manifest_path).read_text(encoding='utf-8')) if manifest_path else None
         measurement = render_contract.validate(data, getattr(args, 'qualified_renderer', None),
@@ -326,8 +334,10 @@ def main():
     parser.add_argument('--require-geometry', action='store_true')
     parser.add_argument('--require-settled', action='store_true')
     parser.add_argument('--require-camera-chunk', action='store_true')
-    parser.add_argument('--qualified-renderer', help='Exact GL_RENDERER required for v3 qualification')
+    parser.add_argument('--qualified-renderer', help='Exact GL_RENDERER required for v3/v4 qualification')
     parser.add_argument('--qualified-vendor', help='Optional exact GL_VENDOR')
+    parser.add_argument('--reference-capture', type=Path,
+                        help='Validate a reference capture and require the same complete render identity')
     parser.add_argument('--profile', choices=('legacy', 'quality', 'performance'),
                         help='Expected v3 performance profile')
     parser.add_argument('--width', type=int, help='Expected v3 capture width')
@@ -339,7 +349,7 @@ def main():
     parser.add_argument('--traversal', type=Path, help='Expected committed traversal script')
     parser.add_argument('--workload-manifest', type=Path, help='Expected workload fields as a JSON object')
     parser.add_argument('--enforce-floor', action='store_true',
-                        help='v3 only: exit 4 when frame_wall_ms p99 exceeds 16.67 ms')
+                        help='v3/v4 only: exit 4 when frame_wall_ms p99 exceeds 16.67 ms')
     parser.add_argument('--verdict-out', type=Path,
                         help='Write the floor verdict JSON here (requires --enforce-floor)')
     args = parser.parse_args()
@@ -349,8 +359,8 @@ def main():
         data = json.loads(args.artifact.read_text(encoding='utf-8-sig'))
         result = validate(data, args)
         if args.enforce_floor:
-            if data.get('schema') != render_contract.SCHEMA:
-                print(json.dumps({'verdict': 'FAIL', 'reason': '--enforce-floor requires a v3 capture'}, indent=2))
+            if data.get('schema') not in render_contract.SCHEMAS:
+                print(json.dumps({'verdict': 'FAIL', 'reason': '--enforce-floor requires a v3/v4 capture'}, indent=2))
                 return 1
             floor = render_budget.evaluate(data)
             result['floor'] = floor

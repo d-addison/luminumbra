@@ -13,6 +13,9 @@
 namespace Luminumbra::Client::ScenarioHarness {
 
 bool HasCommandLineFlag(int argc, char* argv[], const std::string& flag);
+// Value-taking options accept both --option value and --option=value, including
+// an empty assignment so validation cannot confuse it with an absent option.
+bool HasCommandLineOption(int argc, char* argv[], const std::string& flag);
 std::string
 GetCommandLineOption(int argc, char* argv[], const std::string& flag, const std::string& fallback);
 int GetCommandLineIntOption(int argc, char* argv[], const std::string& flag, int fallback);

@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Device-free run_client controls with real and injected process timeouts."""
 import argparse
-import base64
 from contextlib import redirect_stderr
 import hashlib
 import importlib.util
@@ -18,6 +17,8 @@ import types
 import unittest
 from unittest import mock
 
+import test_render_contract as contract_fixtures
+
 
 parser = argparse.ArgumentParser(add_help=False)
 parser.add_argument('--runner', type=Path, default=Path(__file__).with_name('test_render_runner.py'))
@@ -27,7 +28,7 @@ runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
 
 CHILD = r'''
-import base64, pathlib, sys, time
+import pathlib, sys, time
 artifact, payload, code, loaders, ready, startup_delay = sys.argv[1:]
 time.sleep(float(startup_delay))
 if loaders == '1':
@@ -35,7 +36,7 @@ if loaders == '1':
     for part in ('trunk', 'branches', 'leaves'):
         print(f"tree_small_02_{part}.lmesh' (3 verts, 3 indices)", flush=True)
 if payload != '-':
-    pathlib.Path(artifact).write_bytes(base64.b64decode(payload))
+    pathlib.Path(artifact).write_bytes(pathlib.Path(payload).read_bytes())
 if ready != '-':
     print('A' * 20000, flush=True)
     print('EnsureSurfaceReadyNear: draining generation jobs (near 0,0)...', flush=True)
@@ -65,6 +66,46 @@ time.sleep(30)
 '''
 
 
+class RenderRunnerRefusalInputsTests(unittest.TestCase):
+    def check_texture_inputs(self, method):
+        # Validate the actual integration case's argv and script before substituting
+        # the native content loader's refusal. An option error must fail this check.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / 'data/models/trees/tree_textures.json'
+            manifest.parent.mkdir(parents=True)
+            texture = root / 'data/texture.ltex'
+            texture.write_bytes(b'texture bytes')
+            manifest.write_text(json.dumps({'models': [{'albedo': 'data/texture.ltex'}]}),
+                                encoding='utf-8')
+            case = runner.RenderRunnerTests(method)
+            case.root = root
+            def content_refusal(name, extra, *, expected_exit, schema):
+                self.assertEqual((name, expected_exit, schema), ('refused', 2, 'v4'))
+                self.assertEqual(extra[0], '--traversal')
+                self.assertEqual(len(extra), 2, 'content refusal must not have a duration override')
+                script = runner.contract.traversal_manifest(Path(extra[1]).read_text(encoding='utf-8'))
+                self.assertEqual(script['kind'], 'save_load')
+                self.assertEqual(script['expected_ticks'], 4)
+                self.assertEqual([action['tick'] for action in script['actions']], [1, 2])
+                document = json.loads(manifest.read_bytes())
+                reference = document['models'][0]['albedo']
+                self.assertEqual((root / reference).resolve(), (root / 'external.ltex').resolve())
+                self.assertEqual((root / 'external.ltex').read_bytes(), texture.read_bytes())
+                return 'Benchmark content reference escapes inventoried trees'
+            with mock.patch.object(runner, 'OPTIONS', types.SimpleNamespace(
+                    source=Path(__file__).resolve().parents[2]), create=True), \
+                    mock.patch.object(case, 'run_client', side_effect=content_refusal) as process:
+                getattr(case, method)()
+                process.assert_called_once()
+
+    def test_absolute_texture_case_reaches_content_gate(self):
+        self.check_texture_inputs('test_absolute_texture_refusal')
+
+    def test_parent_relative_texture_case_reaches_content_gate(self):
+        self.check_texture_inputs('test_parent_relative_texture_refusal')
+
+
 class RenderRunnerEvidenceTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -91,6 +132,9 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         self.startup_delay = 0
         self.loaders = True
         self.process_exception = None
+        def ordinary_run(command, *, receipt, evidence_parent, expected_exit=0, **kwargs):
+            return subprocess.run(command, **kwargs)
+        mock.patch.object(runner.crash_capture, 'run', side_effect=ordinary_run).start()
         self.original_run = subprocess.run
         self.calls = []
         mock.patch.object(runner.subprocess, 'run', side_effect=self.run_child).start()
@@ -100,7 +144,13 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         self.assertEqual(kwargs['timeout'], 180)
         self.assertFalse(kwargs['check'])
         artifact = command[command.index('--render-benchmark') + 1]
-        payload = '-' if self.payload is None else base64.b64encode(self.payload).decode('ascii')
+        payload = '-'
+        if self.payload is not None:
+            # Capture JSON can exceed both Windows' command-line limit and the
+            # POSIX per-argument bound. Close the fixture file before spawning.
+            fixture = self.root / 'child-payload.json'
+            fixture.write_bytes(self.payload)
+            payload = str(fixture)
         if self.wait and not self.real_timeout:
             if self.payload is not None:
                 Path(artifact).write_bytes(self.payload)
@@ -171,7 +221,7 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
                 process.wait()
 
     def paths(self, name='capture'):
-        stem = 'test_traversal_twice-' + name
+        stem = 'test_traversal_twice-' + self.case.root.name + '-' + name
         return self.artifacts / (stem + '.json'), self.artifacts / (stem + '.process.json')
 
     def receipt(self, name='capture'):
@@ -200,6 +250,79 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
                 self.assertEqual(path.read_bytes(), b'current evidence')
         self.assertEqual(replace.call_count, 2)
         self.assertFalse(list(self.artifacts.glob('*.tmp')))
+
+    def test_successful_v4_workload_runs_through_report_validation(self):
+        source = Path(__file__).resolve().parents[2]
+        runner.OPTIONS.source = source
+        data = self.delayed_reload_capture()
+        self.payload = (json.dumps(data) + '\n').encode('utf-8')
+        self.case.test_v4_save_load_success()
+        self.assertEqual(len(self.calls), 1)
+        command = self.calls[0][0]
+        self.assertEqual(command[command.index('--render-benchmark-schema') + 1], 'v4')
+        self.assertNotIn('--no-audio', command)
+        capture, _ = self.paths('save-load')
+        self.assertEqual(json.loads(capture.read_bytes()), data)
+        receipt = self.receipt('save-load')
+        self.assertEqual(receipt['outcome'], 'returned')
+        self.assertEqual(receipt['return_code'], 0)
+        self.assertEqual(receipt['capture_status'], 'retained')
+        self.assertEqual(receipt['capture_sha256'], hashlib.sha256(self.payload).hexdigest())
+
+    def test_successful_v4_without_audio_runs_through_report_validation(self):
+        runner.OPTIONS.source = Path(__file__).resolve().parents[2]
+        data = self.delayed_reload_capture()
+        content = data['settings']['content_files']
+        for path in list(content):
+            if path.startswith('assets/audio/'):
+                del content[path]
+        content['assets/audio'] = None
+        data['render_identity'] = runner.contract.render_identity(data['settings'])
+        self.payload = (json.dumps(data) + '\n').encode('utf-8')
+        self.case.test_v4_no_audio_success()
+        self.assertEqual(len(self.calls), 1)
+        command = self.calls[0][0]
+        self.assertIn('--no-audio', command)
+        self.assertEqual(command[command.index('--render-benchmark-schema') + 1], 'v4')
+        self.assertFalse((self.runtime / 'assets/audio').exists())
+        self.assertEqual(json.loads(self.paths('save-load')[0].read_bytes()), data)
+        self.assertEqual(self.receipt('save-load')['return_code'], 0)
+
+    def delayed_reload_capture(self):
+        script = self.case.save_load_script()
+        data = contract_fixtures.workload_artifact('save_load', script)
+        manifest = runner.contract.traversal_manifest(script.read_text(encoding='utf-8'))
+        reload = data['workload']['reload']
+        request = reload['request_frame']
+        settled = request + 30
+        for row in data['workload']['observations']:
+            if request <= row['frame'] < settled:
+                row.update(settled=False, stream_meshing_batches=1, stream_pending_lod_chunks=1)
+        reload['first_settled_frame'] = settled
+        samples = data['frame_samples']
+        warmup = data['warmup_frames']
+        reload['elapsed_ms'] = sum(row['frame_wall_ms'] for row in
+                                   samples[request - warmup:settled - warmup])
+        # No streaming churn from camera movement while the reload is settling.
+        poses = [runner.contract.camera_sample(manifest, tick)['position'] for tick in
+                 range(manifest['actions'][-1]['tick'], settled - warmup + 2)]
+        self.assertTrue(all(pose == poses[0] for pose in poses))
+        self.assertTrue(any(runner.contract.camera_sample(manifest, tick)['position'] != poses[0]
+                            for tick in range(settled - warmup + 2, manifest['expected_ticks'] + 1)))
+        return data
+
+    def test_v4_success_case_rejects_reload_that_never_settles(self):
+        runner.OPTIONS.source = Path(__file__).resolve().parents[2]
+        data = self.delayed_reload_capture()
+        request = data['workload']['reload']['request_frame']
+        data['workload']['reload'] = None
+        for row in data['workload']['observations']:
+            if row['frame'] >= request:
+                row.update(settled=False, stream_meshing_batches=1, stream_pending_lod_chunks=1)
+        self.payload = json.dumps(data).encode('utf-8')
+        with self.assertRaisesRegex(ValueError, 'did not settle after reload'):
+            self.case.test_v4_save_load_success()
+        self.assertEqual(self.receipt('save-load')['capture_status'], 'retained')
 
     def test_timeout_retains_complete_capture_after_runtime_cleanup(self):
         self.real_timeout = True

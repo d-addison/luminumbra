@@ -11,6 +11,7 @@
 // the sampled genes are clamped to [0,1]. Loading is pure file I/O; the sim/world_hash is
 // unaffected until a sampled plant is actually spawned (plants are opt-in via PlantTag).
 
+#include "../core/CaptureContentPaths.h"
 #include <array>
 #include <cstdint>
 #include <filesystem>
@@ -132,6 +133,8 @@ public:
     // per-file failures are appended to `errors` and skipped.
     std::size_t LoadFromDirectory(const std::filesystem::path& dir,
                                   std::vector<std::string>& errors) {
+        if (!Luminumbra::Filesystem::capture_content_paths.allows(dir))
+            return 0;
         std::error_code ec;
         if (!std::filesystem::is_directory(dir, ec)) {
             errors.push_back("species directory not found: " + dir.string());
@@ -145,6 +148,8 @@ public:
         std::sort(files.begin(), files.end());
         std::size_t loaded = 0;
         for (const auto& f : files) {
+            if (!Luminumbra::Filesystem::capture_content_paths.allows(f))
+                return 0;
             std::ifstream in(f, std::ios::binary);
             if (!in) {
                 errors.push_back("cannot open " + f.string());

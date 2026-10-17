@@ -19,6 +19,7 @@
 // compiled-in behaviour. Any FUTURE field the sim consumes as an integer (tick counts,
 // counts) must be parsed as an integer (get<std::uint32_t>), never via a float round-trip.
 
+#include "../core/CaptureContentPaths.h"
 #include <algorithm>
 #include <cstdint>
 #include <exception>
@@ -197,6 +198,10 @@ public:
             errors.push_back(message);
         };
         try {
+            if (!Luminumbra::Filesystem::capture_content_paths.allows(dir)) {
+                report_io_failure("creature species directory escapes capture content trees");
+                return 0;
+            }
             std::error_code ec;
             auto status = read_status(dir, ec);
             if (!ec && std::filesystem::is_symlink(status))
@@ -230,6 +235,10 @@ public:
                         ::Luminumbra::Filesystem::GenericUtf8PathString(entry.path().filename());
                     if (!::Luminumbra::World::IsValidDependencyPathUtf8(filename)) {
                         report_io_failure("creature species filename is not valid UTF-8");
+                        return 0;
+                    }
+                    if (!Luminumbra::Filesystem::capture_content_paths.allows(entry.path())) {
+                        report_io_failure("creature species file escapes capture content trees");
                         return 0;
                     }
                     files.push_back(entry.path());

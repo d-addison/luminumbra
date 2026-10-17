@@ -48,6 +48,7 @@
 #include "../persistence/WorldPersistenceRoundtrip.h" // Persistence::StableChecksum (ComputeScentSubHash)
 #include "../persistence/WorldSaveService.h"
 #include "../scripting/LuaState.h"
+#include "../simulation/SimWorkCounters.h"
 #include "../systems/AetherFieldSystem.h"
 #include "../systems/CropLifecycleSystem.h"
 #include "../systems/FieldEmitterSystem.h" // Gathers field-emitter deposits.
@@ -1334,11 +1335,14 @@ bool GameSession::CreateWorldInternal(const std::string& name,
 }
 
 bool GameSession::LoadWorld(const std::string& worldId) {
+    return LoadWorldFrom(worldId, GetSaveRootPath());
+}
+
+bool GameSession::LoadWorldFrom(const std::string& worldId, const fs::path& save_root) {
     if (!IsSimulationTickBoundary())
         return false;
     m_lastLoadedChunkCount = 0;
-    const auto saved =
-        Persistence::InspectSavedWorld(GetSaveRootPath(), RuntimeRoot(m_rootPath), worldId);
+    const auto saved = Persistence::InspectSavedWorld(save_root, RuntimeRoot(m_rootPath), worldId);
     m_worldOpenError = saved.error;
     if (m_worldOpenError.empty() && saved.requires_active_regions && !m_activeRegionsEnabled)
         m_worldOpenError = "Incompatible configuration: this world requires sim.active_regions.";
@@ -1356,7 +1360,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
             return false;
         }
     }
-    const std::string worldPath = (GetSaveRootPath() / "worlds/saves" / worldId).string();
+    const auto worldPath = save_root / "worlds/saves" / worldId;
     // Generate from the same canonical bytes whose saved identity was verified.
     const TerrainPresetLoadResult preset = LoadTerrainPresetFromJson(
         nlohmann::json::parse(saved.preset_json), RuntimeRoot(m_rootPath) / "data");
@@ -1413,7 +1417,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     // record is all-zeros by contract. OFF -> null -> byte-identical.
     InitializeEnergyFieldState();
     if (m_energyFieldState) {
-        const std::string recordPath = worldPath + "/aether_state.efs";
+        const auto recordPath = worldPath / "aether_state.efs";
         std::ifstream recordFile(recordPath);
         if (recordFile) {
             std::ostringstream recordBytes;
@@ -1424,7 +1428,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
                                      m_energyFieldState->page_count());
             } else {
                 LUMINUMBRA_CORE_WARN("Aether state record UNREADABLE at {} - starting all-zero.",
-                                     recordPath);
+                                     recordPath.string());
             }
         }
     }
@@ -1453,8 +1457,10 @@ bool GameSession::LoadWorld(const std::string& worldId) {
 
     m_worldOpenError.clear();
     AttachRegionEditObserver();
-    if (!LoadWorldState())
+    if (!LoadWorldStateFrom(worldPath))
         return false;
+    if (m_activeRegionsEnabled)
+        m_regionDurableDirectory = GetWorldSaveDir();
     LUMINUMBRA_CORE_INFO("World loaded successfully: {}", m_metadata.name);
     return true;
 }
@@ -1532,7 +1538,7 @@ void GameSession::ReplaceActiveRegionLedger(ActiveRegionLedger ledger) {
     // Retain the effective settings when create/transient/reset clears region state.
     m_regionSchedulerConfig = m_activeRegionLedger.config();
 }
-void GameSession::LatchRegionFault(std::uint64_t tick, std::string message) {
+void GameSession::LatchRegionFault(std::uint64_t tick, const std::string& message) {
     if (m_regionFault)
         return; // first fault wins
     m_regionFault = RegionSchedulerFault{tick, message};

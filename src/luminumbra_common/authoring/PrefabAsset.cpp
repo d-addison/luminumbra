@@ -1,3 +1,4 @@
+#include "../core/CaptureContentPaths.h"
 #include "PrefabRuntime.h"
 
 #include "PrefabDigest.h"
@@ -75,6 +76,8 @@ std::filesystem::path Child(const std::filesystem::path& parent, const std::stri
 }
 
 std::vector<std::uint8_t> Read(const std::filesystem::path& path, std::size_t limit) {
+    Require(Filesystem::capture_content_paths.allows(path),
+            "Capture prefab reference escapes inventoried trees");
     Require(std::filesystem::is_regular_file(path), "Missing regular prefab member");
     const auto size = std::filesystem::file_size(path);
     Require(size > 0 && size <= limit, "Prefab member exceeds its byte budget");

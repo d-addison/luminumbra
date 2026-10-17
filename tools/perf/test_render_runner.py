@@ -13,6 +13,8 @@ import tempfile
 import time
 import unittest
 
+import render_crash_capture as crash_capture
+
 import render_contract as contract
 import render_runner_process as process_runner
 
@@ -106,7 +108,8 @@ def _report_timeout(receipt, log):
         pass
 
 
-def _run_process(command, *, cwd, environment, log, artifact, retained, receipt_path):
+def _run_process(command, *, cwd, environment, log, artifact, retained, receipt_path,
+                 expected_exit=0):
     # Retire only this case's exact outputs, including a repeated invocation in
     # the same runtime root. Never let an earlier capture appear current.
     for path in (artifact, retained, receipt_path, log):
@@ -123,12 +126,14 @@ def _run_process(command, *, cwd, environment, log, artifact, retained, receipt_
         with process_runner.verified_binary(receipt), log.open('wb') as output:
             started = time.perf_counter()
             try:
-                result = subprocess.run(command, cwd=cwd, env=environment,
-                                        stdout=output, stderr=subprocess.STDOUT,
-                                        timeout=180, check=False)
+                result = crash_capture.run(command, receipt=receipt,
+                                           evidence_parent=receipt_path.parent, expected_exit=expected_exit,
+                                           cwd=cwd, env=environment,
+                                           stdout=output, stderr=subprocess.STDOUT,
+                                           timeout=180, check=False)
+                receipt.update(outcome='returned', return_code=result.returncode)
             finally:
                 receipt['elapsed_seconds'] = time.perf_counter() - started
-            receipt.update(outcome='returned', return_code=result.returncode)
     except (subprocess.TimeoutExpired, OSError) as error:
         receipt.update(outcome='timed_out' if isinstance(error, subprocess.TimeoutExpired)
                        else receipt['outcome'], exception_type=type(error).__name__,
@@ -170,6 +175,9 @@ class RenderRunnerTests(unittest.TestCase):
                      self.root / 'config/game-asset-packs.json')
         shutil.copytree(OPTIONS.assets / 'game-assets', self.root / 'game-assets',
                         copy_function=link_or_copy)
+        audio = OPTIONS.source / 'assets/audio'
+        if audio.is_dir():
+            shutil.copytree(audio, self.root / 'assets/audio', copy_function=link_or_copy)
         shutil.copytree(OPTIONS.source / 'worlds/atlas', self.root / 'worlds/atlas')
         self.environment = os.environ.copy()
         for name in list(self.environment):
@@ -183,18 +191,20 @@ class RenderRunnerTests(unittest.TestCase):
         text = text.replace('expected_ticks 1800', 'expected_ticks 4')
         self.script.write_bytes(text.encode('utf-8'))
 
-    def run_client(self, name, extra=(), environment=None, expected_exit=0):
+    def run_client(self, name, extra=(), environment=None, expected_exit=0, schema='v3',
+                   audio=False):
         artifact = self.root / (name + '.json')
-        log = OPTIONS.artifacts / (self._testMethodName + '-' + name + '.log')
-        command = [str(OPTIONS.client), '--no-audio', '--no-menu-backdrop',
-                   '--render-benchmark', str(artifact), '--render-benchmark-schema', 'v3',
+        log = OPTIONS.artifacts / (self._testMethodName + '-' + self.root.name + '-' + name + '.log')
+        command = [str(OPTIONS.client), *([] if audio else ['--no-audio']), '--no-menu-backdrop',
+                   '--render-benchmark', str(artifact), '--render-benchmark-schema', schema,
                    '--capture-size', '160x90', '--perf-profile', 'quality',
                    '--render-benchmark-warmup', '2', *extra]
-        retained = OPTIONS.artifacts / (self._testMethodName + '-' + name + '.json')
+        retained = OPTIONS.artifacts / (self._testMethodName + '-' + self.root.name + '-' + name + '.json')
         receipt_path = retained.with_suffix('.process.json')
         result, evidence_errors = _run_process(
             command, cwd=self.root, environment=environment or self.environment,
-            log=log, artifact=artifact, retained=retained, receipt_path=receipt_path)
+            log=log, artifact=artifact, retained=retained, receipt_path=receipt_path,
+            expected_exit=expected_exit)
         self.assertEqual(result.returncode, expected_exit, log.read_text(errors='replace', encoding="utf-8")[-6000:])
         if expected_exit:
             self.assertFalse(artifact.exists())
@@ -219,6 +229,142 @@ class RenderRunnerTests(unittest.TestCase):
             self.assertEqual([row['tick'] for row in data['workload']['camera_samples']], [1, 2, 3, 4])
         self.assertEqual(first['workload']['camera_samples'], second['workload']['camera_samples'])
         self.assertEqual(first['workload']['actual_ticks'], second['workload']['actual_ticks'])
+
+    def short_save_load_script(self):
+        script = self.root / 'save-load.traversal'
+        text = (OPTIONS.source / 'tools/perf/fixtures/save-load.traversal').read_text(encoding='utf-8')
+        text = text.split('points ', 1)[0]
+        text = text.replace('duration_seconds 60', 'duration_seconds 0.13333333333333333')
+        text = text.replace('expected_ticks 1800', 'expected_ticks 4')
+        text += ('points 2\npoint 0 8 80 8 0 -6\npoint 4 9 80 8 0 -6\n'
+                 'actions 2\naction 1 save 0 0 0 0\naction 2 reload 0 0 0 0\n')
+        script.write_bytes(text.encode('utf-8'))
+        return script
+
+    def test_v4_save_load_success(self):
+        self.validate_save_load_capture(audio=True)
+
+    def test_v4_no_audio_success(self):
+        audio = self.root / 'assets/audio'
+        if audio.exists():
+            shutil.rmtree(audio)
+        self.assertFalse(audio.exists())
+        data = self.validate_save_load_capture(audio=False)
+        self.assertIn('assets/audio', data['settings']['content_files'])
+        self.assertIsNone(data['settings']['content_files']['assets/audio'])
+
+    def validate_save_load_capture(self, audio):
+        script = self.save_load_script()
+        data = self.run_client('save-load', ['--traversal', str(script)], schema='v4', audio=audio)
+        contract.validate(data, data['adapter']['renderer'], traversal=script)
+        self.assertEqual(data['schema'], contract.WORKLOAD_SCHEMA)
+        self.assertEqual(data['workload']['actual_ticks'],
+                         contract.traversal_manifest(script.read_text(encoding='utf-8'))['expected_ticks'])
+        self.assertEqual([(row['name'], row['succeeded']) for row in data['workload']['actions']],
+                         [('save', True), ('reload', True)])
+        self.assertIsNotNone(data['workload']['reload'])
+        return data
+
+    def save_load_script(self):
+        # Hold the view while asynchronous reload/meshing completes, then resume
+        # motion inside the same chunk. The four-tick refusal script cannot
+        # supply a successful reload's quiescence and resumed-camera evidence.
+        script = self.short_save_load_script()
+        text = script.read_text(encoding='utf-8').split('points ', 1)[0]
+        text = text.replace('duration_seconds 0.13333333333333333', 'duration_seconds 10')
+        text = text.replace('expected_ticks 4', 'expected_ticks 300')
+        text += ('points 3\npoint 0 8 80 8 0 -6\npoint 240 8 80 8 0 -6\n'
+                 'point 300 9 80 8 0 -6\nactions 2\n'
+                 'action 1 save 0 0 0 0\naction 2 reload 0 0 0 0\n')
+        script.write_bytes(text.encode('utf-8'))
+        return script
+
+    def test_escaping_audio_refusal(self):
+        bank = self.root / 'data/audio/sfx_main.bank.json'
+        document = json.loads(bank.read_bytes())
+        event = next(iter(document['events'].values()))
+        external = self.root / 'assets/private.mp3'
+        external.parent.mkdir(exist_ok=True)
+        external.write_bytes(b'outside the audio content tree')
+        event['files'] = ['assets/audio/../private.mp3']
+        _atomic_write(bank, json.dumps(document).encode('utf-8'))
+        log = self.run_client('refused-audio',
+                              ['--traversal', str(self.short_save_load_script())],
+                              expected_exit=2, schema='v4', audio=True)
+        self.assertIn('content reference escapes inventoried trees', log)
+
+    def external_texture_refusal(self, absolute):
+        manifest = self.root / 'data/models/trees/tree_textures.json'
+        document = json.loads(manifest.read_bytes())
+        external = self.root / 'external.ltex'
+        shutil.copy2(self.root / document['models'][0]['albedo'], external)
+        document['models'][0]['albedo'] = (str(external) if absolute
+                                           else 'data/../external.ltex')
+        # The fixture may share a hard link with the source; replace its inode.
+        _atomic_write(manifest, json.dumps(document).encode('utf-8'))
+        log = self.run_client('refused', ['--traversal', str(self.short_save_load_script())],
+                              expected_exit=2, schema='v4')
+        self.assertIn('content reference escapes inventoried trees', log)
+        self.assertNotIn('Traversal owns the measured duration', log)
+
+    def test_absolute_texture_refusal(self):
+        self.external_texture_refusal(absolute=True)
+
+    def test_parent_relative_texture_refusal(self):
+        self.external_texture_refusal(absolute=False)
+
+    def scene_config_refusal(self, assignment):
+        scene = self.root / 'external-scene.json'
+        scene.write_text(json.dumps({'moon': 0.75, 'weather': {'type': 'rain'},
+                                     'clouds': {'coverage': 0.9}}), encoding='utf-8')
+        option = [f'--scene-config={scene}'] if assignment else ['--scene-config', str(scene)]
+        log = self.run_client('refused', ['--traversal', str(self.short_save_load_script()),
+                                         *option], expected_exit=2, schema='v4')
+        self.assertIn('schema v4 refuses --scene-config', log)
+        self.assertNotIn('Scene-config loaded:', log)
+        self.assertNotIn('Scene-config parse failed:', log)
+        self.assertFalse((self.root / 'worlds/saves').exists())
+
+    def test_scene_config_separate_refusal(self):
+        self.scene_config_refusal(assignment=False)
+
+    def test_scene_config_assignment_refusal(self):
+        self.scene_config_refusal(assignment=True)
+
+    def test_existing_world_option_forms_refusal(self):
+        for option in (['--load-world', 'existing-world'], ['--load-world=existing-world'],
+                       ['--load-world=']):
+            with self.subTest(option=option):
+                log = self.run_client('refused', ['--traversal', str(self.short_save_load_script()),
+                                                 *option], expected_exit=2, schema='v4')
+                self.assertIn('schema v4 refuses --load-world', log)
+                self.assertNotIn('Static-model textures registered', log)
+                self.assertFalse((self.root / 'worlds/saves').exists())
+
+    def test_traversal_duration_option_forms_refusal(self):
+        for option in (['--render-benchmark-frames', '4'], ['--render-benchmark-frames=4']):
+            with self.subTest(option=option):
+                log = self.run_client('refused', ['--traversal', str(self.script), *option],
+                                      expected_exit=2)
+                self.assertIn('Traversal owns the measured duration', log)
+
+    def test_capture_option_missing_values_refusal(self):
+        for name in ('--render-benchmark-schema', '--capture-size', '--perf-profile',
+                     '--traversal', '--declare-render-overrides'):
+            for option in ([name, '--no-audio'], [f'{name}=']):
+                with self.subTest(option=option):
+                    log = self.run_client('refused', option, expected_exit=2)
+                    self.assertIn(f'missing value for {name}', log)
+
+    def test_traversal_owner_option_forms_refusal(self):
+        for name, value in (('--cam-pos', '1,2,3'), ('--cam-yaw', '10'), ('--cam-pitch', '5'),
+                            ('--debug-goto', 'spawn'), ('--profile-fly', '4'),
+                            ('--timelapse-frames', '4')):
+            for option in ([name, value], [f'{name}={value}']):
+                with self.subTest(option=option):
+                    log = self.run_client('refused', ['--traversal', str(self.script), *option],
+                                          expected_exit=2)
+                    self.assertIn('exclusive camera/world ownership', log)
 
     def test_implicit_creation_failure(self):
         log = self.run_client('missing', ['--world-preset', 'nonexistent_render_test_preset'], expected_exit=2)
