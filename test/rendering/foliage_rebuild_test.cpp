@@ -933,7 +933,11 @@ TEST_F(FoliageRebuildTest, GpuDrawsSurviveChurnBeforeFirstSnapshotAndAfterEmptyS
         glFinish();
     }
     // A valid zero snapshot must not prevent a later nonempty GPU draw either.
-    pass.set_density_scale(0);
+    // A zero scale normalizes to 1.0f. Chunks(1) sets every chunk's density to
+    // 0.5f; with kMaxCandidatesPerChunk == 8192 this positive scale gives exactly
+    // 0.5 * 8192 / 16384 == 0.25. Both CPU std::lround and GPU round therefore
+    // yield zero candidates for every chunk, without a rounding tie.
+    pass.set_density_scale(1.0f / 16384.0f);
     Rebuild(pass, chunks, 5);
     glFinish();
     Rebuild(pass, chunks, 6);
