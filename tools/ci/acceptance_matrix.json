@@ -1714,7 +1714,7 @@
     {
       "id": "contract.dw.regions.05",
       "source": "docs/distant-world.md#persistent-active-regions",
-      "statement": "Acceptance obligations: see [the active-region format and scheduling guide](active-regions.md) for its canonical bytes, refusal behaviours and bounded slice boundaries. / It has no per-system consumers and no measured budget caps yet. / Dirty parking, snapshot transactions and the diagnostic panel are planned for v0.3.1. / Current default behaviour still evicts dirty chunks without a flush, the client saves only on quit or shutdown, and the dedicated server autosave interval defaults to 9000 ticks (five minutes at the canonical 30 Hz clock). / Explicit zero disables autosave; / capture and determinism fixtures explicitly use 30 ticks.",
+      "statement": "Acceptance obligations: see [the active-region format and scheduling guide](active-regions.md) for its canonical bytes, refusal behaviours and bounded slice boundaries. / It has no per-system consumers and no measured budget caps yet. / Dirty parking, snapshot transactions and the diagnostic panel are planned for v0.3.1. / Current default behaviour still evicts dirty chunks without a flush, the client saves only on quit or shutdown, and the dedicated server autosave interval defaults to 9000 ticks (five minutes at the canonical 30 Hz clock). / Explicit zero disables autosave; / capture and determinism fixtures explicitly use 30 ticks. / The dedicated server autosaves every five minutes by default.",
       "status": "planned",
       "requirements": [
         "dw.regions.025",
@@ -2503,7 +2503,7 @@
     {
       "id": "contract.ar.file.08",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "statement": "Acceptance obligations: All integers are little endian, signed integers use two's complement, floats are IEEE binary32 (finite, with positive zero as the sole zero encoding). / The header is exactly 56 bytes: / | 0 | 4 | ASCII ARL1 | / | 4 | 2 | version = 1 or 2 | / | 6 | 2 | reserved zero | / | 8 | 8 | canonical scheduler tick;",
+      "statement": "Acceptance obligations: All integers are little endian, signed integers use two's complement, floats are IEEE binary32 (finite, with positive zero as the sole zero encoding). / The header is exactly 56 bytes: / | 0 | 4 | ASCII ARL1 | / | 4 | 2 | version = 1, 2 or 3 | / | 6 | 2 | reserved zero | / | 8 | 8 | canonical scheduler tick;",
       "status": "planned",
       "requirements": [
         "ar.file.051",
@@ -2608,7 +2608,7 @@
     {
       "id": "contract.ar.file.13",
       "source": "docs/active-regions.md#file-and-compatibility",
-      "statement": "Acceptance obligations: | 80 | 8 | u32 over-hold, u32 under-hold | / | 88 | 8 | u64 water cursor | / | 96 | 8 | u64 frozen simulation content digest | / The footer is one LE u64 FNV-1a-64 checksum over every preceding byte, including the extension length and TLVs (offset basis 14695981039346656037, multiplier 1099511628211). / Total length must be exactly 56 + count * 104 + 8 for version 1, or 56 + count * 104 + 4 + ext_len + 8 for version 2. / No trailing bytes, padding, native structs, section omission or alternate encodings are accepted.",
+      "statement": "Acceptance obligations: | 80 | 8 | u32 over-hold, u32 under-hold | / | 88 | 8 | u64 water cursor | / | 96 | 8 | u64 frozen simulation content digest | / The footer is one LE u64 FNV-1a-64 checksum over every preceding byte, including the extension length and TLVs (offset basis 14695981039346656037, multiplier 1099511628211). / Total length must be exactly 56 + count * 104 + 8 for version 1, or 56 + count * 104 + 4 + ext_len + 8 for versions 2 and 3. / No trailing bytes, padding, native structs, section omission or alternate encodings are accepted.",
       "status": "planned",
       "requirements": [
         "ar.file.081",
@@ -3239,9 +3239,41 @@
           "ref": "TerrainPresetLoaderTest.DiskAndOverrideLoadsRefuseOversizedPresetsBeforeParsing"
         },
         {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedgerTest.ContentIdentityRequiresItsOwnEnvelopeVersion"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DistantPolicyTest.NonDefinitionEntriesCannotBypassDirectoryWorkBound"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.NetworkHelloUsesCapturedPolicyAndPlantIdentity"
+        },
+        {
           "kind": "doc",
           "ref": "docs/active-regions.md#distant-policy-adoption-and-simulation-content-identity",
           "planned": "review integrated qualification for the content admission contract; owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "graphics.horizon-authority",
+      "source": "docs/engine-guide.md#world-generation-and-streaming",
+      "statement": "Legacy graphics horizon changes preserve edited chunk authority and reject stale captures through the chunk voxel revision even when world/region publication revisions are unchanged. This row covers the owner-thread snapshot and admission regression, not native rendering qualification.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "GraphicsRuntimePure.ShrinkingAndGrowingHorizonRetainsEditedAuthorityAndRejectsStaleCapture"
+        },
+        {
+          "kind": "ctest",
+          "ref": "StreamingHardening.FarLodSnapshotOwnsBytesAndRejectsStaleLiveData"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarLodWorker.AuthoritativeCaptureBuildsPersistsAndStales"
         }
       ]
     }

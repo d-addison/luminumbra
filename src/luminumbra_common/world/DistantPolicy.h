@@ -39,6 +39,7 @@ inline constexpr PlantDistantPolicy kDefaultPlantPolicy{};
 inline constexpr std::uint16_t kDistantDefaultsVersion = 1;
 inline constexpr std::size_t kMaxContentDocumentBytes = 1048576;
 inline constexpr std::size_t kMaxSpeciesDefinitions = 256;
+inline constexpr std::size_t kMaxSpeciesDirectoryEntries = 512;
 inline constexpr std::size_t kMaxCapturedDefinitionBytes = 16 * 1048576;
 inline constexpr std::size_t kMaxContentDepth = 32;
 inline constexpr std::uint16_t kDistantAlgorithmVersion = 1;
@@ -133,6 +134,9 @@ struct SimulationContent {
 };
 [[nodiscard]] std::uint16_t SimulationSpeciesId(std::string_view name);
 [[nodiscard]] std::uint64_t SimulationContentDigest(std::string_view bytes);
+// Bind captured content into the existing opaque network/replay configuration identity.
+[[nodiscard]] std::string BindSimulationContentIdentity(std::string_view configuration_identity,
+                                                        const SimulationContentIdentity& content);
 bool ResolveDistantPolicy(const DistantPolicyOverrides& overrides,
                           const std::vector<CapturedSpeciesDefinition>& creatures,
                           const std::vector<CapturedSpeciesDefinition>& plants,

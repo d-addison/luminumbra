@@ -40,7 +40,7 @@ int RunSteamHost(const ServerCliOptions& options) {
     }
 
     auto host_identity = RuntimeHelloFrom(options);
-    host_identity.system_config_identity = runner.Session()->SystemConfigIdentity();
+    host_identity.system_config_identity = runner.Session()->SessionConfigIdentity();
     host_identity.preset_content_hash = runner.Session()->PresetContentHash();
     host_identity.client_id = 0;
 

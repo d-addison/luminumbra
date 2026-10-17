@@ -305,13 +305,13 @@ bool NetworkedSessionDriver::Begin(Luminumbra::world::GameSession* client_sessio
     host_cfg.local_client_id = 0;
     host_cfg.peer_client_id = 1;
     // This driver steps one authoritative host; its client renders that host's state.
-    host_cfg.system_config_identity = m_impl->host_session->SystemConfigIdentity();
+    host_cfg.system_config_identity = m_impl->host_session->SessionConfigIdentity();
     host_cfg.preset_content_hash = m_impl->host_session->PresetContentHash();
     host_cfg.hash_cadence_ticks = config.hash_cadence_ticks;
     Luminumbra::Net::LockstepConfig client_cfg = host_cfg;
     client_cfg.local_client_id = 1;
     client_cfg.peer_client_id = 0;
-    client_cfg.system_config_identity = client_session->SystemConfigIdentity();
+    client_cfg.system_config_identity = client_session->SessionConfigIdentity();
     client_cfg.preset_content_hash = client_session->PresetContentHash();
 
     Luminumbra::Net::LockstepHooks host_hooks = hooks_template;

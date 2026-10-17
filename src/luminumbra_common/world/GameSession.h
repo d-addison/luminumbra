@@ -322,6 +322,8 @@ public:
     void ApplySystemConfig(const luminumbra::core::SystemConfig& config);
     // Computed on demand from the current effective simulation gates and tuning.
     [[nodiscard]] std::string SystemConfigIdentity() const;
+    // Network/replay configuration identity also binds admitted enabled content.
+    [[nodiscard]] std::string SessionConfigIdentity() const;
     // Resolved preset, biome/structure dependencies and captured species bytes.
     // Shared by TCP Hello, lockstep and replay; never re-reads content.
     [[nodiscard]] const std::string& PresetContentHash() const {

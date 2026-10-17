@@ -72,7 +72,7 @@ int RunRecord(const ServerCliOptions& options) {
     header.collision_radius = static_cast<std::uint32_t>(options.collision_radius);
     header.engine_version = std::string(luminumbra::core::GetEngineVersionString());
     header.start_world_hash = runner.ComputeWorldHash();
-    header.system_config_identity = runner.Session()->SystemConfigIdentity();
+    header.system_config_identity = runner.Session()->SessionConfigIdentity();
     header.preset_content_hash = runner.Session()->PresetContentHash();
 
     Luminumbra::Replay::RegionScheduleTrace schedule_trace;
@@ -201,7 +201,7 @@ int RunReplay(const ServerCliOptions& options) {
     }
 
     if (!Luminumbra::Replay::ConfigurationMatches(header,
-                                                  runner.Session()->SystemConfigIdentity(),
+                                                  runner.Session()->SessionConfigIdentity(),
                                                   runner.Session()->PresetContentHash())) {
         LUMINUMBRA_CORE_ERROR("replay: incompatible simulation configuration or resolved "
                               "preset/species content hash");

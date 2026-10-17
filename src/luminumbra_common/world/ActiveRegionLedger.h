@@ -110,8 +110,9 @@ public:
     // anchor presence and anchor.
     static constexpr std::size_t kHeaderBytes = 56;
     // Version 2 adds a u32 extension length and ascending TLVs: type 1 allocator (14 bytes),
-    // type 2 digest projection (7 bytes), type 3 water debt, type 4 energy ages, type 5
-    // content identity (46 bytes), and type 6 completed work (10 + 16 bytes per owned key).
+    // type 2 digest projection (7 bytes), type 3 water debt, type 4 energy ages, and type 6
+    // completed work (10 + 16 bytes per owned key). Version 3 requires type 5 content
+    // identity (46 bytes); version 2 keeps that type reserved and refuses it.
     static constexpr std::size_t kMaxFileBytes = kHeaderBytes + kMaxRegions * kRecordBytes + 4 + 7 +
                                                  14 + 6 + SimulationContentIdentity::kEncodedBytes +
                                                  3 * (6 + 4 + 16 * kMaxRegions) + 8;
