@@ -140,7 +140,12 @@ public:
     void init_buffers();
     void destroy_buffers();
     void use_rendered_ground() {
-        m_use_rendered_ground = true;
+        if (!m_use_rendered_ground) {
+            m_use_rendered_ground = true;
+            m_chunk_cache.clear();
+            m_surf_grid_cache.clear();
+            m_scatter_built = false;
+        }
     }
     void update_ground_mesh(ChunkID id,
                             const glm::ivec3& coords,
@@ -268,13 +273,29 @@ public:
     // the gate exact)..
     void set_readback_enabled(bool e) {
         m_readback_enabled = e;
-        if (!e)
+        if (!e) {
             m_gpu_generated_count.reset();
+            // Re-enabling must request a fresh snapshot even when the build
+            // and its previously consumed readback had the same generation.
+            m_readback_submitted_generation = 0;
+        }
     }
     // Gate readback provides generated counts; normal indirect draws expose capacity
     // separately and leave the generated count unknown.
     bool readback_enabled() const {
         return m_readback_enabled;
+    }
+    // Explicitly opt in before building qualification/benchmark evidence. This
+    // does not change placement, readback, wind, or rebuild admission policy.
+    void set_evidence_enabled(bool enabled) {
+        m_evidence_enabled = enabled;
+        if (!enabled)
+            m_uploaded_input_hash.reset();
+    }
+    // Identity of the current uploaded inputs, absent when not collected.
+    // A const diagnostic for evidence consumers; it never triggers hashing.
+    std::optional<std::uint64_t> uploaded_input_hash() const {
+        return m_uploaded_input_hash;
     }
     void set_sway_strength(float amplitude, float speed) {
         m_sway_amplitude = amplitude;
@@ -414,11 +435,18 @@ private:
     void submit_foliage_readback();
     SurfaceSample sample_ground(
         const ChunkScatter& chunk, SurfaceQuery query, void* query_ctx, float x, float z) const;
+    bool contributes_to_scatter(const ChunkScatter& chunk, const glm::vec3& camera_pos) const;
     bool m_use_rendered_ground = false;
-    std::uint64_t m_ground_revision = 0;
+    // Render-only revision allocator. Only a contributing column's stored token
+    // enters the scatter signature; absent columns have revision zero. Storage
+    // follows resident columns, with no history retained for unloaded terrain.
+    std::uint64_t m_next_ground_revision = 0;
+    struct GroundColumn {
+        std::uint64_t revision = 0;
+        std::unordered_map<ChunkID, FoliageGroundMesh> meshes;
+    };
     std::unordered_map<ChunkID, std::uint64_t> m_ground_columns;
-    std::unordered_map<std::uint64_t, std::unordered_map<ChunkID, FoliageGroundMesh>>
-        m_ground_meshes;
+    std::unordered_map<std::uint64_t, GroundColumn> m_ground_meshes;
 
     //  implementation note (foliage streaming-burst amortization): build (or fetch the cached)
     // CAMERA-INDEPENDENT instance records for one chunk. The records (position/size/color/phase/
@@ -438,15 +466,18 @@ private:
     // m_blade_ssbo this session (execute then draws from it directly through
     // the command stored in m_count_ssbo).
     void dispatch_scatter();
+    void collect_input_hash();
     void poll_vertex_evidence();
     void destroy_qualification();
     bool capture_vertices(const glm::mat4& view_projection);
     void rebuild_frozen_inputs();
     FoliageQualificationEvidence m_qualification;
     std::vector<InstanceRecord> m_rebuild_reference;
-    std::uint64_t m_uploaded_input_hash = 0;
+    bool m_evidence_enabled = false;
+    std::optional<std::uint64_t> m_uploaded_input_hash;
     glm::vec2 m_uploaded_wind{0.0f};
     glm::vec3 m_uploaded_camera{0.0f};
+    std::array<float, 5> m_uploaded_hash_settings{};
     AsyncReadbackRing m_vertex_readback;
     u32 m_vertex_feedback_buffer = 0;
     u32 m_vertex_feedback_object = 0;
@@ -458,10 +489,42 @@ private:
     std::size_t m_last_draw_calls = 0;
     u32 m_compute_prog = 0;
     u32 m_prefix_prog = 0;
+    struct ScatterUniforms {
+        int chunk_count = -1;
+        int archetype_count = -1;
+        int total_weight = -1;
+        int max_candidates = -1;
+        int max_instances = -1;
+        int density_scale = -1;
+        int camera_xz = -1;
+        int fade_end_m = -1;
+        int wind_xz = -1;
+        int emit = -1;
+    } m_scatter_uniforms;
+    struct PrefixUniforms {
+        int group_count = -1;
+        int max_instances = -1;
+    } m_prefix_uniforms;
     u32 m_group_counts_ssbo = 0;
     u32 m_group_offsets_ssbo = 0;
     int m_uploaded_chunk_count = 0;
     static constexpr std::size_t kMaxGpuChunks = 512;
+    // Rebuild scratch retains its high-water capacity. GPU input scratch is
+    // bounded by 512 columns, each with 8192 vec4 samples (64 MiB total).
+    struct GpuChunk {
+        float origin_extent[4];
+        float id_density[4];
+    };
+    static_assert(sizeof(GpuChunk) == 8 * sizeof(float));
+    std::vector<ChunkScatter> m_ordered_chunks;
+    std::vector<const ChunkScatter*> m_admitted_chunks;
+    std::vector<GpuChunk> m_chunk_params;
+    std::vector<glm::vec4> m_surface_scratch;
+    // Palette storage is checked against element, GL byte, and uniform limits.
+    std::vector<float> m_palette;
+    float m_palette_total_weight = 1.0f;
+    bool m_palette_dirty = true;
+    std::size_t m_group_storage_bytes = 0;
     u32 m_chunk_ssbo = 0;
     u32 m_surf_ssbo = 0;
     u32 m_blade_ssbo = 0;

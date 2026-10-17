@@ -11,12 +11,12 @@
 
 namespace Luminumbra::Client::Attribution {
 
-// Components mirror the existing quantized scatter signature. Diagnostics never
-// decide whether a build runs; the original signature remains authoritative.
+// Components mirror the quantized scatter signature for render diagnostics.
+// Foliage owns rebuild admission; these values never feed simulation state.
 struct ScatterSignature {
     std::uint64_t config = 0;
     std::uint64_t camera_cell = 0;
-    std::uint64_t ground_revision = 0;
+    std::uint64_t ground_revision = 0; // folded revisions of contributing support columns
     std::uint64_t scatter_chunks = 0;
 };
 enum RebuildReason : std::uint32_t {
@@ -74,10 +74,13 @@ struct FoliageRebuild {
     std::uint32_t reasons = 0;
     std::uint64_t admitted_columns = 0;
     std::uint64_t surface_misses = 0;
+    std::uint64_t surface_samples = 0;
     std::uint64_t deferred_columns = 0;
     std::uint64_t copied_bytes = 0;
     std::uint64_t hashed_bytes = 0;
     std::uint64_t uploaded_bytes = 0;
+    std::uint64_t uploads = 0;
+    std::uint64_t stale_results = 0;
     // Storage allocated with null glBufferData, separate from transferred bytes.
     std::uint64_t scratch_bytes = 0;
     bool backlog = false;

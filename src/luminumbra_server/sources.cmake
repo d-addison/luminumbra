@@ -3,6 +3,7 @@
 # or RmlUi anywhere under src/luminumbra_server/ (enforced by the
 # ServerHeadlessHygiene ctest and the HeadlessServerTick validator mode).
 set(SERVER_APP_SOURCES
+    "${CMAKE_CURRENT_LIST_DIR}/../startup/RuntimeEntry.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/main_server.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/ServerWorldRunner.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/modes/AetherBench.cpp"
@@ -23,3 +24,7 @@ set(SERVER_APP_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/modes/WeatherBench.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/modes/WindBench.cpp"
 )
+
+# The implementation retains Jolt's ISA; only RuntimeEntry.cpp owns main.
+set_source_files_properties("${CMAKE_CURRENT_LIST_DIR}/main_server.cpp" PROPERTIES
+    COMPILE_DEFINITIONS "main=LuminumbraApplicationMain")

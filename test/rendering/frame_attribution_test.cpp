@@ -167,10 +167,13 @@ TEST(FrameAttribution, FrameCollectorIncludesAllCallersAndDoesNotLeakBetweenFram
     gpu.dispatch_ms = 8;
     gpu.admitted_columns = 5;
     gpu.surface_misses = 4;
+    gpu.surface_samples = 32768;
     gpu.deferred_columns = 1;
     gpu.copied_bytes = 100;
     gpu.hashed_bytes = 200;
     gpu.uploaded_bytes = 300;
+    gpu.uploads = 4;
+    gpu.stale_results = 1;
     gpu.scratch_bytes = 400;
     gpu.backlog = true;
     {
@@ -193,10 +196,13 @@ TEST(FrameAttribution, FrameCollectorIncludesAllCallersAndDoesNotLeakBetweenFram
         EXPECT_DOUBLE_EQ(first.rebuild.dispatch_ms, 16);
         EXPECT_EQ(first.rebuild.admitted_columns, 10u);
         EXPECT_EQ(first.rebuild.surface_misses, 8u);
+        EXPECT_EQ(first.rebuild.surface_samples, 65536u);
         EXPECT_EQ(first.rebuild.deferred_columns, 2u);
         EXPECT_EQ(first.rebuild.copied_bytes, 200u);
         EXPECT_EQ(first.rebuild.hashed_bytes, 400u);
         EXPECT_EQ(first.rebuild.uploaded_bytes, 600u);
+        EXPECT_EQ(first.rebuild.uploads, 8u);
+        EXPECT_EQ(first.rebuild.stale_results, 2u);
         EXPECT_EQ(first.rebuild.scratch_bytes, 800u);
         EXPECT_TRUE(first.rebuild.backlog);
         EXPECT_DOUBLE_EQ(first.rebuild_ms, 80);

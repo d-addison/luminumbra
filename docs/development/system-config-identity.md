@@ -151,11 +151,10 @@ order; authored biome rows, boxes and sockets retain their JSON array order.
 Direct generators constructed without a preset snapshot still load their biome table
 and structure pools from disk. Nested files and other extensions are
 not inputs. An absent selected biome table loads with the marker
-`biome-table-absent:legacy-classification`; a present rejected/empty table binds its bytes
-and `biome-table-rejected/empty:legacy-classification`. An absent structures directory
-loads with `structures-directory-absent`; a present directory binds
-`structures-directory-present`. Each type binds `pool-accepted` or `pool-rejected/empty`,
-including types with no pieces. An absent placement binds
+`biome-table-absent:legacy-classification`. A present rejected/empty biome table
+refuses preset loading without publishing an identity. Enabled structures require a
+present directory and valid, nonempty pools; the manifest binds
+`structures-directory-present` and `pool-accepted` for each type. An absent placement binds
 `placement-absent:compiled-defaults`. All of these states produce distinct identities.
 A present unreadable dependency, directory enumeration failure or incomplete file read
 refuses loading without publishing an identity; it never becomes an absence marker.

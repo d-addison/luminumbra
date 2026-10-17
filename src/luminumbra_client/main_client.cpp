@@ -1026,6 +1026,9 @@ static void UpdateFoliageScatter(ClientAppContext& g_app,
             // (every gate, incl. FoliageInstancing's foliage_visual_smoke)
             // KEEPS the readback so instance_hash/coverage stay exact.
             foliage->set_readback_enabled(scenario_config.active() && !g_app.capture.play_paths);
+            // Only the foliage qualification scenario consumes uploaded-input evidence.
+            foliage->set_evidence_enabled(scenario_config.foliage_visual_smoke() &&
+                                          !g_app.capture.play_paths);
             glm::vec2 wind_xz(0.0f, 0.0f);
             if (auto* wind = gameSession->GetWindFieldSystem()) {
                 const Luminumbra::Vec2 w = wind->SampleWind(Luminumbra::Vec3(
