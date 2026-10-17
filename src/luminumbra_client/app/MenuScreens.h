@@ -13,6 +13,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <optional>
 #include <string>
 
 struct GLFWwindow;
@@ -52,6 +53,7 @@ private:
 // Menu rendering retains the input ownership state alongside the scene cache.
 struct MenuSceneState : MenuPreviewState {
     MenuSceneSchedule schedule;
+    std::optional<MenuSceneKey> capture_key;
     MenuCameraRevision camera_revision;
     std::uint64_t preview_revision = 0;
     float last_tod = -1;

@@ -1,6 +1,7 @@
 """Guard production attribution wiring beyond the pure bucket/count tests."""
 
 from pathlib import Path
+import ast
 import json
 import re
 import unittest
@@ -33,6 +34,26 @@ def block(text, marker):
             if depth == 0:
                 return text[start + 1:index]
     raise AssertionError(f"Unclosed block: {marker}")
+
+
+def cpp_expression(expression, **bindings):
+    """Evaluate only scalar production predicates, without executing native code."""
+    names = {}
+    for index, (name, value) in enumerate(sorted(bindings.items(), key=lambda item: -len(item[0]))):
+        token = f"value_{index}"
+        expression = re.sub(r"(?<![\w.])" + re.escape(name) + r"(?![\w.])", token, expression)
+        names[token] = value
+    expression = expression.replace("&&", " and ").replace("||", " or ")
+    expression = re.sub(r"!(?!=)", " not ", expression).replace("/", "//")
+    expression = compact(re.sub(r"(?<=\d)'(?=\d)", "", expression))
+    tree = ast.parse(expression, mode="eval")
+    allowed = (ast.Expression, ast.BoolOp, ast.And, ast.Or, ast.UnaryOp, ast.Not,
+               ast.BinOp, ast.Add, ast.Sub, ast.Mult, ast.FloorDiv, ast.Mod,
+               ast.Compare, ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE,
+               ast.Name, ast.Load, ast.Constant)
+    if any(not isinstance(node, allowed) for node in ast.walk(tree)):
+        raise AssertionError(f"Unsupported scalar expression: {expression}")
+    return eval(compile(tree, "<production predicate>", "eval"), {"__builtins__": {}}, names)
 
 
 class FrameAttributionWiring(unittest.TestCase):
@@ -446,6 +467,151 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertIn("menuPreviewState.schedule = {};", self.main)
         self.assertLess(self.main.index("menuPreviewState.scene_image.release_scene_image();"),
                         self.main.index("glfwDestroyWindow(window);", self.main.index("menuPreviewState.scene_image.release_scene_image();")))
+
+    def test_capture_samples_require_success_and_refusals_replay_without_progress(self):
+        menu = block(read(CLIENT / "app/MenuScreens.cpp"), "void RenderMenuScreens(")
+        scene = block(menu, "if (scenic || previewActive)")
+        refresh = block(scene, "if (drawable && (refresh || !has_image))")
+        self.assertIn("bool scene_rendered = false;", menu[:menu.index("if (scenic || previewActive)")])
+        self.assertEqual(menu.count("scene_rendered = true;"), 1)
+        self.assertEqual(menu.count("schedule.rendered();"), 1)
+        self.assertIn("bool rendered = false;", refresh)
+        preview = compact(block(refresh, "if (previewActive)"))
+        self.assertEqual(preview,
+                         "rendered = worldgenPreview->render_to_backbuffer(renderPipeline, render_delta);")
+        scenic = compact(block(refresh, "else"))
+        self.assertTrue(scenic.endswith("rendered = true;"))
+        self.assertLess(scenic.index("renderPipeline.render_frame("), scenic.index("rendered = true;"))
+        success = compact(block(refresh, "if (rendered)"))
+        self.assertTrue(success.startswith("scene_rendered = true;"))
+        self.assertIn("previewState.schedule.rendered();", success)
+        refused = compact(block(refresh, "else if (has_image && previewState.schedule.valid())"))
+        self.assertEqual(refused, "previewState.scene_image.copy_scene_image(false);")
+        self.assertLess(menu.index("uiManager->Render();"), menu.index("bool ready_to_capture = false;"))
+
+    def test_capture_settling_evaluates_live_throttle_and_admission_predicates(self):
+        # Evaluate the shipping scheduler and counter guards, not a separately
+        # hardcoded cadence. Binding checks above keep render success outside replay.
+        menu = block(read(CLIENT / "app/MenuScreens.cpp"), "void RenderMenuScreens(")
+        regular = block(menu, "else if (app.capture.ui_screenshot_settle < 30)")
+        regular = re.sub(r"//[^\n]*", "", regular)
+        admission = re.fullmatch(r"\s*if \((.*?)\)\s*"
+                                r"\+\+app.capture.ui_screenshot_settle;\s*", regular, re.S)
+        self.assertIsNotNone(admission)
+        predicate = admission.group(1)
+        for scenic, preview, rendered in ((False, False, False), (True, False, False),
+                                         (False, True, False), (True, False, True),
+                                         (False, True, True)):
+            self.assertEqual(cpp_expression(predicate, scene_rendered=rendered,
+                                            scenic=scenic, previewActive=preview),
+                             rendered or not (scenic or preview))
+        schedule = read(CLIENT / "app/MenuSceneSchedule.h")
+        update = block(schedule, "bool update(")
+        self.assertEqual(compact(block(schedule, "float render_delta_seconds() const")),
+                         "return std::chrono::duration<float>(m_now - m_last_render).count();")
+        self.assertIn("m_last_render = m_now;", block(schedule, "void rendered()"))
+        self.assertIn("m_now = now;", update)
+        slot_expression = re.search(r"const auto slot = (.*?);", update, re.S).group(1)
+        refresh_expression = re.search(r"return (.*?);", update, re.S).group(1)
+        second = int(re.search(r"kSecond = ([\d']+);", schedule).group(1).replace("'", ""))
+        last_slot, valid, samples, replayed = -1, False, 0, 0
+        for tick in range(1001):  # 1000 Hz UI over exactly one elapsed second
+            slot = cpp_expression(slot_expression, elapsed=tick * 1_000_000, kSecond=second)
+            refresh = cpp_expression(refresh_expression, **{
+                "key.width": 1920, "key.height": 1080, "m_valid": valid,
+                "due": slot != last_slot, "interactive": False})
+            last_slot = slot
+            if refresh:
+                valid = True
+            else:
+                replayed += 1
+            samples += bool(cpp_expression(predicate, scene_rendered=refresh,
+                                           scenic=True, previewActive=False))
+            if tick == 30:
+                self.assertEqual(samples, 1)  # 31 UI frames cannot settle a scene
+            if tick == 966:
+                self.assertEqual(samples, 29)
+        self.assertEqual((samples, replayed), (31, 970))
+        for width, height, interactive, expected in ((0, 1080, True, False),
+                                                      (1920, 0, True, False),
+                                                      (1920, 1080, True, True),
+                                                      (1920, 1080, False, False)):
+            self.assertEqual(cpp_expression(refresh_expression, **{
+                "key.width": width, "key.height": height, "m_valid": True,
+                "due": False, "interactive": interactive}), expected)
+
+    def test_preview_capture_requires_ready_successes_and_keeps_the_timeout(self):
+        menu = block(read(CLIENT / "app/MenuScreens.cpp"), "void RenderMenuScreens(")
+        preview = block(menu, "if (preview_live_screen)")
+        readiness = preview[preview.index("const bool world_ready"):]
+        reset = re.search(r"if \((.*?)\)\s*app.capture.ui_preview_settle_after_ready = 0;",
+                          readiness, re.S).group(1)
+        increment = re.search(r"else if \((.*?)\)\s*\+\+app.capture.ui_preview_settle_after_ready;",
+                              readiness, re.S).group(1)
+        settled = re.search(r"const bool settled = (.*?);", readiness, re.S).group(1)
+        timeout = re.search(r"const bool timed_out = (.*?);", readiness, re.S).group(1)
+        self.assertRegex(compact(readiness), r"kPreviewTimeoutSeconds = 45\.0;")
+        self.assertRegex(compact(readiness), r"kPreviewSettleAfterReady = 40;")
+        self.assertIn("ready_to_capture = settled || timed_out;", readiness)
+        self.assertIn("worldgenPreview && worldgenPreview->world_ready()", preview)
+        armed = block(preview, "if (!s_preview_wait_armed)")
+        self.assertIn("app.capture.ui_preview_settle_after_ready = 0;", armed)
+        self.assertIn("s_preview_wait_start = std::chrono::steady_clock::now();", armed)
+        self.assertEqual(menu.count("s_preview_wait_start = std::chrono::steady_clock::now();"), 1)
+        count = 0
+        # Pending/missing world, successful renders, cache replays, refused renders,
+        # readiness loss, inactive preview, then a fresh uninterrupted warmup.
+        for ready, active, rendered, expected in (
+                [(False, True, False, 0)] + [(True, True, True, n) for n in range(1, 40)] +
+                [(True, True, False, 39), (False, True, False, 0),
+                 (True, True, True, 1), (True, False, False, 0)] +
+                [(True, True, True, n) for n in range(1, 41)]):
+            values = dict(world_ready=ready, previewActive=active, scene_rendered=rendered)
+            if cpp_expression(reset, **values):
+                count = 0
+            elif cpp_expression(increment, **values):
+                count += 1
+            self.assertEqual(count, expected)
+            self.assertEqual(cpp_expression(settled, **{
+                "world_ready": ready, "app.capture.ui_preview_settle_after_ready": count,
+                "kPreviewSettleAfterReady": 40}), ready and count >= 40)
+        for waited, expected in ((0, False), (44.999, False), (45, True), (46, True)):
+            self.assertEqual(cpp_expression(timeout, waited_s=waited,
+                                            kPreviewTimeoutSeconds=45.0), expected)
+
+    def test_capture_invalidation_batch_advancement_and_thumbnail_siblings(self):
+        menu = block(read(CLIENT / "app/MenuScreens.cpp"), "void RenderMenuScreens(")
+        transition = block(menu, "if (!previewState.capture_key || key != *previewState.capture_key)")
+        for reset in ("app.capture.ui_screenshot_settle = 0;",
+                      "app.capture.ui_preview_settle_after_ready = 0;",
+                      "previewState.capture_key = key;"):
+            self.assertIn(reset, transition)
+        self.assertLess(menu.index("previewState.capture_key = key;"),
+                        menu.index("schedule.update(now, key, interactive)"))
+        self.assertIn("std::optional<MenuSceneKey> capture_key;", read(CLIENT / "app/MenuScreens.h"))
+        without_scene = block(menu[menu.index("} else if (previewState.schedule.valid())"):], "else {")
+        reset = block(without_scene, "if (previewState.capture_key)")
+        for fragment in ("app.capture.ui_screenshot_settle = 0;",
+                         "app.capture.ui_preview_settle_after_ready = 0;",
+                         "previewState.capture_key.reset();"):
+            self.assertIn(fragment, reset)
+        # The inner ready log has no capture writes; use the final ready block.
+        capture = block(menu[menu.index("} else if (app.capture.ui_screenshot_settle < 30)"):],
+                        "if (ready_to_capture)")
+        self.assertIn("s_preview_wait_armed = false;", capture)
+        self.assertLess(capture.index("WritePixelBufferPpm("), capture.index("++app.capture.ui_screen_index;"))
+        for fragment in ("app.capture.ui_screenshot_settle = 0;",
+                         "app.capture.ui_preview_settle_after_ready = 0;",
+                         "previewState.capture_key.reset();", "RequestLoadDocument(",
+                         "glfwSetWindowShouldClose(window, GLFW_TRUE);"):
+            self.assertIn(fragment, capture)
+        self.assertIn("app.capture.ui_screen_index < app.capture.ui_screens.size()", menu)
+        thumbs = block(menu, "if (app.capture.ui_thumbs > 0")
+        self.assertNotIn("schedule.update", thumbs)
+        self.assertLess(thumbs.index("renderPipeline.render_frame("), thumbs.index("++app.capture.ui_thumbs_settle;"))
+        self.assertIn("app.capture.ui_thumbs_settle < 28", thumbs)
+        self.assertIn("app.capture.ui_thumbs_settle = 0;", thumbs)
+        self.assertIn("++app.capture.ui_thumbs_index;", thumbs)
 
     def test_blur_reuses_geometry_and_kernels_without_changing_the_passes(self):
         backend = read(CLIENT / "ui/gl3/RmlUi_Renderer_GL3.cpp")

@@ -335,6 +335,7 @@ void RenderMenuScreens(ClientAppContext& app,
 
         const bool scenic = !previewActive && app.menu.menu_backdrop_active && camera &&
                             gameSession && gameSession->GetWorldSystem();
+        bool scene_rendered = false;
         if (scenic || previewActive) {
             const Attribution::PhaseScope scene_phase(Attribution::Phase::MenuScene);
             int width = 0, height = 0;
@@ -378,6 +379,13 @@ void RenderMenuScreens(ClientAppContext& app,
                              .graphics = renderPipeline.graphics_runtime_config()},
                 .preview_active = previewActive,
                 .wireframe = app.overlay.wireframe_mode};
+            if (app.capture.ui_screen_index < app.capture.ui_screens.size()) {
+                if (!previewState.capture_key || key != *previewState.capture_key) {
+                    app.capture.ui_screenshot_settle = 0;
+                    app.capture.ui_preview_settle_after_ready = 0;
+                    previewState.capture_key = key;
+                }
+            }
             // The camera phase advances with all elapsed menu time, including
             // frames which only replay the cached image. Dusk remains at 0.24.
             if (scenic) {
@@ -392,7 +400,7 @@ void RenderMenuScreens(ClientAppContext& app,
             const bool drawable = width > 0 && height > 0;
             if (drawable && (refresh || !has_image)) {
                 const float render_delta = previewState.schedule.render_delta_seconds();
-                bool rendered = true;
+                bool rendered = false;
                 if (previewActive) {
                     rendered = worldgenPreview->render_to_backbuffer(renderPipeline, render_delta);
                 } else {
@@ -402,20 +410,29 @@ void RenderMenuScreens(ClientAppContext& app,
                                                 *camera,
                                                 render_delta,
                                                 app.overlay.wireframe_mode);
+                    rendered = true;
                 }
                 if (rendered) {
+                    scene_rendered = true;
                     // Capture BEFORE RmlUi so hover, text, and animations remain live.
                     if (has_image)
                         previewState.scene_image.copy_scene_image(true);
                     previewState.schedule.rendered();
                     if (!has_image)
                         previewState.schedule.invalidate();
+                } else if (has_image && previewState.schedule.valid()) {
+                    previewState.scene_image.copy_scene_image(false);
                 }
             } else if (previewState.schedule.valid()) {
                 previewState.scene_image.copy_scene_image(false);
             }
         } else {
             previewState.schedule.invalidate();
+            if (previewState.capture_key) {
+                app.capture.ui_screenshot_settle = 0;
+                app.capture.ui_preview_settle_after_ready = 0;
+                previewState.capture_key.reset();
+            }
         }
 
         if (uiManager) {
@@ -427,7 +444,7 @@ void RenderMenuScreens(ClientAppContext& app,
         if (!app.capture.ui_screens.empty() &&
             app.capture.ui_screen_index < app.capture.ui_screens.size()) {
             // HEADLESS PREVIEW-DIORAMA CAPTURE: for world_creation under --preview-live,
-            // the live diorama builds on a background worker, so the fixed 30-frame settle
+            // the live diorama builds on a background worker, so the fixed 30-sample settle
             // would capture a black backdrop before world_ready. Instead, wait (bounded
             // by a wall-clock timeout so we never hang) for the candidate world to build +
             // a short post-ready settle (far-LOD/foliage/precipitation drawn), THEN
@@ -445,7 +462,9 @@ void RenderMenuScreens(ClientAppContext& app,
                     app.capture.ui_preview_settle_after_ready = 0;
                 }
                 const bool world_ready = worldgenPreview && worldgenPreview->world_ready();
-                if (world_ready)
+                if (!world_ready || !previewActive)
+                    app.capture.ui_preview_settle_after_ready = 0;
+                else if (scene_rendered)
                     ++app.capture.ui_preview_settle_after_ready;
                 const double waited_s = std::chrono::duration<double>(
                                             std::chrono::steady_clock::now() - s_preview_wait_start)
@@ -453,7 +472,7 @@ void RenderMenuScreens(ClientAppContext& app,
                 constexpr double kPreviewTimeoutSeconds =
                     45.0; // hard bound -> never hangs headlessly
                 constexpr int kPreviewSettleAfterReady =
-                    40; // post-ready frames for far-LOD/foliage/particles
+                    40; // successful post-ready scene renders for far-LOD/foliage/particles
                 const bool settled = world_ready && app.capture.ui_preview_settle_after_ready >=
                                                         kPreviewSettleAfterReady;
                 const bool timed_out = waited_s >= kPreviewTimeoutSeconds;
@@ -475,7 +494,10 @@ void RenderMenuScreens(ClientAppContext& app,
                                         : std::string("<null preview>"));
                 }
             } else if (app.capture.ui_screenshot_settle < 30) {
-                ++app.capture.ui_screenshot_settle;
+                // UI-only screens still settle layout/fonts every frame. A scenic or
+                // preview screen needs actual scene updates; cached replays do no work.
+                if (scene_rendered || !(scenic || previewActive))
+                    ++app.capture.ui_screenshot_settle;
             } else {
                 ready_to_capture = true;
             }
@@ -502,6 +524,8 @@ void RenderMenuScreens(ClientAppContext& app,
                     app.capture.ui_screenshot_screen =
                         app.capture.ui_screens[app.capture.ui_screen_index];
                     app.capture.ui_screenshot_settle = 0;
+                    app.capture.ui_preview_settle_after_ready = 0;
+                    previewState.capture_key.reset();
                     if (uiManager)
                         uiManager->RequestLoadDocument(
                             app.capture.ui_screens[app.capture.ui_screen_index] + ".rml");
