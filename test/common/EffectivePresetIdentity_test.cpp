@@ -363,8 +363,29 @@ TEST_F(EffectivePresetIdentity, ReplayRefusesInvalidOrMismatchedIdentityBeforeCr
         header.collision_radius = std::numeric_limits<std::uint32_t>::max();
         EXPECT_FALSE(ReplayRunnerConfigFrom(options, header).has_value());
         header = valid;
-        ++header.version;
+        // Both complete and diagnostic layouts are supported. Keep the refusal
+        // fixture beyond both versions without overflowing the wire integer.
+        constexpr auto unsupported_version = (std::numeric_limits<std::uint16_t>::max)();
+        static_assert(unsupported_version > Luminumbra::Replay::kLrec1Version &&
+                      unsupported_version > Luminumbra::Replay::kLrec1ElidedVersion);
+        header.version = unsupported_version;
         EXPECT_FALSE(ReplayRunnerConfigFrom(options, header).has_value());
+        for (const auto version :
+             {Luminumbra::Replay::kLrec1Version, Luminumbra::Replay::kLrec1ElidedVersion}) {
+            SCOPED_TRACE(version);
+            header = valid;
+            header.version = version;
+            const auto admitted = ReplayRunnerConfigFrom(options, header);
+            ASSERT_TRUE(admitted.has_value());
+            if (!admitted.has_value())
+                continue;
+            EXPECT_EQ(admitted->required_preset_content_hash, resolved.preset_content_hash);
+            EXPECT_TRUE(Luminumbra::Replay::ConfigurationMatches(
+                header, retained.SystemConfigIdentity(), admitted->required_preset_content_hash));
+            EXPECT_EQ(retained.GetWorldSystem(), retained_world);
+            EXPECT_EQ(retained.PresetContentHash(), retained_identity);
+            EXPECT_FALSE(fs::exists(root / "worlds/saves"));
+        }
         const auto matched = ReplayRunnerConfigFrom(options, valid);
         ASSERT_TRUE(matched.has_value());
         // Recheck the snapshot at the last point before CreateWorld writes or

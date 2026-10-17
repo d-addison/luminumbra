@@ -119,6 +119,34 @@ class ReplaySourceContract(unittest.TestCase):
         with self.assertRaises(AssertionError):
             self.assert_shipping_owner(cmake, identity.replace("RunReplay(options)", "FakeReplay(options)"))
 
+    def test_replay_admission_fixture_distinguishes_supported_and_unknown_versions(self):
+        identity = read_source("test/common/EffectivePresetIdentity_test.cpp")
+        refusal = identity.split(
+            "ReplayRefusesInvalidOrMismatchedIdentityBeforeCreatingDirectories) {", 1)[1].split(
+                "\nTEST_F(", 1)[0]
+        self.assertIn("for (const bool custom : {false, true})", refusal)
+        self.assertIn("constexpr auto unsupported_version = "
+                      "(std::numeric_limits<std::uint16_t>::max)();", refusal)
+        self.assertRegex(refusal, r'static_assert\(unsupported_version > '
+                         r'Luminumbra::Replay::kLrec1Version &&\s*unsupported_version > '
+                         r'Luminumbra::Replay::kLrec1ElidedVersion\);')
+        self.assertIn("header.version = unsupported_version;\n"
+                      "        EXPECT_FALSE(ReplayRunnerConfigFrom(options, header).has_value());",
+                      refusal)
+        self.assertNotIn("++header.version", refusal)
+        self.assertRegex(refusal, r'for \(const auto version :\s*'
+                         r'\{Luminumbra::Replay::kLrec1Version, '
+                         r'Luminumbra::Replay::kLrec1ElidedVersion\}\) \{\s*'
+                         r'SCOPED_TRACE\(version\);\s*header = valid;\s*'
+                         r'header.version = version;\s*'
+                         r'const auto admitted = ReplayRunnerConfigFrom\(options, header\);\s*'
+                         r'ASSERT_TRUE\(admitted.has_value\(\)\);')
+        self.assertIn("EXPECT_EQ(admitted->required_preset_content_hash, "
+                      "resolved.preset_content_hash);", refusal)
+        self.assertRegex(refusal, r'EXPECT_TRUE\(Luminumbra::Replay::ConfigurationMatches\(\s*'
+                         r'header, retained.SystemConfigIdentity\(\), '
+                         r'admitted->required_preset_content_hash\)\);')
+
     def test_contract_is_registered_in_ctest_and_both_python_platform_plans(self):
         path = "tools/ci/test_replay_source_contract.py"
         self.assertIn('add_test(NAME ReplaySourceContract COMMAND "${Python3_EXECUTABLE}" -I -B\n'
