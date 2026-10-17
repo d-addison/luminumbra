@@ -58,6 +58,14 @@ def immutable_repository_reads() -> Any:
         for name in ("_read_text", "_path_problem", "load_required_ids"):
             cached = lru_cache(maxsize=256)(getattr(MODULE, name))
             stack.enter_context(mock.patch.object(MODULE, name, cached))
+        source_problem = MODULE._source_problem
+        @lru_cache(maxsize=256)
+        def source_result(base: Path, source: str) -> str | None:
+            # Only filesystem-derived answers are shared. Every mutated JSON
+            # binding is still checked by validate/validate_inventory itself.
+            return source_problem(base, source, {})
+        stack.enter_context(mock.patch.object(MODULE, "_source_problem",
+            lambda base, source, documents: source_result(base, source)))
         yield
 
 
@@ -187,9 +195,37 @@ class AcceptanceFixture(unittest.TestCase):
             seed.doCleanups()
 
     def setUp(self) -> None:
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.tmp = Path(tmp.name).resolve()
+        # Parser and repository-only checks need no mutable synthetic tree.
+        # Create it on first use; every filesystem test still owns fresh files.
+        self._fixture_pending = True
+        self.index = self.fixture_index
+        # Logical fault/interleaving tests exercise flush ordering and injected
+        # sync failures. Physical disk barriers are qualified separately below
+        # and in every actual process-termination case, not repeated per fault.
+        sync_patch = mock.patch.object(os, "fsync", autospec=True)
+        self.sync = sync_patch.start()
+        self.addCleanup(sync_patch.stop)
+
+    def __getattr__(self, name: str) -> Any:
+        if self.__dict__.get("_fixture_pending", False):
+            if name in {"tmp", "matrix_path"}:
+                self._temporary_fixture()
+                return getattr(self, name)
+            if name in {"root", "inventory"}:
+                self._fixture_pending = False
+                self._materialize_fixture()
+                return getattr(self, name)
+        raise AttributeError(name)
+
+    def _temporary_fixture(self) -> None:
+        if "tmp" not in self.__dict__:
+            tmp = tempfile.TemporaryDirectory()
+            self.addCleanup(tmp.cleanup)
+            self.tmp = Path(tmp.name).resolve()
+            self.matrix_path = self.tmp / "matrix.json"
+
+    def _materialize_fixture(self) -> None:
+        self._temporary_fixture()
         self.root = self.tmp / "repo"
         self.root.mkdir()
         for relative in self.fixture_directories:
@@ -199,12 +235,6 @@ class AcceptanceFixture(unittest.TestCase):
         self.inventory = copy.deepcopy(self.fixture_inventory)
         self.index = self.fixture_index
         self.matrix_path = self.tmp / "matrix.json"
-        # Logical fault/interleaving tests exercise flush ordering and injected
-        # sync failures. Physical disk barriers are qualified separately below
-        # and in every actual process-termination case, not repeated per fault.
-        sync_patch = mock.patch.object(os, "fsync", autospec=True)
-        self.sync = sync_patch.start()
-        self.addCleanup(sync_patch.stop)
 
     def _create_fixture(self) -> None:
         tmp = tempfile.TemporaryDirectory()
@@ -260,6 +290,9 @@ class AcceptanceFixture(unittest.TestCase):
             json.dumps(self.inventory), encoding="utf-8")
 
     def write_matrix(self, matrix: Any) -> None:
+        # CLI fault tests must receive their complete repository before they
+        # inject failures into publication and filesystem primitives.
+        _ = self.root
         if isinstance(matrix, str):
             self.matrix_path.write_text(matrix, encoding="utf-8")
         else:
@@ -354,11 +387,17 @@ raise SystemExit(module["main"](sys.argv[3:]))
                     linked = True
                 except OSError:
                     duplicate(first, alias)
-                    resolve = Path.resolve
+                    # This model changes link topology only through retarget;
+                    # ordinary publication replaces regular files. Cache only
+                    # resolution (256 names), never bytes, status or identities.
+                    # The cache belongs to this one synthetic link context.
+                    resolve = lru_cache(maxsize=256)(Path.resolve)
                     def resolved(path: Path, *args: Any, **kwargs: Any) -> Path:
                         # Resolve parent components after following the alias,
                         # as a real directory link or Windows short name does.
-                        if path.is_relative_to(alias):
+                        if path == alias:
+                            path = current
+                        elif directory and path.is_relative_to(alias):
                             path = current / path.relative_to(alias)
                         return resolve(path, *args, **kwargs)
                     stack.enter_context(mock.patch.object(Path, "resolve", resolved))
@@ -368,6 +407,8 @@ raise SystemExit(module["main"](sys.argv[3:]))
                     if linked:
                         alias.unlink()
                         alias.symlink_to(second, target_is_directory=directory)
+                    else:
+                        resolve.cache_clear()
                 yield first, second, retarget
             finally:
                 if linked or not directory:
@@ -392,6 +433,51 @@ raise SystemExit(module["main"](sys.argv[3:]))
 
 
 class AcceptanceMatrixTests(AcceptanceFixture):
+    def test_mutable_fixture_is_created_once_on_first_use(self) -> None:
+        self.assertNotIn("root", self.__dict__)
+        self.assertNotIn("tmp", self.__dict__)
+        temporary = tempfile.TemporaryDirectory
+        with mock.patch.object(tempfile, "TemporaryDirectory", wraps=temporary) as created:
+            self.assertIs(self.index, self.fixture_index)
+            self.assertNotIn("tmp", self.__dict__)
+            self.assertTrue(self.tmp.is_dir())
+            self.assertFalse((self.tmp / "repo").exists())
+            self.assertEqual(self.matrix_path.parent, self.tmp)
+            self.assertEqual(self.inventory, self.fixture_inventory)
+            self.assertIsNot(self.inventory, self.fixture_inventory)
+            self.assertEqual({path: (self.root / path).read_bytes() for path, _ in self.fixture_files},
+                             dict(self.fixture_files))
+            self.assertTrue(self.tmp.is_dir())
+            self.assertEqual(self.matrix_path.parent, self.tmp)
+            created.assert_called_once()
+        second = type(self)("runTest")
+        second._fixture_pending = True
+        try:
+            self.assertNotEqual(second.root, self.root)
+            second.inventory["requirements"].clear()
+            self.assertTrue(self.inventory["requirements"])
+            self.assertTrue(self.fixture_inventory["requirements"])
+            target = self.fixture_files[0][0]
+            (second.root / target).write_bytes(b"changed fixture")
+            self.assertEqual((self.root / target).read_bytes(), self.fixture_files[0][1])
+            with self.assertRaises(AttributeError):
+                getattr(second, "unavailable_fixture_attribute")
+        finally:
+            second.doCleanups()
+
+    def test_failed_lazy_fixture_creation_closes_and_removes_partial_tree(self) -> None:
+        seed = type(self)("runTest")
+        seed._fixture_pending = True
+        try:
+            with mock.patch.object(Path, "write_bytes", side_effect=PermissionError("fixture denied")):
+                with self.assertRaisesRegex(PermissionError, "fixture denied"):
+                    getattr(seed, "root")
+            temporary = seed.tmp
+            self.assertTrue(temporary.exists())
+        finally:
+            seed.doCleanups()
+        self.assertFalse(temporary.exists())
+
     def errors(self, matrix: dict[str, Any], require_landed: bool = False) -> list[str]:
         return MODULE.validate(matrix, self.index, self.root, require_landed)
 
@@ -1026,6 +1112,144 @@ raise SystemExit(module["main"](["--root", sys.argv[2], "--matrix", sys.argv[3],
         with mock.patch.object(Path, "stat", side_effect=PermissionError("metadata denied")):
             with self.assertRaisesRegex(PermissionError, "metadata denied"):
                 MODULE._same_path(args.write_doc, inputs[0])
+
+    def test_cli_lock_overlap_metadata_is_shared_only_for_one_check(self) -> None:
+        self.prepare_refresh()
+        lock = MODULE._refresh_lock_path(self.root)
+        export = self.tmp / "export.md"
+        export.write_bytes(b"previous export")
+        args = MODULE.argparse.Namespace(root=self.root, matrix=self.matrix_path, refresh_inventory=False,
+            check_doc=export, write_doc=export, discovery=None, execution_receipt=None,
+            junit=[], require_landed=False, ci_context=False)
+        resolve, metadata = Path.resolve, Path.stat
+        resolved, stated = [], []
+        def resolution(path: Path, *values: Any, **options: Any) -> Path:
+            resolved.append(path)
+            return resolve(path, *values, **options)
+        def information(path: Path, *values: Any, **options: Any) -> Any:
+            stated.append(path)
+            return metadata(path, *values, **options)
+        with mock.patch.object(Path, "resolve", resolution), \
+                mock.patch.object(Path, "stat", information), \
+                mock.patch.object(MODULE, "_run", return_value=0):
+            self.assertEqual(MODULE._run_locked(args, self.root), 0)
+        # One initial lock resolution and one in the comparison cache; every
+        # argument shares the same lock metadata within this overlap check.
+        self.assertEqual(resolved.count(lock), 2)
+        # POSIX resolve itself may stat its result; Windows resolves through a
+        # handle. Only one additional identity stat is needed on either host.
+        self.assertGreaterEqual(stated.count(lock), 1)
+        self.assertLessEqual(stated.count(lock), resolved.count(lock) + 1)
+        export.unlink()
+        export.hardlink_to(lock)
+        with self.assertRaisesRegex(MODULE.MatrixError, "overlaps an input: refresh lock"):
+            MODULE._run_locked(args, self.root)
+        export.unlink()
+        export.write_bytes(b"independent export")
+        with mock.patch.object(MODULE, "_run", return_value=0):
+            self.assertEqual(MODULE._run_locked(args, self.root), 0)
+        # Metadata failures are not cached across calls or treated as absence.
+        def denied(path: Path, *values: Any, **options: Any) -> Any:
+            if path == lock:
+                raise PermissionError("lock metadata denied")
+            return metadata(path, *values, **options)
+        with mock.patch.object(Path, "stat", denied):
+            with self.assertRaisesRegex(PermissionError, "lock metadata denied"):
+                MODULE._run_locked(args, self.root)
+
+    def test_readonly_modes_do_not_expand_publication_inputs(self) -> None:
+        matrix = self.prepare_refresh()
+        discovery, report = self.execution_inputs()
+        doc = self.root / "docs/acceptance-matrix.md"
+        for options in ([], ["--check-doc", str(doc)],
+                        ["--discovery", str(discovery), "--junit", str(report)]):
+            with self.subTest(options=options), \
+                    mock.patch.object(MODULE, "_matrix_input_paths", wraps=MODULE._matrix_input_paths) as inputs, \
+                    mock.patch.object(MODULE, "_check_output_paths", wraps=MODULE._check_output_paths) as overlaps:
+                code, _, err = self.run_main(*self.base_args(), *options)
+                self.assertEqual(code, 0, err)
+                inputs.assert_not_called()
+                overlaps.assert_not_called()
+        for bad, message in (({}, "rows must be a non-empty list"),
+                             (dict(matrix, rows=[]), "rows must be a non-empty list")):
+            self.write_matrix(bad)
+            code, _, err = self.run_main(*self.base_args())
+            self.assertEqual(code, 1, err)
+            self.assertIn(message, err)
+        self.write_matrix(matrix)
+        (self.root / "tools/script.py").unlink()
+        code, _, err = self.run_main(*self.base_args())
+        self.assertEqual(code, 1, err)
+        self.assertIn("file not found: tools/script.py", err)
+        self.matrix_path.write_bytes(b"{")
+        code, _, err = self.run_main(*self.base_args())
+        self.assertEqual(code, 2, err)
+        self.assertIn("cannot parse", err)
+
+    def test_immutable_source_answers_are_shared_and_discarded_after_each_sweep(self) -> None:
+        doc = self.root / "docs/d.md"
+        source = "docs/d.md#section"
+        with mock.patch.object(MODULE, "_source_problem", wraps=MODULE._source_problem) as read:
+            with immutable_repository_reads():
+                for _ in range(3):
+                    self.assertIsNone(MODULE._source_problem(self.root, source, {}))
+                    self.assertEqual(MODULE._source_problem(self.root, "docs/d.md#absent", {}),
+                                     "source anchor not found: docs/d.md#absent")
+                self.assertEqual(read.call_count, 2)
+            doc.write_text("# Changed\n", encoding="utf-8")
+            with immutable_repository_reads():
+                self.assertEqual(MODULE._source_problem(self.root, source, {}),
+                                 "source anchor not found: docs/d.md#section")
+            doc.unlink()
+            with immutable_repository_reads():
+                self.assertEqual(MODULE._source_problem(self.root, source, {}),
+                                 "source file not found: docs/d.md")
+        doc.write_bytes(b"# Section\n")
+        with mock.patch.object(MODULE, "_read_text", side_effect=PermissionError("source denied")):
+            with immutable_repository_reads():
+                self.assertIn("source denied", MODULE._source_problem(self.root, source, {}))
+        # Exception paths unwind every patch as well as successful sweeps.
+        original = MODULE._source_problem
+        with self.assertRaisesRegex(RuntimeError, "interrupted sweep"):
+            with immutable_repository_reads():
+                raise RuntimeError("interrupted sweep")
+        self.assertIs(MODULE._source_problem, original)
+
+    def test_denied_file_alias_resolution_does_not_walk_unrelated_parents(self) -> None:
+        alias = self.root / "tools/script.py"
+        with self.retargetable_path(alias, denied=True) as (first, second, retarget):
+            with mock.patch.object(Path, "is_relative_to", side_effect=AssertionError("unexpected parent walk")):
+                self.assertEqual(alias.resolve(), first)
+                self.assertEqual(self.matrix_path.resolve(), self.matrix_path)
+                retarget()
+                self.assertEqual(alias.resolve(), second)
+            self.assertEqual(first.read_bytes(), second.read_bytes())
+
+    def test_modeled_resolution_cache_is_local_and_retargeted_without_caching_bytes(self) -> None:
+        alias = self.root / "tools/script.py"
+        original = Path.resolve
+        resolved = []
+        def resolution(path: Path, *values: Any, **options: Any) -> Path:
+            resolved.append(path)
+            return original(path, *values, **options)
+        with mock.patch.object(Path, "resolve", resolution):
+            with self.retargetable_path(alias, denied=True) as (first, second, retarget):
+                for _ in range(3):
+                    self.assertEqual(alias.resolve(), first)
+                self.assertEqual(resolved.count(first), 1)
+                first.write_bytes(b"updated bytes")
+                self.assertEqual(MODULE._RefreshSnapshot._fingerprint(first),
+                                 MODULE.hashlib.sha256(b"updated bytes").digest())
+                retarget()
+                for _ in range(3):
+                    self.assertEqual(alias.resolve(), second)
+                self.assertEqual(resolved.count(second), 1)
+                self.assertNotEqual(MODULE._RefreshSnapshot._fingerprint(first),
+                                    MODULE._RefreshSnapshot._fingerprint(second))
+            count = len(resolved)
+            alias.resolve()
+            alias.resolve()
+            self.assertEqual(len(resolved), count + 2)
 
     def test_external_edits_invalidate_path_discovery_and_evidence_answers(self) -> None:
         self.prepare_refresh()

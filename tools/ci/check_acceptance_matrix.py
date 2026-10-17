@@ -2089,10 +2089,11 @@ def _run_locked(args: argparse.Namespace, root: Path) -> int:
     args.junit = [aliases[path] for path in args.junit]
     lock_path = _refresh_lock_path(root, required=False)
     lock = lock_path.resolve() if lock_path is not None else None
-    if lock is not None and any(path is not None and _same_path(path, lock)
+    comparisons = _PathComparisons()
+    if lock is not None and any(path is not None and comparisons.same(path, lock)
                                 for path in (args.write_doc, args.execution_receipt)):
         raise MatrixError("output path overlaps an input: refresh lock")
-    if lock is not None and any(path is not None and _same_path(path, lock)
+    if lock is not None and any(path is not None and comparisons.same(path, lock)
                                 for path in (args.matrix, args.inventory, args.generated_doc,
                                              args.discovery, args.check_doc, *args.junit)):
         raise MatrixError("refresh lock cannot be used as an input")
@@ -2113,9 +2114,11 @@ def _run(args: argparse.Namespace, root: Path, snapshot: _RefreshSnapshot | None
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    inputs, protected_inputs = _matrix_input_paths(matrix, root)
-    _check_output_paths(args, root, matrix_path, protected_inputs)
     if snapshot is not None:
+        # Read-only validation has no destinations to protect or snapshot to
+        # extend. Its source and evidence checks still run in validate below.
+        inputs, protected_inputs = _matrix_input_paths(matrix, root)
+        _check_output_paths(args, root, matrix_path, protected_inputs)
         snapshot.add(inputs)
     refreshed = None
     decisions: list[dict[str, Any]] = []
