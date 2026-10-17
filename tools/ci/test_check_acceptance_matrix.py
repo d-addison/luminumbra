@@ -164,7 +164,45 @@ def row_of(matrix: dict[str, Any], row_id: str) -> dict[str, Any]:
 
 
 class AcceptanceFixture(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        cls.real_fsync = staticmethod(os.fsync)
+        # Build and index the immutable synthetic repository once per class.
+        seed = cls("runTest")
+        try:
+            seed._create_fixture()
+            cls.fixture_files = tuple((path.relative_to(seed.root), path.read_bytes())
+                                      for path in seed.root.rglob("*") if path.is_file())
+            cls.fixture_directories = tuple(sorted(
+                {path.parent for path, _ in cls.fixture_files if path.parent != Path(".")},
+                key=lambda path: (len(path.parts), path.as_posix())))
+            cls.fixture_inventory = seed.inventory
+            cls.fixture_index = seed.index
+        finally:
+            seed.doCleanups()
+
     def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name).resolve()
+        self.root = self.tmp / "repo"
+        self.root.mkdir()
+        for relative in self.fixture_directories:
+            (self.root / relative).mkdir()
+        for relative, data in self.fixture_files:
+            (self.root / relative).write_bytes(data)
+        self.inventory = copy.deepcopy(self.fixture_inventory)
+        self.index = self.fixture_index
+        self.matrix_path = self.tmp / "matrix.json"
+        # Logical fault/interleaving tests exercise flush ordering and injected
+        # sync failures. Physical disk barriers are qualified separately below
+        # and in every actual process-termination case, not repeated per fault.
+        sync_patch = mock.patch.object(os, "fsync", autospec=True)
+        self.sync = sync_patch.start()
+        self.addCleanup(sync_patch.stop)
+
+    def _create_fixture(self) -> None:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         # Match the CLI's resolved root, including directory aliases on macOS
@@ -368,27 +406,28 @@ raise SystemExit(module["main"](["--root", sys.argv[2], "--matrix", sys.argv[3],
     def test_readers_refuse_mixed_publication_then_accept_completed_refresh(self) -> None:
         discovery, report = self.execution_inputs()
         doc = self.root / "docs/acceptance-matrix.md"
+        replace = Path.replace
         for options in ([], ["--check-doc", str(doc)],
                         ["--junit", str(report), "--discovery", str(discovery)]):
             with self.subTest(options=options):
-                self.write_inventory()
-                self.prepare_refresh()
-                (self.root / MODULE.CONTRACT_DOCUMENTS[1]).write_text(
-                    "# Moved\nEvery requirement has evidence.\n", encoding="utf-8")
-                child = self.start_paused_refresh(during_publication=True)
-                try:
-                    with mock.patch.object(MODULE, "load_matrix", wraps=MODULE.load_matrix) as load:
-                        code, _, err = self.run_main(*self.base_args(), *options)
-                    self.assertEqual(code, 2, err)
-                    self.assertIn("cannot acquire inventory refresh lock within deadline", err)
-                    load.assert_not_called()
-                    self.assertIsNone(child.poll())
-                    out, err = child.communicate("x", timeout=5)
-                    self.assertEqual(child.returncode, 0, (out, err))
-                finally:
-                    if child.poll() is None:
-                        child.kill()
-                    child.communicate(timeout=5)
+                self.prepare_rollback()
+                checked = False
+                def interleave(path: Path, target: Path) -> Path:
+                    nonlocal checked
+                    result = replace(path, target)
+                    if not checked:
+                        checked = True
+                        with mock.patch.object(MODULE.time, "monotonic", side_effect=[0.0, 3.0]), \
+                                mock.patch.object(MODULE, "load_matrix") as load:
+                            code, _, err = self.run_main(*self.base_args(), *options)
+                        self.assertEqual(code, 2, err)
+                        self.assertIn("cannot acquire inventory refresh lock within deadline", err)
+                        load.assert_not_called()
+                    return result
+                with mock.patch.object(Path, "replace", interleave):
+                    code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+                self.assertEqual(code, 0, err)
+                self.assertTrue(checked)
                 code, _, err = self.run_main(*self.base_args(), *options)
                 self.assertEqual(code, 0, err)
 
@@ -412,16 +451,18 @@ raise SystemExit(module["main"](["--root", sys.argv[2], "--matrix", sys.argv[3],
 
     def test_reader_retries_after_publication_finishes_before_loading_inputs(self) -> None:
         self.prepare_rollback()
-        child = self.start_paused_refresh(during_publication=True)
-        with mock.patch.object(MODULE, "load_matrix", wraps=MODULE.load_matrix) as load:
-            def finish_publication(delay: float) -> None:
-                self.assertGreater(delay, 0)
-                load.assert_not_called()
-                out, err = child.communicate("x", timeout=5)
-                self.assertEqual(child.returncode, 0, (out, err))
-            with mock.patch.object(MODULE.time, "sleep", side_effect=finish_publication) as wait:
-                code, _, err = self.run_main(*self.base_args(), "--check-doc",
-                                             str(self.root / "docs/acceptance-matrix.md"))
+        with contextlib.ExitStack() as holder:
+            holder.enter_context(MODULE._refresh_lock(self.root))
+            with mock.patch.object(MODULE, "load_matrix", wraps=MODULE.load_matrix) as load:
+                def finish_publication(delay: float) -> None:
+                    self.assertGreater(delay, 0)
+                    load.assert_not_called()
+                    holder.close()
+                    code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+                    self.assertEqual(code, 0, err)
+                with mock.patch.object(MODULE.time, "sleep", side_effect=finish_publication) as wait:
+                    code, _, err = self.run_main(*self.base_args(), "--check-doc",
+                                                 str(self.root / "docs/acceptance-matrix.md"))
         self.assertEqual(code, 0, err)
         wait.assert_called_once()
         self.assertTrue(load.called)
@@ -436,7 +477,172 @@ raise SystemExit(module["main"](["--root", sys.argv[2], "--matrix", sys.argv[3],
             self.assertEqual(code, 2, err)
             self.assertIn("within deadline", err)
 
-    def test_validation_never_creates_missing_lock_and_uses_existing_lock_read_only(self) -> None:
+    def test_first_reader_holds_lock_before_first_writer_can_publish(self) -> None:
+        self.prepare_refresh()
+        lock = MODULE._refresh_lock_path(self.root)
+        doc = self.root / "docs/acceptance-matrix.md"
+        discovery, report = self.execution_inputs()
+        load = MODULE.load_matrix
+        for options in ([], ["--check-doc", str(doc)],
+                        ["--junit", str(report), "--discovery", str(discovery)]):
+            with self.subTest(options=options):
+                lock.unlink()
+                destination = self.tmp / "first-writer.md"
+                checked = False
+                def interleave(path: Path) -> Any:
+                    nonlocal checked
+                    if not checked:
+                        checked = True
+                        with mock.patch.object(MODULE.time, "monotonic", side_effect=[0.0, 3.0]):
+                            code, _, err = self.run_main(*self.base_args(), "--write-doc", str(destination))
+                        self.assertEqual(code, 2, err)
+                        self.assertIn("within deadline", err)
+                        self.assertFalse(destination.exists())
+                    return load(path)
+                with mock.patch.object(MODULE, "load_matrix", interleave):
+                    code, _, err = self.run_main(*self.base_args(), *options)
+                self.assertEqual(code, 0, err)
+                self.assertTrue(checked)
+                self.assertEqual(lock.read_bytes(), b"")
+
+    def test_first_writer_can_create_lock_between_reader_open_and_create(self) -> None:
+        self.prepare_rollback()
+        lock = MODULE._refresh_lock_path(self.root)
+        lock.unlink()
+        system_open = os.open
+        interleaved = False
+        def create(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+            nonlocal interleaved
+            if Path(path) == lock and not interleaved:
+                interleaved = True
+                code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+                self.assertEqual(code, 0, err)
+            return system_open(path, flags, *args, **kwargs)
+        with mock.patch.object(os, "open", create):
+            code, _, err = self.run_main(*self.base_args(), "--check-doc",
+                                         str(self.root / "docs/acceptance-matrix.md"))
+        self.assertEqual(code, 0, err)
+        self.assertTrue(interleaved)
+        self.assertEqual(lock.read_bytes(), b"")
+
+    def test_readonly_checkout_detects_first_writer_and_discards_speculative_results(self) -> None:
+        doc = self.root / "docs/acceptance-matrix.md"
+        discovery, report = self.execution_inputs()
+        lock = MODULE._refresh_lock_path(self.root)
+        system_open, load = os.open, MODULE.load_matrix
+        for failure in (None, "partial", "unreadable"):
+            for options in ([], ["--check-doc", str(doc)],
+                            ["--junit", str(report), "--discovery", str(discovery)]):
+                with self.subTest(failure=failure, options=options):
+                    self.prepare_rollback()
+                    lock.unlink()
+                    interleaved = False
+                    def readonly(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+                        if Path(path) == lock and flags & os.O_CREAT:
+                            raise OSError(errno.EROFS, "read-only metadata")
+                        return system_open(path, flags, *args, **kwargs)
+                    def first_writer(path: Path) -> Any:
+                        nonlocal interleaved
+                        old = load(path)
+                        if not interleaved:
+                            interleaved = True
+                            code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+                            self.assertEqual(code, 0, err)
+                            if failure == "partial":
+                                raise MODULE.MatrixError("partial input")
+                            if failure == "unreadable":
+                                raise PermissionError("input unreadable")
+                        return old
+                    with mock.patch.object(os, "open", readonly), \
+                            mock.patch.object(MODULE, "load_matrix", first_writer):
+                        code, out, err = self.run_main(*self.base_args(), *options)
+                    self.assertEqual(code, 0, err)
+                    self.assertTrue(interleaved)
+                    self.assertIn("detect-and-retry", err)
+                    self.assertNotIn("error:", err)
+                    self.assertEqual(len(out.splitlines()), 1)
+
+    def test_missing_lock_creation_failures_use_fallback_only_for_readonly_metadata(self) -> None:
+        self.prepare_refresh()
+        lock = MODULE._refresh_lock_path(self.root)
+        lock.unlink()
+        system_open = os.open
+        for error in (errno.EACCES, errno.EPERM, errno.EROFS, errno.EIO):
+            with self.subTest(error=error):
+                def denied(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+                    if Path(path) == lock:
+                        raise OSError(error, "creation denied")
+                    return system_open(path, flags, *args, **kwargs)
+                with mock.patch.object(os, "open", denied):
+                    code, out, err = self.run_main(*self.base_args())
+                self.assertEqual(code, 2 if error == errno.EIO else 0, err)
+                self.assertIn("creation denied", err)
+                self.assertEqual("detect-and-retry" in err, error != errno.EIO)
+                self.assertEqual("static references ok" in out, error != errno.EIO)
+                self.assertFalse(lock.exists())
+
+    def test_repeated_loss_of_synchronization_refuses_speculative_success(self) -> None:
+        self.prepare_refresh()
+        @contextlib.contextmanager
+        def unlocked(*args: Any, **kwargs: Any) -> Any:
+            yield False
+        with mock.patch.object(MODULE, "_refresh_lock", unlocked):
+            code, out, err = self.run_main(*self.base_args())
+        self.assertEqual(code, 2, err)
+        self.assertIn("lock changed", err)
+        self.assertEqual(out, "")
+
+    def test_reader_creation_closes_descriptor_when_handle_construction_fails(self) -> None:
+        lock = MODULE._refresh_lock_path(self.root)
+        lock.unlink()
+        with mock.patch.object(os, "open", wraps=os.open) as opened, \
+                mock.patch.object(os, "fdopen", side_effect=OSError(errno.EIO, "handle unavailable")), \
+                mock.patch.object(os, "close", wraps=os.close) as closed, \
+                mock.patch.object(MODULE, "load_matrix") as load:
+            code, _, err = self.run_main(*self.base_args())
+        self.assertEqual(code, 2, err)
+        self.assertIn("handle unavailable", err)
+        opened.assert_called_once_with(lock, os.O_RDONLY | os.O_CREAT, 0o600)
+        closed.assert_called_once()
+        load.assert_not_called()
+        self.assertEqual(lock.read_bytes(), b"")
+        lock.unlink()
+        with mock.patch.object(MODULE.time, "monotonic", side_effect=OSError("timer unavailable")), \
+                mock.patch.object(MODULE, "load_matrix") as load:
+            code, _, err = self.run_main(*self.base_args())
+        self.assertEqual(code, 2, err)
+        self.assertIn("timer unavailable", err)
+        load.assert_not_called()
+        # The persistent file remains, but the failed acquisition owns no handle.
+        renamed = lock.with_suffix(".closed")
+        lock.rename(renamed)
+        renamed.rename(lock)
+
+    def test_speculative_diagnostics_are_bounded_and_overflow_refuses_success(self) -> None:
+        capture = MODULE._ReadDiagnostics()
+        self.assertEqual(capture.write(""), 0)
+        self.assertEqual(capture.write("x" * capture.LIMIT), capture.LIMIT)
+        self.assertFalse(capture.overflow)
+        self.assertEqual(len(capture.getvalue()), capture.LIMIT)
+        self.assertEqual(capture.write("overflow"), 8)
+        self.assertTrue(capture.overflow)
+        capture.write("ignored")
+        self.assertEqual(len(capture.getvalue()), capture.LIMIT)
+        lock = MODULE._refresh_lock_path(self.root)
+        lock.unlink()
+        for stream in ("stdout", "stderr"):
+            with self.subTest(stream=stream):
+                def verbose(*args: Any) -> int:
+                    getattr(sys, stream).write("x" * (capture.LIMIT + 1))
+                    return 0
+                with mock.patch.object(os, "open", side_effect=OSError(errno.EROFS, "read-only metadata")), \
+                        mock.patch.object(MODULE, "_run_locked", verbose):
+                    code, out, err = self.run_main(*self.base_args())
+                self.assertEqual(code, 2, err)
+                self.assertEqual(out, "")
+                self.assertIn("diagnostics exceed capture bound", err)
+
+    def test_validation_creates_missing_lock_and_uses_existing_lock_read_only(self) -> None:
         self.prepare_refresh()
         lock = MODULE._refresh_lock_path(self.root)
         lock.unlink()
@@ -445,8 +651,8 @@ raise SystemExit(module["main"](["--root", sys.argv[2], "--matrix", sys.argv[3],
             code, out, err = self.run_main(*self.base_args(), *options)
             self.assertEqual(code, 0, err)
             self.assertIn("static references ok", out)
-            self.assertFalse(lock.exists())
-        lock.touch()
+            self.assertTrue(lock.exists())
+        self.assertEqual(lock.read_bytes(), b"")
         identity, opened = lock.stat(), []
         open_path = Path.open
         def read_only(path: Path, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
@@ -3322,6 +3528,107 @@ raise SystemExit(module["main"](["--root", sys.argv[2], "--matrix", sys.argv[3],
 
 
 class AcceptanceRecoveryTests(AcceptanceFixture):
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        # One genuinely terminated writer supplies the reusable crash image.
+        # Each use gets fresh file identities; no subprocess is needed to test
+        # journal damage or recovery refusal against the same published bytes.
+        seed = cls("runTest")
+        try:
+            seed.setUp()
+            paths, _ = seed.prepare_rollback()
+            seed.crash_publication(3, ["--refresh-inventory"])
+            journal = MODULE._refresh_lock_path(seed.root).with_suffix(".transaction")
+            entries = json.loads(journal.read_bytes())["outputs"]
+            cls.crash_image = tuple((paths.index(Path(entry["path"])),
+                                     Path(entry["backup"]["path"]).read_bytes(),
+                                     Path(entry["path"]).read_bytes()) for entry in entries)
+        finally:
+            seed.doCleanups()
+
+    def interrupted_refresh(self, count: int) -> None:
+        paths = (self.root / "docs/acceptance-matrix.md", self.matrix_path,
+                 self.root / "tools/ci/acceptance_requirements.json")
+        entries = []
+        for index, (destination, old, new) in enumerate(self.crash_image):
+            path = paths[destination]
+            self.assertEqual(path.read_bytes(), old)
+            records = []
+            for offset, data in enumerate((old, new)):
+                artifact = path.parent / (".acceptance-" + f"{2 * index + offset:032x}")
+                with artifact.open("xb") as handle:
+                    handle.write(data)
+                records.append(MODULE._transaction_record(artifact))
+            entries.append({"path": str(path), "old": records[0]["sha256"],
+                            "backup": records[0], "new": records[1]})
+        journal = MODULE._refresh_lock_path(self.root).with_suffix(".transaction")
+        MODULE._write_transaction(journal, entries, committed=False)
+        for entry in entries[:count]:
+            Path(entry["new"]["path"]).replace(entry["path"])
+
+    def test_outputs_and_journal_use_real_fsync_after_flush(self) -> None:
+        self.prepare_rollback()
+        real_sync = self.real_fsync
+        synced = []
+        def sync(descriptor: int) -> None:
+            metadata = os.fstat(descriptor)
+            self.assertGreater(metadata.st_size, 0)
+            synced.append(metadata.st_size)
+            real_sync(descriptor)
+        with mock.patch.object(os, "fsync", side_effect=sync):
+            code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(synced), 8)  # Three payload/backup pairs, two journals.
+
+    def test_readonly_first_writer_journal_is_recovered_or_refused_before_retry_inputs(self) -> None:
+        lock = MODULE._refresh_lock_path(self.root)
+        journal = lock.with_suffix(".transaction")
+        system_open, load, read = os.open, MODULE.load_matrix, MODULE._read_transaction_file
+        for failure in (None, "partial", "unreadable", "unknown"):
+            with self.subTest(failure=failure):
+                paths, before = self.prepare_rollback()
+                lock.unlink()
+                matrix_reads = 0
+                def readonly(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+                    if Path(path) == lock and flags & os.O_CREAT:
+                        raise OSError(errno.EROFS, "read-only metadata")
+                    return system_open(path, flags, *args, **kwargs)
+                def interleave(path: Path) -> Any:
+                    nonlocal matrix_reads
+                    if path == self.matrix_path:
+                        matrix_reads += 1
+                        if matrix_reads == 2:
+                            self.assertFalse(journal.exists())
+                            self.assertEqual({item: item.read_bytes() for item in paths}, before)
+                            raise MODULE.MatrixError("stop after recovery")
+                        old = load(path)
+                        with MODULE._refresh_lock(self.root):
+                            if failure is None:
+                                self.interrupted_refresh(1)
+                            else:
+                                journal.write_bytes(b"{" if failure == "partial" else b'{"version":2}')
+                        return old
+                    return load(path)
+                def read_journal(path: Path, limit: int) -> Any:
+                    if path == journal and failure == "unreadable":
+                        raise PermissionError("journal unreadable")
+                    return read(path, limit)
+                with mock.patch.object(os, "open", readonly), \
+                        mock.patch.object(MODULE, "load_matrix", interleave), \
+                        mock.patch.object(MODULE, "_read_transaction_file", read_journal):
+                    code, out, err = self.run_main(*self.base_args())
+                self.assertEqual(code, 2, err)
+                self.assertEqual(out, "")
+                self.assertIn("detect-and-retry", err)
+                self.assertEqual(matrix_reads, 2 if failure is None else 1)
+                if failure is None:
+                    self.assertIn("stop after recovery", err)
+                else:
+                    self.assertIn("journal unreadable" if failure == "unreadable" else "invalid recovery journal", err)
+                    self.assertEqual({item: item.read_bytes() for item in paths}, before)
+                    journal.unlink()
+
     def test_static_validation_reads_source_archive_without_git_or_any_writes(self) -> None:
         self.prepare_refresh()
         metadata = self.root / ".git"
@@ -3383,7 +3690,7 @@ class AcceptanceRecoveryTests(AcceptanceFixture):
 
     def test_recovery_rejects_damaged_or_unknown_journal_before_any_input_read(self) -> None:
         paths, _ = self.prepare_rollback()
-        self.crash_publication(1, ["--refresh-inventory"])
+        self.interrupted_refresh(1)
         journal = MODULE._refresh_lock_path(self.root).with_suffix(".transaction")
         original = journal.read_bytes()
         baseline = json.loads(original)
@@ -3453,7 +3760,7 @@ class AcceptanceRecoveryTests(AcceptanceFixture):
                         "unreadable-backup", "unknown-identity", "restore-denied", "cleanup-denied"):
             with self.subTest(failure=failure):
                 paths, before = self.prepare_rollback()
-                self.crash_publication(3, ["--refresh-inventory"])
+                self.interrupted_refresh(3)
                 journal = MODULE._refresh_lock_path(self.root).with_suffix(".transaction")
                 value = json.loads(journal.read_bytes())
                 backup = Path(value["outputs"][1]["backup"]["path"])
@@ -3538,7 +3845,7 @@ raise SystemExit(module["main"](sys.argv[3:]))
         for count in (1, 2, 3):
             with self.subTest(count=count):
                 paths, before = self.prepare_rollback()
-                self.crash_publication(3, ["--refresh-inventory"])
+                self.interrupted_refresh(3)
                 child = subprocess.run([sys.executable, "-I", "-B", "-c", program,
                                         str(MODULE_PATH), str(count), *self.base_args()],
                                        capture_output=True, text=True, timeout=5)
@@ -3553,7 +3860,7 @@ raise SystemExit(module["main"](sys.argv[3:]))
 
     def test_committed_recovery_keeps_new_outputs_and_handles_windows_readonly_cleanup(self) -> None:
         paths, before = self.prepare_rollback()
-        self.crash_publication(3, ["--refresh-inventory"])
+        self.interrupted_refresh(3)
         journal = MODULE._refresh_lock_path(self.root).with_suffix(".transaction")
         value = json.loads(journal.read_bytes())
         value["committed"] = True
@@ -3622,13 +3929,15 @@ raise SystemExit(module["main"](sys.argv[3:]))
             MODULE._read_transaction_file(output, 4)
 
     def test_journal_write_flush_and_publication_failures_preserve_outputs(self) -> None:
-        for failure in ("write", "flush", "sync", "replace", "commit", "candidate-identity"):
+        for failure in ("write", "flush", "payload-sync", "sync", "commit-sync", "replace", "commit",
+                        "candidate-identity"):
             with self.subTest(failure=failure):
                 paths, before = self.prepare_rollback()
                 journal = MODULE._refresh_lock_path(self.root).with_suffix(".transaction")
                 candidate = journal.with_suffix(".pending")
                 fdopen, replace, sync, metadata = os.fdopen, os.replace, os.fsync, MODULE._transaction_metadata
                 calls = 0
+                journal_syncs = 0
                 unknown_reported = False
                 def faulted_fdopen(descriptor: int, mode: str) -> Any:
                     handle = fdopen(descriptor, mode)
@@ -3646,7 +3955,13 @@ raise SystemExit(module["main"](sys.argv[3:]))
                             raise PermissionError("journal publication denied")
                     replace(source, target)
                 def faulted_sync(descriptor: int) -> None:
-                    if failure == "sync":
+                    nonlocal journal_syncs
+                    is_journal = candidate.exists()
+                    if is_journal:
+                        journal_syncs += 1
+                    if (failure == "payload-sync" or (is_journal and (
+                            (failure == "sync" and journal_syncs == 1)
+                            or (failure == "commit-sync" and journal_syncs == 2)))):
                         raise OSError("sync denied")
                     sync(descriptor)
                 def unknown_candidate(handle: Any) -> Any:
@@ -3664,6 +3979,8 @@ raise SystemExit(module["main"](sys.argv[3:]))
                         mock.patch.object(MODULE, "_transaction_metadata", unknown_candidate):
                     code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
                 self.assertEqual(code, 2, err)
+                if failure in ("sync", "commit-sync"):
+                    self.assertEqual(journal_syncs, 1 if failure == "sync" else 2)
                 self.assertEqual({path: path.read_bytes() for path in paths}, before)
                 self.assertFalse(journal.exists())
                 self.assertEqual(list(self.tmp.rglob(".acceptance-*")), [])
@@ -3673,7 +3990,7 @@ raise SystemExit(module["main"](sys.argv[3:]))
 
     def test_pending_recovery_exclusive_lock_still_obeys_deadline(self) -> None:
         self.prepare_rollback()
-        self.crash_publication(1, ["--refresh-inventory"])
+        self.interrupted_refresh(1)
         with MODULE._refresh_lock(self.root, shared=True), \
                 mock.patch.object(MODULE.time, "monotonic", side_effect=[0.0, 0.0, 3.0]), \
                 mock.patch.object(MODULE, "load_matrix") as load:
@@ -3813,6 +4130,7 @@ raise SystemExit(module["main"](sys.argv[3:]))
         self.assertFalse(journal.exists())
 
     def test_windows_recovery_identity_uses_full_handle_ids_when_crt_fields_are_zero(self) -> None:
+        self.addCleanup(MODULE._windows_file_information.cache_clear)
         path = self.tmp / "identity"
         path.write_bytes(b"data")
         metadata = path.stat()
@@ -3826,6 +4144,7 @@ raise SystemExit(module["main"](sys.argv[3:]))
                 queried = []
                 def query(native: Any, kind: int, pointer: Any, size: int) -> int:
                     self.assertEqual(size, ctypes.sizeof(pointer._obj))
+                    self.assertEqual(native, primitive.get_osfhandle.return_value)
                     queried.append(kind)
                     if kind == failure:
                         return 0
@@ -3837,15 +4156,17 @@ raise SystemExit(module["main"](sys.argv[3:]))
                         pointer._obj.links = 2
                     return 1
                 kernel.GetFileInformationByHandleEx.side_effect = query
+                primitive = mock.Mock()
                 platform = mock.Mock(wraps=os)
                 platform.name = "nt"
                 platform.fstat.return_value = incomplete
                 with mock.patch.object(MODULE, "os", platform), \
-                        mock.patch.dict(sys.modules, {"msvcrt": mock.Mock()}), \
-                        mock.patch.object(ctypes, "WinDLL", return_value=kernel, create=True), \
+                        mock.patch.dict(sys.modules, {"msvcrt": primitive}), \
+                        mock.patch.object(ctypes, "WinDLL", return_value=kernel, create=True) as library, \
                         mock.patch.object(ctypes, "get_last_error", return_value=6, create=True), \
                         mock.patch.object(ctypes, "WinError", return_value=OSError("identity query denied"),
                                           create=True):
+                    MODULE._windows_file_information.cache_clear()
                     if failure is None:
                         result = MODULE._transaction_metadata(handle)
                         self.assertEqual(result.st_ino, (1 << 120) + 7)
@@ -3857,6 +4178,11 @@ raise SystemExit(module["main"](sys.argv[3:]))
                         with self.assertRaisesRegex(OSError, "identity query denied"):
                             MODULE._transaction_metadata(handle)
                         self.assertEqual(queried, [18] if failure == 18 else [18, 1])
+                    self.assertIs(MODULE._windows_file_information()[0], kernel.GetFileInformationByHandleEx)
+                    library.assert_called_once_with("kernel32", use_last_error=True)
+                    primitive.get_osfhandle.assert_called_once_with(handle.fileno())
+                    self.assertEqual(len(kernel.GetFileInformationByHandleEx.argtypes), 4)
+                    self.assertIs(kernel.GetFileInformationByHandleEx.restype, ctypes.wintypes.BOOL)
         opened = []
         def identity(handle: Any) -> Any:
             self.assertFalse(handle.closed)
@@ -3873,6 +4199,55 @@ raise SystemExit(module["main"](sys.argv[3:]))
             fields[1] += 1
             self.assertFalse(MODULE._same_transaction_identity(path, os.stat_result(fields)))
         self.assertTrue(all(handle.closed for handle in opened))
+
+    @unittest.skipUnless(os.name == "nt", "requires the Windows file-information API")
+    def test_windows_recovery_identity_with_real_handles_hardlinks_and_short_names(self) -> None:
+        import msvcrt
+        from ctypes import wintypes
+
+        MODULE._windows_file_information.cache_clear()
+        path = self.tmp / "long recovery identity filename.dat"
+        alias, displaced = self.tmp / "alias.dat", self.tmp / "previous.dat"
+        path.write_bytes(b"data")
+        with path.open("rb") as handle:
+            self.assertNotEqual(msvcrt.get_osfhandle(handle.fileno()), -1)
+            identity = MODULE._transaction_metadata(handle)
+            crt = os.fstat(handle.fileno())
+            fields = list(crt)
+            fields[1:4] = [0, 0, 0]
+            with mock.patch.object(os, "fstat", return_value=os.stat_result(fields)):
+                recovered = MODULE._transaction_metadata(handle)  # Real native queries.
+            self.assertTrue(os.path.samestat(identity, recovered))
+            self.assertEqual(recovered.st_nlink, identity.st_nlink)
+        self.assertGreater(identity.st_ino, 0)
+        self.assertGreaterEqual(identity.st_dev, 0)
+        self.assertEqual((identity.st_nlink, identity.st_size), (1, 4))
+        query, identity_type, standard_type = MODULE._windows_file_information()
+        self.assertEqual(ctypes.sizeof(identity_type), 24)
+        self.assertEqual(ctypes.sizeof(standard_type), 24)
+        self.assertEqual(query.argtypes[0], wintypes.HANDLE)
+        os.link(path, alias)
+        with alias.open("rb") as handle:
+            linked = MODULE._transaction_metadata(handle)
+        self.assertEqual(linked.st_nlink, 2)
+        self.assertTrue(os.path.samestat(identity, linked))
+        self.assertTrue(MODULE._same_transaction_identity(alias, identity))
+        short_path = ctypes.WinDLL("kernel32", use_last_error=True).GetShortPathNameW
+        short_path.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+        short_path.restype = wintypes.DWORD
+        # Windows path buffers are bounded to 32,768 UTF-16 code units here.
+        buffer = ctypes.create_unicode_buffer(32768)
+        length = short_path(str(path), buffer, len(buffer))
+        self.assertGreater(length, 0)
+        self.assertLess(length, len(buffer))
+        self.assertTrue(MODULE._same_transaction_identity(Path(buffer.value), identity))
+        data, read_identity = MODULE._read_transaction_file(path, 4)
+        self.assertEqual(data, b"data")
+        self.assertTrue(os.path.samestat(identity, read_identity))
+        path.replace(displaced)
+        path.write_bytes(b"data")
+        self.assertFalse(MODULE._same_transaction_identity(path, identity))
+        self.assertTrue(MODULE._same_transaction_identity(displaced, identity))
 
 
 class ProductionAcceptanceMatrixTests(unittest.TestCase):

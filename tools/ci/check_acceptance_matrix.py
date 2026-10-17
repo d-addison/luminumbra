@@ -8,6 +8,7 @@ import contextlib
 import copy
 import errno
 import hashlib
+import io
 import json
 import os
 import re
@@ -912,21 +913,35 @@ def _try_refresh_lock(handle: Any, *, shared: bool = False) -> None:
 
 
 @contextlib.contextmanager
-def _refresh_lock(root: Path, *, shared: bool = False, timeout: float = 2.0) -> Iterator[None]:
+def _refresh_lock(root: Path, *, shared: bool = False, timeout: float = 2.0) -> Iterator[bool]:
     # Kernel ownership, rather than a PID or age check, makes a crashed holder
     # harmless and prevents stealing a live holder's lock. Closing releases it.
     path = _refresh_lock_path(root, required=not shared)
     if path is None:
-        yield
+        yield False
         return
     try:
-        # Readers use an existing persistent file without metadata writes.
+        # Existing readers need only read access, including on Windows.
         handle = path.open("rb" if shared else "a+b")
     except FileNotFoundError:
         if not shared:
             raise
-        yield
-        return
+        try:
+            # Both platforms lock the same persistent inode even when a reader
+            # and the first writer create it concurrently. Never truncate it.
+            descriptor = os.open(path, os.O_RDONLY | os.O_CREAT, 0o600)
+        except OSError as exc:
+            if exc.errno not in (errno.EACCES, errno.EPERM, errno.EROFS):
+                raise
+            print(f"warning: cannot create inventory refresh lock; using detect-and-retry: {exc}",
+                  file=sys.stderr)
+            yield False
+            return
+        try:
+            handle = os.fdopen(descriptor, "rb")
+        except BaseException:
+            os.close(descriptor)
+            raise
     with handle:
         deadline = time.monotonic() + timeout
         while True:
@@ -939,7 +954,23 @@ def _refresh_lock(root: Path, *, shared: bool = False, timeout: float = 2.0) -> 
                 if time.monotonic() >= deadline:
                     raise MatrixError("cannot acquire inventory refresh lock within deadline") from exc
                 time.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
-        yield
+        yield True
+
+
+class _ReadDiagnostics(io.StringIO):
+    # A speculative pass retains at most 256 Ki characters per stream. If no
+    # lock appears, overflow is an explicit refusal, never truncated success.
+    LIMIT = 256 * 1024
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.overflow = False
+
+    def write(self, text: str) -> int:
+        if self.overflow or len(text) > self.LIMIT - self.tell():
+            self.overflow = True
+            return len(text)
+        return super().write(text)
 
 
 class _RefreshSnapshot:
@@ -980,15 +1011,11 @@ _TRANSACTION_BYTES = 16 * 1024 * 1024
 _JOURNAL_BYTES = 64 * 1024
 
 
-def _transaction_metadata(handle: Any) -> os.stat_result:
-    metadata = os.fstat(handle.fileno())
-    if os.name != "nt":
-        return metadata
-    # CRT fstat can report zero identity/link fields. Query the owning handle,
-    # including the full 128-bit file ID used by modern Windows filesystems.
+@lru_cache(maxsize=1)
+def _windows_file_information() -> tuple[Any, Any, Any]:
+    """Declare the native ABI once, rather than for each recovery file read."""
     import ctypes
     from ctypes import wintypes
-    import msvcrt
 
     class FileIdentity(ctypes.Structure):
         _fields_ = [("volume", ctypes.c_ulonglong), ("identity", ctypes.c_ubyte * 16)]
@@ -1002,6 +1029,19 @@ def _transaction_metadata(handle: Any) -> os.stat_result:
     query = kernel.GetFileInformationByHandleEx
     query.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
     query.restype = wintypes.BOOL
+    return query, FileIdentity, FileStandard
+
+
+def _transaction_metadata(handle: Any) -> os.stat_result:
+    metadata = os.fstat(handle.fileno())
+    if os.name != "nt":
+        return metadata
+    # CRT fstat can report zero identity/link fields. Query the owning handle,
+    # including the full 128-bit file ID used by modern Windows filesystems.
+    import ctypes
+    import msvcrt
+
+    query, FileIdentity, FileStandard = _windows_file_information()
     identity, standard = FileIdentity(), FileStandard()
     native = msvcrt.get_osfhandle(handle.fileno())
     if (not query(native, 18, ctypes.byref(identity), ctypes.sizeof(identity))
@@ -1885,17 +1925,37 @@ def main(argv: list[str] | None = None) -> int:
         print("error: --junit and --discovery are required together for execution evidence", file=sys.stderr)
         return 2
     try:
-        # Readers coordinate through an existing lock, without requiring Git
-        # metadata or creating files in source archives/read-only checkouts.
+        # At most one speculative read on a read-only checkout. A writer always
+        # creates the persistent lock before publishing any journal or output;
+        # its appearance invalidates even an unsuccessful speculative result.
         writing = args.refresh_inventory or args.write_doc is not None or args.execution_receipt is not None
-        with _refresh_lock(root, shared=not writing):
-            lock = _refresh_lock_path(root, required=writing)
-            journal = lock.with_suffix(".transaction") if lock is not None else None
-            if writing:
-                _recover_outputs(journal)
-                return _run_locked(args, root)
-            if journal is None or not journal.exists():
-                return _run_locked(args, root)
+        for attempt in range(2):
+            with _refresh_lock(root, shared=not writing) as synchronized:
+                lock = _refresh_lock_path(root, required=writing)
+                journal = lock.with_suffix(".transaction") if lock is not None else None
+                if writing:
+                    _recover_outputs(journal)
+                    return _run_locked(args, root)
+                if journal is not None and journal.exists():
+                    break
+                if synchronized:
+                    return _run_locked(args, root)
+                if attempt:
+                    raise MatrixError("inventory refresh lock changed during validation; retry")
+                out, err = _ReadDiagnostics(), _ReadDiagnostics()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    try:
+                        code = _run_locked(args, root)
+                    except (MatrixError, OSError, UnicodeError, RuntimeError) as exc:
+                        print(f"error: {exc}", file=sys.stderr)
+                        code = 2
+                lock = _refresh_lock_path(root, required=False)
+                if lock is None or not lock.exists():
+                    if out.overflow or err.overflow:
+                        raise MatrixError("unlocked validation diagnostics exceed capture bound; retry with a refresh lock")
+                    sys.stdout.write(out.getvalue())
+                    sys.stderr.write(err.getvalue())
+                    return code
         # Recovery needs exclusive ownership. Recheck under that lock before
         # reading inputs; another writer may have completed recovery meanwhile.
         with _refresh_lock(root):
