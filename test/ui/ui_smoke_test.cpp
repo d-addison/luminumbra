@@ -17,6 +17,7 @@
 #include <fstream>
 #include <functional>
 #include <ios>
+#include <limits>
 #include <nlohmann/json.hpp>
 #include <nlohmann/json_fwd.hpp>
 #include <optional>
@@ -26,6 +27,7 @@
 #include <string>
 #include <system_error>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #ifndef _WIN32
@@ -36,6 +38,7 @@
 #include "audio/NullAudioManager.h"
 #include "luminumbra_common/core/FramePacing.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
+#include "luminumbra_common/world/KnobLayer.h"
 #include "ui/Rml_UIManager.h"
 #include "ui/components/common/Button.h"
 #include "ui/components/common/Input.h"
@@ -381,8 +384,9 @@ void AwaitWorldCatalog(Luminumbra::Client::Rml_UIManager& ui) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
         ui.Update();
     }
-    if (document)
+    if (document) {
         EXPECT_FALSE(document->HasAttribute("data-worlds-pending"));
+    }
 }
 
 Rml::ElementDocument* LoadDocumentAndFind(Luminumbra::Client::Rml_UIManager& ui,
@@ -1352,8 +1356,9 @@ TEST(UiSmokeTest, RedesignedControlsAreFunctional) {
             jump_row = r;
     }
     ASSERT_NE(jump_row, nullptr);
-    if (auto* chip = settings->GetElementById("kb_Jump"))
+    if (auto* chip = settings->GetElementById("kb_Jump")) {
         EXPECT_EQ(chip->GetInnerRML(), "Space");
+    }
     ClickAndUpdate(ui, jump_row);
     EXPECT_EQ(last_rebind_action, "Jump");
 
@@ -1996,6 +2001,136 @@ TEST(WorldgenOverrideTest, BuildCustomPresetAppliesOnlyRealDeltas) {
     auto rb = BuildCustomPreset(base, bad);
     EXPECT_FALSE(rb.changed);
     EXPECT_EQ(rb.skipped, 1);
+}
+
+TEST(WorldgenOverrideTest, NumericOverridesRejectPartialNonfiniteAndOutOfRangeValues) {
+    using Luminumbra::Client::BuildCustomPreset;
+    using namespace Luminumbra::world;
+    const nlohmann::json base = {
+        {"generation_params", {{"terrain", {{"base_amplitude", 34.0}, {"octaves", 5}}}}}};
+    const auto unchanged = BuildCustomPreset(base, {}).json;
+    const auto knobs = NeutralKnobVector();
+    const auto baseline = ApplyKnobLayer(base, knobs);
+    const auto reopened = [&](const char* path, const char* value, const char* type) {
+        nlohmann::json persisted;
+        WriteKnobLayer(persisted, base, knobs, {{path, value, type}});
+        const auto layer = ReadKnobLayer(nlohmann::json::parse(persisted.dump()));
+        return ResolveKnobLayer(layer.baseline, layer.knobs, layer.overrides);
+    };
+    for (const auto* value : {"", "0suffix", "nan", "inf", "-inf", "1e999"}) {
+        SCOPED_TRACE(value);
+        for (const auto* type : {"float", "int"}) {
+            SCOPED_TRACE(type);
+            const auto result = BuildCustomPreset(base, {{"terrain.base_amplitude", value, type}});
+            EXPECT_FALSE(result.changed);
+            EXPECT_EQ(result.applied, 0);
+            EXPECT_EQ(result.skipped, 1);
+            EXPECT_EQ(result.json, unchanged);
+            EXPECT_EQ(reopened("terrain.base_amplitude", value, type), baseline);
+        }
+    }
+    for (const auto* value : {"1e38",
+                              "-1e38",
+                              "1e1",
+                              "6.5",
+                              "6.",
+                              "9223372036854775808",
+                              "-9223372036854775809",
+                              "9223372036854775808.0"}) {
+        SCOPED_TRACE(value);
+        const auto result = BuildCustomPreset(base, {{"terrain.octaves", value, "int"}});
+        EXPECT_FALSE(result.changed);
+        EXPECT_EQ(result.skipped, 1);
+        EXPECT_EQ(result.json, unchanged);
+        EXPECT_EQ(reopened("terrain.octaves", value, "int"), baseline);
+    }
+    for (const auto& [value, expected] :
+         {std::pair{"0", 0LL},
+          std::pair{"0.000000", 0LL},
+          std::pair{"8.000000", 8LL},
+          std::pair{"123456789.000000", 123456789LL},
+          std::pair{"9223372036854775807", std::numeric_limits<long long>::max()},
+          std::pair{"9223372036854775807.0", std::numeric_limits<long long>::max()},
+          std::pair{"-9223372036854775808", std::numeric_limits<long long>::lowest()}}) {
+        SCOPED_TRACE(value);
+        const auto result = BuildCustomPreset(base, {{"terrain.octaves", value, "int"}});
+        EXPECT_TRUE(result.changed);
+        EXPECT_EQ(result.applied, 1);
+        EXPECT_EQ(result.skipped, 0);
+        EXPECT_EQ(result.json["generation_params"]["terrain"]["octaves"].get<long long>(),
+                  expected);
+        EXPECT_EQ(
+            reopened("terrain.octaves", value, "int")["generation_params"]["terrain"]["octaves"]
+                .get<long long>(),
+            expected);
+    }
+    const auto zero = BuildCustomPreset(base, {{"terrain.base_amplitude", "0", "float"}});
+    EXPECT_TRUE(zero.changed);
+    EXPECT_EQ(zero.json["generation_params"]["terrain"]["base_amplitude"], 0.0);
+    EXPECT_EQ(reopened("terrain.base_amplitude",
+                       "0",
+                       "float")["generation_params"]["terrain"]["base_amplitude"],
+              0.0);
+}
+
+TEST(WorldgenOverrideTest, NumericBaselineComparisonIsExactAndRangeChecked) {
+    using Luminumbra::Client::BuildCustomPreset;
+    for (const auto& initial : {nlohmann::json(),
+                                nlohmann::json("unknown"),
+                                nlohmann::json(5.5),
+                                nlohmann::json(1e38),
+                                nlohmann::json(-1e38),
+                                nlohmann::json(std::numeric_limits<unsigned long long>::max())}) {
+        SCOPED_TRACE(initial.dump());
+        const nlohmann::json base = {{"generation_params", {{"custom_integer", initial}}}};
+        const auto result = BuildCustomPreset(base, {{"custom_integer", "5", "int"}});
+        EXPECT_TRUE(result.changed);
+        EXPECT_EQ(result.json["generation_params"]["custom_integer"], 5);
+    }
+    for (const auto& initial : {nlohmann::json(5LL), nlohmann::json(5ULL), nlohmann::json(5.0)}) {
+        const nlohmann::json base = {{"generation_params", {{"custom_integer", initial}}}};
+        EXPECT_FALSE(BuildCustomPreset(base, {{"custom_integer", "5", "int"}}).changed);
+    }
+    const auto maximum = std::to_string(std::numeric_limits<long long>::max());
+    const auto added =
+        BuildCustomPreset(nlohmann::json::object(), {{"custom_integer", maximum, "int"}});
+    EXPECT_TRUE(added.changed);
+    EXPECT_EQ(added.json["generation_params"]["custom_integer"].get<long long>(),
+              std::numeric_limits<long long>::max());
+    for (const auto& initial :
+         {nlohmann::json("unknown"), nlohmann::json(std::numeric_limits<double>::quiet_NaN())}) {
+        const nlohmann::json base = {{"generation_params", {{"custom_float", initial}}}};
+        const auto result = BuildCustomPreset(base, {{"custom_float", "1e38", "float"}});
+        EXPECT_TRUE(result.changed);
+        EXPECT_EQ(result.applied, 1);
+        EXPECT_EQ(result.json["generation_params"]["custom_float"].get<float>(), 1e38f);
+    }
+}
+
+TEST(WorldgenOverrideTest, KnobsRejectInvalidNumbersAndRetainFiniteClamping) {
+    using Luminumbra::Client::BuildKnobResolvedPreset;
+    const nlohmann::json base = {
+        {"generation_params", {{"terrain", {{"base_amplitude", 34.0}, {"octaves", 5}}}}}};
+    const auto neutral = BuildKnobResolvedPreset(base, {});
+    for (const auto* value : {"", "0suffix", "nan", "inf", "-inf", "1e999"}) {
+        SCOPED_TRACE(value);
+        const auto result =
+            BuildKnobResolvedPreset(base, {{"knob.mountainousness", value, "knob"}});
+        EXPECT_FALSE(result.changed);
+        EXPECT_EQ(result.knob_count, 0);
+        EXPECT_EQ(result.json, neutral.json);
+    }
+    for (const auto* value : {"0", "1", "-4", "4"}) {
+        SCOPED_TRACE(value);
+        const auto result =
+            BuildKnobResolvedPreset(base, {{"knob.mountainousness", value, "knob"}});
+        EXPECT_TRUE(result.changed);
+        EXPECT_EQ(result.knob_count, 1);
+        const auto expected = BuildKnobResolvedPreset(
+            base,
+            {{"knob.mountainousness", value[0] == '-' || value[0] == '0' ? "0" : "1", "knob"}});
+        EXPECT_EQ(result.json, expected.json);
+    }
 }
 
 // Drift guard: every worldgen-param data-path authored in world_creation.rml must be a real

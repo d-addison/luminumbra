@@ -7,9 +7,72 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
+from unittest import mock
 import unittest
 
 from test_client import client_module, running, state, wait_for, wire
+
+
+class OwnedProcessCompletion(unittest.TestCase):
+    def test_job_drain_precedes_handle_release_including_failure_paths(self):
+        module = sys.modules[client_module.OwnedProcess.__module__]
+        for failure in (None, 'terminate', 'query', 'deadline', 'root'):
+            with self.subTest(failure=failure):
+                calls = []
+                active = iter((2, 1, 0))
+                def terminate(job, code):
+                    calls.append(('terminate', job))
+                    if failure == 'terminate': raise OSError('terminate failed')
+                    return True
+                def query(job, kind, pointer, size, needed):
+                    calls.append(('query', job))
+                    if failure == 'query': raise OSError('query failed')
+                    pointer._obj.active = 1 if failure == 'deadline' else next(active)
+                    return True
+                def close(handle): calls.append(('close', handle))
+                api = SimpleNamespace(check=lambda value: value, kernel=SimpleNamespace(
+                    TerminateJobObject=terminate, QueryInformationJobObject=query,
+                    CloseHandle=close, WaitForSingleObject=lambda *args: 258 if failure == 'root' else 0))
+                owner = module.OwnedProcess.__new__(module.OwnedProcess)
+                owner.child, owner.job, owner.handle, owner.api, owner.closed = None, 11, 22, api, False
+                values = iter((0., 0., 2.))
+                sample = (lambda: next(values)) if failure == 'deadline' else (lambda: 0.)
+                with mock.patch.object(module, 'time', SimpleNamespace(monotonic=sample)), \
+                        mock.patch.object(module.threading, 'Event'):
+                    if failure:
+                        with self.assertRaises((OSError, TimeoutError)):
+                            owner.close()
+                    else:
+                        owner.close()
+                self.assertEqual(calls[0], ('terminate', 11))
+                self.assertEqual(calls[-2:], [('close', 11), ('close', 22)])
+                if failure is None:
+                    self.assertEqual(calls.count(('query', 11)), 3)
+                self.assertTrue(owner.closed)
+                self.assertIsNone(owner.job)
+                self.assertIsNone(owner.handle)
+                before = calls.copy()
+                owner.close()
+                self.assertEqual(calls, before)
+
+    def test_empty_job_and_absent_handles_close_without_waiting(self):
+        module = sys.modules[client_module.OwnedProcess.__module__]
+        for job, handle in ((None, None), (None, 22), (11, None), (11, 22)):
+            with self.subTest(job=job, handle=handle):
+                owner = module.OwnedProcess.__new__(module.OwnedProcess)
+                owner.child, owner.job, owner.handle, owner.closed = None, job, handle, False
+                owner.api = mock.Mock()
+                def empty(job, kind, pointer, size, needed):
+                    pointer._obj.active = 0
+                    return True
+                owner.api.kernel.QueryInformationJobObject.side_effect = empty
+                owner.api.kernel.WaitForSingleObject.return_value = 0
+                owner.close()
+                self.assertEqual(owner.api.kernel.TerminateJobObject.call_count, int(job is not None))
+                self.assertEqual(owner.api.kernel.QueryInformationJobObject.call_count, int(job is not None))
+                self.assertEqual(owner.api.kernel.WaitForSingleObject.call_count, int(handle is not None))
+                self.assertTrue(owner.closed)
 
 
 @unittest.skipUnless(os.name == 'nt', 'Windows Job Object and protected DACL qualification')
@@ -97,7 +160,10 @@ class WindowsProcessTests(unittest.TestCase):
 from pathlib import Path
 descendant=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)'],
     stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,close_fds=True)
-Path(sys.argv[1]).write_text(json.dumps({'broker':os.getpid(),'descendant':descendant.pid}))
+witness=Path(sys.argv[1])
+temporary=witness.with_suffix('.publishing')
+temporary.write_text(json.dumps({'broker':os.getpid(),'descendant':descendant.pid}))
+os.replace(temporary,witness)
 time.sleep(60)
 ''')
             owner_script = root / 'owner.py'
@@ -120,9 +186,12 @@ time.sleep(60)
                 owner.wait(timeout=3)
                 wait_for(lambda: all(not running(pid) for pid in pids.values()), timeout=3)
             finally:
-                if owner.poll() is None:
-                    owner.kill()
-                owner.wait(timeout=3)
+                try:
+                    if owner.poll() is None:
+                        owner.kill()
+                    owner.wait(timeout=3)
+                finally:
+                    owner._handle.Close()
 
 
 if __name__ == '__main__':

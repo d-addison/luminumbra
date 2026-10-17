@@ -27,8 +27,8 @@ Luminumbra::Net::HelloMsg RuntimeHelloFrom(const ServerCliOptions& options) {
         options.preset_json_override
             ? Luminumbra::world::LoadTerrainPresetFromJson(
                   nlohmann::json::parse(*options.preset_json_override), root / "data")
-            : Luminumbra::world::LoadTerrainPreset(root / "worlds/atlas/presets" /
-                                                   (options.preset + ".json"));
+            : Luminumbra::world::LoadTerrainPreset(
+                  root / "worlds/atlas/presets" / (options.preset + ".json"), root / "data");
     hello.preset_content_hash = preset.preset_content_hash;
     return hello;
 }

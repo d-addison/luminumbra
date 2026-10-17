@@ -33,13 +33,15 @@ struct CustomPresetResult {
 // Merge param overrides onto a base preset JSON under /generation_params. Only keys whose typed
 // value DIFFERS from the base are applied (so an untouched form does not "customize" anything,
 // and a customized world only records real deltas). Numeric parsing is locale-independent
-// (std::from_chars); a malformed numeric value is skipped rather than silently zeroed.
+// (std::from_chars); malformed, non-finite and out-of-range numbers are skipped.
+// Integers accept an optional fractional suffix containing only zeroes.
 CustomPresetResult BuildCustomPreset(const nlohmann::json& base,
                                      const std::vector<WorldGenParam>& params);
 
 // SEMANTIC KNOBS (separate persisted layer). The create-world
 // form sends one WorldGenParam vector that mixes knob entries (path "knob.<id>",
-// type "knob", value in [0,1]) with the raw advanced-panel override entries. This
+// type "knob", finite numeric values clamped to [0,1]) with the raw advanced-panel override
+// entries. Invalid numeric knob values are ignored. This
 // resolves a world preset from BOTH layers: the knobs drive the engine-side
 // KnobLayer response curves over `base` (the override BASELINE — a curated preset
 // or a prior resolved one), then the raw overrides overlay as a sparse diff. The

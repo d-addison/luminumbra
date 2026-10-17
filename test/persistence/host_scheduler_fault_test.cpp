@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include "../support/WorldgenTestData.h"
+
 #include "luminumbra_client/app/SessionExit.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/replay/RegionScheduleTrace.h"
@@ -188,6 +190,7 @@ protected:
         fs::create_directories(root / "worlds/atlas/presets");
         fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets/default.json",
                       root / "worlds/atlas/presets/default.json");
+        Luminumbra::TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, root);
         WriteHostFile(root / "data/common/systems.json",
                       R"({"sim":{"active_regions":{"enabled":true}}})");
         previous_logger = Log::GetCoreLogger();

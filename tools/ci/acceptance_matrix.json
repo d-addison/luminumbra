@@ -1137,12 +1137,12 @@
       "requirements": [
         "ar.activation.050"
       ],
-      "discrepancy": "The contract and ledger specify [-2^24, 2^24). ActiveRegionLedgerTest.ValidAnchorBoundaries covers the ledger predicate; exact endpoint coverage across walking anchors, ground-object edits and pins remains tracked in issue #250.",
+      "discrepancy": "docs/active-regions.md and the ledger specify [-2^24, 2^24). ActiveRegionLedgerTest.ValidAnchorBoundaries covers the ledger predicate; full walking-anchor, ground-object edit and pin boundary coverage remains planned under issue #250.",
       "evidence": [
         {
           "kind": "ctest",
           "ref": "ActiveRegionLedgerTest.SymmetricAnchorBoundaries",
-          "planned": "Cover both X and Z endpoints for walking anchors, ground-object edits and pins: accept -2^24 and the adjacent interior coordinates, and reject +2^24 and the adjacent exterior coordinates.; owner: ds"
+          "planned": "Cover both X and Z endpoints for walking anchors, ground-object edits and pins: accept -2^24 and the adjacent interior coordinates, and reject +2^24 and the adjacent exterior coordinates, including the next representable float below -2^24.; owner: ds"
         }
       ]
     },
@@ -2993,6 +2993,18 @@
         {
           "kind": "ctest",
           "ref": "UserPresetPersistence.InvalidSourceAndPublicationFailurePreserveExistingFiles"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldgenOverrideTest.NumericOverridesRejectPartialNonfiniteAndOutOfRangeValues"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldgenOverrideTest.NumericBaselineComparisonIsExactAndRangeChecked"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldgenOverrideTest.KnobsRejectInvalidNumbersAndRetainFiniteClamping"
         },
         {
           "kind": "ctest",
