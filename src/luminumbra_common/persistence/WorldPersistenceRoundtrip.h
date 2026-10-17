@@ -90,6 +90,22 @@ struct ChunkAuthorityLoadPolicy {
 // Owner-thread eviction snapshot. Omits worker-owned staging arrays, which are
 // discarded on admission; live simulation and render fields remain intact.
 std::string SerializeChunkAuthoritySnapshotJson(const Chunk& chunk, bool omit_water = false);
+// Decodes the same snapshot contract without boxing terrain samples as JSON values.
+// The const diagnostic counts samples decoded directly in the last successful load;
+// it is zero after failure or when a noncanonical input needs the general decoder.
+class WorldStreamingSnapshotDecoder {
+public:
+    bool load(const std::string& json_text,
+              WorldStreamingState& out_state,
+              std::vector<std::string>& errors,
+              ChunkAuthorityLoadPolicy authority = {});
+    [[nodiscard]] std::size_t direct_terrain_samples() const {
+        return m_directTerrainSamples;
+    }
+
+private:
+    std::size_t m_directTerrainSamples = 0;
+};
 bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
                                          WorldStreamingState& out_state,
                                          std::vector<std::string>& errors,

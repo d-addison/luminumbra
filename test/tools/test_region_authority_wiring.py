@@ -22,6 +22,85 @@ def function(source, name):
 
 
 class RegionAuthorityWiring(unittest.TestCase):
+    def test_snapshot_decoder_moves_terrain_samples_without_numeric_dom_arrays(self):
+        source = (ROOT / "src/luminumbra_common/persistence/"
+                  "WorldPersistenceRoundtrip.cpp").read_text(encoding="utf-8")
+        # Select the numeric callback's branch, not the same guard in start_object.
+        number = source[source.index("bool number(Number value)"):]
+        direct = function(number, "if (m_samples)")
+        self.assertIn("m_samples->push_back(nlohmann::json(value).get<float>());", direct)
+        self.assertNotIn("m_dom", direct)
+        self.assertNotIn("std::function", source)
+        self.assertIn("return true;", direct)
+        fields = function(source, "static int terrain_field(")
+        self.assertEqual(re.findall(r'key == "([^"]+)"', fields),
+                         ["sdf_data", "heightmap_data"])
+        start = function(source, "bool start_array(std::size_t elements)")
+        self.assertIn("frame.kind == Kind::Chunk", start)
+        self.assertIn("m_samples = &captured.emplace();", start)
+        self.assertIn("return m_dom.start_array(elements);", start)
+        apply = function(source, "void ApplyChunkJson(")
+        for field in ("sdf", "heightmap"):
+            self.assertIn(f"std::move(*terrain->{field})", apply)
+        decoder = function(source, "bool WorldStreamingSnapshotDecoder::load(")
+        self.assertIn("nlohmann::json::sax_parse(json_text, &sax)", decoder)
+        self.assertIn("direct && chunks.is_array() && terrain.size() == chunks.size()", decoder)
+        self.assertIn("ApplyChunkJson(chunk_json, *chunk, authority, samples)", decoder)
+        self.assertIn("m_directTerrainSamples = direct_samples;", decoder)
+        wrapper = function(source, "bool LoadWorldStreamingStateSnapshotJson(")
+        self.assertIn("return decoder.load(json_text, out_state, errors, authority);", wrapper)
+
+    def test_snapshot_fallback_releases_partial_buffers_and_keeps_validation(self):
+        source = (ROOT / "src/luminumbra_common/persistence/"
+                  "WorldPersistenceRoundtrip.cpp").read_text(encoding="utf-8")
+        decoder = function(source, "bool WorldStreamingSnapshotDecoder::load(")
+        fallback = function(source[source.index("bool WorldStreamingSnapshotDecoder::load("):],
+                            "if (!direct)")
+        for release in ("terrain.clear();", "snapshot = nullptr;"):
+            self.assertLess(fallback.index(release),
+                            fallback.index("snapshot = nlohmann::json::parse(json_text);"))
+        self.assertTrue(decoder.startswith("m_directTerrainSamples = 0;"))
+        for validation in ('snapshot.at("schema")', 'snapshot.at("order_contract")',
+                           'snapshot.at("chunk_count")', "chunk->get_id() !=",
+                           "!out_state.insert_chunk(chunk)", "out_state.clear();"):
+            self.assertIn(validation, decoder)
+        keys = function(source, "bool key(std::string& value)")
+        self.assertIn("if (m_seenChunks) return false;", keys)
+        self.assertIn("if (frame.seen[index]) return false;", keys)
+        for callback, call in (("bool null()", "m_dom.null()"),
+                               ("bool boolean(bool value)", "m_dom.boolean(value)"),
+                               ("bool string(std::string& value)", "m_dom.string(value)")):
+            self.assertIn("scalar_allowed() && " + call, function(source, callback))
+        native = (ROOT / "test/persistence/persistence_hardening_test.cpp").read_text(
+            encoding="utf-8")
+        for case in ("SnapshotTerrainSamplesBypassNumericDomAndKeepCanonicalBytes",
+                     "SnapshotDirectTerrainParsingKeepsNumericConversionsAndUnknownFields",
+                     "SnapshotTerrainFallbackPreservesDuplicateKeysAndLegacyContainers",
+                     "SnapshotTerrainParsingRefusesMalformedSamplesWithoutPartialState",
+                     "SnapshotTerrainParsingHandlesEmptyWorldAndEmptyArrays"):
+            self.assertIn("TEST(PersistenceHardening, " + case + ")", native)
+        self.assertIn("EXPECT_EQ(decoder.direct_terrain_samples(), expected_samples);", native)
+
+    def test_save_validation_consumers_keep_full_record_and_lattice_checks(self):
+        source = (ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp").read_text(
+            encoding="utf-8")
+        decode = function(source, "std::shared_ptr<Chunk> DecodeChunkRecord(")
+        self.assertIn("LoadWorldStreamingStateSnapshotJson(", decode)
+        self.assertIn(".validate_record_authority = true", decode)
+        loader = function(source, "bool WorldSaveService::load_world(")
+        self.assertIn("for (const auto& entry : index.records)", loader)
+        self.assertIn("DecodeChunkRecord(record, path, &errors, migrate_legacy_water)", loader)
+        self.assertLess(loader.index("DecodeChunkRecord("),
+                        loader.index("state.size() < max_resident_chunks"))
+        self.assertIn("chunk->sdf_data.size() != lattice", loader)
+        for entry in ("bool WorldSaveService::validate_save(",
+                      "WorldSaveService::SaveBatch::begin(",
+                      "bool WorldSaveService::has_world_save(",
+                      "bool WorldSaveService::has_chunk_snapshot("):
+            self.assertIn("load_world(", function(source, entry))
+        cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn("persistence/persistence_hardening_test.cpp", cmake)
+
     def test_meshing_captures_voxel_revision_with_owner_thread_snapshot(self):
         source = SOURCE.read_text(encoding="utf-8")
         dispatch = function(source, "SHIELD_WorldSystem::dispatch_meshing_jobs(")
