@@ -2,6 +2,10 @@
 #include <gtest/gtest.h>
 
 #include "luminumbra_client/app/SessionExit.h"
+#include "luminumbra_common/ai/CreaturePersistence.h"
+#include "luminumbra_common/components/CoreComponents.h"
+#include "luminumbra_common/components/CreatureComponents.h"
+#include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/replay/RegionScheduleTrace.h"
 #include "luminumbra_server/modes/ModeHelpers.h"
@@ -97,6 +101,7 @@ void DirtyHostChunk(GameSession& session) {
 }
 
 struct HostFaultObservation {
+    unsigned fault_kind = 0;
     bool inject_fault = true;
     bool explicit_shutdown = false;
     bool recovery_saved = false;
@@ -115,6 +120,52 @@ HostFaultObservation*& HostObservation() {
     static HostFaultObservation* observation = nullptr;
     return observation;
 }
+
+Luminumbra::Server::ServerWorldRunnerConfig
+ConfigureHostFault(Luminumbra::Server::ServerWorldRunnerConfig config) {
+    if (HostObservation()->fault_kind == 1) {
+        Luminumbra::world::RegionPopulator populator;
+        populator.contract = "fault-population:v1";
+        populator.canonical_configuration = "unknown-species-after-founder";
+        populator.populate = [](const Luminumbra::world::RegionPopulateRequest& request) {
+            if (request.key != kFaultRegion)
+                return;
+            const Luminumbra::Vec3 position{static_cast<float>(request.key.x) * 512.0f + 128.0f,
+                                            100.0f,
+                                            static_cast<float>(request.key.z) * 512.0f + 128.0f};
+            request.sink.spawn(Luminumbra::world::CreatureSpawnCommand{
+                Luminumbra::Components::CreatureSpeciesId16("fixture_creature"), position, false});
+            request.sink.spawn(
+                Luminumbra::world::CreatureSpawnCommand{std::uint16_t{0}, position, false});
+        };
+        config.region_populator = std::move(populator);
+    }
+    return config;
+}
+void ArmCreatureHostFault(GameSession& session, unsigned kind) {
+    session.GetSimulationEventBus().subscribe([&session, kind](const auto& event) {
+        if (event.topic == "host.prepare") {
+            session.PinActiveRegion(kFaultRegion, true);
+            if (kind == 2) {
+                namespace C = Luminumbra::Components;
+                auto& registry = session.GetRegistry();
+                const auto entity = registry.create();
+                registry.emplace<C::TransformComponent>(entity).position =
+                    session.GetMetadata().spawnPoint;
+                registry.emplace<C::CreatureComponent>(entity).species_id =
+                    C::CreatureSpeciesId16("fixture_creature");
+                ASSERT_TRUE(session.AdmitCreature(entity, true));
+            }
+        }
+        if (kind == 3 && event.activation && event.activation->x == kFaultRegion.x &&
+            event.activation->z == kFaultRegion.z)
+            throw std::runtime_error("Activation host delivery failure");
+    });
+    session.GetSimulationEventBus().publish(kFaultTick - 1, "host.prepare", "");
+    if (kind == 2)
+        session.SetCreatureControllerPreparationHook(
+            [] { throw std::runtime_error("Creature host controller failure"); });
+}
 } // namespace
 
 namespace Luminumbra::Server {
@@ -123,14 +174,18 @@ namespace Luminumbra::Server {
 // RunFixedTicks, fault reporting and Shutdown/save all execute production code.
 class SchedulerFaultTestRunner : public ServerWorldRunner {
 public:
-    using ServerWorldRunner::ServerWorldRunner;
+    explicit SchedulerFaultTestRunner(ServerWorldRunnerConfig config)
+        : ServerWorldRunner(ConfigureHostFault(std::move(config))) {}
 
     bool Boot() {
         if (!ServerWorldRunner::Boot())
             return false;
         HostObservation()->save_dir = Session()->GetWorldSaveDir();
         if (HostObservation()->inject_fault) {
-            ArmHostFault(*Session());
+            if (HostObservation()->fault_kind == 0)
+                ArmHostFault(*Session());
+            else
+                ArmCreatureHostFault(*Session(), HostObservation()->fault_kind);
             if (testing::Test::HasFatalFailure())
                 return false;
             DirtyHostChunk(*Session());
@@ -147,7 +202,8 @@ public:
             HostObservation()->fault_message = report.region_fault_message;
             EXPECT_TRUE(Session()->GetRegionSchedulerFault().has_value());
             EXPECT_EQ(Session()->GetSimulationTickCount(), kFaultTick);
-            RemoveHostFaultFile(*Session());
+            if (HostObservation()->fault_kind == 0)
+                RemoveHostFaultFile(*Session());
             HostObservation()->expected_contents = LiveAuthoritativeContents(*Session());
         }
         return report;
@@ -169,10 +225,13 @@ public:
 // Headers are included above before substitution. Keep the mode control flow
 // verbatim so deleting its fault branch, Finalize guard or explicit shutdown
 // changes the behavior under test. These sources are not separately linked.
+// Isolate every mode definition, as in CreatureHostAcceptance_test.cpp.
+namespace HostSchedulerFaultModes {
 #define ServerWorldRunner SchedulerFaultTestRunner
 #include "../../src/luminumbra_server/modes/Replay.cpp"
 #include "../../src/luminumbra_server/modes/Server.cpp"
 #undef ServerWorldRunner
+} // namespace HostSchedulerFaultModes
 
 namespace {
 class HostSchedulerFault : public testing::Test {
@@ -244,7 +303,7 @@ protected:
 
 TEST_F(HostSchedulerFault, ServerSavesTheFaultedWorldBeforeReturningExitThree) {
     const auto options = Options();
-    EXPECT_EQ(RunServer(options), 3);
+    EXPECT_EQ(HostSchedulerFaultModes::RunServer(options), 3);
     EXPECT_EQ(observation.ticks, kFaultTick);
     EXPECT_EQ(observation.frames, kFaultTick);
     // No streaming/trace publication after the faulting tick, including when a
@@ -263,7 +322,7 @@ TEST_F(HostSchedulerFault, ServerSavesTheFaultedWorldBeforeReturningExitThree) {
 
 TEST_F(HostSchedulerFault, RecordFaultAbortsWithoutPublishingReplayOrRegionTrace) {
     const auto options = Options();
-    EXPECT_EQ(RunRecord(options), 1);
+    EXPECT_EQ(HostSchedulerFaultModes::RunRecord(options), 1);
     ASSERT_FALSE(observation.fault_message.empty());
     EXPECT_EQ(observation.ticks, kFaultTick);
     EXPECT_EQ(observation.frames, kFaultTick);
@@ -293,7 +352,7 @@ TEST_F(HostSchedulerFault, RecordFaultPreservesAnExistingReplayAndTraceByteForBy
         << error;
     const auto previous_replay = ReadHostFile(options.record_path);
     const auto previous_trace = ReadHostFile(options.record_path + ".regions.json");
-    EXPECT_EQ(RunRecord(options), 1);
+    EXPECT_EQ(HostSchedulerFaultModes::RunRecord(options), 1);
     ASSERT_FALSE(observation.fault_message.empty());
     EXPECT_EQ(ReadHostFile(options.record_path), previous_replay);
     EXPECT_EQ(ReadHostFile(options.record_path + ".regions.json"), previous_trace);
@@ -307,7 +366,7 @@ TEST_F(HostSchedulerFault, HealthyRecordPublishesACompleteReplayAndRegionTrace) 
     observation.inject_fault = false;
     auto options = Options();
     options.ticks = 2;
-    ASSERT_EQ(RunRecord(options), 0);
+    ASSERT_EQ(HostSchedulerFaultModes::RunRecord(options), 0);
     const auto recording = Luminumbra::Replay::ReadReplay(options.record_path);
     ASSERT_TRUE(recording.has_value());
     if (recording) {
@@ -486,5 +545,140 @@ TEST_F(HostSchedulerFault, ClientMetadataSaveFailureSuppressesSuccessAndAllowsRe
     EXPECT_EQ(retried_metadata.at("spawnPoint").at("z"), exit_spawn.z);
     ASSERT_NO_FATAL_FAILURE(expect_consistent_session());
     ASSERT_NO_FATAL_FAILURE(ExpectRecoveryWorld(directory, expected_contents));
+}
+} // namespace
+
+TEST_F(HostSchedulerFault, PopulationFaultSavesCoherentStateAndReturnsFaultExit) {
+    observation.fault_kind = 1;
+    const auto options = Options();
+    EXPECT_EQ(HostSchedulerFaultModes::RunServer(options), 3);
+    EXPECT_EQ(observation.ticks, kFaultTick);
+    ASSERT_TRUE(observation.explicit_shutdown);
+    ASSERT_TRUE(observation.recovery_saved);
+    ASSERT_NO_FATAL_FAILURE(
+        ExpectRecoveryWorld(observation.save_dir, observation.expected_contents));
+    luminumbra::ai::CreatureSnapshot creatures;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(WorldSaveService::load_creature_entities(creatures, observation.save_dir, &errors));
+    EXPECT_TRUE(creatures.entities.empty());
+    Luminumbra::world::ActiveRegionLedger ledger;
+    ASSERT_TRUE(WorldSaveService::load_active_regions(
+        ledger, observation.save_dir, &errors, Luminumbra::world::WorldClock(kFaultTick)));
+    EXPECT_FALSE(ledger.records().at(kFaultRegion).populated);
+    EXPECT_EQ(ledger.next_persistent_id(), 1u);
+    EXPECT_TRUE(ledger.completed_work().empty());
+}
+
+TEST_F(HostSchedulerFault, CreatureConsumerFaultStopsRemainingFrameTicks) {
+    observation.fault_kind = 2;
+    auto options = Options();
+    options.avatars = 1;
+    EXPECT_EQ(HostSchedulerFaultModes::RunServer(options), 3);
+    EXPECT_EQ(observation.ticks, kFaultTick);
+    EXPECT_EQ(observation.frames, kFaultTick);
+    EXPECT_EQ(observation.availability_ticks, kFaultTick - 1);
+    ASSERT_TRUE(observation.recovery_saved);
+    ASSERT_NO_FATAL_FAILURE(
+        ExpectRecoveryWorld(observation.save_dir, observation.expected_contents));
+}
+
+TEST_F(HostSchedulerFault, ActivationDeliveryFaultRetainsRecoverableOutbox) {
+    observation.fault_kind = 3;
+    const auto options = Options();
+    EXPECT_EQ(HostSchedulerFaultModes::RunServer(options), 3);
+    EXPECT_EQ(observation.ticks, kFaultTick);
+    ASSERT_TRUE(observation.recovery_saved);
+    ASSERT_NO_FATAL_FAILURE(
+        ExpectRecoveryWorld(observation.save_dir, observation.expected_contents));
+    Luminumbra::world::ActiveRegionLedger ledger;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(WorldSaveService::load_active_regions(
+        ledger, observation.save_dir, &errors, Luminumbra::world::WorldClock(kFaultTick)));
+    ASSERT_EQ(ledger.pending_activations().size(), 1u);
+    const auto& pending = ledger.pending_activations().begin()->second;
+    EXPECT_EQ(pending.key, kFaultRegion);
+    EXPECT_EQ(pending.activation_tick, kFaultTick);
+    EXPECT_EQ(pending.cause, Luminumbra::world::ActivationCause::Pin);
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    GameSession restored;
+    restored.SetJobSystem(&jobs);
+    restored.SetRootPath(root.generic_string() + "/");
+    restored.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(restored.LoadWorld(observation.save_dir.filename().string()));
+    EXPECT_EQ(restored.GetActiveRegionLedger().pending_activations(), ledger.pending_activations());
+    EXPECT_EQ(restored.TickSimulation(restored.GetSimulationClock().fixed_dt()), 1u);
+    EXPECT_FALSE(restored.GetRegionSchedulerFault());
+    EXPECT_TRUE(restored.GetActiveRegionLedger().pending_activations().empty());
+}
+
+namespace {
+class LockstepReplayHardening : public HostSchedulerFault {
+protected:
+    ServerCliOptions PopulatedReplayOptions() {
+        observation.inject_fault = false;
+        for (const auto* name : {"grovestrider", "ridgeback_stalker"})
+            WriteHostFile(root / "data/common/creatures/species" / (std::string(name) + ".json"),
+                          "{\"id\":\"" + std::string(name) + "\"}");
+        auto options = Options();
+        options.ecology_roster = true;
+        options.avatars = 1;
+        options.ticks = 30;
+        options.artifact_path = (root / "replay-result.json").string();
+        return options;
+    }
+};
+TEST_F(LockstepReplayHardening, EnabledFreshWorldCreatureReplayMatchesStartAndCheckpoints) {
+    auto options = PopulatedReplayOptions();
+    ASSERT_EQ(HostSchedulerFaultModes::RunRecord(options), 0);
+    const auto recording = Luminumbra::Replay::ReadReplay(options.record_path);
+    ASSERT_TRUE(recording);
+    ASSERT_EQ(recording->checkpoints.size(), 1u);
+    EXPECT_EQ(recording->checkpoints[0].tick, 30u);
+    EXPECT_FALSE(recording->header.start_world_hash.empty());
+    observation.ticks = 0;
+    options.replay_path = options.record_path;
+    ASSERT_EQ(HostSchedulerFaultModes::RunReplay(options), 0);
+    EXPECT_EQ(observation.ticks, 30u);
+    const auto artifact = nlohmann::json::parse(ReadHostFile(options.artifact_path));
+    EXPECT_EQ(artifact.at("start_world_hash_match"), true);
+    EXPECT_EQ(artifact.at("checkpoints_verified"), 1u);
+}
+TEST_F(LockstepReplayHardening, ChangedCreaturePolicyRefusesBeforeReplayTicks) {
+    auto options = PopulatedReplayOptions();
+    ASSERT_EQ(HostSchedulerFaultModes::RunRecord(options), 0);
+    WriteHostFile(
+        root / "data/common/sim/distant_policy.json",
+        R"({"schema":"luminumbra.distant_policy.v1","creature_species":{"fixture_creature":{"coarse_need_rate_ppm":1,"coarse_travel_m_per_cadence":0,"promote_distance_m":512,"lifespan_cadences":0,"reproduce_cadences":0}},"plant_species":{}})");
+    observation.ticks = 0;
+    options.replay_path = options.record_path;
+    EXPECT_EQ(HostSchedulerFaultModes::RunReplay(options), 1);
+    EXPECT_EQ(observation.ticks, 0u);
+    const auto artifact = nlohmann::json::parse(ReadHostFile(options.artifact_path));
+    EXPECT_EQ(artifact.at("divergence_tick"), 0u);
+    EXPECT_EQ(artifact.at("checkpoints_verified_before_divergence"), 0u);
+}
+TEST_F(LockstepReplayHardening, ChangedPopulationContractRefusesBeforeReplayTicks) {
+    auto options = PopulatedReplayOptions();
+    ASSERT_EQ(HostSchedulerFaultModes::RunRecord(options), 0);
+    observation.ticks = 0;
+    options.replay_path = options.record_path;
+    options.ecology_roster = false;
+    EXPECT_EQ(HostSchedulerFaultModes::RunReplay(options), 1);
+    EXPECT_EQ(observation.ticks, 0u);
+    const auto artifact = nlohmann::json::parse(ReadHostFile(options.artifact_path));
+    EXPECT_EQ(artifact.at("divergence_tick"), 0u);
+    EXPECT_EQ(artifact.at("checkpoints_verified_before_divergence"), 0u);
+}
+TEST_F(LockstepReplayHardening, EnabledCreatureFaultAbortsRecordingWithoutCompletedSidecar) {
+    auto options = PopulatedReplayOptions();
+    observation.inject_fault = true;
+    observation.fault_kind = 2;
+    EXPECT_EQ(HostSchedulerFaultModes::RunRecord(options), 1);
+    EXPECT_EQ(observation.ticks, kFaultTick);
+    EXPECT_FALSE(fs::exists(options.record_path));
+    EXPECT_FALSE(fs::exists(options.record_path + ".regions.json"));
+    EXPECT_FALSE(fs::exists(options.artifact_path));
+    EXPECT_FALSE(observation.fault_message.empty());
 }
 } // namespace

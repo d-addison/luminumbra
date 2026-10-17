@@ -341,6 +341,39 @@ using Luminumbra::Client::ScenarioHarness::WindowMode;
 constexpr int kExitScenarioUnavailable = 6;
 #endif
 
+static void AttachSessionCreaturePresentation(ClientAppContext& app,
+                                              Luminumbra::world::GameSession& session) {
+    if (!session.ActiveRegionsEnabled() || app.worldDressing.wildlifeSkeleton.joints.empty())
+        return;
+    namespace C = Luminumbra::Components;
+    namespace anim = luminumbra::animation;
+    auto& registry = session.GetRegistry();
+    for (const auto& attachment : Luminumbra::Client::CreaturePresentationAttachments(registry)) {
+        const auto entity = attachment.entity;
+        if (registry.any_of<C::SkinnedMeshComponent>(entity))
+            continue;
+        const auto* species = session.GetSpeciesTable();
+        const auto* definition = species ? species->Find(attachment.species_id) : nullptr;
+        if (!definition)
+            continue;
+        auto& mesh = registry.emplace<C::SkinnedMeshComponent>(entity);
+        mesh.meshPath = "data/models/creatures/grovestrider/grovestrider.lmesh";
+        mesh.materialId = 3u;
+        mesh.tintR = definition->base_color[0];
+        mesh.tintG = definition->base_color[1];
+        mesh.tintB = definition->base_color[2];
+        auto& player = registry.get_or_emplace<anim::AnimationPlayerComponent>(entity);
+        player.skeleton = &app.worldDressing.wildlifeSkeleton;
+        player.clip = &app.worldDressing.wildlifeIdle;
+        player.looping = true;
+    }
+}
+
+static void AttachLegacyCreatureBodies(Luminumbra::world::GameSession& session) {
+    if (!session.ActiveRegionsEnabled())
+        AttachMissingCreatureBodies(session.GetPhysicsSystem(), session.GetRegistry());
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void ConsumeWorldDressing(ClientAppContext& g_app,
                           Luminumbra::Systems::SHIELD_WorldSystem* ws,
@@ -379,22 +412,7 @@ void ConsumeWorldDressing(ClientAppContext& g_app,
             std::size_t budget = kTreeBudget;
             while (pend.trees_done < pend.result.trees.size() && budget-- > 0) {
                 const auto& t = pend.result.trees[pend.trees_done++];
-                if (t.palette_index < 0)
-                    continue; // empty palette: counted, nothing to emit
-                const Luminumbra::Vec3 treeScale(t.eff_scale, t.eff_scale, t.eff_scale);
-                auto emit = [&](const std::string& meshKey, std::uint32_t mat) {
-                    const auto e = reg.create();
-                    auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
-                    tf.position = t.position;
-                    tf.scale = treeScale;
-                    tf.rotation = t.rotation;
-                    auto& sm = reg.emplace<Luminumbra::Components::StaticMeshComponent>(e);
-                    sm.meshPath = meshKey;
-                    sm.materialId = mat;
-                };
-                emit(std::string(kTreeMeshPrefix) + "trunk.lmesh", 2u);
-                emit(std::string(kTreeMeshPrefix) + "branches.lmesh", 2u);
-                emit(std::string(kTreeMeshPrefix) + "leaves.lmesh", 3u);
+                Luminumbra::Client::ConsumeDressingPlacement(reg, t);
             }
             if (!pend.trees_logged && pend.trees_done == pend.result.trees.size()) {
                 pend.trees_logged = true;
@@ -411,14 +429,7 @@ void ConsumeWorldDressing(ClientAppContext& g_app,
             std::size_t budget = kRockBudget;
             while (pend.rocks_done < pend.result.rocks.size() && budget-- > 0) {
                 const auto& r = pend.result.rocks[pend.rocks_done++];
-                const auto e = reg.create();
-                auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
-                tf.position = r.position; // settled into ground
-                tf.scale = r.scale;
-                tf.rotation = r.rotation;
-                auto& sm = reg.emplace<Luminumbra::Components::StaticMeshComponent>(e);
-                sm.meshPath = "procgen://rock_" + std::to_string(r.palette_index);
-                sm.materialId = 1u; // Stone -> stone triplanar texture
+                Luminumbra::Client::ConsumeDressingPlacement(reg, r);
             }
             // Legacy logged only when the rock palette existed (the whole
             // loop was skipped otherwise) — preserve that.
@@ -436,14 +447,7 @@ void ConsumeWorldDressing(ClientAppContext& g_app,
             std::size_t budget = kBushBudget;
             while (pend.bushes_done < pend.result.bushes.size() && budget-- > 0) {
                 const auto& b = pend.result.bushes[pend.bushes_done++];
-                const auto e = reg.create();
-                auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
-                tf.position = b.position; // settled into ground
-                tf.scale = b.scale;
-                tf.rotation = b.rotation;
-                auto& sm = reg.emplace<Luminumbra::Components::StaticMeshComponent>(e);
-                sm.meshPath = "procgen://bush_" + std::to_string(b.palette_index);
-                sm.materialId = 3u; // grass/green leaf material (shrub foliage)
+                Luminumbra::Client::ConsumeDressingPlacement(reg, b);
             }
             if (!pend.bushes_logged && pend.bushes_done == pend.result.bushes.size() &&
                 g_procgen.bushPaletteCount > 0) {
@@ -463,98 +467,22 @@ void ConsumeWorldDressing(ClientAppContext& g_app,
         // WaterHoles in the computation. The EnTT emplaces + physics
         // avatar creation here are main-thread-only — that is why the
         // consume (not the computation) stays on this thread.
-        if (pend.wildlife_ok) {
+        if (pend.wildlife_ok && !gameSession->ActiveRegionsEnabled()) {
             auto* phys = gameSession->GetPhysicsSystem();
             std::size_t budget = kCreatureBudget;
             while (pend.wildlife_done < pend.result.wildlife.size() && budget-- > 0) {
                 const auto& c = pend.result.wildlife[pend.wildlife_done++];
-                if (c.kind == Luminumbra::Client::CreaturePlacement::Kind::WaterHole) {
-                    // A DRINKING SPOT at the water so the wired thirst
-                    // system has somewhere to steer creatures.
-                    const auto he = reg.create();
-                    auto& htf = reg.emplace<Luminumbra::Components::TransformComponent>(he);
-                    htf.position = c.position;
-                    reg.emplace<Luminumbra::Components::WaterHoleComponent>(he).radius = 6.0f;
-                    continue;
-                }
-                const auto& roster = g_app.hud.creatureSpecies.all();
-                if (c.species_index < 0 ||
-                    static_cast<std::size_t>(c.species_index) >= roster.size())
-                    continue; // defensive: the roster never changes mid-session
-                const auto& sp = roster[static_cast<std::size_t>(c.species_index)];
-                const auto e = reg.create();
-                auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
-                tf.position = c.position; // settle onto ground (gy + 1.2)
-                tf.scale = Luminumbra::Vec3(c.build_scale.x, c.build_scale.y, c.build_scale.z);
-                tf.rotation = glm::angleAxis(c.yaw, glm::vec3(0.0f, 1.0f, 0.0f));
-                auto& sm = reg.emplace<Luminumbra::Components::SkinnedMeshComponent>(e);
-                sm.meshPath = "data/models/creatures/grovestrider/grovestrider.lmesh";
-                sm.materialId = 3u;
-                sm.tintR = sp.base_color[0];
-                sm.tintG = sp.base_color[1];
-                sm.tintB = sp.base_color[2];
-                auto& cr = reg.emplace<Luminumbra::Components::CreatureComponent>(e);
-                cr.species_id = sp.species_id();
-                cr.is_predator = sp.predator;
-                cr.hunger = pend.init_hunger;
-                cr.move_speed = sp.predator ? pend.pred_speed : pend.prey_speed;
-                auto& gn = reg.emplace<Luminumbra::Components::CreatureGenomeComponent>(e);
-                gn.move_speed = cr.move_speed;
-                gn.size_scale = c.size;
-                gn.female = c.female;
-                gn.age_ticks = 100u;
-                // Survival: every creature thirsts (seeks the drinking spots
-                // above); predators also scavenge carrion. Activates the wired
-                // Thirst/Scavenging tick systems in the living world.
-                auto& th = reg.emplace<Luminumbra::Components::ThirstComponent>(e);
-                th.thirst = c.thirst;
-                if (sp.predator)
-                    reg.emplace<Luminumbra::Components::ScavengerComponent>(e);
-                // a circadian clock -> the creature sleeps in its
-                // off-phase (diurnal at night, nocturnal by day). The brain's
-                // Sleep utility reads CircadianComponent.activity. Nocturnal is
-                // now a per-species DATA flag (creatures/species/*.json), so a new
-                // species can be nocturnal without a client recompile.
-                reg.emplace<Luminumbra::Components::CircadianComponent>(e).nocturnal =
-                    sp.nocturnal ? 1u : 0u;
-                // the built-but-unstamped behavior
-                // components join the CLIENT ambient roster (never feeds server
-                // hashes — this registry is client decoration): prey herds get
-                // ALARM vigilance (collective flee), predators get PACK-HUNTER
-                // flank coordination; everyone claims a TERRITORY home range at
-                // its spawn point and carries the MIGRATORY seasonal-drive slot.
-                // Mortal/Decay lifecycle prep: a long seeded lifespan so ambient
-                // populations turn over slowly (the calm-demo's fast lifecycle
-                // stays demo-only).
-                if (sp.predator) {
-                    reg.emplace<Luminumbra::Components::PackHunterComponent>(e);
-                } else {
-                    reg.emplace<Luminumbra::Components::AlarmComponent>(e);
-                }
-                {
-                    auto& terr_home = reg.emplace<Luminumbra::Components::TerritoryComponent>(e);
-                    terr_home.home_x = c.position.x;
-                    terr_home.home_z = c.position.z;
-                    terr_home.radius = sp.predator ? 60.0f : 35.0f;
-                    terr_home.established = 1;
-                    reg.emplace<Luminumbra::Components::MigratoryComponent>(e);
-                    auto& mort = reg.emplace<Luminumbra::Components::MortalComponent>(e);
-                    const std::uint32_t jit =
-                        static_cast<std::uint32_t>(entt::to_integral(e) * 2654435761u) % 36000u;
-                    mort.lifespan_ticks = 108000u + jit; // ~60-80 min @30Hz ambient turnover
-                    reg.emplace<Luminumbra::Components::DecayComponent>(e).decay_duration = 900u;
-                }
-                auto& pl = reg.emplace<anim::AnimationPlayerComponent>(e);
-                pl.skeleton = &g_app.worldDressing.wildlifeSkeleton;
-                pl.clip = &g_app.worldDressing.wildlifeIdle;
-                pl.time = c.anim_phase * 2.0; // staggered phase
-                pl.looping = true;
-                if (phys) {
-                    const std::size_t idx = phys->create_avatar_character(
-                        glm::vec3(c.position.x, c.position.y, c.position.z));
-                    reg.emplace<Luminumbra::Components::CreaturePhysicsComponent>(e, idx);
-                }
-                ++pend.creatures_spawned;
+                pend.creatures_spawned += Luminumbra::Client::ConsumeDressingWildlife(
+                    reg,
+                    c,
+                    g_app.hud.creatureSpecies.all(),
+                    {false,
+                     pend.init_hunger,
+                     pend.pred_speed,
+                     pend.prey_speed,
+                     &g_app.worldDressing.wildlifeSkeleton,
+                     &g_app.worldDressing.wildlifeIdle,
+                     phys});
             }
         }
         // One-shot TAIL — runs exactly once, when every lane has fully
@@ -565,7 +493,7 @@ void ConsumeWorldDressing(ClientAppContext& g_app,
                                        pend.bushes_done == pend.result.bushes.size() &&
                                        pend.wildlife_done == pend.result.wildlife.size();
         if (dressing_complete) {
-            if (pend.wildlife_ok) {
+            if (pend.wildlife_ok && !gameSession->ActiveRegionsEnabled()) {
                 LUMINUMBRA_CORE_INFO("Living world: spawned {} skinned, species-varied ambient "
                                      "creatures around spawn",
                                      pend.creatures_spawned);
@@ -723,7 +651,7 @@ void ConsumeWorldDressing(ClientAppContext& g_app,
             // hunts toward, prey flee away — and render them as moving octahedron
             // markers via the procgen pass (baked per-frame in the loop).
             // Render/demo-only spawn.
-            if (g_app.capture.timelapse_creatures) {
+            if (g_app.capture.timelapse_creatures && !gameSession->ActiveRegionsEnabled()) {
                 // TRUE PHYSICS: each creature gets a deterministic Jolt avatar body
                 // (CreaturePhysicsComponent). Spawn a little ABOVE the terrain so
                 // it drops and settles on the surface; the brain's wish velocity
@@ -4376,6 +4304,7 @@ int main(int argc, char* argv[]) try {
                         dparams.rock_palette_count = g_procgen.rockPaletteCount;
                         dparams.bush_palette_count = g_procgen.bushPaletteCount;
                         dparams.compute_wildlife = pending->wildlife_ok;
+                        dparams.active_regions = gameSession->ActiveRegionsEnabled();
                         {
                             // Full control: ambient spawn count/speeds from systems.json
                             // render.creature_spawn (client-only; compiled defaults when
@@ -4460,6 +4389,7 @@ int main(int argc, char* argv[]) try {
                                          g_systemConfig,
                                          s_worldDressing,
                                          s_worldDressingHandle);
+                    AttachSessionCreaturePresentation(g_app, *gameSession);
                 }
                 // world_visual_sweep: the synchronous capture matrix runs at
                 // this exact point, before the per-frame render below.
@@ -4653,8 +4583,7 @@ int main(int argc, char* argv[]) try {
                         // Newborn offspring start bodyless; give them avatar bodies so they
                         // collide with the terrain (no more walking through mountains), then
                         // bake markers from the physics-resolved positions.
-                        AttachMissingCreatureBodies(gameSession->GetPhysicsSystem(),
-                                                    gameSession->GetRegistry());
+                        AttachLegacyCreatureBodies(*gameSession);
                         BakeCreatureMarkers(renderPipeline.plant_procgen(),
                                             gameSession->GetRegistry(),
                                             gameSession.get());
