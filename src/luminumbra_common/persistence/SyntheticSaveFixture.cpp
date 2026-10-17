@@ -1,5 +1,7 @@
 #include "SyntheticSaveFixture.h"
 
+#include "SavedWorldCatalog.h"
+#include "WorldPersistenceRoundtrip.h"
 #include "WorldSaveService.h"
 
 #include <nlohmann/json.hpp>
@@ -9,6 +11,7 @@
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -161,6 +164,8 @@ SyntheticSaveReport WriteSyntheticSave(const SyntheticSaveSpec& spec, const fs::
             return Fail(std::move(report), "edit_count must not exceed chunk_count.");
         if (!ValidWorldId(spec.world_id))
             return Fail(std::move(report), "world_id must match [A-Za-z0-9_-]+.");
+        if (spec.preset_source.empty())
+            return Fail(std::move(report), "preset_source is required for a new save.");
 
         std::error_code ec;
         static_cast<void>(fs::create_directories(report.save_dir.parent_path(), ec));
@@ -175,8 +180,19 @@ SyntheticSaveReport WriteSyntheticSave(const SyntheticSaveSpec& spec, const fs::
             return Fail(std::move(report), "save already exists; refusing to overwrite it.");
         cleanup.MarkCreated();
 
+        if (!fs::copy_file(spec.preset_source, report.save_dir / "preset.json", ec))
+            return Fail(std::move(report),
+                        "cannot copy preset: " + spec.preset_source.generic_string() + " (" +
+                            ec.message() + ")");
+        std::string preset_identity;
+        {
+            std::ifstream input(report.save_dir / "preset.json");
+            preset_identity = StableChecksum(json::parse(input).dump());
+        }
         const json metadata = {
             {"container_version", WorldSaveService::kContainerVersion},
+            {"presetFormat", kSavedPresetFormat},
+            {"presetIdentity", preset_identity},
             {"name", spec.world_name},
             {"seed", std::to_string(spec.seed)},
             {"worldType", "default"},
@@ -188,13 +204,6 @@ SyntheticSaveReport WriteSyntheticSave(const SyntheticSaveSpec& spec, const fs::
         if (!WorldSaveService::save_metadata(metadata.dump(4) + "\n", report.save_dir, &errors))
             return Fail(std::move(report),
                         errors.empty() ? "metadata write failed" : errors.front());
-
-        if (!spec.preset_source.empty()) {
-            if (!fs::copy_file(spec.preset_source, report.save_dir / "preset.json", ec))
-                return Fail(std::move(report),
-                            "cannot copy preset: " + spec.preset_source.generic_string() + " (" +
-                                ec.message() + ")");
-        }
 
         WorldStreamingState state;
         const auto coords = SyntheticChunkCoords(spec.chunk_count);

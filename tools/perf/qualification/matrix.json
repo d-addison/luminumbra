@@ -1,0 +1,41 @@
+{
+ "schema": "luminumbra.qualification_matrix.v1",
+ "qualified_renderer": "NVIDIA GeForce RTX 5070 Ti",
+ "floor_ms": 16.67,
+ "target_ms": 8.33,
+ "profiles": [
+  {"id": "quality", "resolution_scale": 1.0},
+  {"id": "performance", "resolution_scale": 0.67}
+ ],
+ "displays": [
+  {"id": "3840x1600", "width": 3840, "height": 1600, "refresh_hz": 143},
+  {"id": "3440x1440", "width": 3440, "height": 1440, "refresh_hz": null}
+ ],
+ "world": {
+  "kind": "fresh",
+  "note": "v3 auto-creates a fresh world; poses are recorded against that world; no seed flag exists"
+ },
+ "time_of_day": 0.04,
+ "warmup_frames": 400,
+ "fixed_view_measured_frames": 240,
+ "workloads": [
+  {"id": "forest-settled", "kind": "fixed_view", "pose": null,
+   "pose_provenance": "unrecorded: operator records position/yaw/pitch on the qualification machine"},
+  {"id": "ground-settled", "kind": "fixed_view", "pose": null,
+   "pose_provenance": "unrecorded: operator records position/yaw/pitch on the qualification machine"},
+  {"id": "high-altitude-settled", "kind": "fixed_view", "pose": null,
+   "pose_provenance": "unrecorded: operator records position/yaw/pitch on the qualification machine"},
+  {"id": "cave-air-settled", "kind": "fixed_view", "pose": null,
+   "pose_provenance": "unrecorded: operator records position/yaw/pitch on the qualification machine"},
+  {"id": "shoreline-settled", "kind": "fixed_view", "pose": null,
+   "pose_provenance": "unrecorded: operator records position/yaw/pitch on the qualification machine"},
+  {"id": "mountain-vista-settled", "kind": "fixed_view", "pose": null,
+   "pose_provenance": "unrecorded: operator records position/yaw/pitch on the qualification machine"},
+  {"id": "surface-flight", "kind": "traversal",
+   "script": "tools/perf/fixtures/surface-flight.traversal", "blocked_by": null},
+  {"id": "cave-walk", "kind": "traversal", "script": null,
+   "blocked_by": "traversal v2 events (fw #132); spec only"},
+  {"id": "edited-world-tour", "kind": "traversal", "script": null,
+   "blocked_by": "edited-world authority (fw #132); spec only"}
+ ]
+}

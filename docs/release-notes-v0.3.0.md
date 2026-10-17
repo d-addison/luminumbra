@@ -70,11 +70,15 @@ supported, including metadata-only old worlds. Current saves use LMR1 container
 v2, manifest schema `luminumbra.persistence.world_manifest.v1` with
 `container_version: 2`, and FSD2 far-LOD payload v3. Explicit terrain preset
 `schema_rev: 7` enables versioned missing-field defaults; revision `6` and
-unversioned presets retain historical omission semantics. Current-format saves
-without embedded presets that name one of the eight packaged presets
-resolve to frozen revision-6 copies in `worlds/atlas/presets-rev6/`, preserving
-terrain choices. Other named presets retain their previous resolution and
-validation; new saves embed resolved presets. This fallback does not reopen
+unversioned presets retain historical omission semantics. New saves embed resolved
+presets and write `presetFormat: 1` plus `presetIdentity`, the existing
+`StableChecksum` of canonical preset JSON. Marked saves refuse missing embedded
+content or missing/mismatched identities without modifying files or falling back.
+Only unmarked legacy saves without embedded presets may resolve packaged content:
+the eight packaged names use frozen revision-6 copies in `worlds/atlas/presets-rev6/`;
+other names retain their original atlas path. Any recorded identity is verified.
+Resaving a legacy world embeds its exact preset with the new metadata. Container
+versions and hash algorithms are unchanged; this fallback does not reopen
 obsolete world formats. Lockstep protocol and LREC1 replay layout are version 3;
 versions 1 and 2 are refused because they lack resolved-content identity.
 See the [format contract](engine-guide.md).

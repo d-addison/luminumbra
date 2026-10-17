@@ -728,7 +728,7 @@ bool ReadRegionFile(const std::filesystem::path& path,
         }
         record.uncompressed_size = ReadU32(header + 10);
         const std::uint32_t compressed_size = ReadU32(header + 14);
-        if (compressed_size > bytes.size() - payload_offset) {
+        if (payload_offset > bytes.size() || compressed_size > bytes.size() - payload_offset) {
             AddError(errors, "region file record payload is truncated: " + path.string());
             out_records.clear();
             return false;
