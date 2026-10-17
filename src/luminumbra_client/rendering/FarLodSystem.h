@@ -70,6 +70,23 @@ public:
     // Bound legacy distant geometry inside the 3200 m camera far plane. This is
     // a finite horizon; elevated views can still see its outer edge.
     static constexpr float kFarClipOuterRadiusMeters = 3050.0f;
+    // Only derived far presentation changes. Wanted-set admission and outer
+    // clipping move together; live residency and authority are untouched.
+    void set_horizon(float radius_m, float outer_clip_m);
+    float wanted_radius_m() const {
+        return m_wanted_radius_m;
+    }
+    float outer_clip_m() const {
+        return m_outer_clip_m;
+    }
+    struct RegionAdmission {
+        float nearest_m;
+        World::FarLodTier tier;
+        bool wanted;
+    };
+    // Const diagnostic shared with scheduling, including boundary regions and
+    // regions carrying edits. Authority freshness is checked separately.
+    RegionAdmission region_admission(int rx, int rz, const glm::vec3& anchor) const;
     // Far meshes sit slightly below the live surface so live geometry always
     // wins where the two coincide (quantization can lift far samples at most
     // 1/32 m above the analytic surface).
@@ -309,6 +326,8 @@ private:
 
     JobSystem* m_job_system = nullptr;
     bool m_enabled = true;
+    float m_wanted_radius_m = kF2OuterRangeMeters;
+    float m_outer_clip_m = kFarClipOuterRadiusMeters;
     std::filesystem::path m_save_dir;
 
     const Systems::SHIELD_WorldSystem* m_world = nullptr;

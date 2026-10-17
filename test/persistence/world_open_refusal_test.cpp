@@ -1,3 +1,4 @@
+#include "../support/WorldgenTestData.h"
 #include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/world/ActiveRegionLedger.h"
 #include "luminumbra_common/world/WorldStreamingState.h"
@@ -128,6 +129,7 @@ protected:
         fs::create_directories(Fixture().root / "worlds/atlas/presets");
         fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets/default.json",
                       Fixture().root / "worlds/atlas/presets/default.json");
+        TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, Fixture().root);
         fs::copy(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets-rev6",
                  Fixture().root / "worlds/atlas/presets-rev6",
                  fs::copy_options::recursive);
@@ -838,8 +840,9 @@ TEST_F(WorldOpenRefusal, NonEmbeddedRevisionSixHillsPreservesTerrainIdentity) {
     const fs::path source = LUMINUMBRA_SOURCE_ROOT;
     Write(Fixture().save / "world_info.json",
           Read(source / "test/fixtures/saves/revision6-hills/world_info.json"));
-    fs::create_directories(Fixture().root / "data");
-    fs::copy(source / "data/common", Fixture().root / "data/common", fs::copy_options::recursive);
+    // SetUp provisions the runtime data once through CopyWorldgenTestData.
+    ASSERT_TRUE(fs::is_regular_file(Fixture().root / "data/common/biomes.json"));
+    ASSERT_TRUE(fs::is_directory(Fixture().root / "data/common/structures"));
     ASSERT_FALSE(fs::exists(Fixture().save / "preset.json"));
     const auto before = DiskBytes(Fixture().root);
     const auto historical =
