@@ -421,14 +421,18 @@ private:
         if (name.size() > 32767)
             throw std::runtime_error("World artifact destination is too long.");
         const auto name_bytes = name.size() * sizeof(wchar_t);
+        // FileName is also a null-terminated Win32 string. FileNameLength
+        // excludes that terminator, but the supplied storage must include it.
         const auto record_bytes =
-            (std::max)(sizeof(FILE_RENAME_INFO), offsetof(FILE_RENAME_INFO, FileName) + name_bytes);
+            (std::max)(sizeof(FILE_RENAME_INFO),
+                       offsetof(FILE_RENAME_INFO, FileName) + name_bytes + sizeof(wchar_t));
         std::vector<std::byte> storage(record_bytes);
         auto* rename_info = reinterpret_cast<FILE_RENAME_INFO*>(storage.data());
         rename_info->ReplaceIfExists = FALSE;
         rename_info->RootDirectory = nullptr;
         rename_info->FileNameLength = static_cast<DWORD>(name_bytes);
         std::memcpy(rename_info->FileName, name.data(), name_bytes);
+        rename_info->FileName[name.size()] = L'\0';
         const ScopedFile bound(::CreateFileW(source.path.c_str(),
                                              FILE_READ_ATTRIBUTES | DELETE,
                                              FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -453,10 +457,17 @@ private:
             throw std::system_error(static_cast<int>(::GetLastError()),
                                     std::system_category(),
                                     "Could not exclusively publish world artifact");
-        if (handle_path(bound.get()) == original_name)
+        const auto published_name = handle_path(bound.get());
+        if (published_name == original_name)
             throw std::system_error(ERROR_ALREADY_EXISTS,
                                     std::system_category(),
                                     "Refusing an existing world artifact alias");
+        // A move to any other name does not publish the reserved destination.
+        // Leave its identity unclaimed and preserve the bytes for recovery.
+        if (published_name != destination)
+            throw std::system_error(ERROR_INVALID_DATA,
+                                    std::system_category(),
+                                    "Could not confirm world artifact publication name");
     }
 #endif
 
