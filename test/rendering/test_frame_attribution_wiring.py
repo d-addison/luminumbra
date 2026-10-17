@@ -247,5 +247,56 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertIn("return exit_code;", self.main)
 
 
+    def test_boot_seed_preparation_is_bounded_owned_and_owner_published(self):
+        water = read(ROOT / "src/luminumbra_common/systems/WaterSystem.cpp")
+        boot = compact(block(water, "void WaterSystem::initialize_water_chunks("))
+        self.assertIn("kBootSeedBatch = 64", boot)
+        self.assertIn("m_boot_settle_mode && m_job_system", boot)
+        self.assertIn("std::min(kBootSeedBatch, pending.size() - begin)", boot)
+        self.assertIn("pending.subspan(begin, count)", boot)
+        self.assertIn("prepare_high_water_seed_inputs(to_init, parallel_boot)", boot)
+        self.assertIn("[task = std::move(task)] { task->compute(); }", boot)
+        self.assertLess(boot.index("dispatch_batch(jobs)"), boot.index("wait(handle)"))
+        self.assertLess(boot.index("jobs.clear()"), boot.index("wait(handle)"))
+        self.assertLess(boot.index("fence->load(std::memory_order_acquire)"),
+                        boot.index("seed_chunk_water("))
+        self.assertLess(boot.index("inputs->ready.load(std::memory_order_acquire)"),
+                        boot.index("seed_chunk_water("))
+        task = compact(block(water, "struct BootWaterSeedTask"))
+        self.assertIn("std::shared_ptr<const SHIELD_WorldSystem> sampler", task)
+        self.assertNotRegex(task, r"Chunk\s*[*&]|WaterSystem\s*[*&]|\[this")
+        self.assertNotIn("seed_chunk_water", task)
+        release = compact(block(water, "~BootWaterSeedTask()"))
+        self.assertLess(release.index("inputs.reset()"), release.index("memory_order_release"))
+        self.assertLess(release.index("sampler.reset()"), release.index("memory_order_release"))
+        world = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        capture = compact(block(world, "SHIELD_WorldSystem::capture_water_seed_sampler() const"))
+        self.assertIn("acquire_worldgen_sample_scope()", capture)
+        self.assertIn("new SHIELD_WorldSystem(*this, WaterSeedSamplerTag{})", capture)
+        constructor = compact(block(world, "SHIELD_WorldSystem::SHIELD_WorldSystem("
+                                    "const SHIELD_WorldSystem& source"))
+        self.assertIn("hydro_lock(source.m_hydro_mutex)", constructor)
+        self.assertIn("m_hydro_cache = source.m_hydro_cache", constructor)
+        self.assertIn("m_job_system(nullptr)", world)
+        self.assertIn("m_params(source.m_params)", world)
+        self.assertIn("m_seed(source.m_seed)", world)
+        for node in ("terrain", "cave", "spaghetti", "worley", "island_mask",
+                     "continentalness", "erosion", "peaks", "warp", "temperature",
+                     "humidity", "river"):
+            self.assertIn(f"m_{node}_generator(source.m_{node}_generator)", world)
+
+        cmake = read(ROOT / "test/CMakeLists.txt")
+        common = re.search(r"add_executable\(common_tests\s+(.*?)^\)", cmake, re.S | re.M)
+        self.assertIsNotNone(common)
+        self.assertIn("common/WaterSeedInputs_test.cpp", common.group(1))
+        native = read(ROOT / "test/common/WaterSeedInputs_test.cpp")
+        for name in ("BootMediumAndHighFallbackQueueBoundedInputsBeforeOwnerPublication",
+                     "BootMixedReadyStaleAndLateInputsKeepSerialHashTrajectory",
+                     "RejectedBootDispatchUsesOwnedInputsAndPausedBootDoesNothing",
+                     "DetachedSamplerSurvivesSourceResetPrefetchAndDestruction",
+                     "BoundedSamplerRefusesUnsupportedResolutionAndPartialTerrain"):
+            self.assertIn("TEST(WaterSeedInputs, " + name + ")", native)
+
+
 if __name__ == "__main__":
     unittest.main()

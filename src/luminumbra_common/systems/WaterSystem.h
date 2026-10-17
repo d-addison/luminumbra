@@ -5,6 +5,7 @@
 #include "entt/entt.hpp"
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <unordered_map>
 #include <vector>
 
@@ -277,11 +278,13 @@ private:
     Vec3 get_camera_position(entt::registry& registry) const;
 
     std::vector<std::shared_ptr<HighWaterSeedInputs>>
-    prepare_high_water_seed_inputs(const std::vector<Chunk*>& to_init);
+    prepare_high_water_seed_inputs(std::span<Chunk* const> to_init, bool defer_fallback);
+    void initialize_water_chunks(std::span<Chunk* const> to_init);
     void seed_chunk_water(Chunk* chunk,
                           const std::vector<float>& terrain,
                           const HighWaterSeedInputs* inputs);
 
+    JobSystem* m_job_system;
     SHIELD_WorldSystem* m_shield_system;
 
     // Holds a read-only pointer to the main chunk map from SHIELD_WorldSystem.

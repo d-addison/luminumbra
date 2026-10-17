@@ -13,10 +13,14 @@
 #include <atomic>
 #include <bit>
 #include <cmath>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <gtest/gtest.h>
+#include <limits>
 #include <memory>
+#include <mutex>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -42,7 +46,8 @@ private:
     std::unordered_map<ChunkID, std::shared_ptr<Chunk>> m_chunks;
 
 public:
-    explicit SeedFixture(int count = 1) {
+    explicit SeedFixture(int count = 1, JobSystem* jobs = nullptr)
+        : m_water(jobs, &m_world) {
         for (int i = 0; i < count; ++i) {
             auto chunk = std::make_shared<Chunk>(IVec3(i - 4, 0, -2));
             EXPECT_TRUE(m_world.adopt_streamed_chunk(chunk));
@@ -433,5 +438,237 @@ TEST(WaterSeedInputs, AdoptionDropsInputsFromTheProducingWorld) {
               destination.water_seed_terrain_generation());
     ASSERT_TRUE(destination.adopt_streamed_chunk(chunk));
     EXPECT_FALSE(chunk->water_seed_inputs());
+}
+
+// Occupy every real worker until the owner has queued a bounded input batch.
+// Release is unconditional, including assertion failures, before joining jobs.
+class BlockedSeedWorkers {
+    struct Gate {
+        std::mutex mutex;
+        std::condition_variable changed;
+        int entered = 0;
+        bool release = false;
+    };
+    std::shared_ptr<Gate> m_gate = std::make_shared<Gate>();
+    JobSystem m_jobs;
+
+public:
+    BlockedSeedWorkers() {
+        m_jobs.startup(2);
+        for (int i = 0; i < 2; ++i) {
+            m_jobs.dispatch([gate = m_gate] {
+                std::unique_lock lock(gate->mutex);
+                ++gate->entered;
+                gate->changed.notify_all();
+                gate->changed.wait(lock, [&gate] { return gate->release; });
+            });
+        }
+        std::unique_lock lock(m_gate->mutex);
+        m_gate->changed.wait(lock, [this] { return m_gate->entered == 2; });
+    }
+    ~BlockedSeedWorkers() {
+        release();
+        m_jobs.shutdown();
+    }
+    JobSystem& jobs() {
+        return m_jobs;
+    }
+    void release() {
+        {
+            std::lock_guard lock(m_gate->mutex);
+            m_gate->release = true;
+        }
+        m_gate->changed.notify_all();
+    }
+};
+
+TEST(WaterSeedInputs, BootMediumAndHighFallbackQueueBoundedInputsBeforeOwnerPublication) {
+    for (const int resolution : {8, 16}) {
+        for (const bool heightmap : {false, true}) {
+            BlockedSeedWorkers workers;
+            SeedFixture parallel(67, &workers.jobs());
+            SeedFixture serial(67);
+            parallel.water().SetSimResolution(resolution);
+            serial.water().SetSimResolution(resolution);
+            parallel.water().SetBootSettleMode(true);
+            serial.water().SetBootSettleMode(true);
+            for (const auto& [id, chunk] : parallel.chunks()) {
+                if (heightmap) {
+                    parallel.world().GenerateChunkData(*chunk, 2);
+                    serial.world().GenerateChunkData(*serial.chunks().at(id), 2);
+                    chunk->current_lod.store(0);
+                    serial.chunks().at(id)->current_lod.store(0);
+                }
+                chunk->is_water_sleeping.store(true);
+                serial.chunks().at(id)->is_water_sleeping.store(true);
+            }
+            std::atomic<bool> finished{false};
+            std::thread owner([&] {
+                parallel.tick();
+                finished.store(true, std::memory_order_release);
+            });
+            std::size_t queued = 0;
+            while (!finished.load(std::memory_order_acquire)) {
+                queued = workers.jobs().get_runtime_stats().queue_depth;
+                if (queued != 0)
+                    break;
+                std::this_thread::yield();
+            }
+            // A serial boot regression completes without ever submitting input jobs.
+            EXPECT_EQ(queued, 64u);
+            for (const auto& [id, chunk] : parallel.chunks()) {
+                EXPECT_FALSE(chunk->has_water_sim.load());
+                EXPECT_TRUE(chunk->water_bed_mm.empty());
+                EXPECT_TRUE(chunk->water_rest_level.empty());
+                EXPECT_TRUE(serial.chunks().at(id)->water_bed_mm.empty());
+            }
+            std::thread shutdown;
+            if (resolution == 16 && !heightmap) {
+                // Shutdown drains the queued batch; later batches are rejected.
+                // Both outcomes must finish before owner publication can return.
+                shutdown = std::thread([&workers] { workers.jobs().shutdown(); });
+                while (workers.jobs().get_runtime_stats().accepting_jobs)
+                    std::this_thread::yield();
+            }
+            workers.release();
+            owner.join();
+            if (shutdown.joinable())
+                shutdown.join();
+            serial.tick();
+            ExpectSameWater(parallel, serial);
+            EXPECT_EQ(parallel.world().debug_water_state_hash().water_chunks, 67u);
+            EXPECT_EQ(parallel.water().cells_stepped_last_update(), 0u);
+        }
+    }
+}
+
+TEST(WaterSeedInputs, BootMixedReadyStaleAndLateInputsKeepSerialHashTrajectory) {
+    JobSystem jobs;
+    jobs.startup(2);
+    {
+        SeedFixture parallel(67, &jobs);
+        SeedFixture serial(67);
+        parallel.water().SetBootSettleMode(true);
+        serial.water().SetBootSettleMode(true);
+        std::vector<std::shared_ptr<HighWaterSeedInputs>> late;
+        std::size_t index = 0;
+        for (const auto& [id, chunk] : parallel.chunks()) {
+            parallel.prepare(*chunk, index % 3 != 2);
+            if (index % 3 == 1) {
+                chunk->mark_voxel_data_dirty();
+                serial.chunks().at(id)->mark_voxel_data_dirty();
+            } else if (index % 3 == 2) {
+                auto inputs = chunk->take_water_seed_inputs();
+                late.push_back(inputs);
+                chunk->stage_water_seed_inputs(std::move(inputs));
+            }
+            ++index;
+        }
+        for (int tick = 0; tick < 3; ++tick) {
+            parallel.tick();
+            serial.tick();
+            ExpectSameWater(parallel, serial);
+            if (tick == 0) {
+                EXPECT_EQ(parallel.water().dbg_seed_attribution().precomputed_columns, 23u);
+                EXPECT_EQ(parallel.water().dbg_seed_attribution().stale_columns, 22u);
+                EXPECT_EQ(parallel.water().dbg_seed_attribution().fallback_columns, 44u);
+                for (const auto& [id, chunk] : parallel.chunks()) {
+                    EXPECT_FALSE(chunk->water_seed_inputs());
+                    EXPECT_EQ(chunk->water_bed_mm, serial.chunks().at(id)->water_bed_mm);
+                }
+                // Late producers finish into retired storage, never into live grids.
+                for (auto& inputs : late)
+                    ComputeHighWaterSeedInputs(*inputs, IVec3(-4, 0, -2), parallel.world());
+            }
+        }
+    }
+    jobs.shutdown();
+}
+
+TEST(WaterSeedInputs, RejectedBootDispatchUsesOwnedInputsAndPausedBootDoesNothing) {
+    JobSystem stopped_jobs;
+    for (const int resolution : {2, 4, 8, 16}) {
+        SeedFixture rejected(7, &stopped_jobs);
+        SeedFixture serial(7);
+        rejected.water().SetSimResolution(resolution);
+        serial.water().SetSimResolution(resolution);
+        rejected.water().SetBootSettleMode(true);
+        serial.water().SetBootSettleMode(true);
+        rejected.water().SetBootPaused(true);
+        rejected.tick();
+        EXPECT_EQ(rejected.world().debug_water_state_hash().water_chunks, 0u);
+        rejected.water().SetBootPaused(false);
+        rejected.tick();
+        serial.tick();
+        ExpectSameWater(rejected, serial);
+    }
+}
+
+TEST(WaterSeedInputs, DetachedSamplerSurvivesSourceResetPrefetchAndDestruction) {
+    BlockedSeedWorkers workers;
+    auto params = SeedParams();
+    params.hydro_enabled = true;
+    params.hydro_iterations = 1;
+    params.rivers_enabled = true;
+    params.island_mask_enabled = true;
+    params.biomes_enabled = true;
+    params.biome_relief_enabled = true;
+    params.cliffs_enabled = true;
+    params.surface_breaks_enabled = true;
+    JobSystem prefetch_jobs;
+    prefetch_jobs.startup(1);
+    auto world = std::make_unique<SHIELD_WorldSystem>(&prefetch_jobs, nullptr, params, 777);
+    // An in-flight prefetch must not become a callback on the detached sampler.
+    world->PrefetchHydroRegions(-48.0f, -32.0f, 0.0f);
+    auto sampler = world->capture_water_seed_sampler();
+    std::weak_ptr<const SHIELD_WorldSystem> lifetime = sampler;
+    HighWaterSeedInputs expected;
+    {
+        const auto scope = world->acquire_worldgen_sample_scope();
+        ComputeHighWaterSeedInputs(expected, IVec3(-4, 0, -2), *world);
+    }
+    auto output = std::make_shared<HighWaterSeedInputs>();
+    const auto handle = workers.jobs().dispatch_batch({[sampler, output] {
+        ComputeHighWaterSeedInputs(*output, IVec3(-4, 0, -2), *sampler);
+    }});
+    sampler.reset();
+    EXPECT_FALSE(lifetime.expired());
+    EXPECT_FALSE(output->ready.load(std::memory_order_acquire));
+    world->set_seed(778);
+    params.height_offset += 5.0f;
+    world->set_params(params);
+    world.reset();
+    prefetch_jobs.shutdown();
+    EXPECT_FALSE(lifetime.expired());
+    EXPECT_FALSE(output->ready.load(std::memory_order_acquire));
+    workers.release();
+    workers.jobs().wait(handle);
+    workers.jobs().shutdown();
+    EXPECT_TRUE(lifetime.expired());
+    ASSERT_TRUE(output->ready.load(std::memory_order_acquire));
+    EXPECT_EQ(output->terrain, expected.terrain);
+    EXPECT_EQ(output->rest, expected.rest);
+}
+
+TEST(WaterSeedInputs, BoundedSamplerRefusesUnsupportedResolutionAndPartialTerrain) {
+    SeedFixture fixture;
+    for (const int resolution : {-1, 0, 1, 3, 17, 32, std::numeric_limits<int>::max()}) {
+        HighWaterSeedInputs inputs;
+        inputs.terrain.fill(123.0f);
+        inputs.rest.fill(456.0f);
+        ComputeWaterSeedInputs(inputs, IVec3(0), resolution, fixture.world());
+        EXPECT_FALSE(inputs.ready.load(std::memory_order_acquire));
+        EXPECT_TRUE(std::all_of(inputs.terrain.begin(), inputs.terrain.end(), [](float value) {
+            return value == 123.0f;
+        }));
+        EXPECT_TRUE(std::all_of(
+            inputs.rest.begin(), inputs.rest.end(), [](float value) { return value == 456.0f; }));
+    }
+    HighWaterSeedInputs inputs;
+    const std::array<float, 63> partial{};
+    ComputeWaterSeedInputs(inputs, IVec3(0), 8, fixture.world(), partial);
+    EXPECT_FALSE(inputs.ready.load(std::memory_order_acquire));
+    EXPECT_EQ(inputs.terrain, (std::array<float, 256>{}));
+    EXPECT_EQ(inputs.rest, (std::array<float, 256>{}));
 }
 } // namespace

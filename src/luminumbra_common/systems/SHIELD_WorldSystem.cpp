@@ -464,6 +464,37 @@ SHIELD_WorldSystem::SHIELD_WorldSystem(JobSystem* job_system,
     reinitialize_noise();
 }
 
+SHIELD_WorldSystem::SHIELD_WorldSystem(const SHIELD_WorldSystem& source, WaterSeedSamplerTag)
+    : m_job_system(nullptr)
+    , m_params(source.m_params)
+    , m_seed(source.m_seed)
+    , m_terrain_generator(source.m_terrain_generator)
+    , m_cave_generator(source.m_cave_generator)
+    , m_spaghetti_generator(source.m_spaghetti_generator)
+    , m_worley_generator(source.m_worley_generator)
+    , m_island_mask_generator(source.m_island_mask_generator)
+    , m_continentalness_generator(source.m_continentalness_generator)
+    , m_erosion_generator(source.m_erosion_generator)
+    , m_peaks_generator(source.m_peaks_generator)
+    , m_warp_generator(source.m_warp_generator)
+    , m_temperature_generator(source.m_temperature_generator)
+    , m_humidity_generator(source.m_humidity_generator)
+    , m_river_generator(source.m_river_generator)
+    , m_water_system(nullptr) {
+    // The epoch is held by capture. Nodes are configured before publication and
+    // replaced on reset, never mutated. Surface/rest sampling does not consult
+    // material or structure tables: no content reload or world-sized data copy.
+    // Copy at most the existing 2048 hydro handles; region bytes stay shared const.
+    const std::shared_lock<std::shared_mutex> hydro_lock(source.m_hydro_mutex);
+    m_hydro_cache = source.m_hydro_cache;
+}
+
+std::shared_ptr<const SHIELD_WorldSystem> SHIELD_WorldSystem::capture_water_seed_sampler() const {
+    const auto scope = acquire_worldgen_sample_scope();
+    return std::shared_ptr<const SHIELD_WorldSystem>(
+        new SHIELD_WorldSystem(*this, WaterSeedSamplerTag{}));
+}
+
 SHIELD_WorldSystem::~SHIELD_WorldSystem() {
     wait_for_hydro_prefetch_jobs();
     wait_for_generation_jobs();

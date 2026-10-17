@@ -534,13 +534,16 @@ Water subzones (issue #400) are nested inside `stream_ms`. The CSV appends
 `water-split` slow-frame log reports the same split. They aggregate every water
 update in the frame and must not be added to the exclusive buckets.
 Selection includes grid migration. Seed-input time covers cache adoption and
-inline fallback sampling; at High, initialization then only fills the grids
-from those exact inputs. At other resolutions, initialization retains the
-existing inline rest-level sampling.
+fallback sampling; at High, initialization then only fills the grids from those
+exact inputs. Live initialization at other resolutions retains the existing
+inline rest-level sampling. Boot prepares all session resolutions in batches of
+at most 64 columns, then initializes them on the owner thread in selection order.
+Input jobs retain a detached sampler and copied terrain inputs, never live chunk
+storage. Rejected or incomplete jobs use the same inputs on the owner thread.
 
 `water_precomputed_columns` counts ready High payloads used during initialization;
-`water_fallback_columns` counts missing, unfinished or stale payloads sampled
-inline, and `water_stale_columns` counts generation mismatches discarded within
+`water_fallback_columns` counts missing, unfinished or stale High payloads needing
+fresh sampling, and `water_stale_columns` counts generation mismatches discarded within
 those fallbacks. Existing terrain jobs prepare the half-cell terrain/rest arrays
 under the world sampling scope. Terrain and edit generations guard their use;
 readiness never changes initialization selection, its six-column live cap, or

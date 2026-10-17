@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 
 namespace Luminumbra {
 
@@ -34,10 +35,19 @@ struct HighWaterSeedInputs {
 // Call under the world's sampling scope. Keep the inline path's exact float
 // operations and z-major/x-minor query order; no heightmap interpolation.
 template<typename World>
-void ComputeHighWaterSeedInputs(HighWaterSeedInputs& inputs,
-                                const IVec3& coords,
-                                const World& world) {
-    constexpr int resolution = HighWaterSeedInputs::kResolution;
+void ComputeWaterSeedInputs(HighWaterSeedInputs& inputs,
+                            const IVec3& coords,
+                            int resolution,
+                            const World& world,
+                            std::span<const float> terrain = {}) {
+    // Session resolutions divide the 16 m chunk: at most 256 cells. Refuse
+    // unsupported sizes before indexing either fixed array or supplied terrain.
+    if (resolution <= 1 || resolution > HighWaterSeedInputs::kResolution ||
+        CHUNK_SIZE_X % resolution != 0 || CHUNK_SIZE_Z % resolution != 0)
+        return;
+    const auto cells = static_cast<std::size_t>(resolution) * resolution;
+    if (!terrain.empty() && terrain.size() != cells)
+        return;
     const float cell_width_x = CHUNK_SIZE_X / static_cast<float>(resolution);
     const float cell_width_z = CHUNK_SIZE_Z / static_cast<float>(resolution);
     for (int z = 0; z < resolution; ++z) {
@@ -49,10 +59,18 @@ void ComputeHighWaterSeedInputs(HighWaterSeedInputs& inputs,
             const auto cell =
                 static_cast<std::size_t>(z) * resolution + static_cast<std::size_t>(x);
             inputs.rest[cell] = world.WaterLevelAt(world_x, world_z);
-            inputs.terrain[cell] = world.GetTerrainHeightAt(world_x, world_z);
+            inputs.terrain[cell] =
+                terrain.empty() ? world.GetTerrainHeightAt(world_x, world_z) : terrain[cell];
         }
     }
     inputs.ready.store(true, std::memory_order_release);
+}
+
+template<typename World>
+void ComputeHighWaterSeedInputs(HighWaterSeedInputs& inputs,
+                                const IVec3& coords,
+                                const World& world) {
+    ComputeWaterSeedInputs(inputs, coords, HighWaterSeedInputs::kResolution, world);
 }
 
 } // namespace Luminumbra

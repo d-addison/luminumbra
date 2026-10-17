@@ -451,6 +451,11 @@ public:
     float get_density_at(const Vec3& world_pos) const;
     float GetTerrainHeightAt(float world_x, float world_z) const;
 
+    // Owner-thread capture for bounded boot input jobs. No streamed chunks,
+    // callbacks or live-world pointers escape; exact immutable noise nodes,
+    // parameters and warm hydro regions are retained. Only derived caches mutate.
+    [[nodiscard]] std::shared_ptr<const SHIELD_WorldSystem> capture_water_seed_sampler() const;
+
     // Changes with seed/terrain parameters, independently of worker completion.
     [[nodiscard]] std::uint64_t water_seed_terrain_generation() const {
         return m_water_seed_terrain_generation.load(std::memory_order_acquire);
@@ -1328,6 +1333,9 @@ private:
     int m_update_tick_counter = 0;
 
     // --- Dependencies ---
+    struct WaterSeedSamplerTag {};
+    SHIELD_WorldSystem(const SHIELD_WorldSystem& source, WaterSeedSamplerTag);
+
     JobSystem* m_job_system;
     TerrainGenParams m_params;
     int m_seed;
