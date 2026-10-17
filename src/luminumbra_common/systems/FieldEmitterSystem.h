@@ -15,10 +15,13 @@
 // Participant-gated: a world with no emitter component queues nothing — the
 // canonical roster runs this as a pure no-op.
 
+#include "RegionConsumerGate.h"
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <stdexcept>
 #include <vector>
 
 #include "entt/entt.hpp"
@@ -35,6 +38,21 @@ struct FieldEmitterGatherStats {
     std::uint64_t deposits = 0; // QueueDeposit calls issued this tick
 };
 
+struct RegionalEmitterGatherStats {
+    FieldEmitterGatherStats queued;
+    std::uint64_t invalid_emitters = 0;
+    bool accepted = true;
+};
+
+template<typename EntityGate, typename CellGate, typename EntityWork>
+inline RegionalEmitterGatherStats
+GatherRegionalFieldEmitterDeposits(entt::registry& registry,
+                                   luminumbra::fields::EnergyFieldState& field,
+                                   const EntityGate& gate,
+                                   const CellGate& cell_gate,
+                                   const EntityWork& completed,
+                                   bool persistent_identity);
+
 // Queue this tick's emitter deposits into `field` (call right before the
 // layer's Tick, which sorts and applies them). Centre cell receives the full
 // rate; when radius_cells > 0 every cell within that Chebyshev radius receives
@@ -42,9 +60,29 @@ struct FieldEmitterGatherStats {
 // zero-amount rings skipped (a deposit of 0 is not queued). Emitters with
 // rate 0 are inert and skipped outright.
 inline FieldEmitterGatherStats
-GatherFieldEmitterDeposits(entt::registry& registry, luminumbra::fields::EnergyFieldState& field) {
+GatherFieldEmitterDeposits(entt::registry& registry,
+                           luminumbra::fields::EnergyFieldState& field,
+                           const Luminumbra::world::RegionEntityGate& gate = {},
+                           const Luminumbra::world::RegionCellGate& cell_gate = {},
+                           const Luminumbra::world::RegionEntityWork& completed = {}) {
     using Luminumbra::Components::FieldEmitterComponent;
     using Luminumbra::Components::TransformComponent;
+
+    if (gate) {
+        const auto gathered = GatherRegionalFieldEmitterDeposits(
+            registry,
+            field,
+            [&](auto entity) { return gate(entity); },
+            [&](int x, int z) { return !cell_gate || cell_gate(x, z); },
+            [&](auto entity) {
+                if (completed)
+                    completed(entity);
+            },
+            true);
+        if (!gathered.accepted)
+            throw std::runtime_error("Creature field deposit admission refused");
+        return gathered.queued;
+    }
 
     FieldEmitterGatherStats stats;
 
@@ -81,26 +119,23 @@ GatherFieldEmitterDeposits(entt::registry& registry, luminumbra::fields::EnergyF
                 // every ring at distance >= 32 is zero anyway.
                 const std::uint32_t amount =
                     (cheb < 32) ? (emitter.rate_raw_per_tick >> static_cast<unsigned>(cheb)) : 0u;
-                if (amount == 0u)
+                if (amount == 0u || (cell_gate && !cell_gate(cx + dx, cz + dz)))
                     continue;
                 field.QueueDeposit(emitter_id, cx + dx, cz + dz, emitter.channel, amount);
                 ++stats.deposits;
                 queued = true;
             }
         }
-        if (queued)
+        if (queued) {
+            if (completed)
+                completed(e);
             ++stats.emitters;
+        }
     }
     return stats;
 }
 
-struct RegionalEmitterGatherStats {
-    FieldEmitterGatherStats queued;
-    std::uint64_t invalid_emitters = 0;
-    bool accepted = true;
-};
-
-// Enabled policy: skip invalid emitters in entity-id order and report their count.
+// Enabled policy: skip invalid emitters in the selected identity order and report their count.
 // Radius is restricted to the 32 nonzero uint32 falloff rings (0..31).
 // Check world bounds BEFORE floor/cast, and the whole footprint before gathering.
 inline bool RegionalEmitterCell(const Components::TransformComponent& transform,
@@ -123,12 +158,15 @@ inline bool RegionalEmitterCell(const Components::TransformComponent& transform,
     return true;
 }
 
+template<typename CellGate>
 inline bool
 AppendRegionalEmitter(std::vector<luminumbra::fields::EnergyFieldState::RegionalDeposit>& deposits,
-                      entt::entity entity,
+                      std::uint64_t emitter_id,
                       const Components::FieldEmitterComponent& emitter,
                       int cx,
-                      int cz) {
+                      int cz,
+                      const CellGate& cell_gate,
+                      std::size_t& candidates) {
     using luminumbra::fields::EnergyFieldState;
     const int radius = emitter.radius_cells;
     for (int dz = -radius; dz <= radius; ++dz) {
@@ -137,13 +175,13 @@ AppendRegionalEmitter(std::vector<luminumbra::fields::EnergyFieldState::Regional
             const auto amount = emitter.rate_raw_per_tick >> static_cast<unsigned>(distance);
             if (amount == 0)
                 continue;
-            if (deposits.size() == EnergyFieldState::kMaxRegionalDeposits)
+            // Bound the complete source footprints before recipient filtering, so
+            // sealed cells cannot hide an oversized batch. Storage has the same cap.
+            if (candidates == EnergyFieldState::kMaxRegionalDeposits)
                 return false;
-            deposits.push_back({static_cast<std::uint64_t>(entt::to_integral(entity)),
-                                cx + dx,
-                                cz + dz,
-                                emitter.channel,
-                                amount});
+            ++candidates;
+            if (cell_gate(cx + dx, cz + dz))
+                deposits.push_back({emitter_id, cx + dx, cz + dz, emitter.channel, amount});
         }
     }
     return true;
@@ -151,21 +189,30 @@ AppendRegionalEmitter(std::vector<luminumbra::fields::EnergyFieldState::Regional
 
 // A capacity refusal drops the ENTIRE new batch, preserving previous input and
 // field bytes. The caller still ticks that input, so a bad/oversized roster
-// cannot poison future ticks. Legacy gather above remains byte-for-byte unchanged.
+// cannot poison future ticks. Empty legacy admission retains the original recipe.
+// Concrete predicates keep the regional session path free of type-erased calls.
+template<typename EntityGate, typename CellGate, typename EntityWork>
 inline RegionalEmitterGatherStats
 GatherRegionalFieldEmitterDeposits(entt::registry& registry,
-                                   luminumbra::fields::EnergyFieldState& field) {
+                                   luminumbra::fields::EnergyFieldState& field,
+                                   const EntityGate& gate,
+                                   const CellGate& cell_gate,
+                                   const EntityWork& completed,
+                                   bool persistent_identity) {
     RegionalEmitterGatherStats stats;
     std::vector<entt::entity> emitters;
     for (auto entity :
          registry
              .view<const Components::TransformComponent, const Components::FieldEmitterComponent>())
-        emitters.push_back(entity);
-    std::sort(emitters.begin(), emitters.end(), [](entt::entity a, entt::entity b) {
-        return entt::to_integral(a) < entt::to_integral(b);
+        if (gate(entity))
+            emitters.push_back(entity);
+    std::sort(emitters.begin(), emitters.end(), [&](entt::entity a, entt::entity b) {
+        return world::RegionEntityIdentity(registry, a, persistent_identity) <
+               world::RegionEntityIdentity(registry, b, persistent_identity);
     });
     std::vector<luminumbra::fields::EnergyFieldState::RegionalDeposit> deposits;
     FieldEmitterGatherStats queued;
+    std::size_t candidates = 0, queued_emitters = 0;
     for (auto entity : emitters) {
         const auto& emitter = registry.get<const Components::FieldEmitterComponent>(entity);
         if (emitter.rate_raw_per_tick == 0)
@@ -179,18 +226,43 @@ GatherRegionalFieldEmitterDeposits(entt::registry& registry,
             ++stats.invalid_emitters;
             continue;
         }
-        if (!AppendRegionalEmitter(deposits, entity, emitter, cx, cz)) {
+        const auto before = deposits.size();
+        if (!AppendRegionalEmitter(
+                deposits,
+                world::RegionEntityIdentity(registry, entity, persistent_identity),
+                emitter,
+                cx,
+                cz,
+                cell_gate,
+                candidates)) {
             stats.accepted = false;
             return stats;
         }
-        ++queued.emitters;
+        if (deposits.size() != before)
+            emitters[queued_emitters++] = entity;
     }
     stats.accepted = field.QueueRegionalDeposits(deposits);
     if (stats.accepted) {
+        queued.emitters = static_cast<std::uint64_t>(queued_emitters);
         queued.deposits = static_cast<std::uint64_t>(deposits.size());
         stats.queued = queued;
+        // Reuse the source roster for completion; refused batches charge no work.
+        for (std::size_t i = 0; i < queued_emitters; ++i)
+            completed(emitters[i]);
     }
     return stats;
+}
+
+inline RegionalEmitterGatherStats
+GatherRegionalFieldEmitterDeposits(entt::registry& registry,
+                                   luminumbra::fields::EnergyFieldState& field) {
+    return GatherRegionalFieldEmitterDeposits(
+        registry,
+        field,
+        [](entt::entity) { return true; },
+        [](int, int) { return true; },
+        [](entt::entity) {},
+        false);
 }
 
 } // namespace Luminumbra::Systems

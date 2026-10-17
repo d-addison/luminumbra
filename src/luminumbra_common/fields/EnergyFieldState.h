@@ -203,6 +203,15 @@ public:
     // Keeps the channel layout and anchor, and clears pages and queued deposits.
     void ResetEmptyAtTick(std::uint64_t tick);
 
+    // Read-only test seam: inspect queued identities before Tick consumes them.
+    [[nodiscard]] std::vector<std::uint64_t> PendingEmitterIdsForTesting() const {
+        std::vector<std::uint64_t> ids;
+        ids.reserve(m_pending.size());
+        for (const auto& deposit : m_pending)
+            ids.push_back(deposit.emitter_id);
+        return ids;
+    }
+
     // Diagnostics.
     [[nodiscard]] std::size_t page_count() const noexcept {
         return m_pages.size();

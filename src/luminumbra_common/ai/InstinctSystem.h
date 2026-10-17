@@ -25,6 +25,7 @@
 // subscription, so passing nullptr (the default) leaves the tick path BYTE-
 // UNCHANGED and world_hash stays `d950a6afc12a5cdc` (regression review / ).
 
+#include "../systems/RegionConsumerGate.h"
 #include <cstdint>
 
 #include "entt/entt.hpp"
@@ -57,9 +58,12 @@ struct InstinctSystemTickStats {
 // unchanged. The flag exists so the shared substrate can be exercised without
 // touching the default sim trajectory; world_hash is untouched either way (the
 // canonical roster carries no InstinctAgentComponent).
-InstinctSystemTickStats RunInstinctSystemOnTick(entt::registry& registry,
-                                                std::uint64_t tick,
-                                                const StimulusChannelRegistry* stimulus = nullptr,
-                                                bool use_perception_substrate = true);
+InstinctSystemTickStats
+RunInstinctSystemOnTick(entt::registry& registry,
+                        std::uint64_t tick,
+                        const StimulusChannelRegistry* stimulus = nullptr,
+                        bool use_perception_substrate = true,
+                        const Luminumbra::world::RegionEntityGate& gate = {},
+                        const Luminumbra::world::RegionEntityWork& completed = {});
 
 } // namespace luminumbra::ai

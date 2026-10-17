@@ -1,6 +1,5 @@
 #include "GameSession.h"
 #include "../ai/CircadianSystem.h" // Diurnal and nocturnal activity.
-#include "../ai/CreatureBrain.h"
 #include "../ai/CreatureBrainSystem.h"
 #include "../ai/CreaturePersistence.h"
 #include "../ai/CreatureReproductionSystem.h" // Generational evolution.
@@ -43,10 +42,8 @@
 #include "../components/PackHunterComponents.h"
 #include "../components/PlantComponents.h"
 #include "../components/PollinationComponents.h"
-#include "../components/ScavengerComponent.h"
 #include "../components/SoilComponents.h"
 #include "../components/TerritoryComponents.h"
-#include "../components/ThirstComponents.h"
 #include "../core/Log.h"
 #include "../core/SystemConfig.h"
 #include "../ecs/EntitySnapshot.h"
@@ -124,6 +121,7 @@
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -592,7 +590,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
             // tick. The engine still names no creature behavior.
             if (m_registry.view<const Luminumbra::Components::StimulusSubscriptionComponent>()
                     .empty()) {
-                luminumbra::ai::RunInstinctSystemOnTick(m_registry, current_tick);
+                luminumbra::ai::RunInstinctSystemOnTick(
+                    m_registry, current_tick, nullptr, true, creature_gate, creature_work);
             } else {
                 luminumbra::ai::StimulusContext stimulus_context;
                 stimulus_context.tick = current_tick;
@@ -623,8 +622,12 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                         m_aetherFieldSystem->SampleAether(m_metadata.spawnPoint);
                 }
                 const luminumbra::ai::StimulusChannelRegistry stimulus_registry(stimulus_context);
-                luminumbra::ai::RunInstinctSystemOnTick(
-                    m_registry, current_tick, &stimulus_registry);
+                luminumbra::ai::RunInstinctSystemOnTick(m_registry,
+                                                        current_tick,
+                                                        &stimulus_registry,
+                                                        true,
+                                                        creature_gate,
+                                                        creature_work);
             }
 
             budget.Next(Stage::Perception, [&] {
@@ -641,7 +644,10 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
             // world_hash is UNCHANGED (byte-identical) -- same discipline as the
             // stimulus-channel opt-in above. No RNG/wall-clock; id-ordered.
             luminumbra::ai::RunPerceptionSystemOnTick(
-                m_registry, static_cast<float>(m_simulationClock.fixed_dt()));
+                m_registry,
+                static_cast<float>(m_simulationClock.fixed_dt()),
+                creature_gate,
+                creature_work);
 
             budget.Next(Stage::Scent, [&] {
                 return (m_scentField &&
@@ -662,13 +668,15 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
             // 2d.: action-plan locomotion, then scent gradient bias.
             // The executor writes only LocomotionIntentComponent; physics/render owners
             // consume that intent in their existing lanes.
-            luminumbra::ai::RunInstinctLocomotionOnTick(m_registry);
+            luminumbra::ai::RunInstinctLocomotionOnTick(m_registry, creature_gate, creature_work);
             if (scent_active && m_scentField) {
                 luminumbra::ai::RunScentSteeringOnTick(m_registry,
                                                        *m_scentField,
                                                        ScentDomainOrigin(true),
                                                        ScentDomainOrigin(false),
-                                                       kScentCellSize);
+                                                       kScentCellSize,
+                                                       creature_gate,
+                                                       creature_work);
             }
 
             budget.Next(Stage::Creatures, [&] {
@@ -2057,15 +2065,38 @@ std::string GameSession::PlantRegionProjection(RegionKey key) const {
 void GameSession::RunRegionalEnergyTick(std::uint64_t tick) {
     if (!m_energyFieldState)
         return;
-    const auto gathered =
-        Systems::GatherRegionalFieldEmitterDeposits(m_registry, *m_energyFieldState);
+    const auto& due = SortedDueRegions();
+    const auto owner_key = [](RegionKey key) {
+        return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(key.x)) << 32) |
+               static_cast<std::uint32_t>(key.z);
+    };
+    // Bounded by ActiveRegionLedger::kMaxRegions, one entry per scheduled owner.
+    // Resolve admission once per tick,
+    // keeping each bounded emitter-footprint lookup constant time on average.
+    std::unordered_set<std::uint64_t> due_owners;
+    due_owners.reserve(due.size());
+    for (const auto key : due) {
+        const auto found = m_activeRegionLedger.records().find(key);
+        if (!m_regionFault && found != m_activeRegionLedger.records().end() &&
+            found->second.state != RegionState::Frozen)
+            due_owners.insert(owner_key(key));
+    }
+    const auto gathered = Systems::GatherRegionalFieldEmitterDeposits(
+        m_registry,
+        *m_energyFieldState,
+        [this](auto entity) { return CreatureFullEligible(entity); },
+        [&due_owners, &owner_key](int x, int z) {
+            return due_owners.contains(
+                owner_key(luminumbra::fields::EnergyFieldState::OwnerOfCell(x, z)));
+        },
+        [this](auto entity) { RecordCreatureOperation(entity); },
+        true);
     if (gathered.invalid_emitters != 0 || !gathered.accepted)
         LUMINUMBRA_CORE_WARN(
             "Regional energy gather: {} invalid emitters skipped; batch accepted={}",
             gathered.invalid_emitters,
             gathered.accepted);
     luminumbra::fields::EnergyFieldState::RegionalResult result;
-    const auto& due = SortedDueRegions();
     if (!m_energyFieldState->TickRegional(tick,
                                           m_activeRegionLedger.records(),
                                           due,
@@ -2385,16 +2416,20 @@ void GameSession::SealCreatureTickAdmission(std::uint64_t tick) {
         const auto* cr = m_registry.try_get<C::CreatureComponent>(e);
         if (!cr) {
             if (ActiveRegionLedger::valid_anchor(tf.position) &&
-                positional_due(ActiveRegionLedger::region_at(tf.position)))
+                positional_due(ActiveRegionLedger::region_at(tf.position))) {
                 admission.positional_sources.insert(e);
+                admission.positional_owners.emplace(e, ActiveRegionLedger::region_at(tf.position));
+            }
             continue;
         }
         const auto* owner = m_registry.try_get<C::CreatureRegionComponent>(e);
         const auto* coarse = m_registry.try_get<C::CreatureCoarseComponent>(e);
         if (!owner && !coarse && cr->species_id == 0) {
             if (ActiveRegionLedger::valid_anchor(tf.position) &&
-                positional_due(ActiveRegionLedger::region_at(tf.position)))
+                positional_due(ActiveRegionLedger::region_at(tf.position))) {
                 admission.transient_grazers.insert(e);
+                admission.positional_owners.emplace(e, ActiveRegionLedger::region_at(tf.position));
+            }
             continue;
         }
         if (!owner || !coarse || !owner->persistent_id || !m_speciesTable ||
@@ -2417,6 +2452,31 @@ void GameSession::SealCreatureTickAdmission(std::uint64_t tick) {
         if (owner->region_stamp == 0 || (owner->region_stamp >> shift) < (tick >> shift))
             admission.coarse_corpses.insert(e);
     }
+    const auto seal_grid_source = [this, &admission](entt::entity e, int x, int z) {
+        if (!m_registry.any_of<C::CreatureComponent, C::TransformComponent>(e) &&
+            ScentCellDue(x, z)) {
+            admission.positional_sources.insert(e);
+            admission.positional_owners.emplace(e, ScentCellOwner(x, z));
+        }
+    };
+    for (auto e : m_registry.view<const C::ForagerComponent>()) {
+        const auto& a = m_registry.get<const C::ForagerComponent>(e);
+        seal_grid_source(e, a.cell_x, a.cell_z);
+    }
+    for (auto e : m_registry.view<const C::FoodSourceComponent>()) {
+        const auto& f = m_registry.get<const C::FoodSourceComponent>(e);
+        seal_grid_source(e, f.cell_x, f.cell_z);
+    }
+}
+bool GameSession::EnergyCellDue(int x, int z) const {
+    if (m_regionFault)
+        return false;
+    const auto owner = luminumbra::fields::EnergyFieldState::OwnerOfCell(x, z);
+    const auto found = m_activeRegionLedger.records().find(owner);
+    return found != m_activeRegionLedger.records().end() &&
+           found->second.state != RegionState::Frozen &&
+           std::find(m_regionSchedule.due.begin(), m_regionSchedule.due.end(), owner) !=
+               m_regionSchedule.due.end();
 }
 bool GameSession::CreatureFullEligible(entt::entity entity) const {
     return m_creatureTickAdmission.full.contains(entity) ||
@@ -2431,13 +2491,12 @@ void GameSession::RecordCreatureOperation(entt::entity entity) {
     if (it != m_creatureTickAdmission.previous.end()) {
         m_creatureTickAdmission.processed.insert(entity);
         m_creatureTickAdmission.processed_owners.insert(it->second.owner);
-        RecordActiveRegionWork({it->second.owner, 0, 1, 0, 0});
+        RecordActiveRegionWork({it->second.owner, 0ull, 1ull, 0ull, 0ull});
     } else if (m_creatureTickAdmission.transient_grazers.contains(entity) ||
                m_creatureTickAdmission.positional_sources.contains(entity)) {
-        const auto& tf = m_registry.get<Components::TransformComponent>(entity);
-        const auto key = ActiveRegionLedger::region_at(tf.position);
+        const auto key = m_creatureTickAdmission.positional_owners.at(entity);
         m_creatureTickAdmission.processed_owners.insert(key);
-        RecordActiveRegionWork({key, 0, 1, 0, 0});
+        RecordActiveRegionWork({key, 0ull, 1ull, 0ull, 0ull});
     }
 }
 void GameSession::CompleteCreatureTickAdmission() {
@@ -4400,6 +4459,13 @@ void GameSession::CaptureRegionalScent() {
 }
 
 void GameSession::AdvanceNearScent() {
+    const RegionEntityGate gate =
+        m_activeRegionsEnabled
+            ? RegionEntityGate([this](auto e) { return CreatureFullEligible(e); })
+            : RegionEntityGate{};
+    const RegionEntityWork completed =
+        m_activeRegionsEnabled ? RegionEntityWork([this](auto e) { RecordCreatureOperation(e); })
+                               : RegionEntityWork{};
     // 2c.: scent stigmergy write/update. Game-data opt-in:
     // no scent emitter/sensor components means no field mutation, while active
     // ecology worlds get deterministic deposit -> diffuse/evaporate -> clamp.
@@ -4416,7 +4482,7 @@ void GameSession::AdvanceNearScent() {
                 return true;
             const auto& forager =
                 foragers_view.get<const Luminumbra::Components::ForagerComponent>(entity);
-            return ScentCellDue(forager.cell_x, forager.cell_z);
+            return CreatureFullEligible(entity) && ScentCellDue(forager.cell_x, forager.cell_z);
         });
     const bool scent_interior = scent_active || foraging_active;
     if ((scent_interior || HasScentBorderWork()) && m_scentField) {
@@ -4425,10 +4491,22 @@ void GameSession::AdvanceNearScent() {
                                                   *m_scentField,
                                                   ScentDomainOrigin(true),
                                                   ScentDomainOrigin(false),
-                                                  kScentCellSize);
+                                                  kScentCellSize,
+                                                  gate,
+                                                  completed);
         }
         if (foraging_active) {
-            luminumbra::ai::RunForagingOnTick(m_registry, *m_scentField, m_foragingTuning);
+            luminumbra::ai::RunForagingOnTick(
+                m_registry,
+                *m_scentField,
+                m_foragingTuning,
+                gate,
+                completed,
+                m_activeRegionsEnabled
+                    ? luminumbra::ai::ScentField::EdgeGate([this](int x, int z, int nx, int nz) {
+                          return ScentEdgeOpen(x, z, nx, nz);
+                      })
+                    : luminumbra::ai::ScentField::EdgeGate{});
         }
         // advect the scent downwind by the PRIOR-tick wind (the wind field is updated
         // later this tick at slot 3, so sampling here keeps the slot order stable). Convert
@@ -4499,6 +4577,15 @@ bool GameSession::HasScentBorderWork() const {
 }
 
 bool GameSession::HasScentParticipants(bool require_due) const {
+    if (m_activeRegionsEnabled) {
+        for (const auto& [cell, values] : m_fieldPages.scent_cells()) {
+            const int x = cell.x - static_cast<int>(ScentDomainOrigin(true));
+            const int z = cell.z - static_cast<int>(ScentDomainOrigin(false));
+            if (x >= 0 && z >= 0 && x < kScentFieldCells && z < kScentFieldCells &&
+                (!require_due || ScentCellDue(x, z)))
+                return true;
+        }
+    }
     const auto near_due = [this, require_due](const Vec3& position) {
         if (!m_activeRegionsEnabled)
             return true;
@@ -4512,6 +4599,8 @@ bool GameSession::HasScentParticipants(bool require_due) const {
         auto emitters = m_registry.view<const Luminumbra::Components::TransformComponent,
                                         const Luminumbra::Components::SensableComponent>();
         for (auto e : emitters) {
+            if (m_activeRegionsEnabled && !CreatureFullEligible(e))
+                continue;
             if (!near_due(
                     emitters.get<const Luminumbra::Components::TransformComponent>(e).position))
                 continue;
@@ -4525,6 +4614,8 @@ bool GameSession::HasScentParticipants(bool require_due) const {
         auto sensors = m_registry.view<const Luminumbra::Components::TransformComponent,
                                        const Luminumbra::Components::ScentSenseComponent>();
         for (auto e : sensors) {
+            if (m_activeRegionsEnabled && !CreatureFullEligible(e))
+                continue;
             if (!near_due(
                     sensors.get<const Luminumbra::Components::TransformComponent>(e).position))
                 continue;

@@ -27,6 +27,7 @@
 // execution for the dominant seek-food/water/shelter case. Avoidance (flee) is a
 // later, explicitly data-flagged extension.
 
+#include "../systems/RegionConsumerGate.h"
 #include <cstdint>
 
 #include "entt/entt.hpp"
@@ -49,6 +50,9 @@ struct InstinctLocomotionTickStats {
 // LocomotionProfile, compute the seek/arrival wish velocity toward the current
 // action's target and store it in LocomotionIntentComponent (created if absent).
 // On arrival the current action index is advanced so the plan can progress.
-InstinctLocomotionTickStats RunInstinctLocomotionOnTick(entt::registry& registry);
+InstinctLocomotionTickStats
+RunInstinctLocomotionOnTick(entt::registry& registry,
+                            const Luminumbra::world::RegionEntityGate& gate = {},
+                            const Luminumbra::world::RegionEntityWork& completed = {});
 
 } // namespace luminumbra::ai

@@ -11,6 +11,7 @@
 // libm); the field write is the solver's deterministic add_impulse. World_hash
 // folds in via the ScentField sub-hash once the field is owned by the sim tick.
 
+#include "../systems/RegionConsumerGate.h"
 #include <algorithm>
 #include <vector>
 
@@ -27,8 +28,15 @@ struct ScentDepositStats {
     std::uint64_t emitters = 0; // entities that deposited this tick
 };
 
-inline ScentDepositStats RunScentDepositOnTick(
-    entt::registry& registry, ScentField& field, float origin_x, float origin_z, float cell_size) {
+inline ScentDepositStats
+RunScentDepositOnTick(entt::registry& registry,
+                      ScentField& field,
+                      float origin_x,
+                      float origin_z,
+                      float cell_size,
+                      const Luminumbra::world::RegionEntityGate& gate = {},
+                      const Luminumbra::world::RegionEntityWork& completed = {}) {
+    using namespace Luminumbra::world;
     using Luminumbra::Components::SensableComponent;
     using Luminumbra::Components::TransformComponent;
 
@@ -46,6 +54,7 @@ inline ScentDepositStats RunScentDepositOnTick(
         });
     }
 
+    FilterRegionEntities(registry, emitters, gate);
     for (auto e : emitters) {
         const auto& s = registry.get<const SensableComponent>(e);
         if (s.scent_channel < 0 || s.scent_deposit <= 0.0f)
@@ -56,6 +65,8 @@ inline ScentDepositStats RunScentDepositOnTick(
         if (!field.SimulationCellAllowed(cx, cz))
             continue;
         field.Deposit(s.scent_channel, cx, cz, static_cast<double>(s.scent_deposit));
+        if (completed)
+            completed(e);
         ++stats.emitters;
     }
     return stats;

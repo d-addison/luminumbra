@@ -13,6 +13,7 @@
 // and the canonical headless determinism roster carries none (terrain/water only),
 // so wiring it into the tick does not move world_hash.
 
+#include "../systems/RegionConsumerGate.h"
 #include <algorithm>
 #include <vector>
 
@@ -32,7 +33,12 @@ struct PerceptionTickStats {
     std::uint64_t engaged = 0;    // reached the Engaged state
 };
 
-inline PerceptionTickStats RunPerceptionSystemOnTick(entt::registry& registry, float dt) {
+inline PerceptionTickStats
+RunPerceptionSystemOnTick(entt::registry& registry,
+                          float dt,
+                          const Luminumbra::world::RegionEntityGate& gate = {},
+                          const Luminumbra::world::RegionEntityWork& completed = {}) {
+    using namespace Luminumbra::world;
     using Luminumbra::Components::AwarenessComponent;
     using Luminumbra::Components::PerceptionComponent;
     using Luminumbra::Components::SensableComponent;
@@ -53,13 +59,16 @@ inline PerceptionTickStats RunPerceptionSystemOnTick(entt::registry& registry, f
     {
         auto view = registry.view<const TransformComponent, const SensableComponent>();
         for (auto e : view) {
+            if (!AdmitRegionEntity(gate, e))
+                continue;
             const auto& tf = view.get<const TransformComponent>(e);
             const auto& s = view.get<const SensableComponent>(e);
             sensables.push_back(
                 {e, tf.position.x, tf.position.z, s.noise_loudness, s.noise_pitch, s.faction});
         }
-        std::sort(sensables.begin(), sensables.end(), [](const Sensable& a, const Sensable& b) {
-            return entt::to_integral(a.id) < entt::to_integral(b.id);
+        std::sort(sensables.begin(), sensables.end(), [&](const Sensable& a, const Sensable& b) {
+            return RegionEntityIdentity(registry, a.id, bool(gate)) <
+                   RegionEntityIdentity(registry, b.id, bool(gate));
         });
     }
 
@@ -75,7 +84,10 @@ inline PerceptionTickStats RunPerceptionSystemOnTick(entt::registry& registry, f
         });
     }
 
+    FilterRegionEntities(registry, perceivers, gate);
     for (auto e : perceivers) {
+        if (completed)
+            completed(e);
         ++stats.perceivers;
         const auto& tf = registry.get<const TransformComponent>(e);
         const auto& perc = registry.get<const PerceptionComponent>(e);
