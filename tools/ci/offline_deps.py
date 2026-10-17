@@ -474,6 +474,16 @@ def remove_stage(dest: Path) -> None:
     shutil.rmtree(dest, onerror=retry)
 
 
+def publish_initial_cache(candidate: Path, init: Path) -> None:
+    """Atomically publish complete bytes, refusing every existing occupant.
+
+    Both names are on the same filesystem. Unlike rename on POSIX or replace
+    on either platform, a hard link cannot overwrite a concurrent publisher.
+    The candidate is closed before linking, including on Windows.
+    """
+    os.link(candidate, init)
+
+
 def stage(root: Path, cache: Path, lock_path: Path, dest: Path, init: Path) -> None:
     scratch = root / "scratch"
     if scratch.is_symlink():
@@ -504,6 +514,9 @@ def stage(root: Path, cache: Path, lock_path: Path, dest: Path, init: Path) -> N
     lock = verify(root, cache, lock_path)
     dest.mkdir(parents=True)
     candidate = None
+    candidate_identity = None
+    publication_started = False
+    retain_stage = False
     try:
         lines = []
         for name, entry in lock["dependencies"].items():
@@ -536,15 +549,47 @@ def stage(root: Path, cache: Path, lock_path: Path, dest: Path, init: Path) -> N
                                          prefix=init.name + ".", suffix=".tmp", delete=False) as handle:
             candidate = Path(handle.name)
             handle.write("\n".join(lines) + "\n")
-        os.replace(candidate, init)
+        # Use lstat rather than DirEntry or CRT metadata, which can report
+        # zero file identity on Windows. The candidate is already closed.
+        candidate_identity = candidate.lstat()
+        publication_started = True
+        publish_initial_cache(candidate, init)
+        retain_stage = True
+        candidate.unlink()
+        candidate = None
     except BaseException as error:
-        # Attempt both cleanups independently, preserving the initiating error
-        # even if storage becomes inaccessible while unwinding.
-        try:
-            remove_stage(dest)
-        except BaseException as cleanup_error:
-            if sys.version_info >= (3, 11):
-                error.add_note(f"stage cleanup failed: {cleanup_error}")
+        # A native link can complete before interruption or an API wrapper
+        # raises. Never unlink init: it may belong to another publisher. Keep
+        # our stage if that name references our candidate, or if lookup cannot
+        # establish the outcome. Absence permits stage rollback, not adoption
+        # or removal of an initial-cache occupant. This is an observation for
+        # retaining data, not an identity-conditioned namespace deletion.
+        if publication_started and not retain_stage:
+            try:
+                occupant = init.lstat()
+                if stat.S_ISREG(occupant.st_mode):
+                    if (not candidate_identity.st_ino or not occupant.st_ino
+                            or not candidate_identity.st_dev or not occupant.st_dev):
+                        retain_stage = True
+                        if sys.version_info >= (3, 11):
+                            error.add_note("stage retained: initial cache identity unavailable")
+                    else:
+                        retain_stage = os.path.samestat(candidate_identity, occupant)
+            except FileNotFoundError:
+                pass
+            except BaseException as lookup_error:
+                retain_stage = True
+                if sys.version_info >= (3, 11):
+                    error.add_note(f"stage retained: initial cache lookup failed: {lookup_error}")
+        # Attempt independent cleanups without masking the initiating error.
+        # Once published, even a candidate cleanup failure must retain the
+        # stage so the complete configuration never names deleted sources.
+        if not retain_stage:
+            try:
+                remove_stage(dest)
+            except BaseException as cleanup_error:
+                if sys.version_info >= (3, 11):
+                    error.add_note(f"stage cleanup failed: {cleanup_error}")
         try:
             if candidate is not None:
                 candidate.unlink(missing_ok=True)

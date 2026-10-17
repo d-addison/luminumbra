@@ -3,7 +3,7 @@
 
 import errno
 import ctypes
-from contextlib import redirect_stderr
+from contextlib import contextmanager, redirect_stderr
 import importlib.util
 import io
 import json
@@ -15,6 +15,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -511,19 +512,19 @@ class OfflineDependenciesTests(unittest.TestCase):
 
     def test_initial_cache_replace_failure_cleans_up_and_retry_succeeds(self):
         init = self.root / "scratch/initial cache.cmake"
-        real_replace = deps.os.replace
+        real_replace = deps.os.link
         def fail(source, target):
             self.assertEqual(Path(source).parent, Path(target).parent)
             self.assertFalse(Path(target).exists())
             self.assertIn("FETCHCONTENT_SOURCE_DIR_SAMPLE", Path(source).read_text())
             raise OSError("injected cache publication failure")
-        with patch.object(deps.os, "replace", side_effect=fail):
+        with patch.object(deps.os, "link", side_effect=fail):
             with self.assertRaisesRegex(OSError, "publication failure"):
                 self.stage()
         self.assertFalse(init.exists())
         self.assertFalse((self.root / "scratch/copied sources").exists())
         self.assertEqual(list(init.parent.glob(init.name + ".*.tmp")), [])
-        with patch.object(deps.os, "replace", wraps=real_replace) as replace:
+        with patch.object(deps.os, "link", wraps=real_replace) as replace:
             self.stage()
         self.assertEqual(replace.call_count, 1)
         self.assertIn("FETCHCONTENT_FULLY_DISCONNECTED ON", init.read_text())
@@ -554,7 +555,7 @@ class OfflineDependenciesTests(unittest.TestCase):
             self.assertFalse((dest / "sample/readonly directory").stat().st_mode & stat.S_IWUSR)
             raise original
 
-        with patch.object(deps.os, "replace", side_effect=fail):
+        with patch.object(deps.os, "link", side_effect=fail):
             with self.assertRaises(OSError) as caught:
                 self.stage()
         self.assertIs(caught.exception, original)
@@ -669,7 +670,7 @@ class OfflineDependenciesTests(unittest.TestCase):
                     return function(path, *args, **kwargs)
 
                 with patch.object(deps.shutil, "copytree", side_effect=copy), \
-                        patch.object(deps.os, "replace", side_effect=publish), \
+                        patch.object(deps.os, "link", side_effect=publish), \
                         patch.object(deps.os, "lstat", side_effect=lstat), \
                         patch.object(Path, "lstat", lstat), \
                         patch.object(deps.os, "chmod", side_effect=chmod), \
@@ -717,7 +718,7 @@ class OfflineDependenciesTests(unittest.TestCase):
                             raise PermissionError("injected temporary cache cleanup failure")
                     return real_unlink(path, *args, **kwargs)
 
-                with patch.object(deps.os, "replace", side_effect=original), \
+                with patch.object(deps.os, "link", side_effect=original), \
                         patch.object(deps.shutil, "rmtree", side_effect=remove), \
                         patch.object(Path, "unlink", unlink):
                     with self.assertRaises(OSError) as caught:
@@ -729,6 +730,324 @@ class OfflineDependenciesTests(unittest.TestCase):
                 if dest.exists():
                     real_rmtree(dest)
                 attempts[0].unlink(missing_ok=True)
+
+    def test_concurrent_stages_publish_exactly_one_complete_initial_cache(self):
+        self.readonly_source()
+        initial_digest = deps.source_digest(self.source)
+        initial_lock = self.lock.read_bytes()
+        init = self.root / "scratch/shared initial cache.cmake"
+        destinations = [self.root / "scratch" / name for name in ("first stage", "second stage")]
+        ready = threading.Barrier(2)
+        reached = set()
+        outcomes = [None, None]
+        published = []
+        real_temporary, real_link = deps.tempfile.NamedTemporaryFile, deps.os.link
+
+        @contextmanager
+        def complete_candidate(*args, **kwargs):
+            with real_temporary(*args, **kwargs) as stream:
+                yield stream
+            # Both freshness checks and complete closed writes precede either
+            # native publication. The same boundary also reaches old rename code.
+            reached.add(threading.get_ident())
+            ready.wait()
+
+        def publish(source, target):
+            result = real_link(source, target)
+            published.append(Path(target).read_bytes())
+            return result
+
+        def run(index):
+            try:
+                self.stage(destinations[index], init)
+                outcomes[index] = True
+            except BaseException as error:
+                outcomes[index] = error
+                if threading.get_ident() not in reached:
+                    ready.abort()
+
+        with patch.object(deps.tempfile, "NamedTemporaryFile", side_effect=complete_candidate), \
+                patch.object(deps.os, "link", side_effect=publish):
+            threads = [threading.Thread(target=run, args=(index,)) for index in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+        winners = [index for index, result in enumerate(outcomes) if result is True]
+        self.assertEqual(len(winners), 1, outcomes)
+        winner = winners[0]
+        loser = 1 - winner
+        self.assertIsInstance(outcomes[loser], FileExistsError)
+        self.assertEqual(outcomes[loser].errno, errno.EEXIST)
+        self.assertEqual(published, [init.read_bytes()])
+        self.assertTrue(destinations[winner].is_dir())
+        self.assertFalse(destinations[loser].exists())
+        self.assertIn(deps.cmake_string(str(destinations[winner] / "sample")), init.read_text())
+        self.assertNotIn(deps.cmake_string(str(destinations[loser] / "sample")), init.read_text())
+        self.assertEqual(deps.source_digest(destinations[winner] / "sample"), initial_digest)
+        self.assertEqual(deps.source_digest(self.source), initial_digest)
+        self.assertEqual(self.lock.read_bytes(), initial_lock)
+        self.assertEqual(list(init.parent.glob(init.name + ".*.tmp")), [])
+        self.assertEqual(init.stat().st_nlink, 1)
+
+    def test_late_initial_cache_occupants_are_never_replaced_or_removed(self):
+        real_verify, real_link = deps.verify, deps.os.link
+        foreign = self.base / "foreign cache"
+        foreign.write_bytes(b"retained foreign configuration\n")
+        for kind in ("file", "directory", "hardlink"):
+            with self.subTest(kind=kind):
+                dest = self.root / "scratch" / (kind + " stage")
+                init = self.root / "scratch" / (kind + " init.cmake")
+                attempts = []
+
+                def verified(*args):
+                    lock = real_verify(*args)
+                    init.parent.mkdir(parents=True, exist_ok=True)
+                    if kind == "directory":
+                        init.mkdir()
+                        (init / "retained").write_bytes(foreign.read_bytes())
+                    elif kind == "hardlink":
+                        real_link(foreign, init)
+                    else:
+                        init.write_bytes(foreign.read_bytes())
+                    return lock
+
+                def publish(source, target):
+                    try:
+                        return real_link(source, target)
+                    except OSError as error:
+                        attempts.append(error)
+                        raise
+
+                with patch.object(deps, "verify", side_effect=verified), \
+                        patch.object(deps.os, "link", side_effect=publish):
+                    with self.assertRaises(OSError) as caught:
+                        self.stage(dest, init)
+                self.assertEqual(attempts, [caught.exception])
+                if kind != "directory":
+                    self.assertIsInstance(caught.exception, FileExistsError)
+                    self.assertEqual(caught.exception.errno, errno.EEXIST)
+                self.assertFalse(dest.exists())
+                content = init / "retained" if kind == "directory" else init
+                self.assertEqual(content.read_bytes(), foreign.read_bytes())
+                if kind == "hardlink":
+                    self.assertTrue(os.path.samestat(init.lstat(), foreign.lstat()))
+                self.assertEqual(list(init.parent.glob(init.name + ".*.tmp")), [])
+
+    def test_native_missing_candidate_failure_rolls_back_stage_and_allows_retry(self):
+        init = self.root / "scratch/initial cache.cmake"
+        dest = self.root / "scratch/copied sources"
+        real_link = deps.os.link
+        failures = []
+
+        def publish(source, target):
+            Path(source).unlink()
+            try:
+                return real_link(source, target)
+            except OSError as error:
+                failures.append(error)
+                raise
+
+        with patch.object(deps.os, "link", side_effect=publish):
+            with self.assertRaises(FileNotFoundError) as caught:
+                self.stage()
+        self.assertEqual(failures, [caught.exception])
+        self.assertEqual(caught.exception.errno, errno.ENOENT)
+        self.assertFalse(dest.exists())
+        self.assertFalse(init.exists())
+        self.assertEqual(list(init.parent.glob(init.name + ".*.tmp")), [])
+        self.stage()
+        self.assertIn(deps.cmake_string(str(dest / "sample")), init.read_text())
+        self.assertTrue((dest / "sample/input with spaces.h").is_file())
+
+    def test_completed_publication_followed_by_exception_retains_configuration_and_stage(self):
+        real_link, real_unlink = deps.os.link, Path.unlink
+        for number, (error_type, cleanup_failure) in enumerate(
+                (error_type, cleanup_failure) for error_type in (OSError, KeyboardInterrupt)
+                for cleanup_failure in (False, True)):
+            with self.subTest(error=error_type.__name__, cleanup_failure=cleanup_failure):
+                original = error_type("completed link")
+                dest = self.root / "scratch" / (str(number) + " retained stage")
+                init = self.root / "scratch" / (str(number) + " retained.cmake")
+                published, attempts = [], []
+
+                def publish(source, target):
+                    real_link(source, target)
+                    published.append(Path(target).read_bytes())
+                    raise original
+
+                def unlink(path, *args, **kwargs):
+                    if cleanup_failure and path.name.startswith(init.name + "."):
+                        attempts.append(path)
+                        raise PermissionError("cleanup after completed link failed")
+                    return real_unlink(path, *args, **kwargs)
+
+                with patch.object(deps.os, "link", side_effect=publish), \
+                        patch.object(Path, "unlink", unlink):
+                    with self.assertRaises(error_type) as caught:
+                        self.stage(dest, init)
+                self.assertIs(caught.exception, original)
+                self.assertEqual(published, [init.read_bytes()])
+                self.assertIn(deps.cmake_string(str(dest / "sample")), init.read_text())
+                self.assertEqual(deps.source_digest(dest / "sample"), deps.source_digest(self.source))
+                self.assertEqual(len(attempts), int(cleanup_failure))
+                if cleanup_failure:
+                    self.assertEqual(list(init.parent.glob(init.name + ".*.tmp")), attempts)
+                    if sys.version_info >= (3, 11):
+                        self.assertTrue(any("initial cache cleanup failed" in note for note in original.__notes__))
+                    attempts[0].unlink()
+                self.assertEqual(init.stat().st_nlink, 1)
+                self.assertEqual(list(init.parent.glob(init.name + ".*.tmp")), [])
+
+    def test_candidate_cleanup_errors_after_publication_keep_stage_and_original_error(self):
+        real_unlink = Path.unlink
+        for failure in ("once", "always", "removed then raised"):
+            with self.subTest(failure=failure):
+                dest = self.root / "scratch" / (failure + " stage")
+                init = self.root / "scratch" / (failure + ".cmake")
+                original = PermissionError("candidate cleanup failed")
+                attempts = []
+
+                def unlink(path, *args, **kwargs):
+                    if path.name.startswith(init.name + "."):
+                        attempts.append(path)
+                        if len(attempts) == 1 or failure == "always":
+                            self.assertTrue(init.is_file())
+                            if failure == "removed then raised":
+                                real_unlink(path, *args, **kwargs)
+                            raise original
+                    return real_unlink(path, *args, **kwargs)
+
+                with patch.object(Path, "unlink", unlink):
+                    with self.assertRaises(PermissionError) as caught:
+                        self.stage(dest, init)
+                self.assertIs(caught.exception, original)
+                self.assertEqual(len(attempts), 2)
+                self.assertIn(deps.cmake_string(str(dest / "sample")), init.read_text())
+                self.assertEqual(deps.source_digest(dest / "sample"), deps.source_digest(self.source))
+                self.assertEqual(attempts[0].exists(), failure == "always")
+                if failure == "always" and sys.version_info >= (3, 11):
+                    self.assertTrue(any("initial cache cleanup failed" in note for note in original.__notes__))
+                attempts[0].unlink(missing_ok=True)
+                self.assertEqual(init.stat().st_nlink, 1)
+
+    def test_uncertain_publication_retains_stage_without_claiming_an_occupant(self):
+        real_link, real_lstat = deps.os.link, Path.lstat
+        # Every lookup failure and missing identity is exercised with a real
+        # published file and with a genuine native EEXIST foreign occupant.
+        for number, (outcome, metadata) in enumerate(
+                (outcome, metadata) for outcome in ("published", "foreign")
+                for metadata in ("inode", "device", "candidate inode", "candidate device", "denied", "interrupted")):
+            with self.subTest(outcome=outcome, metadata=metadata):
+                dest = self.root / "scratch" / (str(number) + " uncertain stage")
+                init = self.root / "scratch" / (str(number) + " uncertain.cmake")
+                original = OSError("uncertain publication")
+                observing = False
+                expected = []
+
+                def publish(source, target):
+                    nonlocal observing, original
+                    if outcome == "foreign":
+                        Path(target).write_bytes(b"unknown owner\n")
+                    try:
+                        real_link(source, target)
+                    except OSError as error:
+                        original = error
+                    expected.append(Path(target).read_bytes())
+                    observing = True
+                    raise original
+
+                def metadata_for(path, *args, **kwargs):
+                    if metadata.startswith("candidate ") and path.name.startswith(init.name + "."):
+                        info = real_lstat(path, *args, **kwargs)
+                        fields = {key: getattr(info, key) for key in dir(info) if key.startswith("st_")}
+                        fields["st_ino" if metadata.endswith("inode") else "st_dev"] = 0
+                        return SimpleNamespace(**fields)
+                    if path == init and observing:
+                        if metadata == "denied":
+                            raise PermissionError("lookup denied")
+                        if metadata == "interrupted":
+                            raise KeyboardInterrupt("lookup interrupted")
+                        info = real_lstat(path, *args, **kwargs)
+                        fields = {key: getattr(info, key) for key in dir(info) if key.startswith("st_")}
+                        fields["st_ino" if metadata == "inode" else "st_dev"] = 0
+                        return SimpleNamespace(**fields)
+                    return real_lstat(path, *args, **kwargs)
+
+                with patch.object(deps.os, "link", side_effect=publish), \
+                        patch.object(Path, "lstat", metadata_for):
+                    with self.assertRaises(OSError) as caught:
+                        self.stage(dest, init)
+                self.assertIs(caught.exception, original)
+                self.assertEqual(expected, [init.read_bytes()])
+                self.assertEqual(deps.source_digest(dest / "sample"), deps.source_digest(self.source))
+                if outcome == "published":
+                    self.assertIn(deps.cmake_string(str(dest / "sample")), init.read_text())
+                else:
+                    self.assertEqual(init.read_bytes(), b"unknown owner\n")
+                if sys.version_info >= (3, 11):
+                    self.assertTrue(any("stage retained:" in note for note in original.__notes__))
+                self.assertEqual(list(init.parent.glob(init.name + ".*.tmp")), [])
+
+    def test_candidate_identity_lookup_failure_rolls_back_before_publication(self):
+        real_lstat = Path.lstat
+        for missing in (False, True):
+            with self.subTest(missing=missing):
+                dest = self.root / "scratch" / (str(missing) + " metadata stage")
+                init = self.root / "scratch" / (str(missing) + " metadata.cmake")
+                original = FileNotFoundError("candidate disappeared") if missing else PermissionError("candidate metadata denied")
+                inspected = []
+
+                def metadata_for(path, *args, **kwargs):
+                    if path.name.startswith(init.name + "."):
+                        inspected.append(path)
+                        if missing:
+                            path.unlink()
+                        raise original
+                    return real_lstat(path, *args, **kwargs)
+
+                with patch.object(Path, "lstat", metadata_for), \
+                        patch.object(deps.os, "link", wraps=deps.os.link) as publish:
+                    with self.assertRaises(type(original)) as caught:
+                        self.stage(dest, init)
+                self.assertIs(caught.exception, original)
+                self.assertEqual(len(inspected), 1)
+                publish.assert_not_called()
+                self.assertFalse(dest.exists())
+                self.assertFalse(init.exists())
+                self.assertEqual(list(init.parent.glob(init.name + ".*.tmp")), [])
+
+    def test_unpublished_interruption_rolls_back_and_preserves_original_error(self):
+        original = KeyboardInterrupt("before native link")
+        with patch.object(deps.os, "link", side_effect=original):
+            with self.assertRaises(KeyboardInterrupt) as caught:
+                self.stage()
+        self.assertIs(caught.exception, original)
+        self.assertFalse((self.root / "scratch/copied sources").exists())
+        init = self.root / "scratch/initial cache.cmake"
+        self.assertFalse(init.exists())
+        self.assertEqual(list(init.parent.glob(init.name + ".*.tmp")), [])
+
+    def test_cli_late_publication_collision_returns_failure_and_preserves_occupant(self):
+        init = self.root / "scratch/initial cache.cmake"
+        real_verify = deps.verify
+
+        def verified(*args):
+            result = real_verify(*args)
+            init.parent.mkdir(parents=True, exist_ok=True)
+            init.write_bytes(b"CLI concurrent winner\n")
+            return result
+
+        diagnostic = io.StringIO()
+        with patch.object(deps, "verify", side_effect=verified), redirect_stderr(diagnostic):
+            result = deps.main(["stage", "--root", str(self.root), "--cache", str(self.cache),
+                                "--lock", str(self.lock), "--dest", "scratch/copied sources",
+                                "--init", "scratch/initial cache.cmake"])
+        self.assertEqual(result, 1)
+        self.assertIn("offline dependencies:", diagnostic.getvalue())
+        self.assertEqual(init.read_bytes(), b"CLI concurrent winner\n")
+        self.assertFalse((self.root / "scratch/copied sources").exists())
+        self.assertEqual(list(init.parent.glob(init.name + ".*.tmp")), [])
 
     def test_stage_never_writes_initial_cache_inside_source_cache(self):
         local_cache = self.root / "scratch/source cache"
