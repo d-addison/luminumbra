@@ -24,8 +24,11 @@
 namespace Luminumbra::world {
 
 // Explicit preset revisions must match the current algorithm contract.
-inline constexpr std::int64_t kTerrainPresetSchemaRevision = 7;
+inline constexpr std::int64_t kTerrainPresetSchemaRevision = 8;
 inline constexpr std::int64_t kMinTerrainPresetSchemaRevision = 6;
+// Keep historical canonical identity bytes at revision 7. Revision 8 gates the
+// complete activation/material sampling contract against older readers.
+inline constexpr std::int64_t kHistoricalTerrainPresetIdentityRevision = 7;
 
 // generation_params.terrain.shaping — reserved keys pinned by
 // (spline points
@@ -110,8 +113,21 @@ struct TerrainPresetLoadResult {
 // historical revision 6). Explicit false and an empty biome table remain authoritative.
 nlohmann::json ResolveTerrainPresetDefaults(const nlohmann::json& preset);
 
-// Identity bytes: materialized revision defaults, current schema revision, sorted
-// object keys, compact JSON, ASCII escapes and locale-independent binary64 numbers.
+enum class TerrainPresetUse {
+    Historical,
+    NewWorld
+};
+// Resolve before hashing, saving or adopting parameters. Explicit selectors are
+// authoritative. Historical omission means revision 1 and stays absent to retain
+// existing identity bytes; new-world omission selects revision 2. Revision 2
+// carries schema 8, which older preset readers refuse; revision 1 uses schema 7
+// after materializing the original defaults. Safe to apply repeatedly.
+nlohmann::json ResolveEffectivePreset(const nlohmann::json& preset,
+                                      TerrainPresetUse use = TerrainPresetUse::Historical);
+
+// Identity bytes: effective preset, schema 7 for historical sampling or schema 8
+// for revision 2, sorted object keys, compact JSON, ASCII escapes and
+// locale-independent binary64 numbers.
 // No filesystem paths derived from data_root or provenance enter this form.
 std::string CanonicalResolvedTerrainPresetJson(const nlohmann::json& preset);
 // Identity with an empty dependency manifest (for dependency-free presets/fixtures).
