@@ -16,6 +16,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ci_shell import bash_executable
+
+
+BASH = bash_executable()
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location("tidy_cache", REPO_ROOT / "scripts/tidy_cache.py")
 assert SPEC and SPEC.loader
@@ -110,7 +115,7 @@ class ShardShellTests(unittest.TestCase):
     def run_gate(self, *args):
         if self.log.exists():
             self.log.unlink()
-        result = subprocess.run(["bash", str(self.root / "scripts/tidy.sh"), "--jobs", "1", *args],
+        result = subprocess.run([BASH, str(self.root / "scripts/tidy.sh"), "--jobs", "1", *args],
                                 env=self.env, capture_output=True, text=True, check=False)
         calls = [json.loads(line) for line in self.log.read_text(encoding="utf-8").splitlines()] \
             if self.log.exists() else []
@@ -253,7 +258,7 @@ class ShardWorkflowTests(unittest.TestCase):
         self.assertTrue(script.strip())
         for status in ("success", "failure", "cancelled", "skipped", "", "unknown"):
             with self.subTest(status=status):
-                result = subprocess.run(["bash", "-e", "-c", self.aggregate_script("success", status)],
+                result = subprocess.run([BASH, "-e", "-c", self.aggregate_script("success", status)],
                                         env=dict(os.environ, TIDY_SHARD_RESULT=status, CI_PATHS_RESULT="success", NEEDS_CPP="true"),
                                         capture_output=True, text=True, check=False)
                 self.assertEqual(result.returncode == 0, status == "success", result.stderr)
@@ -268,7 +273,7 @@ class ShardWorkflowTests(unittest.TestCase):
                         with self.subTest(classification=classification, cpp=cpp, status=status):
                             summary.unlink(missing_ok=True)
                             result = subprocess.run(
-                                ["bash", "-e", "-c", self.aggregate_script(classification, status)],
+                                [BASH, "-e", "-c", self.aggregate_script(classification, status)],
                                 env=dict(os.environ, TIDY_SHARD_RESULT=status,
                                          CI_PATHS_RESULT=classification, NEEDS_CPP=cpp,
                                          GITHUB_STEP_SUMMARY=str(summary)),
