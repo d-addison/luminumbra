@@ -259,7 +259,7 @@
         {
           "kind": "doc",
           "ref": "docs/render-benchmark.md",
-          "detail": "V4 qualification requires a nonempty named graphics preset; RenderContractPython rejects null presets and not_exposed status for every scripted workload."
+          "detail": "V4 qualification requires a nonempty named graphics preset; RenderContractPython rejects null presets and not_exposed status for every scripted workload. Cave qualification awaits live Ladder activation. Frame evidence uses bounded records serialized after measurement; RenderResolvedConfiguration checks record bounds and workload option forms. RenderSavedAuthorityTampering and HostSchedulerFault cover verified snapshots and refusal without save replacement."
         },
         {
           "kind": "script",

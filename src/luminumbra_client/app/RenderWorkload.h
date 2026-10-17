@@ -2,9 +2,15 @@
 
 #include "RenderMeasurement.h"
 
+#include <array>
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
 #include <optional>
+#include <stdexcept>
 #include <string_view>
+#include <vector>
 
 namespace Luminumbra::Client::Measurement {
 
@@ -17,6 +23,81 @@ inline void require_workload_world_load(bool capture_active,
         throw std::invalid_argument("schema v4 refuses --load-world and existing-world loads; "
                                     "only the world created by this capture may be reloaded");
 }
+
+// Allocate before warmup. Appending a fixed record never allocates; each frame
+// and each transition is visited once. Refuse overflow without dropping evidence.
+template<class T, std::size_t Limit>
+class ObservationRecords {
+    static_assert(Limit <= std::numeric_limits<std::size_t>::max() / sizeof(T));
+
+public:
+    explicit ObservationRecords(std::size_t capacity)
+        : records_(checked_capacity(capacity)) {}
+    void append(const T& record) {
+        if (size_ == records_.size())
+            throw std::runtime_error("workload observations exceed bounds");
+        records_[size_++] = record;
+    }
+    std::size_t size() const {
+        return size_;
+    }
+    std::size_t remaining() const {
+        return records_.size() - size_;
+    }
+    const T& at(std::size_t index) const {
+        if (index >= size_)
+            throw std::out_of_range("missing workload observation");
+        return records_[index];
+    }
+
+private:
+    static std::size_t checked_capacity(std::size_t capacity) {
+        if (capacity > Limit)
+            throw std::invalid_argument("workload observation capacity exceeds bounds");
+        return capacity;
+    }
+    std::vector<T> records_;
+    std::size_t size_ = 0;
+};
+
+struct CameraObservation {
+    int tick = 0;
+    std::array<double, 3> position{};
+    double yaw = 0, pitch = 0;
+};
+struct ActionObservation {
+    int tick = 0;
+    std::string_view name;
+    bool succeeded = false;
+    int modified_chunks = 0;
+};
+struct TransitionObservation {
+    std::array<int, 2> region{};
+    int from = 0, to = 0;
+};
+struct WorkloadObservation {
+    int tick = 0;
+    double presentation_seconds = 0;
+    std::uint64_t frame = 0;
+    std::string_view state, ui_document;
+    bool paused = false;
+    std::array<int, 2> region{};
+    std::size_t transitions_begin = 0, transitions_end = 0;
+    std::string_view far_requested, far_effective;
+    std::optional<int> cave_requested, cave_effective;
+    bool underground = false, camera_in_air = false;
+    std::uint64_t foliage_build_generation = 0, terrain_uploads = 0, stream_queue_depth = 0;
+    std::uint64_t stream_generation_batches = 0, stream_meshing_batches = 0;
+    std::uint64_t stream_pending_lod_chunks = 0;
+    bool stream_promotion_pending = false;
+    bool region_scheduler_fault = false;
+    std::uint64_t terrain_upload_candidates = 0, water_upload_candidates = 0;
+    bool foliage_pending = false, world_ready = false, settled = false;
+};
+// Bound transition storage independently of frame count (at most 65536 per
+// capture); reject excess before iterating any transition in the refused frame.
+inline constexpr std::size_t kMaxCaptureTransitions = 65536;
+using TransitionRecords = ObservationRecords<TransitionObservation, kMaxCaptureTransitions>;
 
 struct ActionResult {
     bool succeeded = true;

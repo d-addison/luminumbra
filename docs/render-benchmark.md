@@ -262,7 +262,7 @@ regions, drives their local anchor from the scripted camera, and records real
 scheduler transitions. Validation requires both departure from Active and
 reactivation, plus camera positions on different 512 m regions.
 
-This base refuses live Ladder activation without immutable committed authority
+**Cave workload status: awaiting activation.** This base refuses live Ladder activation without immutable committed authority
 and dirty parking. Consequently the cave script can collect traversal evidence,
 but cannot qualify its active cave policy on this base. The report preserves the
 requested Ladder/effective Legacy distinction and the checker fails that capture.
@@ -347,6 +347,19 @@ preserve it, and menus continue to animate at the script rate while simulation
 is paused. Every workload observation records `presentation_seconds`, which
 the validator checks against its tick. Other captures and normal play retain
 the existing wall-clock sources.
+
+Frame, camera, action and region-transition observations use fixed records allocated
+before warmup; JSON serialization runs after measurement. Storage is bounded to
+18,000 frame records and camera poses, 64 actions, and 65,536 transitions across
+the capture. Excess transitions refuse before that frame's transitions are copied.
+
+Saved-world reloads copy at most 65,536 entries, 4,096 UTF-8 bytes per relative
+path, 64 directory levels and 512 MiB of payload into an owned snapshot. Reads
+use one regular-file handle per source file. Only a snapshot matching the recorded
+save digest reaches the loader; subsequent live-save changes cannot change its
+metadata, preset, clock, ledger, chunks, plants or energy input. A mismatch refuses
+before the world swap, and capture refusal disables persistence on exit. The
+snapshot is temporary; subsequent saves still target the configured save root.
 
 Warmup and measurement contain all their frame-wall samples, independently of
 slow-frame logging. The first warmup wall interval starts after preparation;

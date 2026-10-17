@@ -450,7 +450,8 @@ TEST_F(HostSchedulerFault, RefusedCapturePreservesReplacementSave) {
             replacement = contents();
             bool refused = false;
             try {
-                Measurement::require_saved_world_digest(directory, recorded);
+                const Measurement::VerifiedSaveSnapshot snapshot(
+                    directory, recorded, session.GetMetadata().worldId);
             } catch (const std::runtime_error& error) {
                 EXPECT_STREQ(error.what(), "workload saved authority changed before reload");
                 refused = true;
@@ -468,6 +469,42 @@ TEST_F(HostSchedulerFault, RefusedCapturePreservesReplacementSave) {
         }
         // Destruction also leaves every file and byte of the refused save intact.
         EXPECT_EQ(contents(), replacement);
+        jobs.shutdown();
+    }
+}
+
+TEST_F(HostSchedulerFault, VerifiedSnapshotLoadsOriginalAfterLiveSaveReplacement) {
+    namespace Measurement = Luminumbra::Client::Measurement;
+    for (const bool active_regions : {false, true}) {
+        Luminumbra::JobSystem jobs;
+        jobs.startup(1);
+        {
+            GameSession session;
+            session.SetJobSystem(&jobs);
+            session.SetRootPath(root.generic_string() + "/");
+            session.SetActiveRegionsEnabled(active_regions);
+            ASSERT_TRUE(session.CreateWorld("Snapshot original", "1337", "default"));
+            ASSERT_TRUE(session.SaveWorldState());
+            ASSERT_TRUE(session.SaveWorld());
+            const auto directory = session.GetWorldSaveDir();
+            const auto recorded = Measurement::saved_world_digest(directory);
+            const auto id = session.GetMetadata().worldId;
+            const auto authority = LiveAuthoritativeContents(session);
+            const Measurement::VerifiedSaveSnapshot snapshot(directory, recorded, id);
+            const auto metadata_path = directory / "world_info.json";
+            auto metadata = nlohmann::json::parse(ReadHostFile(metadata_path));
+            metadata["name"] = "Snapshot replaced";
+            WriteHostFile(metadata_path, metadata.dump(4) + "\n");
+            const auto replacement = ReadHostFile(metadata_path);
+            ASSERT_TRUE(session.LoadWorldFrom(id, snapshot.root()));
+            EXPECT_EQ(session.GetMetadata().name, "Snapshot original");
+            EXPECT_EQ(session.GetWorldSaveDir(), directory);
+            EXPECT_EQ(LiveAuthoritativeContents(session), authority);
+            EXPECT_EQ(ReadHostFile(metadata_path), replacement);
+            // Normal callers still read the configured live root.
+            ASSERT_TRUE(session.LoadWorld(id));
+            EXPECT_EQ(session.GetMetadata().name, "Snapshot replaced");
+        }
         jobs.shutdown();
     }
 }

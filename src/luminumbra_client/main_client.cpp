@@ -104,6 +104,8 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "rendering/Camera.h"
 #include "rendering/ExposureModel.h" //  rendering: lens EV -> render exposure multiplier
 #include "rendering/FarLodSystem.h"
+#include "rendering/FarWorldDiagnostics.h"
+#include "rendering/FarWorldSelection.h"
 #include "rendering/FoliageSurface.h" // Rendering::FoliageScatterContext / FoliageSurfaceQuery
 #include "rendering/FrameHealth.h" // auto frame-health anomaly verdict (black/unlit/blown), render-only
 #include "rendering/FrameScan.h" // framescan: deterministic what's-in-frame scan tool (render-only)
@@ -2713,18 +2715,21 @@ int main(int argc, char* argv[]) {
             refuse_world_entry(asset_error, false);
             return;
         }
-        // The UI's inspection is advisory: revalidate all artifacts at the moment of opening.
-        prepare_world_entry();
+        std::unique_ptr<Measurement::VerifiedSaveSnapshot> snapshot;
         if (benchmark_v4) {
             try {
-                Measurement::require_saved_world_digest(gameSession->GetWorldSaveDir(),
-                                                        benchmark_saved_world_digest);
+                snapshot = std::make_unique<Measurement::VerifiedSaveSnapshot>(
+                    gameSession->GetWorldSaveDir(), benchmark_saved_world_digest, id);
             } catch (const std::exception& error) {
                 refuse_world_entry(error.what(), false);
                 return;
             }
         }
-        if (!gameSession->LoadWorld(id)) {
+        // Verify the snapshot before draining or changing the current world.
+        prepare_world_entry();
+        const bool loaded = snapshot ? gameSession->LoadWorldFrom(id, snapshot->root())
+                                     : gameSession->LoadWorld(id);
+        if (!loaded) {
             refuse_world_entry("Could not load this world.");
             return;
         }
@@ -3626,12 +3631,20 @@ int main(int argc, char* argv[]) {
     nlohmann::json benchmark_world_identity;
     std::chrono::steady_clock::time_point traversal_start{};
     double traversal_measured_duration = 0.0;
-    nlohmann::json traversal_camera_samples = nlohmann::json::array();
+    // Each buffer is allocated before warmup: at most 18000 frames/camera poses,
+    // 64 actions and 65536 transitions across the entire capture.
+    const auto observation_capacity =
+        benchmark_v3 ? static_cast<std::size_t>(g_app.capture.render_benchmark_frames) : 0;
+    Measurement::ObservationRecords<Measurement::CameraObservation, Measurement::kMaxFrames>
+        traversal_camera_records(observation_capacity);
     std::size_t workload_action_index = 0;
-    nlohmann::json workload_actions = nlohmann::json::array();
-    nlohmann::json workload_observations = nlohmann::json::array();
+    Measurement::ObservationRecords<Measurement::ActionObservation, 64> workload_action_records(
+        benchmark_v4 ? 64 : 0);
+    Measurement::ObservationRecords<Measurement::WorkloadObservation, Measurement::kMaxFrames>
+        workload_frame_records(benchmark_v4 ? observation_capacity : 0);
+    Measurement::TransitionRecords workload_transition_records(
+        benchmark_v4 ? Measurement::kMaxCaptureTransitions : 0);
     nlohmann::json workload_windows = nlohmann::json::object();
-    nlohmann::json reload_result = nullptr;
     Measurement::ReloadInterval reload_interval;
     // Warmup and measurement are each bounded by kMaxFrames.
     std::vector<double> workload_warmup_wall;
@@ -3650,6 +3663,9 @@ int main(int argc, char* argv[]) {
     };
     auto active_overrides =
         benchmark_v3 ? Measurement::render_overrides(argc, argv) : nlohmann::json::object();
+    bool observed_wireframe = false;
+    std::optional<int> observed_debug_view;
+    std::optional<float> observed_time_scale;
     if (benchmark_v3) {
         measured_samples =
             std::make_unique<Measurement::SampleRing>(g_app.capture.render_benchmark_frames);
@@ -3847,10 +3863,8 @@ int main(int argc, char* argv[]) {
                     },
                     [&](const Measurement::Traversal::Action& action,
                         const Measurement::ActionResult& result) {
-                        workload_actions.push_back({{"tick", action.tick},
-                                                    {"name", action.name},
-                                                    {"succeeded", result.succeeded},
-                                                    {"modified_chunks", result.modified_chunks}});
+                        workload_action_records.append(
+                            {action.tick, action.name, result.succeeded, result.modified_chunks});
                         if (!result.succeeded)
                             LUMINUMBRA_CORE_ERROR("Benchmark action failed: {}", action.name);
                     });
@@ -5538,21 +5552,18 @@ int main(int argc, char* argv[]) {
                 sample.cpu = cpu_submit_ms;
                 sample.present = present_ms;
                 if (traversal && g_camera) {
-                    traversal_camera_samples.push_back(
-                        {{"tick", traversal_target_tick},
-                         {"position",
-                          {g_camera->Position.x, g_camera->Position.y, g_camera->Position.z}},
-                         {"yaw", g_camera->Yaw},
-                         {"pitch", g_camera->Pitch}});
+                    traversal_camera_records.append(
+                        {traversal_target_tick,
+                         {g_camera->Position.x, g_camera->Position.y, g_camera->Position.z},
+                         g_camera->Yaw,
+                         g_camera->Pitch});
                 }
                 if (g_app.overlay.wireframe_mode)
-                    active_overrides["runtime:wireframe"] = "true";
+                    observed_wireframe = true;
                 if (g_app.overlay.debug_view_mode != 0)
-                    active_overrides["runtime:debug_view"] =
-                        std::to_string(g_app.overlay.debug_view_mode);
+                    observed_debug_view = g_app.overlay.debug_view_mode;
                 if (g_app.capture.timeScale != 1.0f)
-                    active_overrides["runtime:time_scale"] =
-                        std::to_string(g_app.capture.timeScale);
+                    observed_time_scale = g_app.capture.timeScale;
             }
             if (benchmark_v4 && measuring_v3) {
                 traversal_ticks = static_cast<std::uint64_t>(traversal_target_tick);
@@ -5596,12 +5607,18 @@ int main(int argc, char* argv[]) {
                         camera_in_air = chunk->sdf_data[x + y * size_x + z * size_x * size_y] > 0;
                     }
                 }
-                nlohmann::json transitions = nlohmann::json::array();
+                const auto transitions_begin = workload_transition_records.size();
                 if (in_game && !g_app.hud.paused) {
-                    for (const auto& transition : gameSession->GetRegionSchedule().transitions)
-                        transitions.push_back({{"region", {transition.key.x, transition.key.z}},
-                                               {"from", static_cast<int>(transition.from)},
-                                               {"to", static_cast<int>(transition.to)}});
+                    const auto& transitions = gameSession->GetRegionSchedule().transitions;
+                    if (transitions.size() > workload_transition_records.remaining()) {
+                        LUMINUMBRA_CORE_ERROR("Benchmark region observations exceed bounds");
+                        exit_code = 2;
+                        break;
+                    }
+                    for (const auto& transition : transitions)
+                        workload_transition_records.append({{transition.key.x, transition.key.z},
+                                                            static_cast<int>(transition.from),
+                                                            static_cast<int>(transition.to)});
                 }
                 const auto menu = Measurement::observe_menu(
                     in_game, g_app.hud.paused, [&](const char* identifier) {
@@ -5611,50 +5628,43 @@ int main(int argc, char* argv[]) {
                         const auto* document = g_uiManager->GetContext()->GetDocument(identifier);
                         return document && document->IsVisible();
                     });
-                workload_observations.push_back(
-                    {{"tick", traversal_target_tick},
-                     {"presentation_seconds",
-                      *Luminumbra::Client::presentation_clock.capture_seconds()},
-                     {"frame", measured_frame_id},
-                     {"state", menu.state},
-                     {"ui_document", menu.document},
-                     {"paused", menu.paused},
-                     {"region", {region.x, region.z}},
-                     {"transitions", std::move(transitions)},
-                     {"far_requested",
-                      Luminumbra::Rendering::FarWorldModeName(selection.requested)},
-                     {"far_effective",
-                      Luminumbra::Rendering::FarWorldModeName(selection.effective)},
-                     {"cave_requested",
-                      cave.requested ? nlohmann::json(static_cast<int>(*cave.requested))
-                                     : nlohmann::json(nullptr)},
-                     {"cave_effective",
-                      cave.effective ? nlohmann::json(static_cast<int>(*cave.effective))
-                                     : nlohmann::json(nullptr)},
-                     {"underground",
-                      in_game &&
-                          g_camera->Position.y < world->GetTerrainHeightAt(g_camera->Position.x,
-                                                                           g_camera->Position.z)},
-                     {"camera_in_air", camera_in_air},
-                     {"foliage_build_generation", foliage ? foliage->build_generation() : 0},
-                     {"terrain_uploads", uploads.terrain_uploads},
-                     {"stream_queue_depth", streaming.last_queue_depth},
-                     {"stream_generation_batches", streaming.generation_batches},
-                     {"stream_meshing_batches", streaming.meshing_batches},
-                     {"stream_pending_lod_chunks", streaming.pending_lod_chunks},
-                     {"stream_promotion_pending", streaming.promotion_pending},
-                     {"region_scheduler_fault", region_scheduler_fault},
-                     {"terrain_upload_candidates", uploads.terrain_upload_candidates},
-                     {"water_upload_candidates", uploads.water_upload_candidates},
-                     {"foliage_pending", foliage && foliage->build_pending()},
-                     {"world_ready", scenario_ready && !scenario_failed},
-                     {"settled", settled}});
+                workload_frame_records.append(
+                    {.tick = traversal_target_tick,
+                     .presentation_seconds =
+                         *Luminumbra::Client::presentation_clock.capture_seconds(),
+                     .frame = measured_frame_id,
+                     .state = menu.state,
+                     .ui_document = menu.document,
+                     .paused = menu.paused,
+                     .region = {region.x, region.z},
+                     .transitions_begin = transitions_begin,
+                     .transitions_end = workload_transition_records.size(),
+                     .far_requested = Luminumbra::Rendering::FarWorldModeName(selection.requested),
+                     .far_effective = Luminumbra::Rendering::FarWorldModeName(selection.effective),
+                     .cave_requested = cave.requested
+                                           ? std::optional<int>(static_cast<int>(*cave.requested))
+                                           : std::nullopt,
+                     .cave_effective = cave.effective
+                                           ? std::optional<int>(static_cast<int>(*cave.effective))
+                                           : std::nullopt,
+                     .underground = in_game && g_camera->Position.y <
+                                                   world->GetTerrainHeightAt(g_camera->Position.x,
+                                                                             g_camera->Position.z),
+                     .camera_in_air = camera_in_air,
+                     .foliage_build_generation = foliage ? foliage->build_generation() : 0,
+                     .terrain_uploads = uploads.terrain_uploads,
+                     .stream_queue_depth = streaming.last_queue_depth,
+                     .stream_generation_batches = streaming.generation_batches,
+                     .stream_meshing_batches = streaming.meshing_batches,
+                     .stream_pending_lod_chunks = streaming.pending_lod_chunks,
+                     .stream_promotion_pending = streaming.promotion_pending,
+                     .region_scheduler_fault = region_scheduler_fault,
+                     .terrain_upload_candidates = uploads.terrain_upload_candidates,
+                     .water_upload_candidates = uploads.water_upload_candidates,
+                     .foliage_pending = foliage && foliage->build_pending(),
+                     .world_ready = scenario_ready && !scenario_failed,
+                     .settled = settled});
                 reload_interval.observe(measured_frame_id, settled, rb_now);
-                if (const auto& result = reload_interval.result();
-                    result && reload_result.is_null())
-                    reload_result = {{"request_frame", result->request_frame},
-                                     {"first_settled_frame", result->first_settled_frame},
-                                     {"elapsed_ms", result->elapsed_ms}};
             }
             rb_prev_end = rb_now;
 
@@ -5982,6 +5992,14 @@ int main(int argc, char* argv[]) {
                                     {"render_scale", renderPipeline.render_scale()},
                                     {"width", renderPipeline.screen_width()},
                                     {"height", renderPipeline.screen_height()}};
+                    if (observed_wireframe)
+                        active_overrides["runtime:wireframe"] = "true";
+                    if (observed_debug_view)
+                        active_overrides["runtime:debug_view"] =
+                            std::to_string(*observed_debug_view);
+                    if (observed_time_scale)
+                        active_overrides["runtime:time_scale"] =
+                            std::to_string(*observed_time_scale);
                     j["debug_overrides"] = {{"active", active_overrides},
                                             {"declared", declared_overrides}};
                     j["excluded_windows"] = nlohmann::json::array(
@@ -6004,7 +6022,16 @@ int main(int argc, char* argv[]) {
                         j["workload"]["actual_ticks"] = traversal_ticks;
                         j["workload"]["measured_duration_seconds"] = traversal_measured_duration;
                         j["workload"]["cold_cache"] = true;
-                        j["workload"]["camera_samples"] = traversal_camera_samples;
+                        auto& camera_samples = j["workload"]["camera_samples"] =
+                            nlohmann::json::array();
+                        for (std::size_t index = 0; index < traversal_camera_records.size();
+                             ++index) {
+                            const auto& record = traversal_camera_records.at(index);
+                            camera_samples.push_back({{"tick", record.tick},
+                                                      {"position", record.position},
+                                                      {"yaw", record.yaw},
+                                                      {"pitch", record.pitch}});
+                        }
                     }
                 }
                 if (benchmark_v4) {
@@ -6032,6 +6059,10 @@ int main(int argc, char* argv[]) {
                         {"work_limit", region_config.work_limit},
                         {"hold_ticks", region_config.hold_ticks},
                         {"reduced_shift", region_config.reduced_shift}};
+                    auto workload_observations = nlohmann::json::array();
+                    for (std::size_t index = 0; index < workload_frame_records.size(); ++index)
+                        workload_observations.push_back(Measurement::workload_observation_json(
+                            workload_frame_records.at(index), workload_transition_records));
                     const auto& last_observation = workload_observations.back();
                     j["settings"]["far_mode"] = {
                         {"requested", last_observation["far_requested"]},
@@ -6071,9 +6102,20 @@ int main(int argc, char* argv[]) {
                     workload_windows["measured"]["distribution"] =
                         j["distribution"]["frame_wall_ms"];
                     j["windows"] = workload_windows;
-                    j["workload"]["actions"] = workload_actions;
+                    auto& actions = j["workload"]["actions"] = nlohmann::json::array();
+                    for (std::size_t index = 0; index < workload_action_records.size(); ++index) {
+                        const auto& record = workload_action_records.at(index);
+                        actions.push_back({{"tick", record.tick},
+                                           {"name", record.name},
+                                           {"succeeded", record.succeeded},
+                                           {"modified_chunks", record.modified_chunks}});
+                    }
                     j["workload"]["observations"] = workload_observations;
-                    j["workload"]["reload"] = reload_result;
+                    auto& reload = j["workload"]["reload"] = nullptr;
+                    if (const auto& result = reload_interval.result())
+                        reload = {{"request_frame", result->request_frame},
+                                  {"first_settled_frame", result->first_settled_frame},
+                                  {"elapsed_ms", result->elapsed_ms}};
                 }
                 std::error_code _rb_ec;
                 const std::filesystem::path rb_path(g_app.capture.render_benchmark_path);

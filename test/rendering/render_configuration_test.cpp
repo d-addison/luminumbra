@@ -1,3 +1,4 @@
+#include "luminumbra_client/app/RenderBenchmarkReport.h"
 #include "luminumbra_client/app/RenderConfiguration.h"
 #include "luminumbra_client/app/RenderMeasurement.h"
 #include "luminumbra_client/app/RenderWorkload.h"
@@ -26,6 +27,10 @@
 
 #include <nlohmann/json.hpp>
 #include <nlohmann/json_fwd.hpp>
+
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
 
 namespace {
 using namespace Luminumbra::Client::Measurement;
@@ -105,17 +110,25 @@ void graphics_capture_configuration() {
         settings.base_preset = preset;
         require(luminumbra::core::ResolveGraphics(settings, {}, resolved, error));
         const auto captured = graphics_configuration(settings, resolved);
-        require(captured.at("base_preset") == luminumbra::core::GraphicsPresetName(preset));
+        require(captured.at("base_preset").get<std::string>() ==
+                luminumbra::core::GraphicsPresetName(preset));
         require(render_identity(captured) != original);
     }
-    settings.overrides = {{"grass_density", 0.5}, {"taau", false}, {"ui_blur", std::string("off")}};
+    settings.overrides = {
+        {"grass_density", 0.5}, {"grass_enabled", false}, {"ui_blur", std::string("off")}};
     const luminumbra::core::GraphicsOverrides session = {{"render_scale", 0.75}};
     require(luminumbra::core::ResolveGraphics(settings, session, resolved, error));
     const auto captured = graphics_configuration(settings, resolved);
     require(captured.at("saved_overrides").at("grass_density") == 0.5);
-    require(captured.at("saved_overrides").at("taau") == false);
+    require(captured.at("saved_overrides").at("grass_enabled") == false);
     require(captured.at("saved_overrides").at("ui_blur") == "off");
     require(captured.at("session_overrides").at("render_scale") == 0.75);
+    require(!resolved.values.grass_enabled && resolved.values.render_scale == 0.75);
+    auto unsupported = settings;
+    unsupported.overrides["taau"] = false;
+    const auto previous = resolved.values;
+    require(!luminumbra::core::ResolveGraphics(unsupported, session, resolved, error));
+    require(resolved.values == previous);
     require(render_identity(captured) != original);
     const json assets = {{"data/input.json", "unchanged"}};
     auto saved = assets;
@@ -338,6 +351,156 @@ void saved_authority() {
     content.write("save/chunks/part.bin", std::string("\0\1\r\n", 4));
     require_saved_world_digest(directory, recorded);
     require_refusal([&] { require_saved_world_digest(directory, {}); });
+}
+
+void snapshot_authority() {
+    const TemporaryContent content;
+    content.write("save/world_info.json", "original\r\n");
+    content.write("save/region/payload", std::string("\0\1\r\n", 4));
+    const auto directory = content.root() / "save";
+    const auto recorded = saved_world_digest(directory);
+    std::filesystem::path snapshot_root;
+    {
+        const VerifiedSaveSnapshot snapshot(directory, recorded, "capture");
+        snapshot_root = snapshot.root();
+        const auto copy = snapshot_root / "worlds/saves/capture";
+        require(saved_world_digest(copy) == recorded);
+        // Replace the live file after verification, before the consumer opens.
+        content.write("save/world_info.json", "replaced\r\n");
+        content.write("save/region/payload", "changed");
+        require(saved_world_digest(copy) == recorded);
+        require_refusal(
+            [&] { const VerifiedSaveSnapshot rejected(directory, recorded, "capture"); });
+        require(saved_world_digest(copy) == recorded);
+    }
+    require(!std::filesystem::exists(snapshot_root));
+    const std::ifstream live(directory / "world_info.json", std::ios::binary);
+    std::ostringstream live_bytes;
+    live_bytes << live.rdbuf();
+    require(live_bytes.str() == "replaced\r\n");
+    for (const std::string id : {"", ".", "..", "a/b", "a\\b", "C:save"})
+        require_refusal([&] { const VerifiedSaveSnapshot rejected(directory, recorded, id); });
+    require_refusal([&] { const VerifiedSaveSnapshot rejected(directory, {}, "capture"); });
+    std::filesystem::create_directory(content.root() / "empty");
+    const auto empty_digest = saved_world_digest(content.root() / "empty");
+    require_refusal([&] {
+        const VerifiedSaveSnapshot rejected(content.root() / "empty", empty_digest, "capture");
+    });
+    require_refusal([&] { const SavedFileInput missing(directory / "missing"); });
+    require_refusal([&] { const SavedFileInput special(directory); });
+    // A sparse file exercises the byte ceiling before any proportional allocation.
+    content.write("oversize/payload", "");
+    std::filesystem::resize_file(content.root() / "oversize/payload", 512ull * 1024 * 1024 + 1);
+    require_refusal([&] { saved_world_digest(content.root() / "oversize"); });
+#ifndef _WIN32
+    // No writer is needed: a blocking open here would hang on this FIFO.
+    require(::mkfifo((directory / "pipe").c_str(), 0600) == 0);
+    require_refusal([&] { const SavedFileInput special(directory / "pipe"); });
+    require_refusal([&] { saved_world_digest(directory); });
+#endif
+}
+
+void observation_records() {
+    ObservationRecords<WorkloadObservation, kMaxFrames> frames(2);
+    require(frames.size() == 0 && frames.remaining() == 2);
+    TransitionRecords transitions(2);
+    transitions.append({{1, -1}, 0, 1});
+    transitions.append({{2, -2}, 1, 0});
+    WorkloadObservation first;
+    first.tick = 1;
+    first.frame = 400;
+    first.state = "gameplay";
+    first.ui_document = "hud";
+    first.far_requested = "legacy";
+    first.far_effective = "legacy";
+    first.transitions_end = 2;
+    first.cave_requested = 0;
+    first.settled = true;
+    frames.append(first);
+    const auto* address = &frames.at(0);
+    frames.append({});
+    require(&frames.at(0) == address && frames.remaining() == 0);
+    const auto row = workload_observation_json(frames.at(0), transitions);
+    require(row.at("tick") == 1 && row.at("frame") == 400);
+    require(row.at("cave_requested") == 0 && row.at("cave_effective").is_null());
+    require(row.at("transitions").size() == 2);
+    require(row.at("transitions")[1].at("region") == json::array({2, -2}));
+    require(row.at("settled") == true && row.at("state") == "gameplay");
+    for (const char* flag : {"paused",
+                             "underground",
+                             "camera_in_air",
+                             "stream_promotion_pending",
+                             "region_scheduler_fault",
+                             "foliage_pending",
+                             "world_ready",
+                             "settled"})
+        require(row.at(flag).is_boolean());
+    require_refusal([&] { frames.append({}); });
+    require(frames.size() == 2 && frames.at(0).frame == 400);
+    require_refusal([&] { transitions.append({}); });
+    const auto invalid_capacity = [](auto create) {
+        bool refused = false;
+        try {
+            create();
+        } catch (const std::invalid_argument&) {
+            refused = true;
+        }
+        require(refused);
+    };
+    invalid_capacity(
+        [] { (void)ObservationRecords<WorkloadObservation, kMaxFrames>(kMaxFrames + 1); });
+    invalid_capacity([] { (void)TransitionRecords(kMaxCaptureTransitions + 1); });
+    ObservationRecords<ActionObservation, 64> empty(0);
+    require_refusal([&] { empty.append({}); });
+    bool missing = false;
+    try {
+        (void)frames.at(2);
+    } catch (const std::out_of_range&) {
+        missing = true;
+    }
+    require(missing);
+}
+
+void workload_options() {
+    for (const std::string option : {"--render-benchmark",
+                                     "--render-benchmark-schema",
+                                     "--render-benchmark-frames",
+                                     "--render-benchmark-warmup",
+                                     "--render-benchmark-screenshot",
+                                     "--capture-size",
+                                     "--load-world",
+                                     "--perf-profile",
+                                     "--traversal",
+                                     "--runtime-root",
+                                     "--save-root",
+                                     "--declare-render-overrides",
+                                     "--world-preset",
+                                     "--cam-pos",
+                                     "--cam-yaw",
+                                     "--cam-pitch",
+                                     "--window-mode"}) {
+        for (const bool assigned : {false, true}) {
+            for (const std::string value : {"1280x720", "0", ""}) {
+                auto option_argument = option;
+                if (assigned) {
+                    option_argument += '=';
+                    option_argument += value;
+                }
+                std::vector<std::string> arguments = {"client", option_argument};
+                if (!assigned)
+                    arguments.push_back(value);
+                arguments.insert(arguments.end(), {"--render-scale=0", "successor"});
+                std::vector<char*> argv;
+                argv.reserve(arguments.size());
+                for (auto& argument : arguments)
+                    argv.push_back(argument.data());
+                const auto overrides = render_overrides(static_cast<int>(argv.size()), argv.data());
+                require(!overrides.contains("cli:" + option));
+                require(overrides.at("cli:--render-scale") == "0");
+                require(overrides.at("cli:successor") == "true");
+            }
+        }
+    }
 }
 
 json path_diagnostics(const std::filesystem::path& path) {
@@ -614,6 +777,7 @@ int main(int argc, char** argv) {
     try {
         if (argc == 2 && std::string_view(argv[1]) == "saved-authority") {
             saved_authority();
+            snapshot_authority();
             return 0;
         }
         if (argc == 2 && std::string_view(argv[1]) == "content-references") {
@@ -629,6 +793,8 @@ int main(int argc, char** argv) {
             return 0;
         }
         require(argc == 1);
+        workload_options();
+        observation_records();
         configuration();
         graphics_capture_configuration();
         simulation_configuration();
