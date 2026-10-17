@@ -1048,14 +1048,19 @@ TEST(GameSessionHeadlessWorldTest, CatalogResolvesPackagedPresetsUnderRuntimeRoo
         // Historical saves predate the format marker, embedded preset and checksum.
         document.erase("presetFormat");
         document.erase("presetIdentity");
-        {
-            std::ofstream output(metadata);
-            output << document.dump();
-        }
+        // Creation now indexes metadata by default. Keep that index consistent
+        // while expressing the historical preset contract this fixture exercises.
+        ASSERT_TRUE(Luminumbra::Persistence::WorldSaveService::save_metadata(
+            document.dump(), session.GetWorldSaveDir()));
         const auto saved =
             Luminumbra::Persistence::InspectSavedWorld(storage.path(), assets.path(), world_id);
         EXPECT_TRUE(saved.error.empty()) << saved.error;
         EXPECT_EQ(saved.preset_path, assets.path() / "worlds/atlas/presets-rev6/default.json");
+        const auto catalog =
+            Luminumbra::Persistence::EnumerateSavedWorlds(storage.path(), assets.path());
+        ASSERT_EQ(catalog.worlds.size(), 1u);
+        EXPECT_TRUE(catalog.worlds.front().error.empty()) << catalog.worlds.front().error;
+        EXPECT_EQ(catalog.worlds.front().preset_path, saved.preset_path);
         ASSERT_TRUE(session.LoadWorld(world_id)) << session.GetWorldOpenError();
     }
     jobs.shutdown();
@@ -1561,7 +1566,7 @@ TEST_P(SavedWorldPresetTest, MissingOrInvalidIdentityRefusesWithoutWrites) {
     const auto path = created.GetWorldSaveDir() / "world_info.json";
     auto metadata = nlohmann::json::parse(ReadClockTestFile(path));
     metadata.erase("presetIdentity");
-    WriteSavedPresetTestJson(path, metadata);
+    ASSERT_TRUE(P::WorldSaveService::save_metadata(metadata.dump(), created.GetWorldSaveDir()));
     ExpectRefusedWithoutWrites(created.GetMetadata().worldId, "identity");
     for (const auto& identity : {nlohmann::json(nullptr),
                                  nlohmann::json(123),
@@ -1569,7 +1574,7 @@ TEST_P(SavedWorldPresetTest, MissingOrInvalidIdentityRefusesWithoutWrites) {
                                  nlohmann::json("wrong")}) {
         SCOPED_TRACE(identity.dump());
         metadata["presetIdentity"] = identity;
-        WriteSavedPresetTestJson(path, metadata);
+        ASSERT_TRUE(P::WorldSaveService::save_metadata(metadata.dump(), created.GetWorldSaveDir()));
         ExpectRefusedWithoutWrites(created.GetMetadata().worldId, "identity");
     }
 }
@@ -1599,7 +1604,7 @@ TEST_P(SavedWorldPresetTest, InvalidFormatNeverFallsBack) {
                                nlohmann::json("1")}) {
         SCOPED_TRACE(format.dump());
         metadata["presetFormat"] = format;
-        WriteSavedPresetTestJson(save / "world_info.json", metadata);
+        ASSERT_TRUE(P::WorldSaveService::save_metadata(metadata.dump(), save));
         ExpectRefusedWithoutWrites(created.GetMetadata().worldId, "preset format");
     }
 }
