@@ -5,23 +5,44 @@
 #include "GBufferPass.h"
 #include "LightingPass.h"
 #include "PassGlHelpers.h"
+#include "app/FrameAttribution.h"
+#include "app/RenderMeasurement.h"
 #include "core/Log.h"
 #include "core/Profiler.h"
+#include "luminumbra/core/Types.h"
+#include "luminumbra_common/world/Chunk.h"
 #include "rendering/Camera.h"
+#include "rendering/RenderContext.h"
+#include "rendering/RenderFrameTypes.h"
 #include "rendering/Shader.h"
 #include <iterator>
 #include <limits>
 
-#include <GLFW/glfw3.h>
-#include <glm/gtc/matrix_transform.hpp>
+#include <glm/ext/matrix_float4x4.hpp>
+#include <glm/ext/vector_float4.hpp>
+#include <glm/ext/vector_int3.hpp>
+#include <glm/geometric.hpp>
+#include <glm/trigonometric.hpp>
 #include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
 
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
+#include <exception>
+#include <filesystem>
 #include <fstream>
+#include <memory>
+#include <optional>
+#include <ratio>
 #include <sstream>
 #include <stdexcept>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace Luminumbra::Rendering {
@@ -278,6 +299,7 @@ void FoliagePass::clear_ground_meshes() {
     m_scatter_built = false;
     m_uploaded_input_hash.reset();
     m_uploaded_chunk_count = 0;
+    m_attributed_signature_valid = false;
     m_foliage_build_backlog = false;
     m_instance_generation = 0;
     m_instances_from_gpu_readback = false;
@@ -498,7 +520,14 @@ void FoliagePass::destroy_compute() {
     m_group_counts_ssbo = m_group_offsets_ssbo = 0;
     m_gpu_scatter = false;
     m_gpu_generated_count.reset();
+    m_gpu_count_generation = 0;
     m_gpu_active = false;
+    m_instances.clear();
+    m_draw_instance_limit = 0;
+    m_instance_generation = 0;
+    m_instances_from_gpu_readback = false;
+    m_readback_submitted_generation = 0;
+    m_scatter_built = false;
 }
 
 bool FoliagePass::load_scatter_set(const std::filesystem::path& json_path) {
@@ -541,6 +570,7 @@ bool FoliagePass::load_scatter_set(const std::filesystem::path& json_path) {
         return false;
     }
     m_enabled = true;
+    m_scatter_built = false;
     ++m_chunk_cache_gen; // archetypes changed -> invalidate the per-chunk instance cache
     LUMINUMBRA_CORE_INFO("FoliagePass: loaded {} scatter archetypes from '{}'.",
                          m_archetypes.size(),
@@ -553,7 +583,7 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
                                     void* query_ctx,
                                     const glm::vec3& camera_pos) {
     const bool collect_attribution = Attribution::foliage_frame_active();
-    RebuildAttributionScope rebuild_scope(*this);
+    const RebuildAttributionScope rebuild_scope(*this);
     if (collect_attribution) {
         m_rebuild_attribution = {};
         m_rebuild_attribution.rebuild_calls = 1;
@@ -565,18 +595,8 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
     }
     Attribution::StageTimer signature_timer(m_rebuild_attribution.signature_ms,
                                             collect_attribution);
-    // drain any COMPLETED async blade readback into
-    // m_instances EVERY frame, BEFORE the scatter-cache elision below. The GPU
-    // blade buffer is unchanged while a build is elided, so a readback submitted on
-    // the last non-elided frame stays valid; draining it here (not only inside
-    // rebuild_instances_gpu, which the elision skips) keeps instance_hash/coverage
-    // populated on static frames. Stale-safe: m_instances is replaced only when a
-    // newer result arrives, so it is never re-emptied once primed.
-    if (m_readback_enabled && m_gpu_active) {
-        // A queued GPU result must not replace a newer CPU fallback instance set.
-        poll_foliage_readback();
-    }
-
+    // Poll only after resolving this call's input revision. A completed result
+    // from the previous build must not become the snapshot for changed inputs.
     poll_vertex_evidence();
     if (m_qualification.frozen_inputs) {
         signature_timer.stop();
@@ -587,8 +607,10 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
                 m_rebuild_attribution.reasons = Attribution::Config;
             rebuild_frozen_inputs();
         }
-        if (m_readback_submitted_generation != m_build_generation)
+        if (m_readback_enabled && m_readback_submitted_generation != m_build_generation)
             submit_foliage_readback();
+        if (m_readback_enabled && m_gpu_active)
+            poll_foliage_readback();
         return;
     }
 
@@ -678,9 +700,17 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
             config_mix(static_cast<std::uint64_t>(std::llround(m_density_scale * 100.0f)));
             components.config = config_sig;
             components.scatter_chunks = chunk_acc;
-            m_rebuild_attribution.reasons = Attribution::classify_rebuild(
-                m_attributed_signature, components, m_scatter_built, m_foliage_build_backlog);
+            m_rebuild_attribution.reasons =
+                Attribution::classify_rebuild(m_attributed_signature,
+                                              components,
+                                              m_attributed_signature_valid,
+                                              m_foliage_build_backlog);
+            // Settings setters also invalidate changes smaller than the quantized
+            // signature. Attribute those rebuilds even when its hash is unchanged.
+            if (m_attributed_signature_valid && !m_scatter_built)
+                m_rebuild_attribution.reasons |= Attribution::Config;
             m_attributed_signature = components;
+            m_attributed_signature_valid = true;
         }
         if (m_scatter_built && sig == m_last_scatter_sig && !m_foliage_build_backlog) {
             signature_timer.stop();
@@ -694,6 +724,8 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
                 m_readback_submitted_generation != m_build_generation) {
                 submit_foliage_readback();
             }
+            if (m_readback_enabled && m_gpu_active)
+                poll_foliage_readback();
             return; // unchanged -> reuse the last build (ring VBO + frame_instance_count)
         }
         m_last_scatter_sig = sig;
@@ -703,19 +735,26 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
     signature_timer.stop();
     m_uploaded_input_hash.reset();
     ++m_build_generation;
+    // A held blade snapshot may outlive its build, but its count cannot
+    // describe the new indirect command before a matching readback completes.
+    m_gpu_generated_count.reset();
+    m_gpu_count_generation = 0;
+    if (m_readback_enabled && m_gpu_active)
+        poll_foliage_readback();
     m_build_frame = m_evidence_frame;
     m_build_phase = m_evidence_phase;
     if (!m_enabled || m_archetypes.empty() || query == nullptr) {
         m_uploaded_chunk_count = 0;
         if (collect_attribution)
             m_rebuild_attribution.path = Attribution::FoliagePath::Inactive;
-        m_gpu_generated_count.reset();
-        if (m_readback_enabled) {
-            m_gpu_generated_count = 0;
-            m_gpu_count_generation = m_build_generation;
-        }
+        // No command was submitted for this generation. Do not tag the old
+        // GPU command as current on a later cache-elided readback retry.
+        m_gpu_active = false;
         m_instances.clear();
         m_draw_instance_limit = 0;
+        m_instance_generation = m_build_generation;
+        m_instances_from_gpu_readback = false;
+        m_instance_available_frame = m_evidence_frame;
         return;
     }
 
@@ -755,7 +794,8 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
             m_rebuild_attribution.fallback = Attribution::FallbackReason::GpuDisabled;
         m_last_fallback = m_rebuild_attribution.fallback;
     }
-    Attribution::StageTimer cpu_timer(m_rebuild_attribution.cpu_fallback_ms, collect_attribution);
+    const Attribution::StageTimer cpu_timer(m_rebuild_attribution.cpu_fallback_ms,
+                                            collect_attribution);
 
     // CPU fallback path: builds m_instances directly this frame.
     m_instances.clear();
@@ -793,7 +833,8 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
             cit->second.placement == scatter_signature(chunk)) {
             cachedp = &cit->second.records;
         } else if (builds_left > 0) {
-            Attribution::StageTimer timer(m_rebuild_attribution.surface_ms, collect_attribution);
+            const Attribution::StageTimer timer(m_rebuild_attribution.surface_ms,
+                                                collect_attribution);
             LUMIN_PROFILE_ZONE_N("Foliage CPU surface miss");
             if (collect_attribution)
                 ++m_rebuild_attribution.surface_misses;
@@ -867,13 +908,15 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
     m_instances_from_gpu_readback = false;
     m_instance_available_frame = m_evidence_frame;
     {
-        Attribution::StageTimer timer(m_rebuild_attribution.upload_ms, collect_attribution);
+        const Attribution::StageTimer timer(m_rebuild_attribution.upload_ms, collect_attribution);
         LUMIN_PROFILE_ZONE_N("Foliage mapped upload");
         map_instances_for_frame();
         if (m_instance_ptr[m_ring_cursor] != nullptr) {
             if (collect_attribution)
                 m_rebuild_attribution.uploaded_bytes +=
                     m_draw_instance_limit * sizeof(InstanceRecord);
+            if (collect_attribution && m_draw_instance_limit != 0)
+                ++m_rebuild_attribution.uploads;
             if (collect_attribution)
                 m_rebuild_attribution.copied_bytes +=
                     m_draw_instance_limit * sizeof(InstanceRecord);
@@ -919,6 +962,9 @@ const std::vector<FoliagePass::InstanceRecord>& FoliagePass::build_or_get_chunk_
             kMaxCandidatesPerChunk,
             static_cast<std::size_t>(std::lround(
                 chunk.density * static_cast<float>(kMaxCandidatesPerChunk) * m_density_scale)));
+
+        if (Attribution::foliage_frame_active())
+            m_rebuild_attribution.surface_samples += candidates;
 
         for (uint32_t idx = 0; idx < candidates; ++idx) {
             const uint64_t h0 =
@@ -1112,12 +1158,15 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
         if (git != m_surf_grid_cache.end() && git->second.placement == placement) {
             gridp = &git->second.samples;
         } else if (builds_left > 0) {
-            Attribution::StageTimer timer(m_rebuild_attribution.surface_ms, collect_attribution);
+            const Attribution::StageTimer timer(m_rebuild_attribution.surface_ms,
+                                                collect_attribution);
             LUMIN_PROFILE_ZONE_N("Foliage GPU surface miss");
             if (collect_attribution)
                 ++m_rebuild_attribution.surface_misses;
             std::vector<glm::vec4> grid;
             grid.reserve(kMaxCandidatesPerChunk);
+            if (collect_attribution)
+                m_rebuild_attribution.surface_samples += kMaxCandidatesPerChunk;
             for (uint32_t candidate = 0; candidate < kMaxCandidatesPerChunk; ++candidate) {
                 const uint64_t h0 =
                     placement_hash(chunk.chunk_xz.x, chunk.chunk_xz.y, chunk.biome_id, candidate);
@@ -1180,10 +1229,12 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
     m_uploaded_chunk_count = chunk_count;
     if (chunk_count == 0) {
         // Nothing to scatter (all chunks culled). Empty build; gate sees 0.
-        Attribution::StageTimer timer(m_rebuild_attribution.upload_ms, collect_attribution);
+        const Attribution::StageTimer timer(m_rebuild_attribution.upload_ms, collect_attribution);
         LUMIN_PROFILE_ZONE_N("Foliage empty upload");
         if (collect_attribution)
             m_rebuild_attribution.uploaded_bytes += 5 * sizeof(GLuint);
+        if (collect_attribution)
+            ++m_rebuild_attribution.uploads;
         const GLuint empty_draw[5] = {0u, 12u, 0u, 0u, 0u};
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_count_ssbo);
         glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(empty_draw), empty_draw);
@@ -1245,6 +1296,8 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
         m_rebuild_attribution.uploaded_bytes += chunk_params.size() * sizeof(GpuChunk) +
                                                 surf_grid.size() * sizeof(glm::vec4) +
                                                 pal.size() * sizeof(float) + 5 * sizeof(GLuint);
+    if (collect_attribution)
+        m_rebuild_attribution.uploads += 4;
     // --- Upload. ---
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_chunk_ssbo);
     glBufferData(GL_SHADER_STORAGE_BUFFER,
@@ -1306,7 +1359,7 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
     m_group_storage_bytes = std::max(m_group_storage_bytes, group_bytes);
     scratch_timer.stop();
     {
-        Attribution::StageTimer timer(m_rebuild_attribution.dispatch_ms, collect_attribution);
+        const Attribution::StageTimer timer(m_rebuild_attribution.dispatch_ms, collect_attribution);
         LUMIN_PROFILE_ZONE_N("Foliage dispatch submission");
         dispatch_scatter();
     }
@@ -1334,10 +1387,9 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
         // mode, so keep it empty (mirrors the prior synchronous path's else branch).
         m_instances.clear();
     }
-    // Preserve the existing draw guard, including its nonzero capacity marker
-    // without readback. Public counts come only from the completed snapshot.
-    m_draw_instance_limit =
-        m_readback_enabled ? m_instances.size() : static_cast<std::size_t>(kMaxInstances);
+    // GPU draws use the bounded indirect command, independently of whether a
+    // CPU snapshot has completed. Public counts still require validated readback.
+    m_draw_instance_limit = kMaxInstances;
     m_gpu_active = true;
     return true;
 }
@@ -1346,7 +1398,7 @@ void FoliagePass::collect_input_hash() {
     if (!m_evidence_enabled || m_uploaded_input_hash)
         return;
     const bool collect_attribution = Attribution::foliage_frame_active();
-    Attribution::StageTimer timer(m_rebuild_attribution.hash_ms, collect_attribution);
+    const Attribution::StageTimer timer(m_rebuild_attribution.hash_ms, collect_attribution);
     LUMIN_PROFILE_ZONE_N("Foliage evidence hash");
     if (collect_attribution)
         m_rebuild_attribution.hashed_bytes += m_chunk_params.size() * sizeof(GpuChunk) +
@@ -1403,20 +1455,29 @@ void FoliagePass::submit_foliage_readback() {
 
 void FoliagePass::poll_foliage_readback() {
     const bool collect_attribution = Attribution::foliage_frame_active();
-    // drain the most-recent COMPLETED blade readback into
-    // m_instances (stale-safe). Replaces m_instances only when a NEWER result
-    // arrives, so it is never re-emptied once primed -- keeping instance_hash and
-    // the FoliageInstancing coverage probe non-empty even across cache-elided
-    // frames..
+    // Adopt a completed blade readback only for the current build generation.
+    // Keep the held snapshot when no matching result is available, including
+    // across cache-elided frames.
     const void* slot = nullptr;
     std::size_t slot_bytes = 0;
     std::uint64_t generation = 0;
     if (!m_readback_ring.consume(&slot, &slot_bytes, &generation) || slot == nullptr) {
         return; // no newer completed result this frame -> keep the held set
     }
+    if (generation != m_build_generation) {
+        if (collect_attribution)
+            ++m_rebuild_attribution.stale_results;
+        return;
+    }
+    if (slot_bytes < kReadbackCountBytes)
+        return;
     GLuint count = 0;
     std::memcpy(&count, slot, kReadbackCountBytes);
     count = std::min<GLuint>(count, static_cast<GLuint>(kMaxInstances));
+    // The ring is bounded to kMaxInstances records. Check by division before
+    // allocating/copying so malformed sizes cannot overflow a byte product.
+    if (count > (slot_bytes - kReadbackCountBytes) / sizeof(InstanceRecord))
+        return;
     const InstanceRecord* blades = reinterpret_cast<const InstanceRecord*>(
         static_cast<const char*>(slot) + kReadbackCountBytes);
     m_instances.assign(blades, blades + count);
@@ -1441,9 +1502,6 @@ void FoliagePass::poll_foliage_readback() {
     m_instance_generation = generation;
     m_instances_from_gpu_readback = true;
     m_instance_available_frame = m_evidence_frame;
-    // Keep the private draw guard synced with the drained set even
-    // on scatter-cache-elided frames (where rebuild_instances_gpu does not run).
-    m_draw_instance_limit = m_instances.size();
 }
 
 void FoliagePass::map_instances_for_frame() {
@@ -1623,7 +1681,7 @@ bool FoliagePass::begin_qualification() {
     m_evidence_queries->queries.initialize();
     {
         const bool collect_attribution = Attribution::foliage_frame_active();
-        RebuildAttributionScope rebuild_scope(*this);
+        const RebuildAttributionScope rebuild_scope(*this);
         if (collect_attribution) {
             m_rebuild_attribution = {};
             m_rebuild_attribution.rebuild_calls = 1;
@@ -1667,7 +1725,7 @@ void FoliagePass::rebuild_frozen_inputs() {
         m_rebuild_attribution.path = Attribution::FoliagePath::FrozenGpu;
     if (collect_attribution)
         m_rebuild_attribution.admitted_columns = static_cast<std::uint64_t>(m_uploaded_chunk_count);
-    Attribution::StageTimer timer(m_rebuild_attribution.dispatch_ms, collect_attribution);
+    const Attribution::StageTimer timer(m_rebuild_attribution.dispatch_ms, collect_attribution);
     LUMIN_PROFILE_ZONE_N("Foliage frozen submission");
     // Reuse only the immutable INPUT buffers. Clear all prior OUTPUT bytes and
     // counters; both count and emit kernels execute again with a fresh generation.
@@ -1678,11 +1736,14 @@ void FoliagePass::rebuild_frozen_inputs() {
     glClearBufferData(GL_SHADER_STORAGE_BUFFER, GL_R32UI, GL_RED_INTEGER, GL_UNSIGNED_INT, &zero);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
     ++m_build_generation;
+    m_gpu_generated_count.reset();
+    m_gpu_count_generation = 0;
     m_build_frame = m_evidence_frame;
     m_build_phase = m_evidence_phase;
     m_uploaded_wind = m_wind_xz;
     dispatch_scatter();
-    submit_foliage_readback();
+    if (m_readback_enabled)
+        submit_foliage_readback();
 }
 
 bool FoliagePass::capture_vertices(const glm::mat4& view_projection) {

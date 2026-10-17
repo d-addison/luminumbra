@@ -1,6 +1,7 @@
 """Guard production attribution wiring beyond the pure bucket/count tests."""
 
 from pathlib import Path
+import json
 import re
 import unittest
 
@@ -65,6 +66,12 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertRegex(compact(self.foliage),
                          r"if \(collect_attribution\) \{ // Diagnostic[^\n]*? "
                          r"Attribution::ScatterSignature components\{\};")
+
+    def test_benchmark_does_not_enable_foliage_input_hashing(self):
+        update = compact(block(self.main, "static void UpdateFoliageScatter("))
+        self.assertIn("foliage->set_evidence_enabled(scenario_config.foliage_visual_smoke() && "
+                      "!g_app.capture.play_paths);", update)
+        self.assertNotIn("render_benchmark_path", update)
 
     def test_menu_input_ownership_and_exclusive_attribution_share_the_call(self):
         main = compact(self.main)
@@ -160,11 +167,62 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertIn("m_pass.frame_instance_count_known() ? "
                       "std::optional<std::size_t>(m_pass.frame_instance_count()) : std::nullopt", scope)
 
+    def test_nullable_frame_scan_count_requires_v2_for_all_capture_paths(self):
+        writer = compact(block(read(CLIENT / "rendering/FrameScan.cpp"),
+                               "bool WriteFrameScanReport("))
+        self.assertIn('j["schema"] = "luminumbra.frame_scan.v2";', writer)
+        self.assertIn('foliage["instances"] = report.foliage_instance_count_known ? '
+                      'nlohmann::json(report.foliage_instances) : nlohmann::json(nullptr);', writer)
+        self.assertIn('foliage["instance_capacity"] = report.foliage_instance_capacity;', writer)
+        self.assertIn('j["foliage"] = std::move(foliage);', writer)
+        for source in (self.main, read(CLIENT / "rendering/SceneSurvey.cpp")):
+            self.assertIn("WriteFrameScanReport(", source)
+            self.assertNotIn("luminumbra.frame_scan.", source)
+
     def test_recorder_propagates_writer_failure_and_checks_stream_state(self):
         record = compact(block(self.collector, "bool FrameRecorder::record("))
         self.assertTrue(record.startswith("if (!active()) return false; return write_csv_row(m_out,"))
         self.assertEqual(compact(block(self.header, "bool active() const")),
                          "return m_out.is_open() && m_out.good();")
+
+    def test_deterministic_work_gates_are_registered_on_standard_targets(self):
+        cmake = read(ROOT / "test/CMakeLists.txt")
+        for target, source in (
+            ("common_tests", "common/DeterministicWorkBudget_test.cpp"),
+            ("pass_context_test", "rendering/foliage_rebuild_test.cpp"),
+        ):
+            sources = re.search(r"add_executable\(" + target + r"\s+(.*?)^\)",
+                                cmake, re.S | re.M)
+            self.assertIsNotNone(sources)
+            self.assertIn(source, sources.group(1))
+            roster = re.search(r"set\(LUMINUMBRA_GTEST_TARGETS\s+(.*?)^\)",
+                               cmake, re.S | re.M)
+            self.assertIsNotNone(roster)
+            self.assertIn(target, roster.group(1).split())
+        native = read(ROOT / "test/common/DeterministicWorkBudget_test.cpp")
+        for name in ("EveryPinnedLimitRejectsAnInjectedExcess",
+                     "IdleRejectsOneUploadByteAndOneHashByteIndependently",
+                     "LiveSubsystemMovementEditAndDrainStayBounded"):
+            self.assertIn("TEST(DeterministicWorkBudget, " + name + ")", native)
+        for name in ("DeterministicWorkBudgetMovementEditDrainAndIdle",
+                     "OutdatedRevisionReadbackIsDiscardedBeforeAdoption"):
+            self.assertIn("TEST_F(FoliageRebuildTest, " + name + ")",
+                          read(ROOT / "test/rendering/foliage_rebuild_test.cpp"))
+
+    def test_reviewed_work_budget_data_has_integer_units_and_exact_idle_zero(self):
+        data = json.loads(read(ROOT / "test/fixtures/deterministic-work-budgets.json"))
+        self.assertEqual(data["schema"], "luminumbra.deterministic_work_budgets.v1")
+        self.assertEqual(set(data["limits"]), {"idle", "foliage", "simulation"})
+        for limits in data["limits"].values():
+            self.assertTrue(limits)
+            for name, limit in limits.items():
+                self.assertIs(type(limit), int)
+                self.assertGreaterEqual(limit, 0)
+                self.assertLess(limit, 2**64 - 1)
+                self.assertNotRegex(name, r"(?i)ms|time|seconds|fps")
+        self.assertEqual(data["limits"]["idle"]["uploaded_bytes"], 0)
+        self.assertEqual(data["limits"]["idle"]["hashed_bytes"], 0)
+        self.assertTrue(all(value == 0 for value in data["limits"]["idle"].values()))
 
     def test_recorder_finalization_failure_reaches_shutdown_error_path(self):
         finish = compact(block(self.collector, "bool FrameRecorder::finish()"))

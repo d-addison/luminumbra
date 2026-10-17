@@ -47,9 +47,9 @@ slots. Normal cached frames do not repeat this work.
 ## Evidence collection and rebuild storage
 
 For issue #388, `FoliagePass::set_evidence_enabled(true)` explicitly enables the
-full byte-wise input hash. The default is off. Scenario runs (including the
-functional foliage scenario) and `--render-benchmark` runs enable it independently
-of CPU readback and frame attribution. Ordinary play does not. Enabling frame
+full byte-wise input hash. The default is off. The foliage visual qualification
+scenario enables it independently of CPU readback and frame attribution. Ordinary
+play, other scenarios and `--render-benchmark` runs leave it off. Enabling frame
 recording alone does not enable evidence hashing.
 
 The hash recipe is unchanged: FNV-1a over uploaded chunk records, exact surface
@@ -88,7 +88,8 @@ The exact OpenGL call changes, for Ultra and every other foliage preset, are:
   Growth uses the same byte count, buffer targets and usage arguments as before;
   all surrounding buffer binds retain their order.
 
-All other GL calls, ordering and arguments are unchanged, including full chunk,
+For nonempty successful GPU rebuilds, all remaining GL calls, ordering and
+arguments are unchanged, including full chunk,
 surface and palette uploads, count-command resets, count/prefix/emit dispatches,
 barriers, readback policy and draws. Placement, candidate order, surface queries,
 instance layout, fade, wind and density controls are unchanged.

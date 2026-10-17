@@ -1,6 +1,8 @@
 #pragma once
 
+#include "luminumbra/core/Types.h"
 #include "luminumbra_client/rendering/passes/FoliagePass.h"
+#include "luminumbra_common/world/Chunk.h"
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
@@ -9,9 +11,11 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <span>
 #include <vector>
 
 namespace FoliageTest {
@@ -23,12 +27,18 @@ inline constexpr float kColumnExtent = static_cast<float>(Luminumbra::CHUNK_SIZE
 
 // All GL storage is released before the fixture releases its context, including
 // when an assertion aborts a test. No production test seams are required.
-struct ScopedPass {
-    FoliagePass pass;
-    ~ScopedPass() {
-        pass.destroy_compute();
-        pass.destroy_buffers();
+class ScopedPass {
+public:
+    FoliagePass& pass() {
+        return m_pass;
     }
+    ~ScopedPass() {
+        m_pass.destroy_compute();
+        m_pass.destroy_buffers();
+    }
+
+private:
+    FoliagePass m_pass;
 };
 
 class FoliageRebuildTest : public ::testing::Test {
@@ -70,7 +80,7 @@ protected:
         }
     }
     static std::vector<FoliagePass::ChunkScatter> Chunks(std::size_t count) {
-        // Small fixtures: at most three nearby columns, no pool saturation.
+        // Fixtures use at most nine columns, below the fixed instance-pool capacity.
         std::vector<FoliagePass::ChunkScatter> result;
         for (std::size_t index = 0; index < count; ++index) {
             const auto x = static_cast<int>(index);
@@ -101,7 +111,7 @@ protected:
                       const std::vector<FoliagePass::ChunkScatter>& chunks,
                       std::uint64_t frame_id,
                       const glm::vec3& camera = kCamera) {
-        Attribution::FoliageFrameScope frame(true);
+        const Attribution::FoliageFrameScope frame(true);
         Rebuild(pass, chunks, frame_id, camera);
         return frame.snapshot().rebuild;
     }
@@ -161,7 +171,10 @@ protected:
                            const std::vector<FoliagePass::InstanceRecord>& second) {
         ASSERT_EQ(first.size(), second.size());
         if (!first.empty()) {
-            EXPECT_EQ(std::memcmp(first.data(), second.data(), first.size() * sizeof(first[0])), 0);
+            EXPECT_EQ(std::memcmp(std::as_bytes(std::span(first)).data(),
+                                  std::as_bytes(std::span(second)).data(),
+                                  first.size() * sizeof(first[0])),
+                      0);
         }
     }
     static std::uint64_t
@@ -182,8 +195,8 @@ protected:
             glGetNamedBufferParameteri64v(buffer, GL_BUFFER_SIZE, &size);
             // These fixtures have <= 3 columns and <= 6 archetypes.
             EXPECT_GT(size, 0);
-            EXPECT_LE(size, 3 * 8192 * 16);
-            if (size <= 0 || size > 3 * 8192 * 16) {
+            EXPECT_LE(size, 3LL * 8192 * 16);
+            if (size <= 0 || size > 3LL * 8192 * 16) {
                 return 0;
             }
             std::vector<unsigned char> bytes(static_cast<std::size_t>(size));

@@ -1,6 +1,19 @@
 #include "foliage_rebuild_fixture.h"
 
+#include "luminumbra/core/Types.h"
+#include "luminumbra_client/app/FrameAttribution.h"
+
+#include <glm/ext/vector_float3.hpp>
+#include <glm/ext/vector_int3.hpp>
+#include <gtest/gtest.h>
+
+#include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <span>
+#include <vector>
 
 namespace FoliageTest {
 
@@ -16,7 +29,7 @@ protected:
         glm::ivec3 coords;
         float height;
     };
-    enum class SupportEdit {
+    enum class SupportEdit : std::uint8_t {
         Add,
         Remove,
         Modify
@@ -40,34 +53,34 @@ protected:
         // This pass has never seen the old support or either column cache. Only
         // the final meshes are uploaded; no evidence-phase rebuild is used.
         ScopedPass fresh;
-        ASSERT_NO_FATAL_FAILURE(Initialize(fresh.pass, gpu));
-        EXPECT_EQ(fresh.pass.build_generation(), 0u);
-        fresh.pass.use_rendered_ground();
-        fresh.pass.set_evidence_enabled(true);
-        fresh.pass.set_fade_distances(incremental.fade_start_m(), incremental.fade_end_m());
-        fresh.pass.set_density_scale(incremental.density_scale());
-        fresh.pass.set_wind(incremental.wind());
-        UploadSupports(fresh.pass, final_supports);
-        const auto rebuilt = RebuildAttributed(fresh.pass, chunks, 1, camera);
+        ASSERT_NO_FATAL_FAILURE(Initialize(fresh.pass(), gpu));
+        EXPECT_EQ(fresh.pass().build_generation(), 0u);
+        fresh.pass().use_rendered_ground();
+        fresh.pass().set_evidence_enabled(true);
+        fresh.pass().set_fade_distances(incremental.fade_start_m(), incremental.fade_end_m());
+        fresh.pass().set_density_scale(incremental.density_scale());
+        fresh.pass().set_wind(incremental.wind());
+        UploadSupports(fresh.pass(), final_supports);
+        const auto rebuilt = RebuildAttributed(fresh.pass(), chunks, 1, camera);
         EXPECT_EQ(rebuilt.reasons, Attribution::Initial);
         EXPECT_EQ(rebuilt.path,
                   gpu ? Attribution::FoliagePath::Gpu : Attribution::FoliagePath::Cpu);
         EXPECT_FALSE(rebuilt.backlog);
-        ExpectSame(incremental_records, Records(fresh.pass, gpu));
+        ExpectSame(incremental_records, Records(fresh.pass(), gpu));
         if (gpu) {
             ASSERT_TRUE(incremental_hash.has_value());
-            ASSERT_TRUE(fresh.pass.uploaded_input_hash().has_value());
-            EXPECT_EQ(incremental_hash, fresh.pass.uploaded_input_hash());
+            ASSERT_TRUE(fresh.pass().uploaded_input_hash().has_value());
+            EXPECT_EQ(incremental_hash, fresh.pass().uploaded_input_hash());
         } else {
             EXPECT_FALSE(incremental_hash.has_value());
-            EXPECT_FALSE(fresh.pass.uploaded_input_hash().has_value());
+            EXPECT_FALSE(fresh.pass().uploaded_input_hash().has_value());
         }
     }
     static void ExpectEditedSupportMatchesFresh(SupportEdit edit) {
         for (const bool gpu : {false, true}) {
             SCOPED_TRACE(gpu);
             ScopedPass scoped;
-            auto& pass = scoped.pass;
+            auto& pass = scoped.pass();
             ASSERT_NO_FATAL_FAILURE(Initialize(pass, gpu));
             pass.use_rendered_ground();
             pass.set_evidence_enabled(true);
@@ -154,7 +167,7 @@ TEST_F(FoliageInvalidationTest, ColumnsEnterAndLeaveHorizonWithinOneCameraCell) 
     for (const bool gpu : {false, true}) {
         SCOPED_TRACE(gpu);
         ScopedPass scoped;
-        auto& pass = scoped.pass;
+        auto& pass = scoped.pass();
         ASSERT_NO_FATAL_FAILURE(Initialize(pass, gpu));
         pass.use_rendered_ground();
         pass.set_evidence_enabled(true);
@@ -197,7 +210,7 @@ TEST_F(FoliageInvalidationTest, FadeRadiusExpansionAndContractionChangeContribut
     for (const bool gpu : {false, true}) {
         SCOPED_TRACE(gpu);
         ScopedPass scoped;
-        auto& pass = scoped.pass;
+        auto& pass = scoped.pass();
         ASSERT_NO_FATAL_FAILURE(Initialize(pass, gpu));
         pass.use_rendered_ground();
         pass.set_evidence_enabled(true);
@@ -244,7 +257,7 @@ TEST_F(FoliageInvalidationTest, ExcludedSupportEditIsVisibleWhenColumnReenters) 
     for (const bool gpu : {false, true}) {
         SCOPED_TRACE(gpu);
         ScopedPass scoped;
-        auto& pass = scoped.pass;
+        auto& pass = scoped.pass();
         ASSERT_NO_FATAL_FAILURE(Initialize(pass, gpu));
         pass.use_rendered_ground();
         pass.set_evidence_enabled(true);
@@ -279,7 +292,9 @@ TEST_F(FoliageInvalidationTest, ExcludedSupportEditIsVisibleWhenColumnReenters) 
             if (original[index].pos[0] >= 3 * kColumnExtent) {
                 EXPECT_NEAR(changed[index].pos[1], original[index].pos[1] - 2, 0.0001f);
             } else {
-                EXPECT_EQ(std::memcmp(&original[index], &changed[index], sizeof(changed[index])),
+                EXPECT_EQ(std::memcmp(std::as_bytes(std::span(&original[index], 1)).data(),
+                                      std::as_bytes(std::span(&changed[index], 1)).data(),
+                                      sizeof(changed[index])),
                           0);
             }
         }
