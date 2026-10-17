@@ -90,6 +90,13 @@ missing from that database fails explicitly.
 Run from the clone after provisioning. All generated sources, temporary files,
 objects, logs, dependency copies, build state and compiler-cache entries belong
 under this clone's `scratch/`. Keep the shared dependency cache read-only.
+Run `prepare` before creating temporary/cache directories or exporting their
+paths. It checks the checkout and original scratch path components, fresh stage
+and init paths, and every existing entry under `tmp`, `ccache`, `local-gcc` and
+`local-tidy`. Symlinks, Windows reparse points, non-directory path components,
+special files and escaped paths are refused before directory creation. Ordinary
+nested directories and files in reused build/cache trees are allowed. Checks
+are fresh on every invocation.
 Staging uses ordinary copies, never writable hardlinks. Destinations and the
 initial CMake cache must be fresh paths strictly inside `scratch/`; path
 traversal outside that directory, a symlinked `scratch/` root, and any symlinked
@@ -107,7 +114,8 @@ set -euo pipefail
 : "${LUMINUMBRA_DEPS_CACHE:?Set the provisioned dependency snapshot path}"
 base_ref="${LUMINUMBRA_BASE_REF:-origin/devel}"
 
-mkdir -p scratch/tmp scratch/ccache
+nice -n 10 python3 -I -B tools/ci/offline_deps.py prepare \
+  --root "$PWD" --cache "$LUMINUMBRA_DEPS_CACHE"
 export TMPDIR="$PWD/scratch/tmp"
 export CCACHE_DIR="$PWD/scratch/ccache"
 export CCACHE_MAXSIZE=250M

@@ -554,9 +554,76 @@ def stage(root: Path, cache: Path, lock_path: Path, dest: Path, init: Path) -> N
         raise
 
 
+def prepare_scratch(root: Path) -> None:
+    """Validate the recipe's writable paths before creating tmp/cache dirs."""
+    root = root.absolute()
+    scratch = root / "scratch"
+    directories = tuple(scratch / name for name in ("tmp", "ccache", "local-gcc", "local-tidy"))
+
+    def directory(path):
+        # Inspect original components, including those before '..', before
+        # containment resolves them. Do not retain checks across invocations.
+        reject_reparse_points(path)
+        for component in (path, *path.parents):
+            try:
+                mode = component.lstat().st_mode
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISDIR(mode):
+                raise DependencyError(f"scratch path component is not an ordinary directory: {component}")
+
+    directory(root)
+    if not root.is_dir():
+        raise DependencyError("missing checkout directory")
+    directory(scratch)
+    contained(scratch, root)
+    for path in directories:
+        directory(path)
+        contained(path, scratch)
+
+    # Staging still verifies the lock and publishes/rolls back its own outputs.
+    # Check its fresh paths here too, before tmp/cache creation or environment
+    # exports. No Git command or shared dependency-cache write is needed.
+    dest, init = scratch / "offline-deps", scratch / "offline-init.cmake"
+    directory(dest)
+    for path in (dest, init):
+        contained(path, scratch)
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            continue
+        raise DependencyError("stage needs fresh destination and initial cache paths")
+
+    def inspect_tree(path):
+        # The scan is bounded by the existing entries under this writable
+        # tree, including the pending-directory stack. Read no payloads. Use
+        # lstat, not DirEntry's Windows metadata, and inspect before descending.
+        pending = [path]
+        while pending:
+            parent = pending.pop()
+            directory(parent)
+            with os.scandir(parent) as entries:
+                for item in entries:
+                    entry = Path(item.path)
+                    reject_reparse_points(entry)
+                    mode = entry.lstat().st_mode
+                    if stat.S_ISDIR(mode):
+                        pending.append(entry)
+                    elif not stat.S_ISREG(mode):
+                        raise DependencyError(f"scratch tree entry is not an ordinary file or directory: {entry}")
+
+    # Reused build trees can redirect generated files below an ordinary root,
+    # just as tmp/cache can. Complete every read-only check before any mkdir.
+    for path in directories:
+        if path.exists():
+            inspect_tree(path)
+    for path in directories[:2]:
+        path.mkdir(parents=True, exist_ok=True)
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("snapshot", "verify", "stage"))
+    parser.add_argument("command", choices=("snapshot", "verify", "stage", "prepare"))
     parser.add_argument("--root", type=Path, default=ROOT)
     parser.add_argument("--cache", type=Path, required=True)
     parser.add_argument("--lock", type=Path, default=Path("tools/ci/deps-lock.json"))
@@ -565,6 +632,11 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     cache = args.cache
     try:
+        if args.command == "prepare":
+            # Preserve the original root spelling for component inspection.
+            prepare_scratch(args.root)
+            print("offline dependencies: prepare complete")
+            return 0
         root = resolve_path(args.root)
         lock = root / args.lock
         if args.command == "snapshot":

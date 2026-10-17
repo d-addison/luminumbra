@@ -1879,6 +1879,342 @@ class CachedGitSafetyTests(unittest.TestCase):
         self.assert_refused_without_writes()
 
 
+class ScratchPreparationTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="scratch preparation ")
+        self.addCleanup(temporary.cleanup)
+        self.base = Path(temporary.name).resolve()
+        self.root = self.base / "nested checkout" / "clone with spaces"
+        self.root.mkdir(parents=True)
+        self.outside = self.base / "outside"
+        self.outside.mkdir()
+        (self.outside / "retained bytes").write_bytes(b"unchanged\x00\xff\n")
+
+    def state(self):
+        def visit(path):
+            info = path.lstat()
+            if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+                return ("redirect", os.readlink(path))
+            if stat.S_ISDIR(info.st_mode):
+                return {child.name: visit(child) for child in path.iterdir()}
+            if stat.S_ISREG(info.st_mode):
+                return path.read_bytes()
+            return ("special", info.st_mode)
+        return visit(self.base)
+
+    def preparation(self, root=None, child=False):
+        # Execute the documented command through its real CLI parser. Only
+        # nice and the interpreter launch are elided, so this also runs on
+        # Windows without a shell, compiler, CMake or a dependency snapshot.
+        docs = (ROOT / "docs/ci/local-checks.md").read_text(encoding="utf-8")
+        recipe = docs.split("## Worker recipe\n", 1)[1].split("```bash\n", 1)[1].split("\n```", 1)[0]
+        prefix, separator, _ = recipe.partition("export TMPDIR=")
+        self.assertTrue(separator)
+        lines = [line for line in prefix.replace("\\\n", "").splitlines() if line.strip()]
+        self.assertEqual(len(lines), 4, "preparation must precede mkdir and environment exports")
+        argv = shlex.split(lines[-1])
+        self.assertEqual(argv[:7], ["nice", "-n", "10", "python3", "-I", "-B", "tools/ci/offline_deps.py"])
+        argv = [value.replace("$PWD", str(root or self.root)).replace(
+            "$LUMINUMBRA_DEPS_CACHE", str(self.outside)) for value in argv[7:]]
+        if child:
+            result = subprocess.run([sys.executable, "-I", "-B", str(ROOT / "tools/ci/offline_deps.py"), *argv],
+                                    capture_output=True, text=True, check=False)
+            self.assertNotIn("Traceback", result.stderr)
+            if result.returncode == 1:
+                self.assertEqual(result.stdout, "")
+                self.assertTrue(result.stderr.startswith("offline dependencies: "))
+            return result.returncode
+        output = io.StringIO()
+        with patch.object(sys, "stdout", output), redirect_stderr(io.StringIO()) as diagnostic:
+            result = deps.main(argv)
+        self.assertNotIn("Traceback", diagnostic.getvalue())
+        if result == 1:
+            self.assertEqual(output.getvalue(), "")
+            self.assertTrue(diagnostic.getvalue().startswith("offline dependencies: "))
+        return result
+
+    def refused(self, root=None):
+        before = self.state()
+        self.assertEqual(self.preparation(root), 1)
+        self.assertEqual(self.state(), before)
+
+    def redirect(self, path, target):
+        if os.name == "nt":
+            # Junction creation needs no symlink privilege. These fixtures
+            # are required: setup failure must fail the refusal regression.
+            result = subprocess.run(["cmd", "/d", "/c", "mklink", "/J", str(path), str(target)],
+                                    capture_output=True, text=True, check=False)
+            if result.returncode:
+                diagnostic = (f"junction creation failed: status={result.returncode}; "
+                              f"stdout={result.stdout!r}; stderr={result.stderr!r}")
+                self.assertFalse(path.exists(), diagnostic)
+                self.fail(diagnostic)
+        else:
+            path.symlink_to(target, target_is_directory=True)
+        self.addCleanup(self.remove_redirect, path)
+
+    def remove_redirect(self, path):
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            return
+        if stat.S_ISLNK(info.st_mode):
+            path.unlink()
+        elif getattr(info, "st_file_attributes", 0) & 0x400:
+            os.rmdir(path)
+
+    def test_required_windows_junction_setup_failure_is_an_assertion_with_captured_diagnostics(self):
+        path = self.root / "required junction"
+        before = self.state()
+        for status, stdout, stderr in ((1, "partial output\r\n", "access denied\r\n"),
+                                       (5, "", ""), (-1, "partial", "incomplete error")):
+            with self.subTest(status=status):
+                result = subprocess.CompletedProcess([], status, stdout, stderr)
+                with patch.object(os, "name", "nt"), \
+                        patch.object(subprocess, "run", return_value=result) as run:
+                    with self.assertRaises(AssertionError) as failure:
+                        self.redirect(path, self.outside)
+                run.assert_called_once_with(
+                    ["cmd", "/d", "/c", "mklink", "/J", str(path), str(self.outside)],
+                    capture_output=True, text=True, check=False)
+                for captured in (f"status={status}", f"stdout={stdout!r}", f"stderr={stderr!r}"):
+                    self.assertIn(captured, str(failure.exception))
+                self.assertEqual(self.state(), before)
+
+    def test_successful_windows_junction_setup_reaches_every_real_refusal_caller(self):
+        # Model only the Windows command on POSIX; every caller still uses
+        # real redirects and the real preparation/refusal assertions below.
+        windows = os.name == "nt"
+        run = subprocess.run
+        cases = (
+            ("test_documented_preparation_allows_nested_ordinary_trees_and_rechecks_each_call", 1, 1),
+            ("test_documented_preparation_cli_checks_real_paths_in_a_child_process", 1, 0),
+            ("test_documented_preparation_refuses_real_root_child_tmp_cache_and_build_redirects", 12, 12),
+            ("test_documented_preparation_refuses_original_components_before_dotdot", 1, 1 if windows else 5),
+        )
+        for name, redirects, refusals in cases:
+            with self.subTest(caller=name):
+                case = ScratchPreparationTests(name)
+                redirect = case.redirect
+
+                def required(path, target):
+                    def create(command, **kwargs):
+                        if windows:
+                            return run(command, **kwargs)
+                        path.symlink_to(target, target_is_directory=True)
+                        return subprocess.CompletedProcess(command, 0, "junction created\r\n", "")
+
+                    with patch.object(os, "name", "nt"), patch.object(subprocess, "run", side_effect=create):
+                        redirect(path, target)
+
+                result = unittest.TestResult()
+                with patch.object(case, "redirect", side_effect=required) as setup, \
+                        patch.object(case, "refused", wraps=case.refused) as refused, \
+                        patch.object(case, "preparation", wraps=case.preparation) as preparation:
+                    case.run(result)
+                self.assertEqual(result.testsRun, 1)
+                self.assertEqual(result.failures, [])
+                self.assertEqual(result.errors, [])
+                self.assertEqual(result.skipped, [])
+                self.assertEqual(setup.call_count, redirects)
+                self.assertEqual(refused.call_count, refusals)
+                if "child_process" in name:
+                    self.assertEqual(preparation.call_args_list,
+                                     [unittest.mock.call(child=True), unittest.mock.call(child=True)])
+
+    def test_documented_preparation_allows_nested_ordinary_trees_and_rechecks_each_call(self):
+        for name in ("tmp", "ccache", "local-gcc", "local-tidy"):
+            nested = self.root / "scratch" / name / "ordinary nested" / "deeper"
+            nested.mkdir(parents=True)
+            (nested / "retained file").write_bytes(b"ordinary\n")
+        before = self.state()
+        for _ in range(2):
+            self.assertEqual(self.preparation(), 0)
+            self.assertEqual(self.state(), before)
+        ordinary = self.root / "ordinary"
+        ordinary.mkdir()
+        self.assertEqual(self.preparation(ordinary / ".."), 0)
+        redirected = self.root / "scratch/local-tidy/new redirect"
+        self.redirect(redirected, self.outside)
+        self.refused()
+
+    def test_documented_preparation_creates_only_tmp_cache_after_all_checks(self):
+        self.assertEqual(self.preparation(), 0)
+        self.assertEqual({path.name for path in (self.root / "scratch").iterdir()}, {"tmp", "ccache"})
+        self.assertEqual(list((self.root / "scratch/tmp").iterdir()), [])
+        self.assertEqual(list((self.root / "scratch/ccache").iterdir()), [])
+        for relative in ("offline-deps", "offline-init.cmake"):
+            path = self.root / "scratch" / relative
+            path.write_bytes(b"retained stage occupant")
+            self.refused()
+            path.unlink()
+
+    def test_documented_preparation_cli_checks_real_paths_in_a_child_process(self):
+        self.assertEqual(self.preparation(child=True), 0)
+        tmp = self.root / "scratch/tmp"
+        tmp.rmdir()
+        self.redirect(tmp, self.outside)
+        before = self.state()
+        self.assertEqual(self.preparation(child=True), 1)
+        self.assertEqual(self.state(), before)
+
+    def test_documented_preparation_refuses_real_root_child_tmp_cache_and_build_redirects(self):
+        for relative in ("scratch", "scratch/tmp", "scratch/ccache", "scratch/local-gcc",
+                         "scratch/local-tidy", "scratch/tmp" "/nested", "scratch/ccache/nested",
+                         "scratch/local-gcc/_deps", "scratch/local-tidy/CMakeFiles",
+                         "scratch/offline-deps", "scratch/offline-init.cmake"):
+            with self.subTest(relative=relative):
+                link = self.root / relative
+                link.parent.mkdir(parents=True, exist_ok=True)
+                self.redirect(link, self.outside)
+                self.refused()
+                if os.name == "nt":
+                    os.rmdir(link)
+                else:
+                    link.unlink()
+        alias = self.base / "checkout alias"
+        self.redirect(alias, self.outside)
+        self.refused(alias)
+
+    def test_documented_preparation_refuses_original_components_before_dotdot(self):
+        alias = self.root / "redirect"
+        self.redirect(alias, self.outside)
+        self.refused(alias / ".." / self.root.name)
+        if os.name == "posix":
+            scratch = self.root / "scratch"
+            scratch.mkdir(exist_ok=True)
+            for target in ("missing", "tmp", "."):
+                with self.subTest(target=target):
+                    link = scratch / "tmp"
+                    link.symlink_to(target, target_is_directory=True)
+                    self.refused()
+                    link.unlink()
+            # A generated file can redirect writes just like a directory.
+            build = scratch / "local-gcc"
+            build.mkdir()
+            (build / "compile_commands.json").symlink_to(self.outside / "retained bytes")
+            self.refused()
+
+    def test_documented_preparation_refuses_non_directory_components_and_unknown_entry_types(self):
+        for relative in ("scratch", "scratch/tmp", "scratch/ccache", "scratch/local-gcc",
+                         "scratch/local-tidy"):
+            with self.subTest(relative=relative):
+                path = self.root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"not a directory")
+                self.refused()
+                path.unlink()
+        entry = self.root / "scratch/local-tidy/unknown"
+        entry.parent.mkdir()
+        entry.write_bytes(b"placeholder")
+        lstat = Path.lstat
+        with patch.object(Path, "lstat", lambda path: SimpleNamespace(st_mode=0) if path == entry else lstat(path)):
+            self.refused()
+        if os.name == "posix":
+            entry.unlink()
+            os.mkfifo(entry)
+            self.refused()
+
+    def test_documented_preparation_refuses_windows_reparse_components_without_privilege(self):
+        scratch = self.root / "scratch"
+        directories = [scratch / name for name in ("tmp", "ccache", "local-gcc", "local-tidy")]
+        for path in directories:
+            path.mkdir(parents=True)
+        entry = scratch / "local-tidy/nested/generated"
+        entry.parent.mkdir(parents=True)
+        entry.write_bytes(b"retained generated input")
+        lstat = os.lstat
+        for marked in (self.root, scratch, *directories, entry.parent, entry):
+            def metadata(path, *args, **kwargs):
+                info = lstat(path, *args, **kwargs)
+                fields = {name: getattr(info, name) for name in dir(info) if name.startswith("st_")}
+                fields.update(st_file_attributes=0x400 if Path(path) == marked else 0,
+                              st_reparse_tag=0xDEADBEEF)
+                return SimpleNamespace(**fields)
+            before = self.state()
+            with self.subTest(marked=marked), patch.object(deps._PATH_SAFETY, "WINDOWS", True), \
+                    patch.object(os, "lstat", side_effect=metadata):
+                self.assertEqual(self.preparation(), 1)
+            self.assertEqual(self.state(), before)
+
+    def test_documented_preparation_rechecks_resolved_containment_for_every_output(self):
+        resolve = Path.resolve
+        for relative in ("scratch", "scratch/tmp", "scratch/ccache", "scratch/local-gcc",
+                         "scratch/local-tidy", "scratch/offline-deps", "scratch/offline-init.cmake"):
+            target = self.root / relative
+            with self.subTest(relative=relative), patch.object(
+                    Path, "resolve", lambda path: self.outside if path == target else resolve(path)):
+                self.refused()
+
+    def test_documented_preparation_refuses_lookup_resolution_and_partial_scan_errors_without_writes(self):
+        entry = self.root / "scratch/local-tidy/nested/retained"
+        entry.parent.mkdir(parents=True)
+        entry.write_bytes(b"same bytes")
+        lstat, scandir = Path.lstat, os.scandir
+        for failure in (PermissionError(errno.EACCES, "lookup denied"), OSError(errno.EIO, "partial lookup"),
+                        OSError(errno.ELOOP, "cyclic lookup"), RuntimeError("cyclic lookup")):
+            with self.subTest(failure=failure), patch.object(Path, "resolve", side_effect=failure):
+                self.refused()
+        for method, original in (("lstat", lstat), ("scandir", scandir)):
+            for failure in (PermissionError(errno.EACCES, "scan denied"), OSError(errno.EIO, "partial scan")):
+                def failed(path, *args, **kwargs):
+                    if Path(path) == entry.parent:
+                        raise failure
+                    return original(path, *args, **kwargs)
+                before = self.state()
+                owner = os if method == "scandir" else Path
+                with self.subTest(method=method, failure=failure), patch.object(owner, method, failed):
+                    self.assertEqual(self.preparation(), 1)
+                self.assertEqual(self.state(), before)
+        # Failure after a real directory entry was returned must also precede
+        # tmp/cache creation, and the scanner must still be closed.
+        class PartialScan:
+            def __enter__(scan):
+                scan.entries = scandir(entry.parent)
+                scan.first = True
+                return scan
+
+            def __exit__(scan, *args):
+                scan.entries.close()
+
+            def __iter__(scan):
+                return scan
+
+            def __next__(scan):
+                if scan.first:
+                    scan.first = False
+                    return next(scan.entries)
+                raise OSError(errno.EIO, "partial directory scan")
+
+        before = self.state()
+        with patch.object(os, "scandir", lambda path: PartialScan() if Path(path) == entry.parent else scandir(path)):
+            self.assertEqual(self.preparation(), 1)
+        self.assertEqual(self.state(), before)
+        mkdir = Path.mkdir
+        for failure in (PermissionError(errno.EACCES, "creation denied"), OSError(errno.EIO, "creation failed")):
+            def failed_mkdir(path, *args, **kwargs):
+                if path == self.root / "scratch/tmp":
+                    raise failure
+                return mkdir(path, *args, **kwargs)
+            with self.subTest(failure=failure), patch.object(Path, "mkdir", failed_mkdir):
+                self.refused()
+        # An I/O error creating the second directory may leave the first
+        # empty directory; no cleanup may remove a pre-existing occupant.
+        def failed_cache_mkdir(path, *args, **kwargs):
+            if path == self.root / "scratch/ccache":
+                raise PermissionError(errno.EACCES, "cache creation denied")
+            return mkdir(path, *args, **kwargs)
+        before = self.state()
+        with patch.object(Path, "mkdir", failed_cache_mkdir):
+            self.assertEqual(self.preparation(), 1)
+        self.assertEqual(list((self.root / "scratch/tmp").iterdir()), [])
+        self.assertFalse((self.root / "scratch/ccache").exists())
+        (self.root / "scratch/tmp").rmdir()
+        self.assertEqual(self.state(), before)
+        self.refused(self.base / "missing checkout")
+        self.refused(self.outside / "retained bytes")
+
+
 class WindowsReparseMetadataTests(unittest.TestCase):
     def test_attributes_junction_api_and_unknown_tags(self):
         safety = deps._PATH_SAFETY
