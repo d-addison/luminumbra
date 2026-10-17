@@ -177,10 +177,10 @@ jobs:
           ctest --preset debug-asan -LE manual --show-only=json-v1 > build/debug-asan/ctest.inventory.json
           ctest --preset debug-asan --show-only=json-v1 > build/debug-asan/ctest.all.json
           # Alternate independent tests; keep fixture setup/consumers in one shard.
-          python3 tools/ci/asan_shards.py plan --shard ${{ matrix.shard }} --directory build/debug-asan
+          python3 tools/ci/ctest_shards.py plan --profile asan --shard ${{ matrix.shard }} --directory build/debug-asan --require-suite SimBudgetWorldParity. --require-suite AmbientDeterminismReceipt.
           # Recheck the ordered roster in the same context immediately before CTest.
           env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \
-            xvfb-run -a python3 tools/ci/asan_shards.py run --directory build/debug-asan
+            xvfb-run -a python3 tools/ci/ctest_shards.py run --profile asan --directory build/debug-asan
       - name: Bind manual qualification shard evidence
         if: always() && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)
         env:
@@ -196,6 +196,7 @@ jobs:
           path: |
             build/debug-asan/ctest.junit.xml
             build/debug-asan/ctest.inventory.json
+            build/debug-asan/ctest.partition.json
             build/debug-asan/qualification-shard.json
           if-no-files-found: error
           # Preserve successful producers for GitHub's full 30-day rerun window.
@@ -216,13 +217,14 @@ jobs:
   asan:
     name: Linux / GCC ASan
     needs: [changes, asan-shard]
-    # Cancel a running aggregate when the workflow is cancelled. Cancelled
-    # dependencies must still schedule the explicit refusal, never a job skip.
+    # Invalid dependencies must reach the refusal step.
     # The first guard still rejects every draft (including docs-only drafts).
     # A successful classification with needs_cpp=false and a skipped shard
     # preserves the path gate's successful required check. Failed classification
-    # or missing output still requires successful shards.
-    if: ${{ !cancelled() || needs.changes.result == 'cancelled' || needs.asan-shard.result == 'cancelled' }}
+    # is rejected even when the shards succeed.
+    # Keep invalid dependencies on the explicit failure path during cancellation.
+    # Otherwise cancellation must stop the job even after its first guard.
+    if: ${{ !cancelled() || needs.changes.result != 'success' || (needs.asan-shard.result != 'success' && needs.asan-shard.result != 'skipped') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -238,10 +240,10 @@ jobs:
           fi
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Reject cancelled dependencies
-        if: ${{ always() && (needs.changes.result == 'cancelled' || needs.asan-shard.result == 'cancelled') }}
+      - name: Reject invalid dependencies
+        if: ${{ always() && (needs.changes.result != 'success' || (needs.asan-shard.result != 'success' && needs.asan-shard.result != 'skipped')) }}
         run: |
-          echo "ASan dependencies were cancelled" >&2
+          echo "Aggregate dependencies did not pass" >&2
           exit 1
       - name: Require all ASan shards to pass
         if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
@@ -271,7 +273,7 @@ jobs:
           for shard in 1 2; do
             mv "build/asan-shards/asan-junit-${{ github.sha }}-${{ github.run_id }}-shard-$shard" "build/asan-shards/shard-$shard"
           done
-          python3 tools/ci/asan_shards.py merge --directory build/asan-shards --output build/debug-asan/ctest.junit.xml
+          python3 tools/ci/ctest_shards.py merge --profile asan --directory build/asan-shards --output build/debug-asan/ctest.junit.xml
           # Keep devel's inventory floor on the verified union of both shards.
           # Require each developer target explicitly; total-count margin cannot hide one.
           python3 tools/ci/check_ctest_junit.py build/debug-asan/ctest.junit.xml --minimum-tests 2320 --require-test ConsoleFixture.CompleteInventoryDefaultsBindingsAndUnavailableRows --require-test UiFixture.DefaultPassiveHudRendersWithoutShellOrFocusAndCanBeDisabled --require-test DeveloperPersistence.DirectConstructionMatchesFactoryDefaultsAndInitializesRecords

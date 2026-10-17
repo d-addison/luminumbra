@@ -1,8 +1,14 @@
 #include "GraphicsPresetClassifier.h"
+#include "GraphicsPresets.h"
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
+#include <cstdint>
 #include <limits>
+#include <optional>
+#include <string>
+#include <string_view>
 
 namespace luminumbra::core {
 namespace {
