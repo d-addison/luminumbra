@@ -8,7 +8,6 @@ variant, in ordinary and clang analyzer preprocessing contexts. No Git fetches.
 from __future__ import annotations
 
 import argparse
-import concurrent.futures
 import fnmatch
 import functools
 import hashlib
@@ -80,6 +79,18 @@ class SelectionError(ValueError):
     pass
 
 
+def reject_reparse_points(path):
+    try:
+        _DEPS.reject_reparse_points(path)
+    except OSError as error:
+        raise SelectionError(str(error)) from error
+
+
+def checked_resolve(path):
+    reject_reparse_points(path)
+    return path.resolve()
+
+
 # Compiler installations/search lists are stable during one invocation. PCH
 # scan results also record directory identities and timestamps: adding a cache
 # after database validation must still invalidate a successful scan.
@@ -111,7 +122,7 @@ def changed_paths(root: Path, base_ref: str, worktree=True, include_untracked=Tr
         for raw in git(*command).split(b"\0"):
             if raw:
                 path = root / os.fsdecode(raw)
-                if not path.resolve().is_relative_to(root):
+                if not checked_resolve(path).is_relative_to(root):
                     raise SelectionError(f"changed path escapes checkout: {os.fsdecode(raw)}")
                 paths.add(path)
     return paths
@@ -128,12 +139,12 @@ def read_database(root: Path, build_dir: Path) -> list[dict]:
         directory = Path(raw.get("directory", ""))
         if not directory.is_absolute() or not directory.is_dir():
             raise SelectionError("compile database needs existing absolute working directories")
-        source = (directory / raw["file"]).resolve()
+        source = checked_resolve(directory / raw["file"])
         if not source.is_relative_to(root) or not first_party(source.relative_to(root)):
             continue
         if source.suffix.lower() not in SOURCE_SUFFIXES:
             continue
-        if not directory.resolve().is_relative_to(root):
+        if not checked_resolve(directory).is_relative_to(root):
             raise SelectionError(f"working directory escapes checkout: {source}")
         try:
             if "arguments" in raw and (not isinstance(raw["arguments"], list)
@@ -142,7 +153,7 @@ def read_database(root: Path, build_dir: Path) -> list[dict]:
             args = normalise_pch_arguments(_DEPS.entry_arguments(raw), directory, build_dir)
             # Reject unsupported arguments and wrong source operands before probing.
             cleaned, operands = parse_arguments(args)
-            if len(operands) != 1 or (directory / operands[0]).resolve() != source:
+            if len(operands) != 1 or checked_resolve(directory / operands[0]) != source:
                 raise SelectionError(f"command must compile exactly one database source: {source}")
             validate_textual_includes(cleaned, directory)
         except (_DEPS.CacheMiss, ValueError, TypeError) as error:
@@ -177,8 +188,8 @@ def normalise_pch_arguments(arguments: list[str], directory: Path, build_dir: Pa
             if arg == "-include" and Path(value).name not in {"cmake_pch.h", "cmake_pch.hxx"}:
                 # Ordinary forced includes retain the existing input policy.
                 # They can also provide the textual counterpart of a PCH.
-                path = (directory / value).resolve()
-                if path.is_relative_to(build_dir.resolve()) and path.is_file():
+                path = checked_resolve(directory / value)
+                if path.is_relative_to(checked_resolve(build_dir)) and path.is_file():
                     headers.add(path)
                 result.extend([arg, value])
                 continue
@@ -192,8 +203,8 @@ def normalise_pch_arguments(arguments: list[str], directory: Path, build_dir: Pa
             continue
         if not value or value.startswith(("-", "@")):
             raise SelectionError(f"missing value after {option}")
-        path = (directory / value).resolve()
-        if not path.is_relative_to(build_dir.resolve()):
+        path = checked_resolve(directory / value)
+        if not path.is_relative_to(checked_resolve(build_dir)):
             raise SelectionError("PCH reference escapes build tree")
         if option == "-include":
             if not path.is_file():
@@ -245,7 +256,7 @@ def compiler_header_roots(arguments: list[str], directory: Path) -> tuple[Path, 
     environment = tuple(sorted({**os.environ, "LC_ALL": "C", "LANG": "C"}.items()))
     # Serialize misses too, so parallel TU variants cannot duplicate a probe.
     with _HEADER_SEARCH_LOCK:
-        return _compiler_header_roots(tuple(probe), directory.resolve(), environment)
+        return _compiler_header_roots(tuple(probe), checked_resolve(directory), environment)
 
 
 @functools.lru_cache(maxsize=None)
@@ -276,6 +287,7 @@ def _compiler_header_roots(probe: tuple[str, ...], directory: Path,
 
 def directory_stamp(path: Path) -> tuple | None:
     """Use stat, not DirEntry's incomplete Windows identity fields."""
+    reject_reparse_points(path)
     try:
         info = path.stat()
     except FileNotFoundError:
@@ -290,8 +302,10 @@ def directory_entries(path: Path, names=None) -> tuple:
     Use lstat because Windows DirEntry.stat omits device and inode identity.
     Target changes, including dangling links, have separate directory stamps.
     """
+    reject_reparse_points(path)
     entries = []
     for name in sorted(os.listdir(path) if names is None else names):
+        reject_reparse_points(path / name)
         info = os.lstat(path / name)
         entries.append((name, stat.S_IFMT(info.st_mode), info.st_dev, info.st_ino))
     return tuple(entries)
@@ -326,7 +340,7 @@ def check_pch_search_roots(compiler: str, search: set[Path]) -> None:
         try:
             # Resolve before deduplication and keying: Windows handles expand
             # short names, and Path equality folds native case/separators.
-            roots = tuple(sorted({path.resolve() for path in search}))
+            roots = tuple(sorted({checked_resolve(path) for path in search}))
             # Compiler spellings are case/separator insensitive on Windows.
             # Keep the launch argument intact; only the scan identity changes.
             compiler_key = ntpath.normcase(ntpath.normpath(compiler)) if os.name == "nt" else compiler
@@ -363,7 +377,7 @@ def check_pch_search_roots(compiler: str, search: set[Path]) -> None:
                             if (kind == stat.S_IFDIR) != (name in directories):
                                 raise SelectionError(
                                     f"header search entry changed type during scan: {child}")
-                        resolved = path.resolve()
+                        resolved = checked_resolve(path)
                         if resolved in seen:
                             children[:] = []
                             continue
@@ -415,7 +429,7 @@ def validate_textual_includes(arguments: list[str], directory: Path, *, compiler
             search.add(directory / option[2:])
         elif option not in VALUE_OPTIONS and not option.startswith("-"):
             source = directory / option
-            search.update((source.parent, source.resolve().parent))
+            search.update((source.parent, checked_resolve(source).parent))
         index += 2 if option in VALUE_OPTIONS else 1
 
     roots = None
@@ -424,14 +438,14 @@ def validate_textual_includes(arguments: list[str], directory: Path, *, compiler
         index = 0
         while index < len(candidates):
             header = candidates[index]
-            for path in (header, header.resolve()):
+            for path in (header, checked_resolve(header)):
                 for suffix in (".gch", ".pch"):
                     binary = Path(str(path) + suffix)
                     if os.path.lexists(binary):
                         raise SelectionError(f"binary PCH cache beside forced include: {binary}; "
                                              "remove the cache before replaying textual headers")
             if header.is_file():
-                search.update((header.parent, header.resolve().parent))
+                search.update((header.parent, checked_resolve(header).parent))
                 break
             if index == 0 and not Path(value).is_absolute():
                 if roots is None:
@@ -551,7 +565,7 @@ def dependencies(entry: dict) -> set[Path]:
             paths = _DEPS.parse_make_deps(output)
         except _DEPS.CacheMiss as error:
             raise SelectionError(str(error)) from error
-        resolved = {(entry["directory"] / p).resolve() for p in paths}
+        resolved = {checked_resolve(entry["directory"] / p) for p in paths}
         if entry["file"] not in resolved or any(not p.is_file() for p in resolved):
             raise SelectionError(f"incomplete dependency scan: {entry['file']}")
         found.update(resolved)
@@ -559,18 +573,11 @@ def dependencies(entry: dict) -> set[Path]:
 
 
 def parallel(function, items, jobs: int):
-    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
-        # Consume every future so failures from any variant remain visible.
-        futures = [pool.submit(function, item) for item in items]
-        results, errors = [], []
-        for future in futures:
-            try:
-                results.append(future.result())
-            except (ValueError, OSError, subprocess.SubprocessError) as error:
-                errors.append(str(error))
-        if errors:
-            raise SelectionError("\n".join(errors))
-        return results
+    try:
+        return _DEPS.parallel_map(function, items, jobs, collect_errors=(
+            ValueError, OSError, subprocess.SubprocessError))
+    except ValueError as error:
+        raise SelectionError(str(error)) from error
 
 
 def requires_full_selection(relative: Path) -> bool:
@@ -592,10 +599,13 @@ def configured_header_inputs(root: Path, build_dir: Path) -> tuple[dict[Path, se
     """
     mappings, incomplete = {}, False
     for directory, children, files in os.walk(root):
+        reject_reparse_points(directory)
+        for name in children + files:
+            reject_reparse_points(Path(directory) / name)
         children[:] = sorted(c for c in children if c not in {
             ".git", "scratch", "vendor", "third_party", "deps", "node_modules"
         } and not (Path(directory) / c).is_symlink()
-            and not (Path(directory) / c).resolve().is_relative_to(build_dir))
+            and not checked_resolve(Path(directory) / c).is_relative_to(build_dir))
         for name in sorted(files):
             if name != "CMakeLists.txt" and not name.endswith(".cmake"):
                 continue
@@ -676,7 +686,7 @@ def configured_header_inputs(root: Path, build_dir: Path) -> tuple[dict[Path, se
                 if (not source.is_absolute() or not output.is_absolute()) and script != root / "CMakeLists.txt":
                     script_incomplete = True
                     continue
-                source, output = (root / source).resolve(), (build_dir / output).resolve()
+                source, output = checked_resolve(root / source), checked_resolve(build_dir / output)
                 if (source.is_file() and source.is_relative_to(root)
                         and output != source and not output.is_dir()):
                     script_mappings.setdefault(output, set()).add(source)
@@ -702,13 +712,13 @@ def select(root: Path, entries: list[dict], changed: set[Path], jobs=2,
         suffix = path.suffix.lower()
         if suffix in SOURCE_SUFFIXES and first_party(relative):
             if path.exists():
-                resolved = path.resolve()
+                resolved = checked_resolve(path)
                 sources.add(resolved)
             else:
                 # A removed TU has nothing to compile, but can invalidate targets.
                 full = True
         elif suffix in HEADER_SUFFIXES:
-            headers.add(path.resolve())
+            headers.add(checked_resolve(path))
             full |= not path.exists()
         elif suffix in SOURCE_SUFFIXES or requires_full_selection(relative):
             full = True
@@ -811,7 +821,7 @@ def profile_flags(entry: dict, profile: str) -> list[str]:
         if arg in INPUT_VALUE_OPTIONS:
             index += 2
             continue
-        if not arg.startswith("-") and (entry["directory"] / arg).resolve() == entry["file"]:
+        if not arg.startswith("-") and checked_resolve(entry["directory"] / arg) == entry["file"]:
             break
         index += 1
     flags = []
@@ -848,7 +858,7 @@ def variant_key(entry: dict, profile: str) -> str:
 def clean_prefixes(root: Path, prefixes: list[Path]) -> tuple[Path, ...]:
     resolved = []
     for prefix in prefixes:
-        path = (root / prefix).resolve()
+        path = checked_resolve(root / prefix)
         if prefix.is_absolute() or ".." in prefix.parts or not path.is_relative_to(root) or not path.is_dir():
             raise SelectionError("clean prefixes must be existing checkout-relative directories")
         resolved.append(path)
@@ -896,7 +906,7 @@ def profile_diagnostics(result, entry: dict, profile: str, root: Path,
             unknown_error |= bool(re.search(r"\b(?:fatal )?error:", line))
             continue
         filename, lineno, column, severity, message, option = match.groups()
-        path = (entry["directory"] / filename).resolve()
+        path = checked_resolve(entry["directory"] / filename)
         family = warning_family(option)
         # Clean scopes cannot acquire conversion baseline exemptions, including
         # diagnostics in a baseline header included by a clean translation unit.
@@ -972,7 +982,7 @@ def ci_gate_file(root: Path, source: Path) -> bool:
 
 def run_checks(args, root: Path, selected: list[dict], build_dir: Path) -> list[dict]:
     scratch = root / "scratch"
-    if scratch.is_symlink() or not scratch.resolve().is_relative_to(root):
+    if scratch.is_symlink() or not checked_resolve(scratch).is_relative_to(root):
         raise SelectionError("scratch escapes checkout")
     scratch.mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="local-checks-", dir=scratch) as temporary:
@@ -1011,7 +1021,7 @@ def run_checks(args, root: Path, selected: list[dict], build_dir: Path) -> list[
             tidy = shutil.which("clang-tidy-18") or shutil.which("clang-tidy")
             if not tidy:
                 raise SelectionError("clang-tidy-18 or clang-tidy not found")
-            config = (root / args.config_file).resolve()
+            config = checked_resolve(root / args.config_file)
             if not config.is_file():
                 raise SelectionError(f"missing tidy configuration: {config}")
             def tidy_one(item):
@@ -1044,9 +1054,9 @@ def warning_baseline_destination(root: Path, destination: Path) -> Path:
     scratch = root / "scratch"
     if scratch.is_symlink() or destination.is_symlink():
         raise SelectionError("new warning baseline must be a fresh file under scratch")
-    destination = destination.resolve()
+    destination = checked_resolve(destination)
     if (destination.exists() or not destination.parent.is_dir()
-            or not destination.is_relative_to(scratch.resolve())):
+            or not destination.is_relative_to(checked_resolve(scratch))):
         raise SelectionError("new warning baseline must be a fresh file under scratch")
     return destination
 
@@ -1087,9 +1097,9 @@ def main(argv=None) -> int:
     baselines.add_argument("--write-warning-baseline", type=Path)
     parser.add_argument("--conversion-clean-prefix", type=Path, action="append", default=[])
     args = parser.parse_args(argv)
-    root = args.root.resolve()
     start = time.monotonic()
     try:
+        root = checked_resolve(args.root)
         if args.jobs < 1:
             raise SelectionError("--jobs must be positive")
         if ((args.warning_baseline or args.write_warning_baseline or args.conversion_clean_prefix)
@@ -1098,12 +1108,12 @@ def main(argv=None) -> int:
         if args.command != "compile" and args.warning_profile != "none":
             raise SelectionError("warning profiles apply to compile checks only")
         args.clean_prefixes = clean_prefixes(root, args.conversion_clean_prefix)
-        args.baseline_records = (read_warning_baseline((root / args.warning_baseline).resolve())
+        args.baseline_records = (read_warning_baseline(checked_resolve(root / args.warning_baseline))
                                  if args.warning_baseline else [])
         if args.write_warning_baseline:
             args.write_warning_baseline = warning_baseline_destination(root, root / args.write_warning_baseline)
         changed = changed_paths(root, args.base_ref, args.worktree, args.include_untracked)
-        build_dir = (root / args.build_dir).resolve()
+        build_dir = checked_resolve(root / args.build_dir)
         entries = read_database(root, build_dir)
         selected, report = select(root, entries, changed, args.jobs, build_dir)
         scan_done = time.monotonic()

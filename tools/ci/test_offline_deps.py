@@ -2,6 +2,7 @@
 """Isolated stdlib contracts for offline dependency provisioning."""
 
 import errno
+import ctypes
 import importlib.util
 import json
 import os
@@ -13,7 +14,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location("offline_deps", ROOT / "tools/ci/offline_deps.py")
@@ -61,6 +63,127 @@ class OfflineDependenciesTests(unittest.TestCase):
 
     def verify(self):
         return deps.verify(self.root, self.cache, self.lock)
+
+    def test_windows_reparse_sources_metadata_and_stage_components_are_refused(self):
+        nested = self.source / "nested"
+        nested.mkdir()
+        (nested / "same.h").write_text("same bytes\n")
+        scratch = self.root / "scratch"
+        scratch.mkdir()
+        self.write_lock()
+        real_lstat = os.lstat
+        marked = None
+
+        def metadata(path, *args, **kwargs):
+            info = real_lstat(path, *args, **kwargs)
+            fields = {name: getattr(info, name) for name in dir(info) if name.startswith("st_")}
+            # Junctions and unknown reparse tags can retain directory mode.
+            fields["st_file_attributes"] = 0x400 if Path(path) == marked else 0
+            return SimpleNamespace(**fields)
+
+        with patch.object(deps._PATH_SAFETY, "WINDOWS", True), \
+                patch.object(os, "lstat", side_effect=metadata):
+            for marked in (self.source, nested, nested / "same.h", self.source / ".git", scratch):
+                with self.subTest(marked=marked):
+                    with self.assertRaisesRegex(deps.DependencyError, "reparse point"):
+                        self.stage()
+                    self.assertFalse((scratch / "copied sources").exists())
+                    self.assertFalse((scratch / "initial cache.cmake").exists())
+            marked = self.source / ".git"
+            with self.assertRaisesRegex(deps.DependencyError, "reparse point"):
+                deps.git_metadata(self.source, self.cache)
+
+    def test_windows_reparse_injected_after_verification_is_refused_during_copy(self):
+        nested = self.source / "nested"
+        nested.mkdir()
+        (nested / "same.h").write_text("same bytes\n")
+        self.write_lock()
+        real_lstat, real_verify = os.lstat, deps.verify
+        inject = False
+
+        def verified(*args):
+            nonlocal inject
+            result = real_verify(*args)
+            inject = True
+            return result
+
+        def metadata(path, *args, **kwargs):
+            info = real_lstat(path, *args, **kwargs)
+            fields = {name: getattr(info, name) for name in dir(info) if name.startswith("st_")}
+            fields["st_file_attributes"] = 0x400 if inject and Path(path) == nested else 0
+            return SimpleNamespace(**fields)
+
+        with patch.object(deps._PATH_SAFETY, "WINDOWS", True), \
+                patch.object(os, "lstat", side_effect=metadata), \
+                patch.object(deps, "verify", side_effect=verified):
+            with self.assertRaisesRegex(deps.DependencyError, "reparse point"):
+                self.stage()
+        self.assertFalse((self.root / "scratch/copied sources").exists())
+        self.assertFalse((self.root / "scratch/initial cache.cmake").exists())
+        self.assertEqual((nested / "same.h").read_text(), "same bytes\n")
+
+    def test_real_windows_junction_to_identical_content_is_refused(self):
+        if os.name != "nt":
+            self.skipTest("directory junction creation requires Windows")
+        nested = self.source / "nested"
+        nested.mkdir()
+        (nested / "same.h").write_text("same bytes\n")
+        self.write_lock()
+        outside = self.base / "outside"
+        nested.rename(outside)
+        try:
+            created = subprocess.run(["cmd", "/d", "/c", "mklink", "/J", str(nested), str(outside)],
+                                     capture_output=True, check=False)
+        except OSError as error:
+            self.skipTest(f"directory junction creation unavailable: {error}")
+        if created.returncode:
+            self.skipTest(f"directory junction creation unavailable: {created.stderr!r}")
+        try:
+            for action in (lambda: deps.source_digest(self.source), self.verify, self.stage):
+                with self.subTest(action=action), self.assertRaisesRegex(deps.DependencyError, "reparse point"):
+                    action()
+            self.assertEqual((outside / "same.h").read_text(), "same bytes\n")
+            self.assertFalse((self.root / "scratch/copied sources").exists())
+        finally:
+            os.rmdir(nested)
+
+    def test_windows_reparse_introduced_at_file_copy_is_refused(self):
+        real_copytree = deps.shutil.copytree
+        source = self.source / "input with spaces.h"
+        inject = False
+
+        def copytree(*args, **kwargs):
+            copy_file = kwargs.get("copy_function", shutil.copy2)
+
+            def changed(path, destination):
+                nonlocal inject
+                inject = True
+                return copy_file(path, destination)
+
+            kwargs["copy_function"] = changed
+            return real_copytree(*args, **kwargs)
+
+        with patch.object(deps._PATH_SAFETY, "WINDOWS", True), \
+                patch.object(deps._PATH_SAFETY, "is_reparse_point", side_effect=lambda p:
+                             inject and Path(p) == source), \
+                patch.object(deps.shutil, "copytree", side_effect=copytree):
+            with self.assertRaisesRegex(deps.DependencyError, "reparse point"):
+                self.stage()
+        self.assertFalse((self.root / "scratch/copied sources").exists())
+        self.assertFalse((self.root / "scratch/initial cache.cmake").exists())
+        self.assertEqual(source.read_text(), "source content\n")
+
+    def test_windows_reparse_cleanup_root_is_not_traversed(self):
+        destination = self.base / "cleanup root"
+        destination.mkdir()
+        content = destination / "preserved"
+        content.write_text("preserved\n")
+        with patch.object(deps._PATH_SAFETY, "WINDOWS", True), \
+                patch.object(deps._PATH_SAFETY, "is_reparse_point", side_effect=lambda p:
+                             Path(p) == destination):
+            with self.assertRaisesRegex(deps.DependencyError, "reparse point"):
+                deps.remove_stage(destination)
+        self.assertEqual(content.read_text(), "preserved\n")
 
     def stage(self, dest=None, init=None):
         deps.stage(self.root, self.cache, self.lock,
@@ -1196,6 +1319,53 @@ class CachedGitSafetyTests(unittest.TestCase):
         (nested / ".git").rename(metadata)
         (nested / ".git").write_text("gitdir: " + str(metadata) + "\n")
         self.assert_refused_without_writes()
+
+
+class WindowsReparseMetadataTests(unittest.TestCase):
+    def test_attributes_junction_api_and_unknown_tags(self):
+        safety = deps._PATH_SAFETY
+        for attributes, expected in ((0, False), (0x400, True), (0x401, True)):
+            with self.subTest(attributes=attributes), \
+                    patch.object(safety.os, "lstat", return_value=SimpleNamespace(
+                        st_file_attributes=attributes, st_reparse_tag=0xDEADBEEF)):
+                self.assertEqual(safety.is_reparse_point("entry"), expected)
+        with patch.object(safety.os, "lstat", return_value=SimpleNamespace()), \
+                patch.object(safety.os.path, "isjunction", return_value=True, create=True):
+            self.assertTrue(safety.is_reparse_point("entry"))
+
+    def test_legacy_attribute_api_and_failure_inputs(self):
+        safety = deps._PATH_SAFETY
+        kernel = MagicMock()
+        with patch.object(safety, "WINDOWS", True), \
+                patch.object(safety.os, "lstat", return_value=SimpleNamespace()), \
+                patch.object(safety.os.path, "isjunction", return_value=False, create=True), \
+                patch.object(ctypes, "WinDLL", return_value=kernel, create=True), \
+                patch.object(ctypes, "get_last_error", return_value=5, create=True), \
+                patch.object(ctypes, "WinError", side_effect=PermissionError("attributes denied"), create=True):
+            for attributes, expected in ((0, False), (0x400, True)):
+                kernel.GetFileAttributesW.return_value = attributes
+                self.assertEqual(safety.is_reparse_point("entry"), expected)
+            kernel.GetFileAttributesW.return_value = 0xFFFFFFFF
+            with self.assertRaisesRegex(PermissionError, "attributes denied"):
+                safety.is_reparse_point("entry")
+        for error in (FileNotFoundError(), PermissionError("unreadable")):
+            with self.subTest(error=type(error)), patch.object(safety.os, "lstat", side_effect=error):
+                if isinstance(error, FileNotFoundError):
+                    self.assertFalse(safety.is_reparse_point("entry"))
+                else:
+                    with self.assertRaises(PermissionError):
+                        safety.is_reparse_point("entry")
+
+    def test_original_components_are_checked_before_dotdot_resolution(self):
+        safety = deps._PATH_SAFETY
+        with patch.object(safety, "WINDOWS", True), \
+                patch.object(safety, "is_reparse_point", side_effect=lambda p: p == "redirect"):
+            with self.assertRaisesRegex(OSError, "reparse point"):
+                safety.reject_reparse_points(os.path.join("redirect", "..", "ordinary", "new"))
+            safety.reject_reparse_points("")
+        with patch.object(safety, "WINDOWS", False), patch.object(safety, "is_reparse_point") as probe:
+            safety.reject_reparse_points("entry")
+            probe.assert_not_called()
 
 
 if __name__ == "__main__":

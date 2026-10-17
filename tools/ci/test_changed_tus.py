@@ -26,6 +26,31 @@ SPEC.loader.exec_module(tus)
 
 
 class ChangedTranslationUnitsTests(unittest.TestCase):
+    def test_windows_reparse_entries_are_refused_by_every_tree_consumer(self):
+        real_lstat = os.lstat
+        marked = self.src / "redirect"
+        marked.mkdir()
+        (marked / "input.hpp").write_text("same content\n")
+
+        def metadata(path, *args, **kwargs):
+            info = real_lstat(path, *args, **kwargs)
+            fields = {name: getattr(info, name) for name in dir(info) if name.startswith("st_")}
+            fields["st_file_attributes"] = 0x400 if Path(path) == marked else 0
+            return SimpleNamespace(**fields)
+
+        actions = (
+            lambda: tus.check_pch_search_roots("g++", {self.src}),
+            lambda: tus.directory_entries(self.src),
+            lambda: tus.directory_stamp(marked),
+            lambda: tus.configured_header_inputs(self.root, self.build),
+            lambda: tus.checked_resolve(marked / "input.hpp"),
+        )
+        with patch.object(tus._DEPS._PATH_SAFETY, "WINDOWS", True), \
+                patch.object(os, "lstat", side_effect=metadata):
+            for action in actions:
+                with self.subTest(action=action), self.assertRaisesRegex(tus.SelectionError, "reparse point"):
+                    action()
+
     def setUp(self):
         (ROOT / "scratch").mkdir(exist_ok=True)
         temporary = tempfile.TemporaryDirectory(prefix="changed tus ", dir=ROOT / "scratch")
@@ -1988,6 +2013,22 @@ COMPILER_HEADER_ROOTS = tus.compiler_header_roots
 
 
 class ProcessTimeoutTests(unittest.TestCase):
+    def test_parallel_interrupt_cancels_queue_and_reaps_descendants(self):
+        spec = importlib.util.spec_from_file_location("tree_interrupt_tests", ROOT / "tools/ci/test_tidy_cache.py")
+        fixtures = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fixtures)
+        visited = []
+
+        def launch(command, directory):
+            def work(index):
+                visited.append(index)
+                if index == 0:
+                    return EXECUTE(command, directory)
+            tus.parallel(work, range(8), 1)
+
+        fixtures.assert_tree_timeout(self, launch, KeyboardInterrupt, interrupt=True)
+        self.assertEqual(visited, [0])
+
     def test_replay_and_probe_timeout_terminate_grandchildren(self):
         spec = importlib.util.spec_from_file_location("tree_timeout_tests", ROOT / "tools/ci/test_tidy_cache.py")
         fixtures = importlib.util.module_from_spec(spec)
@@ -2096,8 +2137,16 @@ class PchEntryIdentityTests(unittest.TestCase):
                 yield from walk(path / name, **kwargs)
 
         def lstat(path):
-            kind, device, inode = self.nodes[Path(path)]
-            return SimpleNamespace(st_mode=kind, st_dev=device, st_ino=inode)
+            path = Path(path)
+            if path in self.root.parents:
+                kind, device, inode = stat.S_IFDIR, 1, 0
+            elif path in self.nodes:
+                kind, device, inode = self.nodes[path]
+            else:
+                raise FileNotFoundError(path)
+            # This virtual filesystem isolates entry identity changes from
+            # native reparse tags; ancestor probes must use its metadata too.
+            return SimpleNamespace(st_mode=kind, st_dev=device, st_ino=inode, st_file_attributes=0)
 
         patches = [patch.object(tus, "_PCH_SEARCH_CACHE", {}),
                    patch.object(tus, "directory_stamp",

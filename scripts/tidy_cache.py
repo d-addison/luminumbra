@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import hashlib
+import importlib.util
 import json
 import ntpath
 import os
@@ -52,6 +53,12 @@ import sys
 import tempfile
 import threading
 import time
+
+_PATH_SPEC = importlib.util.spec_from_file_location(
+    "_tidy_path_safety", os.path.join(os.path.dirname(__file__), "..", "tools", "ci", "path_safety.py"))
+_PATH_SAFETY = importlib.util.module_from_spec(_PATH_SPEC)
+_PATH_SPEC.loader.exec_module(_PATH_SAFETY)
+reject_reparse_points = _PATH_SAFETY.reject_reparse_points
 
 FORMAT_VERSION = "tidy-cache-v1"
 DEPS_TIMEOUT_SECONDS = 300
@@ -168,12 +175,52 @@ class _WindowsJob:
         self._api.CloseHandle(self._handle)
 
 
+_PROCESS_CONTEXT = threading.local()
+
+
+def parallel_map(function, items, jobs, *, collect_errors=()):
+    """Cancel queued work and interrupt active tool trees before joining workers."""
+    cancelled = threading.Event()
+
+    def invoke(item):
+        _PROCESS_CONTEXT.cancelled = cancelled
+        try:
+            if cancelled.is_set():
+                raise concurrent.futures.CancelledError()
+            return function(item)
+        finally:
+            del _PROCESS_CONTEXT.cancelled
+
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, jobs))
+    try:
+        futures = [pool.submit(invoke, item) for item in items]
+        results, errors = [], []
+        for future in futures:
+            try:
+                results.append(future.result())
+            except collect_errors as error:
+                errors.append(str(error))
+        if errors:
+            raise ValueError("\n".join(errors))
+        return results
+    except BaseException:
+        cancelled.set()
+        raise
+    finally:
+        # Do this before waiting: workers observe cancellation within 100ms,
+        # terminate their own group/job and drain/reap their driver as usual.
+        pool.shutdown(wait=True, cancel_futures=cancelled.is_set())
+
+
 def run_process(command, *, timeout, capture_output=False, check=False, **kwargs):
     """Run a timed tool and terminate its entire tree before releasing files."""
     if capture_output:
         if "stdout" in kwargs or "stderr" in kwargs:
             raise ValueError("capture_output cannot be combined with stdout or stderr")
         kwargs.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    cancelled = getattr(_PROCESS_CONTEXT, "cancelled", None)
+    if cancelled is not None and cancelled.is_set():
+        raise concurrent.futures.CancelledError()
     job = None
     if os.name == "nt":
         # CREATE_SUSPENDED closes the race between launch and job assignment:
@@ -187,14 +234,29 @@ def run_process(command, *, timeout, capture_output=False, check=False, **kwargs
             try:
                 if job is not None:
                     job.start(process)
-                stdout, stderr = process.communicate(timeout=timeout)
+                if cancelled is None:
+                    stdout, stderr = process.communicate(timeout=timeout)
+                else:
+                    deadline = time.monotonic() + timeout
+                    while True:
+                        if cancelled.is_set():
+                            raise concurrent.futures.CancelledError()
+                        remaining = deadline - time.monotonic()
+                        try:
+                            stdout, stderr = process.communicate(timeout=max(0, min(0.1, remaining)))
+                            break
+                        except subprocess.TimeoutExpired as error:
+                            if time.monotonic() >= deadline:
+                                error.timeout = timeout
+                                raise
             except BaseException as error:
                 try:
                     if job is not None:
                         job.terminate()
                         # Assignment may have failed while the driver was
                         # still suspended, outside the otherwise empty job.
-                        process.kill()
+                        if process.poll() is None:
+                            process.kill()
                     else:
                         try:
                             os.killpg(process.pid, signal.SIGKILL)
@@ -254,6 +316,7 @@ def sha256_bytes(data: bytes) -> str:
 
 
 def sha256_file(path: str) -> str:
+    reject_reparse_points(path)
     digest = hashlib.sha256()
     with open(path, "rb") as handle:
         for block in iter(lambda: handle.read(1 << 20), b""):
@@ -544,6 +607,7 @@ class KeyBuilder:
     @staticmethod
     def _hash_dependency(path: str) -> str:
         try:
+            reject_reparse_points(path)
             with open(path, "rb") as handle:
                 data = handle.read()
         except OSError as error:
@@ -666,7 +730,7 @@ def store(cache_dir: str, key: str, tu: str) -> None:
 
 def combined_tool_hash(tool_files: list[str]) -> str:
     digest = hashlib.sha256()
-    for path in [os.path.abspath(__file__), *tool_files]:
+    for path in [os.path.abspath(__file__), _PATH_SPEC.origin, *tool_files]:
         digest.update(os.path.basename(path).encode("utf-8") + b"\0")
         digest.update(sha256_file(path).encode("ascii") + b"\0")
     return digest.hexdigest()
@@ -693,8 +757,7 @@ def run_command(args: argparse.Namespace) -> int:
             return tu, None, False
         return tu, key, read_enabled and lookup(args.cache_dir, key)
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
-        prepared = list(pool.map(prepare, files))
+    prepared = parallel_map(prepare, files, args.jobs)
 
     hits = [item for item in prepared if item[2]]
     misses = [item for item in prepared if not item[2]]
@@ -749,8 +812,7 @@ def run_command(args: argparse.Namespace) -> int:
         with output_lock:
             recorded += 1
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
-        list(pool.map(analyze, misses))
+    parallel_map(analyze, misses, args.jobs)
 
     print(f"tidy cache: analyzed {len(misses)}, recorded {recorded}, failed {len(failures)}")
     for tu in failures:

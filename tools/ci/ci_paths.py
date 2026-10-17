@@ -46,7 +46,7 @@ PYTHON_TESTS = (
 )
 PYTHON_MODULES = {
     "tools/ci/ci_paths.py", "tools/ci/check_docs.py",
-    "tools/ci/changed_tus.py", "tools/ci/offline_deps.py",
+    "tools/ci/changed_tus.py", "tools/ci/offline_deps.py", "tools/ci/path_safety.py",
     "tools/ci/check_ctest_junit.py", "tools/ci/slowest_tests.py",
     "tools/ci/validate_performance_measurement.py",
     "tools/ci/validate_public_tree.py", "tools/ci/validate_visual_catalog.py",

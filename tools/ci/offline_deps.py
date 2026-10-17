@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -17,11 +18,21 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
+_PATH_SPEC = importlib.util.spec_from_file_location("_offline_path_safety", ROOT / "tools/ci/path_safety.py")
+_PATH_SAFETY = importlib.util.module_from_spec(_PATH_SPEC)
+_PATH_SPEC.loader.exec_module(_PATH_SAFETY)
 MAX_GIT_REDIRECTIONS = 32
 
 
 class DependencyError(ValueError):
     pass
+
+
+def reject_reparse_points(path):
+    try:
+        _PATH_SAFETY.reject_reparse_points(path)
+    except OSError as error:
+        raise DependencyError(str(error)) from error
 
 
 def declarations(root: Path) -> dict:
@@ -56,6 +67,8 @@ def unresolved_lock(root: Path) -> dict:
 
 
 def contained(path: Path, parent: Path) -> Path:
+    reject_reparse_points(path)
+    reject_reparse_points(parent)
     try:
         resolved = path.resolve()
     except RuntimeError as error:
@@ -68,9 +81,10 @@ def contained(path: Path, parent: Path) -> Path:
 def source_digest(source: Path) -> str:
     """Hash sorted paths, types, executable bits and bytes; omit Git metadata.
 
-    Only relative symlinks resolving inside this source are accepted. Copying
-    them therefore preserves their meaning without exposing shared files.
+    POSIX relative symlinks must resolve inside this source, so copying them
+    preserves their meaning. Windows reparse points are refused entirely.
     """
+    reject_reparse_points(source)
     if source.is_symlink() or not source.is_dir():
         raise DependencyError(f"missing source directory: {source.name}")
     digest = hashlib.sha256()
@@ -83,6 +97,7 @@ def source_digest(source: Path) -> str:
 
     def visit(directory):
         for item in sorted(directory.iterdir(), key=lambda p: os.fsencode(p.name)):
+            reject_reparse_points(item)
             if item.name == ".git":
                 continue
             rel = item.relative_to(source).as_posix()
@@ -179,11 +194,13 @@ def git_metadata(source: Path, cache: Path) -> None:
     instead of allowing Git to discover unvalidated files outside the cache.
     """
     marker = source / ".git"
+    reject_reparse_points(marker)
     if marker.is_symlink():
         raise DependencyError(f"symlinked Git identity: {source.name}")
     seen = set()
 
     def visit(path):
+        reject_reparse_points(path)
         if path.is_symlink():
             contained(path, cache)
             if not path.exists():
@@ -359,6 +376,7 @@ def verify(root: Path, cache: Path, lock_path: Path) -> dict:
 
 def snapshot(root: Path, cache: Path, lock_path: Path) -> None:
     # Fresh directories avoid reusing stale or partially populated sources.
+    reject_reparse_points(cache)
     if cache.exists() and any(cache.iterdir()):
         raise DependencyError("snapshot requires an empty cache directory")
     cache.mkdir(parents=True, exist_ok=True)
@@ -403,6 +421,7 @@ def remove_stage(dest: Path) -> None:
         mode = path.lstat().st_mode
         if stat.S_ISLNK(mode):
             return
+        reject_reparse_points(path)
         # Older Windows Python lacks follow_symlinks for chmod. Only chmod
         # non-links there; use explicit no-follow semantics where supported.
         options = {"follow_symlinks": False} if os.chmod in os.supports_follow_symlinks else {}
@@ -421,11 +440,13 @@ def remove_stage(dest: Path) -> None:
         function(path)
 
     # onerror is available on every supported Python, including 3.10/3.11.
+    reject_reparse_points(dest)
     shutil.rmtree(dest, onerror=retry)
 
 
 def stage(root: Path, cache: Path, lock_path: Path, dest: Path, init: Path) -> None:
     scratch = root / "scratch"
+    reject_reparse_points(scratch)
     if scratch.is_symlink():
         raise DependencyError("symlinked scratch root")
     contained(scratch, root)
@@ -456,8 +477,22 @@ def stage(root: Path, cache: Path, lock_path: Path, dest: Path, init: Path) -> N
         lines = []
         for name, entry in lock["dependencies"].items():
             target = dest / name
+            reject_reparse_points(cache / name)
+
+            def checked_entries(directory, names):
+                # copytree calls this for each directory before recursing or
+                # copying its entries. Recheck after verification as well.
+                reject_reparse_points(directory)
+                for child in names:
+                    reject_reparse_points(Path(directory) / child)
+                return {".git"}
+
+            def checked_copy(source, destination):
+                reject_reparse_points(source)
+                return shutil.copy2(source, destination)
+
             shutil.copytree(cache / name, target, symlinks=True,
-                            ignore=shutil.ignore_patterns(".git"))
+                            ignore=checked_entries, copy_function=checked_copy)
             if source_digest(target) != entry["sha256"]:
                 raise DependencyError(f"source changed during copy: {name}")
             lines.append(f'set(FETCHCONTENT_SOURCE_DIR_{name.upper()} '
@@ -498,7 +533,7 @@ def main(argv=None) -> int:
     parser.add_argument("--init", type=Path, default=Path("scratch/offline-init.cmake"))
     args = parser.parse_args(argv)
     root = args.root.resolve()
-    cache = args.cache.resolve()
+    cache = args.cache
     lock = root / args.lock
     try:
         if args.command == "snapshot":

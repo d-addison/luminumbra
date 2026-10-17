@@ -108,7 +108,8 @@ sys.exit(0)
 """
 
 
-def assert_tree_timeout(case, launch, error_type=subprocess.TimeoutExpired, *, driver_exits=False):
+def assert_tree_timeout(case, launch, error_type=subprocess.TimeoutExpired, *, driver_exits=False,
+                        interrupt=False):
     """Exercise a real driver and grandchild, and reap the fixture on failure."""
     with tempfile.TemporaryDirectory(prefix="process-tree-") as temporary:
         directory = Path(temporary)
@@ -127,6 +128,7 @@ def assert_tree_timeout(case, launch, error_type=subprocess.TimeoutExpired, *, d
         process = None
         subreaper = None
         terminated = False
+        started = threading.Event()
         if sys.platform == "linux":
             # Adopt the orphan so the regression verifies reaping as well as
             # termination, even in containers whose init does not reap zombies.
@@ -159,6 +161,7 @@ def assert_tree_timeout(case, launch, error_type=subprocess.TimeoutExpired, *, d
                     if os.name == "nt":
                         handle = kernel.OpenProcess(0x100001, False, grandchild)
                         case.assertTrue(handle)
+                    started.set()
                     # Start the actual timeout only after the descendant exists.
                     return communicate(input, timeout=0.05)
                 return communicate(input)
@@ -191,7 +194,23 @@ def assert_tree_timeout(case, launch, error_type=subprocess.TimeoutExpired, *, d
             def driver_only(command, **kwargs):
                 return start(command, **kwargs) if command[0] == sys.executable else popen(command, **kwargs)
 
-            with patch.object(subprocess, "Popen", side_effect=driver_only):
+            future_result = concurrent.futures.Future.result
+
+            def interrupt_result(future, *args, **kwargs):
+                deadline = time.monotonic() + 5
+                while not started.is_set():
+                    # Let non-process preparation finish before interrupting
+                    # the analysis pool in the public command regression.
+                    if future.done():
+                        return future_result(future, *args, **kwargs)
+                    case.assertLess(time.monotonic(), deadline, "worker did not start")
+                    started.wait(0.001)
+                raise KeyboardInterrupt()
+
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(patch.object(subprocess, "Popen", side_effect=driver_only))
+                if interrupt:
+                    stack.enter_context(patch.object(concurrent.futures.Future, "result", interrupt_result))
                 with case.assertRaises(error_type):
                     launch([sys.executable, "-I", "-B", str(script), str(ready)], directory)
             case.assertIsNotNone(grandchild)
@@ -221,8 +240,11 @@ def assert_tree_timeout(case, launch, error_type=subprocess.TimeoutExpired, *, d
 class ProcessRunnerContractTests(unittest.TestCase):
     def setUp(self):
         self.process = MagicMock(pid=123, returncode=0)
+        self.process.poll.return_value = None
         self.process.__enter__.return_value = self.process
         self.popen = patch.object(MODULE.subprocess, "Popen", return_value=self.process).start()
+        # Fake Popen handles must use a fake job backend on native Windows too.
+        patch.object(MODULE, "_WindowsJob").start()
         self.addCleanup(patch.stopall)
 
     def test_success_output_exit_codes_and_capture_validation(self):
@@ -319,6 +341,69 @@ class ProcessRunnerContractTests(unittest.TestCase):
             factory.return_value.start.assert_called_once_with(self.process)
             factory.return_value.close.assert_called_once()
             factory.return_value.terminate.assert_not_called()
+
+    def test_windows_assignment_failure_after_driver_exit_is_reported_and_reaped(self):
+        failure = OSError("assignment failed after exit")
+        self.process.poll.return_value = 0
+        self.process.communicate.return_value = (b"", b"")
+        with patch.object(MODULE.os, "name", "nt"), \
+                patch.object(MODULE.subprocess, "CREATE_NEW_PROCESS_GROUP", 512, create=True), \
+                patch.object(MODULE, "_WindowsJob") as factory:
+            factory.return_value.start.side_effect = failure
+            with self.assertRaises(OSError) as raised:
+                MODULE.run_process(["tool"], timeout=7)
+            self.assertIs(raised.exception, failure)
+            self.process.kill.assert_not_called()
+            self.process.communicate.assert_called_once_with()
+            self.process.__exit__.assert_called_once()
+            factory.return_value.terminate.assert_called_once()
+            factory.return_value.close.assert_called_once()
+
+    def test_parallel_cancellation_terminates_both_backends_and_refuses_new_launches(self):
+        for platform in ("posix", "nt"):
+            with self.subTest(platform=platform), patch.object(MODULE.os, "name", platform), \
+                    patch.object(MODULE.signal, "SIGKILL", 9, create=True), \
+                    patch.object(MODULE.os, "killpg", create=True) as killpg, \
+                    patch.object(MODULE.subprocess, "CREATE_NEW_PROCESS_GROUP", 512, create=True), \
+                    patch.object(MODULE, "_WindowsJob") as factory:
+                self.process.reset_mock()
+                cancelled = threading.Event()
+
+                def communicate(timeout=None):
+                    if timeout is None:
+                        return b"partial", b"diagnostic"
+                    self.assertLessEqual(timeout, 0.1)
+                    cancelled.set()
+                    raise subprocess.TimeoutExpired("tool", timeout)
+
+                self.process.communicate.side_effect = communicate
+                with patch.object(MODULE._PROCESS_CONTEXT, "cancelled", cancelled, create=True):
+                    with self.assertRaises(concurrent.futures.CancelledError):
+                        MODULE.run_process(["tool"], timeout=7)
+                    self.process.communicate.assert_called_with()
+                    self.popen.reset_mock()
+                    with self.assertRaises(concurrent.futures.CancelledError):
+                        MODULE.run_process(["queued tool"], timeout=7)
+                    self.popen.assert_not_called()
+                if platform == "nt":
+                    factory.return_value.terminate.assert_called_once()
+                    factory.return_value.close.assert_called_once()
+                else:
+                    killpg.assert_called_once_with(123, 9)
+
+    def test_parallel_deadline_preserves_partial_output_and_empty_work(self):
+        cancelled = threading.Event()
+        self.process.communicate.side_effect = [subprocess.TimeoutExpired("tool", 0, b"partial"),
+                                               (b"partial", b"diagnostic")]
+        with patch.object(MODULE.os, "name", "posix"), \
+                patch.object(MODULE.signal, "SIGKILL", 9, create=True), \
+                patch.object(MODULE.os, "killpg", create=True), \
+                patch.object(MODULE._PROCESS_CONTEXT, "cancelled", cancelled, create=True):
+            with self.assertRaises(subprocess.TimeoutExpired) as raised:
+                MODULE.run_process(["tool"], timeout=0)
+            self.assertEqual(raised.exception.timeout, 0)
+            self.assertEqual(raised.exception.stdout, b"partial")
+        self.assertEqual(MODULE.parallel_map(lambda item: self.fail("unexpected work"), [], 2), [])
 
 
 class WindowsJobTests(unittest.TestCase):
@@ -426,6 +511,57 @@ class WindowsJobTests(unittest.TestCase):
 
 
 class ProcessTreeTests(unittest.TestCase):
+    def test_cache_command_interrupt_cleans_up_preparation_and_analysis(self):
+        for phase in ("prepare", "analyze"):
+            with self.subTest(phase=phase):
+                key_calls, launches, failures = [], [], []
+
+                def launch(command, directory):
+                    original_run = MODULE.run_process
+
+                    def run_tool(*args, **kwargs):
+                        launches.append(args[0])
+                        try:
+                            return original_run(command, cwd=directory, capture_output=True, timeout=1)
+                        except BaseException as error:
+                            failures.append(type(error))
+                            raise
+
+                    def key_for(tu, *args):
+                        key_calls.append(tu)
+                        if phase == "prepare":
+                            run_tool(command)
+                        return "key"
+
+                    args = SimpleNamespace(files=[str(directory / f"{i}.cpp") for i in range(8)],
+                                           tool_file=[], clang_tidy="tidy", build_dir=str(directory),
+                                           mode="readwrite", cache_dir=str(directory / "cache"),
+                                           jobs=1, config="{}")
+                    with patch.object(MODULE, "combined_tool_hash", return_value="hash"), \
+                            patch.object(MODULE, "load_entries", return_value={}), \
+                            patch.object(MODULE.KeyBuilder, "key_for", side_effect=key_for), \
+                            patch.object(MODULE, "run_process", side_effect=run_tool), \
+                            contextlib.redirect_stdout(io.StringIO()):
+                        MODULE.run_command(args)
+
+                assert_tree_timeout(self, launch, KeyboardInterrupt, interrupt=True)
+                self.assertEqual(len(launches), 1)
+                self.assertEqual(len(key_calls), 1 if phase == "prepare" else 8)
+                self.assertEqual(failures, [concurrent.futures.CancelledError])
+
+    def test_parallel_interrupt_cancels_queue_and_reaps_descendants(self):
+        visited = []
+
+        def launch(command, directory):
+            def work(index):
+                visited.append(index)
+                if index == 0:
+                    return MODULE.run_process(command, cwd=directory, capture_output=True, timeout=1)
+            MODULE.parallel_map(work, range(8), 1)
+
+        assert_tree_timeout(self, launch, KeyboardInterrupt, interrupt=True)
+        self.assertEqual(visited, [0])
+
     def test_timeout_terminates_and_reaps_grandchild(self):
         for driver_exits in (False, True):
             with self.subTest(driver_exits=driver_exits):
@@ -803,6 +939,23 @@ class CompileCommandParserTests(unittest.TestCase):
 
 
 class ToolIdentityTests(unittest.TestCase):
+    def test_dependency_hashing_rejects_reparse_paths_and_hashes_safety_code(self):
+        with patch.object(MODULE._PATH_SAFETY, "WINDOWS", True), \
+                patch.object(MODULE._PATH_SAFETY, "is_reparse_point", return_value=True):
+            with self.assertRaisesRegex(MODULE.CacheMiss, "reparse point"):
+                MODULE.KeyBuilder._hash_dependency(str(self.tool))
+            with self.assertRaisesRegex(OSError, "reparse point"):
+                MODULE.sha256_file(str(self.tool))
+        safety_content = "before"
+
+        def content(path):
+            return safety_content if path == MODULE._PATH_SPEC.origin else "unchanged"
+
+        with patch.object(MODULE, "sha256_file", side_effect=content):
+            before = MODULE.combined_tool_hash([])
+            safety_content = "after"
+            self.assertNotEqual(MODULE.combined_tool_hash([]), before)
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="tool-identity-")
         self.addCleanup(temporary.cleanup)
@@ -852,7 +1005,9 @@ class ToolIdentityTests(unittest.TestCase):
         with patch.object(MODULE, "run_process", return_value=result) as version, \
                 patch.object(MODULE, "sha256_file", wraps=MODULE.sha256_file) as content:
             before = self.tools.describe(str(self.tool), str(self.root))
-            os.utime(self.tool, ns=(self.tick + 1, self.tick + 1))
+            # Windows file times have 100ns resolution: a 1ns change rounds
+            # back to the old fingerprint and correctly takes the cache hit.
+            os.utime(self.tool, ns=(self.tick + 1_000_000_000, self.tick + 1_000_000_000))
             self.assertEqual(self.tools.describe(str(self.tool), str(self.root)), before)
             self.assertEqual(content.call_count, 2)
             self.assertEqual(version.call_count, 1)
