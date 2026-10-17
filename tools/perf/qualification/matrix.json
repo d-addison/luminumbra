@@ -33,7 +33,7 @@
    "pose_provenance": "unrecorded: operator records position/yaw/pitch on the qualification machine"},
   {"id": "surface-flight", "kind": "traversal",
    "script": "tools/perf/fixtures/surface-flight.traversal",
-   "script_sha256": "029e54d693c993472d84d7a9a38b2c3bbf513f129a1922534906c0f91b479e4e",
+   "script_sha256": "99d5ec201f0ac19118b05d6b5cebef9c7db9943aeaa3ca299339b85131393868",
    "blocked_by": null},
   {"id": "cave-walk", "kind": "traversal", "script": null, "script_sha256": null,
    "blocked_by": "traversal v2 events (fw #132); spec only"},
