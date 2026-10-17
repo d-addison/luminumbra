@@ -4,53 +4,24 @@
 
 #include <glad/glad.h>
 
-#include "core/Log.h"
+#include "core/RuntimeScenarioConfig.h"
 #include "core/RuntimeScenarioHarness.h"
 #include "core/scenarios/NetworkedSessionHooks.h"
-#include "core/scenarios/ScenarioCommon.h"
-#include "luminumbra_common/ai/CreatureSpeciesRegistry.h" //  species base_color -> creature tint
-#include "luminumbra_common/animation/AnimationRuntime.h"
-#include "luminumbra_common/components/CoreComponents.h"
-#include "luminumbra_common/components/InstinctComponents.h"
-#include "luminumbra_common/core/Environment.h"
-#include "luminumbra_common/core/JobSystem.h"
+#include "luminumbra/core/Types.h"
 #include "luminumbra_common/core/SystemConfig.h"
-#include "luminumbra_common/ecs/EntitySnapshot.h"
-#include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
-#include "luminumbra_common/persistence/WorldSaveService.h"
-#include "luminumbra_common/systems/CreatureProcgen.h" //  genome -> body-proportion build
-#include "luminumbra_common/systems/PhysicsSystem.h"
-#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
-#include "luminumbra_common/systems/WeatherSystem.h"
-#include "luminumbra_common/systems/WindFieldSystem.h"
-#include "luminumbra_common/world/GameSession.h"
-#include "luminumbra_common/world/WorldStreamingState.h"
-#include "rendering/Camera.h"
-#include "rendering/LightningBolt.h"
-#include "rendering/passes/FoliagePass.h"
-#include "rendering/passes/ParticlePass.h"
-// lockstep transport seam (engine-generic; ILockstepTransport +
-// LoopbackTransport + LockstepSession). Named SendFrame/TryReceiveFrame to dodge
-// the <windows.h> SendMessage macro (see LockstepSession.h note).
 #include "luminumbra_common/net/LockstepSession.h"
-//  (AU1): atmosphere audio telemetry. The harness sweeps the replicated
-// weather/wind state through the REAL EnvironmentalAudioSystem atmosphere model +
-// the AudioPropagationSystem ambience bed and emits the AtmosphereAudio artifact.
-// Client-side dressing only -- no world_hash, no visual-gate dependency.
-#include "audio/AudioPropagationSystem.h"
-#include "audio/EnvironmentalAudioSystem.h"
+#include "luminumbra_common/world/GameSession.h"
+
 #include <algorithm>
-#include <array>
-#include <cmath>
-#include <cstdio>
-#include <cstdlib>
-#include <ctime>
+#include <cstdint>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
-#include <limits>
-#include <sstream>
-#include <stdexcept>
+#include <memory>
+#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
+#include <string>
 #include <system_error>
 
 namespace Luminumbra::Client::ScenarioHarness {
@@ -243,7 +214,7 @@ bool NetworkedSessionDriver::WriteArtifact(const std::filesystem::path& artifact
 
     const GLDebugRuntimeStats gl_debug = CurrentGLDebugRuntimeStats();
 
-    nlohmann::json artifact{
+    const nlohmann::json artifact{
         {"schema", "luminumbra.networked_session.v1"},
         {"generated_by", "luminumbra_client_qa_app --scenario networked_session_smoke ()"},
         {"preset", m_impl->config.preset},

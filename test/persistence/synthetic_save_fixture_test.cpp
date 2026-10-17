@@ -2,7 +2,10 @@
 
 #include "luminumbra_common/persistence/SavedWorldCatalog.h"
 #include "luminumbra_common/persistence/SyntheticSaveFixture.h"
+#include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
+
+#include <nlohmann/json.hpp>
 
 #include <chrono>
 #include <cstddef>
@@ -74,6 +77,7 @@ SyntheticSaveSpec Spec(const std::string& world_id, std::uint32_t chunks) {
     SyntheticSaveSpec spec;
     spec.world_id = world_id;
     spec.chunk_count = chunks;
+    spec.preset_source = fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets/default.json";
     return spec;
 }
 
@@ -120,6 +124,12 @@ TEST_F(SyntheticSaveFixture, WritesCatalogValidWorld) {
     ASSERT_TRUE(report.ok) << report.error;
     EXPECT_EQ(report.chunks_written, 24u);
     EXPECT_GT(report.region_files, 0u);
+    const auto metadata = nlohmann::json::parse(Read(report.save_dir / "world_info.json"));
+    EXPECT_EQ(metadata.at("presetFormat"), Persistence::kSavedPresetFormat);
+    EXPECT_EQ(metadata.at("presetIdentity"),
+              Persistence::StableChecksum(
+                  nlohmann::json::parse(Read(report.save_dir / "preset.json")).dump()));
+    EXPECT_EQ(Read(report.save_dir / "preset.json"), Read(spec.preset_source));
 
     const auto inspected = Persistence::InspectSavedWorld(root, spec.world_id);
     EXPECT_EQ(inspected.error, "");
@@ -199,6 +209,16 @@ TEST_F(SyntheticSaveFixture, RefusesBadSpecAndExistingSave) {
     EXPECT_FALSE(second.ok);
     EXPECT_FALSE(second.error.empty());
     EXPECT_EQ(DiskBytes(first.save_dir), before);
+}
+
+TEST_F(SyntheticSaveFixture, RefusesMissingPresetSourceBeforeCreatingDirectories) {
+    const auto root = NewRoot("missing_source");
+    auto spec = Spec("missing_source", 1);
+    spec.preset_source.clear();
+    const auto report = WriteSyntheticSave(spec, root);
+    EXPECT_FALSE(report.ok);
+    EXPECT_NE(report.error.find("preset_source is required"), std::string::npos);
+    EXPECT_FALSE(fs::exists(root));
 }
 
 TEST_F(SyntheticSaveFixture, RefusesPreExistingLeafWithoutChangingItsContents) {

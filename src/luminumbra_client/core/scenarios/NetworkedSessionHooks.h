@@ -1,6 +1,8 @@
 #pragma once
 
+#include "luminumbra/core/Types.h"
 #include "luminumbra_common/core/JobSystem.h"
+#include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/net/LockstepSession.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
@@ -11,6 +13,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace Luminumbra::Client::ScenarioHarness::detail {
@@ -218,7 +221,10 @@ BeginNetworkedSession(NetworkedSessionState& state,
         ch.client_id = 1;
         ch.system_config_identity = client_cfg.system_config_identity;
         ch.preset_content_hash = client_cfg.preset_content_hash;
-        state.client_transport->SendFrame(Luminumbra::Net::EncodeHello(ch));
+        if (!state.client_transport->SendFrame(Luminumbra::Net::EncodeHello(ch))) {
+            failure_reason = "handshake_failed";
+            return false;
+        }
         Luminumbra::Net::HelloMsg hh;
         hh.seed = seed;
         hh.preset = host_config.preset;
@@ -226,7 +232,10 @@ BeginNetworkedSession(NetworkedSessionState& state,
         hh.client_id = 0;
         hh.system_config_identity = host_cfg.system_config_identity;
         hh.preset_content_hash = host_cfg.preset_content_hash;
-        state.host_transport->SendFrame(Luminumbra::Net::EncodeHello(hh));
+        if (!state.host_transport->SendFrame(Luminumbra::Net::EncodeHello(hh))) {
+            failure_reason = "handshake_failed";
+            return false;
+        }
     }
     if (!state.host->Handshake() || !state.client->Handshake()) {
         failure_reason = "handshake_failed";
