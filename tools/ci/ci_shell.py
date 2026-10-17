@@ -105,7 +105,10 @@ def bash_executable(override=None):
         '[[ -n "$BASH_VERSION" ]] || { ci_bash_observe bash-version; exit 11; }; '
     )
     if windows:
-        script += '[[ "$OSTYPE" == msys* ]] || { ci_bash_observe ostype; exit 12; }; '
+        # MSYS2 changed Bash's OSTYPE from msys to cygwin in February 2025:
+        # https://www.msys2.org/news/#2025-02-14-moving-msys2-closer-to-cygwin
+        # Check the shell intrinsic, independently of inherited MSYSTEM.
+        script += '[[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin ]] || { ci_bash_observe ostype; exit 12; }; '
     script += "printf 'ci-bash-ready\\n'"
     environment = {key: value for key, value in os.environ.items()
                    if key.upper() not in ("BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "OSTYPE", "BASH_VERSION")
