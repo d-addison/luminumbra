@@ -89,6 +89,7 @@ public:
     // reproducible. Per-avatar movement comes from the latest network usercmd;
     // avatars with no input settle against world collision under gravity.
     void clear_avatar_characters();
+    // Positions use the feet, matching creature transforms and the local player.
     std::size_t create_avatar_character(const glm::vec3& initial_position);
     // Set an avatar's horizontal wish velocity (world XZ m/s) for the
     // next step -- the server applies the network usercmd's movement here. Persists

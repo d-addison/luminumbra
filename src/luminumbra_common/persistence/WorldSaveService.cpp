@@ -1249,21 +1249,12 @@ bool WorldSaveService::save_plant_entities(const Luminumbra::Ecs::EntityRegistry
     if (snapshot.entities.empty()) {
         // No plants -> no file (a no-plant save is byte-identical). Retire any stale file.
         std::filesystem::remove(path, ec);
-        return true;
+        if (ec)
+            AddError(errors, "failed to remove plant entities file: " + ec.message());
+        return !ec;
     }
-    std::filesystem::create_directories(path.parent_path(), ec);
-    std::ofstream output(path, std::ios::binary | std::ios::trunc);
-    if (!output.is_open()) {
-        AddError(errors, "failed to open plant entities file for writing: " + path.string());
-        return false;
-    }
-    output << Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(snapshot);
-    output.flush();
-    if (!output.good()) {
-        AddError(errors, "failed to write plant entities file: " + path.string());
-        return false;
-    }
-    return true;
+    return write_file_durably(
+        path, Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(snapshot), errors);
 }
 
 bool WorldSaveService::load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapshot& out,

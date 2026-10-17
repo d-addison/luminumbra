@@ -10,7 +10,8 @@
 
 namespace Luminumbra::Filesystem {
 
-// An immutable opened file image. Windows readers share deletion so atomic
+// An opened regular file image; directories and devices are refused without
+// reading, and FIFOs are opened without blocking. Windows readers share deletion so atomic
 // replacement can publish a new image while existing readers finish the old one.
 // POSIX readers have the same semantics through their open descriptor.
 class ReplacementSafeInputFile {

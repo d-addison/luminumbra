@@ -515,13 +515,19 @@ std::size_t PhysicsSystem::create_avatar_character(const glm::vec3& start_pos) {
         return 0;
     // Shared capsule (same dimensions as the standing player) created once.
     if (m_avatar_shape == nullptr) {
-        m_avatar_shape = JPH::CapsuleShapeSettings(0.9f, 0.4f).Create().Get();
+        const JPH::Ref<JPH::Shape> capsule = JPH::CapsuleShapeSettings(0.9f, 0.4f).Create().Get();
+        // Character positions and replicated creature transforms are feet.
+        // A centered capsule starts below the floor and may resolve through it.
+        m_avatar_shape = JPH::RotatedTranslatedShapeSettings(
+                             JPH::Vec3(0.0f, 1.3f, 0.0f), JPH::Quat::sIdentity(), capsule.GetPtr())
+                             .Create()
+                             .Get();
     }
     JPH::CharacterVirtualSettings settings;
     settings.mShape = m_avatar_shape;
     settings.mMass = 80.0f;
     settings.mMaxSlopeAngle = glm::radians(50.0f);
-    settings.mSupportingVolume = JPH::Plane(JPH::Vec3::sAxisY(), -0.1f);
+    settings.mSupportingVolume = JPH::Plane(JPH::Vec3::sAxisY(), -0.4f);
     m_avatar_characters.push_back(
         std::make_unique<JPH::CharacterVirtual>(&settings,
                                                 JPH::RVec3(start_pos.x, start_pos.y, start_pos.z),

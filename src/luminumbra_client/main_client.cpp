@@ -278,8 +278,7 @@ void AttachMissingCreatureBodies(Luminumbra::Systems::PhysicsSystem* phys,
         if (reg.all_of<Luminumbra::Components::CreaturePhysicsComponent>(e))
             continue;
         const auto& tf = view.get<const Luminumbra::Components::TransformComponent>(e);
-        const std::size_t idx = phys->create_avatar_character(
-            glm::vec3(tf.position.x, tf.position.y + 1.0f, tf.position.z));
+        const std::size_t idx = phys->create_avatar_character(tf.position);
         reg.emplace<Luminumbra::Components::CreaturePhysicsComponent>(e, idx);
         ++made;
     }

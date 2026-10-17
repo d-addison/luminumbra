@@ -5777,21 +5777,18 @@ SHIELD_WorldSystem::snapshot_streamed_chunks() const {
 std::vector<std::shared_ptr<Luminumbra::Chunk>>
 SHIELD_WorldSystem::snapshot_region_authority(i32 rx, i32 rz) const {
     std::vector<std::shared_ptr<Luminumbra::Chunk>> chunks;
-    const auto append_region = [&](const auto& source) {
-        for (const auto& [id, chunk] : source) {
-            (void)id;
-            if (!chunk || !chunk->has_simulation_authority())
-                continue;
-            const auto coords = chunk->get_coords();
-            const auto floor_region = [](i32 value) {
-                const i32 quotient = value / 32;
-                return value % 32 < 0 ? quotient - 1 : quotient;
-            };
-            if (floor_region(coords.x) == rx && floor_region(coords.z) == rz)
-                chunks.push_back(chunk);
-        }
-    };
-    append_region(m_streaming_state.chunks);
+    // Use the durable reader's signed coordinate mapping for the live half of
+    // the merge too, including exact and partial negative-region boundaries.
+    for (const auto& [id, chunk] : m_streaming_state.chunks) {
+        (void)id;
+        if (!chunk || !chunk->has_simulation_authority())
+            continue;
+        int chunk_rx = 0, chunk_rz = 0;
+        Persistence::WorldSaveService::region_coords_for_chunk(
+            chunk->get_coords(), chunk_rx, chunk_rz);
+        if (chunk_rx == rx && chunk_rz == rz)
+            chunks.push_back(chunk);
+    }
     return chunks;
 }
 

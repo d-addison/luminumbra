@@ -598,38 +598,7 @@ Vec3 WaterSystem::get_camera_position(entt::registry& registry) const {
     return Vec3(0.0f);
 }
 
-void WaterSystem::update(entt::registry& registry,
-                         const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>& active_chunks,
-                         bool deterministic_authority) {
-    m_cells_stepped_last_update = 0;
-    // (water-kernel perf) sub-phase wall timers — RUNTIME TELEMETRY ONLY (never hashed),
-    // the _dbg_split pattern from SHIELD_WorldSystem::update.
-    m_dbg_water = {};
-    auto dbg_prev = std::chrono::steady_clock::now();
-    auto dbg_split = [&](double& slot) {
-        const auto now = std::chrono::steady_clock::now();
-        slot += std::chrono::duration<double, std::milli>(now - dbg_prev).count();
-        dbg_prev = now;
-    };
-
-    m_active_chunks = &active_chunks;
-    // Derived cache shares the bounded simulation set's lifetime. Restored
-    // chunks reconstruct activity from their persisted integer flux.
-    for (auto it = m_water_activity_cache.begin();
-         deterministic_authority && it != m_water_activity_cache.end();) {
-        if (!active_chunks.contains(it->first))
-            it = m_water_activity_cache.erase(it);
-        else
-            ++it;
-    }
-    if (m_active_chunks->empty())
-        return;
-    // a session booted from a save pauses water for the whole Boot (see
-    // SetBootPaused) — no init, no wake/sleep mutation, no stepping. The loaded
-    // mid-flow water state stays bit-exact until live ticks resume it.
-    if (m_boot_paused)
-        return;
-
+std::vector<Chunk*> WaterSystem::PrepareWaterGrids(bool deterministic_authority) {
     // --- ADAPTIVE WATER GRID SYSTEM INTEGRATION ---
     // Apply adaptive resolution to active water chunks.  implementation note: each resolution
     // change re-samples GetTerrainHeightAt per cell (~30us, up to 1024 cells at Ultra), so a burst
@@ -665,7 +634,7 @@ void WaterSystem::update(entt::registry& registry,
     // depends only on the chunk's canonical inputs, independently of worker execution order.
     std::vector<Chunk*> to_init;
     bool init_cap_reached = false;
-    for (const auto& active_chunk : active_chunks) {
+    for (const auto& active_chunk : *m_active_chunks) {
         const auto& chunk_ptr = active_chunk.second;
         if (!chunk_ptr) {
             continue;
@@ -713,6 +682,43 @@ void WaterSystem::update(entt::registry& registry,
         if (!deterministic_authority)
             m_water_resize_cursor = (start + budget) % total;
     }
+
+    return to_init;
+}
+
+void WaterSystem::update(entt::registry& registry,
+                         const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>& active_chunks,
+                         bool deterministic_authority) {
+    m_cells_stepped_last_update = 0;
+    // (water-kernel perf) sub-phase wall timers — RUNTIME TELEMETRY ONLY (never hashed),
+    // the _dbg_split pattern from SHIELD_WorldSystem::update.
+    m_dbg_water = {};
+    auto dbg_prev = std::chrono::steady_clock::now();
+    auto dbg_split = [&](double& slot) {
+        const auto now = std::chrono::steady_clock::now();
+        slot += std::chrono::duration<double, std::milli>(now - dbg_prev).count();
+        dbg_prev = now;
+    };
+
+    m_active_chunks = &active_chunks;
+    // Derived cache shares the bounded simulation set's lifetime. Restored
+    // chunks reconstruct activity from their persisted integer flux.
+    for (auto it = m_water_activity_cache.begin();
+         deterministic_authority && it != m_water_activity_cache.end();) {
+        if (!active_chunks.contains(it->first))
+            it = m_water_activity_cache.erase(it);
+        else
+            ++it;
+    }
+    if (m_active_chunks->empty())
+        return;
+    // a session booted from a save pauses water for the whole Boot (see
+    // SetBootPaused) — no init, no wake/sleep mutation, no stepping. The loaded
+    // mid-flow water state stays bit-exact until live ticks resume it.
+    if (m_boot_paused)
+        return;
+
+    auto to_init = PrepareWaterGrids(deterministic_authority);
 
     auto source_view = registry.view<const Components::TransformComponent,
                                      const Components::FlowingWaterSourceComponent>();

@@ -24,7 +24,9 @@
 #include <io.h>
 #include <windows.h>
 #else
+#include <fcntl.h>
 #include <stdio.h>
+#include <unistd.h>
 #endif
 
 namespace Luminumbra::Filesystem {
@@ -54,6 +56,12 @@ bool ReplacementSafeInputFile::open(const std::filesystem::path& path) {
                                       nullptr);
     if (handle == INVALID_HANDLE_VALUE)
         return false;
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (GetFileType(handle) != FILE_TYPE_DISK || !GetFileInformationByHandle(handle, &info) ||
+        (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+        CloseHandle(handle);
+        return false;
+    }
     const int descriptor =
         _open_osfhandle(reinterpret_cast<std::intptr_t>(handle), _O_RDONLY | _O_BINARY);
     if (descriptor == -1) {
@@ -64,7 +72,19 @@ bool ReplacementSafeInputFile::open(const std::filesystem::path& path) {
     if (!m_file)
         _close(descriptor);
 #else
-    m_file = std::fopen(path.c_str(), "rb");
+    // Nonblocking open prevents a substituted FIFO from waiting for a writer.
+    // Validate the same descriptor that supplies all subsequent bytes.
+    const int descriptor = ::open(path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (descriptor == -1)
+        return false;
+    struct stat info {};
+    if (fstat(descriptor, &info) != 0 || !S_ISREG(info.st_mode)) {
+        ::close(descriptor);
+        return false;
+    }
+    m_file = fdopen(descriptor, "rb");
+    if (!m_file)
+        ::close(descriptor);
 #endif
     return is_open();
 }

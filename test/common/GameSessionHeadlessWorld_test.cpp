@@ -1559,12 +1559,9 @@ TEST_P(SavedWorldPresetTest, UnmarkedLegacySaveUsesFrozenPresetAndEmbedsItOnResa
 
 INSTANTIATE_TEST_SUITE_P(ActiveRegionsEnabledAndDisabled, SavedWorldPresetTest, testing::Bool());
 
-// Reads a record that production writes through a text-mode stream, so its bytes
-// carry the host's line endings: the energy record (GameSession writes
-// aether_state.efs with a default-mode ofstream) is LF on Linux and CRLF on
-// Windows. That platform difference predates this change; normalising here keeps
-// the assertions about record CONTENT independent of it. Tests that assert exact
-// bytes written by the test itself use binary streams instead.
+// Older Windows energy records used text-mode CRLF; durable replacement writes
+// binary LF on every platform. Normalize historical records for content checks.
+// Failure-preservation checks compare the original binary bytes directly.
 std::string ReadClockTestTextRecord(const fs::path& path) {
     std::string text = ReadClockTestFile(path);
     text.erase(std::remove(text.begin(), text.end(), '\r'), text.end());
@@ -2271,6 +2268,246 @@ TEST(GameSessionHeadlessWorldTest, EmptyAlignedEnergySaveRemovesStaleRecord) {
     EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(original));
 }
 
+TEST(GameSessionHeadlessWorldTest, EnergyWriteFailureRefusesBothRegionModesAndDirtyPaths) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    for (const bool active_regions : {false, true}) {
+        for (const bool dirty : {false, true}) {
+            SCOPED_TRACE(active_regions);
+            SCOPED_TRACE(dirty);
+            GameSession session;
+            session.SetRootPath(root.root_string());
+            session.SetJobSystem(&jobs);
+            session.SetActiveRegionsEnabled(active_regions);
+            session.SetAetherStateEnabled(true);
+            ASSERT_TRUE(session.CreateWorld("Failed energy save", "1337", "default"));
+            auto* energy = session.GetEnergyFieldState();
+            ASSERT_NE(energy, nullptr);
+            energy->SetAnchorCell(0, 0);
+            energy->QueueDeposit(1, 0, 0, 0, 60000);
+            energy->Tick(0);
+            ASSERT_GT(energy->page_count(), 0u);
+            if (dirty) {
+                const auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+                chunk->heightmap_data = {8.0f};
+                chunk->set_state(Luminumbra::ChunkState::Idle);
+                chunk->mark_voxel_data_dirty();
+                ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+            }
+            const auto save = session.GetWorldSaveDir();
+            const auto obstruction = save / "aether_state.efs";
+            ASSERT_TRUE(fs::create_directory(obstruction));
+            std::ofstream(obstruction / "retained") << "retained";
+            const auto metadata = ReadClockTestFile(save / "world_info.json");
+            const auto before_energy = energy->CanonicalBytes();
+            Luminumbra::world::WorldStateSaveReport report;
+            EXPECT_FALSE(session.SaveWorldState(&report));
+            EXPECT_FALSE(report.saved);
+            EXPECT_EQ(energy->CanonicalBytes(), before_energy);
+            EXPECT_EQ(ReadClockTestFile(save / "world_info.json"), metadata);
+            EXPECT_EQ(ReadClockTestFile(obstruction / "retained"), "retained");
+            ASSERT_EQ(fs::remove_all(obstruction), 2u);
+            ASSERT_TRUE(session.SaveWorldState());
+            EXPECT_TRUE(fs::is_regular_file(obstruction));
+        }
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, InterruptedEnergyReplacementRetainsPreviousPayload) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(false);
+    session.SetAetherStateEnabled(true);
+    ASSERT_TRUE(session.CreateWorld("Energy replacement", "1337", "default"));
+    auto* energy = session.GetEnergyFieldState();
+    ASSERT_NE(energy, nullptr);
+    energy->SetAnchorCell(0, 0);
+    energy->QueueDeposit(1, 0, 0, 0, 1000);
+    energy->Tick(0);
+    ASSERT_TRUE(session.SaveWorldState());
+    const auto save = session.GetWorldSaveDir();
+    const auto before = SavedPresetTestDiskBytes(save);
+    energy->QueueDeposit(1, 0, 0, 0, 1000);
+    energy->Tick(0);
+    const auto live = energy->CanonicalBytes();
+    P::WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
+    const bool saved = session.SaveWorldState();
+    P::WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
+    EXPECT_FALSE(saved);
+    EXPECT_EQ(SavedPresetTestDiskBytes(save), before);
+    EXPECT_EQ(energy->CanonicalBytes(), live);
+    ASSERT_TRUE(session.SaveWorldState());
+    EXPECT_NE(ReadClockTestFile(save / "aether_state.efs"), before.at("aether_state.efs"));
+}
+
+TEST(GameSessionHeadlessWorldTest, InterruptedPlantReplacementRetainsPreviousPayload) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(false);
+    session.SetAetherStateEnabled(false);
+    ASSERT_TRUE(session.CreateWorld("Plant replacement", "1337", "default"));
+    const auto plant = ClockTestPlant(session.GetRegistry(), session.GetMetadata().spawnPoint);
+    ASSERT_TRUE(session.SaveWorldState());
+    const auto save = session.GetWorldSaveDir();
+    const auto before = SavedPresetTestDiskBytes(save);
+    ++session.GetRegistry().get<C::PlantGrowthComponent>(plant).growth_points;
+    const auto live = session.ComputePlantSubHash();
+    P::WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
+    const bool saved = session.SaveWorldState();
+    P::WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
+    EXPECT_FALSE(saved);
+    EXPECT_EQ(SavedPresetTestDiskBytes(save), before);
+    EXPECT_EQ(session.ComputePlantSubHash(), live);
+    ASSERT_TRUE(session.SaveWorldState());
+    EXPECT_NE(SavedPresetTestDiskBytes(save), before);
+}
+
+TEST(GameSessionHeadlessWorldTest, OpenPlantPayloadRemovalUsesPlatformFileSemantics) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    for (const bool active_regions : {false, true}) {
+        SCOPED_TRACE(active_regions);
+        GameSession session;
+        session.SetRootPath(root.root_string());
+        session.SetJobSystem(&jobs);
+        session.SetActiveRegionsEnabled(active_regions);
+        ASSERT_TRUE(session.CreateWorld("Opened plant removal", "1337", "default"));
+        const auto plant = ClockTestPlant(session.GetRegistry(), session.GetMetadata().spawnPoint);
+        ASSERT_TRUE(session.SaveWorldState());
+        const auto save = session.GetWorldSaveDir();
+        const auto payload = P::WorldSaveService::plant_entities_path(save);
+        session.GetRegistry().destroy(plant);
+        // The CRT reader permits other readers, but denies deletion on Windows.
+        // POSIX unlinks the path while this opened image remains readable.
+        std::ifstream opened(payload, std::ios::binary);
+        ASSERT_TRUE(opened.is_open());
+        const auto before = SavedPresetTestDiskBytes(save);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+        EXPECT_FALSE(session.SaveWorldState());
+        EXPECT_EQ(SavedPresetTestDiskBytes(save), before);
+#else
+        EXPECT_TRUE(session.SaveWorldState());
+        EXPECT_FALSE(fs::exists(payload));
+#endif
+        std::ostringstream retained;
+        retained << opened.rdbuf();
+        EXPECT_EQ(retained.str(), before.at("chunks/region/plant-entities.json"));
+        opened.close();
+        ASSERT_TRUE(session.SaveWorldState());
+        EXPECT_FALSE(fs::exists(payload));
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, InvalidEnergyRecordsRefuseBothLoadEntriesAndDisableSaving) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    for (const bool active_regions : {false, true}) {
+        SCOPED_TRACE(active_regions);
+        GameSession source;
+        source.SetRootPath(root.root_string());
+        source.SetJobSystem(&jobs);
+        source.SetActiveRegionsEnabled(active_regions);
+        source.SetAetherStateEnabled(true);
+        ASSERT_TRUE(source.CreateWorld("Invalid energy", "1337", "default"));
+        ClockTestPlant(source.GetRegistry(), source.GetMetadata().spawnPoint);
+        ASSERT_TRUE(source.SaveWorldState());
+        const auto save = source.GetWorldSaveDir();
+        const auto payload = save / "aether_state.efs";
+        for (const char* record : {"",
+                                   "broken",
+                                   "EFS1",
+                                   "EFS1 +",
+                                   "EFS1 2 0\n",
+                                   "EFS1 2 8\nP 0\n",
+                                   "EFS1 1 8\n",
+                                   "EFS1 2147483647 8\nP 0 0\n"}) {
+            SCOPED_TRACE(record);
+            std::ofstream(payload, std::ios::binary | std::ios::trunc) << record;
+            const auto before = SavedPresetTestDiskBytes(save);
+            for (const bool full_open : {false, true}) {
+                SCOPED_TRACE(full_open);
+                GameSession loaded;
+                loaded.SetRootPath(root.root_string());
+                loaded.SetJobSystem(&jobs);
+                loaded.SetActiveRegionsEnabled(active_regions);
+                loaded.SetAetherStateEnabled(true);
+                if (full_open) {
+                    EXPECT_FALSE(loaded.LoadWorld(source.GetMetadata().worldId));
+                } else {
+                    ASSERT_TRUE(loaded.CreateTransientWorld("Energy reload", "1337", "default"));
+                    EXPECT_FALSE(loaded.LoadWorldStateFrom(save));
+                }
+                EXPECT_EQ(loaded.GetWorldOpenError(), "Corrupt or unreadable aether state record.");
+                EXPECT_TRUE(loaded.GetWorldSystem()->snapshot_streamed_chunks().empty());
+                EXPECT_TRUE(loaded.GetRegistry().view<C::PlantTag>().empty());
+                EXPECT_FALSE(loaded.SaveWorldStateTo(save));
+                EXPECT_EQ(SavedPresetTestDiskBytes(save), before);
+            }
+        }
+        ASSERT_TRUE(fs::remove(payload));
+        ASSERT_TRUE(fs::create_directory(payload));
+        const auto before = SavedPresetTestDiskBytes(save);
+        EXPECT_FALSE(source.LoadWorldStateFrom(save));
+        EXPECT_EQ(source.GetWorldOpenError(), "Corrupt or unreadable aether state record.");
+        EXPECT_FALSE(source.SaveWorldState());
+        EXPECT_EQ(SavedPresetTestDiskBytes(save), before);
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, MissingEnergyRecordClearsOldStateAndDisabledLayerIgnoresData) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    for (const bool active_regions : {false, true}) {
+        GameSession source;
+        source.SetRootPath(root.root_string());
+        source.SetJobSystem(&jobs);
+        source.SetActiveRegionsEnabled(active_regions);
+        source.SetAetherStateEnabled(true);
+        ASSERT_TRUE(source.CreateWorld("Absent energy", "1337", "default"));
+        auto* energy = source.GetEnergyFieldState();
+        ASSERT_NE(energy, nullptr);
+        energy->SetAnchorCell(0, 0);
+        energy->QueueDeposit(1, 0, 0, 0, 1000);
+        energy->Tick(0);
+        ASSERT_GT(energy->page_count(), 0u);
+        const auto save = source.GetWorldSaveDir();
+        ASSERT_FALSE(fs::exists(save / "aether_state.efs"));
+        ASSERT_TRUE(source.LoadWorldStateFrom(save));
+        EXPECT_EQ(energy->page_count(), 0u);
+        std::ofstream(save / "aether_state.efs", std::ios::binary)
+            << " \tEFS1 +2 8\r\nP 0 0 0:1000\r\n";
+        GameSession historical;
+        historical.SetRootPath(root.root_string());
+        historical.SetJobSystem(&jobs);
+        historical.SetActiveRegionsEnabled(active_regions);
+        historical.SetAetherStateEnabled(true);
+        ASSERT_TRUE(historical.LoadWorld(source.GetMetadata().worldId));
+        ASSERT_NE(historical.GetEnergyFieldState(), nullptr);
+        EXPECT_EQ(historical.GetEnergyFieldState()->total_raw(), 1000u);
+        std::ofstream(save / "aether_state.efs", std::ios::binary) << "broken";
+        GameSession disabled;
+        disabled.SetRootPath(root.root_string());
+        disabled.SetJobSystem(&jobs);
+        disabled.SetActiveRegionsEnabled(active_regions);
+        disabled.SetAetherStateEnabled(false);
+        ASSERT_TRUE(disabled.LoadWorld(source.GetMetadata().worldId));
+        EXPECT_EQ(disabled.GetEnergyFieldState(), nullptr);
+        EXPECT_EQ(ReadClockTestFile(save / "aether_state.efs"), "broken");
+    }
+}
+
 TEST(GameSessionHeadlessWorldTest, TransientClockSnapshotRefusesBeforeWritingAnyMember) {
     const HeadlessRoot root;
     JobSystem jobs;
@@ -2823,7 +3060,91 @@ void ChangeRegionResumeHeight(std::initializer_list<GameSession*> sessions,
         ASSERT_FALSE(chunk->heightmap_data.empty());
         chunk->heightmap_data[0] = 12.0f;
         chunk->mark_voxel_data_dirty();
+        int rx = 0, rz = 0;
+        P::WorldSaveService::region_coords_for_chunk(coords, rx, rz);
+        const auto live = session->GetWorldSystem()->snapshot_region_authority(rx, rz);
+        ASSERT_EQ(live.size(), 1u);
+        ASSERT_EQ(live.front(), chunk);
+        P::RegionContentHasher expected;
+        expected.append(*chunk);
+        EXPECT_EQ(P::WorldSaveService::region_simulation_digest(
+                      session->GetWorldSystem()->authority_directory(),
+                      {rx, rz},
+                      P::RegionDigestInputs{live, {}, true}),
+                  expected.value());
     }
+}
+
+TEST(GameSessionHeadlessWorldTest, ResidentRegionDigestKeepsSignedBoundariesAndLivePrecedence) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(session.CreateTransientWorld("Resident digest", "1337", "default"));
+    auto* world = session.GetWorldSystem();
+    for (const int x : {-1281, -1280, -1, 0, 31, 32, 1280}) {
+        for (const int z : {-1281, -1280, -1, 0, 31, 32, 1280}) {
+            const Luminumbra::IVec3 coords(x, 20, z);
+            const auto chunk = std::make_shared<Luminumbra::Chunk>(coords);
+            chunk->set_state(Luminumbra::ChunkState::Idle);
+            chunk->heightmap_data = {8.0f, 8.5f, 9.0f};
+            chunk->mark_voxel_data_dirty();
+            ASSERT_TRUE(world->adopt_streamed_chunk(chunk));
+        }
+    }
+    const Luminumbra::IVec3 target(1280, 20, -1280);
+    const Luminumbra::world::RegionKey key{40, -40};
+    const auto chunk = world->find_streamed_chunk(target);
+    ASSERT_NE(chunk, nullptr);
+    ASSERT_TRUE(P::WorldSaveService::persist_chunk_authority(world->authority_directory(), chunk));
+    chunk->heightmap_data[0] = 12.0f;
+    chunk->mark_voxel_data_dirty();
+    for (const auto state : {Luminumbra::ChunkState::Loading,
+                             Luminumbra::ChunkState::Idle,
+                             Luminumbra::ChunkState::Meshing,
+                             Luminumbra::ChunkState::Ready}) {
+        chunk->set_state(state);
+        const auto live = world->snapshot_region_authority(key.x, key.z);
+        ASSERT_EQ(live.size(), 1u);
+        EXPECT_EQ(live.front(), chunk);
+        P::RegionContentHasher expected;
+        expected.append(*chunk);
+        for (const auto& directory : {fs::path{}, world->authority_directory()}) {
+            EXPECT_EQ(P::WorldSaveService::region_simulation_digest(
+                          directory, key, P::RegionDigestInputs{live, {}, true}),
+                      expected.value());
+        }
+    }
+    for (const auto& resident : world->snapshot_streamed_chunks()) {
+        const auto coords = resident->get_coords();
+        const auto floor_region = [](int value) {
+            return static_cast<int>(std::floor(static_cast<double>(value) / 32.0));
+        };
+        const auto live =
+            world->snapshot_region_authority(floor_region(coords.x), floor_region(coords.z));
+        EXPECT_NE(std::find(live.begin(), live.end(), resident), live.end());
+    }
+    EXPECT_TRUE(world->snapshot_region_authority(100, 100).empty());
+}
+
+void ExpectFrozenRegionEditedDigest(GameSession& original,
+                                    GameSession& uninterrupted,
+                                    Luminumbra::world::RegionKey far,
+                                    const Luminumbra::IVec3& coords) {
+    ASSERT_EQ(original.GetActiveRegionLedger().records().at(far).state,
+              Luminumbra::world::RegionState::Frozen);
+    EXPECT_EQ(original.GetActiveRegionLedger().records().at(far).frozen_digest,
+              uninterrupted.GetActiveRegionLedger().records().at(far).frozen_digest);
+    const auto edited = original.GetWorldSystem()->find_streamed_chunk(coords);
+    ASSERT_NE(edited, nullptr);
+    ASSERT_FALSE(edited->heightmap_data.empty());
+    ASSERT_EQ(edited->heightmap_data.front(), 12.0f);
+    P::RegionContentHasher expected;
+    expected.append(*edited);
+    EXPECT_EQ(original.GetActiveRegionLedger().records().at(far).frozen_digest, expected.value());
 }
 
 TEST(GameSessionHeadlessWorldTest, RegionScheduleAndWorldHashResumeAcrossBothHoldCounters) {
@@ -2881,10 +3202,8 @@ TEST(GameSessionHeadlessWorldTest, RegionScheduleAndWorldHashResumeAcrossBothHol
                   render_only.GetActiveRegionLedger().canonical_bytes());
         EXPECT_EQ(SessionWorldHash(original), SessionWorldHash(render_only));
         if (tick == 7) {
-            ASSERT_EQ(original.GetActiveRegionLedger().records().at(far).state,
-                      Luminumbra::world::RegionState::Frozen);
-            EXPECT_EQ(original.GetActiveRegionLedger().records().at(far).frozen_digest,
-                      uninterrupted.GetActiveRegionLedger().records().at(far).frozen_digest);
+            ASSERT_NO_FATAL_FAILURE(
+                ExpectFrozenRegionEditedDigest(original, uninterrupted, far, coords));
         }
         if (tick >= 4) {
             loaded.RecordActiveRegionWork({far, tick <= 9 ? 11u : 10u, 0, 0, 0});

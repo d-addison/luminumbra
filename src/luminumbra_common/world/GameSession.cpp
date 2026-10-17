@@ -40,6 +40,7 @@
 #include "../components/PollinationComponents.h"
 #include "../components/SoilComponents.h"
 #include "../components/TerritoryComponents.h"
+#include "../core/FilesystemPath.h"
 #include "../core/JobSystem.h"
 #include "../core/Log.h"
 #include "../fields/EnergyFieldState.h"
@@ -70,6 +71,7 @@
 #include <cmath>             // std::floor (energy-layer anchor quantization)
 
 #include <algorithm> // explicit: stabilise std template instantiation for entt storage helpers
+#include <charconv>
 #include <chrono>
 #include <exception>
 #include <filesystem>
@@ -83,6 +85,8 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -1421,7 +1425,6 @@ bool GameSession::LoadWorld(const std::string& worldId) {
             return false;
         }
     }
-    const std::string worldPath = (GetSaveRootPath() / "worlds/saves" / worldId).string();
     // Generate from the same canonical bytes whose saved identity was verified.
     const TerrainPresetLoadResult preset = LoadTerrainPresetFromJson(
         nlohmann::json::parse(saved.preset_json), RuntimeRoot(m_rootPath) / "data");
@@ -1477,23 +1480,6 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     // restores it (epoch-rebased onto the session clock); an absent
     // record is all-zeros by contract. OFF -> null -> byte-identical.
     InitializeEnergyFieldState();
-    if (m_energyFieldState) {
-        const std::string recordPath = worldPath + "/aether_state.efs";
-        std::ifstream recordFile(recordPath);
-        if (recordFile) {
-            std::ostringstream recordBytes;
-            recordBytes << recordFile.rdbuf();
-            if (m_energyFieldState->DeserializeRecord(recordBytes.str(),
-                                                      GetSimulationTickCount())) {
-                LUMINUMBRA_CORE_INFO("Aether state record restored ({} pages).",
-                                     m_energyFieldState->page_count());
-            } else {
-                LUMINUMBRA_CORE_WARN("Aether state record UNREADABLE at {} - starting all-zero.",
-                                     recordPath);
-            }
-        }
-    }
-
     // Legacy saves without a persisted spawnPoint: derive it from terrain
     // height exactly like CreateWorld does (pure function of seed/params).
     if (!saved.has_spawn_point) {
@@ -1862,7 +1848,7 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
         const bool plants_ok =
             Persistence::WorldSaveService::save_plant_entities(plant_snapshot, save_dir, nullptr);
         const bool energy_ok = SaveEnergyFieldRecord(save_dir);
-        if (m_activeRegionsEnabled && (!plants_ok || !energy_ok))
+        if (!plants_ok || !energy_ok)
             return false;
         if (report) {
             *report = result;
@@ -1915,7 +1901,7 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
     // persist the stateful energy layer alongside (null/
     // all-zero layer -> no file -> byte-identical; the plant discipline).
     const bool energy_ok = SaveEnergyFieldRecord(save_dir);
-    if (m_activeRegionsEnabled && !energy_ok)
+    if (!energy_ok)
         ok = false;
 
     for (const std::string& error : errors) {
@@ -1993,8 +1979,6 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         m_worldSystem->clear_world(m_physicsSystem.get());
         return false;
     }
-    if (!snapshot_present && !m_activeRegionsEnabled)
-        return true; // legacy fresh world
     if (m_activeRegionsEnabled) {
         const Vec3 previous_ambient_anchor = m_ambientFieldAnchor;
         m_ambientFieldAnchor = ambient_anchor.value_or(m_metadata.spawnPoint);
@@ -2042,6 +2026,13 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
             LUMINUMBRA_CORE_ERROR("World open refused: {}", m_worldOpenError);
             return false;
         }
+    }
+
+    // Refuse a damaged energy record before adopting chunks or plant entities.
+    // A missing record resets this layer at the restored absolute tick.
+    if (!LoadEnergyFieldRecord(save_dir)) {
+        m_worldSystem->clear_world(m_physicsSystem.get());
+        return false;
     }
 
     m_worldSystem->SetWaterSimWindowCursor(water_cursor);
@@ -2111,26 +2102,6 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         } else {
             for (const std::string& e : plant_errors)
                 LUMINUMBRA_CORE_ERROR("Plant state load failed: {}", e);
-        }
-    }
-
-    // restore the stateful energy layer's record (a
-    // missing file is a clean miss == all zeros by contract). Epoch-rebased
-    // onto the loaded session's tick stream (-4).
-    if (m_energyFieldState) {
-        const fs::path recordPath = save_dir / "aether_state.efs";
-        std::ifstream recordFile(recordPath);
-        if (recordFile) {
-            std::ostringstream recordBytes;
-            recordBytes << recordFile.rdbuf();
-            if (m_energyFieldState->DeserializeRecord(recordBytes.str(),
-                                                      GetSimulationTickCount())) {
-                LUMINUMBRA_CORE_INFO("Aether state record restored ({} pages).",
-                                     m_energyFieldState->page_count());
-            } else {
-                LUMINUMBRA_CORE_WARN("Aether state record UNREADABLE at {} - starting all-zero.",
-                                     recordPath.string());
-            }
         }
     }
 
@@ -2278,6 +2249,69 @@ void GameSession::InitializeEnergyFieldState() {
     LUMINUMBRA_CORE_INFO("Energy field state layer initialized (sim.aether_state ON, 2 channels).");
 }
 
+bool GameSession::LoadEnergyFieldRecord(const std::filesystem::path& save_dir) {
+    if (!m_energyFieldState)
+        return true;
+    const auto refuse = [this] {
+        m_worldOpenError = "Corrupt or unreadable aether state record.";
+        return false;
+    };
+    try {
+        const auto path = save_dir / "aether_state.efs";
+        std::error_code error;
+        const auto status = fs::symlink_status(path, error);
+        if (error && error != std::errc::no_such_file_or_directory)
+            return refuse();
+        if (!fs::exists(status)) {
+            m_energyFieldState->ResetEmptyAtTick(GetSimulationTickCount());
+            return true;
+        }
+        Filesystem::ReplacementSafeInputFile input;
+        if (!input.open(path))
+            return refuse();
+        const auto length = input.size(error);
+        std::string record;
+        // Allocate exactly the opened regular file's extent, checked against
+        // the string's representable bound before conversion or allocation.
+        if (error || length > record.max_size())
+            return refuse();
+        record.resize(static_cast<std::size_t>(length));
+        if (!input.read(record.data(), record.size()))
+            return refuse();
+        // Inspect the channel layout without copying the record or allocating
+        // attacker-controlled page vectors. This session always owns its layout.
+        std::string_view header(record);
+        const auto next_token = [&header] {
+            constexpr std::string_view whitespace = " \t\r\n\v\f";
+            const auto begin = header.find_first_not_of(whitespace);
+            if (begin == std::string_view::npos)
+                return std::string_view{};
+            header.remove_prefix(begin);
+            const auto end = header.find_first_of(whitespace);
+            const auto token = header.substr(0, end);
+            header.remove_prefix(end == std::string_view::npos ? header.size() : end);
+            return token;
+        };
+        const auto magic = next_token();
+        auto layout = next_token();
+        if (!layout.empty() && layout.front() == '+')
+            layout.remove_prefix(1);
+        if (layout.empty())
+            return refuse();
+        int channels = 0;
+        const auto parsed = std::from_chars(layout.data(), layout.data() + layout.size(), channels);
+        if (magic != "EFS1" || parsed.ec != std::errc{} ||
+            parsed.ptr != layout.data() + layout.size() ||
+            channels != m_energyFieldState->channels())
+            return refuse();
+        if (!m_energyFieldState->DeserializeRecord(record, GetSimulationTickCount()))
+            return refuse();
+        return true;
+    } catch (const std::exception&) {
+        return refuse();
+    }
+}
+
 bool GameSession::SaveEnergyFieldRecord(const std::filesystem::path& save_dir) {
     if (!m_worldOpenError.empty())
         return false;
@@ -2299,14 +2333,11 @@ bool GameSession::SaveEnergyFieldRecord(const std::filesystem::path& save_dir) {
         // The existing header alone preserves it without adding zero pages.
     }
     const std::string record = m_energyFieldState->SerializeRecord(GetSimulationTickCount());
-    std::ofstream file(save_dir / "aether_state.efs", std::ios::trunc);
-    if (!file.is_open()) {
+    if (!Persistence::WorldSaveService::write_file_durably(save_dir / "aether_state.efs", record)) {
         LUMINUMBRA_CORE_ERROR("Failed to write aether state record under {}", save_dir.string());
         return false;
     }
-    file << record;
-    file.flush();
-    return file.good();
+    return true;
 }
 
 std::string GameSession::ComputeAetherStateSubHash() const {

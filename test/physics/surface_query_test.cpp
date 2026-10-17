@@ -96,6 +96,33 @@ TEST(SurfaceQuery, FlatFloorReportsUpwardNormal) {
     physics.shutdown();
 }
 
+TEST(SurfaceQuery, AvatarFeetSettleAboveNewlyAdmittedFloor) {
+    PhysicsSystem physics;
+    physics.startup();
+    ASSERT_TRUE(physics.is_started());
+    constexpr float kFloorHeight = 256.0f;
+    for (const int column : {-5121, 0, 5120}) {
+        const IVec3 coords(column, 16, column);
+        const float centre = static_cast<float>(column * Luminumbra::CHUNK_SIZE_X) + 8.0f;
+        const glm::vec3 feet(centre, kFloorHeight + 0.25f, centre);
+        const auto avatar = physics.create_avatar_character(feet);
+        EXPECT_EQ(physics.get_avatar_position(avatar), feet);
+        auto floor = MakeFlatFloorChunk(coords, kFloorHeight);
+        physics.add_chunk_collision(*floor);
+    }
+    for (int tick = 0; tick < 30; ++tick) {
+        physics.update_avatars(1.0f / 30.0f);
+        for (std::size_t avatar = 0; avatar < 3; ++avatar) {
+            EXPECT_GT(physics.get_avatar_position(avatar).y, kFloorHeight - 0.25f);
+        }
+    }
+    for (std::size_t avatar = 0; avatar < 3; ++avatar) {
+        EXPECT_NEAR(physics.get_avatar_position(avatar).y, kFloorHeight, 0.1f);
+        EXPECT_TRUE(physics.is_avatar_grounded(avatar));
+    }
+    physics.shutdown();
+}
+
 TEST(SurfaceQuery, RampReportsSlopeNormal) {
     PhysicsSystem physics;
     physics.startup();

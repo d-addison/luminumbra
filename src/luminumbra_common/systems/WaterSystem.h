@@ -278,6 +278,8 @@ public:
     void ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level);
 
 private:
+    std::vector<Chunk*> PrepareWaterGrids(bool deterministic_authority);
+
     // (water performance contract) The float render-mirror sim (dispatch_simulation_jobs /
     // simulate_chunk_water + its WaterChunkSnapshot/Output/Neighbors structs) was DEAD CODE — zero
     // callers; the live path is the integer  StepChunkWaterFixed. Removed.
