@@ -25,10 +25,9 @@ SPEC.loader.exec_module(deps)
 
 class OfflineDependenciesTests(unittest.TestCase):
     def setUp(self):
-        (ROOT / "scratch").mkdir(exist_ok=True)
-        temporary = tempfile.TemporaryDirectory(prefix="offline deps ", dir=ROOT / "scratch")
+        temporary = tempfile.TemporaryDirectory(prefix="offline deps ")
         self.addCleanup(temporary.cleanup)
-        self.base = Path(temporary.name)
+        self.base = Path(temporary.name).resolve()
         self.root = self.base / "clone with spaces"
         (self.root / "vendor").mkdir(parents=True)
         self.vendor = self.root / "vendor/CMakeLists.txt"
@@ -810,10 +809,9 @@ class CachedGitSafetyTests(unittest.TestCase):
     """Use real local Git repositories; no transports or native tools run."""
 
     def setUp(self):
-        (ROOT / "scratch").mkdir(exist_ok=True)
-        temporary = tempfile.TemporaryDirectory(prefix="cached git ", dir=ROOT / "scratch")
+        temporary = tempfile.TemporaryDirectory(prefix="cached git ")
         self.addCleanup(temporary.cleanup)
-        self.base = Path(temporary.name)
+        self.base = Path(temporary.name).resolve()
         self.root = self.base / "clone"
         (self.root / "vendor").mkdir(parents=True)
         (self.root / "vendor/CMakeLists.txt").write_text(

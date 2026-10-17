@@ -52,10 +52,9 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
                     action()
 
     def setUp(self):
-        (ROOT / "scratch").mkdir(exist_ok=True)
-        temporary = tempfile.TemporaryDirectory(prefix="changed tus ", dir=ROOT / "scratch")
+        temporary = tempfile.TemporaryDirectory(prefix="changed tus ")
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve()
         self.src = self.root / "src"
         self.src.mkdir()
         self.build = self.root / "scratch/build with spaces"
@@ -630,7 +629,10 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         for flags in (["-fplugin=x.so"], ["-specs=x"], ["-B/x"], ["-B", "/x"],
                       ["-wrapper", "x"], ["@rsp"], ["-load", "x.so"],
                       ["-fprofile-use=data"], ["-flto=plugin.so"], ["-mfoo"],
-                      ["-mno-foo"], ["-Xclang", "-load", "-Xclang", "x.so"]):
+                      ["-mno-foo"], ["-mbmi20"], ["-mmovbe-extra"],
+                      ["-mbmi2=x.so"], ["-mno-bmi2=x.so"],
+                      ["-mmovbe=x.so"], ["-mno-movbe=x.so"],
+                      ["-Xclang", "-load", "-Xclang", "x.so"]):
             with self.subTest(flags=flags):
                 self.raw = [self.raw_entry(self.a, flags)]
                 self.save_db()
@@ -644,6 +646,78 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         flags = ["-mno-bmi", "-mno-avx512f", "-mno-f16c", "-mno-popcnt"]
         self.assertEqual(tus.clean_arguments(["g++", *flags, str(self.a)]),
                          ["g++", *flags, str(self.a)])
+
+    def test_bmi2_and_movbe_enable_and_disable_forms_are_preserved(self):
+        flags = ["-mbmi2", "-mmovbe", "-mno-bmi2", "-mno-movbe"]
+        for compiler in ("g++", "clang++", "g++.exe", "clang++.exe"):
+            with self.subTest(compiler=compiler):
+                command = [compiler, *flags, str(self.a)]
+                self.assertEqual(tus.clean_arguments(command), command)
+
+    def test_cmake_startup_database_reaches_compile_and_tidy_plans(self):
+        text = (ROOT / "cmake/runtime_isa.cmake").read_text()
+        # Read both bitness branches and the complete shared suffix from the
+        # shipping producer, so adding another startup flag exercises replay.
+        architectures = [value.split(";") for value in
+                         re.findall(r'set\(_startup_arch "([^"]+)"\)', text)
+                         if value.startswith("-")]
+        suffixes = [value.split(";")[1:] for value in
+                    re.findall(r'COMPILE_OPTIONS "(\$\{_startup_arch\};[^"]+)"', text)
+                    if value.startswith("${_startup_arch};-")]
+        self.assertEqual(len(architectures), 2)
+        self.assertEqual(len(suffixes), 1)
+        self.assertEqual({flags[0] for flags in architectures}, {"-march=x86-64", "-march=i686"})
+        inherited = [*self.cmake_warning_flags(), "-flto=auto", "-mavx2", "-mbmi",
+                     "-mfma", "-mfpmath=sse", "-fno-omit-frame-pointer"]
+        for compiler in ("g++", "clang++", r"C:\msys64\ucrt64\bin\g++.exe",
+                         r"C:\LLVM\bin\clang++.exe"):
+            for architecture in architectures:
+                flags = [*inherited, *architecture, *suffixes[0]]
+                startup = self.raw_entry(self.a, flags)
+                arguments = startup.pop("arguments")
+                arguments[0] = compiler
+                windows = "\\" in compiler
+                startup["command_platform"] = "windows" if windows else "posix"
+                startup["command"] = (subprocess.list2cmdline(arguments) if windows
+                                      else shlex.join(arguments))
+                self.raw = [startup, self.raw_entry(self.b)]
+                self.save_db()
+                for mode in ("compile", "tidy"):
+                    for changed in (self.a, self.b):
+                        with self.subTest(compiler=compiler, architecture=architecture,
+                                          mode=mode, changed=changed.name):
+                            self.commands.clear()
+                            replayed = []
+
+                            def execute(command, directory, check=True):
+                                if "-p" in command:
+                                    database = Path(command[command.index("-p") + 1]) / "compile_commands.json"
+                                    replayed.append(json.loads(database.read_text())[0]["arguments"])
+                                elif "-M" not in command:
+                                    replayed.append(command)
+                                return self.fake_execute(command, directory, check)
+
+                            output, errors = io.StringIO(), io.StringIO()
+                            with patch.object(tus, "changed_paths", return_value={changed}), \
+                                    patch.object(tus.shutil, "which", return_value="clang-tidy-18"), \
+                                    patch.object(tus, "execute", side_effect=execute), \
+                                    redirect_stdout(output), redirect_stderr(errors):
+                                code = tus.main([mode, "--root", str(self.root),
+                                                 "--build-dir", str(self.build)])
+                            self.assertEqual(code, 0, errors.getvalue())
+                            report = json.loads(output.getvalue().splitlines()[0])
+                            self.assertEqual(report["selected"], [str(changed.relative_to(self.root))])
+                            self.assertEqual(report["scan_variants"], 2)
+                            scans = [command for command, _ in self.commands if "-M" in command]
+                            self.assertEqual(len(scans), 4)
+                            startup_scans = [command for command in scans if str(self.a) in command]
+                            self.assertEqual(len(startup_scans), 2)
+                            for command in startup_scans:
+                                self.assertEqual([flag for flag in command if flag in flags], flags)
+                            self.assertEqual(len(replayed), 1)
+                            self.assertIn(str(changed), replayed[0])
+                            self.assertEqual([flag for flag in replayed[0] if flag in flags],
+                                             flags if changed == self.a else [])
 
     def test_clang_pch_replays_textual_header_without_binary_cache(self):
         header = self.build / "cmake_pch.hxx"

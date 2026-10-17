@@ -503,8 +503,8 @@ def parse_arguments(arguments: list[str]) -> tuple[list[str], list[str]]:
         "-flto", "-fno-lto", "-fpch-instantiate-templates", "-m32", "-m64", "-Wa,-mbig-obj",
     }
     # Explicit x86 features, including their disable forms; no driver/path options.
-    x86_features = {"avx", "avx2", "avx512dq", "avx512f", "bmi", "f16c", "fma",
-                    "lzcnt", "popcnt", "sse", "sse2", "sse3", "ssse3", "sse4.1", "sse4.2"}
+    x86_features = {"avx", "avx2", "avx512dq", "avx512f", "bmi", "bmi2", "f16c", "fma",
+                    "lzcnt", "movbe", "popcnt", "sse", "sse2", "sse3", "ssse3", "sse4.1", "sse4.2"}
     safe_exact.update(f"-m{prefix}{feature}" for prefix in ("", "no-") for feature in x86_features)
     safe_pattern = re.compile(
         r"(?:-O(?:[0-3gsz]|fast)?|-g(?:[0-3]|gdb[0-3]?|dwarf-[2-5])?"
