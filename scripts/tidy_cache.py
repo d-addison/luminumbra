@@ -322,21 +322,45 @@ class ToolIdentity:
     fingerprint (realpath, kind, device, inode, size, mtime_ns), re-stat'ed for every
     key, so replacing or rebuilding a tool invalidates its identity. A sample
     taken within its mtime's two-second tick is revalidated on reuse until an
-    observation after the tick closes establishes a stable identity.
+    observation after the tick closes establishes a stable identity. Identical
+    content reuses its version result; concurrent checks share one observation.
     """
 
     def __init__(self) -> None:
-        self._cache: dict[tuple, tuple[str, int]] = {}
+        self._cache: dict[str, tuple[tuple, str, str, int]] = {}
+        self._pending: dict[str, concurrent.futures.Future] = {}
         self._lock = threading.Lock()
 
     def describe(self, executable: str, directory: str) -> str:
         probe = executable
-        if os.sep in probe and not os.path.isabs(probe):
+        has_directory = bool(os.path.dirname(probe))
+        if has_directory and not os.path.isabs(probe):
             probe = os.path.join(directory, probe)
-        resolved = probe if os.sep in probe else (shutil.which(probe) or "")
+        resolved = probe if has_directory else (shutil.which(probe) or "")
         if not resolved or not os.path.isfile(resolved):
             raise CacheMiss(f"cannot resolve executable {executable}")
-        resolved = os.path.realpath(resolved)
+        resolved = os.path.normcase(os.path.realpath(resolved))
+        with self._lock:
+            pending = self._pending.get(resolved)
+            owner = pending is None
+            if owner:
+                pending = concurrent.futures.Future()
+                self._pending[resolved] = pending
+        if not owner:
+            return pending.result()
+        try:
+            value = self._describe(executable, resolved)
+        except BaseException as error:
+            pending.set_exception(error)
+            raise
+        else:
+            pending.set_result(value)
+            return value
+        finally:
+            with self._lock:
+                del self._pending[resolved]
+
+    def _describe(self, executable: str, resolved: str) -> str:
         # Record the start, not the end: identification itself can span ticks.
         checked_at = time.time_ns()
         try:
@@ -348,26 +372,30 @@ class ToolIdentity:
         fingerprint = (resolved, stat.S_IFMT(info.st_mode), info.st_dev, info.st_ino,
                        info.st_size, info.st_mtime_ns)
         with self._lock:
-            known = self._cache.get(fingerprint)
-        if known is not None and info.st_mtime_ns + 2_000_000_000 <= known[1]:
-            return known[0]
+            known = self._cache.get(resolved)
+        if (known is not None and fingerprint == known[0]
+                and info.st_mtime_ns + 2_000_000_000 <= known[3]):
+            return known[2]
         try:
             content = sha256_file(resolved)
-            completed = subprocess.run(
-                [resolved, "--version"],
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                timeout=60,
-                check=False,
-            )
+            if known is not None and content == known[1]:
+                value = known[2]
+            else:
+                completed = subprocess.run(
+                    [resolved, "--version"],
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    timeout=60,
+                    check=False,
+                )
+                if completed.returncode != 0 or not completed.stdout:
+                    raise CacheMiss(f"{executable} --version failed")
+                text = completed.stdout.decode("utf-8", "replace")
+                value = f"{resolved}\n{content}\n{text}"
         except (OSError, subprocess.SubprocessError) as error:
             raise CacheMiss(f"cannot identify {executable}: {error}") from error
-        if completed.returncode != 0 or not completed.stdout:
-            raise CacheMiss(f"{executable} --version failed")
-        text = completed.stdout.decode("utf-8", "replace")
-        value = f"{resolved}\n{content}\n{text}"
         with self._lock:
-            self._cache[fingerprint] = (value, checked_at)
+            self._cache[resolved] = (fingerprint, content, value, checked_at)
         return value
 
 

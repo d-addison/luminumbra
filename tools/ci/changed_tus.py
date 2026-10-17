@@ -139,7 +139,7 @@ def read_database(root: Path, build_dir: Path) -> list[dict]:
                     or not all(isinstance(a, str) for a in raw["arguments"])):
                 raise SelectionError("malformed compiler arguments")
             args = normalise_pch_arguments(_DEPS.entry_arguments(raw), directory, build_dir)
-            # Validate before spawning anything, including unselected variants.
+            # Reject unsupported arguments and wrong source operands before probing.
             cleaned, operands = parse_arguments(args)
             if len(operands) != 1 or (directory / operands[0]).resolve() != source:
                 raise SelectionError(f"command must compile exactly one database source: {source}")
@@ -211,7 +211,7 @@ def clean_arguments(arguments: list[str]) -> list[str]:
     return parse_arguments(arguments)[0]
 
 
-def compiler_header_roots(arguments: list[str], directory: Path) -> set[Path]:
+def compiler_header_roots(arguments: list[str], directory: Path) -> tuple[Path, ...]:
     """Query effective GCC/Clang roots with the variant's target and sysroot.
 
     Preprocess empty stdin, never a header or TU, so the probe cannot consume
@@ -244,12 +244,12 @@ def compiler_header_roots(arguments: list[str], directory: Path) -> set[Path]:
     environment = tuple(sorted({**os.environ, "LC_ALL": "C", "LANG": "C"}.items()))
     # Serialize misses too, so parallel TU variants cannot duplicate a probe.
     with _HEADER_SEARCH_LOCK:
-        return set(_compiler_header_roots(tuple(probe), directory, environment))
+        return _compiler_header_roots(tuple(probe), directory.resolve(), environment)
 
 
 @functools.lru_cache(maxsize=None)
 def _compiler_header_roots(probe: tuple[str, ...], directory: Path,
-                           environment: tuple[tuple[str, str], ...]) -> frozenset[Path]:
+                           environment: tuple[tuple[str, str], ...]) -> tuple[Path, ...]:
     try:
         result = subprocess.run(list(probe), cwd=directory, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -257,7 +257,7 @@ def _compiler_header_roots(probe: tuple[str, ...], directory: Path,
                                 env=dict(environment))
     except (OSError, subprocess.SubprocessError) as error:
         raise SelectionError(f"cannot query compiler header search paths: {error}") from error
-    roots, scanning, complete = set(), False, False
+    roots, scanning, complete = [], False, False
     for line in result.stderr.splitlines():
         line = line.strip()
         if line in {'#include "..." search starts here:', '#include <...> search starts here:'}:
@@ -266,10 +266,11 @@ def _compiler_header_roots(probe: tuple[str, ...], directory: Path,
             complete = True
             break
         elif scanning:
-            roots.add(directory / line.removesuffix(" (framework directory)"))
+            roots.append(directory / line.removesuffix(" (framework directory)"))
     if result.returncode or not complete:
         raise SelectionError("cannot establish compiler header search paths; refusing replay")
-    return frozenset(roots)
+    # Forced includes follow the driver's quote/system search order.
+    return tuple(dict.fromkeys(roots))
 
 
 def directory_stamp(path: Path) -> tuple | None:
@@ -303,9 +304,6 @@ def check_pch_search_roots(compiler: str, search: set[Path]) -> None:
     newly added nested .gch entries or retargeted links require another walk.
     Track dangling links too, so creating their targets invalidates reuse.
     """
-    roots = tuple(sorted(search))
-    key = (compiler, roots)
-
     def fail(error):
         raise SelectionError(f"cannot check binary PCH search directory: {error}") from error
 
@@ -325,6 +323,10 @@ def check_pch_search_roots(compiler: str, search: set[Path]) -> None:
 
     with _HEADER_SEARCH_LOCK:
         try:
+            # Resolve before deduplication and keying: Windows handles expand
+            # short names, and Path equality folds native case/separators.
+            roots = tuple(sorted({path.resolve() for path in search}))
+            key = (compiler, roots)
             # Sample before walking or checking membership, so crossing a
             # timestamp tick during either operation cannot confer trust.
             checked_at = time.time_ns()
@@ -384,8 +386,8 @@ def validate_textual_includes(arguments: list[str], directory: Path, *, compiler
 
     Check both the spelled and resolved names: a header symlink can have a
     cache beside either name. Directories and dangling cache links also count.
-    Require an explicit file so compiler include-search paths cannot select an
-    unchecked header. For ordinary includes, conservatively scan all explicit
+    Locate forced headers in the working directory, then in the driver's
+    ordered quote/system search paths. Conservatively scan all explicit
     search roots, environment roots and source/forced-header directories,
     including subdirectories and directory links. Before replay also query
     compiler defaults/system roots; never guess platform-specific locations.
@@ -393,7 +395,7 @@ def validate_textual_includes(arguments: list[str], directory: Path, *, compiler
     rejecting the cache is safer than relying on invalid-PCH warnings. Call
     again at replay in case a build populated it after database validation.
     """
-    search = set()
+    search, forced = set(), []
     for variable in ("CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH"):
         if variable in os.environ:
             # An empty component means the compiler's working directory.
@@ -402,17 +404,7 @@ def validate_textual_includes(arguments: list[str], directory: Path, *, compiler
     while index < len(arguments):
         option = arguments[index]
         if option in {"-include", "-imacros"}:
-            header = directory / arguments[index + 1]
-            for path in (header, header.resolve()):
-                for suffix in (".gch", ".pch"):
-                    binary = Path(str(path) + suffix)
-                    if os.path.lexists(binary):
-                        raise SelectionError(f"binary PCH cache beside forced include: {binary}; "
-                                             "remove the cache before replaying textual headers")
-            if not header.is_file():
-                raise SelectionError(f"cannot locate textual forced include: {header}; "
-                                     "use an existing absolute header path")
-            search.update((header.parent, header.resolve().parent))
+            forced.append(arguments[index + 1])
         elif option in {"-I", "-iquote", "-isystem", "-idirafter"}:
             search.add(directory / arguments[index + 1])
         elif option.startswith("-I"):
@@ -422,8 +414,32 @@ def validate_textual_includes(arguments: list[str], directory: Path, *, compiler
             search.update((source.parent, source.resolve().parent))
         index += 2 if option in VALUE_OPTIONS else 1
 
-    if compiler_roots:
-        search.update(compiler_header_roots(arguments, directory))
+    roots = None
+    for value in forced:
+        candidates = [directory / value]
+        index = 0
+        while index < len(candidates):
+            header = candidates[index]
+            for path in (header, header.resolve()):
+                for suffix in (".gch", ".pch"):
+                    binary = Path(str(path) + suffix)
+                    if os.path.lexists(binary):
+                        raise SelectionError(f"binary PCH cache beside forced include: {binary}; "
+                                             "remove the cache before replaying textual headers")
+            if header.is_file():
+                search.update((header.parent, header.resolve().parent))
+                break
+            if index == 0 and not Path(value).is_absolute():
+                if roots is None:
+                    roots = compiler_header_roots(arguments, directory)
+                candidates.extend(root / value for root in roots)
+            index += 1
+        else:
+            raise SelectionError(f"cannot locate textual forced include: {value}")
+
+    if compiler_roots and roots is None:
+        roots = compiler_header_roots(arguments, directory)
+    search.update(roots or ())
     check_pch_search_roots(arguments[0], search)
 
 

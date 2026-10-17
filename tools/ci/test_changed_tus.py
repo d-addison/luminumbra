@@ -6,8 +6,9 @@ from contextlib import redirect_stderr, redirect_stdout
 import importlib.util
 import io
 import json
+import ntpath
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import re
 import shlex
 import stat
@@ -761,6 +762,116 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         entry = self.entries()[0]
         self.assertEqual(tus.replay_arguments(entry), tus.clean_arguments(entry["arguments"]))
 
+    def test_forced_system_and_relative_project_headers_use_compiler_search(self):
+        search = self.root / "compiler headers"
+        search.mkdir()
+        system = search / "cstdint"
+        system.write_text("// system header\n")
+        relative = self.build / "relative.hpp"
+        relative.write_text("// working directory header\n")
+        cases = [("cstdint", [], system), (relative.name, [], relative)]
+        for option in (["-I", str(self.src)], ["-I" + str(self.src)],
+                       ["-isystem", str(self.src)], ["-iquote", str(self.src)],
+                       ["-idirafter", str(self.src)]):
+            cases.append((self.other.name, option, self.other))
+        for compiler in ("g++", "clang++", "G++.EXE", "CLANG++.EXE"):
+            for forced in ("-include", "-imacros"):
+                for name, flags, header in cases:
+                    with self.subTest(compiler=compiler, forced=forced, flags=flags, name=name):
+                        self.raw = [self.raw_entry(self.a, [*flags, forced, name])]
+                        self.raw[0]["arguments"][0] = compiler
+                        self.save_db()
+                        tus._compiler_header_roots.cache_clear()
+                        result = subprocess.CompletedProcess([], 0, "",
+                            '#include "..." search starts here:\r\n ' + str(self.src)
+                            + '\r\n#include <...> search starts here:\r\n ' + str(search)
+                            + '\r\nEnd of search list.\r\n')
+                        with patch.object(tus, "compiler_header_roots", side_effect=COMPILER_HEADER_ROOTS), \
+                                patch.object(tus.subprocess, "run", return_value=result) as probe:
+                            entry = self.entries()[0]
+                            self.assertEqual(tus.replay_arguments(entry), tus.clean_arguments(entry["arguments"]))
+                            self.assertEqual(probe.call_count, 1)
+                            binary = Path(str(header) + ".pch")
+                            binary.write_bytes(b"stale cache")
+                            try:
+                                for action in (self.entries, lambda: tus.dependencies(entry),
+                                               lambda: tus.compile_command(entry, self.build / "isolated.o"),
+                                               lambda: tus.run_checks(self.arguments("tidy"), self.root,
+                                                                      [entry], self.build)):
+                                    with patch.object(tus.shutil, "which", return_value="clang-tidy"), \
+                                            self.assertRaisesRegex(tus.SelectionError, "binary PCH.*remove"):
+                                        action()
+                            finally:
+                                binary.unlink()
+        self.assertEqual(self.commands, [])
+
+    def test_forced_header_search_preserves_working_directory_and_driver_order(self):
+        first, second = self.root / "z headers", self.root / "a headers"
+        first.mkdir()
+        second.mkdir()
+        for root in (self.build, first, second):
+            (root / "forced.hpp").write_text("// header\n")
+        self.raw = [self.raw_entry(self.a, ["-include", "forced.hpp"])]
+        self.save_db()
+        result = subprocess.CompletedProcess([], 0, "", '#include "..." search starts here:\n '
+            + str(first) + '\n#include <...> search starts here:\n ' + str(second)
+            + '\nEnd of search list.\n')
+        # A cache beside a shadowed header must not change forced-header lookup.
+        (second / "forced.hpp.pch").write_bytes(b"shadowed cache")
+        with patch.object(tus, "compiler_header_roots", side_effect=COMPILER_HEADER_ROOTS), \
+                patch.object(tus.subprocess, "run", return_value=result) as probe:
+            self.entries()
+            probe.assert_not_called()
+            (first / "forced.hpp.pch").write_bytes(b"shadowed cache")
+            self.entries()
+            (self.build / "forced.hpp").unlink()
+            with self.assertRaisesRegex(tus.SelectionError, "binary PCH.*remove"):
+                self.entries()
+            (first / "forced.hpp.pch").unlink()
+            self.entries()
+            self.assertEqual(probe.call_count, 1)
+
+    def test_missing_forced_headers_refuse_even_with_known_search_paths(self):
+        (self.src / "missing.hpp").mkdir()
+        for forced in ("-include", "-imacros"):
+            for roots in ((), (self.src, self.build / "missing directory")):
+                for name in ("missing.hpp", str(self.root / "missing.hpp")):
+                    with self.subTest(forced=forced, roots=roots, name=name), \
+                            patch.object(tus, "compiler_header_roots", return_value=roots):
+                        self.raw = [self.raw_entry(self.a, [forced, name])]
+                        self.save_db()
+                        with self.assertRaisesRegex(tus.SelectionError, "cannot locate textual forced include"):
+                            self.entries()
+        self.assertEqual(self.commands, [])
+
+    def test_forced_header_resolution_refuses_unknown_search_and_unreadable_paths(self):
+        self.raw = [self.raw_entry(self.a, ["-include", "cstdint"])]
+        self.save_db()
+        results = [OSError("unavailable compiler"), subprocess.TimeoutExpired("compiler", 1800),
+                   subprocess.CompletedProcess([], 0, "", ""),
+                   subprocess.CompletedProcess([], 0, "", '#include <...> search starts here:\n '
+                       + str(self.src) + '\n'),
+                   subprocess.CompletedProcess([], 1, "", '#include <...> search starts here:\n '
+                       + str(self.src) + '\nEnd of search list.\n')]
+        for result in results:
+            with self.subTest(result=result), \
+                    patch.object(tus, "compiler_header_roots", side_effect=COMPILER_HEADER_ROOTS), \
+                    patch.object(tus.subprocess, "run", side_effect=[result]), \
+                    self.assertRaisesRegex(tus.SelectionError, "compiler header search paths"):
+                self.entries()
+        is_file = Path.is_file
+
+        def readable(path):
+            if path == self.src / "cstdint":
+                raise PermissionError("unreadable header")
+            return is_file(path)
+
+        with patch.object(tus, "compiler_header_roots", return_value=(self.src,)), \
+                patch.object(Path, "is_file", autospec=True, side_effect=readable), \
+                self.assertRaisesRegex(OSError, "unreadable header"):
+            self.entries()
+        self.assertEqual(self.commands, [])
+
     def test_environment_header_roots_are_checked_before_every_replay(self):
         search = self.root / "environment headers"
         nested = search / "nested"
@@ -877,6 +988,7 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
     def test_compiler_search_probe_refuses_unavailable_or_unknown_defaults(self):
         entry = self.entries()[0]
         results = [OSError("compiler unavailable"),
+                   subprocess.TimeoutExpired("compiler", 1800),
                    subprocess.CompletedProcess([], 1, "", "unsupported target"),
                    subprocess.CompletedProcess([], 0, "", "unrecognized search output"),
                    subprocess.CompletedProcess([], 0, "", '#include <...> search starts here:\n /headers\n')]
@@ -1043,7 +1155,7 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
                         tus._compiler_header_roots.cache_clear()
                         with self.subTest(arguments=arguments, trailing=trailing), \
                                 patch.object(tus.subprocess, "run", return_value=result) as run:
-                            self.assertEqual(COMPILER_HEADER_ROOTS(arguments + trailing, self.build), set())
+                            self.assertEqual(COMPILER_HEADER_ROOTS(arguments + trailing, self.build), ())
                             self.assertEqual(run.call_args.args[0][-3:], ["-x", expected, "-"])
 
     def test_msvc_pch_replay_is_refused_before_execution(self):
@@ -1086,10 +1198,11 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         header = self.src / "ordinary.hpp"
         Path(str(header) + ".gch").write_bytes(b"stale binary header")
         for option in ("-include", "-imacros"):
-            with self.subTest(option=option):
+            with self.subTest(option=option), \
+                    patch.object(tus, "compiler_header_roots", return_value=(self.src,)):
                 self.raw = [self.raw_entry(self.a, [option, header.name])]
                 self.save_db()
-                with self.assertRaisesRegex(tus.SelectionError, "use an existing absolute header path"):
+                with self.assertRaisesRegex(tus.SelectionError, "binary PCH.*remove"):
                     self.entries()
         self.assertEqual(self.commands, [])
 
@@ -1858,6 +1971,68 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
 EXECUTE = tus.execute
 COMPILER_HEADER_ROOTS = tus.compiler_header_roots
 # The implementation is saved before any setUp patch replaces the entry point.
+
+
+class WindowsSearchPathTests(unittest.TestCase):
+    class SearchPath(PureWindowsPath):
+        def resolve(self):
+            # Model the handle-based short-name expansion at the OS boundary.
+            parts = ["Header Directory" if part.casefold() == "header~1" else part
+                     for part in self.parts]
+            return type(self)(ntpath.normpath(str(type(self)(*parts))))
+
+    def test_equivalent_windows_roots_reuse_scan_and_keep_invalidation(self):
+        root = self.SearchPath(r"C:\Header Directory")
+        variants = [root, self.SearchPath("c:/header directory/"),
+                    self.SearchPath(r"C:\HEADER~1"),
+                    self.SearchPath(r"c:\HEADER~1\nested\..")]
+        tick = 10_000_000_000
+        stamp = [1, 1, stat.S_IFDIR, 0, tick, tick]
+        files = []
+        with patch.object(tus.os, "name", "nt"), \
+                patch.object(tus, "Path", self.SearchPath), \
+                patch.object(tus, "_PCH_SEARCH_CACHE", {}), \
+                patch.object(tus.time, "time_ns", return_value=tick + 2_000_000_000), \
+                patch.object(tus, "directory_stamp", side_effect=lambda path: tuple(stamp)) as stamps, \
+                patch.object(tus, "directory_entries", side_effect=lambda *args: tuple(
+                    (name, stat.S_IFREG, 1, 2) for name in files)), \
+                patch.object(tus.os, "walk", side_effect=lambda *args, **kwargs:
+                             iter([(str(root), [], list(files))])) as walk:
+            for variant in variants:
+                tus.check_pch_search_roots("g++.exe", {variant, root})
+            self.assertEqual(walk.call_count, 1)
+            self.assertEqual(len(tus._PCH_SEARCH_CACHE), 1)
+            self.assertTrue(all(call.args[0] == root for call in stamps.call_args_list))
+            files.append("header.hpp.gch")
+            stamp[4] += 1
+            with self.assertRaisesRegex(tus.SelectionError, "binary PCH.*remove"):
+                tus.check_pch_search_roots("g++.exe", {variants[-1]})
+            self.assertEqual(walk.call_count, 2)
+            with self.assertRaisesRegex(tus.SelectionError, "binary PCH.*remove"):
+                tus.check_pch_search_roots("g++.exe", {variants[1]})
+            self.assertEqual(walk.call_count, 2)
+
+    def test_equivalent_windows_probe_directories_reuse_search_list(self):
+        result = subprocess.CompletedProcess([], 0, "", '#include <...> search starts here:\r\n '
+            'C:/Header Directory\r\nEnd of search list.\r\n')
+        tus._compiler_header_roots.cache_clear()
+        with patch.object(tus.os, "name", "nt"), \
+                patch.object(tus, "Path", self.SearchPath), \
+                patch.object(tus.subprocess, "run", return_value=result) as probe:
+            for directory in (r"C:\Header Directory", "c:/header directory", r"C:\HEADER~1"):
+                roots = COMPILER_HEADER_ROOTS(["g++.exe", r"C:\changed_tus\unit.cpp"],
+                                             self.SearchPath(directory))
+                self.assertEqual(roots, (self.SearchPath(r"C:\Header Directory"),))
+            self.assertEqual(probe.call_count, 1)
+
+    def test_unresolvable_root_refuses_and_empty_roots_do_not_walk(self):
+        with patch.object(tus, "_PCH_SEARCH_CACHE", {}), \
+                patch.object(tus.os, "walk") as walk:
+            tus.check_pch_search_roots("g++", set())
+            with patch.object(Path, "resolve", side_effect=PermissionError("unreadable root")), \
+                    self.assertRaisesRegex(tus.SelectionError, "cannot check binary PCH search directory"):
+                tus.check_pch_search_roots("g++", {Path("headers")})
+            walk.assert_not_called()
 
 
 class PchEntryIdentityTests(unittest.TestCase):

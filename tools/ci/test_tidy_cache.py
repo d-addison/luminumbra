@@ -3,9 +3,11 @@
 whole analysis input is identical to an earlier passing run."""
 
 import importlib.util
+import concurrent.futures
 import contextlib
 import io
 import json
+import ntpath
 import os
 import shlex
 import shutil
@@ -14,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import time
 import unittest
 from types import SimpleNamespace
@@ -494,15 +497,155 @@ class ToolIdentityTests(unittest.TestCase):
     def test_identity_is_revalidated_until_tick_closes(self):
         result = subprocess.CompletedProcess([], 0, b"tool version\n", b"")
         with patch.object(MODULE.subprocess, "run", return_value=result) as version, \
+                patch.object(MODULE, "sha256_file", wraps=MODULE.sha256_file) as content, \
                 patch.object(MODULE.time, "time_ns", return_value=self.tick + 500_000_000) as clock:
             before = self.tools.describe(str(self.tool), str(self.root))
             self.assertEqual(self.tools.describe(str(self.tool), str(self.root)), before)
-            self.assertEqual(version.call_count, 2)
+            self.assertEqual(content.call_count, 2)
+            self.assertEqual(version.call_count, 1)
             clock.return_value = self.tick + 2_000_000_000
             self.assertEqual(self.tools.describe(str(self.tool), str(self.root)), before)
-            self.assertEqual(version.call_count, 3)
+            self.assertEqual(content.call_count, 3)
+            self.assertEqual(version.call_count, 1)
             self.assertEqual(self.tools.describe(str(self.tool), str(self.root)), before)
-            self.assertEqual(version.call_count, 3)
+            self.assertEqual(content.call_count, 3)
+            self.assertEqual(version.call_count, 1)
+
+    def test_identical_content_with_new_fingerprint_reuses_version(self):
+        result = subprocess.CompletedProcess([], 0, b"tool version\r\n", b"")
+        with patch.object(MODULE.subprocess, "run", return_value=result) as version, \
+                patch.object(MODULE, "sha256_file", wraps=MODULE.sha256_file) as content:
+            before = self.tools.describe(str(self.tool), str(self.root))
+            os.utime(self.tool, ns=(self.tick + 1, self.tick + 1))
+            self.assertEqual(self.tools.describe(str(self.tool), str(self.root)), before)
+            self.assertEqual(content.call_count, 2)
+            self.assertEqual(version.call_count, 1)
+
+    def test_windows_tool_spellings_share_identity_in_command_directory(self):
+        result = subprocess.CompletedProcess([], 0, b"tool version\n", b"")
+        info = SimpleNamespace(st_mode=stat.S_IFREG, st_dev=1, st_ino=1,
+                               st_size=8, st_mtime_ns=self.tick)
+        with patch.object(MODULE.os, "path", ntpath), \
+                patch.object(MODULE.os, "sep", "\\"), \
+                patch.object(ntpath, "isfile", return_value=True), \
+                patch.object(ntpath, "realpath", side_effect=ntpath.normpath), \
+                patch.object(MODULE.os, "stat", return_value=info), \
+                patch.object(MODULE, "sha256_file", return_value="content") as content, \
+                patch.object(MODULE.subprocess, "run", return_value=result) as version, \
+                patch.object(MODULE.shutil, "which") as which, \
+                patch.object(MODULE.time, "time_ns", return_value=self.tick + 2_000_000_000):
+            before = self.tools.describe("../bin/CLANG++.EXE", r"C:\toolchain\build")
+            for executable in (r"..\bin\clang++.exe", "C:/toolchain/bin/clang++.exe"):
+                self.assertEqual(self.tools.describe(executable, r"C:\toolchain\build"), before)
+            which.assert_not_called()
+            self.assertEqual(content.call_count, 1)
+            self.assertEqual(version.call_count, 1)
+            self.assertEqual(version.call_args.args[0], [r"c:\toolchain\bin\clang++.exe", "--version"])
+
+    def concurrent_descriptions(self, failure=None):
+        started, release, joined = threading.Event(), threading.Event(), threading.Event()
+        result_lock = threading.Lock()
+        waiters, outcomes = [], []
+        original_hash = MODULE.sha256_file
+
+        class ObservedFuture(concurrent.futures.Future):
+            def result(self, timeout=None):
+                with result_lock:
+                    waiters.append(self)
+                    if len(waiters) == 3:
+                        joined.set()
+                return super().result(timeout)
+
+        def hash_tool(path):
+            started.set()
+            if not release.wait(5):
+                raise OSError("identity check did not finish")
+            if failure is not None:
+                raise failure
+            return original_hash(path)
+
+        def describe():
+            try:
+                outcome = self.tools.describe(str(self.tool), str(self.root))
+            except MODULE.CacheMiss as error:
+                outcome = error
+            with result_lock:
+                outcomes.append(outcome)
+
+        threads = [threading.Thread(target=describe) for _ in range(4)]
+        result = subprocess.CompletedProcess([], 0, b"tool version\n", b"")
+        with patch.object(MODULE.concurrent.futures, "Future", ObservedFuture), \
+                patch.object(MODULE, "sha256_file", side_effect=hash_tool) as content, \
+                patch.object(MODULE.subprocess, "run", return_value=result) as version, \
+                patch.object(MODULE.time, "time_ns", return_value=self.tick + 500_000_000):
+            threads[0].start()
+            try:
+                self.assertTrue(started.wait(5))
+                for thread in threads[1:]:
+                    thread.start()
+                self.assertTrue(joined.wait(5))
+            finally:
+                release.set()
+                for thread in threads:
+                    if thread.ident is not None:
+                        thread.join(5)
+                        self.assertFalse(thread.is_alive())
+            self.assertEqual(content.call_count, 1)
+            self.assertEqual(version.call_count, 0 if failure is not None else 1)
+        self.assertEqual(len(outcomes), 4)
+        self.assertEqual(self.tools._pending, {})
+        return outcomes
+
+    def test_concurrent_identity_checks_share_hash_and_version(self):
+        outcomes = self.concurrent_descriptions()
+        self.assertTrue(all(isinstance(outcome, str) for outcome in outcomes))
+        self.assertEqual(len(set(outcomes)), 1)
+
+    def test_failed_concurrent_identity_check_refuses_all_waiters_and_retries(self):
+        outcomes = self.concurrent_descriptions(PermissionError("unreadable executable"))
+        self.assertTrue(all(isinstance(outcome, MODULE.CacheMiss) for outcome in outcomes))
+        self.assertTrue(all("unreadable executable" in str(outcome) for outcome in outcomes))
+        result = subprocess.CompletedProcess([], 0, b"tool version\n", b"")
+        with patch.object(MODULE.subprocess, "run", return_value=result) as version:
+            self.assertIn(MODULE.sha256_bytes(b"old tool"),
+                          self.tools.describe(str(self.tool), str(self.root)))
+            self.assertEqual(version.call_count, 1)
+
+    def test_revalidation_failures_cannot_reuse_stale_identity(self):
+        result = subprocess.CompletedProcess([], 0, b"tool version\n", b"")
+        for failure in (PermissionError("unreadable"), OSError("partial read")):
+            with self.subTest(failure=failure), \
+                    patch.object(MODULE.subprocess, "run", return_value=result) as version, \
+                    patch.object(MODULE.time, "time_ns", return_value=self.tick + 500_000_000):
+                self.tools = MODULE.ToolIdentity()
+                before = self.tools.describe(str(self.tool), str(self.root))
+                with patch.object(MODULE, "sha256_file", side_effect=failure), \
+                        self.assertRaises(MODULE.CacheMiss):
+                    self.tools.describe(str(self.tool), str(self.root))
+                self.assertEqual(self.tools.describe(str(self.tool), str(self.root)), before)
+                self.assertEqual(version.call_count, 1)
+
+    def test_version_failures_are_not_cached_and_can_retry(self):
+        success = subprocess.CompletedProcess([], 0, b"tool version\n", b"")
+        failures = (subprocess.TimeoutExpired("tool", 60), OSError("cannot launch"),
+                    subprocess.CompletedProcess([], 1, b"partial version", b"error"),
+                    subprocess.CompletedProcess([], 0, b"", b""))
+        for failure in failures:
+            with self.subTest(failure=failure), \
+                    patch.object(MODULE.time, "time_ns", return_value=self.tick + 500_000_000):
+                self.tools = MODULE.ToolIdentity()
+                self.write_tool(b"old tool")
+                with patch.object(MODULE.subprocess, "run", return_value=success):
+                    before = self.tools.describe(str(self.tool), str(self.root))
+                self.write_tool(b"new tool")
+                with patch.object(MODULE.subprocess, "run", side_effect=[failure, success]) as version:
+                    with self.assertRaises(MODULE.CacheMiss):
+                        self.tools.describe(str(self.tool), str(self.root))
+                    after = self.tools.describe(str(self.tool), str(self.root))
+                    self.assertNotEqual(after, before)
+                    self.assertIn(MODULE.sha256_bytes(b"new tool"), after)
+                    self.assertEqual(self.tools.describe(str(self.tool), str(self.root)), after)
+                    self.assertEqual(version.call_count, 2)
 
     def test_identity_observed_after_tick_closes_uses_fingerprint(self):
         result = subprocess.CompletedProcess([], 0, b"tool version\n", b"")
