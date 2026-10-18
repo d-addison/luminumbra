@@ -1217,8 +1217,18 @@ class CTestShardTests(unittest.TestCase):
     def test_light_coverage_refuses_missing_extra_skipped_or_mismatched_selection_without_mutation(self):
         output = self.root / "merged.xml"
         receipt = output.with_suffix(".selection.json")
+        self.policy_reports("light")
+        inputs = [self.root / shard / name
+                  for shard in ("shard-1", "shard-2")
+                  for name in ("ctest.all.json", "ctest.inventory.json", "ctest.partition.json",
+                               "ctest.shard-index.txt", "ctest.junit.xml")]
+        # Bound the ten case-owned payloads before reading; allow platform path
+        # encodings and CRLF without sharing bytes across cases or profiles.
+        self.assertLessEqual(sum(path.stat().st_size for path in inputs), 2 * 1024 * 1024)
+        saved = [(path, path.read_bytes()) for path in inputs]
         for mutation in ("missing", "extra", "skipped", "selection", "digest", "mixed", "floor"):
-            self.policy_reports("light")
+            for path, payload in saved:
+                path.write_bytes(payload)
             path = self.root / "shard-1/ctest.junit.xml"
             tree = ET.parse(path)
             if mutation == "missing":
@@ -1244,6 +1254,167 @@ class CTestShardTests(unittest.TestCase):
                 shards.merge(self.root, output, selection="light")
             self.assertEqual(output.read_text(), "original report")
             self.assertEqual(receipt.read_text(), "original receipt")
+
+    def test_plan_validates_two_owned_graphs_and_keeps_fresh_refusals(self):
+        def graph_ids(value):
+            if isinstance(value, dict):
+                return (id(value), tuple((key, graph_ids(item)) for key, item in value.items()))
+            if isinstance(value, list):
+                return (id(value), tuple(graph_ids(item) for item in value))
+            return None
+
+        for profile, selection in (("gcc", "light"), ("asan", None)):
+            rows = self.policy_roster() if profile == "gcc" else self.tests
+            all_rows = copy.deepcopy(rows) + [test("Manual.Only", LABELS=["manual"])]
+            files = ((self.root / "ctest.all.json", all_rows),
+                     (self.root / "ctest.inventory.json", rows))
+            for path, value in files:
+                path.write_text(json.dumps({"tests": value}), encoding="utf-8")
+            roots = shards.inventory_roots(self.root)
+            selected = shards.select_tests(rows, profile, selection)
+            parts = shards.partition(all_rows, selected, profile)
+            golden = {**shards.evidence_for(rows, parts, profile, roots=roots, selection=selection), "shard": 1}
+            positions = {row["name"]: index for index, row in enumerate(rows, 1)}
+            indices = [positions[name] for name in parts[0]]
+            expected_index = (",".join(map(str, [indices[0], indices[0], 1, *indices[1:]])) + os.linesep).encode()
+            calls = []
+            original = shards.inventory
+
+            def validate(document):
+                value = original(document)
+                calls.append((value, copy.deepcopy(value), graph_ids(value)))
+                return value
+
+            with patch.object(shards, "inventory", side_effect=validate), patch.object(
+                    shards, "_partition_validated", wraps=shards._partition_validated) as core:
+                prefab = shards.plan(self.root, 1, profile, selection=selection)
+            # This registered assertion fails if plan calls public partition again.
+            self.assertEqual(len(calls), 2)
+            self.assertIsNot(calls[0][0], calls[1][0])
+            self.assertEqual(core.call_count, 1)
+            self.assertIs(core.call_args.args[0], calls[0][0])
+            for value, content, identities in calls:
+                self.assertEqual(value, content)
+                self.assertEqual(graph_ids(value), identities)
+            self.assertEqual((self.root / "ctest.partition.json").read_bytes(),
+                             (json.dumps(golden, sort_keys=True) + os.linesep).encode("utf-8"))
+            self.assertEqual((self.root / "ctest.shard-index.txt").read_bytes(), expected_index)
+            self.assertEqual(prefab, any(name.startswith("PrefabRuntimeTest.") for name in parts[0]))
+            if profile == "gcc":
+                calls.clear()
+                with patch.object(shards, "inventory", side_effect=validate), patch.object(
+                        shards, "_partition_validated", wraps=shards._partition_validated) as core:
+                    shards.plan(self.root, 0, profile, selection="full")
+                self.assertEqual(len(calls), 2)
+                self.assertIsNot(calls[0][0], calls[1][0])
+                core.assert_not_called()
+            outputs = {name: (self.root / name).read_bytes()
+                       for name in ("ctest.partition.json", "ctest.shard-index.txt")}
+            for mutation in ("provenance", "command", "properties", "roots"):
+                changed = copy.deepcopy(all_rows)
+                if mutation == "provenance":
+                    changed[0]["provenance"] = "different"
+                elif mutation == "command":
+                    changed[0]["command"] = ["different-command"]
+                elif mutation == "properties":
+                    changed[0]["properties"] = [{"name": "ENVIRONMENT", "value": ["DIFFERENT=1"]}]
+                (self.root / "ctest.all.json").write_text(json.dumps({"tests": changed}), encoding="utf-8")
+                current_roots = {**roots, "source": "relative"} if mutation == "roots" else roots
+                with self.subTest(profile=profile, mutation=mutation), patch.object(
+                        shards, "inventory_roots", return_value=current_roots), self.assertRaises(ValueError):
+                    shards.plan(self.root, 1, profile, selection=selection)
+                for name, payload in outputs.items():
+                    self.assertEqual((self.root / name).read_bytes(), payload)
+            caller_rows = copy.deepcopy(all_rows)
+            shards.partition(caller_rows, selected, profile)
+            caller_rows[0]["command"] = []
+            with self.assertRaisesRegex(ValueError, "malformed or unbuilt CTest command"):
+                shards.partition(caller_rows, selected, profile)
+
+    def test_light_refusal_fixture_is_constructed_once_with_real_boundaries(self):
+        original = shards.merge
+        refusals = []
+        script = str(Path(__file__).with_name("ctest_shards.py"))
+
+        def merge(*args, **kwargs):
+            result = subprocess.run(
+                [sys.executable, "-I", "-B", script, "merge", "--directory", str(self.root),
+                 "--output", str(args[1]), "--selection", "light"],
+                capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("CTest merge refused:", result.stderr)
+            try:
+                return original(*args, **kwargs)
+            except ValueError:
+                refusals.append(True)
+                raise
+
+        with patch.object(self, "policy_reports", wraps=self.policy_reports) as construct, patch.object(
+                shards, "plan", wraps=shards.plan) as plans, patch.object(shards, "merge", side_effect=merge):
+            self.test_light_coverage_refuses_missing_extra_skipped_or_mismatched_selection_without_mutation()
+        self.assertEqual(construct.call_count, 1)
+        self.assertEqual(plans.call_count, 2)
+        self.assertEqual(len(refusals), 7)
+
+    def test_case_progress_records_survive_success_failure_and_interruption(self):
+        import time
+
+        child = """import runpy, sys, threading, unittest
+script, outcome = sys.argv[1:]
+class OwnedCases(unittest.TestCase):
+    def test_first(self):
+        self.assertTrue(True)
+    def test_second(self):
+        if outcome == 'failure':
+            self.fail('owned failure')
+        if outcome == 'interruption':
+            print('waiting', flush=True)
+            threading.Event().wait()
+sys.argv = [script, 'OwnedCases']
+runpy.run_path(script, run_name='__main__', init_globals={'OwnedCases': OwnedCases})
+"""
+        first = "__main__.OwnedCases.test_first"
+        second = "__main__.OwnedCases.test_second"
+        for suite in ("test_ctest_shards.py", "test_offline_deps.py"):
+            for outcome in ("success", "failure", "interruption"):
+                argv = [sys.executable, "-I", "-B", "-c", child,
+                        str(Path(__file__).with_name(suite)), outcome]
+                with self.subTest(suite=suite, outcome=outcome):
+                    if outcome == "interruption":
+                        log = self.root / "progress.stderr"
+                        ready = self.root / "progress.stdout"
+                        with log.open("wb") as stream, ready.open("wb") as signal:
+                            process = subprocess.Popen(argv, stdout=signal, stderr=stream)
+                            try:
+                                deadline = time.monotonic() + 10
+                                while not ready.stat().st_size:
+                                    if process.poll() is not None or time.monotonic() >= deadline:
+                                        self.fail("owned child did not reach its waiting case")
+                                    self.assertLessEqual(log.stat().st_size, 8192)
+                                    time.sleep(0.005)
+                                self.assertEqual(ready.read_bytes().replace(b"\r\n", b"\n"), b"waiting\n")
+                                self.assertIn(b"CASE START " + second.encode() + b"\n",
+                                              log.read_bytes().replace(b"\r\n", b"\n"))
+                                with self.assertRaises(subprocess.TimeoutExpired):
+                                    process.communicate(timeout=0)
+                            finally:
+                                process.kill()
+                                process.communicate()
+                        data = log.read_bytes()
+                    else:
+                        result = subprocess.run(argv, capture_output=True, timeout=10)
+                        self.assertEqual(result.returncode, 1 if outcome == "failure" else 0)
+                        self.assertEqual(result.stdout, b"")
+                        data = result.stderr
+                    self.assertLessEqual(len(data), 8192)
+                    records = [line for line in data.decode().replace("\r\n", "\n").splitlines(keepends=True)
+                               if line.startswith("CASE ")]
+                    expected = [f"CASE START {first}\n", f"CASE FINISH {first}\n", f"CASE START {second}\n"]
+                    if outcome != "interruption":
+                        expected.append(f"CASE FINISH {second}\n")
+                    self.assertEqual(records, expected)
+                    self.assertIn(b"FAILED (failures=1)" if outcome == "failure" else
+                                  b"OK" if outcome == "success" else f"CASE START {second}".encode(), data)
 
     def test_merge_publication_failure_restores_report_and_receipt(self):
         self.policy_reports("light")
@@ -1367,5 +1538,20 @@ class CTestShardTests(unittest.TestCase):
             shards.gate("skipped", "false", "true", "push", "", "false", "false", "success")
 
 
+class CaseProgressResult(unittest.TextTestResult):
+    def startTest(self, case):
+        super().startTest(case)
+        print(f"\nCASE START {case.id()}", file=sys.stderr, flush=True)
+
+    def stopTest(self, case):
+        # FINISH records completion, including failures, errors and skips.
+        print(f"\nCASE FINISH {case.id()}", file=sys.stderr, flush=True)
+        super().stopTest(case)
+
+
+class CaseProgressRunner(unittest.TextTestRunner):
+    resultclass = CaseProgressResult
+
+
 if __name__ == "__main__":
-    unittest.main()
+    unittest.main(testRunner=CaseProgressRunner)
