@@ -185,8 +185,18 @@ def prepare(source: Path, output: Path, root: Path = ROOT) -> None:
             raise PatchError("edit payload exceeds bound")
         originals[entry["path"]] = content
     for entry in manifest["files"]:
-        if digest(originals[entry["path"]]) != entry["before"]:
+        content = originals[entry["path"]]
+        # Upstream text attributes permit native checkout line endings. Accept
+        # only uniform CRLF or LF, then verify the exact reviewed LF identity.
+        # Raw file and aggregate bounds above apply before this bounded copy.
+        if b"\r" in content:
+            pairs = content.count(b"\r\n")
+            if content.count(b"\r") != pairs or content.count(b"\n") != pairs:
+                raise PatchError(f"nonuniform pinned line endings: {entry['path']}")
+            content = content.replace(b"\r\n", b"\n")
+        if digest(content) != entry["before"]:
             raise PatchError(f"wrong pinned preimage: {entry['path']}")
+        originals[entry["path"]] = content
     patched = apply_patch(patch, originals)
     if sum(map(len, patched.values())) > MAX_BYTES:
         raise PatchError("patched payload exceeds bound")
