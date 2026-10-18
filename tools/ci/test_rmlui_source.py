@@ -10,6 +10,7 @@ the exact pin.
 """
 from __future__ import annotations
 
+import ast
 import concurrent.futures
 import contextlib
 import io
@@ -932,12 +933,26 @@ class DeliveryRefusals(unittest.TestCase):
         with self.small_git_source() as (source, spec, nested):
             for directory in (source, source / "nested"):
                 with self.subTest(directory=directory.name):
-                    old = M.git(directory, "rev-parse", "HEAD^{tree}").strip().decode()
+                    old = M.git(directory, "show", "--no-patch", "--format=%T", "HEAD").strip().decode()
                     current = M.git(directory, "rev-parse", "HEAD:").strip().decode()
                     self.assertEqual(old, spec.data["tree"])
                     self.assertEqual(current, old)
                     self.assertNotEqual(current, nested)
             M.verify_git(source, spec)
+
+    def test_root_tree_equivalence_oracle_survives_singleton_brace_expansion(self):
+        original = M.run_command
+        queries = []
+        def native_parent_glob(directory, argv, environment, input_bytes=None):
+            converted = [re.sub(r"\{([^,{}]*)\}", r"\1", arg)
+                         if '"' not in subprocess.list2cmdline([arg]) else arg for arg in argv]
+            if "--format=%T" in argv:
+                queries.append(directory)
+            return original(directory, converted, environment, input_bytes)
+        with mock.patch.object(M, "run_command", side_effect=native_parent_glob):
+            self.test_root_tree_query_is_equivalent_for_root_and_nested_working_directories()
+        self.assertEqual(len(queries), 2)
+        self.assertEqual(queries[1].name, "nested")
 
     def test_root_tree_verification_survives_singleton_brace_expansion(self):
         with self.small_git_source() as (source, spec, nested):
@@ -1371,6 +1386,27 @@ class PairedWorkflowInitialization(unittest.TestCase):
         self.assertEqual([args[:4] for args in self.calls()],
                          [["-S", "base", "-B", "build/base"], ["-S", "head", "-B", "build/head"]])
 
+    @staticmethod
+    def foreign_fixture_path(build):
+        # Native enumeration appends a backslash even when the parent uses slashes.
+        separator = chr(92) if os.name == "nt" else "/"
+        return type(build)(str(build) + separator + "foreign")
+
+    def test_foreign_fixture_path_matches_native_enumeration_spelling(self):
+        class SlashPath(str):
+            def __truediv__(self, child):
+                return type(self)(str(self) + "/" + child)
+        for platform, separator in (("nt", chr(92)), ("posix", "/")):
+            with self.subTest(platform=platform), mock.patch.object(os, "name", platform):
+                path = self.foreign_fixture_path(SlashPath("D:/fixture/build/base"))
+                self.assertEqual(path, "D:/fixture/build/base" + separator + "foreign")
+        build = self.root / "foreign-check"
+        build.mkdir()
+        foreign = self.foreign_fixture_path(build)
+        foreign.write_bytes(b"preserve")
+        self.assertEqual(list(build.iterdir()), [foreign])
+        self.assertEqual(foreign.read_bytes(), b"preserve")
+
     def test_base_initialization_refusals_stop_before_configure(self):
         manifest = self.root / "base/vendor/rmlui/rmlui-6.1-source.json"
         original = manifest.read_bytes()
@@ -1389,12 +1425,13 @@ class PairedWorkflowInitialization(unittest.TestCase):
                     manifest.write_bytes(original)
         build = self.root / "build/base"
         build.mkdir(parents=True)
-        (build / "foreign").write_bytes(b"preserve")
+        foreign = self.foreign_fixture_path(build)
+        foreign.write_bytes(b"preserve")
         result = self.run_workflow()
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.calls(), [])
-        self.assertEqual(list(build.iterdir()), [build / "foreign"])
-        self.assertEqual((build / "foreign").read_bytes(), b"preserve")
+        self.assertEqual(list(build.iterdir()), [foreign])
+        self.assertEqual(foreign.read_bytes(), b"preserve")
         self.assertFalse((self.root / "build/head").exists())
 
 
@@ -1459,13 +1496,9 @@ class BootstrapInterpreterBinding(unittest.TestCase):
         self.assertEqual((build / ".rmlui-owner.json").read_bytes(), owner)
         self.assertFalse((build / ".rmlui-ready.json").exists())
 
-    def test_mixed_writer_spelling_refuses_at_real_cmake_reader_without_mutation(self):
-        build = self.root / "build"
-        # Exercise the real writer in a subprocess with an alternate pathlib
-        # serialization, then the unmodified reader through LANGUAGES NONE.
-        # Windows uses the observed slash difference; POSIX models it with a
-        # redundant separator. This is not native Windows qualification.
-        writer = textwrap.dedent("""\
+    @staticmethod
+    def mixed_writer_program():
+        return textwrap.dedent("""\
             import importlib.util
             import os
             from pathlib import Path
@@ -1479,7 +1512,7 @@ class BootstrapInterpreterBinding(unittest.TestCase):
                 def __str__(self):
                     value = super().__str__()
                     if value == str(root):
-                        return value.replace(chr(92), "/") if os.name == "nt" else value + "/"
+                        return value + "/"
                     return value
             def writer_canonical(raw):
                 path = canonical(raw)
@@ -1487,6 +1520,45 @@ class BootstrapInterpreterBinding(unittest.TestCase):
             module.canonical = writer_canonical
             raise SystemExit(module.main(["init", "--root", str(root)]))
             """)
+
+    def test_mixed_writer_fixture_spelling_is_distinct_for_native_slash_paths(self):
+        root = self.root / "build"
+        root.mkdir()
+        program = ast.parse(self.mixed_writer_program())
+        definition = next(node for node in program.body
+                          if isinstance(node, ast.ClassDef) and node.name == "WriterPath")
+        namespace = {"root": root, "os": os}
+        exec(compile(ast.Module(body=[definition], type_ignores=[]), "<writer-fixture>", "exec"), namespace)
+        path = namespace["WriterPath"](root)
+        for platform in ("nt", "posix"):
+            with self.subTest(platform=platform):
+                with mock.patch.object(os, "name", platform):
+                    alternate = str(path)
+                self.assertNotEqual(alternate, str(root))
+                self.assertTrue(os.path.samefile(root, alternate))
+
+    def test_mixed_writer_fixture_refuses_at_bootstrap_preflight_without_mutation(self):
+        build = self.root / "build"
+        helper = str(self.root / "tools/ci/rmlui_source.py")
+        initialized = subprocess.run([sys.executable, "-I", "-B", "-c", self.mixed_writer_program(),
+                                      helper, str(build)], capture_output=True, text=True, check=False)
+        self.assertEqual(initialized.returncode, 0, initialized.stdout + initialized.stderr)
+        owner = (build / ".rmlui-owner.json").read_bytes()
+        self.assertNotEqual(json.loads(owner)["root"], str(build))
+        self.assertTrue(os.path.samefile(json.loads(owner)["root"], build))
+        refused = subprocess.run([sys.executable, "-I", "-B", helper, "preflight", "--root", str(build)],
+                                 capture_output=True, text=True, check=False)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("workspace ownership root mismatch", refused.stdout + refused.stderr)
+        self.assertEqual((build / ".rmlui-owner.json").read_bytes(), owner)
+        self.assertFalse((build / ".rmlui-ready.json").exists())
+        self.assertFalse((build / ".rmlui-admission").exists())
+
+    def test_mixed_writer_spelling_refuses_at_real_cmake_reader_without_mutation(self):
+        build = self.root / "build"
+        # Keep the same path with a distinct trailing-separator serialization.
+        # The unmodified reader still runs through LANGUAGES NONE.
+        writer = self.mixed_writer_program()
         initialized = subprocess.run([sys.executable, "-I", "-B", "-c", writer,
                                       str(self.root / "tools/ci/rmlui_source.py"), str(build)],
                                      capture_output=True, text=True, check=False)
