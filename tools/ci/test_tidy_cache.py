@@ -314,6 +314,9 @@ def assert_parallel_failure(case, module, failure, *, collect_errors=(), active_
                     return slow()
                 except BaseException as error:
                     tool_errors.append(type(error))
+                    # Cancellation may reap the tool before the failing future
+                    # publishes its callback; keep this worker off the queue.
+                    case.assertTrue(published.wait(5), "failure was not published")
                     if boundary and boundary[0]:
                         case.assertTrue(joining.wait(5), "coordinator did not join")
                     raise
