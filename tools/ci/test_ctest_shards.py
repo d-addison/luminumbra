@@ -867,6 +867,93 @@ class CTestShardTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(f"Reviewed heavy correctness case missing: {name}", " ".join(result.stderr.split()))
 
+    def heavy_hook_fixture(self, names, roster):
+        ctest = shutil.which("ctest")
+        self.assertIsNotNone(ctest, "CTest is required for heavy-label discovery regressions")
+        fixture = Path(tempfile.mkdtemp(prefix="ctest partial fixture ", dir=self.root))
+        discovery = "\n".join(
+            f'add_test([==[{name}]==] [==[{Path(sys.executable).as_posix()}]==] --fixture-only)\n'
+            f'set_tests_properties([==[{name}]==] PROPERTIES '
+            f'TIMEOUT 37 WORKING_DIRECTORY [==[{fixture.as_posix()}]==] '
+            'ENVIRONMENT "DISCOVERY_FIXTURE=retained" LABELS "partial;unrelated" RUN_SERIAL TRUE)'
+            for name in names
+        )
+        if roster is not None:
+            # set(VAR) unsets VAR; an explicit empty string models a defined empty list.
+            discovery += '\nset(LUMINUMBRA_WORLD_OPEN_TESTS "' + ";".join(roster) + '")\n'
+        discovered = fixture / "discovered.cmake"
+        discovered.write_text(discovery, encoding="utf-8")
+        includes = f'include([==[{discovered.as_posix()}]==])\n'
+        testfile = fixture / "CTestTestfile.cmake"
+        testfile.write_text(includes, encoding="utf-8")
+
+        def discover(*filters):
+            return subprocess.run(
+                [ctest, "--test-dir", str(fixture), "--show-only=json-v1", *filters],
+                capture_output=True, text=True, timeout=30,
+            )
+
+        return testfile, includes, discover
+
+    def test_ctest_partial_discovery_without_target_list_preserves_selection(self):
+        hook = Path(__file__).resolve().parents[2] / "test/HeavyTestsCTest.cmake"
+        unrelated = ["Preview.Frame", "Rhi.Bringup"]
+        for placeholder in ([], ["world_open_refusal_test_NOT_BUILT"]):
+            names = [*unrelated, *placeholder]
+            testfile, includes, discover = self.heavy_hook_fixture(names, None)
+            # Non-GoogleTest registrations follow the discovery includes in CTest.
+            continued = (
+                f'add_test(RenderTraversalIntegrated [==[{Path(sys.executable).as_posix()}]==] --fixture-only)\n'
+                'set_tests_properties(RenderTraversalIntegrated PROPERTIES LABELS "partial;runner" TIMEOUT 37)\n'
+            )
+            names.append("RenderTraversalIntegrated")
+            testfile.write_text(includes + continued, encoding="utf-8")
+            selections = (
+                ((), names),
+                (("-R", "^Preview\\.Frame$"), unrelated[:1]),
+                (("-R", "^Rhi\\.Bringup$"), unrelated[1:]),
+                (("-R", "^RenderTraversalIntegrated$"), [names[-1]]),
+                (("-L", "partial"), names),
+                (("-LE", "heavy"), names),
+                (("-L", "heavy"), []),
+            )
+            expected = {}
+            for filters, selected in selections:
+                before = discover(*filters)
+                self.assertEqual(before.returncode, 0, before.stdout + before.stderr)
+                expected[filters] = json.loads(before.stdout)["tests"]
+                self.assertEqual([row["name"] for row in expected[filters]], selected)
+            testfile.write_text(includes + f'include([==[{hook.as_posix()}]==])\n' + continued, encoding="utf-8")
+            for filters, selected in selections:
+                with self.subTest(placeholder=placeholder, filters=filters):
+                    result = discover(*filters)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    actual = json.loads(result.stdout)["tests"]
+                    self.assertEqual([row["name"] for row in actual], selected)
+                    self.assertEqual(actual, expected[filters])
+
+    def test_ctest_defined_invalid_target_lists_refuse_even_filtered(self):
+        hook = Path(__file__).resolve().parents[2] / "test/HeavyTestsCTest.cmake"
+        heavy = sorted(shards.HEAVY_NAMES)
+        names = [*heavy, "Preview.Frame"]
+        rosters = [[], ["OFF"], ["NOTFOUND"], ["Preview.Frame"]]
+        for name in heavy:
+            rosters.append([item for item in names if item != name])
+            rosters.append([item + "Renamed" if item == name else item for item in names])
+        for roster in rosters:
+            testfile, includes, discover = self.heavy_hook_fixture(names, roster)
+            before = discover()
+            self.assertEqual(before.returncode, 0, before.stdout + before.stderr)
+            self.assertEqual([row["name"] for row in json.loads(before.stdout)["tests"]], names)
+            testfile.write_text(includes + f'include([==[{hook.as_posix()}]==])\n', encoding="utf-8")
+            missing = next(name for name in heavy if name not in roster)
+            for filters in ((), ("-R", "^Preview\\.Frame$")):
+                with self.subTest(roster=roster, filters=filters):
+                    result = discover(*filters)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(f"Reviewed heavy correctness case missing: {missing}",
+                                  " ".join(result.stderr.split()))
+
     def test_only_explicit_false_selects_light_missing_old_or_invalid_outputs_select_full(self):
         for value in ("", "true", "False", "0", "unknown", None):
             self.assertEqual(shards.selection_policy(value), "full")
