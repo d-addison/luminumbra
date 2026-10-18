@@ -146,59 +146,74 @@ class CTestShardTests(unittest.TestCase):
             for row in expected_current:
                 row["properties"].reverse()
             expected_discovery = json.dumps({"tests": expected_current})
-            for selection in ("full", "light", "heavy"):
-                for shard in (1, 2):
-                    with self.subTest(profile=profile, selection=selection, shard=shard):
-                        output.write_bytes(sentinel)
-                        with patch.dict(os.environ, GITHUB_OUTPUT=str(output)):
-                            self.write_plan(self.root, shard, tests=tests, profile=profile,
-                                            selection=selection)
-                        self.assertEqual(output.read_bytes(), sentinel)
-                        result = subprocess.run(
-                            [sys.executable, "-I", "-B", str(Path(__file__).with_name("ctest_shards.py")),
-                             "plan", "--directory", str(self.root), "--profile", profile,
-                             "--shard", str(shard), "--selection", selection],
-                            env=dict(os.environ, GITHUB_OUTPUT=str(output)),
-                            capture_output=True, text=True, timeout=10)
-                        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                        manifest = shards.read_json(self.root / "ctest.partition.json")
-                        self.assertEqual(manifest["selection"], selection)
-                        shards.validate_union(shards.select_tests(tests, profile, selection),
-                                              manifest["partitions"])
-                        selected = manifest["partitions"][shard - 1]
-                        prefab = "PrefabRuntimeTest.Installed" in selected
-                        self.assertEqual(output.read_bytes(), sentinel +
-                                         f"prefab={str(prefab).lower()}{os.linesep}".encode("utf-8"))
-                        fixture = {"PrefabRuntimeTest.Installed", "PrefabDigest.Content", "Runtime.Cleanup"}
-                        self.assertIn(fixture.intersection(selected), (set(), fixture))
-                        if selection == "heavy":
-                            self.assertEqual(set().union(*map(set, manifest["partitions"])), shards.HEAVY_NAMES)
-                            self.assertFalse(prefab)
-                        # Only the property-list order changes before serialization;
-                        # nested command and property values stay read-only.
-                        with patch.object(copy, "deepcopy", side_effect=AssertionError(
-                                "execution discovery fixture must not recursively copy each lane")):
-                            current = [{**row, "properties": list(reversed(row["properties"]))} for row in tests]
-                            response = subprocess.CompletedProcess([], 0, stdout=json.dumps({"tests": current}))
-                        self.assertEqual(response.stdout, expected_discovery)
-                        with patch.object(shards.subprocess, "run", side_effect=[
-                                response, subprocess.CompletedProcess([], 8)]) as invoke:
-                            self.assertEqual(shards.run(alias, profile), 8)
-                        self.assertEqual(invoke.call_args.args[0][4], str(resolved))
-                        self.assertIn(str(resolved / "ctest.shard-index.txt"), invoke.call_args.args[0])
-                        before = {name: (self.root / name).read_bytes() for name in
-                                  ("ctest.partition.json", "ctest.shard-index.txt", "step-output")}
-                        # A partial discovery must refuse before changing plan or workflow outputs.
-                        (self.root / "ctest.inventory.json").write_text("{", encoding="utf-8")
-                        result = subprocess.run(
-                            [sys.executable, "-I", "-B", str(Path(__file__).with_name("ctest_shards.py")),
-                             "plan", "--directory", str(self.root), "--profile", profile,
-                             "--shard", str(shard), "--selection", selection],
-                            env=dict(os.environ, GITHUB_OUTPUT=str(output)),
-                            capture_output=True, text=True, timeout=10)
-                        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-                        for name, content in before.items():
-                            self.assertEqual((self.root / name).read_bytes(), content)
+            expected_tests = [{**row, "properties": list(reversed(row["properties"]))}
+                              for row in expected_current]
+            encode = json.dumps
+            preparations = 0
+            current = None
+
+            def encode_discovery(document, *args, **kwargs):
+                nonlocal preparations
+                if isinstance(document, dict) and "tests" in document and document["tests"] is current:
+                    preparations += 1
+                return encode(document, *args, **kwargs)
+
+            with patch.object(json, "dumps", new=encode_discovery):
+                # One bounded preparation per profile; nested values stay read-only.
+                with patch.object(copy, "deepcopy", side_effect=AssertionError(
+                        "execution discovery fixture must not recursively copy each lane")):
+                    current = [{**row, "properties": list(reversed(row["properties"]))} for row in tests]
+                    discovery = json.dumps({"tests": current})
+                for selection in ("full", "light", "heavy"):
+                    for shard in (1, 2):
+                        with self.subTest(profile=profile, selection=selection, shard=shard):
+                            output.write_bytes(sentinel)
+                            with patch.dict(os.environ, GITHUB_OUTPUT=str(output)):
+                                self.write_plan(self.root, shard, tests=tests, profile=profile,
+                                                selection=selection)
+                            self.assertEqual(output.read_bytes(), sentinel)
+                            result = subprocess.run(
+                                [sys.executable, "-I", "-B", str(Path(__file__).with_name("ctest_shards.py")),
+                                 "plan", "--directory", str(self.root), "--profile", profile,
+                                 "--shard", str(shard), "--selection", selection],
+                                env=dict(os.environ, GITHUB_OUTPUT=str(output)),
+                                capture_output=True, text=True, timeout=10)
+                            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                            manifest = shards.read_json(self.root / "ctest.partition.json")
+                            self.assertEqual(manifest["selection"], selection)
+                            shards.validate_union(shards.select_tests(tests, profile, selection),
+                                                  manifest["partitions"])
+                            selected = manifest["partitions"][shard - 1]
+                            prefab = "PrefabRuntimeTest.Installed" in selected
+                            self.assertEqual(output.read_bytes(), sentinel +
+                                             f"prefab={str(prefab).lower()}{os.linesep}".encode("utf-8"))
+                            fixture = {"PrefabRuntimeTest.Installed", "PrefabDigest.Content", "Runtime.Cleanup"}
+                            self.assertIn(fixture.intersection(selected), (set(), fixture))
+                            if selection == "heavy":
+                                self.assertEqual(set().union(*map(set, manifest["partitions"])), shards.HEAVY_NAMES)
+                                self.assertFalse(prefab)
+                            response = subprocess.CompletedProcess([], 0, stdout=discovery)
+                            self.assertEqual(response.stdout, expected_discovery)
+                            with patch.object(shards.subprocess, "run", side_effect=[
+                                    response, subprocess.CompletedProcess([], 8)]) as invoke:
+                                self.assertEqual(shards.run(alias, profile), 8)
+                            self.assertEqual(invoke.call_args.args[0][4], str(resolved))
+                            self.assertIn(str(resolved / "ctest.shard-index.txt"), invoke.call_args.args[0])
+                            before = {name: (self.root / name).read_bytes() for name in
+                                      ("ctest.partition.json", "ctest.shard-index.txt", "step-output")}
+                            # A partial discovery must refuse before changing plan or workflow outputs.
+                            (self.root / "ctest.inventory.json").write_text("{", encoding="utf-8")
+                            result = subprocess.run(
+                                [sys.executable, "-I", "-B", str(Path(__file__).with_name("ctest_shards.py")),
+                                 "plan", "--directory", str(self.root), "--profile", profile,
+                                 "--shard", str(shard), "--selection", selection],
+                                env=dict(os.environ, GITHUB_OUTPUT=str(output)),
+                                capture_output=True, text=True, timeout=10)
+                            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                            for name, content in before.items():
+                                self.assertEqual((self.root / name).read_bytes(), content)
+            self.assertEqual(preparations, 1)
+            self.assertEqual(tests, expected_tests)
 
     def test_plan_fixture_encodes_shared_inputs_once_without_retaining_mutations(self):
         encode = json.dumps
@@ -899,19 +914,35 @@ class CTestShardTests(unittest.TestCase):
         resolved = directory.resolve()
         preset, parallel, timeout = limits
         selection = [] if shard == 0 else ["-I", str(resolved / "ctest.shard-index.txt")]
-        for status in (0, 8):
-            response = subprocess.CompletedProcess([], 0, stdout=json.dumps({"tests": self.tests}))
-            with self.subTest(status=status), patch.object(shards.subprocess, "run", side_effect=[response, subprocess.CompletedProcess([], status)]) as invoke:
-                self.assertEqual(shards.run(directory, profile), status)
-                check, execute = invoke.call_args_list
-                base = ["ctest", "--preset", preset, "--test-dir", str(resolved), "-LE", "manual"]
-                self.assertEqual(check.args[0], [*base, "--show-only=json-v1"])
-                self.assertEqual(check.kwargs, {"check": True, "capture_output": True, "text": True, "encoding": "utf-8"})
-                self.assertEqual(execute.args[0], [*base, "--no-tests=error", *selection,
-                                                  "--parallel", str(parallel), "--timeout", str(timeout),
-                                                  "--output-junit", "ctest.junit.xml"])
-                # Both calls inherit the wrapper's cwd and environment.
-                self.assertEqual(execute.kwargs, {})
+        expected_tests = copy.deepcopy(self.tests)
+        expected_discovery = json.dumps({"tests": expected_tests})
+        encode = json.dumps
+        encodings = 0
+
+        def encode_discovery(document, *args, **kwargs):
+            nonlocal encodings
+            if isinstance(document, dict) and document.get("tests") is self.tests:
+                encodings += 1
+            return encode(document, *args, **kwargs)
+
+        with patch.object(json, "dumps", new=encode_discovery):
+            discovery = json.dumps({"tests": self.tests})
+            for status in (0, 8):
+                response = subprocess.CompletedProcess([], 0, stdout=discovery)
+                self.assertEqual(response.stdout, expected_discovery)
+                with self.subTest(status=status), patch.object(shards.subprocess, "run", side_effect=[response, subprocess.CompletedProcess([], status)]) as invoke:
+                    self.assertEqual(shards.run(directory, profile), status)
+                    check, execute = invoke.call_args_list
+                    base = ["ctest", "--preset", preset, "--test-dir", str(resolved), "-LE", "manual"]
+                    self.assertEqual(check.args[0], [*base, "--show-only=json-v1"])
+                    self.assertEqual(check.kwargs, {"check": True, "capture_output": True, "text": True, "encoding": "utf-8"})
+                    self.assertEqual(execute.args[0], [*base, "--no-tests=error", *selection,
+                                                      "--parallel", str(parallel), "--timeout", str(timeout),
+                                                      "--output-junit", "ctest.junit.xml"])
+                    # Both calls inherit the wrapper's cwd and environment.
+                    self.assertEqual(execute.kwargs, {})
+        self.assertEqual(encodings, 1)
+        self.assertEqual(self.tests, expected_tests)
 
     def test_windows_short_alias_uses_exact_resolved_full_and_shard_contexts(self):
         resolved = self.root.resolve()
