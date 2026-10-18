@@ -81,6 +81,15 @@ def resolve_reference(root: Path, reference: str) -> Path:
     return contain_path(root, root.joinpath(*parts))
 
 
+def path_exists(path: Path) -> bool:
+    """Keep missing-file fallbacks without suppressing other status errors."""
+    try:
+        path.stat()
+    except FileNotFoundError:
+        return False
+    return True
+
+
 def _open_posix(target: Path, flags: int) -> int:
     """Anchor every canonical component; replacements cannot introduce links."""
     # Search descriptors preserve ordinary traversal permissions. Platforms

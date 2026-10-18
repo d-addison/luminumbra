@@ -49,7 +49,7 @@ import sys
 from pathlib import Path
 from typing import Any, Iterator
 
-from fixture_paths import contain_path, read_bytes, resolve_reference
+from fixture_paths import contain_path, path_exists, read_bytes, resolve_reference
 
 # JSON object keys beginning with this prefix are documentation for humans, not
 # input to the engine. `data/common/systems.json` uses the convention heavily
@@ -189,7 +189,7 @@ def fixture_hash(root: Path, *, scope: str = "all", reference_root: Path | None 
             continue
         visited.add(name)
         if path not in hashed:
-            if path.exists():
+            if path_exists(path):
                 discovered: dict[str, Path] = {}
                 extra[name] = canonical_file_digest(path, reference_root=reference_root,
                                                      dependencies=discovered,

@@ -14,7 +14,7 @@ from pathlib import Path
 import shutil
 
 from fixture_hash import fixture_entry_status, fixture_hash
-from fixture_paths import contain_path, open_regular, read_text, resolve_reference
+from fixture_paths import contain_path, open_regular, path_exists, read_text, resolve_reference
 
 GATES = ("ActiveRegions", "WaterHighRes", "WeatherRain", "WeatherEvents", "AetherState")
 TUNINGS = ("Ecology", "WildlifeFoliage", "Thirst", "Scavenging", "Foraging", "Reproduction")
@@ -74,7 +74,7 @@ def prepare(base: Path, head: Path, receipt: Path) -> None:
             destination_root = root / "data"
             destination = contain_path(destination_root, destination_root /
                                        path.relative_to(data))
-            if not destination.exists() and path.exists():
+            if not path_exists(destination) and path_exists(path):
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 with open_regular(data, path) as stream, destination.open("wb") as output:
                     shutil.copyfileobj(stream, output)

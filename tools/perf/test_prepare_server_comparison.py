@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Controlled-workload identity and isolation contracts; stdlib only."""
+import contextlib
+import errno
 import hashlib
 import io
 import json
@@ -11,6 +13,7 @@ import types
 import unittest
 from unittest import mock
 
+import fixture_paths
 import prepare_server_comparison as comparison
 from test_fixture_hash import (ROOTED_REFERENCES, ESCAPING_REFERENCES, directory_link,
                                remove_directory_link, symlink_or_skip)
@@ -115,6 +118,179 @@ class ComparisonFixtureTest(unittest.TestCase):
                         self.assertEqual(copied.read_bytes(), dependency.read_bytes())
                 self.assertEqual(comparison.identity(base / "perf-common"),
                                  comparison.identity(head / "perf-common"))
+
+    def test_dependency_status_errors_refuse_before_any_preparation_write(self):
+        # Model Python 3.14 querying semantics even on older interpreters:
+        # exists() suppresses every OSError, whereas stat() preserves it.
+        original_stat = Path.stat
+        for relative in ("extra/branch.json", "extra/leaf.json"):
+            for error_type, number in ((PermissionError, errno.EACCES),
+                                       (OSError, errno.EIO),
+                                       (NotADirectoryError, errno.ENOTDIR)):
+                for consumer in ("hash", "identity", "prepare"):
+                    with self.subTest(path=relative, error=number, consumer=consumer), \
+                            tempfile.TemporaryDirectory() as temp:
+                        parent = Path(temp).resolve()
+                        base, head = self.comparison_checkouts(parent)
+                        (base / comparison.MARKER).write_text("controlled")
+                        target = base / "data" / relative
+                        failure = error_type(number, "dependency status refused", str(target))
+                        before = self.tree_contents(parent)
+                        inspected = []
+
+                        def failing_stat(path, *args, **kwargs):
+                            if path == target:
+                                inspected.append(path)
+                                raise failure
+                            return original_stat(path, *args, **kwargs)
+
+                        def querying_exists(path, *, follow_symlinks=True):
+                            try:
+                                path.stat(follow_symlinks=follow_symlinks)
+                            except OSError:
+                                return False
+                            return True
+
+                        with mock.patch.object(Path, "stat", failing_stat), \
+                                mock.patch.object(Path, "exists", querying_exists):
+                            with self.assertRaises(error_type) as caught:
+                                if consumer == "hash":
+                                    comparison.fixture_hash(base / "worlds/atlas/presets",
+                                                            reference_root=base / "data")
+                                elif consumer == "identity":
+                                    comparison.identity(base)
+                                else:
+                                    comparison.prepare(base, head, parent / "receipt.json")
+                            self.assertIs(caught.exception, failure)
+                        self.assertTrue(inspected)
+                        self.assertEqual(self.tree_contents(parent), before)
+                        self.assertFalse((base / "perf-common").exists())
+                        self.assertFalse((head / "perf-common").exists())
+                        self.assertFalse((parent / "receipt.json").exists())
+
+    def test_dependency_open_and_partial_read_errors_leave_preparation_unchanged(self):
+        original_open, original_fdopen = os.open, os.fdopen
+        for relative in ("extra/branch.json", "extra/leaf.json"):
+            for stage in ("open", "read"):
+                for error_type, number in ((PermissionError, errno.EACCES), (OSError, errno.EIO)):
+                    with self.subTest(path=relative, stage=stage, error=number), \
+                            tempfile.TemporaryDirectory() as temp:
+                        parent = Path(temp).resolve()
+                        base, head = self.comparison_checkouts(parent)
+                        target = base / "data" / relative
+                        status = target.stat()
+                        failure = error_type(number, "dependency read refused", str(target))
+                        before = self.tree_contents(parent)
+                        partial = []
+
+                        def failing_open(path, *args, **kwargs):
+                            if stage == "open" and path in (target, target.name):
+                                raise failure
+                            return original_open(path, *args, **kwargs)
+
+                        @contextlib.contextmanager
+                        def failing_reader(stream):
+                            with stream:
+                                def read(*args, **kwargs):
+                                    partial.append(stream.read(1))
+                                    raise failure
+                                yield types.SimpleNamespace(read=read)
+
+                        def failing_fdopen(descriptor, *args, **kwargs):
+                            stream = original_fdopen(descriptor, *args, **kwargs)
+                            opened = os.fstat(descriptor)
+                            if stage == "read" and (opened.st_dev, opened.st_ino) == (status.st_dev, status.st_ino):
+                                return failing_reader(stream)
+                            return stream
+
+                        with mock.patch.object(fixture_paths.os, "open", failing_open), \
+                                mock.patch.object(fixture_paths.os, "fdopen", failing_fdopen):
+                            with self.assertRaises(error_type) as caught:
+                                comparison.prepare(base, head, parent / "receipt.json")
+                            self.assertIs(caught.exception, failure)
+                        self.assertEqual(partial, [b"{"] if stage == "read" else [])
+                        self.assertEqual(self.tree_contents(parent), before)
+                        self.assertFalse((parent / "receipt.json").exists())
+                        self.assertFalse((base / "perf-common").exists())
+                        self.assertFalse((head / "perf-common").exists())
+
+    def test_missing_external_and_transitive_dependencies_keep_null_fallback(self):
+        for relative in ("extra/branch.json", "extra/leaf.json"):
+            with self.subTest(path=relative), tempfile.TemporaryDirectory() as temp:
+                parent = Path(temp).resolve()
+                base, head = self.comparison_checkouts(parent)
+                (base / "data" / relative).unlink()
+                source = comparison.fixture_hash(base / "worlds/atlas/presets",
+                                                  reference_root=base / "data")
+                receipt = parent / "receipt.json"
+                comparison.prepare(base, head, receipt)
+                self.assertTrue(receipt.is_file())
+                for checkout in (base, head):
+                    root = checkout / "perf-common"
+                    self.assertFalse((root / "data" / relative).exists())
+                    self.assertEqual(comparison.fixture_hash(root / "worlds/atlas/presets",
+                                                             reference_root=root / "data"), source)
+                self.assertEqual(comparison.identity(base / "perf-common"),
+                                 comparison.identity(head / "perf-common"))
+
+    def test_real_dependency_status_refusal_preserves_preparation_inputs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            parent = Path(temp).resolve()
+            base, head = self.comparison_checkouts(parent)
+            target = base / "data/extra/leaf.json"
+            directory = target.parent
+            previous_mode = directory.stat().st_mode
+            try:
+                directory.chmod(0)
+                try:
+                    target.stat()
+                except PermissionError:
+                    # Snapshot before restricting traversal, then compare again
+                    # after restoring it; the production consumer gets no mock.
+                    directory.chmod(previous_mode)
+                    before = self.tree_contents(parent)
+                    directory.chmod(0)
+                    with self.assertRaises((OSError, ValueError)):
+                        comparison.prepare(base, head, parent / "receipt.json")
+                    directory.chmod(previous_mode)
+                    self.assertEqual(self.tree_contents(parent), before)
+                    self.assertFalse((parent / "receipt.json").exists())
+                    self.assertFalse((base / "perf-common").exists())
+                    self.assertFalse((head / "perf-common").exists())
+                else:
+                    # Privileged users and some filesystems ignore chmod denial.
+                    self.assertTrue(stat.S_ISREG(target.stat().st_mode))
+                    print("Filesystem traversal denial unavailable for these credentials; "
+                          "exact status-error injection remains exercised")
+            finally:
+                directory.chmod(previous_mode)
+
+    def test_real_nondirectory_dependency_is_not_silently_missing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            parent = Path(temp).resolve()
+            base, head = self.comparison_checkouts(parent)
+            blocker = base / "data/extra/blocker"
+            blocker.write_text("not a directory")
+            target = blocker / "table.json"
+            (base / "data/extra/leaf.json").write_text(json.dumps({
+                "generation_params": {"biomes": {"table": "extra/blocker/table.json"}}}))
+            before = self.tree_contents(parent)
+            try:
+                target.stat()
+            except FileNotFoundError:
+                # Some hosts classify this as ENOENT. Only that exception is
+                # allowed to select the documented missing-dependency fallback.
+                comparison.prepare(base, head, parent / "receipt.json")
+                self.assertTrue((parent / "receipt.json").is_file())
+            except OSError:
+                with self.assertRaises((OSError, ValueError)):
+                    comparison.prepare(base, head, parent / "receipt.json")
+                self.assertEqual(self.tree_contents(parent), before)
+                self.assertFalse((parent / "receipt.json").exists())
+                self.assertFalse((base / "perf-common").exists())
+                self.assertFalse((head / "perf-common").exists())
+            else:
+                self.fail("a child of a regular file unexpectedly has metadata")
 
     @staticmethod
     def comparison_checkouts(parent):
