@@ -86,6 +86,8 @@ class ShardShellTests(unittest.TestCase):
         (self.root / "scripts").mkdir()
         for name in ("tidy.sh", "tidy_cache.py"):
             shutil.copyfile(REPO_ROOT / "scripts" / name, self.root / "scripts" / name)
+        (self.root / "tools/ci").mkdir(parents=True)
+        shutil.copyfile(REPO_ROOT / "tools/ci/path_safety.py", self.root / "tools/ci/path_safety.py")
         self.bin = self.root / "bin"
         self.bin.mkdir()
         stub = self.bin / "clang-tidy-18"

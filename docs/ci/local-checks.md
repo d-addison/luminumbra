@@ -6,7 +6,11 @@ CTest. `BUILD_TESTING=ON` exposes test translation units in the databases so
 their source can be compiled and linted without running tests. The only allowed
 unit tests in this workflow are the stdlib Python suites for the helpers.
 
-Use a local merge base, with `LUMINUMBRA_BASE_REF` overriding `origin/devel`.
+Use a local merge base. Direct `compile` and `tidy` selector invocations and the
+shell recipe below use a nonempty `LUMINUMBRA_BASE_REF` instead of `origin/devel`;
+an unset or empty variable defaults to `origin/devel`. An explicit `--base-ref`
+takes priority over the environment, including an explicit empty value (which
+Git refuses). A nonempty invalid or unavailable ref fails without falling back.
 The selector never fetches. The owner must provision that ref and enough local
 history for `git merge-base` to succeed. Committed, staged, unstaged and
 untracked files are included by default. `--no-worktree` and
@@ -54,7 +58,9 @@ allow HTTPS. Metadata symlinks and submodule gitdir, common-directory and
 alternate-object references must stay inside the cache; dangling metadata links
 are refused. Redirections are checked recursively, including relative alternate
 paths and alternates in common directories or other object stores. Blank and
-`#` comment lines in alternate lists are ignored. Redirection cycles and chains
+`#` comment lines in alternate lists are ignored. Only LF separates alternate
+paths; other separator bytes remain part of the pathname checked for containment.
+Write these lists with LF endings on every platform. Redirection cycles and chains
 deeper than 32 edges are refused, as are quoted alternate path encodings.
 Inherited object-directory and alternate-directory environment overrides are
 removed before Git runs. Top-level source `.git` directories cannot be symlinks.
@@ -84,6 +90,13 @@ missing from that database fails explicitly.
 Run from the clone after provisioning. All generated sources, temporary files,
 objects, logs, dependency copies, build state and compiler-cache entries belong
 under this clone's `scratch/`. Keep the shared dependency cache read-only.
+Run `prepare` before creating temporary/cache directories or exporting their
+paths. It checks the checkout and original scratch path components, fresh stage
+and init paths, and every existing entry under `tmp`, `ccache`, `local-gcc` and
+`local-tidy`. Symlinks, Windows reparse points, non-directory path components,
+special files and escaped paths are refused before directory creation. Ordinary
+nested directories and files in reused build/cache trees are allowed. Checks
+are fresh on every invocation.
 Staging uses ordinary copies, never writable hardlinks. Destinations and the
 initial CMake cache must be fresh paths strictly inside `scratch/`; path
 traversal outside that directory, a symlinked `scratch/` root, and any symlinked
@@ -101,7 +114,8 @@ set -euo pipefail
 : "${LUMINUMBRA_DEPS_CACHE:?Set the provisioned dependency snapshot path}"
 base_ref="${LUMINUMBRA_BASE_REF:-origin/devel}"
 
-mkdir -p scratch/tmp scratch/ccache
+nice -n 10 python3 -I -B tools/ci/offline_deps.py prepare \
+  --root "$PWD" --cache "$LUMINUMBRA_DEPS_CACHE"
 export TMPDIR="$PWD/scratch/tmp"
 export CCACHE_DIR="$PWD/scratch/ccache"
 export CCACHE_MAXSIZE=250M
@@ -176,8 +190,9 @@ owned by the current checkout and no longer in use.
 First-party TUs are `.c`, `.cc`, `.cpp` and `.cxx` files below `src/`,
 `include/`, `test/` and `tools/`, excluding the upstream RmlUi GL3 backend at
 `src/luminumbra_client/ui/gl3/`. Changed sources select every database command
-variant. Changed headers scan every configured first-party variant using its
-actual compiler, defines, include paths and working directory, both normally
+variant and the variants that include them. Changed sources and headers scan
+every configured first-party variant using its actual compiler, defines, include
+paths and working directory, both normally
 and with `__clang_analyzer__`. Transitive, conditional and generated headers
 are included. New headers are scanned too, so newly shadowing includes count.
 Literal `configure_file`, `file(COPY_FILE)` and single-file `file(COPY)` outputs
@@ -195,8 +210,10 @@ reason included in the report. Header edits never silently select no work.
 Deleted sources/headers and build/flag/dependency or unknown native inputs
 select the full configured scope. Scans which fail, omit the TU, name missing
 dependencies, or cannot be parsed fail the check. Missing changed-TU database
-entries fail even for optional backends. Unsupported wrappers, response files,
-plugins, modules and flags creating extra outputs fail visibly. Compiler
+entries fail even for optional backends, unless dependency scans prove that the
+source is an included-only input consumed by configured translation units.
+Unsupported wrappers, response files, plugins, modules and flags creating extra
+outputs fail visibly. Compiler
 options use an allowlist; unknown options are refused before execution. Exact
 codegen flags include PIC, exception/RTTI controls, fast-math controls,
 `-fno-stack-protector`, `-fno-fat-lto-objects`, `-fpch-instantiate-templates`,
@@ -221,6 +238,12 @@ without requiring a prebuilt binary PCH; compile correctness must not depend
 on that cache. GCC's `-include cmake_pch.h`/`cmake_pch.hxx` likewise requires
 an existing header resolving inside the build tree. Other ordinary GCC/Clang
 textual `-include` arguments are preserved and can supply the matching header.
+Every forced include (`-include` or `-imacros`) must name an existing file
+directly, relative to the command directory or by absolute path. Include-search
+names must be replaced with absolute paths. An adjacent `.gch` or `.pch` file,
+directory or link causes an actionable refusal; remove that cache before
+replaying. Both the spelled header path and its resolved target are checked,
+at database validation and again for dependency, compile and tidy replay.
 PCH generation (`-x c++-header`, `-Xclang -emit-pch`) remains refused for
 first-party sources; dependency-only generation entries are outside selection.
 Other pass-through, unknown separate-value options and MSVC/clang-cl driver

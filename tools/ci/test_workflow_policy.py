@@ -853,10 +853,10 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         # Freeze existing routing, limits, required names and authoritative gates.
         expected = {
             "changes": "5036f79eb4004d8774c166590fc35c97ac1419a9ad8e8f99516c395851bd7b1e",
-            "linux": "f9e967694cd5f75e1bb89b1ba4466795ece0c9df9822d3bf3b6e0727fa062001",
+            "linux": "05a0dfbb924be809da5c6d52bcd95b2d9c74b3adb877efe7c6f80fc66240e72e",
             "gns-compile-probe": "8ba48b3b08d1b8c8b3c566827d1c07b850f3d21b3ee2c4765952169a7c13532b",
             "diligent-rhi": "2a28a0e5b3c072291b194e931261e96328280d6e589f7d2478e61d6fa70afed9",
-            "windows-msvc": "0ab55eb95d304284576e2818603128476bbf3dc32192b7e02ce0eeacf44a5773",
+            "windows-msvc": "47a945caca4789dbf32c34dcc89c18e97afa4fe2bd2715771465a35be84bccc9",
             "windows-ucrt64": "85c4fb01cf8d886b3b5ab0886ad915d7e891bdab187ecde8df11469005dccbe9",
             "linux-result": "506db39392d1e4e81219389b13a4a626675bec93182c598d4e6588f356512f77",
             "windows-msvc-result": "2e3aee7e3172451168f2d25558d3a573b7aecedf17489c0528b61521e458854f",
