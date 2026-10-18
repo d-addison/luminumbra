@@ -16,6 +16,15 @@
 
 #include <gtest/gtest.h>
 
+#include "luminumbra_common/core/Log.h"
+#include "luminumbra_common/systems/PhysicsSystem.h"
+#include <Jolt/Physics/Collision/PhysicsMaterialSimple.h>
+#include <mutex>
+#include <spdlog/sinks/base_sink.h>
+#include <stdexcept>
+#include <string>
+#include <utility>
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -1168,5 +1177,725 @@ void ZeroWorkerPool() {
 
 TEST(JoltStartup, ZeroWorkersAcceptNullOnlyForZeroAllocatorAndExecuteBarrierJobs) {
     ASSERT_EXIT(ZeroWorkerPool(), ::testing::ExitedWithCode(0), "");
+}
+#endif
+
+namespace {
+using ApplicationPhysics = Luminumbra::Systems::PhysicsSystem;
+
+#ifndef JPH_DISABLE_CUSTOM_ALLOCATOR
+struct RuntimeAllocationState {
+    // Exclusive child-process hook custody. The fixed 4096-entry roster bounds
+    // every diagnostic scan; production allocation and scheduling are unchanged.
+    std::array<void*, 4096> blocks{};
+    std::atomic_flag lock = ATOMIC_FLAG_INIT;
+    std::thread::id owner = std::this_thread::get_id();
+    JPH::AllocateFunction allocate = JPH::Allocate;
+    JPH::ReallocateFunction reallocate = JPH::Reallocate;
+    JPH::FreeFunction free = JPH::Free;
+    JPH::AlignedAllocateFunction aligned_allocate = JPH::AlignedAllocate;
+    JPH::AlignedFreeFunction aligned_free = JPH::AlignedFree;
+    std::size_t ordinal = 0;
+    std::size_t fail_at = 0;
+    bool null_result = false;
+    bool material_failure = false;
+    bool failed = false;
+    void* physics = nullptr;
+    void* temp = nullptr;
+    unsigned physics_acquisitions = 0;
+    unsigned temp_acquisitions = 0;
+    unsigned dependency_releases = 0;
+    bool observe = false;
+};
+RuntimeAllocationState* runtime_allocations = nullptr;
+
+bool RefuseRuntimeAllocation() {
+    auto& state = *runtime_allocations;
+    if (std::this_thread::get_id() != state.owner) {
+        return false;
+    }
+    ++state.ordinal;
+    const bool material_ready = state.material_failure && JPH::Factory::sInstance != nullptr &&
+                                JPH::Factory::sInstance->Find("PhysicsMaterialSimple") != nullptr &&
+                                JPH::PhysicsMaterial::sDefault == nullptr;
+    if (!state.failed &&
+        ((state.fail_at != 0 && state.ordinal == state.fail_at) || material_ready)) {
+        state.failed = true;
+        if (state.null_result) {
+            return true;
+        }
+        throw std::bad_alloc();
+    }
+    return false;
+}
+void RecordRuntimeBlock(void* block, std::size_t size) {
+    if (block == nullptr) {
+        return;
+    }
+    auto& state = *runtime_allocations;
+    while (state.lock.test_and_set(std::memory_order_acquire)) {}
+    bool recorded = false;
+    for (void*& slot : state.blocks) {
+        if (slot == nullptr) {
+            slot = block;
+            recorded = true;
+            break;
+        }
+    }
+    state.lock.clear(std::memory_order_release);
+    Require(recorded);
+    if (state.observe && std::this_thread::get_id() == state.owner) {
+        if (size == sizeof(JPH::PhysicsSystem)) {
+            Require(state.physics == nullptr);
+            state.physics = block;
+            ++state.physics_acquisitions;
+        }
+        if (size == 10 * 1024 * 1024) {
+            Require(state.temp == nullptr);
+            state.temp = block;
+            ++state.temp_acquisitions;
+        }
+    }
+}
+void ForgetRuntimeBlock(void* block) {
+    if (block == nullptr) {
+        return;
+    }
+    auto& state = *runtime_allocations;
+    if (std::this_thread::get_id() == state.owner &&
+        (block == state.physics || block == state.temp)) {
+#if defined(__linux__)
+        // These are actual allocations returned to the shipping constructor.
+        // Native interposition observes real successful pthread_join returns,
+        // including on rollback from logging after the pool has been built.
+        Require(Native().active);
+        Require(Native().created.load() == Native().joined.load());
+#endif
+        Require(JPH::Factory::sInstance != nullptr);
+        if (block == state.physics) {
+            state.physics = nullptr;
+        } else {
+            Require(state.physics == nullptr);
+            state.temp = nullptr;
+        }
+        ++state.dependency_releases;
+    }
+    while (state.lock.test_and_set(std::memory_order_acquire)) {}
+    bool found = false;
+    for (void*& slot : state.blocks) {
+        if (slot == block) {
+            Require(!found);
+            slot = nullptr;
+            found = true;
+        }
+    }
+    state.lock.clear(std::memory_order_release);
+    Require(found);
+}
+void* RuntimeAllocate(std::size_t size) {
+    if (RefuseRuntimeAllocation()) {
+        return nullptr;
+    }
+    void* block = runtime_allocations->allocate(size);
+    RecordRuntimeBlock(block, size);
+    return block;
+}
+void* RuntimeAlignedAllocate(std::size_t size, std::size_t alignment) {
+    if (RefuseRuntimeAllocation()) {
+        return nullptr;
+    }
+    void* block = runtime_allocations->aligned_allocate(size, alignment);
+    RecordRuntimeBlock(block, size);
+    return block;
+}
+void RuntimeFree(void* block) {
+    ForgetRuntimeBlock(block);
+    runtime_allocations->free(block);
+}
+void RuntimeAlignedFree(void* block) {
+    ForgetRuntimeBlock(block);
+    runtime_allocations->aligned_free(block);
+}
+void* RuntimeReallocate(void* block, std::size_t old_size, std::size_t new_size) {
+    if (RefuseRuntimeAllocation()) {
+        return nullptr;
+    }
+    // Retain the old allocation when the supported callback refuses.
+    void* replacement = runtime_allocations->allocate(new_size);
+    if (replacement == nullptr) {
+        return nullptr;
+    }
+    if (block != nullptr) {
+        std::memcpy(replacement, block, (std::min)(old_size, new_size));
+        RuntimeFree(block);
+    }
+    RecordRuntimeBlock(replacement, new_size);
+    return replacement;
+}
+
+class ScopedRuntimeHooks {
+public:
+    ScopedRuntimeHooks() {
+        Require(runtime_allocations == nullptr);
+        runtime_allocations = &state;
+        JPH::Allocate = RuntimeAllocate;
+        JPH::Reallocate = RuntimeReallocate;
+        JPH::Free = RuntimeFree;
+        JPH::AlignedAllocate = RuntimeAlignedAllocate;
+        JPH::AlignedFree = RuntimeAlignedFree;
+#if defined(__linux__)
+        BeginNativeAccounting();
+#endif
+    }
+    ~ScopedRuntimeHooks() {
+        Require(state.physics == nullptr && state.temp == nullptr);
+#if defined(__linux__)
+        EndNativeAccounting(Native().created.load());
+#endif
+        // Delegated storage, including process-static RTTI, stays compatible
+        // with these saved callbacks. No callback is restored to null.
+        JPH::Allocate = state.allocate;
+        JPH::Reallocate = state.reallocate;
+        JPH::Free = state.free;
+        JPH::AlignedAllocate = state.aligned_allocate;
+        JPH::AlignedFree = state.aligned_free;
+        runtime_allocations = nullptr;
+    }
+    ScopedRuntimeHooks(const ScopedRuntimeHooks&) = delete;
+    ScopedRuntimeHooks& operator=(const ScopedRuntimeHooks&) = delete;
+
+    void ArmFailure(std::size_t ordinal, bool return_null, bool material = false) {
+        state.ordinal = 0;
+        state.fail_at = ordinal;
+        state.null_result = return_null;
+        state.material_failure = material;
+        state.failed = false;
+    }
+    void DisarmFailure() {
+        state.fail_at = 0;
+        state.material_failure = false;
+    }
+    void RequireInstalled() const {
+        Require(JPH::Allocate == RuntimeAllocate && JPH::Reallocate == RuntimeReallocate &&
+                JPH::Free == RuntimeFree && JPH::AlignedAllocate == RuntimeAlignedAllocate &&
+                JPH::AlignedFree == RuntimeAlignedFree);
+    }
+    void RequireRetained(const std::array<void*, 4096>& retained) const {
+        for (void* block : retained) {
+            if (block != nullptr) {
+                Require(std::count(state.blocks.begin(), state.blocks.end(), block) == 1);
+            }
+        }
+    }
+    RuntimeAllocationState state;
+};
+#endif
+
+class RefusingStartupSink final : public spdlog::sinks::base_sink<std::mutex> {
+public:
+    unsigned refusals = 0;
+
+protected:
+    void sink_it_(const spdlog::details::log_msg&) override {
+        ++refusals;
+        throw std::bad_alloc();
+    }
+    void flush_() override {}
+};
+class ScopedStartupLogRefusal {
+public:
+    ScopedStartupLogRefusal()
+        : m_prior(Log::GetCoreLogger())
+        , m_sink(std::make_shared<RefusingStartupSink>()) {
+        auto logger = std::make_shared<spdlog::logger>("physics-startup-refusal", m_sink);
+        logger->set_level(spdlog::level::info);
+        logger->set_error_handler([](const std::string&) { throw std::bad_alloc(); });
+        Log::GetCoreLogger() = std::move(logger);
+    }
+    ~ScopedStartupLogRefusal() {
+        Log::GetCoreLogger() = std::move(m_prior);
+    }
+    void RequireRefused() const {
+        Require(m_sink->refusals == 1);
+    }
+    ScopedStartupLogRefusal(const ScopedStartupLogRefusal&) = delete;
+    ScopedStartupLogRefusal& operator=(const ScopedStartupLogRefusal&) = delete;
+
+private:
+    std::shared_ptr<spdlog::logger> m_prior;
+    std::shared_ptr<RefusingStartupSink> m_sink;
+};
+
+void RequireUnpublished(ApplicationPhysics& physics) {
+    Require(!physics.is_started());
+    Require(physics.create_dynamic_sphere({0, 5, 0}, {0, 0, 0}, 0.25F).IsInvalid());
+    physics.update(0.0F);
+    physics.shutdown();
+}
+
+// Initialize the real logger before installing hooks or arming any refusal.
+// Log and the registry retain its console and periodic workers across all
+// physics-only accounting windows, including temporary logger replacement.
+void RepeatedApplicationLifecycle() {
+    Log::Init();
+    InitializeAllocators();
+    auto* const prior_factory = JPH::Factory::sInstance;
+    const auto prior_material = JPH::PhysicsMaterial::sDefault;
+    {
+#ifndef JPH_DISABLE_CUSTOM_ALLOCATOR
+        ScopedRuntimeHooks hooks;
+        hooks.state.observe = true;
+#endif
+        ApplicationPhysics physics;
+        RequireUnpublished(physics);
+        for (int cycle = 0; cycle < 2; ++cycle) {
+            physics.startup();
+            Require(physics.is_started() && JPH::Factory::sInstance != nullptr);
+            auto* const factory = JPH::Factory::sInstance;
+            const auto material = JPH::PhysicsMaterial::sDefault;
+            physics.startup();
+            Require(JPH::Factory::sInstance == factory &&
+                    JPH::PhysicsMaterial::sDefault == material);
+            physics.create_player_controller({0, 4, 0});
+            Require(physics.create_avatar_character({2, 4, 0}) == 0);
+            physics.update_avatars(1.0F / 60.0F);
+            Require(physics.get_avatar_position(0).x == 2.0F);
+            physics.set_avatar_wish_velocity(0, {5.0F, 0.0F});
+            const auto body = physics.create_dynamic_sphere({0, 8, 0}, {0, 0, 0}, 0.25F);
+            Require(!body.IsInvalid());
+            physics.update(1.0F / 60.0F);
+            physics.shutdown();
+            Require(!physics.is_started() && physics.avatar_character_count() == 0);
+            Require(JPH::Factory::sInstance == prior_factory &&
+                    JPH::PhysicsMaterial::sDefault == prior_material);
+            RequireUnpublished(physics);
+#ifndef JPH_DISABLE_CUSTOM_ALLOCATOR
+            hooks.RequireInstalled();
+#endif
+        }
+#ifndef JPH_DISABLE_CUSTOM_ALLOCATOR
+        Require(hooks.state.physics_acquisitions == 2 && hooks.state.temp_acquisitions == 2 &&
+                hooks.state.dependency_releases == 4);
+#endif
+    }
+    std::_Exit(0);
+}
+
+#ifndef JPH_DISABLE_CUSTOM_ALLOCATOR
+void ColdApplicationRefusal(std::size_t ordinal, bool null_result, bool material_failure) {
+    Log::Init();
+    InitializeAllocators();
+    {
+        ScopedRuntimeHooks hooks;
+        hooks.ArmFailure(ordinal, null_result, material_failure);
+        ApplicationPhysics physics;
+        bool caught = false;
+        try {
+            physics.startup();
+        } catch (const std::bad_alloc&) {
+            caught = true;
+        }
+        hooks.DisarmFailure();
+        Require(caught && hooks.state.failed && JPH::Factory::sInstance == nullptr &&
+                JPH::PhysicsMaterial::sDefault == nullptr);
+        RequireUnpublished(physics);
+        hooks.RequireInstalled();
+        physics.startup();
+        Require(physics.is_started());
+        physics.shutdown();
+        Require(JPH::Factory::sInstance == nullptr && JPH::PhysicsMaterial::sDefault == nullptr);
+    }
+    Require(JPH::Allocate == JoltAllocate && JPH::Reallocate == JoltReallocate &&
+            JPH::Free == JoltFree && JPH::AlignedAllocate == JoltAlignedAllocate &&
+            JPH::AlignedFree == JoltAlignedFree);
+    std::_Exit(0);
+}
+
+void PriorMaterialAndPartialCallbacks() {
+    Log::Init();
+    InitializeAllocators();
+    ApplicationPhysics physics;
+    // Every incomplete callback sibling refuses before global mutation.
+    for (unsigned missing = 0; missing < 5; ++missing) {
+        const auto allocate = JPH::Allocate;
+        const auto reallocate = JPH::Reallocate;
+        const auto free = JPH::Free;
+        const auto aligned_allocate = JPH::AlignedAllocate;
+        const auto aligned_free = JPH::AlignedFree;
+        if (missing == 0)
+            JPH::Allocate = nullptr;
+        if (missing == 1)
+            JPH::Reallocate = nullptr;
+        if (missing == 2)
+            JPH::Free = nullptr;
+        if (missing == 3)
+            JPH::AlignedAllocate = nullptr;
+        if (missing == 4)
+            JPH::AlignedFree = nullptr;
+        bool refused = false;
+        try {
+            physics.startup();
+        } catch (const std::logic_error&) {
+            refused = true;
+        }
+        Require(refused && JPH::Factory::sInstance == nullptr &&
+                JPH::PhysicsMaterial::sDefault == nullptr);
+        Require(JPH::Allocate == (missing == 0 ? nullptr : allocate) &&
+                JPH::Reallocate == (missing == 1 ? nullptr : reallocate) &&
+                JPH::Free == (missing == 2 ? nullptr : free) &&
+                JPH::AlignedAllocate == (missing == 3 ? nullptr : aligned_allocate) &&
+                JPH::AlignedFree == (missing == 4 ? nullptr : aligned_free));
+        JPH::Allocate = allocate;
+        JPH::Reallocate = reallocate;
+        JPH::Free = free;
+        JPH::AlignedAllocate = aligned_allocate;
+        JPH::AlignedFree = aligned_free;
+        RequireUnpublished(physics);
+    }
+    {
+        ScopedRuntimeHooks hooks;
+        const JPH::RefConst<JPH::PhysicsMaterial> prior =
+            new JPH::PhysicsMaterialSimple("retained", JPH::Color::sGreen);
+        JPH::PhysicsMaterial::sDefault = prior;
+        hooks.ArmFailure(2, true);
+        bool caught = false;
+        try {
+            physics.startup();
+        } catch (const std::bad_alloc&) {
+            caught = true;
+        }
+        hooks.DisarmFailure();
+        Require(caught && hooks.state.failed && JPH::Factory::sInstance == nullptr &&
+                JPH::PhysicsMaterial::sDefault == prior);
+        physics.startup();
+        physics.shutdown();
+        Require(JPH::Factory::sInstance == nullptr && JPH::PhysicsMaterial::sDefault == prior);
+        JPH::PhysicsMaterial::sDefault = nullptr;
+    }
+    std::_Exit(0);
+}
+
+void BeginCandidateAccounting() {
+#if defined(__linux__)
+    BeginNativeAccounting();
+#endif
+}
+void EndCandidateAccounting() {
+#if defined(__linux__)
+    EndNativeAccounting(Native().created.load());
+#endif
+}
+
+void RetainedApplicationOwner(bool borrowed, bool null_result, bool log_failure) {
+    Log::Init();
+    InitializeAllocators();
+    {
+        ScopedRuntimeHooks hooks;
+        JPH::RTTI sentinel("ExternalSentinel", 1, nullptr, [](void*) {});
+        std::unique_ptr<JPH::Factory> external;
+        if (borrowed) {
+            external = std::make_unique<JPH::Factory>();
+            JPH::Factory::sInstance = external.get();
+            JPH::RegisterTypes();
+            Require(external->Register(&sentinel));
+        }
+#if defined(__linux__)
+        // Only the candidate attempt owns native accounting. The retained
+        // owner's idle handles are outside each bounded attempt roster.
+        Native().active = false;
+#endif
+        ApplicationPhysics old;
+        old.startup();
+        auto* const factory = JPH::Factory::sInstance;
+        const auto* const type = factory->Find("PhysicsMaterialSimple");
+        const auto material = JPH::PhysicsMaterial::sDefault;
+        const auto body = old.create_dynamic_sphere({0, 8, 0}, {0, 0, 0}, 0.25F);
+        old.create_player_controller({0, 4, 0});
+        Require(!body.IsInvalid());
+        const auto position = old.get_body_position(body);
+        const auto player = old.get_player_position();
+        const auto retained = hooks.state.blocks;
+
+        hooks.state.observe = true;
+        ApplicationPhysics candidate;
+        const auto require_old = [&] {
+            RequireUnpublished(candidate);
+            hooks.RequireInstalled();
+            hooks.RequireRetained(retained);
+            Require(old.is_started() && JPH::Factory::sInstance == factory &&
+                    factory->Find("PhysicsMaterialSimple") == type &&
+                    JPH::PhysicsMaterial::sDefault == material);
+            Require(old.get_body_position(body) == position && old.get_player_position() == player);
+        };
+        if (log_failure) {
+            bool caught = false;
+            {
+                ScopedStartupLogRefusal refusal;
+                BeginCandidateAccounting();
+                try {
+                    candidate.startup();
+                } catch (const std::bad_alloc&) {
+                    caught = true;
+                }
+                refusal.RequireRefused();
+            }
+            EndCandidateAccounting();
+            Require(caught);
+            require_old();
+        } else {
+            hooks.ArmFailure(0, false);
+            BeginCandidateAccounting();
+            candidate.startup();
+            const std::size_t measured = hooks.state.ordinal;
+            hooks.DisarmFailure();
+            candidate.shutdown();
+            EndCandidateAccounting();
+            Require(measured > 4 && measured < hooks.state.blocks.size());
+            require_old();
+            // Measure the real creator-thread callback sequence, including pool
+            // construction. Workers forward through the same stable callbacks
+            // but never consume failure ordinals. No hooks change while live.
+            for (std::size_t selected = 1; selected <= measured; ++selected) {
+                hooks.ArmFailure(selected, null_result);
+                BeginCandidateAccounting();
+                bool caught = false;
+                try {
+                    candidate.startup();
+                } catch (const std::bad_alloc&) {
+                    caught = true;
+                }
+                hooks.DisarmFailure();
+                EndCandidateAccounting();
+                Require(caught && hooks.state.failed);
+                require_old();
+            }
+        }
+        BeginCandidateAccounting();
+        candidate.startup();
+        Require(candidate.is_started() && JPH::Factory::sInstance == factory);
+        candidate.shutdown();
+        EndCandidateAccounting();
+        hooks.RequireRetained(retained);
+        Require(hooks.state.physics == nullptr && hooks.state.temp == nullptr);
+        hooks.state.observe = false;
+        old.update(1.0F / 60.0F);
+        Require(old.get_body_position(body).y < position.y);
+        old.shutdown();
+        if (borrowed) {
+            Require(JPH::Factory::sInstance == external.get() &&
+                    external->Find("PhysicsMaterialSimple") == type &&
+                    external->Find("ExternalSentinel") == &sentinel &&
+                    JPH::PhysicsMaterial::sDefault == material);
+            JPH::UnregisterTypes();
+            JPH::Factory::sInstance = nullptr;
+            external.reset();
+        } else {
+            Require(JPH::Factory::sInstance == nullptr &&
+                    JPH::PhysicsMaterial::sDefault == nullptr);
+        }
+    }
+    std::_Exit(0);
+}
+#endif
+
+void ApplicationExternalFactoryRefusal() {
+    Log::Init();
+    InitializeAllocators();
+    JPH::Factory unrelated;
+    JPH::Factory::sInstance = &unrelated;
+    ApplicationPhysics candidate;
+    bool refused = false;
+    try {
+        candidate.startup();
+    } catch (const std::logic_error&) {
+        refused = true;
+    }
+    Require(refused && JPH::Factory::sInstance == &unrelated &&
+            JPH::PhysicsMaterial::sDefault == nullptr &&
+            unrelated.Find("PhysicsMaterialSimple") == nullptr);
+    RequireUnpublished(candidate);
+    JPH::Factory::sInstance = nullptr;
+    ApplicationPhysics old;
+    old.startup();
+    auto* const factory = JPH::Factory::sInstance;
+    const auto material = JPH::PhysicsMaterial::sDefault;
+    // No updates or producers overlap this owner-thread identity refusal.
+    // Idle workers do not read the factory; restore it before retiring either.
+    JPH::Factory::sInstance = &unrelated;
+    refused = false;
+    try {
+        candidate.startup();
+    } catch (const std::logic_error&) {
+        refused = true;
+    }
+    Require(refused && JPH::Factory::sInstance == &unrelated &&
+            JPH::PhysicsMaterial::sDefault == material);
+    JPH::Factory::sInstance = factory;
+    RequireUnpublished(candidate);
+    candidate.startup();
+    candidate.shutdown();
+    Require(old.is_started() && JPH::Factory::sInstance == factory);
+    old.shutdown();
+    Require(JPH::Factory::sInstance == nullptr);
+    std::_Exit(0);
+}
+
+#ifndef JPH_DISABLE_CUSTOM_ALLOCATOR
+void ApplicationDefaultAllocatorLifetime() {
+    Log::Init();
+    Require(JPH::Allocate == nullptr && JPH::Reallocate == nullptr && JPH::Free == nullptr &&
+            JPH::AlignedAllocate == nullptr && JPH::AlignedFree == nullptr);
+    ApplicationPhysics physics;
+    physics.startup();
+    const auto allocate = JPH::Allocate;
+    const auto reallocate = JPH::Reallocate;
+    const auto free = JPH::Free;
+    const auto aligned_allocate = JPH::AlignedAllocate;
+    const auto aligned_free = JPH::AlignedFree;
+    physics.shutdown();
+    Require(allocate && reallocate && free && aligned_allocate && aligned_free);
+    Require(JPH::Allocate == allocate && JPH::Reallocate == reallocate && JPH::Free == free &&
+            JPH::AlignedAllocate == aligned_allocate && JPH::AlignedFree == aligned_free);
+    // All runtime resources and workers are gone. Clearing callbacks after
+    // process-static RTTI use is an external inconsistency, never cold startup.
+    JPH::Allocate = nullptr;
+    JPH::Reallocate = nullptr;
+    JPH::Free = nullptr;
+    JPH::AlignedAllocate = nullptr;
+    JPH::AlignedFree = nullptr;
+    bool refused = false;
+    try {
+        physics.startup();
+    } catch (const std::logic_error&) {
+        refused = true;
+    }
+    Require(refused && JPH::Factory::sInstance == nullptr && JPH::Allocate == nullptr &&
+            JPH::Reallocate == nullptr && JPH::Free == nullptr && JPH::AlignedAllocate == nullptr &&
+            JPH::AlignedFree == nullptr);
+    JPH::Allocate = allocate;
+    JPH::Reallocate = reallocate;
+    JPH::Free = free;
+    JPH::AlignedAllocate = aligned_allocate;
+    JPH::AlignedFree = aligned_free;
+    RequireUnpublished(physics);
+    physics.startup();
+    physics.shutdown();
+    Require(JPH::Factory::sInstance == nullptr);
+    std::_Exit(0);
+}
+#endif
+
+void ApplicationLeaseStorageRefusal() {
+    Log::Init();
+    InitializeAllocators();
+    ApplicationPhysics physics;
+    Arm(1, false, false);
+    bool caught = false;
+    try {
+        physics.startup();
+    } catch (const std::bad_alloc&) {
+        caught = true;
+    }
+    Disarm();
+    Require(caught && Allocations().failures == 1 && Outstanding() == 0 &&
+            JPH::Factory::sInstance == nullptr);
+    RequireUnpublished(physics);
+    physics.startup();
+    physics.shutdown();
+    Require(JPH::Factory::sInstance == nullptr);
+    std::_Exit(0);
+}
+
+void ApplicationLogRollbackAndDestructor() {
+    Log::Init();
+    InitializeAllocators();
+    {
+#ifndef JPH_DISABLE_CUSTOM_ALLOCATOR
+        ScopedRuntimeHooks hooks;
+        hooks.state.observe = true;
+#endif
+        ApplicationPhysics physics;
+        bool caught = false;
+        {
+            ScopedStartupLogRefusal refusal;
+            try {
+                physics.startup();
+            } catch (const std::bad_alloc&) {
+                caught = true;
+            }
+            refusal.RequireRefused();
+        }
+        Require(caught && JPH::Factory::sInstance == nullptr);
+        RequireUnpublished(physics);
+#ifndef JPH_DISABLE_CUSTOM_ALLOCATOR
+        Require(hooks.state.physics_acquisitions == 1 && hooks.state.temp_acquisitions == 1 &&
+                hooks.state.dependency_releases == 2);
+#endif
+        {
+            ApplicationPhysics retry;
+            retry.startup();
+            Require(retry.is_started());
+            retry.update(1.0F / 60.0F);
+        }
+        Require(JPH::Factory::sInstance == nullptr);
+#ifndef JPH_DISABLE_CUSTOM_ALLOCATOR
+        Require(hooks.state.physics_acquisitions == 2 && hooks.state.temp_acquisitions == 2 &&
+                hooks.state.dependency_releases == 4);
+#endif
+    }
+    std::_Exit(0);
+}
+} // namespace
+
+TEST(JoltStartup, ApplicationRepeatedStartupShutdownKeepsAllocatorCustody) {
+    ASSERT_EXIT(RepeatedApplicationLifecycle(), ::testing::ExitedWithCode(0), "");
+}
+TEST(JoltStartup, ApplicationLoggingFailureJoinsBeforeDependenciesAndAllowsRetry) {
+    ASSERT_EXIT(ApplicationLogRollbackAndDestructor(), ::testing::ExitedWithCode(0), "");
+}
+#ifndef JPH_DISABLE_CUSTOM_ALLOCATOR
+TEST(JoltStartup, ApplicationColdFactoryAllocationNullAndThrowAllowRetry) {
+    for (bool null_result : {false, true}) {
+        ASSERT_EXIT(
+            ColdApplicationRefusal(1, null_result, false), ::testing::ExitedWithCode(0), "");
+    }
+}
+TEST(JoltStartup, ApplicationColdRegistrationNullAndThrowAllowRetry) {
+    for (bool null_result : {false, true}) {
+        ASSERT_EXIT(
+            ColdApplicationRefusal(2, null_result, false), ::testing::ExitedWithCode(0), "");
+        ASSERT_EXIT(ColdApplicationRefusal(0, null_result, true), ::testing::ExitedWithCode(0), "");
+    }
+}
+TEST(JoltStartup, ApplicationPartialAllocatorsRefuseAndPriorMaterialSurvives) {
+    ASSERT_EXIT(PriorMaterialAndPartialCallbacks(), ::testing::ExitedWithCode(0), "");
+}
+TEST(JoltStartup, ApplicationCandidateNullAndThrowPreserveOwnedAndBorrowedSessions) {
+    for (bool borrowed : {false, true}) {
+        for (bool null_result : {false, true}) {
+            ASSERT_EXIT(RetainedApplicationOwner(borrowed, null_result, false),
+                        ::testing::ExitedWithCode(0),
+                        "");
+        }
+    }
+}
+TEST(JoltStartup, ApplicationCandidateLoggingRollbackPreservesBothFactoryOwners) {
+    for (bool borrowed : {false, true}) {
+        ASSERT_EXIT(
+            RetainedApplicationOwner(borrowed, false, true), ::testing::ExitedWithCode(0), "");
+    }
+}
+#endif
+
+TEST(JoltStartup, ApplicationLeaseStorageFailureIsIndependentOfStartedFlag) {
+    ASSERT_EXIT(ApplicationLeaseStorageRefusal(), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(JoltStartup, ApplicationUninitializedAndSubstitutedFactoriesRefuseWithoutMutation) {
+    ASSERT_EXIT(ApplicationExternalFactoryRefusal(), ::testing::ExitedWithCode(0), "");
+}
+#ifndef JPH_DISABLE_CUSTOM_ALLOCATOR
+TEST(JoltStartup, ApplicationDefaultAllocatorsRemainCompatibleWithStaticStorage) {
+    ASSERT_EXIT(ApplicationDefaultAllocatorLifetime(), ::testing::ExitedWithCode(0), "");
 }
 #endif
