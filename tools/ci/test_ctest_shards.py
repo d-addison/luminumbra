@@ -241,11 +241,11 @@ class CTestShardTests(unittest.TestCase):
                             # The general API remains the complete pre-reuse manifest oracle.
                             expected = {**shards.evidence_for(tests, parts, profile, timings, roots, selection),
                                         "shard": shard}
-                            expected_bytes = (json.dumps(expected, sort_keys=True) + "\n").encode("utf-8")
+                            expected_bytes = (json.dumps(expected, sort_keys=True) + os.linesep).encode("utf-8")
                             names = parts[0 if shard == 0 else shard - 1]
                             positions = {name: index for index, name in enumerate(eligible, 1)}
                             indices = [positions[name] for name in names]
-                            expected_indices = (",".join(map(str, [indices[0], indices[0], 1, *indices[1:]])) + "\n").encode()
+                            expected_indices = (",".join(map(str, [indices[0], indices[0], 1, *indices[1:]])) + os.linesep).encode()
                             inputs = copy.deepcopy((tests, all_tests, roots, timings))
                             with patch.object(shards, "inventory_roots", return_value=roots):
                                 prefab = shards.plan(self.root, shard, profile, timings, selection)
@@ -289,7 +289,7 @@ class CTestShardTests(unittest.TestCase):
                     shards, "digest", side_effect=digest):
                 shards.plan(self.root, 1, profile, timings)
                 self.assertEqual((self.root / "ctest.partition.json").read_bytes(),
-                                 (json.dumps(expected, sort_keys=True) + "\n").encode("utf-8"))
+                                 (json.dumps(expected, sort_keys=True) + os.linesep).encode("utf-8"))
                 # Count real normalization/hash calls only after checking complete output.
                 self.assertEqual(len(normalized), 2)
                 self.assertEqual(len(contracts), 2)
