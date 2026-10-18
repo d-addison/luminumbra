@@ -416,8 +416,12 @@ def run_command(source: Path, argv: list[str], environment: dict[str, str],
                 next_scan = now + 0.1
             # WNOWAIT retains the session leader's PID until tree termination:
             # an exited parent cannot cause an unrelated reused PGID to be killed.
-            exited = (process.poll() is not None if job is not None else
-                      os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None)
+            if job is not None:
+                exited = process.poll() is not None
+            else:
+                info = os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+                # WNOHANG may report no exit as either None or a zero PID.
+                exited = info is not None and info.si_pid == process.pid
             # Observe exit before reading: an earlier empty read cannot prove
             # that an exited leader left a writer, or omit its final bytes.
             data = None

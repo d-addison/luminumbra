@@ -1826,7 +1826,7 @@ class OwnedCommandLifetime(unittest.TestCase):
                 # including when exercising the old direct-parent-only code.
                 def poll(self):
                     info = os.waitid(os.P_PID, self.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
-                    if info is None:
+                    if info is None or info.si_pid != self.pid:
                         return None
                     return info.si_status if info.si_code == os.CLD_EXITED else -info.si_status
                 def wait(self, timeout=None):
@@ -2095,6 +2095,130 @@ class OwnedCommandLifetime(unittest.TestCase):
             self.assertEqual(observed, [True], "real empty pipe boundary was not exercised")
             self.assertIsNotNone(self.launched[0].poll())
             self.assertFalse((self.root / "child.pid").exists(), "fixture must have no descendant")
+
+    def waitid_pipe_boundary(self, final_output=b"", returncode=0, descendant=False):
+        if os.name != "posix":
+            if descendant:
+                return self.command("exited")
+            return self.pipe_exit_after_empty_read(final_output, returncode)
+        self.script.write_text(textwrap.dedent("""\
+            import os
+            from pathlib import Path
+            import subprocess
+            import sys
+            import time
+            root = Path(sys.argv[1])
+            if sys.argv[2] == "child":
+                (root / "child.pid").write_text(str(os.getpid()), encoding="ascii")
+                # Bound fixture work independently of the parent's cleanup.
+                deadline = time.monotonic() + 3
+                with (root / "work").open("ab", buffering=0) as work:
+                    while time.monotonic() < deadline:
+                        work.write(b"x")
+                        time.sleep(0.005)
+                sys.exit(0)
+            if sys.argv[2] == "descendant":
+                subprocess.Popen([sys.executable, "-I", "-B", __file__, str(root), "child"])
+                deadline = time.monotonic() + 3
+                while not (root / "work").exists():
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError("descendant startup deadline exceeded")
+                    time.sleep(0.005)
+            (root / "ready").touch()
+            deadline = time.monotonic() + 3
+            while not (root / "release").exists():
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("release deadline exceeded")
+                time.sleep(0.005)
+            os.write(1, bytes.fromhex(sys.argv[3]))
+            sys.exit(int(sys.argv[4]))
+            """), encoding="utf-8")
+        native_waitid, native_killpg = os.waitid, os.killpg
+        observed, terminated = [], []
+        def wait_until(predicate):
+            deadline = time.monotonic() + 3
+            while not predicate():
+                if time.monotonic() >= deadline:
+                    raise AssertionError("waitid boundary deadline exceeded")
+                time.sleep(0.005)
+        def launch(argv, **kwargs):
+            process = self.process(argv, **kwargs)
+            self.launched.append(process)
+            self.assertEqual(os.getpgid(process.pid), process.pid)
+            wait_until(lambda: (self.root / "ready").exists())
+            for observation in (None, os.waitid_result((0, 0, 0, 0, 0)),
+                                os.waitid_result((process.pid + 1, 0, 0, 0, os.CLD_EXITED))):
+                def observe_fixture(kind, pid, options):
+                    self.assertEqual((kind, pid, options),
+                                     (os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT))
+                    actual = native_waitid(kind, pid, options)
+                    self.assertTrue(actual is None or actual.si_pid == 0)
+                    return observation
+                with mock.patch.object(M.os, "waitid", side_effect=observe_fixture):
+                    self.assertIsNone(process.poll())
+            return process
+        def observe(kind, pid, options):
+            self.assertEqual((kind, pid, options),
+                             (os.P_PID, self.launched[0].pid, os.WEXITED | os.WNOHANG | os.WNOWAIT))
+            actual = native_waitid(kind, pid, options)
+            if terminated:
+                return actual
+            if actual is None or actual.si_pid == 0:
+                if len(observed) < 3:
+                    # Inject only while native WNOWAIT proves this exact child
+                    # still lives with its output pipe held open by the barrier.
+                    self.assertFalse((self.root / "release").exists())
+                    observations = (None, os.waitid_result((0, 0, 0, 0, 0)),
+                                    os.waitid_result((pid + 1, 0, 0, 0, os.CLD_EXITED)))
+                    observed.append(("none", "zero", "foreign")[len(observed)])
+                    return observations[len(observed) - 1]
+                (self.root / "release").touch()
+                def exited():
+                    nonlocal actual
+                    actual = native_waitid(kind, pid, options)
+                    return actual is not None and actual.si_pid == pid
+                wait_until(exited)
+            self.assertEqual(actual.si_pid, pid)
+            if len(observed) == 3:
+                observed.append("exact-exit")
+            return actual
+        def terminate(pid, sig):
+            # A native WNOWAIT observation proves the leader is still our
+            # unreaped child before signaling only its private process group.
+            self.assertEqual(pid, self.launched[0].pid)
+            actual = native_waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            self.assertTrue(actual is None or actual.si_pid in (0, pid))
+            self.assertEqual(os.getpgid(pid), pid)
+            terminated.append(pid)
+            return native_killpg(pid, sig)
+        argv = [sys.executable, "-I", "-B", str(self.script), str(self.root),
+                "descendant" if descendant else "leader", final_output.hex(), str(returncode)]
+        try:
+            with mock.patch.object(M.subprocess, "Popen", side_effect=launch), \
+                    mock.patch.object(M.os, "waitid", side_effect=observe), \
+                    mock.patch.object(M.os, "killpg", side_effect=terminate), \
+                    mock.patch.object(M.os, "waitpid", side_effect=AssertionError("leader reaped before cleanup")):
+                return M.run_command(self.root, argv, dict(os.environ))
+        finally:
+            self.assertEqual(observed, ["none", "zero", "foreign", "exact-exit"])
+            self.assertEqual(terminated, [self.launched[0].pid])
+            self.assertIsNotNone(self.launched[0].poll())
+
+    def test_waitid_live_observations_preserve_empty_success(self):
+        self.assertEqual(self.waitid_pipe_boundary(), b"")
+
+    def test_waitid_live_observations_preserve_final_output(self):
+        data = "final utf8: ö\n".encode("utf-8")
+        self.assertEqual(self.waitid_pipe_boundary(data), data)
+
+    def test_waitid_exact_exit_preserves_nonzero_refusal(self):
+        with self.assertRaisesRegex(M.Refusal, "Git command refused\nfinal failure"):
+            self.waitid_pipe_boundary(b"final failure", 7)
+
+    def test_waitid_exact_exit_refuses_descendant_held_pipe(self):
+        with self.assertRaisesRegex(M.Refusal, "descendant retained output"):
+            self.waitid_pipe_boundary(descendant=True)
+        self.assert_child_stopped()
 
     def test_pipe_exit_after_empty_read_preserves_success(self):
         self.assertEqual(self.pipe_exit_after_empty_read(b""), b"")
