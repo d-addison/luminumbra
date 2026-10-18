@@ -88,11 +88,13 @@ def validate_union(names, parts):
     require(set(flattened) == set(names), "partition union differs from eligible inventory")
 
 
-def partition(all_tests, eligible, profile="gcc", timings=None):
+def relationship_groups(all_tests, eligible, profile):
     inventory({"tests": all_tests})
     names = [test["name"] for test in all_tests]
     require(eligible and len(eligible) == len(set(eligible)) and set(eligible) <= set(names),
             "empty, duplicate or unknown eligible tests")
+    selected = set(eligible)
+    excluded_manual = set(names) - {test["name"] for test in filtered_tests(all_tests)} - selected
     groups = {name: {name} for name in names}
 
     def join(left, right):
@@ -105,7 +107,12 @@ def partition(all_tests, eligible, profile="gcc", timings=None):
         name = test["name"]
         for prop in test.get("properties", []):
             kind = prop["name"]
-            if kind not in RELATIONS or (profile == "asan" and not kind.startswith("FIXTURES_")):
+            if kind not in RELATIONS:
+                continue
+            # Excluded manual tests never execute, so their locks need no shard
+            # placement. Keep all fixture/dependency edges, even through them,
+            # and every lock edge of selected manual or nonmanual tests.
+            if kind == "RESOURCE_LOCK" and name in excluded_manual:
                 continue
             for value in prop["value"]:
                 if kind == "DEPENDS":
@@ -121,9 +128,15 @@ def partition(all_tests, eligible, profile="gcc", timings=None):
         prefab = [name for name in eligible if name.startswith(("PrefabDigest.", "PrefabRuntimeTest."))]
         for name in prefab[1:]:
             join(prefab[0], name)
-    selected = set(eligible)
     for name in eligible:
         require(groups[name] <= selected, "eligible selection breaks fixture, dependency or resource lock closure")
+    return groups
+
+
+def partition(all_tests, eligible, profile="gcc", timings=None):
+    groups = relationship_groups(all_tests, eligible, profile)
+    names = [test["name"] for test in all_tests]
+    selected = set(eligible)
     assignments = [[], []]
     if profile == "asan":
         # Preserve the existing ASan placement and heavy parity balance.
@@ -210,7 +223,11 @@ def plan(directory, shard, profile="gcc", timings=None):
     require(evidence_for(tests, [eligible], profile, roots=roots) ==
             evidence_for(filtered_tests(all_tests), [eligible], profile, roots=roots),
             "discovery CTest execution inventory differs between inventories")
-    parts = [eligible] if shard == 0 else partition(all_tests, eligible, profile, timings)
+    if shard == 0:
+        relationship_groups(all_tests, eligible, profile)
+        parts = [eligible]
+    else:
+        parts = partition(all_tests, eligible, profile, timings)
     manifest = {**evidence_for(tests, parts, profile, timings, roots), "shard": shard}
     names = parts[0 if shard == 0 else shard - 1]
     positions = {name: index for index, name in enumerate(eligible, 1)}

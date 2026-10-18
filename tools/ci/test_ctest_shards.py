@@ -191,6 +191,197 @@ class CTestShardTests(unittest.TestCase):
                 shards.partition(tests, [name for name in names if name != removed["name"]])
         self.assertTrue(related[-1]["properties"][-1]["value"])
 
+    def shared_gl_inventory(self):
+        locked = [test("RenderTraversalIntegrated", RESOURCE_LOCK=["luminumbra_gl_context"]),
+                  test("RenderTraversalEmbeddedPresetRefusal", RESOURCE_LOCK=["luminumbra_gl_context"])]
+        manual = [test(name, LABELS=["manual", "perf", "gpu"], RESOURCE_LOCK=["luminumbra_gl_context"])
+                  for name in ("ShieldRtBasicGpu", "ShieldRtSpikeGpu")]
+        tests = [manual[0], *self.tests, locked[0], manual[1], locked[1],
+                 test("SimBudgetWorldParity.First"), test("SimBudgetWorldParity.Second")]
+        return tests, shards.filtered_tests(tests), {row["name"] for row in locked}
+
+    def test_excluded_manual_gl_locks_preserve_exact_deterministic_selected_groups(self):
+        tests, selected, locked = self.shared_gl_inventory()
+        # A nonexecuting manual test may also bridge two otherwise independent locks.
+        tests += [test("ManualBridge", LABELS=["manual-gpu"],
+                       RESOURCE_LOCK=["luminumbra_gl_context", "other-context"]),
+                  test("OtherRender.First", RESOURCE_LOCK=["other-context"]),
+                  test("OtherRender.Second", RESOURCE_LOCK=["other-context"])]
+        selected = shards.filtered_tests(tests)
+        names = [row["name"] for row in selected]
+        for profile in shards.PROFILES:
+            for timings in (None, {names[0]: 0.1}):
+                with self.subTest(profile=profile, timings=timings):
+                    parts = shards.partition(tests, names, profile, timings)
+                    shards.validate_union(names, parts)
+                    self.assertEqual(len(sum(parts, [])), len(names))
+                    self.assertEqual(set(sum(parts, [])), set(names))
+                    self.assertEqual(sum(bool(locked & set(part)) for part in parts), 1)
+                    self.assertEqual(sum(bool({"OtherRender.First", "OtherRender.Second"} & set(part))
+                                         for part in parts), 1)
+                    self.assertTrue(all(part == [name for name in names if name in part] for part in parts))
+                    self.assertEqual(parts, shards.partition(tests, names, profile, timings))
+                    if profile == "asan":
+                        self.assertEqual([sum("SimBudgetWorldParity." in name for name in part)
+                                          for part in parts], [1, 1])
+                    else:
+                        reversed_parts = shards.partition(list(reversed(tests)), list(reversed(names)),
+                                                          profile, timings)
+                        self.assertEqual([set(part) for part in parts], [set(part) for part in reversed_parts])
+
+    def test_manual_gl_plans_keep_exact_filtered_indices_and_merge_evidence_in_all_profiles(self):
+        tests, selected, locked = self.shared_gl_inventory()
+        names = [row["name"] for row in selected]
+        for profile in shards.PROFILES:
+            for shard in ((1, 2) if profile == "asan" else (0, 1, 2)):
+                with self.subTest(profile=profile, shard=shard):
+                    directory = self.root / f"shard-{shard}"
+                    manifest = self.write_plan(directory, shard, selected, tests, profile)
+                    parts = manifest["partitions"]
+                    shards.validate_union(names, parts)
+                    self.assertEqual(sum(bool(locked & set(part)) for part in parts), 1)
+                    self.assertEqual(manifest["inventory_digest"],
+                                     shards.evidence_for(selected, parts, profile,
+                                                         roots=manifest["roots"])["inventory_digest"])
+                    start, end, stride, *extra = map(int, (directory / "ctest.shard-index.txt").read_text().split(","))
+                    indices = [*range(start, end + 1, stride), *extra]
+                    assigned = parts[0 if shard == 0 else shard - 1]
+                    self.assertEqual([names[index - 1] for index in indices], assigned)
+                    root = ET.Element("testsuite", failures="0", errors="0", skipped="0")
+                    for name in assigned:
+                        ET.SubElement(root, "testcase", name=name, status="run")
+                    ET.ElementTree(root).write(directory / "ctest.junit.xml")
+            self.merge(profile=profile)
+            self.assertEqual(sorted(case.get("name") for case in ET.parse(self.root / "merged.xml").iter("testcase")),
+                             sorted(names))
+            if profile != "asan":
+                self.merge(full=True, profile=profile)
+                self.assertEqual(sorted(case.get("name") for case in ET.parse(self.root / "merged.xml").iter("testcase")),
+                                 sorted(names))
+
+    def test_manual_gl_selection_reaches_shared_and_compatibility_cli_planners(self):
+        tests, selected, locked = self.shared_gl_inventory()
+        for filename, rows in (("ctest.all.json", tests), ("ctest.inventory.json", selected)):
+            (self.root / filename).write_text(json.dumps({"tests": rows}), encoding="utf-8")
+        for script, profile in (("asan_shards.py", "asan"), ("ctest_shards.py", "asan"),
+                                ("ctest_shards.py", "gcc"), ("ctest_shards.py", "msvc"),
+                                ("ctest_shards.py", "ucrt64")):
+            with self.subTest(script=script, profile=profile):
+                result = subprocess.run(
+                    [sys.executable, "-I", "-B", str(Path(__file__).with_name(script)), "plan",
+                     "--directory", str(self.root), "--profile", profile, "--shard", "1"],
+                    capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                manifest = shards.read_json(self.root / "ctest.partition.json")
+                shards.validate_union([row["name"] for row in selected], manifest["partitions"])
+                self.assertEqual(sum(bool(locked & set(part)) for part in manifest["partitions"]), 1)
+
+    def test_manual_fixture_and_dependency_edges_still_refuse_before_writing_every_plan(self):
+        edges = ([test("selected", DEPENDS=["manual"]), test("manual", LABELS=["manual"])],
+                 [test("selected"), test("manual", LABELS=["manual"], DEPENDS=["selected"])],
+                 [test("selected", FIXTURES_REQUIRED=["scene"]),
+                  test("manual", LABELS=["manual"], FIXTURES_SETUP=["scene"])],
+                 [test("selected", FIXTURES_SETUP=["scene"]),
+                  test("manual", LABELS=["manual"], FIXTURES_CLEANUP=["scene"])],
+                 [test("selected", DEPENDS=["middle"]), test("middle", DEPENDS=["manual"]),
+                  test("manual", LABELS=["manual"])])
+        for profile in shards.PROFILES:
+            for shard in ((1, 2) if profile == "asan" else (0, 1, 2)):
+                for related in edges:
+                    tests = [*self.tests, test("SimBudgetWorldParity.First"),
+                             test("SimBudgetWorldParity.Second"), *related]
+                    for filename, rows in (("ctest.all.json", tests),
+                                           ("ctest.inventory.json", shards.filtered_tests(tests))):
+                        (self.root / filename).write_text(json.dumps({"tests": rows}), encoding="utf-8")
+                    for filename in ("ctest.partition.json", "ctest.shard-index.txt"):
+                        (self.root / filename).write_bytes(b"previous evidence\n")
+                    before = {path: path.read_bytes() for path in self.root.iterdir()}
+                    with self.subTest(profile=profile, shard=shard, related=related), \
+                            self.assertRaisesRegex(ValueError, "closure"):
+                        shards.plan(self.root, shard, profile)
+                    self.assertEqual({path: path.read_bytes() for path in self.root.iterdir()}, before)
+
+    def test_nonmanual_omissions_and_selected_manual_locks_keep_complete_closure(self):
+        for profile in shards.PROFILES:
+            for labels in ([], ["perf", "gpu"], ["Manual"]):
+                related = [test("selected", RESOURCE_LOCK=["context"]),
+                           test("omitted", LABELS=labels, RESOURCE_LOCK=["context"])]
+                tests = [*self.tests, test("SimBudgetWorldParity.First"),
+                         test("SimBudgetWorldParity.Second"), *related]
+                names = [row["name"] for row in tests if row["name"] != "omitted"]
+                with self.subTest(profile=profile, labels=labels), self.assertRaisesRegex(ValueError, "closure"):
+                    shards.partition(tests, names, profile)
+            tests, selected, locked = self.shared_gl_inventory()
+            names = [row["name"] for row in tests]
+            parts = shards.partition(tests, names, profile)
+            all_locked = locked | {"ShieldRtBasicGpu", "ShieldRtSpikeGpu"}
+            self.assertEqual(sum(bool(all_locked & set(part)) for part in parts), 1)
+            self.assertEqual(set(sum(parts, [])), set(names))
+            names.remove("RenderTraversalIntegrated")
+            with self.subTest(profile=profile), self.assertRaisesRegex(ValueError, "closure"):
+                shards.partition(tests, names, profile)
+
+    def test_manual_lock_exemption_keeps_indirect_nonmanual_closure(self):
+        related = [test("selected", RESOURCE_LOCK=["first"]),
+                   test("bridge", RESOURCE_LOCK=["first", "second"]),
+                   test("last", RESOURCE_LOCK=["second"]),
+                   test("manual", LABELS=["manual"], RESOURCE_LOCK=["first", "second"])]
+        tests = [*self.tests, test("SimBudgetWorldParity.First"), test("SimBudgetWorldParity.Second"), *related]
+        for profile in shards.PROFILES:
+            for omitted in ("bridge", "last"):
+                names = [row["name"] for row in shards.filtered_tests(tests) if row["name"] != omitted]
+                with self.subTest(profile=profile, omitted=omitted), self.assertRaisesRegex(ValueError, "closure"):
+                    shards.partition(tests, names, profile)
+
+    def test_manual_lock_exemption_does_not_hide_invalid_or_unknown_metadata(self):
+        tests, selected, locked = self.shared_gl_inventory()
+        names = [row["name"] for row in selected]
+        for profile in shards.PROFILES:
+            for eligible in ([], names + names[:1], names + ["unknown"]):
+                with self.subTest(profile=profile, eligible=eligible), self.assertRaisesRegex(ValueError, "eligible"):
+                    shards.partition(tests, eligible, profile)
+            for manual in (test("manual", LABELS="manual"),
+                           test("manual", LABELS=["manual", None]),
+                           test("manual", LABELS=["manual"], RESOURCE_LOCK="context"),
+                           test("manual", LABELS=["manual"], RESOURCE_LOCK=[None]),
+                           {"name": "manual", "properties": [{"name": "LABELS", "value": ["manual"]}]}):
+                with self.subTest(profile=profile, manual=manual), self.assertRaises(ValueError):
+                    shards.partition([*tests, manual], names, profile)
+            with self.subTest(profile=profile), self.assertRaisesRegex(ValueError, "unknown CTest dependency"):
+                shards.partition([*tests, test("manual", LABELS=["manual"], DEPENDS=["unknown"])], names, profile)
+
+    def test_asan_lock_and_dependency_heavy_conflicts_refuse_without_replacing_plan(self):
+        for properties in ({"RESOURCE_LOCK": ["context"]}, {"DEPENDS": ["SimBudgetWorldParity.Second"]}):
+            tests = [*self.tests, test("SimBudgetWorldParity.First", **properties),
+                     test("SimBudgetWorldParity.Second", RESOURCE_LOCK=["context"])]
+            for filename in ("ctest.all.json", "ctest.inventory.json"):
+                (self.root / filename).write_text(json.dumps({"tests": tests}), encoding="utf-8")
+            for shard in (1, 2):
+                for filename in ("ctest.partition.json", "ctest.shard-index.txt"):
+                    (self.root / filename).write_bytes(b"previous evidence\n")
+                before = {path: path.read_bytes() for path in self.root.iterdir()}
+                with self.subTest(properties=properties, shard=shard), self.assertRaisesRegex(ValueError, "prevents balanced"):
+                    shards.plan(self.root, shard, "asan")
+                self.assertEqual({path: path.read_bytes() for path in self.root.iterdir()}, before)
+
+    def test_manual_gl_full_inventory_mismatch_preserves_existing_plan(self):
+        tests, selected, locked = self.shared_gl_inventory()
+        for profile in shards.PROFILES:
+            self.write_plan(self.root, 1, selected, tests, profile)
+            for changed in (list(reversed(selected)), selected[:-1], tests):
+                (self.root / "ctest.inventory.json").write_text(json.dumps({"tests": changed}), encoding="utf-8")
+                before = {path: path.read_bytes() for path in self.root.iterdir()}
+                with self.subTest(profile=profile, changed=changed), self.assertRaisesRegex(ValueError, "filtered CTest roster"):
+                    shards.plan(self.root, 1, profile)
+                self.assertEqual({path: path.read_bytes() for path in self.root.iterdir()}, before)
+            changed = copy.deepcopy(selected)
+            changed[-3]["command"] = ["different-test-binary"]
+            (self.root / "ctest.inventory.json").write_text(json.dumps({"tests": changed}), encoding="utf-8")
+            before = {path: path.read_bytes() for path in self.root.iterdir()}
+            with self.subTest(profile=profile), self.assertRaisesRegex(ValueError, "execution inventory differs"):
+                shards.plan(self.root, 1, profile)
+            self.assertEqual({path: path.read_bytes() for path in self.root.iterdir()}, before)
+
     def test_prefab_cases_share_one_owner_for_installed_qualification(self):
         tests = self.tests + [test("PrefabDigest.MatchesIndependentSha256Vectors"),
                               test("PrefabRuntimeTest.Loads"), test("PrefabRuntimeTest.Refuses")]
