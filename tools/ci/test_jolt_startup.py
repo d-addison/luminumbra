@@ -319,6 +319,122 @@ class PatchIntegrationTests(unittest.TestCase):
                 self.assertEqual(target.read_bytes(), self.before)
                 self.assertNotRegex((build / "CMakeCache.txt").read_text(), r"(?m)^CMAKE_(?:C|CXX)_COMPILER:")
 
+    def test_uniform_crlf_preimages_preserve_source_and_produce_exact_lf(self):
+        before = b"\tfirst \t\n\nold\nlast \t\n"
+        after = before.replace(b"old\n", b"new\n")
+        payload = "".join(difflib.unified_diff(
+            before.decode().splitlines(True), after.decode().splitlines(True),
+            fromfile="a/" + self.name, tofile="b/" + self.name)).encode()
+        self.install_edit(before, after, payload)
+        target = self.source / self.name
+        encoded = before.replace(b"\n", b"\r\n")
+        target.write_bytes(encoded)
+        target.chmod(0o444)
+        metadata = target.lstat()
+        self.prepare()
+        output_metadata = (self.output / self.name).lstat()
+        self.prepare()
+        self.assertEqual(target.read_bytes(), encoded)
+        self.assertEqual((self.output / self.name).read_bytes(), after)
+        self.assertNotIn(b"\r", (self.output / self.name).read_bytes())
+        for path, previous in ((target, metadata), (self.output / self.name, output_metadata)):
+            current = path.lstat()
+            for field in ("st_mode", "st_size", "st_mtime_ns", "st_ctime_ns", "st_ino", "st_dev", "st_nlink"):
+                self.assertEqual(getattr(current, field), getattr(previous, field), field)
+
+    def test_crlf_cli_and_cmake_consumers_repeat_and_refuse_corruption(self):
+        self.copy_integration(self.root)
+        self.save()
+        target = self.source / self.name
+        encoded = self.before.replace(b"\n", b"\r\n")
+        target.write_bytes(encoded)
+        metadata = target.lstat()
+        (self.root / "CMakeLists.txt").write_text(
+            "cmake_minimum_required(VERSION 3.20)\n"
+            "project(JoltTextCheckout LANGUAGES NONE)\n"
+            "add_library(Jolt OBJECT EXCLUDE_FROM_ALL)\n"
+            "set_target_properties(Jolt PROPERTIES LINKER_LANGUAGE CXX)\n"
+            f'set_property(TARGET Jolt PROPERTY SOURCES "{target.as_posix()}")\n'
+            'include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/jolt_startup.cmake")\n'
+            f'luminumbra_prepare_jolt_startup("{self.source.as_posix()}" "{self.output.as_posix()}")\n'
+            'get_target_property(_sources Jolt SOURCES)\n'
+            'file(WRITE "${CMAKE_BINARY_DIR}/sources.txt" "${_sources}")\n', encoding="utf-8")
+        build = self.base / "text-checkout-build"
+        commands = ([sys.executable, "-I", "-B", str(self.root / "tools/ci/jolt_startup.py"),
+                     "--source", str(self.source), "--output", str(self.output)],
+                    ["cmake", "-S", str(self.root), "-B", str(build), "-G", "Ninja",
+                     f"-DPython3_EXECUTABLE={sys.executable}"])
+        for command in commands:
+            for repeat in range(2):
+                with self.subTest(command=command[0], repeat=repeat):
+                    result = subprocess.run(command, capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertEqual((self.output / self.name).read_bytes(), self.after)
+                    self.assertEqual(target.read_bytes(), encoded)
+                    current = target.lstat()
+                    for field in ("st_mode", "st_size", "st_mtime_ns", "st_ctime_ns", "st_ino", "st_dev", "st_nlink"):
+                        self.assertEqual(getattr(current, field), getattr(metadata, field), field)
+        self.assertEqual((build / "sources.txt").read_text(), (self.output / self.name).as_posix())
+        self.assertNotRegex((build / "CMakeCache.txt").read_text(), r"(?m)^CMAKE_(?:C|CXX)_COMPILER:")
+        corrupted = encoded.replace(b"old", b"bad")
+        target.write_bytes(corrupted)
+        output_metadata = (self.output / self.name).lstat()
+        for command in commands:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertRegex(result.stdout + result.stderr, r"wrong pinned\s+preimage")
+            self.assertEqual(target.read_bytes(), corrupted)
+            self.assertEqual((self.output / self.name).read_bytes(), self.after)
+            self.assertEqual((self.output / self.name).lstat().st_mtime_ns, output_metadata.st_mtime_ns)
+
+    def test_corrupted_crlf_mixed_and_lone_cr_preimages_refuse_untouched(self):
+        encoded = self.before.replace(b"\n", b"\r\n")
+        malformed = (encoded.replace(b"old", b"bad"), b"\xef\xbb\xbf" + encoded,
+                     encoded.replace(b"old", b"old "), encoded.replace(b"\r\n", b"\n", 1),
+                     self.before.replace(b"\n", b"\r\n", 1), encoded.replace(b"\r\n", b"\r", 1),
+                     encoded.replace(b"old", b"o\rld"), encoded.replace(b"\r\n", b"\r\r\n"),
+                     encoded[:-1], encoded[:-2], encoded + b"\r", encoded.replace(b"old", b"\xffld"), b"")
+        target = self.source / self.name
+        for materialized in (False, True):
+            self.output = self.base / ("materialized" if materialized else "absent")
+            if materialized:
+                target.write_bytes(self.before)
+                self.prepare()
+            for content in malformed:
+                with self.subTest(materialized=materialized, content=content):
+                    target.write_bytes(content)
+                    metadata = target.lstat()
+                    previous = (self.output / self.name).lstat() if materialized else None
+                    with self.assertRaises(MODULE.PatchError):
+                        self.prepare()
+                    self.assertEqual(target.read_bytes(), content)
+                    self.assertEqual(target.lstat().st_mtime_ns, metadata.st_mtime_ns)
+                    if materialized:
+                        self.assertEqual((self.output / self.name).read_bytes(), self.after)
+                        self.assertEqual((self.output / self.name).lstat().st_mtime_ns, previous.st_mtime_ns)
+                    else:
+                        self.assertFalse(self.output.exists())
+
+    def test_crlf_raw_file_and_total_size_bounds_precede_conversion(self):
+        target = self.source / self.name
+        encoded = self.before.replace(b"\n", b"\r\n")
+        target.write_bytes(encoded)
+        with patch.object(MODULE, "MAX_BYTES", len(self.before)), \
+                patch.object(MODULE, "inputs", return_value=(self.manifest, self.patch)):
+            with self.assertRaisesRegex(MODULE.PatchError, "regular-file bound"):
+                self.prepare()
+        second = "Jolt/Core/Other.h"
+        (self.source / second).write_bytes(encoded)
+        manifest = copy.deepcopy(self.manifest)
+        manifest["files"].append({**manifest["files"][0], "path": second})
+        with patch.object(MODULE, "MAX_BYTES", len(encoded)), \
+                patch.object(MODULE, "inputs", return_value=(manifest, self.patch)):
+            with self.assertRaisesRegex(MODULE.PatchError, "edit payload exceeds bound"):
+                self.prepare()
+        self.assertFalse(self.output.exists())
+        self.assertEqual(target.read_bytes(), encoded)
+        self.assertEqual((self.source / second).read_bytes(), encoded)
+
     def test_repeat_is_idempotent_and_source_is_read_only(self):
         self.prepare()
         target = self.output / self.name
@@ -474,6 +590,36 @@ class PatchIntegrationTests(unittest.TestCase):
                     self.prepare()
                 self.assertFalse(self.output.exists())
                 self.assertEqual((self.source / self.name).read_bytes(), before)
+
+    def test_reviewed_capacity_bounds_use_macro_safe_limits(self):
+        _, payload = MODULE.inputs()
+        expected = {
+            b"Jolt/Core/HashTable.h":
+                b"if (bytes > (std::numeric_limits<size_t>::max)() - 15)",
+            b"Jolt/Core/JobSystemThreadPool.cpp":
+                b"if (hardware_threads > uint((std::numeric_limits<int>::max)()))",
+            b"Jolt/Core/Memory.h":
+                b"if (inSize != 0 && inCount > (std::numeric_limits<size_t>::max)() / inSize)",
+            b"Jolt/Physics/Collision/BroadPhase/BroadPhaseQuadTree.cpp":
+                b"if (num_leaves_plus_internal_nodes > (uint64((std::numeric_limits<uint32>::max)()) - 1) / 2)",
+        }
+        additions = {}
+        name = None
+        for line in payload.splitlines():
+            if line.startswith(b"+++ b/"):
+                name = line[6:]
+                additions[name] = []
+            elif line.startswith(b"+"):
+                additions[name].append(line[1:])
+        for name, expression in expected.items():
+            with self.subTest(path=name):
+                self.assertIn(expression, b"\n".join(additions[name]))
+        # Scan every added call, including bounds introduced in other files.
+        for name, lines in additions.items():
+            with self.subTest(path=name):
+                self.assertNotRegex(
+                    b"\n".join(lines),
+                    rb"std::numeric_limits<[^>\n]+>::(?:min|max)\s*\(")
 
     def test_reviewed_patch_uses_zero_context_without_whitespace_errors(self):
         payload = (ROOT / MODULE.MANIFEST.parent / "jolt-startup.patch").read_bytes()

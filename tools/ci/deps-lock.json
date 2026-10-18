@@ -46,9 +46,9 @@
       "overlay": {
         "revision": "0373ec0dd762e4bc2f6acdb08371ee84fa23c6db",
         "inputs": {
-          "cmake/patches/jolt-startup.json": "05a06388379a9e0c254132b9894f8fe1dfb5c69284af09afc395d5679df9997f",
-          "cmake/patches/jolt-startup.patch": "191e45b23cf749e4af21a69fe42ed98538a6bcf2bfe6f486ed8a71b6b8fea5a0",
-          "tools/ci/jolt_startup.py": "04a78867aa5ca09fa42110416d5d3b3ddeafb702adf4f6d5aa0dfeea337d81ba",
+          "cmake/patches/jolt-startup.json": "0731c8408c7cc5b7db26ecba2bfc4ef3711fc12c4a8c4ad57505ee816d56d053",
+          "cmake/patches/jolt-startup.patch": "dc4498a01b27d7ce9542db8994d3be532ec5a0a5f24d497b232d6d0a93bd0160",
+          "tools/ci/jolt_startup.py": "1d528911f75e4731e31a0219785798c46be9abc30f4303cdad7d782c6368b628",
           "tools/ci/path_safety.py": "49e30553bee8495838e69adf41802f3a881df60a38987a776ce7c47f30696146",
           "cmake/jolt_startup.cmake": "3e5f5a062709b857d19e9ca633d10a3cd965838db5497b09af51e7dcf9ccfd98",
           "vendor/CMakeLists.txt": "38fe9d3bf5e1ba8fe69899aa9105939a25d3037ecc582bf20c05bcda5cf95850"
