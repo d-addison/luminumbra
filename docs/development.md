@@ -2,8 +2,12 @@
 
 ## Toolchain
 
-The required tools are CMake 3.20 or newer, Ninja, Git, and a C++20 compiler. The
-first configure downloads pinned dependencies. Subsequent configuration can reuse
+The required tools are CMake 3.20 or newer, Ninja, Git, Python 3.10 or newer,
+and a C++20 compiler. Python is required during configuration even with
+`BUILD_TESTING=OFF` to verify and materialize the Jolt startup overlay. This
+minimum follows the existing local-check Python policy; the overlay helper uses
+`Path.is_relative_to`, available since Python 3.9. The first configure downloads
+pinned dependencies. Subsequent configuration can reuse
 the populated dependency sources without probing upstream repositories.
 
 Windows builds with `LUMINUMBRA_ENABLE_GNS=ON` or `LUMINUMBRA_ENABLE_STEAM=ON`

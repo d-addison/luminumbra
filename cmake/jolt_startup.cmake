@@ -1,7 +1,7 @@
 # Apply the reviewed edits into build-owned files. Supplied FetchContent sources,
 # including offline and shared overrides, remain read-only.
 function(luminumbra_prepare_jolt_startup SOURCE_DIR OUTPUT_DIR)
-  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
   set(_root "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/..")
   set(_manifest "${_root}/cmake/patches/jolt-startup.json")
   execute_process(

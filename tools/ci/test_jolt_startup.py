@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import shutil
 from pathlib import Path
 import subprocess
@@ -141,6 +142,106 @@ class PatchIntegrationTests(unittest.TestCase):
         (self.root / "tools/ci/jolt_startup.py").unlink()
         with self.assertRaisesRegex(offline.DependencyError, "overlay identity"):
             offline.declarations(self.root)
+
+    def copy_integration(self, destination):
+        for name in MODULE.identity()["inputs"]:
+            target = destination / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes((ROOT / name).read_bytes())
+
+    def test_autocrlf_checkout_preserves_actual_input_bytes_identity_and_overlay(self):
+        project = self.base / "private checkout"
+        project.mkdir()
+        self.copy_integration(project)
+        (project / ".gitattributes").write_bytes((ROOT / ".gitattributes").read_bytes())
+        # A control proves Git actually converts unspecified text in this fixture.
+        (project / "conversion-control.txt").write_bytes(b"first\nsecond\n")
+
+        def git(*arguments):
+            return subprocess.run(
+                ["git", "-C", str(project), *arguments], check=True,
+                capture_output=True, text=True, timeout=10)
+
+        git("init")
+        git("config", "core.autocrlf", "true")
+        git("config", "user.name", "Fixture")
+        git("config", "user.email", "fixture@example.invalid")
+        git("config", "commit.gpgsign", "false")
+        hooks = self.base / "empty hooks"
+        hooks.mkdir()
+        git("config", "core.hooksPath", str(hooks))
+        git("add", ".")
+        git("commit", "-m", "Checkout fixture")
+        for name in [*MODULE.identity()["inputs"], ".gitattributes", "conversion-control.txt"]:
+            (project / name).unlink()
+        git("checkout", "HEAD", "--", ".")
+        self.assertEqual((project / "conversion-control.txt").read_bytes(), b"first\r\nsecond\r\n")
+        spec = importlib.util.spec_from_file_location("checkout_overlay", project / "tools/ci/jolt_startup.py")
+        checked_out = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(checked_out)
+        expected = MODULE.identity()
+        self.assertEqual(checked_out.identity(), expected)
+        self.assertEqual(len(expected["inputs"]), 6)
+        for name in expected["inputs"]:
+            self.assertEqual((project / name).read_bytes(), (ROOT / name).read_bytes())
+            attributes = git("check-attr", "text", "eol", "--", name).stdout.splitlines()
+            self.assertEqual([line.rsplit(": ", 1)[-1] for line in attributes], ["set", "lf"])
+        # Execute the materialized verifier on a small complete patch fixture.
+        # Actual upstream eighteen-file qualification is separate from this test.
+        checked_out.prepare(self.source, self.output, self.root)
+        self.assertEqual((self.output / self.name).read_bytes(), self.after)
+        self.assertEqual((self.source / self.name).read_bytes(), self.before)
+
+    def test_configure_requires_supported_python_with_testing_off(self):
+        self.copy_integration(self.root)
+        self.save()
+        (self.root / "CMakeLists.txt").write_text(
+            "cmake_minimum_required(VERSION 3.20)\n"
+            "project(JoltOverlayContract LANGUAGES NONE)\n"
+            "option(BUILD_TESTING \"Testing\" OFF)\n"
+            "if(BUILD_TESTING)\n  message(FATAL_ERROR \"Testing must be off\")\nendif()\n"
+            "add_library(Jolt OBJECT EXCLUDE_FROM_ALL)\n"
+            "set_target_properties(Jolt PROPERTIES LINKER_LANGUAGE CXX)\n"
+            f'set_property(TARGET Jolt PROPERTY SOURCES "{(self.source / self.name).as_posix()}")\n'
+            'include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/jolt_startup.cmake")\n'
+            f'luminumbra_prepare_jolt_startup("{self.source.as_posix()}" "{self.output.as_posix()}")\n'
+            'get_target_property(_sources Jolt SOURCES)\n'
+            'file(WRITE "${CMAKE_BINARY_DIR}/sources.txt" "${_sources}")\n', encoding="utf-8")
+        unsupported = self.base / ("unsupported.cmd" if os.name == "nt" else "unsupported")
+        driver = self.base / "interpreter-metadata.py"
+        driver.write_text(
+            "import os, sys\n"
+            "if len(sys.argv) == 3 and sys.argv[1] == '-c':\n"
+            "    sys.version_info = (3, 9, 0, 'final', 0)\n    exec(sys.argv[2])\n"
+            "else:\n    os.execv(sys.executable, [sys.executable, *sys.argv[1:]])\n", encoding="utf-8")
+        command = subprocess.list2cmdline([sys.executable, "-I", "-B", str(driver)])
+        unsupported.write_text(
+            "@echo off\n" + command + " %*\n" if os.name == "nt" else
+            "#!/bin/sh\nexec " + shlex.join([sys.executable, "-I", "-B", str(driver)]) + ' "$@"\n')
+        unsupported.chmod(0o755)
+        # This executable supplies only old interpreter version metadata to the
+        # real FindPython3 probe; no substitute verifier or package finder runs.
+        for label, interpreter in (("missing", self.base / "absent-python"),
+                                   ("unsupported", unsupported), ("supported", Path(sys.executable))):
+            with self.subTest(interpreter=label):
+                build = self.base / ("configure-" + label)
+                result = subprocess.run(
+                    ["cmake", "-S", str(self.root), "-B", str(build), "-G", "Ninja",
+                     "-DBUILD_TESTING=OFF", f"-DPython3_EXECUTABLE={interpreter}"],
+                    capture_output=True, text=True, timeout=10)
+                if label == "supported":
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertEqual((self.output / self.name).read_bytes(), self.after)
+                    self.assertEqual((build / "sources.txt").read_text(), (self.output / self.name).as_posix())
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("Python3", result.stdout + result.stderr)
+                    self.assertIn("3.10", result.stdout + result.stderr)
+                    if label == "unsupported":
+                        self.assertIn("unsuitable version", result.stdout + result.stderr)
+                    self.assertFalse(self.output.exists())
+                self.assertEqual((self.source / self.name).read_bytes(), self.before)
+                self.assertNotRegex((build / "CMakeCache.txt").read_text(), r"(?m)^CMAKE_(?:C|CXX)_COMPILER:")
 
     def test_repeat_is_idempotent_and_source_is_read_only(self):
         self.prepare()

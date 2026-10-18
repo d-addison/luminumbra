@@ -52,8 +52,14 @@ struct AllocationLedger {
     bool return_null = false;
     bool continue_refusing = false;
     std::thread::id creator{};
+    unsigned zero_allocation_calls = 0;
 };
-AllocationLedger ledger;
+AllocationLedger& Allocations() {
+    // Warm this nonallocating state before installing callbacks or capturing.
+    // It owns only fixed storage and has no destructor work.
+    static AllocationLedger state;
+    return state;
+}
 
 void Require(bool value, int code = 91) {
     if (!value) {
@@ -62,14 +68,14 @@ void Require(bool value, int code = 91) {
 }
 
 void Record(void* block) {
-    if (block == nullptr || !ledger.capture.load()) {
+    if (block == nullptr || !Allocations().capture.load()) {
         return;
     }
-    while (ledger.lock.test_and_set(std::memory_order_acquire)) {}
-    for (void*& slot : ledger.blocks) {
+    while (Allocations().lock.test_and_set(std::memory_order_acquire)) {}
+    for (void*& slot : Allocations().blocks) {
         if (slot == nullptr) {
             slot = block;
-            ledger.lock.clear(std::memory_order_release);
+            Allocations().lock.clear(std::memory_order_release);
             return;
         }
     }
@@ -77,58 +83,59 @@ void Record(void* block) {
 }
 
 void Forget(void* block) {
-    while (ledger.lock.test_and_set(std::memory_order_acquire)) {}
-    for (void*& slot : ledger.blocks) {
+    while (Allocations().lock.test_and_set(std::memory_order_acquire)) {}
+    for (void*& slot : Allocations().blocks) {
         if (slot == block) {
             slot = nullptr;
             break;
         }
     }
-    ledger.lock.clear(std::memory_order_release);
+    Allocations().lock.clear(std::memory_order_release);
 }
 
 std::size_t Outstanding() {
     std::size_t count = 0;
-    for (void* block : ledger.blocks) {
+    for (void* block : Allocations().blocks) {
         count += block != nullptr ? 1U : 0U;
     }
     return count;
 }
 
 bool Refuse() {
-    if (!ledger.capture.load() ||
-        (ledger.workers_only.load() && std::this_thread::get_id() == ledger.creator)) {
+    if (!Allocations().capture.load() || (Allocations().workers_only.load() &&
+                                          std::this_thread::get_id() == Allocations().creator)) {
         return false;
     }
-    const std::size_t ordinal = ledger.attempts.fetch_add(1) + 1;
-    const std::size_t selected = ledger.fail_at.load();
-    if (selected == 0 || ordinal < selected || (!ledger.continue_refusing && ordinal != selected)) {
+    const std::size_t ordinal = Allocations().attempts.fetch_add(1) + 1;
+    const std::size_t selected = Allocations().fail_at.load();
+    if (selected == 0 || ordinal < selected ||
+        (!Allocations().continue_refusing && ordinal != selected)) {
         return false;
     }
-    ledger.failures.fetch_add(1);
+    Allocations().failures.fetch_add(1);
     return true;
 }
 
 void Arm(std::size_t ordinal, bool null_result, bool continued, bool workers = false) {
-    ledger.creator = std::this_thread::get_id();
-    ledger.attempts = 0;
-    ledger.failures = 0;
-    ledger.fail_at = ordinal;
-    ledger.return_null = null_result;
-    ledger.continue_refusing = continued;
-    ledger.workers_only = workers;
-    ledger.capture = true;
+    Allocations().creator = std::this_thread::get_id();
+    Allocations().attempts = 0;
+    Allocations().failures = 0;
+    Allocations().fail_at = ordinal;
+    Allocations().return_null = null_result;
+    Allocations().continue_refusing = continued;
+    Allocations().workers_only = workers;
+    Allocations().capture = true;
 }
 
 void Disarm() {
-    ledger.capture = false;
-    ledger.fail_at = 0;
-    ledger.workers_only = false;
+    Allocations().capture = false;
+    Allocations().fail_at = 0;
+    Allocations().workers_only = false;
 }
 
 void* AllocateBytes(std::size_t size, std::size_t alignment, bool nullable) {
     if (Refuse()) {
-        if (nullable && ledger.return_null) {
+        if (nullable && Allocations().return_null) {
             return nullptr;
         }
         throw std::bad_alloc();
@@ -182,7 +189,7 @@ void JoltAlignedFree(void* block) {
 }
 void* JoltReallocate(void* block, std::size_t old_size, std::size_t size) {
     if (Refuse()) {
-        if (ledger.return_null) {
+        if (Allocations().return_null) {
             return nullptr;
         }
         throw std::bad_alloc();
@@ -204,6 +211,7 @@ void* JoltReallocate(void* block, std::size_t old_size, std::size_t size) {
 #endif
 
 void InitializeAllocators() {
+    static_cast<void>(Allocations());
     JPH::RegisterDefaultAllocator();
 #ifndef JPH_DISABLE_CUSTOM_ALLOCATOR
     JPH::Allocate = JoltAllocate;
@@ -266,9 +274,9 @@ void AllocationSweep() {
     // omitted; every observed allocation is reached again in all four modes.
     Arm(0, false, false);
     Startup();
-    const std::size_t measured = ledger.attempts.load();
+    const std::size_t measured = Allocations().attempts.load();
     Disarm();
-    Require(measured > 0 && measured < ledger.blocks.size());
+    Require(measured > 0 && measured < Allocations().blocks.size());
     Require(Outstanding() == 0);
     for (bool null_result : {false, true}) {
         for (bool continued : {false, true}) {
@@ -280,7 +288,7 @@ void AllocationSweep() {
                 } catch (const std::bad_alloc&) {
                     caught = true;
                 }
-                const bool reached = ledger.failures.load() != 0;
+                const bool reached = Allocations().failures.load() != 0;
                 Disarm();
                 Require(caught && reached && Outstanding() == 0);
             }
@@ -390,7 +398,7 @@ void UnbackedPage() {
         } catch (const std::bad_alloc&) {
             caught = true;
         }
-        Require(caught && ledger.failures.load() == 1);
+        Require(caught && Allocations().failures.load() == 1);
         // Destruction occurs while all further acquisitions are still refused.
     }
     Disarm();
@@ -456,10 +464,10 @@ void ProfileStartup() {
                 caught = true;
             }
             if (ordinal == 0) {
-                measured = ledger.attempts.load();
-                Require(measured > 0 && measured < ledger.blocks.size());
+                measured = Allocations().attempts.load();
+                Require(measured > 0 && measured < Allocations().blocks.size());
             } else {
-                Require(caught && ledger.failures.load() != 0);
+                Require(caught && Allocations().failures.load() != 0);
             }
             Disarm();
             JPH::Profiler::sInstance = nullptr;
@@ -488,7 +496,7 @@ void PopulatedTeardown() {
     Require(Outstanding() == 0);
     Arm(0, false, false);
     const auto recorded = [](const void* block) {
-        return std::count(ledger.blocks.begin(), ledger.blocks.end(), block) == 1;
+        return std::count(Allocations().blocks.begin(), Allocations().blocks.end(), block) == 1;
     };
     auto* physics = new JPH::PhysicsSystem;
     Require(recorded(physics));
@@ -530,7 +538,7 @@ void PopulatedTeardown() {
     // Switching to refusal resets attempt counters, never the acquired roster.
     Require(Outstanding() == acquired_blocks && recorded(physics) && recorded(owned_shape));
     delete physics;
-    const std::size_t teardown_allocations = ledger.attempts.load();
+    const std::size_t teardown_allocations = Allocations().attempts.load();
     Disarm();
     Require(teardown_allocations == 0 && Outstanding() == 0);
     JPH::UnregisterTypes();
@@ -562,10 +570,10 @@ void FactoryGrowth() {
                 caught = true;
             }
             if (ordinal == 0) {
-                measured = ledger.attempts.load();
-                Require(measured > 0 && measured < ledger.blocks.size());
+                measured = Allocations().attempts.load();
+                Require(measured > 0 && measured < Allocations().blocks.size());
             } else {
-                Require(caught && ledger.failures.load() != 0);
+                Require(caught && Allocations().failures.load() != 0);
             }
             Disarm();
             Require(factory.Find(sentinel.GetName()) == &sentinel);
@@ -691,6 +699,10 @@ TEST(JoltStartup, PopulatedFactoryKeepsEntriesOnReplacementFailure) {
 
 #if defined(__linux__)
 namespace {
+using CreateThread = int (*)(pthread_t*, const pthread_attr_t*, void* (*)(void*), void*);
+using JoinThread = int (*)(pthread_t, void**);
+using InitSemaphore = int (*)(sem_t*, int, unsigned);
+using DestroySemaphore = int (*)(sem_t*);
 struct NativeLedger {
     std::atomic<unsigned> launch_attempts{0};
     std::atomic<unsigned> launch_failure{0};
@@ -700,40 +712,43 @@ struct NativeLedger {
     unsigned semaphore_failure = 0;
     unsigned semaphore_acquired = 0;
     unsigned semaphore_closed = 0;
+    // Fixed storage bounds both acquired handles and every ownership scan.
     std::array<sem_t*, 32> semaphores{};
     bool active = false;
+    CreateThread real_create = nullptr;
+    JoinThread real_join = nullptr;
+    InitSemaphore real_sem_init = nullptr;
+    DestroySemaphore real_sem_destroy = nullptr;
 };
-NativeLedger native;
-using CreateThread = int (*)(pthread_t*, const pthread_attr_t*, void* (*)(void*), void*);
-using JoinThread = int (*)(pthread_t, void**);
-using InitSemaphore = int (*)(sem_t*, int, unsigned);
-using DestroySemaphore = int (*)(sem_t*);
-CreateThread real_create = nullptr;
-JoinThread real_join = nullptr;
-InitSemaphore real_sem_init = nullptr;
-DestroySemaphore real_sem_destroy = nullptr;
+NativeLedger& Native() {
+    // Constant initialization cannot enter allocation or interposed functions.
+    // Resolve symbols separately, after this state is available to wrappers.
+    static constinit NativeLedger state;
+    return state;
+}
 
 void ResolveNative() {
-    real_create = reinterpret_cast<CreateThread>(dlsym(RTLD_NEXT, "pthread_create"));
-    real_join = reinterpret_cast<JoinThread>(dlsym(RTLD_NEXT, "pthread_join"));
-    real_sem_init = reinterpret_cast<InitSemaphore>(dlsym(RTLD_NEXT, "sem_init"));
-    real_sem_destroy = reinterpret_cast<DestroySemaphore>(dlsym(RTLD_NEXT, "sem_destroy"));
-    Require(real_create && real_join && real_sem_init && real_sem_destroy);
+    auto& state = Native();
+    state.real_create = reinterpret_cast<CreateThread>(dlsym(RTLD_NEXT, "pthread_create"));
+    state.real_join = reinterpret_cast<JoinThread>(dlsym(RTLD_NEXT, "pthread_join"));
+    state.real_sem_init = reinterpret_cast<InitSemaphore>(dlsym(RTLD_NEXT, "sem_init"));
+    state.real_sem_destroy = reinterpret_cast<DestroySemaphore>(dlsym(RTLD_NEXT, "sem_destroy"));
+    Require(state.real_create && state.real_join && state.real_sem_init && state.real_sem_destroy);
 }
 
 void ResetNative() {
-    native.launch_attempts = 0;
-    native.launch_failure = 0;
-    native.created = 0;
-    native.joined = 0;
-    native.semaphore_attempts = 0;
-    native.semaphore_failure = 0;
-    native.semaphore_acquired = 0;
-    native.semaphore_closed = 0;
-    for (auto& semaphore : native.semaphores) {
+    Native().launch_attempts = 0;
+    Native().launch_failure = 0;
+    Native().created = 0;
+    Native().joined = 0;
+    Native().semaphore_attempts = 0;
+    Native().semaphore_failure = 0;
+    Native().semaphore_acquired = 0;
+    Native().semaphore_closed = 0;
+    for (auto& semaphore : Native().semaphores) {
         semaphore = nullptr;
     }
-    native.active = true;
+    Native().active = true;
 }
 
 void BeginNativeAccounting() {
@@ -741,9 +756,9 @@ void BeginNativeAccounting() {
     ResetNative();
 }
 void EndNativeAccounting(unsigned expected) {
-    Require(native.created.load() == expected && native.joined.load() == expected);
-    Require(native.semaphore_acquired == native.semaphore_closed);
-    native.active = false;
+    Require(Native().created.load() == expected && Native().joined.load() == expected);
+    Require(Native().semaphore_acquired == Native().semaphore_closed);
+    Native().active = false;
 }
 
 void ThreadLaunchFailures() {
@@ -751,7 +766,7 @@ void ThreadLaunchFailures() {
     ResolveNative();
     for (unsigned failure : {1U, 2U}) {
         ResetNative();
-        native.launch_failure = failure;
+        Native().launch_failure = failure;
         Arm(0, false, false);
         bool caught = false;
         try {
@@ -760,16 +775,16 @@ void ThreadLaunchFailures() {
             caught = error.code().value() == EAGAIN;
         }
         Disarm();
-        Require(caught && native.launch_attempts == failure);
-        Require(native.created == failure - 1 && native.joined == native.created);
-        Require(native.semaphore_acquired == native.semaphore_closed && Outstanding() == 0);
-        native.active = false;
+        Require(caught && Native().launch_attempts == failure);
+        Require(Native().created == failure - 1 && Native().joined == Native().created);
+        Require(Native().semaphore_acquired == Native().semaphore_closed && Outstanding() == 0);
+        Native().active = false;
     }
     // Failed replacement stops the old pool and owns no replacement worker.
     ResetNative();
     {
         JPH::JobSystemThreadPool pool(2048, 8, 1);
-        native.launch_failure = native.launch_attempts.load() + 1;
+        Native().launch_failure = Native().launch_attempts.load() + 1;
         bool caught = false;
         try {
             pool.SetNumThreads(3);
@@ -777,10 +792,10 @@ void ThreadLaunchFailures() {
             caught = error.code().value() == EAGAIN;
         }
         Require(caught && pool.GetMaxConcurrency() == 1);
-        Require(native.joined == native.created);
+        Require(Native().joined == Native().created);
     }
-    Require(native.semaphore_acquired == native.semaphore_closed);
-    native.active = false;
+    Require(Native().semaphore_acquired == Native().semaphore_closed);
+    Native().active = false;
     std::_Exit(0);
 }
 
@@ -790,12 +805,12 @@ void SemaphoreFailures() {
     // One pool semaphore and eight real BarrierImpl semaphore members.
     ResetNative();
     { JPH::JobSystemThreadPool pool(2048, 8, 0); }
-    const unsigned measured = native.semaphore_attempts;
-    Require(measured > 1 && native.semaphore_acquired == native.semaphore_closed);
-    native.active = false;
+    const unsigned measured = Native().semaphore_attempts;
+    Require(measured > 1 && Native().semaphore_acquired == Native().semaphore_closed);
+    Native().active = false;
     for (unsigned failure = 1; failure <= measured; ++failure) {
         ResetNative();
-        native.semaphore_failure = failure;
+        Native().semaphore_failure = failure;
         Arm(0, false, false);
         bool caught = false;
         try {
@@ -804,10 +819,10 @@ void SemaphoreFailures() {
             caught = error.code().value() == ENOSPC;
         }
         Disarm();
-        Require(caught && native.semaphore_attempts == failure);
-        Require(native.semaphore_acquired == failure - 1);
-        Require(native.semaphore_closed == native.semaphore_acquired && Outstanding() == 0);
-        native.active = false;
+        Require(caught && Native().semaphore_attempts == failure);
+        Require(Native().semaphore_acquired == failure - 1);
+        Require(Native().semaphore_closed == Native().semaphore_acquired && Outstanding() == 0);
+        Native().active = false;
     }
     std::_Exit(0);
 }
@@ -819,53 +834,53 @@ extern "C" int pthread_create(pthread_t* thread,
                               const pthread_attr_t* attributes,
                               void* (*entry)(void*),
                               void* argument) noexcept {
-    if (real_create == nullptr) {
+    if (Native().real_create == nullptr) {
         ResolveNative();
     }
-    if (native.active) {
-        const unsigned attempt = native.launch_attempts.fetch_add(1) + 1;
-        if (attempt == native.launch_failure.load()) {
+    if (Native().active) {
+        const unsigned attempt = Native().launch_attempts.fetch_add(1) + 1;
+        if (attempt == Native().launch_failure.load()) {
             return EAGAIN;
         }
     }
-    const int result = real_create(thread, attributes, entry, argument);
-    if (native.active && result == 0) {
-        native.created.fetch_add(1);
+    const int result = Native().real_create(thread, attributes, entry, argument);
+    if (Native().active && result == 0) {
+        Native().created.fetch_add(1);
     }
     return result;
 }
 extern "C" int pthread_join(pthread_t thread, void** result) {
-    if (real_join == nullptr) {
+    if (Native().real_join == nullptr) {
         ResolveNative();
     }
-    const int status = real_join(thread, result);
-    if (native.active && status == 0) {
-        native.joined.fetch_add(1);
+    const int status = Native().real_join(thread, result);
+    if (Native().active && status == 0) {
+        Native().joined.fetch_add(1);
     }
     return status;
 }
 extern "C" int sem_init(sem_t* semaphore, int shared, unsigned value) noexcept {
-    if (real_sem_init == nullptr) {
+    if (Native().real_sem_init == nullptr) {
         ResolveNative();
     }
-    if (native.active && ++native.semaphore_attempts == native.semaphore_failure) {
+    if (Native().active && ++Native().semaphore_attempts == Native().semaphore_failure) {
         errno = ENOSPC;
         return -1;
     }
-    const int result = real_sem_init(semaphore, shared, value);
-    if (native.active && result == 0) {
-        Require(native.semaphore_acquired < native.semaphores.size());
-        native.semaphores[native.semaphore_acquired++] = semaphore;
+    const int result = Native().real_sem_init(semaphore, shared, value);
+    if (Native().active && result == 0) {
+        Require(Native().semaphore_acquired < Native().semaphores.size());
+        Native().semaphores[Native().semaphore_acquired++] = semaphore;
     }
     return result;
 }
 extern "C" int sem_destroy(sem_t* semaphore) noexcept {
-    if (real_sem_destroy == nullptr) {
+    if (Native().real_sem_destroy == nullptr) {
         ResolveNative();
     }
-    if (native.active) {
+    if (Native().active) {
         bool found = false;
-        for (auto& owned : native.semaphores) {
+        for (auto& owned : Native().semaphores) {
             if (owned == semaphore) {
                 Require(!found);
                 owned = nullptr;
@@ -874,9 +889,9 @@ extern "C" int sem_destroy(sem_t* semaphore) noexcept {
         }
         Require(found);
     }
-    const int result = real_sem_destroy(semaphore);
-    if (native.active && result == 0) {
-        ++native.semaphore_closed;
+    const int result = Native().real_sem_destroy(semaphore);
+    if (Native().active && result == 0) {
+        ++Native().semaphore_closed;
     }
     return result;
 }
@@ -910,7 +925,7 @@ void RefuseFirstAllocation(Operation operation) {
             caught = true;
         }
         Disarm();
-        Require(caught && ledger.failures.load() != 0 && Outstanding() == 0);
+        Require(caught && Allocations().failures.load() != 0 && Outstanding() == 0);
     }
 }
 
@@ -923,7 +938,7 @@ void RejectOverflowBeforeAllocation(const Operation& operation) {
     } catch (const std::bad_alloc&) {
         caught = true;
     }
-    const auto attempts = ledger.attempts.load();
+    const auto attempts = Allocations().attempts.load();
     Disarm();
     Require(caught && attempts == 0 && Outstanding() == 0);
 }
@@ -1007,7 +1022,7 @@ void SharedRootPage() {
             JPH::QuadTree second;
             first.Init(allocator);
             second.Init(allocator);
-            Require(ledger.attempts.load() == 1);
+            Require(Allocations().attempts.load() == 1);
         }
         Disarm();
     }
@@ -1031,9 +1046,9 @@ void PoolStorageSweep() {
     InitializeAllocators();
     Arm(0, false, false);
     { JPH::JobSystemThreadPool pool(2048, 8, 1); }
-    const std::size_t measured = ledger.attempts.load();
+    const std::size_t measured = Allocations().attempts.load();
     Disarm();
-    Require(measured > 0 && measured < ledger.blocks.size() && Outstanding() == 0);
+    Require(measured > 0 && measured < Allocations().blocks.size() && Outstanding() == 0);
     for (bool null_result : {false, true}) {
         for (bool continued : {false, true}) {
             for (std::size_t ordinal = 1; ordinal <= measured; ++ordinal) {
@@ -1045,7 +1060,7 @@ void PoolStorageSweep() {
                     caught = true;
                 }
                 Disarm();
-                Require(caught && ledger.failures.load() != 0 && Outstanding() == 0);
+                Require(caught && Allocations().failures.load() != 0 && Outstanding() == 0);
             }
         }
     }
@@ -1096,3 +1111,62 @@ TEST(JoltStartup, PoolJoinReleasesRealQueueOwnedCaptures) {
 TEST(JoltStartup, OverflowRefusesBeforeAnyAllocationOrPublication) {
     ASSERT_EXIT(OverflowInputs(), ::testing::ExitedWithCode(0), "");
 }
+
+#ifndef JPH_DISABLE_CUSTOM_ALLOCATOR
+namespace {
+void* NullOnlyForZeroAllocation(std::size_t size) {
+    if (size == 0) {
+        ++Allocations().zero_allocation_calls;
+        return nullptr;
+    }
+    return JoltAllocate(size);
+}
+
+void ZeroWorkerPool() {
+    InitializeAllocators();
+    JPH::Allocate = NullOnlyForZeroAllocation;
+    // Prove the callback's zero-size contract before exercising the real pool.
+    Require(JPH::Allocate(0) == nullptr && Allocations().zero_allocation_calls == 1);
+    Allocations().zero_allocation_calls = 0;
+    unsigned initialized = 0;
+    unsigned exited = 0;
+    unsigned executed = 0;
+    Arm(0, false, false);
+    { JPH::JobSystemThreadPool constructed(2048, 8, 0); }
+    Require(Outstanding() == 0 && Allocations().zero_allocation_calls == 0);
+    {
+        JPH::JobSystemThreadPool pool;
+        pool.SetThreadInitFunction([&initialized](int) { ++initialized; });
+        pool.SetThreadExitFunction([&exited](int) { ++exited; });
+        pool.Init(2048, 8, 0);
+        Require(pool.GetMaxConcurrency() == 1 && Outstanding() > 0);
+        auto run_job = [&] {
+            auto job =
+                pool.CreateJob("zero worker", JPH::Color::sGreen, [&executed] { ++executed; }, 1);
+            auto* barrier = pool.CreateBarrier();
+            Require(barrier != nullptr);
+            barrier->AddJob(job);
+            job.RemoveDependency();
+            pool.WaitForJobs(barrier);
+            pool.DestroyBarrier(barrier);
+        };
+        run_job();
+        pool.SetNumThreads(0);
+        Require(pool.GetMaxConcurrency() == 1);
+        run_job();
+        Require(executed == 2 && initialized == 0 && exited == 0 &&
+                Allocations().zero_allocation_calls == 0);
+    }
+    Disarm();
+    Require(Outstanding() == 0 && initialized == 0 && exited == 0 &&
+            Allocations().zero_allocation_calls == 0);
+    Require(JPH::Allocate == NullOnlyForZeroAllocation);
+    JPH::Allocate = JoltAllocate;
+    std::_Exit(0);
+}
+} // namespace
+
+TEST(JoltStartup, ZeroWorkersAcceptNullOnlyForZeroAllocatorAndExecuteBarrierJobs) {
+    ASSERT_EXIT(ZeroWorkerPool(), ::testing::ExitedWithCode(0), "");
+}
+#endif
