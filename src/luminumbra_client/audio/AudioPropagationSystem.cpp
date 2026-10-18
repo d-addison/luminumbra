@@ -449,8 +449,6 @@ float LinearToDb(float linear) {
 
 float CalculateAirAbsorption(float distance, float frequency_hz, float humidity) {
     // ISO 9613-1 standard for atmospheric absorption
-    float temp_celsius = 20.0f;    // Assume 20°C
-    float pressure_kpa = 101.325f; // Standard atmospheric pressure
 
     // Simplified air absorption coefficient
     float absorption_coefficient = 0.0f;

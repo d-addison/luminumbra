@@ -33,9 +33,9 @@ struct ClusterNode {
         glm::vec3 max;
 
         AABB() = default;
-        AABB(const glm::vec3& min, const glm::vec3& max)
-            : min(min)
-            , max(max) {}
+        AABB(const glm::vec3& min_point, const glm::vec3& max_point)
+            : min(min_point)
+            , max(max_point) {}
 
         bool contains(const glm::vec3& point) const {
             return point.x >= min.x && point.x <= max.x && point.y >= min.y && point.y <= max.y &&
@@ -59,8 +59,8 @@ struct ClusterNode {
     int cluster_id = -1;
 
     ClusterNode() = default;
-    ClusterNode(const AABB& bounds)
-        : bounds(bounds) {}
+    ClusterNode(const AABB& node_bounds)
+        : bounds(node_bounds) {}
 };
 
 enum class AudioDetailLevel {
