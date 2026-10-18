@@ -158,6 +158,10 @@ rosters should not be confused with missing simulation wiring.
   path with the SDK root containing `public/steam/steam_api.h`):
 
   ```sh
+  if [ ! -e build/debug ]; then
+    python3 -I -B tools/ci/rmlui_source.py init --root build/debug || exit
+  fi
+  python3 -I -B tools/ci/rmlui_source.py preflight --root build/debug || exit
   cmake --preset debug -DLUMINUMBRA_ENABLE_STEAM=ON -DLUMINUMBRA_ENABLE_GNS=OFF \
     -DLUMINUMBRA_STEAM_SDK_DIR=/absolute/path/to/steamworks/sdk
   cmake --build --preset debug

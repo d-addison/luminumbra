@@ -28,6 +28,10 @@ usual compiler and package-configuration tools. The exact Ubuntu package set is 
 Configure, build, and test a preset with matching names:
 
 ```sh
+if [ ! -e build/release ]; then
+  python3 -I -B tools/ci/rmlui_source.py init --root build/release || exit
+fi
+python3 -I -B tools/ci/rmlui_source.py preflight --root build/release || exit
 cmake --preset release
 cmake --build --preset release --parallel
 ctest --preset release -LE manual --no-tests=error --output-on-failure
@@ -414,6 +418,10 @@ Run the preset that matches the affected platform and configuration. At minimum:
 
 ```sh
 scripts/lint.sh --format-only
+if [ ! -e build/debug ]; then
+  python3 -I -B tools/ci/rmlui_source.py init --root build/debug || exit
+fi
+python3 -I -B tools/ci/rmlui_source.py preflight --root build/debug || exit
 cmake --preset debug
 cmake --build --preset debug --parallel
 ctest --preset debug -LE manual --no-tests=error --output-on-failure

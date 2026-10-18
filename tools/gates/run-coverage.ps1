@@ -56,6 +56,13 @@ try {
 
     if (-not $SkipBuild) {
         Write-Host "== configure coverage preset ==" -ForegroundColor Cyan
+        # Enroll only an absent preset binaryDir; CMake strictly checks existing roots.
+        if (-not (Test-Path -LiteralPath $buildDir)) {
+            & python -I -B tools/ci/rmlui_source.py init --root $buildDir
+            if ($LASTEXITCODE -ne 0) { throw "RmlUi workspace initialization failed ($LASTEXITCODE)" }
+        }
+        & python -I -B tools/ci/rmlui_source.py preflight --root $buildDir
+        if ($LASTEXITCODE -ne 0) { throw "RmlUi workspace preflight failed ($LASTEXITCODE)" }
         & cmake --preset coverage
         if ($LASTEXITCODE -ne 0) { throw "cmake configure (coverage) failed" }
 

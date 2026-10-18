@@ -110,6 +110,10 @@ Luminumbra uses CMake presets and Ninja. A first configure downloads dependencie
 at revisions pinned by the repository, so it requires Git and network access.
 
 ```sh
+if [ ! -e build/debug ]; then
+  python3 -I -B tools/ci/rmlui_source.py init --root build/debug || exit
+fi
+python3 -I -B tools/ci/rmlui_source.py preflight --root build/debug || exit
 cmake --preset debug
 cmake --build --preset debug --parallel
 ctest --preset debug -LE manual --no-tests=error --output-on-failure

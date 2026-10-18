@@ -6,6 +6,10 @@ weights on the CPU. Existing `.lmesh`, LMS2 and LANM formats retain their curren
 behavior, including refusal of morph targets in the ordinary mesh profile.
 
 ```sh
+if [ ! -e build/release ]; then
+  python3 -I -B tools/ci/rmlui_source.py init --root build/release || exit
+fi
+python3 -I -B tools/ci/rmlui_source.py preflight --root build/release || exit
 cmake --preset release
 cmake --build --preset release --target asset_processor morph_asset_test --parallel 2
 build/release/bin/asset_processor source.glb result.lmorph

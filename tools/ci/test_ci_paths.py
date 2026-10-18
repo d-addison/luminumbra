@@ -120,7 +120,7 @@ class PathGateTests(unittest.TestCase):
 
     def test_pr_classification_and_mixed_changes(self):
         for paths, expected in (
-            (["docs/development.md"], (False, False)),
+            (["docs/development.md"], (False, True)),
             (["tools/audio/bank_validate.py"], (False, True)),
             (["tools/ci/check_docs.py"], (True, True)),
             (["src/main.cpp"], (True, False)),
@@ -370,7 +370,7 @@ class PathGateTests(unittest.TestCase):
                 "--head-repository", "owner/repo", "--output", str(output),
             ]):
                 self.assertEqual(gate.main(), 0)
-            self.assertEqual(output.read_text(encoding="utf-8"), "needs_cpp=false\nneeds_python=false\n")
+            self.assertEqual(output.read_text(encoding="utf-8"), "needs_cpp=false\nneeds_python=true\n")
 
     def test_unavailable_or_empty_diff_fails_open(self):
         for error in (OSError("missing git"), subprocess.CalledProcessError(1, "git")):

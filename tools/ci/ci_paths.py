@@ -162,10 +162,18 @@ def needs_cpp(path: str) -> bool:
     return True
 
 
+RMLUI_CALLER_INPUTS = frozenset({
+    "CMakePresets.json", "tools/gates/run-coverage.ps1", "tools/gates/validate-engine-frontier.ps1",
+    "README.md", "CONTRIBUTING.md", "docs/development.md", "docs/static-morph-assets.md",
+    "docs/performance.md", "docs/index.md", "docs/known-limitations.md", "docs/static-preview.md",
+    "docs/dependency-source.md",
+})
+
+
 def needs_python(path: str) -> bool:
     # Standalone Python suites validate workflow and CI configuration files,
     # so CI infrastructure changes run the Python plan as well as native lanes.
-    return (path.endswith(".py") or path.startswith(CI_PREFIXES)
+    return (path.endswith(".py") or path.startswith(CI_PREFIXES) or path in RMLUI_CALLER_INPUTS
             or path == "vendor/rmlui/rmlui-6.1-source.json"
             or path == "cmake/rmlui_source.cmake" or path.startswith("cmake/patches/rmlui-"))
 

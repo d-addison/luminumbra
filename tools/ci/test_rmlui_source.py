@@ -10,6 +10,7 @@ from __future__ import annotations
 import concurrent.futures
 import hashlib
 import importlib.util
+import itertools
 import json
 import os
 import re
@@ -19,6 +20,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import threading
 import textwrap
 import unittest
@@ -83,11 +85,91 @@ def install_exact_git(source, spec):
     M.verify_git(source, spec)
 
 
+def file_identity(path):
+    info = os.lstat(path)
+    return info.st_dev, info.st_ino
+
+
+def clear_fixture_readonly(path, expected):
+    """Clear only the readonly attribute through an exclusively opened own file."""
+    import ctypes
+    from ctypes import wintypes
+    import msvcrt
+    api = ctypes.WinDLL("kernel32", use_last_error=True)
+    api.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                               ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    api.CreateFileW.restype = wintypes.HANDLE
+    api.CloseHandle.argtypes = [wintypes.HANDLE]
+    api.CloseHandle.restype = wintypes.BOOL
+    class BasicInfo(ctypes.Structure):
+        _fields_ = [(name, ctypes.c_longlong) for name in
+                    ("CreationTime", "LastAccessTime", "LastWriteTime", "ChangeTime")]
+        _fields_ += [("FileAttributes", wintypes.DWORD)]
+    for name in ("GetFileInformationByHandleEx", "SetFileInformationByHandle"):
+        method = getattr(api, name)
+        method.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        method.restype = wintypes.BOOL
+    # Share mode zero refuses live users/writers before any attribute mutation.
+    handle = api.CreateFileW(str(path), 0x80 | 0x100, 0, None, 3, 0x00200000, None)
+    if handle == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        fd = msvcrt.open_osfhandle(handle, os.O_RDONLY)
+    except BaseException:
+        api.CloseHandle(handle)
+        raise
+    try:
+        info = os.fstat(fd)
+        if (info.st_dev, info.st_ino) != expected or not M.ordinary(info) or info.st_nlink != 1:
+            raise AssertionError("fixture file custody changed")
+        basic = BasicInfo()
+        if not api.GetFileInformationByHandleEx(handle, 0, ctypes.byref(basic), ctypes.sizeof(basic)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if not basic.FileAttributes & stat.FILE_ATTRIBUTE_READONLY:
+            raise AssertionError("cleanup failure was not a readonly file")
+        basic.FileAttributes &= ~stat.FILE_ATTRIBUTE_READONLY
+        if not api.SetFileInformationByHandle(handle, 0, ctypes.byref(basic), ctypes.sizeof(basic)):
+            raise ctypes.WinError(ctypes.get_last_error())
+    finally:
+        os.close(fd)
+
+
+def remove_source_fixture(directory, expected_directory, sources):
+    """Remove a verified fresh test allocation; foreign or busy files fail closed."""
+    if file_identity(directory) != expected_directory or directory != M.canonical(directory):
+        raise AssertionError("fixture directory custody changed")
+    identities = {directory / name: file_identity(directory / name) for name in M.inventory(directory)}
+    def retry(function, filename, error_info):
+        error = error_info[1]
+        path = Path(filename)
+        if (function is not os.unlink or not isinstance(error, PermissionError)
+                or getattr(error, "winerror", None) != 5
+                or file_identity(directory) != expected_directory or path not in identities):
+            raise error
+        # Git marks pack/loose object files readonly. Only those exact owned files
+        # qualify; reparse points, links, ordinary access errors and locks do not.
+        eligible = any(path.is_relative_to(source / ".git") and
+                       re.fullmatch(r"objects/(?:pack/pack-[0-9a-f]{40}\.(?:pack|idx|rev)|[0-9a-f]{2}/[0-9a-f]{38})",
+                                    path.relative_to(source / ".git").as_posix())
+                       for source in sources)
+        info = os.lstat(path)
+        if (not eligible or not M.ordinary(info) or info.st_nlink != 1
+                or not getattr(info, "st_file_attributes", 0) & 1
+                or file_identity(path) != identities[path]):
+            raise error
+        clear_fixture_readonly(path, identities[path])
+        if file_identity(directory) != expected_directory or file_identity(path) != identities[path]:
+            raise AssertionError("fixture custody changed before unlink")
+        function(path)
+    shutil.rmtree(directory, onerror=retry)
+
+
 class SourceFiles(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.spec = specification()
         cls.directory = Path(tempfile.mkdtemp(prefix="rmlui-contract-")).resolve(strict=True)
+        cls.directory_identity = file_identity(cls.directory)
         cls.workspace = M.Workspace(cls.directory / "build", cls.spec)
         cls.workspace.initialize()
         cls.offline = os.environ.get("LUMINUMBRA_RMLUI_TEST_SOURCE")
@@ -118,7 +200,12 @@ class SourceFiles(unittest.TestCase):
             current = cls.workspace.stage if cls.workspace.stage.exists() else cls.workspace.source
             os.rename(current, cls.input)
             cls.spec.verify_files(cls.input, False)
-        shutil.rmtree(cls.directory)
+        current = cls.workspace.stage if cls.workspace.stage.exists() else cls.workspace.source
+        if not cls.offline:
+            M.verify_git(current, cls.spec)
+            cls.spec.verify_files(current, False)
+        remove_source_fixture(cls.directory, cls.directory_identity,
+                              (cls.workspace.stage, cls.workspace.source))
 
     def test_full_pin_publication_and_readonly_repeat(self):
         w = self.workspace
@@ -167,9 +254,9 @@ class SourceFiles(unittest.TestCase):
         try:
             block = "".join("\tusing " + n + " = LengthPercentageAuto;\n" for n in ("Top", "Right", "Bottom", "Left"))
             for name, before in pristine.items():
-                after = (source / name).read_text()
+                after = (source / name).read_text(encoding="utf-8", errors="strict")
                 restored = re.sub(r"\binitial_(\w+)\b", r"\1", after)
-                original = before.decode()
+                original = before.decode("utf-8", errors="strict")
                 if name.endswith("/StyleTypes.h"):
                     self.assertEqual(after.count(block), 1)
                     self.assertGreater(after.index(block), after.index("enum class OriginY"))
@@ -179,6 +266,15 @@ class SourceFiles(unittest.TestCase):
                 self.assertEqual(restored, original, name)
         finally:
             M.git(source, "apply", "--reverse", "--unidiff-zero", "-p1", "--", str(self.spec.patch))
+
+    def test_operation_assertions_use_strict_utf8_with_a_cp1252_default(self):
+        read = Path.read_text
+        def cp1252(path, *args, **kwargs):
+            kwargs.setdefault("encoding", "cp1252")
+            kwargs.setdefault("errors", "strict")
+            return read(path, *args, **kwargs)
+        with mock.patch.object(Path, "read_text", cp1252):
+            self.test_every_changed_file_preserves_operations_defaults_and_enum_declarations()
 
     def test_interruption_at_each_publication_boundary_never_marks_incomplete_ready(self):
         w = self.workspace
@@ -466,7 +562,7 @@ class DeliveryRefusals(unittest.TestCase):
                 M.canonical(self.w.root.parent)
 
     def test_cmake_and_ci_registration_preserve_population_and_verification_order(self):
-        cmake = (ROOT / "cmake/rmlui_source.cmake").read_text()
+        cmake = (ROOT / "cmake/rmlui_source.cmake").read_text(encoding="utf-8", errors="strict")
         self.assertLess(cmake.index("preflight --root"), cmake.index("FetchContent_Declare(RmlUi"))
         self.assertLess(cmake.index("FetchContent_MakeAvailable(RmlUi)"), cmake.index("verify --root"))
         self.assertLess(cmake.index("verify --root"), cmake.index("add_subdirectory("))
@@ -478,12 +574,12 @@ class DeliveryRefusals(unittest.TestCase):
         self.assertIn('set(rmlui_SOURCE_DIR "${_rmlui_expected_source}")', cmake)
         for refusal in ("FETCHCONTENT_SOURCE_DIR_RMLUI", "_rmlui_provider", "rmlui_POPULATED", "FETCHCONTENT_BASE_DIR"):
             self.assertIn(refusal, cmake)
-        self.assertIn('"tools/ci/test_rmlui_source.py"', (ROOT / "tools/ci/ci_paths.py").read_text())
-        self.assertIn("RmlUiSourceScriptContract", (ROOT / "tools/CMakeLists.txt").read_text())
+        self.assertIn('"tools/ci/test_rmlui_source.py"', (ROOT / "tools/ci/ci_paths.py").read_text(encoding="utf-8", errors="strict"))
+        self.assertIn("RmlUiSourceScriptContract", (ROOT / "tools/CMakeLists.txt").read_text(encoding="utf-8", errors="strict"))
         for workflow in ("ci.yml", "asan.yml", "performance.yml", "release.yml"):
-            text = (ROOT / ".github/workflows" / workflow).read_text()
+            text = (ROOT / ".github/workflows" / workflow).read_text(encoding="utf-8", errors="strict")
             self.assertIn("rmlui_source.py init --root", text)
-        self.assertIn("tools/ci/ci_paths.py python-tests", (ROOT / ".github/workflows/ci.yml").read_text())
+        self.assertIn("tools/ci/ci_paths.py python-tests", (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8", errors="strict"))
 
     def test_git_live_rename_is_transient_but_final_scan_and_other_errors_are_strict(self):
         real_process, real_inventory = subprocess.Popen, M.inventory
@@ -509,10 +605,12 @@ class DeliveryRefusals(unittest.TestCase):
                         return self
                     def __exit__(self, *args):
                         return self.stream.__exit__(*args)
-                    def read(self, count):
+                    def fileno(self):
                         if not observed.wait(5):
                             raise AssertionError("storage monitor did not run")
-                        return self.stream.read(count)
+                        return self.stream.fileno()
+                    def close(self):
+                        return self.stream.close()
                 def launch(*args, **kwargs):
                     process = real_process(*args, **kwargs)
                     process.stdout = Output(process.stdout)
@@ -576,9 +674,9 @@ class DeliveryRefusals(unittest.TestCase):
         self.assertEqual(json.loads(self.w.owner_path.read_bytes())["delivery"], self.spec.delivery)
         self.assertEqual(self.spec.manifest_bytes, (ROOT / manifest).read_bytes())
         self.assertFalse((ROOT / "cmake/patches/rmlui-6.1-source.json").exists())
-        self.assertIn('repository / "' + manifest + '"', MODULE_PATH.read_text())
+        self.assertIn('repository / "' + manifest + '"', MODULE_PATH.read_text(encoding="utf-8", errors="strict"))
         self.assertIn('set(_rmlui_manifest "${CMAKE_SOURCE_DIR}/' + manifest + '")',
-                      (ROOT / "cmake/rmlui_source.cmake").read_text())
+                      (ROOT / "cmake/rmlui_source.cmake").read_text(encoding="utf-8", errors="strict"))
         result = subprocess.run(["git", "check-attr", "text", "eol", "--", manifest],
                                 cwd=ROOT, capture_output=True, text=True, check=True,
                                 env=dict(os.environ, GIT_OPTIONAL_LOCKS="0"))
@@ -589,7 +687,7 @@ class DeliveryRefusals(unittest.TestCase):
     def test_ucrt_enrollment_failure_stops_configure_and_legacy_tree_remains_usable(self):
         sys.path.insert(0, str(MODULE_PATH.parent))
         from ci_shell import bash_executable
-        script = (ROOT / "tools/ci/ucrt_attribution.sh").read_text()
+        script = (ROOT / "tools/ci/ucrt_attribution.sh").read_text(encoding="utf-8", errors="strict")
         begin = script.index("    # Legacy source trees")
         end = script.index("    if (( rc != 0 )); then", begin)
         fragment = script[begin:end]
@@ -609,7 +707,7 @@ class DeliveryRefusals(unittest.TestCase):
                            + fragment + "\nprintf '%s' \"$rc\"\n")
                 result = subprocess.run([bash_executable(), "-c", harness], cwd=root,
                                         capture_output=True, text=True, check=True)
-                calls = (root / "calls").read_text().splitlines()
+                calls = (root / "calls").read_text(encoding="utf-8", errors="strict").splitlines()
                 self.assertEqual(calls, (["python", "cmake"] if initialization_exit == 0 else ["python"])
                                  if current else ["cmake"])
                 self.assertEqual(result.stdout, str(initialization_exit if current else 0))
@@ -685,7 +783,7 @@ class PairedWorkflowInitialization(unittest.TestCase):
         # Both helpers remain valid; ownership must distinguish their bytes.
         with self.base_helper.open("ab") as stream:
             stream.write(b"\n# Distinct source revision.\n")
-        workflow = (ROOT / ".github/workflows/performance.yml").read_text()
+        workflow = (ROOT / ".github/workflows/performance.yml").read_text(encoding="utf-8", errors="strict")
         marker = "      - name: Configure identical builds\n        run: |\n"
         self.assertEqual(workflow.count(marker), 1)
         self.fragment = textwrap.dedent(workflow.split(marker, 1)[1].split("\n      - name:", 1)[0])
@@ -722,7 +820,7 @@ class PairedWorkflowInitialization(unittest.TestCase):
 
     def calls(self):
         path = self.root / "configure-calls.jsonl"
-        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+        return [json.loads(line) for line in path.read_text(encoding="utf-8", errors="strict").splitlines()] if path.exists() else []
 
     def assert_owner(self, checkout):
         root = self.root / "build" / checkout
@@ -781,8 +879,8 @@ class PairedWorkflowInitialization(unittest.TestCase):
 
 class HostedConfigurationContracts(unittest.TestCase):
     def test_dependency_configuration_keeps_the_original_shared_option_order(self):
-        vendor = (ROOT / "vendor/CMakeLists.txt").read_text()
-        module = (ROOT / "cmake/rmlui_source.cmake").read_text()
+        vendor = (ROOT / "vendor/CMakeLists.txt").read_text(encoding="utf-8", errors="strict")
+        module = (ROOT / "cmake/rmlui_source.cmake").read_text(encoding="utf-8", errors="strict")
         calls = re.findall(r'^FetchContent_MakeAvailable\(([^)]*)\)|'
                            r'^include\("\$\{CMAKE_CURRENT_LIST_DIR\}/../cmake/rmlui_source.cmake"\)',
                            vendor, re.MULTILINE)
@@ -867,6 +965,545 @@ class HostedConfigurationContracts(unittest.TestCase):
                 finally:
                     if "directory" in Fixture.__dict__:
                         shutil.rmtree(Fixture.directory)
+
+
+class OwnedCommandLifetime(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory(prefix="rmlui-process-")
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name).resolve(strict=True)
+        self.script = self.root / "command.py"
+        self.script.write_text(textwrap.dedent("""\
+            import os
+            from pathlib import Path
+            import subprocess
+            import sys
+            import time
+            root = Path(sys.argv[1])
+            mode = sys.argv[2]
+            if mode == "child":
+                mode = sys.argv[3]
+                (root / "child.pid").write_text(str(os.getpid()), encoding="ascii")
+                with (root / "work").open("ab", buffering=0) as work:
+                    if mode == "storage":
+                        entries = root / "entries"
+                        entries.mkdir()
+                        for i in range(8193):
+                            (entries / str(i)).touch()
+                    while True:
+                        work.write(b"x")
+                        if mode == "output":
+                            try:
+                                os.write(1, b"x" * 65536)
+                            except OSError:
+                                mode = "closed-output"
+                        time.sleep(0.005)
+            elif mode in ("storage", "output", "exited", "input"):
+                subprocess.Popen([sys.executable, "-I", "-B", __file__, str(root), "child", mode])
+                limit = time.monotonic() + 3
+                while not (root / "work").exists():
+                    if time.monotonic() > limit:
+                        raise RuntimeError("child did not start")
+                    time.sleep(0.005)
+                if mode in ("exited", "input"):
+                    sys.exit(0)
+                time.sleep(20)
+            elif mode == "startup":
+                with (root / "work").open("ab", buffering=0) as work:
+                    while True:
+                        work.write(b"x")
+                        time.sleep(0.005)
+            elif mode == "broken-input":
+                os.close(0)
+                (root / "closed").touch()
+                time.sleep(0.2)
+            elif mode == "nonzero":
+                sys.exit(7)
+            else:
+                os.write(1, "strict utf8: ö\\n".encode("utf-8"))
+            """), encoding="utf-8")
+        self.launched = []
+        self.process = subprocess.Popen
+        if os.name == "posix":
+            class RetainedProcess(subprocess.Popen):
+                # Keep the private session leader unreaped until test cleanup,
+                # including when exercising the old direct-parent-only code.
+                def poll(self):
+                    info = os.waitid(os.P_PID, self.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+                    if info is None:
+                        return None
+                    return info.si_status if info.si_code == os.CLD_EXITED else -info.si_status
+                def wait(self, timeout=None):
+                    deadline = None if timeout is None else time.monotonic() + timeout
+                    while True:
+                        status = self.poll()
+                        if status is not None:
+                            self.returncode = status
+                            return status
+                        if deadline is not None and time.monotonic() >= deadline:
+                            raise subprocess.TimeoutExpired(self.args, timeout)
+                        time.sleep(0.005)
+            self.process = RetainedProcess
+        self.addCleanup(self.stop_sessions)
+
+    def stop_sessions(self):
+        if os.name == "posix":
+            import signal
+            for process in self.launched:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            for process in self.launched:
+                deadline = time.monotonic() + 2
+                try:
+                    while True:
+                        waited, status = os.waitpid(process.pid, os.WNOHANG)
+                        if waited:
+                            process.returncode = os.waitstatus_to_exitcode(status)
+                            break
+                        if time.monotonic() >= deadline:
+                            raise AssertionError("test session cleanup deadline exceeded")
+                        time.sleep(0.005)
+                except ChildProcessError:
+                    pass
+            self.launched.clear()
+
+    def command(self, mode, input_bytes=None):
+        def launch(argv, **kwargs):
+            actual = [sys.executable, "-I", "-B", str(self.script), str(self.root), mode]
+            if "--contained-git" in argv:
+                offset = argv.index("--contained-git") + 2
+                actual = argv[:offset] + actual
+            # Test custody also contains a reverted implementation's leaked
+            # children, so demonstrating the old hang cannot strand a writer.
+            if os.name == "posix":
+                kwargs["start_new_session"] = True
+            result = self.process(actual, **kwargs)
+            self.launched.append(result)
+            if mode in ("input", "broken-input") and os.name == "posix":
+                import fcntl
+                if hasattr(fcntl, "F_SETPIPE_SZ"):
+                    fcntl.fcntl(result.stdin.fileno(), fcntl.F_SETPIPE_SZ, 4096)
+            if mode == "broken-input":
+                deadline = time.monotonic() + 3
+                while not (self.root / "closed").exists():
+                    if time.monotonic() > deadline:
+                        raise AssertionError("input closure not reached")
+                    time.sleep(0.005)
+            return result
+        result, errors = [], []
+        def run():
+            try:
+                with mock.patch.object(M.subprocess, "Popen", side_effect=launch):
+                    result.append(M.git(self.root, "--version", input_bytes=input_bytes))
+            except BaseException as error:
+                errors.append(error)
+        thread = threading.Thread(target=run, daemon=True)
+        started = time.monotonic()
+        thread.start()
+        thread.join(4)
+        try:
+            self.assertFalse(thread.is_alive(), "owned command did not return within four seconds")
+            self.assertLess(time.monotonic() - started, 4)
+            if errors:
+                raise errors[0]
+            return result[0]
+        finally:
+            # Only this test's explicitly created private sessions, never a PID sweep.
+            if thread.is_alive() and os.name == "posix":
+                import signal
+                for process in self.launched:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+            thread.join(2)
+
+    def assert_child_stopped(self):
+        pid = int((self.root / "child.pid").read_text(encoding="ascii"))
+        before = (self.root / "work").stat().st_size
+        time.sleep(0.12)
+        self.assertEqual(before, (self.root / "work").stat().st_size, "descendant continued work")
+        if os.name == "posix":
+            status = Path("/proc") / str(pid) / "stat"
+            if status.exists():
+                self.assertEqual(status.read_text(encoding="ascii").split(") ", 1)[1][0], "Z")
+        else:
+            import ctypes
+            from ctypes import wintypes
+            api = ctypes.WinDLL("kernel32", use_last_error=True)
+            api.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            api.OpenProcess.restype = wintypes.HANDLE
+            api.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+            api.WaitForSingleObject.restype = wintypes.DWORD
+            api.CloseHandle.argtypes = [wintypes.HANDLE]
+            handle = api.OpenProcess(0x00100000, False, pid)
+            if handle:
+                try:
+                    self.assertEqual(api.WaitForSingleObject(handle, 0), 0)
+                finally:
+                    api.CloseHandle(handle)
+            else:
+                self.assertEqual(ctypes.get_last_error(), 87)
+
+
+    def pipe_exit_after_empty_read(self, final_output, returncode=0):
+        """Synchronize at the real pipe boundary, without replacing run_command."""
+        self.script.write_text(textwrap.dedent("""\
+            import os
+            from pathlib import Path
+            import sys
+            import time
+            root = Path(sys.argv[1])
+            (root / "ready").touch()
+            deadline = time.monotonic() + 3
+            while not (root / "release").exists():
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("release deadline exceeded")
+                time.sleep(0.005)
+            os.write(1, bytes.fromhex(sys.argv[2]))
+            sys.exit(int(sys.argv[3]))
+            """), encoding="utf-8")
+        observed = []
+        original_read = os.read
+        original_available = M.WindowsJob.available
+        def wait_until(predicate):
+            deadline = time.monotonic() + 3
+            while not predicate():
+                if time.monotonic() >= deadline:
+                    raise AssertionError("pipe synchronization deadline exceeded")
+                time.sleep(0.005)
+        def launch(argv, **kwargs):
+            process = self.process(argv, **kwargs)
+            self.launched.append(process)
+            wait_until(lambda: (self.root / "ready").exists())
+            return process
+        def release_after_empty():
+            process = self.launched[0]
+            self.assertIsNone(process.poll(), "empty read must precede leader exit")
+            (self.root / "release").touch()
+            # POSIX test poll uses WNOWAIT, preserving the owned session identity.
+            wait_until(lambda: process.poll() is not None)
+            self.assertEqual(process.poll(), returncode)
+            observed.append(True)
+        def read(fd, count):
+            try:
+                return original_read(fd, count)
+            except BlockingIOError:
+                if not observed and self.launched and fd == self.launched[0].stdout.fileno():
+                    release_after_empty()
+                raise
+        def available(job, stream):
+            count = original_available(job, stream)
+            if count == 0 and not observed:
+                release_after_empty()
+            return count
+        argv = [sys.executable, "-I", "-B", str(self.script), str(self.root),
+                final_output.hex(), str(returncode)]
+        try:
+            with mock.patch.object(M.subprocess, "Popen", side_effect=launch), \
+                    mock.patch.object(M.os, "read", side_effect=read), \
+                    mock.patch.object(M.WindowsJob, "available", available):
+                return M.run_command(self.root, argv, dict(os.environ))
+        finally:
+            self.assertEqual(observed, [True], "real empty pipe boundary was not exercised")
+            self.assertIsNotNone(self.launched[0].poll())
+            self.assertFalse((self.root / "child.pid").exists(), "fixture must have no descendant")
+
+    def test_pipe_exit_after_empty_read_preserves_success(self):
+        self.assertEqual(self.pipe_exit_after_empty_read(b""), b"")
+
+    def test_pipe_exit_after_empty_read_preserves_final_output(self):
+        data = "final utf8: ö\n".encode("utf-8")
+        self.assertEqual(self.pipe_exit_after_empty_read(data), data)
+
+    def test_pipe_exit_after_empty_read_preserves_nonzero_refusal(self):
+        with self.assertRaisesRegex(M.Refusal, "Git command refused\nfinal failure"):
+            self.pipe_exit_after_empty_read(b"final failure", 7)
+
+    def test_storage_refusal_stops_actual_descendant_and_held_pipe(self):
+        with self.assertRaisesRegex(M.Refusal, "entry bound"):
+            self.command("storage")
+        self.assert_child_stopped()
+
+    def test_output_refusal_stops_actual_descendant_and_held_pipe(self):
+        with self.assertRaisesRegex(M.Refusal, "output bound"):
+            self.command("output")
+        self.assert_child_stopped()
+
+    def test_exited_parent_with_descendant_output_refuses_and_stops_work(self):
+        with self.assertRaisesRegex(M.Refusal, "descendant retained output"):
+            self.command("exited")
+        self.assert_child_stopped()
+
+    def test_blocked_input_writer_joins_after_descendant_shutdown(self):
+        with self.assertRaises(M.Refusal):
+            self.command("input", b"x" * 22655)
+        self.assert_child_stopped()
+
+    def test_input_failure_nonzero_success_and_launch_failure_are_bounded(self):
+        with self.assertRaises(M.Refusal):
+            self.command("broken-input", b"x" * 22655)
+        with self.assertRaises(M.Refusal):
+            self.command("nonzero")
+        self.assertEqual(self.command("success"), "strict utf8: ö\n".encode("utf-8"))
+        with mock.patch.object(M.subprocess, "Popen", side_effect=OSError("launch refused")):
+            with self.assertRaisesRegex(OSError, "launch refused"):
+                M.git(self.root, "--version")
+
+    def test_input_thread_start_failure_terminates_the_already_launched_command(self):
+        def launch(argv, **kwargs):
+            actual = [sys.executable, "-I", "-B", str(self.script), str(self.root), "startup"]
+            if "--contained-git" in argv:
+                actual = argv[:argv.index("--contained-git") + 2] + actual
+            if os.name == "posix":
+                kwargs["start_new_session"] = True
+            process = self.process(actual, **kwargs)
+            self.launched.append(process)
+            deadline = time.monotonic() + 3
+            while not (self.root / "work").exists():
+                if time.monotonic() >= deadline:
+                    raise AssertionError("writer startup fixture did not start")
+                time.sleep(0.005)
+            return process
+        with mock.patch.object(M.subprocess, "Popen", side_effect=launch), \
+                mock.patch.object(threading.Thread, "start", side_effect=RuntimeError("thread start refused")):
+            with self.assertRaisesRegex(RuntimeError, "thread start refused"):
+                M.git(self.root, "--version", input_bytes=b"input")
+        before = (self.root / "work").stat().st_size
+        time.sleep(0.12)
+        self.assertEqual((self.root / "work").stat().st_size, before)
+        self.assertIsNotNone(self.launched[0].poll())
+
+    def test_command_deadline_and_excess_input_refuse_without_live_writer(self):
+        with mock.patch.object(M.time, "monotonic", side_effect=itertools.count(0, 121)):
+            with self.assertRaisesRegex(M.Refusal, "deadline"):
+                M.run_command(self.root, [sys.executable, "-I", "-B", "-c", "import time; time.sleep(20)"],
+                              dict(os.environ))
+        with mock.patch.object(M.subprocess, "Popen", side_effect=AssertionError("must not launch")):
+            with self.assertRaisesRegex(M.Refusal, "input bound"):
+                M.git(self.root, "--version", input_bytes=b"x" * 22656)
+
+
+class WindowsContainmentRefusal(unittest.TestCase):
+    def test_bootstrap_assignment_failure_closes_job_before_any_command(self):
+        job = mock.Mock()
+        job.enroll_bootstrap.side_effect = OSError("assignment refused")
+        with mock.patch.object(M.os, "name", "nt"), \
+                mock.patch.object(M, "WindowsJob", return_value=job), \
+                mock.patch.object(M.subprocess, "call", side_effect=AssertionError("uncontained launch")) as launch:
+            with self.assertRaisesRegex(OSError, "assignment refused"):
+                M.contained_git("private-test-job", ["git", "--version"])
+        job.close.assert_called_once_with()
+        launch.assert_not_called()
+
+
+class OwnershipFieldDiagnostics(unittest.TestCase):
+    def test_each_failed_field_is_named_without_disclosing_values(self):
+        with tempfile.TemporaryDirectory(prefix="rmlui-fields-") as directory:
+            w = M.Workspace(Path(directory).resolve(strict=True) / "build", specification())
+            w.initialize()
+            original = w.owner_path.read_bytes()
+            changes = (("fields", {"extra": "secret"}), ("schema", {"schema": 2}),
+                       ("root", {"root": "secret"}), ("nonce format", {"nonce": "secret"}),
+                       ("nonce format", {"nonce": None}), ("delivery", {"delivery": "secret"}))
+            for field, change in changes:
+                with self.subTest(field=field):
+                    value = json.loads(original)
+                    value.update(change)
+                    raw = M.encoded(value)
+                    w.owner_path.write_bytes(raw)
+                    with self.assertRaisesRegex(M.Refusal, field) as result:
+                        w.owner()
+                    self.assertNotIn("secret", str(result.exception))
+                    self.assertEqual(w.owner_path.read_bytes(), raw)
+            for field in w.spec.delivery:
+                value = json.loads(original)
+                value["delivery"][field] = "secret"
+                raw = M.encoded(value)
+                w.owner_path.write_bytes(raw)
+                with self.assertRaisesRegex(M.Refusal, "delivery " + field) as result:
+                    w.owner()
+                self.assertNotIn("secret", str(result.exception))
+                self.assertEqual(w.owner_path.read_bytes(), raw)
+            w.owner_path.write_bytes(original)
+            self.assertEqual(w.owner(), original)
+
+
+class ConfigureCallerBoundaries(unittest.TestCase):
+    sites = (("run-coverage.ps1", "coverage", "$buildDir", "coverage"),
+             ("validate-engine-frontier.ps1", "debug-asan", "$asanBuildDir", "debug-asan"),
+             ("validate-engine-frontier.ps1", "debug-simo0", "$parityDir", "$parityPreset"))
+
+    def test_caller_changes_select_the_registered_source_contract_suite(self):
+        loader = importlib.util.spec_from_file_location("ci_paths", ROOT / "tools/ci/ci_paths.py")
+        paths = importlib.util.module_from_spec(loader)
+        loader.loader.exec_module(paths)
+        for name in ("CMakePresets.json", "tools/gates/run-coverage.ps1",
+                     "tools/gates/validate-engine-frontier.ps1", "README.md", "CONTRIBUTING.md",
+                     "docs/development.md", "docs/static-morph-assets.md", "docs/performance.md",
+                     "docs/index.md", "docs/known-limitations.md", "docs/static-preview.md",
+                     "docs/dependency-source.md"):
+            with self.subTest(path=name):
+                self.assertTrue(paths.needs_python(name))
+        self.assertIn("tools/ci/test_rmlui_source.py", paths.PYTHON_TESTS)
+
+    def test_manual_preset_examples_enroll_only_absent_matching_roots(self):
+        paths = ("README.md", "CONTRIBUTING.md", "docs/development.md", "docs/static-morph-assets.md",
+                 "docs/performance.md", "docs/index.md", "docs/known-limitations.md", "docs/static-preview.md")
+        for name in paths:
+            source = (ROOT / name).read_text(encoding="utf-8")
+            for configure in re.finditer(r"(?m)^( *)cmake --preset ([a-z-]+)", source):
+                root = "build/" + configure[2]
+                before = source[:configure.start()]
+                self.assertTrue(before.endswith(f"preflight --root {root} || exit\n"))
+                self.assertIn(f"if [ ! -e {root} ]; then", before)
+                self.assertIn(f"python3 -I -B tools/ci/rmlui_source.py init --root {root} || exit", before)
+
+    def test_preset_roots_and_absent_only_initializer_before_every_gate_configure(self):
+        presets = {p["name"]: p for p in json.loads((ROOT / "CMakePresets.json").read_bytes())["configurePresets"]}
+        for file, preset, variable, argument in self.sites:
+            with self.subTest(preset=preset):
+                node = presets[preset]
+                for _ in range(len(presets)):
+                    if "binaryDir" in node:
+                        break
+                    node = presets[node["inherits"]]
+                self.assertEqual(node["binaryDir"], "${sourceDir}/build/${presetName}")
+                source = (ROOT / "tools/gates" / file).read_text(encoding="utf-8")
+                call = "& cmake --preset " + argument
+                self.assertEqual(source.count(call), 1)
+                before = source.split(call)[0]
+                self.assertTrue("        # Enroll only" in before, "configure caller lacks enrollment guard")
+                fragment = before[before.rindex("        # Enroll only"):].strip()
+                expected = (
+                    f"if (-not (Test-Path -LiteralPath {variable})) {{",
+                    f"& python -I -B tools/ci/rmlui_source.py init --root {variable}",
+                    'if ($LASTEXITCODE -ne 0) { throw "RmlUi workspace initialization failed ($LASTEXITCODE)" }',
+                    f"& python -I -B tools/ci/rmlui_source.py preflight --root {variable}",
+                    'if ($LASTEXITCODE -ne 0) { throw "RmlUi workspace preflight failed ($LASTEXITCODE)" }',
+                )
+                for line in expected:
+                    self.assertIn(line, fragment)
+                self.assertLess(fragment.index(expected[0]), fragment.index(expected[1]))
+                self.assertLess(fragment.index(expected[1]), fragment.index(expected[2]))
+                self.assertLess(fragment.index(expected[2]), fragment.index(expected[3]))
+                self.assertLess(fragment.index(expected[3]), fragment.index(expected[4]))
+                with tempfile.TemporaryDirectory(prefix="rmlui-configure-") as directory:
+                    root = Path(directory).resolve(strict=True) / "build" / preset
+                    # Boundary model follows the verified guard; only the real
+                    # helper runs. No CMake or native gate commands execute.
+                    def boundary():
+                        if not os.path.lexists(root):
+                            init = subprocess.run([sys.executable, "-I", "-B", str(MODULE_PATH),
+                                                   "init", "--root", str(root)], capture_output=True, check=False)
+                            if init.returncode:
+                                return init
+                        return subprocess.run([sys.executable, "-I", "-B", str(MODULE_PATH),
+                                               "preflight", "--root", str(root)], capture_output=True, check=False)
+                    result = boundary()
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    owner = (root / ".rmlui-owner.json").read_bytes()
+                    self.assertEqual(boundary().returncode, 0)
+                    self.assertEqual((root / ".rmlui-owner.json").read_bytes(), owner)
+                    (root / ".rmlui-owner.json").unlink()
+                    (root / "foreign").write_bytes(b"foreign")
+                    self.assertNotEqual(boundary().returncode, 0)
+                    self.assertEqual((root / "foreign").read_bytes(), b"foreign")
+                    self.assertFalse((root / ".rmlui-owner.json").exists())
+                    (root / "foreign").unlink()
+                    root.rmdir()
+                    root.parent.rmdir()
+                    root.parent.write_bytes(b"occupied parent")
+                    self.assertNotEqual(boundary().returncode, 0)
+                    self.assertEqual(root.parent.read_bytes(), b"occupied parent")
+
+
+class Utf8SourceReads(unittest.TestCase):
+    def test_existing_workflow_and_registration_cases_ignore_cp1252_default(self):
+        read = Path.read_text
+        def cp1252(path, *args, **kwargs):
+            kwargs.setdefault("encoding", "cp1252")
+            kwargs.setdefault("errors", "strict")
+            return read(path, *args, **kwargs)
+        cases = [DeliveryRefusals("test_cmake_and_ci_registration_preserve_population_and_verification_order"),
+                 PairedWorkflowInitialization("test_distinct_revisions_initialize_with_their_own_helpers")]
+        with mock.patch.object(Path, "read_text", cp1252):
+            for case in cases:
+                result = unittest.TestResult()
+                case.run(result)
+                self.assertTrue(result.wasSuccessful(), str(result.errors) + str(result.failures))
+
+
+class FixtureCleanupCustody(unittest.TestCase):
+    def test_readonly_object_retry_requires_exact_custody_attributes_and_unlink(self):
+        for name, attributes, winerror, allowed in (
+                ("objects/pack/pack-" + "a" * 40 + ".idx", 1, 5, True),
+                ("objects/pack/pack-" + "a" * 40 + ".idx", 0, 5, False),
+                ("objects/pack/pack-" + "a" * 40 + ".idx", M.REPARSE | 1, 5, False),
+                ("objects/pack/pack-" + "a" * 40 + ".idx", 1, 32, False),
+                ("config", 1, 5, False)):
+            with self.subTest(name=name, attributes=attributes, winerror=winerror):
+                with tempfile.TemporaryDirectory(prefix="rmlui-cleanup-") as directory:
+                    root = Path(directory).resolve(strict=True)
+                    source = root / "build" / "source"
+                    path = source / ".git" / name
+                    path.parent.mkdir(parents=True)
+                    path.write_bytes(b"owned object")
+                    identity = file_identity(root)
+                    real_stat = os.lstat
+                    class Info:
+                        def __init__(self, original):
+                            self.original = original
+                            self.st_file_attributes = attributes
+                        def __getattr__(self, field):
+                            return getattr(self.original, field)
+                    def lstat(candidate, *args, **kwargs):
+                        info = real_stat(candidate, *args, **kwargs)
+                        return Info(info) if Path(candidate) == path else info
+                    error = PermissionError("controlled Windows removal refusal")
+                    error.winerror = winerror
+                    def rmtree(candidate, onerror=None):
+                        self.assertEqual(candidate, root)
+                        if onerror is None:
+                            raise error
+                        onerror(os.unlink, str(path), (PermissionError, error, None))
+                    # Inventory must also reject reparse entries before deletion.
+                    with mock.patch.object(os, "lstat", side_effect=lstat),                             mock.patch.object(shutil, "rmtree", side_effect=rmtree),                             mock.patch(__name__ + ".clear_fixture_readonly") as clear:
+                        if allowed:
+                            remove_source_fixture(root, identity, (source,))
+                            clear.assert_called_once_with(path, mock.ANY)
+                            self.assertFalse(path.exists())
+                        else:
+                            with self.assertRaises((PermissionError, M.Refusal)):
+                                remove_source_fixture(root, identity, (source,))
+                            clear.assert_not_called()
+                            self.assertEqual(path.read_bytes(), b"owned object")
+                    with self.assertRaisesRegex(AssertionError, "custody"):
+                        remove_source_fixture(root, (-1, -1), (source,))
+
+    def test_windows_readonly_pack_removal_and_live_handle_refusal(self):
+        # The portable model above always runs. Windows additionally exercises
+        # the actual attribute and exclusive-handle APIs on its own allocation.
+        if os.name == "nt":
+            with tempfile.TemporaryDirectory(prefix="rmlui-readonly-") as directory:
+                root = Path(directory).resolve(strict=True) / "fixture"
+                source = root / "source"
+                path = source / ".git/objects/pack" / ("pack-" + "a" * 40 + ".idx")
+                path.parent.mkdir(parents=True)
+                path.write_bytes(b"owned readonly pack index")
+                path.chmod(stat.S_IREAD)
+                identity = file_identity(root)
+                with path.open("rb") as live:
+                    self.assertEqual(live.read(5), b"owned")
+                    with self.assertRaises(PermissionError):
+                        remove_source_fixture(root, identity, (source,))
+                    self.assertTrue(os.lstat(path).st_file_attributes & stat.FILE_ATTRIBUTE_READONLY)
+                remove_source_fixture(root, identity, (source,))
+                self.assertFalse(root.exists())
+        else:
+            self.test_readonly_object_retry_requires_exact_custody_attributes_and_unlink()
 
 
 if __name__ == "__main__":

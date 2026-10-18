@@ -14,10 +14,12 @@ import os
 from pathlib import Path, PureWindowsPath
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import threading
+import time
 import uuid
 
 REVISION = "58c751531f4c1a1eb2dc56f409b8e8a323a0c9ad"
@@ -196,64 +198,274 @@ def git(source: Path, *args: str, input_bytes: bytes | None = None) -> bytes:
     argv = [str(Path(executable).resolve()), "-c", "core.autocrlf=false", "-c", "core.safecrlf=false",
             "-c", "core.hooksPath=" + os.devnull, "-c", "core.fsmonitor=false",
             "-c", "protocol.file.allow=never", "-C", str(source), *args]
-    output = bytearray()
-    failures = []
-    stopped = threading.Event()
-    require(input_bytes is None or len(input_bytes) <= 22655, "Git input bound exceeded")
-    process = subprocess.Popen(argv, env=environment, stdin=subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL,
-                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    writer = None
-    if input_bytes is not None:
-        def send_input() -> None:
-            try:
-                assert process.stdin is not None
-                with process.stdin:
-                    process.stdin.write(input_bytes)
-            except OSError as error:
-                failures.append(str(error))
-        writer = threading.Thread(target=send_input)
-        writer.start()
+    return run_command(source, argv, environment, input_bytes)
 
-    def monitor() -> None:
-        while not stopped.wait(0.1):
+
+class WindowsJob:
+    """A private kill-on-close job; only its bootstrap may enroll itself."""
+
+    def __init__(self, name: str, existing: bool = False):
+        import ctypes
+        from ctypes import wintypes
+        self.ctypes = ctypes
+        self.api = ctypes.WinDLL("kernel32", use_last_error=True)
+        signatures = {
+            "CreateJobObjectW": ([ctypes.c_void_p, wintypes.LPCWSTR], wintypes.HANDLE),
+            "OpenJobObjectW": ([wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR], wintypes.HANDLE),
+            "SetInformationJobObject": ([wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD], wintypes.BOOL),
+            "AssignProcessToJobObject": ([wintypes.HANDLE, wintypes.HANDLE], wintypes.BOOL),
+            "GetCurrentProcess": ([], wintypes.HANDLE),
+            "TerminateJobObject": ([wintypes.HANDLE, wintypes.UINT], wintypes.BOOL),
+            "QueryInformationJobObject": ([wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p,
+                                           wintypes.DWORD, ctypes.c_void_p], wintypes.BOOL),
+            "CloseHandle": ([wintypes.HANDLE], wintypes.BOOL),
+            "PeekNamedPipe": ([wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p,
+                               ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p], wintypes.BOOL),
+        }
+        for function, (arguments, result) in signatures.items():
+            method = getattr(self.api, function)
+            method.argtypes, method.restype = arguments, result
+        # JOB_OBJECT_ASSIGN_PROCESS | JOB_OBJECT_TERMINATE. No breakaway rights.
+        self.handle = (self.api.OpenJobObjectW(0x0001 | 0x0008, False, name) if existing
+                       else self.api.CreateJobObjectW(None, name))
+        if not self.handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            if not existing:
+                require(ctypes.get_last_error() != 183, "private process job already exists")
+                class BasicLimits(ctypes.Structure):
+                    _fields_ = [("PerProcessUserTimeLimit", ctypes.c_longlong),
+                                ("PerJobUserTimeLimit", ctypes.c_longlong),
+                                ("LimitFlags", wintypes.DWORD),
+                                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                                ("ActiveProcessLimit", wintypes.DWORD),
+                                ("Affinity", ctypes.c_size_t),
+                                ("PriorityClass", wintypes.DWORD),
+                                ("SchedulingClass", wintypes.DWORD)]
+                class Counters(ctypes.Structure):
+                    _fields_ = [(field, ctypes.c_ulonglong) for field in (
+                        "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+                        "ReadTransferCount", "WriteTransferCount", "OtherTransferCount")]
+                class ExtendedLimits(ctypes.Structure):
+                    _fields_ = [("BasicLimitInformation", BasicLimits), ("IoInfo", Counters),
+                                ("ProcessMemoryLimit", ctypes.c_size_t), ("JobMemoryLimit", ctypes.c_size_t),
+                                ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t)]
+                limits = ExtendedLimits()
+                limits.BasicLimitInformation.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+                if not self.api.SetInformationJobObject(self.handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
+                    raise ctypes.WinError(ctypes.get_last_error())
+        except BaseException:
+            self.close()
+            raise
+
+    def enroll_bootstrap(self) -> None:
+        if not self.api.AssignProcessToJobObject(self.handle, self.api.GetCurrentProcess()):
+            raise self.ctypes.WinError(self.ctypes.get_last_error())
+
+    def terminate(self) -> None:
+        if not self.api.TerminateJobObject(self.handle, 1):
+            raise self.ctypes.WinError(self.ctypes.get_last_error())
+
+    def close(self) -> None:
+        if self.handle:
+            handle, self.handle = self.handle, None
+            if not self.api.CloseHandle(handle):
+                raise self.ctypes.WinError(self.ctypes.get_last_error())
+
+    def wait_empty(self) -> None:
+        from ctypes import wintypes
+        class Accounting(self.ctypes.Structure):
+            _fields_ = [(field, self.ctypes.c_longlong) for field in (
+                "TotalUserTime", "TotalKernelTime", "ThisPeriodTotalUserTime", "ThisPeriodTotalKernelTime")]
+            _fields_ += [(field, wintypes.DWORD) for field in (
+                "TotalPageFaultCount", "TotalProcesses", "ActiveProcesses", "TotalTerminatedProcesses")]
+        deadline = time.monotonic() + 2
+        while True:
+            info = Accounting()
+            if not self.api.QueryInformationJobObject(self.handle, 1, self.ctypes.byref(info),
+                                                       self.ctypes.sizeof(info), None):
+                raise self.ctypes.WinError(self.ctypes.get_last_error())
+            if info.ActiveProcesses == 0:
+                return
+            require(time.monotonic() < deadline, "Git process tree shutdown deadline exceeded")
+            time.sleep(0.01)
+
+    def available(self, stream) -> int:
+        import msvcrt
+        from ctypes import wintypes
+        count = wintypes.DWORD()
+        if not self.api.PeekNamedPipe(msvcrt.get_osfhandle(stream.fileno()), None, 0, None,
+                                      self.ctypes.byref(count), None):
+            error = self.ctypes.get_last_error()
+            if error == 109:  # ERROR_BROKEN_PIPE: all writers closed.
+                return -1
+            raise self.ctypes.WinError(error)
+        return count.value
+
+
+def contained_git(name: str, argv: list[str]) -> int:
+    # This trusted, isolated Python bootstrap creates no children before enrollment.
+    # Assignment failure (including incompatible outer jobs) refuses before Git.
+    require(os.name == "nt" and bool(argv), "unsupported process bootstrap")
+    job = WindowsJob(name, existing=True)
+    try:
+        job.enroll_bootstrap()
+    finally:
+        # Only the parent retains a job handle when the command starts. Its death
+        # therefore kills the complete tree even if Git retains output handles.
+        job.close()
+    return subprocess.call(argv, stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr)
+
+
+def run_command(source: Path, argv: list[str], environment: dict[str, str],
+                input_bytes: bytes | None = None) -> bytes:
+    """Run one owned tree, with bounded output, storage and shutdown."""
+    require(input_bytes is None or len(input_bytes) <= 22655, "Git input bound exceeded")
+    require(os.name == "nt" or (os.name == "posix" and all(hasattr(os, key) for key in
+            ("waitid", "P_PID", "WNOWAIT", "WEXITED", "WNOHANG"))), "process containment unavailable")
+    job = None
+    process = None
+    writer = None
+    failures = []
+    output = bytearray()  # At most OUTPUT_BYTES; each read is at most 64 KiB.
+    def read_output():
+        if job is not None:
+            available = job.available(process.stdout)
+            if available < 0:
+                return b""
+            if not available:
+                return None
+            return os.read(process.stdout.fileno(), min(65536, available))
+        try:
+            return os.read(process.stdout.fileno(), 65536)
+        except BlockingIOError:
+            return None
+    try:
+        command = argv
+        if os.name == "nt":
+            name = "rmlui-source-" + uuid.uuid4().hex
+            job = WindowsJob(name)
+            command = [sys.executable, "-I", "-B", "-S", str(Path(__file__).resolve()),
+                       "--contained-git", name, *argv]
+        process = subprocess.Popen(command, env=environment,
+                                   stdin=subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                   start_new_session=os.name == "posix", bufsize=0)
+        if input_bytes is not None:
+            def send_input() -> None:
+                try:
+                    assert process.stdin is not None
+                    with process.stdin:
+                        remaining = memoryview(input_bytes)
+                        while remaining:
+                            count = process.stdin.write(remaining)
+                            require(count is not None and count > 0, "partial Git input")
+                            remaining = remaining[count:]
+                except (OSError, ValueError) as error:
+                    failures.append(str(error))
+            sender = threading.Thread(target=send_input, daemon=True)
+            sender.start()
+            writer = sender
+
+        # Scan synchronously: no monitor can outlive this call or block a join.
+        def scan() -> None:
             try:
                 inventory(source)
             except FileNotFoundError:
-                # Git can rename its own lock and pack files during this scan.
-                # The final scan, after Git exits, remains strict.
-                continue
+                # Git renames its own locks/packs. The final scan stays strict.
+                pass
             except (OSError, Refusal) as error:
-                failures.append(str(error))
-                process.kill()
-                return
-
-    watcher = threading.Thread(target=monitor)
-    watcher.start()
-    try:
+                raise Refusal("Git storage refused: " + str(error)) from error
+        scan()
         assert process.stdout is not None
-        with process.stdout:
-            while True:
-                data = process.stdout.read(65536)
-                if not data:
-                    break
-                require(len(output) + len(data) <= OUTPUT_BYTES, "Git output bound exceeded")
-                output.extend(data)
-        code = process.wait()
-        stopped.set()
-        watcher.join()
-        if writer is not None:
-            writer.join()
-        require(not failures and code == 0, "Git command refused: " + " ".join(args[:1]) + "\n" + output[-4096:].decode(errors="replace"))
-        inventory(source)
-        return bytes(output)
+        if job is None:
+            os.set_blocking(process.stdout.fileno(), False)
+        deadline = time.monotonic() + 120
+        next_scan = time.monotonic() + 0.1
+        eof = False
+        while True:
+            now = time.monotonic()
+            require(now < deadline, "Git command deadline exceeded")
+            require(not failures, "Git input refused")
+            if now >= next_scan:
+                scan()
+                next_scan = now + 0.1
+            # WNOWAIT retains the session leader's PID until tree termination:
+            # an exited parent cannot cause an unrelated reused PGID to be killed.
+            exited = (process.poll() is not None if job is not None else
+                      os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None)
+            # Observe exit before reading: an earlier empty read cannot prove
+            # that an exited leader left a writer, or omit its final bytes.
+            data = None
+            if not eof:
+                data = read_output()
+                if data == b"":
+                    eof = True
+                elif data:
+                    require(len(data) <= OUTPUT_BYTES - len(output), "Git output bound exceeded")
+                    output.extend(data)
+                    continue
+            if exited:
+                require(eof, "Git descendant retained output")
+                break
+            time.sleep(0.01)
     finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait()
-        stopped.set()
-        watcher.join()
-        if writer is not None:
-            writer.join()
+        shutdown_errors = []
+        def attempt(action) -> None:
+            try:
+                action()
+            except BaseException as error:
+                shutdown_errors.append(error)
+        if job is not None:
+            attempt(job.terminate)
+        elif process is not None:
+            def terminate_session() -> None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            attempt(terminate_session)
+        if process is not None:
+            attempt(lambda: process.wait(timeout=2))
+            if writer is not None:
+                attempt(lambda: writer.join(timeout=2))
+                if writer.is_alive():
+                    shutdown_errors.append(Refusal("Git input shutdown deadline exceeded"))
+            if process.stdin is not None and (writer is None or not writer.is_alive()):
+                attempt(process.stdin.close)
+            if job is not None:
+                attempt(job.wait_empty)
+            if process.stdout is not None:
+                def drain_output() -> None:
+                    if job is None:
+                        os.set_blocking(process.stdout.fileno(), False)
+                    # Drain already queued bytes before closure, even on refusal.
+                    # Both retained output and discarded drain have the 4 MiB cap.
+                    drain_deadline = time.monotonic() + 2
+                    drained = 0
+                    while True:
+                        data = read_output()
+                        if data == b"":
+                            break
+                        require(time.monotonic() < drain_deadline, "Git pipe shutdown deadline exceeded")
+                        if data:
+                            require(len(data) <= OUTPUT_BYTES - drained, "Git pipe drain bound exceeded")
+                            drained += len(data)
+                            output.extend(data[:max(0, OUTPUT_BYTES - len(output))])
+                        else:
+                            time.sleep(0.01)
+                attempt(drain_output)
+                attempt(process.stdout.close)
+        if job is not None:
+            attempt(job.close)
+        if shutdown_errors:
+            raise Refusal("Git shutdown refused: " + str(shutdown_errors[0])) from shutdown_errors[0]
+    assert process is not None
+    require(not failures and process.returncode == 0, "Git command refused\n" +
+            output[-4096:].decode("utf-8", errors="replace"))
+    inventory(source)
+    return bytes(output)
 
 
 def verify_git(source: Path, spec: Specification) -> None:
@@ -329,9 +541,15 @@ class Workspace:
         raw = read_file(self.owner_path, 4096)
         value = json.loads(raw)
         require(raw == encoded(value), "noncanonical ownership record")
-        require(set(value) == {"schema", "root", "nonce", "delivery"} and value["schema"] == 1
-                and value["root"] == str(self.root) and re.fullmatch(r"[0-9a-f]{32}", value["nonce"])
-                and value["delivery"] == self.spec.delivery, "workspace ownership or delivery mismatch")
+        require(set(value) == {"schema", "root", "nonce", "delivery"}, "workspace ownership fields mismatch")
+        require(value["schema"] == 1, "workspace ownership schema mismatch")
+        require(value["root"] == str(self.root), "workspace ownership root mismatch")
+        require(isinstance(value["nonce"], str) and re.fullmatch(r"[0-9a-f]{32}", value["nonce"]),
+                "workspace ownership nonce format mismatch")
+        require(isinstance(value["delivery"], dict), "workspace delivery format mismatch")
+        require(set(value["delivery"]) == set(self.spec.delivery), "workspace delivery fields mismatch")
+        for field, expected in self.spec.delivery.items():
+            require(value["delivery"][field] == expected, f"workspace delivery {field} mismatch")
         return raw
 
     def expected_receipt(self, owner: bytes) -> dict:
@@ -432,4 +650,10 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    if len(sys.argv) >= 3 and sys.argv[1] == "--contained-git":
+        try:
+            raise SystemExit(contained_git(sys.argv[2], sys.argv[3:]))
+        except (OSError, ValueError) as error:
+            print(f"RmlUi process containment refused: {error}", file=sys.stderr)
+            raise SystemExit(1)
     raise SystemExit(main())

@@ -29,6 +29,10 @@ Tracy trace. Both retain debug symbols and frame pointers; only `profile` enable
 instrumentation.
 
 ```sh
+if [ ! -e build/perf ]; then
+  python3 -I -B tools/ci/rmlui_source.py init --root build/perf || exit
+fi
+python3 -I -B tools/ci/rmlui_source.py preflight --root build/perf || exit
 cmake --preset perf
 cmake --build --preset perf --target luminumbra_server_app --parallel
 python tools/perf/perf.py run \

@@ -4010,6 +4010,13 @@ function Test-PopulatedAsan {
     # so this mode owns its build (it is opt-in, not on the default lane).
     if (-not (Test-Path $serverExe)) {
         Write-Host "PopulatedAsan: building the debug-asan server exe (first run)..."
+        # Enroll only an absent preset binaryDir; CMake strictly checks existing roots.
+        if (-not (Test-Path -LiteralPath $asanBuildDir)) {
+            & python -I -B tools/ci/rmlui_source.py init --root $asanBuildDir
+            if ($LASTEXITCODE -ne 0) { throw "RmlUi workspace initialization failed ($LASTEXITCODE)" }
+        }
+        & python -I -B tools/ci/rmlui_source.py preflight --root $asanBuildDir
+        if ($LASTEXITCODE -ne 0) { throw "RmlUi workspace preflight failed ($LASTEXITCODE)" }
         & cmake --preset debug-asan
         if ($LASTEXITCODE -ne 0) {
             throw "PopulatedAsan: cmake --preset debug-asan configure failed (exit $LASTEXITCODE)"
@@ -5250,6 +5257,13 @@ function Test-SimOptLevelParity {
     if ($env:PATH -notlike "$ucrt*") { $env:PATH = "$ucrt;$env:PATH" }
     try {
         Write-Host "sim-opt-parity: configuring + building $parityPreset (GameSession.cpp @ -)..."
+        # Enroll only an absent preset binaryDir; CMake strictly checks existing roots.
+        if (-not (Test-Path -LiteralPath $parityDir)) {
+            & python -I -B tools/ci/rmlui_source.py init --root $parityDir
+            if ($LASTEXITCODE -ne 0) { throw "RmlUi workspace initialization failed ($LASTEXITCODE)" }
+        }
+        & python -I -B tools/ci/rmlui_source.py preflight --root $parityDir
+        if ($LASTEXITCODE -ne 0) { throw "RmlUi workspace preflight failed ($LASTEXITCODE)" }
         & cmake --preset $parityPreset
         if ($LASTEXITCODE -ne 0) { throw "sim-opt-parity: cmake configure ($parityPreset) failed ($LASTEXITCODE)" }
         & cmake --build --preset $parityPreset --target luminumbra_server_app
