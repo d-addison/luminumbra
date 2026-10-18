@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ci_shell import bash_executable
@@ -119,7 +120,18 @@ elif name == "cmake":
     if args == ["--version"]:
         print("cmake fixture")
     elif "--preset" in args:
-        local(args[args.index("-B") + 1]).mkdir(parents=True, exist_ok=True)
+        build = local(args[-1])
+        expected = ["--preset", "release", "-DPython3_EXECUTABLE=" + Path(sys.executable).as_posix(),
+                    "-B", build.relative_to(root).as_posix()]
+        if args != expected or args[-1] not in ["build/cell-" + str(cell) for cell in range(6)]:
+            raise AssertionError("configure interpreter or build root mismatch: " + repr(args))
+        if (root / "cmake/rmlui_source.cmake").is_file():
+            enrollment = build / "source-enrolled.json"
+            expected_init = ["-I", "-B", "tools/ci/rmlui_source.py", "init", "--root", args[-1]]
+            if not enrollment.is_file() or json.loads(enrollment.read_text()) != expected_init:
+                raise AssertionError("configure preceded source enrollment")
+        build.mkdir(parents=True, exist_ok=True)
+        (build / "configured.txt").write_text("configured", encoding="utf-8")
     elif "--target" in args:
         target = args[args.index("--target") + 1]
         if target == "help":
@@ -143,7 +155,32 @@ elif name == "probe":
             (root / "probe-fixture.json").read_text(encoding="utf-8"), encoding="utf-8")
     if scenario.startswith("probe_exit_"):
         sys.exit(int(scenario.rsplit("_", 1)[1]))
+elif name == "source-init":
+    if (len(args) != 6 or args[:5] != ["-I", "-B", "tools/ci/rmlui_source.py", "init", "--root"]
+            or args[5] not in ["build/cell-" + str(cell) for cell in range(6)]):
+        raise AssertionError("unexpected source initialization: " + repr(args))
+    if not (root / "cmake/rmlui_source.cmake").is_file():
+        raise AssertionError("source initialization in a legacy tree")
+    if scenario == "source_init_failure":
+        print("fixture source initialization refused", file=sys.stderr)
+        sys.exit(9)
+    build = local(args[5])
+    if build.exists():
+        raise AssertionError("source initialization adopted an existing root")
+    build.mkdir(parents=True)
+    (build / "source-enrolled.json").write_text(json.dumps(args), encoding="utf-8")
+elif name == "source-interpreter":
+    if args != ["-I", "-B", "-c", "import sys; print(sys.executable)"]:
+        raise AssertionError("unexpected interpreter query: " + repr(args))
+    if scenario == "source_interpreter_failure":
+        print("fixture interpreter query refused", file=sys.stderr)
+        sys.exit(9)
+    print(Path(sys.executable).as_posix())
 elif name == "python":
+    if (len(args) != 5 or local(args[0]) != root / "check_worldgen_probe_smoke.py"
+            or args[1] != "--validate-report" or args[3:] != ["--mode", "full"]
+            or args[2] not in ["diag/cell-" + str(cell) + "/probe.json" for cell in range(6)]):
+        raise AssertionError("unrecognized Python call: " + repr(args))
     # Execute the copied real validator in the worker, without another process
     # or a host command lookup through PATH.
     sys.argv = args
@@ -203,10 +240,23 @@ _record() {
     printf '%s\0' "$#" "$@" >> calls.bin
 }
 _stub() {
-    _record "$@"
+    # Keep source setup distinct from calls to the real report validator.
+    [[ "$1" == python ]] || _record "$@"
     local name="$1" line arg package version found=1 expression number=0 last=""
     shift
     case "$name" in
+        python)
+            if [[ $# == 6 && "$1" == -I && "$2" == -B && "$3" == tools/ci/rmlui_source.py && "$4" == init && "$5" == --root && "$6" == build/cell-[0-5] ]]; then
+                _record source-init "$@"
+                _python_dispatch source-init "$@"
+            elif [[ $# == 4 && "$1" == -I && "$2" == -B && "$3" == -c && "$4" == 'import sys; print(sys.executable)' ]]; then
+                _record source-interpreter "$@"
+                _python_dispatch source-interpreter "$@"
+            else
+                _record python "$@"
+                _python_dispatch python "$@"
+            fi
+            ;;
         pacman)
             if [[ "$1" != -Q ]]; then
                 _python_dispatch pacman "$@"
@@ -381,9 +431,12 @@ def read_calls(path):
 
 
 class AttributionTests(unittest.TestCase):
-    def run_script(self, scenario, missing=None, cells="0", packages=None, probe_report=None):
+    def run_script(self, scenario, missing=None, cells="0", packages=None, probe_report=None, source_delivery=True):
         with tempfile.TemporaryDirectory(prefix="ucrt attribution ") as directory:
             root = Path(directory)
+            if source_delivery:
+                (root / "cmake").mkdir()
+                (root / "cmake/rmlui_source.cmake").write_text("fixture delivery marker", encoding="utf-8")
             (root / "probe-fixture.json").write_text(
                 json.dumps(valid_report("full")) if probe_report is None else probe_report,
                 encoding="utf-8")
@@ -431,6 +484,8 @@ class AttributionTests(unittest.TestCase):
                 artifacts["fixture/package-state.json"] = state_path.read_text(encoding="utf-8")
             artifacts["fixture/package-snapshot.txt"] = (root / "package-snapshot.txt").read_text(encoding="utf-8")
             calls = read_calls(root / "calls.bin")
+            artifacts["fixture/configured.json"] = json.dumps(sorted(
+                path.parent.relative_to(root).as_posix() for path in (root / "build").glob("cell-*/configured.txt")))
             step_summary = (root / "step-summary.md").read_text(encoding="utf-8")
             return result, artifacts, calls, step_summary
 
@@ -580,8 +635,121 @@ class AttributionTests(unittest.TestCase):
                                            "--mode", "full"])
         self.assertEqual(json.loads(artifacts["diag/cell-0/probe.json"]), valid_report("full"))
 
+    def test_source_enrollment_and_interpreter_binding_precede_configure(self):
+        result, artifacts, calls, summary = self.run_script("good", cells="0 5")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_finalized(artifacts, summary, "COMPLETE")
+        self.assertEqual(json.loads(artifacts["fixture/configured.json"]), ["build/cell-0", "build/cell-5"])
+        setup = [call for call in calls if call[0] in ("source-init", "source-interpreter")
+                 or call[0] == "cmake" and "--preset" in call]
+        self.assertEqual([call[0] for call in setup], ["source-init", "source-interpreter", "cmake"] * 2)
+        for offset, cell in ((0, "0"), (3, "5")):
+            self.assertEqual(setup[offset], ["source-init", "-I", "-B", "tools/ci/rmlui_source.py",
+                                             "init", "--root", "build/cell-" + cell])
+            self.assertEqual(setup[offset + 1], ["source-interpreter", "-I", "-B", "-c",
+                                                 "import sys; print(sys.executable)"])
+            self.assertEqual(setup[offset + 2], ["cmake", "--preset", "release",
+                                                 "-DPython3_EXECUTABLE=" + Path(sys.executable).as_posix(),
+                                                 "-B", "build/cell-" + cell])
+
+    def test_failed_source_initialization_prevents_configure_and_validation(self):
+        result, artifacts, calls, summary = self.run_script("source_init_failure")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_finalized(artifacts, summary, "COMPLETE")
+        self.assertEqual(json.loads(artifacts["diag/cell-0/status.json"])["status"], "BUILD_FAILED")
+        self.assertEqual(sum(call[0] == "source-init" for call in calls), 1)
+        self.assertFalse(any(call[0] in ("source-interpreter", "python", "probe", "perf")
+                             or call[0] == "cmake" and "--preset" in call for call in calls))
+        self.assertEqual(json.loads(artifacts["fixture/configured.json"]), [])
+
+    def test_failed_interpreter_query_cannot_configure_with_an_empty_binding(self):
+        result, artifacts, calls, summary = self.run_script("source_interpreter_failure")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_finalized(artifacts, summary, "COMPLETE")
+        self.assertEqual(json.loads(artifacts["diag/cell-0/status.json"])["status"], "BUILD_FAILED")
+        self.assertFalse(any(call[0] in ("python", "probe", "perf") for call in calls))
+        self.assertEqual(json.loads(artifacts["fixture/configured.json"]), [])
+        configure = [call for call in calls if call[0] == "cmake" and "--preset" in call]
+        self.assertEqual(len(configure), 1)
+        self.assertIn("-DPython3_EXECUTABLE=", configure[0])
+
+    def test_legacy_tree_binds_the_interpreter_without_source_enrollment(self):
+        result, artifacts, calls, summary = self.run_script("good", source_delivery=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_finalized(artifacts, summary, "COMPLETE")
+        self.assertFalse(any(call[0] == "source-init" for call in calls))
+        self.assertEqual(sum(call[0] == "source-interpreter" for call in calls), 1)
+        self.assertEqual(sum(call[0] == "python" for call in calls), 1)
+        self.assertEqual(json.loads(artifacts["fixture/configured.json"]), ["build/cell-0"])
+
 
 class MockTests(unittest.TestCase):
+    def test_unknown_python_commands_are_recorded_and_refused(self):
+        invalid = [[], ["-I", "-B", "-c", "raise RuntimeError('unrecognized')"],
+                   ["-I", "-B", "tools/ci/rmlui_source.py", "init", "--root", "../foreign"],
+                   ["-I", "-B", "tools/ci/rmlui_source.py", "init", "--root", "build/cell-6"],
+                   ["-I", "tools/ci/rmlui_source.py", "init", "--root", "build/cell-0"],
+                   ["check_worldgen_probe_smoke.py", "--probe", "foreign", "--mode", "full"]]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dispatcher = root / "stub.py"
+            dispatcher.write_text("STUB = " + repr(STUB) + "\n" + WORKER, encoding="utf-8")
+            shell = stub_environment(Path(sys.executable).as_posix(), dispatcher.as_posix())
+            for args in invalid:
+                shell += "if " + shlex.join(["python", *args]) + "; then exit 1; fi\n"
+            script = root / "python-refusals.sh"
+            script.write_text(shell, encoding="utf-8")
+            result = subprocess.run([BASH or bash_executable(), "--noprofile", "--norc", script.as_posix()],
+                                    cwd=root, env=self.environment(root), stdin=subprocess.DEVNULL,
+                                    capture_output=True, text=True, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("unrecognized Python call", result.stderr)
+            self.assertEqual(read_calls(root / "calls.bin"), [["python", *args] for args in invalid])
+
+    def dispatch_fixture(self, root, name, args):
+        with mock.patch.object(os, "getcwd", return_value=str(root)), \
+                mock.patch.object(sys, "argv", ["stub.py", name, *args]), \
+                mock.patch.dict(os.environ, STUB_SCENARIO="good"):
+            exec(compile(STUB, "stub.py", "exec"), {})
+
+    def test_source_and_configure_refusals_preserve_unrecognized_roots(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            init = ["-I", "-B", "tools/ci/rmlui_source.py", "init", "--root", "build/cell-0"]
+            with self.assertRaisesRegex(AssertionError, "unexpected source initialization"):
+                self.dispatch_fixture(root, "source-init", [*init[:-1], "../foreign"])
+            with self.assertRaisesRegex(AssertionError, "legacy tree"):
+                self.dispatch_fixture(root, "source-init", init)
+            (root / "cmake").mkdir()
+            (root / "cmake/rmlui_source.cmake").write_text("fixture", encoding="utf-8")
+            build = root / "build/cell-0"
+            build.mkdir(parents=True)
+            with self.assertRaisesRegex(AssertionError, "existing root"):
+                self.dispatch_fixture(root, "source-init", init)
+            configure = ["--preset", "release", "-DPython3_EXECUTABLE=" + Path(sys.executable).as_posix(),
+                         "-B", "build/cell-0"]
+            with self.assertRaisesRegex(AssertionError, "preceded source enrollment"):
+                self.dispatch_fixture(root, "cmake", configure)
+            for data, error in (("{", ValueError), ("[]", AssertionError)):
+                with self.subTest(data=data):
+                    (build / "source-enrolled.json").write_text(data, encoding="utf-8")
+                    with self.assertRaises(error):
+                        self.dispatch_fixture(root, "cmake", configure)
+                    self.assertFalse((build / "configured.txt").exists())
+            with mock.patch.object(Path, "read_text", side_effect=OSError("unreadable enrollment")):
+                with self.assertRaises(OSError):
+                    self.dispatch_fixture(root, "cmake", configure)
+            self.assertFalse((build / "configured.txt").exists())
+            for binding, target in (("relative-python", "build/cell-0"), ("", "build/cell-0"),
+                                    (Path(sys.executable).as_posix(), "build/cell-6")):
+                with self.subTest(binding=binding, target=target):
+                    with self.assertRaisesRegex(AssertionError, "interpreter or build root mismatch"):
+                        self.dispatch_fixture(root, "cmake", ["--preset", "release",
+                                              "-DPython3_EXECUTABLE=" + binding, "-B", target])
+            with self.assertRaisesRegex(AssertionError, "unexpected interpreter query"):
+                self.dispatch_fixture(root, "source-interpreter", ["-c", "foreign"])
+            self.assertFalse((build / "configured.txt").exists())
+
     def environment(self, root):
         environment = {key: value for key, value in os.environ.items()
                        if key.upper() in ("SYSTEMROOT", "WINDIR", "COMSPEC", "TMPDIR", "TEMP", "TMP")}

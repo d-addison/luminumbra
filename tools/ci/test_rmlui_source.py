@@ -786,6 +786,165 @@ class BorrowedFixtureRecovery(unittest.TestCase):
 
 
 class DeliveryRefusals(unittest.TestCase):
+    @contextlib.contextmanager
+    def windows_job_api(self, *, existing=False, failure=False, limit_failure=False):
+        import ctypes
+        api = mock.Mock()
+        error = [183]
+        events = []
+        def set_error(value):
+            events.append(("clear", value))
+            previous, error[0] = error[0], value
+            return previous
+        def get_error():
+            events.append(("capture", error[0]))
+            return error[0]
+        def create(attributes, name):
+            self.assertIsNone(attributes)
+            self.assertEqual(name, "private-fixture-job")
+            events.append(("create", error[0]))
+            if existing or failure:
+                error[0] = 5 if failure else 183
+            return None if failure else 71
+        def open_job(rights, inherit, name):
+            self.assertEqual((rights, inherit, name), (9, False, "private-fixture-job"))
+            events.append(("open", error[0]))
+            error[0] = 87 if failure else 183
+            return None if failure else 71
+        def limits(*args):
+            events.append(("limits", args[0]))
+            error[0] = 8 if limit_failure else 183
+            return not limit_failure
+        def close(handle):
+            events.append(("close", handle))
+            error[0] = 6
+            return True
+        api.CreateJobObjectW.side_effect = create
+        api.OpenJobObjectW.side_effect = open_job
+        api.SetInformationJobObject.side_effect = limits
+        api.CloseHandle.side_effect = close
+        api.GetCurrentProcess.return_value = 72
+        with contextlib.ExitStack() as stack:
+            for name, value in (("WinDLL", mock.Mock(return_value=api)),
+                                ("set_last_error", set_error), ("get_last_error", get_error),
+                                ("WinError", lambda code: OSError(code, "fixture Windows error"))):
+                stack.enter_context(mock.patch.object(ctypes, name, value, create=True))
+            yield api, events
+
+    def test_windows_job_stale_creation_error_is_cleared_before_the_call(self):
+        with self.windows_job_api() as (api, events):
+            job = M.WindowsJob("private-fixture-job")
+            self.assertEqual(events[:3], [("clear", 0), ("create", 0), ("capture", 0)])
+            api.SetInformationJobObject.assert_called_once()
+            job.close()
+            api.CloseHandle.assert_called_once_with(71)
+            self.assertIsNone(job.handle)
+
+    def test_windows_job_real_name_collision_refuses_and_closes(self):
+        with self.windows_job_api(existing=True) as (api, events):
+            with self.assertRaisesRegex(M.Refusal, "private process job already exists"):
+                M.WindowsJob("private-fixture-job")
+            self.assertEqual(events[:3], [("clear", 0), ("create", 0), ("capture", 183)])
+            api.SetInformationJobObject.assert_not_called()
+            api.AssignProcessToJobObject.assert_not_called()
+            api.CloseHandle.assert_called_once_with(71)
+
+    def test_windows_job_null_handles_preserve_create_and_open_errors(self):
+        for existing, code in ((False, 5), (True, 87)):
+            with self.subTest(existing=existing), self.windows_job_api(failure=True) as (api, events):
+                with self.assertRaises(OSError) as result:
+                    M.WindowsJob("private-fixture-job", existing=existing)
+                self.assertEqual(result.exception.errno, code)
+                self.assertEqual(events[-1], ("capture", code))
+                api.CloseHandle.assert_not_called()
+                api.SetInformationJobObject.assert_not_called()
+
+    def test_windows_job_open_enrollment_does_not_reinitialize_the_job(self):
+        with self.windows_job_api() as (api, events):
+            job = M.WindowsJob("private-fixture-job", existing=True)
+            job.enroll_bootstrap()
+            self.assertEqual(events[:2], [("open", 183), ("capture", 183)])
+            api.AssignProcessToJobObject.assert_called_once_with(71, 72)
+            api.CreateJobObjectW.assert_not_called()
+            api.SetInformationJobObject.assert_not_called()
+            job.close()
+            api.CloseHandle.assert_called_once_with(71)
+
+    def test_windows_job_limit_failure_keeps_the_error_and_closes(self):
+        with self.windows_job_api(limit_failure=True) as (api, events):
+            with self.assertRaises(OSError) as result:
+                M.WindowsJob("private-fixture-job")
+            self.assertEqual(result.exception.errno, 8)
+            self.assertIn(("capture", 8), events)
+            api.CloseHandle.assert_called_once_with(71)
+
+    @contextlib.contextmanager
+    def small_git_source(self):
+        # Two tiny files, one blob, two trees and one commit; no fetch or hooks.
+        with tempfile.TemporaryDirectory(prefix="rmlui-tree-") as directory:
+            source = Path(directory).resolve(strict=True)
+            (source / ".git/objects").mkdir(parents=True)
+            (source / ".git/refs").mkdir()
+            (source / ".git/config").write_text(
+                "[core]\nrepositoryformatversion=0\nbare=false\nfilemode=true\n", encoding="ascii")
+            blob = object_file(source, "blob", b"fixture\n")
+            nested = object_file(source, "tree", b"100644 file.txt\0" + bytes.fromhex(blob))
+            tree = object_file(source, "tree", b"40000 nested\0" + bytes.fromhex(nested)
+                               + b"100644 root.txt\0" + bytes.fromhex(blob))
+            commit = object_file(source, "commit", (
+                f"tree {tree}\nauthor Fixture <fixture@example.invalid> 1 +0000\n"
+                "committer Fixture <fixture@example.invalid> 1 +0000\n\nfixture\n").encode())
+            (source / ".git/HEAD").write_text(commit + "\n", encoding="ascii")
+            (source / "nested").mkdir()
+            for name in ("root.txt", "nested/file.txt"):
+                (source / name).write_bytes(b"fixture\n")
+            spec = mock.Mock(data={"tree": tree}, files={
+                name: {"mode": "100644", "blob": blob} for name in ("root.txt", "nested/file.txt")})
+            M.git(source, "read-tree", commit)
+            with mock.patch.object(M, "REVISION", commit), mock.patch.object(M, "FILE_COUNT", 2):
+                yield source, spec, nested
+
+    def test_root_tree_query_is_equivalent_for_root_and_nested_working_directories(self):
+        with self.small_git_source() as (source, spec, nested):
+            for directory in (source, source / "nested"):
+                with self.subTest(directory=directory.name):
+                    old = M.git(directory, "rev-parse", "HEAD^{tree}").strip().decode()
+                    current = M.git(directory, "rev-parse", "HEAD:").strip().decode()
+                    self.assertEqual(old, spec.data["tree"])
+                    self.assertEqual(current, old)
+                    self.assertNotEqual(current, nested)
+            M.verify_git(source, spec)
+
+    def test_root_tree_verification_survives_singleton_brace_expansion(self):
+        with self.small_git_source() as (source, spec, nested):
+            original = M.run_command
+            queries = []
+            def native_parent_glob(directory, argv, environment, input_bytes=None):
+                # Model only unquoted singleton braces at the native/MSYS boundary.
+                # The executable remains real Git; this does not qualify Windows.
+                converted = [re.sub(r"\{([^,{}]*)\}", r"\1", arg)
+                             if '"' not in subprocess.list2cmdline([arg]) else arg for arg in argv]
+                queries.append((argv[-1], converted[-1]))
+                return original(directory, converted, environment, input_bytes)
+            self.assertEqual(subprocess.list2cmdline(["HEAD^{tree}"]), "HEAD^{tree}")
+            with mock.patch.object(M, "run_command", side_effect=native_parent_glob):
+                with self.assertRaises(M.Refusal):
+                    M.git(source, "rev-parse", "HEAD^{tree}")
+                M.verify_git(source, spec)
+            self.assertIn(("HEAD^{tree}", "HEAD^tree"), queries)
+            self.assertIn(("HEAD:", "HEAD:"), queries)
+
+    def test_root_tree_verification_retains_pin_and_tree_mismatch_refusals(self):
+        with self.small_git_source() as (source, spec, nested):
+            spec.data["tree"] = "0" * 40
+            with self.assertRaisesRegex(M.Refusal, "wrong Git tree"):
+                M.verify_git(source, spec)
+            head = (source / ".git/HEAD").read_bytes()
+            with mock.patch.object(M, "REVISION", "0" * 40):
+                with self.assertRaisesRegex(M.Refusal, "HEAD is not the detached pin"):
+                    M.verify_git(source, spec)
+            self.assertEqual((source / ".git/HEAD").read_bytes(), head)
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(prefix="rmlui-refusal-")
         self.addCleanup(self.directory.cleanup)
@@ -2405,6 +2564,7 @@ class WindowsContainmentRefusal(unittest.TestCase):
         api.SetInformationJobObject.return_value = False
         api.CloseHandle.return_value = False
         with mock.patch.object(ctypes, "WinDLL", return_value=api, create=True), \
+                mock.patch.object(ctypes, "set_last_error", create=True), \
                 mock.patch.object(ctypes, "get_last_error", return_value=0, create=True), \
                 mock.patch.object(ctypes, "WinError", side_effect=[
                     OSError("job limits refused"), OSError("job handle close refused")], create=True):

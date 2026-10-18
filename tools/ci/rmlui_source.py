@@ -236,13 +236,17 @@ class WindowsJob:
             method = getattr(self.api, function)
             method.argtypes, method.restype = arguments, result
         # JOB_OBJECT_ASSIGN_PROCESS | JOB_OBJECT_TERMINATE. No breakaway rights.
+        # A successful creation need not clear a stale ERROR_ALREADY_EXISTS.
+        if not existing:
+            ctypes.set_last_error(0)
         self.handle = (self.api.OpenJobObjectW(0x0001 | 0x0008, False, name) if existing
                        else self.api.CreateJobObjectW(None, name))
+        error = ctypes.get_last_error()
         if not self.handle:
-            raise ctypes.WinError(ctypes.get_last_error())
+            raise ctypes.WinError(error)
         try:
             if not existing:
-                require(ctypes.get_last_error() != 183, "private process job already exists")
+                require(error != 183, "private process job already exists")
                 class BasicLimits(ctypes.Structure):
                     _fields_ = [("PerProcessUserTimeLimit", ctypes.c_longlong),
                                 ("PerJobUserTimeLimit", ctypes.c_longlong),
@@ -517,7 +521,8 @@ def verify_git(source: Path, spec: Specification) -> None:
     require(all(k in allowed and v.lower() in allowed[k] for k, v in config["core"].items()), "unsafe local Git configuration")
     require(read_file(admin / "HEAD", 128) == (REVISION + "\n").encode(), "HEAD is not the detached pin")
     require(git(source, "rev-parse", "HEAD").strip().decode() == REVISION, "wrong Git revision")
-    require(git(source, "rev-parse", "HEAD^{tree}").strip().decode() == spec.data["tree"], "wrong Git tree")
+    # An empty path selects the root tree without brace metacharacters.
+    require(git(source, "rev-parse", "HEAD:").strip().decode() == spec.data["tree"], "wrong Git tree")
     expected = {name: (e["mode"], e["blob"]) for name, e in spec.files.items()}
     index = {}
     for row in git(source, "ls-files", "--stage", "-z").split(b"\0")[:-1]:
