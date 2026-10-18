@@ -559,8 +559,11 @@ void PopulatedTeardown() {
 #ifndef JPH_DISABLE_CUSTOM_ALLOCATOR
 void FactoryGrowth() {
     InitializeAllocators();
-    JPH::RTTI sentinel("Sentinel", 1, nullptr, nullptr);
-    JPH::RTTI extra("Extra", 1, nullptr, nullptr);
+    const auto destruct = +[](void* object) {
+        delete static_cast<unsigned char*>(object);
+    };
+    JPH::RTTI sentinel("Sentinel", 1, nullptr, destruct);
+    JPH::RTTI extra("Extra", 1, nullptr, destruct);
     const JPH::RTTI* additions[128];
     for (auto& entry : additions) {
         entry = &extra;
@@ -582,8 +585,15 @@ void FactoryGrowth() {
             if (ordinal == 0) {
                 measured = Allocations().attempts.load();
                 Require(measured > 0 && measured < Allocations().blocks.size());
+                // Each map reserves for 129 entries; the 128 additions share
+                // one type, so insertion needs no allocation after both reserves.
+                Require(measured == 2);
+                Require(factory.Find(extra.GetName()) == &extra);
+                Require(factory.Find(extra.GetHash()) == &extra);
             } else {
                 Require(caught && Allocations().failures.load() != 0);
+                Require(factory.Find(extra.GetName()) == nullptr);
+                Require(factory.Find(extra.GetHash()) == nullptr);
             }
             Disarm();
             Require(factory.Find(sentinel.GetName()) == &sentinel);
