@@ -12,8 +12,9 @@ import hashlib
 import json
 from pathlib import Path
 import shutil
+import stat
 
-from fixture_hash import fixture_entry_status, fixture_hash
+from fixture_hash import fixture_entries, fixture_hash
 from fixture_paths import contain_path, open_regular, path_exists, read_text, resolve_reference
 
 GATES = ("ActiveRegions", "WaterHighRes", "WeatherRain", "WeatherEvents", "AetherState")
@@ -30,6 +31,27 @@ def identity(root: Path) -> str:
     return hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
 
 
+def copy_fixture_tree(source_root: Path, destination: Path, entries) -> None:
+    """Copy only a completed bounded preflight, preserving logical aliases.
+
+    Files use verified readers as before; directories (including empty ones)
+    retain copytree's metadata semantics. No second namespace scan can discover
+    additional work after destination creation.
+    """
+    destination.mkdir(parents=True)
+    for path, _, status in entries:
+        target = destination / path.relative_to(source_root)
+        if stat.S_ISDIR(status.st_mode):
+            target.mkdir()
+        else:
+            with open_regular(source_root, path) as stream, target.open("wb") as output:
+                shutil.copyfileobj(stream, output)
+    for path, _, status in reversed(entries):
+        if stat.S_ISDIR(status.st_mode):
+            shutil.copystat(path, destination / path.relative_to(source_root))
+    shutil.copystat(source_root, destination)
+
+
 def prepare(base: Path, head: Path, receipt: Path) -> None:
     # Take the base content once. The source adapters pin lower-layer defaults,
     # including finite hydrology, which systems.json alone cannot configure.
@@ -37,11 +59,13 @@ def prepare(base: Path, head: Path, receipt: Path) -> None:
     presets = resolve_reference(base, "worlds/atlas/presets")
     # Match the canonical authority used by dependency collection and reads.
     data = resolve_reference(base, "data").resolve()
-    # Refuse unsafe source trees before copytree follows links or adapters edit
+    # Refuse unsafe source trees before copying files or adapters edit
     # either checkout. Retain dependencies outside common in the copied fixture.
     fixture_hash(common, scope="headless-server")
     dependencies: dict[str, Path] = {}
     fixture_hash(presets, reference_root=data, dependencies=dependencies)
+    common_entries = list(fixture_entries(common))
+    preset_entries = list(fixture_entries(presets))
     systems = json.loads(read_text(common, common / "systems.json", encoding="utf-8-sig"))
     schema = json.loads((head / "src/luminumbra_common/core/ConfigSchema.json").read_text(encoding="utf-8-sig"))
     # Registry fields are authored in the schema; do not omit an absent base key.
@@ -52,21 +76,8 @@ def prepare(base: Path, head: Path, receipt: Path) -> None:
         root = checkout / "perf-common"
         if root.exists():
             raise ValueError(f"refusing to replace existing fixture: {root}")
-        def copy_fixture(source, destination):
-            source = Path(source)
-            source_root = common if source.is_relative_to(common) else presets
-            with open_regular(source_root, source) as stream, Path(destination).open("wb") as output:
-                shutil.copyfileobj(stream, output)
-            return destination
-
-        def ignore_missing_placement(directory, names):
-            return [name for name in names
-                    if Path(name) == Path("placement.json")
-                    and fixture_entry_status(common, Path(directory) / name)[1] is None]
-
-        shutil.copytree(common, root / "data/common", copy_function=copy_fixture,
-                        ignore=ignore_missing_placement)
-        shutil.copytree(presets, root / "worlds/atlas/presets", copy_function=copy_fixture)
+        copy_fixture_tree(common, root / "data/common", common_entries)
+        copy_fixture_tree(presets, root / "worlds/atlas/presets", preset_entries)
         for _, path in sorted(dependencies.items()):
             # Dependencies already carry validated native paths. Reinterpreting
             # their normalized names would treat literal POSIX backslashes as

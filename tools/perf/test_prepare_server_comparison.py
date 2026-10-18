@@ -292,6 +292,93 @@ class ComparisonFixtureTest(unittest.TestCase):
             else:
                 self.fail("a child of a regular file unexpectedly has metadata")
 
+    def test_expanded_traversal_refusals_preserve_both_checkouts_and_receipt(self):
+        import fixture_hash
+        for workload in ("common", "presets", "dependencies"):
+            with self.subTest(workload=workload), tempfile.TemporaryDirectory() as temp:
+                parent = Path(temp).resolve()
+                base, head = self.comparison_checkouts(parent)
+                if workload == "dependencies":
+                    # A narrow tree with a transitive external chain. Both
+                    # individual trees fit; dependency work must share the cap.
+                    for i in range(14):
+                        name = f"extra/chain{i + 1}.json"
+                        (base / f"data/extra/chain{i}.json").write_text(json.dumps(
+                            {"generation_params": {"biomes": {"table": name}}}))
+                    (base / "data/extra/branch.json").write_text(json.dumps(
+                        {"generation_params": {"biomes": {"table": "extra/chain0.json"}}}))
+                else:
+                    root = base / ("data/common" if workload == "common" else "worlds/atlas/presets")
+                    target = root / "template"
+                    target.mkdir()
+                    (target / "empty").mkdir()
+                    # Each directory alias adds work even with no regular file.
+                    for i in range(6):
+                        link = root / f"alias{i}"
+                        directory_link(link, target)
+                try:
+                    receipt = parent / "receipt.json"
+                    before = self.tree_contents(parent)
+                    with mock.patch.object(fixture_hash, "MAX_FIXTURE_ENTRIES", 12, create=True), \
+                            self.assertRaisesRegex(ValueError, "entry budget"):
+                        comparison.prepare(base, head, receipt)
+                    self.assertEqual(before, self.tree_contents(parent))
+                    self.assertFalse(receipt.exists())
+                    self.assertFalse((base / "perf-common").exists())
+                    self.assertFalse((head / "perf-common").exists())
+                finally:
+                    if workload != "dependencies":
+                        for i in reversed(range(6)):
+                            remove_directory_link(root / f"alias{i}")
+
+    def test_bounded_copy_keeps_alias_names_empty_directories_and_identity(self):
+        with tempfile.TemporaryDirectory() as temp:
+            parent = Path(temp).resolve()
+            base, head = self.comparison_checkouts(parent)
+            common = base / "data/common"
+            target = common / "template"
+            (target / "empty").mkdir(parents=True)
+            (target / "leaf.bin").write_bytes(b"leaf")
+            links = [common / name for name in ("left", "right")]
+            try:
+                for link in links:
+                    directory_link(link, target)
+                comparison.prepare(base, head, parent / "receipt.json")
+                for checkout in (base, head):
+                    copied = checkout / "perf-common"
+                    for name in ("template", "left", "right"):
+                        folder = copied / "data/common" / name
+                        self.assertTrue((folder / "empty").is_dir())
+                        self.assertEqual((folder / "leaf.bin").read_bytes(), b"leaf")
+                        self.assertFalse(folder.is_symlink())
+                        self.assertEqual(stat.S_IMODE(folder.stat().st_mode),
+                                         stat.S_IMODE(target.stat().st_mode))
+                    self.assertEqual(comparison.identity(base / "perf-common"), comparison.identity(copied))
+                document = json.loads((parent / "receipt.json").read_text())
+                self.assertEqual(document["runs"][0]["fixture_hash"],
+                                 document["runs"][1]["fixture_hash"])
+            finally:
+                for link in reversed(links):
+                    if link.exists():
+                        remove_directory_link(link)
+
+    def test_copy_uses_completed_plan_without_rescanning_after_destination_creation(self):
+        import fixture_hash
+        with tempfile.TemporaryDirectory() as temp:
+            parent = Path(temp).resolve()
+            base, head = self.comparison_checkouts(parent)
+            original = os.scandir
+            def scan(path):
+                # All source expansion must finish before the first payload is
+                # created. Identity reads after copying may scan destinations.
+                if (base / "perf-common").exists() and Path(path).is_relative_to(base) \
+                        and not Path(path).is_relative_to(base / "perf-common"):
+                    raise AssertionError("source rescanned after destination creation")
+                return original(path)
+            with mock.patch.object(os, "scandir", side_effect=scan):
+                comparison.prepare(base, head, parent / "receipt.json")
+            self.assertTrue((parent / "receipt.json").is_file())
+
     @staticmethod
     def comparison_checkouts(parent):
         base, head = parent / "base", parent / "head"

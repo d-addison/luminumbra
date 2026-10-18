@@ -44,6 +44,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import stat
 import sys
 from pathlib import Path
@@ -127,26 +128,78 @@ def fixture_entry_status(root: Path, path: Path):
     return contained, status
 
 
-def fixture_files(root: Path) -> Iterator[tuple[Path, Path]]:
-    """Check containment before reading files or descending into directories."""
-    pending = [(root, frozenset({root.resolve()}))]
-    while pending:
-        directory, ancestors = pending.pop()
-        for path in directory.iterdir():
+# Count logical entries, including the root, directories, missing optional files,
+# excluded files and dependency edges. The shipped data tree has 207 entries at
+# depth four (common: 46; presets: nine). These conservative caps leave room for
+# ordinary additions without allowing a small directory-link graph to expand
+# indefinitely. Depth also bounds path-prefix checks and active scanner storage.
+MAX_FIXTURE_ENTRIES = 4096
+MAX_FIXTURE_DEPTH = 64
+
+
+class FixtureBudget:
+    """One hash/traversal's expanded work, charged before retaining an entry."""
+
+    def __init__(self):
+        self.remaining = MAX_FIXTURE_ENTRIES
+
+    def take(self, depth: int):
+        if self.remaining <= 0:
+            raise ValueError("fixture traversal entry budget exceeded")
+        if depth > MAX_FIXTURE_DEPTH:
+            raise ValueError("fixture traversal depth budget exceeded")
+        self.remaining -= 1
+
+
+def fixture_entries(root: Path, *, budget: FixtureBudget | None = None):
+    """Stream contained entries with O(depth) scanners and active ancestry.
+
+    No directory listing or pending ancestry copies are accumulated. At most
+    MAX_FIXTURE_DEPTH + 1 scanners are open, and every encountered name is charged
+    before status queries, optional omission, descent or yielding to a collector.
+    Logical aliases remain separate entries; only active-ancestry cycles refuse.
+    """
+    budget = budget if budget is not None else FixtureBudget()
+    budget.take(0)
+    target = root.resolve()
+    ancestors = {target}
+    stack = [(os.scandir(root), target)]
+    try:
+        while stack:
+            scanner, target = stack[-1]
+            entry = next(scanner, None)
+            if entry is None:
+                scanner.close()
+                stack.pop()
+                ancestors.remove(target)
+                continue
+            budget.take(len(stack))
+            path = Path(entry.path)
             contained, status = fixture_entry_status(root, path)
             if status is None:
                 continue
-            if stat.S_ISREG(status.st_mode):
-                yield path, contained
-            elif stat.S_ISDIR(status.st_mode):
+            if stat.S_ISDIR(status.st_mode):
                 target = contained.resolve()
                 if target in ancestors:
                     raise ValueError(f"cyclic fixture directory reference: {path}")
-                # Track ancestry, not a global visited set: each logical pool
-                # name contributes even when it aliases an existing template.
-                pending.append((path, ancestors | {target}))
+                yield path, contained, status
+                scanner = os.scandir(path)
+                stack.append((scanner, target))
+                ancestors.add(target)
+            elif stat.S_ISREG(status.st_mode):
+                yield path, contained, status
             else:
                 raise ValueError(f"fixture reference is not a regular file: {path}")
+    finally:
+        for scanner, _ in stack:
+            scanner.close()
+
+
+def fixture_files(root: Path, *, budget: FixtureBudget | None = None) -> Iterator[tuple[Path, Path]]:
+    """Check and bound all expanded work before collecting regular files."""
+    for path, contained, status in fixture_entries(root, budget=budget):
+        if stat.S_ISREG(status.st_mode):
+            yield path, contained
 
 
 def fixture_hash(root: Path, *, scope: str = "all", reference_root: Path | None = None,
@@ -160,13 +213,15 @@ def fixture_hash(root: Path, *, scope: str = "all", reference_root: Path | None 
         raise ValueError(f"unknown fixture scope: {scope}")
     digest = hashlib.sha256()
     reference_root = reference_root if reference_root is not None else root
+    budget = FixtureBudget()
     referenced: dict[str, Path] = {}
     hashed: set[Path] = set()
     if scope != "all":
         # Separate scoped identities from the existing full-tree hash format.
         digest.update(f"fixture-scope:{scope}\0".encode("ascii"))
     # Native Windows Path ordering folds case; the receipt order must not.
-    for path, contained in sorted(fixture_files(root), key=lambda item: item[0].relative_to(root).parts):
+    for path, contained in sorted(fixture_files(root, budget=budget),
+                                  key=lambda item: item[0].relative_to(root).parts):
         relative = path.relative_to(root).as_posix()
         if scope == "headless-server" and relative in SERVER_RENDER_ONLY_FILES:
             continue
@@ -181,7 +236,10 @@ def fixture_hash(root: Path, *, scope: str = "all", reference_root: Path | None 
     # included. The extension uses JSON framing to bind names, contents and
     # missing-file state without delimiter ambiguity, including unusual names.
     extra: dict[str, str | None] = {}
-    pending = list(referenced.items())
+    pending = []
+    for item in referenced.items():
+        budget.take(len(item[1].relative_to(reference_root.resolve()).parts))
+        pending.append(item)
     visited: set[str] = set()
     while pending:
         name, path = pending.pop()
@@ -194,8 +252,10 @@ def fixture_hash(root: Path, *, scope: str = "all", reference_root: Path | None 
                 extra[name] = canonical_file_digest(path, reference_root=reference_root,
                                                      dependencies=discovered,
                                                      containment_root=reference_root.resolve())
-                referenced.update(discovered)
-                pending.extend(discovered.items())
+                for item in discovered.items():
+                    budget.take(len(item[1].relative_to(reference_root.resolve()).parts))
+                    referenced[item[0]] = item[1]
+                    pending.append(item)
             else:
                 extra[name] = None
     if dependencies is not None:

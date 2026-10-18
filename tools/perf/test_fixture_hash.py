@@ -869,6 +869,201 @@ class FixtureHashTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 2)
 
 
+class FixtureTraversalTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+
+    def fanout(self, levels=3):
+        # A small real acyclic graph, also supported without Windows symlink
+        # privilege. Explicit reverse cleanup never traverses a junction target.
+        for level in range(levels + 1):
+            (self.root / str(level)).mkdir()
+        for level in range(levels):
+            for name in ("left", "right"):
+                link = self.root / str(level) / name
+                directory_link(link, self.root / str(level + 1))
+                self.addCleanup(remove_directory_link, link)
+        (self.root / str(levels) / "leaf.bin").write_bytes(b"leaf")
+        return self.root
+
+    def test_small_acyclic_fanout_bounds_expanded_work_before_hash_reads(self):
+        root = self.fanout()
+        # 27 logical directories (including root), 15 logical files.
+        with mock.patch.object(module, "MAX_FIXTURE_ENTRIES", 42, create=True):
+            admitted = module.fixture_hash(root, reference_root=self.root)
+        with mock.patch.object(module, "MAX_FIXTURE_ENTRIES", 41, create=True), \
+                mock.patch.object(module, "canonical_file_digest",
+                                  side_effect=AssertionError("read before preflight")), \
+                self.assertRaisesRegex(ValueError, "entry budget"):
+            module.fixture_hash(root, reference_root=self.root)
+        names = [p.relative_to(root).as_posix() for p, _ in module.fixture_files(root)]
+        expected = hashlib.sha256()
+        for name in sorted(names):
+            expected.update(name.encode() + b"\0" + hashlib.sha256(b"leaf").hexdigest().encode() + b"\n")
+        self.assertEqual(len(names), 15)
+        self.assertEqual(len(set(names)), 15)
+        self.assertEqual(admitted, expected.hexdigest())
+        self.assertEqual(admitted, module.fixture_hash(root, reference_root=self.root))
+
+    def test_empty_directories_are_charged_including_root(self):
+        for name in ("a", "b", "c", "d", "e"):
+            (self.root / name).mkdir()
+        with mock.patch.object(module, "MAX_FIXTURE_ENTRIES", 6, create=True):
+            self.assertEqual(module.fixture_hash(self.root), hashlib.sha256().hexdigest())
+        with mock.patch.object(module, "MAX_FIXTURE_ENTRIES", 5, create=True), \
+                self.assertRaisesRegex(ValueError, "entry budget"):
+            module.fixture_hash(self.root)
+        with mock.patch.object(module, "MAX_FIXTURE_ENTRIES", 0, create=True), \
+                self.assertRaisesRegex(ValueError, "entry budget"):
+            module.fixture_hash(self.root)
+
+    def test_missing_optional_placement_entries_are_charged(self):
+        structures = self.root / "structures"
+        structures.mkdir()
+        # Disappearing optional directory entries model the permitted missing
+        # placement fallback on both hosts, without requiring file symlinks.
+        for name in ("a", "b", "c"):
+            folder = structures / name
+            folder.mkdir()
+            (folder / "placement.json").write_text("{}")
+        original = Path.stat
+        def missing(path, *args, **kwargs):
+            if path.name == "placement.json":
+                raise FileNotFoundError(str(path))
+            return original(path, *args, **kwargs)
+        with mock.patch.object(Path, "stat", missing):
+            with mock.patch.object(module, "MAX_FIXTURE_ENTRIES", 8, create=True):
+                self.assertEqual(module.fixture_hash(self.root), hashlib.sha256().hexdigest())
+            with mock.patch.object(module, "MAX_FIXTURE_ENTRIES", 7, create=True), \
+                    self.assertRaisesRegex(ValueError, "entry budget"):
+                module.fixture_hash(self.root)
+
+    def test_scope_exclusions_are_charged_before_filtering(self):
+        for name in module.SERVER_RENDER_ONLY_FILES:
+            path = self.root / name
+            path.parent.mkdir(exist_ok=True)
+            path.write_text("{}")
+        with mock.patch.object(module, "MAX_FIXTURE_ENTRIES", 6, create=True):
+            admitted = module.fixture_hash(self.root, scope="headless-server")
+        self.assertEqual(admitted, hashlib.sha256(b"fixture-scope:headless-server\0").hexdigest())
+        with mock.patch.object(module, "MAX_FIXTURE_ENTRIES", 5, create=True), \
+                self.assertRaisesRegex(ValueError, "entry budget"):
+            module.fixture_hash(self.root, scope="headless-server")
+
+    def test_depth_boundary_and_scanners_close_on_refusal(self):
+        directory = self.root / "a" / "b" / "c"
+        directory.mkdir(parents=True)
+        (directory / "leaf.bin").write_bytes(b"leaf")
+        original = os.scandir
+        opened = []
+        def scan(path):
+            scanner = original(path)
+            opened.append(scanner)
+            return scanner
+        with mock.patch.object(module, "MAX_FIXTURE_DEPTH", 4, create=True):
+            admitted = module.fixture_hash(self.root)
+        with mock.patch.object(os, "scandir", side_effect=scan):
+            with mock.patch.object(module, "MAX_FIXTURE_DEPTH", 3, create=True), \
+                    self.assertRaisesRegex(ValueError, "depth budget"):
+                module.fixture_hash(self.root)
+            self.assertTrue(opened)
+            self.assertTrue(all(next(scanner, None) is None for scanner in opened))
+        self.assertEqual(admitted, module.fixture_hash(self.root))
+
+    def test_streaming_listing_refuses_before_inspecting_or_retaining_overflow(self):
+        for i in range(12):
+            (self.root / str(i)).write_text("{}")
+        original = module.fixture_entry_status
+        with mock.patch.object(module, "MAX_FIXTURE_ENTRIES", 4, create=True), \
+                mock.patch.object(module, "fixture_entry_status", wraps=original) as inspected, \
+                mock.patch.object(os, "listdir", side_effect=AssertionError("eager directory listing")), \
+                self.assertRaisesRegex(ValueError, "entry budget"):
+            module.fixture_hash(self.root)
+        self.assertEqual(inspected.call_count, 3)
+
+    def test_scanner_open_and_iteration_errors_propagate_and_close_ancestors(self):
+        (self.root / "child").mkdir()
+        original = os.scandir
+        for error in (PermissionError("denied"), OSError(errno.EIO, "scan failed")):
+            opened = []
+            def scan(path):
+                if Path(path).name == "child":
+                    raise error
+                scanner = original(path)
+                opened.append(scanner)
+                return scanner
+            with self.subTest(error=error), mock.patch.object(os, "scandir", side_effect=scan), \
+                    self.assertRaises(type(error)):
+                module.fixture_hash(self.root)
+            self.assertTrue(all(next(scanner, None) is None for scanner in opened))
+
+    def test_partial_scan_errors_and_abandoned_file_iterator_close_scanners(self):
+        (self.root / "leaf.bin").write_bytes(b"leaf")
+        original = os.scandir
+        opened = []
+        def scan(path):
+            scanner = original(path)
+            opened.append(scanner)
+            return scanner
+        with mock.patch.object(os, "scandir", side_effect=scan):
+            files = module.fixture_files(self.root)
+            self.assertEqual(next(files)[0], self.root / "leaf.bin")
+            files.close()
+        self.assertTrue(opened)
+        self.assertTrue(all(next(scanner, None) is None for scanner in opened))
+        class PartialScan:
+            def __init__(self, path):
+                self.scanner = original(path)
+                self.calls = 0
+                self.closed = False
+            def __next__(self):
+                self.calls += 1
+                if self.calls == 2:
+                    raise OSError(errno.EIO, "partial listing")
+                return next(self.scanner)
+            def close(self):
+                self.closed = True
+                self.scanner.close()
+        scanner = PartialScan(self.root)
+        with mock.patch.object(os, "scandir", return_value=scanner), \
+                self.assertRaisesRegex(OSError, "partial listing"):
+            module.fixture_hash(self.root)
+        self.assertTrue(scanner.closed)
+
+    def test_transitive_dependency_work_shares_tree_budget_and_preserves_output(self):
+        presets = self.root / "presets"
+        presets.mkdir()
+        document = lambda name: json.dumps({"generation_params": {"biomes": {"table": name}}})
+        (presets / "one.json").write_text(document("a.json"))
+        (self.root / "a.json").write_text(document("b.json"))
+        (self.root / "b.json").write_text(document("missing.json"))
+        dependencies = {"sentinel": self.root / "sentinel"}
+        with mock.patch.object(module, "MAX_FIXTURE_ENTRIES", 5, create=True):
+            admitted = module.fixture_hash(presets, reference_root=self.root)
+        with mock.patch.object(module, "MAX_FIXTURE_ENTRIES", 4, create=True), \
+                self.assertRaisesRegex(ValueError, "entry budget"):
+            module.fixture_hash(presets, reference_root=self.root, dependencies=dependencies)
+        self.assertEqual(dependencies, {"sentinel": self.root / "sentinel"})
+        self.assertEqual(admitted, module.fixture_hash(presets, reference_root=self.root))
+
+    def test_dependency_depth_is_checked_and_cycles_still_terminate(self):
+        presets = self.root / "presets"
+        presets.mkdir()
+        document = lambda name: json.dumps({"generation_params": {"biomes": {"table": name}}})
+        (presets / "one.json").write_text(document("a/b/leaf.json"))
+        leaf = self.root / "a/b/leaf.json"
+        leaf.parent.mkdir(parents=True)
+        leaf.write_text(document("a/b/leaf.json"))
+        with mock.patch.object(module, "MAX_FIXTURE_DEPTH", 3, create=True):
+            admitted = module.fixture_hash(presets, reference_root=self.root)
+        with mock.patch.object(module, "MAX_FIXTURE_DEPTH", 2, create=True), \
+                self.assertRaisesRegex(ValueError, "depth budget"):
+            module.fixture_hash(presets, reference_root=self.root)
+        self.assertEqual(admitted, module.fixture_hash(presets, reference_root=self.root))
+
+
 class FixtureEvidenceReaderTests(unittest.TestCase):
     def setUp(self):
         import check_residency
