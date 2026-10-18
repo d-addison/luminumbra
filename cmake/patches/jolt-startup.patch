@@ -1,0 +1,540 @@
+--- a/Jolt/Core/FixedSizeFreeList.h
++++ b/Jolt/Core/FixedSizeFreeList.h
+@@ -35,0 +36,3 @@
++
++	/// Return backed raw storage without destroying an unconstructed object.
++	inline void				ReturnStorage(uint32 inObjectIndex);
+--- a/Jolt/Core/FixedSizeFreeList.inl
++++ b/Jolt/Core/FixedSizeFreeList.inl
+@@ -31,2 +31,9 @@
+-	// Store configuration parameters
+-	mNumPages = (inMaxObjects + inPageSize - 1) / inPageSize;
++	// Round without overflowing, and keep every index distinct from the sentinel.
++	uint32 num_pages = inMaxObjects / inPageSize + uint32(inMaxObjects % inPageSize != 0);
++	if (num_pages > (cInvalidObjectIndex - 1) / inPageSize)
++		AllocationFailed();
++	CheckedMultiply(inPageSize, sizeof(ObjectStorage));
++	ObjectStorage **pages = reinterpret_cast<ObjectStorage **>(CheckedAllocation(Allocate(CheckedMultiply(num_pages, sizeof(ObjectStorage *)))));
++
++	// Publish only a complete page table. Lazy page failures are discard-only.
++	mNumPages = num_pages;
+@@ -37,3 +44 @@
+-
+-	// Allocate page table
+-	mPages = reinterpret_cast<ObjectStorage **>(Allocate(mNumPages * sizeof(ObjectStorage *)));
++	mPages = pages;
+@@ -74 +79 @@
+-					mPages[next_page] = reinterpret_cast<ObjectStorage *>(AlignedAllocate(mPageSize * sizeof(ObjectStorage), max<size_t>(alignof(ObjectStorage), JPH_CACHE_LINE_SIZE)));
++					mPages[next_page] = reinterpret_cast<ObjectStorage *>(CheckedAllocation(AlignedAllocate(CheckedMultiply(mPageSize, sizeof(ObjectStorage)), max<size_t>(alignof(ObjectStorage), JPH_CACHE_LINE_SIZE))));
+@@ -82 +87,14 @@
+-			new (&storage.mObject) Object(std::forward<Parameters>(inParameters)...);
++			// Only backed storage is returned; never rewind the concurrent cursor.
++#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
++			try
++			{
++#endif
++				new (&storage.mObject) Object(std::forward<Parameters>(inParameters)...);
++#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
++			}
++			catch (...)
++			{
++				ReturnStorage(first_free);
++				throw;
++			}
++#endif
+@@ -100 +118,14 @@
+-				new (&storage.mObject) Object(std::forward<Parameters>(inParameters)...);
++				// Only backed storage is returned; never rewind the concurrent cursor.
++#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
++				try
++				{
++#endif
++					new (&storage.mObject) Object(std::forward<Parameters>(inParameters)...);
++#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
++				}
++				catch (...)
++				{
++					ReturnStorage(first_free);
++					throw;
++				}
++#endif
+@@ -183,0 +215,8 @@
++	ReturnStorage(inObjectIndex);
++}
++
++template <typename Object>
++void FixedSizeFreeList<Object>::ReturnStorage(uint32 inObjectIndex)
++{
++	ObjectStorage &storage = GetStorage(inObjectIndex);
++
+--- a/Jolt/Core/HashTable.h
++++ b/Jolt/Core/HashTable.h
+@@ -147,0 +148,14 @@
++	/// Acquire replacement storage before changing any owning fields.
++	static KeyValue *AllocateData(size_type inMaxSize)
++	{
++		size_t bytes = CheckedMultiply(inMaxSize, sizeof(KeyValue) + 1);
++		if (bytes > std::numeric_limits<size_t>::max() - 15)
++			AllocationFailed();
++		// Fifteen mirrored control bytes bound each sixteen-bucket probe.
++		bytes += 15;
++		if constexpr (cNeedsAlignedAllocate)
++			return reinterpret_cast<KeyValue *>(CheckedAllocation(AlignedAllocate(bytes, alignof(KeyValue))));
++		else
++			return reinterpret_cast<KeyValue *>(CheckedAllocation(Allocate(bytes)));
++	}
++
+@@ -149 +163 @@
+-	void					AllocateTable(size_type inMaxSize)
++	void AllocateTable(size_type inMaxSize)
+@@ -152 +166,2 @@
+-
++		KeyValue *data = AllocateData(inMaxSize);
++		mData = data;
+@@ -155,5 +169,0 @@
+-		size_t required_size = size_t(mMaxSize) * (sizeof(KeyValue) + 1) + 15; // Add 15 bytes to mirror the first 15 bytes of the control values
+-		if constexpr (cNeedsAlignedAllocate)
+-			mData = reinterpret_cast<KeyValue *>(AlignedAllocate(required_size, alignof(KeyValue)));
+-		else
+-			mData = reinterpret_cast<KeyValue *>(Allocate(required_size));
+@@ -184,0 +195,4 @@
++		// Allocation failure leaves all old entries owned and accessible. This is
++		// not a general guarantee for throwing element moves or hash functions.
++		KeyValue *new_data = AllocateData(inNewMaxSize);
++
+@@ -195,2 +209,5 @@
+-		// Allocate new table
+-		AllocateTable(inNewMaxSize);
++		// Publish the acquired block before the existing nonallocating migration.
++		mData = new_data;
++		mMaxSize = inNewMaxSize;
++		mLoadLeft = sGetMaxLoad(inNewMaxSize);
++		mControl = reinterpret_cast<uint8 *>(mData + mMaxSize);
+@@ -489 +506,4 @@
+-		size_type max_size = GetNextPowerOf2(max<uint32>((cMaxLoadFactorDenominator * inMaxSize) / cMaxLoadFactorNumerator, 16));
++		uint64 requested_size = max<uint64>((uint64(cMaxLoadFactorDenominator) * inMaxSize) / cMaxLoadFactorNumerator, 16);
++		if (requested_size > (uint64(1) << 31))
++			AllocationFailed();
++		size_type max_size = GetNextPowerOf2(uint32(requested_size));
+--- a/Jolt/Core/JobSystemThreadPool.cpp
++++ b/Jolt/Core/JobSystemThreadPool.cpp
+@@ -9,0 +10,3 @@
++#include <condition_variable>
++#include <exception>
++#include <mutex>
+@@ -30,0 +34,16 @@
++
++// Stack-owned startup state is used only until every worker leaves the gate.
++// Notifications occur under the mutex before the final acknowledgement unlock.
++struct JobSystemThreadPool::StartupState
++{
++	enum class Decision { Pending, Run, Abort };
++	std::mutex mMutex;
++	std::condition_variable mChanged;
++	Decision mDecision = Decision::Pending;
++	uint mReady = 0;
++	uint mDeparted = 0;
++#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
++	std::exception_ptr mFailure;
++#endif
++};
++
+@@ -56 +75,6 @@
+-		inNumThreads = thread::hardware_concurrency() - 1;
++	{
++		uint hardware_threads = thread::hardware_concurrency();
++		if (hardware_threads > uint(std::numeric_limits<int>::max()))
++			AllocationFailed();
++		inNumThreads = hardware_threads > 0? int(hardware_threads - 1) : 0;
++	}
+@@ -62 +86 @@
+-	// Don't quit the threads
++	StartupState startup;
+@@ -64,11 +88,41 @@
+-
+-	// Allocate heads
+-	mHeads = reinterpret_cast<atomic<uint> *>(Allocate(sizeof(atomic<uint>) * inNumThreads));
+-	for (int i = 0; i < inNumThreads; ++i)
+-		mHeads[i] = 0;
+-
+-	// Start running threads
+-	JPH_ASSERT(mThreads.empty());
+-	mThreads.reserve(inNumThreads);
+-	for (int i = 0; i < inNumThreads; ++i)
+-		mThreads.emplace_back([this, i] { ThreadMain(i); });
++	JPH_ASSERT(mThreads.empty() && mHeads == nullptr);
++#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
++	try
++	{
++#endif
++		mHeads = reinterpret_cast<atomic<uint> *>(CheckedAllocation(Allocate(CheckedMultiply(size_t(inNumThreads), sizeof(atomic<uint>)))));
++		for (int i = 0; i < inNumThreads; ++i)
++			mHeads[i] = 0;
++
++		// Array::emplace_back counts the slot before construction. Prepare only
++		// nonthrowing, nonjoinable slots, then assign each real thread into one.
++		mThreads.reserve(size_t(inNumThreads));
++		for (int i = 0; i < inNumThreads; ++i)
++			mThreads.emplace_back();
++		for (int i = 0; i < inNumThreads; ++i)
++			mThreads[size_t(i)] = thread([this, i, &startup] { ThreadMain(i, startup); });
++
++		std::unique_lock lock(startup.mMutex);
++		startup.mChanged.wait(lock, [&startup, inNumThreads] { return startup.mReady == uint(inNumThreads); });
++#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
++		if (startup.mFailure)
++			std::rethrow_exception(startup.mFailure);
++#endif
++		startup.mDecision = StartupState::Decision::Run;
++		startup.mChanged.notify_all();
++		startup.mChanged.wait(lock, [&startup, inNumThreads] { return startup.mDeparted == uint(inNumThreads); });
++#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
++	}
++	catch (...)
++	{
++		{
++			std::lock_guard lock(startup.mMutex);
++			startup.mDecision = StartupState::Decision::Abort;
++			startup.mChanged.notify_all();
++		}
++		// Join even when creation failed before the first worker. Heads belong
++		// to this attempt and are released independently of the thread count.
++		StopThreads();
++		throw;
++	}
++#endif
+@@ -86,3 +139,0 @@
+-	if (mThreads.empty())
+-		return;
+-
+@@ -91 +142,2 @@
+-	mSemaphore.Release((uint)mThreads.size());
++	if (!mThreads.empty())
++		mSemaphore.Release((uint)mThreads.size());
+@@ -94,3 +146,3 @@
+-	for (thread &t : mThreads)
+-		if (t.joinable())
+-			t.join();
++	for (size_t index = 0; index < mThreads.size(); ++index)
++		if (mThreads[index].joinable())
++			mThreads[index].join();
+@@ -309 +361 @@
+-void JobSystemThreadPool::ThreadMain(int inThreadIndex)
++void JobSystemThreadPool::ThreadMain(int inThreadIndex, StartupState &ioStartup)
+@@ -323,4 +375,36 @@
+-	JPH_PROFILE_THREAD_START(name);
+-
+-	// Call the thread init function
+-	mThreadInitFunction(inThreadIndex);
++	bool profile_started = false;
++	bool init_completed = false;
++#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
++	std::exception_ptr failure;
++	try
++	{
++#endif
++		JPH_PROFILE_THREAD_START(name);
++#if defined(JPH_PROFILE_ENABLED) && !defined(JPH_EXTERNAL_PROFILE)
++		profile_started = ProfileThread::sGetInstance() != nullptr;
++#endif
++		mThreadInitFunction(inThreadIndex);
++		init_completed = true;
++#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
++	}
++	catch (...)
++	{
++		failure = std::current_exception();
++	}
++#endif
++
++	bool run;
++	{
++		std::unique_lock lock(ioStartup.mMutex);
++#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
++		if (failure && !ioStartup.mFailure)
++			ioStartup.mFailure = failure;
++#endif
++		++ioStartup.mReady;
++		ioStartup.mChanged.notify_all();
++		ioStartup.mChanged.wait(lock, [&ioStartup] { return ioStartup.mDecision != StartupState::Decision::Pending; });
++		run = ioStartup.mDecision == StartupState::Decision::Run;
++		++ioStartup.mDeparted;
++		ioStartup.mChanged.notify_all();
++		// No access, including notification, after this lock releases.
++	}
+@@ -330 +414 @@
+-	while (!mQuit)
++	while (run && !mQuit)
+@@ -359,3 +443,7 @@
+-	mThreadExitFunction(inThreadIndex);
+-
+-	JPH_PROFILE_THREAD_END();
++	if (init_completed)
++		mThreadExitFunction(inThreadIndex);
++
++	if (profile_started)
++	{
++		JPH_PROFILE_THREAD_END();
++	}
+--- a/Jolt/Core/JobSystemThreadPool.h
++++ b/Jolt/Core/JobSystemThreadPool.h
+@@ -66 +66,2 @@
+-	void					ThreadMain(int inThreadIndex);
++	struct StartupState;
++	void					ThreadMain(int inThreadIndex, StartupState &ioStartup);
+@@ -73,0 +75 @@
++	/// Exit callbacks must not throw. They run only after initialization succeeds.
+--- a/Jolt/Core/JobSystemWithBarrier.cpp
++++ b/Jolt/Core/JobSystemWithBarrier.cpp
+@@ -174,0 +175,3 @@
++	CheckedMultiply(inMaxBarriers, sizeof(BarrierImpl));
++	BarrierImpl *barriers = new BarrierImpl [inMaxBarriers];
++	mBarriers = barriers;
+@@ -176 +178,0 @@
+-	mBarriers = new BarrierImpl [inMaxBarriers];
+@@ -188,2 +190,2 @@
+-	for (const BarrierImpl *b = mBarriers, *b_end = mBarriers + mMaxBarriers; b < b_end; ++b)
+-		JPH_ASSERT(!b->mInUse);
++	for (uint index = 0; index < mMaxBarriers; ++index)
++		JPH_ASSERT(!mBarriers[index].mInUse);
+--- a/Jolt/Core/LockFreeHashMap.h
++++ b/Jolt/Core/LockFreeHashMap.h
+@@ -182 +182 @@
+-#include "LockFreeHashMap.inl"
++#include <Jolt/Core/LockFreeHashMap.inl>
+--- a/Jolt/Core/LockFreeHashMap.inl
++++ b/Jolt/Core/LockFreeHashMap.inl
+@@ -21,0 +22,2 @@
++	auto *store = reinterpret_cast<uint8 *>(CheckedAllocation(JPH::AlignedAllocate(inObjectStoreSizeBytes, 16)));
++	mObjectStore = store;
+@@ -23 +24,0 @@
+-	mObjectStore = reinterpret_cast<uint8 *>(JPH::AlignedAllocate(inObjectStoreSizeBytes, 16));
+@@ -123,0 +125,5 @@
++	auto *buckets = reinterpret_cast<atomic<uint32> *>(CheckedAllocation(AlignedAllocate(CheckedMultiply(inMaxBuckets, sizeof(atomic<uint32>)), 16)));
++	// Initialize before publishing ownership; bounded by the configured buckets.
++	for (uint32 index = 0; index < inMaxBuckets; ++index)
++		buckets[index].store(cInvalidHandle, memory_order_relaxed);
++	mBuckets = buckets;
+@@ -126,2 +131,0 @@
+-
+-	mBuckets = reinterpret_cast<atomic<uint32> *>(AlignedAllocate(inMaxBuckets * sizeof(atomic<uint32>), 16));
+--- a/Jolt/Core/Memory.h
++++ b/Jolt/Core/Memory.h
+@@ -6,0 +7,4 @@
++#include <cstdlib>
++#include <limits>
++#include <new>
++
+@@ -7,0 +12,26 @@
++
++/// Refuse an unsupported allocation size or failed startup allocation.
++/// Exception-disabled builds retain the fatal allocation contract.
++[[noreturn]] inline void AllocationFailed()
++{
++#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
++	throw std::bad_alloc();
++#else
++	std::abort();
++#endif
++}
++
++inline size_t CheckedMultiply(size_t inCount, size_t inSize)
++{
++	if (inSize != 0 && inCount > std::numeric_limits<size_t>::max() / inSize)
++		AllocationFailed();
++	return inCount * inSize;
++}
++
++template <class T>
++inline T *CheckedAllocation(T *inPointer)
++{
++	if (inPointer == nullptr)
++		AllocationFailed();
++	return inPointer;
++}
+@@ -32 +62 @@
+-	JPH_INLINE void *operator new (size_t inCount)												{ return JPH::Allocate(inCount); } \
++	JPH_INLINE void *operator new (size_t inCount)												{ return JPH::CheckedAllocation(JPH::Allocate(inCount)); } \
+@@ -34 +64 @@
+-	JPH_INLINE void *operator new[] (size_t inCount)											{ return JPH::Allocate(inCount); } \
++	JPH_INLINE void *operator new[] (size_t inCount)											{ return JPH::CheckedAllocation(JPH::Allocate(inCount)); } \
+@@ -36 +66 @@
+-	JPH_INLINE void *operator new (size_t inCount, std::align_val_t inAlignment)				{ return JPH::AlignedAllocate(inCount, static_cast<size_t>(inAlignment)); } \
++	JPH_INLINE void *operator new (size_t inCount, std::align_val_t inAlignment)				{ return JPH::CheckedAllocation(JPH::AlignedAllocate(inCount, static_cast<size_t>(inAlignment))); } \
+@@ -38 +68 @@
+-	JPH_INLINE void *operator new[] (size_t inCount, std::align_val_t inAlignment)				{ return JPH::AlignedAllocate(inCount, static_cast<size_t>(inAlignment)); } \
++	JPH_INLINE void *operator new[] (size_t inCount, std::align_val_t inAlignment)				{ return JPH::CheckedAllocation(JPH::AlignedAllocate(inCount, static_cast<size_t>(inAlignment))); } \
+--- a/Jolt/Core/STLAlignedAllocator.h
++++ b/Jolt/Core/STLAlignedAllocator.h
+@@ -44 +44 @@
+-		return (pointer)AlignedAllocate(inN * sizeof(value_type), N);
++		return (pointer)CheckedAllocation(AlignedAllocate(CheckedMultiply(inN, sizeof(value_type)), N));
+--- a/Jolt/Core/STLAllocator.h
++++ b/Jolt/Core/STLAllocator.h
+@@ -53 +53 @@
+-			return pointer(AlignedAllocate(inN * sizeof(value_type), alignof(T)));
++			return pointer(CheckedAllocation(AlignedAllocate(CheckedMultiply(inN, sizeof(value_type)), alignof(T))));
+@@ -55 +55 @@
+-			return pointer(Allocate(inN * sizeof(value_type)));
++			return pointer(CheckedAllocation(Allocate(CheckedMultiply(inN, sizeof(value_type)))));
+@@ -66 +66 @@
+-		return pointer(Reallocate(inOldPointer, inOldSize * sizeof(value_type), inNewSize * sizeof(value_type)));
++		return pointer(CheckedAllocation(Reallocate(inOldPointer, CheckedMultiply(inOldSize, sizeof(value_type)), CheckedMultiply(inNewSize, sizeof(value_type)))));
+--- a/Jolt/Core/Semaphore.cpp
++++ b/Jolt/Core/Semaphore.cpp
+@@ -7,0 +8,3 @@
++#include <cerrno>
++#include <stdexcept>
++#include <system_error>
+@@ -30,0 +34,4 @@
++#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
++		const int error = static_cast<int>(GetLastError());
++		throw std::system_error(error, std::system_category(), "CreateSemaphore");
++#else
+@@ -32,0 +40 @@
++#endif
+@@ -37,0 +46,4 @@
++#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
++		const int error = errno;
++		throw std::system_error(error, std::generic_category(), "sem_init");
++#else
+@@ -39,0 +52 @@
++#endif
+@@ -44,0 +58,3 @@
++#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
++		throw std::runtime_error("dispatch_semaphore_create failed without an error code");
++#else
+@@ -46,0 +63 @@
++#endif
+@@ -50,0 +68,3 @@
++#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
++		throw std::runtime_error("Platform semaphore initialization failed without an error code");
++#else
+@@ -52,0 +73 @@
++#endif
+--- a/Jolt/Core/TempAllocator.h
++++ b/Jolt/Core/TempAllocator.h
+@@ -38 +38 @@
+-		mBase(static_cast<uint8 *>(AlignedAllocate(inSize, JPH_RVECTOR_ALIGNMENT))),
++		mBase(static_cast<uint8 *>(CheckedAllocation(AlignedAllocate(inSize, JPH_RVECTOR_ALIGNMENT)))),
+--- a/Jolt/Physics/Body/BodyManager.cpp
++++ b/Jolt/Physics/Body/BodyManager.cpp
+@@ -94,3 +94,3 @@
+-	for (Body *b : mBodies)
+-		if (sIsValidBodyPointer(b))
+-			sDeleteBody(b);
++	for (size_t index = 0; index < mBodies.size(); ++index)
++		if (sIsValidBodyPointer(mBodies[index]))
++			sDeleteBody(mBodies[index]);
+@@ -113,0 +114,5 @@
++
++	// Validate startup byte counts before acquiring their storage.
++	CheckedMultiply(inMaxBodies, sizeof(Body *));
++	CheckedMultiply(inMaxBodies, sizeof(BodyID));
++	CheckedMultiply(inMaxBodies, sizeof(uint8));
+--- a/Jolt/Physics/Collision/BroadPhase/BroadPhaseQuadTree.cpp
++++ b/Jolt/Physics/Collision/BroadPhase/BroadPhaseQuadTree.cpp
+@@ -41,3 +41,5 @@
+-	uint32 num_leaves = (uint32)(mMaxBodies + 1) / 2; // Assume 50% fill
+-	uint32 num_leaves_plus_internal_nodes = num_leaves + (num_leaves + 2) / 3; // = Sum(num_leaves * 4^-i) with i = [0, Inf].
+-	mAllocator.Init(2 * num_leaves_plus_internal_nodes, 256); // We use double the amount of nodes while rebuilding the tree during Update()
++	uint64 num_leaves = (uint64(mMaxBodies) + 1) / 2; // Assume 50% fill
++	uint64 num_leaves_plus_internal_nodes = num_leaves + (num_leaves + 2) / 3; // = Sum(num_leaves * 4^-i) with i = [0, Inf].
++	if (num_leaves_plus_internal_nodes > (uint64(std::numeric_limits<uint32>::max()) - 1) / 2)
++		AllocationFailed();
++	mAllocator.Init(uint32(2 * num_leaves_plus_internal_nodes), 256); // We use double the amount of nodes while rebuilding the tree during Update()
+@@ -45,0 +48 @@
++	CheckedMultiply(mNumLayers, sizeof(QuadTree));
+--- a/Jolt/Physics/Collision/BroadPhase/BroadPhaseQuadTree.h
++++ b/Jolt/Physics/Collision/BroadPhase/BroadPhaseQuadTree.h
+@@ -81,2 +81,2 @@
+-	QuadTree *				mLayers;
+-	uint					mNumLayers;
++	QuadTree *				mLayers = nullptr;
++	uint					mNumLayers = 0;
+--- a/Jolt/Physics/Collision/BroadPhase/QuadTree.cpp
++++ b/Jolt/Physics/Collision/BroadPhase/QuadTree.cpp
+@@ -156 +156,12 @@
+-	// Get rid of any nodes that are still to be freed
++	// Test the raw sentinel before tagged NodeID conversion or allocator access.
++	RootNode &root_node = GetCurrentRoot();
++	if (root_node.mIndex.load(memory_order_relaxed) == cInvalidNodeIndex)
++	{
++		JPH_ASSERT(mRootNode[mRootNodeIndex ^ 1].mIndex == cInvalidNodeIndex);
++		JPH_ASSERT(mFreeNodeBatch.mNumObjects == 0);
++		JPH_ASSERT(mNumBodies == 0);
++		return;
++	}
++	JPH_ASSERT(mAllocator != nullptr);
++
++	// Retired batches contain replaced nodes, not the retained active subtrees.
+@@ -159,4 +170,4 @@
+-	// Get the current root node
+-	const RootNode &root_node = GetCurrentRoot();
+-
+-	// Collect all bodies
++	// Quiescent destruction: reuse parent fields as a pending list. Old parent
++	// links are unreliable after insertion or rebuilding and are never followed.
++	uint32 pending = root_node.mIndex.exchange(cInvalidNodeIndex);
++	mAllocator->Get(pending).mParentNodeIndex = cInvalidNodeIndex;
+@@ -164,27 +175,16 @@
+-	Array<NodeID, STLLocalAllocator<NodeID, cStackSize>> node_stack;
+-	node_stack.reserve(cStackSize);
+-	node_stack.push_back(root_node.GetNodeID());
+-	JPH_ASSERT(node_stack.front().IsValid());
+-	if (node_stack.front().IsNode())
+-	{
+-		do
+-		{
+-			// Process node
+-			NodeID node_id = node_stack.back();
+-			node_stack.pop_back();
+-			JPH_ASSERT(!node_id.IsBody());
+-			uint32 node_idx = node_id.GetNodeIndex();
+-			const Node &node = mAllocator->Get(node_idx);
+-
+-			// Recurse and get all child nodes
+-			for (NodeID child_node_id : node.mChildNodeID)
+-				if (child_node_id.IsValid() && child_node_id.IsNode())
+-					node_stack.push_back(child_node_id);
+-
+-			// Mark node to be freed
+-			mAllocator->AddObjectToBatch(free_batch, node_idx);
+-		}
+-		while (!node_stack.empty());
+-	}
+-
+-	// Now free all nodes
++	while (pending != cInvalidNodeIndex)
++	{
++		uint32 node_index = pending;
++		Node &node = mAllocator->Get(node_index);
++		// Cache before the separate free-list link can be overwritten.
++		pending = node.mParentNodeIndex.load(memory_order_relaxed);
++		for (NodeID child : node.mChildNodeID)
++			if (child.IsValid() && child.IsNode())
++			{
++				uint32 child_index = child.GetNodeIndex();
++				mAllocator->Get(child_index).mParentNodeIndex = pending;
++				pending = child_index;
++			}
++		mAllocator->AddObjectToBatch(free_batch, node_index);
++	}
++	// Four child checks per owned node; O(nodes) time and O(1) extra storage.
+--- a/Jolt/Physics/IslandBuilder.cpp
++++ b/Jolt/Physics/IslandBuilder.cpp
+@@ -33,0 +34,7 @@
++	// Link each body to itself before publishing the completed array.
++	JPH_ASSERT(mBodyLinks == nullptr);
++	CheckedMultiply(inMaxActiveBodies, sizeof(BodyLink));
++	BodyLink *links = new BodyLink [inMaxActiveBodies];
++	for (uint32 i = 0; i < inMaxActiveBodies; ++i)
++		links[i].mLinkedTo.store(i, memory_order_relaxed);
++	mBodyLinks = links;
+@@ -35,6 +41,0 @@
+-
+-	// Link each body to itself, BuildBodyIslands() will restore this so that we don't need to do this each step
+-	JPH_ASSERT(mBodyLinks == nullptr);
+-	mBodyLinks = new BodyLink [mMaxActiveBodies];
+-	for (uint32 i = 0; i < mMaxActiveBodies; ++i)
+-		mBodyLinks[i].mLinkedTo.store(i, memory_order_relaxed);

@@ -1,0 +1,118 @@
+{
+  "version": 1,
+  "repository": "https://github.com/jrouwe/JoltPhysics.git",
+  "revision": "0373ec0dd762e4bc2f6acdb08371ee84fa23c6db",
+  "tag": "v5.3.0",
+  "patch": "jolt-startup.patch",
+  "sha256": "191e45b23cf749e4af21a69fe42ed98538a6bcf2bfe6f486ed8a71b6b8fea5a0",
+  "files": [
+    {
+      "path": "Jolt/Core/FixedSizeFreeList.h",
+      "before": "f6603a650b0894ac324c1fabde1d0a3d2386ae32ec822d833c37be510bce8109",
+      "after": "ae8e66d645ee89133af31c51591fc2d0e452d476044cb2d2589c5a7642154c87",
+      "mode": "100644"
+    },
+    {
+      "path": "Jolt/Core/FixedSizeFreeList.inl",
+      "before": "2980848ae1d1dfe1388112329cf7944984d1c45b0068ebaf6d30a54b08eabc3b",
+      "after": "8650da4b65ee984c92049d1e74b0e03a54a6f2acdb643d29ccfb8e4484f1b1ac",
+      "mode": "100644"
+    },
+    {
+      "path": "Jolt/Core/HashTable.h",
+      "before": "4047af63d37e20c55d833086eccd4a6413df5f7d330d2ad85fe68f4114d99ab0",
+      "after": "d52ab780308f39e6dc0f0ba803becfbb657e65a32631e693be04af01308b50fa",
+      "mode": "100644"
+    },
+    {
+      "path": "Jolt/Core/JobSystemThreadPool.cpp",
+      "before": "c342499f68b988ea6d3a175e859a70ad07a704cc05b088e8b630e209283e9dd5",
+      "after": "b8064efb89ddbfad73af5af18aa4c4f3a4b9db71e59e78fd3304ae42c5828c71",
+      "mode": "100644"
+    },
+    {
+      "path": "Jolt/Core/JobSystemThreadPool.h",
+      "before": "d263a2617008982850d8459c2672876dea0a3083b9284f1489d54bcf1b5e6578",
+      "after": "e6d8ddf6b9476276c20214e78391bc930c1e448d44fef6435b3632ecd019f060",
+      "mode": "100644"
+    },
+    {
+      "path": "Jolt/Core/JobSystemWithBarrier.cpp",
+      "before": "717b69903662d6b1428cc025bfe193656514bac8d4ad74235d1be5a75b668f7e",
+      "after": "0d94b17932d6b9d87d8c277c73ba5096f5644daf54e60ecacc3ab8f73fbe05b2",
+      "mode": "100644"
+    },
+    {
+      "path": "Jolt/Core/LockFreeHashMap.h",
+      "before": "59afd2d147f6334cd51a32ab67161467bfde1637b0c62cd6193c7b940593fb97",
+      "after": "d1cf38e15681911d0cdf0a0f7af0a1e9123e37d6e1166086b5de08306b6ecbeb",
+      "mode": "100644"
+    },
+    {
+      "path": "Jolt/Core/LockFreeHashMap.inl",
+      "before": "32a6025e87e8a53a7e565f88b67862be92b390610ea8ae000d6fbebb202cfab6",
+      "after": "27d2cd3914805352ba1a3dbeecaf8bf6b675426ac698bc56e50944bb14004834",
+      "mode": "100644"
+    },
+    {
+      "path": "Jolt/Core/Memory.h",
+      "before": "5fa2d0af9fe575a705e679c27f66da73727c50a46f4f1cf4107cdd043d716315",
+      "after": "ab9e48e157a4e9a2c19f83b8b730e2dfa1e62b6fb9ed6795d1bb276330b87f91",
+      "mode": "100644"
+    },
+    {
+      "path": "Jolt/Core/STLAlignedAllocator.h",
+      "before": "0e959b8757fd43f33ebe142eccc8d13c42defaa0fbaf62d76ed798655be9a560",
+      "after": "2a2408d5e56b5502ce580131cd93c573e0404e05e98f11a431264eeac7580e35",
+      "mode": "100644"
+    },
+    {
+      "path": "Jolt/Core/STLAllocator.h",
+      "before": "414f41d34670d103f4bedecabc443c35ea2a37d10dae0a40fa4e18e4ecc369fb",
+      "after": "7d406f767458eb4b39e7aa93855587844e7963a6f380deaf6ee34e83116cb403",
+      "mode": "100644"
+    },
+    {
+      "path": "Jolt/Core/Semaphore.cpp",
+      "before": "0cbeb380b3e3ecca4b654cfd0709b9f6235d0fc8f9f2254439409b7017b167ed",
+      "after": "4cee6e632ba07434995ec1291704231ea0bee71d68a96333b9ecf0d826a1a7b2",
+      "mode": "100644"
+    },
+    {
+      "path": "Jolt/Core/TempAllocator.h",
+      "before": "ee9da67a488c3f26c0c44c10b6341202a0d0a6446c048d9802e729b96198b4ea",
+      "after": "2ec3219b626b0990e4e866fd876191db79ea281e6616e8d5c305f857e838eb61",
+      "mode": "100644"
+    },
+    {
+      "path": "Jolt/Physics/Body/BodyManager.cpp",
+      "before": "2af51058f9a35c57a416136310feeb345404774e59fea2a9d00b0ae17e68db5d",
+      "after": "395232cf0dfe872f15e9aafaaaca1818748bbc41870d7c87cf3618670e4a8758",
+      "mode": "100644"
+    },
+    {
+      "path": "Jolt/Physics/Collision/BroadPhase/BroadPhaseQuadTree.cpp",
+      "before": "19687babe19073e7e361e683ed36c985ab61bc9822b55a816456bf81a8676805",
+      "after": "7109a608765ed83a097735b989bac8e081b592e14189a1ac2fdd6554417c5390",
+      "mode": "100644"
+    },
+    {
+      "path": "Jolt/Physics/Collision/BroadPhase/BroadPhaseQuadTree.h",
+      "before": "9e5f4c961ee1468f65b302d95795020e752d41822be6a34a38bbffb1eb74ce9f",
+      "after": "855f12ba504294d511ce4005475246f8fe832a709fff7afa522493cab94ae758",
+      "mode": "100644"
+    },
+    {
+      "path": "Jolt/Physics/Collision/BroadPhase/QuadTree.cpp",
+      "before": "27429ba323d4aca694074a61e4574f404dcb48db4f4f872d47bc4c200168ee80",
+      "after": "fb42919bf3d6c7d3fe65d6ee189908a4be96512c72cb36db55c31faafd3b77f6",
+      "mode": "100644"
+    },
+    {
+      "path": "Jolt/Physics/IslandBuilder.cpp",
+      "before": "81ac69ad8dfdd64ad32cddd1ab6292ef6f4400f463a438b7594b0b5e32c4441e",
+      "after": "2141ab8b57f906f728139acd3a0c76ab7650e8bf90b4460c3757014a9f48cb4c",
+      "mode": "100644"
+    }
+  ]
+}

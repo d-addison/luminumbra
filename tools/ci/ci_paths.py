@@ -23,6 +23,7 @@ PYTHON_TESTS = (
     "tools/ci/test_check_docs.py",
     "tools/ci/test_changed_tus.py",
     "tools/ci/test_offline_deps.py",
+    "tools/ci/test_jolt_startup.py",
     "tools/ci/test_local_check_contracts.py",
     "tools/ci/test_check_ctest_junit.py",
     "tools/ci/test_qualification_capture.py",

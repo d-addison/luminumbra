@@ -3668,6 +3668,28 @@
           "ref": "docs/engine-guide.md"
         }
       ]
+    },
+    {
+      "id": "iss.553-dependency-startup",
+      "source": "issue #553",
+      "statement": "A revision-bound Jolt startup patch uses a read-only source overlay and registered actual-dependency failure-injection regressions. Native ownership and platform qualification remain pending; first-party startup and world adoption are separate work.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "JoltStartupPatchContract"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/jolt-startup.md"
+        },
+        {
+          "kind": "ctest",
+          "ref": "JoltStartup.MeasuredNullThrowAndUnwindSweep",
+          "planned": "Run actual-dependency failure and mutation controls with generated build owners; owner: physics"
+        }
+      ],
+      "requirements": []
     }
   ]
 }

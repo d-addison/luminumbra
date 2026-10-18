@@ -191,6 +191,8 @@ endif()
 
 # Jolt: ensure <Jolt/...> resolves from the fetched source root.
 if (TARGET Jolt)
+  include("${CMAKE_CURRENT_LIST_DIR}/../cmake/jolt_startup.cmake")
+  luminumbra_prepare_jolt_startup("${joltphysics_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/jolt-startup")
   target_include_directories(Jolt PUBLIC $<BUILD_INTERFACE:${joltphysics_SOURCE_DIR}>)
   if(MSVC)
     # Visual Studio 18 emits C4865 from Windows SDK display enums included by
