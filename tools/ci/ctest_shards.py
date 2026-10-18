@@ -118,6 +118,13 @@ def validate_union(names, parts):
 
 def partition(all_tests, eligible, profile="gcc", timings=None):
     inventory({"tests": all_tests})
+    return _partition_validated(all_tests, eligible, profile, timings)
+
+
+def _partition_validated(all_tests, eligible, profile="gcc", timings=None):
+    # Only plan may bypass public validation: its freshly parsed graph is owned
+    # by this call and all aliases remain read-only until partitioning finishes.
+    # Never retain this mutable graph in a global or cross-call cache.
     names = [test["name"] for test in all_tests]
     require(eligible and len(eligible) == len(set(eligible)) and set(eligible) <= set(names),
             "empty, duplicate or unknown eligible tests")
@@ -241,7 +248,7 @@ def plan(directory, shard, profile="gcc", timings=None, selection=None):
             "discovery CTest execution inventory differs between inventories")
     selected = select_tests(tests, profile, selection)
     require(shard != 0 or selection in (None, "full"), "qualification requires full selection")
-    parts = [selected] if shard == 0 else partition(all_tests, selected, profile, timings)
+    parts = [selected] if shard == 0 else _partition_validated(all_tests, selected, profile, timings)
     # Reuse identity only within this call: tests and roots must remain unchanged
     # after independent discovery validation, including during selection/partition.
     manifest = {**validated, "selection": selection, "timings": timings or {},

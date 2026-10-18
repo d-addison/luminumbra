@@ -2218,9 +2218,28 @@ class CachedGitSafetyTests(unittest.TestCase):
         metadata.parent.mkdir()
         (nested / ".git").rename(metadata)
         (nested / ".git").write_text("gitdir: ../.git/modules/nested\n")
-        self.write_lock()
+        # Known heads belong to this fixture; rediscovery is tested immediately
+        # below, after this construction-only guard has been removed.
+        with patch.object(deps, "submodules", side_effect=AssertionError("fixture rediscovered submodules")):
+            identity = {
+                "commit": deps.head(self.source, self.cache),
+                "sha256": deps.source_digest(self.source),
+                "submodules": {nested.name: nested_head, nested.name + "/child": child_head},
+            }
+            self.save_lock(identity)
         self.assertEqual(deps.submodules(self.source, self.cache),
                          {nested.name: nested_head, nested.name + "/child": child_head})
+        # Verify the expected lock bytes without repeating recursive Git work.
+        # The real verify below independently rechecks the fresh root identity.
+        golden = deps.unresolved_lock(self.root)
+        golden["status"] = "resolved"
+        golden["dependencies"]["sample"].update(identity)
+        expected_lock = self.base / "expected lock.json"
+        expected_lock.write_text(json.dumps(golden))
+        self.assertEqual(self.lock.read_bytes(), expected_lock.read_bytes())
+        self.assertNotEqual(identity["commit"], self.template_identity["commit"])
+        self.assertEqual(list(json.loads(self.lock.read_text())["dependencies"]["sample"]["submodules"]),
+                         [nested.name, nested.name + "/child"])
         deps.verify(self.root, self.cache, self.lock)
         self.git(child, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.org",
                  "-c", "commit.gpgSign=false", "-c", "maintenance.auto=false",
@@ -2627,5 +2646,20 @@ class WindowsReparseMetadataTests(unittest.TestCase):
             probe.assert_not_called()
 
 
+class CaseProgressResult(unittest.TextTestResult):
+    def startTest(self, case):
+        super().startTest(case)
+        print(f"\nCASE START {case.id()}", file=sys.stderr, flush=True)
+
+    def stopTest(self, case):
+        # FINISH records completion, including failures, errors and skips.
+        print(f"\nCASE FINISH {case.id()}", file=sys.stderr, flush=True)
+        super().stopTest(case)
+
+
+class CaseProgressRunner(unittest.TextTestRunner):
+    resultclass = CaseProgressResult
+
+
 if __name__ == "__main__":
-    unittest.main()
+    unittest.main(testRunner=CaseProgressRunner)
