@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location("ci_paths", ROOT / "tools/ci/ci_paths.py")
@@ -137,7 +138,7 @@ class RegistrationTests(unittest.TestCase):
                 self.assertEqual(policy.value(run, "shell", 8), "bash")
                 self.assertEqual(policy.value(run, "id", 8), "local-contracts")
                 self.assertEqual(policy.value(run, "run", 8).splitlines(), [
-                    "cmake -S tools/ci/contracts -B build/local-check-contracts -G Ninja",
+                    f"cmake -S tools/ci/contracts -B build/local-check-contracts -G Ninja \"-DPython3_EXECUTABLE=$({python} -I -B -c 'import sys; print(sys.executable)')\"",
                     "ctest --test-dir build/local-check-contracts --show-only=json-v1 > build/local-check-contracts/ctest-discovery.json",
                     'ctest --test-dir build/local-check-contracts --no-tests=error --parallel 4 --output-on-failure --output-junit "$LOCAL_CHECK_JUNIT"',
                     f'{python} -I -B tools/ci/check_ctest_junit.py "$LOCAL_CHECK_JUNIT" --minimum-tests 2 --require-test ChangedTranslationUnitsContract --require-test OfflineDependenciesContract',
@@ -151,6 +152,51 @@ class RegistrationTests(unittest.TestCase):
                 self.assertIn("${{ github.sha }}", upload)
                 self.assertLess(jobs[job].index(run), jobs[job].index(upload))
         self.assertNotIn("paths:", workflow.split("permissions:", 1)[0])
+
+    def test_hosted_route_contract_rejects_missing_and_wrong_platform_interpreters(self):
+        workflow_path = ROOT / ".github/workflows/ci.yml"
+        workflow = workflow_path.read_text(encoding="utf-8")
+        jobs = policy.jobs(workflow)
+        read_text = Path.read_text
+        for job, python, other_python in (("linux", "python3", "python"),
+                                          ("windows-msvc", "python", "python3")):
+            steps = {step.splitlines()[0].removeprefix("      - name: "): step
+                     for step in policy.steps(jobs[job])}
+            run = steps["Run registered local-check deadlines"]
+            configure = policy.value(run, "run", 8).splitlines()[0]
+            without_binding, binding = configure.rsplit(' "-DPython3_EXECUTABLE=', 1)
+            self.assertTrue(binding)
+            interpreter = f"$({python} -I -B -c "
+            self.assertEqual(configure.count(interpreter), 1)
+            wrong_binding = configure.replace(interpreter, f"$({other_python} -I -B -c ", 1)
+            for defect, replacement in (("missing", without_binding), ("wrong platform", wrong_binding)):
+                with self.subTest(job=job, defect=defect):
+                    changed_run = run.replace(configure, replacement, 1)
+                    self.assertNotEqual(changed_run, run)
+                    self.assertEqual(workflow.count(run), 1)
+                    candidate = workflow.replace(run, changed_run, 1)
+
+                    def read_workflow(path, *args, **kwargs):
+                        if path == workflow_path:
+                            return candidate
+                        return read_text(path, *args, **kwargs)
+
+                    # Feed the mutated shipping step through the existing exact
+                    # route contract and real policy parser; never run its shell.
+                    result = unittest.TestResult()
+                    with patch.object(Path, "read_text", read_workflow):
+                        inner_case = RegistrationTests(
+                            "test_both_hosted_routes_execute_registered_deadlines_and_keep_failure_evidence"
+                        )
+                        inner_case.maxDiff = None
+                        inner_case.run(result)
+                    self.assertEqual(result.testsRun, 1)
+                    self.assertEqual(result.errors, [])
+                    self.assertEqual(result.skipped, [])
+                    self.assertEqual(len(result.failures), 1)
+                    rejected, message = result.failures[0]
+                    self.assertIn(f"job='{job}'", rejected.id())
+                    self.assertIn("-DPython3_EXECUTABLE=", message)
 
     def test_local_check_artifacts_are_distinct_for_both_platforms_and_every_shard(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
