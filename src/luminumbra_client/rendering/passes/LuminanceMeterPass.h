@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../AsyncReadbackRing.h"
+#include "../AttributedGl.h"
 #include "../RenderContext.h"
 
 #include <filesystem>
@@ -9,7 +10,7 @@
 namespace Luminumbra::Rendering {
 
 // Shared compute-program helper used by the luminance meter and froxel passes.
-GLuint create_compute_program(const char* compute_source);
+AttributedGl::Program create_compute_program(const char* compute_source);
 
 // GPU auto-exposure metering pass extracted from RenderPipeline. Its compute
 // program, reduction SSBO, and asynchronous readback ring are pass-owned; the
@@ -31,7 +32,7 @@ public:
     void destroy();
 
 private:
-    u32 m_reduce_program = 0;
+    AttributedGl::Program m_reduce_program{};
     u32 m_reduce_ssbo = 0;
     AsyncReadbackRing m_readback;
 };

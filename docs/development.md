@@ -157,6 +157,15 @@ additional execution fields; only diagnostic backtrace IDs are excluded.
 Source and build roots are recorded in partition evidence and included in the
 inventory digest. Both producers must record byte-identical roots; different
 roots refuse merging, independently of the aggregate's artifact download path.
+Execution must also reproduce the exact source and build roots recorded at planning;
+case, separator, trailing-slash and drive-spelling differences refuse execution.
+Each lane's shard matrix uses the same hosted runner image and default checkout
+location. Discovery, planning and execution share one test step: PowerShell for
+MSVC, the MSYS2 UCRT64 shell and native Python for UCRT64, and Bash for GCC/ASan.
+No step switches the checkout between short/long Windows paths or MSYS and
+Windows spellings. The aggregate compares the recorded producer roots, including
+when Windows evidence is downloaded on Linux; it does not resolve those roots on
+the aggregate host.
 Execution strings are compared byte for byte, including paths, case-sensitive
 regexes, literal environment values and quoted or nested assignments containing
 roots. The fresh execution discovery uses the same contract, so

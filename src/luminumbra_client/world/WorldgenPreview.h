@@ -99,8 +99,9 @@ public:
     // Candidate params source. set_candidate stores the resolved preset JSON +
     // the data root and marks a pending rebuild (debounced in tick). Latest
     // call wins. data_root is the absolute path to data/ so biome/structure
-    // tables resolve correctly (the in-memory seam, not a temp file).
-    void set_candidate(const nlohmann::json& resolved_preset_json,
+    // tables resolve correctly (the in-memory seam, not a temp file). Returns
+    // whether parsing admitted this request, independently of an older build.
+    bool set_candidate(const nlohmann::json& resolved_preset_json,
                        const std::filesystem::path& data_root,
                        int seed);
     // Directly set fixed params (tests / callers that already hold params). Marks
@@ -173,6 +174,12 @@ public:
 
     bool world_ready() const {
         return m_world != nullptr;
+    }
+    // Render-thread readiness for the current request. A retained older world
+    // remains drawable while a replacement is debouncing, building or refused.
+    bool candidate_ready() const {
+        return world_ready() && !m_pending_dirty && !m_build_inflight.load() &&
+               !m_last_build_failed;
     }
     bool last_build_failed() const {
         return m_last_build_failed;
