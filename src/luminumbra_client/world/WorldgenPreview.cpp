@@ -1,7 +1,9 @@
 #include "world/WorldgenPreview.h"
+#include "app/FrameAttribution.h"
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -144,7 +146,7 @@ void WorldgenPreview::ensure_target(int width, int height) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
-void WorldgenPreview::set_candidate(const nlohmann::json& resolved_preset_json,
+bool WorldgenPreview::set_candidate(const nlohmann::json& resolved_preset_json,
                                     const std::filesystem::path& data_root,
                                     int seed) {
     // Build candidate TerrainGenParams IN MEMORY via the additive loader seam,
@@ -157,11 +159,12 @@ void WorldgenPreview::set_candidate(const nlohmann::json& resolved_preset_json,
         m_last_error =
             result.errors.empty() ? "candidate preset parse failed" : result.errors.front();
         LUMINUMBRA_CORE_WARN("WorldgenPreview candidate parse failed: {}", m_last_error);
-        return;
+        return false;
     }
     // Remember the data root so the foliage scatter set resolves.
     m_data_root = data_root;
     set_params(result.params, seed);
+    return true;
 }
 
 void WorldgenPreview::set_params(const Systems::TerrainGenParams& params, int seed) {
@@ -276,13 +279,23 @@ void WorldgenPreview::build_world_pending() {
     m_pending_water =
         std::make_unique<Systems::WaterSystem>(/*job_system*/ nullptr, m_pending_world.get());
     m_pending_world->SetWaterSystem(m_pending_water.get());
-    m_pending_world->EnsureSurfaceReadyNear(
-        look_at_center(), m_physics.get(), kSurfaceRadius, kCollisionRadius, kRenderLod0Radius);
+    if (!m_pending_world->EnsureSurfaceReadyNear(look_at_center(),
+                                                 m_physics.get(),
+                                                 kSurfaceRadius,
+                                                 kCollisionRadius,
+                                                 kRenderLod0Radius)) {
+        // Publish a refused candidate without updating it or replacing the live world.
+        m_pending_water.reset();
+        m_pending_world.reset();
+        return;
+    }
     // Pull the streamed chunks into the renderable set (into the PENDING registry).
     m_pending_world->update(m_pending_registry, look_at_center(), m_physics.get());
 }
 
 void WorldgenPreview::swap_pending_into_live(Rendering::RenderPipeline& pipeline) {
+    const Luminumbra::Client::Attribution::PhaseScope phase_scope(
+        Luminumbra::Client::Attribution::Phase::PreviewAdoption);
     // GL/MAIN THREAD. Called only after observing m_build_done == true, at which
     // point the worker is BLOCKED (its loop waits for m_build_done to clear before
     // touching pending again), so the main thread solely owns the pending members
@@ -295,20 +308,28 @@ void WorldgenPreview::swap_pending_into_live(Rendering::RenderPipeline& pipeline
     // reintroduces the create-screen pan use-after-free. prepare_world_swap waits
     // the FarLodSystem build handles + the  far pass, then nulls their
     // world pointer; the next render_frame re-adopts the freshly-swapped world.
-    pipeline.prepare_world_swap();
+    if (m_pending_world) {
+        pipeline.prepare_world_swap();
 
-    m_water.reset();
-    m_world = std::move(m_pending_world);
-    m_water = std::move(m_pending_water);
-    m_registry = std::move(m_pending_registry);
-    m_pending_registry.clear();
-    m_pending_world.reset();
-    m_pending_water.reset();
+        m_water.reset();
+        m_world = std::move(m_pending_world);
+        m_water = std::move(m_pending_water);
+        m_registry = std::move(m_pending_registry);
+        m_pending_registry.clear();
+        m_pending_world.reset();
+        m_pending_water.reset();
 
-    m_built_once = true;
-    m_last_build_failed = false;
-    m_last_error.clear();
-    ++m_rebuild_generation; // render-only: the foliage rebuild + tests key off this
+        m_built_once = true;
+        m_last_build_failed = false;
+        m_last_error.clear();
+        ++m_rebuild_generation; // render-only: the foliage rebuild + tests key off this
+    } else {
+        m_last_build_failed = true;
+        m_last_error = "Surface preparation exceeds the supported work budget";
+        // A first-candidate refusal waits for an explicit new candidate, just like
+        // a refused replacement; rendering must not repeatedly enqueue it.
+        m_first_build_requested = true;
+    }
 
     // Release the worker: clear done + wake it so it may start any queued build
     // (it only resumes touching pending now that we've moved it out). A build is
@@ -372,9 +393,6 @@ void WorldgenPreview::rebuild_foliage_if_needed(Rendering::RenderPipeline& pipel
     if (m_world == nullptr) {
         return;
     }
-    if (m_last_foliage_generation == m_rebuild_generation) {
-        return; // already built for this world rebuild
-    }
     Rendering::FoliagePass* foliage = pipeline.foliage();
     if (foliage == nullptr) {
         m_last_foliage_generation = m_rebuild_generation; // no pass -> nothing to do, don't retry
@@ -386,11 +404,20 @@ void WorldgenPreview::rebuild_foliage_if_needed(Rendering::RenderPipeline& pipel
     // common/foliage/. If we never received a data root (pure set_params caller),
     // skip the load — the pass stays disabled and renders no foliage.
     if (!m_foliage_loaded && !m_data_root.empty()) {
-        if (foliage->load_scatter_set(m_data_root / "common/foliage/scatter_set.json")) {
-            foliage->set_fade_distances(kFoliageFadeStartM, kFoliageFadeEndM);
-            foliage->set_density_scale(kFoliagePreviewDensityScale);
-        }
+        foliage->load_scatter_set(m_data_root / "common/foliage/scatter_set.json");
         m_foliage_loaded = true; // attempt once; on failure the pass stays empty
+    }
+
+    // Both preview render paths retain the same look after re-entry or a live
+    // preset change. Equal setters are no-ops, so unchanged frames keep caches.
+    // The host restores resolved gameplay values before rendering another view.
+    if (m_foliage_loaded && foliage->archetype_count() != 0) {
+        foliage->set_enabled(true);
+        foliage->set_fade_distances(kFoliageFadeStartM, kFoliageFadeEndM);
+        foliage->set_density_scale(kFoliagePreviewDensityScale);
+    }
+    if (m_last_foliage_generation == m_rebuild_generation) {
+        return; // already built for this world rebuild
     }
 
     // Build the per-chunk scatter inputs from the live world's renderable chunks —
@@ -556,6 +583,7 @@ void WorldgenPreview::clear_precipitation(Rendering::RenderPipeline& pipeline) {
 }
 
 bool WorldgenPreview::render(Rendering::RenderPipeline& pipeline, float dt) {
+    const Attribution::PhaseScope scene_phase(Attribution::Phase::MenuScene);
     if (!m_active)
         return false;
     m_drain_pipeline =
@@ -615,6 +643,7 @@ bool WorldgenPreview::render(Rendering::RenderPipeline& pipeline, float dt) {
 }
 
 bool WorldgenPreview::render_to_backbuffer(Rendering::RenderPipeline& pipeline, float dt) {
+    const Attribution::PhaseScope scene_phase(Attribution::Phase::MenuScene);
     if (!m_active)
         return false;
     m_drain_pipeline =

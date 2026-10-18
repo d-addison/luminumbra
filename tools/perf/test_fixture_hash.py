@@ -268,6 +268,114 @@ class FixtureHashTests(unittest.TestCase):
                 with self.assertRaises(OSError):
                     os.fstat(descriptor)
 
+    def test_missing_optional_placement_matches_contained_dangling_link(self):
+        # The native loader uses compiled defaults for both forms of absence.
+        common = self.root / "common"
+        write(common, "structures/cairn/cairn.json", '{"weight":1}')
+        placement = common / "structures/cairn" / ("PLACEMENT.JSON" if os.name == "nt" else "placement.json")
+        roots = (common, self.root)
+        before = {(str(root), scope): module.fixture_hash(root, scope=scope)
+                  for root in roots for scope in module.SCOPES}
+        # A junction exercises the same dangling status without Windows symlink
+        # privilege; on POSIX this is a real symbolic link.
+        directory_link(placement, placement.parent / "missing.json")
+        try:
+            self.assertFalse(placement.exists())
+            for root in roots:
+                for scope in module.SCOPES:
+                    with self.subTest(root=root, scope=scope):
+                        self.assertEqual(module.fixture_hash(root, scope=scope),
+                                         before[str(root), scope])
+        finally:
+            remove_directory_link(placement)
+        self.assertTrue((common / "structures/cairn/cairn.json").is_file())
+        placement.write_text('{"spacing":96}')
+        for root in roots:
+            for scope in module.SCOPES:
+                self.assertNotEqual(module.fixture_hash(root, scope=scope),
+                                    before[str(root), scope])
+
+    def test_missing_optional_placement_uses_native_filename_case_rules(self):
+        for grammar in (PurePosixPath, PureWindowsPath):
+            root = grammar("data")
+            for name, optional in (("structures/cairn/placement.json", True),
+                                   ("common/structures/cairn/placement.json", True),
+                                   ("COMMON/STRUCTURES/cairn/PLACEMENT.JSON", grammar is PureWindowsPath),
+                                   ("structures/cairn/cairn.json", False),
+                                   ("structures/cairn/nested/placement.json", False)):
+                contained = mock.Mock()
+                contained.stat.side_effect = FileNotFoundError("absent")
+                with self.subTest(grammar=grammar.__name__, name=name), \
+                        mock.patch.object(module, "Path", grammar), \
+                        mock.patch.object(module, "contain_path", return_value=contained) as checked:
+                    if optional:
+                        self.assertEqual(module.fixture_entry_status(root, root / name), (contained, None))
+                    else:
+                        with self.assertRaises(FileNotFoundError):
+                            module.fixture_entry_status(root, root / name)
+                    checked.assert_called_once_with(root, root / name)
+
+    def test_missing_tree_entries_other_than_optional_placement_are_refused(self):
+        for name in ("structures/cairn/cairn.json", "structures/cairn/nested/placement.json",
+                     "placement.json"):
+            link = self.root / name
+            link.parent.mkdir(parents=True, exist_ok=True)
+            directory_link(link, self.root / "absent.json")
+            try:
+                for scope in module.SCOPES:
+                    with self.subTest(name=name, scope=scope), self.assertRaises(FileNotFoundError):
+                        module.fixture_hash(self.root, scope=scope)
+            finally:
+                remove_directory_link(link)
+
+    def test_optional_placement_still_refuses_outside_and_cyclic_links(self):
+        placement = self.root / "structures/cairn/placement.json"
+        placement.parent.mkdir(parents=True)
+        with tempfile.TemporaryDirectory() as temporary:
+            outside = Path(temporary)
+            for target in (outside, outside / "missing.json", placement.parent):
+                directory_link(placement, target)
+                try:
+                    for scope in module.SCOPES:
+                        with self.subTest(target=target, scope=scope), self.assertRaises(ValueError):
+                            module.fixture_hash(self.root, scope=scope)
+                finally:
+                    remove_directory_link(placement)
+
+    def test_optional_placement_stat_errors_and_nonregular_metadata_are_refused(self):
+        placement = self.root / "structures/cairn/placement.json"
+        write(self.root, "structures/cairn/placement.json", "{}")
+        original_stat = Path.stat
+        for failure in (PermissionError(errno.EACCES, "unreadable"),
+                        OSError(errno.EIO, "partial status"),
+                        NotADirectoryError(errno.ENOTDIR, "not a directory"),
+                        os.stat_result((0,) + (0,) * 9),
+                        os.stat_result((stat.S_IFIFO,) + (0,) * 9),
+                        os.stat_result((stat.S_IFSOCK,) + (0,) * 9)):
+            def status(path, *args, **kwargs):
+                if path == placement:
+                    if isinstance(failure, OSError):
+                        raise failure
+                    return failure
+                return original_stat(path, *args, **kwargs)
+
+            with self.subTest(failure=failure), mock.patch.object(Path, "stat", status), \
+                    self.assertRaises((OSError, ValueError)):
+                module.fixture_hash(self.root)
+
+    def test_optional_placement_existing_directory_and_fifo_are_refused(self):
+        placement = self.root / "structures/cairn/placement.json"
+        placement.mkdir(parents=True)
+        with self.assertRaisesRegex(ValueError, "not a regular file"):
+            module.fixture_hash(self.root)
+        placement.rmdir()
+        if hasattr(os, "mkfifo"):
+            os.mkfifo(placement)
+            try:
+                with self.assertRaisesRegex(ValueError, "not a regular file"):
+                    module.fixture_hash(self.root)
+            finally:
+                placement.unlink()
     def test_directory_alias_adds_a_logical_pool_to_hash(self):
         write(self.root, "structures/template/pool.json", '{"weight":1}')
         before = module.fixture_hash(self.root)

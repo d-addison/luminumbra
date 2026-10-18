@@ -1,6 +1,7 @@
 #include "../../src/luminumbra_common/world/TerrainPresetLoader.h"
 
 #include <cstdint>
+#include <filesystem>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -32,8 +33,8 @@ bool Contains(const std::vector<std::string>& messages, const std::string& text)
 }
 
 bool Accepts(std::int64_t revision, const char* provenance) {
-    const auto result =
-        Luminumbra::world::LoadTerrainPresetFromJson(ValidPreset(revision), {}, provenance);
+    const auto result = Luminumbra::world::LoadTerrainPresetFromJson(
+        ValidPreset(revision), std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) / "data", provenance);
     return result.ok && result.errors.empty();
 }
 
@@ -50,13 +51,18 @@ int main() {
         return 1;
     }
 
-    if (kTerrainPresetSchemaRevision != 7 || kMinTerrainPresetSchemaRevision != 6) {
-        std::cerr << "current preset revision must be 7 and minimum 6\n";
+    if (kTerrainPresetSchemaRevision != 8 || kMinTerrainPresetSchemaRevision != 6) {
+        std::cerr << "current preset revision must be 8 and minimum 6\n";
         return 1;
     }
 
     if (!Accepts(6, "legacy-six")) {
         std::cerr << "revision 6 compatibility was lost\n";
+        return 1;
+    }
+
+    if (!Accepts(7, "legacy-seven")) {
+        std::cerr << "revision 7 compatibility was lost\n";
         return 1;
     }
 

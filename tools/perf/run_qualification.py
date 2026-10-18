@@ -18,6 +18,7 @@ import math
 import os
 import re
 import shutil
+import stat
 import struct
 import subprocess
 import sys
@@ -29,6 +30,7 @@ import plan_qualification as planner
 import qualification_matrix as matrix_lib
 import render_budget
 import render_runner_process as runner
+from check_gl_debug_log import MAX_FILE_BYTES
 
 SCHEMA = 'luminumbra.render_qualification.v1'
 VERDICT_SCHEMA = 'luminumbra.render_verdict.v1'
@@ -48,7 +50,9 @@ SETTINGS_KEYS = ('HOME', 'USERPROFILE', 'APPDATA', 'XDG_CONFIG_HOME', 'XDG_DATA_
 RUNTIME_SENTINELS = ('res/shaders/g_buffer.vert', 'data/audio/music.bank.json',
                      'worlds/atlas/presets/default.json')
 EXPECTED_FOV = 45.0  # The client default from SystemConfig.
-FIXED_VIEW_CHECK_FLAGS = ('--require-settled', '--require-geometry', '--require-camera-chunk')
+# Geometry and settling checks are supplied by the matrix checker command.
+FIXED_VIEW_CHECK_FLAGS = ('--require-camera-chunk',)
+MAX_HOST_JSON_DEPTH = 64  # Object/array levels, checked before recursive JSON decoding.
 
 # The canonical qualification universe. A run qualifies only against exactly these.
 CANONICAL_RENDERER = 'NVIDIA GeForce RTX 5070 Ti'
@@ -74,7 +78,7 @@ CANONICAL_SURFACE_SCRIPT = 'tools/perf/fixtures/surface-flight.traversal'
 # AC8 commits their scripts and binds them here.
 BOUND_TRAVERSAL_SCRIPTS = {'surface-flight': CANONICAL_SURFACE_SCRIPT}
 BOUND_TRAVERSAL_SHA256 = {
-    'surface-flight': '029e54d693c993472d84d7a9a38b2c3bbf513f129a1922534906c0f91b479e4e',
+    'surface-flight': '99d5ec201f0ac19118b05d6b5cebef9c7db9943aeaa3ca299339b85131393868',
 }
 TRAVERSAL_MAX_BYTES = 64 * 1024  # Traversal manifests are bounded to 64 KiB.
 
@@ -132,6 +136,117 @@ def read_json_object(path):
     except (OSError, ValueError, UnicodeError):
         return None
     return data if isinstance(data, dict) else None
+
+
+def read_host_bytes(path, *, missing_ok=False):
+    """Read only regular, non-symlink host files within the shared 16 MiB cap."""
+    try:
+        path = Path(path)
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            if missing_ok:
+                return None
+            raise
+        if not stat.S_ISREG(info.st_mode):
+            raise UsageError(f'host evidence must be a regular file, not a symlink: {path}')
+        if info.st_size > MAX_FILE_BYTES:
+            raise UsageError(f'host evidence exceeds {MAX_FILE_BYTES} byte cap: {path}')
+        # Do not follow a replacement symlink or block on a replacement FIFO.
+        flags = (os.O_RDONLY | getattr(os, 'O_BINARY', 0)
+                 | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
+        with os.fdopen(os.open(path, flags), 'rb') as source:
+            opened = os.fstat(source.fileno())
+            if not stat.S_ISREG(opened.st_mode):
+                raise UsageError(f'host evidence must be a regular file: {path}')
+            if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                raise UsageError(f'host evidence changed while opening: {path}')
+            if opened.st_size > MAX_FILE_BYTES:
+                raise UsageError(f'host evidence exceeds {MAX_FILE_BYTES} byte cap: {path}')
+            payload = source.read(MAX_FILE_BYTES + 1)
+        if len(payload) > MAX_FILE_BYTES:
+            raise UsageError(f'host evidence exceeds {MAX_FILE_BYTES} byte cap: {path}')
+        return payload
+    except UsageError:
+        raise
+    except (OSError, ValueError) as error:
+        raise UsageError(f'cannot read host evidence {path}: {error}') from error
+
+
+def check_host_json_depth(text):
+    """Bound containers before decoding; brackets inside JSON strings do not count."""
+    depth = 0
+    in_string = escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == '\\':
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in '[{':
+            depth += 1
+            if depth > MAX_HOST_JSON_DEPTH:
+                raise UsageError(f'JSON depth exceeds {MAX_HOST_JSON_DEPTH} container levels')
+        elif char in ']}':
+            depth -= 1
+
+
+def load_host_record(path):
+    """Validate staged wrapper evidence before any existing run is modified."""
+    if path is None:
+        return None
+    try:
+        payload = read_host_bytes(path).decode('utf-8-sig')
+        check_host_json_depth(payload)
+        document = json.loads(payload)
+    except (ValueError, UnicodeError, RecursionError) as error:
+        raise UsageError(f'--host-record: {error}') from error
+
+    def text(value):
+        return isinstance(value, str) and bool(value.strip()) and '\x00' not in value
+
+    if (not isinstance(document, dict)
+            or any(not text(document.get(key))
+                   for key in ('os_caption', 'os_version', 'powershell'))
+            or not isinstance(document.get('gpus'), list) or not document['gpus']
+            or any(not isinstance(gpu, dict)
+                   or any(not text(gpu.get(key)) for key in ('Name', 'DriverVersion'))
+                   for gpu in document['gpus'])):
+        raise UsageError('--host-record: expected OS, PowerShell and GPU driver identity')
+    try:
+        record = (json.dumps(document, ensure_ascii=False, separators=(',', ':'),
+                             allow_nan=False) + '\n').encode('utf-8')
+    except (ValueError, UnicodeError, RecursionError) as error:
+        raise UsageError(f'--host-record: {error}') from error
+    if len(record) > MAX_FILE_BYTES:
+        raise UsageError(f'--host-record: serialized host evidence exceeds '
+                         f'{MAX_FILE_BYTES} byte cap')
+    return record
+
+
+def publish_evidence(path, payload, host_record=None, *, previous_host):
+    """Atomically replace each record under the qualification lock.
+
+    Retire the host for hostless runs. Restore the validated previous snapshot if
+    aggregate publication fails, so host and aggregate provenance stay together.
+    """
+    host_path = path.parent / 'host.json'
+    if host_record is None:
+        host_path.unlink(missing_ok=True)
+    else:
+        runner.atomic_write(host_path, host_record)
+    try:
+        runner.atomic_write(path, payload)
+    except OSError:
+        if previous_host is None:
+            host_path.unlink(missing_ok=True)
+        else:
+            runner.atomic_write(host_path, previous_host)
+        raise
 
 
 def finite(value):
@@ -425,9 +540,8 @@ def run_client_process(command, *, client, build_manifest, systems_config,
                     'build_manifest_sha256': None if build_manifest is None else
                     build_manifest['sha256']}
     errors = []
-    try:
-        completed, errors = runner.run_process(command, **kwargs)
-    finally:
+
+    def finalize_receipt():
         receipt = read_json_object(kwargs['receipt_path'])
         if receipt is not None:
             try:
@@ -470,7 +584,9 @@ def run_client_process(command, *, client, build_manifest, systems_config,
                 errors.append(f'client identity evidence: {error}')
         else:
             errors.append('client identity: process receipt missing/malformed')
-    return completed, errors, identity
+    completed, process_errors = runner.run_process(
+        command, finalize_receipt=finalize_receipt, **kwargs)
+    return completed, process_errors + errors, identity
 
 
 def check_command(cell, *, matrix, artifact, verdict_path, root, python, checker):
@@ -829,7 +945,7 @@ def run_dry(matrix, args, out_dir):
     return 0
 
 
-def fail_closed(path, error):
+def fail_closed(path, error, host_record=None, *, previous_host):
     """Replace the aggregate with an unqualified error record; exit 1."""
     message = str(error) or type(error).__name__
     payload = {'schema': SCHEMA, 'render_floor_qualified': False, 'harness_complete': False,
@@ -837,7 +953,8 @@ def fail_closed(path, error):
                    'qualification_status': 'NEEDS-NATIVE-RUN',
                    'render_floor_qualified_reasons': ['qualification_run_failed']}
     try:
-        runner.atomic_write(path, (json.dumps(payload, indent=2) + '\n').encode('utf-8'))
+        publish_evidence(path, (json.dumps(payload, indent=2) + '\n').encode('utf-8'),
+                         host_record, previous_host=previous_host)
     except OSError as write_error:
         print(f'run_qualification: cannot write {path}: {write_error}', file=sys.stderr)
     print(f'run_qualification: unexpected error: {message}', file=sys.stderr)
@@ -860,6 +977,9 @@ def build_parser():
     parser.add_argument('--build-manifest', type=Path,
                         help='performance-build.json extended with client.sha256; '
                              'required for native qualification')
+    parser.add_argument('--host-record', type=Path,
+                        help='Staged Windows host JSON; validated before execution and '
+                             'published with qualification.json under the output lock')
     parser.add_argument('--only', action='append', metavar='CELL_ID',
                         help='Select one cell id; repeatable; makes the run partial')
     parser.add_argument('--timeout-seconds', type=int, default=DEFAULT_TIMEOUT_SECONDS,
@@ -884,6 +1004,7 @@ def main(argv=None):
         matrix = matrix_lib.load_matrix(args.matrix)
         provenance = matrix_identity(matrix, args.matrix)
         build_manifest = load_build_manifest(args.build_manifest)
+        host_record = load_host_record(args.host_record)
         declared = parse_declarations(args.declare_refresh, matrix)
         planner.select(matrix_lib.cells(matrix), args.only)
     except (matrix_lib.MatrixError, UsageError) as error:
@@ -911,19 +1032,28 @@ def main(argv=None):
         os.close(descriptor)
         if args.dry_run:
             try:
-                return run_dry(matrix, args, out_dir)
+                code = run_dry(matrix, args, out_dir)
+                if host_record is not None:
+                    runner.atomic_write(out_dir / 'host-dryrun.json', host_record)
+                return code
             except (OSError, UsageError) as error:
                 print(f'run_qualification: {error}', file=sys.stderr)
                 return 2
         return run_locked(matrix, args, out_dir, client, checker, declared,
-                          provenance, build_manifest)
+                          provenance, build_manifest, host_record)
     finally:
         lock.unlink()
 
 
-def run_locked(matrix, args, out_dir, client, checker, declared, provenance, build_manifest):
+def run_locked(matrix, args, out_dir, client, checker, declared, provenance, build_manifest,
+               host_record=None):
     """Execute and atomically publish while main owns the directory lock."""
     path = out_dir / QUALIFICATION_NAME
+    try:
+        previous_host = read_host_bytes(out_dir / 'host.json', missing_ok=True)
+    except UsageError as error:
+        print(f'run_qualification: {error}', file=sys.stderr)
+        return 2
     try:
         set_aside(path)
         results = run_cells(matrix, client=client, out_dir=out_dir,
@@ -933,9 +1063,10 @@ def run_locked(matrix, args, out_dir, client, checker, declared, provenance, bui
         payload = aggregate(matrix, results, partial=args.only is not None,
                             declared_refresh=declared, matrix_provenance=provenance)
     except Exception as error:  # noqa: BLE001 - Any failure must leave an unqualified record.
-        return fail_closed(path, error)
+        return fail_closed(path, error, host_record, previous_host=previous_host)
     try:
-        runner.atomic_write(path, (json.dumps(payload, indent=2) + '\n').encode('utf-8'))
+        publish_evidence(path, (json.dumps(payload, indent=2) + '\n').encode('utf-8'),
+                         host_record, previous_host=previous_host)
     except OSError as error:
         print(f'run_qualification: cannot write {path}: {error}', file=sys.stderr)
         return 2

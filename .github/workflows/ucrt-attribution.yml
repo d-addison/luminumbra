@@ -10,6 +10,7 @@ on:
     paths:
       - .github/workflows/ucrt-attribution.yml
       - tools/ci/ucrt_attribution.sh
+      - tools/ci/ci_shell.py
       - tools/ci/test_ucrt_attribution.py
       - tools/ci/test_ucrt_gcc_cohort.py
       - tools/ci/check_worldgen_probe_smoke.py
@@ -20,6 +21,7 @@ on:
     paths:
       - .github/workflows/ucrt-attribution.yml
       - tools/ci/ucrt_attribution.sh
+      - tools/ci/ci_shell.py
       - tools/ci/test_ucrt_attribution.py
       - tools/ci/test_ucrt_gcc_cohort.py
       - tools/ci/check_worldgen_probe_smoke.py

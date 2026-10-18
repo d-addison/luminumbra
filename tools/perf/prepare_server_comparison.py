@@ -13,7 +13,7 @@ import json
 from pathlib import Path
 import shutil
 
-from fixture_hash import fixture_hash
+from fixture_hash import fixture_entry_status, fixture_hash
 from fixture_paths import contain_path, open_regular, read_text, resolve_reference
 
 GATES = ("ActiveRegions", "WaterHighRes", "WeatherRain", "WeatherEvents", "AetherState")
@@ -59,7 +59,13 @@ def prepare(base: Path, head: Path, receipt: Path) -> None:
                 shutil.copyfileobj(stream, output)
             return destination
 
-        shutil.copytree(common, root / "data/common", copy_function=copy_fixture)
+        def ignore_missing_placement(directory, names):
+            return [name for name in names
+                    if Path(name) == Path("placement.json")
+                    and fixture_entry_status(common, Path(directory) / name)[1] is None]
+
+        shutil.copytree(common, root / "data/common", copy_function=copy_fixture,
+                        ignore=ignore_missing_placement)
         shutil.copytree(presets, root / "worlds/atlas/presets", copy_function=copy_fixture)
         for _, path in sorted(dependencies.items()):
             # Dependencies already carry validated native paths. Reinterpreting

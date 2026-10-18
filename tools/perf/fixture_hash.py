@@ -106,14 +106,36 @@ def canonical_file_digest(path: Path, *, reference_root: Path | None = None,
     return hashlib.sha256(raw).hexdigest()
 
 
+def fixture_entry_status(root: Path, path: Path):
+    """Inspect a contained entry, allowing only missing native placement defaults."""
+    contained = contain_path(root, path)
+    parts = path.relative_to(root).parts
+    # Callers hash either data/common or data. Only the direct per-type
+    # placement file is optional; pieces and other tree entries remain required.
+    if parts and Path(parts[0]) == Path("common"):
+        parts = parts[1:]
+    optional = (len(parts) == 3 and Path(parts[0]) == Path("structures")
+                and Path(parts[2]) == Path("placement.json"))
+    try:
+        status = contained.stat()
+    except FileNotFoundError:
+        if not optional:
+            raise
+        return contained, None
+    if optional and not stat.S_ISREG(status.st_mode):
+        raise ValueError(f"fixture reference is not a regular file: {path}")
+    return contained, status
+
+
 def fixture_files(root: Path) -> Iterator[tuple[Path, Path]]:
     """Check containment before reading files or descending into directories."""
     pending = [(root, frozenset({root.resolve()}))]
     while pending:
         directory, ancestors = pending.pop()
         for path in directory.iterdir():
-            contained = contain_path(root, path)
-            status = contained.stat()
+            contained, status = fixture_entry_status(root, path)
+            if status is None:
+                continue
             if stat.S_ISREG(status.st_mode):
                 yield path, contained
             elif stat.S_ISDIR(status.st_mode):

@@ -24,6 +24,7 @@
 #include "luminumbra_client/rendering/passes/LightingPass.h"
 #include "luminumbra_client/rendering/passes/ParticlePass.h"
 #include "luminumbra_client/rendering/passes/ShadowPass.h"
+#include "luminumbra_common/core/GraphicsPresets.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include <glm/gtc/type_ptr.hpp>
 #include <luminumbra/rendering/RenderView.h>
@@ -895,6 +896,7 @@ TEST(PassContext, FoliageCappedCompactionAndIndependentRebuildAreByteStable) {
         pass.set_density_scale(1.6f);
         pass.set_wind({0, 0});
         pass.set_readback_enabled(true);
+        pass.set_evidence_enabled(true);
         for (std::uint64_t frame = 1; frame <= 4; ++frame) {
             pass.set_evidence_frame(frame, 1);
             pass.rebuild_instances(chunks, ground, nullptr, {8, 12.4f, 8});
@@ -964,6 +966,7 @@ TEST(PassContext, FoliageGpuCapacityCountsOnlyColumnsInsideTheScatterHorizon) {
         pass.set_fade_distances(48, 92);
         pass.set_density_scale(1.6f);
         pass.set_readback_enabled(true);
+        pass.set_evidence_enabled(true);
         pass.set_wind({0, 0});
         std::size_t queries = 0;
         for (std::uint64_t frame = 1; frame <= 4; ++frame) {
@@ -1022,6 +1025,7 @@ TEST(PassContext, FoliageGpuCapacityKeepsTheExistingUploadedColumnLimit) {
         pass.set_fade_distances(900, 1000);
         pass.set_density_scale(1.6f);
         pass.set_readback_enabled(true);
+        pass.set_evidence_enabled(true);
         pass.set_wind({0, 0});
         for (std::uint64_t frame = 1; frame <= 4; ++frame) {
             pass.set_evidence_frame(frame, 1);
@@ -1061,6 +1065,7 @@ TEST(PassContext, FoliageActualDrawFeedbackSurvivesReloadAndPreservesFrameIdenti
     pass.set_fade_distances(48, 92);
     pass.set_density_scale(1.6f);
     pass.set_readback_enabled(true);
+    pass.set_evidence_enabled(true);
     Camera camera({8, 12.4f, 8}, {0, 1, 0}, 35, -18);
     camera.Zoom = 60;
     const auto ground = +[](void*, float, float) {
@@ -1174,5 +1179,29 @@ TEST(PassContext, ShippingTemporalResolveBuildsHistoryJittersAndResets) {
     pipeline.render_frame(registry, world, camera, 1.0f / 30.0f);
     EXPECT_TRUE(pipeline.taau_history_valid());
     EXPECT_NE(pipeline.taau_jitter_ndc(), glm::vec2(0.0f));
+    // Settings transactions invalidate history even when render scale is unchanged.
+    // Exercise every non-scale graphics control through the public renderer API.
+    using namespace luminumbra::core;
+    for (const GraphicsOverrides& overrides :
+         {GraphicsOverrides{{"grass_density", 0.8}},
+          GraphicsOverrides{{"grass_fade_start_m", 32.0}},
+          GraphicsOverrides{{"grass_fade_end_m", 64.0}},
+          GraphicsOverrides{{"far_terrain_radius_m", 1500.0}},
+          GraphicsOverrides{{"shadow_resolution", 1024.0}},
+          GraphicsOverrides{{"volumetric_quality", 0.0}},
+          GraphicsOverrides{{"grass_enabled", false}},
+          GraphicsOverrides{{"ui_blur", std::string("off")}}}) {
+        GraphicsSettings settings;
+        settings.overrides = overrides;
+        ResolvedGraphics resolved;
+        std::string error;
+        ASSERT_TRUE(ResolveGraphics(settings, {}, resolved, error)) << error;
+        ASSERT_TRUE(pipeline.apply_graphics(resolved));
+        EXPECT_FALSE(pipeline.taau_history_valid());
+        pipeline.render_frame(registry, world, camera, 1.0f / 30.0f);
+        EXPECT_TRUE(pipeline.taau_history_valid());
+        ASSERT_TRUE(pipeline.apply_graphics(resolved));
+        EXPECT_TRUE(pipeline.taau_history_valid()); // Unchanged application preserves history.
+    }
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
 }

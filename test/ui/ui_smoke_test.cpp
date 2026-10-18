@@ -224,8 +224,9 @@ void AwaitWorldCatalog(Luminumbra::Client::Rml_UIManager& ui) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
         ui.Update();
     }
-    if (document)
+    if (document) {
         EXPECT_FALSE(document->HasAttribute("data-worlds-pending"));
+    }
 }
 
 Rml::ElementDocument* LoadDocumentAndFind(Luminumbra::Client::Rml_UIManager& ui,
@@ -924,6 +925,135 @@ TEST(UiSmokeTest, SettingsScreenRoundTripsThroughTheBridge) {
     ui.Shutdown();
 }
 
+TEST(UiSmokeTest, GraphicsControlsUseOneBridgeAndShowSessionValuesAndFailures) {
+    using namespace Luminumbra::Client;
+    using namespace luminumbra::core;
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Rml_UIManager ui(SourceRoot().string() + "/");
+    ui.Init(context.window(), nullptr);
+    ASSERT_NE(ui.GetContext(), nullptr);
+    GraphicsSettingsState state({}, {{"render_scale", 0.67}});
+    int edits = 0;
+    SettingsBridge bridge;
+    bridge.GetGraphics = [&] {
+        return state.Display();
+    };
+    bridge.EditGraphics = [&](const GraphicsEdit& edit) {
+        ++edits;
+        if (edit.kind == GraphicsEditKind::DetectApply) {
+            GraphicsHardwareInputs inputs;
+            inputs.renderer = "<em>unknown GPU</em>";
+            EXPECT_TRUE(state.Stage(edit, inputs));
+        } else {
+            EXPECT_TRUE(state.Stage(edit));
+        }
+        state.Applied(true, 0.0);
+    };
+    bridge.SaveGraphics = [&] {
+        state.Saved(false);
+    };
+    bridge.Save = [] {
+        return false;
+    };
+    ui.SetSettingsBridge(std::move(bridge));
+    auto* settings = LoadDocumentAndFind(ui, "settings.rml", "settings");
+    ASSERT_NE(settings, nullptr);
+    auto* scale = settings->GetElementById("graphics_render_scale");
+    ASSERT_NE(scale, nullptr);
+    ASSERT_NE(dynamic_cast<Rml::ElementFormControl*>(scale), nullptr);
+    EXPECT_NEAR(
+        std::stof(dynamic_cast<Rml::ElementFormControl*>(scale)->GetValue()), 0.67f, 0.001f);
+    EXPECT_TRUE(scale->HasAttribute("disabled"));
+    EXPECT_EQ(settings->GetElementById("graphics_render_scale_session")->GetInnerRML(),
+              " (session override)");
+
+    const auto change = [&](const char* id, const char* value) {
+        auto* element = settings->GetElementById(id);
+        ASSERT_NE(element, nullptr);
+        auto* control = dynamic_cast<Rml::ElementFormControl*>(element);
+        ASSERT_NE(control, nullptr);
+        control->SetValue(value);
+        Rml::Dictionary params;
+        element->DispatchEvent(Rml::EventId::Change, params);
+        ui.Update();
+    };
+    change("graphics_render_scale", "0.5");
+    EXPECT_EQ(edits, 0); // Session controls cannot write their effective values to saved choices.
+    change("graphics_preset", "high");
+    EXPECT_EQ(state.Settings().base_preset, GraphicsPreset::High);
+    EXPECT_TRUE(state.Settings().overrides.empty());
+    change("graphics_grass_density", "0.5");
+    EXPECT_NE(settings->GetElementById("graphics_state")->GetInnerRML().find("Custom (base: High)"),
+              std::string::npos);
+    EXPECT_DOUBLE_EQ(std::get<double>(state.Settings().overrides.at("grass_density")), 0.5);
+    change("graphics_grass_fade_start_m", "30");
+    change("graphics_grass_fade_end_m", "60");
+    change("graphics_far_terrain_radius_m", "1500");
+    change("graphics_shadow_resolution", "1024");
+    change("graphics_volumetric_quality", "0");
+    change("graphics_grass_enabled", "off");
+    change("graphics_ui_blur", "half");
+    EXPECT_EQ(state.Settings().overrides.size(), 8u);
+    EXPECT_DOUBLE_EQ(state.Display().effective.values.far_outer_clip_m, 1550.0);
+    EXPECT_EQ(state.Display().effective.values.shadow_resolution, 1024);
+    EXPECT_FALSE(state.Display().effective.values.grass_enabled);
+    EXPECT_EQ(state.Display().effective.values.ui_blur, UiBlurQuality::Half);
+    ClickAndUpdate(ui, settings->GetElementById("graphics_reset"));
+    EXPECT_EQ(state.Settings().base_preset, GraphicsPreset::High);
+    EXPECT_TRUE(state.Settings().overrides.empty());
+    ClickAndUpdate(ui, settings->GetElementById("graphics_detect"));
+    EXPECT_EQ(state.Settings().base_preset, GraphicsPreset::Low);
+    EXPECT_TRUE(state.Settings().overrides.empty());
+    EXPECT_EQ(settings->GetElementById("graphics_hardware")->QuerySelector("em"), nullptr);
+    EXPECT_NE(settings->GetElementById("graphics_hardware")->GetInnerRML().find("Recommended: Low"),
+              std::string::npos);
+    ClickAndUpdate(ui, settings->GetElementById("graphics_retry_save"));
+    EXPECT_EQ(settings->GetElementById("graphics_status")->GetInnerRML(),
+              "Save failed; graphics are active for this session");
+    EXPECT_TRUE(state.Settings().overrides.empty());
+    EXPECT_DOUBLE_EQ(state.Display().effective.values.render_scale, 0.67);
+    ClickAndUpdate(ui, settings->GetElementById("back_btn"));
+    auto* menu = FindDocumentByElementId(ui.GetContext(), "main_menu");
+    ASSERT_NE(menu, nullptr);
+    EXPECT_FALSE(menu->GetElementById("notification")->IsClassSet("hidden"));
+    EXPECT_EQ(menu->GetElementById("notification_text")->GetInnerRML(),
+              "Settings could not be saved. Reopen settings for details.");
+    ui.Shutdown();
+}
+
+TEST(UiSmokeTest, BackdropClassesFollowLiveQualityAndNewDocumentsWithoutCompounding) {
+    using namespace Luminumbra::Client;
+    using luminumbra::core::UiBlurQuality;
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Rml_UIManager ui(SourceRoot().string() + "/");
+    ui.Init(context.window(), nullptr);
+    ui.SetSavedWorldList(SavedWorldFixture);
+    for (const auto quality : {UiBlurQuality::Off,
+                               UiBlurQuality::Half,
+                               UiBlurQuality::Full,
+                               UiBlurQuality::Half,
+                               UiBlurQuality::Full}) {
+        ui.SetBackdropBlurQuality(quality);
+        for (const auto& [path, id] : {std::pair{"main_menu.rml", "main_menu"},
+                                       std::pair{"settings.rml", "settings"},
+                                       std::pair{"world_selection.rml", "world_selection"},
+                                       std::pair{"world_creation.rml", "world_creation"},
+                                       std::pair{"pause.rml", "pause"}}) {
+            auto* document = LoadDocumentAndFind(ui, path, id);
+            ASSERT_NE(document, nullptr);
+            EXPECT_EQ(document->IsClassSet("backdrop-off"), quality == UiBlurQuality::Off);
+            EXPECT_EQ(document->IsClassSet("backdrop-half"), quality == UiBlurQuality::Half);
+            ui.SetBackdropBlurQuality(UiBlurQuality::Full);
+            EXPECT_FALSE(document->IsClassSet("backdrop-off"));
+            EXPECT_FALSE(document->IsClassSet("backdrop-half"));
+            ui.SetBackdropBlurQuality(quality);
+        }
+    }
+    ui.Shutdown();
+}
+
 TEST(UiSmokeTest, DisabledAudioShowsStatusAndPreservesSavedVolumes) {
     HiddenGlContext context;
     if (!context.ready()) {
@@ -1066,8 +1196,9 @@ TEST(UiSmokeTest, RedesignedControlsAreFunctional) {
             jump_row = r;
     }
     ASSERT_NE(jump_row, nullptr);
-    if (auto* chip = settings->GetElementById("kb_Jump"))
+    if (auto* chip = settings->GetElementById("kb_Jump")) {
         EXPECT_EQ(chip->GetInnerRML(), "Space");
+    }
     ClickAndUpdate(ui, jump_row);
     EXPECT_EQ(last_rebind_action, "Jump");
 
@@ -1710,6 +1841,22 @@ TEST(WorldgenOverrideTest, BuildCustomPresetAppliesOnlyRealDeltas) {
     auto rb = BuildCustomPreset(base, bad);
     EXPECT_FALSE(rb.changed);
     EXPECT_EQ(rb.skipped, 1);
+}
+
+TEST(WorldgenOverrideTest, CustomizationKeepsExplicitSamplingAndItsSchemaGate) {
+    for (const int revision : {1, 2}) {
+        const nlohmann::json base = {{"schema_rev", 7},
+                                     {"generation_params",
+                                      {{"terrain", {{"surface_sampling_revision", revision}}},
+                                       {"features", nlohmann::json::object()}}}};
+        const auto custom = Luminumbra::Client::BuildCustomPreset(base, {});
+        const auto knobs = Luminumbra::Client::BuildKnobResolvedPreset(base, {});
+        for (const auto* preset : {&custom.json, &knobs.json}) {
+            EXPECT_EQ(preset->at("schema_rev"), revision == 1 ? 7 : 8);
+            EXPECT_EQ(preset->at("generation_params").at("terrain").at("surface_sampling_revision"),
+                      revision);
+        }
+    }
 }
 
 // Drift guard: every worldgen-param data-path authored in world_creation.rml must be a real

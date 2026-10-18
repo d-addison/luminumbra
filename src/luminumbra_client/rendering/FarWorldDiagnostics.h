@@ -2,6 +2,7 @@
 
 #include "FarVolumeResidency.h"
 #include "FarWorldSelection.h"
+#include <memory>
 #include <nlohmann/json_fwd.hpp>
 #include <optional>
 
@@ -49,6 +50,11 @@ struct FarWorldDiagnosticSnapshot {
     std::array<FarWorldTierDiagnostic, World::kFarTierCount> tiers{};
     std::array<FarWorldTileDiagnostic, kFarWorldDiagnosticTiles> tiles{};
     std::size_t tile_count = 0, draws = 0, indices = 0;
+    // Reconstruct in place: a whole-snapshot temporary can exhaust debug stacks.
+    void Reset() noexcept {
+        std::destroy_at(this);
+        std::construct_at(this);
+    }
 };
 // A paired render keeps selection/plane and disables only scheduling/submission.
 constexpr FarWorldSelection FarWorldSubmissionOverride(FarWorldSelection selected,

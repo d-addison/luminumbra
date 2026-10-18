@@ -3,24 +3,51 @@
 
 Read the workflows' indented job/step blocks using only the standard library.
 This is deliberately scoped to their current YAML layout, not a YAML parser.
+
+The 72-case baseline launched 772 subprocesses on POSIX; aggregate cancellation,
+ASan admission and Bash syntax cases accounted for 340, 210 and 79 launches.
+Windows qualification exhausted the suite's 30-second CTest deadline without
+per-case timings. Eight disjoint registrations isolate those workloads and keep
+each 30-second deadline. Each selected case reports elapsed time so a slow case
+remains visible. Native per-case qualification is still required; local timings
+do not establish that every Windows case fits its deadline. Direct invocation
+and unittest discovery retain the complete suite.
 """
 
+import argparse
+import fnmatch
+import io
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import ci_shell as shell
+
+
+BASH = shell.bash_executable()
 ROOT = Path(__file__).resolve().parents[2]
 GUARDED = {
-    "ci.yml": ("linux", "Linux / GCC"),
+    "ci.yml": ("linux-result", "Linux / GCC"),
     "asan.yml": ("asan", "Linux / GCC ASan"),
     "performance.yml": ("preview-frame", "Preview frame / software OpenGL"),
 }
 READY = "github.event_name != 'pull_request' || github.event.pull_request.draft == false"
+ASAN_MINIMUM_TESTS = 2320
+ASAN_REQUIRED_TESTS = (
+    "ConsoleFixture.CompleteInventoryDefaultsBindingsAndUnavailableRows",
+    "UiFixture.DefaultPassiveHudRendersWithoutShellOrFocusAndCanBeDisabled",
+    "DeveloperPersistence.DirectConstructionMatchesFactoryDefaultsAndInitializesRecords",
+)
+ASAN_MERGE_COMMAND = "python3 tools/ci/ctest_shards.py merge --profile asan --directory build/asan-shards --output build/debug-asan/ctest.junit.xml"
 UCRT_ROUTE = (
     "github.event_name == 'pull_request' || github.ref_name == 'main' || "
     "(github.event_name == 'push' && github.ref == 'refs/heads/devel') || "
@@ -32,6 +59,574 @@ SERVER_ROUTE = (
     "(github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && "
     "github.event.before != '0000000000000000000000000000000000000000'))"
 )
+
+
+class WorkflowShellTests(unittest.TestCase):
+    def test_windows_candidates_prefer_git_over_wsl_for_all_git_layouts(self):
+        root = r"C:\Program Files\Git"
+        wsl = r"C:\Windows\System32\bash.exe"
+        expected = [root + r"\bin\bash.exe", root + r"\usr\bin\bash.exe", wsl]
+        for location in (r"cmd\git.exe", r"bin\git.exe", r"mingw64\bin\git.exe",
+                         r"mingw32\bin\git.exe", r"usr\bin\git.exe"):
+            with self.subTest(location=location):
+                self.assertEqual(shell._windows_candidates(root + "\\" + location, wsl, ""), expected)
+        self.assertEqual(shell._windows_candidates(None, wsl, ""), [wsl])
+        self.assertEqual(shell._windows_candidates(r"relative\git.exe", None, ""), [])
+        self.assertEqual(shell._windows_candidates(None, None, ""), [])
+
+    def test_active_msys_keeps_its_path_shell_and_deduplicates_git_siblings(self):
+        msys = r"D:\MSYS installation\usr\bin\bash.exe"
+        git = r"D:\MSYS installation\usr\bin\git.exe"
+        self.assertEqual(shell._windows_candidates(git, msys, "UCRT64"),
+                         [msys, r"D:\MSYS installation\bin\bash.exe"])
+        self.assertEqual(shell._windows_candidates(None, msys, "UCRT64"), [msys])
+
+    def test_lookup_excludes_empty_and_relative_path_entries_and_cwd_results(self):
+        entries = ["", ".", "relative/bin", str(ROOT / "directory with spaces")]
+        with patch.object(shell.os, "get_exec_path", return_value=entries), patch.object(
+                shell.shutil, "which", return_value=str(ROOT / "directory with spaces/bash")) as which:
+            self.assertEqual(shell._absolute_which("bash"), str(ROOT / "directory with spaces/bash"))
+            which.assert_called_once_with("bash", path=entries[-1])
+            which.return_value = "bash.exe"
+            self.assertIsNone(shell._absolute_which("bash"))
+        with patch.object(shell.os, "get_exec_path", return_value=["", "."]), patch.object(
+                shell.shutil, "which") as which:
+            self.assertIsNone(shell._absolute_which("bash"))
+            which.assert_not_called()
+
+    def windows_resolution(self, msystem="", responses=None):
+        git = r"C:\Program Files\Git\cmd\git.exe"
+        wsl = r"C:\Windows\System32\bash.exe"
+
+        def path(candidate):
+            result = MagicMock()
+            result.is_absolute.return_value = True
+            result.is_file.return_value = True
+            result.resolve.return_value = result
+            result.__str__.return_value = candidate
+            return result
+
+        with patch.object(shell.sys, "platform", "win32"), patch.dict(
+                os.environ, MSYSTEM=msystem), patch.object(
+                shell, "_absolute_which", side_effect=lambda name: git if name == "git" else wsl), patch.object(
+                shell, "Path", side_effect=path), patch.object(shell.os, "access", return_value=True), patch.object(
+                shell.subprocess, "run", side_effect=responses) as run:
+            return shell.bash_executable(), run.call_args_list
+
+    def test_native_windows_resolution_uses_absolute_git_path_as_one_argument(self):
+        success = subprocess.CompletedProcess([], 0, b"ci-bash-ready\n", b"")
+        executable, calls = self.windows_resolution(responses=[success])
+        self.assertEqual(executable, r"C:\Program Files\Git\bin\bash.exe")
+        self.assertEqual(len(calls), 1)
+        args, kwargs = calls[0]
+        self.assertEqual(args[0][:-1], [executable, "--noprofile", "--norc", "-e", "-c"])
+        self.assertIn('[[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin ]] || { ci_bash_observe ostype; exit 12; };', args[0][-1])
+        self.assertIn('[[ -n "$BASH_VERSION" ]] || { ci_bash_observe bash-version; exit 11; };', args[0][-1])
+        self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
+        self.assertTrue(kwargs["capture_output"])
+        self.assertEqual(kwargs["timeout"], 2)
+        self.assertNotIn("shell", kwargs)
+
+    def test_windows_rejects_wsl_collision_and_tries_git_siblings(self):
+        wsl = subprocess.CompletedProcess([], 1, "Windows Subsystem for Linux has no installed distributions".encode("utf-16"), b"")
+        success = subprocess.CompletedProcess([], 0, b"ci-bash-ready\n", b"")
+        executable, calls = self.windows_resolution("UCRT64", [wsl, OSError("unusable"), success])
+        self.assertEqual(executable, r"C:\Program Files\Git\usr\bin\bash.exe")
+        self.assertEqual([call.args[0][0] for call in calls], [
+            r"C:\Windows\System32\bash.exe", r"C:\Program Files\Git\bin\bash.exe", executable])
+        with self.assertRaisesRegex(RuntimeError, "usable native Bash"):
+            self.windows_resolution(responses=[wsl, wsl, wsl])
+
+    def test_posix_lookup_preserves_path_selection_and_does_not_query_git(self):
+        with patch.object(shell.sys, "platform", "linux"), patch.object(
+                shell, "_absolute_which", return_value=BASH) as which:
+            self.assertEqual(shell.bash_executable(), BASH)
+            which.assert_called_once_with("bash")
+        with patch.object(shell.sys, "platform", "linux"), patch.object(
+                shell, "_absolute_which", return_value=None), self.assertRaises(RuntimeError):
+            shell.bash_executable()
+
+    def test_overrides_require_absolute_regular_executable_files_without_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for candidate in ("", "relative/bash", str(root / "missing"), str(root)):
+                with self.subTest(candidate=candidate), patch.object(shell, "_absolute_which") as which, patch.object(
+                        shell.subprocess, "run") as run, self.assertRaises(RuntimeError):
+                    shell.bash_executable(candidate)
+                which.assert_not_called()
+                run.assert_not_called()
+        for failure in (False, PermissionError("denied"), RuntimeError("link loop")):
+            with self.subTest(failure=failure), patch.object(shell.os, "access", **(
+                    {"return_value": failure} if failure is False else {"side_effect": failure})), patch.object(
+                    shell.subprocess, "run") as run, self.assertRaises(RuntimeError):
+                shell.bash_executable(BASH)
+            run.assert_not_called()
+
+    def test_probe_refuses_partial_output_wsl_errors_deadline_and_unusable_binaries(self):
+        failures = [
+            subprocess.CompletedProcess([], 1, b"ci-bash-ready\n", b""),
+            subprocess.CompletedProcess([], 0, b"ci-bash", b""),
+            subprocess.CompletedProcess([], 0, b"ci-bash-ready\n", b"warning"),
+            subprocess.CompletedProcess([], 0, "Windows Subsystem for Linux has no installed distributions".encode("utf-16-le"), b""),
+            subprocess.TimeoutExpired([BASH], 2), PermissionError("denied"), OSError("invalid executable"),
+        ]
+        for failure in failures:
+            with self.subTest(failure=failure), patch.object(shell.subprocess, "run", **(
+                    {"side_effect": failure} if isinstance(failure, Exception) else {"return_value": failure})), self.assertRaises(RuntimeError):
+                shell.bash_executable(BASH)
+
+    def test_probe_does_not_run_inherited_shell_startup_hooks(self):
+        untrusted = dict(BASH_ENV="untrusted", ENV="untrusted", SHELLOPTS="untrusted", BASHOPTS="untrusted",
+                         OSTYPE="msys", BASH_VERSION="untrusted")
+        untrusted["BASH_FUNC_exit%%"] = "() { return 0; }"
+        with patch.dict(os.environ, untrusted), patch.object(
+                shell.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, b"ci-bash-ready\n", b"")) as run:
+            self.assertEqual(shell.bash_executable(BASH), BASH)
+        self.assertFalse(untrusted.keys() & run.call_args.kwargs["env"].keys())
+
+    def test_resolved_bash_executes_literal_arguments_cwd_crlf_and_exit_status(self):
+        with tempfile.TemporaryDirectory(prefix="shell contract ") as directory:
+            root = Path(directory)
+            (root / "input with spaces.txt").write_bytes(b"first\r\nsecond\r\n")
+            script = ('[[ "$1" == \'C:/directory with spaces/file\' && "$2" == \'a "quote"\' && -z "$3" ]]\n'
+                      '[[ "$CONTRACT_VALUE" == kept ]]\n'
+                      'IFS= read -r line < "input with spaces.txt"\n'
+                      '[[ "$line" == $\'first\\r\' ]]\n'
+                      'printf \'contract passed\\n\'\nexit 7')
+            result = subprocess.run([shell.bash_executable(), "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script,
+                                     "contract", "C:/directory with spaces/file", 'a "quote"', ""],
+                                    cwd=root, env=dict(os.environ, CONTRACT_VALUE="kept"),
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 7, result.stdout + result.stderr)
+            self.assertEqual(result.stdout, "contract passed\n")
+            self.assertEqual(result.stderr, "")
+
+
+class WorkflowShellDiagnosticTests(unittest.TestCase):
+    @staticmethod
+    def candidate_path(candidate):
+        path = MagicMock()
+        path.is_absolute.return_value = True
+        path.is_file.return_value = True
+        path.resolve.return_value = path
+        path.__str__.return_value = candidate
+        return path
+
+    def failure(self, override=BASH, platform="linux", discoveries=None, path=None,
+                access=True, response=None):
+        if response is None:
+            response = subprocess.CompletedProcess([], 1, b"", b"")
+        run_options = ({"side_effect": response} if isinstance(response, (Exception, list))
+                       else {"return_value": response})
+        access_options = {"side_effect": access} if isinstance(access, Exception) else {"return_value": access}
+        with patch.object(shell.sys, "platform", platform), patch.object(
+                shell, "_absolute_which", side_effect=lambda name: (discoveries or {}).get(name)) as which, patch.object(
+                shell, "Path", side_effect=path or self.candidate_path) as construct, patch.object(
+                shell.os, "access", **access_options) as executable, patch.object(
+                shell.subprocess, "run", **run_options) as run, self.assertRaises(RuntimeError) as caught:
+            shell.bash_executable(override)
+        message = str(caught.exception)
+        self.assertTrue(message.startswith("A usable native Bash is required"))
+        self.assertLess(len(message), 24 * 1024)
+        return message, which, construct, executable, run
+
+    def test_failure_reports_actual_absolute_discovery_and_allowlisted_platform_context(self):
+        environment = {
+            "PATH": os.pathsep.join(("", ".", "relative/bin", str(ROOT / "absolute bin"))),
+            "PATHEXT": ".EXE;.CMD", "MSYSTEM": "UCRT64", "MSYS2_ARG_CONV_EXCL": "*",
+            "MSYS_NO_PATHCONV": "1", "MSYS2_ENV_CONV_EXCL": "PATH", "MSYS2_PATH_TYPE": "minimal",
+            "ACCESS_TOKEN": "private-value", "BASH_ENV": "private-hook", "BASH_FUNC_exit%%": "private-function",
+        }
+        entries = ["", ".", "relative/bin", str(ROOT / "absolute bin")]
+        for found in (None, "bash.exe"):
+            with self.subTest(found=found), patch.dict(os.environ, environment, clear=True), patch.object(
+                    shell.sys, "platform", "linux"), patch.object(shell.sys, "executable", "C:/runtime/python.exe"), patch.object(
+                    shell.os, "get_exec_path", return_value=entries) as get_path, patch.object(
+                    shell.shutil, "which", return_value=found) as which, patch.object(
+                    shell.subprocess, "run") as run, self.assertRaises(RuntimeError) as caught:
+                shell.bash_executable()
+            message = str(caught.exception)
+            for fragment in ("interpreter='C:/runtime/python.exe'", "python=", "sys.platform='linux'",
+                             f"path_module={os.path.__name__!r}", f"pathsep={os.pathsep!r}", "os.name=",
+                             f"discovery.bash.absolute_PATH={entries[-1]!r}", f"discovery.bash.which={found!r}",
+                             "discovery.bash=None", "candidates=0", "absolute PATH entries only"):
+                self.assertIn(fragment, message)
+            for name, value in environment.items():
+                if name not in ("ACCESS_TOKEN", "BASH_ENV", "BASH_FUNC_exit%%"):
+                    self.assertIn(f"{name}={value!r}", message)
+            for private in ("ACCESS_TOKEN", "private-value", "private-hook", "private-function", "BASH_ENV", "BASH_FUNC_"):
+                self.assertNotIn(private, message)
+            get_path.assert_called_once_with()
+            which.assert_called_once_with("bash", path=entries[-1])
+            run.assert_not_called()
+
+    def test_nested_discovery_keeps_failure_observations_isolated(self):
+        outer_path = str(ROOT / "outer bin")
+        inner_path = str(ROOT / "inner bin")
+        inner_messages = []
+
+        def lookup(name, *, path):
+            self.assertEqual(name, "bash")
+            if path == outer_path:
+                with self.assertRaises(RuntimeError) as inner:
+                    shell.bash_executable()
+                inner_messages.append(str(inner.exception))
+            return None
+
+        with patch.object(shell.sys, "platform", "linux"), patch.object(
+                shell.os, "get_exec_path", side_effect=[[outer_path], [inner_path]]) as get_path, patch.object(
+                shell.shutil, "which", side_effect=lookup) as which, patch.object(
+                shell.subprocess, "run") as run, self.assertRaises(RuntimeError) as outer:
+            shell.bash_executable()
+        self.assertEqual(get_path.call_count, 2)
+        self.assertEqual(which.call_count, 2)
+        run.assert_not_called()
+        self.assertEqual(len(inner_messages), 1)
+        for message, included, excluded in ((str(outer.exception), outer_path, inner_path),
+                                            (inner_messages[0], inner_path, outer_path)):
+            self.assertIn(f"discovery.bash.absolute_PATH={included!r}", message)
+            self.assertNotIn(f"discovery.bash.absolute_PATH={excluded!r}", message)
+
+    def test_windows_failure_retains_discovery_order_drive_paths_and_probe_budget(self):
+        git = r"C:\PROGRA~1\Git\cmd\git.exe"
+        bash = r"C:\Windows\System32\bash.exe"
+        for msystem, expected in (("", [r"C:\PROGRA~1\Git\bin\bash.exe", r"C:\PROGRA~1\Git\usr\bin\bash.exe", bash]),
+                                  ("UCRT64", [bash, r"C:\PROGRA~1\Git\bin\bash.exe", r"C:\PROGRA~1\Git\usr\bin\bash.exe"])):
+            with self.subTest(msystem=msystem), patch.dict(os.environ, MSYSTEM=msystem):
+                message, which, construct, executable, run = self.failure(
+                    override=None, platform="win32", discoveries={"bash": bash, "git": git})
+            self.assertIn(f"discovery.git={git!r}", message)
+            self.assertIn(f"discovery.bash={bash!r}", message)
+            self.assertIn("candidates=3", message)
+            self.assertEqual([call.args for call in which.call_args_list], [("bash",), ("git",)])
+            self.assertEqual([call.args[0] for call in construct.call_args_list], expected)
+            self.assertEqual(executable.call_count, 3)
+            self.assertEqual(run.call_count, 3)
+            for index, (candidate, call) in enumerate(zip(expected, run.call_args_list)):
+                self.assertIn(f"candidate[{index}]={candidate!r}", message)
+                self.assertIn(f"candidate[{index}].probe.returncode=1", message)
+                self.assertEqual(call.args[0][0], candidate)
+                self.assertEqual(call.kwargs["timeout"], 2)
+                self.assertIn('[[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin ]] || { ci_bash_observe ostype; exit 12; };', call.args[0][-1])
+
+    def test_validation_failures_name_the_last_stage_without_extra_checks_or_fallback(self):
+        for stage in ("is_absolute", "is_file", "access"):
+            path = self.candidate_path(BASH)
+            if stage != "access":
+                getattr(path, stage).return_value = False
+            with self.subTest(stage=stage):
+                message, which, construct, executable, run = self.failure(
+                    path=lambda candidate: path, access=stage != "access")
+                field = "executable" if stage == "access" else stage
+                self.assertIn(f"candidate[0].{field}=False", message)
+                self.assertIn("selection=override", message)
+                self.assertEqual(construct.call_count, 1)
+                self.assertEqual(path.is_absolute.call_count, 1)
+                self.assertEqual(path.is_file.call_count, int(stage != "is_absolute"))
+                self.assertEqual(executable.call_count, int(stage == "access"))
+                path.resolve.assert_not_called()
+                which.assert_not_called()
+                run.assert_not_called()
+
+    def test_validation_exceptions_report_stage_and_codes_without_exception_payload(self):
+        for stage in ("path", "is_absolute", "is_file", "access", "resolve"):
+            for error in (PermissionError(13, "private-exception-payload"), RuntimeError("private-exception-payload")):
+                path = self.candidate_path(BASH)
+                if stage not in ("path", "access"):
+                    getattr(path, stage).side_effect = error
+
+                def construct(candidate):
+                    if stage == "path":
+                        raise error
+                    return path
+
+                with self.subTest(stage=stage, error=type(error).__name__):
+                    message, which, _, _, run = self.failure(
+                        path=construct, access=error if stage == "access" else True)
+                    self.assertIn(f"candidate[0].{stage}.exception={type(error).__name__}", message)
+                    self.assertNotIn("private-exception-payload", message)
+                    if isinstance(error, OSError):
+                        self.assertIn("candidate[0].errno=13", message)
+                        self.assertIn("candidate[0].winerror=None", message)
+                    which.assert_not_called()
+                    run.assert_not_called()
+
+    def test_probe_refusals_preserve_raw_bytes_returncode_and_resolved_path(self):
+        failures = (
+            (7, b"ci-bash-ready\n", b""), (0, b"", b""), (0, b"ci-bash", b""),
+            (0, b"ci-bash-ready\r\n", b""), (0, b"ci-bash-ready\n", b"warning\r\n"),
+            (1, "WSL unavailable".encode("utf-16-le"), b"\xff\x00\x1b"),
+        )
+        resolved = self.candidate_path("C:/long directory/bash.exe")
+        for returncode, stdout, stderr in failures:
+            path = self.candidate_path(BASH)
+            path.resolve.return_value = resolved
+            with self.subTest(returncode=returncode, stdout=stdout, stderr=stderr):
+                message, _, _, _, run = self.failure(path=lambda candidate: path,
+                    response=subprocess.CompletedProcess([], returncode, stdout, stderr))
+                self.assertIn(f"candidate[0].probe.returncode={returncode}", message)
+                self.assertIn(f"candidate[0].probe.stdout={stdout!r}", message)
+                self.assertIn(f"candidate[0].probe.stderr={stderr!r}", message)
+                self.assertIn("candidate[0].resolved='C:/long directory/bash.exe'", message)
+                path.resolve.assert_called_once_with(strict=True)
+                run.assert_called_once()
+                self.assertEqual(run.call_args.args[0][0], str(resolved))
+
+    def test_launch_and_deadline_failures_report_codes_and_available_partial_bytes(self):
+        denied = OSError(5, "private-launch-payload")
+        denied.winerror = 193
+        for error in (denied, subprocess.TimeoutExpired(["private-command"], 2),
+                      subprocess.TimeoutExpired(["private-command"], 2, output=b"partial\r\n", stderr=b"\xffwarning")):
+            with self.subTest(error=type(error).__name__, output=getattr(error, "output", None)):
+                message, _, _, _, run = self.failure(response=error)
+                self.assertIn(f"candidate[0].probe.exception={type(error).__name__}", message)
+                self.assertNotIn("private-launch-payload", message)
+                self.assertNotIn("private-command", message)
+                if isinstance(error, subprocess.TimeoutExpired):
+                    self.assertIn(f"candidate[0].probe.stdout={error.output!r}", message)
+                    self.assertIn(f"candidate[0].probe.stderr={error.stderr!r}", message)
+                else:
+                    self.assertIn("candidate[0].errno=5", message)
+                    self.assertIn("candidate[0].winerror=193", message)
+                run.assert_called_once()
+                self.assertEqual(run.call_args.kwargs["timeout"], 2)
+
+    def test_failure_bounds_apply_before_formatting_all_context_candidates_and_output(self):
+        huge = "\U0001f600\n\x1b" * 100000
+        huge_bytes = b"\x00\xff\r\n" * 100000
+        absolute = "//server/share/" + huge
+        environment = dict.fromkeys(("PATH", "PATHEXT", "MSYSTEM", "MSYS2_ARG_CONV_EXCL", "MSYS_NO_PATHCONV",
+                                     "MSYS2_ENV_CONV_EXCL", "MSYS2_PATH_TYPE"), huge)
+        with patch.object(shell.os, "environ", environment), patch.object(shell.sys, "executable", huge), patch.object(
+                shell.sys, "version", huge), patch.object(shell.sys, "platform", "win32"), patch.object(
+                shell.os, "get_exec_path", return_value=[absolute]) as get_path, patch.object(
+                shell.shutil, "which", side_effect=lambda name, **kwargs: absolute + (
+                    "/cmd/git.exe" if name == "git" else "/bash.exe")) as which, patch.object(
+                shell, "Path", side_effect=self.candidate_path) as construct, patch.object(
+                shell.os, "access", return_value=True), patch.object(shell.subprocess, "run",
+                    return_value=subprocess.CompletedProcess([], 1, huge_bytes, huge_bytes)) as run, self.assertRaises(RuntimeError) as caught:
+            shell.bash_executable()
+        message = str(caught.exception)
+        self.assertLess(len(message), 24 * 1024)
+        self.assertEqual(get_path.call_count, 2)
+        self.assertEqual(which.call_count, 2)
+        for name in ("bash", "git"):
+            self.assertIn(f"discovery.{name}.absolute_PATH=", message)
+            self.assertIn(f"discovery.{name}.which=", message)
+        self.assertIn("candidates=3", message)
+        self.assertEqual(construct.call_count, 3)
+        self.assertEqual(run.call_count, 3)
+        self.assertIn(f"length={len(huge_bytes)}, truncated=True", message)
+        self.assertIn(f"length={len(huge)}, truncated=True", message)
+        self.assertIn("candidate[2].probe.stderr=", message)
+        self.assertTrue(message.isascii())
+        self.assertNotIn("\x1b", message)
+        self.assertNotIn("\r", message)
+        self.assertLess(len(message.splitlines()), 50)
+
+    def test_success_stays_silent_after_failed_probe_and_keeps_exact_success_contract(self):
+        failure = subprocess.CompletedProcess([], 0, b"ci-bash-ready\r\n", b"")
+        success = subprocess.CompletedProcess([], 0, b"ci-bash-ready\n", b"")
+        with patch.object(shell.sys, "stdout") as stdout, patch.object(shell.sys, "stderr") as stderr:
+            executable, calls = WorkflowShellTests().windows_resolution("UCRT64", [failure, success])
+        self.assertEqual(executable, r"C:\Program Files\Git\bin\bash.exe")
+        self.assertEqual(len(calls), 2)
+        stdout.write.assert_not_called()
+        stderr.write.assert_not_called()
+
+    def run_probe_body(self, *, platform="win32", prefix="", replace=None):
+        # Capture the actual production command, then execute it outside mocks.
+        # Prefixes/rewrites force guard inputs; they do not emulate MSYS decoding.
+        _, _, _, _, run = self.failure(platform=platform)
+        command = list(run.call_args.args[0])
+        script = prefix + command[-1]
+        if replace is not None:
+            before, after = replace
+            self.assertIn(before, script)
+            script = script.replace(before, after)
+        command[-1] = script
+        result = subprocess.run(command, **run.call_args.kwargs)
+        return result, script
+
+    def assert_refusal_observations(self, result, script, status, stage):
+        self.assertEqual(result.returncode, status, result.stderr)
+        self.assertEqual(result.stdout, b"BASH_EXECUTION_STRING=" + script[:512].encode("utf-8"))
+        self.assertTrue(result.stderr.startswith(f"stage={stage} BASH_VERSION=".encode("ascii")))
+        self.assertIn(b" OSTYPE=", result.stderr)
+        message, _, _, _, run = self.failure(response=result)
+        self.assertIn(f"candidate[0].probe.returncode={status}", message)
+        self.assertIn(shell._observation("candidate[0].probe.stdout", result.stdout), message)
+        self.assertIn(shell._observation("candidate[0].probe.stderr", result.stderr), message)
+        run.assert_called_once()
+
+    def test_actual_probe_distinguishes_empty_bash_version_on_both_platform_branches(self):
+        for platform in ("linux", "win32"):
+            with self.subTest(platform=platform):
+                result, script = self.run_probe_body(platform=platform, prefix="BASH_VERSION=; ")
+                self.assert_refusal_observations(result, script, 11, "bash-version")
+                self.assertIn(b"BASH_VERSION='' OSTYPE=", result.stderr)
+
+    def test_actual_windows_guard_reports_empty_and_non_msys_intrinsics(self):
+        for prefix, ostype in (("OSTYPE=; ", b"''"), ("OSTYPE=linux-gnu; ", b"linux-gnu")):
+            with self.subTest(prefix=prefix):
+                result, script = self.run_probe_body(prefix=prefix)
+                self.assert_refusal_observations(result, script, 12, "ostype")
+                self.assertRegex(result.stderr, rb"BASH_VERSION=[^\n ]+ OSTYPE=" + re.escape(ostype) + rb"\n$")
+                self.assertIn(ascii(result.stdout), shell._observation("stdout", result.stdout))
+                self.assertIn("truncated=False", shell._observation("stdout", result.stdout))
+
+    def test_actual_refusal_observes_changed_decoded_quotes_without_evaluating_command(self):
+        result, script = self.run_probe_body(prefix="OSTYPE=msys; ",
+                                            replace=('"$OSTYPE"', r'\"$OSTYPE\"'))
+        self.assert_refusal_observations(result, script, 12, "ostype")
+        self.assertIn(rb'\"$OSTYPE\"', result.stdout)
+        self.assertTrue(result.stderr.endswith(b" OSTYPE=msys\n"))
+
+    def test_actual_probe_success_retains_only_exact_magic_on_both_platform_branches(self):
+        for platform, prefix in (("linux", ""), ("win32", "OSTYPE=msys; ")):
+            with self.subTest(platform=platform):
+                result, _ = self.run_probe_body(platform=platform, prefix=prefix)
+                self.assertEqual((result.returncode, result.stdout, result.stderr), (0, b"ci-bash-ready\n", b""))
+                with patch.object(shell.subprocess, "run", return_value=result) as run, patch.object(
+                        shell.sys, "stdout") as stdout, patch.object(shell.sys, "stderr") as stderr:
+                    self.assertEqual(shell.bash_executable(BASH), BASH)
+                run.assert_called_once()
+                stdout.write.assert_not_called()
+                stderr.write.assert_not_called()
+
+    def test_actual_windows_probe_accepts_legacy_msys_and_documented_cygwin(self):
+        for msystem in ("", "UCRT64", "untrusted"):
+            for ostype, version in (("msys", "4.4.23(1)-release"),
+                                    ("msys2", "5.3.20(2)-release"),
+                                    ("cygwin", "5.3.20(2)-release")):
+                with self.subTest(msystem=msystem, ostype=ostype), patch.dict(os.environ, MSYSTEM=msystem):
+                    result, _ = self.run_probe_body(prefix=f"BASH_VERSION='{version}'; OSTYPE={ostype}; ")
+                self.assertEqual((result.returncode, result.stdout, result.stderr), (0, b"ci-bash-ready\n", b""))
+                # Feed the executed probe's raw result through the Windows
+                # override path, including spaces and an 8.3 installation alias.
+                for candidate in (r"D:\MSYS installation\usr\bin\bash.exe",
+                                  r"C:\PROGRA~1\Git\usr\bin\bash.exe"):
+                    with self.subTest(candidate=candidate), patch.object(shell.sys, "platform", "win32"), patch.object(
+                            shell, "Path", side_effect=self.candidate_path), patch.object(
+                            shell.os, "access", return_value=True), patch.object(shell, "_absolute_which") as which, patch.object(
+                            shell.subprocess, "run", return_value=result) as run, patch.object(
+                            shell.sys, "stdout") as stdout, patch.object(shell.sys, "stderr") as stderr:
+                        self.assertEqual(shell.bash_executable(candidate), candidate)
+                    which.assert_not_called()
+                    run.assert_called_once()
+                    self.assertEqual(run.call_args.args[0][0], candidate)
+                    self.assertEqual(run.call_args.kwargs["timeout"], 2)
+                    stdout.write.assert_not_called()
+                    stderr.write.assert_not_called()
+
+    def test_actual_windows_probe_refuses_other_identities_despite_msystem(self):
+        for msystem in ("", "UCRT64", "MINGW64"):
+            for ostype in ("", "linux-gnu", "linux-musl", "unknown", "cygwin-extra", "CYGWIN", "darwin"):
+                # WSL and caller-supplied Windows identities cannot override the
+                # actual shell intrinsics. Hooks must also remain filtered.
+                untrusted = dict(MSYSTEM=msystem, WSL_DISTRO_NAME="Ubuntu", WSL_INTEROP="untrusted",
+                                 OSTYPE="cygwin", BASH_VERSION="5.3.20(2)-release",
+                                 BASH_ENV="untrusted", ENV="untrusted", SHELLOPTS="untrusted", BASHOPTS="untrusted")
+                untrusted["BASH_FUNC_exit%%"] = "() { return 0; }"
+                with self.subTest(msystem=msystem, ostype=ostype), patch.dict(os.environ, untrusted):
+                    result, script = self.run_probe_body(prefix=f"BASH_VERSION='5.3.20(2)-release'; OSTYPE='{ostype}'; ")
+                self.assert_refusal_observations(result, script, 12, "ostype")
+                self.assertIn(b"BASH_VERSION=5.3.20\\(2\\)-release OSTYPE=" + (ostype.encode("ascii") or b"''"),
+                              result.stderr)
+
+    def test_actual_documented_cygwin_identity_still_refuses_empty_bash_version(self):
+        with patch.dict(os.environ, MSYSTEM="UCRT64"):
+            result, script = self.run_probe_body(prefix="BASH_VERSION=; OSTYPE=cygwin; ")
+        self.assert_refusal_observations(result, script, 11, "bash-version")
+        self.assertEqual(result.stderr, b"stage=bash-version BASH_VERSION='' OSTYPE=cygwin\n")
+
+    def test_actual_abort_without_guard_observations_leaves_body_stage_unknown(self):
+        result, _ = self.run_probe_body(prefix="exit 1; ")
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (1, b"", b""))
+        message, _, _, _, run = self.failure(response=result)
+        self.assertIn("candidate[0].probe.returncode=1", message)
+        self.assertIn("candidate[0].probe.stdout=b''", message)
+        self.assertIn("candidate[0].probe.stderr=b''", message)
+        self.assertNotIn("stage=", message)
+        run.assert_called_once()
+
+    def test_actual_guard_observation_write_failures_never_reach_success_magic(self):
+        for descriptor in (1, 2):
+            with self.subTest(descriptor=descriptor):
+                result, _ = self.run_probe_body(prefix=f"exec {descriptor}>&-; OSTYPE=refused; ")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn(b"ci-bash-ready\n", result.stdout)
+                _, _, _, _, run = self.failure(response=result)
+                run.assert_called_once()
+
+    def test_actual_guard_observations_filter_hooks_and_do_not_dump_environment(self):
+        private = "private-observation-payload"
+        untrusted = dict(ACCESS_TOKEN=private, BASH_EXECUTION_STRING=private, BASH_ENV=private,
+                         ENV=private, BASH_VERSION=private, OSTYPE="msys", SHELLOPTS=private, BASHOPTS=private)
+        untrusted["BASH_FUNC_ci_bash_observe%%"] = "() { printf " + private + "; }"
+        with patch.dict(os.environ, untrusted):
+            result, script = self.run_probe_body(prefix="OSTYPE=refused; ")
+        self.assert_refusal_observations(result, script, 12, "ostype")
+        for forbidden in (private.encode("ascii"), b"ACCESS_TOKEN", b"BASH_ENV", b"BASH_FUNC_"):
+            self.assertNotIn(forbidden, result.stdout + result.stderr)
+
+    def test_actual_guard_observations_bound_intrinsics_and_decoded_command_and_escape_controls(self):
+        prefix = "BASH_VERSION=" + "v" * 1000 + "; OSTYPE=" + "o" * 1000 + "; "
+        result, script = self.run_probe_body(prefix=prefix)
+        self.assert_refusal_observations(result, script, 12, "ostype")
+        self.assertEqual(result.stderr, b"stage=ostype BASH_VERSION=" + b"v" * 32 + b" OSTYPE=" + b"o" * 32 + b"\n")
+        self.assertEqual(len(result.stdout), len(b"BASH_EXECUTION_STRING=") + 512)
+        result, script = self.run_probe_body(prefix=r"BASH_VERSION=$'ver\n\033'; OSTYPE=$'other\r\033'; ")
+        self.assert_refusal_observations(result, script, 12, "ostype")
+        self.assertIn(rb"ver\n\E", result.stderr)
+        self.assertIn(rb"other\r\E", result.stderr)
+        self.assertNotIn(b"\x1b", result.stderr)
+        self.assertEqual(result.stderr.count(b"\n"), 1)
+        observation = shell._observation("stderr", result.stderr)
+        self.assertTrue(observation.isascii())
+        self.assertNotIn("\x1b", observation)
+        self.assertNotIn("\r", observation)
+
+    def test_byte_observation_keeps_display_bound_before_formatting_and_retains_command_tail(self):
+        class BoundedBytes(bytes):
+            def __repr__(self):
+                raise AssertionError("unsliced output was formatted")
+
+            def __getitem__(self, key):
+                self_test.assertIsInstance(key, slice)
+                self_test.assertLessEqual(key.stop, 640)
+                return super().__getitem__(key)
+
+        self_test = self
+        for payload in (b"x" * 500 + b"command-tail", b"\xff\x00\r\n" * 100000):
+            with self.subTest(length=len(payload)):
+                observation = shell._observation("stdout", BoundedBytes(payload))
+                self.assertTrue(observation.isascii())
+                preview = observation.split("=", 1)[1].rsplit(" (length=", 1)[0]
+                self.assertLessEqual(len(preview), 640)
+                if len(payload) < 640:
+                    self.assertIn("command-tail", observation)
+                    self.assertIn("truncated=False", observation)
+                else:
+                    self.assertIn("truncated=True", observation)
+        partial = b"x" * 200 + b"decoded-command-tail"
+        message, _, _, _, run = self.failure(response=subprocess.TimeoutExpired(
+            ["private-command"], 2, output=partial, stderr=b"stage=ostype"))
+        self.assertIn("decoded-command-tail", message)
+        self.assertNotIn("private-command", message)
+        run.assert_called_once()
+
+    def test_refusal_observations_cannot_make_unknown_output_or_guard_status_successful(self):
+        for status in (0, 11, 12):
+            failures = ((b"BASH_EXECUTION_STRING=command", b"stage=ostype"),
+                        (b"ci-bash-ready\n", b"stage=ostype"),
+                        (b"ci-bash-ready\nextra", b""))
+            if status:
+                failures += ((b"ci-bash-ready\n", b""),)
+            for stdout, stderr in failures:
+                with self.subTest(status=status, stdout=stdout, stderr=stderr):
+                    _, _, _, _, run = self.failure(response=subprocess.CompletedProcess([], status, stdout, stderr))
+                    run.assert_called_once()
 
 
 def jobs(workflow):
@@ -63,6 +658,114 @@ def value(block, key, indent):
     return " ".join(body.split()) if result == ">-" else body
 
 
+def aggregate_invalid_expression(producer):
+    return ("needs.changes.result != 'success' || "
+            f"(needs.{producer}.result != 'success' && needs.{producer}.result != 'skipped')")
+
+
+def evaluate_condition(expression, dependencies, *, cancelled=False, failed=None):
+    """Evaluate this workflow's status/result conditions in their Actions context.
+
+    At job admission/re-evaluation cancelled is workflow cancellation. At step
+    evaluation it is the current job's cancellation, which can still be false
+    when a job condition kept it running during workflow cancellation.
+    """
+    expression = (expression or "success()").removeprefix("${{ ").removesuffix(" }}")
+    if failed is None:
+        failed = "failure" in dependencies.values()
+    status = {"always": True, "cancelled": cancelled, "failure": failed,
+              "success": not cancelled and not failed and
+              all(result == "success" for result in dependencies.values())}
+    expression, count = re.subn(r"\b(always|cancelled|success|failure)\(\)",
+                               lambda match: repr(status[match[1]]), expression)
+    expression = re.sub(r"needs\.([\w-]+)\.result",
+                        lambda match: repr(dependencies[match[1]]), expression)
+    expression = re.sub(r"!(?!=)", "not ", expression)
+    expression = expression.replace("&&", " and ").replace("||", " or ")
+    return bool((count or status["success"]) and
+                eval(expression, {"__builtins__": {}}, {}))
+
+
+def guarded_jobs(workflows):
+    for filename, (job_id, check_name) in GUARDED.items():
+        yield filename, job_id, check_name, jobs(workflows[filename])[job_id]
+    yield ("asan.yml", "asan-shard", "Linux / GCC ASan shard ${{ matrix.shard }}/2",
+           jobs(workflows["asan.yml"])["asan-shard"])
+    ci = jobs(workflows["ci.yml"])
+    for job_id, name in (("linux", value(ci["linux"], "name", 4)),
+                         ("windows-msvc-result", "Windows / MSVC"),
+                         ("windows-ucrt64-result", "Windows / MSYS2 UCRT64")):
+        yield "ci.yml", job_id, name, ci[job_id]
+
+
+def status_function_violations(workflow):
+    """Find status expressions outside if values in our indented YAML layout."""
+    if_values = []
+    scalar_key, scalar_indent, scalar_start = None, -1, 0
+    offset = 0
+    for line in workflow.splitlines(keepends=True):
+        indent = len(line) - len(line.lstrip(" "))
+        if line.strip() and not line.lstrip().startswith("#"):
+            if scalar_key is not None and indent <= scalar_indent:
+                if scalar_key == "if":
+                    if_values.append((scalar_start, offset))
+                scalar_key = None
+            if scalar_key is None:
+                header = re.match(r" *(?:- +)?(?P<key>[\w-]+|'[^']+'|\"[^\"]+\"): *(?P<value>.*)", line)
+                if header and (header["key"].strip("'\"") == "if" or
+                               (header["value"].strip() and not header["value"].startswith("#"))):
+                    scalar_key = header["key"].strip("'\"")
+                    scalar_indent = header.start("key")
+                    scalar_start = offset + header.start("value")
+        offset += len(line)
+    if scalar_key == "if":
+        if_values.append((scalar_start, offset))
+
+    violations = []
+    for expression in re.finditer(r"\$\{\{(?:'(?:[^']|'')*'|(?!\}\}).)*\}\}", workflow, re.DOTALL):
+        if re.search(r"\b(?:success|failure|cancelled|always)\s*\(", expression[0], re.IGNORECASE):
+            if not any(start <= expression.start() and expression.end() <= end
+                       for start, end in if_values):
+                violations.append(workflow.count("\n", 0, expression.start()) + 1)
+    return violations
+
+
+class WorkflowExpressionPolicyTests(unittest.TestCase):
+    def test_status_functions_are_only_used_in_if_values(self):
+        paths = sorted(path for path in (ROOT / ".github/workflows").rglob("*")
+                       if path.suffix in (".yml", ".yaml"))
+        self.assertTrue(paths)
+        for path in paths:
+            with self.subTest(workflow=path.name):
+                self.assertEqual(status_function_violations(path.read_text(encoding="utf-8")), [],
+                                 "Status functions are only valid in if values")
+
+    def test_status_expression_contexts(self):
+        for function in ("success", "failure", "cancelled", "always"):
+            expression = "${{ " + function + "() }}"
+            for key in ("name", "env", "with", "run", "outputs"):
+                for scalar in (expression, "|\n  " + expression,
+                               ">-\n  ${{\n    " + function + "()\n  }}"):
+                    with self.subTest(function=function, key=key, scalar=scalar):
+                        self.assertTrue(status_function_violations(key + ": " + scalar + "\n"))
+            for condition in ("if: " + expression, "- if: " + expression,
+                              "'if': " + expression, '"if": ' + expression,
+                              "if:\n  " + expression,
+                              "if: >-\n  " + expression,
+                              "if: ${{\n  " + function + "()\n  }}"):
+                with self.subTest(condition=condition):
+                    self.assertEqual(status_function_violations(condition + "\n"), [])
+        # Script text that looks like an if key must not grant an exemption.
+        self.assertEqual(status_function_violations("run: |\n  if: ${{ always() }}\n"), [2])
+        self.assertEqual(status_function_violations(
+            "if: ${{ always() }}\nenv:\n  BAD: ${{ cancelled() }}\n"), [3])
+        self.assertEqual(status_function_violations("name: ${{ ALWAYS () }}\n"), [1])
+        self.assertEqual(status_function_violations("name: ${{ '}}' || cancelled() }}\n"), [1])
+        self.assertEqual(status_function_violations("if: ${{ '}}' || cancelled() }}\n"), [])
+        self.assertEqual(status_function_violations("name: ${{ github.workflow }}\n"), [])
+        self.assertEqual(status_function_violations(""), [])
+
+
 class WorkflowDraftPolicyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -82,14 +785,17 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                 self.assertEqual(value(pr, "branches", 4), "[main, devel]")
 
     def test_guard_runs_first_under_existing_check_name_without_draft_job_skip(self):
-        for filename, (job_id, check_name) in GUARDED.items():
-            with self.subTest(workflow=filename):
-                job = jobs(self.workflows[filename])[job_id]
+        for filename, job_id, check_name, job in guarded_jobs(self.workflows):
+            with self.subTest(workflow=filename, job=job_id):
                 self.assertEqual(value(job, "name", 4), check_name)
                 self.assertEqual(value(job, "runs-on", 4), "ubuntu-24.04")
-                self.assertEqual(value(job, "needs", 4), "changes")
-                condition = "!cancelled()"
-                if filename != "ci.yml":
+                self.assertEqual(value(job, "needs", 4),
+                                 "[changes, asan-shard]" if job_id == "asan" else
+                                 f"[changes, {job_id.removesuffix('-result')}]" if job_id.endswith("-result") else "changes")
+                condition = ("!cancelled() || " + aggregate_invalid_expression(
+                    "asan-shard" if job_id == "asan" else job_id.removesuffix("-result"))
+                    if job_id == "asan" or job_id.endswith("-result") else "!cancelled()")
+                if filename == "performance.yml" or job_id == "asan-shard":
                     condition += (
                         " && ((github.event_name == 'pull_request' && "
                         "toJSON(github.event.pull_request.draft) != 'false') || "
@@ -116,13 +822,13 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             ("workflow_dispatch", "", 0),
         ]
         with tempfile.TemporaryDirectory() as directory:
-            for filename, (job_id, _) in GUARDED.items():
-                script = value(steps(jobs(self.workflows[filename])[job_id])[0], "run", 8)
+            for filename, job_id, _, job in guarded_jobs(self.workflows):
+                script = value(steps(job)[0], "run", 8)
                 self.assertIsNotNone(script)
                 for event, draft, expected in cases:
-                    with self.subTest(workflow=filename, event=event, draft=draft):
+                    with self.subTest(workflow=filename, job=job_id, event=event, draft=draft):
                         result = subprocess.run(
-                            ["bash", "--noprofile", "--norc", "-e", "-c", script],
+                            [BASH, "--noprofile", "--norc", "-e", "-c", script],
                             cwd=directory,
                             env=dict(os.environ, CI_EVENT_NAME=event, CI_PR_DRAFT=draft),
                             capture_output=True,
@@ -134,10 +840,17 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                             self.assertIn("::error::Draft pull requests cannot merge", result.stdout)
 
     def test_failed_guard_cannot_be_bypassed_by_build_or_evidence_steps(self):
-        for filename, (job_id, _) in GUARDED.items():
-            for step in steps(jobs(self.workflows[filename])[job_id])[1:]:
-                with self.subTest(workflow=filename, step=step.splitlines()[0]):
+        for filename, job_id, _, job in guarded_jobs(self.workflows):
+            for step in steps(job)[1:]:
+                with self.subTest(workflow=filename, job=job_id, step=step.splitlines()[0]):
                     condition = value(step, "if", 8) or ""
+                    if (job_id == "asan" or job_id.endswith("-result")) and step.startswith("      - name: Reject invalid dependencies\n"):
+                        self.assertEqual(condition, "${{ always() && (" + aggregate_invalid_expression(
+                            "asan-shard" if job_id == "asan" else job_id.removesuffix("-result")) + ") }}")
+                        self.assertIsNone(value(step, "continue-on-error", 8))
+                        self.assertEqual(value(step, "run", 8).splitlines()[-1], "exit 1")
+                        self.assertEqual(len(value(step, "run", 8).splitlines()), 2)
+                        continue
                     # Ordinary steps implicitly require success(). Evidence steps
                     # using always() must explicitly exclude drafts or be manual-only.
                     if "always()" in condition:
@@ -149,6 +862,21 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                     self.assertNotIn("cancelled()", condition)
                     self.assertNotRegex(condition, r"!(?!=)")
 
+    def test_unconditional_always_on_shard_build_fails_draft_policy(self):
+        workflow = self.workflows["asan.yml"]
+        original = jobs(workflow)["asan-shard"]
+        mutated = original.replace("      - name: Build\n",
+                                   "      - name: Build\n        if: always()\n", 1)
+        self.assertNotEqual(mutated, original)
+        case = WorkflowDraftPolicyTests("test_failed_guard_cannot_be_bypassed_by_build_or_evidence_steps")
+        case.workflows = {**self.workflows, "asan.yml": workflow.replace(original, mutated, 1)}
+        result = unittest.TestResult()
+        case.run(result)
+        self.assertEqual(len(result.errors), 0, result.errors)
+        self.assertEqual(len(result.failures), 1, result.failures)
+        self.assertIn("asan-shard", str(result.failures[0][0]))
+        self.assertIn("Build", str(result.failures[0][0]))
+
     def test_other_heavy_jobs_still_skip_drafts_and_keep_routed_skips(self):
         ci = jobs(self.workflows["ci.yml"])
         for job_id in ("gns-compile-probe", "diligent-rhi", "tidy-shard"):
@@ -159,7 +887,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         self.assertEqual(value(ci["windows-msvc"], "needs", 4), "changes")
         self.assertEqual(value(ci["windows-msvc"], "if", 4), "${{ !cancelled() && (" + READY + ") }}")
         self.assertEqual(value(ci["tidy"], "needs", 4), "[changes, tidy-shard]")
-        self.assertEqual(value(ci["tidy"], "if", 4), "always() && (" + READY + ")")
+        self.assertEqual(value(ci["tidy"], "if", 4), "${{ (!cancelled() || " + aggregate_invalid_expression("tidy-shard") + ") && (" + READY + ") }}")
         self.assertEqual(value(ci["windows-ucrt64"], "if", 4), "${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && " + f"({READY}) && ({UCRT_ROUTE})" + " }}")
         perf = jobs(self.workflows["performance.yml"])
         self.assertEqual(value(perf["server-smoke-comparison"], "if", 4), "!cancelled() && needs.changes.outputs.needs_cpp != 'false' && " + f"({READY}) && {SERVER_ROUTE}")
@@ -171,9 +899,649 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         for job in (ci["lint"], ci["public-tree"], perf["runner-contract"]):
             self.assertIsNone(value(job, "if", 4))
 
+    def test_asan_matrix_and_aggregate_preserve_limits_coverage_and_evidence(self):
+        workflow = self.workflows["asan.yml"]
+        blocks = jobs(workflow)
+        self.assertEqual(set(blocks), {"changes", "asan-shard", "asan"})
+        shard, aggregate = blocks["asan-shard"], blocks["asan"]
+        self.assertEqual(value(shard, "name", 4), "Linux / GCC ASan shard ${{ matrix.shard }}/2")
+        self.assertEqual(value(shard, "needs", 4), "changes")
+        self.assertEqual(value(shard, "if", 4), "${{ !cancelled() && ((github.event_name == 'pull_request' && toJSON(github.event.pull_request.draft) != 'false') || needs.changes.outputs.needs_cpp != 'false') }}")
+        self.assertEqual(value(shard, "runs-on", 4), "ubuntu-24.04")
+        self.assertEqual(value(shard, "timeout-minutes", 4), "60")
+        self.assertEqual(value(shard, "fail-fast", 6), "false")
+        self.assertEqual(value(shard, "shard", 8), "[1, 2]")
+        self.assertIsNone(value(shard, "continue-on-error", 4))
+        self.assertEqual(steps(shard)[0], steps(aggregate)[0])
+        self.assertEqual(value(aggregate, "timeout-minutes", 4), "5")
+        shard_steps = {step.splitlines()[0].removeprefix("      - name: "): step for step in steps(shard)}
+        aggregate_steps = {step.splitlines()[0].removeprefix("      - name: "): step for step in steps(aggregate)}
+        self.assertEqual(value(shard_steps["Test"], "id", 8), "tests")
+        self.assertEqual(value(shard_steps["Test"], "run", 8),
+                         'ctest --preset debug-asan -LE manual --show-only=json-v1 > build/debug-asan/ctest.inventory.json\n'
+                         'ctest --preset debug-asan --show-only=json-v1 > build/debug-asan/ctest.all.json\n'
+                         '# Alternate independent tests; keep fixture setup/consumers in one shard.\n'
+                         'python3 tools/ci/ctest_shards.py plan --profile asan --shard ${{ matrix.shard }} --directory build/debug-asan --require-suite SimBudgetWorldParity. --require-suite AmbientDeterminismReceipt.\n'
+                         '# Recheck the ordered roster in the same context immediately before CTest.\n'
+                         'env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \\\n'
+                         '  xvfb-run -a python3 tools/ci/ctest_shards.py run --profile asan --directory build/debug-asan')
+        self.assertNotIn("check_ctest_junit.py", shard)
+        self.assertNotIn("compare_ambient_receipts.py", shard)
+        check = aggregate_steps["Merge shard JUnit and check inventory"]
+        self.assertEqual(value(check, "id", 8), "tests")
+        commands = value(check, "run", 8).splitlines()
+        merge_command = ASAN_MERGE_COMMAND
+        inventory_prefix = "python3 tools/ci/check_ctest_junit.py build/debug-asan/ctest.junit.xml --minimum-tests "
+        inventory_commands = [command for command in commands if command.startswith(inventory_prefix)]
+        self.assertIn(merge_command, commands)
+        self.assertEqual(len(inventory_commands), 1, inventory_commands)
+        inventory_command = inventory_commands[0]
+        self.assertRegex(inventory_command,
+                         rf"^{re.escape(inventory_prefix)}[0-9]+(?: --require-test [\w./-]+)*$")
+        self.assertGreaterEqual(int(inventory_command.split()[4]), ASAN_MINIMUM_TESTS)
+        required_tests = set(re.findall(r" --require-test ([\w./-]+)", inventory_command))
+        self.assertLessEqual(set(ASAN_REQUIRED_TESTS), required_tests)
+        self.assertLess(commands.index(merge_command), commands.index(inventory_command))
+        coverage_command = "python3 tools/ci/compare_ambient_receipts.py asan=build/debug-asan/ctest.junit.xml \\"
+        self.assertIn(coverage_command, commands)
+        self.assertLess(commands.index(inventory_command), commands.index(coverage_command))
+        coverage_index = commands.index(coverage_command)
+        self.assertEqual(commands[coverage_index + 1:coverage_index + 2],
+                         ["  --expect-labels asan --require-probe asan"])
+        for name in ("Download shard JUnit", "Merge shard JUnit and check inventory"):
+            self.assertEqual(value(aggregate_steps[name], "if", 8), "needs.asan-shard.result == 'success'")
+            self.assertIsNone(value(aggregate_steps[name], "continue-on-error", 8))
+        self.assertIn("actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333", aggregate)
+        self.assertNotIn("merge-multiple: true", aggregate)
+        upload = shard_steps["Upload shard JUnit"]
+        self.assertIn("name: asan-junit-${{ github.sha }}-${{ github.run_id }}-shard-${{ matrix.shard }}", upload)
+        self.assertEqual(value(upload, "overwrite", 10), "true")
+        self.assertIn("build/debug-asan/ctest.inventory.json", upload)
+        self.assertIn("build/debug-asan/ctest.junit.xml", upload)
+        self.assertIn("build/debug-asan/qualification-shard.json", upload)
+        self.assertIn("if-no-files-found: error", upload)
+        diagnostics = shard_steps["Upload sanitizer evidence"]
+        self.assertEqual(value(diagnostics, "name", 10),
+                         "asan-test-evidence-${{ github.sha }}-shard-${{ matrix.shard }}")
+        self.assertEqual(value(diagnostics, "overwrite", 10), "true")
+        self.assertEqual(value(shard_steps["Bind manual qualification shard evidence"], "QUALIFICATION_PRODUCERS", 10),
+                         "'{\"identity\":\"${{ steps.identity.outcome }}\",\"configure\":\"${{ steps.configure.outcome }}\",\"build\":\"${{ steps.build.outcome }}\",\"tests\":\"${{ steps.tests.outcome }}\"}'")
+        for name in ("identity", "configure", "build", "tests"):
+            self.assertIn(f"id: {name}\n", shard)
+        self.assertIn('asan-shard --lane asan --expected-sha "$QUALIFICATION_EXPECTED_SHA" --shard ${{ matrix.shard }}', shard)
+        self.assertIn('--asan-shards build/asan-shards', aggregate_steps["Bind manual qualification evidence"])
+        self.assertEqual(value(aggregate_steps["Bind manual qualification evidence"], "QUALIFICATION_PRODUCERS", 10),
+                         "'{\"tests\":\"${{ steps.tests.outcome }}\"}'")
+        self.assertIn("name: qualification-asan-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}", aggregate)
+        self.assertIn("python3 tools/ci/test_asan_shards.py", jobs(self.workflows["ci.yml"])["public-tree"])
+
+    def test_native_matrices_aggregates_limits_and_full_qualification_route(self):
+        ci = jobs(self.workflows["ci.yml"])
+        matrix = "${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture && fromJSON('[0]') || fromJSON('[1,2]') }}"
+        for job_id, profile, title, runner, limit, floor in (
+                ("linux", "gcc", "Linux / GCC", "ubuntu-24.04", "60", "2340"),
+                ("windows-msvc", "msvc", "Windows / MSVC", "windows-2025", "90", "2320"),
+                ("windows-ucrt64", "ucrt64", "Windows / MSYS2 UCRT64", "windows-2025", "85", "2320")):
+            with self.subTest(job=job_id):
+                producer, aggregate = ci[job_id], ci[job_id + "-result"]
+                self.assertEqual(value(producer, "shard", 8), matrix)
+                self.assertEqual(value(producer, "fail-fast", 6), "false")
+                self.assertEqual(value(producer, "timeout-minutes", 4), limit)
+                self.assertEqual(value(producer, "runs-on", 4), runner)
+                self.assertIn(title + " full qualification", value(producer, "name", 4))
+                self.assertIn(title + " shard {0}/2", value(producer, "name", 4))
+                self.assertEqual(value(aggregate, "name", 4), title)
+                self.assertEqual(value(aggregate, "if", 4), "${{ !cancelled() || " + aggregate_invalid_expression(job_id) + " }}")
+                self.assertEqual(value(aggregate, "needs", 4), f"[changes, {job_id}]")
+                self.assertEqual(value(aggregate, "timeout-minutes", 4), "5")
+                self.assertEqual(self.workflows["ci.yml"].count("    name: " + title + "\n"), 1)
+                self.assertIsNone(value(producer, "continue-on-error", 4))
+                self.assertIsNone(value(aggregate, "continue-on-error", 4))
+                for command in ("plan", "run"):
+                    self.assertIn(f"ctest_shards.py {command} --profile {profile}", producer)
+                self.assertIn("ctest --preset release -LE manual --show-only=json-v1", producer)
+                self.assertIn("ctest --preset release --show-only=json-v1", producer)
+                self.assertIn("--require-suite SimBudgetWorldParity. --require-suite AmbientDeterminismReceipt.", producer)
+                gate = next(step for step in steps(aggregate) if "name: Require expected producers and route\n" in step)
+                self.assertEqual(value(gate, "SHARD_RESULT", 10), "${{ needs." + job_id + ".result }}")
+                for key, expression in (("NEEDS_CPP", "needs.changes.outputs.needs_cpp"),
+                                        ("CI_EVENT", "github.event_name"),
+                                        ("CI_DRAFT", "github.event.pull_request.draft")):
+                    self.assertEqual(value(gate, key, 10), "${{ " + expression + " }}")
+                self.assertEqual(value(gate, "CI_PATHS_RESULT", 10), "${{ needs.changes.result }}")
+                self.assertIn('--classification "$CI_PATHS_RESULT"', gate)
+                self.assertEqual(value(gate, "CI_CANCELLED", 10), '"false"')
+                self.assertIn('ctest_shards.py gate --result "$SHARD_RESULT" --cpp "$NEEDS_CPP"', gate)
+                merge = next(step for step in steps(aggregate) if "name: Merge shard JUnit and check inventory\n" in step)
+                self.assertIn(f"ctest_shards.py merge --profile {profile}", merge)
+                self.assertIn("--minimum-tests " + floor, merge)
+                check = ("tools/ci/check_ctest_junit.py build/release/ctest.junit.xml"
+                         " --minimum-tests " + floor)
+                for name in ASAN_REQUIRED_TESTS:
+                    check += " --require-test " + name
+                self.assertIn("python3 " + check, merge)
+                self.assertLess(merge.index("ctest_shards.py merge --profile " + profile),
+                                merge.index("python3 " + check))
+                test_name = "Configure, build, and test" if profile == "msvc" else "Test"
+                test = next(step for step in steps(producer) if "name: " + test_name + "\n" in step)
+                full_check = ("if (${{ matrix.shard }} -eq 0) {\n  python " + check + "\n}"
+                              if profile == "msvc" else
+                              "if [ '${{ matrix.shard }}' = 0 ]; then\n  " +
+                              ("python3 " if profile == "gcc" else "python ") + check + "\nfi")
+                self.assertIn(full_check, value(test, "run", 8))
+                self.assertEqual(value(test, "run", 8).count("check_ctest_junit.py"), 1)
+                self.assertEqual(value(merge, "run", 8).count("check_ctest_junit.py"), 1)
+                self.assertIn('if [ "$CI_QUALIFICATION" = true ]; then full=(--full); fi', merge)
+                self.assertIn('"${full[@]}"', merge)
+                self.assertNotIn("merge-multiple: true", aggregate)
+                self.assertNotIn("actions/cache", aggregate)
+
+    def test_native_cache_writers_and_attempt_specific_retained_evidence(self):
+        ci = jobs(self.workflows["ci.yml"])
+        for job_id, profile in (("linux", "gcc"), ("windows-msvc", "msvc"), ("windows-ucrt64", "ucrt64")):
+            producer, aggregate = ci[job_id], ci[job_id + "-result"]
+            producer_steps = {step.splitlines()[0].removeprefix("      - name: "): step for step in steps(producer)}
+            for step in ("Clean compiler cache before saving", "Save compiler cache"):
+                self.assertTrue(value(producer_steps[step], "if", 8).startswith("${{ matrix.shard == 1 && "))
+            self.assertNotIn("matrix.shard", producer_steps["Restore compiler cache"])
+            upload = producer_steps["Upload shard JUnit"]
+            self.assertEqual(value(upload, "retention-days", 10), "30")
+            self.assertEqual(value(upload, "if-no-files-found", 10), "error")
+            self.assertEqual(value(upload, "path", 10).splitlines(), [
+                "build/release/ctest.junit.xml", "build/release/ctest.inventory.json", "build/release/ctest.partition.json",
+                *(["build/release/ctest-discovery.json", "build/release/netsoak.junit.xml"] if profile == "gcc" else [])])
+            self.assertEqual(value(upload, "name", 10), profile + "-junit-${{ github.sha }}-${{ github.run_id }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}")
+            self.assertIn("pattern: " + profile + "-junit-${{ github.sha }}-${{ github.run_id }}-shard-*-attempt-*", aggregate)
+            self.assertIn("--attempt ${{ github.run_attempt }}", aggregate)
+        self.assertIn("cache: ${{ matrix.shard == 1 && github.event_name == 'push'", ci["windows-ucrt64"])
+
+    def test_gcc_preserves_prefab_netsoak_packaging_and_diagnostics(self):
+        linux = jobs(self.workflows["ci.yml"])["linux"]
+        self.assertIn("-DLUMINUMBRA_ENABLE_PREFAB_RUNTIME=ON", linux)
+        self.assertIn("--require-suite PrefabRuntimeTest. --require-suite PrefabDigest.", linux)
+        prefab = next(step for step in steps(linux) if "name: Qualify installed prefab runtime\n" in step)
+        self.assertIn("steps.tests.outputs.prefab == 'true'", value(prefab, "if", 8))
+        self.assertIn("--ctest-report build/release/ctest.junit.xml", prefab)
+        netsoak = next(step for step in steps(linux) if "name: Test over-the-wire networking\n" in step)
+        self.assertIn("matrix.shard != 2", value(netsoak, "if", 8))
+        self.assertIn("-R '^NetSoak$'", netsoak)
+        self.assertIn("--parallel 1 --output-junit netsoak.junit.xml", netsoak)
+        for text in ("build/package-off", "build/package-linux", "build/release/Testing/Temporary",
+                     "build/release/test-artifacts", "include-hidden-files: true"):
+            self.assertIn(text, linux)
+        self.assertIn("python3 -I -B tools/ci/test_ctest_shards.py", jobs(self.workflows["ci.yml"])["public-tree"])
+
+    def test_acceptance_execution_uses_verified_union_and_retains_networking_evidence(self):
+        ci = jobs(self.workflows["ci.yml"])
+        producer, aggregate = ci["linux"], ci["linux-result"]
+        self.assertNotIn("check_acceptance_matrix.py", producer)
+        self.assertIn("ctest --preset release --show-only=json-v1 > build/release/ctest-discovery.json", producer)
+        named = {step.splitlines()[0].removeprefix("      - name: "): step for step in steps(aggregate)}
+        check = named["Check acceptance matrix CTest execution"]
+        self.assertLess(aggregate.index("name: Merge shard JUnit and check inventory\n"),
+                        aggregate.index("name: Check acceptance matrix CTest execution\n"))
+        self.assertEqual(value(check, "if", 8),
+                         "needs.linux.result == 'success' && needs.changes.outputs.needs_cpp != 'false'")
+        self.assertIsNone(value(check, "continue-on-error", 8))
+        self.assertEqual(value(check, "CI_QUALIFICATION", 10),
+                         "${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture }}")
+        script = value(check, "run", 8)
+        prepare, command = script.split("python3 tools/ci/check_acceptance_matrix.py", 1)
+        self.assertEqual(" ".join(command.replace("\\\n", "").split()),
+                         "--junit build/release/ctest.junit.xml --junit build/release/netsoak.junit.xml "
+                         "--discovery build/release/ctest-discovery.json --ci-context "
+                         "--execution-receipt build/release/test-artifacts/acceptance-execution.json")
+        upload = named["Upload merged JUnit"]
+        self.assertEqual(value(upload, "if", 8),
+                         "always() && needs.linux.result == 'success' && "
+                         "needs.changes.outputs.needs_cpp != 'false' && (" + READY + ")")
+        self.assertEqual(value(upload, "path", 10).splitlines(), [
+            "build/release/ctest.junit.xml", "build/release/ctest-discovery.json",
+            "build/release/netsoak.junit.xml", "build/release/test-artifacts/acceptance-execution.json"])
+        self.assertEqual(value(upload, "retention-days", 10), "30")
+        public = ci["public-tree"]
+        self.assertIn("python3 tools/ci/test_check_acceptance_matrix.py", public)
+        self.assertIn("python3 tools/ci/check_acceptance_matrix.py --check-doc docs/acceptance-matrix.md", public)
+        # Run the actual evidence-selection script for both execution routes.
+        for full, owner in (("false", 1), ("true", 0)):
+            for missing in (None, "ctest-discovery.json", "netsoak.junit.xml"):
+                with self.subTest(full=full, missing=missing), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    (root / "build/release").mkdir(parents=True)
+                    source = root / f"build/gcc-shards/shard-{owner}"
+                    source.mkdir(parents=True)
+                    for filename in ("ctest-discovery.json", "netsoak.junit.xml"):
+                        if filename != missing:
+                            (source / filename).write_text(f"owner-{owner}-{filename}", encoding="utf-8")
+                    result = subprocess.run(
+                        [BASH, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", prepare],
+                        cwd=root, env=dict(os.environ, CI_QUALIFICATION=full),
+                        capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode == 0, missing is None, result.stderr)
+                    if missing is None:
+                        for filename in ("ctest-discovery.json", "netsoak.junit.xml"):
+                            self.assertEqual((root / "build/release" / filename).read_bytes(),
+                                             (source / filename).read_bytes())
+
+    def test_ci_and_asan_bash_scripts_parse_without_executing_native_commands(self):
+        for filename in ("ci.yml", "asan.yml"):
+            for job_id, job in jobs(self.workflows[filename]).items():
+                windows = value(job, "runs-on", 4).startswith("windows-")
+                for step in steps(job):
+                    script = value(step, "run", 8)
+                    shell = value(step, "shell", 8) or ("pwsh" if windows else "bash")
+                    if script is None or not shell.startswith(("bash", "msys2")):
+                        continue
+                    script = re.sub(r"\$\{\{.*?\}\}", "1", script)
+                    with self.subTest(workflow=filename, job=job_id, step=step.splitlines()[0]):
+                        result = subprocess.run([BASH, "--noprofile", "--norc", "-n", "-c", script],
+                                                capture_output=True, text=True, timeout=10)
+                        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_asan_aggregate_requires_inventory_floor_after_merge(self):
+        workflow = self.workflows["asan.yml"]
+        merge = "          " + ASAN_MERGE_COMMAND + "\n"
+        inventory = next(line for line in workflow.splitlines(keepends=True)
+                         if line.startswith("          python3 tools/ci/check_ctest_junit.py "
+                                            "build/debug-asan/ctest.junit.xml --minimum-tests "))
+        for mutation in ("removed", "lowered", "commented", "before-merge"):
+            with self.subTest(mutation=mutation):
+                replacement = {
+                    "removed": "",
+                    "lowered": re.sub(r"--minimum-tests [0-9]+",
+                                      f"--minimum-tests {ASAN_MINIMUM_TESTS - 1}", inventory, count=1),
+                    "commented": inventory.replace("python3", "# python3", 1),
+                    "before-merge": "",
+                }[mutation]
+                mutated = workflow.replace(inventory, replacement, 1)
+                if mutation == "before-merge":
+                    mutated = mutated.replace(merge, inventory + merge, 1)
+                self.assertNotEqual(mutated, workflow)
+                case = WorkflowDraftPolicyTests(
+                    "test_asan_matrix_and_aggregate_preserve_limits_coverage_and_evidence")
+                case.workflows = {**self.workflows, "asan.yml": mutated}
+                result = unittest.TestResult()
+                case.run(result)
+                self.assertEqual(len(result.errors), 0, result.errors)
+                self.assertEqual(len(result.failures), 1, result.failures)
+
+    def test_asan_aggregate_accepts_stronger_inventory_checks_after_merge(self):
+        workflow = self.workflows["asan.yml"]
+        for floor in (ASAN_MINIMUM_TESTS, ASAN_MINIMUM_TESTS + 1):
+            with self.subTest(floor=floor):
+                strengthened, count = re.subn(
+                    r"(?m)^(          python3 tools/ci/check_ctest_junit.py "
+                    r"build/debug-asan/ctest.junit.xml --minimum-tests )[0-9]+([^\n]*)$",
+                    rf"\g<1>{floor}\g<2> --require-test AmbientDeterminismReceipt.EmitsConstructorAndEvolvedHashes"
+                    " --require-test AmbientInputBounds.UnpaddedTwoElementInputFaultsAtActiveIsa",
+                    workflow,
+                )
+                self.assertEqual(count, 1)
+                for method in (
+                    "test_asan_matrix_and_aggregate_preserve_limits_coverage_and_evidence",
+                    "test_asan_aggregate_requires_inventory_floor_after_merge",
+                ):
+                    case = WorkflowDraftPolicyTests(method)
+                    case.workflows = {**self.workflows, "asan.yml": strengthened}
+                    result = unittest.TestResult()
+                    case.run(result)
+                    self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
+
+    def test_asan_aggregate_rejects_removed_or_replaced_required_tests(self):
+        workflow = self.workflows["asan.yml"]
+        mutations = []
+        for index, name in enumerate(ASAN_REQUIRED_TESTS):
+            argument = f" --require-test {name}"
+            self.assertIn(argument, workflow)
+            mutations.extend((
+                (f"removed-{name}", workflow.replace(argument, "", 1)),
+                (f"replaced-{name}", workflow.replace(
+                    argument, " --require-test AmbientDeterminismReceipt.EmitsConstructorAndEvolvedHashes", 1)),
+                (f"duplicated-instead-of-{name}", workflow.replace(
+                    argument, f" --require-test {ASAN_REQUIRED_TESTS[(index + 1) % len(ASAN_REQUIRED_TESTS)]}", 1)),
+            ))
+        mutations.append(("removed-all", re.sub(r" --require-test [\w./-]+", "", workflow)))
+        for mutation, mutated in mutations:
+            with self.subTest(mutation=mutation):
+                self.assertNotEqual(mutated, workflow)
+                case = WorkflowDraftPolicyTests(
+                    "test_asan_matrix_and_aggregate_preserve_limits_coverage_and_evidence")
+                case.workflows = {**self.workflows, "asan.yml": mutated}
+                result = unittest.TestResult()
+                case.run(result)
+                self.assertEqual(len(result.errors), 0, result.errors)
+                self.assertEqual(len(result.failures), 1, result.failures)
+                self.assertIn("not less than or equal", result.failures[0][1])
+
+    def test_asan_aggregate_rejects_invalid_inventory_and_coverage_commands(self):
+        workflow = self.workflows["asan.yml"]
+        inventory = next(line for line in workflow.splitlines(keepends=True)
+                         if line.startswith("          python3 tools/ci/check_ctest_junit.py "
+                                            "build/debug-asan/ctest.junit.xml --minimum-tests "))
+        coverage = ('          python3 tools/ci/compare_ambient_receipts.py '
+                    'asan=build/debug-asan/ctest.junit.xml \\\n'
+                    '            --expect-labels asan --require-probe asan\n')
+        for mutation, original, replacement in (
+            ("missing-floor", inventory, re.sub(r" --minimum-tests [0-9]+", "", inventory)),
+            ("invalid-floor", inventory, re.sub(r"--minimum-tests [0-9]+", "--minimum-tests unknown", inventory)),
+            ("ignored-failure", inventory, inventory.rstrip() + " || true\n"),
+            ("partial-report", inventory, inventory.replace("build/debug-asan/", "build/asan-shards/shard-1/")),
+            ("empty-required-test", inventory, inventory.rstrip() + " --require-test\n"),
+            ("missing-coverage", coverage, ""),
+            ("commented-coverage", coverage, coverage.replace("python3", "# python3", 1)),
+            ("missing-probe", coverage, coverage.replace(" --require-probe asan", "")),
+            ("missing-coverage-options", coverage,
+             coverage.replace("            --expect-labels asan --require-probe asan\n", "")),
+            ("coverage-before-floor", coverage, ""),
+        ):
+            with self.subTest(mutation=mutation):
+                mutated = workflow.replace(original, replacement, 1)
+                if mutation == "coverage-before-floor":
+                    mutated = mutated.replace(inventory, coverage + inventory, 1)
+                self.assertNotEqual(mutated, workflow)
+                case = WorkflowDraftPolicyTests(
+                    "test_asan_matrix_and_aggregate_preserve_limits_coverage_and_evidence")
+                case.workflows = {**self.workflows, "asan.yml": mutated}
+                result = unittest.TestResult()
+                case.run(result)
+                self.assertEqual(len(result.errors), 0, result.errors)
+                self.assertEqual(len(result.failures), 1, result.failures)
+
+    def assert_asan_rerun_artifacts(self, rerun_shards):
+        blocks = jobs(self.workflows["asan.yml"])
+        upload = next(step for step in steps(blocks["asan-shard"])
+                      if step.startswith("      - name: Upload shard JUnit\n"))
+        download = next(step for step in steps(blocks["asan"])
+                        if step.startswith("      - name: Download shard JUnit\n"))
+        merge = next(step for step in steps(blocks["asan"])
+                     if step.startswith("      - name: Merge shard JUnit and check inventory\n"))
+
+        def render(text, attempt, shard=""):
+            for key, item in (("github.sha", "a" * 40), ("github.run_id", "10"),
+                              ("github.run_attempt", str(attempt)), ("matrix.shard", str(shard))):
+                text = text.replace("${{ " + key + " }}", item)
+            self.assertNotIn("${{", text)
+            return text
+
+        # Model the artifact store across attempts using the actual workflow names.
+        artifacts = {}
+        for attempt, producers in ((1, (1, 2)), (2, rerun_shards)):
+            for shard in producers:
+                name = render(value(upload, "name", 10), attempt, shard)
+                if name in artifacts:
+                    self.assertEqual(value(upload, "overwrite", 10), "true")
+                artifacts[name] = (attempt, shard)
+        artifacts["asan-junit-foreign-10-shard-1"] = (1, 1)
+        artifacts["asan-junit-" + "a" * 40 + "-9-shard-2"] = (1, 2)
+        selected = {name: producer for name, producer in artifacts.items()
+                    if fnmatch.fnmatchcase(name, render(value(download, "pattern", 10), 2))}
+        self.assertEqual(len(selected), 2, selected)
+        self.assertEqual(sorted(selected.values(), key=lambda item: item[1]),
+                         [(2 if shard in rerun_shards else 1, shard) for shard in (1, 2)])
+        script = render(value(merge, "run", 8), 2)
+        for name, (_, shard) in selected.items():
+            self.assertIn(f'mv "build/asan-shards/{name}" "build/asan-shards/shard-{shard}"',
+                          script.replace("$shard", str(shard)))
+        self.assertEqual(value(download, "if", 8), "needs.asan-shard.result == 'success'")
+
+    def test_asan_aggregate_only_rerun_downloads_both_original_shards(self):
+        self.assert_asan_rerun_artifacts(())
+
+    def test_asan_single_shard_rerun_downloads_latest_and_unchanged_shards(self):
+        self.assert_asan_rerun_artifacts((2,))
+
+    def test_asan_rerun_evidence_retained_for_full_30_day_window(self):
+        shard = jobs(self.workflows["asan.yml"])["asan-shard"]
+        upload = next(step for step in steps(shard)
+                      if step.startswith("      - name: Upload shard JUnit\n"))
+        self.assertEqual(value(upload, "retention-days", 10), "30")
+        # Keep the recovery artifact limited to reports/receipts, excluding
+        # binaries, compiler caches and the separate bulky diagnostic bundle.
+        self.assertEqual(value(upload, "path", 10).splitlines(), [
+            "build/debug-asan/ctest.junit.xml",
+            "build/debug-asan/ctest.inventory.json",
+            "build/debug-asan/ctest.partition.json",
+            "build/debug-asan/qualification-shard.json",
+        ])
+
+    def test_aggregate_status_conditions_use_valid_contexts(self):
+        # jobs.<id>.if and jobs.<id>.steps.if permit status functions and needs;
+        # env/with/run do not permit status functions (checked separately).
+        for filename, workflow in self.workflows.items():
+            for job_id, job in jobs(workflow).items():
+                if "name: Reject invalid dependencies" not in job:
+                    continue
+                declared = set(value(job, "needs", 4).strip("[]").split(", "))
+                for block, indent in [(job, 4)] + [(step, 8) for step in steps(job)]:
+                    condition = value(block, "if", indent)
+                    if condition is None:
+                        continue
+                    with self.subTest(workflow=filename, job=job_id, condition=condition):
+                        self.assertLessEqual(set(re.findall(r"needs\.([\w-]+)\.", condition)), declared)
+                        functions = set(re.findall(r"\b(\w+)\(", condition))
+                        self.assertLessEqual(functions, {"always", "cancelled", "failure", "success"})
+                        self.assertNotIn("steps.", value(job, "if", 4))
+
+    def test_aggregates_cancel_at_each_phase_and_fail_invalid_dependencies(self):
+        aggregates = [("asan-shard", jobs(self.workflows["asan.yml"])["asan"])]
+        ci = jobs(self.workflows["ci.yml"])
+        aggregates += [(producer, ci[producer + "-result"])
+                       for producer in ("linux", "windows-msvc", "windows-ucrt64")]
+        aggregates.append(("tidy-shard", ci["tidy"]))
+        for producer, aggregate in aggregates:
+            condition = value(aggregate, "if", 4).replace(READY, "True")
+            refusal = next(step for step in steps(aggregate)
+                           if step.startswith("      - name: Reject invalid dependencies\n"))
+            self.assertIsNone(value(refusal, "continue-on-error", 8))
+            for classification in ("success", "failure", "cancelled", "skipped", "", "unknown"):
+                for result in ("success", "failure", "cancelled", "skipped", "", "unknown"):
+                    dependencies = {"changes": classification, producer: result}
+                    invalid = classification != "success" or result not in ("success", "skipped")
+                    for cancelled in (False, True):
+                        with self.subTest(producer=producer, classification=classification,
+                                          result=result, cancelled=cancelled):
+                            admitted = evaluate_condition(condition, dependencies, cancelled=cancelled)
+                            self.assertEqual(admitted, not cancelled or invalid)
+                            # Kept-running jobs have not received job cancellation:
+                            # cancelled() at step level is false, despite workflow cancellation.
+                            for earlier_step_failed in (False, True):
+                                refuses = evaluate_condition(value(refusal, "if", 8), dependencies,
+                                                             failed=earlier_step_failed)
+                                self.assertEqual(refuses, invalid)
+                            if admitted and invalid:
+                                process = subprocess.run(
+                                    [BASH, "--noprofile", "--norc", "-e", "-c", value(refusal, "run", 8)],
+                                    capture_output=True, text=True, timeout=10)
+                                self.assertNotEqual(process.returncode, 0)
+            # Re-evaluate admission after each actual step, including download,
+            # validation and uploads. A completed early guard offers no protection.
+            for result in ("success", "skipped"):
+                dependencies = {"changes": "success", producer: result}
+                self.assertTrue(evaluate_condition(condition, dependencies))
+                for phase in steps(aggregate):
+                    with self.subTest(producer=producer, phase=phase.splitlines()[0], result=result):
+                        self.assertFalse(evaluate_condition(condition, dependencies, cancelled=True))
+
+    def test_required_aggregates_cancel_running_jobs_but_fail_cancelled_dependencies(self):
+        # At job level cancelled() reads workflow cancellation. At step level
+        # it reads the current job status, which can still be successful while
+        # the server re-evaluates the job's condition during artifact download.
+        # Read both conditions from the workflow and never treat a job skip as
+        # an acceptable substitute for an explicit dependency refusal.
+        aggregates = (("asan.yml", "asan", "asan-shard"),
+                      ("ci.yml", "tidy", "tidy-shard"),
+                      ("ci.yml", "linux-result", "linux"),
+                      ("ci.yml", "windows-msvc-result", "windows-msvc"),
+                      ("ci.yml", "windows-ucrt64-result", "windows-ucrt64"))
+        self.check_required_aggregates(aggregates)
+
+    def check_required_aggregates(self, aggregates):
+        results = ("success", "failure", "cancelled", "skipped", "", "unknown")
+        for filename, job_id, shard_id in aggregates:
+            aggregate = jobs(self.workflows[filename])[job_id]
+            self.assertEqual(value(aggregate, "needs", 4), f"[changes, {shard_id}]")
+            self.assertIsNone(value(aggregate, "continue-on-error", 4))
+            refusal = next(step for step in steps(aggregate)
+                           if step.startswith("      - name: Reject invalid dependencies\n"))
+            self.assertIsNone(value(refusal, "continue-on-error", 8))
+            # This must be an unconditional failure whenever the refusal runs.
+            process = subprocess.run(
+                [BASH, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c",
+                 value(refusal, "run", 8)], capture_output=True, text=True, timeout=10,
+            )
+            self.assertNotEqual(process.returncode, 0, process.stdout + process.stderr)
+            for cancelled in (False, True):
+                for changes in results:
+                    for shard in results:
+                        with self.subTest(job=job_id, cancelled=cancelled, changes=changes, shard=shard):
+                            dependency_invalid = changes != "success" or shard not in ("success", "skipped")
+                            # Ready PRs and pushes retain their existing routing.
+                            for event in ("pull_request", "push", "workflow_dispatch"):
+                                self.assertEqual(
+                                    self.aggregate_condition(value(aggregate, "if", 4), shard_id,
+                                                             cancelled, changes, shard, event),
+                                    not cancelled or dependency_invalid,
+                                )
+                            # Even if the current job is still successful, any
+                            # invalid dependency must run the failure step.
+                            for job_cancelled in (False, True):
+                                self.assertEqual(
+                                    self.aggregate_condition(value(refusal, "if", 8), shard_id,
+                                                             job_cancelled, changes, shard, step=True),
+                                    dependency_invalid,
+                                )
+
+    @staticmethod
+    def aggregate_condition(expression, shard_id, cancelled, changes, shard, event="pull_request", step=False):
+        expression = expression.removeprefix("${{ ").removesuffix(" }}")
+        status = {"always": True, "cancelled": cancelled,
+                  "success": not cancelled and (step or changes == shard == "success"),
+                  "failure": not step and "failure" in (changes, shard)}
+        rendered, count = re.subn(r"\b(always|cancelled|success|failure)\(\)",
+                                 lambda match: str(status[match[1]]), expression)
+        for key, item in (("needs.changes.result", changes), (f"needs.{shard_id}.result", shard),
+                          ("github.event_name", event), ("github.event.pull_request.draft", False)):
+            rendered = rendered.replace(key, repr(item))
+        rendered = re.sub(r"!(?!=)", "not ", rendered.replace("false", "False"))
+        rendered = rendered.replace("&&", " and ").replace("||", " or ")
+        return bool((count > 0 or status["success"]) and eval(rendered, {"__builtins__": {}}, {}))
+
+    def test_required_aggregate_graph_rejects_cancellation_regressions(self):
+        method = "test_required_aggregates_cancel_running_jobs_but_fail_cancelled_dependencies"
+        for filename, job_id, shard_id in (("asan.yml", "asan", "asan-shard"),
+                                           ("ci.yml", "tidy", "tidy-shard"),
+                                           ("ci.yml", "linux-result", "linux"),
+                                           ("ci.yml", "windows-msvc-result", "windows-msvc"),
+                                           ("ci.yml", "windows-ucrt64-result", "windows-ucrt64")):
+            workflow = self.workflows[filename]
+            aggregate = jobs(workflow)[job_id]
+            job_if = value(aggregate, "if", 4)
+            refusal = next(step for step in steps(aggregate)
+                           if step.startswith("      - name: Reject invalid dependencies\n"))
+            for mutation, original, replacement in (
+                ("uncancellable-job", job_if, "${{ always() }}"),
+                ("skipped-cancelled-dependencies", job_if, "${{ !cancelled() }}"),
+                ("implicit-success", job_if, "${{ github.event_name == 'pull_request' }}"),
+                ("missed-classifier-cancellation", job_if,
+                 "${{ !cancelled() || needs." + shard_id + ".result == 'cancelled' }}"),
+                ("missed-shard-cancellation", job_if,
+                 "${{ !cancelled() || needs.changes.result == 'cancelled' }}"),
+                ("job-status-refusal", value(refusal, "if", 8), "${{ cancelled() }}"),
+                ("implicit-success-refusal", value(refusal, "if", 8),
+                 "${{ needs.changes.result == 'cancelled' || needs." + shard_id + ".result == 'cancelled' }}"),
+                ("successful-refusal", "          exit 1", "          exit 0"),
+            ):
+                with self.subTest(job=job_id, mutation=mutation):
+                    # Apply only inside this job, not the classifier or shards.
+                    mutated = aggregate.replace(original, replacement)
+                    self.assertNotEqual(mutated, aggregate)
+                    case = WorkflowDraftPolicyTests(method)
+                    case.workflows = {**self.workflows, filename: workflow.replace(aggregate, mutated, 1)}
+                    result = unittest.TestResult()
+                    unittest.FunctionTestCase(
+                        lambda: case.check_required_aggregates(((filename, job_id, shard_id),))
+                    ).run(result)
+                    self.assertEqual(result.errors, [], result.errors)
+                    self.assertTrue(result.failures)
+
+    def test_asan_aggregate_accepts_only_success_or_the_original_path_skip(self):
+        aggregate = jobs(self.workflows["asan.yml"])["asan"]
+        step = next(step for step in steps(aggregate) if step.splitlines()[0].removeprefix("      - name: ") == "Require all ASan shards to pass")
+        self.assertEqual(value(step, "ASAN_SHARD_RESULT", 10), "${{ needs.asan-shard.result }}")
+        self.assertEqual(value(step, "CI_PATHS_RESULT", 10), "${{ needs.changes.result }}")
+        self.assertEqual(value(step, "NEEDS_CPP", 10), "${{ needs.changes.outputs.needs_cpp }}")
+        self.assertIsNone(value(step, "ASAN_CANCELLED", 10))
+        self.assertEqual(value(step, "if", 8), "always() && (" + READY + ")")
+        self.assertIsNone(value(step, "continue-on-error", 8))
+        self.check_asan_aggregate_results(value(step, "run", 8))
+
+    def check_asan_aggregate_results(self, script):
+        aggregate = jobs(self.workflows["asan.yml"])["asan"]
+        refusal = next(step for step in steps(aggregate)
+                       if step.startswith("      - name: Reject invalid dependencies\n"))
+        self.assertEqual(value(refusal, "if", 8), "${{ always() && (" + aggregate_invalid_expression("asan-shard") + ") }}")
+        self.assertIsNone(value(refusal, "continue-on-error", 8))
+        refusal_script = value(refusal, "run", 8)
+        self.assertIsNotNone(refusal_script)
+        with tempfile.TemporaryDirectory() as directory:
+            for classification in ("success", "failure", "cancelled", "skipped", "", "unknown"):
+                for cancelled in (False, True):
+                    for cpp in ("true", "false", ""):
+                        for result in ("success", "failure", "cancelled", "skipped", "", "unknown"):
+                            with self.subTest(cancelled=cancelled, classification=classification,
+                                              cpp=cpp, result=result):
+                                dependencies = {"changes": classification, "asan-shard": result}
+                                admitted = evaluate_condition(value(aggregate, "if", 4), dependencies,
+                                                              cancelled=cancelled)
+                                if not admitted:
+                                    self.assertTrue(cancelled)
+                                    self.assertEqual(classification, "success")
+                                    self.assertIn(result, ("success", "skipped"))
+                                    continue
+                                refuses = evaluate_condition(value(refusal, "if", 8), dependencies, failed=False)
+                                process = subprocess.run(
+                                    [BASH, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c",
+                                     (refusal_script + "\n" if refuses else "") + script],
+                                    env=dict(os.environ, NEEDS_CPP=cpp, ASAN_SHARD_RESULT=result,
+                                             CI_PATHS_RESULT=classification,
+                                             GITHUB_STEP_SUMMARY=str(Path(directory) / "summary")),
+                                    capture_output=True, text=True, timeout=10,
+                                )
+                                accepted = not cancelled and classification == "success" and (
+                                    result == "success" or (classification == "success" and
+                                                            cpp == "false" and result == "skipped"))
+                                self.assertEqual(process.returncode == 0, accepted, process.stdout + process.stderr)
+                                if cancelled:
+                                    self.assertIn("Aggregate dependencies did not pass", process.stderr)
+
+    def test_native_aggregates_refuse_invalid_dependencies_before_the_route_gate(self):
+        ci = jobs(self.workflows["ci.yml"])
+        for job in ("linux-result", "windows-msvc-result", "windows-ucrt64-result"):
+            with self.subTest(job=job):
+                aggregate = ci[job]
+                refusal = next(step for step in steps(aggregate)
+                               if step.startswith("      - name: Reject invalid dependencies\n"))
+                gate = next(step for step in steps(aggregate)
+                            if step.startswith("      - name: Require expected producers and route\n"))
+                self.assertEqual(value(refusal, "if", 8), "${{ always() && (" + aggregate_invalid_expression(job.removesuffix("-result")) + ") }}")
+                self.assertIsNone(value(refusal, "continue-on-error", 8))
+                self.assertIsNone(value(gate, "if", 8))
+                self.assertIsNone(value(gate, "continue-on-error", 8))
+                self.assertLess(aggregate.index(refusal), aggregate.index(gate))
+                result = subprocess.run(
+                    [BASH, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c",
+                     value(refusal, "run", 8)], capture_output=True, text=True, timeout=10)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Aggregate dependencies did not pass", result.stderr)
+
     def test_ucrt_route_seeds_devel_and_preserves_other_event_and_path_guards(self):
-        job = jobs(self.workflows["ci.yml"])["windows-ucrt64"]
+        ci = jobs(self.workflows["ci.yml"])
+        job = ci["windows-ucrt64"]
         self.assertEqual(value(job, "needs", 4), "changes")
+        gate = next(step for step in steps(ci["windows-ucrt64-result"])
+                    if step.startswith("      - name: Require expected producers and route\n"))
+        self.assertEqual(value(gate, "CI_ENABLED", 10),
+                         "${{ needs.changes.outputs.needs_cpp != 'false' && (" + UCRT_ROUTE + ") }}")
         expression = value(job, "if", 4).removeprefix("${{ ").removesuffix(" }}")
         for event in ("pull_request", "push", "workflow_dispatch", "schedule"):
             for branch in ("main", "devel", "feature"):
@@ -213,7 +1581,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         )
         capture = "github.event_name == 'workflow_dispatch' && inputs.qualification_capture"
         self.assertEqual(value(named["Set up MSYS2 UCRT64"], "cache", 10),
-                         "${{ " + trusted_push + " }}")
+                         "${{ matrix.shard == 1 && " + trusted_push + " }}")
         disable = named["Disable compiler cache for qualification captures"]
         self.assertEqual(value(disable, "if", 8), capture)
         self.assertIn('CCACHE_DISABLE=1', value(disable, "run", 8))
@@ -223,7 +1591,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             with self.subTest(step=name):
                 self.assertEqual(
                     value(named[name], "if", 8),
-                    "${{ always() && " + trusted_push + " && !(" + capture + ") && "
+                    "${{ matrix.shard == 1 && always() && " + trusted_push + " && !(" + capture + ") && "
                     "steps.compiler-cache.outcome == 'success' && "
                     "steps.compiler-cache.outputs.cache-hit != 'true' }}",
                 )
@@ -337,6 +1705,7 @@ class WorkflowAttributionPolicyTests(unittest.TestCase):
         cls.input_paths = [
             ".github/workflows/ucrt-attribution.yml",
             "tools/ci/ucrt_attribution.sh",
+            "tools/ci/ci_shell.py",
             "tools/ci/test_ucrt_attribution.py",
             "tools/ci/test_ucrt_gcc_cohort.py",
             "tools/ci/check_worldgen_probe_smoke.py",
@@ -400,5 +1769,338 @@ class WorkflowAttributionPolicyTests(unittest.TestCase):
         self.assertIn('"| checked out sha | $env:MERGE_SHA |"', script)
 
 
+# Keep launch-heavy cases separate without changing any case or subtest.
+# Selection scans the finite unittest roster once; no subprocess is started here.
+POLICY_PARTITIONS = tuple(str(index) for index in range(8))
+POLICY_CASE_PARTITIONS = {
+    "WorkflowDraftPolicyTests.test_aggregates_cancel_at_each_phase_and_fail_invalid_dependencies": "1",
+    "WorkflowDraftPolicyTests.test_asan_aggregate_accepts_only_success_or_the_original_path_skip": "2",
+    "WorkflowDraftPolicyTests.test_ci_and_asan_bash_scripts_parse_without_executing_native_commands": "3",
+    "WorkflowShellDiagnosticTests.test_actual_windows_probe_accepts_legacy_msys_and_documented_cygwin": "6",
+    "WorkflowShellDiagnosticTests.test_actual_windows_probe_refuses_other_identities_despite_msystem": "7",
+}
+POLICY_CLASS_PARTITIONS = {
+    "WorkflowDraftPolicyTests": "0",
+    "WorkflowExpressionPolicyTests": "0",
+    "WorkflowCacheCleanupPolicyTests": "0",
+    "WorkflowAttributionPolicyTests": "0",
+    "WorkflowPartitionSelectionTests": "0",
+    "WorkflowShellTests": "4",
+    "WorkflowShellDiagnosticTests": "5",
+}
+
+
+def policy_cases(suite):
+    for item in suite:
+        if isinstance(item, unittest.TestSuite):
+            yield from policy_cases(item)
+        else:
+            yield item
+
+
+def policy_partition_suite(loader, module, partition):
+    if partition not in POLICY_PARTITIONS:
+        raise ValueError("unknown policy partition")
+    cases = list(policy_cases(loader.loadTestsFromModule(module)))
+    seen = set()
+    selected = []
+    for case in cases:
+        key = f"{type(case).__name__}.{case._testMethodName}"
+        if key in seen:
+            raise ValueError("duplicate policy case: " + key)
+        seen.add(key)
+        class_partition = POLICY_CLASS_PARTITIONS.get(type(case).__name__)
+        if class_partition is None:
+            raise ValueError("unregistered policy class: " + type(case).__name__)
+        if POLICY_CASE_PARTITIONS.get(key, class_partition) == partition:
+            selected.append(case)
+    if not POLICY_CASE_PARTITIONS.keys() <= seen:
+        raise ValueError("missing dedicated policy case")
+    if not selected:
+        raise ValueError("empty policy partition")
+    return unittest.TestSuite(selected)
+
+
+class PolicyTimingResult(unittest.TextTestResult):
+    def startTest(self, test):
+        self.case_started = time.perf_counter()
+        super().startTest(test)
+
+    def stopTest(self, test):
+        super().stopTest(test)
+        self.stream.writeln(f"  {test.id()}: {time.perf_counter() - self.case_started:.3f}s")
+
+
+def policy_main(argv=None):
+    # With no partition, retain unittest's complete CLI and discovery semantics.
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    parser.add_argument("--partition", choices=POLICY_PARTITIONS, action="append")
+    parser.add_argument("--list-tests", action="store_true")
+    args, remaining = parser.parse_known_args(argv)
+    if args.partition is None:
+        if args.list_tests:
+            parser.error("--list-tests requires --partition")
+        unittest.main(argv=[sys.argv[0], *remaining])
+        return 0
+    if len(args.partition) != 1 or remaining:
+        parser.error("one partition is required, without unittest selectors")
+    try:
+        suite = policy_partition_suite(unittest.defaultTestLoader, sys.modules[__name__], args.partition[0])
+    except ValueError as error:
+        parser.error(str(error))
+    if args.list_tests:
+        for case in policy_cases(suite):
+            print(case.id())
+        return 0
+    result = unittest.TextTestRunner(verbosity=2, resultclass=PolicyTimingResult).run(suite)
+    return int(not result.wasSuccessful())
+
+
+class WorkflowPartitionSelectionTests(unittest.TestCase):
+    def test_existing_roster_is_retained(self):
+        expected = {
+            "WorkflowShellTests": (
+                "test_windows_candidates_prefer_git_over_wsl_for_all_git_layouts",
+                "test_active_msys_keeps_its_path_shell_and_deduplicates_git_siblings",
+                "test_lookup_excludes_empty_and_relative_path_entries_and_cwd_results",
+                "test_native_windows_resolution_uses_absolute_git_path_as_one_argument",
+                "test_windows_rejects_wsl_collision_and_tries_git_siblings",
+                "test_posix_lookup_preserves_path_selection_and_does_not_query_git",
+                "test_overrides_require_absolute_regular_executable_files_without_fallback",
+                "test_probe_refuses_partial_output_wsl_errors_deadline_and_unusable_binaries",
+                "test_probe_does_not_run_inherited_shell_startup_hooks",
+                "test_resolved_bash_executes_literal_arguments_cwd_crlf_and_exit_status",
+            ),
+            "WorkflowShellDiagnosticTests": (
+                "test_failure_reports_actual_absolute_discovery_and_allowlisted_platform_context",
+                "test_nested_discovery_keeps_failure_observations_isolated",
+                "test_windows_failure_retains_discovery_order_drive_paths_and_probe_budget",
+                "test_validation_failures_name_the_last_stage_without_extra_checks_or_fallback",
+                "test_validation_exceptions_report_stage_and_codes_without_exception_payload",
+                "test_probe_refusals_preserve_raw_bytes_returncode_and_resolved_path",
+                "test_launch_and_deadline_failures_report_codes_and_available_partial_bytes",
+                "test_failure_bounds_apply_before_formatting_all_context_candidates_and_output",
+                "test_success_stays_silent_after_failed_probe_and_keeps_exact_success_contract",
+                "test_actual_probe_distinguishes_empty_bash_version_on_both_platform_branches",
+                "test_actual_windows_guard_reports_empty_and_non_msys_intrinsics",
+                "test_actual_refusal_observes_changed_decoded_quotes_without_evaluating_command",
+                "test_actual_probe_success_retains_only_exact_magic_on_both_platform_branches",
+                "test_actual_windows_probe_accepts_legacy_msys_and_documented_cygwin",
+                "test_actual_windows_probe_refuses_other_identities_despite_msystem",
+                "test_actual_documented_cygwin_identity_still_refuses_empty_bash_version",
+                "test_actual_abort_without_guard_observations_leaves_body_stage_unknown",
+                "test_actual_guard_observation_write_failures_never_reach_success_magic",
+                "test_actual_guard_observations_filter_hooks_and_do_not_dump_environment",
+                "test_actual_guard_observations_bound_intrinsics_and_decoded_command_and_escape_controls",
+                "test_byte_observation_keeps_display_bound_before_formatting_and_retains_command_tail",
+                "test_refusal_observations_cannot_make_unknown_output_or_guard_status_successful",
+            ),
+            "WorkflowExpressionPolicyTests": (
+                "test_status_functions_are_only_used_in_if_values",
+                "test_status_expression_contexts",
+            ),
+            "WorkflowDraftPolicyTests": (
+                "test_ready_and_draft_transitions_trigger_existing_pr_routes",
+                "test_guard_runs_first_under_existing_check_name_without_draft_job_skip",
+                "test_actual_guard_script_rejects_drafts_but_allows_ready_and_non_pr_events",
+                "test_failed_guard_cannot_be_bypassed_by_build_or_evidence_steps",
+                "test_unconditional_always_on_shard_build_fails_draft_policy",
+                "test_other_heavy_jobs_still_skip_drafts_and_keep_routed_skips",
+                "test_asan_matrix_and_aggregate_preserve_limits_coverage_and_evidence",
+                "test_native_matrices_aggregates_limits_and_full_qualification_route",
+                "test_native_cache_writers_and_attempt_specific_retained_evidence",
+                "test_gcc_preserves_prefab_netsoak_packaging_and_diagnostics",
+                "test_acceptance_execution_uses_verified_union_and_retains_networking_evidence",
+                "test_ci_and_asan_bash_scripts_parse_without_executing_native_commands",
+                "test_asan_aggregate_requires_inventory_floor_after_merge",
+                "test_asan_aggregate_accepts_stronger_inventory_checks_after_merge",
+                "test_asan_aggregate_rejects_removed_or_replaced_required_tests",
+                "test_asan_aggregate_rejects_invalid_inventory_and_coverage_commands",
+                "test_asan_aggregate_only_rerun_downloads_both_original_shards",
+                "test_asan_single_shard_rerun_downloads_latest_and_unchanged_shards",
+                "test_asan_rerun_evidence_retained_for_full_30_day_window",
+                "test_aggregate_status_conditions_use_valid_contexts",
+                "test_aggregates_cancel_at_each_phase_and_fail_invalid_dependencies",
+                "test_required_aggregates_cancel_running_jobs_but_fail_cancelled_dependencies",
+                "test_required_aggregate_graph_rejects_cancellation_regressions",
+                "test_asan_aggregate_accepts_only_success_or_the_original_path_skip",
+                "test_native_aggregates_refuse_invalid_dependencies_before_the_route_gate",
+                "test_ucrt_route_seeds_devel_and_preserves_other_event_and_path_guards",
+                "test_ucrt_cache_guards_keep_saves_on_trusted_pushes_and_bypass_captures",
+                "test_concurrency_keeps_pr_cancellation_and_batches_only_devel_pushes",
+                "test_policy_suite_is_part_of_cheap_inventory_check",
+                "test_freeze_audit_comment_is_identical_in_every_workflow",
+            ),
+            "WorkflowCacheCleanupPolicyTests": (
+                "test_only_cache_writer_completions_trigger_serialized_cleanup",
+                "test_completion_list_covers_every_cache_saving_workflow",
+                "test_cleanup_filter_accepts_only_main_and_devel_push_completions",
+            ),
+            "WorkflowAttributionPolicyTests": (
+                "test_only_input_changes_trigger_devel_pull_requests",
+                "test_devel_pushes_also_cover_probe_build_definitions",
+                "test_weekly_schedule_and_manual_dispatch_remain_available",
+                "test_concurrency_separates_schedules_pushes_and_manual_runs",
+                "test_revision_recording_handles_missing_pull_request_metadata",
+            ),
+        }
+        module = sys.modules[__name__]
+        for name, methods in expected.items():
+            with self.subTest(test_class=name):
+                self.assertLessEqual(set(methods), set(unittest.defaultTestLoader.getTestCaseNames(getattr(module, name))))
+        self.assertEqual(sum(map(len, expected.values())), 72)
+
+    def test_partitions_cover_discovered_old_and_new_cases_exactly_once(self):
+        module = sys.modules[__name__]
+        loader = unittest.TestLoader()
+        complete = [case.id() for case in policy_cases(loader.loadTestsFromModule(module))]
+        selected = []
+        for partition in POLICY_PARTITIONS:
+            cases = list(policy_cases(policy_partition_suite(loader, module, partition)))
+            self.assertTrue(cases)
+            selected.extend(case.id() for case in cases)
+        self.assertEqual(len(selected), len(set(selected)))
+        self.assertCountEqual(selected, complete)
+        self.assertTrue(any("WorkflowPartitionSelectionTests." in name for name in selected))
+        # New methods in known classes enter the same exhaustive selection.
+        class Extended(WorkflowShellTests):
+            def test_added_case(self):
+                pass
+        Extended.__name__ = "WorkflowShellTests"
+        extra = Extended("test_added_case")
+        augmented = unittest.TestSuite([loader.loadTestsFromModule(module), extra])
+        with patch.object(loader, "loadTestsFromModule", return_value=augmented):
+            cases = list(policy_cases(policy_partition_suite(loader, module, "4")))
+        self.assertIn(extra, cases)
+
+    def test_selection_refuses_invalid_empty_duplicate_missing_and_unknown_rosters(self):
+        module = sys.modules[__name__]
+        loader = unittest.TestLoader()
+        for invalid in ("", "-1", "8", "01", "0/8", None, 0):
+            with self.subTest(partition=invalid), self.assertRaises(ValueError):
+                policy_partition_suite(loader, module, invalid)
+        complete = list(policy_cases(loader.loadTestsFromModule(module)))
+        dedicated = next(case for case in complete if type(case).__name__ + "." + case._testMethodName in POLICY_CASE_PARTITIONS)
+        class Unknown(unittest.TestCase):
+            def test_unknown(self):
+                pass
+        for cases, partition, message in (
+            ([], "0", "missing dedicated"),
+            ([*complete, complete[0]], "0", "duplicate"),
+            ([case for case in complete if case is not dedicated], "0", "missing dedicated"),
+            ([*complete, Unknown("test_unknown")], "0", "unregistered"),
+            ([case for case in complete if type(case).__name__ != "WorkflowShellTests"], "4", "empty"),
+        ):
+            with self.subTest(message=message), patch.object(loader, "loadTestsFromModule", return_value=unittest.TestSuite(cases)):
+                with self.assertRaisesRegex(ValueError, message):
+                    policy_partition_suite(loader, module, partition)
+
+    def test_launch_heavy_cases_keep_individual_partitions(self):
+        module = sys.modules[__name__]
+        for partition, method in (
+            ("1", "test_aggregates_cancel_at_each_phase_and_fail_invalid_dependencies"),
+            ("2", "test_asan_aggregate_accepts_only_success_or_the_original_path_skip"),
+            ("3", "test_ci_and_asan_bash_scripts_parse_without_executing_native_commands"),
+            ("6", "test_actual_windows_probe_accepts_legacy_msys_and_documented_cygwin"),
+            ("7", "test_actual_windows_probe_refuses_other_identities_despite_msystem"),
+        ):
+            with self.subTest(partition=partition):
+                cases = list(policy_cases(policy_partition_suite(unittest.TestLoader(), module, partition)))
+                self.assertEqual([case._testMethodName for case in cases], [method])
+
+    def test_cmake_registers_every_partition_once_with_unchanged_deadlines(self):
+        cmake = (ROOT / "tools/CMakeLists.txt").read_text(encoding="utf-8")
+        registrations = re.findall(r"add_test\(\s*NAME ([\w]+)\s+COMMAND ([^)]*)\)", cmake)
+        actual = [(name, " ".join(command.split())) for name, command in registrations
+                  if "ci/test_workflow_policy.py" in command]
+        expected = []
+        for partition in POLICY_PARTITIONS:
+            name = "WorkflowPolicyContract" + ("" if partition == "0" else "Part" + partition)
+            expected.append((name, '\"${Python3_EXECUTABLE}\" -I -B '
+                             '\"${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py\" --partition ' + partition))
+            properties = re.findall(r"set_tests_properties\(" + name + r"\s+PROPERTIES ([^)]*)\)", cmake)
+            self.assertEqual([" ".join(item.split()) for item in properties], ['LABELS "ci;tools" TIMEOUT 30'])
+        self.assertCountEqual(actual, expected)
+        self.assertEqual(len(actual), len(set(actual)))
+
+    def test_direct_workflow_discovery_and_path_routes_keep_complete_suite(self):
+        import ci_paths
+        self.assertEqual(ci_paths.PYTHON_TESTS.count("tools/ci/test_workflow_policy.py"), 1)
+        commands = ci_paths.python_test_commands(ROOT)
+        self.assertEqual(commands.count(("tools/ci/test_workflow_policy.py",)), 1)
+        self.assertIn(("tools/ci/test_replay_source_contract.py",), commands)
+        for path in ("tools/ci/test_workflow_policy.py", "tools/CMakeLists.txt"):
+            self.assertTrue(ci_paths.needs_cpp(path))
+        self.assertTrue(ci_paths.needs_python("tools/ci/test_workflow_policy.py"))
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        inventory = jobs(workflow)["public-tree"]
+        self.assertRegex(inventory, r"(?m)^          python3 tools/ci/test_workflow_policy.py$")
+        self.assertNotRegex(inventory, r"test_workflow_policy.py[^\n]*--partition")
+        discovered = unittest.TestLoader().discover(str(ROOT / "tools/ci"), pattern="test_workflow_policy.py")
+        expected = unittest.TestLoader().loadTestsFromModule(sys.modules[__name__])
+        discovered_cases = list(policy_cases(discovered))
+        expected_cases = list(policy_cases(expected))
+        def roster(cases):
+            return [(type(case).__name__, case._testMethodName) for case in cases]
+        self.assertCountEqual(roster(discovered_cases), roster(expected_cases))
+        # Package imports can add several module components to unittest IDs.
+        with patch.object(expected_cases[0], "id", return_value="qualified." + expected_cases[0].id()):
+            self.assertCountEqual(roster(discovered_cases), roster(expected_cases))
+
+    def test_cli_listing_and_refusals_use_actual_selection(self):
+        for partition in ("0", "7"):
+            with self.subTest(partition=partition), patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                self.assertEqual(policy_main(["--partition", partition, "--list-tests"]), 0)
+                expected = policy_partition_suite(unittest.TestLoader(), sys.modules[__name__], partition)
+                self.assertEqual(output.getvalue().splitlines(), [case.id() for case in policy_cases(expected)])
+        for argv in (["--partition"], ["--partition", "8"], ["--partition", "01"],
+                     ["--partition", "0", "--partition", "1"], ["--list-tests"],
+                     ["--partition", "0", "WorkflowShellTests"], ["--partition", "0", "--unknown"]):
+            with self.subTest(argv=argv), patch.object(sys, "stderr", new_callable=io.StringIO), self.assertRaises(SystemExit) as error:
+                policy_main(argv)
+            self.assertEqual(error.exception.code, 2)
+        with patch.object(unittest, "main") as run:
+            self.assertEqual(policy_main([]), 0)
+            run.assert_called_once_with(argv=[sys.argv[0]])
+
+    def test_partition_runner_propagates_case_failure_and_reports_duration(self):
+        class Fails(unittest.TestCase):
+            def test_failure(self):
+                self.fail("partition failure")
+        suite = unittest.TestSuite([Fails("test_failure")])
+        with patch.dict(os.environ, {}), patch.object(sys, "stderr", new_callable=io.StringIO) as output, patch.object(
+                sys.modules[__name__], "policy_partition_suite", return_value=suite):
+            self.assertEqual(policy_main(["--partition", "0"]), 1)
+        self.assertIn("partition failure", output.getvalue())
+        self.assertRegex(output.getvalue(), r"test_failure: [0-9]+\.[0-9]{3}s")
+        timing = PolicyTimingResult(io.StringIO(), True, 2)
+        with patch.object(time, "perf_counter", side_effect=OSError("timer unavailable")):
+            with self.assertRaisesRegex(OSError, "timer unavailable"):
+                timing.startTest(Fails("test_failure"))
+        self.assertEqual(timing.testsRun, 0)
+
+    def test_qualified_import_keeps_complete_partition_roster_and_listing(self):
+        import importlib.util
+        name = "policy_selection.qualified"
+        spec = importlib.util.spec_from_file_location(name, Path(__file__))
+        module = importlib.util.module_from_spec(spec)
+        # Reuse the already vetted shell; this checks module/selection semantics.
+        with patch.dict(sys.modules, {name: module}), patch.object(shell, "bash_executable", return_value=BASH):
+            spec.loader.exec_module(module)
+            complete = list(module.policy_cases(unittest.TestLoader().loadTestsFromModule(module)))
+            selected = []
+            for partition in module.POLICY_PARTITIONS:
+                selected.extend(module.policy_cases(module.policy_partition_suite(unittest.TestLoader(), module, partition)))
+            self.assertEqual(len(selected), len({case.id() for case in selected}))
+            self.assertCountEqual([case.id() for case in selected], [case.id() for case in complete])
+            expected = policy_cases(unittest.TestLoader().loadTestsFromModule(sys.modules[__name__]))
+            self.assertCountEqual([(type(case).__name__, case._testMethodName) for case in complete],
+                                  [(type(case).__name__, case._testMethodName) for case in expected])
+            with patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                self.assertEqual(module.policy_main(["--partition", "0", "--list-tests"]), 0)
+            part_zero = module.policy_partition_suite(unittest.TestLoader(), module, "0")
+            self.assertEqual(output.getvalue().splitlines(), [case.id() for case in module.policy_cases(part_zero)])
+
+
 if __name__ == "__main__":
-    unittest.main()
+    raise SystemExit(policy_main())

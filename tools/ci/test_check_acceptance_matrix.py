@@ -389,15 +389,23 @@ class AcceptanceMatrixTests(unittest.TestCase):
     def test_execution_workflow_uses_the_native_producer_condition(self) -> None:
         workflow = (MODULE.DEFAULT_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         linux = workflow.split("\n  linux:\n", 1)[1].split("\n  gns-compile-probe:\n", 1)[0]
-        for name in ("Configure", "Test", "Test over-the-wire networking",
-                     "Check acceptance matrix CTest execution", "Upload test evidence"):
+        for name in ("Configure", "Test", "Test over-the-wire networking", "Upload test evidence"):
             with self.subTest(step=name):
                 step = linux.split("      - name: " + name + "\n", 1)[1].split("      - name: ", 1)[0]
                 condition = re.search(r"^        if: (.+)$", step, re.MULTILINE)
                 self.assertIsNotNone(condition)
                 self.assertTrue(condition[1].startswith("${{ needs.changes.outputs.needs_cpp != 'false'"))
-                if name != "Upload test evidence":
+                if name == "Test over-the-wire networking":
+                    self.assertEqual(condition[1], "${{ needs.changes.outputs.needs_cpp != 'false' && matrix.shard != 2 }}")
+                elif name != "Upload test evidence":
                     self.assertEqual(condition[1], "${{ needs.changes.outputs.needs_cpp != 'false' }}")
+        aggregate = workflow.split("\n  linux-result:\n", 1)[1].split("\n  windows-msvc-result:\n", 1)[0]
+        step = aggregate.split("      - name: Check acceptance matrix CTest execution\n", 1)[1].split("      - name: ", 1)[0]
+        condition = re.search(r"^        if: (.+)$", step, re.MULTILINE)
+        self.assertIsNotNone(condition)
+        self.assertEqual(condition[1], "needs.linux.result == 'success' && needs.changes.outputs.needs_cpp != 'false'")
+        self.assertLess(aggregate.index("name: Merge shard JUnit and check inventory\n"),
+                        aggregate.index("name: Check acceptance matrix CTest execution\n"))
 
     def test_missing_covered_doc_ref_is_rejected(self) -> None:
         matrix = baseline_matrix()
@@ -653,6 +661,16 @@ class AcceptanceMatrixTests(unittest.TestCase):
         self.assertEqual(set(requirements), mapped)
         self.assertTrue(MODULE._doc_matches(root / "docs/acceptance-matrix.md", MODULE.render_doc(matrix)))
 
+    def test_station_numeric_evidence_includes_floating_point_refusal_controls(self) -> None:
+        matrix = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_matrix.json")
+        row = row_of(matrix, "station.numeric-inputs")
+        self.assertEqual(row["status"], "covered")
+        self.assertIn("independent MXCSR rounding, FTZ and DAZ states", row["statement"])
+        self.assertIn({"kind": "ctest", "ref": "StationDiscoveryNumericRefusals"}, row["evidence"])
+        self.assertIn("missing FMA, disabled OS AVX state", row["statement"])
+        self.assertIn({"kind": "ctest", "ref": "CommonLibraryIsaContract"}, row["evidence"])
+        self.assertIn({"kind": "ctest", "ref": "StationDiscoveryCliSmoke"}, row["evidence"])
+
     def test_path_escape_is_rejected(self) -> None:
         matrix = baseline_matrix()
         matrix["rows"][0]["evidence"][2]["ref"] = "../secret.py"
@@ -866,15 +884,34 @@ class AcceptanceMatrixTests(unittest.TestCase):
         rows = [row for row in matrix["rows"] if "ar.activation.050" in row.get("requirements", [])]
         self.assertEqual(len(rows), 1)
         row = rows[0]
-        self.assertEqual(row["status"], "planned")
+        self.assertEqual(row["status"], "partial")
         self.assertEqual(row["source"], "docs/active-regions.md#activation-and-ordering")
+        self.assertIn("outside -2^24 <= x,z < 2^24", row["statement"])
+        self.assertIn("observational, never hashed or saved", row["statement"])
         self.assertIn("ActiveRegionLedgerTest.ValidAnchorBoundaries", row["discrepancy"])
         self.assertIn("[-2^24, 2^24)", row["discrepancy"])
         self.assertIn("issue #250", row["discrepancy"])
-        self.assertIn("owner: ds", row["evidence"][0]["planned"])
-        self.assertIn("accept -2^24", row["evidence"][0]["planned"])
-        self.assertIn("reject +2^24", row["evidence"][0]["planned"])
-        self.assertIn("walking anchors, ground-object edits and pins", row["evidence"][0]["planned"])
+        self.assertIn("integrated boundary regression", row["discrepancy"])
+        self.assertEqual(row["evidence"][:3], [
+            {"kind": "ctest", "ref": "ActiveRegionLedgerTest.ValidAnchorBoundaries"},
+            {"kind": "ctest", "ref": "ActiveRegionLedgerTest.InvalidSchedulerInputsAreSkippedAndCounted"},
+            {"kind": "ctest", "ref": "GameSessionHeadlessWorldTest.InvalidHostInputsNeverThrowAndAreCounted"},
+        ])
+        self.assertEqual(len(row["evidence"]), 4)
+        planned = row["evidence"][3]
+        self.assertEqual(planned["kind"], "ctest")
+        self.assertEqual(planned["ref"], "ActiveRegionLedgerTest.SymmetricAnchorBoundaries")
+        self.assertIn("owner: ds", planned["planned"])
+        self.assertIn("accept -2^24", planned["planned"])
+        self.assertIn("reject +2^24", planned["planned"])
+        self.assertIn("walking anchors, ground-object edits and pins", planned["planned"])
+        self.assertIn(MODULE._escape_cell(row["statement"]), MODULE.render_doc(matrix))
+        self.assertIn("docs/active-regions.md", row["discrepancy"])
+        self.assertIn("coverage remains planned", row["discrepancy"])
+        self.assertIn("next representable float below -2^24", planned["planned"])
+        self.assertIn("both X and Z endpoints", planned["planned"])
+        self.assertIn("adjacent interior coordinates", planned["planned"])
+        self.assertIn("adjacent exterior coordinates", planned["planned"])
         self.assertIn(MODULE._escape_cell("Discrepancy: " + row["discrepancy"]), MODULE.render_doc(matrix))
         watchdog = row_of(matrix, "em.client-hang")
         self.assertIn("HangWatchdog.RearmsAfterHeartbeatResumes", {e["ref"] for e in watchdog["evidence"]})
@@ -1404,6 +1441,30 @@ class AcceptanceMatrixTests(unittest.TestCase):
         doc.write_bytes(crlf)
         code, _, err = self.run_main(*self.base_args(), "--check-doc", str(doc))
         self.assertEqual(code, 0, err)
+
+    def test_merged_rows_with_stale_summary_are_rejected(self) -> None:
+        matrix = baseline_matrix()
+        original = MODULE.render_doc(matrix)
+        added = copy.deepcopy(matrix["rows"][0])
+        added.update(id="merged.covered", requirements=[])
+        matrix["rows"].append(added)
+        self.write_matrix(matrix)
+        rendered = MODULE.render_doc(matrix)
+        # A clean text merge can retain a parent's unchanged summary while
+        # adding the other parent's row. Every row cell still matches exactly.
+        stale = original.split("| Row |", 1)[0] + "| Row |" + rendered.split("| Row |", 1)[1]
+        doc = self.root / "docs/acceptance-matrix.md"
+        for newline in ("\n", "\r\n"):
+            with self.subTest(newline=newline):
+                doc.write_bytes(stale.replace("\n", newline).encode("utf-8"))
+                self.assertFalse(MODULE._doc_matches(doc, rendered))
+                code, _, err = self.run_main(*self.base_args(), "--check-doc", str(doc))
+                self.assertEqual(code, 1)
+                self.assertIn("is stale", err)
+                code, _, err = self.run_main(*self.base_args(), "--write-doc", str(doc))
+                self.assertEqual(code, 0, err)
+                self.assertEqual(doc.read_bytes(), rendered.encode("utf-8"))
+                self.assertTrue(MODULE._doc_matches(doc, rendered))
 
     def test_edited_doc_is_stale(self) -> None:
         self.write_matrix(baseline_matrix())

@@ -1,20 +1,32 @@
 #include "TerrainPresetLoader.h"
 
 #include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstdint>
 #include <exception>
+#include <filesystem>
 #include <fstream>
 #include <initializer_list>
 #include <map>
 #include <memory>
+#include <string>
 #include <string_view>
+#include <system_error>
+#include <utility>
+#include <vector>
 
 #include "nlohmann/json.hpp"
+#include "nlohmann/json_fwd.hpp"
 
 #include "../ai/CreatureSpeciesRegistry.h"
 #include "../core/FilesystemPath.h"
 #include "../core/Log.h"
+#include "../systems/SHIELD_WorldSystem.h"
 #include "BiomeTable.h"
 #include "StructurePlacement.h"
+#include "WorldgenDependencySnapshot.h"
+#include "WorldgenFileReader.h"
 
 namespace Luminumbra::world {
 namespace {
@@ -23,7 +35,7 @@ constexpr std::uint64_t kFnvOffsetBasis = 14695981039346656037ull;
 constexpr std::uint64_t kFnvPrime = 1099511628211ull;
 
 void HashBytes(std::uint64_t& hash, std::string_view bytes) {
-    for (unsigned char byte : bytes) {
+    for (const unsigned char byte : bytes) {
         hash ^= byte;
         hash *= kFnvPrime;
     }
@@ -54,7 +66,8 @@ bool ResolveDependencyManifest(TerrainPresetLoadResult& preset,
                                const std::filesystem::path& data_root,
                                nlohmann::json& manifest,
                                std::vector<std::string>& errors,
-                               const World::WorldgenFileStatusReader& read_status) {
+                               const World::WorldgenFileStatusReader& read_status,
+                               const World::WorldgenFileReader& dependency_reader) {
     // Use the generator's loaders to record their decisions and only the bytes
     // they consume. In particular, a rejected placement stops that pool before
     // any pieces are read; malformed pieces reject a pool after all piece reads.
@@ -94,7 +107,7 @@ bool ResolveDependencyManifest(TerrainPresetLoadResult& preset,
         const auto logical = logical_path(path.lexically_relative(data_root));
         if (logical.empty())
             return false;
-        if (!World::ReadWorldgenFile(path, bytes)) {
+        if (!dependency_reader(path, bytes)) {
             errors.push_back("failed to read worldgen dependency: " + logical);
             return false;
         }
@@ -132,16 +145,18 @@ bool ResolveDependencyManifest(TerrainPresetLoadResult& preset,
                 const auto& table = snapshot->biome_table;
                 if (!errors.empty())
                     return false;
-                state(logical,
-                      table.ok() && !table.empty()
-                          ? "biome-table-accepted"
-                          : "biome-table-rejected/empty:legacy-classification");
+                if (!table.ok() || table.empty()) {
+                    errors.push_back("invalid worldgen biome table: " + logical);
+                    return false;
+                }
+                state(logical, "biome-table-accepted");
             }
         }
         if (preset.params.structures_enabled) {
             const auto structures = data_root / "common/structures";
             if (!dependency_exists(structures)) {
-                state("common/structures", "structures-directory-absent");
+                errors.push_back("missing worldgen structure pools: common/structures");
+                return false;
             } else {
                 if (!std::filesystem::is_directory(structures)) {
                     errors.push_back("unreadable worldgen dependency directory: common/structures");
@@ -152,6 +167,10 @@ bool ResolveDependencyManifest(TerrainPresetLoadResult& preset,
                 for (const auto& type : std::filesystem::directory_iterator(structures)) {
                     if (type.is_directory())
                         type_dirs.push_back(type.path());
+                }
+                if (type_dirs.empty()) {
+                    errors.push_back("missing worldgen structure pools: common/structures");
+                    return false;
                 }
                 std::sort(type_dirs.begin(), type_dirs.end(), [](const auto& a, const auto& b) {
                     return Filesystem::GenericUtf8PathString(a.filename()) <
@@ -174,9 +193,13 @@ bool ResolveDependencyManifest(TerrainPresetLoadResult& preset,
                         errors.push_back("failed to read worldgen structure pool: " + logical);
                         return false;
                     }
+                    if (!pool.ok()) {
+                        errors.push_back("invalid or empty worldgen structure pool: " + logical);
+                        return false;
+                    }
                     if (!errors.empty())
                         return false;
-                    state(logical, pool.ok() ? "pool-accepted" : "pool-rejected/empty");
+                    state(logical, "pool-accepted");
                     snapshot->structure_pools.push_back(std::move(pool));
                 }
             }
@@ -353,9 +376,7 @@ void ParseBiomesBlock(const nlohmann::json& gen_params,
     biomes.enabled = !biomes.table.empty();
     if (biomes.enabled) {
         // The table path is relative to the data/ root, resolved against the
-        // explicit data_root the caller supplied (the on-disk loader derives it
-        // four parents up from the preset; the in-memory seam is handed it
-        // directly so the table resolves correctly without a temp file).
+        // explicit data_root the caller supplied, independently of save storage.
         biomes.resolved_table_path = Filesystem::GenericUtf8PathString(
             Filesystem::LexicallyNormalPath(data_root / Filesystem::PathFromUtf8(biomes.table)));
     }
@@ -407,10 +428,31 @@ nlohmann::json ResolveTerrainPresetDefaults(const nlohmann::json& preset) {
     return out;
 }
 
-std::string CanonicalResolvedTerrainPresetJson(const nlohmann::json& preset) {
+nlohmann::json ResolveEffectivePreset(const nlohmann::json& preset, TerrainPresetUse use) {
+    // Do not upgrade malformed, retired or future contracts into a valid one.
+    if (const auto schema = preset.find("schema_rev");
+        schema != preset.end() &&
+        (!schema->is_number_integer() || *schema < kMinTerrainPresetSchemaRevision ||
+         *schema > kTerrainPresetSchemaRevision))
+        return preset;
     auto resolved = ResolveTerrainPresetDefaults(preset);
-    resolved["schema_rev"] = kTerrainPresetSchemaRevision;
-    return resolved.dump(-1, ' ', true);
+    if (!JsonHasObject(resolved, "generation_params") ||
+        !JsonHasObject(resolved["generation_params"], "terrain"))
+        return resolved;
+    auto& terrain = resolved["generation_params"]["terrain"];
+    if (!terrain.contains("surface_sampling_revision") && use == TerrainPresetUse::NewWorld)
+        terrain["surface_sampling_revision"] = Systems::kSurfaceSamplingRevision;
+    const auto revision = terrain.find("surface_sampling_revision");
+    // Invalid selectors are left for the loader to diagnose without typed reads.
+    if (revision != terrain.end() && revision->is_number_integer() && *revision == 2)
+        resolved["schema_rev"] = kTerrainPresetSchemaRevision;
+    else if (revision == terrain.end() || (revision->is_number_integer() && *revision == 1))
+        resolved["schema_rev"] = kHistoricalTerrainPresetIdentityRevision;
+    return resolved;
+}
+
+std::string CanonicalResolvedTerrainPresetJson(const nlohmann::json& preset) {
+    return ResolveEffectivePreset(preset).dump(-1, ' ', true);
 }
 
 std::string TerrainPresetContentHash(const nlohmann::json& preset) {
@@ -438,7 +480,7 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
     nlohmann::json data;
     try {
         data = nlohmann::json::parse(file);
-    } catch (const nlohmann::json::parse_error& e) {
+    } catch (const nlohmann::json::exception& e) {
         result.errors.push_back("failed to parse world preset JSON '" +
                                 Filesystem::GenericUtf8PathString(preset_path) + "': " + e.what());
         return result;
@@ -452,28 +494,22 @@ TerrainPresetLoadResult
 LoadTerrainPresetFromJson(const nlohmann::json& source,
                           const std::filesystem::path& data_root,
                           const std::string& provenance,
-                          const World::WorldgenFileStatusReader& read_status) try {
+                          const World::WorldgenFileStatusReader& read_status,
+                          const World::WorldgenFileReader& dependency_reader) try {
     TerrainPresetLoadResult result;
-    // Validate revision type before resolving defaults, retaining the no-throw error path.
-    if (source.contains("schema_rev") && !source["schema_rev"].is_number_integer()) {
-        result.errors.push_back("world preset schema_rev must be an integer: " + provenance);
-        return result;
-    }
-    const nlohmann::json data = ResolveTerrainPresetDefaults(source);
-
     // schema_rev is validated when declared, not required. Every preset under
     // worlds/atlas/presets/ carries it, but in-memory fixtures construct minimal
     // param blocks for unrelated assertions and have never had to declare it.
     // Requiring it would be a new contract, which is a bigger change than this
-    // guard is for.
-    if (data.contains("schema_rev") && !data["schema_rev"].is_number_integer()) {
+    // guard is for. Validate before resolving, retaining the no-throw error path.
+    if (source.contains("schema_rev") && !source["schema_rev"].is_number_integer()) {
         result.errors.push_back("world preset schema_rev must be an integer: found " +
-                                data["schema_rev"].dump() + ": " + provenance);
+                                source["schema_rev"].dump() + ": " + provenance);
         return result;
     }
 
-    const std::int64_t schema_revision = data.contains("schema_rev")
-                                             ? data["schema_rev"].get<std::int64_t>()
+    const std::int64_t schema_revision = source.contains("schema_rev")
+                                             ? source["schema_rev"].get<std::int64_t>()
                                              : kMinTerrainPresetSchemaRevision;
     if (schema_revision < kMinTerrainPresetSchemaRevision ||
         schema_revision > kTerrainPresetSchemaRevision) {
@@ -483,6 +519,8 @@ LoadTerrainPresetFromJson(const nlohmann::json& source,
                                 std::to_string(schema_revision) + ": " + provenance);
         return result;
     }
+
+    const nlohmann::json data = ResolveEffectivePreset(source);
 
     if (!JsonHasObject(data, "generation_params")) {
         result.errors.push_back("world preset is missing object generation_params: " + provenance);
@@ -570,6 +608,25 @@ LoadTerrainPresetFromJson(const nlohmann::json& source,
 
     // Consume the versioned, materialized generation parameters.
     Systems::TerrainGenParams& params = result.params;
+    // Absent in existing saved presets: preserve their activation schedule and
+    // persisted vertex materials. CreateWorld stamps revision 2 for new worlds.
+    if (const auto revision = terrain.find("surface_sampling_revision");
+        revision != terrain.end()) {
+        if (!revision->is_number_integer() || *revision < 1 ||
+            *revision > Systems::kSurfaceSamplingRevision) {
+            result.errors.push_back("surface_sampling_revision must be an integer in 1.." +
+                                    std::to_string(Systems::kSurfaceSamplingRevision) + ": " +
+                                    provenance);
+            return result;
+        }
+        params.surface_sampling_revision = revision->get<int>();
+    }
+    if (params.surface_sampling_revision == Systems::kSurfaceSamplingRevision &&
+        schema_revision < kTerrainPresetSchemaRevision) {
+        result.errors.push_back("surface_sampling_revision 2 requires preset schema revision 8: " +
+                                provenance);
+        return result;
+    }
     // Missing optional blocks retain historical off semantics in revision 6.
     const bool shipping_defaults = schema_revision >= 7;
     result.extras.hydro.enabled = shipping_defaults;
@@ -729,6 +786,7 @@ LoadTerrainPresetFromJson(const nlohmann::json& source,
     WarnUnknownKeys(terrain,
                     "generation_params.terrain",
                     {"base_frequency",
+                     "surface_sampling_revision",
                      "base_amplitude",
                      "octaves",
                      "persistence",
@@ -757,10 +815,17 @@ LoadTerrainPresetFromJson(const nlohmann::json& source,
                     result.warnings);
 
     nlohmann::json manifest;
-    if (!ResolveDependencyManifest(result, data_root, manifest, result.errors, read_status))
+    if (!ResolveDependencyManifest(
+            result, data_root, manifest, result.errors, read_status, dependency_reader))
         return result;
     result.preset_content_hash = HashPresetIdentity(source, manifest);
     result.ok = true;
+    return result;
+} catch (const nlohmann::json::exception& error) {
+    // File and in-memory callers share the same refusal for malformed typed values.
+    TerrainPresetLoadResult result;
+    result.errors.push_back("failed to resolve world preset: invalid world preset JSON values '" +
+                            provenance + "': " + error.what());
     return result;
 } catch (const std::exception& error) {
     // Include serialization/hashing in the resolver boundary. Discard any captured

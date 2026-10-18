@@ -24,8 +24,11 @@
 namespace Luminumbra::world {
 
 // Explicit preset revisions must match the current algorithm contract.
-inline constexpr std::int64_t kTerrainPresetSchemaRevision = 7;
+inline constexpr std::int64_t kTerrainPresetSchemaRevision = 8;
 inline constexpr std::int64_t kMinTerrainPresetSchemaRevision = 6;
+// Keep historical canonical identity bytes at revision 7. Revision 8 gates the
+// complete activation/material sampling contract against older readers.
+inline constexpr std::int64_t kHistoricalTerrainPresetIdentityRevision = 7;
 
 // generation_params.terrain.shaping — reserved keys pinned by
 // (spline points
@@ -110,8 +113,21 @@ struct TerrainPresetLoadResult {
 // historical revision 6). Explicit false and an empty biome table remain authoritative.
 nlohmann::json ResolveTerrainPresetDefaults(const nlohmann::json& preset);
 
-// Identity bytes: materialized revision defaults, current schema revision, sorted
-// object keys, compact JSON, ASCII escapes and locale-independent binary64 numbers.
+enum class TerrainPresetUse {
+    Historical,
+    NewWorld
+};
+// Resolve before hashing, saving or adopting parameters. Explicit selectors are
+// authoritative. Historical omission means revision 1 and stays absent to retain
+// existing identity bytes; new-world omission selects revision 2. Revision 2
+// carries schema 8, which older preset readers refuse; revision 1 uses schema 7
+// after materializing the original defaults. Safe to apply repeatedly.
+nlohmann::json ResolveEffectivePreset(const nlohmann::json& preset,
+                                      TerrainPresetUse use = TerrainPresetUse::Historical);
+
+// Identity bytes: effective preset, schema 7 for historical sampling or schema 8
+// for revision 2, sorted object keys, compact JSON, ASCII escapes and
+// locale-independent binary64 numbers.
 // No filesystem paths derived from data_root or provenance enter this form.
 std::string CanonicalResolvedTerrainPresetJson(const nlohmann::json& preset);
 // Identity with an empty dependency manifest (for dependency-free presets/fixtures).
@@ -123,12 +139,13 @@ std::string TerrainPresetContentHash(const nlohmann::json& preset);
 // must be objects, the six terrain noise fields must be numeric and
 // caves_enabled/cave_frequency must be present and typed. On any error the
 // result carries ok=false and human-readable messages; params/extras are only
-// meaningful when ok=true. Absent optional worldgen inputs bind fallback markers;
-// present but unreadable inputs are errors.
-TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path);
-// Saved presets may live outside the runtime tree; resolve their dependencies here.
+// meaningful when ok=true. Absent biome tables use legacy classification; present
+// tables must be readable and valid. Enabled structure pools must exist.
+// Runtime callers supply data_root independently of the preset's storage location.
 TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path,
                                           const std::filesystem::path& data_root);
+// Convenience for presets in the standard worlds/atlas/presets layout.
+TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path);
 
 // Explicit CLI preset override, validated against the runtime data root. Failure leaves
 // json_text unchanged; successful text is passed to GameSession::CreateWorld.
@@ -137,22 +154,20 @@ bool LoadTerrainPresetOverride(const std::filesystem::path& preset_path,
                                std::string& json_text,
                                std::string& error);
 
-//   (ADDITIVE in-memory seam — no struct/behavior change). Parses
-// an ALREADY-PARSED preset JSON with an EXPLICIT data root, so a host that holds
-// candidate preset JSON in memory (the create-world live preview) gets identical
-// TerrainGenParams WITHOUT round-tripping through a temp file (the temp-file
-// route resolves the biome/structure table paths against the wrong data root —
-// they are resolved relative to <data_root> here). `data_root` is the absolute
-// path to the `data/` directory (the same root the on-disk loader derives as
-// four parents up from the preset file + "data"). `provenance` only labels the
-// unknown-key warnings. LoadTerrainPreset(path) reads+parses the file and
-// DELEGATES here with the file-derived data root. Identity binds the selected
+// Parses an already-parsed preset with the runtime data directory supplied
+// explicitly. The disk loader delegates here. Present biome tables and enabled
+// structure pools must be readable and valid; absent tables use legacy classification.
+// Disabled features require no files. `provenance` only
+// labels diagnostics. Identity binds the selected
 // biome table and enabled structure placement/piece files through portable paths.
 // The status reader queries links themselves and permits deterministic I/O failure coverage.
+// A supplied dependency reader must provide every consumed biome, structure and
+// species file; bounded hosts can serve validated snapshots without reopening bytes.
 TerrainPresetLoadResult LoadTerrainPresetFromJson(
     const nlohmann::json& data,
     const std::filesystem::path& data_root,
     const std::string& provenance = "<memory>",
-    const World::WorldgenFileStatusReader& read_status = World::ReadWorldgenSymlinkStatus);
+    const World::WorldgenFileStatusReader& read_status = World::ReadWorldgenSymlinkStatus,
+    const World::WorldgenFileReader& dependency_reader = World::ReadWorldgenFile);
 
 } // namespace Luminumbra::world

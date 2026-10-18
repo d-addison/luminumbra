@@ -13,11 +13,22 @@ import sys
 # Only reviewed, test-backed files may skip native builds. New files require
 # an explicit coverage decision; directory membership never grants an exemption.
 PYTHON_TESTS = (
+    "test/rendering/test_frame_attribution_wiring.py",
     "tools/ci/test_ci_paths.py",
+    "tools/ci/test_asan_shards.py",
+    "tools/ci/test_ctest_shards.py",
+    "tools/ci/test_workflow_policy.py",
+    "tools/ci/test_replay_source_contract.py",
     "tools/ci/test_cache_retention.py",
     "tools/ci/test_check_docs.py",
+    "tools/ci/test_changed_tus.py",
+    "tools/ci/test_offline_deps.py",
+    "tools/ci/test_local_check_contracts.py",
     "tools/ci/test_check_ctest_junit.py",
     "tools/ci/test_qualification_capture.py",
+    "tools/ci/test_compare_ambient_receipts.py",
+    "tools/ci/test_qualify_prefab_runtime.py",
+    "tools/static_preview/test_run_software_gl.py",
     "tools/ci/test_slowest_tests.py",
     "tools/ci/test_validate_performance_measurement.py",
     "tools/ci/test_validate_public_tree.py",
@@ -44,7 +55,8 @@ PYTHON_TESTS = (
     "tools/rendering/acceptance/test_scene_matrix.py",
 )
 PYTHON_MODULES = {
-    "tools/ci/ci_paths.py", "tools/ci/check_docs.py",
+    "tools/ci/ci_paths.py", "tools/ci/ci_shell.py", "tools/ci/check_docs.py",
+    "tools/ci/changed_tus.py", "tools/ci/offline_deps.py", "tools/ci/path_safety.py",
     "tools/ci/check_ctest_junit.py", "tools/ci/slowest_tests.py",
     "tools/ci/validate_performance_measurement.py",
     "tools/ci/validate_public_tree.py", "tools/ci/validate_visual_catalog.py",

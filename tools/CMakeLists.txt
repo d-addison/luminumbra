@@ -18,6 +18,28 @@ target_include_directories(asset_processor SYSTEM PRIVATE
 # is not held to the project's -Werror warning policy.
 target_link_libraries(asset_processor PRIVATE meshoptimizer stb_headers)
 
+# CPU-only station discovery uses the common query surface without a server lifecycle.
+add_executable(luminumbra_station_discovery station_discovery.cpp)
+target_link_libraries(luminumbra_station_discovery PRIVATE luminumbra_common)
+luminumbra_configure_first_party_target(luminumbra_station_discovery)
+luminumbra_pin_fp_determinism(luminumbra_station_discovery)
+if(MINGW)
+    # Select the CRT startup that supplies UTF-16 argv to wmain.
+    target_link_options(luminumbra_station_discovery PRIVATE -municode)
+endif()
+luminumbra_baseline_startup("${CMAKE_CURRENT_SOURCE_DIR}/station_discovery.cpp")
+set(LUMINUMBRA_STATION_ENGINE_REVISION "" CACHE STRING "Pinned discovery source revision")
+if(NOT LUMINUMBRA_STATION_ENGINE_REVISION)
+    find_package(Git QUIET)
+    if(Git_FOUND)
+        execute_process(COMMAND "${GIT_EXECUTABLE}" -C "${CMAKE_SOURCE_DIR}" rev-parse HEAD
+            OUTPUT_VARIABLE LUMINUMBRA_STATION_ENGINE_REVISION OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET)
+    endif()
+endif()
+target_compile_definitions(luminumbra_station_discovery PRIVATE
+    LUMINUMBRA_STATION_ENGINE_REVISION="${LUMINUMBRA_STATION_ENGINE_REVISION}")
+
 option(LUMINUMBRA_ENABLE_PREFAB_RUNTIME "Build the optional compiled prefab ECS runtime and inspector" OFF)
 option(LUMINUMBRA_ENABLE_STATIC_PREVIEW "Build the neutral production static renderer and installed capture host" OFF)
 if(LUMINUMBRA_ENABLE_PREFAB_RUNTIME OR LUMINUMBRA_ENABLE_STATIC_PREVIEW)
@@ -29,6 +51,26 @@ if(LUMINUMBRA_ENABLE_STATIC_PREVIEW)
 endif()
 
 if(BUILD_TESTING)
+    # Compile the shipping entry separately so the harness changes the FP state
+    # before calling it, without a production injection switch or header seam.
+    add_library(station_discovery_numeric_entry OBJECT station_discovery.cpp)
+    target_link_libraries(station_discovery_numeric_entry PRIVATE luminumbra_common)
+    target_compile_definitions(station_discovery_numeric_entry PRIVATE
+        main=StationDiscoveryEntry wmain=StationDiscoveryEntry
+        LUMINUMBRA_STATION_ENGINE_REVISION="${LUMINUMBRA_STATION_ENGINE_REVISION}")
+    luminumbra_configure_first_party_target(station_discovery_numeric_entry)
+    luminumbra_pin_fp_determinism(station_discovery_numeric_entry)
+    add_executable(station_discovery_numeric_environment
+        "${CMAKE_SOURCE_DIR}/test/common/StationDiscoveryNumericEnvironment.cpp"
+        $<TARGET_OBJECTS:station_discovery_numeric_entry>)
+    target_link_libraries(station_discovery_numeric_environment PRIVATE luminumbra_common)
+    luminumbra_configure_first_party_target(station_discovery_numeric_environment)
+    luminumbra_pin_fp_determinism(station_discovery_numeric_environment)
+    luminumbra_baseline_startup(
+        "${CMAKE_SOURCE_DIR}/test/common/StationDiscoveryNumericEnvironment.cpp")
+    if(MINGW)
+        target_link_options(station_discovery_numeric_environment PRIVATE -municode)
+    endif()
     add_test(
         NAME NetworkingImportedFilesContract
         COMMAND "${CMAKE_COMMAND}"
@@ -115,6 +157,18 @@ if(BUILD_TESTING)
                 "${CMAKE_CURRENT_SOURCE_DIR}/perf/test_run_qualification.py")
     set_tests_properties(QualificationRunnerPython
         PROPERTIES LABELS "perf;tools" TIMEOUT 120)
+    add_test(
+        NAME GlDebugLogCheckerPython
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/perf/test_check_gl_debug_log.py")
+    set_tests_properties(GlDebugLogCheckerPython
+        PROPERTIES LABELS "perf;tools" TIMEOUT 60)
+    add_test(
+        NAME ProcessReceiptSummaryPython
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/perf/test_summarize_process_receipts.py")
+    set_tests_properties(ProcessReceiptSummaryPython
+        PROPERTIES LABELS "perf;tools" TIMEOUT 60)
     add_test(
         NAME PerformanceMeasurementValidatorContract
         COMMAND "${Python3_EXECUTABLE}"
@@ -224,6 +278,64 @@ if(BUILD_TESTING)
     set_tests_properties(AmbientReceiptComparatorContract
         PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
     add_test(
+        NAME AsanShardContract
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_asan_shards.py")
+    set_tests_properties(AsanShardContract
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME CTestShardContract
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_ctest_shards.py")
+    set_tests_properties(CTestShardContract
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    # Disjoint policy partitions preserve every unittest case and the 30s deadline.
+    # Direct Python invocation and unittest discovery still execute the full suite.
+    add_test(
+        NAME WorkflowPolicyContract
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py" --partition 0)
+    set_tests_properties(WorkflowPolicyContract
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME WorkflowPolicyContractPart1
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py" --partition 1)
+    set_tests_properties(WorkflowPolicyContractPart1
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME WorkflowPolicyContractPart2
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py" --partition 2)
+    set_tests_properties(WorkflowPolicyContractPart2
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME WorkflowPolicyContractPart3
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py" --partition 3)
+    set_tests_properties(WorkflowPolicyContractPart3
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME WorkflowPolicyContractPart4
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py" --partition 4)
+    set_tests_properties(WorkflowPolicyContractPart4
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME WorkflowPolicyContractPart5
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py" --partition 5)
+    set_tests_properties(WorkflowPolicyContractPart5
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME WorkflowPolicyContractPart6
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py" --partition 6)
+    set_tests_properties(WorkflowPolicyContractPart6
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME WorkflowPolicyContractPart7
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py" --partition 7)
+    set_tests_properties(WorkflowPolicyContractPart7
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME SoftwareGlEvidenceContract
+        COMMAND "${Python3_EXECUTABLE}" -I -B
+                "${CMAKE_CURRENT_SOURCE_DIR}/static_preview/test_run_software_gl.py")
+    set_tests_properties(SoftwareGlEvidenceContract
+        PROPERTIES LABELS "tools;rendering" TIMEOUT 30)
+    add_test(
         NAME QualificationCaptureContract
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_qualification_capture.py")
     set_tests_properties(QualificationCaptureContract
@@ -263,5 +375,11 @@ if(BUILD_TESTING)
         NAME SlowestTestsScriptContract
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_slowest_tests.py")
     set_tests_properties(SlowestTestsScriptContract
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    include("${CMAKE_CURRENT_SOURCE_DIR}/ci/local_check_contracts.cmake")
+    add_test(
+        NAME LocalCheckRegistrationContract
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_local_check_contracts.py")
+    set_tests_properties(LocalCheckRegistrationContract
         PROPERTIES LABELS "ci;tools" TIMEOUT 30)
 endif()

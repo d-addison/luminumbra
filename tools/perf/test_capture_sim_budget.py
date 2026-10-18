@@ -15,7 +15,8 @@ from unittest import mock
 
 import capture_sim_budget as capture
 from fixture_hash import fixture_hash
-from test_fixture_hash import ROOTED_REFERENCES, ESCAPING_REFERENCES
+from test_fixture_hash import (ROOTED_REFERENCES, ESCAPING_REFERENCES,
+                               directory_link, remove_directory_link)
 
 
 def artifact() -> dict:
@@ -247,6 +248,113 @@ class SimBudgetCaptureTests(unittest.TestCase):
             self.assertEqual(manifest["collision_radius"], 1)
             self.assertEqual([run["command"] for run in manifest["runs"]], commands)
             self.assertEqual([run["preset"] for run in manifest["runs"]], list(capture.PRESETS))
+
+    def test_shipping_capture_accepts_contained_dangling_optional_placement(self):
+        systems = (Path(capture.__file__).resolve().parents[2] / "data/common/systems.json").read_bytes()
+        hashes = []
+        for dangling in (False, True):
+            with self.subTest(dangling=dangling), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve()
+                common = root / "data/common"
+                pool = common / "structures/cairn"
+                pool.mkdir(parents=True)
+                (common / "systems.json").write_bytes(systems)
+                (pool / "cairn.json").write_text('{"weight":1}')
+                presets = root / "worlds/atlas/presets"
+                presets.mkdir(parents=True)
+                (presets / "default.json").write_text("{}")
+                binary = root / "synthetic-server"
+                binary.write_bytes(b"synthetic server; never executed")
+                evidence = root / "evidence"
+                placement = pool / "placement.json"
+                if dangling:
+                    directory_link(placement, pool / "missing.json")
+                try:
+                    sample = artifact()
+
+                    def run(argv, **kwargs):
+                        self.assertEqual(kwargs["cwd"], root)
+                        current = dict(sample, preset=argv[argv.index("--preset") + 1])
+                        Path(argv[argv.index("--artifact") + 1]).write_text(json.dumps(current))
+
+                    # The executable result is synthetic; input traversal and
+                    # pre/post-capture identities run on the real filesystem.
+                    with mock.patch.object(capture, "__file__", str(root / "tools/perf/capture_sim_budget.py")), \
+                            mock.patch("sys.argv", ["capture_sim_budget.py", "--binary", str(binary),
+                                                   "--evidence-dir", str(evidence), "--ticks", "2"]), \
+                            mock.patch.object(capture.subprocess, "check_output", side_effect=["a" * 40, ""]), \
+                            mock.patch.object(capture.subprocess, "run", side_effect=run), \
+                            contextlib.redirect_stdout(io.StringIO()):
+                        self.assertEqual(capture.main(), 0)
+                    manifest = json.loads((evidence / "capture.json").read_text())
+                    self.assertEqual(manifest["fixture_hash"], fixture_hash(common, scope="headless-server"))
+                    self.assertEqual(manifest["preset_hash"], fixture_hash(presets, reference_root=root / "data"))
+                    self.assertEqual([entry["preset"] for entry in manifest["runs"]], list(capture.PRESETS))
+                    hashes.append((manifest["fixture_hash"], manifest["preset_hash"]))
+                finally:
+                    if dangling:
+                        remove_directory_link(placement)
+        self.assertEqual(hashes[0], hashes[1])
+
+    def test_optional_placement_prepare_capture_and_hash_identities_agree(self):
+        import prepare_server_comparison as comparison
+        import test_prepare_server_comparison as comparison_tests
+
+        identities = []
+        for dangling in (False, True):
+            with self.subTest(dangling=dangling), tempfile.TemporaryDirectory() as temporary:
+                parent = Path(temporary).resolve()
+                base, head = comparison_tests.ComparisonFixtureTest.comparison_checkouts(parent)
+                pool = base / "data/common/structures/cairn"
+                pool.mkdir(parents=True)
+                (pool / "cairn.json").write_text('{"weight":1}')
+                placement = pool / "placement.json"
+                if dangling:
+                    directory_link(placement, pool / "missing.json")
+                try:
+                    receipt = parent / "preparation.json"
+                    comparison.prepare(base, head, receipt)
+                    records = json.loads(receipt.read_text())["runs"]
+                    # Only process execution is synthetic. The preparation,
+                    # copied files, hashes, manifest and validators are real.
+                    sample = artifact()
+                    captures = []
+                    for checkout, record in zip((base, head), records):
+                        root = checkout / "perf-common"
+                        binary = parent / "synthetic-server"
+                        binary.write_bytes(b"synthetic server; never executed")
+                        evidence = checkout / "capture"
+                        commands = []
+
+                        def run(argv, **kwargs):
+                            self.assertEqual(kwargs["cwd"], root)
+                            self.assertEqual(argv[argv.index("--root") + 1], str(root))
+                            current = dict(sample, preset=argv[argv.index("--preset") + 1])
+                            Path(argv[argv.index("--artifact") + 1]).write_text(json.dumps(current))
+                            commands.append(argv)
+
+                        with mock.patch.object(capture, "__file__", str(root / "tools/perf/capture_sim_budget.py")), \
+                                mock.patch("sys.argv", ["capture_sim_budget.py", "--binary", str(binary),
+                                                       "--evidence-dir", str(evidence), "--ticks", "2"]), \
+                                mock.patch.object(capture.subprocess, "check_output", side_effect=["a" * 40, ""]), \
+                                mock.patch.object(capture.subprocess, "run", side_effect=run), \
+                                contextlib.redirect_stdout(io.StringIO()):
+                            self.assertEqual(capture.main(), 0)
+                        manifest = json.loads((evidence / "capture.json").read_text())
+                        self.assertEqual(manifest["fixture_hash"],
+                                         fixture_hash(root / "data/common", scope="headless-server"))
+                        self.assertEqual(manifest["preset_hash"],
+                                         fixture_hash(root / "worlds/atlas/presets", reference_root=root / "data"))
+                        self.assertEqual(record["fixture_hash"], comparison.identity(root))
+                        self.assertEqual([entry["command"] for entry in manifest["runs"]], commands)
+                        self.assertEqual(len(commands), len(capture.PRESETS))
+                        captures.append((manifest["fixture_hash"], manifest["preset_hash"], comparison.identity(root)))
+                    self.assertEqual(captures[0], captures[1])
+                    identities.append(captures[0])
+                finally:
+                    if dangling:
+                        remove_directory_link(placement)
+        self.assertEqual(identities[0], identities[1])
 
     def test_capture_refuses_fixture_changes_during_runs(self):
         systems = (Path(capture.__file__).resolve().parents[2] / "data/common/systems.json").read_bytes()

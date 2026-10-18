@@ -140,6 +140,79 @@ class ComparisonFixtureTest(unittest.TestCase):
                 ("directory", None) if path.is_dir() else ("file", path.read_bytes())
                 for path in root.rglob("*")}
 
+    def test_preparation_preserves_missing_optional_placement_identity(self):
+        identities = []
+        for dangling in (False, True):
+            with self.subTest(dangling=dangling), tempfile.TemporaryDirectory() as temp:
+                parent = Path(temp).resolve()
+                base, head = self.comparison_checkouts(parent)
+                common = base / "data/common"
+                pool = common / "structures/cairn"
+                pool.mkdir(parents=True)
+                (pool / "cairn.json").write_text('{"weight":1}')
+                placement = pool / ("PLACEMENT.JSON" if os.name == "nt" else "placement.json")
+                expected = comparison.fixture_hash(common, scope="headless-server")
+                if dangling:
+                    directory_link(placement, pool / "missing.json")
+                try:
+                    self.assertEqual(comparison.fixture_hash(common, scope="headless-server"), expected)
+                    receipt = parent / "receipt.json"
+                    comparison.prepare(base, head, receipt)
+                    records = json.loads(receipt.read_text())["runs"]
+                    prepared = []
+                    for checkout, record in zip((base, head), records):
+                        root = checkout / "perf-common"
+                        self.assertFalse((root / "data/common/structures/cairn/placement.json").exists())
+                        self.assertFalse((root / "data/common/structures/cairn/placement.json").is_symlink())
+                        self.assertEqual((root / "data/common/structures/cairn/cairn.json").read_bytes(),
+                                         (pool / "cairn.json").read_bytes())
+                        prepared.append(comparison.identity(root))
+                        self.assertEqual(record["fixture_hash"], prepared[-1])
+                    self.assertEqual(prepared[0], prepared[1])
+                    identities.append(prepared[0])
+                finally:
+                    if dangling:
+                        remove_directory_link(placement)
+        self.assertEqual(identities[0], identities[1])
+
+    def test_preparation_copies_authored_optional_placement(self):
+        with tempfile.TemporaryDirectory() as temp:
+            parent = Path(temp).resolve()
+            base, head = self.comparison_checkouts(parent)
+            pool = base / "data/common/structures/cairn"
+            pool.mkdir(parents=True)
+            (pool / "cairn.json").write_text('{"weight":1}')
+            placement = pool / "placement.json"
+            placement.write_text('{"spacing":96,"salt":101}')
+            comparison.prepare(base, head, parent / "receipt.json")
+            for checkout in (base, head):
+                root = checkout / "perf-common"
+                copied = root / "data/common/structures/cairn/placement.json"
+                self.assertEqual(copied.read_bytes(), placement.read_bytes())
+                before = comparison.identity(root)
+                copied.write_text('{"spacing":97,"salt":101}')
+                self.assertNotEqual(comparison.identity(root), before)
+
+    def test_preparation_refuses_missing_required_piece_and_outside_placement_before_copy(self):
+        for name, outside in (("cairn.json", False), ("placement.json", True)):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temp:
+                parent = Path(temp).resolve()
+                base, head = self.comparison_checkouts(parent)
+                pool = base / "data/common/structures/cairn"
+                pool.mkdir(parents=True)
+                target = parent / "outside-missing.json" if outside else pool / "missing.json"
+                link = pool / name
+                directory_link(link, target)
+                try:
+                    before = [self.tree_contents(checkout) for checkout in (base, head)]
+                    receipt = parent / "receipt.json"
+                    with self.assertRaises((ValueError, FileNotFoundError)):
+                        comparison.prepare(base, head, receipt)
+                    self.assertEqual([self.tree_contents(checkout) for checkout in (base, head)], before)
+                    self.assertFalse(receipt.exists())
+                finally:
+                    remove_directory_link(link)
+
     def test_preparation_uses_one_data_root_for_links_and_caller_aliases(self):
         for linked_data in (False, True):
             for caller_alias in (False, True):
