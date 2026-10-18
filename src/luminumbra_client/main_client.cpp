@@ -135,6 +135,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include <chrono>
 #include <cmath>
 #include <csignal>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -2560,6 +2561,8 @@ int main(int argc, char* argv[]) {
                                     const std::string& seed,
                                     const std::string& worldType,
                                     const std::vector<Luminumbra::Client::WorldGenParam>& params) {
+        const Luminumbra::Client::Attribution::PhaseScope callback_phase(
+            Luminumbra::Client::Attribution::Phase::WorldCreateCallback);
         // If the customize form changed any param from the base preset, build a resolved preset
         // (base + only the real deltas) and hand it to CreateWorld, which embeds it in THIS world's
         // own save dir. No global custom files, no collisions, no dangling references. If nothing
@@ -2646,6 +2649,8 @@ int main(int argc, char* argv[]) {
     };
 
     auto start_world_load = [&](const std::string& id) {
+        const Luminumbra::Client::Attribution::PhaseScope callback_phase(
+            Luminumbra::Client::Attribution::Phase::WorldLoadCallback);
         const auto asset_error = game_content_error();
         if (!asset_error.empty()) {
             refuse_world_entry(asset_error, false);
@@ -3396,7 +3401,7 @@ int main(int argc, char* argv[]) {
     auto worldgenPreview = std::make_unique<Luminumbra::Client::WorldgenPreview>();
     // Preview orbit/drag bookkeeping consumed by the menu-branch renderer
     // (app/MenuScreens.cpp).
-    MenuPreviewState menuPreviewState;
+    MenuSceneState menuPreviewState;
 
     if (runtime_boot_recorder.enabled() &&
         gameStateManager.GetCurrentState() == GameState::IN_GAME) {
@@ -3590,6 +3595,7 @@ int main(int argc, char* argv[]) {
         frame_limiter.pace(pacing.frame_cap, frame_timing);
         const auto _frameStart = std::chrono::steady_clock::now();
         Attribution::FoliageFrameScope foliage_scope(frame_attribution_enabled);
+        Attribution::PhaseFrameScope phase_scope(frame_attribution_enabled);
         const double observedFrame = glfwGetTime();
         observedFrameSeconds = observedFrame - previousObservedFrame;
         previousObservedFrame = observedFrame;
@@ -3714,12 +3720,16 @@ int main(int argc, char* argv[]) {
         }
 
         const auto _rb_poll_t0 = std::chrono::steady_clock::now(); // always-on (runtime telemetry)
+        const double poll_phases_before = Attribution::phase_total_ms();
+        const double poll_foliage_before = foliage_scope.snapshot().rebuild_ms;
         RefreshInputOwnership(window);
         glfwPollEvents();
         RefreshInputOwnership(window);
         rb_poll_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
                                                                _rb_poll_t0)
                          .count();
+        rb_poll_ms -= Attribution::phase_total_ms() - poll_phases_before +
+                      foliage_scope.snapshot().rebuild_ms - poll_foliage_before;
 
         // --bake-tree-impostor: GL is ready at the loop top and the bake needs no world, so run the
         // octahedral atlas bake ONCE here (independent of game state), write the atlas + coverage
@@ -4837,6 +4847,7 @@ int main(int argc, char* argv[]) {
                                            std::chrono::steady_clock::now() - _fb0)
                                            .count();
                     }
+                    const double render_phases_before = Attribution::phase_total_ms();
                     const double render_foliage_before = foliage_scope.snapshot().rebuild_ms;
                     const auto _rb_rcall_t0 =
                         std::chrono::steady_clock::now(); // always-on (runtime telemetry)
@@ -4859,6 +4870,7 @@ int main(int argc, char* argv[]) {
                         Attribution::exclusive_parent_ms(rb_render_call_ms,
                                                          render_foliage_before,
                                                          foliage_scope.snapshot().rebuild_ms);
+                    rb_render_bucket_ms -= Attribution::phase_total_ms() - render_phases_before;
 
                     // --scene-config: self-contained capture. Settle a few frames (world
                     // stream + atmosphere), then read the clean back buffer (BEFORE any UI
@@ -5126,6 +5138,7 @@ int main(int argc, char* argv[]) {
                 // Menu-branch rendering: thumbs capture, menu backdrop,
                 // create-world preview diorama, UI pass, and the
                 // --ui-screenshot batch (app/MenuScreens.cpp).
+                const double menu_phases_before = Attribution::phase_total_ms();
                 const double menu_foliage_before = foliage_scope.snapshot().rebuild_ms;
                 Attribution::StageTimer menu_timer(rb_menu_ms, frame_attribution_enabled);
                 RenderMenuScreens(g_app,
@@ -5142,10 +5155,13 @@ int main(int argc, char* argv[]) {
                 menu_timer.stop();
                 rb_menu_ms = Attribution::exclusive_parent_ms(
                     rb_menu_ms, menu_foliage_before, foliage_scope.snapshot().rebuild_ms);
+                rb_menu_ms -= Attribution::phase_total_ms() - menu_phases_before;
             }
         }
 
         if (currentState == GameState::IN_GAME) {
+            menuPreviewState.schedule = {};
+            menuPreviewState.last_menu_frame = {};
             // Ecology capture retains its explicit label override independently of preferences.
             if (g_app.capture.timelapse_creatures)
                 DrawCreatureNameplates(g_app, window, g_camera.get(), gameSession.get());
@@ -5176,6 +5192,7 @@ int main(int argc, char* argv[]) {
         //  render the RmlUi overlay in-game too (HUD / photo-mode / pause), over the scene and
         // under the ImGui debug layer. Menus still render via the else-branch above; this path
         // shows whatever in-game document is loaded (hud.rml on entry).
+        const double ui_phases_before = Attribution::phase_total_ms();
         const auto _rb_ui_t0 = std::chrono::steady_clock::now(); //
         if (currentState == GameState::IN_GAME && g_uiManager) {
             g_uiManager->Render();
@@ -5199,6 +5216,7 @@ int main(int argc, char* argv[]) {
             rb_ui_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
                                                                  _rb_ui_t0)
                            .count(); //
+        rb_ui_ms -= Attribution::phase_total_ms() - ui_phases_before;
 
         // Capture an additional, unmeasured frame before presentation. Hidden-window
         // front buffers are not a portable readback source (Mesa can return black).
@@ -5297,13 +5315,14 @@ int main(int argc, char* argv[]) {
                                            foliage_frame.capacity,
                                            foliage_frame.count_known,
                                            foliage_frame.generated_count,
-                                           foliage_frame.count_generation))
+                                           foliage_frame.count_generation,
+                                           phase_scope.snapshot()))
                     LUMINUMBRA_CORE_ERROR("Frame attribution CSV write failed");
             }
             if (_wallMs > 12.0 && g_app.telemetry.slowFrameCount++ < 400) {
                 const double _other =
                     frame_attribution_enabled
-                        ? buckets.other(_wallMs)
+                        ? buckets.other(_wallMs, phase_scope.snapshot())
                         : _wallMs - rb_sim_ms - rb_stream_ms - rb_render_call_ms - _presentMs;
                 LUMINUMBRA_CORE_WARN("SLOWFRAME {:.1f}ms ({:.0f}fps): sim={:.1f} stream={:.1f} "
                                      "render={:.1f} present={:.1f} other={:.1f} | "
@@ -5323,6 +5342,14 @@ int main(int argc, char* argv[]) {
                                      foliage_frame.rebuild_ms,
                                      rb_menu_ms,
                                      rb_ui_ms);
+                if (frame_attribution_enabled) {
+                    const auto& phases = phase_scope.snapshot();
+                    for (std::size_t index = 0; index < Attribution::kPhaseCount; ++index)
+                        LUMINUMBRA_CORE_WARN(
+                            "  phase {}={:.3f}ms",
+                            Attribution::phase_name(static_cast<Attribution::Phase>(index)),
+                            phases.milliseconds()[index]);
+                }
                 if (frame_attribution_enabled)
                     LUMINUMBRA_CORE_WARN(
                         "  foliage-split: signature={:.3f} sort={:.3f} surface={:.3f} "
@@ -5814,6 +5841,8 @@ int main(int argc, char* argv[]) {
             }
         }
     }
+    if (menuPreviewState.capture_failed && exit_code == 0)
+        exit_code = 1;
     if (!frame_recorder.finish()) {
         LUMINUMBRA_CORE_ERROR("Frame attribution CSV finalization failed");
         if (exit_code == 0)
@@ -5912,6 +5941,7 @@ int main(int argc, char* argv[]) {
     }
     audioManager->Shutdown();
     mark_shutdown("audio_shutdown");
+    menuPreviewState.scene_image.release_scene_image();
     renderPipeline.shutdown();
     mark_shutdown("renderer_shutdown");
     developerLogAttachment.Detach();

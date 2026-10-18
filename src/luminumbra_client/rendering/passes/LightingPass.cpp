@@ -1,6 +1,7 @@
 #include "LightingPass.h"
 #include "../FarWorldReplay.h"
 #include "../RenderingDefaults.h"
+#include "rendering/AttributedGl.h"
 
 #include "../EnvironmentBrdfLut.gen.h"
 #include "../PassShaderLayouts.h"
@@ -426,7 +427,7 @@ void LightingPass::execute(const RenderContext& ctx) {
         m_lighting_shader->setVec3("u_cloudSunDir", cloud.sun_travel_dir);
     }
     glBindVertexArray(ctx.screen_quad_vao);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLE_STRIP, 0, 4);
     if (ctx.lighting_draws)
         ++(*ctx.lighting_draws);
     glBindVertexArray(0);
@@ -530,7 +531,7 @@ void LightingPass::execute_lightning_overlay(const RenderContext& ctx) {
     }
 
     glBindVertexArray(ctx.screen_quad_vao);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLE_STRIP, 0, 4);
     glBindVertexArray(0);
     glEnable(GL_DEPTH_TEST);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
