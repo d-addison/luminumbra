@@ -11,6 +11,8 @@ the exact pin.
 from __future__ import annotations
 
 import concurrent.futures
+import contextlib
+import io
 import hashlib
 import importlib.util
 import itertools
@@ -1327,6 +1329,7 @@ class OwnedCommandLifetime(unittest.TestCase):
                         entries.mkdir()
                         for i in range(8193):
                             (entries / str(i)).touch()
+                        (root / "entries-complete").touch()
                     while True:
                         work.write(b"x")
                         if mode == "output":
@@ -1406,6 +1409,30 @@ class OwnedCommandLifetime(unittest.TestCase):
                     pass
             self.launched.clear()
 
+    def command_diagnostics(self, thread):
+        # One snapshot, 16 frames, four retained launch records and three known
+        # fixture paths only. Never inspect locals, scan storage or poll/wait children.
+        frame = sys._current_frames().get(thread.ident)
+        stack = []
+        for _ in range(16):
+            if frame is None:
+                break
+            stack.append(dict(file=Path(frame.f_code.co_filename).name,
+                              function=frame.f_code.co_name, line=frame.f_lineno))
+            frame = frame.f_back
+        details = dict(stack=stack, stack_truncated=frame is not None,
+                       launches=[dict(pid=p.pid, returncode=p.returncode) for p in self.launched[-4:]])
+        del frame
+        for name in ("work", "child.pid", "entries-complete"):
+            try:
+                info = os.lstat(self.root / name)
+                details[name] = dict(size=info.st_size, mode=info.st_mode)
+                if name == "child.pid":
+                    details[name]["pid"] = int(M.read_file(self.root / name, 32))
+            except (OSError, ValueError) as error:
+                details[name] = dict(unavailable=type(error).__name__)
+        return details
+
     def command(self, mode, input_bytes=None):
         def launch(argv, **kwargs):
             actual = [sys.executable, "-I", "-B", str(self.script), str(self.root), mode]
@@ -1441,6 +1468,9 @@ class OwnedCommandLifetime(unittest.TestCase):
         thread.start()
         thread.join(4)
         try:
+            if thread.is_alive():
+                print("owned command deadline: " + json.dumps(self.command_diagnostics(thread),
+                                                              sort_keys=True), file=sys.stderr)
             self.assertFalse(thread.is_alive(), "owned command did not return within four seconds")
             self.assertLess(time.monotonic() - started, 4)
             if errors:
@@ -1558,6 +1588,57 @@ class OwnedCommandLifetime(unittest.TestCase):
     def test_pipe_exit_after_empty_read_preserves_nonzero_refusal(self):
         with self.assertRaisesRegex(M.Refusal, "Git command refused\nfinal failure"):
             self.pipe_exit_after_empty_read(b"final failure", 7)
+
+    def test_deadline_diagnostics_capture_the_actual_owned_parent_stack(self):
+        entered, release = threading.Event(), threading.Event()
+        real_inventory, real_join = M.inventory, threading.Thread.join
+        def held_inventory(source):
+            entered.set()
+            if not release.wait(3):
+                raise AssertionError("diagnostic barrier deadline exceeded")
+            return real_inventory(source)
+        def join(thread, timeout=None):
+            if timeout == 4:
+                self.assertTrue(entered.wait(3))
+                return
+            release.set()
+            return real_join(thread, timeout)
+        output = io.StringIO()
+        try:
+            with mock.patch.object(M, "inventory", side_effect=held_inventory),                     mock.patch.object(threading.Thread, "join", join), contextlib.redirect_stderr(output):
+                with self.assertRaisesRegex(AssertionError, "owned command did not return within four seconds"):
+                    self.command("storage")
+        finally:
+            release.set()
+        self.assertIn("owned command deadline: ", output.getvalue())
+        details = json.loads(output.getvalue().split("owned command deadline: ", 1)[1])
+        self.assertIn("held_inventory", [frame["function"] for frame in details["stack"]])
+        self.assertTrue(all(set(frame) == {"file", "function", "line"} for frame in details["stack"]))
+        self.assertLessEqual(len(details["stack"]), 16)
+        self.assertEqual(details["launches"][0]["pid"], self.launched[0].pid)
+        self.assertIn("work", details)
+        self.assertIn("entries-complete", details)
+
+    def test_deadline_diagnostics_report_missing_progress_without_waiting(self):
+        details = self.command_diagnostics(threading.current_thread())
+        self.assertEqual(details["launches"], [])
+        with mock.patch.object(sys, "_current_frames", return_value={}):
+            absent = self.command_diagnostics(threading.current_thread())
+        self.assertEqual(absent["stack"], [])
+        self.assertFalse(absent["stack_truncated"])
+        def nested(depth):
+            if depth:
+                return nested(depth - 1)
+            return self.command_diagnostics(threading.current_thread())
+        truncated = nested(17)
+        self.assertEqual(len(truncated["stack"]), 16)
+        self.assertTrue(truncated["stack_truncated"])
+        for name in ("work", "child.pid", "entries-complete"):
+            self.assertEqual(details[name], {"unavailable": "FileNotFoundError"})
+        with mock.patch.object(M, "read_file", return_value=b"partial"):
+            (self.root / "child.pid").touch()
+            self.assertEqual(self.command_diagnostics(threading.current_thread())["child.pid"],
+                             {"unavailable": "ValueError"})
 
     def test_storage_refusal_stops_actual_descendant_and_held_pipe(self):
         with self.assertRaisesRegex(M.Refusal, "entry bound"):
@@ -2092,6 +2173,67 @@ class OwnershipFieldDiagnostics(unittest.TestCase):
                 self.assertEqual(w.owner_path.read_bytes(), raw)
             w.owner_path.write_bytes(original)
             self.assertEqual(w.owner(), original)
+
+
+class RootMismatchObservations(unittest.TestCase):
+    def test_cli_root_refusal_reports_spellings_reader_and_nofollow_identity(self):
+        with tempfile.TemporaryDirectory(prefix="rmlui-root-") as directory:
+            root = Path(directory).resolve(strict=True)
+            w = M.Workspace(root / "build", specification())
+            w.initialize()
+            other = root / "other"
+            other.mkdir()
+            for stored in (str(other), str(w.root) + os.sep, str(root / "missing")):
+                with self.subTest(stored=stored):
+                    value = json.loads(w.owner_path.read_bytes())
+                    value["root"] = stored
+                    raw = M.encoded(value)
+                    w.owner_path.write_bytes(raw)
+                    output = io.StringIO()
+                    with contextlib.redirect_stderr(output):
+                        self.assertEqual(M.main(["preflight", "--root", str(w.root)]), 1)
+                    self.assertIn("workspace ownership root mismatch: ", output.getvalue())
+                    details = json.loads(output.getvalue().split("workspace ownership root mismatch: ", 1)[1])
+                    self.assertEqual(details["expected_root"], str(w.root))
+                    self.assertEqual(details["stored_root"], stored)
+                    self.assertEqual(details["interpreter"], sys.executable)
+                    self.assertEqual(details["platform"], sys.platform)
+                    self.assertEqual(details["os_name"], os.name)
+                    info = os.lstat(w.root)
+                    self.assertEqual(details["expected_identity"]["inode"], info.st_ino)
+                    self.assertEqual(details["expected_identity"]["device"], info.st_dev)
+                    self.assertEqual(w.owner_path.read_bytes(), raw)
+                    self.assertEqual(set(p.name for p in w.root.iterdir()), {".rmlui-owner.json"})
+                    self.assertNotIn(value["nonce"], output.getvalue())
+                    self.assertNotIn("stored_identity", details)
+                    if stored == str(w.root) + os.sep:
+                        self.assertEqual(os.lstat(stored).st_ino, info.st_ino)
+
+    def test_root_observations_preserve_refusal_when_metadata_is_unavailable(self):
+        with tempfile.TemporaryDirectory(prefix="rmlui-root-") as directory:
+            w = M.Workspace(Path(directory).resolve(strict=True) / "build", specification())
+            w.initialize()
+            for stored in (None, "", "private-field", "bad\0path", str(w.root.parent / "other")):
+                with self.subTest(stored=stored):
+                    value = json.loads(w.owner_path.read_bytes())
+                    value["root"] = stored
+                    raw = M.encoded(value)
+                    w.owner_path.write_bytes(raw)
+                    real_lstat = M.os.lstat
+                    def lstat(path):
+                        if path in (w.root, stored):
+                            raise PermissionError(13, "private metadata detail")
+                        return real_lstat(path)
+                    with mock.patch.object(M.os, "lstat", side_effect=lstat):
+                        with self.assertRaisesRegex(M.Refusal, "root mismatch: ") as caught:
+                            w.owner()
+                    details = json.loads(str(caught.exception).split("root mismatch: ", 1)[1])
+                    self.assertEqual(details["expected_identity"], {"unavailable": "PermissionError", "errno": 13})
+                    self.assertNotIn("stored_identity", details)
+                    if not isinstance(stored, str) or not Path(stored).is_absolute():
+                        self.assertEqual(details["stored_root"], "<invalid absolute root>")
+                    self.assertNotIn("private", str(caught.exception))
+                    self.assertEqual(w.owner_path.read_bytes(), raw)
 
 
 class ConfigureCallerBoundaries(unittest.TestCase):

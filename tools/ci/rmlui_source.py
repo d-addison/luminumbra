@@ -545,6 +545,29 @@ def encoded(value: dict) -> bytes:
     return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
 
 
+def root_mismatch_details(root: Path, stored: object) -> str:
+    # Refusal only: one lstat of the validated root, no contents or environment.
+    # Root inputs are capped at 32768 characters; the owner record at 4096 bytes.
+    def identity(path):
+        try:
+            info = os.lstat(path)
+            return dict(device=info.st_dev, inode=info.st_ino, links=info.st_nlink,
+                        mode=info.st_mode, attributes=getattr(info, "st_file_attributes", None))
+        except (OSError, ValueError) as error:
+            return dict(unavailable=type(error).__name__, errno=getattr(error, "errno", None))
+    valid = isinstance(stored, str) and 0 < len(stored) <= 32768 and "\0" not in stored
+    valid = valid and Path(stored).is_absolute()
+    details = dict(expected_root=str(root), expected_identity=identity(root),
+                   interpreter=sys.executable[:32768], version=sys.version[:512],
+                   platform=sys.platform, os_name=os.name)
+    # Malformed relative fields are not root spellings and may contain secrets.
+    if valid:
+        details["stored_root"] = stored
+    else:
+        details["stored_root"] = "<invalid absolute root>"
+    return json.dumps(details, sort_keys=True, ensure_ascii=True)
+
+
 class Workspace:
     def __init__(self, root: Path, spec: Specification):
         self.root = canonical(root)
@@ -569,7 +592,8 @@ class Workspace:
         require(raw == encoded(value), "noncanonical ownership record")
         require(set(value) == {"schema", "root", "nonce", "delivery"}, "workspace ownership fields mismatch")
         require(value["schema"] == 1, "workspace ownership schema mismatch")
-        require(value["root"] == str(self.root), "workspace ownership root mismatch")
+        if value["root"] != str(self.root):
+            raise Refusal("workspace ownership root mismatch: " + root_mismatch_details(self.root, value["root"]))
         require(isinstance(value["nonce"], str) and re.fullmatch(r"[0-9a-f]{32}", value["nonce"]),
                 "workspace ownership nonce format mismatch")
         require(isinstance(value["delivery"], dict), "workspace delivery format mismatch")

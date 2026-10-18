@@ -3672,12 +3672,16 @@
     {
       "id": "dependency.rmlui-source",
       "source": "docs/dependency-source.md",
-      "statement": "RmlUi source delivery binds the immutable pin and exact patch to a complete upstream identity manifest in vendor/rmlui/rmlui-6.1-source.json, owned workspace and readiness receipt. The manifest retains LF checkout bytes and selects both Python and native CI lanes. Registered Python controls check full-file preservation, refusal of mismatched or incomplete inputs, and read-only repetition. Generated command equivalence, supported CMake versions, Windows and native builds require separate execution.",
+      "statement": "RmlUi source delivery binds the immutable pin and exact patch to a complete upstream identity manifest in vendor/rmlui/rmlui-6.1-source.json, owned workspace and readiness receipt. The manifest retains LF checkout bytes and selects both Python and native CI lanes. Registered Python controls check full-file preservation and read-only repetition; the separate command contract checks workspace ownership and command refusals. Generated command equivalence, supported CMake versions, Windows and native builds require separate execution.",
       "status": "covered",
       "evidence": [
         {
           "kind": "ctest",
           "ref": "RmlUiSourceScriptContract"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RmlUiSourceCommandContract"
         }
       ],
       "requirements": []

@@ -43,8 +43,10 @@ disconnected configuration requires an already completed exact source; it never
 fetches a replacement. Source overrides, shared Git administration, symlinks,
 reparse paths, path escapes and Windows short-name aliases are ineligible.
 
-`RmlUiSourceScriptContract` exercises the real patch against the full vendor
-input and checks delivery refusals and read-only repetition. Offline authors may
+`RmlUiSourceScriptContract` exercises publication and read-only repetition against
+the full vendor input. The separately registered `RmlUiSourceFixture_*` cases
+check file and Git refusals; `RmlUiSourceCommandContract` checks workspace and
+command refusals. Offline authors may
 provide an immutable pristine archive extraction directly under their private
 `TMPDIR` through `LUMINUMBRA_RMLUI_TEST_SOURCE`; this is a test input only. The
 tests temporarily move that input and restore it afterward. Otherwise the suite
