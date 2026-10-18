@@ -120,9 +120,49 @@ class AsanShardTests(unittest.TestCase):
                         shards.plan(self.root, shard)
                     self.assertEqual(selection.read_text(encoding="utf-8"), "previous selection\n")
 
+    def test_plan_fixture_encodes_shared_inputs_once_without_retaining_mutations(self):
+        encode = json.dumps
+        for shared in (True, False):
+            with self.subTest(shared=shared):
+                all_tests = self.tests if shared else [dict(row) for row in self.tests]
+                expected = encode({"tests": self.tests}).encode()
+                with patch.object(json, "dumps", wraps=encode) as serialize:
+                    self.planned_selection(all_tests, self.tests)
+                calls = [call for call in serialize.call_args_list
+                         if isinstance(call.args[0], dict) and "tests" in call.args[0]
+                         and (call.args[0]["tests"] is self.tests or call.args[0]["tests"] is all_tests)]
+                self.assertEqual(len(calls), 1 if shared else 2)
+                self.assertEqual((self.root / "ctest.all.json").read_bytes(), expected)
+                self.assertEqual((self.root / "ctest.inventory.json").read_bytes(), expected)
+                self.assertEqual(encode({"tests": self.tests}).encode(), expected)
+                self.assertEqual(all_tests, self.tests)
+        self.tests[0]["command"].append("--changed")
+        expected = encode({"tests": self.tests}).encode()
+        with patch.object(json, "dumps", wraps=encode) as serialize:
+            self.planned_selection(self.tests, self.tests)
+        calls = [call for call in serialize.call_args_list
+                 if isinstance(call.args[0], dict) and call.args[0].get("tests") is self.tests]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual((self.root / "ctest.all.json").read_bytes(), expected)
+        self.assertEqual((self.root / "ctest.inventory.json").read_bytes(), expected)
+        independent = json.loads(encode({"tests": self.tests}))["tests"]
+        independent[0]["command"].append("--independent")
+        with self.assertRaisesRegex(ValueError, "execution inventory differs"):
+            self.planned_selection(independent, self.tests)
+        self.assertEqual((self.root / "ctest.all.json").read_bytes(),
+                         encode({"tests": independent}).encode())
+        self.assertEqual((self.root / "ctest.inventory.json").read_bytes(), expected)
+        empty = []
+        with self.assertRaisesRegex(ValueError, "empty CTest inventory"):
+            self.planned_selection(empty, empty)
+
     def planned_selection(self, all_tests, eligible):
-        (self.root / "ctest.all.json").write_text(json.dumps({"tests": all_tests}))
-        (self.root / "ctest.inventory.json").write_text(json.dumps({"tests": eligible}))
+        # Reuse only this call's encoding when both fixture inputs are the same object.
+        # Both files and the real planner remain independent consumers.
+        all_text = json.dumps({"tests": all_tests})
+        (self.root / "ctest.all.json").write_text(all_text)
+        eligible_text = all_text if eligible is all_tests else json.dumps({"tests": eligible})
+        (self.root / "ctest.inventory.json").write_text(eligible_text)
         selected = []
         # Model CTest 3.28: apply -LE manual first, then interpret -I against
         # that filtered roster, preserving registration order.
