@@ -235,9 +235,9 @@ def plan(directory, shard, profile="gcc", timings=None, selection=None):
     eligible = [test["name"] for test in tests]
     require(eligible == [test["name"] for test in filtered_tests(all_tests)],
             "filtered CTest roster or ordering differs from inventory")
-    validated = evidence_for(tests, [eligible], profile, roots=roots)
+    validated = evidence_for(tests, [eligible], profile, roots=roots, selection=selection)
     require(validated ==
-            evidence_for(filtered_tests(all_tests), [eligible], profile, roots=roots),
+            evidence_for(filtered_tests(all_tests), [eligible], profile, roots=roots, selection=selection),
             "discovery CTest execution inventory differs between inventories")
     selected = select_tests(tests, profile, selection)
     require(shard != 0 or selection in (None, "full"), "qualification requires full selection")
@@ -276,6 +276,7 @@ def run(directory, profile="gcc"):
     require(shard in (0, 1, 2) and len(parts) == (1 if shard == 0 else 2), "invalid execution partition")
     require(shard != 0 or manifest["selection"] in (None, "full"), "qualification requires full selection")
     roots = inventory_roots(directory)
+    require(manifest["roots"] == roots, "execution source or build roots differ from plan")
     require(manifest == {**evidence_for(roster(directory), parts, profile, manifest["timings"], roots, manifest["selection"]), "shard": shard},
             "execution partition digest differs from plan")
     require(evidence_for(current_tests, parts, profile, manifest["timings"], roots, manifest["selection"]) ==

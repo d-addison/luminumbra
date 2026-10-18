@@ -15,6 +15,10 @@ and unittest discovery retain the complete suite.
 """
 
 import argparse
+from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor, wait
+from contextlib import closing
+from itertools import islice
 import fnmatch
 import io
 import os
@@ -27,6 +31,7 @@ import textwrap
 import time
 import unittest
 from pathlib import Path
+from typing import NamedTuple
 from unittest.mock import MagicMock, patch
 
 
@@ -1594,21 +1599,33 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                 refusal_script, gate_script = value(refusal, "run", 8), value(gate, "run", 8)
                 self.assertIsNotNone(refusal_script)
                 self.assertIsNotNone(gate_script)
-                for classification in ("success", "failure", "cancelled", "skipped", "", "unknown"):
-                    for result, cpp, event, draft, qualification, enabled, accepted in cases:
-                        with self.subTest(job=job, classification=classification, result=result, cpp=cpp,
-                                          event=event, draft=draft, qualification=qualification, enabled=enabled):
+                # Only this grid may overlap, using case-local launch inputs.
+                environment = tuple(os.environ.items())
+
+                def route_cases():
+                    index = 0
+                    for classification in ("success", "failure", "cancelled", "skipped", "", "unknown"):
+                        for result, cpp, event, draft, qualification, enabled, accepted in cases:
                             script = 'python3() { "$POLICY_PYTHON" -I -B "$@"; }\n'
                             script += (refusal_script + "\n" if classification != "success" or result not in ("success", "skipped") else "") + gate_script
-                            process = subprocess.run(
-                                [BASH, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script],
-                                cwd=ROOT,
-                                env=dict(os.environ, POLICY_PYTHON=Path(sys.executable).as_posix(),
-                                         CI_PATHS_RESULT=classification, CI_CANCELLED="false", SHARD_RESULT=result, NEEDS_CPP=cpp, CI_EVENT=event, CI_DRAFT=draft,
-                                         CI_QUALIFICATION=qualification, CI_ENABLED=enabled,
-                                         GITHUB_STEP_SUMMARY=(Path(directory) / "summary").as_posix()),
-                                capture_output=True, text=True, timeout=10,
+                            yield PolicyRouteCase(
+                                (classification, result, cpp, event, draft, qualification, enabled), accepted,
+                                (BASH, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script),
+                                str(ROOT),
+                                tuple(dict(environment, POLICY_PYTHON=Path(sys.executable).as_posix(),
+                                           CI_PATHS_RESULT=classification, CI_CANCELLED="false", SHARD_RESULT=result, NEEDS_CPP=cpp, CI_EVENT=event, CI_DRAFT=draft,
+                                           CI_QUALIFICATION=qualification, CI_ENABLED=enabled,
+                                           GITHUB_STEP_SUMMARY=(Path(directory) / f"summary-{job}-{index}").as_posix()).items()),
                             )
+                            index += 1
+
+                with closing(policy_route_results(route_cases(), getattr(self, "route_case_workers", 1))) as results:
+                    for case, future in results:
+                        classification, result, cpp, event, draft, qualification, enabled = case.parameters
+                        accepted = case.accepted
+                        with self.subTest(job=job, classification=classification, result=result, cpp=cpp,
+                                          event=event, draft=draft, qualification=qualification, enabled=enabled):
+                            process = future.result()
                             self.assertEqual(process.returncode == 0, accepted and classification == "success",
                                              process.stdout + process.stderr)
                             if classification != "success" or result not in ("success", "skipped"):
@@ -2019,6 +2036,46 @@ class WorkflowAttributionPolicyTests(unittest.TestCase):
         self.assertIn('"| checked out sha | $env:MERGE_SHA |"', script)
 
 
+class PolicyRouteCase(NamedTuple):
+    parameters: tuple[str, ...]
+    accepted: bool
+    command: tuple[str, ...]
+    cwd: str
+    environment: tuple[tuple[str, str], ...]
+
+
+def policy_run_route_case(case):
+    return subprocess.run(case.command, cwd=case.cwd, env=dict(case.environment),
+                          capture_output=True, text=True, timeout=10)
+
+
+def policy_route_results(cases, workers):
+    """Keep at most two submitted cases; report outcomes in original roster order."""
+    if type(workers) is not int or workers not in (1, 2):
+        raise ValueError("route case workers must be 1 or 2")
+    if workers == 1:
+        for case in cases:
+            future = Future()
+            try:
+                future.set_result(policy_run_route_case(case))
+            except Exception as error:
+                future.set_exception(error)
+            yield case, future
+        return
+    # The window bounds descriptors, futures and owned subprocesses to two.
+    # Closing the iterator drains the executor before its temporary files go away.
+    iterator = iter(cases)
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        pending = deque((case, executor.submit(policy_run_route_case, case))
+                        for case in islice(iterator, workers))
+        while pending:
+            case, future = pending.popleft()
+            wait((future,))
+            yield case, future
+            for following in islice(iterator, 1):
+                pending.append((following, executor.submit(policy_run_route_case, following)))
+
+
 # Keep launch-heavy cases separate without changing any case or subtest.
 # Selection scans the finite unittest roster once; no subprocess is started here.
 POLICY_PARTITIONS = tuple(str(index) for index in range(8))
@@ -2086,7 +2143,11 @@ def policy_main(argv=None):
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     parser.add_argument("--partition", choices=POLICY_PARTITIONS, action="append")
     parser.add_argument("--list-tests", action="store_true")
+    parser.add_argument("--case-workers", choices=("1", "2"), action="append")
     args, remaining = parser.parse_known_args(argv)
+    if args.case_workers is not None:
+        if len(args.case_workers) != 1 or args.partition != ["0"]:
+            parser.error("one --case-workers option requires partition 0")
     if args.partition is None:
         if args.list_tests:
             parser.error("--list-tests requires --partition")
@@ -2102,11 +2163,234 @@ def policy_main(argv=None):
         for case in policy_cases(suite):
             print(case.id())
         return 0
+    for case in policy_cases(suite):
+        if (isinstance(case, WorkflowDraftPolicyTests)
+                and case._testMethodName == "test_native_aggregates_preserve_route_checks"):
+            case.route_case_workers = int(args.case_workers[0]) if args.case_workers else 1
     result = unittest.TextTestRunner(verbosity=2, resultclass=PolicyTimingResult).run(suite)
     return int(not result.wasSuccessful())
 
 
 class WorkflowPartitionSelectionTests(unittest.TestCase):
+    @staticmethod
+    def route_fixture(directory, index, script="print('complete')"):
+        summary = (Path(directory) / f"summary-{index}").as_posix()
+        return PolicyRouteCase((str(index),), True,
+                               (sys.executable, "-I", "-B", "-c", script, str(index), directory),
+                               directory, tuple(dict(os.environ, GITHUB_STEP_SUMMARY=summary,
+                                                     POLICY_CASE=str(index)).items()))
+
+    def test_route_window_overlaps_owned_children_with_bounded_ordered_consumption(self):
+        script = textwrap.dedent('''
+            import os, sys, time
+            from pathlib import Path
+            index, root = sys.argv[1], Path(sys.argv[2])
+            def await_file(name):
+                deadline = time.monotonic() + 5
+                while not (root / name).exists():
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(name)
+                    time.sleep(.005)
+            summary = Path(os.environ['GITHUB_STEP_SUMMARY'])
+            assert not summary.exists()
+            summary.write_text(os.environ['POLICY_CASE'], encoding='utf-8')
+            if index == '0':
+                (root / 'first-ready').write_text('ready')
+                await_file('second-done')
+            elif index == '1':
+                await_file('first-ready')
+                (root / 'second-done').write_text('done')
+            print(index)
+        ''')
+        generated = []
+        with tempfile.TemporaryDirectory() as directory:
+            def cases():
+                for index in range(4):
+                    generated.append(index)
+                    yield self.route_fixture(directory, index, script)
+            with closing(policy_route_results(cases(), 2)) as results:
+                first, future = next(results)
+                self.assertEqual(generated, [0, 1])
+                self.assertEqual(first.parameters, ("0",))
+                process = future.result()
+                self.assertEqual(process.returncode, 0, process.stderr)
+                self.assertTrue((Path(directory) / 'second-done').is_file())
+                outputs = [process.stdout.strip()]
+                for index, (case, future) in enumerate(results, 1):
+                    self.assertEqual(len(generated), min(index + 2, 4))
+                    self.assertEqual(case.parameters, (str(index),))
+                    process = future.result()
+                    self.assertEqual(process.returncode, 0, process.stderr)
+                    outputs.append(process.stdout.strip())
+            self.assertEqual(outputs, ["0", "1", "2", "3"])
+            self.assertEqual([(Path(directory) / f"summary-{index}").read_text() for index in range(4)],
+                             ["0", "1", "2", "3"])
+            self.assertEqual(len({dict(self.route_fixture(directory, index).environment)["GITHUB_STEP_SUMMARY"]
+                                  for index in range(4)}), 4)
+
+    def test_actual_route_descriptors_isolate_summary_environment_and_working_directory(self):
+        descriptors = []
+        collect = policy_route_results
+        def sample(cases, workers):
+            current = list(islice(cases, 2))
+            descriptors.extend(current)
+            yield from collect(current, workers)
+        case = WorkflowDraftPolicyTests("test_native_aggregates_preserve_route_checks")
+        case.workflows = {filename: (ROOT / ".github/workflows" / filename).read_text(encoding="utf-8")
+                          for filename in GUARDED}
+        case.route_case_workers = 2
+        environment = dict(os.environ)
+        cwd = Path.cwd()
+        result = unittest.TestResult()
+        with patch.object(sys.modules[__name__], "policy_route_results", side_effect=sample):
+            case.run(result)
+        self.assertEqual(result.errors, [], result.errors)
+        self.assertEqual(result.failures, [], result.failures)
+        self.assertEqual(len(descriptors), 6)
+        summaries = [Path(dict(item.environment)["GITHUB_STEP_SUMMARY"]) for item in descriptors]
+        self.assertEqual(len(set(summaries)), 6)
+        self.assertEqual(len({path.parent for path in summaries}), 1)
+        self.assertTrue(all(path.is_absolute() for path in summaries))
+        self.assertFalse(summaries[0].parent.exists())
+        self.assertTrue(all(item.cwd == str(ROOT) for item in descriptors))
+        self.assertEqual(dict(os.environ), environment)
+        self.assertEqual(Path.cwd(), cwd)
+        for item in descriptors:
+            self.assertIsInstance(item.environment, tuple)
+            self.assertIsInstance(item.command, tuple)
+            with self.assertRaises(AttributeError):
+                item.cwd = "changed"
+
+    def test_route_serial_path_empty_rosters_and_invalid_bounds(self):
+        for workers in (1, 2):
+            self.assertEqual(list(policy_route_results((), workers)), [])
+        for workers in (0, -1, 3, 504, True, None, "2", 2.0):
+            with self.subTest(workers=workers), self.assertRaises(ValueError):
+                list(policy_route_results((), workers))
+        generated = []
+        with tempfile.TemporaryDirectory() as directory:
+            def cases():
+                for index in range(3):
+                    generated.append(index)
+                    yield self.route_fixture(directory, index)
+            with patch.object(sys.modules[__name__], "ThreadPoolExecutor", side_effect=AssertionError("serial executor")):
+                with closing(policy_route_results(cases(), 1)) as results:
+                    for index, (case, future) in enumerate(results):
+                        self.assertEqual(generated, list(range(index + 1)))
+                        self.assertEqual(case.parameters, (str(index),))
+                        self.assertEqual(future.result().returncode, 0)
+
+    def test_route_subtests_keep_exit_exception_identity_and_later_case_coverage(self):
+        import threading
+        reporting_thread = threading.get_ident()
+        seen = []
+        errors = []
+        # Use real owned children with a short controlled timeout; this tests
+        # outcome transport, not the runtime of the workflow grid.
+        def launch(case):
+            return subprocess.run(case.command, cwd=case.cwd, env=dict(case.environment),
+                                  capture_output=True, text=True, timeout=.2 if case.parameters == ("2",) else 10)
+        for workers in (1, 2):
+            with self.subTest(workers=workers), tempfile.TemporaryDirectory() as directory:
+                cases = [self.route_fixture(directory, 0, "import sys; print('refused'); sys.exit(7)"),
+                         self.route_fixture(directory, 1),
+                         self.route_fixture(directory, 2, "import time; time.sleep(30)"),
+                         self.route_fixture(directory, 3)]
+                cases[1] = cases[1]._replace(command=(str(Path(directory) / "missing-executable"),))
+                seen.clear()
+                errors.clear()
+                class ExercisesSubtests(unittest.TestCase):
+                    def runTest(inner):
+                        with closing(policy_route_results(cases, workers)) as results:
+                            for case, future in results:
+                                with inner.subTest(case=case.parameters):
+                                    seen.append((case.parameters[0], threading.get_ident()))
+                                    try:
+                                        process = future.result()
+                                    except Exception as error:
+                                        errors.append((error, future.exception()))
+                                        raise
+                                    inner.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+                result = unittest.TestResult()
+                with patch.object(sys.modules[__name__], "policy_run_route_case", side_effect=launch):
+                    ExercisesSubtests().run(result)
+                self.assertEqual(seen, [(str(index), reporting_thread) for index in range(4)])
+                self.assertEqual(len(result.failures), 1, result.failures)
+                self.assertEqual(len(result.errors), 2, result.errors)
+                self.assertIsInstance(errors[0][0], FileNotFoundError)
+                self.assertIsInstance(errors[1][0], subprocess.TimeoutExpired)
+                self.assertEqual(errors[1][0].cmd, cases[2].command)
+                for original, transported in errors:
+                    self.assertIs(original, transported)
+
+    def test_route_close_and_descriptor_failure_drain_owned_children(self):
+        from queue import Queue
+        completed = Queue()
+        launch = policy_run_route_case
+        def record(case):
+            process = launch(case)
+            completed.put((case.parameters, process.returncode))
+            return process
+        for broken in (False, True):
+            with self.subTest(broken=broken), tempfile.TemporaryDirectory() as directory:
+                def cases():
+                    yield self.route_fixture(directory, 0)
+                    yield self.route_fixture(directory, 1)
+                    if broken:
+                        raise OSError("descriptor input unavailable")
+                with patch.object(sys.modules[__name__], "policy_run_route_case", side_effect=record):
+                    with closing(policy_route_results(cases(), 2)) as results:
+                        _, future = next(results)
+                        self.assertEqual(future.result().returncode, 0)
+                        if broken:
+                            with self.assertRaisesRegex(OSError, "descriptor input unavailable"):
+                                next(results)
+                self.assertCountEqual([completed.get_nowait(), completed.get_nowait()],
+                                      [(("0",), 0), (("1",), 0)])
+                self.assertTrue(completed.empty())
+
+    def test_case_workers_are_local_to_selected_route_case_and_listing_is_inert(self):
+        for option, expected in (([], 1), (["--case-workers", "1"], 1), (["--case-workers", "2"], 2)):
+            case = WorkflowDraftPolicyTests("test_native_aggregates_preserve_route_checks")
+            other = WorkflowDraftPolicyTests("test_ready_and_draft_transitions_trigger_existing_pr_routes")
+            suite = unittest.TestSuite([case, other])
+            with patch.object(sys.modules[__name__], "policy_partition_suite", return_value=suite), patch.object(
+                    unittest, "TextTestRunner") as runner:
+                runner.return_value.run.return_value.wasSuccessful.return_value = True
+                self.assertEqual(policy_main(["--partition", "0", *option]), 0)
+                self.assertEqual(case.route_case_workers, expected)
+                self.assertFalse(hasattr(other, "route_case_workers"))
+                runner.return_value.run.assert_called_once_with(suite)
+        self.assertFalse(hasattr(WorkflowDraftPolicyTests("test_native_aggregates_preserve_route_checks"),
+                                 "route_case_workers"))
+        with patch.object(unittest, "TextTestRunner") as runner, patch.object(
+                sys.modules[__name__], "policy_run_route_case") as launch, patch.object(
+                sys, "stdout", new_callable=io.StringIO) as output:
+            self.assertEqual(policy_main(["--partition", "0", "--case-workers", "2", "--list-tests"]), 0)
+            self.assertIn("test_native_aggregates_preserve_route_checks", output.getvalue())
+            runner.assert_not_called()
+            launch.assert_not_called()
+
+    def test_case_worker_cli_refuses_invalid_duplicate_and_unreserved_options(self):
+        invalid = [["--partition", "0", "--case-workers", value]
+                   for value in ("0", "3", "-1", "1.0", "nan", "inf", "01", "02", "", "2" * 5000)]
+        invalid += [["--partition", "0", "--case-workers"],
+                    ["--partition", "0", "--case-workers", "2", "--case-workers", "2"],
+                    ["--partition", "0", "--case-workers", "1", "--case-workers", "2"],
+                    ["--case-workers", "2"], ["--case-workers", "1"],
+                    ["--partition", "0", "--partition", "0", "--case-workers", "2"],
+                    ["--partition", "0", "--case-workers", "2", "WorkflowDraftPolicyTests"]]
+        invalid += [["--partition", partition, "--case-workers", workers]
+                    for partition in POLICY_PARTITIONS[1:] for workers in ("1", "2")]
+        with patch.object(unittest, "main") as direct, patch.object(
+                sys.modules[__name__], "policy_partition_suite") as select:
+            for argv in invalid:
+                with self.subTest(argv=argv), patch.object(sys, "stderr", new_callable=io.StringIO), self.assertRaises(SystemExit) as error:
+                    policy_main(argv)
+                self.assertEqual(error.exception.code, 2)
+            direct.assert_not_called()
+            select.assert_not_called()
+
     def test_existing_roster_is_retained(self):
         expected = {
             "WorkflowShellTests": (
@@ -2267,9 +2551,11 @@ class WorkflowPartitionSelectionTests(unittest.TestCase):
         for partition in POLICY_PARTITIONS:
             name = "WorkflowPolicyContract" + ("" if partition == "0" else "Part" + partition)
             expected.append((name, '\"${Python3_EXECUTABLE}\" -I -B '
-                             '\"${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py\" --partition ' + partition))
+                             '\"${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py\" --partition ' + partition
+                             + (' --case-workers 2' if partition == '0' else '')))
             properties = re.findall(r"set_tests_properties\(" + name + r"\s+PROPERTIES ([^)]*)\)", cmake)
-            self.assertEqual([" ".join(item.split()) for item in properties], ['LABELS "ci;tools" TIMEOUT 30'])
+            self.assertEqual([" ".join(item.split()) for item in properties], ['LABELS "ci;tools" TIMEOUT 30'
+                             + (' PROCESSORS 2' if partition == '0' else '')])
         self.assertCountEqual(actual, expected)
         self.assertEqual(len(actual), len(set(actual)))
 

@@ -226,33 +226,94 @@ class CTestShardTests(unittest.TestCase):
             all_tests[0]["backtrace"] = 99
             all_tests[0]["properties"].reverse()
             eligible = [row["name"] for row in tests]
+            positions = {name: index for index, name in enumerate(eligible, 1)}
+            # Snapshot each distinct input once; every plan still checks it.
+            fixtures = []
+            for timings, roots in (
+                    (None, {"source": "/opt/source", "build": "/opt/build"}),
+                    ({eligible[0]: 1.25, eligible[1]: 90.0},
+                     {"source": "C:/source/世界", "build": "C:/build/release"})):
+                fixtures.append((timings, roots, copy.deepcopy((tests, all_tests, roots, timings))))
+            for name, rows in (("ctest.inventory.json", tests), ("ctest.all.json", all_tests)):
+                (self.root / name).write_text(json.dumps({"tests": rows}), encoding="utf-8")
             for selection in (None, "full", "light", "heavy"):
                 lanes = (1, 2, 0) if profile != "asan" and selection in (None, "full") else (1, 2)
-                for timings, roots in (
-                        (None, {"source": "/opt/source", "build": "/opt/build"}),
-                        ({eligible[0]: 1.25, eligible[1]: 90.0},
-                         {"source": "C:/source/世界", "build": "C:/build/release"})):
+                selected = shards.select_tests(tests, profile, selection)
+                for timings, roots, inputs in fixtures:
+                    # The general API remains the complete pre-reuse manifest oracle.
+                    # Only full capture changes the partition shape between lanes.
+                    parts_by_capture = {False: shards.partition(all_tests, selected, profile, timings)}
+                    if 0 in lanes:
+                        parts_by_capture[True] = [selected]
+                    evidence = {full: shards.evidence_for(tests, parts, profile, timings, roots, selection)
+                                for full, parts in parts_by_capture.items()}
                     for shard in lanes:
                         with self.subTest(profile=profile, selection=selection, timings=timings, shard=shard):
-                            for name, rows in (("ctest.inventory.json", tests), ("ctest.all.json", all_tests)):
-                                (self.root / name).write_text(json.dumps({"tests": rows}), encoding="utf-8")
-                            selected = shards.select_tests(tests, profile, selection)
-                            parts = [selected] if shard == 0 else shards.partition(all_tests, selected, profile, timings)
-                            # The general API remains the complete pre-reuse manifest oracle.
-                            expected = {**shards.evidence_for(tests, parts, profile, timings, roots, selection),
-                                        "shard": shard}
+                            parts = parts_by_capture[shard == 0]
+                            expected = {**evidence[shard == 0], "shard": shard}
                             expected_bytes = (json.dumps(expected, sort_keys=True) + os.linesep).encode("utf-8")
                             names = parts[0 if shard == 0 else shard - 1]
-                            positions = {name: index for index, name in enumerate(eligible, 1)}
                             indices = [positions[name] for name in names]
                             expected_indices = (",".join(map(str, [indices[0], indices[0], 1, *indices[1:]])) + os.linesep).encode()
-                            inputs = copy.deepcopy((tests, all_tests, roots, timings))
                             with patch.object(shards, "inventory_roots", return_value=roots):
                                 prefab = shards.plan(self.root, shard, profile, timings, selection)
                             self.assertEqual((self.root / "ctest.partition.json").read_bytes(), expected_bytes)
                             self.assertEqual((self.root / "ctest.shard-index.txt").read_bytes(), expected_indices)
                             self.assertEqual(prefab, any(name.startswith("PrefabRuntimeTest.") for name in names))
                             self.assertEqual((tests, all_tests, roots, timings), inputs)
+
+    def test_manifest_oracle_construction_is_bounded_with_real_plans(self):
+        # Count outer snapshot constructions, not deepcopy's recursive visits.
+        original_copy = copy.deepcopy
+        original_plan = shards.plan
+        original_partition = shards.partition
+        original_evidence = shards.evidence_for
+        counts = dict(snapshots=0, partitions=0, evidence=0, plans=0)
+        copying = 0
+        planning = False
+
+        def snapshot(*args, **kwargs):
+            nonlocal copying
+            if not copying:
+                counts["snapshots"] += 1
+            copying += 1
+            try:
+                return original_copy(*args, **kwargs)
+            finally:
+                copying -= 1
+
+        def plan(*args, **kwargs):
+            nonlocal planning
+            counts["plans"] += 1
+            planning = True
+            try:
+                return original_plan(*args, **kwargs)
+            finally:
+                planning = False
+
+        def partition(*args, **kwargs):
+            if not planning:
+                counts["partitions"] += 1
+            return original_partition(*args, **kwargs)
+
+        def evidence(*args, **kwargs):
+            if not planning:
+                counts["evidence"] += 1
+            return original_evidence(*args, **kwargs)
+
+        with patch.object(copy, "deepcopy", new=snapshot), patch.object(
+                shards, "plan", side_effect=plan), patch.object(
+                shards, "partition", side_effect=partition), patch.object(
+                shards, "evidence_for", side_effect=evidence), patch.object(
+                self, "policy_roster", wraps=self.policy_roster) as roster, patch.object(
+                shards, "PROFILES", {"gcc": shards.PROFILES["gcc"]}):
+            # Use the full-size GCC fixture for this additional cost check;
+            # the original test separately retains all 76 plans/four profiles.
+            self.test_plan_manifest_bytes_match_general_evidence_in_every_profile()
+        self.assertEqual(roster.call_count, 1)
+        # One independent all-test copy plus two before-plan snapshots;
+        # eight partitioned combinations and four full-capture oracles.
+        self.assertEqual(counts, dict(snapshots=3, partitions=8, evidence=12, plans=20))
 
     def test_plan_normalizes_and_hashes_each_independent_inventory_once(self):
         original_normalize = shards.execution_inventory
@@ -541,7 +602,7 @@ class CTestShardTests(unittest.TestCase):
         for index in (2, 3):
             changed = copy.deepcopy(self.tests)
             changed[0]["command"][index] = changed[0]["command"][index].replace("C:/checkout", "c:/CHECKOUT")
-            yield "quoted-or-nested-assignment-case", changed
+            yield ("quoted-assignment-case" if index == 2 else "nested-assignment-case"), changed
         for key, value in (("PASS_REGULAR_EXPRESSION", ["c:/CHECKOUT/MATCH"]),
                            ("FAIL_REGULAR_EXPRESSION", ["c:/CHECKOUT/MATCH"]),
                            ("SKIP_REGULAR_EXPRESSION", ["c:/CHECKOUT/MATCH"]),
@@ -552,7 +613,7 @@ class CTestShardTests(unittest.TestCase):
             for prop in changed[0]["properties"]:
                 if prop["name"] == key:
                     prop["value"] = value
-            yield "literal-root-case-" + key, changed
+            yield "literal-root-case-" + key + "-" + str(value), changed
         for key, value in (("ENVIRONMENT", ["MODE=changed"]),
                            ("ENVIRONMENT_MODIFICATION", ["MODE=set:changed"]),
                            ("WORKING_DIRECTORY", "/opt/alternate-work"),
@@ -588,20 +649,20 @@ class CTestShardTests(unittest.TestCase):
         for profile in shards.PROFILES:
             self.write_plan(self.root, 1)
             shards.plan(self.root, 1, profile)
-            before = {name: (self.root / name).read_bytes() for name in
-                      ("ctest.partition.json", "ctest.shard-index.txt")}
+            (self.root / "ctest.junit.xml").write_text("existing execution evidence")
             for change, tests in self.execution_changes():
                 with self.subTest(profile=profile, change=change):
                     (self.root / "ctest.all.json").write_text(json.dumps({"tests": tests}))
+                    before = {path: path.read_bytes() for path in self.root.rglob("*") if path.is_file()}
                     with self.assertRaisesRegex(ValueError, "execution inventory differs"):
                         shards.plan(self.root, 1, profile)
+                    self.assertEqual({path: path.read_bytes() for path in self.root.rglob("*") if path.is_file()}, before)
                     response = subprocess.CompletedProcess([], 0, stdout=json.dumps({"tests": tests}))
                     with patch.object(shards.subprocess, "run", return_value=response) as invoke:
                         with self.assertRaisesRegex(ValueError, "execution inventory differs"):
                             shards.run(self.root, profile)
                         invoke.assert_called_once()
-                    for name, content in before.items():
-                        self.assertEqual((self.root / name).read_bytes(), content)
+                    self.assertEqual({path: path.read_bytes() for path in self.root.rglob("*") if path.is_file()}, before)
                     self.reports(profile=profile)
                     # First reject tampered raw evidence against its own manifest.
                     path = self.root / "shard-2/ctest.inventory.json"
@@ -619,6 +680,30 @@ class CTestShardTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "different CTest inventories"):
                         self.merge(profile=profile)
                     self.assertEqual({path: path.read_bytes() for path in self.root.rglob("*") if path.is_file()}, evidence)
+
+    def test_changed_execution_roots_refuse_without_mutating_evidence_in_every_profile(self):
+        original = {"source": "C:/checkout", "build": "C:/checkout/build/release"}
+        self.tests += [test(f"SimBudgetWorldParity.Replay/{index}") for index in range(2)]
+        response = subprocess.CompletedProcess([], 0, stdout=json.dumps({"tests": self.tests}))
+        for profile in shards.PROFILES:
+            self.write_plan(self.root, 1, profile=profile, roots=original)
+            (self.root / "ctest.junit.xml").write_text("existing execution evidence")
+            before = {path: path.read_bytes() for path in self.root.rglob("*") if path.is_file()}
+            for kind in ("source", "build"):
+                for root in (original[kind].upper(), original[kind].replace("/", "\\"),
+                             original[kind] + "/", "D:/other", "/d/a/checkout"):
+                    with self.subTest(profile=profile, kind=kind, root=root), \
+                            patch.object(shards, "inventory_roots", return_value={**original, kind: root}), \
+                            patch.object(shards.subprocess, "run", return_value=response) as invoke:
+                        with self.assertRaisesRegex(ValueError, "execution source or build roots differ"):
+                            shards.run(self.root, profile)
+                        invoke.assert_called_once()
+                        self.assertEqual({path: path.read_bytes() for path in self.root.rglob("*") if path.is_file()}, before)
+            with patch.object(shards, "inventory_roots", return_value=original), \
+                    patch.object(shards.subprocess, "run", side_effect=[response, subprocess.CompletedProcess([], 0)]) as invoke:
+                self.assertEqual(shards.run(self.root, profile), 0)
+                self.assertEqual(invoke.call_count, 2)
+            self.assertEqual({path: path.read_bytes() for path in self.root.rglob("*") if path.is_file()}, before)
 
     def test_different_recorded_roots_refuse_merge_without_mutating_evidence(self):
         original = {"source": "C:/checkout", "build": "C:/checkout/build/release"}
@@ -681,11 +766,12 @@ class CTestShardTests(unittest.TestCase):
         path = self.root / "ctest.partition.json"
         manifest = shards.read_json(path)
         response = subprocess.CompletedProcess([], 0, stdout=json.dumps({"tests": self.tests}))
-        for change in ({"roots": {**manifest["roots"], "source": "/opt/foreign"}},
-                       {"version": 1}, {"version": 2}, {"version": 3}):
+        for change, error in (({"roots": {**manifest["roots"], "source": "/opt/foreign"}}, "roots differ"),
+                              ({"version": 1}, "digest differs"), ({"version": 2}, "digest differs"),
+                              ({"version": 3}, "digest differs")):
             path.write_text(json.dumps({**manifest, **change}))
             with patch.object(shards.subprocess, "run", return_value=response) as invoke:
-                with self.assertRaisesRegex(ValueError, "digest differs"):
+                with self.assertRaisesRegex(ValueError, error):
                     shards.run(self.root)
                 invoke.assert_called_once()
         self.reports()
