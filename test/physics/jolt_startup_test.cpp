@@ -20,6 +20,7 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -909,10 +910,22 @@ struct PlainAllocation {
     JPH_OVERRIDE_NEW_DELETE
     unsigned value = 7;
 };
-struct alignas(64) AlignedAllocation {
+constexpr std::size_t kAllocationAlignment = 64;
+static_assert(sizeof(unsigned) < kAllocationAlignment);
+struct alignas(kAllocationAlignment) AlignedAllocation {
     JPH_OVERRIDE_NEW_DELETE
     unsigned value = 7;
+    // Explicit storage fills the remainder of this fixed 64-byte allocation.
+    std::array<unsigned char, kAllocationAlignment - sizeof(unsigned)> trailing_storage{};
 };
+static_assert(alignof(AlignedAllocation) == kAllocationAlignment);
+static_assert(sizeof(AlignedAllocation) == kAllocationAlignment);
+static_assert(offsetof(AlignedAllocation, value) == 0);
+static_assert(offsetof(AlignedAllocation, trailing_storage) == sizeof(unsigned));
+static_assert(offsetof(AlignedAllocation, trailing_storage) +
+                  sizeof(AlignedAllocation::trailing_storage) ==
+              kAllocationAlignment);
+static_assert(AlignedAllocation{}.value == 7);
 
 template<class Operation>
 void RefuseFirstAllocation(Operation operation) {
