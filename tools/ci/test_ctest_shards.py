@@ -655,7 +655,11 @@ class CTestShardTests(unittest.TestCase):
             *({"name": key, "value": ["C:/checkout/MATCH"]} for key in
               ("PASS_REGULAR_EXPRESSION", "FAIL_REGULAR_EXPRESSION", "SKIP_REGULAR_EXPRESSION"))]
         self.names = [row["name"] for row in self.tests]
+        report_builder = patch.object(self, "reports", wraps=self.reports)
+        prepare_reports = report_builder.start()
+        self.addCleanup(report_builder.stop)
         for profile in shards.PROFILES:
+            report_inputs = None
             self.write_plan(self.root, 1)
             shards.plan(self.root, 1, profile)
             (self.root / "ctest.junit.xml").write_text("existing execution evidence")
@@ -672,7 +676,17 @@ class CTestShardTests(unittest.TestCase):
                             shards.run(self.root, profile)
                         invoke.assert_called_once()
                     self.assertEqual({path: path.read_bytes() for path in self.root.rglob("*") if path.is_file()}, before)
-                    self.reports(profile=profile)
+                    if report_inputs is None:
+                        self.reports(profile=profile)
+                        paths = [self.root / f"shard-{shard}" / name for shard in (1, 2)
+                                 for name in ("ctest.all.json", "ctest.inventory.json", "ctest.partition.json",
+                                              "ctest.shard-index.txt", "ctest.junit.xml")]
+                        # The ten case-owned fixture inputs are bounded before reading.
+                        self.assertLessEqual(sum(path.stat().st_size for path in paths), 32 * 1024)
+                        report_inputs = {path: path.read_bytes() for path in paths}
+                    else:
+                        for path, contents in report_inputs.items():
+                            path.write_bytes(contents)
                     # First reject tampered raw evidence against its own manifest.
                     path = self.root / "shard-2/ctest.inventory.json"
                     path.write_text(json.dumps({"tests": tests}))
@@ -689,6 +703,7 @@ class CTestShardTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "different CTest inventories"):
                         self.merge(profile=profile)
                     self.assertEqual({path: path.read_bytes() for path in self.root.rglob("*") if path.is_file()}, evidence)
+        self.assertEqual(prepare_reports.call_count, len(shards.PROFILES))
 
     def test_changed_execution_roots_refuse_without_mutating_evidence_in_every_profile(self):
         original = {"source": "C:/checkout", "build": "C:/checkout/build/release"}
