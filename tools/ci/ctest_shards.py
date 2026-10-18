@@ -235,13 +235,18 @@ def plan(directory, shard, profile="gcc", timings=None, selection=None):
     eligible = [test["name"] for test in tests]
     require(eligible == [test["name"] for test in filtered_tests(all_tests)],
             "filtered CTest roster or ordering differs from inventory")
-    require(evidence_for(tests, [eligible], profile, roots=roots) ==
+    validated = evidence_for(tests, [eligible], profile, roots=roots)
+    require(validated ==
             evidence_for(filtered_tests(all_tests), [eligible], profile, roots=roots),
             "discovery CTest execution inventory differs between inventories")
     selected = select_tests(tests, profile, selection)
     require(shard != 0 or selection in (None, "full"), "qualification requires full selection")
     parts = [selected] if shard == 0 else partition(all_tests, selected, profile, timings)
-    manifest = {**evidence_for(tests, parts, profile, timings, roots, selection), "shard": shard}
+    # Reuse identity only within this call: tests and roots must remain unchanged
+    # after independent discovery validation, including during selection/partition.
+    manifest = {**validated, "selection": selection, "timings": timings or {},
+                "partition_digest": digest({"selection": selection, "partitions": parts}),
+                "partitions": parts, "shard": shard}
     names = parts[0 if shard == 0 else shard - 1]
     positions = {name: index for index, name in enumerate(eligible, 1)}
     indices = [positions[name] for name in names]
