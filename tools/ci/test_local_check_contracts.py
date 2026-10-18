@@ -3,7 +3,9 @@
 
 import importlib.util
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
+import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -73,8 +75,8 @@ class RegistrationTests(unittest.TestCase):
                 self.assertEqual(policy.value(run, "run", 8).splitlines(), [
                     "cmake -S tools/ci/contracts -B build/local-check-contracts -G Ninja",
                     "ctest --test-dir build/local-check-contracts --show-only=json-v1 > build/local-check-contracts/ctest-discovery.json",
-                    "ctest --test-dir build/local-check-contracts --no-tests=error --parallel 4 --output-on-failure --output-junit ctest.junit.xml",
-                    f"{python} -I -B tools/ci/check_ctest_junit.py build/local-check-contracts/ctest.junit.xml --minimum-tests 2 --require-test ChangedTranslationUnitsContract --require-test OfflineDependenciesContract",
+                    'ctest --test-dir build/local-check-contracts --no-tests=error --parallel 4 --output-on-failure --output-junit "$LOCAL_CHECK_JUNIT"',
+                    f'{python} -I -B tools/ci/check_ctest_junit.py "$LOCAL_CHECK_JUNIT" --minimum-tests 2 --require-test ChangedTranslationUnitsContract --require-test OfflineDependenciesContract',
                 ])
                 # With no step condition, false/empty classifier output cannot
                 # bypass CTest. Existing job-level draft guards still apply.
@@ -85,6 +87,64 @@ class RegistrationTests(unittest.TestCase):
                 self.assertIn("${{ github.sha }}", upload)
                 self.assertLess(jobs[job].index(run), jobs[job].index(upload))
         self.assertNotIn("paths:", workflow.split("permissions:", 1)[0])
+
+    def test_local_check_artifacts_are_distinct_for_both_platforms_and_every_shard(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        jobs = policy.jobs(workflow)
+        names = []
+        for job, platform in (("linux", "linux"), ("windows-msvc", "windows")):
+            with self.subTest(job=job):
+                steps = {step.splitlines()[0].removeprefix("      - name: "): step
+                         for step in policy.steps(jobs[job])}
+                upload = steps["Upload local-check deadline evidence"]
+                name = policy.value(upload, "name", 10)
+                self.assertEqual(name, platform + "-local-check-contracts-${{ github.sha }}-"
+                                 "${{ github.run_id }}-${{ github.run_attempt }}-shard-${{ matrix.shard }}")
+                matrix = policy.value(jobs[job], "shard", 8)
+                selections = [json.loads(value) for value in re.findall(r"fromJSON\('([^']+)'\)", matrix)]
+                self.assertEqual(selections, [[0], [1, 2]])
+                for selection in selections:
+                    for shard in selection:
+                        rendered = name
+                        for key, value in (("github.sha", "a" * 40), ("github.run_id", "7"),
+                                           ("github.run_attempt", "1"), ("matrix.shard", str(shard))):
+                            rendered = rendered.replace("${{ " + key + " }}", value)
+                        self.assertNotIn("${{", rendered)
+                        names.append(rendered)
+        self.assertEqual(len(names), 6)
+        self.assertEqual(len(set(names)), len(names))
+
+    def test_local_check_junit_producer_checker_and_upload_share_an_absolute_path(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        jobs = policy.jobs(workflow)
+        expected = "${{ github.workspace }}/build/local-check-contracts/ctest.junit.xml"
+        for job, python in (("linux", "python3"), ("windows-msvc", "python")):
+            with self.subTest(job=job):
+                steps = {step.splitlines()[0].removeprefix("      - name: "): step
+                         for step in policy.steps(jobs[job])}
+                run = steps["Run registered local-check deadlines"]
+                self.assertEqual(policy.value(run, "LOCAL_CHECK_JUNIT", 10), expected)
+                commands = policy.value(run, "run", 8).splitlines()
+                producer, = [line for line in commands if "--output-junit" in line]
+                checker, = [line for line in commands if "check_ctest_junit.py" in line]
+                self.assertIn('--output-junit "$LOCAL_CHECK_JUNIT"', producer)
+                self.assertIn('check_ctest_junit.py "$LOCAL_CHECK_JUNIT"', checker)
+                arguments = shlex.split(producer)
+                self.assertEqual(arguments[arguments.index("--output-junit") + 1], "$LOCAL_CHECK_JUNIT")
+                self.assertEqual(shlex.split(checker)[:5],
+                                 [python, "-I", "-B", "tools/ci/check_ctest_junit.py", "$LOCAL_CHECK_JUNIT"])
+                upload = steps["Upload local-check deadline evidence"]
+                self.assertEqual(policy.value(upload, "path", 10).splitlines(), [
+                    "build/local-check-contracts/ctest-discovery.json", expected,
+                    "build/local-check-contracts/Testing/Temporary",
+                ])
+                for workspace, path_type in (("/work/tree with spaces", PurePosixPath),
+                                             ("D:/work/tree with spaces", PureWindowsPath),
+                                             ("D:/WORKTR~1/tree", PureWindowsPath)):
+                    with self.subTest(workspace=workspace):
+                        path = expected.replace("${{ github.workspace }}", workspace)
+                        self.assertTrue(path_type(path).is_absolute())
+                        self.assertEqual(path_type(path).name, "ctest.junit.xml")
 
     def test_registration_regression_is_in_both_test_plans_and_requires_ci_coverage(self):
         path = "tools/ci/test_local_check_contracts.py"
