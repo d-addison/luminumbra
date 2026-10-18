@@ -132,6 +132,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends build-essential cmake extra-cmake-modules libfreetype6-dev libgl1-mesa-dev libglu1-mesa-dev libwayland-dev libxkbcommon-dev ninja-build pkg-config wayland-protocols xorg-dev
       - name: Build and validate package
         run: |
+          python3 -I -B tools/ci/rmlui_source.py init --root build/package
           cmake -S . -B build/package -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DENABLE_BINARY_RELEASES=ON -DLUMINUMBRA_WARNINGS_AS_ERRORS=ON
           cmake --build build/package --target package --parallel 4
           cmake --install build/package --prefix build/stage
@@ -176,6 +177,8 @@ jobs:
             -property installationPath
           Import-Module "$installPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
           Enter-VsDevShell -VsInstallPath $installPath -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          python -I -B tools/ci/rmlui_source.py init --root build/package
+          if ($LASTEXITCODE -ne 0) { throw 'RmlUi workspace initialization failed' }
           cmake -S . -B build/package -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DENABLE_BINARY_RELEASES=ON -DLUMINUMBRA_WARNINGS_AS_ERRORS=ON
           cmake --build build/package --target package --parallel 4
           cmake --install build/package --prefix build/stage

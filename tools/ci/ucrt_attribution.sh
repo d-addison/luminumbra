@@ -683,7 +683,15 @@ run_cell() {
     write_identity "$dir" || return 1
 
     rc=0
-    bounded cmake --preset release -B "$bdir" > "$dir/configure.log" 2>&1 || rc=$?
+    # Legacy source trees do not have the tracked dependency delivery module.
+    # Current trees require enrollment before configure; CMake independently
+    # refuses missing helpers, ownership and incomplete delivery.
+    if [[ -f cmake/rmlui_source.cmake ]]; then
+        bounded python -I -B tools/ci/rmlui_source.py init --root "$bdir" > "$dir/configure.log" 2>&1 || rc=$?
+    fi
+    if (( rc == 0 )); then
+        bounded cmake --preset release -B "$bdir" >> "$dir/configure.log" 2>&1 || rc=$?
+    fi
     if (( rc != 0 )); then
         finish_cell "$dir" "$(op_failure_status "$rc" BUILD_FAILED)" || return 1
         return 0

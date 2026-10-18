@@ -169,6 +169,9 @@ jobs:
           restore-keys: |
             linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-
             linux-x64-gcc-ccache-
+      - name: Prepare fresh RmlUi build root
+        if: ${{ needs.changes.outputs.needs_cpp != 'false' }}
+        run: python3 -I -B tools/ci/rmlui_source.py init --root build/release
       - name: Configure
         if: ${{ needs.changes.outputs.needs_cpp != 'false' }}
         id: configure
@@ -271,8 +274,10 @@ jobs:
       - name: Validate dormant and enabled Linux packaging
         if: ${{ needs.changes.outputs.needs_cpp != 'false' && (github.ref_name == 'main' || github.base_ref == 'main') }}
         run: |
+          python3 -I -B tools/ci/rmlui_source.py init --root build/package-off
           cmake -S . -B build/package-off -G Ninja -DBUILD_TESTING=OFF -DENABLE_BINARY_RELEASES=OFF
           test ! -e build/package-off/CPackConfig.cmake
+          python3 -I -B tools/ci/rmlui_source.py init --root build/package-linux
           cmake -S . -B build/package-linux -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_TESTING=OFF -DENABLE_BINARY_RELEASES=ON -DLUMINUMBRA_WARNINGS_AS_ERRORS=ON
           cmake --build build/package-linux --target package --parallel 4
@@ -313,6 +318,7 @@ jobs:
             protobuf-compiler wayland-protocols xorg-dev
       - name: Configure GNS compile command
         run: |
+          python3 -I -B tools/ci/rmlui_source.py init --root build/gns-probe
           cmake -S . -B build/gns-probe -G Ninja \
             -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
@@ -376,6 +382,7 @@ jobs:
             diligent-rhi-linux-x64-gcc-ccache-
       - name: Configure with Diligent RHI
         run: |
+          python3 -I -B tools/ci/rmlui_source.py init --root build/release
           cmake --preset release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DLUMINUMBRA_ENABLE_DILIGENT=ON
       - name: Reset compiler cache statistics
@@ -591,6 +598,8 @@ jobs:
           if ($env:CCACHE_DISABLE -ne '1') {
             $compilerLaunchers = @('-DCMAKE_C_COMPILER_LAUNCHER=ccache', '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache')
           }
+          python -I -B tools/ci/rmlui_source.py init --root build/release
+          if ($LASTEXITCODE -ne 0) { throw 'RmlUi workspace initialization failed' }
           cmake --preset release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl @compilerLaunchers
           cmake --build --preset release --parallel 4
           # Require the file-only production writer/oracle integration even
@@ -701,8 +710,12 @@ jobs:
             -property installationPath
           Import-Module "$installPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
           Enter-VsDevShell -VsInstallPath $installPath -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          python -I -B tools/ci/rmlui_source.py init --root build/package-off
+          if ($LASTEXITCODE -ne 0) { throw 'RmlUi workspace initialization failed' }
           cmake -S . -B build/package-off -G Ninja -DBUILD_TESTING=OFF -DENABLE_BINARY_RELEASES=OFF
           if (Test-Path build/package-off/CPackConfig.cmake) { throw 'binary packaging enabled while disabled' }
+          python -I -B tools/ci/rmlui_source.py init --root build/package-windows
+          if ($LASTEXITCODE -ne 0) { throw 'RmlUi workspace initialization failed' }
           cmake -S . -B build/package-windows -G Ninja -DCMAKE_BUILD_TYPE=Release `
             -DBUILD_TESTING=OFF -DENABLE_BINARY_RELEASES=ON -DLUMINUMBRA_WARNINGS_AS_ERRORS=ON
           cmake --build build/package-windows --target package --parallel 4
@@ -819,6 +832,9 @@ jobs:
               throw "Mesa3D archive is missing x64/$dll"
             }
           }
+      - name: Prepare fresh RmlUi build root
+        shell: msys2 {0}
+        run: python3 -I -B tools/ci/rmlui_source.py init --root build/release
       - name: Configure
         id: configure
         shell: msys2 {0}
@@ -1218,6 +1234,7 @@ jobs:
             wayland-protocols xorg-dev
       - name: Configure compile database
         run: |
+          python3 -I -B tools/ci/rmlui_source.py init --root build/tidy
           cmake -S . -B build/tidy -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DLUMINUMBRA_ENABLE_DILIGENT=OFF \
             -DLUMINUMBRA_WARNINGS_AS_ERRORS=OFF \

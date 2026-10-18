@@ -143,6 +143,8 @@ jobs:
           restore-keys: |
             linux-x64-gcc-asan-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-
             linux-x64-gcc-asan-ccache-
+      - name: Prepare fresh RmlUi build root
+        run: python3 -I -B tools/ci/rmlui_source.py init --root build/debug-asan
       - name: Configure
         id: configure
         run: >-

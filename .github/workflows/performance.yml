@@ -162,6 +162,8 @@ jobs:
           restore-keys: |
             perf-linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-
             perf-linux-x64-gcc-ccache-
+      - name: Prepare fresh RmlUi build root
+        run: python3 -I -B tools/ci/rmlui_source.py init --root build/perf
       - name: Configure
         run: cmake --preset perf -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
       - name: Build measurement target
@@ -264,6 +266,7 @@ jobs:
             --receipt build/server-comparison-fixture.json
       - name: Configure identical builds
         run: |
+          python3 -I -B head/tools/ci/rmlui_source.py init --root build/base
           cmake -S base -B build/base -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DCMAKE_CXX_FLAGS_RELWITHDEBINFO="-O2 -g -DNDEBUG -fno-omit-frame-pointer" \
@@ -275,6 +278,7 @@ jobs:
             -DLUMINUMBRA_ENABLE_TRACY=OFF \
             -DLUMINUMBRA_WARNINGS_AS_ERRORS=ON \
             -DCMAKE_PROJECT_INCLUDE="$GITHUB_WORKSPACE/head/cmake/performance_manifest.cmake"
+          python3 -I -B head/tools/ci/rmlui_source.py init --root build/head
           cmake -S head -B build/head -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DCMAKE_CXX_FLAGS_RELWITHDEBINFO="-O2 -g -DNDEBUG -fno-omit-frame-pointer" \
@@ -647,6 +651,7 @@ jobs:
       - name: Configure candidate
         id: configure
         run: |
+          python3 -I -B tools/ci/rmlui_source.py init --root build/qualification-build
           cmake -S . -B build/qualification-build -G Ninja \
             -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DCMAKE_CXX_FLAGS_RELWITHDEBINFO="-O2 -g -DNDEBUG -fno-omit-frame-pointer" \

@@ -22,3 +22,8 @@ docs/evidence/blender-presentation-20260913/*.json -text
 # Catalog and historical receipt identities must survive native Windows checkout.
 docs/visual-catalog*.json text eol=lf
 docs/assets/visual-baselines/20260908/*.json text eol=lf
+
+# Reviewed dependency inputs and delivery code have byte-bound identities.
+cmake/patches/rmlui-* text eol=lf
+vendor/rmlui/rmlui-6.1-source.json text eol=lf
+tools/ci/rmlui_source.py text eol=lf

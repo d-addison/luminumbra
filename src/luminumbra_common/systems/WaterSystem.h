@@ -1,7 +1,7 @@
 #pragma once
 #include "../../../include/luminumbra/core/Types.h"
 #include "../core/JobSystem.h"
-#include "entt/entt.hpp"
+#include "entt/entity/registry.hpp"
 #include <cstdint>
 #include <memory>
 #include <unordered_map>

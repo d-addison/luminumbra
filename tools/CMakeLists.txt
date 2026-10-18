@@ -372,6 +372,11 @@ if(BUILD_TESTING)
     set_tests_properties(ReleaseGatesProtectionContract
         PROPERTIES LABELS "release;tools" TIMEOUT 60)
     add_test(
+        NAME RmlUiSourceScriptContract
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_rmlui_source.py")
+    set_tests_properties(RmlUiSourceScriptContract
+        PROPERTIES LABELS "ci;tools" TIMEOUT 60)
+    add_test(
         NAME SlowestTestsScriptContract
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_slowest_tests.py")
     set_tests_properties(SlowestTestsScriptContract

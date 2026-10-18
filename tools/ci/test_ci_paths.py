@@ -33,6 +33,20 @@ def run_block(workflow: str, step: str) -> str:
 
 
 class PathGateTests(unittest.TestCase):
+    def test_rmlui_manifest_requires_python_and_native_lanes(self):
+        manifest = "vendor/rmlui/rmlui-6.1-source.json"
+        for paths in ([manifest], ["docs/dependency-source.md", manifest],
+                      ["cmake/patches/rmlui-6.1-source.json", manifest]):
+            with self.subTest(paths=paths), patch.object(gate, "changed_paths", return_value=paths):
+                self.assertTrue(gate.needs_python(manifest))
+                self.assertTrue(gate.needs_cpp(manifest))
+                self.assertEqual(gate.classify(ROOT, "pull_request", "base", "head",
+                                               "owner/repo", "owner/repo"), (True, True))
+        for path in ("vendor/rmlui/other.json", "vendor/other/rmlui-6.1-source.json"):
+            with self.subTest(path=path):
+                self.assertFalse(gate.needs_python(path))
+                self.assertTrue(gate.needs_cpp(path))
+
     def setUp(self):
         history = patch.object(gate.subprocess, "check_output", return_value="false\n")
         self.history = history.start()
