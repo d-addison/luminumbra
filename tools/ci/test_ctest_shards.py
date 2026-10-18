@@ -140,6 +140,12 @@ class CTestShardTests(unittest.TestCase):
                 test("PrefabRuntimeTest.Installed", FIXTURES_REQUIRED=["runtime"], TIMEOUT=30),
                 test("PrefabDigest.Content", FIXTURES_SETUP=["runtime"], TIMEOUT=30),
                 test("Runtime.Cleanup", FIXTURES_CLEANUP=["runtime"], TIMEOUT=30)]
+            # At most max(FLOORS.values()) + 3 rows; retain the original
+            # recursive construction once per profile as an exact byte oracle.
+            expected_current = copy.deepcopy(tests)
+            for row in expected_current:
+                row["properties"].reverse()
+            expected_discovery = json.dumps({"tests": expected_current})
             for selection in ("full", "light", "heavy"):
                 for shard in (1, 2):
                     with self.subTest(profile=profile, selection=selection, shard=shard):
@@ -168,10 +174,13 @@ class CTestShardTests(unittest.TestCase):
                         if selection == "heavy":
                             self.assertEqual(set().union(*map(set, manifest["partitions"])), shards.HEAVY_NAMES)
                             self.assertFalse(prefab)
-                        current = copy.deepcopy(tests)
-                        for row in current:
-                            row["properties"].reverse()
-                        response = subprocess.CompletedProcess([], 0, stdout=json.dumps({"tests": current}))
+                        # Only the property-list order changes before serialization;
+                        # nested command and property values stay read-only.
+                        with patch.object(copy, "deepcopy", side_effect=AssertionError(
+                                "execution discovery fixture must not recursively copy each lane")):
+                            current = [{**row, "properties": list(reversed(row["properties"]))} for row in tests]
+                            response = subprocess.CompletedProcess([], 0, stdout=json.dumps({"tests": current}))
+                        self.assertEqual(response.stdout, expected_discovery)
                         with patch.object(shards.subprocess, "run", side_effect=[
                                 response, subprocess.CompletedProcess([], 8)]) as invoke:
                             self.assertEqual(shards.run(alias, profile), 8)
