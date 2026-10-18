@@ -216,6 +216,126 @@ class CTestShardTests(unittest.TestCase):
     def merge(self, full=False, profile="gcc"):
         shards.merge(self.root, self.root / "merged.xml", full=full, profile=profile)
 
+    def test_plan_manifest_bytes_match_general_evidence_in_every_profile(self):
+        for profile in shards.PROFILES:
+            tests = self.policy_roster(profile)
+            tests[0] = test("PrefabRuntimeTest.Identity", TIMEOUT=12.5,
+                            ENVIRONMENT=["DATA=résumé/世界", "ORDER=second"])
+            tests[0]["backtrace"] = 7
+            all_tests = copy.deepcopy(tests) + [test("Manual.Only", LABELS=["manual"])]
+            all_tests[0]["backtrace"] = 99
+            all_tests[0]["properties"].reverse()
+            eligible = [row["name"] for row in tests]
+            for selection in (None, "full", "light", "heavy"):
+                lanes = (1, 2, 0) if profile != "asan" and selection in (None, "full") else (1, 2)
+                for timings, roots in (
+                        (None, {"source": "/opt/source", "build": "/opt/build"}),
+                        ({eligible[0]: 1.25, eligible[1]: 90.0},
+                         {"source": "C:/source/世界", "build": "C:/build/release"})):
+                    for shard in lanes:
+                        with self.subTest(profile=profile, selection=selection, timings=timings, shard=shard):
+                            for name, rows in (("ctest.inventory.json", tests), ("ctest.all.json", all_tests)):
+                                (self.root / name).write_text(json.dumps({"tests": rows}), encoding="utf-8")
+                            selected = shards.select_tests(tests, profile, selection)
+                            parts = [selected] if shard == 0 else shards.partition(all_tests, selected, profile, timings)
+                            # The general API remains the complete pre-reuse manifest oracle.
+                            expected = {**shards.evidence_for(tests, parts, profile, timings, roots, selection),
+                                        "shard": shard}
+                            expected_bytes = (json.dumps(expected, sort_keys=True) + "\n").encode("utf-8")
+                            names = parts[0 if shard == 0 else shard - 1]
+                            positions = {name: index for index, name in enumerate(eligible, 1)}
+                            indices = [positions[name] for name in names]
+                            expected_indices = (",".join(map(str, [indices[0], indices[0], 1, *indices[1:]])) + "\n").encode()
+                            inputs = copy.deepcopy((tests, all_tests, roots, timings))
+                            with patch.object(shards, "inventory_roots", return_value=roots):
+                                prefab = shards.plan(self.root, shard, profile, timings, selection)
+                            self.assertEqual((self.root / "ctest.partition.json").read_bytes(), expected_bytes)
+                            self.assertEqual((self.root / "ctest.shard-index.txt").read_bytes(), expected_indices)
+                            self.assertEqual(prefab, any(name.startswith("PrefabRuntimeTest.") for name in names))
+                            self.assertEqual((tests, all_tests, roots, timings), inputs)
+
+    def test_plan_normalizes_and_hashes_each_independent_inventory_once(self):
+        original_normalize = shards.execution_inventory
+        original_digest = shards.digest
+        for profile in shards.PROFILES:
+            tests = copy.deepcopy(self.tests)
+            tests[0]["properties"] = [{"name": "TIMEOUT", "value": 2.5},
+                                      {"name": "ENVIRONMENT", "value": ["A=one", "B=two"]}]
+            all_tests = copy.deepcopy(tests)
+            all_tests[0]["properties"].reverse()
+            all_tests[0]["backtrace"] = 11
+            for name, rows in (("ctest.inventory.json", tests), ("ctest.all.json", all_tests)):
+                (self.root / name).write_text(json.dumps({"tests": rows}), encoding="utf-8")
+            roots = shards.inventory_roots(self.root)
+            timings = {self.names[0]: 4.0}
+            parts = shards.partition(all_tests, self.names, profile, timings)
+            expected = {**shards.evidence_for(tests, parts, profile, timings, roots), "shard": 1}
+            normalized, contracts, partitions = [], [], []
+
+            def normalize(rows):
+                result = original_normalize(rows)
+                normalized.append((rows, copy.deepcopy(rows), result))
+                return result
+
+            def digest(value):
+                result = original_digest(value)
+                if isinstance(value, dict) and set(value) == {"roots", "tests"}:
+                    contracts.append((value, result))
+                if isinstance(value, dict) and set(value) == {"selection", "partitions"}:
+                    partitions.append(value)
+                return result
+
+            with self.subTest(profile=profile), patch.object(shards, "execution_inventory", side_effect=normalize), patch.object(
+                    shards, "digest", side_effect=digest):
+                shards.plan(self.root, 1, profile, timings)
+                self.assertEqual((self.root / "ctest.partition.json").read_bytes(),
+                                 (json.dumps(expected, sort_keys=True) + "\n").encode("utf-8"))
+                # Count real normalization/hash calls only after checking complete output.
+                self.assertEqual(len(normalized), 2)
+                self.assertEqual(len(contracts), 2)
+                self.assertIsNot(normalized[0][0], normalized[1][0])
+                self.assertEqual(normalized[0][0], tests)
+                self.assertEqual(normalized[1][0], all_tests)
+                for index, (rows, before, result) in enumerate(normalized):
+                    self.assertEqual(rows, before)
+                    self.assertIs(contracts[index][0]["tests"], result)
+                    self.assertEqual(contracts[index][0]["roots"], roots)
+                    self.assertEqual(contracts[index][1], expected["inventory_digest"])
+                self.assertEqual(len(partitions), 3)
+                self.assertEqual(partitions[-1], {"selection": None, "partitions": parts})
+                self.assertIsNot(partitions[-1]["partitions"], partitions[0]["partitions"])
+
+    def test_cli_independent_discovery_refuses_before_any_plan_or_output_write(self):
+        script = str(Path(__file__).with_name("ctest_shards.py"))
+        for profile in shards.PROFILES:
+            tests = self.policy_roster(profile)
+            for change in ("command", "non-finite"):
+                changed = copy.deepcopy(tests)
+                if change == "command":
+                    changed[0]["command"].append("--different-execution")
+                else:
+                    changed[0]["properties"].append({"name": "TIMEOUT", "value": float("nan")})
+                for existing in (False, True):
+                    with self.subTest(profile=profile, change=change, existing=existing):
+                        directory = self.root / f"{profile}-{change}-{existing}"
+                        directory.mkdir()
+                        for name, rows in (("ctest.inventory.json", tests), ("ctest.all.json", changed)):
+                            (directory / name).write_text(json.dumps({"tests": rows}), encoding="utf-8")
+                        outputs = [directory / name for name in
+                                   ("ctest.partition.json", "ctest.shard-index.txt", "workflow-output")]
+                        if existing:
+                            for path in outputs:
+                                path.write_bytes(b"existing bytes retained\n")
+                        before = {path.name: path.read_bytes() for path in directory.iterdir()}
+                        result = subprocess.run([sys.executable, "-I", "-B", script, "plan", "--directory", str(directory),
+                                                 "--profile", profile, "--shard", "1"],
+                                                env=dict(os.environ, GITHUB_OUTPUT=str(outputs[-1])),
+                                                capture_output=True, text=True, timeout=10)
+                        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                        self.assertIn("execution inventory differs" if change == "command" else "non-finite", result.stderr)
+                        self.assertEqual(result.stdout, "")
+                        self.assertEqual({path.name: path.read_bytes() for path in directory.iterdir()}, before)
+
     def test_exact_union_stable_hash_and_registration_order_independence(self):
         parts = shards.partition(self.tests, self.names)
         shards.validate_union(self.names, parts)
