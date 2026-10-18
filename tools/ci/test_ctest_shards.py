@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 import xml.etree.ElementTree as ET
@@ -136,6 +137,7 @@ class CTestShardTests(unittest.TestCase):
 
         alias = WindowsBuildAlias("C:/Users/RUNNER~1/AppData/Local/Temp/build")
         for profile in shards.PROFILES:
+            CaseProgressResult._phase(profile, "all", 0, "fixture-start")
             tests = self.policy_roster(profile) + [
                 test("PrefabRuntimeTest.Installed", FIXTURES_REQUIRED=["runtime"], TIMEOUT=30),
                 test("PrefabDigest.Content", FIXTURES_SETUP=["runtime"], TIMEOUT=30),
@@ -164,20 +166,27 @@ class CTestShardTests(unittest.TestCase):
                         "execution discovery fixture must not recursively copy each lane")):
                     current = [{**row, "properties": list(reversed(row["properties"]))} for row in tests]
                     discovery = json.dumps({"tests": current})
+                CaseProgressResult._phase(profile, "all", 0, "fixture-finish")
                 for selection in ("full", "light", "heavy"):
                     for shard in (1, 2):
                         with self.subTest(profile=profile, selection=selection, shard=shard):
+                            CaseProgressResult._phase(profile, selection, shard, "lane-fixture-start")
                             output.write_bytes(sentinel)
+                            CaseProgressResult._phase(profile, selection, shard, "lane-fixture-finish")
+                            CaseProgressResult._phase(profile, selection, shard, "plan-start")
                             with patch.dict(os.environ, GITHUB_OUTPUT=str(output)):
                                 self.write_plan(self.root, shard, tests=tests, profile=profile,
                                                 selection=selection)
+                            CaseProgressResult._phase(profile, selection, shard, "plan-finish")
                             self.assertEqual(output.read_bytes(), sentinel)
+                            CaseProgressResult._phase(profile, selection, shard, "positive-start")
                             result = subprocess.run(
                                 [sys.executable, "-I", "-B", str(Path(__file__).with_name("ctest_shards.py")),
                                  "plan", "--directory", str(self.root), "--profile", profile,
                                  "--shard", str(shard), "--selection", selection],
                                 env=dict(os.environ, GITHUB_OUTPUT=str(output)),
                                 capture_output=True, text=True, timeout=10)
+                            CaseProgressResult._phase(profile, selection, shard, "positive-finish")
                             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                             manifest = shards.read_json(self.root / "ctest.partition.json")
                             self.assertEqual(manifest["selection"], selection)
@@ -192,23 +201,31 @@ class CTestShardTests(unittest.TestCase):
                             if selection == "heavy":
                                 self.assertEqual(set().union(*map(set, manifest["partitions"])), shards.HEAVY_NAMES)
                                 self.assertFalse(prefab)
+                            CaseProgressResult._phase(profile, selection, shard, "run-fixture-start")
                             response = subprocess.CompletedProcess([], 0, stdout=discovery)
                             self.assertEqual(response.stdout, expected_discovery)
+                            CaseProgressResult._phase(profile, selection, shard, "run-fixture-finish")
+                            CaseProgressResult._phase(profile, selection, shard, "resolved-start")
                             with patch.object(shards.subprocess, "run", side_effect=[
                                     response, subprocess.CompletedProcess([], 8)]) as invoke:
                                 self.assertEqual(shards.run(alias, profile), 8)
+                            CaseProgressResult._phase(profile, selection, shard, "resolved-finish")
                             self.assertEqual(invoke.call_args.args[0][4], str(resolved))
                             self.assertIn(str(resolved / "ctest.shard-index.txt"), invoke.call_args.args[0])
+                            CaseProgressResult._phase(profile, selection, shard, "refusal-fixture-start")
                             before = {name: (self.root / name).read_bytes() for name in
                                       ("ctest.partition.json", "ctest.shard-index.txt", "step-output")}
                             # A partial discovery must refuse before changing plan or workflow outputs.
                             (self.root / "ctest.inventory.json").write_text("{", encoding="utf-8")
+                            CaseProgressResult._phase(profile, selection, shard, "refusal-fixture-finish")
+                            CaseProgressResult._phase(profile, selection, shard, "negative-start")
                             result = subprocess.run(
                                 [sys.executable, "-I", "-B", str(Path(__file__).with_name("ctest_shards.py")),
                                  "plan", "--directory", str(self.root), "--profile", profile,
                                  "--shard", str(shard), "--selection", selection],
                                 env=dict(os.environ, GITHUB_OUTPUT=str(output)),
                                 capture_output=True, text=True, timeout=10)
+                            CaseProgressResult._phase(profile, selection, shard, "negative-finish")
                             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
                             for name, content in before.items():
                                 self.assertEqual((self.root / name).read_bytes(), content)
@@ -1450,6 +1467,109 @@ class CTestShardTests(unittest.TestCase):
         self.assertEqual(plans.call_count, 2)
         self.assertEqual(len(refusals), 7)
 
+    def test_case_clock_and_phase_observations_are_bounded_and_synchronous(self):
+        import io
+        import time
+
+        class Stream:
+            def __init__(self):
+                self.operations = []
+
+            def write(self, value):
+                self.operations.append(("write", value))
+                return len(value)
+
+            def flush(self):
+                self.operations.append(("flush",))
+
+        stream = Stream()
+        result = CaseProgressResult(io.StringIO(), False, 0)
+        with patch.object(time, "monotonic_ns", return_value=7, create=True), \
+                patch.object(sys, "stderr", stream):
+            result.startTest(self)
+            result.stopTest(self)
+        self.assertEqual(stream.operations, [
+            ("write", f"\nCASE START {self.id()}\nCLOCK START 0 00000000000000000007"),
+            ("write", "\n"), ("flush",),
+            ("write", f"\nCASE FINISH {self.id()}\nCLOCK FINISH 0 00000000000000000007"),
+            ("write", "\n"), ("flush",)])
+        self.assertEqual(result.testsRun, 1)
+        for value, expected in ((0, "0 00000000000000000000"),
+                                (10**20 - 1, "0 99999999999999999999"),
+                                (-1, "4 00000000000000000000"),
+                                (10**20, "4 00000000000000000000"),
+                                (True, "4 00000000000000000000"),
+                                (None, "4 00000000000000000000"),
+                                (1.5, "4 00000000000000000000"),
+                                ("7", "4 00000000000000000000")):
+            with self.subTest(value=value), patch.object(time, "monotonic_ns", return_value=value):
+                self.assertEqual(CaseProgressResult._clock(), expected)
+        for error, status in ((OSError("timer unavailable"), 2),
+                              (NotImplementedError("timer unsupported"), 3)):
+            with self.subTest(error=type(error)), patch.object(time, "monotonic_ns", side_effect=error):
+                self.assertEqual(CaseProgressResult._clock(), f"{status} 00000000000000000000")
+        with patch.object(time, "monotonic_ns", None):
+            self.assertEqual(CaseProgressResult._clock(), "1 00000000000000000000")
+        with patch.object(time, "monotonic_ns"):
+            del time.monotonic_ns
+            self.assertEqual(CaseProgressResult._clock(), "1 00000000000000000000")
+        for error in (PermissionError("denied"), RuntimeError("unexpected"),
+                      ValueError("unexpected"), TypeError("unexpected"), KeyboardInterrupt(), SystemExit(9)):
+            with self.subTest(error=type(error)), patch.object(time, "monotonic_ns", side_effect=error):
+                with self.assertRaises(type(error)):
+                    CaseProgressResult._clock()
+        # Timer unavailability must not turn a real assertion failure into success.
+        class OwnedFailure(unittest.TestCase):
+            def runTest(self):
+                self.fail("retained failure")
+
+        for timer_options in ({"new": None}, {"side_effect": OSError("timer unavailable")},
+                              {"side_effect": NotImplementedError("timer unsupported")},
+                              {"return_value": -1}):
+            result = CaseProgressResult(io.StringIO(), False, 0)
+            with patch.object(time, "monotonic_ns", **timer_options), \
+                    patch.object(sys, "stderr", io.StringIO()):
+                OwnedFailure().run(result)
+            self.assertEqual((result.testsRun, len(result.failures), len(result.errors)), (1, 1, 0))
+        for operation in ("write", "flush"):
+            stream = Stream()
+            with patch.object(stream, operation, side_effect=OSError("stream failure")), \
+                    patch.object(sys, "stderr", stream):
+                with self.assertRaises(OSError):
+                    CaseProgressResult(io.StringIO(), False, 0).startTest(self)
+                with self.assertRaises(OSError):
+                    CaseProgressResult(io.StringIO(), False, 0).stopTest(self)
+                with self.assertRaises(OSError):
+                    CaseProgressResult._phase("asan", "full", 1, "plan-start")
+        profiles = ("asan", "gcc", "msvc", "ucrt64")
+        self.assertEqual(tuple(shards.PROFILES), profiles)
+        phases = ("lane-fixture-start", "lane-fixture-finish", "plan-start", "plan-finish",
+                  "positive-start", "positive-finish", "run-fixture-start", "run-fixture-finish",
+                  "resolved-start", "resolved-finish", "refusal-fixture-start", "refusal-fixture-finish",
+                  "negative-start", "negative-finish")
+        # Enumerate only scalar IDs, never execute or copy a policy input graph.
+        stream = Stream()
+        with patch.object(time, "monotonic_ns", return_value=10**20 - 1), \
+                patch.object(sys, "stderr", stream):
+            for profile in profiles:
+                for phase in ("fixture-start", "fixture-finish"):
+                    CaseProgressResult._phase(profile, "all", 0, phase)
+                for selection in ("full", "light", "heavy"):
+                    for shard in (1, 2):
+                        for phase in phases:
+                            CaseProgressResult._phase(profile, selection, shard, phase)
+        self.assertEqual(len(stream.operations), 344 * 3)
+        lines = []
+        for index in range(0, len(stream.operations), 3):
+            write, newline, flush = stream.operations[index:index + 3]
+            self.assertEqual((write[0], newline, flush), ("write", ("write", "\n"), ("flush",)))
+            line = write[1] + "\n"
+            self.assertEqual(len(line.split()), 7)
+            self.assertEqual(line.split()[-2:], ["0", "99999999999999999999"])
+            lines.append(line)
+        self.assertEqual((len(lines), sum(map(len, lines)), max(map(len, lines))), (344, 20210, 67))
+        self.assertEqual(sum(len(line.replace("\n", "\r\n")) for line in lines), 20554)
+
     def test_case_progress_records_survive_success_failure_and_interruption(self):
         import time
 
@@ -1475,8 +1595,8 @@ runpy.run_path(script, run_name='__main__', init_globals={'OwnedCases': OwnedCas
                         str(Path(__file__).with_name(suite)), outcome]
                 with self.subTest(suite=suite, outcome=outcome):
                     if outcome == "interruption":
-                        log = self.root / "progress.stderr"
-                        ready = self.root / "progress.stdout"
+                        log = self.root / f"{suite}.progress.stderr"
+                        ready = self.root / f"{suite}.progress.stdout"
                         with log.open("wb") as stream, ready.open("wb") as signal:
                             process = subprocess.Popen(argv, stdout=signal, stderr=stream)
                             try:
@@ -1633,13 +1753,41 @@ runpy.run_path(script, run_name='__main__', init_globals={'OwnedCases': OwnedCas
 
 
 class CaseProgressResult(unittest.TextTestResult):
+    @staticmethod
+    def _clock():
+        # Two scalar fields, exactly 22 ASCII bytes. Status: 0 valid, 1 missing,
+        # 2 OS timer failure, 3 unsupported, 4 invalid scalar/range. No wall clock.
+        timer = getattr(time, "monotonic_ns", None)
+        if timer is None:
+            return "1 00000000000000000000"
+        try:
+            value = timer()
+        except PermissionError:
+            raise
+        except OSError:
+            return "2 00000000000000000000"
+        except NotImplementedError:
+            return "3 00000000000000000000"
+        if type(value) is not int or not 0 <= value < 10**20:
+            return "4 00000000000000000000"
+        return f"0 {value:020d}"
+
+    @staticmethod
+    def _phase(profile, selection, shard, phase):
+        # Policy CLI observations use this fixed roster:
+        # 8 profile + 24 * 14 lane records, <=67 ASCII bytes each with LF
+        # (68 with CRLF), 20210/20554 bytes total. No graph values are emitted.
+        # Synchronous stderr keeps its existing, unbounded OS write latency.
+        print(f"PHASE {profile} {selection} {shard} {phase} {CaseProgressResult._clock()}",
+              file=sys.stderr, flush=True)
+
     def startTest(self, case):
         super().startTest(case)
-        print(f"\nCASE START {case.id()}", file=sys.stderr, flush=True)
+        print(f"\nCASE START {case.id()}\nCLOCK START {self._clock()}", file=sys.stderr, flush=True)
 
     def stopTest(self, case):
         # FINISH records completion, including failures, errors and skips.
-        print(f"\nCASE FINISH {case.id()}", file=sys.stderr, flush=True)
+        print(f"\nCASE FINISH {case.id()}\nCLOCK FINISH {self._clock()}", file=sys.stderr, flush=True)
         super().stopTest(case)
 
 
