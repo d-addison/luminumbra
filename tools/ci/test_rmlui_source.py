@@ -1360,6 +1360,54 @@ class BootstrapInterpreterBinding(unittest.TestCase):
 
 
 class HostedConfigurationContracts(unittest.TestCase):
+    def test_git_proxy_spellings_preserve_transport_environment_without_git_injection(self):
+        source = ROOT / "synthetic-source"
+        executable = ROOT / "synthetic-bin" / "git"
+        base = {"Path": str(executable.parent), "SystemRoot": "system-root",
+                "ComSpec": "command-shell", "PathExt": ".EXE", "Temp": "temp",
+                "Tmp": "tmp", "TmpDir": "tmpdir"}
+        inherited = {key: "inherited-control" for key in (
+            "HOME", "XDG_CONFIG_HOME", "GIT_CONFIG", "GIT_CONFIG_COUNT",
+            "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_PARAMETERS",
+            "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_EXEC_PATH", "GIT_TEMPLATE_DIR", "GIT_SSH_COMMAND", "GIT_PROXY_COMMAND",
+            "GIT_ASKPASS", "SSH_ASKPASS", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL",
+            "GIT_CONFIG_SYSTEM", "GIT_ATTR_NOSYSTEM", "GIT_NO_REPLACE_OBJECTS",
+            "GIT_OPTIONAL_LOCKS", "GIT_TERMINAL_PROMPT", "GIT_CONFIG_SYSTEM_EXTRA",
+            "https_proxy_extra", "core.hooksPath", "filter.fixture.clean", "credential.helper")}
+        forced = {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+                  "GIT_CONFIG_SYSTEM": os.devnull, "GIT_ATTR_NOSYSTEM": "1",
+                  "GIT_NO_REPLACE_OBJECTS": "1", "GIT_OPTIONAL_LOCKS": "0",
+                  "GIT_TERMINAL_PROMPT": "0"}
+        proxies = {key: "http://proxy.invalid:8123" for key in (
+            "http_proxy", "HTTP_PROXY", "Http_Proxy", "https_proxy", "HTTPS_PROXY",
+            "Https_Proxy", "all_proxy", "ALL_PROXY", "All_Proxy")}
+        proxies.update(no_proxy="local.invalid", NO_PROXY="upper.invalid", No_Proxy="")
+        expected_argv = [str(executable.resolve()), "-c", "core.autocrlf=false",
+                         "-c", "core.safecrlf=false", "-c", "core.hooksPath=" + os.devnull,
+                         "-c", "core.fsmonitor=false", "-c", "protocol.file.allow=never",
+                         "-C", str(source), "fetch", "--depth=1", "https://source.invalid", "revision"]
+        output = b"captured-output"
+        for proxy_environment in ({}, proxies):
+            for payload in (None, b"request-bytes"):
+                with self.subTest(proxies=bool(proxy_environment), payload=payload):
+                    # A plain synthetic mapping also models original spellings on
+                    # hosts whose native environment mapping folds key casing.
+                    environment = dict(base, **inherited, **proxy_environment)
+                    with mock.patch.object(M.os, "environ", environment), \
+                            mock.patch.object(M.shutil, "which", return_value=str(executable)) as which, \
+                            mock.patch.object(M, "run_command", return_value=output) as command, \
+                            mock.patch.object(M.subprocess, "Popen", side_effect=AssertionError("unexpected process")):
+                        result = M.git(source, "fetch", "--depth=1", "https://source.invalid", "revision",
+                                       input_bytes=payload)
+                    self.assertIs(result, output)
+                    which.assert_called_once_with("git", path=base["Path"])
+                    expected = {key.upper(): value for key, value in base.items()}
+                    expected.update(forced)
+                    expected.update(proxy_environment)
+                    command.assert_called_once_with(source, expected_argv, expected, payload)
+
     def test_dependency_configuration_keeps_the_original_shared_option_order(self):
         vendor = (ROOT / "vendor/CMakeLists.txt").read_text(encoding="utf-8", errors="strict")
         module = (ROOT / "cmake/rmlui_source.cmake").read_text(encoding="utf-8", errors="strict")
@@ -2488,6 +2536,30 @@ class ConfigureCallerBoundaries(unittest.TestCase):
             with self.subTest(path=name):
                 self.assertTrue(paths.needs_python(name))
         self.assertIn("tools/ci/test_rmlui_source.py", paths.PYTHON_TESTS)
+
+    def test_prefab_recipe_enrolls_a_fresh_root_and_binds_all_consumers(self):
+        loader = importlib.util.spec_from_file_location("recipe_paths", ROOT / "tools/ci/ci_paths.py")
+        paths = importlib.util.module_from_spec(loader)
+        loader.loader.exec_module(paths)
+        name = "tools/prefab_runtime/README.md"
+        self.assertTrue(paths.needs_python(name), name)
+        self.assertIn("tools/ci/test_rmlui_source.py", paths.PYTHON_TESTS)
+        source = (ROOT / name).read_text(encoding="utf-8", errors="strict")
+        recipe = re.search(r"```sh\n(.*?)\n```", source, re.DOTALL)
+        self.assertIsNotNone(recipe)
+        self.assertEqual(recipe[1].splitlines(), [
+            "python3 -I -B tools/ci/rmlui_source.py init --root build/release-prefab || exit",
+            "python3 -I -B tools/ci/rmlui_source.py preflight --root build/release-prefab || exit",
+            'cmake --preset release -B build/release-prefab '
+            '"-DPython3_EXECUTABLE=$(python3 -I -B -c \'import sys; print(sys.executable)\')" '
+            '-DLUMINUMBRA_ENABLE_PREFAB_RUNTIME=ON',
+            "cmake --build build/release-prefab --target luminumbra_prefab_inspect prefab_runtime_test --parallel 2",
+            "ctest --test-dir build/release-prefab -R '^Prefab(Digest|RuntimeTest)\\.' "
+            "--no-tests=error --output-on-failure",
+            "cmake --install build/release-prefab --prefix /your/install --component PrefabRuntime",
+        ])
+        presets = json.loads((ROOT / "CMakePresets.json").read_bytes())["configurePresets"]
+        self.assertIn("release", {preset["name"] for preset in presets})
 
     def test_manual_preset_examples_enroll_only_absent_matching_roots(self):
         paths = ("README.md", "CONTRIBUTING.md", "docs/development.md", "docs/static-morph-assets.md",

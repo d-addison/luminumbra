@@ -188,6 +188,9 @@ def git(source: Path, *args: str, input_bytes: bytes | None = None) -> bytes:
     # Exclude inherited Git directories, filters, hooks, credential helpers and config.
     environment = {k.upper(): v for k, v in os.environ.items()
                    if k.upper() in {"PATH", "SYSTEMROOT", "COMSPEC", "PATHEXT", "TEMP", "TMP", "TMPDIR"}}
+    # Transport libraries distinguish proxy variable spellings; preserve them.
+    environment.update({k: v for k, v in os.environ.items()
+                        if k.upper() in {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"}})
     environment.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
                        GIT_CONFIG_SYSTEM=os.devnull, GIT_ATTR_NOSYSTEM="1",
                        GIT_NO_REPLACE_OBJECTS="1", GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0")
