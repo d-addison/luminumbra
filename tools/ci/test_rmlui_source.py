@@ -1624,6 +1624,432 @@ class OwnedCommandLifetime(unittest.TestCase):
 
 
 class WindowsContainmentRefusal(unittest.TestCase):
+    stop_sessions = OwnedCommandLifetime.stop_sessions
+
+    def assert_child_stopped(self):
+        for api, handle in self.child_handles:
+            self.assertEqual(api.WaitForSingleObject(handle, 2000), 0)
+        OwnedCommandLifetime.assert_child_stopped(self)
+
+    def retain_native_child(self):
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+            api = ctypes.WinDLL("kernel32", use_last_error=True)
+            api.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            api.OpenProcess.restype = wintypes.HANDLE
+            api.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+            api.WaitForSingleObject.restype = wintypes.DWORD
+            api.CloseHandle.argtypes = [wintypes.HANDLE]
+            api.CloseHandle.restype = wintypes.BOOL
+            # The worker is alive behind the spawn barrier in our private job.
+            # Retain its synchronization handle before cleanup can terminate it.
+            pid = int((self.root / "child.pid").read_text(encoding="ascii"))
+            handle = api.OpenProcess(0x00100000, False, pid)
+            if not handle:
+                raise ctypes.WinError(ctypes.get_last_error())
+            self.child_handles.append((api, handle))
+
+    def setUp(self):
+        OwnedCommandLifetime.setUp(self)
+        self.events = []
+        self.jobs = []
+        self.owned_processes = []
+        self.child_handles = []
+        self.writers = []
+        self.release_writer = threading.Event()
+        self.drained = bytearray()
+        self.script.write_text(textwrap.dedent("""\
+            import importlib.util
+            import os
+            from pathlib import Path
+            import subprocess
+            import sys
+            import time
+
+            root, helper, name, phase, has_input = sys.argv[1:]
+            root = Path(root)
+            def wait_for(marker):
+                deadline = time.monotonic() + 3
+                while not (root / marker).exists():
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError("bootstrap barrier deadline exceeded: " + marker)
+                    time.sleep(0.005)
+            if phase == "worker":
+                (root / "child.pid").write_text(str(os.getpid()), encoding="ascii")
+                with (root / "work").open("ab", buffering=0) as work:
+                    while True:
+                        work.write(b"x")
+                        time.sleep(0.005)
+            (root / "before").touch()
+            if phase in ("before", "assignment"):
+                wait_for("enroll")
+            if os.name == "nt":
+                loader = importlib.util.spec_from_file_location("bootstrap_helper", helper)
+                module = importlib.util.module_from_spec(loader)
+                loader.loader.exec_module(module)
+                job = module.WindowsJob(name, existing=True)
+                try:
+                    job.enroll_bootstrap()
+                finally:
+                    job.close()
+            # These are child-side barriers around actual enrollment on Windows.
+            # On POSIX they control only the portable lifetime-order model.
+            os.write(1, b"queued output\\n")
+            if has_input == "yes":
+                if os.read(0, 1) != b"x":
+                    raise RuntimeError("bootstrap did not receive the input")
+                (root / "input-seen").touch()
+            (root / "assigned").touch()
+            if phase == "spawn":
+                wait_for("spawn")
+                subprocess.Popen([sys.executable, "-I", "-B", __file__,
+                                  str(root), helper, name, "worker", "no"])
+                wait_for("work")
+                (root / "spawned").touch()
+            wait_for("hold")
+            """), encoding="utf-8")
+        self.addCleanup(self.cleanup_bootstraps)
+
+    def wait_for(self, marker):
+        deadline = time.monotonic() + 3
+        while not (self.root / marker).exists():
+            if time.monotonic() >= deadline:
+                raise AssertionError("child barrier not reached: " + marker)
+            time.sleep(0.005)
+
+    def cleanup_bootstraps(self):
+        # Exact retained handles only; POSIX session identities remain unreaped
+        # until stop_sessions, including while exercising the old implementation.
+        for process, kill, wait in self.owned_processes:
+            kill()
+            wait(timeout=2)
+        for job in self.jobs:
+            job.finish()
+        self.release_writer.set()
+        for writer in self.writers:
+            threading.Thread.join(writer, timeout=2)
+            self.assertFalse(writer.is_alive(), "fixture writer did not stop")
+        for api, handle in self.child_handles:
+            self.assertEqual(api.WaitForSingleObject(handle, 2000), 0)
+            self.assertTrue(api.CloseHandle(handle))
+        self.child_handles.clear()
+
+    def run_bootstrap(self, phase, *, errors=(), input_bytes=None, live_writer=False,
+                      launch_failure=False, nonzero=False):
+        """Real child/pipe ordering; only Windows runs the native job APIs."""
+        native = os.name == "nt"
+        real_job, real_read, real_thread = M.WindowsJob, os.read, threading.Thread
+        owner = self
+        platform = mock.Mock(wraps=os)
+        platform.name = "nt"
+        class Job:
+            def __init__(self, name):
+                self.real = real_job(name) if native else None
+                owner.jobs.append(self)
+            def terminate(self):
+                owner.events.append("terminate-job")
+                if owner.owned_processes and not {"kill", "wait", "kill-denied", "wait-unobserved"}.intersection(errors):
+                    owner.assertIn("bootstrap-exited", owner.events)
+                    owner.assertIsNotNone(owner.owned_processes[0][0].poll())
+                if "terminate-denied" in errors:
+                    raise PermissionError("controlled job termination denied")
+                if self.real is not None:
+                    self.real.terminate()
+                elif owner.launched:
+                    import signal
+                    os.killpg(owner.launched[0].pid, signal.SIGKILL)
+                if "terminate" in errors:
+                    raise OSError("controlled job termination failure")
+            def wait_empty(self):
+                owner.events.append("wait-empty")
+                if self.real is not None:
+                    self.real.wait_empty()
+                elif "terminate-denied" in errors:
+                    # The portable model has no native active-process query.
+                    raise M.Refusal("portable job emptiness remains unverified")
+                if "empty" in errors:
+                    raise OSError("controlled job emptiness failure")
+            def available(self, stream):
+                if self.real is not None:
+                    return self.real.available(stream)
+                import select
+                return 65536 if select.select([stream.fileno()], [], [], 0)[0] else 0
+            def close(self):
+                owner.events.append("close-job")
+                self.finish()
+                if "close-job" in errors:
+                    raise OSError("controlled job close failure")
+            def finish(self):
+                if self.real is not None:
+                    self.real.close()
+                elif owner.launched:
+                    import signal
+                    os.killpg(owner.launched[0].pid, signal.SIGKILL)
+        class Pipe:
+            def __init__(self, stream, kind):
+                self.stream, self.kind = stream, kind
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                self.close()
+            def fileno(self):
+                return self.stream.fileno()
+            def write(self, data):
+                return self.stream.write(data)
+            def close(self):
+                if self.kind == "input" and owner.writers:
+                    writer = owner.writers[0]
+                    if threading.current_thread() is not writer:
+                        owner.assertFalse(writer.is_alive(), "stdin closed under live writer")
+                owner.events.append("close-" + self.kind)
+                self.stream.close()
+                if "close-" + self.kind in errors:
+                    raise OSError("controlled " + self.kind + " close failure")
+        class Writer(real_thread):
+            def run(self):
+                if live_writer:
+                    if not owner.release_writer.wait(3):
+                        raise AssertionError("writer release deadline exceeded")
+                super().run()
+            def join(self, timeout=None):
+                owner.events.append("join-writer")
+                if "join" in errors:
+                    raise OSError("controlled writer join failure")
+                super().join(timeout)
+        def writer(*args, **kwargs):
+            thread = Writer(*args, **kwargs)
+            owner.writers.append(thread)
+            return thread
+        def launch(argv, **kwargs):
+            if launch_failure:
+                raise OSError("controlled bootstrap launch failure")
+            name = argv[argv.index("--contained-git") + 1]
+            actual = [sys.executable, "-I", "-B", "-S", str(self.script),
+                      str(self.root), str(MODULE_PATH.resolve()), name, phase,
+                      "yes" if input_bytes is not None and not live_writer else "no"]
+            if nonzero:
+                actual = [sys.executable, "-I", "-B", "-c",
+                          "import os; os.write(1, b'final failure'); raise SystemExit(7)"]
+            kwargs["start_new_session"] = not native
+            process = self.process(actual, **kwargs)
+            self.launched.append(process)
+            kill, wait = process.kill, process.wait
+            self.owned_processes.append((process, kill, wait))
+            def stop():
+                self.events.append("kill-bootstrap")
+                if phase == "assignment":
+                    (self.root / "enroll").touch()
+                    self.wait_for("assigned")
+                elif phase == "spawn":
+                    (self.root / "spawn").touch()
+                    self.wait_for("spawned")
+                    self.retain_native_child()
+                if "kill-denied" in errors:
+                    raise PermissionError("controlled bootstrap kill denied")
+                kill()
+                if "kill" in errors:
+                    raise OSError("controlled bootstrap kill failure")
+            def reap(timeout=None):
+                self.events.append("wait-bootstrap")
+                if "wait-unobserved" in errors:
+                    raise OSError("controlled bootstrap exit unobserved")
+                result = wait(timeout)
+                self.events.append("bootstrap-exited")
+                if "wait" in errors:
+                    raise OSError("controlled bootstrap reap failure")
+                return result
+            process.kill, process.wait = stop, reap
+            if process.stdin is not None:
+                process.stdin = Pipe(process.stdin, "input")
+                if not native:
+                    import fcntl
+                    if hasattr(fcntl, "F_SETPIPE_SZ"):
+                        fcntl.fcntl(process.stdin.fileno(), fcntl.F_SETPIPE_SZ, 4096)
+            process.stdout = Pipe(process.stdout, "output")
+            return process
+        def scan(source):
+            self.wait_for("assigned" if phase == "spawn" else "before")
+            if input_bytes is not None and not live_writer:
+                # The child consumed a real byte, then held the remaining input.
+                # Its pipe is smaller than the unchanged 22,655-byte payload.
+                self.wait_for("input-seen")
+                self.assertTrue(self.writers[0].is_alive(), "input writer was not blocked")
+                self.assertNotIn("close-input", self.events)
+            raise M.Refusal("controlled source refusal")
+        def read(fd, count):
+            data = real_read(fd, count)
+            if self.launched and fd == self.launched[0].stdout.fileno():
+                # Capture at most both 4 MiB budgets and their final 64 KiB reads.
+                self.assertLessEqual(len(self.drained) + len(data), 2 * M.OUTPUT_BYTES + 2 * 65536)
+                self.drained.extend(data)
+            return data
+        with mock.patch.object(M, "os", platform), \
+                mock.patch.object(M, "WindowsJob", Job), \
+                mock.patch.object(M.subprocess, "Popen", side_effect=launch), \
+                mock.patch.object(M.threading, "Thread", side_effect=writer), \
+                mock.patch.object(platform, "read", side_effect=read), \
+                mock.patch.object(M, "inventory", side_effect=scan if not nonzero else lambda source: {}):
+            return M.run_command(self.root, [sys.executable, "-I", "-B", "-c", "pass"],
+                                 dict(os.environ), input_bytes)
+
+    def assert_shutdown_order(self):
+        for earlier, later in (("kill-bootstrap", "wait-bootstrap"),
+                               ("bootstrap-exited", "terminate-job"),
+                               ("terminate-job", "wait-empty"),
+                               ("wait-empty", "close-output"), ("close-output", "close-job")):
+            self.assertLess(self.events.index(earlier), self.events.index(later), self.events)
+
+    def test_pre_enrollment_refusal_stops_exact_bootstrap_before_final_job(self):
+        with self.assertRaisesRegex(M.Refusal, "controlled source refusal"):
+            self.run_bootstrap("before")
+        self.assert_shutdown_order()
+        (self.root / "enroll").touch()
+        self.assertFalse((self.root / "assigned").exists())
+        self.assertFalse((self.root / "spawned").exists())
+
+    def test_assignment_during_cleanup_cannot_follow_final_job_termination(self):
+        with self.assertRaisesRegex(M.Refusal, "controlled source refusal"):
+            self.run_bootstrap("assignment")
+        self.assertTrue((self.root / "assigned").exists())
+        self.assert_shutdown_order()
+        self.assertEqual(self.drained, b"queued output\n")
+
+    def test_spawn_during_cleanup_stops_blocked_input_and_drains_held_output(self):
+        with self.assertRaisesRegex(M.Refusal, "controlled source refusal"):
+            self.run_bootstrap("spawn", input_bytes=b"x" * 22655)
+        self.assertTrue((self.root / "spawned").exists())
+        self.assert_shutdown_order()
+        self.assertLess(self.events.index("wait-empty"), self.events.index("join-writer"))
+        self.assertFalse(self.writers[0].is_alive())
+        self.assertEqual(self.drained, b"queued output\n")
+        self.assert_child_stopped()
+
+    def test_each_cleanup_failure_retains_primary_and_finishes_owned_cleanup(self):
+        for failure, message in (("kill", "bootstrap kill"), ("wait", "bootstrap reap"),
+                                 ("terminate", "job termination"), ("empty", "job emptiness"),
+                                 ("join", "writer join"), ("close-input", "input close"),
+                                 ("close-output", "output close"), ("close-job", "job close")):
+            with self.subTest(failure=failure):
+                # Each subcase has its own processes, barriers and pipe ownership.
+                case = WindowsContainmentRefusal()
+                try:
+                    case.setUp()
+                    with self.assertRaisesRegex(M.Refusal, "controlled source refusal") as caught:
+                        case.run_bootstrap("spawn", errors=(failure,), input_bytes=b"x" * 22655)
+                    self.assertIn("controlled " + message + " failure", str(caught.exception))
+                    self.assertIn("controlled source refusal", str(caught.exception.__cause__))
+                    self.assertIn("wait-empty", case.events)
+                    self.assertIn("close-output", case.events)
+                    self.assertIn("close-job", case.events)
+                    case.assert_child_stopped()
+                finally:
+                    self.assertTrue(case.doCleanups(), "bootstrap fixture cleanup failed")
+
+    def test_join_failure_never_closes_stdin_under_a_live_writer(self):
+        with self.assertRaisesRegex(M.Refusal, "controlled source refusal") as caught:
+            self.run_bootstrap("spawn", errors=("join",), input_bytes=b"x" * 22655,
+                               live_writer=True)
+        self.assertIn("writer join failure", str(caught.exception))
+        self.assertIn("Git input shutdown deadline exceeded", str(caught.exception))
+        self.assertTrue(self.writers[0].is_alive())
+        self.assertNotIn("close-input", self.events)
+        self.assertIn("close-output", self.events)
+        self.assertIn("close-job", self.events)
+
+    def test_combined_cleanup_failures_keep_every_failure_and_primary(self):
+        errors = ("kill", "wait", "terminate", "empty", "join", "close-output", "close-job")
+        with self.assertRaisesRegex(M.Refusal, "controlled source refusal") as caught:
+            self.run_bootstrap("spawn", errors=errors, input_bytes=b"x" * 22655)
+        for message in ("bootstrap kill", "bootstrap reap", "job termination", "job emptiness",
+                        "writer join", "output close", "job close"):
+            self.assertIn("controlled " + message + " failure", str(caught.exception))
+        self.assertIn("controlled source refusal", str(caught.exception.__cause__))
+        self.assert_child_stopped()
+
+    def test_denied_bootstrap_kill_retains_the_actual_reap_timeout(self):
+        with self.assertRaisesRegex(M.Refusal, "controlled source refusal") as caught:
+            self.run_bootstrap("spawn", errors=("kill-denied",), input_bytes=b"x" * 22655)
+        self.assertIn("controlled bootstrap kill denied", str(caught.exception))
+        self.assertIn("TimeoutExpired", str(caught.exception))
+        self.assertNotIn("bootstrap-exited", self.events)
+        self.assertIn("wait-empty", self.events)
+        self.assertIn("join-writer", self.events)
+        self.assertIn("close-job", self.events)
+        self.assert_child_stopped()
+
+    def test_unobserved_bootstrap_exit_still_finishes_remaining_cleanup(self):
+        with self.assertRaisesRegex(M.Refusal, "controlled source refusal") as caught:
+            self.run_bootstrap("spawn", errors=("wait-unobserved",))
+        self.assertIn("controlled bootstrap exit unobserved", str(caught.exception))
+        self.assertNotIn("bootstrap-exited", self.events)
+        self.assertIn("wait-empty", self.events)
+        self.assertIn("close-output", self.events)
+        self.assertIn("close-job", self.events)
+        self.assert_child_stopped()
+
+    def test_denied_job_termination_keeps_emptiness_and_pipe_failures(self):
+        with self.assertRaisesRegex(M.Refusal, "controlled source refusal") as caught:
+            self.run_bootstrap("spawn", errors=("terminate-denied",))
+        self.assertIn("controlled job termination denied", str(caught.exception))
+        self.assertIn("Git pipe shutdown deadline exceeded", str(caught.exception))
+        self.assertIn("wait-empty", self.events)
+        self.assertIn("close-output", self.events)
+        self.assertIn("close-job", self.events)
+        self.assert_child_stopped()
+
+    def test_launch_and_job_cleanup_failures_are_all_retained(self):
+        with self.assertRaisesRegex(M.Refusal, "controlled bootstrap launch failure") as caught:
+            self.run_bootstrap("before", launch_failure=True,
+                               errors=("terminate", "empty", "close-job"))
+        for message in ("job termination", "job emptiness", "job close"):
+            self.assertIn("controlled " + message + " failure", str(caught.exception))
+        self.assertIn("controlled bootstrap launch failure", str(caught.exception.__cause__))
+        self.assertEqual(self.events, ["terminate-job", "wait-empty", "close-job"])
+
+    def test_launch_failure_still_terminates_and_verifies_the_empty_job(self):
+        with self.assertRaisesRegex(OSError, "controlled bootstrap launch failure"):
+            self.run_bootstrap("before", launch_failure=True)
+        self.assertEqual(self.events, ["terminate-job", "wait-empty", "close-job"])
+        self.assertEqual(self.owned_processes, [])
+
+    def test_nonzero_exit_and_final_output_survive_job_close_failure(self):
+        with self.assertRaisesRegex(M.Refusal, "Git command refused\nfinal failure") as caught:
+            self.run_bootstrap("before", errors=("close-job",), nonzero=True)
+        self.assertIn("controlled job close failure", str(caught.exception))
+        self.assert_shutdown_order()
+
+    def test_bootstrap_assignment_and_job_close_failures_are_both_retained(self):
+        job = mock.Mock()
+        job.enroll_bootstrap.side_effect = OSError("assignment refused")
+        job.close.side_effect = OSError("bootstrap handle close refused")
+        with mock.patch.object(M, "os", mock.Mock(name="nt", wraps=os)) as platform, \
+                mock.patch.object(M, "WindowsJob", return_value=job), \
+                mock.patch.object(M.subprocess, "call") as launch:
+            platform.name = "nt"
+            with self.assertRaisesRegex(M.Refusal, "assignment refused") as caught:
+                M.contained_git("private-test-job", ["git", "--version"])
+        self.assertIn("bootstrap handle close refused", str(caught.exception))
+        self.assertIn("assignment refused", str(caught.exception.__cause__))
+        job.close.assert_called_once_with()
+        launch.assert_not_called()
+
+    def test_job_initialization_and_handle_close_failures_are_both_retained(self):
+        import ctypes
+        api = mock.Mock()
+        api.CreateJobObjectW.return_value = 1
+        api.SetInformationJobObject.return_value = False
+        api.CloseHandle.return_value = False
+        with mock.patch.object(ctypes, "WinDLL", return_value=api, create=True), \
+                mock.patch.object(ctypes, "get_last_error", return_value=0, create=True), \
+                mock.patch.object(ctypes, "WinError", side_effect=[
+                    OSError("job limits refused"), OSError("job handle close refused")], create=True):
+            with self.assertRaisesRegex(M.Refusal, "job limits refused") as caught:
+                M.WindowsJob("private-test-job")
+        self.assertIn("job handle close refused", str(caught.exception))
+        self.assertIn("job limits refused", str(caught.exception.__cause__))
+        api.CloseHandle.assert_called_once_with(1)
+
     def test_bootstrap_assignment_failure_closes_job_before_any_command(self):
         job = mock.Mock()
         job.enroll_bootstrap.side_effect = OSError("assignment refused")

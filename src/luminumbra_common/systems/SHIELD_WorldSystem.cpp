@@ -6,7 +6,7 @@
 #include "../world/HydraulicErosion.h" //
 #include "../world/MarchingCubes.h"
 #include "WaterSystem.h"
-#include "entt/entt.hpp"
+#include "entt/entity/fwd.hpp"
 #include "systems/PhysicsSystem.h"
 #include "world/SurfaceWorkBudget.h"
 #include <algorithm> // Required for std::max and std::min

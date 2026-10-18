@@ -201,6 +201,13 @@ def git(source: Path, *args: str, input_bytes: bytes | None = None) -> bytes:
     return run_command(source, argv, environment, input_bytes)
 
 
+def shutdown_refusal(primary_error: BaseException | None, shutdown_errors: list[BaseException]) -> Refusal:
+    # Callers contribute at most ten failures from their exact owned resources.
+    detail = "; ".join(f"{type(error).__name__}: {error}" for error in shutdown_errors)
+    reason = (str(primary_error) + "\n" if primary_error is not None else "")
+    return Refusal(reason + "Git shutdown refused: " + detail)
+
+
 class WindowsJob:
     """A private kill-on-close job; only its bootstrap may enroll itself."""
 
@@ -255,8 +262,11 @@ class WindowsJob:
                 limits.BasicLimitInformation.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
                 if not self.api.SetInformationJobObject(self.handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
                     raise ctypes.WinError(ctypes.get_last_error())
-        except BaseException:
-            self.close()
+        except BaseException as primary_error:
+            try:
+                self.close()
+            except BaseException as error:
+                raise shutdown_refusal(primary_error, [error]) from primary_error
             raise
 
     def enroll_bootstrap(self) -> None:
@@ -314,7 +324,13 @@ def contained_git(name: str, argv: list[str]) -> int:
     finally:
         # Only the parent retains a job handle when the command starts. Its death
         # therefore kills the complete tree even if Git retains output handles.
-        job.close()
+        primary_error = sys.exc_info()[1]
+        try:
+            job.close()
+        except BaseException as error:
+            if primary_error is not None:
+                raise shutdown_refusal(primary_error, [error]) from primary_error
+            raise
     return subprocess.call(argv, stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr)
 
 
@@ -411,14 +427,18 @@ def run_command(source: Path, argv: list[str], environment: dict[str, str],
                 break
             time.sleep(0.01)
     finally:
+        primary_error = sys.exc_info()[1]
         shutdown_errors = []
         def attempt(action) -> None:
             try:
                 action()
             except BaseException as error:
                 shutdown_errors.append(error)
-        if job is not None:
-            attempt(job.terminate)
+        if job is not None and process is not None:
+            # The bootstrap may still be outside the job. Stop that exact
+            # retained process and observe exit before final job termination:
+            # an empty job alone cannot exclude later enrollment or spawning.
+            attempt(process.kill)
         elif process is not None:
             def terminate_session() -> None:
                 try:
@@ -428,14 +448,17 @@ def run_command(source: Path, argv: list[str], environment: dict[str, str],
             attempt(terminate_session)
         if process is not None:
             attempt(lambda: process.wait(timeout=2))
+        if job is not None:
+            # Even failed bootstrap shutdown must not bypass remaining cleanup.
+            attempt(job.terminate)
+            attempt(job.wait_empty)
+        if process is not None:
             if writer is not None:
                 attempt(lambda: writer.join(timeout=2))
                 if writer.is_alive():
                     shutdown_errors.append(Refusal("Git input shutdown deadline exceeded"))
             if process.stdin is not None and (writer is None or not writer.is_alive()):
                 attempt(process.stdin.close)
-            if job is not None:
-                attempt(job.wait_empty)
             if process.stdout is not None:
                 def drain_output() -> None:
                     if job is None:
@@ -460,7 +483,10 @@ def run_command(source: Path, argv: list[str], environment: dict[str, str],
         if job is not None:
             attempt(job.close)
         if shutdown_errors:
-            raise Refusal("Git shutdown refused: " + str(shutdown_errors[0])) from shutdown_errors[0]
+            if primary_error is None and process is not None and process.returncode not in (None, 0):
+                primary_error = Refusal("Git command refused\n" +
+                                        output[-4096:].decode("utf-8", errors="replace"))
+            raise shutdown_refusal(primary_error, shutdown_errors) from (primary_error or shutdown_errors[0])
     assert process is not None
     require(not failures and process.returncode == 0, "Git command refused\n" +
             output[-4096:].decode("utf-8", errors="replace"))
