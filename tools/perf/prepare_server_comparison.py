@@ -22,7 +22,7 @@ MARKER = ".perf-controlled"
 
 
 def identity(root: Path) -> str:
-    data = resolve_reference(root, "data")
+    data = resolve_reference(root, "data").resolve()
     inputs = {"common": fixture_hash(resolve_reference(root, "data/common"), scope="headless-server"),
               "presets": fixture_hash(resolve_reference(root, "worlds/atlas/presets"),
                                       reference_root=data),
@@ -35,7 +35,8 @@ def prepare(base: Path, head: Path, receipt: Path) -> None:
     # including finite hydrology, which systems.json alone cannot configure.
     common = resolve_reference(base, "data/common")
     presets = resolve_reference(base, "worlds/atlas/presets")
-    data = resolve_reference(base, "data")
+    # Match the canonical authority used by dependency collection and reads.
+    data = resolve_reference(base, "data").resolve()
     # Refuse unsafe source trees before copytree follows links or adapters edit
     # either checkout. Retain dependencies outside common in the copied fixture.
     fixture_hash(common, scope="headless-server")
