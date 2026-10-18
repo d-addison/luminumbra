@@ -248,9 +248,9 @@ def plan(directory, shard, profile="gcc", timings=None, selection=None):
     index_selection = [indices[0], indices[0], 1, *indices[1:]]
     (directory / "ctest.shard-index.txt").write_text(",".join(map(str, index_selection)) + "\n", encoding="utf-8")
     (directory / "ctest.partition.json").write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
-    if os.environ.get("GITHUB_OUTPUT"):
-        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
-            handle.write(f"prefab={'true' if any(name.startswith('PrefabRuntimeTest.') for name in names) else 'false'}\n")
+    # Library callers can plan synthetic inventories inside a running CTest step.
+    # Only the CLI publishes the real producer's workflow output.
+    return any(name.startswith("PrefabRuntimeTest.") for name in names)
 
 
 def run(directory, profile="gcc"):
@@ -330,7 +330,7 @@ def merge(directory, output, profile="gcc", evidence=True, full=False, selection
             if element.tag in ("testsuite", "testsuites"):
                 for attribute in ("failures", "errors", "skipped", "disabled"):
                     require(int(element.get(attribute, "0")) == 0, "JUnit has failed or unevaluated totals")
-        require(all(case.get("status", "run") == "run" and case.get("result") != "suppressed" for case in cases),
+        require(all(case.get("status", "run") == "run" and case.get("result") in (None, "completed") for case in cases),
                 "JUnit has unevaluated test status")
         if evidence:
             require(set(executed) == set(parts[0 if full else shard - 1]), "report differs from assigned partition")
@@ -413,7 +413,8 @@ def collect(directory, prefix, attempt, full=False):
             raise
 
 
-def gate(result, cpp, cancelled, event, draft, qualification, enabled):
+def gate(result, cpp, cancelled, event, draft, qualification, enabled, classification):
+    require(classification == "success", "path classification did not succeed")
     require(event != "pull_request" or draft == "false", "draft or missing draft metadata")
     require(cancelled == "false", "workflow cancelled or cancellation status missing")
     if enabled == "false":
@@ -450,15 +451,18 @@ def main(default_profile="gcc", legacy_evidence=False):
     sub.add_argument("--attempt", type=int, required=True)
     sub.add_argument("--full", action="store_true")
     sub = commands.add_parser("gate")
-    for key in ("result", "cpp", "cancelled", "event", "draft", "qualification", "enabled"):
+    for key in ("result", "cpp", "cancelled", "event", "draft", "qualification", "enabled", "classification"):
         sub.add_argument("--" + key, required=True)
     args = parser.parse_args()
     try:
         if args.mode == "plan":
             names = planned_roster(args.directory)
             require(all(any(suite in name for name in names) for suite in args.require_suite), "missing expected CTest suite")
-            plan(args.directory, args.shard, args.profile, read_json(args.timings) if args.timings else None,
-                 selection_policy(args.needs_heavy, args.selection))
+            prefab = plan(args.directory, args.shard, args.profile, read_json(args.timings) if args.timings else None,
+                          selection_policy(args.needs_heavy, args.selection))
+            if os.environ.get("GITHUB_OUTPUT"):
+                with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+                    handle.write(f"prefab={'true' if prefab else 'false'}\n")
         elif args.mode == "run":
             return run(args.directory, args.profile)
         elif args.mode == "merge":
@@ -467,7 +471,7 @@ def main(default_profile="gcc", legacy_evidence=False):
         elif args.mode == "collect":
             collect(args.directory, args.prefix, args.attempt, args.full)
         else:
-            route = gate(args.result, args.cpp, args.cancelled, args.event, args.draft, args.qualification, args.enabled)
+            route = gate(args.result, args.cpp, args.cancelled, args.event, args.draft, args.qualification, args.enabled, args.classification)
             print(f"route: {route}")
             if os.environ.get("GITHUB_STEP_SUMMARY"):
                 with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as handle:

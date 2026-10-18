@@ -32,6 +32,7 @@ class ProcessStatReaders(unittest.TestCase):
         for comm in (b'worker\xff', b'worker\xe2\x82', b'worker ) with spaces)'):
             with self.subTest(comm=comm), patch.object(Path, 'read_bytes',
                     return_value=stat_bytes(123, 45, 678, comm)), patch.object(os, 'name', 'posix'), \
+                    patch.object(sys, 'platform', 'linux'), \
                     patch.object(owner, 'Path', path_type), \
                     patch('luminumbra_author.meshgen_jobs.Path', path_type):
                 self.assertEqual(owner._proc_identity(123), (45, 678))
@@ -51,7 +52,8 @@ class ProcessStatReaders(unittest.TestCase):
 
     def test_lock_identity_preserves_zombie_and_unreadable_owner_policy(self):
         path_type = type(Path())
-        with patch.object(os, 'name', 'posix'), patch('luminumbra_author.meshgen_jobs.Path', path_type):
+        with patch.object(os, 'name', 'posix'), patch.object(sys, 'platform', 'linux'), \
+                patch('luminumbra_author.meshgen_jobs.Path', path_type):
             for state in (b'Z', b'X'):
                 with self.subTest(state=state), patch.object(path_type, 'read_bytes',
                         return_value=stat_bytes(123, 45, 678, b'worker\xff', state)):
@@ -190,6 +192,13 @@ class WorkerCompletion(unittest.TestCase):
 
 
 class LinuxSupervisorStartup(unittest.TestCase):
+    def setUp(self):
+        for target, attribute, value in ((owner.os, 'name', 'posix'),
+                                         (owner.sys, 'platform', 'linux'),
+                                         (owner.signal, 'SIGKILL', 9)):
+            context = patch.object(target, attribute, value, create=True)
+            context.start(); self.addCleanup(context.stop)
+
     def setup_failure(self, stack, phase, failure):
         stack.enter_context(patch.object(owner, '_enable_subreaper'))
         stack.enter_context(patch.object(owner, '_SUPERVISOR_PID', os.getpid()))
@@ -208,7 +217,6 @@ class LinuxSupervisorStartup(unittest.TestCase):
             with self.subTest(phase=phase), ExitStack() as stack:
                 failure = OSError('injected '+phase+' failure')
                 self.setup_failure(stack, phase, failure)
-                stack.enter_context(patch.object(owner.os, 'name', 'posix'))
                 stack.enter_context(patch.object(owner.os, 'pipe', return_value=(11, 12)))
                 stack.enter_context(patch.object(owner.os, 'read', return_value=b'S'))
                 close = stack.enter_context(patch.object(owner.os, 'close'))
@@ -230,7 +238,6 @@ class LinuxSupervisorStartup(unittest.TestCase):
             with self.subTest(phase=phase), ExitStack() as stack:
                 failure = OSError('injected '+phase+' failure')
                 self.setup_failure(stack, phase, failure)
-                stack.enter_context(patch.object(owner.os, 'name', 'posix'))
                 stack.enter_context(patch.object(owner.os, 'pipe', return_value=(11, 12)))
                 stack.enter_context(patch.object(owner.os, 'read', return_value=b'S'))
                 closed, now = [], [10]
@@ -265,7 +272,6 @@ class LinuxSupervisorStartup(unittest.TestCase):
                 process.poll.return_value = 0
                 tree._pidfds = {(101, 20): 1001}
                 stack.enter_context(patch.object(owner.subprocess, 'Popen', return_value=process))
-                stack.enter_context(patch.object(owner.signal, 'SIGKILL', 9, create=True))
                 stack.enter_context(patch('time.monotonic', return_value=10))
                 def owned(*args, **kwargs): events.append('owned'); return tree
                 tree._descendants.side_effect = lambda **kwargs: events.append('validated')
@@ -305,7 +311,6 @@ class LinuxSupervisorStartup(unittest.TestCase):
                 closed.append(fd)
                 if fd == 10: raise OSError('injected control close failure')
             stack.enter_context(patch.object(owner.os, 'close', side_effect=close))
-            stack.enter_context(patch.object(owner.signal, 'SIGKILL', 9, create=True))
             stack.enter_context(patch.object(owner.subprocess, 'Popen', return_value=process))
             stack.enter_context(patch.object(owner, 'ProcessTree', return_value=tree))
             stack.enter_context(patch('time.monotonic', return_value=15))
@@ -578,7 +583,7 @@ class LinuxProcessOwnership(unittest.TestCase):
         def waitpid(*args):
             self.now += 5
             return 101, 9
-        with patch.object(owner.os, 'waitpid', side_effect=waitpid) as wait:
+        with patch.object(owner.os, 'waitpid', side_effect=waitpid, create=True) as wait:
             with self.assertRaisesRegex(OSError, 'deadline'):
                 tree.reap(deadline=10, clock=self.clock)
         self.assertEqual(wait.call_count, 2)
@@ -599,7 +604,12 @@ class LinuxProcessOwnership(unittest.TestCase):
 class OwnershipAvailability(unittest.TestCase):
     def test_missing_pidfd_apis_refuse_before_any_spawn(self):
         for target, name in ((owner.os, 'pidfd_open'), (owner.signal, 'pidfd_send_signal')):
-            with self.subTest(api=name), patch.object(owner.os, 'name', 'posix'), patch.object(owner.sys, 'platform', 'linux'), patch.object(target, name, None, create=True), patch.object(owner.subprocess, 'Popen') as spawn:
+            with self.subTest(api=name), patch.object(owner.os, 'name', 'posix'), \
+                    patch.object(owner.sys, 'platform', 'linux'), \
+                    patch.object(owner.os, 'pidfd_open', create=True), \
+                    patch.object(owner.signal, 'pidfd_send_signal', create=True), \
+                    patch.object(target, name, None, create=True), \
+                    patch.object(owner.subprocess, 'Popen') as spawn:
                 with self.assertRaises(Refusal) as caught:
                     owner.run_owned(['unused'], b'', timeout=1)
                 self.assertEqual(caught.exception.finding['rule_id'], 'worker.unavailable')

@@ -1,5 +1,7 @@
 # src/CMakeLists.txt
 
+luminumbra_baseline_startup("${CMAKE_CURRENT_SOURCE_DIR}/startup/RuntimeEntry.cpp")
+
 # --- Common Library (Core Engine Logic) ---
 add_subdirectory(luminumbra_common)
 
@@ -29,6 +31,8 @@ target_include_directories(luminumbra_client PUBLIC
 
 target_link_libraries(luminumbra_client PUBLIC
     luminumbra_common
+    # Empty in default builds; profiling builds opt in through the interface.
+    luminumbra_profiler
     rmlui
     glfw
     miniaudio

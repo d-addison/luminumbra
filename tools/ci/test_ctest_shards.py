@@ -29,8 +29,167 @@ class CTestShardTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
+        environment = patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop("GITHUB_OUTPUT", None)
         self.tests = [test(f"Suite.Case{index}") for index in range(40)]
         self.names = [row["name"] for row in self.tests]
+
+    def test_synthetic_plans_do_not_publish_workflow_outputs(self):
+        self.assertNotIn("GITHUB_OUTPUT", os.environ)
+        output = self.root / "step-output"
+        sentinel = b"sentinel=retained\nprefab=true\n"
+        for profile in ("asan", "gcc", "msvc", "ucrt64"):
+            tests = [*self.tests, test("SimBudgetWorldParity.First"),
+                     test("SimBudgetWorldParity.Second")]
+            for shard in ((1, 2) if profile == "asan" else (0, 1, 2)):
+                with self.subTest(profile=profile, shard=shard):
+                    output.write_bytes(sentinel)
+                    with patch.dict(os.environ, GITHUB_OUTPUT=str(output)):
+                        self.write_plan(self.root, shard, tests=tests, profile=profile)
+                    self.assertEqual(output.read_bytes(), sentinel)
+
+    def test_cli_publishes_only_the_selected_real_plan(self):
+        tests = self.policy_roster() + [test("PrefabRuntimeTest.Installed"), test("PrefabDigest.Content")]
+        output = self.root / "step-output"
+        sentinel = b"sentinel=retained\n"
+        for script, profile in (("asan_shards.py", "asan"), ("ctest_shards.py", "asan"),
+                                ("ctest_shards.py", "gcc"), ("ctest_shards.py", "msvc"),
+                                ("ctest_shards.py", "ucrt64")):
+            for shard in ((1, 2) if profile == "asan" else (0, 1, 2)):
+                with self.subTest(script=script, profile=profile, shard=shard):
+                    manifest = self.write_plan(self.root, shard, tests=tests, profile=profile)
+                    selected = manifest["partitions"][0 if shard == 0 else shard - 1]
+                    expected = any(name.startswith("PrefabRuntimeTest.") for name in selected)
+                    output.write_bytes(sentinel)
+                    result = subprocess.run(
+                        [sys.executable, "-I", "-B", str(Path(__file__).with_name(script)), "plan",
+                         "--directory", str(self.root), "--profile", profile, "--shard", str(shard)],
+                        env=dict(os.environ, GITHUB_OUTPUT=str(output)),
+                        capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    published = f"prefab={str(expected).lower()}{os.linesep}".encode("utf-8")
+                    self.assertEqual(output.read_bytes(), sentinel + published)
+
+    def test_full_capture_prefab_output_survives_both_contract_suites(self):
+        tests = self.policy_roster() + [test("PrefabRuntimeTest.Installed"), test("PrefabDigest.Content")]
+        self.write_plan(self.root, 0, tests=tests)
+        output = self.root / "step-output"
+        output.write_bytes(b"sentinel=retained\n")
+        environment = dict(os.environ, GITHUB_OUTPUT=str(output))
+        result = subprocess.run(
+            [sys.executable, "-I", "-B", str(Path(__file__).with_name("ctest_shards.py")),
+             "plan", "--directory", str(self.root), "--shard", "0", "--require-suite", "PrefabRuntimeTest."],
+            env=environment, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        expected = b"sentinel=retained\n" + f"prefab=true{os.linesep}".encode("utf-8")
+        self.assertEqual(output.read_bytes(), expected)
+        for script, case in (("test_asan_shards.py", "AsanShardTests"),
+                             ("test_ctest_shards.py", "CTestShardTests")):
+            with self.subTest(script=script):
+                result = subprocess.run(
+                    [sys.executable, "-I", "-B", str(Path(__file__).with_name(script)),
+                     case + ".test_synthetic_plans_do_not_publish_workflow_outputs"],
+                    env=environment, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(output.read_bytes(), expected)
+
+    def test_cli_output_absent_empty_unwritable_and_invalid_inventory(self):
+        output = self.root / "step-output"
+        command = [sys.executable, "-I", "-B", str(Path(__file__).with_name("ctest_shards.py")),
+                   "plan", "--directory", str(self.root), "--shard", "0"]
+        self.write_plan(self.root, 0, tests=self.policy_roster())
+        for value in (None, "", str(self.root)):
+            environment = dict(os.environ)
+            if value is not None:
+                environment["GITHUB_OUTPUT"] = value
+            with self.subTest(output=value):
+                result = subprocess.run(command, env=environment, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 1 if value else 0, result.stdout + result.stderr)
+                self.assertFalse(output.exists())
+                if value:
+                    self.assertIn("CTest plan refused:", result.stderr)
+        sentinel = b"sentinel=retained\nprefab=true\n"
+        for document in ("{", '{"tests": []}', '{"tests": [{"name": "unknown"}]}', None):
+            with self.subTest(document=document):
+                inventory = self.root / "ctest.inventory.json"
+                if document is None:
+                    inventory.unlink()
+                else:
+                    inventory.write_text(document, encoding="utf-8")
+                output.write_bytes(sentinel)
+                result = subprocess.run(command, env=dict(os.environ, GITHUB_OUTPUT=str(output)),
+                                        capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("CTest plan refused:", result.stderr)
+                self.assertEqual(output.read_bytes(), sentinel)
+
+    def test_policy_cli_publication_and_resolved_execution_preserve_fixture_contract(self):
+        output = self.root / "step-output"
+        sentinel = b"sentinel=retained\nprefab=true\n"
+        resolved = self.root.resolve()
+
+        class WindowsBuildAlias(type(self.root)):
+            def resolve(self):
+                return resolved
+
+        alias = WindowsBuildAlias("C:/Users/RUNNER~1/AppData/Local/Temp/build")
+        for profile in shards.PROFILES:
+            tests = self.policy_roster(profile) + [
+                test("PrefabRuntimeTest.Installed", FIXTURES_REQUIRED=["runtime"], TIMEOUT=30),
+                test("PrefabDigest.Content", FIXTURES_SETUP=["runtime"], TIMEOUT=30),
+                test("Runtime.Cleanup", FIXTURES_CLEANUP=["runtime"], TIMEOUT=30)]
+            for selection in ("full", "light", "heavy"):
+                for shard in (1, 2):
+                    with self.subTest(profile=profile, selection=selection, shard=shard):
+                        output.write_bytes(sentinel)
+                        with patch.dict(os.environ, GITHUB_OUTPUT=str(output)):
+                            self.write_plan(self.root, shard, tests=tests, profile=profile,
+                                            selection=selection)
+                        self.assertEqual(output.read_bytes(), sentinel)
+                        result = subprocess.run(
+                            [sys.executable, "-I", "-B", str(Path(__file__).with_name("ctest_shards.py")),
+                             "plan", "--directory", str(self.root), "--profile", profile,
+                             "--shard", str(shard), "--selection", selection],
+                            env=dict(os.environ, GITHUB_OUTPUT=str(output)),
+                            capture_output=True, text=True, timeout=10)
+                        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                        manifest = shards.read_json(self.root / "ctest.partition.json")
+                        self.assertEqual(manifest["selection"], selection)
+                        shards.validate_union(shards.select_tests(tests, profile, selection),
+                                              manifest["partitions"])
+                        selected = manifest["partitions"][shard - 1]
+                        prefab = "PrefabRuntimeTest.Installed" in selected
+                        self.assertEqual(output.read_bytes(), sentinel +
+                                         f"prefab={str(prefab).lower()}{os.linesep}".encode("utf-8"))
+                        fixture = {"PrefabRuntimeTest.Installed", "PrefabDigest.Content", "Runtime.Cleanup"}
+                        self.assertIn(fixture.intersection(selected), (set(), fixture))
+                        if selection == "heavy":
+                            self.assertEqual(set().union(*map(set, manifest["partitions"])), shards.HEAVY_NAMES)
+                            self.assertFalse(prefab)
+                        current = copy.deepcopy(tests)
+                        for row in current:
+                            row["properties"].reverse()
+                        response = subprocess.CompletedProcess([], 0, stdout=json.dumps({"tests": current}))
+                        with patch.object(shards.subprocess, "run", side_effect=[
+                                response, subprocess.CompletedProcess([], 8)]) as invoke:
+                            self.assertEqual(shards.run(alias, profile), 8)
+                        self.assertEqual(invoke.call_args.args[0][4], str(resolved))
+                        self.assertIn(str(resolved / "ctest.shard-index.txt"), invoke.call_args.args[0])
+                        before = {name: (self.root / name).read_bytes() for name in
+                                  ("ctest.partition.json", "ctest.shard-index.txt", "step-output")}
+                        # A partial discovery must refuse before changing plan or workflow outputs.
+                        (self.root / "ctest.inventory.json").write_text("{", encoding="utf-8")
+                        result = subprocess.run(
+                            [sys.executable, "-I", "-B", str(Path(__file__).with_name("ctest_shards.py")),
+                             "plan", "--directory", str(self.root), "--profile", profile,
+                             "--shard", str(shard), "--selection", selection],
+                            env=dict(os.environ, GITHUB_OUTPUT=str(output)),
+                            capture_output=True, text=True, timeout=10)
+                        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                        for name, content in before.items():
+                            self.assertEqual((self.root / name).read_bytes(), content)
 
     def write_plan(self, directory, shard, tests=None, all_tests=None, profile="gcc", roots=None, selection=None):
         directory.mkdir(parents=True, exist_ok=True)
@@ -148,6 +307,28 @@ class CTestShardTests(unittest.TestCase):
         cases = list(ET.parse(self.root / "merged.xml").getroot().iter("testcase"))
         self.assertEqual(sorted(case.get("name") for case in cases), sorted(self.names))
         self.assertTrue(all(case.findtext("system-out") == "receipt: " + case.get("name") for case in cases))
+
+    def test_result_metadata_refuses_on_every_native_route_without_overwriting(self):
+        output = self.root / "merged.xml"
+        for profile in ("gcc", "msvc", "ucrt64"):
+            for full in (False, True):
+                for shard in ((0,) if full else (1, 2)):
+                    for result in (None, "completed", "suppressed", "skipped", "failed", "unknown", ""):
+                        with self.subTest(profile=profile, full=full, shard=shard, result=result):
+                            self.reports(full=full, profile=profile)
+                            path = self.root / f"shard-{shard}/ctest.junit.xml"
+                            tree = ET.parse(path)
+                            if result is not None:
+                                tree.getroot()[0].set("result", result)
+                            tree.write(path)
+                            output.write_bytes(b"unchanged")
+                            if result in (None, "completed"):
+                                self.merge(full=full, profile=profile)
+                                self.assertNotEqual(output.read_bytes(), b"unchanged")
+                            else:
+                                with self.assertRaisesRegex(ValueError, "unevaluated"):
+                                    self.merge(full=full, profile=profile)
+                                self.assertEqual(output.read_bytes(), b"unchanged")
 
     def test_report_write_failure_keeps_existing_output_and_cleans_staging(self):
         self.reports()
@@ -440,18 +621,46 @@ class CTestShardTests(unittest.TestCase):
                     "msvc": ("release", 4, 180), "ucrt64": ("release", 4, 360)}
         self.assertEqual(shards.PROFILES, expected)
         for profile in ("gcc", "msvc", "ucrt64"):
-            preset, parallel, timeout = expected[profile]
-            self.write_plan(self.root, 1)
-            shards.plan(self.root, 1, profile=profile)
+            for shard in (0, 1, 2):
+                with self.subTest(profile=profile, shard=shard):
+                    self.write_plan(self.root, shard, profile=profile)
+                    self.assert_execution_context(self.root, profile, shard, expected[profile])
+
+    def assert_execution_context(self, directory, profile, shard, limits):
+        resolved = directory.resolve()
+        preset, parallel, timeout = limits
+        selection = [] if shard == 0 else ["-I", str(resolved / "ctest.shard-index.txt")]
+        for status in (0, 8):
             response = subprocess.CompletedProcess([], 0, stdout=json.dumps({"tests": self.tests}))
-            with self.subTest(profile=profile), patch.object(shards.subprocess, "run", side_effect=[response, subprocess.CompletedProcess([], 8)]) as invoke:
-                self.assertEqual(shards.run(self.root, profile), 8)
+            with self.subTest(status=status), patch.object(shards.subprocess, "run", side_effect=[response, subprocess.CompletedProcess([], status)]) as invoke:
+                self.assertEqual(shards.run(directory, profile), status)
                 check, execute = invoke.call_args_list
-                base = ["ctest", "--preset", preset, "--test-dir", str(self.root), "-LE", "manual"]
+                base = ["ctest", "--preset", preset, "--test-dir", str(resolved), "-LE", "manual"]
                 self.assertEqual(check.args[0], [*base, "--show-only=json-v1"])
-                self.assertEqual(execute.args[0], [*base, "--no-tests=error", "-I", str(self.root / "ctest.shard-index.txt"),
+                self.assertEqual(check.kwargs, {"check": True, "capture_output": True, "text": True, "encoding": "utf-8"})
+                self.assertEqual(execute.args[0], [*base, "--no-tests=error", *selection,
                                                   "--parallel", str(parallel), "--timeout", str(timeout),
                                                   "--output-junit", "ctest.junit.xml"])
+                # Both calls inherit the wrapper's cwd and environment.
+                self.assertEqual(execute.kwargs, {})
+
+    def test_windows_short_alias_uses_exact_resolved_full_and_shard_contexts(self):
+        resolved = self.root.resolve()
+
+        # Model the filesystem's short-name expansion without requiring Windows
+        # symlink privilege or enabled 8.3 names. All reads use real plan files.
+        class WindowsBuildAlias(type(self.root)):
+            def resolve(self):
+                return resolved
+
+        alias = WindowsBuildAlias("C:/Users/RUNNER~1/AppData/Local/Temp/build")
+        self.assertNotEqual(str(alias), str(resolved))
+        for profile, limits in (("gcc", ("release", 4, 180)), ("msvc", ("release", 4, 180)),
+                                ("ucrt64", ("release", 4, 360))):
+            for shard in (0, 1, 2):
+                with self.subTest(profile=profile, shard=shard):
+                    self.write_plan(self.root, shard, profile=profile)
+                    self.assert_execution_context(alias, profile, shard, limits)
 
     def test_index_tampering_and_failed_discovery_never_launch_execution(self):
         self.write_plan(self.root, 1)
@@ -658,6 +867,93 @@ class CTestShardTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(f"Reviewed heavy correctness case missing: {name}", " ".join(result.stderr.split()))
 
+    def heavy_hook_fixture(self, names, roster):
+        ctest = shutil.which("ctest")
+        self.assertIsNotNone(ctest, "CTest is required for heavy-label discovery regressions")
+        fixture = Path(tempfile.mkdtemp(prefix="ctest partial fixture ", dir=self.root))
+        discovery = "\n".join(
+            f'add_test([==[{name}]==] [==[{Path(sys.executable).as_posix()}]==] --fixture-only)\n'
+            f'set_tests_properties([==[{name}]==] PROPERTIES '
+            f'TIMEOUT 37 WORKING_DIRECTORY [==[{fixture.as_posix()}]==] '
+            'ENVIRONMENT "DISCOVERY_FIXTURE=retained" LABELS "partial;unrelated" RUN_SERIAL TRUE)'
+            for name in names
+        )
+        if roster is not None:
+            # set(VAR) unsets VAR; an explicit empty string models a defined empty list.
+            discovery += '\nset(LUMINUMBRA_WORLD_OPEN_TESTS "' + ";".join(roster) + '")\n'
+        discovered = fixture / "discovered.cmake"
+        discovered.write_text(discovery, encoding="utf-8")
+        includes = f'include([==[{discovered.as_posix()}]==])\n'
+        testfile = fixture / "CTestTestfile.cmake"
+        testfile.write_text(includes, encoding="utf-8")
+
+        def discover(*filters):
+            return subprocess.run(
+                [ctest, "--test-dir", str(fixture), "--show-only=json-v1", *filters],
+                capture_output=True, text=True, timeout=30,
+            )
+
+        return testfile, includes, discover
+
+    def test_ctest_partial_discovery_without_target_list_preserves_selection(self):
+        hook = Path(__file__).resolve().parents[2] / "test/HeavyTestsCTest.cmake"
+        unrelated = ["Preview.Frame", "Rhi.Bringup"]
+        for placeholder in ([], ["world_open_refusal_test_NOT_BUILT"]):
+            names = [*unrelated, *placeholder]
+            testfile, includes, discover = self.heavy_hook_fixture(names, None)
+            # Non-GoogleTest registrations follow the discovery includes in CTest.
+            continued = (
+                f'add_test(RenderTraversalIntegrated [==[{Path(sys.executable).as_posix()}]==] --fixture-only)\n'
+                'set_tests_properties(RenderTraversalIntegrated PROPERTIES LABELS "partial;runner" TIMEOUT 37)\n'
+            )
+            names.append("RenderTraversalIntegrated")
+            testfile.write_text(includes + continued, encoding="utf-8")
+            selections = (
+                ((), names),
+                (("-R", "^Preview\\.Frame$"), unrelated[:1]),
+                (("-R", "^Rhi\\.Bringup$"), unrelated[1:]),
+                (("-R", "^RenderTraversalIntegrated$"), [names[-1]]),
+                (("-L", "partial"), names),
+                (("-LE", "heavy"), names),
+                (("-L", "heavy"), []),
+            )
+            expected = {}
+            for filters, selected in selections:
+                before = discover(*filters)
+                self.assertEqual(before.returncode, 0, before.stdout + before.stderr)
+                expected[filters] = json.loads(before.stdout)["tests"]
+                self.assertEqual([row["name"] for row in expected[filters]], selected)
+            testfile.write_text(includes + f'include([==[{hook.as_posix()}]==])\n' + continued, encoding="utf-8")
+            for filters, selected in selections:
+                with self.subTest(placeholder=placeholder, filters=filters):
+                    result = discover(*filters)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    actual = json.loads(result.stdout)["tests"]
+                    self.assertEqual([row["name"] for row in actual], selected)
+                    self.assertEqual(actual, expected[filters])
+
+    def test_ctest_defined_invalid_target_lists_refuse_even_filtered(self):
+        hook = Path(__file__).resolve().parents[2] / "test/HeavyTestsCTest.cmake"
+        heavy = sorted(shards.HEAVY_NAMES)
+        names = [*heavy, "Preview.Frame"]
+        rosters = [[], ["OFF"], ["NOTFOUND"], ["Preview.Frame"]]
+        for name in heavy:
+            rosters.append([item for item in names if item != name])
+            rosters.append([item + "Renamed" if item == name else item for item in names])
+        for roster in rosters:
+            testfile, includes, discover = self.heavy_hook_fixture(names, roster)
+            before = discover()
+            self.assertEqual(before.returncode, 0, before.stdout + before.stderr)
+            self.assertEqual([row["name"] for row in json.loads(before.stdout)["tests"]], names)
+            testfile.write_text(includes + f'include([==[{hook.as_posix()}]==])\n', encoding="utf-8")
+            missing = next(name for name in heavy if name not in roster)
+            for filters in ((), ("-R", "^Preview\\.Frame$")):
+                with self.subTest(roster=roster, filters=filters):
+                    result = discover(*filters)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(f"Reviewed heavy correctness case missing: {missing}",
+                                  " ".join(result.stderr.split()))
+
     def test_only_explicit_false_selects_light_missing_old_or_invalid_outputs_select_full(self):
         for value in ("", "true", "False", "0", "unknown", None):
             self.assertEqual(shards.selection_policy(value), "full")
@@ -831,6 +1127,19 @@ class CTestShardTests(unittest.TestCase):
             shards.collect(self.root, "prefix", 1)
         self.assertEqual(sorted(path.name for path in self.root.iterdir()), before)
 
+    def test_gate_refuses_failed_or_unknown_classification_on_every_route(self):
+        for classification in ("failure", "cancelled", "skipped", "", "unknown"):
+            for result, cpp, enabled, qualification in (
+                    ("success", "true", "true", "false"),
+                    ("success", "false", "true", "false"),
+                    ("skipped", "false", "false", "false"),
+                    ("success", "true", "true", "true")):
+                with self.subTest(classification=classification, result=result,
+                                  cpp=cpp, enabled=enabled, qualification=qualification):
+                    with self.assertRaisesRegex(ValueError, "classification"):
+                        shards.gate(result, cpp, "false", "workflow_dispatch", "",
+                                    qualification, enabled, classification)
+
     def test_gate_all_results_cancellation_drafts_and_explicit_routes(self):
         for result in ("success", "failure", "cancelled", "skipped", "", "unknown"):
             for cancelled in ("false", "true", ""):
@@ -839,17 +1148,17 @@ class CTestShardTests(unittest.TestCase):
                         accepted = result == "success" and cancelled == draft == "false"
                         with self.subTest(result=result, cancelled=cancelled, draft=draft, cpp=cpp):
                             if accepted:
-                                self.assertEqual(shards.gate(result, cpp, cancelled, "pull_request", draft, "false", "true"),
+                                self.assertEqual(shards.gate(result, cpp, cancelled, "pull_request", draft, "false", "true", "success"),
                                                  "python-only" if cpp == "false" else "sharded")
                             else:
                                 with self.assertRaises(ValueError):
-                                    shards.gate(result, cpp, cancelled, "pull_request", draft, "false", "true")
-        self.assertEqual(shards.gate("success", "true", "false", "workflow_dispatch", "", "true", "true"), "full")
-        self.assertEqual(shards.gate("skipped", "true", "false", "push", "", "false", "false"), "skipped")
+                                    shards.gate(result, cpp, cancelled, "pull_request", draft, "false", "true", "success")
+        self.assertEqual(shards.gate("success", "true", "false", "workflow_dispatch", "", "true", "true", "success"), "full")
+        self.assertEqual(shards.gate("skipped", "true", "false", "push", "", "false", "false", "success"), "skipped")
         with self.assertRaises(ValueError):
-            shards.gate("success", "false", "false", "workflow_dispatch", "", "true", "true")
+            shards.gate("success", "false", "false", "workflow_dispatch", "", "true", "true", "success")
         with self.assertRaises(ValueError):
-            shards.gate("skipped", "false", "true", "push", "", "false", "false")
+            shards.gate("skipped", "false", "true", "push", "", "false", "false", "success")
 
 
 if __name__ == "__main__":

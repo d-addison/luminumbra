@@ -28,6 +28,7 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/core/BoundedConsoleSink.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/SimulationClock.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/SystemConfig.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/GraphicsPresets.cpp
 
     # Net
     # delay-based lockstep transport (engine-generic; LoopbackTransport
@@ -109,6 +110,7 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/world/PlayerAvatar.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/StructurePlacement.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/TerrainPresetLoader.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/world/StationDiscovery.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/WorldStreamingState.cpp
 )
 

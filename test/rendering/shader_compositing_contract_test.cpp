@@ -242,7 +242,6 @@ TEST(GlassOitContract, DestroyedBeforeLightingDepthInEveryLifecyclePath) {
 
     const char* const functions[] = {
         "void RenderPipeline::on_resize(u32 new_width, u32 new_height)",
-        "void RenderPipeline::set_render_scale(float scale)",
         "void RenderPipeline::cleanup_gpu_resources()",
     };
     for (const char* signature : functions) {
@@ -255,6 +254,76 @@ TEST(GlassOitContract, DestroyedBeforeLightingDepthInEveryLifecyclePath) {
         ASSERT_NE(depth_pos, std::string::npos);
         EXPECT_LT(destroy_pos, depth_pos);
     }
+
+    const auto setter = ExtractBlock(source, "void RenderPipeline::set_render_scale(float scale)");
+    ExpectContains(setter,
+                   "resize_graphics_targets(scale, m_shadow_pass->shadow_map().resolution)");
+    const auto apply = ExtractBlock(source, "bool RenderPipeline::apply_graphics(");
+    ExpectContains(apply, "resize_graphics_targets(config.render_scale,");
+    const auto transaction = ExtractBlock(source, "bool RenderPipeline::resize_graphics_targets(");
+    ASSERT_FALSE(transaction.empty());
+    const auto destroy_oit = transaction.find("m_glass_oit_pass->destroy()");
+    const auto replace = transaction.find("m_render_registry.replace_targets(");
+    ASSERT_NE(destroy_oit, std::string::npos);
+    ASSERT_NE(replace, std::string::npos);
+    EXPECT_LT(destroy_oit, replace); // Before publication AND allocation/failure cleanup.
+    EXPECT_EQ(CountOccurrences(transaction, "m_render_registry.replace_targets("), 1u);
+
+    const auto registry = ReadShader("src/luminumbra_client/rendering/RenderResourceRegistry.cpp");
+    const auto replacement =
+        ExtractBlock(registry, "bool RenderResourceRegistry::replace_targets(");
+    const auto cleanup = ExtractBlock(replacement, "class Cleanup");
+    ExpectContains(cleanup, "m_registry.destroy_all_owned();");
+    const auto guard = replacement.find("const Cleanup cleanup{replacement};");
+    const auto allocate = replacement.find("replacement.create_texture(");
+    const auto publish = replacement.find("std::swap(value, m_owned_renderbuffers.at(name));");
+    ASSERT_NE(guard, std::string::npos);
+    ASSERT_NE(allocate, std::string::npos);
+    ASSERT_NE(publish, std::string::npos);
+    EXPECT_LT(guard, allocate); // Partial allocation and FBO failure retain the cleanup guard.
+    EXPECT_LT(allocate, publish);
+    ExpectContains(replacement, "!replacement.create_fbo(name, fbo.desc).id");
+    // Success retires old targets through the same guard; rollback retires only
+    // candidates. In either case every framebuffer precedes depth storage.
+    const auto retire = ExtractBlock(registry, "void RenderResourceRegistry::destroy_all_owned()");
+    const auto delete_fbos = retire.find("glDeleteFramebuffers(");
+    const auto delete_depth = retire.find("glDeleteRenderbuffers(");
+    ASSERT_NE(delete_fbos, std::string::npos);
+    ASSERT_NE(delete_depth, std::string::npos);
+    EXPECT_LT(delete_fbos, delete_depth);
+}
+
+TEST(FoliagePreviewContract, BothPreviewPathsKeepTheirLookAndRestoreBeforeOtherViews) {
+    const auto preview = ReadShader("src/luminumbra_client/world/WorldgenPreview.cpp");
+    ExpectContains(preview, "kFoliageFadeStartM = 60.0f");
+    ExpectContains(preview, "kFoliageFadeEndM = 96.0f");
+    ExpectContains(preview, "kFoliagePreviewDensityScale = 1.6f");
+    for (const char* signature :
+         {"bool WorldgenPreview::render(", "bool WorldgenPreview::render_to_backbuffer("}) {
+        const auto body = ExtractBlock(preview, signature);
+        ExpectContains(body, "rebuild_foliage_if_needed(pipeline);");
+    }
+    const auto foliage = ExtractBlock(preview, "void WorldgenPreview::rebuild_foliage_if_needed(");
+    const auto look = foliage.find("foliage->set_fade_distances(");
+    const auto cached = foliage.find("if (m_last_foliage_generation == m_rebuild_generation)");
+    ASSERT_NE(look, std::string::npos);
+    ASSERT_NE(cached, std::string::npos);
+    EXPECT_LT(look, cached); // Re-entry preserves the preview even with a cached world.
+    ExpectContains(foliage, "foliage->set_density_scale(kFoliagePreviewDensityScale);");
+    const auto client = ReadShader("src/luminumbra_client/main_client.cpp");
+    const auto exit = ExtractBlock(client, "if (worldgenPreview->active() &&");
+    ExpectContains(client, "currentState != GameState::MAIN_MENU || !g_uiManager ||");
+    ExpectContains(client, "!g_uiManager->GetWorldCreationPreviewState().active");
+    ExpectContains(exit, "renderPipeline.apply_graphics(resolved_graphics)");
+    ExpectContains(exit, "worldgenPreview->set_active(false)");
+    const auto restore = client.find("if (worldgenPreview->active() &&");
+    const auto render = client.find("UpdateFoliageScatter(g_app,");
+    const auto menu = client.find("RenderMenuScreens(g_app,");
+    ASSERT_NE(restore, std::string::npos);
+    ASSERT_NE(render, std::string::npos);
+    ASSERT_NE(menu, std::string::npos);
+    EXPECT_LT(restore, render);
+    EXPECT_LT(restore, menu); // Cancellation restores the menu before later gameplay.
 }
 
 TEST(FarWorldShadowContract, SignedTagIsLadderOnlyAndAfterAllMaterialPaths) {

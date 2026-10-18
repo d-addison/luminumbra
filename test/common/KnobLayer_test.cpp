@@ -288,6 +288,19 @@ TEST(KnobLayerTest, ReopenIsExactWithKnobsAndOverrides) {
     EXPECT_EQ(saved, a);
 }
 
+TEST(KnobLayerTest, SavedSchemaPreservesTheSamplingContract) {
+    for (const int revision : {1, 2}) {
+        auto baseline = ResolveEffectivePreset(FixedBasePreset());
+        baseline["generation_params"]["terrain"]["surface_sampling_revision"] = revision;
+        nlohmann::json saved;
+        WriteKnobLayer(saved, baseline, NeutralKnobVector(), {});
+        EXPECT_EQ(saved.at("schema_rev"), revision == 1 ? 7 : 8);
+        const auto loaded = LoadTerrainPresetFromJson(saved, {});
+        ASSERT_TRUE(loaded.ok);
+        EXPECT_EQ(loaded.params.surface_sampling_revision, revision);
+    }
+}
+
 // CURATED PRESETS ARE NEVER FLATTENED: a curated preset has no knob layer; with
 // the neutral vector and no overrides, ApplyKnobLayer must preserve its AUTHORED
 // values (the knob map's neutral position == each param's default, so a neutral

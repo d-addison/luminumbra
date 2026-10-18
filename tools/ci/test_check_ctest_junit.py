@@ -58,12 +58,14 @@ class CTestSkipAuditTests(unittest.TestCase):
         )
         self.assertFalse(MODULE.skip_is_allowed(case))
 
-    def audit_required_tests(self, names, required, expected, skipped=False):
+    def audit_required_tests(self, names, required, expected, skipped=False, status=None):
         root = ET.Element("testsuite")
         for name in names:
             case = ET.SubElement(root, "testcase")
             if name is not None:
                 case.set("name", name)
+            if status is not None:
+                case.set("status", status)
             if skipped:
                 ET.SubElement(case, "skipped")
         with tempfile.TemporaryDirectory() as directory:
@@ -105,6 +107,20 @@ class CTestSkipAuditTests(unittest.TestCase):
         self.assertEqual(output, "")
         self.assertIn("Unexpected unevaluated tests:\n  - Developer.First\n", errors)
 
+    def test_explicit_run_status_passes_inventory_and_required_name_checks(self):
+        output, errors = self.audit_required_tests(
+            ["Developer.First"], ["Developer.First"], 0, status="run")
+        self.assertIn("1 tests; 0 approved skips", output)
+        self.assertEqual(errors, "")
+
+    def test_unevaluated_status_cannot_satisfy_inventory_or_required_name_checks(self):
+        for status in ("disabled", "notrun", "", "unknown"):
+            with self.subTest(status=status):
+                output, errors = self.audit_required_tests(
+                    ["Developer.First"], ["Developer.First"], 1, status=status)
+                self.assertEqual(output, "")
+                self.assertIn("Unexpected unevaluated tests:\n  - Developer.First\n", errors)
+
     def test_required_target_passes_when_registered(self):
         self.check_required_test("DeveloperConsoleUi.ScopedContextRestoresPreviousContext", 0)
 
@@ -120,6 +136,28 @@ class CTestSkipAuditTests(unittest.TestCase):
             self.assertIn(required, errors)
         else:
             self.assertIn("2 tests; 0 approved skips", output)
+
+    def test_unevaluated_status_or_result_fails_audit(self):
+        for field, value in (("status", "disabled"), ("status", "notrun"),
+                             ("status", "skipped"), ("status", "unknown"), ("status", ""),
+                             ("result", "suppressed"), ("result", "skipped"),
+                             ("result", "unknown"), ("result", "")):
+            with self.subTest(field=field, value=value), tempfile.TemporaryDirectory() as directory:
+                root = ET.Element("testsuite")
+                case = ET.SubElement(root, "testcase", name="Required.Case")
+                case.set(field, value)
+                report = Path(directory) / "ctest.junit.xml"
+                ET.ElementTree(root).write(report, encoding="utf-8")
+                with mock.patch.object(sys, "argv", [str(MODULE_PATH), str(report), "--require-test", "Required.Case"]), contextlib.redirect_stderr(io.StringIO()) as errors:
+                    self.assertEqual(MODULE.main(), 1)
+                self.assertIn("Unexpected unevaluated tests", errors.getvalue())
+
+    def test_run_completed_metadata_passes_audit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "ctest.junit.xml"
+            report.write_text('<testsuite><testcase name="Case" status="run" result="completed"/></testsuite>', encoding="utf-8")
+            with mock.patch.object(sys, "argv", [str(MODULE_PATH), str(report)]), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(MODULE.main(), 0)
 
     def test_allow_list_is_empty(self):
         # Every previously allow-listed test now genuinely runs. Guard against a

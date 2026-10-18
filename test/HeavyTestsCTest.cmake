@@ -1,5 +1,10 @@
 # Label only the reviewed long cases; quick world-opening refusals stay light.
 # The TEST_LIST is populated by the preceding GoogleTest discovery includes.
+# Partial builds may not have discovered this target. A defined list, including
+# an empty one, must still contain both reviewed cases before labeling proceeds.
+if(NOT DEFINED LUMINUMBRA_WORLD_OPEN_TESTS)
+    return()
+endif()
 foreach(_lum_heavy_variant IN ITEMS Disabled Enabled)
     set(_lum_heavy_name
         "ActiveRegions/SimBudgetWorldParity.Populated3600TicksPreserveWorldHashAndReplayWork/${_lum_heavy_variant}")

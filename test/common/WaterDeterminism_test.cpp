@@ -16,6 +16,7 @@
 // and the non-vacuity guards (water_chunks / max_depth / seam_wet / found_water /
 // land_water) still prove real water was exercised.
 #include "../support/UniqueTempPath.h"
+#include "../support/WorldgenTestData.h"
 
 #include <gtest/gtest.h>
 
@@ -27,6 +28,7 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -57,31 +59,27 @@ using Luminumbra::world::GameSession;
 // within-run path stability still holds. The destructor removes the tree.
 class HeadlessRoot {
 public:
-    explicit HeadlessRoot(bool disable_island_mask = false) {
+    explicit HeadlessRoot(bool historical_physics_scenario = false) {
         root_ = Luminumbra::TestSupport::CreateUniqueTempDirectory(
             "luminumbra_water_determinism_test_");
         const fs::path src(LUMINUMBRA_SOURCE_ROOT);
         fs::create_directories(root_ / "worlds" / "atlas" / "presets");
         fs::copy_file(src / "worlds" / "atlas" / "presets" / "default.json",
                       root_ / "worlds" / "atlas" / "presets" / "default.json");
-        if (disable_island_mask) {
+        if (historical_physics_scenario) {
             const auto path = root_ / "worlds" / "atlas" / "presets" / "default.json";
             std::ifstream input(path);
             auto preset = nlohmann::json::parse(input);
             input.close();
             preset["generation_params"]["terrain"]["island_mask_enabled"] = false;
+            // Keep the calibrated resident chunk set as well as the unmasked bed.
+            // Revision 2 changes activation spans, hence water init and scheduling,
+            // even though the terrain sampler and integer flow kernel are unchanged.
+            preset["generation_params"]["terrain"]["surface_sampling_revision"] = 1;
             std::ofstream output(path);
             output << preset.dump(2);
         }
-        // The `default` preset has rivers_enabled + a biome table ("common/biomes.json"); copy it
-        // to the locations the loader probes so the rivers/water actually generate.
-        std::error_code ec;
-        fs::create_directories(root_ / "data" / "common", ec);
-        fs::create_directories(root_ / "common", ec);
-        fs::copy_file(
-            src / "data" / "common" / "biomes.json", root_ / "data" / "common" / "biomes.json", ec);
-        fs::copy_file(
-            src / "data" / "common" / "biomes.json", root_ / "common" / "biomes.json", ec);
+        Luminumbra::TestSupport::CopyWorldgenTestData(src, root_);
     }
     ~HeadlessRoot() {
         std::error_code ec;
@@ -191,7 +189,7 @@ std::vector<std::uint64_t> run_water_sequence(const std::string& root,
     return hashes;
 }
 
-constexpr int kTicks = 64;
+constexpr int kReplayTicks = 64;
 constexpr int kWeatherRainTicks = 32;
 constexpr int kSourceWarmupTicks = 24;
 constexpr int kSourceObservationTicks = 8;
@@ -205,10 +203,10 @@ TEST(WaterDeterminism, LiveWaterSimIsRunReplayDeterministic) {
     std::size_t water_chunks_a = 0, water_chunks_b = 0;
     std::int64_t max_depth_a = 0, max_depth_b = 0;
     int seam_wet_a = 0, seam_wet_b = 0;
-    const auto seq_a =
-        run_water_sequence(root.root_string(), kTicks, water_chunks_a, max_depth_a, seam_wet_a);
-    const auto seq_b =
-        run_water_sequence(root.root_string(), kTicks, water_chunks_b, max_depth_b, seam_wet_b);
+    const auto seq_a = run_water_sequence(
+        root.root_string(), kReplayTicks, water_chunks_a, max_depth_a, seam_wet_a);
+    const auto seq_b = run_water_sequence(
+        root.root_string(), kReplayTicks, water_chunks_b, max_depth_b, seam_wet_b);
 
     ASSERT_GT(water_chunks_a, 0u)
         << "no water chunks were simulated — the test is vacuous (no live water exercised); "
@@ -932,6 +930,8 @@ PhysicsCompareResult run_bed_edit_compare(const std::string& root,
         session.SetWaterHighResEnabled(high_res);
         EXPECT_TRUE(session.CreateWorld("PhysCompare", "777", "default"));
         SHIELD_WorldSystem* world = session.GetWorldSystem();
+        EXPECT_EQ(world->get_params().surface_sampling_revision, 1);
+        EXPECT_FALSE(world->get_params().island_mask_enabled);
         world->debug_set_streaming_radius_cap(kStreamRadiusCap);
         auto* physics = session.GetPhysicsSystem();
         const Vec3 anchor = find_wet_anchor(world, session.GetMetadata().spawnPoint);
@@ -970,9 +970,10 @@ PhysicsCompareResult run_bed_edit_compare(const std::string& root,
 }
 
 TEST(WaterDeterminism, HighResWaterMatchesMediumPhysicsPerSimPass) {
-    // Keep the bed/shoreline used to calibrate both pit-fill and dam-displacement bands:
-    // the shipping island mask reshapes the terrain and can move find_wet_anchor.
-    const HeadlessRoot root(/*disable_island_mask=*/true);
+    // Keep the bed, shoreline and activation used to calibrate both resolution bands.
+    // The island mask moves find_wet_anchor; sampling revision 2 changes the resident
+    // chunks feeding the capped water scheduler. Neither belongs in a flow-scaling probe.
+    const HeadlessRoot root(/*historical_physics_scenario=*/true);
     const int probe_high = kCompareCadence * kCompareMedTicks; // equal wall-clock horizon
     const int max_high = 2 * probe_high;                       // 2x cadence safety
 
