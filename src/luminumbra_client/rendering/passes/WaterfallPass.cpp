@@ -1,4 +1,5 @@
 #include "WaterfallPass.h"
+#include "rendering/AttributedGl.h"
 
 #include "ParticlePass.h"
 #include "PassGlHelpers.h"
@@ -111,7 +112,8 @@ void WaterfallPass::execute(const RenderContext& ctx) {
             m_shader->setFloat("u_crest_y", s.crest.y);
             m_shader->setFloat("u_foot_y", s.foot.y);
             // 12 verts/site: the vertical sheet (0..5) + the horizontal plunge-pool quad (6..11).
-            glDrawArrays(GL_TRIANGLES, static_cast<GLint>(i * 12), 12);
+            Luminumbra::Rendering::AttributedGl::Submit(
+                glDrawArrays, GL_TRIANGLES, static_cast<GLint>(i * 12), 12);
         }
         glBindVertexArray(0);
 
