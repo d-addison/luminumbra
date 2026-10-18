@@ -27,7 +27,9 @@ class PatchIntegrationTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="jolt-patch-")
         self.addCleanup(self.temporary.cleanup)
-        self.base = Path(self.temporary.name)
+        # Bind fixtures and fault injections to the paths prepare() accesses.
+        # Retain TemporaryDirectory's original spelling for its own cleanup.
+        self.base = Path(self.temporary.name).resolve()
         self.root = self.base / "project"
         self.source = self.base / "supplied"
         self.output = self.base / "build/overlay"
@@ -241,6 +243,80 @@ class PatchIntegrationTests(unittest.TestCase):
                         self.assertIn("unsuitable version", result.stdout + result.stderr)
                     self.assertFalse(self.output.exists())
                 self.assertEqual((self.source / self.name).read_bytes(), self.before)
+                self.assertNotRegex((build / "CMakeCache.txt").read_text(), r"(?m)^CMAKE_(?:C|CXX)_COMPILER:")
+
+    def test_fixture_aliases_bind_injections_to_accessed_paths(self):
+        temporary_directory = tempfile.TemporaryDirectory
+        spellings = []
+
+        def aliased_temporary(*args, **kwargs):
+            temporary = temporary_directory(*args, **kwargs)
+            original = Path(temporary.name)
+            # A real existing directory gives a portable spelling alias. This
+            # does not assume Windows short-name support or symlink privilege.
+            (original / "spelling").mkdir()
+            alias = original / "spelling/.."
+            self.assertNotEqual(alias, alias.resolve())
+            self.assertTrue(alias.samefile(original))
+            spellings.append((alias, original.resolve()))
+
+            class TemporaryAlias:
+                name = str(alias)
+                cleanup = temporary.cleanup
+
+            return TemporaryAlias()
+
+        methods = ("test_configure_requires_supported_python_with_testing_off",
+                   "test_resolved_output_alias_cannot_enter_supplied_source",
+                   "test_short_write_reports_failure_and_preserves_partial_output",
+                   "test_fifo_directory_and_redirect_metadata_refuse")
+        for method in methods:
+            with self.subTest(method=method), patch.object(tempfile, "TemporaryDirectory", aliased_temporary):
+                result = unittest.TestResult()
+                PatchIntegrationTests(method).run(result)
+                self.assertEqual(result.testsRun, 1)
+                self.assertEqual(result.skipped, [])
+                self.assertEqual(result.errors + result.failures, [])
+        self.assertEqual(len(spellings), len(methods))
+
+    def test_cmake_source_spellings_match_and_missing_or_duplicate_inputs_refuse(self):
+        self.copy_integration(self.root)
+        self.save()
+        (self.source / "Build").mkdir()
+        target = self.source / self.name
+        source_alias = self.source / "Build/.."
+        self.assertTrue(source_alias.samefile(self.source))
+        cases = (("source-spelling", source_alias, [target.as_posix()], None),
+                 ("relative-source", self.source, ["../" + self.name], None),
+                 ("duplicate", self.source, [target.as_posix(), "../" + self.name], "Duplicate Jolt input"),
+                 ("missing", self.source, [(self.source / "absent.h").as_posix()], "missing reviewed input"),
+                 ("empty", self.source, [], "missing reviewed input"))
+        for label, source, sources, refusal in cases:
+            with self.subTest(case=label):
+                output = self.base / ("overlay-" + label)
+                (self.root / "CMakeLists.txt").write_text(
+                    "cmake_minimum_required(VERSION 3.20)\n"
+                    "project(JoltSourcePaths LANGUAGES NONE)\n"
+                    "add_library(Jolt OBJECT EXCLUDE_FROM_ALL)\n"
+                    "set_target_properties(Jolt PROPERTIES LINKER_LANGUAGE CXX)\n"
+                    f'set_property(TARGET Jolt PROPERTY SOURCES "{";".join(sources)}")\n'
+                    'include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/jolt_startup.cmake")\n'
+                    f'luminumbra_prepare_jolt_startup("{source.as_posix()}" "{output.as_posix()}")\n'
+                    'get_target_property(_sources Jolt SOURCES)\n'
+                    'file(WRITE "${CMAKE_BINARY_DIR}/sources.txt" "${_sources}")\n', encoding="utf-8")
+                build = self.base / ("source-paths-" + label)
+                result = subprocess.run(
+                    ["cmake", "-S", str(self.root), "-B", str(build), "-G", "Ninja",
+                     f"-DPython3_EXECUTABLE={sys.executable}"],
+                    capture_output=True, text=True, timeout=10)
+                if refusal is None:
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertEqual((build / "sources.txt").read_text(), (output / self.name).as_posix())
+                    self.assertEqual((output / self.name).read_bytes(), self.after)
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(refusal, result.stdout + result.stderr)
+                self.assertEqual(target.read_bytes(), self.before)
                 self.assertNotRegex((build / "CMakeCache.txt").read_text(), r"(?m)^CMAKE_(?:C|CXX)_COMPILER:")
 
     def test_repeat_is_idempotent_and_source_is_read_only(self):
@@ -459,15 +535,18 @@ class PatchIntegrationTests(unittest.TestCase):
     def test_resolved_output_alias_cannot_enter_supplied_source(self):
         original = Path.resolve
         alias = self.base / "short-name/overlay"
+        injected = []
 
         def resolved(path, *args, **kwargs):
             if path == alias:
+                injected.append(path)
                 return self.source / "overlay"
             return original(path, *args, **kwargs)
 
         with patch.object(Path, "resolve", resolved):
             with self.assertRaisesRegex(MODULE.PatchError, "separate"):
                 MODULE.prepare(self.source, alias, self.root)
+        self.assertEqual(injected, [alias])
         self.assertFalse(alias.exists())
         self.assertFalse((self.source / "overlay").exists())
 
@@ -487,6 +566,7 @@ class PatchIntegrationTests(unittest.TestCase):
     def test_short_write_reports_failure_and_preserves_partial_output(self):
         original = Path.open
         target = self.output / self.name
+        injected = []
 
         class ShortWriter:
             def __init__(self, handle):
@@ -504,12 +584,14 @@ class PatchIntegrationTests(unittest.TestCase):
         def opened(path, *args, **kwargs):
             handle = original(path, *args, **kwargs)
             if path == target and args == ("xb",):
+                injected.append(path)
                 return ShortWriter(handle)
             return handle
 
         with patch.object(Path, "open", opened):
             with self.assertRaisesRegex(MODULE.PatchError, "short overlay write"):
                 self.prepare()
+        self.assertEqual(injected, [target])
         self.assertEqual(target.read_bytes(), self.after[:2])
         with self.assertRaisesRegex(MODULE.PatchError, "content mismatch"):
             self.prepare()
@@ -536,16 +618,21 @@ class PatchIntegrationTests(unittest.TestCase):
         target.rmdir()
         target.write_bytes(self.before)
         original = Path.lstat
+        injected = []
 
         def redirected(path):
             info = original(path)
             if path == target:
+                injected.append(path)
                 return type("Reparse", (), {"st_mode": info.st_mode, "st_file_attributes": 0x400})()
             return info
 
         with patch.object(Path, "lstat", redirected):
             with self.assertRaisesRegex(MODULE.PatchError, "redirected"):
                 self.prepare()
+        self.assertTrue(injected)
+        self.assertTrue(all(path == target for path in injected))
+        self.assertEqual(target.read_bytes(), self.before)
         if hasattr(os, "mkfifo"):
             target.unlink()
             os.mkfifo(target)
