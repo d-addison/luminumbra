@@ -3,7 +3,10 @@
 
 An offline author may supply a pristine archive extraction directly under TMPDIR
 with LUMINUMBRA_RMLUI_TEST_SOURCE. It is temporarily moved, never copied or used
-as a production source override. Otherwise the fixture downloads the exact pin.
+as a production source override. The caller must give each direct CLI process
+exclusive ownership of this input until it returns; the CTest resource lock only
+coordinates the registered CTest consumers. Otherwise the fixture downloads
+the exact pin.
 """
 from __future__ import annotations
 
@@ -164,6 +167,107 @@ def remove_source_fixture(directory, expected_directory, sources):
     shutil.rmtree(directory, onerror=retry)
 
 
+class BorrowedSource:
+    """Return only the enrolled tree; failed recovery forbids ancestor cleanup."""
+
+    def __init__(self, original, spec):
+        self.original = M.canonical(original)
+        self.spec = spec
+        spec.verify_files(self.original, False)
+        self.identity = file_identity(self.original)
+        self.had_git = (self.original / ".git").exists()
+        if self.had_git:
+            M.verify_git(self.original, spec)
+        self.seal = self.snapshot(self.original)
+        self.created_git = None
+        self.created_git_seal = None
+
+    @staticmethod
+    def snapshot(path):
+        # Both passes cap entries; inventory also bounds total bytes before hashing.
+        files = M.inventory(path)
+        result = {name: (info.st_size, stat.S_IMODE(info.st_mode),
+                         M.digest(M.read_file(path / name, info.st_size)))
+                  for name, info in files.items()}
+        result["./"] = (0, stat.S_IMODE(os.lstat(path).st_mode), "")
+        pending, seen, count = [path], set(), 0
+        while pending:
+            with os.scandir(pending.pop()) as entries:
+                for entry in entries:
+                    count += 1
+                    M.require(count <= M.STORAGE_ENTRIES, "fixture directory entry bound exceeded")
+                    name = Path(entry.path).relative_to(path).as_posix()
+                    info = os.lstat(entry.path)
+                    if M.ordinary(info, True):
+                        result[name + "/"] = (0, stat.S_IMODE(info.st_mode), "")
+                        pending.append(Path(entry.path))
+                    else:
+                        M.require(name in files and M.ordinary(info) and info.st_nlink == 1,
+                                  "fixture inventory changed during sealing")
+                        seen.add(name)
+        M.require(seen == set(files), "fixture inventory changed during sealing")
+        return result
+
+    def prepare_git(self, current):
+        if not self.had_git:
+            admin = current / ".git"
+            admin.mkdir()
+            self.created_git = file_identity(admin)
+            install_exact_git(current, self.spec)
+            self.created_git_seal = self.snapshot(admin)
+
+    def restore(self, *locations):
+        original_error = sys.exc_info()[1]
+        try:
+            candidates = set((self.original, *locations))
+            present = [path for path in candidates if os.path.lexists(path)]
+            if len(present) != 1 or file_identity(present[0]) != self.identity:
+                raise AssertionError("borrowed tree missing, replaced or destination occupied")
+            current = present[0]
+            if current != M.canonical(current):
+                raise AssertionError("borrowed tree path changed")
+            if self.had_git or self.created_git is not None:
+                if not self.had_git and self.created_git_seal is None:
+                    raise AssertionError("incomplete created Git administration; preserve for recovery")
+                M.verify_git(current, self.spec)
+                try:
+                    self.spec.verify_files(current, False)
+                except M.Refusal:
+                    # A mixed or partial tree is never treated as a patched tree.
+                    self.spec.verify_files(current, True)
+                    M.git(current, "apply", "--reverse", "--unidiff-zero", "-p1", "--check",
+                          "--", str(self.spec.patch))
+                    M.git(current, "apply", "--reverse", "--unidiff-zero", "-p1",
+                          "--", str(self.spec.patch))
+                self.spec.verify_files(current, False)
+                # The complete trusted seal below checks every Git byte after
+                # reversal, including created administration before its removal.
+                if not self.had_git:
+                    admin = current / ".git"
+                    if (file_identity(admin) != self.created_git
+                            or self.snapshot(admin) != self.created_git_seal):
+                        raise AssertionError("created Git administration custody changed")
+                    remove_source_fixture(admin, self.created_git, (current,))
+                    self.created_git = None
+                    self.created_git_seal = None
+            self.spec.verify_files(current, False)
+            if self.snapshot(current) != self.seal:
+                raise AssertionError("borrowed source bytes, modes or Git metadata changed")
+            if file_identity(current) != self.identity:
+                raise AssertionError("borrowed tree custody changed before return")
+            if current != self.original:
+                if os.path.lexists(self.original):
+                    raise AssertionError("borrowed return destination occupied")
+                os.rename(current, self.original)
+            if (file_identity(self.original) != self.identity
+                    or self.snapshot(self.original) != self.seal):
+                raise AssertionError("borrowed source return verification failed")
+        except BaseException as error:
+            raise AssertionError(
+                f"borrowed source recovery failed; preserve {self.original} and {locations}; "
+                f"original failure: {original_error!r}; restoration failure: {error!r}") from error
+
+
 class SourceFiles(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -171,37 +275,40 @@ class SourceFiles(unittest.TestCase):
         cls.directory = Path(tempfile.mkdtemp(prefix="rmlui-contract-")).resolve(strict=True)
         cls.directory_identity = file_identity(cls.directory)
         cls.workspace = M.Workspace(cls.directory / "build", cls.spec)
-        cls.workspace.initialize()
         cls.offline = os.environ.get("LUMINUMBRA_RMLUI_TEST_SOURCE")
-        if cls.offline:
-            cls.input = M.canonical(cls.offline)
-            if cls.input.parent != M.canonical(os.environ["TMPDIR"]):
-                raise AssertionError("offline input must belong directly to the private temporary root")
-            cls.spec.verify_files(cls.input, False)
-            cls.workspace.stage.parent.mkdir()
-            os.rename(cls.input, cls.workspace.stage)
-            try:
-                if not (cls.workspace.stage / ".git").exists():
-                    install_exact_git(cls.workspace.stage, cls.spec)
-            except BaseException:
-                os.rename(cls.workspace.stage, cls.input)
-                raise
-        else:
-            cls.workspace.download()
-            M.git(cls.workspace.source, "apply", "--reverse", "--unidiff-zero", "-p1", "--", str(cls.spec.patch))
-            cls.workspace.receipt.unlink()
-            os.rename(cls.workspace.source, cls.workspace.stage)
-        M.verify_git(cls.workspace.stage, cls.spec)
-        cls.spec.verify_files(cls.workspace.stage, False)
+        cls.borrowed = None
+        try:
+            cls.workspace.initialize()
+            if cls.offline:
+                cls.input = M.canonical(cls.offline)
+                if cls.input.parent != M.canonical(os.environ["TMPDIR"]):
+                    raise AssertionError("offline input must belong directly to the private temporary root")
+                cls.borrowed = BorrowedSource(cls.input, cls.spec)
+                cls.workspace.stage.parent.mkdir()
+                os.rename(cls.input, cls.workspace.stage)
+                cls.borrowed.prepare_git(cls.workspace.stage)
+            else:
+                cls.workspace.download()
+                M.git(cls.workspace.source, "apply", "--reverse", "--unidiff-zero", "-p1", "--", str(cls.spec.patch))
+                cls.workspace.receipt.unlink()
+                os.rename(cls.workspace.source, cls.workspace.stage)
+            M.verify_git(cls.workspace.stage, cls.spec)
+            cls.spec.verify_files(cls.workspace.stage, False)
+        except BaseException:
+            if cls.borrowed is not None:
+                cls.borrowed.restore(cls.workspace.stage, cls.workspace.source)
+            # Without an enrolled offline input this fresh directory is owned.
+            # A failed restoration raises above and preserves its ancestor.
+            remove_source_fixture(cls.directory, cls.directory_identity,
+                                  (cls.workspace.stage, cls.workspace.source))
+            raise
 
     @classmethod
     def tearDownClass(cls):
-        if cls.offline:
+        if cls.borrowed is not None:
+            cls.borrowed.restore(cls.workspace.stage, cls.workspace.source)
+        else:
             current = cls.workspace.stage if cls.workspace.stage.exists() else cls.workspace.source
-            os.rename(current, cls.input)
-            cls.spec.verify_files(cls.input, False)
-        current = cls.workspace.stage if cls.workspace.stage.exists() else cls.workspace.source
-        if not cls.offline:
             M.verify_git(current, cls.spec)
             cls.spec.verify_files(current, False)
         remove_source_fixture(cls.directory, cls.directory_identity,
@@ -213,8 +320,9 @@ class SourceFiles(unittest.TestCase):
         before = {n: M.digest(M.read_file(w.stage / n, e["size"])) for n, e in self.spec.files.items()}
         M.write_exclusive(w.admission, b"test admission\n")
         self.assertFalse(w.receipt.exists())
-        w.publish(owner)
+        borrowed = BorrowedSource(w.stage, self.spec)
         try:
+            w.publish(owner)
             self.assertFalse(w.stage.exists())
             self.assertTrue(w.receipt.exists())
             w.verify()
@@ -242,9 +350,9 @@ class SourceFiles(unittest.TestCase):
                 self.assertEqual(w.receipt.read_bytes(), M.encoded(value))
                 w.receipt.write_bytes(raw)
         finally:
-            M.git(w.source, "apply", "--reverse", "--unidiff-zero", "-p1", "--", str(self.spec.patch))
-            w.receipt.unlink()
-            os.rename(w.source, w.stage)
+            borrowed.restore(w.source)
+            if w.receipt.exists():
+                w.receipt.unlink()
 
     def test_every_changed_file_preserves_operations_defaults_and_enum_declarations(self):
         source = self.workspace.stage
@@ -284,6 +392,7 @@ class SourceFiles(unittest.TestCase):
             with self.subTest(boundary=boundary):
                 M.write_exclusive(w.admission, b"controlled admission\n")
                 owner = w.owner()
+                borrowed = BorrowedSource(w.stage, self.spec)
                 def command(source, *args, **kwargs):
                     if args[0] == "apply" and ((boundary == "check" and "--check" in args)
                                                or (boundary == "apply" and "--check" not in args)):
@@ -321,12 +430,7 @@ class SourceFiles(unittest.TestCase):
                         w.preflight(False)
                     self.assertTrue(w.admission.exists())
                 finally:
-                    if w.source.exists():
-                        real_rename(w.source, w.stage)
-                    try:
-                        self.spec.verify_files(w.stage, False)
-                    except M.Refusal:
-                        real_git(w.stage, "apply", "--reverse", "--unidiff-zero", "-p1", "--", str(self.spec.patch))
+                    borrowed.restore(w.source)
                     if w.receipt.exists():
                         w.receipt.unlink()
                     w.admission.unlink()
@@ -340,6 +444,7 @@ class SourceFiles(unittest.TestCase):
                 name = next(iter(self.spec.files))
             path = source / name
             original = path.read_bytes()
+            original_mode = stat.S_IMODE(os.lstat(path).st_mode)
             for replacement in (b"", original[:-1], original + b"\n"):
                 path.write_bytes(replacement)
                 with self.assertRaises(M.Refusal):
@@ -350,6 +455,7 @@ class SourceFiles(unittest.TestCase):
                 self.spec.verify_files(source, False)
             self.assertFalse(path.exists())
             path.write_bytes(original)
+            path.chmod(original_mode)
         for directory in (False, True):
             extra = source / "untracked-input"
             extra.mkdir() if directory else extra.write_bytes(b"foreign")
@@ -384,12 +490,29 @@ class SourceFiles(unittest.TestCase):
                 path.write_bytes(original)
         for name in ("commondir", "objects/info/alternates", "objects/info/http-alternates", "info/grafts"):
             path = admin / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(b"foreign\n")
-            with self.assertRaises(M.Refusal):
-                M.verify_git(source, self.spec)
-            self.assertEqual(path.read_bytes(), b"foreign\n")
-            path.unlink()
+            # These fixed probes need at most two administrative parent levels.
+            missing = [parent for parent in path.parents
+                       if parent != admin and parent.is_relative_to(admin)
+                       and not os.path.lexists(parent)]
+            created, probe_identity = [], None
+            try:
+                for parent in reversed(missing):
+                    parent.mkdir()
+                    created.append((parent, file_identity(parent)))
+                with path.open("xb") as stream:
+                    info = os.fstat(stream.fileno())
+                    probe_identity = info.st_dev, info.st_ino
+                    stream.write(b"foreign\n")
+                with self.assertRaises(M.Refusal):
+                    M.verify_git(source, self.spec)
+                self.assertEqual(path.read_bytes(), b"foreign\n")
+            finally:
+                if probe_identity is not None:
+                    M.require(file_identity(path) == probe_identity, "Git fixture probe custody changed")
+                    path.unlink()
+                for parent, identity in reversed(created):
+                    M.require(file_identity(parent) == identity, "Git fixture parent custody changed")
+                    parent.rmdir()
         original = (admin / "index").read_bytes()
         name = next(iter(self.spec.files))
         for args in (("--assume-unchanged",), ("--skip-worktree",), ("--chmod=+x",)):
@@ -406,6 +529,7 @@ class SourceFiles(unittest.TestCase):
         name = next(iter(self.spec.files))
         path = source / name
         original = path.read_bytes()
+        original_mode = stat.S_IMODE(os.lstat(path).st_mode)
         path.unlink()
         try:
             with mock.patch.object(M.os, "lstat", return_value=mock.Mock(st_mode=stat.S_IFLNK, st_file_attributes=0)):
@@ -431,6 +555,7 @@ class SourceFiles(unittest.TestCase):
             if os.path.lexists(path):
                 path.unlink()
             path.write_bytes(original)
+            path.chmod(original_mode)
 
     def test_mode_and_unreadable_refuse(self):
         path = self.workspace.stage / next(iter(self.spec.files))
@@ -445,6 +570,217 @@ class SourceFiles(unittest.TestCase):
         with mock.patch.object(M.os, "open", side_effect=PermissionError("unreadable")):
             with self.assertRaises(PermissionError):
                 M.read_file(path, 1024)
+
+
+class BorrowedFixtureRecovery(unittest.TestCase):
+    setUpClass = classmethod(SourceFiles.setUpClass.__func__)
+    tearDownClass = classmethod(SourceFiles.tearDownClass.__func__)
+
+    def test_setup_final_verification_failure_returns_the_complete_input(self):
+        original = self.workspace.stage
+        identity, seal = file_identity(original), BorrowedSource.snapshot(original)
+        for boundary in ("git", "files"):
+            with self.subTest(boundary=boundary):
+                class Fixture:
+                    pass
+                real_git, real_files = M.verify_git, M.Specification.verify_files
+                failed = False
+                def verify_git(path, spec):
+                    nonlocal failed
+                    real_git(path, spec)
+                    if boundary == "git" and path != original and not failed:
+                        failed = True
+                        raise RuntimeError("injected setup verification")
+                def verify_files(spec, path, patched):
+                    nonlocal failed
+                    real_files(spec, path, patched)
+                    if boundary == "files" and path != original and not failed:
+                        failed = True
+                        raise RuntimeError("injected setup verification")
+                with mock.patch.dict(os.environ, LUMINUMBRA_RMLUI_TEST_SOURCE=str(original),
+                                     TMPDIR=str(original.parent)), \
+                        mock.patch.object(M, "verify_git", side_effect=verify_git), \
+                        mock.patch.object(M.Specification, "verify_files", verify_files):
+                    with self.assertRaisesRegex(RuntimeError, "injected setup verification"):
+                        SourceFiles.setUpClass.__func__(Fixture)
+                self.assertTrue(failed)
+                self.assertFalse(Fixture.directory.exists())
+                self.assertEqual(file_identity(original), identity)
+                self.assertEqual(BorrowedSource.snapshot(original), seal)
+
+    def test_teardown_refusal_preserves_ancestor_and_can_retry_both_locations(self):
+        original = self.workspace.stage
+        for published in (False, True):
+            with self.subTest(published=published):
+                class Fixture:
+                    pass
+                with mock.patch.dict(os.environ, LUMINUMBRA_RMLUI_TEST_SOURCE=str(original),
+                                     TMPDIR=str(original.parent)):
+                    SourceFiles.setUpClass.__func__(Fixture)
+                try:
+                    if published:
+                        M.write_exclusive(Fixture.workspace.admission, b"test admission\n")
+                        Fixture.workspace.publish(Fixture.workspace.owner())
+                    current = Fixture.workspace.source if published else Fixture.workspace.stage
+                    with mock.patch.object(M, "verify_git", side_effect=OSError("injected teardown refusal")):
+                        with self.assertRaisesRegex(AssertionError, "restoration failure:.*teardown refusal"):
+                            SourceFiles.tearDownClass.__func__(Fixture)
+                    self.assertTrue(Fixture.directory.exists())
+                    self.assertEqual(file_identity(current), Fixture.borrowed.identity)
+                    self.assertFalse(original.exists())
+                finally:
+                    SourceFiles.tearDownClass.__func__(Fixture)
+                self.assertTrue(original.exists())
+                self.assertFalse(Fixture.directory.exists())
+
+    def test_borrowed_recovery_refuses_unknown_partial_and_changed_metadata(self):
+        original = self.workspace.stage
+        borrowed = BorrowedSource(original, self.spec)
+        root = Path(tempfile.mkdtemp(prefix="borrowed refusal ")).resolve(strict=True)
+        root_identity = file_identity(root)
+        try:
+            current, hidden = root / "current", root / "hidden"
+            os.rename(original, current)
+            try:
+                # Missing custody and an occupied original destination cannot
+                # select or adopt a different tree, including empty input sets.
+                os.rename(current, hidden)
+                with self.assertRaisesRegex(AssertionError, "missing, replaced or destination occupied"):
+                    borrowed.restore(current)
+                current.mkdir()
+                with self.assertRaisesRegex(AssertionError, "missing, replaced or destination occupied"):
+                    borrowed.restore(current)
+                current.rmdir()
+                os.rename(hidden, current)
+                original.mkdir()
+                with self.assertRaisesRegex(AssertionError, "destination occupied"):
+                    borrowed.restore(current)
+                original.rmdir()
+                name = next(iter(self.spec.files))
+                for path in (current / name, current / ".git/HEAD"):
+                    raw = path.read_bytes()
+                    path.write_bytes(b"partial")
+                    try:
+                        with self.assertRaisesRegex(AssertionError, "borrowed source recovery failed"):
+                            borrowed.restore(current)
+                        self.assertEqual(file_identity(current), borrowed.identity)
+                        self.assertEqual(path.read_bytes(), b"partial")
+                    finally:
+                        path.write_bytes(raw)
+                extra = current / ".git/unexpected-empty"
+                extra.mkdir()
+                try:
+                    with self.assertRaisesRegex(AssertionError, "bytes, modes or Git metadata changed"):
+                        borrowed.restore(current)
+                    self.assertTrue(extra.is_dir())
+                    self.assertEqual(file_identity(current), borrowed.identity)
+                finally:
+                    extra.rmdir()
+                with mock.patch.object(M, "read_file", side_effect=PermissionError("injected unreadable input")):
+                    with self.assertRaisesRegex(AssertionError, "unreadable input"):
+                        borrowed.restore(current)
+                with mock.patch.object(os, "rename", side_effect=OSError("injected return failure")):
+                    with self.assertRaisesRegex(AssertionError, "return failure"):
+                        borrowed.restore(current)
+                self.assertEqual(file_identity(current), borrowed.identity)
+            finally:
+                borrowed.restore(current)
+        finally:
+            # A restoration exception bypasses recursive allocation cleanup.
+            borrowed.restore(root / "current", root / "hidden")
+            remove_source_fixture(root, root_identity, ())
+
+        if os.name == "posix":
+            # Two fixed unpatched files isolate both unlink/recreate consumers
+            # from Git's permission normalization when applying changed files.
+            names = (next(iter(self.spec.files)), "LICENSE.txt")
+            self.assertTrue(all(self.spec.files[name]["pristine_sha256"]
+                                == self.spec.files[name]["patched_sha256"] for name in names))
+            paths = [original / name for name in names]
+            modes = {path: stat.S_IMODE(os.lstat(path).st_mode) for path in paths}
+            try:
+                for path, mode in modes.items():
+                    variant = mode ^ stat.S_IRGRP
+                    self.assertNotEqual(variant, mode)
+                    path.chmod(variant)
+                SourceFiles.test_nonordinary_files_and_links(self)
+                SourceFiles.test_files_mixed_missing_extra_and_partial_refuse_untouched(self)
+                for path, mode in modes.items():
+                    variant = mode ^ stat.S_IRGRP
+                    self.assertEqual(stat.S_IMODE(os.lstat(path).st_mode), variant)
+            finally:
+                for path, mode in modes.items():
+                    path.chmod(mode)
+
+    def test_borrowed_archive_without_git_returns_its_original_metadata(self):
+        original = self.workspace.stage
+        root = Path(tempfile.mkdtemp(prefix="borrowed Git recovery ")).resolve(strict=True)
+        root_identity = file_identity(root)
+        try:
+            saved_git = root / "original-git"
+            os.rename(original / ".git", saved_git)
+            try:
+                for state in ("unprepared", "prepared", "partial"):
+                    with self.subTest(state=state):
+                        borrowed = BorrowedSource(original, self.spec)
+                        current = root / "current"
+                        os.rename(original, current)
+                        try:
+                            if state == "partial":
+                                partial_identity = None
+                                def install_failure(path, spec):
+                                    nonlocal partial_identity
+                                    head = path / ".git/HEAD"
+                                    head.write_bytes(b"partial")
+                                    partial_identity = file_identity(head)
+                                    raise OSError("injected Git installation failure")
+                                with mock.patch(__name__ + ".install_exact_git", side_effect=install_failure):
+                                    with self.assertRaisesRegex(OSError, "installation failure"):
+                                        borrowed.prepare_git(current)
+                                with self.assertRaisesRegex(AssertionError, "restoration failure"):
+                                    borrowed.restore(current)
+                                self.assertTrue(current.exists())
+                                head = current / ".git/HEAD"
+                                self.assertEqual(head.read_bytes(), b"partial")
+                                self.assertEqual(file_identity(head), partial_identity)
+                                # Explicitly repair only this injection's own file
+                                # and empty directory; the helper never adopts it.
+                                head.unlink()
+                                self.assertEqual(file_identity(current / ".git"), borrowed.created_git)
+                                (current / ".git").rmdir()
+                                borrowed.created_git = None
+                            elif state == "prepared":
+                                borrowed.prepare_git(current)
+                                extra = current / ".git/unexpected-empty"
+                                extra.mkdir()
+                                try:
+                                    with self.assertRaisesRegex(AssertionError, "administration custody changed"):
+                                        borrowed.restore(current)
+                                    self.assertTrue(extra.exists())
+                                finally:
+                                    extra.rmdir()
+                                M.git(current, "apply", "--unidiff-zero", "-p1", "--", str(self.spec.patch))
+                                with mock.patch(__name__ + ".remove_source_fixture",
+                                                side_effect=PermissionError("injected Git cleanup refusal")):
+                                    with self.assertRaisesRegex(AssertionError, "Git cleanup refusal"):
+                                        borrowed.restore(current)
+                                self.assertTrue((current / ".git").exists())
+                                with mock.patch.object(os, "rename", side_effect=OSError("injected return failure")):
+                                    with self.assertRaisesRegex(AssertionError, "return failure"):
+                                        borrowed.restore(current)
+                                self.assertTrue(current.exists())
+                                self.assertFalse((current / ".git").exists())
+                        finally:
+                            borrowed.restore(current)
+                        self.assertFalse((original / ".git").exists())
+                        self.assertEqual(BorrowedSource.snapshot(original), borrowed.seal)
+            finally:
+                os.rename(saved_git, original / ".git")
+        finally:
+            # Keep the saved original Git directory if any recovery step failed.
+            M.verify_git(original, self.spec)
+            self.spec.verify_files(original, False)
+            remove_source_fixture(root, root_identity, ())
 
 
 class DeliveryRefusals(unittest.TestCase):
@@ -963,8 +1299,9 @@ class HostedConfigurationContracts(unittest.TestCase):
                         Fixture.setUpClass()
                     self.assertEqual(Fixture.directory, M.canonical(Fixture.directory))
                 finally:
-                    if "directory" in Fixture.__dict__:
-                        shutil.rmtree(Fixture.directory)
+                    if "directory" in Fixture.__dict__ and Fixture.directory.exists():
+                        remove_source_fixture(Fixture.directory, Fixture.directory_identity,
+                                              (Fixture.workspace.stage, Fixture.workspace.source))
 
 
 class OwnedCommandLifetime(unittest.TestCase):

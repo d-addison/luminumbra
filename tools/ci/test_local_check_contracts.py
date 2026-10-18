@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Check effective CTest registrations and hosted coverage without native work."""
 
+import ast
 import importlib.util
 import json
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -21,6 +22,69 @@ SPEC.loader.exec_module(policy)
 
 
 class RegistrationTests(unittest.TestCase):
+    def test_borrowed_source_contracts_share_an_effective_resource_lock(self):
+        production = (ROOT / "tools/CMakeLists.txt").read_text(encoding="utf-8")
+        start = production.index("    add_test(\n        NAME RmlUiSourceScriptContract")
+        end = production.index("    add_test(\n        NAME SlowestTestsScriptContract", start)
+        # Evaluate the exact production registration block with real CMake/CTest.
+        # This synthetic project has no targets, compilers or dependency setup.
+        with tempfile.TemporaryDirectory(prefix="source lock discovery ") as temporary:
+            root = Path(temporary)
+            (root / "CMakeLists.txt").write_text(
+                "cmake_minimum_required(VERSION 3.20)\n"
+                "project(SourceLockContracts LANGUAGES NONE)\nenable_testing()\n"
+                + production[start:end], encoding="utf-8")
+            build = root / "build"
+            subprocess.run(["cmake", "-S", str(root), "-B", str(build), "-G", "Ninja",
+                            f"-DPython3_EXECUTABLE={sys.executable}"],
+                           check=True, capture_output=True, text=True)
+            result = subprocess.run(["ctest", "--test-dir", str(build), "--show-only=json-v1"],
+                                    check=True, capture_output=True, text=True)
+            tests = {test["name"]: test for test in json.loads(result.stdout)["tests"]}
+            expected = {"RmlUiSourceScriptContract", "RmlUiSourceCommandContract",
+                        "LocalRmlUiRecipeContract", "LocalRmlUiRecoveryFailureContract"}
+            expected.update("RmlUiSourceFixture_" + fixture for fixture in (
+                'every_changed_file_preserves_operations_defaults_and_enum_declarations',
+                'files_mixed_missing_extra_and_partial_refuse_untouched',
+                'git_pin_index_modes_flags_alternates_and_config_refusals',
+                'interruption_at_each_publication_boundary_never_marks_incomplete_ready',
+                'mode_and_unreadable_refuse',
+                'nonordinary_files_and_links',
+                'operation_assertions_use_strict_utf8_with_a_cp1252_default'))
+            expected.update("RmlUiSourceRecovery_" + recovery for recovery in (
+                "borrowed_archive_without_git_returns_its_original_metadata",
+                "borrowed_recovery_refuses_unknown_partial_and_changed_metadata",
+                "setup_final_verification_failure_returns_the_complete_input",
+                "teardown_refusal_preserves_ancestor_and_can_retry_both_locations"))
+            expected.update("LocalRmlUiRecovery_" + boundary for boundary in
+                            ("beforepatch", "afterpatch", "beforerename", "afterrename", "receipt", "configure"))
+            self.assertEqual(set(tests), expected)
+            # Expand every class/method selector against the actual source AST.
+            # Registration must cover every case exactly once, including future cases.
+            for script in ("test_rmlui_source.py", "test_local_rmlui_recipe.py"):
+                tree = ast.parse((ROOT / "tools/ci" / script).read_text(encoding="utf-8"))
+                cases = {node.name + "." + method.name for node in tree.body
+                         if isinstance(node, ast.ClassDef) for method in node.body
+                         if isinstance(method, ast.FunctionDef) and method.name.startswith("test_")}
+                selected = []
+                for test in tests.values():
+                    if Path(test["command"][3]).name == script:
+                        for selector in test["command"][4:]:
+                            matches = sorted(case for case in cases
+                                             if case == selector or case.startswith(selector + "."))
+                            self.assertTrue(matches, selector)
+                            selected.extend(matches)
+                self.assertCountEqual(selected, cases)
+            for test in tests.values():
+                properties = {item["name"]: item["value"] for item in test["properties"]}
+                self.assertEqual(properties["RESOURCE_LOCK"], ["rmlui_offline_input"])
+                self.assertFalse(properties.get("RUN_SERIAL", False))
+                self.assertEqual(properties["TIMEOUT"], 60)
+                self.assertFalse(properties.get("DISABLED", False))
+                self.assertNotIn("SKIP_RETURN_CODE", properties)
+            self.assertNotRegex((build / "CMakeCache.txt").read_text(encoding="utf-8"),
+                                r"(?m)^CMAKE_(?:C|CXX)_COMPILER:")
+
     def test_compiler_free_project_discovers_the_shared_production_registrations(self):
         # Configure only LANGUAGES NONE: no compiler probes, dependencies,
         # target builds or test execution. CTest itself supplies the model.

@@ -10,6 +10,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 
 MODULE_PATH = Path(__file__).with_name("rmlui_source.py")
 LOADER = importlib.util.spec_from_file_location("source_contract", Path(__file__).with_name("test_rmlui_source.py"))
@@ -27,6 +28,9 @@ class LocalSourceRecipe(unittest.TestCase):
     tearDownClass = classmethod(source.SourceFiles.tearDownClass.__func__)
 
     def test_documented_local_recipe_requires_both_owned_disconnected_sources(self):
+        self.exercise_recipe()
+
+    def exercise_recipe(self, failure=None):
         docs = (ROOT / "docs/ci/local-checks.md").read_text(encoding="utf-8")
         owner_section, worker_section = docs.split("## Worker recipe\n", 1)
         owner = owner_section.split("```bash\n")[-1].split("\n```", 1)[0]
@@ -54,6 +58,8 @@ class LocalSourceRecipe(unittest.TestCase):
         identity = file_identity(directory)
         first = M.Workspace(directory / "scratch/local-gcc", self.spec)
         second = M.Workspace(directory / "scratch/local-tidy", self.spec)
+        borrowed = source.BorrowedSource(self.workspace.stage, self.spec)
+        self.recipe_recovery = (borrowed, directory, identity, first, second)
         try:
             for name in ("tools/ci/rmlui_source.py", "tools/ci/offline_deps.py",
                          "tools/ci/path_safety.py", "vendor/rmlui/rmlui-6.1-source.json",
@@ -93,8 +99,32 @@ class LocalSourceRecipe(unittest.TestCase):
                                    "-p1", "--", str(spec.patch.resolve()))
                     # Only transport is replaced: verify the entire immutable
                     # input and run the unchanged publication/receipt machinery.
+                    failure = os.environ.get("PUBLICATION_FAILURE")
+                    real_git, real_rename, real_write = module.git, module.os.rename, module.write_exclusive
+                    def command(path, *arguments, **kwargs):
+                        if failure == "beforepatch" and arguments[0] == "apply":
+                            raise RuntimeError("injected beforepatch")
+                        result = real_git(path, *arguments, **kwargs)
+                        if (failure == "afterpatch" and arguments[0] == "apply"
+                                and "--check" not in arguments):
+                            raise RuntimeError("injected afterpatch")
+                        return result
+                    def rename(before, after):
+                        if failure == "beforerename":
+                            raise RuntimeError("injected beforerename")
+                        real_rename(before, after)
+                        if failure == "afterrename":
+                            raise RuntimeError("injected afterrename")
+                    def write(path, data):
+                        if failure == "receipt":
+                            real_write(path, b"{partial")
+                            raise RuntimeError("injected receipt")
+                        real_write(path, data)
+                    module.git, module.os.rename, module.write_exclusive = command, rename, write
                     workspace.publish(workspace.owner())
                 else:
+                    if os.environ.get("PUBLICATION_FAILURE") == "configure":
+                        raise RuntimeError("injected configure")
                     build = args[args.index("-B") + 1]
                     base = next(value.split("=", 1)[1] for value in args
                                 if value.startswith("-DFETCHCONTENT_BASE_DIR="))
@@ -118,10 +148,29 @@ cmake() { "$FIXTURE_PYTHON" -I -B boundary.py configure "$@"; }
 '''
             environment = dict(os.environ, FIXTURE_PYTHON=Path(sys.executable).as_posix(),
                                PRISTINE_STAGE=self.workspace.stage.as_posix(),
-                               LUMINUMBRA_DEPS_CACHE=directory.as_posix())
+                               LUMINUMBRA_DEPS_CACHE=directory.as_posix(),
+                               PUBLICATION_FAILURE=failure or "")
             def run(fragment):
                 return subprocess.run([bash_executable(), "-e", "-o", "pipefail", "-c", harness + fragment],
                                       cwd=directory, env=environment, capture_output=True, text=True, check=False)
+            if failure:
+                # Failure cases enter the real publication boundary directly;
+                # the normal recipe case below retains every refusal assertion.
+                first.initialize()
+                result = subprocess.run(
+                    [sys.executable, "-I", "-B", "boundary.py", "download", "--root", str(first.root)],
+                    cwd=directory, env=environment, capture_output=True, text=True, check=False)
+                if failure == "configure":
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    second.initialize()
+                    result = subprocess.run(
+                        [sys.executable, "-I", "-B", "boundary.py", "download", "--root", str(second.root)],
+                        cwd=directory, env=environment, capture_output=True, text=True, check=False)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    result = run(worker_boundary)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("injected " + failure, result.stderr)
+                raise RuntimeError("injected publication " + failure)
             # Preparation must finish before enrollment, including its fresh
             # stage/init checks. An occupied init path cannot leave an owner.
             initial = directory / "scratch/offline-init.cmake"
@@ -168,10 +217,63 @@ cmake() { "$FIXTURE_PYTHON" -I -B boundary.py configure "$@"; }
             helper.write_bytes(helper.read_bytes() + b"\n# changed helper identity\n")
             self.assertNotEqual(run(worker_boundary).returncode, 0)
         finally:
-            if first.source.exists():
-                M.git(first.source, "apply", "--reverse", "--unidiff-zero", "-p1", "--", str(self.spec.patch))
-                os.rename(first.source, self.workspace.stage)
+            borrowed.restore(first.stage, first.source)
             remove_source_fixture(directory, identity, (first.source, first.stage, second.source, second.stage))
+
+class LocalRecipeRecovery(unittest.TestCase):
+    setUpClass = classmethod(source.SourceFiles.setUpClass.__func__)
+    tearDownClass = classmethod(source.SourceFiles.tearDownClass.__func__)
+    exercise_recipe = LocalSourceRecipe.exercise_recipe
+
+    def assert_failed_publication_returns_input(self, failure):
+        identity = file_identity(self.workspace.stage)
+        seal = source.BorrowedSource.snapshot(self.workspace.stage)
+        with self.assertRaisesRegex(RuntimeError, "injected publication " + failure):
+            self.exercise_recipe(failure)
+        self.assertEqual(file_identity(self.workspace.stage), identity)
+        self.assertEqual(source.BorrowedSource.snapshot(self.workspace.stage), seal)
+        M.verify_git(self.workspace.stage, self.spec)
+        self.spec.verify_files(self.workspace.stage, False)
+        self.assertFalse(self.recipe_recovery[1].exists())
+
+    def test_publication_beforepatch_returns_borrowed_input(self):
+        self.assert_failed_publication_returns_input("beforepatch")
+
+    def test_publication_afterpatch_returns_borrowed_input(self):
+        self.assert_failed_publication_returns_input("afterpatch")
+
+    def test_publication_beforerename_returns_borrowed_input(self):
+        self.assert_failed_publication_returns_input("beforerename")
+
+    def test_publication_afterrename_returns_borrowed_input(self):
+        self.assert_failed_publication_returns_input("afterrename")
+
+    def test_publication_receipt_returns_borrowed_input(self):
+        self.assert_failed_publication_returns_input("receipt")
+
+    def test_publication_configure_returns_borrowed_input(self):
+        self.assert_failed_publication_returns_input("configure")
+
+    def test_failed_restoration_preserves_recoverable_input_and_both_errors(self):
+        real_git = M.git
+        def command(path, *args, **kwargs):
+            if "--reverse" in args:
+                raise OSError("injected restoration refusal")
+            return real_git(path, *args, **kwargs)
+        try:
+            with mock.patch.object(M, "git", side_effect=command):
+                with self.assertRaisesRegex(AssertionError,
+                                            "original failure:.*afterpatch.*restoration failure:.*refusal"):
+                    self.exercise_recipe("afterpatch")
+            borrowed, directory, identity, first, second = self.recipe_recovery
+            self.assertTrue(directory.exists())
+            self.assertEqual(file_identity(first.stage), borrowed.identity)
+            self.assertFalse(self.workspace.stage.exists())
+            self.spec.verify_files(first.stage, True)
+        finally:
+            borrowed, directory, identity, first, second = self.recipe_recovery
+            borrowed.restore(first.stage, first.source)
+            remove_source_fixture(directory, identity, (first.stage, first.source, second.stage, second.source))
 
 
 if __name__ == "__main__":
