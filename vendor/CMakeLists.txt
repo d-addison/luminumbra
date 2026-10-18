@@ -110,9 +110,11 @@ if(TARGET freetype AND NOT TARGET Freetype::Freetype)
   add_library(Freetype::Freetype ALIAS freetype)
 endif()
 
+FetchContent_MakeAvailable(EnTT glm glfw glad nlohmann_json JoltPhysics)
+
 include("${CMAKE_CURRENT_LIST_DIR}/../cmake/rmlui_source.cmake")
 
-FetchContent_MakeAvailable(EnTT glm glfw glad nlohmann_json JoltPhysics soil2 miniaudio meshoptimizer lua_upstream sol2 spdlog imgui_src stb googletest lz4_upstream)
+FetchContent_MakeAvailable(soil2 miniaudio meshoptimizer lua_upstream sol2 spdlog imgui_src stb googletest lz4_upstream)
 
 # RmlUi 6.1's bundled robin_hood header uses SIZE_MAX and fixed-width integer
 # types without including <cstdint>. Other standard-library implementations

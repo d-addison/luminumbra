@@ -266,7 +266,9 @@ jobs:
             --receipt build/server-comparison-fixture.json
       - name: Configure identical builds
         run: |
-          python3 -I -B head/tools/ci/rmlui_source.py init --root build/base
+          if [[ -f base/tools/ci/rmlui_source.py ]]; then
+            python3 -I -B base/tools/ci/rmlui_source.py init --root build/base
+          fi
           cmake -S base -B build/base -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DCMAKE_CXX_FLAGS_RELWITHDEBINFO="-O2 -g -DNDEBUG -fno-omit-frame-pointer" \

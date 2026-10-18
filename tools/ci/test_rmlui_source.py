@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import textwrap
 import unittest
 from unittest import mock
 import zlib
@@ -86,7 +87,7 @@ class SourceFiles(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.spec = specification()
-        cls.directory = Path(tempfile.mkdtemp(prefix="rmlui-contract-"))
+        cls.directory = Path(tempfile.mkdtemp(prefix="rmlui-contract-")).resolve(strict=True)
         cls.workspace = M.Workspace(cls.directory / "build", cls.spec)
         cls.workspace.initialize()
         cls.offline = os.environ.get("LUMINUMBRA_RMLUI_TEST_SOURCE")
@@ -355,7 +356,7 @@ class DeliveryRefusals(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory(prefix="rmlui-refusal-")
         self.addCleanup(self.directory.cleanup)
         self.spec = specification()
-        self.w = M.Workspace(Path(self.directory.name) / "build", self.spec)
+        self.w = M.Workspace(Path(self.directory.name).resolve(strict=True) / "build", self.spec)
 
     def test_init_never_adopts_existing_file_directory_or_owner(self):
         self.w.root.write_bytes(b"foreign")
@@ -593,7 +594,7 @@ class DeliveryRefusals(unittest.TestCase):
         end = script.index("    if (( rc != 0 )); then", begin)
         fragment = script[begin:end]
         with tempfile.TemporaryDirectory(prefix="rmlui-caller-") as directory:
-            root = Path(directory)
+            root = Path(directory).resolve(strict=True)
             (root / "cmake").mkdir()
             (root / "logs").mkdir()
             module = root / "cmake/rmlui_source.cmake"
@@ -615,7 +616,7 @@ class DeliveryRefusals(unittest.TestCase):
                 (root / "calls").unlink()
 
     def test_atomic_exclusive_creation_collision_and_flush_failure(self):
-        path = Path(self.directory.name) / "record"
+        path = Path(self.directory.name).resolve(strict=True) / "record"
         path.write_bytes(b"foreign")
         with self.assertRaises(FileExistsError):
             M.write_exclusive(path, b"ours")
@@ -638,7 +639,7 @@ class DeliveryRefusals(unittest.TestCase):
                 M.windows_long_name("C:/unreadable")
 
     def test_empty_relative_path_and_missing_executable_refuse(self):
-        source = Path(self.directory.name)
+        source = Path(self.directory.name).resolve(strict=True)
         for path in ("", ".", "relative", os.pathsep + str(source)):
             with mock.patch.dict(M.os.environ, {"PATH": path}):
                 with self.assertRaises(M.Refusal):
@@ -648,8 +649,8 @@ class DeliveryRefusals(unittest.TestCase):
                 M.git(source, "init")
 
     def test_wrong_patch_manifest_pin_and_helper_identity(self):
-        patch = Path(self.directory.name) / "patch"
-        manifest = Path(self.directory.name) / "manifest.json"
+        patch = Path(self.directory.name).resolve(strict=True) / "patch"
+        manifest = Path(self.directory.name).resolve(strict=True) / "manifest.json"
         patch.write_bytes(self.spec.patch_bytes[:-1])
         manifest.write_bytes(self.spec.manifest_bytes)
         with self.assertRaises(M.Refusal):
@@ -667,6 +668,205 @@ class DeliveryRefusals(unittest.TestCase):
             self.assertNotEqual(self.spec.delivery["helper_sha256"], changed.delivery["helper_sha256"])
             with self.assertRaises(M.Refusal):
                 M.Workspace(self.w.root, changed).preflight(False)
+
+
+class PairedWorkflowInitialization(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory(prefix="rmlui-paired-")
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name).resolve(strict=True)
+        for checkout in ("base", "head"):
+            for name in ("tools/ci/rmlui_source.py", "vendor/rmlui/rmlui-6.1-source.json",
+                         "cmake/patches/rmlui-6.1-shadow.patch"):
+                destination = self.root / checkout / name
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes((ROOT / name).read_bytes())
+        self.base_helper = self.root / "base/tools/ci/rmlui_source.py"
+        # Both helpers remain valid; ownership must distinguish their bytes.
+        with self.base_helper.open("ab") as stream:
+            stream.write(b"\n# Distinct source revision.\n")
+        workflow = (ROOT / ".github/workflows/performance.yml").read_text()
+        marker = "      - name: Configure identical builds\n        run: |\n"
+        self.assertEqual(workflow.count(marker), 1)
+        self.fragment = textwrap.dedent(workflow.split(marker, 1)[1].split("\n      - name:", 1)[0])
+        # Stop at configure boundaries: run only the source checkout's real
+        # ownership preflight, never project configure, download or compilation.
+        (self.root / "boundary.py").write_text(textwrap.dedent("""\
+            import json
+            from pathlib import Path
+            import subprocess
+            import sys
+
+            args = sys.argv[1:]
+            source = Path(args[args.index("-S") + 1])
+            build = Path(args[args.index("-B") + 1])
+            with Path("configure-calls.jsonl").open("a") as stream:
+                stream.write(json.dumps(args) + "\\n")
+            helper = source / "tools/ci/rmlui_source.py"
+            if helper.is_file():
+                sys.exit(subprocess.run([sys.executable, "-I", "-B", str(helper),
+                                         "preflight", "--root", str(build)], check=False).returncode)
+            if build.exists():
+                raise AssertionError("legacy base was enrolled")
+            """), encoding="utf-8")
+
+    def run_workflow(self):
+        sys.path.insert(0, str(MODULE_PATH.parent))
+        from ci_shell import bash_executable
+        harness = ('python3() { "$FIXTURE_PYTHON" "$@"; }\n'
+                   'cmake() { python3 -I -B boundary.py "$@"; }\n' + self.fragment)
+        return subprocess.run([bash_executable(), "-e", "-o", "pipefail", "-c", harness],
+                              cwd=self.root, capture_output=True, text=True, check=False,
+                              env=dict(os.environ, FIXTURE_PYTHON=Path(sys.executable).as_posix(),
+                                       GITHUB_WORKSPACE=self.root.as_posix()))
+
+    def calls(self):
+        path = self.root / "configure-calls.jsonl"
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def assert_owner(self, checkout):
+        root = self.root / "build" / checkout
+        owner = json.loads((root / ".rmlui-owner.json").read_bytes())
+        expected = dict(specification().delivery)
+        expected["helper_sha256"] = M.digest((self.root / checkout / "tools/ci/rmlui_source.py").read_bytes())
+        self.assertEqual(owner["delivery"], expected)
+        self.assertEqual(owner["root"], str(M.canonical(root)))
+        self.assertEqual(set(p.name for p in root.iterdir()), {".rmlui-owner.json"})
+        return owner["delivery"]
+
+    def test_distinct_revisions_initialize_with_their_own_helpers(self):
+        result = self.run_workflow()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        base = self.assert_owner("base")
+        head = self.assert_owner("head")
+        self.assertNotEqual(base["helper_sha256"], head["helper_sha256"])
+        self.assertEqual([args[:4] for args in self.calls()],
+                         [["-S", "base", "-B", "build/base"], ["-S", "head", "-B", "build/head"]])
+
+    def test_legacy_base_is_not_enrolled_and_head_keeps_its_own_helper(self):
+        self.base_helper.unlink()
+        result = self.run_workflow()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((self.root / "build/base").exists())
+        self.assert_owner("head")
+        self.assertEqual([args[:4] for args in self.calls()],
+                         [["-S", "base", "-B", "build/base"], ["-S", "head", "-B", "build/head"]])
+
+    def test_base_initialization_refusals_stop_before_configure(self):
+        manifest = self.root / "base/vendor/rmlui/rmlui-6.1-source.json"
+        original = manifest.read_bytes()
+        for data in (None, b"{", b"{}"):
+            with self.subTest(manifest=data):
+                if data is None:
+                    manifest.unlink()
+                else:
+                    manifest.write_bytes(data)
+                try:
+                    result = self.run_workflow()
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(self.calls(), [])
+                    self.assertFalse((self.root / "build").exists())
+                finally:
+                    manifest.write_bytes(original)
+        build = self.root / "build/base"
+        build.mkdir(parents=True)
+        (build / "foreign").write_bytes(b"preserve")
+        result = self.run_workflow()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(list(build.iterdir()), [build / "foreign"])
+        self.assertEqual((build / "foreign").read_bytes(), b"preserve")
+        self.assertFalse((self.root / "build/head").exists())
+
+
+class HostedConfigurationContracts(unittest.TestCase):
+    def test_dependency_configuration_keeps_the_original_shared_option_order(self):
+        vendor = (ROOT / "vendor/CMakeLists.txt").read_text()
+        module = (ROOT / "cmake/rmlui_source.cmake").read_text()
+        calls = re.findall(r'^FetchContent_MakeAvailable\(([^)]*)\)|'
+                           r'^include\("\$\{CMAKE_CURRENT_LIST_DIR\}/../cmake/rmlui_source.cmake"\)',
+                           vendor, re.MULTILINE)
+        # The owned hook verifies the full source before configuring RmlUi.
+        self.assertEqual(module.count('add_subdirectory("${rmlui_SOURCE_DIR}" "${rmlui_BINARY_DIR}")'), 1)
+        self.assertLess(module.index("verify --root"), module.index("add_subdirectory("))
+        order = []
+        for arguments in calls:
+            order.extend(arguments.split() if arguments else ["RmlUi"])
+        self.assertEqual(order, ["freetype", "EnTT", "glm", "glfw", "glad", "nlohmann_json",
+                                 "JoltPhysics", "RmlUi", "soil2", "miniaudio", "meshoptimizer",
+                                 "lua_upstream", "sol2", "spdlog", "imgui_src", "stb",
+                                 "googletest", "lz4_upstream"])
+        self.assertNotIn("BUILD_SHARED_LIBS", vendor + module)
+
+    def test_fresh_fixture_paths_are_resolved_before_strict_workspace_validation(self):
+        with tempfile.TemporaryDirectory(prefix="rmlui-fixture-path-") as directory:
+            root = Path(directory).resolve(strict=True)
+            (root / "alias").mkdir()
+            alias = str(root / "alias" / "..")
+            with self.assertRaises(M.Refusal):
+                M.canonical(alias)
+            # This spelling models an aliased TEMP without symlink privileges.
+            # Each fixture still allocates its own fresh directory underneath it.
+            allocate = tempfile.mkdtemp
+            def allocate_alias(*args, **kwargs):
+                allocated = Path(allocate(*args, **kwargs))
+                return str(allocated.parent / "alias" / ".." / allocated.name)
+            with mock.patch.object(tempfile, "tempdir", str(root)), \
+                    mock.patch.object(tempfile, "mkdtemp", side_effect=allocate_alias):
+                refusal = DeliveryRefusals()
+                try:
+                    refusal.setUp()
+                    self.assertEqual(refusal.w.root, refusal.w.root.resolve())
+                    refusal.w.initialize()
+                    refusal.w.preflight(False)
+                finally:
+                    refusal.doCleanups()
+
+    def test_paired_fixture_resolves_its_fresh_allocation_before_workflow(self):
+        with tempfile.TemporaryDirectory(prefix="rmlui-paired-path-") as directory:
+            root = Path(directory).resolve(strict=True)
+            (root / "alias").mkdir()
+            allocate = tempfile.mkdtemp
+            def allocate_alias(*args, **kwargs):
+                allocated = Path(allocate(*args, **kwargs))
+                return str(allocated.parent / "alias" / ".." / allocated.name)
+            with mock.patch.object(tempfile, "tempdir", str(root)), \
+                    mock.patch.object(tempfile, "mkdtemp", side_effect=allocate_alias):
+                paired = PairedWorkflowInitialization()
+                try:
+                    paired.setUp()
+                    self.assertEqual(paired.root, M.canonical(paired.root))
+                    result = paired.run_workflow()
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    paired.assert_owner("base")
+                    paired.assert_owner("head")
+                finally:
+                    paired.doCleanups()
+
+    def test_full_source_fixture_resolves_its_fresh_allocation_before_workspace(self):
+        class BoundaryReached(Exception):
+            pass
+
+        class Fixture(SourceFiles):
+            pass
+
+        with tempfile.TemporaryDirectory(prefix="rmlui-source-path-") as directory:
+            root = Path(directory).resolve(strict=True)
+            (root / "alias").mkdir()
+            allocate = tempfile.mkdtemp
+            def allocate_alias(*args, **kwargs):
+                allocated = Path(allocate(*args, **kwargs))
+                return str(allocated.parent / "alias" / ".." / allocated.name)
+            with mock.patch.object(tempfile, "tempdir", str(root)), \
+                    mock.patch.object(tempfile, "mkdtemp", side_effect=allocate_alias), \
+                    mock.patch.object(M.Workspace, "initialize", side_effect=BoundaryReached):
+                try:
+                    with self.assertRaises(BoundaryReached):
+                        Fixture.setUpClass()
+                    self.assertEqual(Fixture.directory, M.canonical(Fixture.directory))
+                finally:
+                    if "directory" in Fixture.__dict__:
+                        shutil.rmtree(Fixture.directory)
 
 
 if __name__ == "__main__":

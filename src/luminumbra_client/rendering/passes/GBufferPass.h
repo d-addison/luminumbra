@@ -7,8 +7,8 @@
 #include "../RenderInputs.h"  // GBufferPassInput / GBufferDrawStats
 
 #include <entt/entity/registry.hpp> // entt::registry& execute param
-#include <glad/glad.h>   // GLuint for the owned VBO/VAO/SSBO members
-#include <glm/glm.hpp>   // glm::vec3/vec4/mat4 in the cached-prop structs
+#include <glad/glad.h>              // GLuint for the owned VBO/VAO/SSBO members
+#include <glm/glm.hpp>              // glm::vec3/vec4/mat4 in the cached-prop structs
 
 #include <cstddef>
 #include <cstdint>
