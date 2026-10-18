@@ -354,7 +354,7 @@ class CTestShardTests(unittest.TestCase):
         for index in (2, 3):
             changed = copy.deepcopy(self.tests)
             changed[0]["command"][index] = changed[0]["command"][index].replace("C:/checkout", "c:/CHECKOUT")
-            yield "quoted-or-nested-assignment-case", changed
+            yield ("quoted-assignment-case" if index == 2 else "nested-assignment-case"), changed
         for key, value in (("PASS_REGULAR_EXPRESSION", ["c:/CHECKOUT/MATCH"]),
                            ("FAIL_REGULAR_EXPRESSION", ["c:/CHECKOUT/MATCH"]),
                            ("SKIP_REGULAR_EXPRESSION", ["c:/CHECKOUT/MATCH"]),
@@ -365,7 +365,7 @@ class CTestShardTests(unittest.TestCase):
             for prop in changed[0]["properties"]:
                 if prop["name"] == key:
                     prop["value"] = value
-            yield "literal-root-case-" + key, changed
+            yield "literal-root-case-" + key + "-" + str(value), changed
         for key, value in (("ENVIRONMENT", ["MODE=changed"]),
                            ("ENVIRONMENT_MODIFICATION", ["MODE=set:changed"]),
                            ("WORKING_DIRECTORY", "/opt/alternate-work"),
@@ -401,20 +401,20 @@ class CTestShardTests(unittest.TestCase):
         for profile in shards.PROFILES:
             self.write_plan(self.root, 1)
             shards.plan(self.root, 1, profile)
-            before = {name: (self.root / name).read_bytes() for name in
-                      ("ctest.partition.json", "ctest.shard-index.txt")}
+            (self.root / "ctest.junit.xml").write_text("existing execution evidence")
             for change, tests in self.execution_changes():
                 with self.subTest(profile=profile, change=change):
                     (self.root / "ctest.all.json").write_text(json.dumps({"tests": tests}))
+                    before = {path: path.read_bytes() for path in self.root.rglob("*") if path.is_file()}
                     with self.assertRaisesRegex(ValueError, "execution inventory differs"):
                         shards.plan(self.root, 1, profile)
+                    self.assertEqual({path: path.read_bytes() for path in self.root.rglob("*") if path.is_file()}, before)
                     response = subprocess.CompletedProcess([], 0, stdout=json.dumps({"tests": tests}))
                     with patch.object(shards.subprocess, "run", return_value=response) as invoke:
                         with self.assertRaisesRegex(ValueError, "execution inventory differs"):
                             shards.run(self.root, profile)
                         invoke.assert_called_once()
-                    for name, content in before.items():
-                        self.assertEqual((self.root / name).read_bytes(), content)
+                    self.assertEqual({path: path.read_bytes() for path in self.root.rglob("*") if path.is_file()}, before)
                     self.reports(profile=profile)
                     # First reject tampered raw evidence against its own manifest.
                     path = self.root / "shard-2/ctest.inventory.json"
@@ -432,6 +432,30 @@ class CTestShardTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "different CTest inventories"):
                         self.merge(profile=profile)
                     self.assertEqual({path: path.read_bytes() for path in self.root.rglob("*") if path.is_file()}, evidence)
+
+    def test_changed_execution_roots_refuse_without_mutating_evidence_in_every_profile(self):
+        original = {"source": "C:/checkout", "build": "C:/checkout/build/release"}
+        self.tests += [test(f"SimBudgetWorldParity.Replay/{index}") for index in range(2)]
+        response = subprocess.CompletedProcess([], 0, stdout=json.dumps({"tests": self.tests}))
+        for profile in shards.PROFILES:
+            self.write_plan(self.root, 1, profile=profile, roots=original)
+            (self.root / "ctest.junit.xml").write_text("existing execution evidence")
+            before = {path: path.read_bytes() for path in self.root.rglob("*") if path.is_file()}
+            for kind in ("source", "build"):
+                for root in (original[kind].upper(), original[kind].replace("/", "\\"),
+                             original[kind] + "/", "D:/other", "/d/a/checkout"):
+                    with self.subTest(profile=profile, kind=kind, root=root), \
+                            patch.object(shards, "inventory_roots", return_value={**original, kind: root}), \
+                            patch.object(shards.subprocess, "run", return_value=response) as invoke:
+                        with self.assertRaisesRegex(ValueError, "execution source or build roots differ"):
+                            shards.run(self.root, profile)
+                        invoke.assert_called_once()
+                        self.assertEqual({path: path.read_bytes() for path in self.root.rglob("*") if path.is_file()}, before)
+            with patch.object(shards, "inventory_roots", return_value=original), \
+                    patch.object(shards.subprocess, "run", side_effect=[response, subprocess.CompletedProcess([], 0)]) as invoke:
+                self.assertEqual(shards.run(self.root, profile), 0)
+                self.assertEqual(invoke.call_count, 2)
+            self.assertEqual({path: path.read_bytes() for path in self.root.rglob("*") if path.is_file()}, before)
 
     def test_different_recorded_roots_refuse_merge_without_mutating_evidence(self):
         original = {"source": "C:/checkout", "build": "C:/checkout/build/release"}
@@ -494,11 +518,11 @@ class CTestShardTests(unittest.TestCase):
         path = self.root / "ctest.partition.json"
         manifest = shards.read_json(path)
         response = subprocess.CompletedProcess([], 0, stdout=json.dumps({"tests": self.tests}))
-        for change in ({"roots": {**manifest["roots"], "source": "/opt/foreign"}},
-                       {"version": 1}, {"version": 2}):
+        for change, error in (({"roots": {**manifest["roots"], "source": "/opt/foreign"}}, "roots differ"),
+                              ({"version": 1}, "digest differs"), ({"version": 2}, "digest differs")):
             path.write_text(json.dumps({**manifest, **change}))
             with patch.object(shards.subprocess, "run", return_value=response) as invoke:
-                with self.assertRaisesRegex(ValueError, "digest differs"):
+                with self.assertRaisesRegex(ValueError, error):
                     shards.run(self.root)
                 invoke.assert_called_once()
         self.reports()
