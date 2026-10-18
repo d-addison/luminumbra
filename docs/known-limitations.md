@@ -162,7 +162,7 @@ rosters should not be confused with missing simulation wiring.
     python3 -I -B tools/ci/rmlui_source.py init --root build/debug || exit
   fi
   python3 -I -B tools/ci/rmlui_source.py preflight --root build/debug || exit
-  cmake --preset debug -DLUMINUMBRA_ENABLE_STEAM=ON -DLUMINUMBRA_ENABLE_GNS=OFF \
+  cmake --preset debug "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')" -DLUMINUMBRA_ENABLE_STEAM=ON -DLUMINUMBRA_ENABLE_GNS=OFF \
     -DLUMINUMBRA_STEAM_SDK_DIR=/absolute/path/to/steamworks/sdk
   cmake --build --preset debug
   ctest --preset debug --output-on-failure -LE manual

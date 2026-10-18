@@ -1215,6 +1215,150 @@ class PairedWorkflowInitialization(unittest.TestCase):
         self.assertFalse((self.root / "build/head").exists())
 
 
+class BootstrapInterpreterBinding(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory(prefix="rmlui-interpreter-")
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name).resolve(strict=True)
+        for name in ("cmake/rmlui_source.cmake", "tools/ci/rmlui_source.py",
+                     "vendor/rmlui/rmlui-6.1-source.json", "cmake/patches/rmlui-6.1-shadow.patch"):
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes((ROOT / name).read_bytes())
+        (self.root / "CMakeLists.txt").write_text(
+            'cmake_minimum_required(VERSION 3.20)\n'
+            'project(InterpreterBoundary LANGUAGES NONE)\n'
+            'include(FetchContent)\n'
+            'set(FETCHCONTENT_FULLY_DISCONNECTED ON)\n'
+            'include("${CMAKE_SOURCE_DIR}/cmake/rmlui_source.cmake")\n', encoding="utf-8")
+
+    def initialize(self, build):
+        result = subprocess.run([sys.executable, "-I", "-B", str(self.root / "tools/ci/rmlui_source.py"),
+                                 "init", "--root", str(build)], capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return (build / ".rmlui-owner.json").read_bytes()
+
+    def configure(self, build, executable):
+        args = ["cmake", "-S", str(self.root), "-B", str(build), "-G", "Ninja"]
+        if executable is not None:
+            args.append("-DPython3_EXECUTABLE=" + executable)
+        return subprocess.run(args, capture_output=True, text=True, check=False)
+
+    def test_ucrt_workflow_binds_bootstrap_interpreter_at_real_cmake_boundary(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        marker = "      - name: Prepare fresh RmlUi build root\n        shell: msys2 {0}\n"
+        section = workflow.split(marker, 1)[1]
+        initializer = section.split("run: ", 1)[1].splitlines()[0]
+        configure = " ".join(textwrap.dedent(section.split("run: >-\n", 1)[1]
+                                             .split("\n      - name:", 1)[0]).splitlines())
+        # Model an independent discovery candidate through the preset. The real
+        # workflow must replace it with the bootstrap's actual executable.
+        (self.root / "CMakePresets.json").write_text(json.dumps({
+            "version": 2, "configurePresets": [{"name": "release", "generator": "Ninja",
+                "binaryDir": "${sourceDir}/build/release", "cacheVariables": {
+                    "Python3_EXECUTABLE": str(self.root / "unselected-python")}}]}), encoding="utf-8")
+        sys.path.insert(0, str(MODULE_PATH.parent))
+        from ci_shell import bash_executable
+        script = ('python3() { "$FIXTURE_PYTHON" "$@"; }\n' + initializer + "\n" + configure)
+        result = subprocess.run([bash_executable(), "-e", "-o", "pipefail", "-c", script],
+                                cwd=self.root, capture_output=True, text=True, check=False,
+                                env=dict(os.environ, FIXTURE_PYTHON=Path(sys.executable).as_posix()))
+        output = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0)
+        # Stop at the real helper's disconnected-delivery refusal: no project,
+        # compiler, download, generated native target or upstream CMake runs.
+        self.assertIn("fully disconnected source unavailable", output)
+        self.assertNotIn("workspace ownership root mismatch", output)
+        build = self.root / "build/release"
+        owner = (build / ".rmlui-owner.json").read_bytes()
+        again = self.configure(build, sys.executable)
+        self.assertIn("fully disconnected source unavailable", again.stdout + again.stderr)
+        self.assertEqual((build / ".rmlui-owner.json").read_bytes(), owner)
+        self.assertFalse((build / ".rmlui-ready.json").exists())
+
+    def test_mixed_writer_spelling_refuses_at_real_cmake_reader_without_mutation(self):
+        build = self.root / "build"
+        # Exercise the real writer in a subprocess with an alternate pathlib
+        # serialization, then the unmodified reader through LANGUAGES NONE.
+        # Windows uses the observed slash difference; POSIX models it with a
+        # redundant separator. This is not native Windows qualification.
+        writer = textwrap.dedent("""\
+            import importlib.util
+            import os
+            from pathlib import Path
+            import sys
+            loader = importlib.util.spec_from_file_location("source", sys.argv[1])
+            module = importlib.util.module_from_spec(loader)
+            loader.loader.exec_module(module)
+            root = Path(sys.argv[2])
+            canonical = module.canonical
+            class WriterPath(type(root)):
+                def __str__(self):
+                    value = super().__str__()
+                    if value == str(root):
+                        return value.replace(chr(92), "/") if os.name == "nt" else value + "/"
+                    return value
+            def writer_canonical(raw):
+                path = canonical(raw)
+                return WriterPath(path) if path == root else path
+            module.canonical = writer_canonical
+            raise SystemExit(module.main(["init", "--root", str(root)]))
+            """)
+        initialized = subprocess.run([sys.executable, "-I", "-B", "-c", writer,
+                                      str(self.root / "tools/ci/rmlui_source.py"), str(build)],
+                                     capture_output=True, text=True, check=False)
+        self.assertEqual(initialized.returncode, 0, initialized.stdout + initialized.stderr)
+        owner = (build / ".rmlui-owner.json").read_bytes()
+        self.assertNotEqual(json.loads(owner)["root"], str(build))
+        refused = self.configure(build, sys.executable)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("workspace ownership root mismatch", refused.stdout + refused.stderr)
+        self.assertEqual((build / ".rmlui-owner.json").read_bytes(), owner)
+        self.assertFalse((build / ".rmlui-ready.json").exists())
+        self.assertFalse((build / ".rmlui-admission").exists())
+
+    def test_empty_relative_and_missing_interpreter_bindings_refuse_before_helper(self):
+        for index, executable in enumerate((None, "", "python3", str(self.root / "missing-python"))):
+            with self.subTest(executable=executable):
+                build = self.root / ("build-" + str(index))
+                owner = self.initialize(build)
+                result = self.configure(build, executable)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("RmlUi requires an absolute bootstrap Python3_EXECUTABLE",
+                              result.stdout + result.stderr)
+                self.assertEqual((build / ".rmlui-owner.json").read_bytes(), owner)
+                self.assertFalse((build / ".rmlui-ready.json").exists())
+
+    def test_all_current_configure_callers_bind_the_bootstrap_interpreter(self):
+        for name in ("ci.yml", "asan.yml", "performance.yml", "release.yml"):
+            source = (ROOT / ".github/workflows" / name).read_text(encoding="utf-8")
+            calls = [line for line in source.splitlines() if "cmake " in line and (
+                re.search(r"cmake --preset (?:release|perf|debug-asan)\b", line)
+                or (" -S " in line and " -B build/" in line))]
+            self.assertTrue(calls, name)
+            for call in calls:
+                with self.subTest(path=name, call=call):
+                    self.assertIn("-DPython3_EXECUTABLE=", call)
+                    self.assertIn("-I -B -c 'import sys; print(sys.executable)'", call)
+        for name in ("README.md", "CONTRIBUTING.md", "docs/development.md", "docs/index.md",
+                     "docs/static-morph-assets.md", "docs/performance.md", "docs/known-limitations.md",
+                     "docs/static-preview.md", "docs/dependency-source.md", "docs/ci/local-checks.md",
+                     "tools/ci/ucrt_attribution.sh", "tools/gates/run-coverage.ps1",
+                     "tools/gates/validate-engine-frontier.ps1"):
+            loader = importlib.util.spec_from_file_location("binding_paths", ROOT / "tools/ci/ci_paths.py")
+            paths = importlib.util.module_from_spec(loader)
+            loader.loader.exec_module(paths)
+            self.assertTrue(paths.needs_python(name), name)
+            source = (ROOT / name).read_text(encoding="utf-8")
+            calls = re.findall(r"(?m)^.*cmake (?:--preset (?:[a-z-]+|\$parityPreset)|"
+                               r"-B build/debug-fresh --preset debug).*$", source)
+            calls = [call for call in calls if not call.lstrip().startswith(('throw ', 'return ', '#'))]
+            self.assertTrue(calls, name)
+            for call in calls:
+                with self.subTest(path=name, call=call):
+                    self.assertIn("-DPython3_EXECUTABLE=", call)
+
+
 class HostedConfigurationContracts(unittest.TestCase):
     def test_dependency_configuration_keeps_the_original_shared_option_order(self):
         vendor = (ROOT / "vendor/CMakeLists.txt").read_text(encoding="utf-8", errors="strict")
@@ -1308,9 +1452,18 @@ class HostedConfigurationContracts(unittest.TestCase):
 
 class OwnedCommandLifetime(unittest.TestCase):
     def setUp(self):
-        self.directory = tempfile.TemporaryDirectory(prefix="rmlui-process-")
-        self.addCleanup(self.directory.cleanup)
-        self.root = Path(self.directory.name).resolve(strict=True)
+        self.command_threads = []
+        self.test_jobs = []
+        self.test_processes = []
+        self.custody_lock = threading.Lock()
+        self.custody_stopping = False
+        self.custody_closed = False
+        self.launched = []
+        self.directory = tempfile.mkdtemp(prefix="rmlui-process-")
+        self.root = Path(self.directory).resolve(strict=True)
+        self.fixture_identity = file_identity(self.root)
+        self.addCleanup(self.retire_command_fixture)
+        self.addCleanup(self.stop_sessions)
         self.script = self.root / "command.py"
         self.script.write_text(textwrap.dedent("""\
             import os
@@ -1384,9 +1537,72 @@ class OwnedCommandLifetime(unittest.TestCase):
                             raise subprocess.TimeoutExpired(self.args, timeout)
                         time.sleep(0.005)
             self.process = RetainedProcess
-        self.addCleanup(self.stop_sessions)
+        process_factory = self.process
+        def retained_process(argv, **kwargs):
+            self.assertTrue(self.custody_lock.acquire(timeout=2), "launch custody deadline exceeded")
+            try:
+                self.assertFalse(self.custody_stopping, "test process custody is closing")
+                if os.name == "nt" and "--contained-git" in argv:
+                    name = argv[argv.index("--contained-git") + 1]
+                    # Retain query/termination custody before the bootstrap can run.
+                    # This handle belongs only to the test; production stays real.
+                    job = M.WindowsJob(name, existing=True)
+                    handle = job.api.OpenJobObjectW(0x0004 | 0x0008, False, name)
+                    if not handle:
+                        error = job.ctypes.WinError(job.ctypes.get_last_error())
+                        job.close()
+                        raise error
+                    job.close()
+                    job.handle = handle
+                    self.test_jobs.append(job)
+                process = process_factory(argv, **kwargs)
+                # Sibling refusal fixtures replace these methods. Retain the
+                # actual methods before returning the process to any caller.
+                self.test_processes.append((process, process.kill, process.wait))
+                return process
+            finally:
+                self.custody_lock.release()
+        self.process = retained_process
+        self.real_popen = subprocess.Popen
+
+    def retire_command_fixture(self):
+        self.assertTrue(self.custody_closed, "fixture shutdown remains unverified")
+        self.assertEqual(file_identity(self.root), self.fixture_identity)
+        shutil.rmtree(self.root)
+
+    def stop_command_tree(self):
+        self.assertTrue(self.custody_lock.acquire(timeout=2), "shutdown custody deadline exceeded")
+        try:
+            self.custody_stopping = True
+            processes, jobs = tuple(self.test_processes), tuple(self.test_jobs)
+        finally:
+            self.custody_lock.release()
+        if os.name == "nt":
+            # A live bootstrap may not have enrolled yet. Observe its death
+            # before terminating and observing the exact retained job empty.
+            for process, kill, wait in processes:
+                kill()
+                wait(timeout=2)
+            for job in jobs:
+                job.terminate()
+                job.wait_empty()
+        else:
+            import signal
+            for process, kill, wait in processes:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
     def stop_sessions(self):
+        self.stop_command_tree()
+        for thread in self.command_threads:
+            thread.join(2)
+            self.assertFalse(thread.is_alive(), "owned command cleanup did not join")
+        for job in self.test_jobs:
+            job.close()
+        self.test_jobs.clear()
+
         if os.name == "posix":
             import signal
             for process in self.launched:
@@ -1408,6 +1624,7 @@ class OwnedCommandLifetime(unittest.TestCase):
                 except ChildProcessError:
                     pass
             self.launched.clear()
+        self.custody_closed = True
 
     def command_diagnostics(self, thread):
         # One snapshot, 16 frames, four retained launch records and three known
@@ -1464,6 +1681,7 @@ class OwnedCommandLifetime(unittest.TestCase):
             except BaseException as error:
                 errors.append(error)
         thread = threading.Thread(target=run, daemon=True)
+        self.command_threads.append(thread)
         started = time.monotonic()
         thread.start()
         thread.join(4)
@@ -1477,15 +1695,12 @@ class OwnedCommandLifetime(unittest.TestCase):
                 raise errors[0]
             return result[0]
         finally:
-            # Only this test's explicitly created private sessions, never a PID sweep.
-            if thread.is_alive() and os.name == "posix":
-                import signal
-                for process in self.launched:
-                    try:
-                        os.killpg(process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
+            # Retire the exact tree before releasing any diagnostic barrier
+            # through join(). No writer may survive into fixture removal.
+            if thread.is_alive():
+                self.stop_command_tree()
             thread.join(2)
+            self.assertFalse(thread.is_alive(), "owned command cleanup did not join")
 
     def assert_child_stopped(self):
         pid = int((self.root / "child.pid").read_text(encoding="ascii"))
@@ -1618,6 +1833,24 @@ class OwnedCommandLifetime(unittest.TestCase):
         self.assertEqual(details["launches"][0]["pid"], self.launched[0].pid)
         self.assertIn("work", details)
         self.assertIn("entries-complete", details)
+        self.assertTrue(all(not thread.is_alive() for thread in self.command_threads))
+        self.assertTrue(all(process.poll() is not None for process in self.launched))
+        before = (self.root / "work").stat().st_size if (self.root / "work").exists() else None
+        time.sleep(0.12)
+        self.assertEqual((self.root / "work").stat().st_size if before is not None else None, before)
+        self.assertIs(M.subprocess.Popen, self.real_popen)
+        retained = tuple(self.test_processes)
+        with self.assertRaisesRegex(AssertionError, "custody is closing"):
+            self.process([sys.executable, "-I", "-B", "-c", "pass"])
+        self.assertEqual(tuple(self.test_processes), retained)
+        with self.assertRaisesRegex(AssertionError, "shutdown remains unverified"):
+            self.retire_command_fixture()
+        self.assertEqual(file_identity(self.root), self.fixture_identity)
+        # Final cleanup must use the original methods, including on Windows.
+        for process, kill, wait in retained:
+            process.kill = mock.Mock(side_effect=AssertionError("replaced kill must not run"))
+            process.wait = mock.Mock(side_effect=AssertionError("replaced wait must not run"))
+        self.stop_command_tree()
 
     def test_deadline_diagnostics_report_missing_progress_without_waiting(self):
         details = self.command_diagnostics(threading.current_thread())
@@ -1705,7 +1938,9 @@ class OwnedCommandLifetime(unittest.TestCase):
 
 
 class WindowsContainmentRefusal(unittest.TestCase):
+    stop_command_tree = OwnedCommandLifetime.stop_command_tree
     stop_sessions = OwnedCommandLifetime.stop_sessions
+    retire_command_fixture = OwnedCommandLifetime.retire_command_fixture
 
     def assert_child_stopped(self):
         for api, handle in self.child_handles:

@@ -146,7 +146,7 @@ jobs:
         env:
           LOCAL_CHECK_JUNIT: ${{ github.workspace }}/build/local-check-contracts/ctest.junit.xml
         run: |
-          cmake -S tools/ci/contracts -B build/local-check-contracts -G Ninja
+          cmake -S tools/ci/contracts -B build/local-check-contracts -G Ninja "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')"
           ctest --test-dir build/local-check-contracts --show-only=json-v1 > build/local-check-contracts/ctest-discovery.json
           ctest --test-dir build/local-check-contracts --no-tests=error --parallel 4 --output-on-failure --output-junit "$LOCAL_CHECK_JUNIT"
           python3 -I -B tools/ci/check_ctest_junit.py "$LOCAL_CHECK_JUNIT" --minimum-tests 2 --require-test ChangedTranslationUnitsContract --require-test OfflineDependenciesContract
@@ -197,7 +197,7 @@ jobs:
         if: ${{ needs.changes.outputs.needs_cpp != 'false' }}
         id: configure
         run: >-
-          cmake --preset release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          cmake --preset release "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')" -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           -DLUMINUMBRA_ENABLE_PREFAB_RUNTIME=ON
       - name: Reset compiler cache statistics
         if: ${{ needs.changes.outputs.needs_cpp != 'false' && (always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name != 'workflow_dispatch' || inputs.qualification_capture != true)) }}
@@ -296,10 +296,10 @@ jobs:
         if: ${{ needs.changes.outputs.needs_cpp != 'false' && (github.ref_name == 'main' || github.base_ref == 'main') }}
         run: |
           python3 -I -B tools/ci/rmlui_source.py init --root build/package-off
-          cmake -S . -B build/package-off -G Ninja -DBUILD_TESTING=OFF -DENABLE_BINARY_RELEASES=OFF
+          cmake -S . -B build/package-off "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')" -G Ninja -DBUILD_TESTING=OFF -DENABLE_BINARY_RELEASES=OFF
           test ! -e build/package-off/CPackConfig.cmake
           python3 -I -B tools/ci/rmlui_source.py init --root build/package-linux
-          cmake -S . -B build/package-linux -G Ninja -DCMAKE_BUILD_TYPE=Release \
+          cmake -S . -B build/package-linux "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')" -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_TESTING=OFF -DENABLE_BINARY_RELEASES=ON -DLUMINUMBRA_WARNINGS_AS_ERRORS=ON
           cmake --build build/package-linux --target package --parallel 4
 
@@ -340,7 +340,7 @@ jobs:
       - name: Configure GNS compile command
         run: |
           python3 -I -B tools/ci/rmlui_source.py init --root build/gns-probe
-          cmake -S . -B build/gns-probe -G Ninja \
+          cmake -S . -B build/gns-probe "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')" -G Ninja \
             -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DLUMINUMBRA_ENABLE_DILIGENT=OFF -DLUMINUMBRA_ENABLE_GNS=ON
@@ -404,7 +404,7 @@ jobs:
       - name: Configure with Diligent RHI
         run: |
           python3 -I -B tools/ci/rmlui_source.py init --root build/release
-          cmake --preset release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+          cmake --preset release "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')" -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DLUMINUMBRA_ENABLE_DILIGENT=ON
       - name: Reset compiler cache statistics
         if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
@@ -522,7 +522,7 @@ jobs:
         env:
           LOCAL_CHECK_JUNIT: ${{ github.workspace }}/build/local-check-contracts/ctest.junit.xml
         run: |
-          cmake -S tools/ci/contracts -B build/local-check-contracts -G Ninja
+          cmake -S tools/ci/contracts -B build/local-check-contracts -G Ninja "-DPython3_EXECUTABLE=$(python -I -B -c 'import sys; print(sys.executable)')"
           ctest --test-dir build/local-check-contracts --show-only=json-v1 > build/local-check-contracts/ctest-discovery.json
           ctest --test-dir build/local-check-contracts --no-tests=error --parallel 4 --output-on-failure --output-junit "$LOCAL_CHECK_JUNIT"
           python -I -B tools/ci/check_ctest_junit.py "$LOCAL_CHECK_JUNIT" --minimum-tests 2 --require-test ChangedTranslationUnitsContract --require-test OfflineDependenciesContract
@@ -642,7 +642,7 @@ jobs:
           }
           python -I -B tools/ci/rmlui_source.py init --root build/release
           if ($LASTEXITCODE -ne 0) { throw 'RmlUi workspace initialization failed' }
-          cmake --preset release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl @compilerLaunchers
+          cmake --preset release "-DPython3_EXECUTABLE=$(& python -I -B -c 'import sys; print(sys.executable)')" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl @compilerLaunchers
           cmake --build --preset release --parallel 4
           # Require the file-only production writer/oracle integration even
           # when optional PowerShell discovery would omit it from the suite.
@@ -754,11 +754,11 @@ jobs:
           Enter-VsDevShell -VsInstallPath $installPath -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
           python -I -B tools/ci/rmlui_source.py init --root build/package-off
           if ($LASTEXITCODE -ne 0) { throw 'RmlUi workspace initialization failed' }
-          cmake -S . -B build/package-off -G Ninja -DBUILD_TESTING=OFF -DENABLE_BINARY_RELEASES=OFF
+          cmake -S . -B build/package-off "-DPython3_EXECUTABLE=$(& python -I -B -c 'import sys; print(sys.executable)')" -G Ninja -DBUILD_TESTING=OFF -DENABLE_BINARY_RELEASES=OFF
           if (Test-Path build/package-off/CPackConfig.cmake) { throw 'binary packaging enabled while disabled' }
           python -I -B tools/ci/rmlui_source.py init --root build/package-windows
           if ($LASTEXITCODE -ne 0) { throw 'RmlUi workspace initialization failed' }
-          cmake -S . -B build/package-windows -G Ninja -DCMAKE_BUILD_TYPE=Release `
+          cmake -S . -B build/package-windows "-DPython3_EXECUTABLE=$(& python -I -B -c 'import sys; print(sys.executable)')" -G Ninja -DCMAKE_BUILD_TYPE=Release `
             -DBUILD_TESTING=OFF -DENABLE_BINARY_RELEASES=ON -DLUMINUMBRA_WARNINGS_AS_ERRORS=ON
           cmake --build build/package-windows --target package --parallel 4
 
@@ -881,7 +881,7 @@ jobs:
         id: configure
         shell: msys2 {0}
         run: >-
-          cmake --preset release -DCMAKE_C_COMPILER_LAUNCHER=ccache
+          cmake --preset release "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')" -DCMAKE_C_COMPILER_LAUNCHER=ccache
           -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
       - name: Reset compiler cache statistics
         if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
@@ -1277,7 +1277,7 @@ jobs:
       - name: Configure compile database
         run: |
           python3 -I -B tools/ci/rmlui_source.py init --root build/tidy
-          cmake -S . -B build/tidy -G Ninja -DCMAKE_BUILD_TYPE=Release \
+          cmake -S . -B build/tidy "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')" -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DLUMINUMBRA_ENABLE_DILIGENT=OFF \
             -DLUMINUMBRA_WARNINGS_AS_ERRORS=OFF \
             -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++

@@ -4017,7 +4017,7 @@ function Test-PopulatedAsan {
         }
         & python -I -B tools/ci/rmlui_source.py preflight --root $asanBuildDir
         if ($LASTEXITCODE -ne 0) { throw "RmlUi workspace preflight failed ($LASTEXITCODE)" }
-        & cmake --preset debug-asan
+        & cmake --preset debug-asan "-DPython3_EXECUTABLE=$(& python -I -B -c 'import sys; print(sys.executable)')"
         if ($LASTEXITCODE -ne 0) {
             throw "PopulatedAsan: cmake --preset debug-asan configure failed (exit $LASTEXITCODE)"
         }
@@ -5264,7 +5264,7 @@ function Test-SimOptLevelParity {
         }
         & python -I -B tools/ci/rmlui_source.py preflight --root $parityDir
         if ($LASTEXITCODE -ne 0) { throw "RmlUi workspace preflight failed ($LASTEXITCODE)" }
-        & cmake --preset $parityPreset
+        & cmake --preset $parityPreset "-DPython3_EXECUTABLE=$(& python -I -B -c 'import sys; print(sys.executable)')"
         if ($LASTEXITCODE -ne 0) { throw "sim-opt-parity: cmake configure ($parityPreset) failed ($LASTEXITCODE)" }
         & cmake --build --preset $parityPreset --target luminumbra_server_app
         if ($LASTEXITCODE -ne 0) {

@@ -10,7 +10,7 @@ if [ ! -e build/release ]; then
   python3 -I -B tools/ci/rmlui_source.py init --root build/release || exit
 fi
 python3 -I -B tools/ci/rmlui_source.py preflight --root build/release || exit
-cmake --preset release
+cmake --preset release "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')"
 cmake --build --preset release --target asset_processor morph_asset_test --parallel 2
 build/release/bin/asset_processor source.glb result.lmorph
 ctest --preset release -R '^MorphAssetTest\.' --no-tests=error --output-on-failure

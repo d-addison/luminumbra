@@ -399,7 +399,7 @@ if(BUILD_TESTING)
     add_test(
         NAME RmlUiSourceCommandContract
         COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_rmlui_source.py"
-                DeliveryRefusals PairedWorkflowInitialization HostedConfigurationContracts
+                DeliveryRefusals PairedWorkflowInitialization HostedConfigurationContracts BootstrapInterpreterBinding
                 OwnedCommandLifetime WindowsContainmentRefusal OwnershipFieldDiagnostics RootMismatchObservations
                 ConfigureCallerBoundaries Utf8SourceReads FixtureCleanupCustody)
     set_tests_properties(RmlUiSourceCommandContract

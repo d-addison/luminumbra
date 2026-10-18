@@ -14,8 +14,11 @@ Before the first configure, explicitly enroll a **fresh build root**:
 
 ```sh
 python3 -I -B tools/ci/rmlui_source.py init --root build/release
-cmake --preset release
+cmake --preset release "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')"
 ```
+
+Configure passes the bootstrap interpreter explicitly to CMake. Preflight,
+download and verification use that interpreter; root spellings remain exact.
 
 For another preset or `cmake -B` directory, pass that exact directory to `init`.
 Initialization refuses an existing file or directory. Use a new directory when

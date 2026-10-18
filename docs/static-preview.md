@@ -22,7 +22,7 @@ if [ ! -e build/release ]; then
   python3 -I -B tools/ci/rmlui_source.py init --root build/release || exit
 fi
 python3 -I -B tools/ci/rmlui_source.py preflight --root build/release || exit
-cmake --preset release -DLUMINUMBRA_ENABLE_STATIC_PREVIEW=ON
+cmake --preset release "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')" -DLUMINUMBRA_ENABLE_STATIC_PREVIEW=ON
 cmake --build --preset release --target luminumbra_preview_capture --parallel 2
 cmake --install build/release --prefix ./preview-sdk --component StaticPreview
 ```

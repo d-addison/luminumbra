@@ -166,7 +166,7 @@ nice -n 10 python3 -I -B tools/ci/offline_deps.py stage \
   --init scratch/offline-init.cmake
 
 configure_local() {
-  nice -n 10 cmake --preset release -B "$1" \
+  nice -n 10 cmake --preset release -B "$1" "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')" \
     -C "$PWD/scratch/offline-init.cmake" \
     -DFETCHCONTENT_BASE_DIR="$PWD/$1/_deps" \
     -DFETCHCONTENT_FULLY_DISCONNECTED=ON \

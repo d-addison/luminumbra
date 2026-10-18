@@ -1,4 +1,9 @@
 # RmlUi is delivered only into a build root enrolled before configure.
+# Use the bootstrap caller's interpreter, including its native path spelling.
+# An empty binding must refuse instead of falling back to independent discovery.
+if(NOT IS_ABSOLUTE "${Python3_EXECUTABLE}" OR NOT EXISTS "${Python3_EXECUTABLE}")
+  message(FATAL_ERROR "RmlUi requires an absolute bootstrap Python3_EXECUTABLE")
+endif()
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 set(_rmlui_helper "${CMAKE_SOURCE_DIR}/tools/ci/rmlui_source.py")
 set(_rmlui_manifest "${CMAKE_SOURCE_DIR}/vendor/rmlui/rmlui-6.1-source.json")

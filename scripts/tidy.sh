@@ -134,7 +134,7 @@ compile_db="$repo_root/$build_dir/compile_commands.json"
 if [[ ! -f "$compile_db" ]]; then
     echo "clang-tidy requires $compile_db. Configure CMake with compile commands enabled first." >&2
     echo "First initialize a fresh build root: python3 -I -B tools/ci/rmlui_source.py init --root $build_dir" >&2
-    echo "Example: cmake -S . -B $build_dir -G Ninja -DCMAKE_BUILD_TYPE=Release \\" >&2
+    echo "Example: cmake \"-DPython3_EXECUTABLE=\$(python3 -I -B -c 'import sys; print(sys.executable)')\" -S . -B $build_dir -G Ninja -DCMAKE_BUILD_TYPE=Release \\" >&2
     echo "  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DLUMINUMBRA_WARNINGS_AS_ERRORS=OFF \\" >&2
     echo "  -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18" >&2
     exit 1

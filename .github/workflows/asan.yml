@@ -148,7 +148,7 @@ jobs:
       - name: Configure
         id: configure
         run: >-
-          cmake --preset debug-asan -DCMAKE_C_COMPILER_LAUNCHER=ccache
+          cmake --preset debug-asan "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')" -DCMAKE_C_COMPILER_LAUNCHER=ccache
           -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
       - name: Reset compiler cache statistics
         if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name != 'workflow_dispatch' || inputs.qualification_capture != true) }}

@@ -165,7 +165,7 @@ jobs:
       - name: Prepare fresh RmlUi build root
         run: python3 -I -B tools/ci/rmlui_source.py init --root build/perf
       - name: Configure
-        run: cmake --preset perf -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+        run: cmake --preset perf "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')" -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
       - name: Build measurement target
         run: cmake --build --preset perf --target worldgen_preview_test luminumbra_client_app --parallel 4
       - name: Test native render runner
@@ -269,7 +269,7 @@ jobs:
           if [[ -f base/tools/ci/rmlui_source.py ]]; then
             python3 -I -B base/tools/ci/rmlui_source.py init --root build/base
           fi
-          cmake -S base -B build/base -G Ninja \
+          cmake -S base -B build/base "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')" -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DCMAKE_CXX_FLAGS_RELWITHDEBINFO="-O2 -g -DNDEBUG -fno-omit-frame-pointer" \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
@@ -281,7 +281,7 @@ jobs:
             -DLUMINUMBRA_WARNINGS_AS_ERRORS=ON \
             -DCMAKE_PROJECT_INCLUDE="$GITHUB_WORKSPACE/head/cmake/performance_manifest.cmake"
           python3 -I -B head/tools/ci/rmlui_source.py init --root build/head
-          cmake -S head -B build/head -G Ninja \
+          cmake -S head -B build/head "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')" -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DCMAKE_CXX_FLAGS_RELWITHDEBINFO="-O2 -g -DNDEBUG -fno-omit-frame-pointer" \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
@@ -654,7 +654,7 @@ jobs:
         id: configure
         run: |
           python3 -I -B tools/ci/rmlui_source.py init --root build/qualification-build
-          cmake -S . -B build/qualification-build -G Ninja \
+          cmake -S . -B build/qualification-build "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')" -G Ninja \
             -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DCMAKE_CXX_FLAGS_RELWITHDEBINFO="-O2 -g -DNDEBUG -fno-omit-frame-pointer" \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \

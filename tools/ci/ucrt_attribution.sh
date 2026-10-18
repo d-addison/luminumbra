@@ -690,7 +690,7 @@ run_cell() {
         bounded python -I -B tools/ci/rmlui_source.py init --root "$bdir" > "$dir/configure.log" 2>&1 || rc=$?
     fi
     if (( rc == 0 )); then
-        bounded cmake --preset release -B "$bdir" >> "$dir/configure.log" 2>&1 || rc=$?
+        bounded cmake --preset release "-DPython3_EXECUTABLE=$(python -I -B -c 'import sys; print(sys.executable)')" -B "$bdir" >> "$dir/configure.log" 2>&1 || rc=$?
     fi
     if (( rc != 0 )); then
         finish_cell "$dir" "$(op_failure_status "$rc" BUILD_FAILED)" || return 1

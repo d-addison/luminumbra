@@ -63,7 +63,7 @@ try {
         }
         & python -I -B tools/ci/rmlui_source.py preflight --root $buildDir
         if ($LASTEXITCODE -ne 0) { throw "RmlUi workspace preflight failed ($LASTEXITCODE)" }
-        & cmake --preset coverage
+        & cmake --preset coverage "-DPython3_EXECUTABLE=$(& python -I -B -c 'import sys; print(sys.executable)')"
         if ($LASTEXITCODE -ne 0) { throw "cmake configure (coverage) failed" }
 
         Write-Host "== build coverage preset ==" -ForegroundColor Cyan

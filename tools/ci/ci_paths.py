@@ -171,7 +171,7 @@ RMLUI_CALLER_INPUTS = frozenset({
     "CMakePresets.json", "tools/gates/run-coverage.ps1", "tools/gates/validate-engine-frontier.ps1",
     "README.md", "CONTRIBUTING.md", "docs/development.md", "docs/static-morph-assets.md",
     "docs/performance.md", "docs/index.md", "docs/known-limitations.md", "docs/static-preview.md",
-    "docs/dependency-source.md",
+    "docs/dependency-source.md", "docs/ci/local-checks.md",
 })
 
 
