@@ -659,6 +659,27 @@ file(WRITE "${{CMAKE_BINARY_DIR}}/gl-targets.txt" "${{LUMINUMBRA_GL_GTEST_TARGET
                         'rhi_device_bringup_test', 'rhi_pilot_flip_test',
                         'pilot_shader_reflection_test',
                     }
+                    required_gl_targets = {
+                        'render_smoke_test', 'render_capture_test',
+                        'async_readback_ring_test', 'dual_backend_flip_test',
+                        'registry_ownership_test', 'environment_brdf_test',
+                        'pass_context_test', 'reversed_z_depth_test',
+                        'shader_reflection_test', 'waterfall_visual_test',
+                        'particle_determinism_test', 'far_lod_worker_test',
+                        'ui_smoke_test', 'ui_page_load_test', 'worldgen_preview_test',
+                        'runtime_world_visual_validation_test',
+                    }
+                    # Membership includes optional targets even when discovery omits them.
+                    expected_gl = required_gl_targets | optional_targets
+                    self.assertCountEqual(gl_targets, expected_gl)
+                    expected_registered_gl = {'OFF': required_gl_targets, 'ON': expected_gl}[optional]
+                    self.assertEqual({name[7:] for name in tests
+                                      if name.startswith('native.') and name[7:] in expected_gl},
+                                     expected_registered_gl)
+                    self.assertEqual({name[7:] for name, props in properties.items()
+                                      if name.startswith('native.') and
+                                      props.get('RESOURCE_LOCK') == ['luminumbra_gl_context']},
+                                     expected_registered_gl)
                     active_gl = set(gl_targets)
                     if optional == 'OFF':
                         active_gl -= optional_targets
