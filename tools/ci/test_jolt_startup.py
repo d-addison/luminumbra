@@ -591,6 +591,36 @@ class PatchIntegrationTests(unittest.TestCase):
                 self.assertFalse(self.output.exists())
                 self.assertEqual((self.source / self.name).read_bytes(), before)
 
+    def test_reviewed_capacity_bounds_use_macro_safe_limits(self):
+        _, payload = MODULE.inputs()
+        expected = {
+            b"Jolt/Core/HashTable.h":
+                b"if (bytes > (std::numeric_limits<size_t>::max)() - 15)",
+            b"Jolt/Core/JobSystemThreadPool.cpp":
+                b"if (hardware_threads > uint((std::numeric_limits<int>::max)()))",
+            b"Jolt/Core/Memory.h":
+                b"if (inSize != 0 && inCount > (std::numeric_limits<size_t>::max)() / inSize)",
+            b"Jolt/Physics/Collision/BroadPhase/BroadPhaseQuadTree.cpp":
+                b"if (num_leaves_plus_internal_nodes > (uint64((std::numeric_limits<uint32>::max)()) - 1) / 2)",
+        }
+        additions = {}
+        name = None
+        for line in payload.splitlines():
+            if line.startswith(b"+++ b/"):
+                name = line[6:]
+                additions[name] = []
+            elif line.startswith(b"+"):
+                additions[name].append(line[1:])
+        for name, expression in expected.items():
+            with self.subTest(path=name):
+                self.assertIn(expression, b"\n".join(additions[name]))
+        # Scan every added call, including bounds introduced in other files.
+        for name, lines in additions.items():
+            with self.subTest(path=name):
+                self.assertNotRegex(
+                    b"\n".join(lines),
+                    rb"std::numeric_limits<[^>\n]+>::(?:min|max)\s*\(")
+
     def test_reviewed_patch_uses_zero_context_without_whitespace_errors(self):
         payload = (ROOT / MODULE.MANIFEST.parent / "jolt-startup.patch").read_bytes()
         lines = payload.splitlines()

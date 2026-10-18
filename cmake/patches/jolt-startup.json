@@ -4,7 +4,7 @@
   "revision": "0373ec0dd762e4bc2f6acdb08371ee84fa23c6db",
   "tag": "v5.3.0",
   "patch": "jolt-startup.patch",
-  "sha256": "191e45b23cf749e4af21a69fe42ed98538a6bcf2bfe6f486ed8a71b6b8fea5a0",
+  "sha256": "dc4498a01b27d7ce9542db8994d3be532ec5a0a5f24d497b232d6d0a93bd0160",
   "files": [
     {
       "path": "Jolt/Core/FixedSizeFreeList.h",
@@ -21,13 +21,13 @@
     {
       "path": "Jolt/Core/HashTable.h",
       "before": "4047af63d37e20c55d833086eccd4a6413df5f7d330d2ad85fe68f4114d99ab0",
-      "after": "d52ab780308f39e6dc0f0ba803becfbb657e65a32631e693be04af01308b50fa",
+      "after": "77d4f2b01d26e7bf08b81d3a9d516cb41740f8119047143c25579b25193aabdd",
       "mode": "100644"
     },
     {
       "path": "Jolt/Core/JobSystemThreadPool.cpp",
       "before": "c342499f68b988ea6d3a175e859a70ad07a704cc05b088e8b630e209283e9dd5",
-      "after": "b8064efb89ddbfad73af5af18aa4c4f3a4b9db71e59e78fd3304ae42c5828c71",
+      "after": "437136273260d47a4fafc8692aa0fc19aab26adaf582732bddafd570aa4bc9f9",
       "mode": "100644"
     },
     {
@@ -57,7 +57,7 @@
     {
       "path": "Jolt/Core/Memory.h",
       "before": "5fa2d0af9fe575a705e679c27f66da73727c50a46f4f1cf4107cdd043d716315",
-      "after": "ab9e48e157a4e9a2c19f83b8b730e2dfa1e62b6fb9ed6795d1bb276330b87f91",
+      "after": "b9ccd5ceb81a2e33807c68e9bf189cb569b11a0f46d389b2390d535c9cfab6b9",
       "mode": "100644"
     },
     {
@@ -93,7 +93,7 @@
     {
       "path": "Jolt/Physics/Collision/BroadPhase/BroadPhaseQuadTree.cpp",
       "before": "19687babe19073e7e361e683ed36c985ab61bc9822b55a816456bf81a8676805",
-      "after": "7109a608765ed83a097735b989bac8e081b592e14189a1ac2fdd6554417c5390",
+      "after": "e83a0a5f989c0d5ad083c7dc10baf92747d03b15a1aaf8f51bb8952dc6996cc7",
       "mode": "100644"
     },
     {
