@@ -200,12 +200,51 @@ class CTestShardTests(unittest.TestCase):
                         for name, content in before.items():
                             self.assertEqual((self.root / name).read_bytes(), content)
 
+    def test_plan_fixture_encodes_shared_inputs_once_without_retaining_mutations(self):
+        encode = json.dumps
+        for shared in (True, False):
+            with self.subTest(shared=shared):
+                all_tests = self.tests if shared else copy.deepcopy(self.tests)
+                expected = encode({"tests": self.tests}).encode("utf-8")
+                with patch.object(json, "dumps", wraps=encode) as serialize:
+                    self.write_plan(self.root, 1, all_tests=all_tests)
+                calls = [call for call in serialize.call_args_list
+                         if isinstance(call.args[0], dict) and "tests" in call.args[0]
+                         and (call.args[0]["tests"] is self.tests or call.args[0]["tests"] is all_tests)]
+                self.assertEqual(len(calls), 1 if shared else 2)
+                self.assertEqual((self.root / "ctest.all.json").read_bytes(), expected)
+                self.assertEqual((self.root / "ctest.inventory.json").read_bytes(), expected)
+                self.assertEqual(encode({"tests": self.tests}).encode(), expected)
+                self.assertEqual(all_tests, self.tests)
+        self.tests[0]["command"].append("--changed")
+        expected = encode({"tests": self.tests}).encode("utf-8")
+        with patch.object(json, "dumps", wraps=encode) as serialize:
+            self.write_plan(self.root, 1)
+        calls = [call for call in serialize.call_args_list
+                 if isinstance(call.args[0], dict) and call.args[0].get("tests") is self.tests]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual((self.root / "ctest.all.json").read_bytes(), expected)
+        self.assertEqual((self.root / "ctest.inventory.json").read_bytes(), expected)
+        independent = copy.deepcopy(self.tests)
+        independent[0]["command"].append("--independent")
+        with self.assertRaisesRegex(ValueError, "execution inventory differs"):
+            self.write_plan(self.root, 1, all_tests=independent)
+        self.assertEqual((self.root / "ctest.all.json").read_bytes(),
+                         encode({"tests": independent}).encode("utf-8"))
+        self.assertEqual((self.root / "ctest.inventory.json").read_bytes(), expected)
+        with self.assertRaisesRegex(ValueError, "empty CTest inventory"):
+            self.write_plan(self.root, 1, tests=[])
+
     def write_plan(self, directory, shard, tests=None, all_tests=None, profile="gcc", roots=None, selection=None):
         directory.mkdir(parents=True, exist_ok=True)
         tests = self.tests if tests is None else tests
-        for file, rows in (("ctest.all.json", all_tests if all_tests is not None else tests),
-                           ("ctest.inventory.json", tests)):
-            (directory / file).write_text(json.dumps({"tests": rows}), encoding="utf-8")
+        all_tests = tests if all_tests is None else all_tests
+        # Reuse only this call's encoding when both fixture inputs are the same object.
+        # Both files and the real planner remain independent consumers.
+        all_text = json.dumps({"tests": all_tests})
+        (directory / "ctest.all.json").write_text(all_text, encoding="utf-8")
+        eligible_text = all_text if tests is all_tests else json.dumps({"tests": tests})
+        (directory / "ctest.inventory.json").write_text(eligible_text, encoding="utf-8")
         # Artifact directories model producers with identical hosted checkout paths.
         roots = shards.inventory_roots(self.root) if roots is None else roots
         with patch.object(shards, "inventory_roots", return_value=roots):
