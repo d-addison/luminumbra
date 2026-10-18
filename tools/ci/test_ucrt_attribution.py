@@ -707,10 +707,53 @@ class MockTests(unittest.TestCase):
             self.assertEqual(read_calls(root / "calls.bin"), [["python", *args] for args in invalid])
 
     def dispatch_fixture(self, root, name, args):
-        with mock.patch.object(os, "getcwd", return_value=str(root)), \
-                mock.patch.object(sys, "argv", ["stub.py", name, *args]), \
-                mock.patch.dict(os.environ, STUB_SCENARIO="good"):
-            exec(compile(STUB, "stub.py", "exec"), {})
+        previous = os.getcwd()
+        os.chdir(root)
+        try:
+            with mock.patch.object(sys, "argv", ["stub.py", name, *args]), \
+                    mock.patch.dict(os.environ, STUB_SCENARIO="good"):
+                exec(compile(STUB, "stub.py", "exec"), {})
+        finally:
+            os.chdir(previous)
+
+    def test_dispatch_fixture_uses_native_cwd_and_restores_after_success(self):
+        previous = os.getcwdb()
+        native_compile = compile
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            (root / "cmake").mkdir()
+            (root / "cmake/rmlui_source.cmake").write_text("fixture", encoding="utf-8")
+            observed = []
+            def compile_in_root(source, filename, *args, **kwargs):
+                if filename == "stub.py":
+                    observed.append(os.getcwdb())
+                    self.assertTrue(os.path.samefile(observed[-1], root))
+                return native_compile(source, filename, *args, **kwargs)
+            init = ["-I", "-B", "tools/ci/rmlui_source.py", "init", "--root", "build/cell-0"]
+            with mock.patch("builtins.compile", side_effect=compile_in_root):
+                self.dispatch_fixture(root, "source-init", init)
+            self.assertEqual(len(observed), 1)
+            self.assertEqual(os.getcwdb(), previous)
+            self.assertEqual(json.loads((root / "build/cell-0/source-enrolled.json").read_text()), init)
+            self.assertFalse((root / "build/cell-0/configured.txt").exists())
+
+    def test_dispatch_fixture_restores_native_cwd_after_containment_refusal(self):
+        previous = os.getcwdb()
+        native_compile = compile
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            observed = []
+            def compile_in_root(source, filename, *args, **kwargs):
+                if filename == "stub.py":
+                    observed.append(os.getcwdb())
+                    self.assertTrue(os.path.samefile(observed[-1], root))
+                return native_compile(source, filename, *args, **kwargs)
+            with mock.patch("builtins.compile", side_effect=compile_in_root):
+                with self.assertRaises(ValueError):
+                    self.dispatch_fixture(root, "mkdir", ["../foreign"])
+            self.assertEqual(len(observed), 1)
+            self.assertEqual(os.getcwdb(), previous)
+            self.assertEqual(list(root.iterdir()), [])
 
     def test_source_and_configure_refusals_preserve_unrecognized_roots(self):
         with tempfile.TemporaryDirectory() as directory:

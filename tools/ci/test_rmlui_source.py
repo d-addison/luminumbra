@@ -894,7 +894,7 @@ class DeliveryRefusals(unittest.TestCase):
             commit = object_file(source, "commit", (
                 f"tree {tree}\nauthor Fixture <fixture@example.invalid> 1 +0000\n"
                 "committer Fixture <fixture@example.invalid> 1 +0000\n\nfixture\n").encode())
-            (source / ".git/HEAD").write_text(commit + "\n", encoding="ascii")
+            (source / ".git/HEAD").write_bytes((commit + "\n").encode("ascii"))
             (source / "nested").mkdir()
             for name in ("root.txt", "nested/file.txt"):
                 (source / name).write_bytes(b"fixture\n")
@@ -903,6 +903,30 @@ class DeliveryRefusals(unittest.TestCase):
             M.git(source, "read-tree", commit)
             with mock.patch.object(M, "REVISION", commit), mock.patch.object(M, "FILE_COUNT", 2):
                 yield source, spec, nested
+
+    def test_small_git_source_keeps_canonical_head_under_crlf_text_writes(self):
+        native_open = Path.open
+        def crlf_text_open(path, mode="r", buffering=-1, encoding=None, errors=None, newline=None):
+            # Model Windows default text translation for this two-file fixture.
+            if mode == "w" and newline is None:
+                newline = "\r\n"
+            return native_open(path, mode, buffering, encoding, errors, newline)
+        with mock.patch.object(Path, "open", autospec=True, side_effect=crlf_text_open):
+            with self.small_git_source() as (source, spec, nested):
+                self.assertIn(b"\r\n", (source / ".git/config").read_bytes())
+                self.assertEqual((source / ".git/HEAD").read_bytes(), (M.REVISION + "\n").encode("ascii"))
+                for name in ("root.txt", "nested/file.txt"):
+                    self.assertEqual((source / name).read_bytes(), b"fixture\n")
+                M.verify_git(source, spec)
+
+    def test_root_tree_verification_refuses_noncanonical_head_bytes(self):
+        with self.small_git_source() as (source, spec, nested):
+            for content in (b"", M.REVISION.encode("ascii"), (M.REVISION + "\r\n").encode("ascii")):
+                with self.subTest(content=content):
+                    (source / ".git/HEAD").write_bytes(content)
+                    with self.assertRaisesRegex(M.Refusal, "HEAD is not the detached pin"):
+                        M.verify_git(source, spec)
+                    self.assertEqual((source / ".git/HEAD").read_bytes(), content)
 
     def test_root_tree_query_is_equivalent_for_root_and_nested_working_directories(self):
         with self.small_git_source() as (source, spec, nested):
