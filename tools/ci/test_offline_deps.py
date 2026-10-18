@@ -1382,7 +1382,56 @@ class CachedGitSafetyTests(unittest.TestCase):
     @staticmethod
     def commit(source, cache):
         deps.git(source, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.org",
-                 "-c", "commit.gpgSign=false", "commit", "--quiet", "-m", "fixture", cache=cache)
+                 "-c", "commit.gpgSign=false", "-c", "maintenance.auto=false",
+                 "commit", "--quiet", "-m", "fixture", cache=cache)
+
+    def test_fixture_commits_disable_maintenance_in_real_git(self):
+        original_output = subprocess.check_output
+        commits = []
+
+        def output(argv, **kwargs):
+            if "commit" not in argv:
+                return original_output(argv, **kwargs)
+            source = Path(kwargs["cwd"])
+            config = source / ".git/config"
+            before_config = config.read_bytes()
+            before_source = deps.source_digest(source)
+            trace = self.base / f"commit-trace-{len(commits)}.json"
+            kwargs["env"] = dict(kwargs["env"], GIT_TRACE2_EVENT=str(trace),
+                                 GIT_TRACE2_CONFIG_PARAMS="maintenance.auto")
+            result = original_output(argv, **kwargs)
+            self.assertEqual(config.read_bytes(), before_config)
+            self.assertEqual(deps.source_digest(source), before_source)
+            commits.append((source.name, trace))
+            return result
+
+        class FreshFixture(type(self)):
+            pass
+
+        with patch.object(subprocess, "check_output", side_effect=output):
+            try:
+                FreshFixture.setUpClass()
+            finally:
+                FreshFixture.doClassCleanups()
+            (self.source / "input.h").write_text("changed fixture\n")
+            self.git(self.source, "add", "input.h")
+            self.commit(self.source, self.cache)
+            # Retain the real recursive discovery, verification and refusals.
+            self.test_real_recursive_gitlinks_check_initialized_heads()
+        self.assertEqual([name for name, _ in commits],
+                         ["sample", "sample", "nested path (v1)", "sample", "child"])
+        for name, trace in commits:
+            with self.subTest(repository=name, trace=trace.name):
+                events = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()]
+                self.assertTrue(any(event.get("event") == "cmd_name" and
+                                    event.get("name") == "commit" for event in events), events)
+                self.assertTrue(any(event.get("event") == "exit" and
+                                    event.get("code") == 0 for event in events), events)
+                self.assertTrue(any(event.get("event") == "def_param" and
+                                    event.get("param") == "maintenance.auto" and
+                                    event.get("value") == "false" for event in events), events)
+                children = [event["argv"] for event in events if event.get("event") == "child_start"]
+                self.assertFalse(any("maintenance" in child or "gc" in child for child in children), children)
 
     def save_lock(self, identity):
         lock = deps.unresolved_lock(self.root)
@@ -2178,7 +2227,8 @@ class CachedGitSafetyTests(unittest.TestCase):
                          {nested.name: nested_head, nested.name + "/child": child_head})
         deps.verify(self.root, self.cache, self.lock)
         self.git(child, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.org",
-                 "-c", "commit.gpgSign=false", "commit", "--quiet", "--allow-empty", "-m", "changed")
+                 "-c", "commit.gpgSign=false", "-c", "maintenance.auto=false",
+                 "commit", "--quiet", "--allow-empty", "-m", "changed")
         # Keep the content digest correct while changing only submodule HEAD.
         self.assert_refused_without_writes()
         (child / ".git/HEAD").unlink()
