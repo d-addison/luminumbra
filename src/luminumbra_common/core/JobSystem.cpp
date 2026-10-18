@@ -84,18 +84,19 @@ void complete_job(const std::shared_ptr<JobCompletionState>& completion) {
 // per-job CompletionGuard lambda the old dispatch_batch wrapped each job in.
 // A member (declared in the header) so it can name the private PooledJob type.
 void JobSystem::run_slot(PooledJob& slot) {
-    // Take ownership locally so the slot can be cleared even if job throws.
-    Job job = std::move(slot.job);
-    std::shared_ptr<JobCompletionState> completion = std::move(slot.completion);
-    slot.job = nullptr;
-    slot.completion.reset();
-
     struct Finisher {
         std::shared_ptr<JobCompletionState> completion;
         ~Finisher() {
             complete_job(completion);
         }
-    } finisher{std::move(completion)};
+    } finisher{std::move(slot.completion)};
+
+    // Declare the callable after its completion guard: reverse destruction
+    // order releases every job-owned capture before publishing completion,
+    // including when the callback throws. Both run outside the queue lock.
+    Job job = std::move(slot.job);
+    slot.job = nullptr;
+    slot.completion.reset();
 
     if (job) {
         job();
