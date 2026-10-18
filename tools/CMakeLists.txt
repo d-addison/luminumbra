@@ -289,11 +289,12 @@ if(BUILD_TESTING)
         PROPERTIES LABELS "ci;tools" TIMEOUT 30)
     # Disjoint policy partitions preserve every unittest case and the 30s deadline.
     # Direct Python invocation and unittest discovery still execute the full suite.
+    # Partition 0 reserves both slots for its bounded route-grid overlap.
     add_test(
         NAME WorkflowPolicyContract
-        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py" --partition 0)
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py" --partition 0 --case-workers 2)
     set_tests_properties(WorkflowPolicyContract
-        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30 PROCESSORS 2)
     add_test(
         NAME WorkflowPolicyContractPart1
         COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py" --partition 1)
