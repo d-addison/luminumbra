@@ -1,5 +1,7 @@
 #include "FrameAttribution.h"
 
+#include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -9,6 +11,7 @@
 #include <locale>
 #include <optional>
 #include <ostream>
+#include <ratio>
 #include <system_error>
 
 namespace Luminumbra::Client::Attribution {
@@ -137,6 +140,90 @@ void record_foliage_rebuild(const FoliageRebuild& rebuild,
 double exclusive_parent_ms(double parent_ms, double nested_before_ms, double nested_after_ms) {
     return parent_ms - (nested_after_ms - nested_before_ms);
 }
+namespace {
+// Frame guards own the totals; each thread only borrows its active guard's
+// mutable storage. Keep the stack pointers local to their accessors, like foliage.
+PhaseTotals*& current_phases() {
+    thread_local PhaseTotals* totals = nullptr;
+    return totals;
+}
+const PhaseScope*& current_phase_scope() {
+    thread_local const PhaseScope* scope = nullptr;
+    return scope;
+}
+double foliage_ms() {
+    const auto* frame = current_foliage_frame();
+    return frame ? frame->rebuild_ms : 0;
+}
+constexpr std::array<const char*, kPhaseCount> kPhaseNames{"ui_update",
+                                                           "ui_render",
+                                                           "ui_filters",
+                                                           "menu_scene",
+                                                           "preview_adoption",
+                                                           "document_load",
+                                                           "texture_load",
+                                                           "shader_load",
+                                                           "shader_first_use",
+                                                           "world_create_callback",
+                                                           "world_load_callback"};
+} // namespace
+const char* phase_name(Phase phase) {
+    return kPhaseNames.at(static_cast<std::size_t>(phase));
+}
+double PhaseTotals::sum() const {
+    double result = 0;
+    for (const double value : m_ms)
+        result += value;
+    return result;
+}
+void PhaseTotals::add(Phase phase, double inclusive_ms, double child_ms, double direct_foliage_ms) {
+    m_ms.at(static_cast<std::size_t>(phase)) += inclusive_ms - child_ms - direct_foliage_ms;
+    ++m_scopes.at(static_cast<std::size_t>(phase));
+    m_inclusive_ms.at(static_cast<std::size_t>(phase)) += inclusive_ms;
+}
+PhaseFrameScope::PhaseFrameScope(bool enabled)
+    : m_previous(current_phases()) {
+    current_phases() = enabled ? &m_totals : nullptr;
+    shader_first_use_collection_enabled = current_phases() != nullptr;
+}
+PhaseFrameScope::~PhaseFrameScope() {
+    current_phases() = m_previous;
+    shader_first_use_collection_enabled = current_phases() != nullptr;
+}
+bool PhaseFrameScope::is_current() const {
+    return current_phases() == &m_totals;
+}
+double phase_total_ms() {
+    const auto* totals = current_phases();
+    return totals ? totals->sum() : 0;
+}
+PhaseScope::PhaseScope(Phase phase, bool enabled)
+    : m_phase(phase) {
+    if (!enabled || !current_phases())
+        return;
+    m_totals = current_phases();
+    m_parent = current_phase_scope();
+    current_phase_scope() = this;
+    m_foliage_before = foliage_ms();
+    m_start = std::chrono::steady_clock::now();
+}
+PhaseScope::~PhaseScope() {
+    if (!m_totals)
+        return;
+    const double elapsed =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - m_start)
+            .count();
+    const double foliage = foliage_ms() - m_foliage_before;
+    m_totals->add(m_phase, elapsed, m_children_ms, foliage - m_child_foliage_ms);
+    if (m_parent && m_parent->m_totals == m_totals) {
+        m_parent->m_children_ms += elapsed;
+        m_parent->m_child_foliage_ms += foliage;
+    }
+    current_phase_scope() = m_parent;
+}
+bool PhaseScope::is_current() const {
+    return m_totals && m_totals == current_phases() && current_phase_scope() == this;
+}
 double FrameBuckets::sum() const {
     return sim + stream + render + present + foliage + scatter + rebake + poll + menu + ui;
 }
@@ -147,7 +234,10 @@ void write_csv_header(std::ostream& out) {
            "rebuild_calls,reason_mask,admitted_columns,surface_misses,deferred_columns,copied_"
            "bytes,"
            "hashed_bytes,uploaded_bytes,scratch_bytes,backlog,path,fallback,"
-           "instance_capacity,generated_count,count_generation\n";
+           "instance_capacity,generated_count,count_generation";
+    for (std::size_t index = 0; index < kPhaseCount; ++index)
+        out << ',' << phase_name(static_cast<Phase>(index)) << "_ms";
+    out << '\n';
 }
 bool write_csv_row(std::ostream& out,
                    std::uint64_t frame,
@@ -157,13 +247,14 @@ bool write_csv_row(std::ostream& out,
                    std::uint64_t capacity,
                    bool count_known,
                    std::uint64_t generated_count,
-                   std::uint64_t count_generation) {
+                   std::uint64_t count_generation,
+                   const PhaseTotals& phases) {
     if (!out.good())
         return false;
     out << std::fixed << std::setprecision(6) << frame << ',' << frame_ms << ',' << buckets.sim
         << ',' << buckets.stream << ',' << buckets.render << ',' << buckets.present << ','
         << buckets.foliage << ',' << buckets.scatter << ',' << buckets.rebake << ',' << buckets.poll
-        << ',' << buckets.menu << ',' << buckets.ui << ',' << buckets.other(frame_ms) << ','
+        << ',' << buckets.menu << ',' << buckets.ui << ',' << buckets.other(frame_ms, phases) << ','
         << foliage.signature_ms << ',' << foliage.sort_ms << ',' << foliage.surface_ms << ','
         << foliage.repack_ms << ',' << foliage.hash_ms << ',' << foliage.upload_ms << ','
         << foliage.palette_scratch_ms << ',' << foliage.dispatch_ms << ','
@@ -178,6 +269,8 @@ bool write_csv_row(std::ostream& out,
     out << ',';
     if (count_known)
         out << count_generation;
+    for (const double value : phases.milliseconds())
+        out << ',' << value;
     out << '\n';
     return out.good();
 }
@@ -213,7 +306,8 @@ bool FrameRecorder::record(std::uint64_t frame,
                            std::uint64_t capacity,
                            bool count_known,
                            std::uint64_t generated_count,
-                           std::uint64_t count_generation) {
+                           std::uint64_t count_generation,
+                           const PhaseTotals& phases) {
     if (!active())
         return false;
     return write_csv_row(m_out,
@@ -224,6 +318,7 @@ bool FrameRecorder::record(std::uint64_t frame,
                          capacity,
                          count_known,
                          generated_count,
-                         count_generation);
+                         count_generation,
+                         phases);
 }
 } // namespace Luminumbra::Client::Attribution

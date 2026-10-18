@@ -278,6 +278,58 @@ if(BUILD_TESTING)
     set_tests_properties(AmbientReceiptComparatorContract
         PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
     add_test(
+        NAME AsanShardContract
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_asan_shards.py")
+    set_tests_properties(AsanShardContract
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME CTestShardContract
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_ctest_shards.py")
+    set_tests_properties(CTestShardContract
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    # Disjoint policy partitions preserve every unittest case and the 30s deadline.
+    # Direct Python invocation and unittest discovery still execute the full suite.
+    add_test(
+        NAME WorkflowPolicyContract
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py" --partition 0)
+    set_tests_properties(WorkflowPolicyContract
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME WorkflowPolicyContractPart1
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py" --partition 1)
+    set_tests_properties(WorkflowPolicyContractPart1
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME WorkflowPolicyContractPart2
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py" --partition 2)
+    set_tests_properties(WorkflowPolicyContractPart2
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME WorkflowPolicyContractPart3
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py" --partition 3)
+    set_tests_properties(WorkflowPolicyContractPart3
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME WorkflowPolicyContractPart4
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py" --partition 4)
+    set_tests_properties(WorkflowPolicyContractPart4
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME WorkflowPolicyContractPart5
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py" --partition 5)
+    set_tests_properties(WorkflowPolicyContractPart5
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME WorkflowPolicyContractPart6
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py" --partition 6)
+    set_tests_properties(WorkflowPolicyContractPart6
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME WorkflowPolicyContractPart7
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py" --partition 7)
+    set_tests_properties(WorkflowPolicyContractPart7
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
         NAME SoftwareGlEvidenceContract
         COMMAND "${Python3_EXECUTABLE}" -I -B
                 "${CMAKE_CURRENT_SOURCE_DIR}/static_preview/test_run_software_gl.py")

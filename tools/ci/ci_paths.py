@@ -15,6 +15,9 @@ import sys
 PYTHON_TESTS = (
     "test/rendering/test_frame_attribution_wiring.py",
     "tools/ci/test_ci_paths.py",
+    "tools/ci/test_asan_shards.py",
+    "tools/ci/test_ctest_shards.py",
+    "tools/ci/test_workflow_policy.py",
     "tools/ci/test_replay_source_contract.py",
     "tools/ci/test_cache_retention.py",
     "tools/ci/test_check_docs.py",
@@ -51,7 +54,7 @@ PYTHON_TESTS = (
     "tools/rendering/acceptance/test_scene_matrix.py",
 )
 PYTHON_MODULES = {
-    "tools/ci/ci_paths.py", "tools/ci/check_docs.py",
+    "tools/ci/ci_paths.py", "tools/ci/ci_shell.py", "tools/ci/check_docs.py",
     "tools/ci/changed_tus.py", "tools/ci/offline_deps.py", "tools/ci/path_safety.py",
     "tools/ci/check_ctest_junit.py", "tools/ci/slowest_tests.py",
     "tools/ci/validate_performance_measurement.py",

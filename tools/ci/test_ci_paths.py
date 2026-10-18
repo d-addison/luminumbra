@@ -4,28 +4,21 @@ from pathlib import Path
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ci_paths as gate
+from ci_shell import bash_executable
 
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def bash_executable() -> str:
-    # Prefer Git Bash over the Windows WSL launcher. CI's shell: bash uses
-    # this same Git installation; native paths work with its MSYS tools.
-    git = shutil.which("git")
-    if git:
-        bash = Path(git).resolve().parent.parent / "bin/bash.exe"
-        if bash.is_file():
-            return str(bash)
-    return "bash"
+BASH = bash_executable()
 
 
 def run_block(workflow: str, step: str) -> str:
@@ -128,7 +121,7 @@ class PathGateTests(unittest.TestCase):
 
     def test_ci_changes_override_allowlist_and_force_full_native_matrix(self):
         for path in (
-            "tools/ci/ci_paths.py", "tools/ci/test_ci_paths.py", "tools/ci/check_docs.py",
+            "tools/ci/ci_paths.py", "tools/ci/ci_shell.py", "tools/ci/test_ci_paths.py", "tools/ci/check_docs.py",
             "tools/ci/README.md", "tools/ci/nested/new_file.txt",
             ".github/workflows/ci.yml", ".github/workflows/new.yml",
             "scripts/tidy_cache.py", "scripts/README.md",
@@ -182,7 +175,7 @@ class PathGateTests(unittest.TestCase):
                                FAKE_BASE_SCRIPT=base.as_posix(), FAKE_PYTHON=Path(sys.executable).as_posix(),
                                FAKE_SENSITIVE=str(sensitive).lower(),
                                FAKE_MISSING=str(missing).lower(), FAKE_FAILED=str(failed).lower())
-                    subprocess.run([bash_executable(), "-e", "-o", "pipefail", "-c", fixtures + script], env=env, check=True,
+                    subprocess.run([BASH, "-e", "-o", "pipefail", "-c", fixtures + script], env=env, check=True,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                     self.assertFalse(marker.exists())
                     expected = "needs_cpp=true\nneeds_python=true\n" if sensitive or missing or failed else "needs_cpp=false\nneeds_python=true\n"
@@ -219,7 +212,7 @@ class PathGateTests(unittest.TestCase):
                     root = Path(directory)
                     env = dict(os.environ, NEEDS_CPP=cpp, GITHUB_OUTPUT=(root / "output").as_posix(),
                                GITHUB_STEP_SUMMARY=(root / "summary").as_posix())
-                    result = subprocess.run([bash_executable(), "-e", "-c", script], env=env, check=True,
+                    result = subprocess.run([BASH, "-e", "-c", script], env=env, check=True,
                                             stdout=subprocess.PIPE, text=True)
                     self.assertEqual((root / "output").read_text(encoding="utf-8"), f"route={route}\n")
                     self.assertEqual((root / "summary").read_text(encoding="utf-8"), result.stdout)
@@ -239,6 +232,9 @@ class PathGateTests(unittest.TestCase):
             ("ci", "diligent-rhi", "ready-native"),
             ("ci", "tidy-shard", "ready-native"),
             ("ci", "tidy", "aggregate"),
+            ("ci", "linux-result", "required-aggregate"),
+            ("ci", "windows-msvc-result", "required-aggregate"),
+            ("ci", "windows-ucrt64-result", "required-aggregate"),
             ("asan", "asan-shard", "guarded-native"),
             ("asan", "asan", "required-aggregate"),
             ("performance", "preview-frame", "guarded-native"),
@@ -265,7 +261,7 @@ class PathGateTests(unittest.TestCase):
                                 expected = not cancelled and ready and (
                                     route == "ready-python" or cpp != "false"
                                 )
-                            actual = expression.replace(
+                            actual = re.sub(r"needs\.[\w-]+\.result", repr("success"), expression).replace(
                                 "toJSON(github.event.pull_request.draft)", repr(json.dumps(draft))
                             ).replace("!cancelled()", repr(not cancelled)).replace(
                                 "always()", "True"
@@ -280,6 +276,34 @@ class PathGateTests(unittest.TestCase):
                             with self.subTest(workflow=workflow, job=job, event=event,
                                               draft=draft, cpp=cpp, cancelled=cancelled):
                                 self.assertEqual(eval(actual, {"__builtins__": {}}), expected)
+
+    def test_required_aggregate_graph_keeps_dependency_failures_reachable(self):
+        for filename, producer, aggregate in (
+            ("ci", "linux", "linux-result"),
+            ("ci", "windows-msvc", "windows-msvc-result"),
+            ("ci", "windows-ucrt64", "windows-ucrt64-result"),
+            ("ci", "tidy-shard", "tidy"),
+            ("asan", "asan-shard", "asan"),
+        ):
+            workflow = (ROOT / f".github/workflows/{filename}.yml").read_text(encoding="utf-8")
+            body = re.split(r"\n  [\w-]+:\n", workflow.split(f"  {aggregate}:\n", 1)[1])[0]
+            condition = re.search(r"^    if: (.*)$", body, re.MULTILINE)[1]
+            for classification in ("success", "failure", "cancelled", "skipped", "", "unknown"):
+                for result in ("success", "failure", "cancelled", "skipped", "", "unknown"):
+                    invalid = classification != "success" or result not in ("success", "skipped")
+                    for workflow_cancelled in (False, True):
+                        expression = condition.removeprefix("${{ ").removesuffix(" }}")
+                        expression = expression.replace("!cancelled()", repr(not workflow_cancelled))
+                        expression = expression.replace("always()", "True").replace("failure()", repr("failure" in (classification, result)))
+                        expression = expression.replace("needs.changes.result", repr(classification))
+                        expression = expression.replace(f"needs.{producer}.result", repr(result))
+                        expression = expression.replace("github.event_name", repr("push"))
+                        expression = expression.replace("github.event.pull_request.draft", "False")
+                        expression = expression.replace("== false", "== False").replace("&&", "and").replace("||", "or")
+                        with self.subTest(job=aggregate, classification=classification,
+                                          result=result, cancelled=workflow_cancelled):
+                            self.assertEqual(bool(eval(expression, {"__builtins__": {}})),
+                                             not workflow_cancelled or invalid)
 
     def test_new_files_in_covered_directories_require_builds(self):
         for path in gate.PYTHON_MODULES | gate.AUTHORING_PYTHON_FILES:
@@ -368,6 +392,8 @@ class PathGateTests(unittest.TestCase):
         commands = gate.python_test_commands(ROOT)
         for test in (
             "tools/ci/test_ci_paths.py", "tools/ci/test_qualification_capture.py",
+            "tools/ci/test_asan_shards.py", "tools/ci/test_ctest_shards.py",
+            "tools/ci/test_workflow_policy.py",
             "tools/perf/test_capture_sim_budget.py", "tools/perf/test_foliage_evidence.py",
             "tools/perf/test_terrain_aovs.py", "tools/perf/test_render_runner_evidence.py",
             "tools/release/test_sbom.py", "tools/persistence/test_save_receipt.py",

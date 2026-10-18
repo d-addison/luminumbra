@@ -389,15 +389,23 @@ class AcceptanceMatrixTests(unittest.TestCase):
     def test_execution_workflow_uses_the_native_producer_condition(self) -> None:
         workflow = (MODULE.DEFAULT_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         linux = workflow.split("\n  linux:\n", 1)[1].split("\n  gns-compile-probe:\n", 1)[0]
-        for name in ("Configure", "Test", "Test over-the-wire networking",
-                     "Check acceptance matrix CTest execution", "Upload test evidence"):
+        for name in ("Configure", "Test", "Test over-the-wire networking", "Upload test evidence"):
             with self.subTest(step=name):
                 step = linux.split("      - name: " + name + "\n", 1)[1].split("      - name: ", 1)[0]
                 condition = re.search(r"^        if: (.+)$", step, re.MULTILINE)
                 self.assertIsNotNone(condition)
                 self.assertTrue(condition[1].startswith("${{ needs.changes.outputs.needs_cpp != 'false'"))
-                if name != "Upload test evidence":
+                if name == "Test over-the-wire networking":
+                    self.assertEqual(condition[1], "${{ needs.changes.outputs.needs_cpp != 'false' && matrix.shard != 2 }}")
+                elif name != "Upload test evidence":
                     self.assertEqual(condition[1], "${{ needs.changes.outputs.needs_cpp != 'false' }}")
+        aggregate = workflow.split("\n  linux-result:\n", 1)[1].split("\n  windows-msvc-result:\n", 1)[0]
+        step = aggregate.split("      - name: Check acceptance matrix CTest execution\n", 1)[1].split("      - name: ", 1)[0]
+        condition = re.search(r"^        if: (.+)$", step, re.MULTILINE)
+        self.assertIsNotNone(condition)
+        self.assertEqual(condition[1], "needs.linux.result == 'success' && needs.changes.outputs.needs_cpp != 'false'")
+        self.assertLess(aggregate.index("name: Merge shard JUnit and check inventory\n"),
+                        aggregate.index("name: Check acceptance matrix CTest execution\n"))
 
     def test_missing_covered_doc_ref_is_rejected(self) -> None:
         matrix = baseline_matrix()
