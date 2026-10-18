@@ -23,7 +23,13 @@ from unittest.mock import MagicMock, patch
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location("offline_deps", ROOT / "tools/ci/offline_deps.py")
 deps = importlib.util.module_from_spec(SPEC)
+if __name__ == "__main__":
+    sys.stderr.write("Offline dependencies: LOAD START\n")
+    sys.stderr.flush()
 SPEC.loader.exec_module(deps)
+if __name__ == "__main__":
+    sys.stderr.write("Offline dependencies: LOAD FINISH\n")
+    sys.stderr.flush()
 
 
 class GitConfigScannerTests(unittest.TestCase):
@@ -2632,4 +2638,4 @@ class WindowsReparseMetadataTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    unittest.main(verbosity=2)
