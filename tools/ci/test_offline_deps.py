@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -28,8 +29,6 @@ if __name__ == "__main__":
     sys.stderr.flush()
 SPEC.loader.exec_module(deps)
 if __name__ == "__main__":
-    import time
-
     sys.stderr.write(
         f"Offline dependencies: LOAD FINISH monotonic_ns={time.monotonic_ns()} "
         "phase=load_finish ordinal=0\n"
@@ -4123,94 +4122,118 @@ class ElapsedDiagnosticTests(unittest.TestCase):
                 self.assertIs(Fixture.__dict__['cache_state'], saved_cache)
 
 
-if __name__ == "__main__":
-    # Fixed source identities keep checkpoints stable under unittest selection.
-    _CHECKPOINT_ORDINALS = {
-        "__main__.CachedGitSafetyTests.test_alternate_and_common_directory_cycles_are_refused_before_git": 1,
-        "__main__.CachedGitSafetyTests.test_config_includes_are_refused_in_all_metadata_configs_before_git_runs": 11,
-        "__main__.CachedGitSafetyTests.test_control_whitespace_includes_refuse_every_cached_git_entry_point": 12,
-        "__main__.CachedGitSafetyTests.test_fixture_commits_disable_maintenance_in_real_git": 20,
-        "__main__.CachedGitSafetyTests.test_real_recursive_gitlinks_check_initialized_heads": 38,
-        "__main__.CachedGitSafetyTests.test_windows_crlf_alternate_metadata_is_contained_on_every_host": 45,
-        "__main__.OfflineDependenciesTests.test_candidate_cleanup_errors_after_publication_keep_stage_and_original_error": 49,
-        "__main__.OfflineDependenciesTests.test_glad_requires_bundled_generator_and_specification_inputs": 65,
-        "__main__.OfflineDependenciesTests.test_initial_cache_replace_failure_cleans_up_and_retry_succeeds": 66,
-        "__main__.OfflineDependenciesTests.test_symlinked_scratch_root_refused_without_writes": 97,
-        "__main__.OfflineDependenciesTests.test_uncertain_publication_retains_stage_without_claiming_an_occupant": 98,
-        "__main__.WindowsReparseMetadataTests.test_original_components_are_checked_before_dotdot_resolution": 120,
-    }
-    _START_ORDINALS = frozenset((1, 11, 20, 38, 49, 66, 98))
-    _STOP_ORDINALS = frozenset((12, 20, 38, 45, 65, 66, 97, 98, 120))
+class ImportModeTests(unittest.TestCase):
+    def test_isolated_import_has_no_startup_output_and_runs_diagnostic_control(self):
+        spec = importlib.util.spec_from_file_location("offline_deps_import_test", __file__)
+        module = importlib.util.module_from_spec(spec)
+        output, diagnostic = io.StringIO(), io.StringIO()
+        with patch.object(sys, "stdout", output), redirect_stderr(diagnostic):
+            spec.loader.exec_module(module)
+        self.assertEqual(output.getvalue(), "")
+        self.assertEqual(diagnostic.getvalue(), "")
+        # Select one fixture-free control; never collect the imported suite.
+        result = unittest.TestResult()
+        module.ElapsedDiagnosticTests("test_original_stream_error_and_callback_sequence").run(result)
+        self.assertEqual(result.testsRun, 1)
+        self.assertEqual(result.errors, [])
+        self.assertEqual(result.failures, [])
+        self.assertEqual(result.skipped, [])
+        self.assertIs(module.time, time)
+        self.assertIs(module._LifecycleRunner.resultclass, module._LifecycleResult)
+        self.assertEqual(module._CHECKPOINT_ORDINALS, _CHECKPOINT_ORDINALS)
+        self.assertEqual(module._START_ORDINALS, _START_ORDINALS)
+        self.assertEqual(module._STOP_ORDINALS, _STOP_ORDINALS)
 
-    class _LifecycleResult(unittest.TextTestResult):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            # At most 16 phase/identity pairs, including repeated selections.
-            self._emitted_checkpoints = set()
-            self._elapsed = None
+
+# Fixed source identities keep checkpoints stable under unittest selection.
+_CHECKPOINT_ORDINALS = {
+    "__main__.CachedGitSafetyTests.test_alternate_and_common_directory_cycles_are_refused_before_git": 1,
+    "__main__.CachedGitSafetyTests.test_config_includes_are_refused_in_all_metadata_configs_before_git_runs": 11,
+    "__main__.CachedGitSafetyTests.test_control_whitespace_includes_refuse_every_cached_git_entry_point": 12,
+    "__main__.CachedGitSafetyTests.test_fixture_commits_disable_maintenance_in_real_git": 20,
+    "__main__.CachedGitSafetyTests.test_real_recursive_gitlinks_check_initialized_heads": 38,
+    "__main__.CachedGitSafetyTests.test_windows_crlf_alternate_metadata_is_contained_on_every_host": 45,
+    "__main__.OfflineDependenciesTests.test_candidate_cleanup_errors_after_publication_keep_stage_and_original_error": 49,
+    "__main__.OfflineDependenciesTests.test_glad_requires_bundled_generator_and_specification_inputs": 65,
+    "__main__.OfflineDependenciesTests.test_initial_cache_replace_failure_cleans_up_and_retry_succeeds": 66,
+    "__main__.OfflineDependenciesTests.test_symlinked_scratch_root_refused_without_writes": 97,
+    "__main__.OfflineDependenciesTests.test_uncertain_publication_retains_stage_without_claiming_an_occupant": 98,
+    "__main__.WindowsReparseMetadataTests.test_original_components_are_checked_before_dotdot_resolution": 120,
+}
+_START_ORDINALS = frozenset((1, 11, 20, 38, 49, 66, 98))
+_STOP_ORDINALS = frozenset((12, 20, 38, 45, 65, 66, 97, 98, 120))
+
+class _LifecycleResult(unittest.TextTestResult):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # At most 16 phase/identity pairs, including repeated selections.
+        self._emitted_checkpoints = set()
+        self._elapsed = None
+        try:
+            self._elapsed = _ElapsedDiagnostic()
+        except BaseException:
+            pass
+
+    def _diagnostic(self, method, *args):
+        try:
+            if self._elapsed is not None:
+                if method in ('start', 'stop'):
+                    args = (_elapsed_owner(args[0]),)
+                return getattr(self._elapsed, method)(*args)
+        except BaseException:
             try:
-                self._elapsed = _ElapsedDiagnostic()
+                self._elapsed.abort()
             except BaseException:
                 pass
+        return ''
 
-        def _diagnostic(self, method, *args):
-            try:
-                if self._elapsed is not None:
-                    if method in ('start', 'stop'):
-                        args = (_elapsed_owner(args[0]),)
-                    return getattr(self._elapsed, method)(*args)
-            except BaseException:
-                try:
-                    self._elapsed.abort()
-                except BaseException:
-                    pass
-            return ''
+    def _checkpoint(self, test, phase, selected):
+        identity = test.id()
+        ordinal = _CHECKPOINT_ORDINALS.get(identity)
+        checkpoint = (phase, ordinal)
+        if ordinal in selected and checkpoint not in self._emitted_checkpoints:
+            if phase == "start" and self.showAll:
+                self.stream.write("\n")
+            self.stream.write(
+                f"Offline dependencies: monotonic_ns={time.monotonic_ns()} "
+                f"phase={phase} ordinal={ordinal} identity={identity}"
+                f"{self._diagnostic('suffix', ordinal, phase)}\n"
+            )
+            self.stream.flush()
+            self._emitted_checkpoints.add(checkpoint)
 
-        def _checkpoint(self, test, phase, selected):
-            identity = test.id()
-            ordinal = _CHECKPOINT_ORDINALS.get(identity)
-            checkpoint = (phase, ordinal)
-            if ordinal in selected and checkpoint not in self._emitted_checkpoints:
-                if phase == "start" and self.showAll:
-                    self.stream.write("\n")
-                self.stream.write(
-                    f"Offline dependencies: monotonic_ns={time.monotonic_ns()} "
-                    f"phase={phase} ordinal={ordinal} identity={identity}"
-                    f"{self._diagnostic('suffix', ordinal, phase)}\n"
-                )
-                self.stream.flush()
-                self._emitted_checkpoints.add(checkpoint)
+    def startTest(self, test):
+        self._diagnostic('start', test)
+        try:
+            super().startTest(test)
+            self._checkpoint(test, "start", _START_ORDINALS)
+        except BaseException:
+            self._diagnostic('abort')
+            raise
 
-        def startTest(self, test):
-            self._diagnostic('start', test)
-            try:
-                super().startTest(test)
-                self._checkpoint(test, "start", _START_ORDINALS)
-            except BaseException:
-                self._diagnostic('abort')
-                raise
+    def stopTest(self, test):
+        try:
+            super().stopTest(test)
+        finally:
+            self._diagnostic('stop', test)
+        self._checkpoint(test, "stop", _STOP_ORDINALS)
 
-        def stopTest(self, test):
-            try:
-                super().stopTest(test)
-            finally:
-                self._diagnostic('stop', test)
-            self._checkpoint(test, "stop", _STOP_ORDINALS)
+class _LifecycleRunner(unittest.TextTestRunner):
+    resultclass = _LifecycleResult
 
-    class _LifecycleRunner(unittest.TextTestRunner):
-        resultclass = _LifecycleResult
+    def _makeResult(self):
+        result = super()._makeResult()
+        self._elapsed_result = result
+        return result
 
-        def _makeResult(self):
-            result = super()._makeResult()
-            self._elapsed_result = result
-            return result
+    def run(self, test):
+        try:
+            return super().run(test)
+        finally:
+            result = getattr(self, '_elapsed_result', None)
+            if result is not None:
+                result._diagnostic('abort')
 
-        def run(self, test):
-            try:
-                return super().run(test)
-            finally:
-                result = getattr(self, '_elapsed_result', None)
-                if result is not None:
-                    result._diagnostic('abort')
 
+if __name__ == "__main__":
     unittest.main(verbosity=2, testRunner=_LifecycleRunner)
