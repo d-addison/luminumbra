@@ -1334,6 +1334,21 @@ with patch.object(pathlib.Path, 'resolve', cyclic), patch.object(pathlib.Path, '
                     self.assertEqual(self.fixture_state(), before)
 
 
+def _snapshot_paths(root):
+    """Enumerate fresh names in independently owned, idle test fixtures."""
+    # Snapshot callers observe only the completed mapping, between synchronous
+    # actions. Walk visits ordinary directories once without following links.
+    # Retain the original traversal on Python versions without Path.walk.
+    walk = getattr(root, "walk", None)
+    if walk is None:
+        yield from root.rglob("*")
+        return
+    for directory, directories, files in walk(follow_symlinks=False):
+        for names in (directories, files):
+            for name in names:
+                yield directory / name
+
+
 class CachedGitSafetyTests(unittest.TestCase):
     """Use real local Git repositories; no transports or native tools run."""
 
@@ -1465,7 +1480,295 @@ class CachedGitSafetyTests(unittest.TestCase):
     def cache_state(self):
         return {p.relative_to(self.cache).as_posix():
                 os.readlink(p) if p.is_symlink() else p.read_bytes()
-                for p in self.cache.rglob("*") if p.is_symlink() or p.is_file()}
+                for p in _snapshot_paths(self.cache) if p.is_symlink() or p.is_file()}
+
+    def test_cache_snapshot_refreshes_full_mapping_between_actions(self):
+        root = self.base / "snapshot"
+        (root / ".hidden/nested").mkdir(parents=True)
+        config = root / ".hidden/nested/config"
+        config.write_bytes(b"config\x00\xff\r\n")
+        os.link(config, root / "CONFIG~1")
+        (root / "removed").write_bytes(b"remove me")
+        independent = self.base / "independent snapshot"
+        shutil.copytree(root, independent)
+        fixture = SimpleNamespace(cache=root)
+        other = SimpleNamespace(cache=independent)
+        expected = {".hidden/nested/config": b"config\x00\xff\r\n",
+                    "CONFIG~1": b"config\x00\xff\r\n", "removed": b"remove me"}
+        initial = dict(expected)
+
+        def compare():
+            reference = {p.relative_to(root).as_posix():
+                         os.readlink(p) if p.is_symlink() else p.read_bytes()
+                         for p in root.rglob("*") if p.is_symlink() or p.is_file()}
+            self.assertEqual(reference, expected)
+            self.assertEqual(self.cache_state.__func__(fixture), reference)
+            self.assertEqual(self.cache_state.__func__(other), initial)
+
+        compare()
+        (root / ".hidden/nested/added").write_bytes(b"new\x00payload")
+        expected[".hidden/nested/added"] = b"new\x00payload"
+        compare()
+        config.write_bytes(b"changed\r\n\xff")
+        expected[".hidden/nested/config"] = expected["CONFIG~1"] = b"changed\r\n\xff"
+        compare()
+        (root / "removed").unlink()
+        del expected["removed"]
+        compare()
+        (root / ".hidden/nested/added").rename(root / "renamed")
+        expected["renamed"] = expected.pop(".hidden/nested/added")
+        compare()
+
+    def test_cache_snapshot_names_links_without_following_cycles(self):
+        # Placeholders model no-follow link classification on hosts where
+        # creating a symlink requires privileges. POSIX also uses real links.
+        for real_links in ((False, True) if os.name == "posix" else (False,)):
+            with self.subTest(real_links=real_links):
+                root = self.base / f"links-{real_links}"
+                (root / "nested").mkdir(parents=True)
+                (root / "nested/payload").write_bytes(b"nested\xff")
+                outside = self.base / f"outside-{real_links}"
+                outside.mkdir()
+                (outside / "unobserved").write_bytes(b"outside")
+                targets = {"file-link": ("nested/payload", False),
+                           "directory-link": ("nested", True),
+                           "outside-link": (str(outside), True),
+                           "dangling": ("missing", False),
+                           "cycle": (".", True),
+                           "self-cycle": ("self-cycle", False)}
+                for name, (target, directory) in targets.items():
+                    link = root / name
+                    if real_links:
+                        link.symlink_to(target, target_is_directory=directory)
+                    else:
+                        link.write_bytes(b"link placeholder")
+                unknown = root / "unknown-type"
+                unknown.write_bytes(b"not an ordinary file")
+                is_link, is_file, readlink = Path.is_symlink, Path.is_file, os.readlink
+
+                def link_type(path):
+                    if not real_links and path.parent == root and path.name in targets:
+                        return True
+                    return is_link(path)
+
+                def file_type(path):
+                    return False if path == unknown else is_file(path)
+
+                def link_value(path):
+                    if not real_links and path.parent == root and path.name in targets:
+                        return targets[path.name][0]
+                    return readlink(path)
+
+                expected = {"nested/payload": b"nested\xff",
+                            **{name: target for name, (target, _) in targets.items()}}
+                with patch.object(Path, "is_symlink", link_type), \
+                        patch.object(Path, "is_file", file_type), \
+                        patch.object(os, "readlink", link_value):
+                    reference = {p.relative_to(root).as_posix():
+                                 os.readlink(p) if p.is_symlink() else p.read_bytes()
+                                 for p in root.rglob("*") if p.is_symlink() or p.is_file()}
+                    self.assertEqual(reference, expected)
+                    self.assertEqual(self.cache_state.__func__(SimpleNamespace(cache=root)), reference)
+
+    def test_cache_snapshot_enumerates_each_directory_at_most_once(self):
+        root = self.base / "enumeration"
+        directories = {root, root / ".hidden", root / "nested",
+                       root / "nested/deeper", root / "empty"}
+        for directory in sorted(directories):
+            directory.mkdir(parents=True, exist_ok=True)
+            if directory.name != "empty":
+                (directory / "payload").write_bytes(b"every directory\x00\xff")
+        scandir = os.scandir
+        counts = []
+
+        def scan(path):
+            counts.append(Path(path))
+            return scandir(path)
+
+        with patch.object(os, "scandir", side_effect=scan):
+            reference = {p.relative_to(root).as_posix():
+                         os.readlink(p) if p.is_symlink() else p.read_bytes()
+                         for p in root.rglob("*") if p.is_symlink() or p.is_file()}
+        original_count = len(counts)
+        self.assertEqual(set(counts), directories)
+        counts.clear()
+        with patch.object(os, "scandir", side_effect=scan):
+            self.assertEqual(self.cache_state.__func__(SimpleNamespace(cache=root)), reference)
+        self.assertEqual(set(counts), directories)
+        # This bound does not assume a particular rglob implementation. An
+        # already single-pass rglob remains valid; older Python uses fallback.
+        bound = len(directories) if hasattr(Path, "walk") else original_count
+        self.assertLessEqual(len(counts), bound)
+
+    def test_cache_snapshot_preserves_scan_and_directory_type_errors(self):
+        root = self.base / "scan errors"
+        nested = root / "nested"
+        nested.mkdir(parents=True)
+        (root / "payload").write_bytes(b"root")
+        (nested / "payload").write_bytes(b"nested")
+        fixture = SimpleNamespace(cache=root)
+        scandir = os.scandir
+
+        def reference():
+            return {p.relative_to(root).as_posix():
+                    os.readlink(p) if p.is_symlink() else p.read_bytes()
+                    for p in root.rglob("*") if p.is_symlink() or p.is_file()}
+
+        def outcome(snapshot):
+            try:
+                return snapshot()
+            except OSError as error:
+                self.assertIs(error, failure)
+                return error
+
+        for failure in (PermissionError(errno.EACCES, "denied"),
+                        FileNotFoundError(errno.ENOENT, "gone"),
+                        OSError(errno.EIO, "unreadable")):
+            for failed_path in (root, nested):
+                def scan(path):
+                    if Path(path) == failed_path:
+                        raise failure
+                    return scandir(path)
+
+                with self.subTest(failure=failure, path=failed_path), \
+                        patch.object(os, "scandir", side_effect=scan):
+                    expected = {} if failed_path == root else {"payload": b"root"}
+                    baseline = outcome(reference)
+                    self.assertTrue(baseline == expected or baseline is failure)
+                    self.assertEqual(outcome(lambda: self.cache_state.__func__(fixture)), baseline)
+
+        for failure in (PermissionError("denied type"), OSError(errno.EIO, "partial type"), None):
+            class Scan:
+                def __init__(self, path):
+                    self.entries = scandir(path)
+
+                def __enter__(self):
+                    self.entries.__enter__()
+                    return self
+
+                def __exit__(self, *args):
+                    return self.entries.__exit__(*args)
+
+                def __iter__(self):
+                    return self
+
+                def __next__(self):
+                    entry = next(self.entries)
+
+                    def directory_type(**kwargs):
+                        if Path(entry.path) == nested:
+                            if failure is not None:
+                                raise failure
+                            return False
+                        return entry.is_dir(**kwargs)
+
+                    return SimpleNamespace(name=entry.name, path=entry.path,
+                                           is_dir=directory_type, is_symlink=entry.is_symlink)
+
+            def scan(path):
+                return Scan(path)
+
+            with self.subTest(type_failure=failure), patch.object(os, "scandir", side_effect=scan):
+                baseline = outcome(reference)
+                self.assertTrue(baseline == {"payload": b"root"} or baseline is failure)
+                self.assertEqual(outcome(lambda: self.cache_state.__func__(fixture)), baseline)
+
+    def test_cache_snapshot_preserves_partial_enumeration_error_visibility(self):
+        root = self.base / "partial enumeration"
+        root.mkdir()
+        (root / "payload").write_bytes(b"payload")
+        scandir = os.scandir
+        failure = OSError(errno.EIO, "partial enumeration")
+        attempts = []
+
+        class Scan:
+            def __init__(self, path):
+                self.entries = scandir(path)
+                self.started = False
+
+            def __enter__(self):
+                self.entries.__enter__()
+                return self
+
+            def __exit__(self, *args):
+                return self.entries.__exit__(*args)
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                if self.started:
+                    raise failure
+                entry = next(self.entries)
+                self.started = True
+                return entry
+
+        def scan(path):
+            attempts.append(Path(path))
+            return Scan(path)
+
+        def reference():
+            return {p.relative_to(root).as_posix():
+                    os.readlink(p) if p.is_symlink() else p.read_bytes()
+                    for p in root.rglob("*") if p.is_symlink() or p.is_file()}
+
+        outcomes = []
+        for snapshot in (reference, lambda: self.cache_state.__func__(SimpleNamespace(cache=root))):
+            with patch.object(os, "scandir", side_effect=scan):
+                try:
+                    outcomes.append(("mapping", snapshot()))
+                except OSError as error:
+                    self.assertIs(error, failure)
+                    outcomes.append(("error", error.errno))
+        self.assertTrue(attempts)
+        self.assertEqual(outcomes[1], outcomes[0])
+
+    def test_cache_snapshot_retains_fresh_type_queries_and_payload_errors(self):
+        root = self.base / "fresh queries"
+        root.mkdir()
+        entry = root / "payload"
+        entry.write_bytes(b"payload")
+        fixture = SimpleNamespace(cache=root)
+
+        def reference():
+            return {p.relative_to(root).as_posix():
+                    os.readlink(p) if p.is_symlink() else p.read_bytes()
+                    for p in root.rglob("*") if p.is_symlink() or p.is_file()}
+
+        for snapshot in (reference, lambda: self.cache_state.__func__(fixture)):
+            with patch.object(Path, "is_symlink", side_effect=(False, True)) as links, \
+                    patch.object(Path, "is_file", return_value=True) as files, \
+                    patch.object(os, "readlink", return_value="second fresh result") as readlink:
+                self.assertEqual(snapshot(), {"payload": "second fresh result"})
+                self.assertEqual(links.call_count, 2)
+                self.assertEqual(files.call_count, 1)
+                readlink.assert_called_once_with(entry)
+            for operation in ("is_symlink", "is_file", "read_bytes"):
+                failure = PermissionError(f"unreadable {operation}")
+                with self.subTest(operation=operation), patch.object(Path, operation, side_effect=failure):
+                    with self.assertRaises(PermissionError) as caught:
+                        snapshot()
+                    self.assertIs(caught.exception, failure)
+            failure = OSError(errno.EIO, "unreadable link")
+            with patch.object(Path, "is_symlink", return_value=True), \
+                    patch.object(os, "readlink", side_effect=failure):
+                with self.assertRaises(OSError) as caught:
+                    snapshot()
+                self.assertIs(caught.exception, failure)
+
+    def test_cache_snapshot_legacy_traversal_preserves_empty_names_and_errors(self):
+        root = self.base / "legacy traversal"
+        root.mkdir()
+        legacy = SimpleNamespace(rglob=root.rglob)
+        self.assertEqual(list(_snapshot_paths(legacy)), [])
+        self.assertEqual(self.cache_state.__func__(SimpleNamespace(cache=root)), {})
+        (root / ".hidden").write_bytes(b"payload")
+        self.assertEqual(set(_snapshot_paths(legacy)), set(root.rglob("*")))
+        failure = PermissionError("unreadable legacy traversal")
+        with patch.object(legacy, "rglob", side_effect=failure):
+            with self.assertRaises(PermissionError) as caught:
+                list(_snapshot_paths(legacy))
+        self.assertIs(caught.exception, failure)
 
     def assert_refused_without_writes(self):
         before = self.cache_state()
