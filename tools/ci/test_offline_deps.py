@@ -3,7 +3,7 @@
 
 import errno
 import ctypes
-from contextlib import contextmanager, redirect_stderr
+from contextlib import ExitStack, contextmanager, redirect_stderr
 import importlib.util
 import io
 import json
@@ -1348,6 +1348,23 @@ def _snapshot_paths(root):
                 yield directory / name
 
 
+@contextmanager
+def _patch_snapshot_scandir(scan):
+    """Intercept live and cached raw scanners without changing entry formats."""
+    import glob
+
+    original = os.scandir
+    globber = getattr(glob, "_StringGlobber", None)
+    descriptor = vars(globber).get("scandir") if globber is not None else None
+    with ExitStack() as patches:
+        # Python 3.13 caches the raw scanner. Later tuple-producing adapters
+        # look up os.scandir themselves and must retain their entry format.
+        if isinstance(descriptor, staticmethod) and descriptor.__func__ is original:
+            patches.enter_context(patch.object(globber, "scandir", staticmethod(scan)))
+        patches.enter_context(patch.object(os, "scandir", scan))
+        yield
+
+
 class CachedGitSafetyTests(unittest.TestCase):
     """Use real local Git repositories; no transports or native tools run."""
 
@@ -1584,14 +1601,14 @@ class CachedGitSafetyTests(unittest.TestCase):
             counts.append(Path(path))
             return scandir(path)
 
-        with patch.object(os, "scandir", side_effect=scan):
+        with _patch_snapshot_scandir(scan):
             reference = {p.relative_to(root).as_posix():
                          os.readlink(p) if p.is_symlink() else p.read_bytes()
                          for p in root.rglob("*") if p.is_symlink() or p.is_file()}
         original_count = len(counts)
         self.assertEqual(set(counts), directories)
         counts.clear()
-        with patch.object(os, "scandir", side_effect=scan):
+        with _patch_snapshot_scandir(scan):
             self.assertEqual(self.cache_state.__func__(SimpleNamespace(cache=root)), reference)
         self.assertEqual(set(counts), directories)
         # This bound does not assume a particular rglob implementation. An
@@ -1630,7 +1647,7 @@ class CachedGitSafetyTests(unittest.TestCase):
                     return scandir(path)
 
                 with self.subTest(failure=failure, path=failed_path), \
-                        patch.object(os, "scandir", side_effect=scan):
+                        _patch_snapshot_scandir(scan):
                     expected = {} if failed_path == root else {"payload": b"root"}
                     baseline = outcome(reference)
                     self.assertTrue(baseline == expected or baseline is failure)
@@ -1667,7 +1684,7 @@ class CachedGitSafetyTests(unittest.TestCase):
             def scan(path):
                 return Scan(path)
 
-            with self.subTest(type_failure=failure), patch.object(os, "scandir", side_effect=scan):
+            with self.subTest(type_failure=failure), _patch_snapshot_scandir(scan):
                 baseline = outcome(reference)
                 self.assertTrue(baseline == {"payload": b"root"} or baseline is failure)
                 self.assertEqual(outcome(lambda: self.cache_state.__func__(fixture)), baseline)
@@ -1713,7 +1730,7 @@ class CachedGitSafetyTests(unittest.TestCase):
 
         outcomes = []
         for snapshot in (reference, lambda: self.cache_state.__func__(SimpleNamespace(cache=root))):
-            with patch.object(os, "scandir", side_effect=scan):
+            with _patch_snapshot_scandir(scan):
                 try:
                     outcomes.append(("mapping", snapshot()))
                 except OSError as error:
@@ -2559,6 +2576,132 @@ class CachedGitSafetyTests(unittest.TestCase):
         (nested / ".git").rename(metadata)
         (nested / ".git").write_text("gitdir: " + str(metadata) + "\n")
         self.assert_refused_without_writes()
+
+
+class SnapshotScannerPatchTests(unittest.TestCase):
+    def test_cached_and_tuple_scanners_preserve_entries_and_faults(self):
+        import glob
+
+        original = os.scandir
+        failure = OSError(errno.EIO, "interrupted scan")
+        with tempfile.TemporaryDirectory(prefix="snapshot scanners ") as directory:
+            root = Path(directory)
+            (root / "payload").write_bytes(b"payload")
+            for tuples in (False, True):
+                class Globber:
+                    scandir = staticmethod(original)
+
+                if tuples:
+                    def scan_tuples(path):
+                        with os.scandir(path) as entries:
+                            values = list(entries)
+                        return ((entry, entry.name, entry.path) for entry in values)
+
+                    Globber.scandir = staticmethod(scan_tuples)
+                descriptor = vars(Globber)["scandir"]
+                calls = []
+
+                def scan(path):
+                    calls.append(Path(path))
+                    return original(path)
+
+                def entries():
+                    if tuples:
+                        values = list(Globber.scandir(root))
+                        for entry, name, path in values:
+                            self.assertEqual((name, path), (entry.name, entry.path))
+                        return [entry for entry, _, _ in values]
+                    with Globber.scandir(root) as values:
+                        return list(values)
+
+                with self.subTest(tuples=tuples), \
+                        patch.object(glob, "_StringGlobber", Globber, create=True):
+                    with _patch_snapshot_scandir(scan):
+                        value, = entries()
+                        self.assertEqual(value.name, "payload")
+                        self.assertEqual(Path(value.path), root / "payload")
+                        self.assertFalse(value.is_dir(follow_symlinks=False))
+                        self.assertFalse(value.is_symlink())
+                        with os.scandir(root) as values:
+                            self.assertEqual([entry.name for entry in values], ["payload"])
+                        self.assertEqual(calls, [root, root])
+                    self.assertIs(os.scandir, original)
+                    self.assertIs(vars(Globber)["scandir"], descriptor)
+
+                    def denied(path):
+                        calls.append(Path(path))
+                        raise failure
+
+                    with self.assertRaises(OSError) as caught:
+                        with _patch_snapshot_scandir(denied):
+                            entries()
+                    self.assertIs(caught.exception, failure)
+                    self.assertEqual(calls, [root, root, root])
+                    self.assertIs(os.scandir, original)
+                    self.assertIs(vars(Globber)["scandir"], descriptor)
+
+                    @contextmanager
+                    def partial(path):
+                        with original(path) as values:
+                            def interrupted():
+                                yield next(values)
+                                raise failure
+                            yield interrupted()
+
+                    with self.assertRaises(OSError) as caught:
+                        with _patch_snapshot_scandir(partial):
+                            entries()
+                    self.assertIs(caught.exception, failure)
+                    self.assertIs(os.scandir, original)
+                    self.assertIs(vars(Globber)["scandir"], descriptor)
+
+    def test_nested_scanner_patches_restore_after_body_exception(self):
+        import glob
+
+        original = os.scandir
+
+        class Globber:
+            scandir = staticmethod(original)
+
+        descriptor = vars(Globber)["scandir"]
+        failure = RuntimeError("snapshot body failed")
+
+        def outer(path):
+            return original(path)
+
+        def inner(path):
+            return original(path)
+
+        with patch.object(glob, "_StringGlobber", Globber, create=True):
+            with self.assertRaises(RuntimeError) as caught:
+                with _patch_snapshot_scandir(outer):
+                    outer_descriptor = vars(Globber)["scandir"]
+                    with _patch_snapshot_scandir(inner):
+                        self.assertIs(Globber.scandir, inner)
+                        self.assertIs(os.scandir, inner)
+                    self.assertIs(os.scandir, outer)
+                    self.assertIs(vars(Globber)["scandir"], outer_descriptor)
+                    raise failure
+            self.assertIs(caught.exception, failure)
+            self.assertIs(os.scandir, original)
+            self.assertIs(vars(Globber)["scandir"], descriptor)
+
+    def test_scanner_patch_without_cached_globber_restores_on_error(self):
+        import glob
+
+        original = os.scandir
+        failure = OSError(errno.EACCES, "denied scan")
+
+        def denied(path):
+            raise failure
+
+        with patch.object(glob, "_StringGlobber", None, create=True):
+            with self.assertRaises(OSError) as caught:
+                with _patch_snapshot_scandir(denied):
+                    os.scandir("unused")
+            self.assertIs(caught.exception, failure)
+            self.assertIsNone(glob._StringGlobber)
+            self.assertIs(os.scandir, original)
 
 
 class ScratchPreparationTests(unittest.TestCase):
