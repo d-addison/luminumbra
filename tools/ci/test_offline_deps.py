@@ -28,7 +28,12 @@ if __name__ == "__main__":
     sys.stderr.flush()
 SPEC.loader.exec_module(deps)
 if __name__ == "__main__":
-    sys.stderr.write("Offline dependencies: LOAD FINISH\n")
+    import time
+
+    sys.stderr.write(
+        f"Offline dependencies: LOAD FINISH monotonic_ns={time.monotonic_ns()} "
+        "phase=load_finish ordinal=0\n"
+    )
     sys.stderr.flush()
 
 
@@ -2638,4 +2643,53 @@ class WindowsReparseMetadataTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main(verbosity=2)
+    # Fixed source identities keep checkpoints stable under unittest selection.
+    _CHECKPOINT_ORDINALS = {
+        "__main__.CachedGitSafetyTests.test_alternate_and_common_directory_cycles_are_refused_before_git": 1,
+        "__main__.CachedGitSafetyTests.test_config_includes_are_refused_in_all_metadata_configs_before_git_runs": 11,
+        "__main__.CachedGitSafetyTests.test_control_whitespace_includes_refuse_every_cached_git_entry_point": 12,
+        "__main__.CachedGitSafetyTests.test_fixture_commits_disable_maintenance_in_real_git": 20,
+        "__main__.CachedGitSafetyTests.test_real_recursive_gitlinks_check_initialized_heads": 38,
+        "__main__.CachedGitSafetyTests.test_windows_crlf_alternate_metadata_is_contained_on_every_host": 45,
+        "__main__.OfflineDependenciesTests.test_candidate_cleanup_errors_after_publication_keep_stage_and_original_error": 49,
+        "__main__.OfflineDependenciesTests.test_glad_requires_bundled_generator_and_specification_inputs": 65,
+        "__main__.OfflineDependenciesTests.test_initial_cache_replace_failure_cleans_up_and_retry_succeeds": 66,
+        "__main__.OfflineDependenciesTests.test_symlinked_scratch_root_refused_without_writes": 97,
+        "__main__.OfflineDependenciesTests.test_uncertain_publication_retains_stage_without_claiming_an_occupant": 98,
+        "__main__.WindowsReparseMetadataTests.test_original_components_are_checked_before_dotdot_resolution": 120,
+    }
+    _START_ORDINALS = frozenset((1, 11, 20, 38, 49, 66, 98))
+    _STOP_ORDINALS = frozenset((12, 20, 38, 45, 65, 66, 97, 98, 120))
+
+    class _LifecycleResult(unittest.TextTestResult):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            # At most 16 phase/identity pairs, including repeated selections.
+            self._emitted_checkpoints = set()
+
+        def _checkpoint(self, test, phase, selected):
+            identity = test.id()
+            ordinal = _CHECKPOINT_ORDINALS.get(identity)
+            checkpoint = (phase, ordinal)
+            if ordinal in selected and checkpoint not in self._emitted_checkpoints:
+                if phase == "start" and self.showAll:
+                    self.stream.write("\n")
+                self.stream.write(
+                    f"Offline dependencies: monotonic_ns={time.monotonic_ns()} "
+                    f"phase={phase} ordinal={ordinal} identity={identity}\n"
+                )
+                self.stream.flush()
+                self._emitted_checkpoints.add(checkpoint)
+
+        def startTest(self, test):
+            super().startTest(test)
+            self._checkpoint(test, "start", _START_ORDINALS)
+
+        def stopTest(self, test):
+            super().stopTest(test)
+            self._checkpoint(test, "stop", _STOP_ORDINALS)
+
+    class _LifecycleRunner(unittest.TextTestRunner):
+        resultclass = _LifecycleResult
+
+    unittest.main(verbosity=2, testRunner=_LifecycleRunner)
