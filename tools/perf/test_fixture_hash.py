@@ -130,7 +130,37 @@ class FixtureReferenceTests(unittest.TestCase):
             # No matching directories: exercise more than the hash-only budget
             # without introducing a new limit for the generic containment API.
             parts = ("m",) * 65
+            selected = root.joinpath(*parts)
             original = Path.resolve
+            original_relative_to = Path.relative_to
+            relatives = []
+
+            class GuardedRelativePath(os.PathLike):
+                def __init__(self, path):
+                    self.path = path
+
+                def __fspath__(self):
+                    return os.fspath(self.path)
+
+                def __str__(self):
+                    return str(self.path)
+
+                @property
+                def parts(self):
+                    return self.path.parts
+
+                @property
+                def parents(self):
+                    raise AssertionError("collected ancestors")
+
+            def relative_to(path, *args, **kwargs):
+                # Finish native pathlib work before guarding only the value
+                # handed to application traversal. Stdlib ancestors stay real.
+                relative = original_relative_to(path, *args, **kwargs)
+                if path is selected:
+                    relatives.append(relative)
+                    return GuardedRelativePath(relative)
+                return relative
             depths = []
 
             def resolve(path, *args, **kwargs):
@@ -139,11 +169,17 @@ class FixtureReferenceTests(unittest.TestCase):
                 depths.append(depth)
                 return original(path, *args, **kwargs)
 
-            with mock.patch.object(Path, "parents", new_callable=mock.PropertyMock,
-                                   side_effect=AssertionError("collected ancestors")), \
+            with mock.patch.object(Path, "relative_to", relative_to), \
                     mock.patch.object(Path, "resolve", resolve):
-                self.assertEqual(fixture_paths.contain_path(root, root.joinpath(*parts)),
+                self.assertEqual(root.relative_to(root), Path())
+                self.assertEqual(root.joinpath(*parts).relative_to(root), Path(*parts))
+                self.assertTrue(root.joinpath(*parts).is_relative_to(root))
+                self.assertFalse(root.is_relative_to(selected))
+                with self.assertRaises(ValueError):
+                    root.relative_to(selected)
+                self.assertEqual(fixture_paths.contain_path(root, selected),
                                  root.joinpath(*parts))
+            self.assertEqual(relatives, [Path(*parts)])
             self.assertEqual(depths, list(range(len(parts) + 1)))
 
     def test_reference_depth_budget_uses_normalized_native_parts(self):
