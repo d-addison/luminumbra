@@ -57,9 +57,10 @@ def contain_path(root: Path, path: Path) -> Path:
         raise ValueError(f"fixture reference escapes root: {relative}")
     root = root.resolve()
     contained = root / relative
-    prefixes = [relative, *relative.parents]
-    for prefix in reversed(prefixes[:-1]):
-        path = root / prefix
+    # Keep one prefix, not the quadratic collection of all ancestor parts.
+    path = root
+    for part in relative.parts:
+        path = path / part
         try:
             target = path.resolve()
         except (OSError, RuntimeError) as exc:
@@ -69,7 +70,7 @@ def contain_path(root: Path, path: Path) -> Path:
     return contained
 
 
-def resolve_reference(root: Path, reference: str) -> Path:
+def resolve_reference(root: Path, reference: str, *, max_depth: int | None = None) -> Path:
     """Resolve a relative reference, refusing links that leave the selected root.
 
     Check every normalized prefix so a link cannot leave and then re-enter the
@@ -78,6 +79,9 @@ def resolve_reference(root: Path, reference: str) -> Path:
     Use open_regular or read_bytes for reads; a returned pathname is not a handle.
     """
     parts = reference_parts(reference)
+    # Apply a caller's existing budget before constructing or resolving prefixes.
+    if max_depth is not None and len(parts) > max_depth:
+        raise ValueError("fixture traversal depth budget exceeded")
     return contain_path(root, root.joinpath(*parts))
 
 

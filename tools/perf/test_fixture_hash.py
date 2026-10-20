@@ -124,6 +124,71 @@ class FixtureReferenceTests(unittest.TestCase):
                     self.assertEqual(reference_parts(reference),
                                      PureWindowsPath(ntpath.normpath(reference)).parts)
 
+    def test_native_prefixes_stream_in_order_without_collecting_ancestors(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            # No matching directories: exercise more than the hash-only budget
+            # without introducing a new limit for the generic containment API.
+            parts = ("m",) * 65
+            original = Path.resolve
+            depths = []
+
+            def resolve(path, *args, **kwargs):
+                depth = len(depths)
+                self.assertEqual(path, root.joinpath(*parts[:depth]))
+                depths.append(depth)
+                return original(path, *args, **kwargs)
+
+            with mock.patch.object(Path, "parents", new_callable=mock.PropertyMock,
+                                   side_effect=AssertionError("collected ancestors")), \
+                    mock.patch.object(Path, "resolve", resolve):
+                self.assertEqual(fixture_paths.contain_path(root, root.joinpath(*parts)),
+                                 root.joinpath(*parts))
+            self.assertEqual(depths, list(range(len(parts) + 1)))
+
+    def test_reference_depth_budget_uses_normalized_native_parts(self):
+        for grammar in (PurePosixPath, PureWindowsPath):
+            root = grammar("fixtures")
+            with self.subTest(grammar=grammar.__name__), \
+                    mock.patch.object(fixture_paths, "Path", grammar), \
+                    mock.patch.object(fixture_paths, "contain_path", side_effect=lambda r, p: p) as checked:
+                reference = "a/./b/../table.json"
+                self.assertEqual(resolve_reference(root, reference, max_depth=2), root / "a/table.json")
+                checked.assert_called_once()
+                checked.reset_mock()
+                for limit in (0, 1):
+                    with self.assertRaisesRegex(ValueError, "depth budget"):
+                        resolve_reference(root, reference, max_depth=limit)
+                checked.assert_not_called()
+                self.assertEqual(resolve_reference(root, "a/b/table.json"), root / "a/b/table.json")
+                literal = r"a\b\table.json"
+                depth = len(grammar(literal).parts)
+                self.assertEqual(resolve_reference(root, literal, max_depth=depth), root / literal)
+                with self.assertRaisesRegex(ValueError, "depth budget"):
+                    resolve_reference(root, literal, max_depth=depth - 1)
+                for refused in ROOTED_REFERENCES + ESCAPING_REFERENCES:
+                    with self.subTest(reference=refused), self.assertRaisesRegex(ValueError, "fixture reference"):
+                        resolve_reference(root, refused, max_depth=2)
+
+    def test_budgeted_reference_checks_leave_and_reenter_links_and_selected_root_alias(self):
+        with tempfile.TemporaryDirectory() as temp:
+            parent = Path(temp)
+            root, outside, alias = parent / "root", parent / "outside", parent / "alias"
+            root.mkdir()
+            outside.mkdir()
+            write(root, "table.json", "{}")
+            # Junctions cover Windows without requiring symlink privileges.
+            with contextlib.ExitStack() as cleanup:
+                for link, target in ((outside / "back", root), (root / "exit", outside), (alias, root)):
+                    directory_link(link, target)
+                    cleanup.callback(remove_directory_link, link)
+                self.assertEqual(resolve_reference(alias, "table.json", max_depth=1),
+                                 root.resolve() / "table.json")
+                self.assertEqual(resolve_reference(alias, "missing.json", max_depth=1),
+                                 root.resolve() / "missing.json")
+                with self.assertRaisesRegex(ValueError, "resolves outside root"):
+                    resolve_reference(alias, "exit/back/table.json", max_depth=3)
+
     def test_real_links_are_contained_at_every_component(self):
         with tempfile.TemporaryDirectory() as temp:
             parent = Path(temp)
@@ -1047,6 +1112,56 @@ class FixtureTraversalTests(unittest.TestCase):
             module.fixture_hash(presets, reference_root=self.root, dependencies=dependencies)
         self.assertEqual(dependencies, {"sentinel": self.root / "sentinel"})
         self.assertEqual(admitted, module.fixture_hash(presets, reference_root=self.root))
+
+    def test_deep_authored_references_refuse_before_containment_without_directories(self):
+        presets = self.root / "presets"
+        presets.mkdir()
+        document = lambda name: json.dumps({"generation_params": {"biomes": {"table": name}}})
+        reference = "a/" * 20000 + "missing.json"
+        original = fixture_paths.contain_path
+
+        def contain(root, path):
+            # Count the actual input before any ancestor expansion or I/O. This
+            # tripwire makes the unfixed test fail safely without allocating it.
+            self.assertLessEqual(len(path.relative_to(root).parts), module.MAX_FIXTURE_DEPTH,
+                                 "over-depth reference reached containment")
+            return original(root, path)
+
+        for transitive in (False, True):
+            with self.subTest(transitive=transitive):
+                (presets / "one.json").write_text(document("next.json" if transitive else reference))
+                (self.root / "next.json").write_text(document(reference))
+                dependencies = {"sentinel": self.root / "sentinel"}
+                with mock.patch.object(fixture_paths, "contain_path", contain), \
+                        self.assertRaisesRegex(ValueError, "depth budget"):
+                    module.fixture_hash(presets, reference_root=self.root, dependencies=dependencies)
+                self.assertEqual(dependencies, {"sentinel": self.root / "sentinel"})
+                self.assertFalse((self.root / "a").exists())
+
+    def test_missing_reference_at_depth_boundary_preserves_receipt_and_direct_helper(self):
+        presets = self.root / "presets"
+        presets.mkdir()
+        name = "/".join(["a"] * (module.MAX_FIXTURE_DEPTH - 1) + ["missing.json"])
+        document = {"generation_params": {"biomes": {"table": "drop/../" + name}}}
+        preset = presets / "one.json"
+        preset.write_text(json.dumps(document))
+        canonical = json.dumps(document, sort_keys=True, separators=(",", ":"))
+        file_digest = hashlib.sha256(canonical.encode()).hexdigest()
+        expected = hashlib.sha256(b"one.json\0" + file_digest.encode() + b"\n")
+        expected.update(b"\0fixture-dependencies:v1\0")
+        expected.update(json.dumps([(name, None)], ensure_ascii=True, separators=(",", ":")).encode("ascii"))
+        dependencies = {}
+        self.assertEqual(module.fixture_hash(presets, reference_root=self.root, dependencies=dependencies),
+                         expected.hexdigest())
+        self.assertEqual(dependencies, {name: self.root / name})
+        # The standalone digest has no traversal budget; preserve that contract.
+        document["generation_params"]["biomes"]["table"] = "a/" + name
+        preset.write_text(json.dumps(document))
+        direct = {}
+        module.canonical_file_digest(preset, reference_root=self.root, dependencies=direct)
+        self.assertEqual(direct, {"a/" + name: self.root / ("a/" + name)})
+        with self.assertRaisesRegex(ValueError, "depth budget"):
+            module.fixture_hash(presets, reference_root=self.root)
 
     def test_dependency_depth_is_checked_and_cycles_still_terminate(self):
         presets = self.root / "presets"

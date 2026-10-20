@@ -79,8 +79,12 @@ def strip_comment_keys(value: Any) -> Any:
 
 def canonical_file_digest(path: Path, *, reference_root: Path | None = None,
                           dependencies: dict[str, Path] | None = None,
-                          containment_root: Path | None = None) -> str:
-    """Digest one fixture file, canonicalising JSON and hashing anything else raw."""
+                          containment_root: Path | None = None,
+                          max_reference_depth: int | None = None) -> str:
+    """Digest one file, optionally carrying the enclosing traversal's depth cap.
+
+    Standalone callers have no traversal budget and keep their existing support.
+    """
     raw = read_bytes(containment_root if containment_root is not None else path.parent, path)
     if path.suffix.lower() == ".json":
         try:
@@ -96,7 +100,7 @@ def canonical_file_digest(path: Path, *, reference_root: Path | None = None,
             # An empty table disables biomes. Malformed documents still hash;
             # only authored external path strings need containment validation.
             if isinstance(table, str) and table:
-                dependency = resolve_reference(reference_root, table)
+                dependency = resolve_reference(reference_root, table, max_depth=max_reference_depth)
                 if dependencies is not None:
                     name = dependency.relative_to(reference_root.resolve()).as_posix()
                     dependencies[name] = dependency
@@ -228,7 +232,8 @@ def fixture_hash(root: Path, *, scope: str = "all", reference_root: Path | None 
         digest.update(relative.encode("utf-8"))
         digest.update(b"\0")
         file_digest = canonical_file_digest(contained, reference_root=reference_root,
-                                            dependencies=referenced, containment_root=root.resolve())
+                                            dependencies=referenced, containment_root=root.resolve(),
+                                            max_reference_depth=MAX_FIXTURE_DEPTH)
         hashed.add(contained)
         digest.update(file_digest.encode("ascii"))
         digest.update(b"\n")
@@ -251,7 +256,8 @@ def fixture_hash(root: Path, *, scope: str = "all", reference_root: Path | None 
                 discovered: dict[str, Path] = {}
                 extra[name] = canonical_file_digest(path, reference_root=reference_root,
                                                      dependencies=discovered,
-                                                     containment_root=reference_root.resolve())
+                                                     containment_root=reference_root.resolve(),
+                                                     max_reference_depth=MAX_FIXTURE_DEPTH)
                 for item in discovered.items():
                     budget.take(len(item[1].relative_to(reference_root.resolve()).parts))
                     referenced[item[0]] = item[1]
