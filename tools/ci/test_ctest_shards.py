@@ -1752,6 +1752,437 @@ runpy.run_path(script, run_name='__main__', init_globals={'OwnedCases': OwnedCas
             shards.gate("skipped", "false", "true", "push", "", "false", "false", "success")
 
 
+    @staticmethod
+    def relationship_oracle(rows, selected, profile, timings):
+        # Independent adjacency/traversal construction, with no union/remapping.
+        import hashlib
+        edges = {row["name"]: set() for row in rows}
+        buckets = {}
+        for row in rows:
+            name = row["name"]
+            for prop in row.get("properties", []):
+                kind = prop["name"]
+                if kind not in ("FIXTURES_SETUP", "FIXTURES_REQUIRED", "FIXTURES_CLEANUP",
+                                "DEPENDS", "RESOURCE_LOCK"):
+                    continue
+                if profile == "asan" and not kind.startswith("FIXTURES_"):
+                    continue
+                for value in prop["value"]:
+                    if kind == "DEPENDS":
+                        edges[name].add(value)
+                        edges[value].add(name)
+                    else:
+                        buckets.setdefault((kind.startswith("FIXTURES_"), value), []).append(name)
+        if profile == "gcc":
+            buckets["prefab"] = [name for name in selected
+                                 if name.startswith(("PrefabDigest.", "PrefabRuntimeTest."))]
+        for members in buckets.values():
+            for left, right in zip(members, members[1:]):
+                edges[left].add(right)
+                edges[right].add(left)
+        components, visited = [], set()
+        selected_set = set(selected)
+        for name in edges:
+            if name in visited:
+                continue
+            component, pending = set(), [name]
+            while pending:
+                current = pending.pop()
+                if current in component:
+                    continue
+                component.add(current)
+                pending.extend(edges[current] - component)
+            visited.update(component)
+            if component.intersection(selected_set):
+                if not component <= selected_set:
+                    raise ValueError("closure")
+                components.append(tuple(sorted(component)))
+        owners = {}
+        if profile == "asan":
+            positions = {row["name"]: index for index, row in enumerate(rows)}
+            heavy = [name for name in positions if name in selected and "SimBudgetWorldParity." in name]
+            forced = {name: index % 2 for index, name in enumerate(heavy)}
+            for component in components:
+                choices = {forced[name] for name in component if name in forced}
+                if len(choices) > 1:
+                    raise ValueError("balance")
+                owner = next(iter(choices)) if choices else min(positions[name] for name in component) % 2
+                owners.update((name, owner) for name in component)
+        else:
+            unknown = max([60.0, *(timings or {}).values()])
+            weights = {component: sum((timings or {}).get(name, unknown) for name in component)
+                       for component in components}
+            ordered = sorted(components, key=lambda item: (-weights[item], item)) if timings else sorted(components)
+            loads = [0.0, 0.0]
+            for component in ordered:
+                encoded = json.dumps(component, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+                owner = min(range(2), key=lambda index: (loads[index], index)) if timings else int(
+                    hashlib.sha256(encoded).hexdigest(), 16) % 2
+                owners.update((name, owner) for name in component)
+                loads[owner] += weights[component]
+        return [[name for name in selected if owners[name] == owner] for owner in range(2)]
+
+    def test_projected_plans_match_traversal_oracle_and_literal_manifests(self):
+        for profile in shards.PROFILES:
+            rows = self.policy_roster(profile) + [
+                test("PrefabDigest.Content", FIXTURES_SETUP=["runtime"]),
+                test("PrefabRuntimeTest.Load", FIXTURES_REQUIRED=["runtime"], DEPENDS=["linked"]),
+                test("cleanup", FIXTURES_CLEANUP=["runtime"]),
+                test("linked", DEPENDS=["linked"], RESOURCE_LOCK=["shared", "runtime"]),
+                test("writer", RESOURCE_LOCK=["shared"])]
+            rows[0]["properties"] = [{"name": "DEPENDS", "value": [rows[1]["name"], rows[1]["name"]]}]
+            rows[1]["properties"] = [{"name": "DEPENDS", "value": [rows[0]["name"]]}]
+            rows[2]["unknown"] = {"opaque": [None, True, 17, 1.5, "résumé/世界"]}
+            all_rows = copy.deepcopy(rows) + [test("Manual.Only", LABELS=["manual"])]
+            all_rows[0]["backtrace"] = 91
+            for filename, values in (("ctest.all.json", all_rows), ("ctest.inventory.json", rows)):
+                (self.root / filename).write_text(json.dumps({"tests": values}), encoding="utf-8")
+            inputs = {name: (self.root / name).read_bytes() for name in ("ctest.all.json", "ctest.inventory.json")}
+            before = copy.deepcopy((rows, all_rows))
+            roots = {"build": "C:/build/世界", "source": "/opt/source"}
+            for selection in ("full", "light", "heavy"):
+                selected = shards.select_tests(rows, profile, selection)
+                for timings in (None, {rows[0]["name"]: 0.25, "unknown-observation": 125.0}):
+                    parts = self.relationship_oracle(all_rows, selected, profile, timings)
+                    self.assertEqual(shards.partition(all_rows, selected, profile, timings), parts)
+                    for shard in (1, 2):
+                        with self.subTest(profile=profile, selection=selection, timed=bool(timings), shard=shard):
+                            expected = {**shards.evidence_for(rows, parts, profile, timings, roots, selection),
+                                        "shard": shard}
+                            with patch.object(shards, "inventory_roots", return_value=roots):
+                                prefab = shards.plan(self.root, shard, profile, timings, selection)
+                            self.assertEqual((self.root / "ctest.partition.json").read_bytes(),
+                                             (json.dumps(expected, sort_keys=True) + os.linesep).encode())
+                            positions = {row["name"]: index for index, row in enumerate(rows, 1)}
+                            indices = [positions[name] for name in parts[shard - 1]]
+                            self.assertEqual((self.root / "ctest.shard-index.txt").read_bytes(),
+                                             (",".join(map(str, [indices[0], indices[0], 1, *indices[1:]])) + os.linesep).encode())
+                            self.assertEqual(prefab, any(name.startswith("PrefabRuntimeTest.")
+                                                        for name in parts[shard - 1]))
+                    self.assertEqual({name: (self.root / name).read_bytes() for name in inputs}, inputs)
+                    self.assertEqual((rows, all_rows), before)
+
+    def test_public_string_subclass_hash_counts_and_refusals_stay_exact(self):
+        class Name(str):
+            calls = 0
+            limit = None
+
+            def __hash__(self):
+                Name.calls += 1
+                if Name.limit is not None and Name.calls >= Name.limit:
+                    raise ValueError("bounded callback exhausted")
+                return str.__hash__(self)
+
+        for profile in ("gcc", "msvc", "ucrt64"):
+            name = Name("Callback.Self")
+            rows = self.tests + [test(name, DEPENDS=[name])]
+            selected = [row["name"] for row in rows]
+            for limit in (None, 20, 21):
+                Name.calls, Name.limit = 0, limit
+                with self.subTest(profile=profile, limit=limit):
+                    if limit is None:
+                        result = shards.partition(rows, selected, profile)
+                        self.assertEqual(Name.calls, 21)
+                        self.assertEqual(sorted(map(str, sum(result, []))), sorted(map(str, selected)))
+                    else:
+                        with self.assertRaisesRegex(ValueError, "bounded callback exhausted"):
+                            shards.partition(rows, selected, profile)
+                        self.assertEqual(Name.calls, limit)
+
+    def test_patched_json_and_custom_timings_keep_generic_callbacks(self):
+        class Name(str):
+            calls = 0
+
+            def __hash__(self):
+                Name.calls += 1
+                return str.__hash__(self)
+
+        for custom in ("name", "timings"):
+            observations = []
+            for fallback in (True, False):
+                rows = copy.deepcopy(self.tests)
+                name = Name("Callback.Self") if custom == "name" else "Callback.Self"
+                rows.append(test(name, DEPENDS=[name]))
+                calls = []
+
+                class Timings(dict):
+                    def items(self):
+                        calls.append("items")
+                        rows[0]["unknown"] = "callback change"
+                        return super().items()
+
+                    def get(self, key, default=None):
+                        calls.append(("get", key))
+                        return super().get(key, default)
+
+                timings = Timings({"Callback.Self": 1.0}) if custom == "timings" else None
+                Name.calls = 0
+                generic = shards._partition_validated
+                with patch.object(shards, "read_json", side_effect=lambda path: {"tests": rows}), patch.object(
+                        shards, "_partition_projected", side_effect=generic if fallback else shards._partition_projected):
+                    shards.plan(self.root, 1, "gcc", timings)
+                observations.append((Name.calls, calls, copy.deepcopy(rows),
+                                     (self.root / "ctest.partition.json").read_bytes()))
+            self.assertEqual(observations[0], observations[1])
+            self.assertTrue(observations[0][0] if custom == "name" else observations[0][1])
+
+    def test_projected_independent_selected_names_and_ignored_reader_values_keep_callbacks(self):
+        for custom in ("selected-name", "ignored-value"):
+            observations = []
+            for fallback in (True, False):
+                calls = []
+
+                class Name(str):
+                    def __hash__(self):
+                        calls.append("hash")
+                        return str.__hash__(self)
+
+                class Ignored(list):
+                    def __iter__(self):
+                        calls.append("ignored iteration")
+                        return super().__iter__()
+
+                all_rows, selected_rows = copy.deepcopy(self.tests), copy.deepcopy(self.tests)
+                if custom == "selected-name":
+                    # Equality validation does not prove that names from the
+                    # independently read selected graph have exact builtin type.
+                    selected_rows[0]["name"] = Name(selected_rows[0]["name"])
+                else:
+                    all_rows[0]["unknown"] = Ignored(["literal"])
+                    selected_rows[0]["unknown"] = Ignored(["literal"])
+                reader = lambda path: {"tests": all_rows if path.name == "ctest.all.json" else selected_rows}
+                generic = shards._partition_validated
+                with patch.object(shards, "read_json", side_effect=reader), patch.object(
+                        shards, "_partition_projected", side_effect=generic if fallback else shards._partition_projected):
+                    shards.plan(self.root, 1)
+                observations.append((list(calls), (self.root / "ctest.partition.json").read_bytes(),
+                                     (self.root / "ctest.shard-index.txt").read_bytes()))
+                self.assertIsNot(all_rows, selected_rows)
+            self.assertTrue(observations[0][0])
+            self.assertEqual(observations[0], observations[1])
+
+    def test_projected_refusals_preserve_outputs_and_generic_error_order(self):
+        self.write_plan(self.root, 1)
+        outputs = {name: (self.root / name).read_bytes()
+                   for name in ("ctest.partition.json", "ctest.shard-index.txt")}
+        variants = [([], self.names, None), (self.tests, [], None),
+                    (self.tests, self.names + self.names[:1], None),
+                    (self.tests, ["unknown"], None),
+                    (self.tests + [test("dependent", DEPENDS=["missing"])], self.names, {"bad": 0}),
+                    (self.tests + [test("dependent", DEPENDS=[self.names[0]])], self.names, None)]
+        variants.extend((self.tests, self.names, {self.names[0]: value})
+                        for value in (0, -1, True, "1", float("nan"), float("inf")))
+        for rows, selected, timings in variants:
+            errors = []
+            for projected in (False, True):
+                try:
+                    shards._partition_validated(rows, selected, "gcc", timings, _projected=projected)
+                except (ValueError, KeyError, TypeError) as error:
+                    errors.append((type(error), str(error)))
+            self.assertEqual(len(errors), 2)
+            self.assertEqual(errors[0], errors[1])
+        # Direct private callers retain duplicate-name handling and ASan's
+        # historical disregard of timings, without broadening the fast route.
+        for profile in shards.PROFILES:
+            rows = self.tests + self.tests[:1]
+            timings = {"unused": True} if profile == "asan" else None
+            if profile == "asan":
+                for projected in (False, True):
+                    with self.assertRaisesRegex(ValueError, "overlapping or duplicate"):
+                        shards._partition_validated(rows, self.names, profile, timings, _projected=projected)
+                self.assertEqual(shards._partition_validated(self.tests, self.names, profile, timings),
+                                 shards._partition_validated(self.tests, self.names, profile, timings, _projected=True))
+            else:
+                self.assertEqual(shards._partition_validated(rows, self.names, profile, timings),
+                                 shards._partition_validated(rows, self.names, profile, timings, _projected=True))
+        for content in ("{", '{"tests": [], "tests": []}', '{"tests": []}'):
+            (self.root / "ctest.all.json").write_text(content, encoding="utf-8")
+            with self.assertRaises(ValueError):
+                shards.plan(self.root, 1)
+            self.assertEqual({name: (self.root / name).read_bytes() for name in outputs}, outputs)
+        for error in (PermissionError("unreadable"), OSError("partial read")):
+            with patch.object(Path, "read_text", side_effect=error), self.assertRaises(type(error)):
+                shards.plan(self.root, 1)
+            self.assertEqual({name: (self.root / name).read_bytes() for name in outputs}, outputs)
+
+    def test_projected_relationship_work_is_linear_for_a_growing_component(self):
+        # Bound actual join line events and canonical-sort input volume, not time.
+        # 128 connected rows plus 40 isolated rows keep both shards nonempty.
+        count = 128
+        rows = [test(f"Connected.Case{index}", DEPENDS=[f"Connected.Case{max(0, index - 1)}"])
+                for index in range(count)] + self.tests
+        for name in ("ctest.all.json", "ctest.inventory.json"):
+            (self.root / name).write_text(json.dumps({"tests": rows}), encoding="utf-8")
+        joins, sort_items = 0, 0
+        original_trace = sys.gettrace()
+        source = str(Path(shards.__file__).resolve())
+
+        def trace(frame, event, arg):
+            nonlocal joins
+            if event == "line" and frame.f_code.co_filename == source and frame.f_code.co_name == "join":
+                joins += 1
+            return trace
+
+        def sort(values, *args, **kwargs):
+            nonlocal sort_items
+            result = sorted(values, *args, **kwargs)
+            if result and all(type(value) is str for value in result):
+                sort_items += len(result)
+            return result
+
+        try:
+            sys.settrace(trace)
+            with patch.object(shards, "sorted", new=sort, create=True):
+                shards.plan(self.root, 1)
+        finally:
+            sys.settrace(original_trace)
+        with self.subTest(work="joins"):
+            self.assertLessEqual(joins, 12 * count)
+        with self.subTest(work="canonicalization"):
+            self.assertLessEqual(sort_items, 3 * len(rows))
+        parts = shards.read_json(self.root / "ctest.partition.json")["partitions"]
+        self.assertEqual(parts, self.relationship_oracle(rows, [row["name"] for row in rows], "gcc", None))
+
+    def test_projected_shape_ignores_subtree_work_hooks_aliases_and_cycles(self):
+        def refuse(*args, **kwargs):
+            raise AssertionError("ignored value hook invoked")
+
+        class Opaque(list):
+            __iter__ = __len__ = __getitem__ = __bool__ = __eq__ = __hash__ = refuse
+
+        class Meta(type):
+            __eq__ = __hash__ = refuse
+
+        class Scalar(metaclass=Meta):
+            pass
+
+        rows = copy.deepcopy(self.tests)
+        rows[0]["properties"] = [{"name": "TIMEOUT", "value": None}]
+        small = {"opaque": None}
+        cycle = []
+        cycle.append(cycle)
+        large = {"opaque": [Opaque(), Scalar(), cycle, *({"nested": [0] * 8} for _ in range(4096))]}
+        counts = []
+        for ignored in (small, large):
+            rows[0]["ignored"] = ignored
+            rows[0]["command"] = ignored
+            rows[0]["properties"][0]["value"] = ignored
+            checks = []
+
+            def observe(value):
+                checks.append(1)
+                return type(value)
+
+            with patch.object(shards, "type", new=observe, create=True):
+                self.assertTrue(shards._grouping_shape(rows, self.names, "gcc", None))
+            counts.append(len(checks))
+            expected = shards._partition_validated(rows, self.names)
+            with patch.object(shards, "_partition_validated", side_effect=AssertionError("unexpected fallback")):
+                self.assertEqual(shards._partition_projected(rows, self.names), expected)
+            self.assertIs(rows[0]["ignored"], ignored)
+            self.assertIs(rows[0]["command"], ignored)
+            self.assertIs(rows[0]["properties"][0]["value"], ignored)
+        self.assertGreater(counts[0], 0)
+        self.assertEqual(counts[0], counts[1])
+        self.assertIs(cycle[0], cycle)
+        # Shared observed relation lists and property dictionaries are read-only.
+        relation = {"name": "RESOURCE_LOCK", "value": ["shared"]}
+        rows[0]["properties"] = [relation, relation]
+        rows[1]["properties"] = [relation]
+        self.assertTrue(shards._grouping_shape(rows, self.names, "gcc", None))
+        self.assertEqual(shards._partition_projected(rows, self.names),
+                         shards._partition_validated(rows, self.names))
+        self.assertIs(rows[0]["properties"][0], rows[1]["properties"][0])
+        self.assertEqual(relation, {"name": "RESOURCE_LOCK", "value": ["shared"]})
+
+    def test_projected_shape_rejects_observed_hooks_before_dict_access(self):
+        calls = []
+
+        def refuse(*args, **kwargs):
+            calls.append("hook")
+            raise ValueError("observed callback")
+
+        class Mapping(dict):
+            __iter__ = items = values = get = __getitem__ = refuse
+
+        class Sequence(list):
+            __iter__ = __len__ = __getitem__ = refuse
+
+        class Name(str):
+            __hash__ = __eq__ = refuse
+
+        class Key(str):
+            __hash__ = str.__hash__
+            __eq__ = refuse
+
+        class Number(float):
+            __gt__ = refuse
+
+        class Meta(type):
+            __eq__ = __hash__ = refuse
+
+        class Scalar(metaclass=Meta):
+            pass
+
+        variants = [
+            (Sequence(), self.names, "gcc", None),
+            ([Mapping()], self.names, "gcc", None),
+            ([{"name": Name("name")}], self.names, "gcc", None),
+            (self.tests, Sequence(), "gcc", None),
+            (self.tests, [Name("name")], "gcc", None),
+            (self.tests, self.names, Name("gcc"), None),
+            (self.tests, self.names, "gcc", Mapping()),
+            (self.tests, self.names, "gcc", {"unused": Number(1)}),
+            (self.tests, [Scalar()], "gcc", None),
+            (self.tests, self.names, "gcc", {"unused": Scalar()}),
+            ([test("name", DEPENDS=Sequence())], ["name"], "gcc", None),
+            ([test("name", DEPENDS=[Name("name")])], ["name"], "gcc", None),
+            ([{"name": "name", "properties": [Mapping()]}], ["name"], "gcc", None),
+            ([{"name": "name", "properties": [{"name": Name("DEPENDS")}]}], ["name"], "gcc", None),
+            ([{Key("name"): "name"}], ["name"], "gcc", None),
+            ([{"name": "name", "properties": [{Key("name"): "DEPENDS"}]}], ["name"], "gcc", None),
+        ]
+        calls.clear()
+        for index, arguments in enumerate(variants):
+            with self.subTest(shape=index):
+                self.assertFalse(shards._grouping_shape(*arguments))
+                self.assertEqual(calls, [])
+                with patch.object(shards, "_partition_validated", return_value="generic") as generic:
+                    self.assertEqual(shards._partition_projected(*arguments), "generic")
+                    generic.assert_called_once_with(*arguments)
+        # A key equal to the queried name must run its historical callback in
+        # the generic path, after a callback-free gate has declined the shape.
+        for rows in ([{Key("name"): "name"}],
+                     [{"name": "name", "properties": [{Key("name"): "DEPENDS"}]}]):
+            observations = []
+            for operation in (shards._partition_validated, shards._partition_projected):
+                calls.clear()
+                with self.assertRaisesRegex(ValueError, "observed callback"):
+                    operation(rows, ["name"])
+                observations.append(list(calls))
+            self.assertEqual(observations, [["hook"], ["hook"]])
+
+    def test_projected_relevant_malformed_shapes_keep_generic_results_and_order(self):
+        cycle = []
+        cycle.append(cycle)
+        variants = [None, [], [None], [{}], [{"name": "a", "properties": {}}],
+                    [{"name": "a", "properties": [None]}],
+                    [{"name": "a", "properties": [{}]}],
+                    [test("a", DEPENDS="missing")], [test("a", DEPENDS=[])],
+                    [test("a", DEPENDS=[None])], [test("a", DEPENDS=cycle)],
+                    [{"name": "a", "properties": [{"name": "DEPENDS"}]}],
+                    [test("a", DEPENDS=["missing"])]]
+        for rows in variants:
+            outcomes = []
+            for operation in (shards._partition_validated, shards._partition_projected):
+                try:
+                    outcomes.append(("result", operation(rows, ["a"], "gcc", {"bad": 0})))
+                except (ValueError, KeyError, TypeError) as error:
+                    outcomes.append((type(error), str(error)))
+            self.assertEqual(outcomes[0], outcomes[1])
+
+
+
 class CaseProgressResult(unittest.TextTestResult):
     @staticmethod
     def _clock():

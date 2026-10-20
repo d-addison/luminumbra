@@ -121,7 +121,10 @@ def partition(all_tests, eligible, profile="gcc", timings=None):
     return _partition_validated(all_tests, eligible, profile, timings)
 
 
-def _partition_validated(all_tests, eligible, profile="gcc", timings=None):
+def _partition_validated(all_tests, eligible, profile="gcc", timings=None, *, _projected=False):
+    # Opt-in selects an implementation, never ownership or input provenance.
+    if _projected and type(profile) is str and profile != "asan":
+        return _partition_projected(all_tests, eligible, profile, timings)
     # Only plan may bypass public validation: its freshly parsed graph is owned
     # by this call and all aliases remain read-only until partitioning finishes.
     # Never retain this mutable graph in a global or cross-call cache.
@@ -196,6 +199,136 @@ def _partition_validated(all_tests, eligible, profile="gcc", timings=None):
     return assignments
 
 
+def _grouping_shape(all_tests, eligible, profile, timings):
+    """Check only grouping observations, without invoking input callbacks."""
+    if type(profile) is not str or profile == "asan" or type(all_tests) is not list or type(eligible) is not list:
+        return False
+    for name in eligible:
+        if type(name) is not str:
+            return False
+    for test in all_tests:
+        if type(test) is not dict:
+            return False
+        # Check every key before lookup: even an unrelated custom key can
+        # collide with a queried string and run its hash/equality hooks.
+        for key in test:
+            if type(key) is not str:
+                return False
+        if type(test.get("name")) is not str:
+            return False
+        properties = test.get("properties", [])
+        if type(properties) is not list:
+            return False
+        for prop in properties:
+            if type(prop) is not dict:
+                return False
+            for key in prop:
+                if type(key) is not str:
+                    return False
+            kind = prop.get("name")
+            if type(kind) is not str:
+                return False
+            if kind in RELATIONS:
+                values = prop.get("value")
+                if type(values) is not list:
+                    return False
+                for value in values:
+                    if type(value) is not str:
+                        return False
+    if timings is not None:
+        if type(timings) is not dict:
+            return False
+        for key, value in timings.items():
+            if type(key) is not str or (type(value) is not int and type(value) is not float):
+                return False
+    # Ignored values are never inspected. Aliases need no ownership assumption:
+    # the local grouping state never writes into either input graph.
+    return True
+
+
+def _partition_projected(all_tests, eligible, profile="gcc", timings=None):
+    # Every observed value is checked anew, including independently read names.
+    # Unsupported shapes use the unchanged generic path without prior callbacks.
+    if not _grouping_shape(all_tests, eligible, profile, timings):
+        return _partition_validated(all_tests, eligible, profile, timings)
+    names = [test["name"] for test in all_tests]
+    selected = set(eligible)
+    require(eligible and len(eligible) == len(selected) and selected <= set(names),
+            "empty, duplicate or unknown eligible tests")
+    parents = {name: name for name in names}
+    sizes = {}
+
+    def representative(name):
+        while name != parents[name]:
+            parents[name] = parents[parents[name]]
+            name = parents[name]
+        return name
+
+    def join(left, right):
+        left, right = representative(left), representative(right)
+        if left == right:
+            return
+        if sizes.get(left, 1) < sizes.get(right, 1):
+            left, right = right, left
+        parents[right] = left
+        sizes[left] = sizes.get(left, 1) + sizes.get(right, 1)
+
+    related = {}
+    for test in all_tests:
+        name = test["name"]
+        for prop in test.get("properties", []):
+            kind = prop["name"]
+            if kind not in RELATIONS:
+                continue
+            for value in prop["value"]:
+                if kind == "DEPENDS":
+                    require(value in parents, "unknown CTest dependency")
+                    join(name, value)
+                else:
+                    key = ("fixture" if kind.startswith("FIXTURES_") else "lock", value)
+                    if key in related:
+                        join(name, related[key])
+                    related[key] = name
+    # The installed-runtime qualification consumes all prefab cases together.
+    if profile == "gcc":
+        prefab = [name for name in eligible if name.startswith(("PrefabDigest.", "PrefabRuntimeTest."))]
+        for name in prefab[1:]:
+            join(prefab[0], name)
+    for name, parent in parents.items():
+        if name != parent:
+            parents[name] = representative(parent)
+    selected_roots = {parents[name] for name in eligible}
+    components = {}
+    for name, root in parents.items():
+        if root in selected_roots:
+            components.setdefault(root, []).append(name)
+    for group in components.values():
+        require(all(member in selected for member in group),
+                "eligible selection breaks fixture, dependency or resource lock closure")
+    assignments = [[], []]
+    timings = {} if timings is None else timings
+    require(isinstance(timings, dict) and all(isinstance(key, str) and
+            isinstance(value, (int, float)) and not isinstance(value, bool) and
+            math.isfinite(value) and value > 0 for key, value in timings.items()), "invalid timings")
+    # Unknown tests get at least a minute, or the largest known observation.
+    unknown_weight = max([60.0, *timings.values()])
+    # Each local component is canonicalized once, including overlapping edges.
+    unique = sorted(tuple(group) if len(group) == 1 else tuple(sorted(group))
+                    for group in components.values())
+    loads = [0.0, 0.0]
+    if timings:
+        unique.sort(key=lambda group: (-sum(timings.get(name, unknown_weight) for name in group), group))
+    for group in unique:
+        owner = min(range(2), key=lambda index: (loads[index], index)) if timings else int(digest(group), 16) % 2
+        assignments[owner].extend(group)
+        loads[owner] += sum(timings.get(name, unknown_weight) for name in group)
+    # CTest executes indices in registration order.
+    owners = {name: owner for owner, part in enumerate(assignments) for name in part}
+    assignments = [[name for name in eligible if owners[name] == owner] for owner in range(2)]
+    validate_union(eligible, assignments)
+    return assignments
+
+
 def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
 
@@ -248,7 +381,7 @@ def plan(directory, shard, profile="gcc", timings=None, selection=None):
             "discovery CTest execution inventory differs between inventories")
     selected = select_tests(tests, profile, selection)
     require(shard != 0 or selection in (None, "full"), "qualification requires full selection")
-    parts = [selected] if shard == 0 else _partition_validated(all_tests, selected, profile, timings)
+    parts = [selected] if shard == 0 else _partition_validated(all_tests, selected, profile, timings, _projected=True)
     # Reuse identity only within this call: tests and roots must remain unchanged
     # after independent discovery validation, including during selection/partition.
     manifest = {**validated, "selection": selection, "timings": timings or {},
