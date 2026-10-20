@@ -485,6 +485,13 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Select Python runtime
+        id: python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12.10'
+          architecture: x64
+          check-latest: false
       # Job-level env cannot read the runner context; set the cache
       # directory from RUNNER_TEMP before any step consumes it.
       - name: Locate compiler cache
@@ -508,17 +515,21 @@ jobs:
           echo "route=$route" >> "$GITHUB_OUTPUT"
       - name: Install standalone Python test dependencies
         if: ${{ needs.changes.outputs.needs_cpp == 'false' || needs.changes.outputs.needs_python != 'false' }}
-        run: python -m pip install --disable-pip-version-check numpy Pillow jsonschema
+        env:
+          CI_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          & "$env:CI_PYTHON" -m pip install --disable-pip-version-check numpy Pillow jsonschema
       - name: Run registered local-check deadlines
         id: local-contracts
         shell: bash
         env:
+          CI_PYTHON: ${{ steps.python.outputs.python-path }}
           LOCAL_CHECK_JUNIT: ${{ github.workspace }}/build/local-check-contracts/ctest.junit.xml
         run: |
-          cmake -S tools/ci/contracts -B build/local-check-contracts -G Ninja
+          cmake -S tools/ci/contracts -B build/local-check-contracts -G Ninja "-DPython3_EXECUTABLE=$CI_PYTHON"
           ctest --test-dir build/local-check-contracts --show-only=json-v1 > build/local-check-contracts/ctest-discovery.json
           ctest --test-dir build/local-check-contracts --no-tests=error --parallel 4 --output-on-failure --output-junit "$LOCAL_CHECK_JUNIT"
-          python -I -B tools/ci/check_ctest_junit.py "$LOCAL_CHECK_JUNIT" --minimum-tests 2 --require-test ChangedTranslationUnitsContract --require-test OfflineDependenciesContract
+          "$CI_PYTHON" -I -B tools/ci/check_ctest_junit.py "$LOCAL_CHECK_JUNIT" --minimum-tests 2 --require-test ChangedTranslationUnitsContract --require-test OfflineDependenciesContract
       - name: Upload local-check deadline evidence
         if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -532,14 +543,23 @@ jobs:
           retention-days: 14
       - name: Run standalone Python contracts (including CTest-registered suites)
         if: ${{ needs.changes.outputs.needs_cpp == 'false' || needs.changes.outputs.needs_python != 'false' }}
-        run: python -B tools/ci/ci_paths.py python-tests
+        env:
+          CI_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          & "$env:CI_PYTHON" -B tools/ci/ci_paths.py python-tests
       - name: Verify manual qualification identity and dependencies
         id: identity
         if: ${{ needs.changes.outputs.needs_cpp != 'false' && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
-        run: python tools/ci/qualification_capture.py preflight --lane windows-msvc --expected-sha "$env:QUALIFICATION_EXPECTED_SHA"
+        env:
+          CI_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          & "$env:CI_PYTHON" tools/ci/qualification_capture.py preflight --lane windows-msvc --expected-sha "$env:QUALIFICATION_EXPECTED_SHA"
       - name: Install Python test dependencies
         if: ${{ needs.changes.outputs.needs_cpp != 'false' }}
-        run: python -m pip install --disable-pip-version-check numpy Pillow
+        env:
+          CI_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          & "$env:CI_PYTHON" -m pip install --disable-pip-version-check numpy Pillow
       - name: Disable compiler cache for qualification captures
         if: ${{ needs.changes.outputs.needs_cpp != 'false' && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
         shell: pwsh
@@ -619,7 +639,10 @@ jobs:
         if: ${{ needs.changes.outputs.needs_cpp != 'false' }}
         id: native
         shell: pwsh
+        env:
+          CI_PYTHON: ${{ steps.python.outputs.python-path }}
         run: |
+          $pythonExecutable = $env:CI_PYTHON
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
           $installPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
@@ -627,13 +650,15 @@ jobs:
             -property installationPath
           Import-Module "$installPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
           Enter-VsDevShell -VsInstallPath $installPath -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          # Developer-shell setup can change PATH; retain the selected runtime.
+          Set-Alias -Name python -Value $pythonExecutable
           # Release uses Ninja without /Zi under the project's CMake 3.20
           # policy baseline. Keep launchers local to this configure.
           $compilerLaunchers = @()
           if ($env:CCACHE_DISABLE -ne '1') {
             $compilerLaunchers = @('-DCMAKE_C_COMPILER_LAUNCHER=ccache', '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache')
           }
-          cmake --preset release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl @compilerLaunchers
+          cmake --preset release "-DPython3_EXECUTABLE=$pythonExecutable" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl @compilerLaunchers
           cmake --build --preset release --parallel 4
           # Require the file-only production writer/oracle integration even
           # when optional PowerShell discovery would omit it from the suite.
@@ -701,8 +726,10 @@ jobs:
       - name: Bind manual qualification evidence
         if: ${{ needs.changes.outputs.needs_cpp != 'false' && (always() && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)) }}
         env:
+          CI_PYTHON: ${{ steps.python.outputs.python-path }}
           QUALIFICATION_PRODUCERS: '{"identity":"${{ steps.identity.outcome }}","native":"${{ steps.native.outcome }}"}'
-        run: python tools/ci/qualification_capture.py write --lane windows-msvc --expected-sha "$env:QUALIFICATION_EXPECTED_SHA" --binary build/release/bin/common_tests.exe --junit build/release/ctest.junit.xml --output build/release/qualification-capture.json
+        run: |
+          & "$env:CI_PYTHON" tools/ci/qualification_capture.py write --lane windows-msvc --expected-sha "$env:QUALIFICATION_EXPECTED_SHA" --binary build/release/bin/common_tests.exe --junit build/release/ctest.junit.xml --output build/release/qualification-capture.json
       - name: Upload manual qualification evidence
         if: ${{ needs.changes.outputs.needs_cpp != 'false' && (always() && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)) }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -735,7 +762,10 @@ jobs:
       - name: Validate dormant and enabled Windows packaging
         if: ${{ needs.changes.outputs.needs_cpp != 'false' && (github.ref_name == 'main' || github.base_ref == 'main') }}
         shell: pwsh
+        env:
+          CI_PYTHON: ${{ steps.python.outputs.python-path }}
         run: |
+          $pythonExecutable = $env:CI_PYTHON
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
           $installPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
@@ -743,9 +773,9 @@ jobs:
             -property installationPath
           Import-Module "$installPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
           Enter-VsDevShell -VsInstallPath $installPath -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
-          cmake -S . -B build/package-off -G Ninja -DBUILD_TESTING=OFF -DENABLE_BINARY_RELEASES=OFF
+          cmake -S . -B build/package-off -G Ninja "-DPython3_EXECUTABLE=$pythonExecutable" -DBUILD_TESTING=OFF -DENABLE_BINARY_RELEASES=OFF
           if (Test-Path build/package-off/CPackConfig.cmake) { throw 'binary packaging enabled while disabled' }
-          cmake -S . -B build/package-windows -G Ninja -DCMAKE_BUILD_TYPE=Release `
+          cmake -S . -B build/package-windows -G Ninja "-DPython3_EXECUTABLE=$pythonExecutable" -DCMAKE_BUILD_TYPE=Release `
             -DBUILD_TESTING=OFF -DENABLE_BINARY_RELEASES=ON -DLUMINUMBRA_WARNINGS_AS_ERRORS=ON
           cmake --build build/package-windows --target package --parallel 4
 
