@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location("ci_paths", ROOT / "tools/ci/ci_paths.py")
@@ -63,7 +64,7 @@ class RegistrationTests(unittest.TestCase):
     def test_both_hosted_routes_execute_registered_deadlines_and_keep_failure_evidence(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         jobs = policy.jobs(workflow)
-        for job, python in (("linux", "python3"), ("windows-msvc", "python")):
+        for job, python in (("linux", "python3"), ("windows-msvc", '"$CI_PYTHON"')):
             with self.subTest(job=job):
                 steps = {step.splitlines()[0].removeprefix("      - name: "): step
                          for step in policy.steps(jobs[job])}
@@ -72,8 +73,13 @@ class RegistrationTests(unittest.TestCase):
                 self.assertIsNone(policy.value(run, "continue-on-error", 8))
                 self.assertEqual(policy.value(run, "shell", 8), "bash")
                 self.assertEqual(policy.value(run, "id", 8), "local-contracts")
+                configure = "cmake -S tools/ci/contracts -B build/local-check-contracts -G Ninja"
+                if job == "windows-msvc":
+                    self.assertEqual(policy.value(run, "CI_PYTHON", 10),
+                                     "${{ steps.python.outputs.python-path }}")
+                    configure += ' "-DPython3_EXECUTABLE=$CI_PYTHON"'
                 self.assertEqual(policy.value(run, "run", 8).splitlines(), [
-                    "cmake -S tools/ci/contracts -B build/local-check-contracts -G Ninja",
+                    configure,
                     "ctest --test-dir build/local-check-contracts --show-only=json-v1 > build/local-check-contracts/ctest-discovery.json",
                     'ctest --test-dir build/local-check-contracts --no-tests=error --parallel 4 --output-on-failure --output-junit "$LOCAL_CHECK_JUNIT"',
                     f'{python} -I -B tools/ci/check_ctest_junit.py "$LOCAL_CHECK_JUNIT" --minimum-tests 2 --require-test ChangedTranslationUnitsContract --require-test OfflineDependenciesContract',
@@ -118,7 +124,7 @@ class RegistrationTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         jobs = policy.jobs(workflow)
         expected = "${{ github.workspace }}/build/local-check-contracts/ctest.junit.xml"
-        for job, python in (("linux", "python3"), ("windows-msvc", "python")):
+        for job, python in (("linux", "python3"), ("windows-msvc", "$CI_PYTHON")):
             with self.subTest(job=job):
                 steps = {step.splitlines()[0].removeprefix("      - name: "): step
                          for step in policy.steps(jobs[job])}
@@ -145,6 +151,29 @@ class RegistrationTests(unittest.TestCase):
                         path = expected.replace("${{ github.workspace }}", workspace)
                         self.assertTrue(path_type(path).is_absolute())
                         self.assertEqual(path_type(path).name, "ctest.junit.xml")
+
+    def test_windows_local_checks_reject_bare_unbound_or_mismatched_python(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        run, = [step for step in policy.steps(policy.jobs(workflow)["windows-msvc"])
+                if policy.value(step, "id", 8) == "local-contracts"]
+        check = RegistrationTests(
+            "test_both_hosted_routes_execute_registered_deadlines_and_keep_failure_evidence")
+        check.test_both_hosted_routes_execute_registered_deadlines_and_keep_failure_evidence()
+        for old, new in (
+                ('"$CI_PYTHON" -I -B', "python -I -B"),
+                ('"$CI_PYTHON" -I -B', "$CI_PYTHON -I -B"),
+                (' "-DPython3_EXECUTABLE=$CI_PYTHON"', ""),
+                ('"-DPython3_EXECUTABLE=$CI_PYTHON"', "-DPython3_EXECUTABLE=$CI_PYTHON"),
+                ('"-DPython3_EXECUTABLE=$CI_PYTHON"', '"-DPython3_EXECUTABLE=$OTHER_PYTHON"'),
+                ("          CI_PYTHON: ${{ steps.python.outputs.python-path }}\n", ""),
+                ("${{ steps.python.outputs.python-path }}", "${{ steps.other.outputs.python-path }}")):
+            with self.subTest(mutation=old, replacement=new):
+                self.assertEqual(run.count(old), 1)
+                mutated = workflow.replace(run, run.replace(old, new, 1), 1)
+                with patch.object(Path, "read_text", return_value=mutated) as read:
+                    with self.assertRaises(AssertionError):
+                        check.test_both_hosted_routes_execute_registered_deadlines_and_keep_failure_evidence()
+                    read.assert_called_once_with(encoding="utf-8")
 
     def test_registration_regression_is_in_both_test_plans_and_requires_ci_coverage(self):
         path = "tools/ci/test_local_check_contracts.py"
