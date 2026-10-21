@@ -192,9 +192,9 @@ public:
 
     // Read-only diagnostic of the staging filename base used by region/manifest
     // writers, before the unique temporary suffix. Region members stage in the
-    // save root outside strict scans; standalone paths retain their spelling.
-    // Lexical recognition performs no filesystem I/O; relocated paths retain the
-    // original traversal, including symlinks followed by parent components.
+    // save root outside strict scans when the original suffix is chunks/region.
+    // Other spellings retain standalone behavior. Recognition performs no filesystem
+    // I/O; relocation preserves symlinks followed by parent components in that prefix.
     static std::filesystem::path region_staging_path(const std::filesystem::path& destination);
 
     // Deterministic test seam for failure-atomic LMR1 rewrites. When armed,

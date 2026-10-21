@@ -17,6 +17,7 @@
 #include <array>
 #include <atomic>
 #include <barrier>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -333,14 +334,16 @@ TEST(WorldSaveService, StandaloneContainerReclaimsAdjacentStagingAndPreservesRec
     EXPECT_EQ(records[1].payload, added.payload);
 }
 
-TEST(WorldSaveService, ContainerStagingRecognizesNormalizedRegionPaths) {
-    const TempSaveDir save_dir("normalized_staging");
+TEST(WorldSaveService, ContainerStagingKeepsUnrecognizedRegionSpellingAdjacent) {
+    const TempSaveDir save_dir("unrecognized_staging");
     const auto canonical = WorldSaveService::region_file_path(save_dir.path(), 0, 0);
     const auto path = canonical.parent_path() / "." / canonical.filename();
     const WorldSaveService::ContainerRecord original{
         .id = 7, .lod_level = 1, .flags = 0, .payload = "original"};
     ASSERT_TRUE(WorldSaveService::upsert_container_records(path, {original}));
-    const auto abandoned = save_dir.path() / "r.0.0.lmr.tmp.abandoned";
+    EXPECT_EQ(WorldSaveService::region_staging_path(path).native(), path.native());
+    auto abandoned = path;
+    abandoned += ".tmp.abandoned";
     ASSERT_TRUE(WorldSaveService::write_file_durably(abandoned, "partial bytes"));
     ASSERT_TRUE(WorldSaveService::upsert_container_records(path, {original}));
     EXPECT_FALSE(std::filesystem::exists(abandoned));
@@ -353,18 +356,15 @@ TEST(WorldSaveService, ContainerStagingRecognizesNormalizedRegionPaths) {
 TEST(WorldSaveService, RegionStagingPreservesRootsAndStandaloneSpelling) {
     namespace paths = Luminumbra::Filesystem;
     const auto check_root = [](const std::filesystem::path& root, const std::string& expected) {
-        for (const auto& suffix : {std::filesystem::path("chunks/region/r.0.0.lmr"),
-                                   std::filesystem::path("chunks/region/./r.0.0.lmr"),
-                                   std::filesystem::path("chunks/unused/../region/r.0.0.lmr")}) {
-            const auto destination = root / suffix;
-            const auto staging = WorldSaveService::region_staging_path(destination);
-            EXPECT_EQ(staging.native(),
-                      (destination.parent_path() / ".." / ".." / destination.filename()).native());
-            EXPECT_EQ(paths::GenericUtf8PathString(paths::LexicallyNormalPath(staging)),
-                      expected + "/r.0.0.lmr");
-        }
+        const auto region = root / "chunks/region/r.0.0.lmr";
+        const auto staging = WorldSaveService::region_staging_path(region);
+        EXPECT_EQ(staging.native(), (root / region.filename()).native());
+        EXPECT_EQ(paths::GenericUtf8PathString(staging), expected + "/r.0.0.lmr");
         for (const auto& suffix : {std::filesystem::path("standalone/./records.lmr"),
                                    std::filesystem::path("standalone/child/../records.lmr"),
+                                   std::filesystem::path("chunks/region/./r.0.0.lmr"),
+                                   std::filesystem::path("chunks/./region/r.0.0.lmr"),
+                                   std::filesystem::path("chunks/unused/../region/r.0.0.lmr"),
                                    std::filesystem::path("world-manifest.json")}) {
             const auto destination = root / suffix;
             EXPECT_EQ(WorldSaveService::region_staging_path(destination).native(),
@@ -398,12 +398,94 @@ TEST(WorldSaveService, RegionStagingRetainsSymlinkParentTraversalWithoutFilesyst
         for (const auto* member : {"r.0.0.lmr", "world-manifest.json"}) {
             const auto destination = WorldSaveService::region_directory(root) / member;
             EXPECT_EQ(WorldSaveService::region_staging_path(destination).native(),
-                      (destination.parent_path() / ".." / ".." / member).native());
+                      (root / member).native());
         }
     }
 }
 
 #if !defined(_WIN32)
+TEST(WorldSaveService, SymlinkedRegionStagesInsideSaveRootWithReadOnlyTargetAncestors) {
+    const TempSaveDir fixture("symlink_region_staging");
+    const auto save_root = fixture.path() / "save";
+    const auto outside = fixture.path() / "outside";
+    const auto regions = outside / "regions";
+    const auto target = regions / "worldA";
+    std::filesystem::create_directories(target);
+    std::filesystem::create_directories(save_root / "chunks");
+    std::filesystem::create_directory_symlink(target,
+                                              WorldSaveService::region_directory(save_root));
+
+    class ReadOnlyDirectory {
+    public:
+        explicit ReadOnlyDirectory(const std::filesystem::path& path)
+            : m_path(path)
+            , m_permissions(std::filesystem::status(path).permissions()) {
+            std::filesystem::permissions(
+                m_path, std::filesystem::perms::owner_read | std::filesystem::perms::owner_exec);
+        }
+        ~ReadOnlyDirectory() {
+            std::error_code error;
+            std::filesystem::permissions(m_path, m_permissions, error);
+        }
+
+    private:
+        const std::filesystem::path m_path;
+        const std::filesystem::perms m_permissions;
+    };
+    // Two ancestors bound this pass. Old timestamps detect even transient temp
+    // creation when elevated privileges bypass the read-only permissions.
+    const auto old_time = std::filesystem::last_write_time(outside) - std::chrono::hours(24);
+    std::filesystem::last_write_time(outside, old_time);
+    std::filesystem::last_write_time(regions, old_time);
+    const auto outside_time = std::filesystem::last_write_time(outside);
+    const auto regions_time = std::filesystem::last_write_time(regions);
+    const ReadOnlyDirectory protect_outside(outside);
+    const ReadOnlyDirectory protect_regions(regions);
+
+    const auto region = WorldSaveService::region_file_path(save_root, 0, 0);
+    const auto manifest = WorldSaveService::world_manifest_path(save_root);
+    for (const auto& destination : {region, manifest}) {
+        EXPECT_EQ(WorldSaveService::region_staging_path(destination),
+                  save_root / destination.filename());
+        const auto abandoned = save_root / (destination.filename().string() + ".tmp.abandoned");
+        ASSERT_TRUE(WorldSaveService::write_file_durably(abandoned, "partial"));
+    }
+    const WorldSaveService service;
+    WorldStreamingState state;
+    PopulateFixtureWorld(state);
+    ASSERT_TRUE(service.save_world(state, save_root));
+    const auto original_hash = service.world_hash(state);
+    EXPECT_TRUE(std::filesystem::is_regular_file(target / region.filename()));
+    EXPECT_TRUE(std::filesystem::is_regular_file(target / manifest.filename()));
+    WorldStreamingState loaded;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(service.load_world(loaded, save_root, errors));
+    EXPECT_TRUE(errors.empty());
+    EXPECT_EQ(service.world_hash(loaded), original_hash);
+
+    AddFixtureChunk(state, IVec3(0, 0, 0), ChunkState::Ready, 9u);
+    const auto changed_hash = service.world_hash(state);
+    ASSERT_NE(changed_hash, original_hash);
+    WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
+    const bool interrupted = service.save_world(state, save_root);
+    WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
+    EXPECT_FALSE(interrupted);
+    ASSERT_TRUE(service.load_world(loaded, save_root, errors));
+    EXPECT_EQ(service.world_hash(loaded), original_hash);
+    ASSERT_TRUE(service.save_world(state, save_root));
+    ASSERT_TRUE(service.load_world(loaded, save_root, errors));
+    EXPECT_EQ(service.world_hash(loaded), changed_hash);
+    EXPECT_TRUE(errors.empty());
+    EXPECT_EQ(std::filesystem::last_write_time(outside), outside_time);
+    EXPECT_EQ(std::filesystem::last_write_time(regions), regions_time);
+    // The isolated fixture has three chunks, a manifest and five directories;
+    // default iteration does not follow the region symlink.
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(fixture.path()))
+        EXPECT_EQ(
+            Luminumbra::Filesystem::GenericUtf8PathString(entry.path().filename()).find(".tmp."),
+            std::string::npos);
+}
+
 TEST(WorldSaveService, SymlinkParentSaveReclaimsAndReplacesInTheResolvedDirectory) {
     const TempSaveDir fixture("symlink_parent_staging");
     const auto actual_root = fixture.path() / "actual";

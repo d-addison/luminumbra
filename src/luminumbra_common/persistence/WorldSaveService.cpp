@@ -1146,14 +1146,12 @@ std::filesystem::path
 WorldSaveService::region_staging_path(const std::filesystem::path& destination) {
     // Every region member lives at save/chunks/region/<filename>. Stage on the
     // save filesystem outside both strictly scanned directories, like the ledger.
-    const auto normalized = Filesystem::LexicallyNormalPath(destination);
-    const auto directory = normalized.parent_path();
+    const auto directory = destination.parent_path();
     if (directory.filename() == kRegionDirectoryName &&
         directory.parent_path().filename() == kChunksDirectoryName)
-        // Normalize only to recognize the layout. Traverse from the original
-        // region directory so a symlink followed by ".." keeps its filesystem
-        // meaning in staging, reclamation and final replacement alike.
-        return destination.parent_path() / ".." / ".." / destination.filename();
+        // Remove layout components without traversing a region symlink's parents
+        // or collapsing symlink/.. components in the caller's save-root prefix.
+        return directory.parent_path().parent_path() / destination.filename();
     // Raw container access also supports standalone files outside a world save.
     return destination;
 }

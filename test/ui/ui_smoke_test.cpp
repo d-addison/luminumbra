@@ -40,6 +40,7 @@
 #include "luminumbra_common/core/FramePacing.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/world/KnobLayer.h"
+#include "luminumbra_common/world/TerrainPresetLoader.h"
 #include "ui/Rml_UIManager.h"
 #include "ui/components/common/Button.h"
 #include "ui/components/common/Input.h"
