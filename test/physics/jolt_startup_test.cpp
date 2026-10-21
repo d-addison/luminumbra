@@ -4,6 +4,7 @@
 #include <Jolt/Core/FixedSizeFreeList.h>
 #include <Jolt/Core/JobSystemSingleThreaded.h>
 #include <Jolt/Core/JobSystemThreadPool.h>
+#include <Jolt/Core/Memory.h>
 #include <Jolt/Core/Profiler.h>
 #include <Jolt/Core/STLAlignedAllocator.h>
 #include <Jolt/Core/TempAllocator.h>
@@ -1145,9 +1146,15 @@ void* NullOnlyForZeroAllocation(std::size_t size) {
     return JoltAllocate(size);
 }
 
+void FreeNonNullStorage(void* block) {
+    Require(block != nullptr);
+    JoltFree(block);
+}
+
 void ZeroWorkerPool() {
     InitializeAllocators();
     JPH::Allocate = NullOnlyForZeroAllocation;
+    JPH::Free = FreeNonNullStorage;
     // Prove the callback's zero-size contract before exercising the real pool.
     Require(JPH::Allocate(0) == nullptr && Allocations().zero_allocation_calls == 1);
     Allocations().zero_allocation_calls = 0;
@@ -1155,6 +1162,7 @@ void ZeroWorkerPool() {
     unsigned exited = 0;
     unsigned executed = 0;
     Arm(0, false, false);
+    { const JPH::JobSystemThreadPool empty{}; }
     { JPH::JobSystemThreadPool constructed(2048, 8, 0); }
     Require(Outstanding() == 0 && Allocations().zero_allocation_calls == 0);
     {
@@ -1184,7 +1192,9 @@ void ZeroWorkerPool() {
     Require(Outstanding() == 0 && initialized == 0 && exited == 0 &&
             Allocations().zero_allocation_calls == 0);
     Require(JPH::Allocate == NullOnlyForZeroAllocation);
+    Require(JPH::Free == FreeNonNullStorage);
     JPH::Allocate = JoltAllocate;
+    JPH::Free = JoltFree;
     std::_Exit(0);
 }
 } // namespace
