@@ -155,6 +155,7 @@ def read_database(root: Path, build_dir: Path) -> list[dict]:
             cleaned, operands = parse_arguments(args)
             if len(operands) != 1 or checked_resolve(directory / operands[0]) != source:
                 raise SelectionError(f"command must compile exactly one database source: {source}")
+            first_party_warning_policy({"arguments": args})
             validate_textual_includes(cleaned, directory)
         except (_DEPS.CacheMiss, ValueError, TypeError) as error:
             raise SelectionError(str(error)) from error
@@ -848,11 +849,38 @@ def check_arguments(entry: dict, profile="none") -> list[str]:
     return command
 
 
+def first_party_warning_policy(entry: dict) -> bool:
+    """Read the CMake helper's private marker, never a source/target name.
+
+    Walk option operands so a definition-looking include path cannot opt in.
+    Unknown marker versions and undefines refuse rather than weaken policy.
+    """
+    marker = "LUMINUMBRA_FIRST_PARTY_WARNING_POLICY"
+    command = clean_arguments(entry["arguments"])
+    enabled, index = False, 1
+    # One pass bounded by the validated compile command's argument count.
+    while index < len(command):
+        arg = command[index]
+        if arg in {"-D", "-U"}:
+            option, value = arg, command[index + 1]
+        else:
+            option, value = arg[:2], arg[2:]
+        if option in {"-D", "-U"} and value.split("=", 1)[0] == marker:
+            if option != "-D" or value != marker + "=1":
+                raise SelectionError("unsupported first-party warning policy marker: " + option + value)
+            enabled = True
+        index += 2 if arg in INPUT_VALUE_OPTIONS else 1
+    return enabled
+
+
 def compile_command(entry: dict, output: Path, ccache=False, warning_profile="none",
                     fatal_profile=False) -> list[str]:
     """Replay each variant exactly, then append the optional profile."""
-    command = check_arguments(entry, warning_profile)
-    if fatal_profile:
+    strict = fatal_profile and first_party_warning_policy(entry)
+    # CI replays targets outside the helper with only their normal flags.
+    # The explicit local approximation remains independent of target policy.
+    command = check_arguments(entry, "none" if fatal_profile and not strict else warning_profile)
+    if strict:
         # CI enforces the complete contract independently of the local profile,
         # which deliberately preserves target-family calibration exceptions.
         if "-w" in command or "-Wno-everything" in command:
@@ -1168,7 +1196,7 @@ def ci_cache_key(root: Path, entries: list[dict], tracked: list[Path]) -> str:
                                            "scripts/tidy.sh", "scripts/tidy_cache.py"}):
             inputs[relative.as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
     data = {"configuration": "Linux Release; Diligent OFF; warnings ON",
-            "warning_profile": "msvc-approx; fatal; no calibration",
+            "warning_profile": "msvc-approx; fatal for helper targets; other targets use database flags; no calibration",
             "compiler_identity": identity, "build_inputs": inputs,
             "commands": [{"directory": str(e["directory"]),
                           "arguments": compile_command(e, Path("selected.o"),
@@ -1219,7 +1247,7 @@ def ci_tidy(root: Path, selected: list[dict], work: Path, jobs: int) -> None:
 def ci_checks(args, root: Path) -> int:
     report = {"status": "failed", "selected": {}, "command_variants": {},
               "scan_seconds": 0, "compile_seconds": 0, "tidy_seconds": 0,
-              "warning_profile": "msvc-approx (fatal; no calibration)",
+              "warning_profile": "msvc-approx (fatal for helper targets; other targets use database flags; no calibration)",
               "unsupported_configurations": [
                   "Configured Linux Release only; Diligent OFF. Windows/MSVC, UCRT64, "
                   "ASan and optional backend coverage remain with existing full lanes."],

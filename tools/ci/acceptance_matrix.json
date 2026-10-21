@@ -3,6 +3,19 @@
   "description": "Requirement-to-evidence matrix for the expanded v0.3 contract. Rows are statements; evidence items are executable tests, scripts, native commands or documents. The planned field is descriptive text naming outstanding work and its owner; planned items are visible but never count as covered.",
   "rows": [
     {
+      "id": "ci.target-warning-policy",
+      "source": "docs/ci/local-checks.md#fast-hosted-validation",
+      "statement": "The first-party CMake helper emits a private warning-policy definition for every compiler and configuration. Fast compile applies the strict fatal profile only to command variants carrying that definition; other selected variants replay their normal database flags. Unsupported marker values and undefines refuse before compilation. Mixed-policy variants of the same source remain selected and cache identity includes their effective commands.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "ChangedTranslationUnitsContract"
+        }
+      ],
+      "requirements": []
+    },
+    {
       "id": "ci.ctest-shard-partitions",
       "source": "tools/ci/test_ctest_shards.py",
       "statement": "Eight disjoint CTest shard contract partitions retain every unittest case and the 30-second deadline with unchanged labels. Whole-case overrides balance the groups for Windows; Windows deadline qualification remains pending. Direct Python invocation, the public-tree workflow and unittest discovery retain the complete suite; roster and registration regressions pin exact coverage and reject invalid selections. Windows Python ci/tools contracts reserve four CTest slots in both engine and compiler-free local-check projects, with explicit costs prioritizing known slow cases. These scheduling properties add no shard relationship edges; Linux retains its existing slot policy. Python-only scheduler regressions check exclusive execution, cost ordering and progress with smaller parallelism.",

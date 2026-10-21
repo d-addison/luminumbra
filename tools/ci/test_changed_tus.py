@@ -39,11 +39,20 @@ class DependencyIncludesTests(unittest.TestCase):
         links = re.search(r"target_link_libraries\(luminumbra_common PUBLIC(.*?)\)", common, re.S)
         self.assertIsNotNone(links)
         self.assertEqual(links[1].split(), [aliases.get(name, name) for name in dependencies])
+        # Fetched tool/client dependencies must follow the same export policy.
+        # In particular meshoptimizer is declared by MakeAvailable before this
+        # loop; testing only common-library links would miss its headers.
+        self.assertLess(vendor.index("FetchContent_MakeAvailable(EnTT "), exports.start())
+        dependencies += ("meshoptimizer", "rmlui_core", "rmlui_debugger", "glfw",
+                         "miniaudio", "soil2", "glad")
         with tempfile.TemporaryDirectory(prefix="dependency includes ") as temporary:
             source = Path(temporary).resolve()
             build = source / "build"
             project = ["cmake_minimum_required(VERSION 3.20)",
                        "project(DependencyIncludes LANGUAGES NONE)"]
+            # Optional dependencies may all be absent; the guarded export must
+            # configure successfully before any of these targets exists too.
+            project.append(exports[0])
             for name in dependencies:
                 project += [f"add_library({name} INTERFACE)",
                             f"target_include_directories({name} INTERFACE "
@@ -69,6 +78,39 @@ class DependencyIncludesTests(unittest.TestCase):
                     self.assertEqual((build / f"{name}.txt").read_text(encoding="utf-8").split(";"),
                                      [(source / name).as_posix(), (build / name).as_posix()])
             self.assertEqual((build / "first_party.txt").read_text(encoding="utf-8"), "")
+
+    def test_asset_round_trip_vendor_search_paths_are_system_includes(self):
+        source = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        blocks = re.findall(
+            r"target_include_directories\(asset_processor_round_trip_test\s+(.*?)\)",
+            source, re.S)
+        system_paths = [path for block in blocks if block.startswith("SYSTEM PRIVATE")
+                        for path in block.split()[2:]]
+        regular_paths = [path for block in blocks if block.startswith("PRIVATE")
+                         for path in block.split()[1:]]
+        for path in ("../vendor/cgltf", "../third_party/cgltf", "../third_party/meshoptimizer/src",
+                     "../external/cgltf", "../external/meshoptimizer/src"):
+            with self.subTest(path=path):
+                self.assertIn(path, system_paths)
+                self.assertNotIn(path, regular_paths)
+        for path in ("../src", "../tools"):
+            with self.subTest(path=path):
+                self.assertIn(path, regular_paths)
+                self.assertNotIn(path, system_paths)
+
+    def test_common_and_client_vendor_roots_are_system_includes(self):
+        for path, target in (("src/luminumbra_common/CMakeLists.txt", "luminumbra_common"),
+                             ("src/CMakeLists.txt", "luminumbra_client")):
+            with self.subTest(target=target):
+                source = (ROOT / path).read_text(encoding="utf-8")
+                source = re.sub(r"#[^\n]*", "", source)
+                blocks = re.findall(r"target_include_directories\(" + target + r"\s+(.*?)\)",
+                                    source, re.S)
+                vendor = '"${CMAKE_SOURCE_DIR}/vendor"' if target == "luminumbra_common" else "${CMAKE_SOURCE_DIR}/vendor"
+                self.assertTrue(any(block.startswith("SYSTEM PUBLIC") and vendor in block.split()
+                                    for block in blocks))
+                self.assertFalse(any(not block.startswith("SYSTEM") and vendor in block.split()
+                                     for block in blocks))
 
 
 class ChangedTranslationUnitsTests(unittest.TestCase):
@@ -1531,6 +1573,18 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         # from the same helper CI configures with warnings-as-errors enabled.
         return re.findall(r"(?<!\S)-W[a-zA-Z0-9=-]+", policy[1])
 
+    def cmake_policy_marker(self):
+        text = (ROOT / "CMakeLists.txt").read_text()
+        helper = re.search(r"function\(luminumbra_configure_first_party_target\b(.*?)endfunction\(\)",
+                           text, re.S)[1]
+        definitions = re.search(r"target_compile_definitions\(\$\{TARGET_NAME\} PRIVATE(.*?)\)",
+                                helper, re.S)
+        self.assertIsNotNone(definitions)
+        self.assertIn("LUMINUMBRA_FIRST_PARTY_WARNING_POLICY=1", definitions[1].split())
+        # The private marker applies to both compiler branches and every config.
+        self.assertLess(definitions.end(), helper.index("if(MSVC)"))
+        return "-DLUMINUMBRA_FIRST_PARTY_WARNING_POLICY=1"
+
     def warning_options(self, command):
         return [arg for arg in command if arg.startswith("-W") or arg in {"-w", "-pedantic", "-pedantic-errors"}]
 
@@ -2353,8 +2407,98 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         self.assertIn("No native work", args.summary_file.read_text())
         self.assertEqual(self.commands, [])
 
+    def test_ci_non_policy_commands_replay_normal_flags_for_both_drivers(self):
+        for driver in ("g++", "clang++"):
+            for flags in ([], ["-Werror"], self.cmake_warning_flags(),
+                          ["-w"], ["-Wno-everything"], ["-Wno-error=conversion"]):
+                with self.subTest(driver=driver, flags=flags):
+                    entry = self.entries()[0]
+                    entry["arguments"][0] = driver
+                    entry["arguments"] += flags
+                    before = list(entry["arguments"])
+                    command = tus.compile_command(entry, self.build / "ci.o", True,
+                                                  "msvc-approx", True)
+                    self.assertEqual(command, ["ccache", *tus.clean_arguments(before),
+                                               "-c", "-o", str(self.build / "ci.o")])
+                    self.assertEqual(entry["arguments"], before)
+                    self.assertEqual(self.commands, [])
+
+    def test_ci_policy_marker_uses_definitions_and_refuses_unknown_metadata(self):
+        marker = self.cmake_policy_marker()[2:]
+        for flags in (["-D" + marker], ["-D", marker]):
+            with self.subTest(flags=flags):
+                entry = dict(self.entries()[0])
+                entry["arguments"] = [*entry["arguments"], *flags]
+                self.assertTrue(tus.first_party_warning_policy(entry))
+                command = tus.compile_command(entry, self.build / "ci.o", fatal_profile=True)
+                self.assertIn("-Werror=conversion", command)
+        for flags in (["-DOTHER=" + marker], ["-I", marker],
+                      ["-DLUMINUMBRA_FIRST_PARTY_WARNING_POLICY_EXTRA=1"]):
+            with self.subTest(flags=flags):
+                entry = self.entries()[0]
+                entry["arguments"] += flags
+                self.assertFalse(tus.first_party_warning_policy(entry))
+        name = marker.split("=", 1)[0]
+        for definition in (name, name + "=", name + "=0", name + "=2", name + "=1=2"):
+            for flags in (["-D" + definition], ["-D", definition]):
+                with self.subTest(flags=flags):
+                    entry = self.entries()[0]
+                    entry["arguments"] += ["-D" + marker, *flags]
+                    before = list(entry["arguments"])
+                    with self.assertRaisesRegex(tus.SelectionError, "unsupported first-party warning policy"):
+                        tus.compile_command(entry, self.build / "ci.o", fatal_profile=True)
+                    self.assertEqual(entry["arguments"], before)
+        for flags in (["-U" + name], ["-U", name], ["-D"], ["-I", "-D" + marker]):
+            with self.subTest(flags=flags):
+                entry = self.entries()[0]
+                entry["arguments"] += flags
+                with self.assertRaises(tus.SelectionError):
+                    tus.compile_command(entry, self.build / "ci.o", fatal_profile=True)
+        self.assertEqual(self.commands, [])
+
+    def test_ci_mixed_policy_variants_of_same_source_are_both_replayed(self):
+        self.raw = [self.raw_entry(self.a),
+                    self.raw_entry(self.a, [self.cmake_policy_marker(), *self.cmake_warning_flags()])]
+        self.save_db()
+        self.assertEqual(self.run_ci(), 0)
+        compiles = [c for c, _ in self.commands if c[0] == "ccache"]
+        self.assertEqual(len(compiles), 2)
+        normal = [c for c in compiles if self.cmake_policy_marker() not in c]
+        strict = [c for c in compiles if self.cmake_policy_marker() in c]
+        self.assertEqual(len(normal), 1)
+        self.assertEqual(len(strict), 1)
+        self.assertEqual(normal[0][1:-3], tus.clean_arguments(self.raw[0]["arguments"]))
+        self.assertIn("-Werror=conversion", strict[0])
+        self.assertEqual(sum("--files0-from" in c for c, _ in self.commands), 2)
+        # Cache identity covers the effective command and the policy marker.
+        entries = self.entries()
+        normal_key = tus.ci_cache_key(self.root, entries[:1], [])
+        strict_key = tus.ci_cache_key(self.root, entries[1:], [])
+        self.assertNotEqual(normal_key, strict_key)
+
+    def test_ci_unknown_policy_refuses_before_compilation(self):
+        clang_build = self.root / "clang build"
+        clang_build.mkdir()
+        for context in ("gcc", "clang"):
+            with self.subTest(context=context):
+                self.commands.clear()
+                self.save_db()
+                invalid = [dict(raw, arguments=[*raw["arguments"],
+                           "-DLUMINUMBRA_FIRST_PARTY_WARNING_POLICY=2"]) for raw in self.raw]
+                database = clang_build / "compile_commands.json"
+                database.write_text(json.dumps(invalid if context == "clang" else self.raw))
+                if context == "gcc":
+                    (self.build / "compile_commands.json").write_text(json.dumps(invalid))
+                namespace = os.environ.get("CCACHE_NAMESPACE")
+                self.assertEqual(self.run_ci(clang_build_dir=clang_build), 1)
+                self.assertIn("unsupported first-party warning policy", (self.root / "summary.md").read_text())
+                self.assertFalse(any("-c" in c or "-p" in c for c, _ in self.commands))
+                self.assertEqual(os.environ.get("CCACHE_NAMESPACE"), namespace)
+                self.assertEqual(list((self.root / "scratch").glob("fast-checks-*")), [])
+
     def test_ci_fatal_profile_adds_categories_without_changing_local_policy(self):
         entry = self.entries()[0]
+        entry["arguments"].append(self.cmake_policy_marker())
         original = tus.compile_command(entry, self.build / "local.o", warning_profile="msvc-approx")
         strict = tus.compile_command(entry, self.build / "ci.o", True, "msvc-approx", True)
         self.assertEqual(strict[0], "ccache")
@@ -2379,7 +2523,7 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
                       ["-W" + category for category in categories]):
             with self.subTest(flags=flags):
                 entry = self.entries()[0]
-                entry["arguments"] += flags
+                entry["arguments"] += [self.cmake_policy_marker(), *flags]
                 replay = tus.clean_arguments(entry["arguments"])
                 local = tus.compile_command(entry, self.build / "local.o", warning_profile="msvc-approx")
                 self.assertFalse(any(f.startswith("-Werror=") for f in local[len(replay):-3]))
@@ -2404,7 +2548,7 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
                 for flags in ([flag, "-Wconversion", "-Wunused"], ["-Wconversion", "-Wunused", flag]):
                     with self.subTest(flags=flags):
                         entry = self.entries()[0]
-                        entry["arguments"] += flags
+                        entry["arguments"] += [self.cmake_policy_marker(), *flags]
                         before = list(entry["arguments"])
                         local = tus.compile_command(entry, self.build / "local.o",
                                                     warning_profile="msvc-approx")
@@ -2415,7 +2559,7 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
                         self.assertEqual(self.commands, [])
 
     def test_ci_warning_enforcement_refusal_reports_failure_before_compiling(self):
-        self.raw[0]["arguments"].append("-Wno-error=unused-but-set-variable")
+        self.raw[0]["arguments"] += [self.cmake_policy_marker(), "-Wno-error=unused-but-set-variable"]
         self.save_db()
         namespace = os.environ.get("CCACHE_NAMESPACE")
         self.assertEqual(self.run_ci(), 1)
@@ -2431,7 +2575,8 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         self.assertEqual(flags, ["-Wall", "-Wextra", "-Wpedantic", "-Werror",
                                  "-Wno-error=unused-parameter"])
         for raw in self.raw:
-            raw["arguments"] = self.raw_entry(Path(raw["file"]), flags)["arguments"]
+            raw["arguments"] = self.raw_entry(Path(raw["file"]),
+                                              [self.cmake_policy_marker(), *flags])["arguments"]
         self.save_db()
         original = [list(raw["arguments"]) for raw in self.raw]
         namespace = os.environ.get("CCACHE_NAMESPACE")
@@ -2532,6 +2677,7 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         pin.parent.mkdir()
         pin.write_text("dependency revision one")
         entries = self.entries()
+        entries[0]["arguments"].append(self.cmake_policy_marker())
         tracked = [policy, pin]
         key = tus.ci_cache_key(self.root, entries, tracked)
         self.assertTrue(key.startswith("fast-compile-msvc-approx-"))

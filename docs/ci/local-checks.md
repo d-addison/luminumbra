@@ -395,18 +395,25 @@ of every selected file. A changed or cross-selected TU missing from either
 database fails visibly. Unconfigured sources and unsupported platforms/backends
 are listed explicitly and retain their specialized full gates.
 
-GCC compiles use isolated scratch object paths and the shared `msvc-approx`
-profile. CI independently makes all/extra/pedantic, shadow=global, conversion,
-sign-conversion, narrowing, unused and missing-field-initializers fatal, even
-when a target already configures a warning family.
+GCC compiles use isolated scratch object paths. The first-party CMake helper
+adds the private `LUMINUMBRA_FIRST_PARTY_WARNING_POLICY=1` definition for every
+configuration and compiler. CI reads that definition from each command variant:
+helper targets use the shared `msvc-approx` profile and independently make
+all/extra/pedantic, shadow=global, conversion, sign-conversion, narrowing, unused
+and missing-field-initializers fatal, even when a target already configures a
+warning family. Other targets remain selected and replay only their normal
+compile-database flags, including their own fatal/nonfatal warning policy.
+Source ownership does not imply helper membership; variants of the same file
+can have different policies. Unsupported marker values or undefines refuse
+before compilation. Reconfigure existing databases to include the marker.
 CI accepts the first-party CMake helper's `-Wno-error=unused-parameter`, then
 appends `-Werror=unused-parameter`: that helper's MSVC `/W4 /WX` policy enforces
 C4100 without an exception. Local calibration preserves the original demotion.
-CI conservatively refuses other per-diagnostic disables and demotions because
-subgroup precedence can defeat group enforcement. Entirely warning-disabled commands
-are also refused. The fast lane never reads or writes
-warning-calibration baselines and adds no diagnostic suppressions. MSVC remains
-necessary to validate C4456–C4459 and native conversion diagnostics.
+For helper targets, CI conservatively refuses other per-diagnostic disables
+and demotions because subgroup precedence can defeat group enforcement.
+Entirely warning-disabled helper commands are also refused. The fast lane never
+reads or writes warning-calibration baselines and adds no diagnostic suppressions.
+MSVC remains necessary to validate C4456–C4459 and native conversion diagnostics.
 
 Each selected Clang command variant gets an isolated temporary database.
 clang-tidy-18 (falling back to clang-tidy) first runs the repository `.clang-tidy`
