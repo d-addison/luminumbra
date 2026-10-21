@@ -2183,6 +2183,115 @@ runpy.run_path(script, run_name='__main__', init_globals={'OwnedCases': OwnedCas
 
 
 
+class ExecutionNormalizationTests(unittest.TestCase):
+    def test_plan_does_not_sort_empty_builtin_property_lists(self):
+        case = CTestShardTests()
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        rows = case.tests
+        rows[0]["properties"] = [{"name": "TIMEOUT", "value": 2.5},
+                                  {"name": "ENVIRONMENT", "value": ["A=one", "B=two"]}]
+        del rows[1]["properties"]
+        for name in ("ctest.all.json", "ctest.inventory.json"):
+            (case.root / name).write_text(json.dumps({"tests": rows}), encoding="utf-8")
+        roots = shards.inventory_roots(case.root)
+        for profile in shards.PROFILES:
+            parts = shards.partition(rows, case.names, profile)
+            expected = {**shards.evidence_for(rows, parts, profile, roots=roots), "shard": 1}
+            calls = []
+
+            def sort(values, *args, **kwargs):
+                if type(values) is list and not values:
+                    calls.append("empty sort")
+                return sorted(values, *args, **kwargs)
+
+            with self.subTest(profile=profile), patch.object(shards, "sorted", new=sort, create=True):
+                shards.plan(case.root, 1, profile)
+            self.assertEqual((case.root / "ctest.partition.json").read_bytes(),
+                             (json.dumps(expected, sort_keys=True) + os.linesep).encode())
+            self.assertEqual(calls, [])
+
+    def test_normalization_keeps_custom_sequence_callbacks_and_error_order(self):
+        events = []
+
+        class Properties(list):
+            def __iter__(self):
+                events.append("iterate")
+                return super().__iter__()
+
+            def __len__(self):
+                events.append("length")
+                return super().__len__()
+
+            def __bool__(self):
+                raise AssertionError("custom truth callback must not run")
+
+        class Row(dict):
+            def items(self):
+                events.append("items")
+                return super().items()
+
+            def get(self, *args):
+                events.append("get")
+                return super().get(*args)
+
+        class Property(dict):
+            def __getitem__(self, key):
+                events.append(("property", key))
+                return super().__getitem__(key)
+
+        class Broken(Properties):
+            def __iter__(self):
+                events.append("broken iteration")
+                raise ValueError("property read failed")
+
+        def original(rows):
+            result = [{**{key: value for key, value in row.items() if key != "backtrace"},
+                       "properties": sorted(row.get("properties", []), key=lambda prop: prop["name"])}
+                      for row in rows]
+            json.dumps(result, allow_nan=False)
+            return result
+
+        for properties in (Properties(), Properties([Property(name="TIMEOUT", value=3)]), Broken()):
+            rows = [Row(name="callback", command=["binary"], properties=properties, backtrace=1)]
+            observations = []
+            for operation in (original, shards.execution_inventory):
+                events.clear()
+                try:
+                    result = operation(rows)
+                    outcome = ("value", json.dumps(result))
+                except ValueError as error:
+                    outcome = (type(error), str(error))
+                observations.append((outcome, list(events)))
+            self.assertEqual(observations[0], observations[1])
+            self.assertTrue(observations[0][1])
+
+    def test_empty_normalization_stays_fresh_and_still_validates_every_value(self):
+        shared = []
+        rows = [test("first"), test("second")]
+        for row in rows:
+            row["properties"] = shared
+        first = shards.execution_inventory(rows)
+        second = shards.execution_inventory(rows)
+        self.assertEqual(first, second)
+        for index in (0, 1):
+            self.assertIsNot(first[index]["properties"], shared)
+            self.assertIsNot(first[index]["properties"], second[index]["properties"])
+        self.assertIsNot(first[0]["properties"], first[1]["properties"])
+        first[0]["properties"].append({"name": "TIMEOUT", "value": 1})
+        self.assertEqual(shared, [])
+        self.assertEqual(shards.execution_inventory([]), [])
+        for invalid in (float("nan"), float("inf"), object()):
+            rows[0]["unknown"] = invalid
+            with self.subTest(invalid=type(invalid)), self.assertRaisesRegex(ValueError, "non-finite or invalid"):
+                shards.execution_inventory(rows)
+        cycle = []
+        cycle.append(cycle)
+        rows[0]["unknown"] = cycle
+        with self.assertRaisesRegex(ValueError, "non-finite or invalid"):
+            shards.execution_inventory(rows)
+
+
 class CaseProgressResult(unittest.TextTestResult):
     @staticmethod
     def _clock():
@@ -2224,6 +2333,102 @@ class CaseProgressResult(unittest.TextTestResult):
 
 class CaseProgressRunner(unittest.TextTestRunner):
     resultclass = CaseProgressResult
+
+
+class GateArgumentTests(unittest.TestCase):
+    @staticmethod
+    def arguments(**changes):
+        values = dict(result="success", cpp="true", cancelled="false", event="pull_request",
+                      draft="false", qualification="false", enabled="true", classification="success")
+        values.update(changes)
+        return [item for key, value in values.items() for item in ("--" + key, value)]
+
+    @staticmethod
+    def invoke(argv, **kwargs):
+        import io
+
+        parsers = []
+        initialize = shards.argparse.ArgumentParser.__init__
+
+        def observe(parser, *args, **options):
+            initialize(parser, *args, **options)
+            parsers.append(parser)
+
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.object(sys, "argv", argv), patch.object(sys, "stdout", stdout), patch.object(
+                sys, "stderr", stderr), patch.object(shards.argparse.ArgumentParser, "__init__", observe):
+            try:
+                status = shards.main(**kwargs)
+            except SystemExit as error:
+                status = error.code
+        return status, stdout.getvalue(), stderr.getvalue(), parsers
+
+    def test_gate_retains_parser_order_and_only_configures_selected_actions(self):
+        with patch.dict(os.environ):
+            os.environ.pop("GITHUB_STEP_SUMMARY", None)
+            status, stdout, stderr, parsers = self.invoke(["shards.py", "gate", *self.arguments()])
+        self.assertEqual((status, stdout, stderr), (0, "route: sharded\n", ""))
+        self.assertEqual([parser.prog for parser in parsers],
+                         ["shards.py", "shards.py plan", "shards.py run", "shards.py merge",
+                          "shards.py collect", "shards.py gate"])
+        self.assertEqual([len(parser._actions) for parser in parsers], [2, 1, 1, 1, 1, 9])
+        self.assertEqual(list(parsers[0]._actions[1].choices), ["plan", "run", "merge", "collect", "gate"])
+        self.assertEqual([action.option_strings for action in parsers[-1]._actions],
+                         [["-h", "--help"], *[[self.arguments()[index]] for index in range(0, 16, 2)]])
+
+    def test_other_first_tokens_retain_complete_actions_and_profile_defaults(self):
+        for profile in shards.PROFILES:
+            for argv in (["shards.py"], ["shards.py", "--help", "gate"],
+                         ["shards.py", "gate ", "--help"], ["shards.py", "gat", "--help"],
+                         *[["shards.py", mode, "--help"] for mode in ("plan", "run", "merge", "collect")]):
+                with self.subTest(profile=profile, argv=argv):
+                    _, _, _, parsers = self.invoke(argv, default_profile=profile, legacy_evidence=True)
+                    self.assertEqual([len(parser._actions) for parser in parsers], [2, 8, 3, 8, 5, 9])
+                    for parser in parsers[1:4]:
+                        self.assertEqual(parser.get_default("profile"), profile)
+        with self.assertRaises(IndexError):
+            self.invoke([])
+
+    def test_gate_routes_and_refusals_preserve_summary_writes(self):
+        rows = (({}, "sharded"), ({"qualification": "true"}, "full"),
+                ({"cpp": "false"}, "python-only"), ({"enabled": "false", "result": "skipped"}, "skipped"),
+                ({"classification": "failure"}, "path classification did not succeed"),
+                ({"draft": "true"}, "draft or missing draft metadata"),
+                ({"cancelled": "true"}, "workflow cancelled or cancellation status missing"),
+                ({"enabled": "false"}, "unexpected producer on excluded route"),
+                ({"result": "failure"}, "expected producers did not all succeed"),
+                ({"cpp": "false", "qualification": "true"}, "qualification cannot use Python-only route"))
+        with tempfile.TemporaryDirectory() as directory:
+            for index, (changes, expected) in enumerate(rows):
+                summary = Path(directory) / str(index)
+                summary.write_bytes(b"sentinel\n")
+                with self.subTest(changes=changes), patch.dict(os.environ, GITHUB_STEP_SUMMARY=str(summary)):
+                    status, stdout, stderr, _ = self.invoke(["shards.py", "gate", *self.arguments(**changes)])
+                success = index < 4
+                self.assertEqual(status, 0 if success else 1)
+                self.assertEqual(stdout, f"route: {expected}\n" if success else "")
+                self.assertEqual(stderr, "" if success else f"CTest gate refused: {expected}\n")
+                self.assertEqual(summary.read_bytes(), b"sentinel\n" +
+                                 (f"route: {expected}{os.linesep}".encode() if success else b""))
+            missing = Path(directory) / "absent" / "summary"
+            with patch.dict(os.environ, GITHUB_STEP_SUMMARY=str(missing)):
+                status, stdout, stderr, _ = self.invoke(["shards.py", "gate", *self.arguments()])
+            self.assertEqual((status, stdout), (1, "route: sharded\n"))
+            self.assertTrue(stderr.startswith("CTest gate refused: "))
+            self.assertFalse(missing.exists())
+
+    def test_gate_help_required_unknown_and_whitespace_program_names(self):
+        for prog in ("shards.py", "  shards.py", "shards.py  "):
+            status, stdout, stderr, _ = self.invoke([prog, "gate", "--help", "--help"])
+            self.assertEqual((status, stderr), (0, ""))
+            for option in self.arguments()[::2]:
+                self.assertIn(option, stdout)
+            for args, diagnostic in (([], "the following arguments are required:"),
+                                     ([*self.arguments(), "--unknown"], "unrecognized arguments: --unknown")):
+                with self.subTest(prog=prog, args=args):
+                    status, stdout, stderr, _ = self.invoke([prog, "gate", *args])
+                    self.assertEqual((status, stdout), (2, ""))
+                    self.assertIn(diagnostic, stderr)
 
 
 if __name__ == "__main__":

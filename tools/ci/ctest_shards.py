@@ -351,8 +351,10 @@ def execution_inventory(tests):
     # Backtrace IDs locate declarations in a separate diagnostic graph. All
     # execution values remain literal, including paths, regexes and environment.
     # Only property registration order is immaterial; value/argument order is not.
+    # Empty builtin lists need only a fresh list; custom sequences still sort.
     result = [{**{key: value for key, value in test.items() if key != "backtrace"},
-               "properties": sorted(test.get("properties", []), key=lambda prop: prop["name"])} for test in tests]
+               "properties": ([] if type(props := test.get("properties", [])) is list and not props else
+                              sorted(props, key=lambda prop: prop["name"]))} for test in tests]
     try:
         json.dumps(result, allow_nan=False)
     except (TypeError, ValueError) as error:
@@ -576,8 +578,12 @@ def gate(result, cpp, cancelled, event, draft, qualification, enabled, classific
 def main(default_profile="gcc", legacy_evidence=False):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="mode", required=True)
+    # Gate never parses another mode; keep every parser and its implicit prog.
+    gate_only = len(sys.argv) > 1 and sys.argv[1] == "gate"
     for mode in ("plan", "run", "merge"):
         sub = commands.add_parser(mode)
+        if gate_only:
+            continue
         sub.add_argument("--directory", type=Path, required=True)
         sub.add_argument("--profile", choices=PROFILES, default=default_profile)
         if mode in ("plan", "merge"):
@@ -592,10 +598,11 @@ def main(default_profile="gcc", legacy_evidence=False):
             sub.add_argument("--full", action="store_true")
             sub.add_argument("--reason", default="")
     sub = commands.add_parser("collect")
-    sub.add_argument("--directory", type=Path, required=True)
-    sub.add_argument("--prefix", required=True)
-    sub.add_argument("--attempt", type=int, required=True)
-    sub.add_argument("--full", action="store_true")
+    if not gate_only:
+        sub.add_argument("--directory", type=Path, required=True)
+        sub.add_argument("--prefix", required=True)
+        sub.add_argument("--attempt", type=int, required=True)
+        sub.add_argument("--full", action="store_true")
     sub = commands.add_parser("gate")
     for key in ("result", "cpp", "cancelled", "event", "draft", "qualification", "enabled", "classification"):
         sub.add_argument("--" + key, required=True)
