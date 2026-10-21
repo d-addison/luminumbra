@@ -9,6 +9,7 @@ import io
 import json
 import os
 from pathlib import Path
+from pathlib import PurePosixPath, PureWindowsPath
 import shlex
 import shutil
 import stat
@@ -24,6 +25,116 @@ ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location("offline_deps", ROOT / "tools/ci/offline_deps.py")
 deps = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(deps)
+
+
+class ContainmentTests(unittest.TestCase):
+    def test_lexical_boundaries_match_explicit_table_and_pathlib(self):
+        tables = (
+            (PurePosixPath, (
+                ("/cache/objects", "/cache", True),
+                ("/cache", "/cache", True),
+                ("/cache-other/objects", "/cache", False),
+                ("/cache", "/cache/objects", False),
+                ("/Cache/objects", "/cache", False),
+                ("//cache/objects", "/cache", False),
+                ("//cache/objects", "//cache", True),
+                ("/cache//./objects", "/cache", True),
+                ("/cache/../outside", "/cache", True),
+                ("/cache/objects", "/cache/..", False),
+                ("/cache\\objects", "/cache", False),
+                ("/cache:stream", "/cache", False),
+                ("/cache/objects", "/", True),
+                ("cache/objects", "cache", True),
+                ("", "", True),
+                ("cache", "/cache", False),
+            )),
+            (PureWindowsPath, (
+                ("C:/CACHE/objects", "c:/cache", True),
+                ("C:/cache", "c:/CACHE", True),
+                ("C:/cache-other/objects", "C:/cache", False),
+                ("D:/cache/objects", "C:/cache", False),
+                ("C:/cache/objects", "C:/", True),
+                ("C:/cache/../outside", "C:/cache", True),
+                ("C:/cache/objects", "C:/cache/..", False),
+                ("C:/cache//./objects", "C:/cache", True),
+                ("C:/cache:stream", "C:/cache", False),
+                ("C:/cache/file:stream", "C:/cache", True),
+                ("C:/Straße/file", "C:/STRASSE", False),
+                ("C:/İ/file", "C:/i\u0307", True),
+                ("C:/ΟΣ/file", "C:/ος", True),
+                ("//SERVER/SHARE/cache/file", "//server/share/CACHE", True),
+                ("//server/other/cache", "//server/share", False),
+                ("//server/share/file", "//server/share", True),
+                ("//?/C:/cache/file", "//?/C:/cache", True),
+                ("//?/C:/cache/file", "C:/cache", False),
+                ("//?/UNC/server/share/file", "//?/UNC/SERVER/SHARE", True),
+                ("C:cache/file", "C:cache", True),
+                ("C:/cache/file", "C:cache", False),
+                ("/cache/file", "C:/cache", False),
+                ("", "", True),
+            )),
+        )
+        native = type(Path())
+        for pure, rows in tables:
+            classes = (pure, native) if isinstance(Path(), pure) else (pure,)
+            for cls in classes:
+                for spelling, parent_spelling, expected in rows:
+                    path, parent = cls(spelling), cls(parent_spelling)
+                    with self.subTest(cls=cls, path=spelling, parent=parent_spelling):
+                        self.assertEqual(path.is_relative_to(parent), expected)
+                        self.assertEqual(deps._lexically_relative(path, parent), expected)
+
+    def test_fallback_preserves_nonabsolute_mixed_and_custom_path_calls(self):
+        native = type(Path())
+        pure = PureWindowsPath if os.name == "nt" else PurePosixPath
+        anchor = Path.cwd().anchor
+        for path, parent in ((Path("child"), Path()), (Path(), Path("child")),
+                             (Path(anchor) / "child", Path("relative")),
+                             (Path("child"), Path(anchor)),
+                             (Path(anchor) / "child", pure(anchor)),
+                             (Path("child"), "child")):
+            expected = path.is_relative_to(parent)
+            with self.subTest(path=path, parent=parent), patch.object(
+                    native, "is_relative_to", autospec=True, return_value=expected) as fallback:
+                self.assertEqual(deps._lexically_relative(path, parent), expected)
+                fallback.assert_called_once_with(path, parent)
+
+        calls = []
+        failure = None
+
+        class CustomPath(native):
+            def is_relative_to(path, parent):
+                calls.append((path, parent))
+                if failure is not None:
+                    raise failure
+                return super().is_relative_to(parent)
+
+        with tempfile.TemporaryDirectory(prefix="containment ") as temporary:
+            parent = CustomPath(temporary)
+            child = parent / "child"
+            self.assertEqual(deps.contained(child, parent), child.resolve())
+            self.assertEqual(calls, [(child.absolute(), parent.absolute()),
+                                     (child.resolve(), parent.resolve())])
+            for error in (ValueError("custom path refused"), PermissionError("custom path denied")):
+                failure = error
+                with self.subTest(error=error), self.assertRaises(type(error)) as caught:
+                    deps.contained(child, parent)
+                self.assertIs(caught.exception, error)
+
+    def test_public_containment_avoids_native_ancestor_construction(self):
+        with tempfile.TemporaryDirectory(prefix="containment ") as temporary:
+            parent = Path(temporary).resolve()
+            child = parent / "ordinary"
+            child.mkdir()
+            expected = child.resolve()
+            with patch.object(type(parent), "is_relative_to", side_effect=AssertionError(
+                    "native containment constructed ancestor paths")):
+                self.assertEqual(deps.contained(child, parent), expected)
+                self.assertEqual(deps.contained(child / "missing", parent), expected / "missing")
+                for outside in (parent, parent / "..", parent.with_name(parent.name + "-other")):
+                    with self.subTest(outside=outside), self.assertRaisesRegex(
+                            deps.DependencyError, "strictly inside"):
+                        deps.contained(outside, parent)
 
 
 class GitConfigScannerTests(unittest.TestCase):
@@ -2286,6 +2397,15 @@ class CachedGitSafetyTests(unittest.TestCase):
 
 
 class ScratchPreparationTests(unittest.TestCase):
+    def test_public_containment_preserves_redirect_refusal_without_writes(self):
+        alias = self.root / "redirect"
+        self.redirect(alias, self.outside)
+        before = self.state()
+        for path in (alias / "missing", alias / ".." / "missing"):
+            with self.subTest(path=path), self.assertRaises(deps.DependencyError):
+                deps.contained(path, self.root)
+            self.assertEqual(self.state(), before)
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="scratch preparation ")
         self.addCleanup(temporary.cleanup)
