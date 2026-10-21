@@ -388,7 +388,7 @@ std::shared_ptr<const PrefabAsset> PrefabAsset::Load(const std::filesystem::path
         Vector(matrix, 16);
         for (int c = 0; c < 4; ++c)
             for (int r = 0; r < 4; ++r)
-                node.local_matrix[c][r] = Number(matrix[static_cast<std::size_t>(c * 4 + r)]);
+                node.local_matrix[c][r] = Number(matrix[c * 4 + r]);
         Detail::Affine(node.local_matrix);
         for (int a = 0; a < 3; ++a)
             for (int b = a + 1; b < 3; ++b) {

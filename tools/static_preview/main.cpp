@@ -44,7 +44,7 @@ std::vector<std::uint8_t> Read(const fs::path& path, std::uintmax_t limit = 256u
             "Missing or oversized input file");
     std::ifstream input(path, std::ios::binary);
     std::vector<std::uint8_t> bytes(static_cast<size_t>(fs::file_size(path)));
-    input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    input.read(reinterpret_cast<char*>(bytes.data()), bytes.size());
     Require(input.good() && input.peek() == std::char_traits<char>::eof(),
             "Input changed or could not be read completely");
     return bytes;
@@ -55,8 +55,7 @@ std::string Hash(std::span<const std::uint8_t> bytes) {
 void Write(const fs::path& path, std::span<const std::uint8_t> bytes) {
     Require(!fs::exists(path), "Capture member already exists");
     std::ofstream output(path, std::ios::binary);
-    output.write(reinterpret_cast<const char*>(bytes.data()),
-                 static_cast<std::streamsize>(bytes.size()));
+    output.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
     output.close();
     Require(output.good(), "Capture member write failed");
 }
