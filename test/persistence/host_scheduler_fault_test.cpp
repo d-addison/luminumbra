@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include "../support/UniqueTempPath.h"
 #include "../support/WorldgenTestData.h"
 
 #include "luminumbra_client/app/SessionExit.h"
@@ -8,7 +9,6 @@
 #include "luminumbra_server/modes/ModeHelpers.h"
 #include "luminumbra_server/modes/Modes.h"
 
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -192,16 +192,14 @@ protected:
     std::shared_ptr<spdlog::logger> previous_logger;
 
     void SetUp() override {
-        root = fs::temp_directory_path() /
-               ("luminumbra_host_fault_" +
-                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        previous_logger = Log::GetCoreLogger();
+        root = Luminumbra::TestSupport::CreateUniqueTempDirectory("luminumbra_host_fault_");
         fs::create_directories(root / "worlds/atlas/presets");
         fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets/default.json",
                       root / "worlds/atlas/presets/default.json");
         Luminumbra::TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, root);
         WriteHostFile(root / "data/common/systems.json",
                       R"({"sim":{"active_regions":{"enabled":true}}})");
-        previous_logger = Log::GetCoreLogger();
         auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(log_output);
         auto logger = std::make_shared<spdlog::logger>("host-fault-test", sink);
         logger->set_pattern("%v");
@@ -214,7 +212,8 @@ protected:
         HostObservation() = nullptr;
         Log::GetCoreLogger() = previous_logger;
         std::error_code error;
-        fs::remove_all(root, error);
+        if (!root.empty())
+            fs::remove_all(root, error);
     }
 
     ServerCliOptions Options() const {

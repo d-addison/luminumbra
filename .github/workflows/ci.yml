@@ -518,7 +518,10 @@ jobs:
           echo "route=$route" >> "$GITHUB_OUTPUT"
       - name: Install standalone Python test dependencies
         if: ${{ needs.changes.outputs.needs_cpp == 'false' || needs.changes.outputs.needs_python != 'false' }}
-        run: python -m pip install --disable-pip-version-check numpy Pillow jsonschema
+        env:
+          CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
+        run: |
+          & "$env:CI_PYTHON_EXECUTABLE" -m pip install --disable-pip-version-check numpy Pillow jsonschema
       - name: Run registered local-check deadlines
         id: local-contracts
         shell: bash
@@ -529,7 +532,8 @@ jobs:
           cmake -S tools/ci/contracts -B build/local-check-contracts -G Ninja "-DPython3_EXECUTABLE=$CI_PYTHON_EXECUTABLE"
           ctest --test-dir build/local-check-contracts --show-only=json-v1 > build/local-check-contracts/ctest-discovery.json
           ctest --test-dir build/local-check-contracts --no-tests=error --parallel 4 --output-on-failure --output-junit "$LOCAL_CHECK_JUNIT"
-          python -I -B tools/ci/check_ctest_junit.py "$LOCAL_CHECK_JUNIT" --minimum-tests 4 --require-test ChangedTranslationUnitsContract --require-test OfflineDependenciesContract --require-test OfflineDependenciesContractPart1 --require-test OfflineDependenciesContractPart2
+          CI_PYTHON_EXECUTABLE="$(cygpath -u "$CI_PYTHON_EXECUTABLE")"
+          "$CI_PYTHON_EXECUTABLE" -I -B tools/ci/check_ctest_junit.py "$LOCAL_CHECK_JUNIT" --minimum-tests 4 --require-test ChangedTranslationUnitsContract --require-test OfflineDependenciesContract --require-test OfflineDependenciesContractPart1 --require-test OfflineDependenciesContractPart2
       - name: Upload local-check deadline evidence
         if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -543,14 +547,23 @@ jobs:
           retention-days: 14
       - name: Run standalone Python contracts (including CTest-registered suites)
         if: ${{ needs.changes.outputs.needs_cpp == 'false' || needs.changes.outputs.needs_python != 'false' }}
-        run: python -B tools/ci/ci_paths.py python-tests
+        env:
+          CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
+        run: |
+          & "$env:CI_PYTHON_EXECUTABLE" -B tools/ci/ci_paths.py python-tests
       - name: Verify manual qualification identity and dependencies
         id: identity
         if: ${{ needs.changes.outputs.needs_cpp != 'false' && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
-        run: python tools/ci/qualification_capture.py preflight --lane windows-msvc --expected-sha "$env:QUALIFICATION_EXPECTED_SHA"
+        env:
+          CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
+        run: |
+          & "$env:CI_PYTHON_EXECUTABLE" tools/ci/qualification_capture.py preflight --lane windows-msvc --expected-sha "$env:QUALIFICATION_EXPECTED_SHA"
       - name: Install Python test dependencies
         if: ${{ needs.changes.outputs.needs_cpp != 'false' }}
-        run: python -m pip install --disable-pip-version-check numpy Pillow
+        env:
+          CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
+        run: |
+          & "$env:CI_PYTHON_EXECUTABLE" -m pip install --disable-pip-version-check numpy Pillow
       - name: Disable compiler cache for qualification captures
         if: ${{ needs.changes.outputs.needs_cpp != 'false' && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
         shell: pwsh
@@ -633,6 +646,7 @@ jobs:
         env:
           CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
         run: |
+          $pythonExecutable = $env:CI_PYTHON_EXECUTABLE
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
           $installPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
@@ -640,6 +654,8 @@ jobs:
             -property installationPath
           Import-Module "$installPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
           Enter-VsDevShell -VsInstallPath $installPath -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          # Developer-shell setup can change PATH; retain the selected runtime.
+          Set-Alias -Name python -Value $pythonExecutable
           # Release uses Ninja without /Zi under the project's CMake 3.20
           # policy baseline. Keep launchers local to this configure.
           $compilerLaunchers = @()
@@ -714,8 +730,10 @@ jobs:
       - name: Bind manual qualification evidence
         if: ${{ needs.changes.outputs.needs_cpp != 'false' && (always() && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)) }}
         env:
+          CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
           QUALIFICATION_PRODUCERS: '{"identity":"${{ steps.identity.outcome }}","native":"${{ steps.native.outcome }}"}'
-        run: python tools/ci/qualification_capture.py write --lane windows-msvc --expected-sha "$env:QUALIFICATION_EXPECTED_SHA" --binary build/release/bin/common_tests.exe --junit build/release/ctest.junit.xml --output build/release/qualification-capture.json
+        run: |
+          & "$env:CI_PYTHON_EXECUTABLE" tools/ci/qualification_capture.py write --lane windows-msvc --expected-sha "$env:QUALIFICATION_EXPECTED_SHA" --binary build/release/bin/common_tests.exe --junit build/release/ctest.junit.xml --output build/release/qualification-capture.json
       - name: Upload manual qualification evidence
         if: ${{ needs.changes.outputs.needs_cpp != 'false' && (always() && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)) }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -751,6 +769,7 @@ jobs:
         env:
           CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
         run: |
+          $pythonExecutable = $env:CI_PYTHON_EXECUTABLE
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
           $installPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `

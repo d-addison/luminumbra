@@ -92,6 +92,10 @@ jobs:
 
   runner-contract:
     name: Runner contract / ${{ matrix.os }}
+    # Reuse the required heavy checks' routed-skip pattern. Python inputs also
+    # matter here; uncertain classification must keep the contracts runnable.
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.needs_cpp != 'false' || needs.changes.outputs.needs_python != 'false') }}
     strategy:
       fail-fast: false
       matrix:
@@ -110,6 +114,7 @@ jobs:
           python tools/perf/test_render_contract.py
           python tools/perf/test_capture_sim_budget.py
           python tools/perf/test_sim_budget_gate.py
+          python tools/perf/test_terrain_aov_paths.py
           python tools/perf/test_check_residency.py
           python tools/perf/test_plan_qualification.py
           python tools/perf/test_run_qualification.py

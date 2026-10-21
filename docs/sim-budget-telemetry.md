@@ -232,8 +232,11 @@ incomplete/unqualified capture; corrupt or inconsistent manifests and unknown
 schema versions must be refused by comparison consumers; unknown object keys
 are ignored. `source_dirty` records whether the source tree had uncommitted
 changes and `binary_sha256` identifies the measured executable bytes, so a
-working-tree capture is not mislabeled as a pristine revision. The default
-executable path includes `.exe` on Windows. Logs are optional diagnostics, not
+working-tree capture is not mislabeled as a pristine revision. New captures also
+record `preset_hash`, binding the preset files and their referenced dependency
+content. Historical captures may omit it; comparisons refuse a difference in
+its presence or value. See the [fixture reference and hash rules](performance.md).
+The default executable path includes `.exe` on Windows. Logs are optional diagnostics, not
 authoritative records: missing
 or damaged log text does not synthesize measurements. No evidence file is read
 by world loading or hashed into simulation. Compare stage work traces/totals
