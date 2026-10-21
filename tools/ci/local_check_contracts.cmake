@@ -22,3 +22,13 @@ add_test(
     COMMAND "${Python3_EXECUTABLE}" -I -B "${_local_check_source_dir}/test_offline_deps.py" --partition 2)
 set_tests_properties(OfflineDependenciesContractPart2
     PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+if(WIN32)
+    # Match the engine's four-slot Windows pool reservation in both projects.
+    set_tests_properties(
+        ChangedTranslationUnitsContract OfflineDependenciesContract
+        OfflineDependenciesContractPart1 OfflineDependenciesContractPart2
+        PROPERTIES PROCESSORS 4)
+    set_property(TEST ChangedTranslationUnitsContract PROPERTY COST 29)
+    set_property(TEST OfflineDependenciesContractPart2 PROPERTY COST 18)
+    set_property(TEST OfflineDependenciesContract OfflineDependenciesContractPart1 PROPERTY COST 10)
+endif()

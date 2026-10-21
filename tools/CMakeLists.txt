@@ -282,13 +282,50 @@ if(BUILD_TESTING)
         COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_asan_shards.py")
     set_tests_properties(AsanShardContract
         PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    # Disjoint shard-contract partitions retain the complete suite and deadline.
     add_test(
-        NAME CTestShardContract
-        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_ctest_shards.py")
-    set_tests_properties(CTestShardContract
+        NAME CTestShardContractPart1
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_ctest_shards.py" --partition 1)
+    set_tests_properties(CTestShardContractPart1
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME CTestShardContractPart2
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_ctest_shards.py" --partition 2)
+    set_tests_properties(CTestShardContractPart2
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME CTestShardContractPart3
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_ctest_shards.py" --partition 3)
+    set_tests_properties(CTestShardContractPart3
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME CTestShardContractPart4
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_ctest_shards.py" --partition 4)
+    set_tests_properties(CTestShardContractPart4
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME CTestShardContractPart5
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_ctest_shards.py" --partition 5)
+    set_tests_properties(CTestShardContractPart5
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME CTestShardContractPart6
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_ctest_shards.py" --partition 6)
+    set_tests_properties(CTestShardContractPart6
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME CTestShardContractPart7
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_ctest_shards.py" --partition 7)
+    set_tests_properties(CTestShardContractPart7
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME CTestShardContractPart8
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_ctest_shards.py" --partition 8)
+    set_tests_properties(CTestShardContractPart8
         PROPERTIES LABELS "ci;tools" TIMEOUT 30)
     # Disjoint policy partitions preserve every unittest case and the 30s deadline.
     # Direct Python invocation and unittest discovery still execute the full suite.
+    # Partition 9 reserves two slots for its bounded route-grid overlap.
     add_test(
         NAME WorkflowPolicyContract
         COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py" --partition 0)
@@ -329,6 +366,16 @@ if(BUILD_TESTING)
         COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py" --partition 7)
     set_tests_properties(WorkflowPolicyContractPart7
         PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME WorkflowPolicyContractPart8
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py" --partition 8)
+    set_tests_properties(WorkflowPolicyContractPart8
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME WorkflowPolicyContractPart9
+        COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_workflow_policy.py" --partition 9 --case-workers 2)
+    set_tests_properties(WorkflowPolicyContractPart9
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30 PROCESSORS 2)
     add_test(
         NAME SoftwareGlEvidenceContract
         COMMAND "${Python3_EXECUTABLE}" -I -B
@@ -382,4 +429,35 @@ if(BUILD_TESTING)
         COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_local_check_contracts.py")
     set_tests_properties(LocalCheckRegistrationContract
         PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    if(WIN32)
+        # Both Windows shard profiles use four CTest slots. Reserve the pool
+        # for each Python ci/tools contract, including its child processes.
+        # PROCESSORS adds no dependency/lock edges or cross-shard grouping;
+        # CTest can always run a reservation alone, even with a smaller -j.
+        # Linux retains its existing parallelism. Local-check registrations
+        # share this policy through local_check_contracts.cmake.
+        set_tests_properties(
+            WorldgenProbeSmokeValidatorContract AsanShardContract
+            CTestShardContractPart1 CTestShardContractPart2
+            CTestShardContractPart3 CTestShardContractPart4
+            CTestShardContractPart5 CTestShardContractPart6
+            CTestShardContractPart7 CTestShardContractPart8
+            WorkflowPolicyContract WorkflowPolicyContractPart1
+            WorkflowPolicyContractPart2 WorkflowPolicyContractPart3
+            WorkflowPolicyContractPart4 WorkflowPolicyContractPart5
+            WorkflowPolicyContractPart6 WorkflowPolicyContractPart7
+            WorkflowPolicyContractPart8 WorkflowPolicyContractPart9
+            QualificationCaptureContract SlowestTestsScriptContract
+            LocalCheckRegistrationContract
+            PROPERTIES PROCESSORS 4)
+        # Explicit costs seed longest-first scheduling on fresh runners.
+        set_property(TEST WorkflowPolicyContract PROPERTY COST 30)
+        set_property(TEST CTestShardContractPart1 CTestShardContractPart2
+            CTestShardContractPart3 CTestShardContractPart4
+            CTestShardContractPart5 CTestShardContractPart6
+            CTestShardContractPart7 CTestShardContractPart8 PROPERTY COST 25)
+        set_property(TEST WorkflowPolicyContractPart1 PROPERTY COST 21)
+        set_property(TEST WorkflowPolicyContractPart8 PROPERTY COST 20)
+        set_property(TEST WorkflowPolicyContractPart9 PROPERTY COST 19)
+    endif()
 endif()
