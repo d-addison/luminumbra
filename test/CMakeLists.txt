@@ -1638,6 +1638,25 @@ target_link_libraries(audio_occlusion_test PRIVATE
     luminumbra_common
 )
 
+# Metrics regressions exercise the production propagation API without an audio device.
+add_executable(audio_propagation_metrics_test
+    audio/audio_propagation_metrics_test.cpp
+    ../src/luminumbra_client/audio/AudioPropagationSystem.cpp
+)
+target_include_directories(audio_propagation_metrics_test PRIVATE
+    ../src
+    ../src/luminumbra_client
+    ../src/luminumbra_common
+)
+target_link_libraries(audio_propagation_metrics_test PRIVATE
+    gtest_main
+    luminumbra_common
+    miniaudio
+    nlohmann_json
+    glm
+)
+luminumbra_configure_first_party_target(audio_propagation_metrics_test)
+
 # prune guard — compile-sentinel that the SURVIVING audio headers still build
 # (fails if anything leans on a deleted orphan) + asserts the 7 retired bank manifests are
 # gone. Includes MiniaudioManager.h so needs the miniaudio + nlohmann_json link interface.
@@ -2014,6 +2033,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     jolt_tunneling_test
     surface_query_test
     audio_occlusion_test
+    audio_propagation_metrics_test
     audio_prune_guard_test
     client_policy_test
     audio_physics_binding_test
@@ -2482,6 +2502,8 @@ add_test(NAME FramePacingSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/test/tools/test_frame_pacing_contract.py)
 add_test(NAME GraphicsUiSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/test/tools/test_graphics_ui_contract.py)
+add_test(NAME AudioPropagationMetricsContract COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/tools/ci/test_audio_propagation_metrics.py)
 add_test(NAME ReplaySourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/tools/ci/test_replay_source_contract.py)
 add_test(NAME RenderRunnerEvidencePython COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_render_runner_evidence.py)

@@ -30,6 +30,14 @@
           "ref": "OfflineDependenciesContract"
         },
         {
+          "kind": "ctest",
+          "ref": "OfflineDependenciesContractPart1"
+        },
+        {
+          "kind": "ctest",
+          "ref": "OfflineDependenciesContractPart2"
+        },
+        {
           "kind": "doc",
           "ref": "docs/ci/local-checks.md"
         }
