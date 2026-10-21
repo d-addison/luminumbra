@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Isolated stdlib contracts for offline dependency provisioning."""
 
+import argparse
 import errno
 import ctypes
 from contextlib import ExitStack, contextmanager, redirect_stderr
@@ -9,6 +10,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import stat
@@ -1423,8 +1425,10 @@ class CachedGitSafetyTests(unittest.TestCase):
 
     @staticmethod
     def commit(source, cache):
+        # A commit otherwise starts detached background maintenance, which writes lock files under the
+        # object directory while the finished repository is being copied for every test.
         deps.git(source, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.org",
-                 "-c", "commit.gpgSign=false", "-c", "maintenance.auto=false",
+                 "-c", "commit.gpgSign=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false",
                  "commit", "--quiet", "-m", "fixture", cache=cache)
 
     def test_fixture_commits_disable_maintenance_in_real_git(self):
@@ -1440,7 +1444,7 @@ class CachedGitSafetyTests(unittest.TestCase):
             before_source = deps.source_digest(source)
             trace = self.base / f"commit-trace-{len(commits)}.json"
             kwargs["env"] = dict(kwargs["env"], GIT_TRACE2_EVENT=str(trace),
-                                 GIT_TRACE2_CONFIG_PARAMS="maintenance.auto")
+                                 GIT_TRACE2_CONFIG_PARAMS="gc.auto,maintenance.auto")
             result = original_output(argv, **kwargs)
             self.assertEqual(config.read_bytes(), before_config)
             self.assertEqual(deps.source_digest(source), before_source)
@@ -1472,6 +1476,9 @@ class CachedGitSafetyTests(unittest.TestCase):
                 self.assertTrue(any(event.get("event") == "def_param" and
                                     event.get("param") == "maintenance.auto" and
                                     event.get("value") == "false" for event in events), events)
+                self.assertTrue(any(event.get("event") == "def_param" and
+                                    event.get("param") == "gc.auto" and
+                                    event.get("value") == "0" for event in events), events)
                 children = [event["argv"] for event in events if event.get("event") == "child_start"]
                 self.assertFalse(any("maintenance" in child or "gc" in child for child in children), children)
 
@@ -2557,7 +2564,7 @@ class CachedGitSafetyTests(unittest.TestCase):
                          {nested.name: nested_head, nested.name + "/child": child_head})
         deps.verify(self.root, self.cache, self.lock)
         self.git(child, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.org",
-                 "-c", "commit.gpgSign=false", "-c", "maintenance.auto=false",
+                 "-c", "commit.gpgSign=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false",
                  "commit", "--quiet", "--allow-empty", "-m", "changed")
         # Keep the content digest correct while changing only submodule HEAD.
         self.assert_refused_without_writes()
@@ -4378,5 +4385,320 @@ class _LifecycleRunner(unittest.TextTestRunner):
                 result._diagnostic('abort')
 
 
+# Measured class costs: cached Git 1.80s, provisioning 0.42s, scratch 0.24s.
+# Moving the three costliest Git cases (0.85s) gives parts of about 0.66s,
+# 0.95s and 0.85s, leaving room for slower process launches on Windows.
+OFFLINE_PARTITIONS = ("0", "1", "2")
+OFFLINE_CLASS_PARTITIONS = {
+    "GitConfigScannerTests": "0",
+    "OfflineDependenciesTests": "0",
+    "ScratchPreparationTests": "0",
+    "WindowsReparseMetadataTests": "0",
+    "OfflinePartitionSelectionTests": "0",
+    "ElapsedDiagnosticTests": "0",
+    "ImportModeTests": "0",
+    "SnapshotScannerPatchTests": "0",
+    "CachedGitSafetyTests": "1",
+}
+OFFLINE_CASE_PARTITIONS = {
+    "CachedGitSafetyTests.test_real_recursive_gitlinks_check_initialized_heads": "2",
+    "CachedGitSafetyTests.test_control_whitespace_includes_refuse_every_cached_git_entry_point": "2",
+    "CachedGitSafetyTests.test_config_includes_are_refused_in_all_metadata_configs_before_git_runs": "2",
+}
+
+
+def offline_cases(suite):
+    for item in suite:
+        if isinstance(item, unittest.TestSuite):
+            yield from offline_cases(item)
+        else:
+            yield item
+
+
+def offline_partition_suite(loader, module, partition):
+    if partition not in OFFLINE_PARTITIONS:
+        raise ValueError("unknown offline partition")
+    # Scan the finite unittest roster once; selection starts no subprocesses.
+    cases = list(offline_cases(loader.loadTestsFromModule(module)))
+    seen = set()
+    selected = []
+    for case in cases:
+        key = f"{type(case).__name__}.{case._testMethodName}"
+        if key in seen:
+            raise ValueError("duplicate offline case: " + key)
+        seen.add(key)
+        class_partition = OFFLINE_CLASS_PARTITIONS.get(type(case).__name__)
+        if class_partition is None:
+            raise ValueError("unregistered offline class: " + type(case).__name__)
+        if OFFLINE_CASE_PARTITIONS.get(key, class_partition) == partition:
+            selected.append(case)
+    if not OFFLINE_CASE_PARTITIONS.keys() <= seen:
+        raise ValueError("missing dedicated offline case")
+    if not selected:
+        raise ValueError("empty offline partition")
+    return unittest.TestSuite(selected)
+
+
+class OfflineTimingResult(_LifecycleResult):
+    def startTest(self, test):
+        self.case_started = time.perf_counter()
+        super().startTest(test)
+
+    def stopTest(self, test):
+        super().stopTest(test)
+        self.stream.writeln(f"  {test.id()}: {time.perf_counter() - self.case_started:.3f}s")
+
+
+def offline_main(argv=None):
+    # Without a partition, retain unittest's complete CLI and discovery semantics.
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    parser.add_argument("--partition", choices=OFFLINE_PARTITIONS, action="append")
+    parser.add_argument("--list-tests", action="store_true")
+    args, remaining = parser.parse_known_args(argv)
+    if args.partition is None:
+        if args.list_tests:
+            parser.error("--list-tests requires --partition")
+        unittest.main(argv=[sys.argv[0], *remaining], verbosity=2, testRunner=_LifecycleRunner)
+        return 0
+    if len(args.partition) != 1 or remaining:
+        parser.error("one partition is required, without unittest selectors")
+    try:
+        suite = offline_partition_suite(unittest.TestLoader(), sys.modules[__name__], args.partition[0])
+    except ValueError as error:
+        parser.error(str(error))
+    if args.list_tests:
+        for case in offline_cases(suite):
+            print(case.id())
+        return 0
+    result = _LifecycleRunner(verbosity=2, resultclass=OfflineTimingResult).run(suite)
+    return int(not result.wasSuccessful())
+
+
+class OfflinePartitionSelectionTests(unittest.TestCase):
+    def test_partitions_cover_discovered_old_and_new_cases_exactly_once(self):
+        module = sys.modules[__name__]
+        loader = unittest.TestLoader()
+        complete = [case.id() for case in offline_cases(loader.loadTestsFromModule(module))]
+        selected = []
+        for partition in OFFLINE_PARTITIONS:
+            cases = list(offline_cases(offline_partition_suite(loader, module, partition)))
+            self.assertTrue(cases)
+            selected.extend(case.id() for case in cases)
+        self.assertEqual(len(selected), len(set(selected)))
+        self.assertCountEqual(selected, complete)
+        self.assertTrue(any("OfflinePartitionSelectionTests." in name for name in selected))
+        # New methods in known classes enter selection without maintaining lists.
+        class Extended(CachedGitSafetyTests):
+            def test_added_case(self):
+                pass
+        Extended.__name__ = "CachedGitSafetyTests"
+        extra = Extended("test_added_case")
+        augmented = unittest.TestSuite([loader.loadTestsFromModule(module), extra])
+        with patch.object(loader, "loadTestsFromModule", return_value=augmented):
+            cases = list(offline_cases(offline_partition_suite(loader, module, "1")))
+        self.assertIn(extra, cases)
+
+    def test_selection_refuses_invalid_empty_duplicate_missing_and_unknown_rosters(self):
+        module = sys.modules[__name__]
+        loader = unittest.TestLoader()
+        for invalid in ("", "-1", "3", "01", "0/3", None, 0):
+            with self.subTest(partition=invalid), self.assertRaises(ValueError):
+                offline_partition_suite(loader, module, invalid)
+        complete = list(offline_cases(loader.loadTestsFromModule(module)))
+        dedicated = next(case for case in complete if type(case).__name__ + "." + case._testMethodName in OFFLINE_CASE_PARTITIONS)
+        class Unknown(unittest.TestCase):
+            def test_unknown(self):
+                pass
+        for cases, partition, message in (
+            ([], "0", "missing dedicated"),
+            ([*complete, complete[0]], "0", "duplicate"),
+            ([case for case in complete if case is not dedicated], "0", "missing dedicated"),
+            ([*complete, Unknown("test_unknown")], "0", "unregistered"),
+            ([case for case in complete if type(case).__name__ == "CachedGitSafetyTests"], "0", "empty"),
+        ):
+            with self.subTest(message=message), patch.object(loader, "loadTestsFromModule", return_value=unittest.TestSuite(cases)):
+                with self.assertRaisesRegex(ValueError, message):
+                    offline_partition_suite(loader, module, partition)
+
+    def test_costliest_git_cases_keep_their_dedicated_partition(self):
+        cases = offline_cases(offline_partition_suite(unittest.TestLoader(), sys.modules[__name__], "2"))
+        self.assertCountEqual([type(case).__name__ + "." + case._testMethodName for case in cases],
+                              OFFLINE_CASE_PARTITIONS)
+
+    def test_cmake_registers_every_partition_once_with_unchanged_deadlines(self):
+        cmake = (ROOT / "tools/ci/local_check_contracts.cmake").read_text(encoding="utf-8")
+        registrations = re.findall(r"add_test\(\s*NAME ([\w]+)\s+COMMAND ([^)]*)\)", cmake)
+        actual = [(name, " ".join(command.split())) for name, command in registrations
+                  if "test_offline_deps.py" in command]
+        expected = []
+        for partition in OFFLINE_PARTITIONS:
+            name = "OfflineDependenciesContract" + ("" if partition == "0" else "Part" + partition)
+            expected.append((name, '"${Python3_EXECUTABLE}" -I -B '
+                             '"${_local_check_source_dir}/test_offline_deps.py" --partition ' + partition))
+            properties = re.findall(r"set_tests_properties\(" + name + r"\s+PROPERTIES ([^)]*)\)", cmake)
+            self.assertEqual([" ".join(item.split()) for item in properties], ['LABELS "ci;tools" TIMEOUT 30'])
+        self.assertCountEqual(actual, expected)
+        self.assertEqual(len(actual), len(set(actual)))
+
+    def test_direct_discovery_and_path_routes_keep_complete_suite(self):
+        spec = importlib.util.spec_from_file_location("ci_paths", ROOT / "tools/ci/ci_paths.py")
+        routes = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(routes)
+        path = "tools/ci/test_offline_deps.py"
+        self.assertEqual(routes.PYTHON_TESTS.count(path), 1)
+        self.assertEqual(routes.python_test_commands(ROOT).count((path,)), 1)
+        for changed in (path, "tools/ci/local_check_contracts.cmake"):
+            self.assertTrue(routes.needs_cpp(changed))
+        self.assertTrue(routes.needs_python(path))
+        discovered = unittest.TestLoader().discover(str(ROOT / "tools/ci"), pattern="test_offline_deps.py")
+        expected = unittest.TestLoader().loadTestsFromModule(sys.modules[__name__])
+        def roster(suite):
+            return [(type(case).__name__, case._testMethodName) for case in offline_cases(suite)]
+        self.assertCountEqual(roster(discovered), roster(expected))
+
+    def test_cli_listing_and_refusals_use_actual_selection(self):
+        for partition in OFFLINE_PARTITIONS:
+            with self.subTest(partition=partition), patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                self.assertEqual(offline_main(["--partition", partition, "--list-tests"]), 0)
+                expected = offline_partition_suite(unittest.TestLoader(), sys.modules[__name__], partition)
+                self.assertEqual(output.getvalue().splitlines(), [case.id() for case in offline_cases(expected)])
+        for argv in (["--partition"], ["--partition", "3"], ["--partition", "01"],
+                     ["--partition", "0", "--partition", "1"], ["--list-tests"],
+                     ["--partition", "0", "CachedGitSafetyTests"], ["--partition", "0", "--unknown"]):
+            with self.subTest(argv=argv), patch.object(sys, "stderr", new_callable=io.StringIO), self.assertRaises(SystemExit) as error:
+                offline_main(argv)
+            self.assertEqual(error.exception.code, 2)
+        with patch.object(sys.modules[__name__], "offline_partition_suite", side_effect=ValueError("bad roster")), \
+                patch.object(sys, "stderr", new_callable=io.StringIO) as output, self.assertRaises(SystemExit) as error:
+            offline_main(["--partition", "0"])
+        self.assertEqual(error.exception.code, 2)
+        self.assertIn("bad roster", output.getvalue())
+        with patch.object(unittest, "main") as run:
+            self.assertEqual(offline_main([]), 0)
+            run.assert_called_once_with(argv=[sys.argv[0]], verbosity=2, testRunner=_LifecycleRunner)
+        with patch.object(unittest, "main") as run:
+            self.assertEqual(offline_main(["CachedGitSafetyTests", "-v"]), 0)
+            run.assert_called_once_with(argv=[sys.argv[0], "CachedGitSafetyTests", "-v"],
+                                        verbosity=2, testRunner=_LifecycleRunner)
+
+    def test_partition_runner_propagates_case_failure_and_reports_duration(self):
+        class Fails(unittest.TestCase):
+            def test_failure(self):
+                self.fail("partition failure")
+        for suite, status in ((unittest.TestSuite([Fails("test_failure")]), 1), (unittest.TestSuite(), 0)):
+            with self.subTest(status=status), patch.object(sys, "stderr", new_callable=io.StringIO) as output, patch.object(
+                    sys.modules[__name__], "offline_partition_suite", return_value=suite):
+                self.assertEqual(offline_main(["--partition", "0"]), status)
+            if status:
+                self.assertIn("partition failure", output.getvalue())
+                self.assertRegex(output.getvalue(), r"test_failure: [0-9]+\.[0-9]{3}s")
+        timing = OfflineTimingResult(io.StringIO(), True, 2)
+        with patch.object(time, "perf_counter", side_effect=OSError("timer unavailable")):
+            with self.assertRaisesRegex(OSError, "timer unavailable"):
+                timing.startTest(Fails("test_failure"))
+        self.assertEqual(timing.testsRun, 0)
+
+    def test_partition_runner_preserves_diagnostics_and_restores_after_interrupt(self):
+        owner_name = "test_fixture_commits_disable_maintenance_in_real_git"
+        saved_output = subprocess.check_output
+        for failure in (None, ValueError("partition body failure"), KeyboardInterrupt()):
+            calls = []
+
+            class Fixture(unittest.TestCase):
+                def cache_state(self):
+                    return self
+
+                def id(self):
+                    return "__main__.CachedGitSafetyTests." + owner_name
+
+            def body(case):
+                calls.append(case)
+                self.assertIsNot(subprocess.check_output, saved_output)
+                if failure is not None:
+                    raise failure
+
+            setattr(Fixture, owner_name, body)
+            saved_cache = Fixture.__dict__["cache_state"]
+            case = Fixture(owner_name)
+            with self.subTest(failure=type(failure).__name__), \
+                    patch.dict(globals(), {"CachedGitSafetyTests": Fixture}), \
+                    patch.object(sys, "stderr", new_callable=io.StringIO) as output, \
+                    patch.object(sys.modules[__name__], "offline_partition_suite",
+                                 return_value=unittest.TestSuite([case])):
+                if isinstance(failure, KeyboardInterrupt):
+                    with self.assertRaises(KeyboardInterrupt) as caught:
+                        offline_main(["--partition", "1"])
+                    self.assertIs(caught.exception, failure)
+                else:
+                    self.assertEqual(offline_main(["--partition", "1"]), int(failure is not None))
+                self.assertEqual(calls, [case])
+                self.assertIs(subprocess.check_output, saved_output)
+                self.assertIs(Fixture.__dict__["cache_state"], saved_cache)
+                self.assertIn("phase=start ordinal=20", output.getvalue())
+                self.assertIn("phase=stop ordinal=20", output.getvalue())
+                self.assertIn("elapsed_v1=20:first_only:valid:", output.getvalue())
+                self.assertRegex(output.getvalue(), owner_name + r": [0-9]+\.[0-9]{3}s")
+
+    def test_cli_selection_ignores_default_loader_filters(self):
+        expected = offline_partition_suite(unittest.TestLoader(), sys.modules[__name__], "1")
+        with patch.object(unittest.defaultTestLoader, "testNamePatterns", ["*no_offline_case*"]), \
+                patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+            self.assertEqual(offline_main(["--partition", "1", "--list-tests"]), 0)
+        self.assertEqual(output.getvalue().splitlines(), [case.id() for case in offline_cases(expected)])
+
+    def test_partition_runner_finally_restores_without_stop_callback(self):
+        owner_name = "test_fixture_commits_disable_maintenance_in_real_git"
+
+        class Fixture(unittest.TestCase):
+            def cache_state(self):
+                return self
+
+        case = Fixture()
+        case._testMethodName = owner_name
+        saved_output = subprocess.check_output
+        saved_cache = Fixture.__dict__["cache_state"]
+        failure = SystemExit(73)
+
+        def interrupted(runner, suite):
+            result = runner._makeResult()
+            result.startTest(case)
+            self.assertIsNot(subprocess.check_output, saved_output)
+            raise failure
+
+        with patch.dict(globals(), {"CachedGitSafetyTests": Fixture}), \
+                patch.object(sys, "stderr", new_callable=io.StringIO), \
+                patch.object(sys.modules[__name__], "offline_partition_suite", return_value=unittest.TestSuite()), \
+                patch.object(unittest.TextTestRunner, "run", interrupted):
+            try:
+                with self.assertRaises(SystemExit) as caught:
+                    offline_main(["--partition", "1"])
+                self.assertIs(caught.exception, failure)
+                self.assertIs(subprocess.check_output, saved_output)
+                self.assertIs(Fixture.__dict__["cache_state"], saved_cache)
+            finally:
+                subprocess.check_output = saved_output
+                Fixture.cache_state = saved_cache
+
+    def test_qualified_import_keeps_complete_partition_roster_and_listing(self):
+        name = "offline_selection.qualified"
+        spec = importlib.util.spec_from_file_location(name, Path(__file__))
+        module = importlib.util.module_from_spec(spec)
+        with patch.dict(sys.modules, {name: module}):
+            spec.loader.exec_module(module)
+            complete = list(module.offline_cases(unittest.TestLoader().loadTestsFromModule(module)))
+            selected = []
+            for partition in module.OFFLINE_PARTITIONS:
+                selected.extend(module.offline_cases(module.offline_partition_suite(unittest.TestLoader(), module, partition)))
+            self.assertEqual(len(selected), len({case.id() for case in selected}))
+            self.assertCountEqual([case.id() for case in selected], [case.id() for case in complete])
+            expected = offline_cases(unittest.TestLoader().loadTestsFromModule(sys.modules[__name__]))
+            self.assertCountEqual([(type(case).__name__, case._testMethodName) for case in complete],
+                                  [(type(case).__name__, case._testMethodName) for case in expected])
+            with patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                self.assertEqual(module.offline_main(["--partition", "0", "--list-tests"]), 0)
+            part_zero = module.offline_partition_suite(unittest.TestLoader(), module, "0")
+            self.assertEqual(output.getvalue().splitlines(), [case.id() for case in module.offline_cases(part_zero)])
+
+
 if __name__ == "__main__":
-    unittest.main(verbosity=2, testRunner=_LifecycleRunner)
+    raise SystemExit(offline_main())
