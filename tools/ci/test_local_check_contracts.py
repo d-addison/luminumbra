@@ -35,16 +35,22 @@ class RegistrationTests(unittest.TestCase):
             discovery = json.loads(result.stdout)
             tests = {test["name"]: test for test in discovery["tests"]}
             self.assertEqual(set(tests), {
-                "ChangedTranslationUnitsContract", "OfflineDependenciesContract"})
-            for name, script in (("ChangedTranslationUnitsContract", "test_changed_tus.py"),
-                                 ("OfflineDependenciesContract", "test_offline_deps.py")):
+                "ChangedTranslationUnitsContract", "OfflineDependenciesContract",
+                "OfflineDependenciesContractPart1", "OfflineDependenciesContractPart2"})
+            self.assertEqual(len(discovery["tests"]), len(tests))
+            for name, script, arguments in (
+                ("ChangedTranslationUnitsContract", "test_changed_tus.py", []),
+                ("OfflineDependenciesContract", "test_offline_deps.py", ["--partition", "0"]),
+                ("OfflineDependenciesContractPart1", "test_offline_deps.py", ["--partition", "1"]),
+                ("OfflineDependenciesContractPart2", "test_offline_deps.py", ["--partition", "2"]),
+            ):
                 with self.subTest(name=name):
                     test = tests[name]
                     command = test["command"]
                     self.assertEqual(Path(command[0]).resolve(), Path(sys.executable).resolve())
                     self.assertEqual(command[1:3], ["-I", "-B"])
                     self.assertEqual(Path(command[3]).resolve(), ROOT / "tools/ci" / script)
-                    self.assertEqual(len(command), 4)
+                    self.assertEqual(command[4:], arguments)
                     properties = {item["name"]: item["value"] for item in test["properties"]}
                     self.assertEqual(properties["TIMEOUT"], 30)
                     self.assertEqual(properties["LABELS"], ["ci", "tools"])
@@ -64,7 +70,7 @@ class RegistrationTests(unittest.TestCase):
     def test_both_hosted_routes_execute_registered_deadlines_and_keep_failure_evidence(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         jobs = policy.jobs(workflow)
-        for job, python in (("linux", "python3"), ("windows-msvc", '"$CI_PYTHON"')):
+        for job, python in (("linux", "python3"), ("windows-msvc", '"$CI_PYTHON_EXECUTABLE"')):
             with self.subTest(job=job):
                 steps = {step.splitlines()[0].removeprefix("      - name: "): step
                          for step in policy.steps(jobs[job])}
@@ -76,16 +82,16 @@ class RegistrationTests(unittest.TestCase):
                 configure = "cmake -S tools/ci/contracts -B build/local-check-contracts -G Ninja"
                 normalization = []
                 if job == "windows-msvc":
-                    self.assertEqual(policy.value(run, "CI_PYTHON", 10),
+                    self.assertEqual(policy.value(run, "CI_PYTHON_EXECUTABLE", 10),
                                      "${{ steps.python.outputs.python-path }}")
-                    configure += ' "-DPython3_EXECUTABLE=$CI_PYTHON"'
-                    normalization = ['CI_PYTHON="$(cygpath -u "$CI_PYTHON")"']
+                    configure += ' "-DPython3_EXECUTABLE=$CI_PYTHON_EXECUTABLE"'
+                    normalization = ['CI_PYTHON_EXECUTABLE="$(cygpath -u "$CI_PYTHON_EXECUTABLE")"']
                 self.assertEqual(policy.value(run, "run", 8).splitlines(), [
                     configure,
                     "ctest --test-dir build/local-check-contracts --show-only=json-v1 > build/local-check-contracts/ctest-discovery.json",
                     'ctest --test-dir build/local-check-contracts --no-tests=error --parallel 4 --output-on-failure --output-junit "$LOCAL_CHECK_JUNIT"',
                     *normalization,
-                    f'{python} -I -B tools/ci/check_ctest_junit.py "$LOCAL_CHECK_JUNIT" --minimum-tests 2 --require-test ChangedTranslationUnitsContract --require-test OfflineDependenciesContract',
+                    f'{python} -I -B tools/ci/check_ctest_junit.py "$LOCAL_CHECK_JUNIT" --minimum-tests 4 --require-test ChangedTranslationUnitsContract --require-test OfflineDependenciesContract --require-test OfflineDependenciesContractPart1 --require-test OfflineDependenciesContractPart2',
                 ])
                 # With no step condition, false/empty classifier output cannot
                 # bypass CTest. Existing job-level draft guards still apply.
@@ -127,7 +133,7 @@ class RegistrationTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         jobs = policy.jobs(workflow)
         expected = "${{ github.workspace }}/build/local-check-contracts/ctest.junit.xml"
-        for job, python in (("linux", "python3"), ("windows-msvc", "$CI_PYTHON")):
+        for job, python in (("linux", "python3"), ("windows-msvc", "$CI_PYTHON_EXECUTABLE")):
             with self.subTest(job=job):
                 steps = {step.splitlines()[0].removeprefix("      - name: "): step
                          for step in policy.steps(jobs[job])}
@@ -163,12 +169,12 @@ class RegistrationTests(unittest.TestCase):
             "test_both_hosted_routes_execute_registered_deadlines_and_keep_failure_evidence")
         check.test_both_hosted_routes_execute_registered_deadlines_and_keep_failure_evidence()
         for old, new in (
-                ('"$CI_PYTHON" -I -B', "python -I -B"),
-                ('"$CI_PYTHON" -I -B', "$CI_PYTHON -I -B"),
-                (' "-DPython3_EXECUTABLE=$CI_PYTHON"', ""),
-                ('"-DPython3_EXECUTABLE=$CI_PYTHON"', "-DPython3_EXECUTABLE=$CI_PYTHON"),
-                ('"-DPython3_EXECUTABLE=$CI_PYTHON"', '"-DPython3_EXECUTABLE=$OTHER_PYTHON"'),
-                ("          CI_PYTHON: ${{ steps.python.outputs.python-path }}\n", ""),
+                ('"$CI_PYTHON_EXECUTABLE" -I -B', "python -I -B"),
+                ('"$CI_PYTHON_EXECUTABLE" -I -B', "$CI_PYTHON_EXECUTABLE -I -B"),
+                (' "-DPython3_EXECUTABLE=$CI_PYTHON_EXECUTABLE"', ""),
+                ('"-DPython3_EXECUTABLE=$CI_PYTHON_EXECUTABLE"', "-DPython3_EXECUTABLE=$CI_PYTHON_EXECUTABLE"),
+                ('"-DPython3_EXECUTABLE=$CI_PYTHON_EXECUTABLE"', '"-DPython3_EXECUTABLE=$OTHER_PYTHON"'),
+                ("          CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}\n", ""),
                 ("${{ steps.python.outputs.python-path }}", "${{ steps.other.outputs.python-path }}")):
             with self.subTest(mutation=old, replacement=new):
                 self.assertEqual(run.count(old), 1)
@@ -186,22 +192,22 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(policy.value(selector, "uses", 8),
                          "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6")
         self.assertIsNone(policy.value(selector, "if", 8))
-        self.assertEqual(policy.value(selector, "python-version", 10), "'3.12.10'")
+        self.assertEqual(policy.value(selector, "python-version", 10), "'3.14.8'")
         self.assertEqual(policy.value(selector, "architecture", 10), "x64")
         self.assertEqual(policy.value(selector, "check-latest", 10), "false")
         # Sweep every Bash consumer of the selected interpreter in this job.
         consumers = [step for step in blocks
                      if policy.value(step, "shell", 8) == "bash"
-                     and "CI_PYTHON" in (policy.value(step, "run", 8) or "")]
+                     and "CI_PYTHON_EXECUTABLE" in (policy.value(step, "run", 8) or "")]
         self.assertEqual(len(consumers), 1)
         run, = consumers
         self.assertEqual(policy.value(run, "id", 8), "local-contracts")
-        self.assertEqual(policy.value(run, "CI_PYTHON", 10),
+        self.assertEqual(policy.value(run, "CI_PYTHON_EXECUTABLE", 10),
                          "${{ steps.python.outputs.python-path }}")
         commands = policy.value(run, "run", 8).splitlines()
-        configure = 'cmake -S tools/ci/contracts -B build/local-check-contracts -G Ninja "-DPython3_EXECUTABLE=$CI_PYTHON"'
-        normalize = 'CI_PYTHON="$(cygpath -u "$CI_PYTHON")"'
-        checker = '"$CI_PYTHON" -I -B tools/ci/check_ctest_junit.py "$LOCAL_CHECK_JUNIT" --minimum-tests 2 --require-test ChangedTranslationUnitsContract --require-test OfflineDependenciesContract'
+        configure = 'cmake -S tools/ci/contracts -B build/local-check-contracts -G Ninja "-DPython3_EXECUTABLE=$CI_PYTHON_EXECUTABLE"'
+        normalize = 'CI_PYTHON_EXECUTABLE="$(cygpath -u "$CI_PYTHON_EXECUTABLE")"'
+        checker = '"$CI_PYTHON_EXECUTABLE" -I -B tools/ci/check_ctest_junit.py "$LOCAL_CHECK_JUNIT" --minimum-tests 4 --require-test ChangedTranslationUnitsContract --require-test OfflineDependenciesContract --require-test OfflineDependenciesContractPart1 --require-test OfflineDependenciesContractPart2'
         for command in (configure, normalize, checker):
             self.assertEqual(commands.count(command), 1)
         # Native CMake receives the native path; only Bash command lookup needs
@@ -216,17 +222,17 @@ class RegistrationTests(unittest.TestCase):
                 if policy.value(step, "id", 8) == "local-contracts"]
         check = RegistrationTests("test_windows_bash_normalizes_selected_python_after_native_cmake")
         check.test_windows_bash_normalizes_selected_python_after_native_cmake()
-        normalize = '          CI_PYTHON="$(cygpath -u "$CI_PYTHON")"\n'
+        normalize = '          CI_PYTHON_EXECUTABLE="$(cygpath -u "$CI_PYTHON_EXECUTABLE")"\n'
         configure = next(line + "\n" for line in run.splitlines() if "cmake -S" in line)
         checker = next(line + "\n" for line in run.splitlines() if "check_ctest_junit.py" in line)
         self.assertEqual(run.count(normalize), 1)
         mutations = [
             run.replace(normalize, "", 1),
             run.replace("cygpath -u", "cygpath -w", 1),
-            run.replace('cygpath -u "$CI_PYTHON"', 'cygpath -u "$OTHER_PYTHON"', 1),
-            run.replace('cygpath -u "$CI_PYTHON"', 'cygpath -u $CI_PYTHON', 1),
-            run.replace(normalize, '          CI_PYTHON=$(cygpath -u "$CI_PYTHON")\n', 1),
-            run.replace(normalize, normalize.replace("CI_PYTHON=", "OTHER_PYTHON=", 1), 1),
+            run.replace('cygpath -u "$CI_PYTHON_EXECUTABLE"', 'cygpath -u "$OTHER_PYTHON"', 1),
+            run.replace('cygpath -u "$CI_PYTHON_EXECUTABLE"', 'cygpath -u $CI_PYTHON_EXECUTABLE', 1),
+            run.replace(normalize, '          CI_PYTHON_EXECUTABLE=$(cygpath -u "$CI_PYTHON_EXECUTABLE")\n', 1),
+            run.replace(normalize, normalize.replace("CI_PYTHON_EXECUTABLE=", "OTHER_PYTHON=", 1), 1),
             run.replace(normalize, "", 1).replace(configure, normalize + configure, 1),
             run.replace(normalize, "", 1).replace(checker, checker + normalize, 1),
             run.replace(normalize, normalize + normalize, 1),

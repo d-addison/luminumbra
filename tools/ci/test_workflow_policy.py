@@ -783,7 +783,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             self.assertEqual(value(selector, "uses", 8),
                              "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6")
             self.assertIsNone(value(selector, "if", 8))
-            self.assertEqual(value(selector, "python-version", 10), "'3.12.10'")
+            self.assertEqual(value(selector, "python-version", 10), "'3.14.8'")
             self.assertEqual(value(selector, "architecture", 10), "x64")
             self.assertEqual(value(selector, "check-latest", 10), "false")
             self.assertIsNone(value(selector, "cache", 10))
@@ -796,21 +796,21 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                 script = value(step, "run", 8) or ""
                 configure = re.findall(r"(?m)^cmake (?:-S |--preset )[^\n]*", script)
                 commands = [line.strip() for line in script.splitlines()
-                            if re.match(r'^(?:python(?:3)? |& "\$env:CI_PYTHON" |"\$CI_PYTHON" )',
+                            if re.match(r'^(?:python(?:3)? |& "\$env:CI_PYTHON_EXECUTABLE" |"\$CI_PYTHON_EXECUTABLE" )',
                                         line.strip())]
                 if not configure and not commands:
                     continue
                 consumers += 1
                 configures += len(configure)
                 self.assertLess(blocks.index(selector), blocks.index(step))
-                self.assertEqual(value(step, "CI_PYTHON", 10), output)
+                self.assertEqual(value(step, "CI_PYTHON_EXECUTABLE", 10), output)
                 if value(step, "shell", 8) == "bash":
-                    executable = "$CI_PYTHON"
-                    prefix = '"$CI_PYTHON" '
+                    executable = "$CI_PYTHON_EXECUTABLE"
+                    prefix = '"$CI_PYTHON_EXECUTABLE" '
                 elif "Enter-VsDevShell " in script:
-                    executable = "$pythonExecutable"
+                    executable = "$env:CI_PYTHON_EXECUTABLE"
                     self.assertEqual(script.count("$pythonExecutable ="), 1)
-                    self.assertTrue(script.startswith("$pythonExecutable = $env:CI_PYTHON\n"))
+                    self.assertTrue(script.startswith("$pythonExecutable = $env:CI_PYTHON_EXECUTABLE\n"))
                     if commands:
                         alias = "Set-Alias -Name python -Value $pythonExecutable"
                         self.assertEqual(script.count(alias), 1)
@@ -818,8 +818,8 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                         self.assertLess(script.index(alias), script.index(commands[0]))
                     prefix = "python "
                 else:
-                    executable = "$env:CI_PYTHON"
-                    prefix = '& "$env:CI_PYTHON" '
+                    executable = "$env:CI_PYTHON_EXECUTABLE"
+                    prefix = '& "$env:CI_PYTHON_EXECUTABLE" '
                 for command in commands:
                     self.assertTrue(command.startswith(prefix), command)
                 for command in configure:
@@ -833,15 +833,15 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         # Exercise producer/configure disagreements, including the PATH reset
         # between dependency installation and native inventory generation.
         for old, new in (
-                ("python-version: '3.12.10'", "python-version: '3.12'"),
+                ("python-version: '3.14.8'", "python-version: '3.14'"),
                 ("architecture: x64", "architecture: x86"),
                 ("check-latest: false", "check-latest: true"),
                 ("id: python", "if: false\n        id: python"),
                 (".outputs.python-path", ".outputs.python-version"),
-                (' "-DPython3_EXECUTABLE=$CI_PYTHON"', ""),
-                (' "-DPython3_EXECUTABLE=$pythonExecutable"', ""),
+                (' "-DPython3_EXECUTABLE=$CI_PYTHON_EXECUTABLE"', ""),
+                (' "-DPython3_EXECUTABLE=$env:CI_PYTHON_EXECUTABLE"', ""),
                 ("Set-Alias -Name python -Value $pythonExecutable", ""),
-                ('& "$env:CI_PYTHON" -m pip', "python -m pip")):
+                ('& "$env:CI_PYTHON_EXECUTABLE" -m pip', "python -m pip")):
             with self.subTest(mutation=old):
                 self.assertIn(old, producer)
                 with self.assertRaises(AssertionError):
@@ -1108,6 +1108,88 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                 self.assertIn('"${full[@]}"', merge)
                 self.assertNotIn("merge-multiple: true", aggregate)
                 self.assertNotIn("actions/cache", aggregate)
+
+    def test_windows_python_selection_is_exact_and_precedes_every_consumer(self):
+        ci = jobs(self.workflows["ci.yml"])
+        for job_id in ("windows-msvc", "windows-ucrt64"):
+            with self.subTest(job=job_id):
+                producer = ci[job_id]
+                selected = [step for step in steps(producer) if "uses: actions/setup-python@" in step]
+                self.assertEqual(len(selected), 1)
+                setup = selected[0]
+                self.assertEqual(value(setup, "uses", 8),
+                                 "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6")
+                self.assertEqual(value(setup, "id", 8), "python")
+                self.assertEqual(dict(re.findall(r"^          ([\w-]+): (.*)$", setup, re.MULTILINE)), {
+                    "python-version": "'3.14.8'", "architecture": "x64", "check-latest": "false",
+                    "allow-prereleases": "false", "freethreaded": "false", "update-environment": "true",
+                })
+                # Default success propagation must cover both shards and shard 0;
+                # an unavailable runtime cannot fall through to CMake discovery.
+                self.assertIsNone(value(setup, "if", 8))
+                self.assertIsNone(value(setup, "continue-on-error", 8))
+                self.assertIsNone(value(setup, "env", 8))
+                for step in steps(producer):
+                    script = value(step, "run", 8) or ""
+                    if re.search(r"\b(?:python|python3|cmake)\b", script):
+                        self.assertLess(producer.index(setup), producer.index(step))
+                self.assertEqual(value(producer, "shard", 8),
+                                 "${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture "
+                                 "&& fromJSON('[0]') || fromJSON('[1,2]') }}")
+
+    def test_windows_cmake_discovery_binds_the_selected_python_on_every_route(self):
+        ci = jobs(self.workflows["ci.yml"])
+        expected = {
+            ("windows-msvc", "Run registered local-check deadlines"): (1, "bash", None),
+            ("windows-msvc", "Configure, build, and test"): (
+                1, "pwsh", "${{ needs.changes.outputs.needs_cpp != 'false' }}"),
+            ("windows-msvc", "Validate dormant and enabled Windows packaging"): (
+                2, "pwsh", "${{ needs.changes.outputs.needs_cpp != 'false' && "
+                "(github.ref_name == 'main' || github.base_ref == 'main') }}"),
+            ("windows-ucrt64", "Configure"): (1, "msys2 {0}", None),
+        }
+        actual = {}
+        for job_id in ("windows-msvc", "windows-ucrt64"):
+            for step in steps(ci[job_id]):
+                commands = re.findall(r"^cmake (?:--preset|-S) .*$", value(step, "run", 8) or "", re.MULTILINE)
+                if not commands:
+                    continue
+                name = step.splitlines()[0].removeprefix("      - name: ")
+                with self.subTest(job=job_id, step=name):
+                    actual[job_id, name] = (len(commands), value(step, "shell", 8), value(step, "if", 8))
+                    self.assertEqual(value(step, "CI_PYTHON_EXECUTABLE", 10),
+                                     "${{ steps.python.outputs.python-path }}")
+                    self.assertEqual(step.count("        env:\n"), 1)
+                    self.assertIsNone(value(step, "continue-on-error", 8))
+                    variable = ("$env:CI_PYTHON_EXECUTABLE" if value(step, "shell", 8) == "pwsh"
+                                else "$CI_PYTHON_EXECUTABLE")
+                    for command in commands:
+                        self.assertEqual(command.count("-DPython3_EXECUTABLE="), 1)
+                        self.assertIn('"-DPython3_EXECUTABLE=' + variable + '"', command)
+        self.assertEqual(actual, expected)
+
+    def test_windows_bash_configure_preserves_python_path_as_one_literal_argument(self):
+        ci = jobs(self.workflows["ci.yml"])
+        for job_id, name in (("windows-msvc", "Run registered local-check deadlines"),
+                             ("windows-ucrt64", "Configure")):
+            step = next(step for step in steps(ci[job_id]) if step.startswith("      - name: " + name + "\n"))
+            command, = re.findall(r"^cmake (?:--preset|-S) .*$", value(step, "run", 8), re.MULTILINE)
+            self.assertIn("-DPython3_EXECUTABLE=", command)
+            # Execute only argument transport into a shell function. Neither
+            # CMake nor a Windows interpreter is executed by this lexical check.
+            script = 'cmake() { printf "%s\\0" "$@"; };\n' + command
+            for path in ("C:/hostedtoolcache/windows/Python/3.14.8/x64/python.exe",
+                         r"D:\Python runtime\3.14.8\python.exe",
+                         "C:/PROGRA~1/Python/python.exe", "C:/Python $literal; value/python.exe"):
+                with self.subTest(job=job_id, path=path), tempfile.TemporaryDirectory() as directory:
+                    result = subprocess.run([BASH, "--noprofile", "--norc", "-e", "-c", script],
+                                            cwd=directory, env=dict(os.environ, CI_PYTHON_EXECUTABLE=path),
+                                            capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stderr, "")
+                    arguments = result.stdout.split("\0")[:-1]
+                    self.assertEqual([arg for arg in arguments if arg.startswith("-DPython3_EXECUTABLE=")],
+                                     ["-DPython3_EXECUTABLE=" + path])
 
     def test_native_cache_writers_and_attempt_specific_retained_evidence(self):
         ci = jobs(self.workflows["ci.yml"])
