@@ -176,6 +176,15 @@ The merged floors are 2340 for GCC and 2320 for MSVC, UCRT64 and ASan.
 GCC/MSVC keep four CTest workers and a 180-second default; UCRT64 keeps four
 workers and 360 seconds. Job limits remain 60, 90 and 85 minutes respectively.
 
+For ready pull requests needing native validation, ASan first runs a Python-only
+fast lane with the `ChangedTranslationUnitsContract` and
+`OfflineDependenciesContract` suites registered by the compiler-free contracts
+project. Both shards wait for success; a failed fast lane skips the shards and
+fails the required `Linux / GCC ASan` aggregate. The fast lane skips drafts and
+non-C++ routes, preserving their existing rejection and successful path skip,
+respectively. Pushes to main/devel and manual dispatches skip the fast lane and
+retain their existing shard admission and full ASan build/test execution.
+
 The required `Linux / GCC`, `Windows / MSVC`, `Windows / MSYS2 UCRT64` and
 `Linux / GCC ASan` checks are ordinary aggregates. Workflow cancellation stops
 aggregates with valid dependencies; invalid dependencies still reach an explicit
