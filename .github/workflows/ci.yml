@@ -485,6 +485,16 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Select Python runtime
+        id: python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.14.8'
+          architecture: x64
+          check-latest: false
+          allow-prereleases: false
+          freethreaded: false
+          update-environment: true
       # Job-level env cannot read the runner context; set the cache
       # directory from RUNNER_TEMP before any step consumes it.
       - name: Locate compiler cache
@@ -513,9 +523,10 @@ jobs:
         id: local-contracts
         shell: bash
         env:
+          CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
           LOCAL_CHECK_JUNIT: ${{ github.workspace }}/build/local-check-contracts/ctest.junit.xml
         run: |
-          cmake -S tools/ci/contracts -B build/local-check-contracts -G Ninja
+          cmake -S tools/ci/contracts -B build/local-check-contracts -G Ninja "-DPython3_EXECUTABLE=$CI_PYTHON_EXECUTABLE"
           ctest --test-dir build/local-check-contracts --show-only=json-v1 > build/local-check-contracts/ctest-discovery.json
           ctest --test-dir build/local-check-contracts --no-tests=error --parallel 4 --output-on-failure --output-junit "$LOCAL_CHECK_JUNIT"
           python -I -B tools/ci/check_ctest_junit.py "$LOCAL_CHECK_JUNIT" --minimum-tests 2 --require-test ChangedTranslationUnitsContract --require-test OfflineDependenciesContract
@@ -619,6 +630,8 @@ jobs:
         if: ${{ needs.changes.outputs.needs_cpp != 'false' }}
         id: native
         shell: pwsh
+        env:
+          CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
@@ -633,7 +646,7 @@ jobs:
           if ($env:CCACHE_DISABLE -ne '1') {
             $compilerLaunchers = @('-DCMAKE_C_COMPILER_LAUNCHER=ccache', '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache')
           }
-          cmake --preset release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl @compilerLaunchers
+          cmake --preset release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl @compilerLaunchers "-DPython3_EXECUTABLE=$env:CI_PYTHON_EXECUTABLE"
           cmake --build --preset release --parallel 4
           # Require the file-only production writer/oracle integration even
           # when optional PowerShell discovery would omit it from the suite.
@@ -735,6 +748,8 @@ jobs:
       - name: Validate dormant and enabled Windows packaging
         if: ${{ needs.changes.outputs.needs_cpp != 'false' && (github.ref_name == 'main' || github.base_ref == 'main') }}
         shell: pwsh
+        env:
+          CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
@@ -743,9 +758,9 @@ jobs:
             -property installationPath
           Import-Module "$installPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
           Enter-VsDevShell -VsInstallPath $installPath -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
-          cmake -S . -B build/package-off -G Ninja -DBUILD_TESTING=OFF -DENABLE_BINARY_RELEASES=OFF
+          cmake -S . -B build/package-off -G Ninja -DBUILD_TESTING=OFF -DENABLE_BINARY_RELEASES=OFF "-DPython3_EXECUTABLE=$env:CI_PYTHON_EXECUTABLE"
           if (Test-Path build/package-off/CPackConfig.cmake) { throw 'binary packaging enabled while disabled' }
-          cmake -S . -B build/package-windows -G Ninja -DCMAKE_BUILD_TYPE=Release `
+          cmake -S . -B build/package-windows -G Ninja -DCMAKE_BUILD_TYPE=Release "-DPython3_EXECUTABLE=$env:CI_PYTHON_EXECUTABLE" `
             -DBUILD_TESTING=OFF -DENABLE_BINARY_RELEASES=ON -DLUMINUMBRA_WARNINGS_AS_ERRORS=ON
           cmake --build build/package-windows --target package --parallel 4
 
@@ -788,6 +803,16 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Select Python runtime
+        id: python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.14.8'
+          architecture: x64
+          check-latest: false
+          allow-prereleases: false
+          freethreaded: false
+          update-environment: true
       # Job-level env cannot read the runner context; set the cache
       # directory from RUNNER_TEMP before any step consumes it. The native
       # UCRT64 ccache accepts the Windows path inherited by msys2.
@@ -864,8 +889,10 @@ jobs:
       - name: Configure
         id: configure
         shell: msys2 {0}
+        env:
+          CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
         run: >-
-          cmake --preset release -DCMAKE_C_COMPILER_LAUNCHER=ccache
+          cmake --preset release -DCMAKE_C_COMPILER_LAUNCHER=ccache "-DPython3_EXECUTABLE=$CI_PYTHON_EXECUTABLE"
           -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
       - name: Reset compiler cache statistics
         if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}

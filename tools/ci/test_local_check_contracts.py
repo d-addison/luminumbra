@@ -72,8 +72,13 @@ class RegistrationTests(unittest.TestCase):
                 self.assertIsNone(policy.value(run, "continue-on-error", 8))
                 self.assertEqual(policy.value(run, "shell", 8), "bash")
                 self.assertEqual(policy.value(run, "id", 8), "local-contracts")
+                configure = "cmake -S tools/ci/contracts -B build/local-check-contracts -G Ninja"
+                if job == "windows-msvc":
+                    configure += ' "-DPython3_EXECUTABLE=$CI_PYTHON_EXECUTABLE"'
+                    self.assertEqual(policy.value(run, "CI_PYTHON_EXECUTABLE", 10),
+                                     "${{ steps.python.outputs.python-path }}")
                 self.assertEqual(policy.value(run, "run", 8).splitlines(), [
-                    "cmake -S tools/ci/contracts -B build/local-check-contracts -G Ninja",
+                    configure,
                     "ctest --test-dir build/local-check-contracts --show-only=json-v1 > build/local-check-contracts/ctest-discovery.json",
                     'ctest --test-dir build/local-check-contracts --no-tests=error --parallel 4 --output-on-failure --output-junit "$LOCAL_CHECK_JUNIT"',
                     f'{python} -I -B tools/ci/check_ctest_junit.py "$LOCAL_CHECK_JUNIT" --minimum-tests 2 --require-test ChangedTranslationUnitsContract --require-test OfflineDependenciesContract',
