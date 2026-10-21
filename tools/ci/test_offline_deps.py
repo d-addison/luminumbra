@@ -10,6 +10,7 @@ import io
 import json
 import os
 from pathlib import Path
+from pathlib import PurePosixPath, PureWindowsPath
 import re
 import shlex
 import shutil
@@ -27,6 +28,120 @@ ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location("offline_deps", ROOT / "tools/ci/offline_deps.py")
 deps = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(deps)
+diagnostic_spec = importlib.util.spec_from_file_location(
+    "contract_case_diagnostics", ROOT / "tools/ci/contract_case_diagnostics.py")
+diagnostics = importlib.util.module_from_spec(diagnostic_spec)
+diagnostic_spec.loader.exec_module(diagnostics)
+
+
+class ContainmentTests(unittest.TestCase):
+    def test_lexical_boundaries_match_explicit_table_and_pathlib(self):
+        tables = (
+            (PurePosixPath, (
+                ("/cache/objects", "/cache", True),
+                ("/cache", "/cache", True),
+                ("/cache-other/objects", "/cache", False),
+                ("/cache", "/cache/objects", False),
+                ("/Cache/objects", "/cache", False),
+                ("//cache/objects", "/cache", False),
+                ("//cache/objects", "//cache", True),
+                ("/cache//./objects", "/cache", True),
+                ("/cache/../outside", "/cache", True),
+                ("/cache/objects", "/cache/..", False),
+                ("/cache\\objects", "/cache", False),
+                ("/cache:stream", "/cache", False),
+                ("/cache/objects", "/", True),
+                ("cache/objects", "cache", True),
+                ("", "", True),
+                ("cache", "/cache", False),
+            )),
+            (PureWindowsPath, (
+                ("C:/CACHE/objects", "c:/cache", True),
+                ("C:/cache", "c:/CACHE", True),
+                ("C:/cache-other/objects", "C:/cache", False),
+                ("D:/cache/objects", "C:/cache", False),
+                ("C:/cache/objects", "C:/", True),
+                ("C:/cache/../outside", "C:/cache", True),
+                ("C:/cache/objects", "C:/cache/..", False),
+                ("C:/cache//./objects", "C:/cache", True),
+                ("C:/cache:stream", "C:/cache", False),
+                ("C:/cache/file:stream", "C:/cache", True),
+                ("C:/Straße/file", "C:/STRASSE", False),
+                ("C:/İ/file", "C:/i\u0307", True),
+                ("C:/ΟΣ/file", "C:/ος", True),
+                ("//SERVER/SHARE/cache/file", "//server/share/CACHE", True),
+                ("//server/other/cache", "//server/share", False),
+                ("//server/share/file", "//server/share", True),
+                ("//?/C:/cache/file", "//?/C:/cache", True),
+                ("//?/C:/cache/file", "C:/cache", False),
+                ("//?/UNC/server/share/file", "//?/UNC/SERVER/SHARE", True),
+                ("C:cache/file", "C:cache", True),
+                ("C:/cache/file", "C:cache", False),
+                ("/cache/file", "C:/cache", False),
+                ("", "", True),
+            )),
+        )
+        native = type(Path())
+        for pure, rows in tables:
+            classes = (pure, native) if isinstance(Path(), pure) else (pure,)
+            for cls in classes:
+                for spelling, parent_spelling, expected in rows:
+                    path, parent = cls(spelling), cls(parent_spelling)
+                    with self.subTest(cls=cls, path=spelling, parent=parent_spelling):
+                        self.assertEqual(path.is_relative_to(parent), expected)
+                        self.assertEqual(deps._lexically_relative(path, parent), expected)
+
+    def test_fallback_preserves_nonabsolute_mixed_and_custom_path_calls(self):
+        native = type(Path())
+        pure = PureWindowsPath if os.name == "nt" else PurePosixPath
+        anchor = Path.cwd().anchor
+        for path, parent in ((Path("child"), Path()), (Path(), Path("child")),
+                             (Path(anchor) / "child", Path("relative")),
+                             (Path("child"), Path(anchor)),
+                             (Path(anchor) / "child", pure(anchor)),
+                             (Path("child"), "child")):
+            expected = path.is_relative_to(parent)
+            with self.subTest(path=path, parent=parent), patch.object(
+                    native, "is_relative_to", autospec=True, return_value=expected) as fallback:
+                self.assertEqual(deps._lexically_relative(path, parent), expected)
+                fallback.assert_called_once_with(path, parent)
+
+        calls = []
+        failure = None
+
+        class CustomPath(native):
+            def is_relative_to(path, parent):
+                calls.append((path, parent))
+                if failure is not None:
+                    raise failure
+                return super().is_relative_to(parent)
+
+        with tempfile.TemporaryDirectory(prefix="containment ") as temporary:
+            parent = CustomPath(temporary)
+            child = parent / "child"
+            self.assertEqual(deps.contained(child, parent), child.resolve())
+            self.assertEqual(calls, [(child.absolute(), parent.absolute()),
+                                     (child.resolve(), parent.resolve())])
+            for error in (ValueError("custom path refused"), PermissionError("custom path denied")):
+                failure = error
+                with self.subTest(error=error), self.assertRaises(type(error)) as caught:
+                    deps.contained(child, parent)
+                self.assertIs(caught.exception, error)
+
+    def test_public_containment_avoids_native_ancestor_construction(self):
+        with tempfile.TemporaryDirectory(prefix="containment ") as temporary:
+            parent = Path(temporary).resolve()
+            child = parent / "ordinary"
+            child.mkdir()
+            expected = child.resolve()
+            with patch.object(type(parent), "is_relative_to", side_effect=AssertionError(
+                    "native containment constructed ancestor paths")):
+                self.assertEqual(deps.contained(child, parent), expected)
+                self.assertEqual(deps.contained(child / "missing", parent), expected / "missing")
+                for outside in (parent, parent / "..", parent.with_name(parent.name + "-other")):
+                    with self.subTest(outside=outside), self.assertRaisesRegex(
+                            deps.DependencyError, "strictly inside"):
+                        deps.contained(outside, parent)
 
 
 class GitConfigScannerTests(unittest.TestCase):
@@ -1372,7 +1487,9 @@ class CachedGitSafetyTests(unittest.TestCase):
                                    script.as_posix(), self.marker.as_posix()])
 
     def git(self, source, *args):
-        return deps.git(source, *args, cache=self.cache)
+        # Fixture mutations must not leave a maintenance writer racing the
+        # next metadata scan or a copy of the immutable template.
+        return deps.git(source, "-c", "maintenance.auto=false", *args, cache=self.cache)
 
     @classmethod
     def initialize(cls, source, cache):
@@ -2208,8 +2325,101 @@ class CachedGitSafetyTests(unittest.TestCase):
         (nested / ".git").write_text("gitdir: " + str(metadata) + "\n")
         self.assert_refused_without_writes()
 
+    @contextmanager
+    def fixture_git_trace(self, name):
+        # Install tracing at the real child boundary: the production wrapper
+        # deliberately removes caller-supplied Git tracing from its environment.
+        trace = self.base / name
+        check_output = subprocess.check_output
+
+        def traced(command, **options):
+            options["env"] = dict(options["env"], GIT_TRACE2_EVENT=str(trace))
+            return check_output(command, **options)
+
+        with patch.object(deps.subprocess, "check_output", side_effect=traced):
+            yield trace
+
+    def fixture_git_events(self, trace):
+        # These fixed, tiny repositories need at most six traced Git commands.
+        # Bound the diagnostic input to 256 KiB before parsing its JSON records.
+        limit = 256 * 1024
+        with trace.open("rb") as stream:
+            data = stream.read(limit + 1)
+        self.assertLessEqual(len(data), limit)
+        return [json.loads(line) for line in data.splitlines()]
+
+    def test_fixture_template_commit_does_not_start_automatic_maintenance(self):
+        class FreshFixture(type(self)):
+            pass
+
+        try:
+            with self.fixture_git_trace("template trace.jsonl") as trace:
+                FreshFixture.setUpClass()
+            events = self.fixture_git_events(trace)
+            self.assertTrue(any(event.get("event") == "cmd_name" and event.get("name") == "commit"
+                                for event in events))
+            self.assertFalse(any(event.get("event") == "child_start"
+                                 and "maintenance" in event.get("argv", []) for event in events))
+            self.assertEqual(deps.head(FreshFixture.template_source, FreshFixture.template_cache),
+                             FreshFixture.template_identity["commit"])
+            self.assertEqual((FreshFixture.template_source / "input.h").read_text(), "content\n")
+        finally:
+            FreshFixture.doClassCleanups()
+        self.assertEqual(FreshFixture.tearDown_exceptions, [])
+
+    def test_fixture_mutation_commits_do_not_start_automatic_maintenance(self):
+        nested = self.source / "nested"
+        nested.mkdir()
+        self.initialize(nested, self.cache)
+        nested_head = deps.head(nested, self.cache)
+        self.git(self.source, "update-index", "--add", "--cacheinfo", "160000", nested_head, "nested")
+        before = deps.head(self.source, self.cache)
+        with self.fixture_git_trace("gitlink trace.jsonl") as trace:
+            self.commit(self.source, self.cache)
+        events = self.fixture_git_events(trace)
+        self.assertTrue(any(event.get("event") == "cmd_name" and event.get("name") == "commit"
+                            for event in events))
+        self.assertFalse(any(event.get("event") == "child_start"
+                             and "maintenance" in event.get("argv", []) for event in events))
+        self.assertNotEqual(deps.head(self.source, self.cache), before)
+        self.assertEqual(deps.submodules(self.source, self.cache), {"nested": nested_head})
+        with self.fixture_git_trace("nested commit trace.jsonl") as trace:
+            self.git(nested, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.org",
+                     "-c", "commit.gpgSign=false", "commit", "--quiet", "--allow-empty", "-m", "changed")
+        events = self.fixture_git_events(trace)
+        self.assertTrue(any(event.get("event") == "cmd_name" and event.get("name") == "commit"
+                            for event in events))
+        self.assertFalse(any(event.get("event") == "child_start"
+                             and "maintenance" in event.get("argv", []) for event in events))
+        self.assertNotEqual(deps.head(nested, self.cache), nested_head)
+        self.assert_refused_without_writes()
+
+    def test_real_git_trace_detects_explicit_foreground_automatic_maintenance(self):
+        before = deps.head(self.source, self.cache)
+        with self.fixture_git_trace("maintenance control.jsonl") as trace:
+            deps.git(self.source, "-c", "maintenance.auto=true", "-c", "maintenance.autoDetach=false",
+                     "-c", "gc.autoDetach=false", "-c", "user.name=Fixture",
+                     "-c", "user.email=fixture@example.org", "-c", "commit.gpgSign=false",
+                     "commit", "--quiet", "--allow-empty", "-m", "control", cache=self.cache)
+        events = self.fixture_git_events(trace)
+        self.assertTrue(any(event.get("event") == "child_start"
+                            and "maintenance" in event.get("argv", []) for event in events))
+        self.assertTrue(any(event.get("event") == "cmd_name" and event.get("name") == "maintenance"
+                            for event in events))
+        self.assertNotEqual(deps.head(self.source, self.cache), before)
+        self.assertEqual((self.source / "input.h").read_text(), "content\n")
+
 
 class ScratchPreparationTests(unittest.TestCase):
+    def test_public_containment_preserves_redirect_refusal_without_writes(self):
+        alias = self.root / "redirect"
+        self.redirect(alias, self.outside)
+        before = self.state()
+        for path in (alias / "missing", alias / ".." / "missing"):
+            with self.subTest(path=path), self.assertRaises(deps.DependencyError):
+                deps.contained(path, self.root)
+            self.assertEqual(self.state(), before)
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="scratch preparation ")
         self.addCleanup(temporary.cleanup)
@@ -2597,6 +2807,7 @@ class WindowsReparseMetadataTests(unittest.TestCase):
 # 0.95s and 0.85s, leaving room for slower process launches on Windows.
 OFFLINE_PARTITIONS = ("0", "1", "2")
 OFFLINE_CLASS_PARTITIONS = {
+    "ContainmentTests": "0",
     "GitConfigScannerTests": "0",
     "OfflineDependenciesTests": "0",
     "ScratchPreparationTests": "0",
@@ -2643,7 +2854,7 @@ def offline_partition_suite(loader, module, partition):
     return unittest.TestSuite(selected)
 
 
-class OfflineTimingResult(unittest.TextTestResult):
+class OfflineTimingResult(diagnostics.CaseDiagnosticResult):
     def startTest(self, test):
         self.case_started = time.perf_counter()
         super().startTest(test)
@@ -2662,7 +2873,7 @@ def offline_main(argv=None):
     if args.partition is None:
         if args.list_tests:
             parser.error("--list-tests requires --partition")
-        unittest.main(argv=[sys.argv[0], *remaining])
+        unittest.main(argv=[sys.argv[0], *remaining], testRunner=diagnostics.CaseDiagnosticRunner)
         return 0
     if len(args.partition) != 1 or remaining:
         parser.error("one partition is required, without unittest selectors")
@@ -2674,7 +2885,7 @@ def offline_main(argv=None):
         for case in offline_cases(suite):
             print(case.id())
         return 0
-    result = unittest.TextTestRunner(verbosity=2, resultclass=OfflineTimingResult).run(suite)
+    result = diagnostics.CaseDiagnosticRunner(verbosity=2, resultclass=OfflineTimingResult).run(suite)
     return int(not result.wasSuccessful())
 
 
@@ -2762,7 +2973,8 @@ class OfflinePartitionSelectionTests(unittest.TestCase):
 
     def test_cli_listing_and_refusals_use_actual_selection(self):
         for partition in OFFLINE_PARTITIONS:
-            with self.subTest(partition=partition), patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+            with self.subTest(partition=partition), patch.object(sys, "stdout", new_callable=io.StringIO) as output, \
+                    patch.object(unittest.defaultTestLoader, "testNamePatterns", ["*hidden_case*"]):
                 self.assertEqual(offline_main(["--partition", partition, "--list-tests"]), 0)
                 expected = offline_partition_suite(unittest.TestLoader(), sys.modules[__name__], partition)
                 self.assertEqual(output.getvalue().splitlines(), [case.id() for case in offline_cases(expected)])
@@ -2779,22 +2991,36 @@ class OfflinePartitionSelectionTests(unittest.TestCase):
         self.assertIn("bad roster", output.getvalue())
         with patch.object(unittest, "main") as run:
             self.assertEqual(offline_main([]), 0)
-            run.assert_called_once_with(argv=[sys.argv[0]])
+            run.assert_called_once_with(argv=[sys.argv[0]], testRunner=diagnostics.CaseDiagnosticRunner)
         with patch.object(unittest, "main") as run:
             self.assertEqual(offline_main(["CachedGitSafetyTests", "-v"]), 0)
-            run.assert_called_once_with(argv=[sys.argv[0], "CachedGitSafetyTests", "-v"])
+            run.assert_called_once_with(argv=[sys.argv[0], "CachedGitSafetyTests", "-v"],
+                                        testRunner=diagnostics.CaseDiagnosticRunner)
 
     def test_partition_runner_propagates_case_failure_and_reports_duration(self):
         class Fails(unittest.TestCase):
             def test_failure(self):
                 self.fail("partition failure")
-        for suite, status in ((unittest.TestSuite([Fails("test_failure")]), 1), (unittest.TestSuite(), 0)):
+        class Passes(unittest.TestCase):
+            def test_success(self):
+                pass
+        for cases, status in (([Fails("test_failure")], 1), ([Passes("test_success")], 0), ([], 0)):
+            suite = unittest.TestSuite(cases)
             with self.subTest(status=status), patch.object(sys, "stderr", new_callable=io.StringIO) as output, patch.object(
                     sys.modules[__name__], "offline_partition_suite", return_value=suite):
                 self.assertEqual(offline_main(["--partition", "0"]), status)
+            records = output.getvalue()
+            self.assertEqual(records.count("[contract-case] SUITE_START "), 1)
+            self.assertEqual(records.count("[contract-case] SUITE_STOP "), 1)
+            self.assertEqual(records.count("[contract-case] START "), len(cases))
+            self.assertEqual(records.count("[contract-case] STOP "), len(cases))
+            for case in cases:
+                identity = type(case).__name__ + "." + case._testMethodName
+                self.assertEqual(records.count("case=" + identity + " "), 2)
+                self.assertRegex(records, re.escape(identity) + r": [0-9]+\.[0-9]{3}s")
             if status:
-                self.assertIn("partition failure", output.getvalue())
-                self.assertRegex(output.getvalue(), r"test_failure: [0-9]+\.[0-9]{3}s")
+                self.assertIn("partition failure", records)
+                self.assertRegex(records, r"test_failure: [0-9]+\.[0-9]{3}s")
         timing = OfflineTimingResult(io.StringIO(), True, 2)
         with patch.object(time, "perf_counter", side_effect=OSError("timer unavailable")):
             with self.assertRaisesRegex(OSError, "timer unavailable"):

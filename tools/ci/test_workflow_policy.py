@@ -774,6 +774,79 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             for filename in GUARDED
         }
 
+    def test_msvc_python_consumers_share_the_selected_runtime(self):
+        def check(producer):
+            blocks = steps(producer)
+            selectors = [step for step in blocks if "uses: actions/setup-python@" in step]
+            self.assertEqual(len(selectors), 1)
+            selector = selectors[0]
+            self.assertEqual(value(selector, "uses", 8),
+                             "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6")
+            self.assertIsNone(value(selector, "if", 8))
+            self.assertEqual(value(selector, "python-version", 10), "'3.14.8'")
+            self.assertEqual(value(selector, "architecture", 10), "x64")
+            self.assertEqual(value(selector, "check-latest", 10), "false")
+            self.assertIsNone(value(selector, "cache", 10))
+            runtime_id = value(selector, "id", 8)
+            self.assertTrue(runtime_id)
+            output = "${{ steps." + runtime_id + ".outputs.python-path }}"
+            consumers = 0
+            configures = 0
+            for step in blocks:
+                script = value(step, "run", 8) or ""
+                configure = re.findall(r"(?m)^cmake (?:-S |--preset )[^\n]*", script)
+                commands = [line.strip() for line in script.splitlines()
+                            if re.match(r'^(?:python(?:3)? |& "\$env:CI_PYTHON_EXECUTABLE" |"\$CI_PYTHON_EXECUTABLE" )',
+                                        line.strip())]
+                if not configure and not commands:
+                    continue
+                consumers += 1
+                configures += len(configure)
+                self.assertLess(blocks.index(selector), blocks.index(step))
+                self.assertEqual(value(step, "CI_PYTHON_EXECUTABLE", 10), output)
+                if value(step, "shell", 8) == "bash":
+                    executable = "$CI_PYTHON_EXECUTABLE"
+                    prefix = '"$CI_PYTHON_EXECUTABLE" '
+                elif "Enter-VsDevShell " in script:
+                    executable = "$env:CI_PYTHON_EXECUTABLE"
+                    self.assertEqual(script.count("$pythonExecutable ="), 1)
+                    self.assertTrue(script.startswith("$pythonExecutable = $env:CI_PYTHON_EXECUTABLE\n"))
+                    if commands:
+                        alias = "Set-Alias -Name python -Value $pythonExecutable"
+                        self.assertEqual(script.count(alias), 1)
+                        self.assertLess(script.rindex("Enter-VsDevShell "), script.index(alias))
+                        self.assertLess(script.index(alias), script.index(commands[0]))
+                    prefix = "python "
+                else:
+                    executable = "$env:CI_PYTHON_EXECUTABLE"
+                    prefix = '& "$env:CI_PYTHON_EXECUTABLE" '
+                for command in commands:
+                    self.assertTrue(command.startswith(prefix), command)
+                for command in configure:
+                    self.assertIn('"-DPython3_EXECUTABLE=' + executable + '"', command)
+                    self.assertEqual(command.count("-DPython3_EXECUTABLE="), 1)
+            self.assertEqual(consumers, 8)
+            self.assertEqual(configures, 4)
+
+        producer = jobs(self.workflows["ci.yml"])["windows-msvc"]
+        check(producer)
+        # Exercise producer/configure disagreements, including the PATH reset
+        # between dependency installation and native inventory generation.
+        for old, new in (
+                ("python-version: '3.14.8'", "python-version: '3.14'"),
+                ("architecture: x64", "architecture: x86"),
+                ("check-latest: false", "check-latest: true"),
+                ("id: python", "if: false\n        id: python"),
+                (".outputs.python-path", ".outputs.python-version"),
+                (' "-DPython3_EXECUTABLE=$CI_PYTHON_EXECUTABLE"', ""),
+                (' "-DPython3_EXECUTABLE=$env:CI_PYTHON_EXECUTABLE"', ""),
+                ("Set-Alias -Name python -Value $pythonExecutable", ""),
+                ('& "$env:CI_PYTHON_EXECUTABLE" -m pip', "python -m pip")):
+            with self.subTest(mutation=old):
+                self.assertIn(old, producer)
+                with self.assertRaises(AssertionError):
+                    check(producer.replace(old, new, 1))
+
     def test_ready_and_draft_transitions_trigger_existing_pr_routes(self):
         for filename, workflow in self.workflows.items():
             with self.subTest(workflow=filename):

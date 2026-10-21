@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location("ci_paths", ROOT / "tools/ci/ci_paths.py")
@@ -69,7 +70,7 @@ class RegistrationTests(unittest.TestCase):
     def test_both_hosted_routes_execute_registered_deadlines_and_keep_failure_evidence(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         jobs = policy.jobs(workflow)
-        for job, python in (("linux", "python3"), ("windows-msvc", "python")):
+        for job, python in (("linux", "python3"), ("windows-msvc", '"$CI_PYTHON_EXECUTABLE"')):
             with self.subTest(job=job):
                 steps = {step.splitlines()[0].removeprefix("      - name: "): step
                          for step in policy.steps(jobs[job])}
@@ -79,14 +80,17 @@ class RegistrationTests(unittest.TestCase):
                 self.assertEqual(policy.value(run, "shell", 8), "bash")
                 self.assertEqual(policy.value(run, "id", 8), "local-contracts")
                 configure = "cmake -S tools/ci/contracts -B build/local-check-contracts -G Ninja"
+                normalization = []
                 if job == "windows-msvc":
-                    configure += ' "-DPython3_EXECUTABLE=$CI_PYTHON_EXECUTABLE"'
                     self.assertEqual(policy.value(run, "CI_PYTHON_EXECUTABLE", 10),
                                      "${{ steps.python.outputs.python-path }}")
+                    configure += ' "-DPython3_EXECUTABLE=$CI_PYTHON_EXECUTABLE"'
+                    normalization = ['CI_PYTHON_EXECUTABLE="$(cygpath -u "$CI_PYTHON_EXECUTABLE")"']
                 self.assertEqual(policy.value(run, "run", 8).splitlines(), [
                     configure,
                     "ctest --test-dir build/local-check-contracts --show-only=json-v1 > build/local-check-contracts/ctest-discovery.json",
                     'ctest --test-dir build/local-check-contracts --no-tests=error --parallel 4 --output-on-failure --output-junit "$LOCAL_CHECK_JUNIT"',
+                    *normalization,
                     f'{python} -I -B tools/ci/check_ctest_junit.py "$LOCAL_CHECK_JUNIT" --minimum-tests 4 --require-test ChangedTranslationUnitsContract --require-test OfflineDependenciesContract --require-test OfflineDependenciesContractPart1 --require-test OfflineDependenciesContractPart2',
                 ])
                 # With no step condition, false/empty classifier output cannot
@@ -129,7 +133,7 @@ class RegistrationTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         jobs = policy.jobs(workflow)
         expected = "${{ github.workspace }}/build/local-check-contracts/ctest.junit.xml"
-        for job, python in (("linux", "python3"), ("windows-msvc", "python")):
+        for job, python in (("linux", "python3"), ("windows-msvc", "$CI_PYTHON_EXECUTABLE")):
             with self.subTest(job=job):
                 steps = {step.splitlines()[0].removeprefix("      - name: "): step
                          for step in policy.steps(jobs[job])}
@@ -156,6 +160,91 @@ class RegistrationTests(unittest.TestCase):
                         path = expected.replace("${{ github.workspace }}", workspace)
                         self.assertTrue(path_type(path).is_absolute())
                         self.assertEqual(path_type(path).name, "ctest.junit.xml")
+
+    def test_windows_local_checks_reject_bare_unbound_or_mismatched_python(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        run, = [step for step in policy.steps(policy.jobs(workflow)["windows-msvc"])
+                if policy.value(step, "id", 8) == "local-contracts"]
+        check = RegistrationTests(
+            "test_both_hosted_routes_execute_registered_deadlines_and_keep_failure_evidence")
+        check.test_both_hosted_routes_execute_registered_deadlines_and_keep_failure_evidence()
+        for old, new in (
+                ('"$CI_PYTHON_EXECUTABLE" -I -B', "python -I -B"),
+                ('"$CI_PYTHON_EXECUTABLE" -I -B', "$CI_PYTHON_EXECUTABLE -I -B"),
+                (' "-DPython3_EXECUTABLE=$CI_PYTHON_EXECUTABLE"', ""),
+                ('"-DPython3_EXECUTABLE=$CI_PYTHON_EXECUTABLE"', "-DPython3_EXECUTABLE=$CI_PYTHON_EXECUTABLE"),
+                ('"-DPython3_EXECUTABLE=$CI_PYTHON_EXECUTABLE"', '"-DPython3_EXECUTABLE=$OTHER_PYTHON"'),
+                ("          CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}\n", ""),
+                ("${{ steps.python.outputs.python-path }}", "${{ steps.other.outputs.python-path }}")):
+            with self.subTest(mutation=old, replacement=new):
+                self.assertEqual(run.count(old), 1)
+                mutated = workflow.replace(run, run.replace(old, new, 1), 1)
+                with patch.object(Path, "read_text", return_value=mutated) as read:
+                    with self.assertRaises(AssertionError):
+                        check.test_both_hosted_routes_execute_registered_deadlines_and_keep_failure_evidence()
+                    read.assert_called_once_with(encoding="utf-8")
+
+    def test_windows_bash_normalizes_selected_python_after_native_cmake(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        blocks = policy.steps(policy.jobs(workflow)["windows-msvc"])
+        selector, = [step for step in blocks if "uses: actions/setup-python@" in step]
+        self.assertEqual(policy.value(selector, "id", 8), "python")
+        self.assertEqual(policy.value(selector, "uses", 8),
+                         "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6")
+        self.assertIsNone(policy.value(selector, "if", 8))
+        self.assertEqual(policy.value(selector, "python-version", 10), "'3.14.8'")
+        self.assertEqual(policy.value(selector, "architecture", 10), "x64")
+        self.assertEqual(policy.value(selector, "check-latest", 10), "false")
+        # Sweep every Bash consumer of the selected interpreter in this job.
+        consumers = [step for step in blocks
+                     if policy.value(step, "shell", 8) == "bash"
+                     and "CI_PYTHON_EXECUTABLE" in (policy.value(step, "run", 8) or "")]
+        self.assertEqual(len(consumers), 1)
+        run, = consumers
+        self.assertEqual(policy.value(run, "id", 8), "local-contracts")
+        self.assertEqual(policy.value(run, "CI_PYTHON_EXECUTABLE", 10),
+                         "${{ steps.python.outputs.python-path }}")
+        commands = policy.value(run, "run", 8).splitlines()
+        configure = 'cmake -S tools/ci/contracts -B build/local-check-contracts -G Ninja "-DPython3_EXECUTABLE=$CI_PYTHON_EXECUTABLE"'
+        normalize = 'CI_PYTHON_EXECUTABLE="$(cygpath -u "$CI_PYTHON_EXECUTABLE")"'
+        checker = '"$CI_PYTHON_EXECUTABLE" -I -B tools/ci/check_ctest_junit.py "$LOCAL_CHECK_JUNIT" --minimum-tests 4 --require-test ChangedTranslationUnitsContract --require-test OfflineDependenciesContract --require-test OfflineDependenciesContractPart1 --require-test OfflineDependenciesContractPart2'
+        for command in (configure, normalize, checker):
+            self.assertEqual(commands.count(command), 1)
+        # Native CMake receives the native path; only Bash command lookup needs
+        # the MSYS form. Quote both conversion input and command substitution.
+        self.assertLess(commands.index(configure), commands.index(normalize))
+        self.assertEqual(commands.index(normalize) + 1, commands.index(checker))
+        self.assertEqual(sum("cygpath" in command for command in commands), 1)
+
+    def test_windows_bash_rejects_missing_reversed_or_unquoted_normalization(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        run, = [step for step in policy.steps(policy.jobs(workflow)["windows-msvc"])
+                if policy.value(step, "id", 8) == "local-contracts"]
+        check = RegistrationTests("test_windows_bash_normalizes_selected_python_after_native_cmake")
+        check.test_windows_bash_normalizes_selected_python_after_native_cmake()
+        normalize = '          CI_PYTHON_EXECUTABLE="$(cygpath -u "$CI_PYTHON_EXECUTABLE")"\n'
+        configure = next(line + "\n" for line in run.splitlines() if "cmake -S" in line)
+        checker = next(line + "\n" for line in run.splitlines() if "check_ctest_junit.py" in line)
+        self.assertEqual(run.count(normalize), 1)
+        mutations = [
+            run.replace(normalize, "", 1),
+            run.replace("cygpath -u", "cygpath -w", 1),
+            run.replace('cygpath -u "$CI_PYTHON_EXECUTABLE"', 'cygpath -u "$OTHER_PYTHON"', 1),
+            run.replace('cygpath -u "$CI_PYTHON_EXECUTABLE"', 'cygpath -u $CI_PYTHON_EXECUTABLE', 1),
+            run.replace(normalize, '          CI_PYTHON_EXECUTABLE=$(cygpath -u "$CI_PYTHON_EXECUTABLE")\n', 1),
+            run.replace(normalize, normalize.replace("CI_PYTHON_EXECUTABLE=", "OTHER_PYTHON=", 1), 1),
+            run.replace(normalize, "", 1).replace(configure, normalize + configure, 1),
+            run.replace(normalize, "", 1).replace(checker, checker + normalize, 1),
+            run.replace(normalize, normalize + normalize, 1),
+        ]
+        for mutated_run in mutations:
+            with self.subTest(mutation=mutated_run):
+                self.assertNotEqual(run, mutated_run)
+                mutated = workflow.replace(run, mutated_run, 1)
+                with patch.object(Path, "read_text", return_value=mutated) as read:
+                    with self.assertRaises(AssertionError):
+                        check.test_windows_bash_normalizes_selected_python_after_native_cmake()
+                    read.assert_called_once_with(encoding="utf-8")
 
     def test_registration_regression_is_in_both_test_plans_and_requires_ci_coverage(self):
         path = "tools/ci/test_local_check_contracts.py"

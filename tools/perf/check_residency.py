@@ -16,6 +16,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from fixture_paths import read_bytes
+
 PROFILE_SCHEMA = "luminumbra.sim_budget_profile.v1"
 VERDICT_SCHEMA = "luminumbra.residency_verdict.v1"
 EXIT_PASS = 0
@@ -54,8 +56,8 @@ def reject_constant(name: str) -> Any:
 
 def load_json(path: Path, max_bytes: int | None = None) -> Any:
     try:
-        raw = path.read_bytes()
-    except OSError as exc:
+        raw = read_bytes(path.parent, path, limit=max_bytes)
+    except (OSError, ValueError) as exc:
         raise InvalidInput(f"cannot read {path}: {exc}") from exc
     if max_bytes is not None and len(raw) > max_bytes:
         raise InvalidInput(f"{path} is larger than {max_bytes} bytes")
