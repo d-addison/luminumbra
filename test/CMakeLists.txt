@@ -1638,6 +1638,25 @@ target_link_libraries(audio_occlusion_test PRIVATE
     luminumbra_common
 )
 
+# Metrics regressions exercise the production propagation API without an audio device.
+add_executable(audio_propagation_metrics_test
+    audio/audio_propagation_metrics_test.cpp
+    ../src/luminumbra_client/audio/AudioPropagationSystem.cpp
+)
+target_include_directories(audio_propagation_metrics_test PRIVATE
+    ../src
+    ../src/luminumbra_client
+    ../src/luminumbra_common
+)
+target_link_libraries(audio_propagation_metrics_test PRIVATE
+    gtest_main
+    luminumbra_common
+    miniaudio
+    nlohmann_json
+    glm
+)
+luminumbra_configure_first_party_target(audio_propagation_metrics_test)
+
 # prune guard — compile-sentinel that the SURVIVING audio headers still build
 # (fails if anything leans on a deleted orphan) + asserts the 7 retired bank manifests are
 # gone. Includes MiniaudioManager.h so needs the miniaudio + nlohmann_json link interface.
@@ -1932,7 +1951,23 @@ target_include_directories(menu_presentation_test PRIVATE ../src)
 target_link_libraries(menu_presentation_test PRIVATE gtest_main)
 luminumbra_configure_first_party_target(menu_presentation_test)
 
+add_executable(jolt_startup_test physics/jolt_startup_test.cpp)
+target_link_libraries(jolt_startup_test PRIVATE gtest_main Jolt ${CMAKE_DL_LIBS})
+luminumbra_configure_first_party_target(jolt_startup_test)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_options(jolt_startup_test PRIVATE
+        "-Wl,--export-dynamic-symbol=pthread_create"
+        "-Wl,--export-dynamic-symbol=pthread_join"
+        "-Wl,--export-dynamic-symbol=sem_init"
+        "-Wl,--export-dynamic-symbol=sem_destroy")
+endif()
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME JoltStartupPatchContract COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/tools/ci/test_jolt_startup.py")
+set_tests_properties(JoltStartupPatchContract PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+
 set(LUMINUMBRA_GTEST_TARGETS
+    jolt_startup_test
     frame_attribution_test
     menu_presentation_test
     graphics_preset_classifier_test
@@ -1997,6 +2032,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     jolt_tunneling_test
     surface_query_test
     audio_occlusion_test
+    audio_propagation_metrics_test
     audio_prune_guard_test
     client_policy_test
     audio_physics_binding_test
@@ -2465,6 +2501,8 @@ add_test(NAME FramePacingSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/test/tools/test_frame_pacing_contract.py)
 add_test(NAME GraphicsUiSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/test/tools/test_graphics_ui_contract.py)
+add_test(NAME AudioPropagationMetricsContract COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/tools/ci/test_audio_propagation_metrics.py)
 add_test(NAME ReplaySourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/tools/ci/test_replay_source_contract.py)
 add_test(NAME RenderRunnerEvidencePython COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_render_runner_evidence.py)
