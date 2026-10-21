@@ -20,7 +20,8 @@ AudioPropagationSystem::AudioPropagationSystem(Luminumbra::Systems::PhysicsSyste
 
 AudioPropagationSystem::~AudioPropagationSystem() {
     {
-        // Serialize shutdown with the worker's predicate-to-wait transition.
+        // Publishing shutdown under the task mutex keeps a worker that has just evaluated its wait
+        // predicate from missing the notification and blocking destruction in join().
         std::lock_guard<std::mutex> lock(m_task_mutex);
         m_shutdown = true;
     }
