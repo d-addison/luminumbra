@@ -2117,6 +2117,8 @@ foreach(_lum_gtest_target ${LUMINUMBRA_GTEST_TARGETS})
         # than shorten the run. Everything else in this target is fast; the cost of
         # the wider bound is only that a genuine hang here surfaces later.
         gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120
+            NO_PRETTY_VALUES
+            TEST_LIST LUMINUMBRA_WORLD_OPEN_TESTS
             PROPERTIES TIMEOUT 1800)
     elseif(_lum_gtest_target IN_LIST LUMINUMBRA_GL_GTEST_TARGETS)
         gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120
@@ -2125,6 +2127,10 @@ foreach(_lum_gtest_target ${LUMINUMBRA_GTEST_TARGETS})
         gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120)
     endif()
 endforeach()
+
+# GoogleTest's discovery includes must run before parameterized case labeling.
+set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES
+    "${CMAKE_CURRENT_SOURCE_DIR}/HeavyTestsCTest.cmake")
 
 # The deterministic forest geometry harness is manual because it validates a
 # pinned 16k-tree workload rather than ordinary unit behavior. It guards the

@@ -1553,6 +1553,54 @@ class CachedGitSafetyTests(unittest.TestCase):
                  "-c", "commit.gpgSign=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false",
                  "commit", "--quiet", "-m", "fixture", cache=cache)
 
+    def test_fixture_commits_disable_maintenance_at_the_real_git_boundary(self):
+        original_output = subprocess.check_output
+        commits = []
+        traces = []
+
+        def output(argv, **kwargs):
+            if "commit" in argv:
+                trace = self.base / f"commit-trace-{len(commits)}.json"
+                commits.append((list(argv), kwargs["cwd"]))
+                traces.append(trace)
+                kwargs["env"] = dict(kwargs["env"], GIT_TRACE2_EVENT=str(trace),
+                                     GIT_TRACE2_CONFIG_PARAMS="gc.auto,maintenance.auto")
+            return original_output(argv, **kwargs)
+
+        class FreshFixture(type(self)):
+            pass
+
+        config = (self.source / ".git/config").read_bytes()
+        with patch.object(subprocess, "check_output", side_effect=output):
+            try:
+                # Exercise seed creation as well as copied and nested commits.
+                FreshFixture.setUpClass()
+            finally:
+                FreshFixture.doClassCleanups()
+            (self.source / "input.h").write_text("changed fixture\n")
+            self.git(self.source, "add", "input.h")
+            self.commit(self.source, self.cache)
+            self.test_real_recursive_gitlinks_check_initialized_heads()
+        self.assertEqual(len(commits), 5)
+        self.assertEqual([Path(cwd).name for _, cwd in commits],
+                         ["sample", "sample", "nested path (v1)", "sample", "child"])
+        self.assertEqual((self.source / ".git/config").read_bytes(), config)
+        for (argv, _), trace in zip(commits, traces):
+            with self.subTest(argv=argv):
+                commit = argv.index("commit")
+                options = [argv[index:index + 2] for index in range(commit - 1)]
+                self.assertIn(["-c", "gc.auto=0"], options)
+                self.assertIn(["-c", "maintenance.auto=false"], options)
+                events = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()]
+                self.assertTrue(any(event.get("event") == "def_param" and
+                                    event.get("param") == "maintenance.auto" and
+                                    event.get("value") == "false" for event in events), events)
+                self.assertTrue(any(event.get("event") == "def_param" and
+                                    event.get("param") == "gc.auto" and
+                                    event.get("value") == "0" for event in events), events)
+                children = [event["argv"] for event in events if event.get("event") == "child_start"]
+                self.assertFalse(any("maintenance" in child or "gc" in child for child in children), children)
+
     def test_fixture_commits_disable_maintenance_in_real_git(self):
         original_output = subprocess.check_output
         commits = []
@@ -2681,9 +2729,28 @@ class CachedGitSafetyTests(unittest.TestCase):
         metadata.parent.mkdir()
         (nested / ".git").rename(metadata)
         (nested / ".git").write_text("gitdir: ../.git/modules/nested\n")
-        self.write_lock()
+        # Known heads belong to this fixture; rediscovery is tested immediately
+        # below, after this construction-only guard has been removed.
+        with patch.object(deps, "submodules", side_effect=AssertionError("fixture rediscovered submodules")):
+            identity = {
+                "commit": deps.head(self.source, self.cache),
+                "sha256": deps.source_digest(self.source),
+                "submodules": {nested.name: nested_head, nested.name + "/child": child_head},
+            }
+            self.save_lock(identity)
         self.assertEqual(deps.submodules(self.source, self.cache),
                          {nested.name: nested_head, nested.name + "/child": child_head})
+        # Verify the expected lock bytes without repeating recursive Git work.
+        # The real verify below independently rechecks the fresh root identity.
+        golden = deps.unresolved_lock(self.root)
+        golden["status"] = "resolved"
+        golden["dependencies"]["sample"].update(identity)
+        expected_lock = self.base / "expected lock.json"
+        expected_lock.write_text(json.dumps(golden))
+        self.assertEqual(self.lock.read_bytes(), expected_lock.read_bytes())
+        self.assertNotEqual(identity["commit"], self.template_identity["commit"])
+        self.assertEqual(list(json.loads(self.lock.read_text())["dependencies"]["sample"]["submodules"]),
+                         [nested.name, nested.name + "/child"])
         deps.verify(self.root, self.cache, self.lock)
         self.git(child, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.org",
                  "-c", "commit.gpgSign=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false",
@@ -4601,9 +4668,23 @@ class _LifecycleRunner(diagnostics.CaseDiagnosticRunner):
                 result._diagnostic('abort')
 
 
-# Measured class costs: cached Git 1.80s, provisioning 0.42s, scratch 0.24s.
-# Moving the three costliest Git cases (0.85s) gives parts of about 0.66s,
-# 0.95s and 0.85s, leaving room for slower process launches on Windows.
+class CaseProgressResult(_LifecycleResult):
+    def startTest(self, case):
+        super().startTest(case)
+        print(f"\nCASE START {case.id()}", file=sys.stderr, flush=True)
+
+    def stopTest(self, case):
+        # FINISH records completion, including failures, errors and skips.
+        print(f"\nCASE FINISH {case.id()}", file=sys.stderr, flush=True)
+        super().stopTest(case)
+
+
+class CaseProgressRunner(_LifecycleRunner):
+    resultclass = CaseProgressResult
+
+
+# Keep launch-heavy Git cases and the real commit-boundary regression together,
+# leaving room for slower process launches in the remaining Windows partitions.
 OFFLINE_PARTITIONS = ("0", "1", "2")
 OFFLINE_CLASS_PARTITIONS = {
     "ContainmentTests": "0",
@@ -4618,6 +4699,7 @@ OFFLINE_CLASS_PARTITIONS = {
     "CachedGitSafetyTests": "1",
 }
 OFFLINE_CASE_PARTITIONS = {
+    "CachedGitSafetyTests.test_fixture_commits_disable_maintenance_at_the_real_git_boundary": "2",
     "CachedGitSafetyTests.test_real_recursive_gitlinks_check_initialized_heads": "2",
     "CachedGitSafetyTests.test_control_whitespace_includes_refuse_every_cached_git_entry_point": "2",
     "CachedGitSafetyTests.test_config_includes_are_refused_in_all_metadata_configs_before_git_runs": "2",
@@ -4656,7 +4738,7 @@ def offline_partition_suite(loader, module, partition):
     return unittest.TestSuite(selected)
 
 
-class OfflineTimingResult(_LifecycleResult):
+class OfflineTimingResult(CaseProgressResult):
     def startTest(self, test):
         self.case_started = time.perf_counter()
         super().startTest(test)
@@ -4675,7 +4757,7 @@ def offline_main(argv=None):
     if args.partition is None:
         if args.list_tests:
             parser.error("--list-tests requires --partition")
-        unittest.main(argv=[sys.argv[0], *remaining], verbosity=2, testRunner=_LifecycleRunner)
+        unittest.main(argv=[sys.argv[0], *remaining], verbosity=2, testRunner=CaseProgressRunner)
         return 0
     if len(args.partition) != 1 or remaining:
         parser.error("one partition is required, without unittest selectors")
@@ -4692,6 +4774,38 @@ def offline_main(argv=None):
 
 
 class OfflinePartitionSelectionTests(unittest.TestCase):
+    def test_heavy_deferral_retains_every_offline_workflow_and_ctest_shard_partition(self):
+        spec = importlib.util.spec_from_file_location("ctest_shards", ROOT / "tools/ci/ctest_shards.py")
+        shards = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(shards)
+        cmake = "\n".join(path.read_text(encoding="utf-8") for path in (
+            ROOT / "tools/ci/local_check_contracts.cmake", ROOT / "tools/CMakeLists.txt"))
+        names = re.findall(r"NAME ((?:OfflineDependencies|WorkflowPolicy|CTestShard)Contract(?:Part[0-9]+)?)\s", cmake)
+        self.assertEqual(len(names), 21)
+        self.assertEqual(len(set(names)), len(names))
+        for profile in shards.PROFILES:
+            # The real inventory floor bounds this synthetic roster.
+            tests = [{"name": name, "command": ["python", name], "properties": []}
+                     for name in [*names, *(f"Quick.Case{index}" for index in range(shards.FLOORS[profile]))]]
+            tests.extend({"name": name, "command": ["parity", name],
+                          "properties": [{"name": "LABELS", "value": ["heavy"]}]}
+                         for name in sorted(shards.HEAVY_NAMES))
+            for selection in ("full", "light"):
+                with self.subTest(profile=profile, selection=selection):
+                    selected = shards.select_tests(tests, profile, selection)
+                    self.assertTrue(set(names) <= set(selected))
+                    self.assertEqual(set(row["name"] for row in tests) - set(selected),
+                                     shards.HEAVY_NAMES if selection == "light" else set())
+
+    def test_cli_partition_listing_ignores_shared_unittest_filters(self):
+        module = sys.modules[__name__]
+        with patch.object(unittest.defaultTestLoader, "testNamePatterns", ["*does_not_exist*"]):
+            for partition in OFFLINE_PARTITIONS:
+                with self.subTest(partition=partition), patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                    self.assertEqual(offline_main(["--partition", partition, "--list-tests"]), 0)
+                    expected = offline_partition_suite(unittest.TestLoader(), module, partition)
+                    self.assertEqual(output.getvalue().splitlines(), [case.id() for case in offline_cases(expected)])
+
     def test_partitions_cover_discovered_old_and_new_cases_exactly_once(self):
         module = sys.modules[__name__]
         loader = unittest.TestLoader()
@@ -4793,11 +4907,11 @@ class OfflinePartitionSelectionTests(unittest.TestCase):
         self.assertIn("bad roster", output.getvalue())
         with patch.object(unittest, "main") as run:
             self.assertEqual(offline_main([]), 0)
-            run.assert_called_once_with(argv=[sys.argv[0]], verbosity=2, testRunner=_LifecycleRunner)
+            run.assert_called_once_with(argv=[sys.argv[0]], verbosity=2, testRunner=CaseProgressRunner)
         with patch.object(unittest, "main") as run:
             self.assertEqual(offline_main(["CachedGitSafetyTests", "-v"]), 0)
             run.assert_called_once_with(argv=[sys.argv[0], "CachedGitSafetyTests", "-v"],
-                                        verbosity=2, testRunner=_LifecycleRunner)
+                                        verbosity=2, testRunner=CaseProgressRunner)
 
     def test_partition_runner_propagates_case_failure_and_reports_duration(self):
         class Fails(unittest.TestCase):
@@ -4823,11 +4937,42 @@ class OfflinePartitionSelectionTests(unittest.TestCase):
             if status:
                 self.assertIn("partition failure", records)
                 self.assertRegex(records, r"test_failure: [0-9]+\.[0-9]{3}s")
+                self.assertIn("CASE START " + Fails("test_failure").id(), records)
+                self.assertIn("CASE FINISH " + Fails("test_failure").id(), records)
         timing = OfflineTimingResult(io.StringIO(), True, 2)
         with patch.object(time, "perf_counter", side_effect=OSError("timer unavailable")):
             with self.assertRaisesRegex(OSError, "timer unavailable"):
                 timing.startTest(Fails("test_failure"))
         self.assertEqual(timing.testsRun, 0)
+
+    def test_direct_runner_reports_progress_and_preserves_outcomes(self):
+        class Outcomes(unittest.TestCase):
+            def test_success(self):
+                pass
+
+            def test_failure(self):
+                self.fail("direct failure")
+
+            def test_error(self):
+                raise OSError("direct error")
+
+        suite = unittest.TestLoader().loadTestsFromTestCase(Outcomes)
+        cases = list(offline_cases(suite))
+        with patch.object(sys, "stderr", new_callable=io.StringIO) as output:
+            result = CaseProgressRunner().run(suite)
+        self.assertEqual(result.testsRun, 3)
+        self.assertEqual(len(result.failures), 1)
+        self.assertEqual(len(result.errors), 1)
+        records = output.getvalue()
+        self.assertEqual(records.count("[contract-case] SUITE_START "), 1)
+        self.assertEqual(records.count("[contract-case] SUITE_STOP "), 1)
+        self.assertEqual(records.count("[contract-case] START "), len(cases))
+        self.assertEqual(records.count("[contract-case] STOP "), len(cases))
+        for case in cases:
+            self.assertIn("CASE START " + case.id(), output.getvalue())
+            self.assertIn("CASE FINISH " + case.id(), output.getvalue())
+            identity = type(case).__name__ + "." + case._testMethodName
+            self.assertEqual(records.count("case=" + identity + " "), 2)
 
     def test_partition_runner_preserves_diagnostics_and_restores_after_interrupt(self):
         owner_name = "test_fixture_commits_disable_maintenance_in_real_git"
